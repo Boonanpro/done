@@ -199,6 +199,8 @@ class MessageSendRequest(BaseModel):
     file_urls: Optional[List[dict]] = Field(default=[], description="Uploaded file URLs [{name, url}]")
     reply_to_id: Optional[str] = Field(None, description="ID of the message being replied to")
     replace_message_id: Optional[str] = Field(None, description="ID of existing user message to update instead of creating new")
+    client_message_id: Optional[str] = Field(None, description="Client-side optimistic message id — lets an early cancel delete the row before the client learns the real id")
+    timeline_refs: Optional[List[dict]] = Field(default=[], description="Explicit production timeline references [{content_id, title}]")
 
 
 class ReplyToMessage(BaseModel):

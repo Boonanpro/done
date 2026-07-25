@@ -54,10 +54,50 @@ from app.api.production_asset_routes import router as production_asset_router
 
 logger = logging.getLogger(__name__)
 
+# --- 起動時セルフチェック ----------------------------------------------------
+# 「機能が使われた瞬間に初めて壊れていると分かる」事故の根治。ユーザー要求の
+# 実行経路で遅延importされる主要モジュールを起動時に全て読み込み、壊れていれば
+# 起動ログに全文と /health に理由を出す。auto_deploy 直後・サンドボックス再起動
+# 直後に必ず走るので、書きかけコードの混入はユーザーが指示を出す前に検知される。
+SELFCHECK_FAILURES: list[str] = []
+
+_SELFCHECK_MODULES = [
+    # ダンに指示（編集エージェント）の遅延import連鎖
+    "app.agent.cli_runner",
+    "app.services.timeline_agent",
+    "app.services.timeline_commands",
+    "app.services.timeline_context",
+    "app.services.timeline_draft",
+    # 制作ジョブ・実行系
+    "app.services.run_service",
+]
+
+
+def _boot_selfcheck() -> None:
+    import importlib
+    import traceback
+
+    SELFCHECK_FAILURES.clear()
+    for name in _SELFCHECK_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:  # noqa: BLE001 — 何で壊れていても検知が仕事
+            SELFCHECK_FAILURES.append(f"{name}: {exc}")
+            logger.critical("起動セルフチェック失敗 %s\n%s", name, traceback.format_exc())
+    if SELFCHECK_FAILURES:
+        logger.critical(
+            "SELFCHECK FAILED (%d件) — この状態ではダンへの指示が失敗します: %s",
+            len(SELFCHECK_FAILURES),
+            "; ".join(SELFCHECK_FAILURES),
+        )
+    else:
+        logger.info("起動セルフチェック OK (%d modules)", len(_SELFCHECK_MODULES))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("sandbox started")
+    _boot_selfcheck()
     yield
 
 
@@ -142,4 +182,11 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health() -> dict:
+    if SELFCHECK_FAILURES:
+        return {
+            "status": "degraded",
+            "service": "sandbox",
+            "environment": settings.APP_ENV,
+            "broken_modules": SELFCHECK_FAILURES,
+        }
     return {"status": "healthy", "service": "sandbox", "environment": settings.APP_ENV}

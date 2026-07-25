@@ -366,9 +366,14 @@ class DanNotionService:
         detected_message_id: str,
     ) -> Optional[dict[str, Any]]:
         """
-        外部メッセージ (メール等) を 📥 とりあえず inbox に block として追加する。
+        外部メッセージを 📥 とりあえず inbox に block として追加する。
         重複は source + source_id でガード (source_id が無ければ detected_message_id)。
+
+        メール(gmail/icloud_mail)は dan-notion で管理しない方針(ユーザー決定 2026-06-20)。
+        万一メール系ソースが渡ってきても inbox には入れない(防御的ガード)。
         """
+        if source in {"gmail", "icloud_mail"}:
+            return None
         guard_id = source_id or detected_message_id
         already = (
             self.sb.table("blocks")

@@ -15,6 +15,11 @@ from app.models.detection_schemas import (
 
 logger = logging.getLogger(__name__)
 
+# dan-notion は「案件素材の整理棚」であり、メール受信箱ではない。
+# メール系ソースは通知タブ(dan_proposals)の返信フローが置き場所なので、
+# 「とりあえず」inbox には投入しない（添付の有無を問わず）。
+_INBOX_EXCLUDED_SOURCES = {"gmail", "icloud_mail"}
+
 
 class MessageDetectionService:
     """メッセージ検知サービス"""
@@ -75,8 +80,12 @@ class MessageDetectionService:
         record = result.data[0]
         logger.info(f"Message detected: {source.value}/{source_id or record['id']}")
 
-        # dan-notion 自動整理: メール/外部メッセージを 📥 とりあえず inbox に投入
-        # AI 後段仕分け (Phase 2) で client/folder に振り分けられる想定
+        # dan-notion 自動整理: 外部メッセージを 📥 とりあえず inbox に投入。
+        # ただしメール(gmail/icloud_mail)は除外 — メールはdan-notionで管理せず、
+        # 通知タブ(dan_proposals)の返信フローで扱う(ユーザー決定 2026-06-20)。
+        if source.value in _INBOX_EXCLUDED_SOURCES:
+            logger.info("dan-notion inbox skip (mail source): %s/%s", source.value, source_id)
+            return record
         try:
             from app.services.dan_notion_service import get_dan_notion_service
             get_dan_notion_service().add_detected_message_to_inbox(

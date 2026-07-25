@@ -145,3 +145,25 @@ class RunService:
             state=AgentRunState.SUPERSEDED.value,
             superseded_by_run_id=new_run_id,
         )
+
+    async def pause_active_runs_for_room(self, room_id: str) -> int:
+        query = (
+            self.supabase.table("agent_runs")
+            .select("*")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(20)
+        )
+        result = await asyncio.to_thread(query.execute)
+        rows = result.data or []
+        paused = 0
+        for row in rows:
+            if row.get("superseded_by_run_id"):
+                continue
+            if row.get("state") not in ACTIVE_RUN_STATES:
+                continue
+            if row.get("state") != AgentRunState.PAUSED.value:
+                await self.update_run(row["id"], state=AgentRunState.PAUSED.value)
+                paused += 1
+            break
+        return paused

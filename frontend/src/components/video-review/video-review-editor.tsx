@@ -2,9 +2,16 @@
 
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CAPTION_DESIGN_PRESETS,
+  CAPTION_FONTS,
+  CAPTION_FONT_FACE_CSS,
+  type CaptionAnimation,
+  type CaptionDesign,
+  type CaptionFontId,
+} from './caption-design';
+import {
   ArrowLeft,
   Check,
-  Eraser,
   MessageSquare,
   MousePointer2,
   Pause,
@@ -24,6 +31,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { TimelinePreview } from './timeline-preview';
+import { CaptionLayer, type RenderCaption } from './caption-layer';
 
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
@@ -65,6 +73,7 @@ export type SequenceClip = {
   track?: string | null;
   composition?: 'fullscreen' | 'pip' | 'background' | 'overlay' | string | null;
   position?: { x: number; y: number; width: number; height: number } | null;
+  shape?: 'rect' | 'circle' | 'rounded' | string | null;  // wipe cutout shape (PiP/overlay)
   role?: 'dialogue' | 'music' | 'sfx' | string | null;
   layer?: number | null;
   type?: string | null;
@@ -72,6 +81,7 @@ export type SequenceClip = {
   muted?: boolean | null;
   locked?: boolean | null;
   style?: CaptionStyle | null;  // per-caption styling (color/size/position/outline)
+  words?: { text: string; start: number; end: number }[] | null;  // per-word timings for karaoke/typewriter sync
   // Non-destructive source placement inside the clip's box: zoom + pan. null/absent =
   // today's cover look. scale<1 reveals the full source frame (no pixels cropped).
   transform?: { scale: number; x: number; y: number } | null;
@@ -79,22 +89,90 @@ export type SequenceClip = {
   crop?: { top: number; bottom: number; left: number; right: number } | null;
   // Per-clip audio volume multiplier (1 = unchanged).
   volume?: number | null;
+  // Opt-in special effects applied to this clip (NLE-style: pick a clip, add an effect).
+  // First effect: 'popout' (人物を切り抜いてカードの上辺から飛び出させる). Empty/absent = none.
+  effects?: ClipEffect[] | null;
 };
 
-// Per-caption style. All optional; absence renders as today (white fill, black outline,
-// bold, bottom-center). fontSize/outlineWidth are multipliers of the current defaults.
-export type CaptionStyle = {
-  color?: string;
-  fontSize?: number;
-  bold?: boolean;
-  position?: 'bottom' | 'center' | 'top';
-  outlineColor?: string;
-  outlineWidth?: number;
-  // Free position offsets (normalized output units). x is clamped so the caption stays on
-  // screen horizontally; y can move it up/down freely. Layered on top of `position`.
-  x?: number;
-  y?: number;
+// A special effect applied to a single clip. `type` selects the effect; `params` are
+// effect-specific knobs. Designed to grow (popout → 環境変更/フィルター…).
+export type ClipEffect = {
+  type: 'popout' | string;
+  params?: Record<string, unknown> | null;
 };
+
+type Box = { x: number; y: number; width: number; height: number };
+// A generated pop-out is rendered as a FULL-CANVAS alpha .mov, so its clip sits full-frame by
+// default and the user then moves/scales/crops it like any overlay. The card geometry it was baked
+// with lives in the effect's `params.box` (see popoutBox), independent of that display position.
+const POPOUT_FULL_FRAME: Box = { x: 0, y: 0, width: 1, height: 1 };
+const POPOUT_DEFAULT_BOX: Box = { x: 0.27, y: 0.835, width: 0.46, height: 0.145 };
+
+// Canvas-extension margins a bake recorded (normalized to the base frame), tolerant of a
+// missing/partial server payload.
+function asPopoutMargins(m: unknown): { l: number; t: number; r: number; b: number } {
+  const v = (m || {}) as Record<string, unknown>;
+  return { l: Number(v.l || 0), t: Number(v.t || 0), r: Number(v.r || 0), b: Number(v.b || 0) };
+}
+
+// The card geometry a pop-out is (re)generated with — stored on the effect so it's decoupled from
+// the clip's live display position (which the user edits freely without triggering a re-bake).
+export function popoutBox(clip: { position?: Box | null; effects?: ClipEffect[] | null }): Box {
+  const eff = (clip.effects || []).find((e) => e.type === 'popout');
+  const b = eff?.params?.box as Box | undefined;
+  return b || clip.position || POPOUT_DEFAULT_BOX;
+}
+
+// Does this pop-out clip need a (re-)bake? The bake covers a PADDED source window
+// (params.bake_start..bake_end, server-decided), so trim/split/move inside the pad never
+// re-bakes — only growing past it, changing the canvas format, or a legacy pre-v4 clip
+// (no bake window stored → auto-upgrade to the light color+alpha format) does. The display
+// position/crop is the user's and never triggers a bake; cache-key hashing lives on the
+// server only (the editor stores the key + window the server returns).
+export function popoutNeedsBake(
+  clip: {
+    source_start?: number | null;
+    source_end?: number | null;
+    effects?: ClipEffect[] | null;
+  },
+  format: string,
+): boolean {
+  const eff = (clip.effects || []).find((e) => e.type === 'popout');
+  if (!eff) return false;
+  const p = (eff.params || {}) as Record<string, unknown>;
+  if (!p.overlay_key) return true;
+  if (typeof p.bake_start !== 'number' || typeof p.bake_end !== 'number') return true; // legacy → v4
+  if (!p.margins) return true; // pre-v5 (limited-range alpha + frame-clipped canvas) → re-bake
+  if (Number(p.bake_v || 0) < 6) return true; // pre-v6 (long-GOP = slow boundary activation)
+  if (typeof p.baked_format === 'string' && p.baked_format !== format) return true;
+  const ss = Number(clip.source_start || 0);
+  const se = Number(clip.source_end ?? ss);
+  if (ss < p.bake_start - 0.01) return true;
+  if (Number.isFinite(se) && se > p.bake_end + 0.01) return true;
+  return false;
+}
+
+// Per-caption style = the rich CaptionDesign (font / color / gradient / outline / box / shadow /
+// motion / position incl. x/y nudge) shared with the renderer, plus `bold` (legacy).
+export type CaptionStyle = CaptionDesign & {
+  bold?: boolean;
+};
+
+// True when the caption's current design matches a preset (for highlighting the active chip).
+function captionMatchesPreset(current: CaptionStyle | null | undefined, design: CaptionDesign): boolean {
+  const s = (current || {}) as CaptionDesign;
+  const keys: (keyof CaptionDesign)[] = ['font', 'color', 'outlineColor', 'outlineWidth', 'animation'];
+  return keys.every((k) => JSON.stringify(s[k] ?? null) === JSON.stringify(design[k] ?? null));
+}
+
+const CAPTION_ANIM_OPTIONS: { value: CaptionAnimation; label: string }[] = [
+  { value: 'none', label: 'なし' },
+  { value: 'pop', label: 'ポップ' },
+  { value: 'fade', label: 'フェード' },
+  { value: 'slide', label: 'スライド' },
+  { value: 'typewriter', label: 'タイプ' },
+  { value: 'karaoke', label: 'カラオケ' },
+];
 
 type LaneItem = {
   key: string;
@@ -136,16 +214,12 @@ export type SequenceAsset = {
   fps?: number | string | null;
 };
 
+// A drawn region is given a TYPE after you draw it (popover on the shape) — not pre-selected.
+// ぼかし = hide it; 生成 = let Dan generate something there; ダンに指示 = free-text instruction.
 const INTENTS: Array<{ value: Intent; label: string }> = [
   { value: 'blur', label: 'ぼかし' },
-  { value: 'cut_keep', label: '残す' },
-  { value: 'cut_remove', label: '削る' },
-  { value: 'caption', label: 'テロップ' },
-  { value: 'replace', label: '差し替え' },
   { value: 'generate', label: '生成' },
-  { value: 'motion', label: '動き' },
-  { value: 'audio', label: '音' },
-  { value: 'comment', label: 'メモ' },
+  { value: 'comment', label: 'ダンに指示' },
 ];
 
 function fmtTime(value: number | null | undefined): string {
@@ -157,6 +231,59 @@ function fmtTime(value: number | null | undefined): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+// Default span of a freshly-drawn clip, anchored AT the playhead (seconds). Short on purpose —
+// the user trims from the panel / timeline rather than starting from the whole clip.
+const DEFAULT_ANN_SPAN = 3;
+
+// The tracked-blur box position at time t = the nearest sampled frame from track_boxes
+// ({"t": [x,y,w,h] normalized}). Lets the preview animate the blur along the moving object.
+function trackedBoxAt(
+  boxes: Record<string, number[]> | undefined,
+  t: number,
+): { x: number; y: number; width: number; height: number } | null {
+  if (!boxes) return null;
+  const keys = Object.keys(boxes);
+  if (keys.length === 0) return null;
+  let bestK = keys[0];
+  let bestD = Infinity;
+  for (const k of keys) {
+    const d = Math.abs(Number(k) - t);
+    if (d < bestD) { bestD = d; bestK = k; }
+  }
+  const b = boxes[bestK];
+  if (!b || b.length < 4) return null;
+  return { x: b[0], y: b[1], width: b[2], height: b[3] };
+}
+
+type Keyframe = { t: number; x: number; y: number; width: number; height: number };
+
+// The blur box at time t, LINEARLY interpolated between the surrounding manual keyframes (DaVinci
+// style — the user sets a few, the box glides between them). Before the first / after the last
+// keyframe the box holds that end value.
+function keyframeBoxAt(
+  keyframes: Keyframe[] | undefined,
+  t: number,
+): { x: number; y: number; width: number; height: number } | null {
+  if (!keyframes || keyframes.length === 0) return null;
+  const ks = [...keyframes].sort((a, b) => a.t - b.t);
+  if (t <= ks[0].t) return { x: ks[0].x, y: ks[0].y, width: ks[0].width, height: ks[0].height };
+  const last = ks[ks.length - 1];
+  if (t >= last.t) return { x: last.x, y: last.y, width: last.width, height: last.height };
+  let k0 = ks[0];
+  let k1 = ks[ks.length - 1];
+  for (let i = 0; i < ks.length - 1; i += 1) {
+    if (t >= ks[i].t && t <= ks[i + 1].t) { k0 = ks[i]; k1 = ks[i + 1]; break; }
+  }
+  const span = k1.t - k0.t || 1;
+  const f = (t - k0.t) / span;
+  return {
+    x: k0.x + (k1.x - k0.x) * f,
+    y: k0.y + (k1.y - k0.y) * f,
+    width: k0.width + (k1.width - k0.width) * f,
+    height: k0.height + (k1.height - k0.height) * f,
+  };
 }
 
 // Serialization-stable signature of a value: sorts object keys and rounds numbers so the
@@ -308,9 +435,16 @@ export function VideoReviewEditor({
   embedded = false,
   onBack,
   onSaveTimeline,
+  onSyncCaptionAudio,
+  onTrackBlur,
+  onExecuteClip,
+  onGenerateClip,
   onExecute,
   sidePanelTop,
+  previewTopLeft,
+  roomId,
 }: {
+  roomId?: string;
   initialPath?: string;
   initialUrl?: string;
   initialThumbnailUrl?: string;
@@ -321,12 +455,72 @@ export function VideoReviewEditor({
   embedded?: boolean;
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
+  onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
+  onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, anchor: number, scanStart: number, scanEnd: number) => Promise<{ boxes: Record<string, number[]>; text?: string; t_start?: number | null; t_end?: number | null; found?: boolean }>;
+  onExecuteClip?: (annotation: ReviewAnnotation) => void | boolean | Promise<void | boolean>;
+  /** A pen annotation marked 「生成」 creates an editable video clip immediately. */
+  onGenerateClip?: (annotation: ReviewAnnotation) => void | boolean | Promise<void | boolean>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
+  /** プレビュー領域の左上に浮かせるパネル（例: 使用素材の折りたたみ）。 */
+  previewTopLeft?: ReactNode;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Desktop shell (WebView2) integration. When hosted in the native shell, the GES engine
+  // composites the real video OVER this stage, so we skip the WebCodecs preview here (avoids the
+  // browser decode/OOM that motivated the desktop app) and just report the stage rect (device px)
+  // for the shell to align the native video. No effect on the normal web app (chrome.webview absent).
+  const nativeShell =
+    typeof window !== 'undefined' &&
+    !!(window as unknown as { chrome?: { webview?: unknown } }).chrome?.webview;
+  const nativeSend = useCallback((o: Record<string, unknown>) => {
+    (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } }).chrome?.webview?.postMessage(
+      JSON.stringify(o),
+    );
+  }, []);
+  // Native shell: mark <html> so the page background goes transparent (globals.css) and the native
+  // video (composited below the WebView) shows through the transparent preview area.
+  useEffect(() => {
+    if (!nativeShell) return;
+    document.documentElement.classList.add('native-shell');
+    return () => document.documentElement.classList.remove('native-shell');
+  }, [nativeShell]);
+  useEffect(() => {
+    if (!nativeShell) return;
+    const wv = (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } }).chrome?.webview;
+    const post = () => {
+      const el = stageRef.current;
+      if (!el || !wv) return;
+      const r = el.getBoundingClientRect();
+      const d = window.devicePixelRatio || 1;
+      setStageCssW(r.width); // CSS-px stage width → scales the HTML CaptionLayer over the video
+      wv.postMessage(
+        JSON.stringify({
+          x: Math.round(r.left * d),
+          y: Math.round(r.top * d),
+          w: Math.round(r.width * d),
+          h: Math.round(r.height * d),
+        }),
+      );
+    };
+    post();
+    const id = window.setInterval(post, 200);
+    window.addEventListener('resize', post);
+    const ro = new ResizeObserver(post);
+    if (stageRef.current) ro.observe(stageRef.current);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('resize', post);
+      ro.disconnect();
+      // leaving the editor → pause the engine (so audio doesn't keep playing on the list page)
+      // and push the native video offscreen so it doesn't linger on other pages.
+      wv?.postMessage(JSON.stringify({ cmd: 'pause' }));
+      wv?.postMessage(JSON.stringify({ x: -10000, y: -10000, w: 1, h: 1 }));
+    };
+  }, [nativeShell]);
   // Unified undo/redo: one stack of combined {annotations, sequence} snapshots so Ctrl+Z
   // steps back through ALL edits (clip moves/cuts/deletes AND annotation changes) in the
   // order they happened. Rapid bursts (a drag, a slider sweep) coalesce into one entry.
@@ -339,6 +533,11 @@ export function VideoReviewEditor({
   // Right-drag rubber-band selection over the timeline (left-drag is reserved for scrub/move).
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  // True when the current right-press became a DRAG (marquee select) — used to suppress the
+  // right-click context menu so a right-drag over a clip range-selects instead of opening the menu.
+  const rightDragRef = useRef(false);
+  // Right-click context menu for a video clip (静止画生成 etc). null = closed.
+  const [clipMenu, setClipMenu] = useState<{ x: number; y: number; clip: SequenceClip } | null>(null);
   // Live ghost of a material being dragged over the timeline (before it's dropped).
   const [dropPreview, setDropPreview] = useState<{ zone: 'visual' | 'audio'; layer: number; start: number; len: number } | null>(null);
   const [videoPath, setVideoPath] = useState(initialPath || '');
@@ -346,14 +545,122 @@ export function VideoReviewEditor({
   const [duration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
-  const [intent, setIntent] = useState<Intent>('blur');
-  const [annotations, setAnnotations] = useState<ReviewAnnotation[]>([]);
+  const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
+  // Native shell: mirror the WHOLE timeline to the GES engine on any edit (robust — covers
+  // move/trim/split/delete/link/ripple uniformly, no per-op mapping). Debounced so rapid drags
+  // Serialize the sequence into the native engine's clip list. `cropOverride` lets a live drag
+  // (crop slider) preview a clip's new crop WITHOUT touching the heavy editSequence state — we send
+  // the engine an already-patched list so it does its cheap in-place update, and the 324-clip React
+  // editor never re-renders during the drag (that full re-render was the "重い" jank).
+  const buildNativeClips = useCallback(
+    (seq: EditSequence | null, cropOverride?: { id: string; crop: Record<string, number> }) => {
+      const clips: Array<Record<string, unknown>> = [];
+      for (const tr of seq?.tracks || []) {
+        for (const c of tr.clips || []) {
+          let lane: 'video' | 'overlay' | 'audio' | 'caption' | null = null;
+          if (c.track === 'overlay' || c.composition === 'pip' || c.composition === 'overlay') lane = 'overlay';
+          else if (c.track === 'audio') lane = 'audio';
+          else if (c.track === 'video') lane = 'video';
+          else if (c.track === 'caption') lane = 'caption';
+          if (!lane) continue;
+          if (lane === 'caption') {
+            const text = (c as unknown as { text?: string }).text;
+            if (text) {
+              clips.push({ lane, id: String(c.id), timeline_start: c.timeline_start, timeline_end: c.timeline_end, text });
+            }
+            continue;
+          }
+          if (!c.asset_id) continue;
+          const crop = cropOverride && cropOverride.id === String(c.id) ? cropOverride.crop : c.crop;
+          // Pop-out = an ordinary alpha overlay clip. Once generated, it renders from its baked
+          // color+alpha `{key}.pv.mp4` (HW-decodable — the old ProRes .mov was CPU-only and made
+          // the timeline heavy) via `src`, transformed (move/scale/crop/trim/split) through the
+          // SAME path as any clip. The bake covers a padded window, so the native inpoint is the
+          // clip's source_start RELATIVE to bake_start. While it's still baking (no overlay_key
+          // yet) we skip it so nothing wrong flashes; the inspector shows the progress bar.
+          const popoutEff = (c.effects || []).find((e) => e.type === 'popout');
+          const popoutKey = popoutEff?.params?.overlay_key as string | undefined;
+          if (popoutEff && !popoutKey) continue;
+          const popoutBakeStart = popoutEff?.params?.bake_start as number | undefined;
+          const popoutV4 = typeof popoutBakeStart === 'number';
+          const popoutSrc = popoutKey
+            ? `popout-cache/${popoutKey}${popoutV4 ? '.pv.mp4' : '.mov'}`
+            : undefined;
+          const nativeEffects = (c.effects || [])
+            .filter((e) => e.type !== 'popout')
+            .map((e) => ({ type: e.type, params: e.params || {} }));
+          // A fullscreen clip's サイズ・位置 sliders write `transform` (scale/pan, NOT `position`).
+          // The native engine only understands position boxes, and the mapping is exact: the web
+          // preview draws cover into the frame, scales about the CENTER and pans in canvas
+          // fractions (drawSource) — identical to a position box of {(1-s)/2+tx, (1-s)/2+ty, s, s}
+          // (box aspect = canvas aspect, so the native cover crop matches too).
+          const tf = c.transform as { scale?: number; x?: number; y?: number } | null | undefined;
+          const tfS = Number(tf?.scale ?? 1);
+          const tfX = Number(tf?.x ?? 0);
+          const tfY = Number(tf?.y ?? 0);
+          const hasTf = Math.abs(tfS - 1) > 1e-4 || Math.abs(tfX) > 1e-4 || Math.abs(tfY) > 1e-4;
+          const posOut = c.position
+            ? { x: c.position.x, y: c.position.y, width: c.position.width, height: c.position.height }
+            : hasTf
+              ? { x: (1 - tfS) / 2 + tfX, y: (1 - tfS) / 2 + tfY, width: tfS, height: tfS }
+              : null;
+          clips.push({
+            lane,
+            id: String(c.id),
+            asset_id: String(c.asset_id),
+            source_start: popoutSrc && popoutV4
+              ? Math.max(0, (c.source_start ?? 0) - (popoutBakeStart as number))
+              : c.source_start ?? 0,
+            timeline_start: c.timeline_start,
+            timeline_end: c.timeline_end,
+            ...(posOut ? { position: posOut } : {}),
+            ...(crop
+              ? { crop: { top: crop.top, bottom: crop.bottom, left: crop.left, right: crop.right } }
+              : {}),
+            ...(popoutSrc ? { src: popoutSrc } : {}),
+            ...(nativeEffects.length ? { effects: nativeEffects } : {}),
+          });
+        }
+      }
+      return clips;
+    },
+    []
+  );
+  // don't thrash the rebuild; also runs on first load so the engine matches the editor's data.
+  useEffect(() => {
+    if (!nativeShell) return;
+    const seq = editSequence;
+    const t = window.setTimeout(() => {
+      nativeSend({ cmd: 'rebuild', clips: buildNativeClips(seq) });
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [editSequence, nativeShell, nativeSend, buildNativeClips]);
+  // Live crop preview during a slider drag: throttled, straight to the native engine (in-place
+  // update), bypassing editSequence so the heavy editor doesn't re-render on every tick.
+  const [dragCrop, setDragCrop] = useState<{ top: number; bottom: number; left: number; right: number } | null>(null);
+  const cropSendRef = useRef(0);
+  const sendLiveCrop = useCallback(
+    (clipId: string, crop: { top: number; bottom: number; left: number; right: number }) => {
+      if (!nativeShell) return;
+      const now = performance.now();
+      if (now - cropSendRef.current < 40) return; // ~25Hz is plenty for a smooth preview
+      cropSendRef.current = now;
+      nativeSend({ cmd: 'rebuild', clips: buildNativeClips(editSequence, { id: clipId, crop }) });
+    },
+    [nativeShell, editSequence, buildNativeClips, nativeSend]
+  );
   const [pendingAnnotation, setPendingAnnotation] = useState<DraftAnnotation | null>(null);
+  // A freshly-drawn shape waiting for the user to pick its type (ぼかし/生成/ダンに指示) from a
+  // popover anchored at the shape. Nothing is committed until a type is chosen.
+  const [typePicker, setTypePicker] = useState<{ kind: 'rect' | 'freehand'; data: Record<string, unknown>; cx: number; cy: number } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedSequenceClipId, setSelectedSequenceClipId] = useState<string | null>(null);
   const [selectedSequenceClipIds, setSelectedSequenceClipIds] = useState<string[]>([]);
+  // Drop any in-progress crop-drag state when the selection changes so its sliders never show a
+  // previous clip's uncommitted crop.
+  useEffect(() => { setDragCrop(null); }, [selectedSequenceClipId]);
   const [draftRect, setDraftRect] = useState<{ start: Point; end: Point } | null>(null);
   const [draftPath, setDraftPath] = useState<Point[] | null>(null);
   const [isPointerDown, setIsPointerDown] = useState(false);
@@ -377,6 +684,9 @@ export function VideoReviewEditor({
   const dragLaneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }> | null>(null);
   // A/V link: when on, dragging/trimming a clip also moves its linked partner (same link_id).
   const [linkAV, setLinkAV] = useState(true);
+  // Magnet: snap dragged clip edges to nearby clip edges / the playhead / ends. ON = stable,
+  // gap-free editing; OFF = fully free movement (hold for fine adjustments).
+  const [snapEnabled, setSnapEnabled] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
   const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
@@ -388,7 +698,11 @@ export function VideoReviewEditor({
   // the annotation overlay always maps to the full stage rect — no per-frame measuring.
   const videoContentStyle: CSSProperties = { inset: 0 };
   const [playing, setPlaying] = useState(false);
-  const fps = useMemo(() => parseFps(initialFps) || 30, [initialFps]);
+  // Frame-step rate for ←/→ = the TIMELINE/output frame rate, NOT the source clip's declared fps.
+  // Proxies are CFR 30 and the export renders at 30fps, so the timeline is effectively 30fps; one
+  // arrow press should advance exactly one displayed/output frame. (Stepping at the source rate —
+  // e.g. 59.94 — meant ~2-3 presses per visible frame and let keyframes land between frames.)
+  const fps = 30; // 30 = timeline/output rate (see above)
 
   const sequenceAssetMap = useMemo(
     () => new Map((sequenceAssets || []).map((asset) => [asset.id, asset])),
@@ -458,9 +772,12 @@ export function VideoReviewEditor({
 
     for (const a of annotations) {
       const zone = trackForIntent(a.intent);
+      // Annotations carry their own lane via data.layer (default 5 = a lane above the clips), so
+      // they can be dragged up/down between lanes like clips. Falls back to 5 for legacy ones.
+      const annLayer = Number((a.data as { layer?: number } | undefined)?.layer);
       aggs.push({
         zone,
-        layer: 5,
+        layer: Number.isFinite(annLayer) ? annLayer : 5,
         item: { key: a.id, kind: 'annotation', itemType: a.intent, start: a.start, end: a.end ?? a.start + 0.2, annotation: a },
       });
     }
@@ -468,9 +785,12 @@ export function VideoReviewEditor({
     const buildZone = (zone: 'visual' | 'audio'): TimelineLane[] => {
       const zoneAggs = aggs.filter((g) => g.zone === zone);
       const layers = new Set(zoneAggs.map((g) => g.layer));
-      // Always offer empty lanes (added via "+段") so clips can be dragged onto them.
+      // ALWAYS keep one spare empty lane (plus any added via "+段") so a clip can always be
+      // dragged up/down to a new lane — moving it there effectively creates the lane, and a
+      // fresh spare appears. This is why video/audio clips couldn't move before: with only one
+      // used lane there was no target.
       const maxUsed = layers.size ? Math.max(...layers) : 0;
-      for (let k = 1; k <= extraLanes[zone]; k += 1) layers.add(maxUsed + k);
+      for (let k = 1; k <= extraLanes[zone] + 1; k += 1) layers.add(maxUsed + k);
       if (layers.size === 0) layers.add(0);
       const ordered = Array.from(layers).sort((x, y) => (zone === 'visual' ? y - x : x - y));
       return ordered.map((layer, i) => {
@@ -540,9 +860,29 @@ export function VideoReviewEditor({
   // baseline (Dan render / external change) → adopt it and reset the undo history. Canonical
   // compare ignores key order / number reformat from the round-trip.
   const lastSyncedSig = useRef<string>(seqSig(initialSequence));
+  // Annotations (blur boxes etc.) autosave separately — the sequence sig doesn't cover them, so
+  // without this a drawn blur never reaches the backend/export. Echo-safe via seqSig.
+  const lastSyncedAnnSig = useRef<string>(seqSig(initialAnnotations || []));
+  // Every value the editor itself has held (current + recent past). The parent POLLS the server
+  // (loadAll every few seconds) and can hand back a value that LAGS our latest edit — e.g. right
+  // after we save a resize, an in-flight poll returns the pre-save length. Comparing only against
+  // the single lastSynced sig, that lagging echo looks like an external change and gets adopted
+  // for one frame ("revert to old length, then back"). A value we've ALREADY produced locally is
+  // never a genuine external change, so down-sync skips it. Only a sig we've never held (a real
+  // Dan render /外部更新) is adopted. Bounded so it can't grow without limit.
+  const localSeqSigs = useRef<Set<string>>(new Set([seqSig(initialSequence)]));
+  const localAnnSigs = useRef<Set<string>>(new Set([seqSig(initialAnnotations || [])]));
+  const rememberLocalSig = (set: React.MutableRefObject<Set<string>>, sig: string) => {
+    const s = set.current;
+    s.add(sig);
+    if (s.size > 80) s.delete(s.values().next().value as string);
+  };
+  useEffect(() => { rememberLocalSig(localSeqSigs, seqSig(editSequence)); }, [editSequence]);
+  useEffect(() => { rememberLocalSig(localAnnSigs, seqSig(annotations)); }, [annotations]);
   useEffect(() => {
     const sig = seqSig(initialSequence);
-    if (sig === lastSyncedSig.current) return;
+    // Skip if this is the current sync point OR any state we've held locally (a lagging poll echo).
+    if (sig === lastSyncedSig.current || localSeqSigs.current.has(sig)) return;
     lastSyncedSig.current = sig;
     // genuine new baseline: reset undo history and pre-sync histPrevRef so the resulting
     // setEditSequence isn't itself recorded as an undoable step.
@@ -568,19 +908,147 @@ export function VideoReviewEditor({
     const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
     return `${Number(a) || 9} / ${Number(b) || 16}`;
   }, [editSequence?.format, initialSequence?.format]);
+
+  // Captions in the NATIVE shell now render with the SAME web <CaptionLayer> the browser preview
+  // uses, as an HTML overlay over the (transparent) preview area on top of the native video — made
+  // possible by the compositing flip (webview is now ABOVE the video). This restores full caption
+  // styling AND instant edit reflection (no native rebuild round-trip). Data lives in the timeline
+  // JSON (single source of truth) → Dan's edits and the FFmpeg export read the very same captions.
+  const [stageCssW, setStageCssW] = useState(0);
+  const captionDims = useMemo(() => {
+    const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':').map(Number);
+    const ratio = a && b ? a / b : 9 / 16;
+    const MAX = 900; // matches timeline-preview's canvasDims
+    return ratio >= 1 ? { w: MAX, h: Math.round(MAX / ratio) } : { w: Math.round(MAX * ratio), h: MAX };
+  }, [editSequence?.format, initialSequence?.format]);
+  const renderCaptions = useMemo<RenderCaption[]>(() => {
+    // Detect captions exactly like the GES rebuild watcher (which found all 74): by the per-clip
+    // `c.track === 'caption'` field across ALL tracks — NOT by the track's `type`, which isn't
+    // reliably 'caption' for these clips.
+    const out: RenderCaption[] = [];
+    for (const tr of editSequence?.tracks || []) {
+      for (const c of tr.clips || []) {
+        if (c.track !== 'caption') continue;
+        const text = (c as unknown as { text?: string }).text;
+        if (typeof text !== 'string' || !text.trim()) continue;
+        out.push({
+          id: String(c.id),
+          text: String(text),
+          start: Number(c.timeline_start || 0),
+          end: Number(c.timeline_end || 0),
+          design: (c.style || {}) as CaptionDesign,
+          words: c.words || undefined,
+        });
+      }
+    }
+    return out;
+  }, [editSequence]);
   // Stable callbacks: passing inline arrows would change every render and re-run the
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
   const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
   const handlePreviewEnded = useCallback(() => setPlaying(false), []);
+  // The playhead FOLLOWS the engine's real playback position (engPosRef = last reported position +
+  // the wall-clock time it arrived). The picture stalls ~150-650ms at each clip boundary while the
+  // HW decoder re-inits; a free wall-clock bar would run ahead during those stalls (the desync).
+  // Following the engine keeps the bar locked to the picture — it stalls when the picture stalls.
+  const engPosRef = useRef({ pos: 0, wall: 0 });
+  // The thin playhead bar is moved DIRECTLY via this ref at 60Hz (no React re-render), so the heavy
+  // 324-clip editor doesn't re-render every frame just to nudge the bar (that 60Hz full re-render
+  // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
+  // at ~12Hz only for the reactive bits (captions / annotations / time readout) which don't need 60Hz.
+  const playheadBarRef = useRef<HTMLDivElement>(null);
+  // Magnet for the PLAYHEAD: the clip-join times (every clip's start AND end, plus 0) that the
+  // scrubbing red line snaps onto when 🧲 is ON, so it clicks precisely onto cut points.
+  const playheadSnapPoints = useMemo(() => {
+    const pts = new Set<number>([0]);
+    for (const c of allSequenceClips) {
+      pts.add(Number((c.timeline_start || 0).toFixed(3)));
+      pts.add(Number((c.timeline_end || 0).toFixed(3)));
+    }
+    return Array.from(pts).sort((a, b) => a - b);
+  }, [allSequenceClips]);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
-      const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
-      setPlaying(false);
+      let target = clamp(time, 0, maxDuration);
+      // Magnet (same 🧲 toggle as clip-drag): snap the playhead onto the nearest clip join within
+      // ~8px so it "clicks" onto cut points. OFF or nothing close -> free scrub (target unchanged).
+      if (snapEnabled && maxDuration > 0) {
+        const width = timelineRef.current?.offsetWidth || 0;
+        if (width > 0) {
+          const tol = (8 / width) * timelineDuration;
+          let best = target;
+          let bd = tol;
+          for (const g of playheadSnapPoints) {
+            const d = Math.abs(target - g);
+            if (d < bd) { bd = d; best = g; }
+          }
+          target = best;
+        }
+      }
+      const nextTime = Number(clamp(target, 0, maxDuration).toFixed(3));
+      // Preserve play state: seeking (incl. clicking the ruler) does NOT stop playback. Anchor the
+      // follow-clock at the seek target so the bar jumps there and then stays put until the engine
+      // confirms it actually resumed there (the engine keeps reporting the target while it re-prerolls).
       setCurrentTime(nextTime);
+      engPosRef.current = { pos: nextTime, wall: performance.now() };
+      if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
-    [duration, timelineDuration]
+    [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints]
   );
+
+  // Native transport bridge: in the desktop shell the GES engine is the playback source.
+  // Drive it from the editor's transport, and take the engine's position back for the playhead.
+  useEffect(() => {
+    if (!nativeShell) return;
+    nativeSend({ cmd: playing ? 'play' : 'pause' });
+  }, [playing, nativeShell, nativeSend]);
+  // (captions now render as the web <CaptionLayer> overlay above — no native caption text is sent)
+  // Playhead = engine position, interpolated forward by at most ONE feedback interval so the bar
+  // is smooth between the ~30Hz updates but can NEVER run ahead of the picture: during a stall the
+  // engine keeps reporting the same position, so the interpolation resets every ~33ms (drift ≤ the
+  // cap below). This is what makes the bar and the video/audio stay in lock-step.
+  useEffect(() => {
+    if (!nativeShell || !playing) return;
+    engPosRef.current = { ...engPosRef.current, wall: performance.now() }; // re-anchor on play
+    let raf = 0;
+    let lastState = 0;
+    const max = timelineDuration || duration || 0;
+    const loop = (now: number) => {
+      const e = engPosRef.current;
+      const elapsed = Math.min(Math.max((performance.now() - e.wall) / 1000, 0), 0.08);
+      const pos = max > 0 ? Math.min(e.pos + elapsed, max) : e.pos + elapsed;
+      // 60Hz: move ONLY the thin bar via the ref — no React re-render of the heavy editor.
+      const bar = playheadBarRef.current;
+      if (bar && timelineDuration) bar.style.left = `${(pos / timelineDuration) * 100}%`;
+      // ~12Hz: update React currentTime for the reactive bits (captions/annotations/time readout).
+      if (now - lastState > 80) {
+        lastState = now;
+        setCurrentTime(pos);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [nativeShell, playing, timelineDuration, duration]);
+  useEffect(() => {
+    if (!nativeShell) return;
+    const wv = (window as unknown as { chrome?: { webview?: { addEventListener(t: string, h: (e: { data: unknown }) => void): void; removeEventListener(t: string, h: (e: { data: unknown }) => void): void } } }).chrome?.webview;
+    if (!wv) return;
+    const onMsg = (e: { data: unknown }) => {
+      try {
+        const d = JSON.parse(String(e.data));
+        if (d && d.type === 'pos' && typeof d.t === 'number') {
+          // record the engine's REAL position; the rAF loop above follows it (never runs ahead).
+          engPosRef.current = { pos: d.t, wall: performance.now() };
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    wv.addEventListener('message', onMsg);
+    return () => wv.removeEventListener('message', onMsg);
+  }, [nativeShell]);
   const isActiveAnnotation = useCallback(
     (annotation: Pick<ReviewAnnotation, 'start' | 'end'>) => (
       currentTime >= annotation.start && currentTime <= (annotation.end ?? annotation.start + 0.2)
@@ -589,6 +1057,81 @@ export function VideoReviewEditor({
   );
   const effectiveDrawStart = useMemo(() => {
     return Number(currentTime.toFixed(2));
+  }, [currentTime]);
+  // Blur regions active at a GIVEN time t, resolved to their position. Drawn ON the canvas (in
+  // TimelinePreview) — NOT via CSS backdrop-filter, which flickers. This is a function of t (not a
+  // value at currentTime) so the playback loop can evaluate it at the SAME clock the video frame
+  // uses — otherwise the box lags the frame by a React cycle and a moving target peeks out.
+  const blurRegionsAt = useCallback((t: number) => {
+    return annotations
+      .filter((a) => a.intent === 'blur' && a.kind === 'rect' && t >= a.start && t <= (a.end ?? a.start + 0.2))
+      .map((a) => {
+        const d = (a.data || {}) as { x?: number; y?: number; width?: number; height?: number; track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[] };
+        // priority: manual keyframes (interpolated) > OCR track path > static box
+        const kf = d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, t) : null;
+        const tracked = !kf && d.track ? trackedBoxAt(d.track_boxes, t) : null;
+        return kf || tracked || { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) };
+      });
+  }, [annotations]);
+
+  // Freeze-frame (DaVinci-style ripple insert): right-click a CLIP to freeze ITS frame at the
+  // playhead. The clip is CUT at the playhead, a 5s still that looks IDENTICAL (inherits transform /
+  // position / crop / shape) is inserted in the gap, and the continuation + EVERYTHING after (all
+  // tracks + annotations) ripples +5s — like pausing the video for 5s.
+  const FREEZE_DUR = 5;
+  const insertFreezeRipple = useCallback((clicked: SequenceClip) => {
+    if (!clicked.asset_id) return;
+    const t = Number(Math.max(clicked.timeline_start + 0.05, Math.min(currentTime, clicked.timeline_end - 0.05)).toFixed(2));
+    const srcT = Number((Number(clicked.source_start || 0) + (t - clicked.timeline_start)).toFixed(3));
+    const r = (v: number) => Number(v.toFixed(2));
+    const F = FREEZE_DUR;
+    setEditSequence((current) => {
+      if (!current) return current;
+      const tracks = current.tracks || [];
+      const tIdx = tracks.findIndex((tr) => (tr.clips || []).some((c) => c.id === clicked.id));
+      const freeze: SequenceClip = {
+        id: makeId(), asset_id: clicked.asset_id, track: clicked.track, layer: clicked.layer ?? 0,
+        composition: clicked.composition, position: clicked.position ?? null, transform: clicked.transform ?? null,
+        crop: clicked.crop ?? null, shape: clicked.shape ?? null,
+        timeline_start: r(t), timeline_end: r(t + F), source_start: srcT, source_end: srcT, // freeze
+        role: 'freeze', label: '静止画',
+      };
+      const nextTracks = tracks.map((tr, i) => {
+        const out: SequenceClip[] = [];
+        for (const c of tr.clips || []) {
+          const cs = c.timeline_start, ce = c.timeline_end;
+          const isVid = Number.isFinite(c.source_end as number);
+          if (cs < t - 1e-3 && ce > t + 1e-3) {
+            out.push({ ...c, timeline_end: r(t), ...(isVid ? { source_end: r(Number(c.source_start || 0) + (t - cs)) } : {}) });
+            out.push({ ...c, id: makeId(), timeline_start: r(t + F), timeline_end: r(ce + F), ...(isVid ? { source_start: r(Number(c.source_start || 0) + (t - cs)) } : {}) });
+          } else if (cs >= t - 1e-3) {
+            out.push({ ...c, timeline_start: r(cs + F), timeline_end: r(ce + F) });
+          } else {
+            out.push(c);
+          }
+        }
+        if (i === tIdx) out.push(freeze);
+        return { ...tr, clips: out };
+      });
+      setSelectedSequenceClipId(freeze.id);
+      setSelectedSequenceClipIds([freeze.id]);
+      return { ...current, tracks: nextTracks };
+    });
+    setAnnotations((prev) => {
+      const out: ReviewAnnotation[] = [];
+      for (const a of prev) {
+        const cs = a.start, ce = a.end ?? a.start;
+        if (cs < t - 1e-3 && ce > t + 1e-3) {
+          out.push({ ...a, end: r(t) });
+          out.push({ ...a, id: makeId(), created_at: new Date().toISOString(), start: r(t + F), end: r(ce + F) });
+        } else if (cs >= t - 1e-3) {
+          out.push({ ...a, start: r(cs + F), end: r(ce + F) });
+        } else {
+          out.push(a);
+        }
+      }
+      return out;
+    });
   }, [currentTime]);
 
   const payload: SessionPayload = useMemo(
@@ -661,15 +1204,19 @@ export function VideoReviewEditor({
       const data = (await res.json()) as SessionPayload;
       const loadedAnnotations = data.annotations || [];
       const nextAnnotations = loadedAnnotations.length > 0 ? loadedAnnotations : initialAnnotations || [];
-      // This effect re-runs on every parent poll (new prop refs); only actually load — and
-      // reset the undo history — when the fetched annotations differ from what we show, else
-      // a poll would wipe the undo stack of in-progress sequence edits.
-      if (JSON.stringify(nextAnnotations) === JSON.stringify(histPrevRef.current?.annotations ?? [])) return;
+      // Only adopt a GENUINELY external change. Skip the current sync point AND any annotation
+      // state we've held locally — a lagging poll echo (parent returns the pre-save annotations
+      // right after we save a new blur) is a past local value, not external, so adopting it would
+      // make the just-created blur "disappear then reappear". (Also covers the "vanishes after
+      // 0.3s" in-flight case.)
+      const nextSig = seqSig(nextAnnotations);
+      if (nextSig === lastSyncedAnnSig.current || localAnnSigs.current.has(nextSig)) return;
       histPastRef.current = [];
       histFutureRef.current = [];
       histCheckpointRef.current = null;
       // pre-sync the baseline so this load isn't recorded as an undoable edit
       histPrevRef.current = { annotations: nextAnnotations, sequence: histPrevRef.current?.sequence ?? null };
+      lastSyncedAnnSig.current = seqSig(nextAnnotations); // adopted from parent -> not our edit to re-save
       setAnnotations(nextAnnotations);
     } catch (err) {
       // Network blip (e.g. the sandbox restarting mid-edit) must NOT crash the editor —
@@ -722,21 +1269,32 @@ export function VideoReviewEditor({
     return () => window.clearTimeout(timer);
   }, [editSequence]);
 
+  // Autosave annotation edits (blur boxes etc.) — separate from the sequence save above.
+  useEffect(() => {
+    const sig = seqSig(annotations);
+    if (sig === lastSyncedAnnSig.current) return;
+    const timer = window.setTimeout(() => {
+      lastSyncedAnnSig.current = sig;
+      void autoSaveRef.current.save?.(autoSaveRef.current.payload);
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [annotations]);
+
   const makeDraftAnnotation = useCallback(
-    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>): DraftAnnotation => {
+    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur'): DraftAnnotation => {
       const fallbackStart = effectiveDrawStart;
       const fallbackEnd = Number(Math.min(duration || fallbackStart + 1, fallbackStart + 1).toFixed(2));
       const start = Math.min(fallbackStart, fallbackEnd);
       const end = Math.max(fallbackStart, fallbackEnd);
       return {
         ...annotation,
-        intent,
+        intent: intentArg,
         note: null,
         start,
         end: end > start ? end : start + 0.5,
       };
     },
-    [duration, effectiveDrawStart, intent]
+    [duration, effectiveDrawStart]
   );
 
   useEffect(() => {
@@ -789,15 +1347,6 @@ export function VideoReviewEditor({
     setSelectedSequenceClipIds([]);
   }, []);
 
-  const stageDraftAnnotation = useCallback(
-    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>) => {
-      const draft = makeDraftAnnotation(annotation);
-      setPendingAnnotation(draft);
-      clearSelection();
-    },
-    [clearSelection, makeDraftAnnotation]
-  );
-
   const confirmPendingAnnotation = useCallback(() => {
     if (!pendingAnnotation) return;
     const next: ReviewAnnotation = {
@@ -811,10 +1360,145 @@ export function VideoReviewEditor({
     setPendingAnnotation(null);
   }, [pendingAnnotation]);
 
+  // Commit an annotation immediately on draw — no "タイムラインに追加" step. Selected so the
+  // options show right away; deletable with Delete. The clip is ANCHORED AT THE PLAYHEAD (red
+  // line) with a short default span (NOT the whole clip / not [0,playhead]). Trim start/end on
+  // the timeline, or with the "開始/終了＝再生位置" buttons.
+  const commitAnnotation = useCallback(
+    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur') => {
+      const draft = makeDraftAnnotation(annotation, intentArg);
+      const maxDur = contentDuration > 0 ? contentDuration : effectiveDrawStart + DEFAULT_ANN_SPAN;
+      const start = Number(clamp(effectiveDrawStart, 0, Math.max(0, maxDur - 0.1)).toFixed(2));
+      const end = Number(clamp(start + DEFAULT_ANN_SPAN, start + 0.1, maxDur).toFixed(2));
+      const next: ReviewAnnotation = {
+        ...draft,
+        id: makeId(),
+        created_at: new Date().toISOString(),
+        start,
+        end,
+      };
+      setAnnotations((prev) => [...prev, next]);
+      setSelectedId(next.id);
+      setSelectedIds([next.id]);
+      setPendingAnnotation(null);
+    },
+    [contentDuration, effectiveDrawStart, makeDraftAnnotation]
+  );
+
   const updateSelected = useCallback((patch: Partial<ReviewAnnotation>) => {
     if (!selectedId) return;
     setAnnotations((prev) => prev.map((a) => (a.id === selectedId ? { ...a, ...patch } : a)));
   }, [selectedId]);
+
+  // Manual keyframe blur: add/replace the keyframe at the current playhead with `box`. Dragging the
+  // box on the preview writes a keyframe at the red line; the box interpolates between keyframes.
+  const upsertKeyframe = useCallback((annId: string, box: { x: number; y: number; width: number; height: number }) => {
+    const tt = Number(currentTime.toFixed(2));
+    setAnnotations((prev) => prev.map((a) => {
+      if (a.id !== annId) return a;
+      const d = (a.data || {}) as { keyframes?: Keyframe[] };
+      const kfs: Keyframe[] = Array.isArray(d.keyframes) ? [...d.keyframes] : [];
+      const nk: Keyframe = { t: tt, x: box.x, y: box.y, width: box.width, height: box.height };
+      const idx = kfs.findIndex((k) => Math.abs(k.t - tt) < 0.05);
+      if (idx >= 0) kfs[idx] = nk; else kfs.push(nk);
+      kfs.sort((p, q) => p.t - q.t);
+      return { ...a, data: { ...(a.data as object), keyframes: kfs, kfMode: true, track: false } };
+    }));
+  }, [currentTime]);
+
+  const removeKeyframe = useCallback((annId: string, t: number) => {
+    setAnnotations((prev) => prev.map((a) => {
+      if (a.id !== annId) return a;
+      const d = (a.data || {}) as { keyframes?: Keyframe[] };
+      const kfs = (Array.isArray(d.keyframes) ? d.keyframes : []).filter((k) => Math.abs(k.t - t) > 0.001);
+      return { ...a, data: { ...(a.data as object), keyframes: kfs } };
+    }));
+  }, []);
+
+  // Drag the blur box on the preview (move / resize). Each pointer move writes the keyframe at the
+  // current playhead, so the box follows the cursor and the keyframe is set on release.
+  const startBlurBoxDrag = useCallback((event: React.PointerEvent, a: ReviewAnnotation, mode: 'move' | 'resize') => {
+    event.stopPropagation();
+    event.preventDefault();
+    selectAnnotation(a.id);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage || !stage.width || !stage.height) return;
+    const d = (a.data || {}) as { x?: number; y?: number; width?: number; height?: number; keyframes?: Keyframe[] };
+    const cur = (d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, currentTime) : null)
+      || { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0.1), height: Number(d.height || 0.1) };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / stage.width;
+      const dy = (ev.clientY - startY) / stage.height;
+      const nb = mode === 'move'
+        ? { x: clamp(cur.x + dx, 0, 1 - cur.width), y: clamp(cur.y + dy, 0, 1 - cur.height), width: cur.width, height: cur.height }
+        : { x: cur.x, y: cur.y, width: clamp(cur.width + dx, 0.02, 1 - cur.x), height: clamp(cur.height + dy, 0.02, 1 - cur.y) };
+      upsertKeyframe(a.id, nb);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }, [currentTime, selectAnnotation, upsertKeyframe]);
+
+  // Per-clip 実行 (生成/ダンに指示): dispatch this one instruction clip to Dan and reflect it.
+  const [executingId, setExecutingId] = useState<string | null>(null);
+  const runExecuteClip = useCallback(async (ann: ReviewAnnotation) => {
+    const handler = ann.intent === 'generate' ? onGenerateClip : onExecuteClip;
+    if (!handler) return;
+    setExecutingId(ann.id);
+    try {
+      const ok = await handler(ann);
+      // 一過性の指示クリップ（生成/コメント）は受付成功で役目を終えるので消す（false=受付失敗なら残す）。
+      // 削除は annotation autosave に乗るのでサーバー側タイムラインからも消える。
+      if (ok !== false) {
+        setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
+        clearSelection();
+      }
+    } finally {
+      setExecutingId(null);
+    }
+  }, [onExecuteClip, onGenerateClip, clearSelection]);
+
+  // 追従ぼかし: run the tracker on a drawn box; store its per-frame path (track_boxes) on the
+  // annotation so the preview animates the blur box along the moving object (real tracking).
+  const [trackingId, setTrackingId] = useState<string | null>(null);
+  const runTrackBlur = useCallback(async (ann: ReviewAnnotation) => {
+    if (!onTrackBlur || ann.kind !== 'rect') return;
+    const d = (ann.data || {}) as { x?: number; y?: number; width?: number; height?: number };
+    setTrackingId(ann.id);
+    try {
+      // anchor = the playhead frame the box was drawn on; scan the WHOLE clip so tracking can
+      // discover the time range the text is visible (track-first: that range becomes the clip).
+      const scanEnd = contentDuration > 0 ? contentDuration : 0;
+      const r = await onTrackBlur(
+        { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) },
+        Number(currentTime || 0),
+        0,
+        scanEnd,
+      );
+      const hasPath = r.found && r.boxes && Object.keys(r.boxes).length > 0;
+      setAnnotations((prev) => prev.map((a) => {
+        if (a.id !== ann.id) return a;
+        const nextStart = hasPath && typeof r.t_start === 'number' ? Number(r.t_start.toFixed(2)) : a.start;
+        const nextEnd = hasPath && typeof r.t_end === 'number' ? Number(r.t_end.toFixed(2)) : a.end;
+        return {
+          ...a,
+          // track-first: the tracked range DEFINES the clip span.
+          start: nextStart,
+          end: nextEnd,
+          data: { ...(a.data as object), track: true, track_boxes: r.boxes || {}, track_text: r.text || '' },
+        };
+      }));
+    } finally {
+      setTrackingId(null);
+    }
+  }, [onTrackBlur, currentTime, contentDuration]);
 
   const updatePending = useCallback((patch: Partial<DraftAnnotation>) => {
     setPendingAnnotation((current) => (current ? { ...current, ...patch } : current));
@@ -854,7 +1538,7 @@ export function VideoReviewEditor({
       });
     }
     clearSelection();
-  }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
+  }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, nativeShell, nativeSend]);
 
   // Ripple delete: remove the selected clip(s) (+ A/V-link partners) and close the gap ONLY on
   // each affected lane (same track+layer) — later clips on that lane slide left to fill the
@@ -949,12 +1633,44 @@ export function VideoReviewEditor({
       if (cut === 0) return current;
       return { ...current, tracks };
     });
-  }, [linkAV]);
+  }, [linkAV, nativeShell, nativeSend]);
+
+  // Split a blur/instruction annotation at time t into two, partitioning its keyframes / tracked
+  // path so each half keeps the right boxes (so ぼかしクリップ can be cut like any other clip).
+  const splitAnnotationAtTime = useCallback((t: number, annIds: Set<string>) => {
+    const rr = (v: number) => Number(v.toFixed(2));
+    setAnnotations((prev) => {
+      const out: ReviewAnnotation[] = [];
+      for (const a of prev) {
+        const en = a.end ?? a.start + 0.5;
+        if (!annIds.has(a.id) || !(t > a.start + 0.05 && t < en - 0.05)) { out.push(a); continue; }
+        const d = (a.data || {}) as { keyframes?: Keyframe[]; track_boxes?: Record<string, number[]> };
+        const atT = d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, t) : null;
+        const dedupSort = (ks: Keyframe[]) => ks
+          .filter((k, i, arr) => arr.findIndex((x) => Math.abs(x.t - k.t) < 0.01) === i)
+          .sort((p, q) => p.t - q.t);
+        const leftKf = d.keyframes ? dedupSort([...d.keyframes.filter((k) => k.t <= t), ...(atT ? [{ t: rr(t), ...atT }] : [])]) : undefined;
+        const rightKf = d.keyframes ? dedupSort([...(atT ? [{ t: rr(t), ...atT }] : []), ...d.keyframes.filter((k) => k.t >= t)]) : undefined;
+        const partBoxes = (keep: (n: number) => boolean) => {
+          if (!d.track_boxes) return undefined;
+          const o: Record<string, number[]> = {};
+          for (const k of Object.keys(d.track_boxes)) if (keep(Number(k))) o[k] = d.track_boxes[k];
+          return o;
+        };
+        out.push({ ...a, end: rr(t), data: { ...d, ...(leftKf ? { keyframes: leftKf } : {}), ...(d.track_boxes ? { track_boxes: partBoxes((n) => n <= t) } : {}) } });
+        out.push({ ...a, id: makeId(), created_at: new Date().toISOString(), start: rr(t), data: { ...d, ...(rightKf ? { keyframes: rightKf } : {}), ...(d.track_boxes ? { track_boxes: partBoxes((n) => n >= t) } : {}) } });
+      }
+      return out;
+    });
+  }, []);
 
   const splitAtPlayhead = useCallback(() => {
-    const ids = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
-    splitClipAtTime(currentTime, ids);
-  }, [currentTime, selectedSequenceClipId, selectedSequenceClipIds, splitClipAtTime]);
+    const annIds = new Set(selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : []);
+    const clipIds = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+    if (annIds.size > 0) splitAnnotationAtTime(currentTime, annIds);
+    // Split clips when clips are selected, or (default) when nothing at all is selected.
+    if (clipIds.size > 0 || annIds.size === 0) splitClipAtTime(currentTime, clipIds);
+  }, [currentTime, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, splitAnnotationAtTime, splitClipAtTime]);
 
   const undo = useCallback(() => {
     flushHistory();
@@ -1033,15 +1749,22 @@ export function VideoReviewEditor({
       if (!point) return;
       setIsPointerDown(true);
       if (tool === 'select') return;
+      // Starting a new drawing clears any in-progress draft/pending immediately (on the FIRST
+      // click), so the old rectangle disappears the moment you start redrawing — not on release.
+      setDraftRect(null);
+      setDraftPath(null);
+      setPendingAnnotation(null);
+      setTypePicker(null);
       if (tool === 'rect') {
         setDraftRect({ start: point, end: point });
       } else if (tool === 'freehand') {
         setDraftPath([point]);
       } else if (tool === 'marker') {
-        stageDraftAnnotation({ kind: 'marker', label: intent, data: { point } });
+        // A marker is a point note → always a "ダンに指示" pin (no type choice needed).
+        commitAnnotation({ kind: 'marker', label: 'comment', data: { point } }, 'comment');
       }
     },
-    [clearSelection, getPoint, intent, stageDraftAnnotation, tool]
+    [clearSelection, commitAnnotation, getPoint, tool]
   );
 
   const handlePointerMove = useCallback(
@@ -1057,23 +1780,29 @@ export function VideoReviewEditor({
 
   const handlePointerUp = useCallback(() => {
     setIsPointerDown(false);
+    // On release we DON'T commit — we open a type picker at the shape so the user chooses
+    // ぼかし / 生成 / ダンに指示. Drawing a shape no longer implies "ぼかし".
     if (draftRect) {
       const x = Math.min(draftRect.start.x, draftRect.end.x);
       const y = Math.min(draftRect.start.y, draftRect.end.y);
       const width = Math.abs(draftRect.end.x - draftRect.start.x);
       const height = Math.abs(draftRect.end.y - draftRect.start.y);
       if (width > 0.008 && height > 0.008) {
-        stageDraftAnnotation({ kind: 'rect', label: intent, data: { x, y, width, height } });
+        setTypePicker({ kind: 'rect', data: { x, y, width, height }, cx: x + width / 2, cy: y + height / 2 });
       }
       setDraftRect(null);
     }
     if (draftPath) {
       if (draftPath.length > 1) {
-        stageDraftAnnotation({ kind: 'freehand', label: intent, data: { points: draftPath } });
+        const xs = draftPath.map((p) => p.x);
+        const ys = draftPath.map((p) => p.y);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        setTypePicker({ kind: 'freehand', data: { points: draftPath }, cx, cy });
       }
       setDraftPath(null);
     }
-  }, [draftPath, draftRect, intent, stageDraftAnnotation]);
+  }, [draftPath, draftRect]);
 
   const rectStyle = (data: Record<string, unknown>) => {
     const x = Number(data.x || 0);
@@ -1116,11 +1845,13 @@ export function VideoReviewEditor({
   );
 
   const updateAnnotationTime = useCallback(
-    (id: string, start: number, end: number) => {
+    (id: string, start: number, end: number, layer?: number) => {
       const maxDuration = duration || Math.max(end, start + 0.1);
       const nextStart = Number(clamp(start, 0, maxDuration).toFixed(2));
       const nextEnd = Number(clamp(end, nextStart + 0.1, maxDuration).toFixed(2));
-      setAnnotations((prev) => prev.map((a) => (a.id === id ? { ...a, start: nextStart, end: nextEnd } : a)));
+      setAnnotations((prev) => prev.map((a) => (a.id === id
+        ? { ...a, start: nextStart, end: nextEnd, ...(typeof layer === 'number' ? { data: { ...(a.data as object), layer } } : {}) }
+        : a)));
     },
     [duration]
   );
@@ -1135,14 +1866,25 @@ export function VideoReviewEditor({
       const length = Math.max(0.1, timelineDrag.originalEnd - timelineDrag.originalStart);
       if (timelineDrag.mode === 'move') {
         const nextStart = clamp(timelineDrag.originalStart + delta, 0, Math.max(0, timelineDuration - length));
-        updateAnnotationTime(timelineDrag.id, nextStart, nextStart + length);
+        // Vertical: dragging into another lane (same zone) changes the annotation's layer = up/down
+        // lane move, like sequence clips. Frozen geometry + 8px deadband keep it from oscillating.
+        let layer: number | undefined;
+        const ann = annotations.find((a) => a.id === timelineDrag.id);
+        if (ann) {
+          const zone = trackForIntent(ann.intent);
+          const yWithin = event.clientY - rect.top;
+          const geom = dragLaneGeomRef.current || laneGeomRef.current;
+          const cand = geom.find((g) => g.zone === zone && yWithin >= g.top + 8 && yWithin < g.bottom - 8);
+          if (cand) layer = cand.layer;
+        }
+        updateAnnotationTime(timelineDrag.id, nextStart, nextStart + length, layer);
       } else if (timelineDrag.mode === 'start') {
         updateAnnotationTime(timelineDrag.id, timelineDrag.originalStart + delta, timelineDrag.originalEnd);
       } else {
         updateAnnotationTime(timelineDrag.id, timelineDrag.originalStart, timelineDrag.originalEnd + delta);
       }
     };
-    const clearDrag = () => setTimelineDrag(null);
+    const clearDrag = () => { setTimelineDrag(null); dragLaneGeomRef.current = null; };
     window.addEventListener('pointermove', moveDrag);
     window.addEventListener('pointerup', clearDrag);
     window.addEventListener('pointercancel', clearDrag);
@@ -1151,7 +1893,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [timelineDuration, timelineDrag, updateAnnotationTime]);
+  }, [timelineDuration, timelineDrag, updateAnnotationTime, annotations]);
 
   useEffect(() => {
     if (!pendingTimelineDrag || !pendingAnnotation) return;
@@ -1224,19 +1966,38 @@ export function VideoReviewEditor({
     });
   }, [currentTime, timelineDuration]);
 
+  // Edge-scroll on playhead MOVEMENT: only scroll when the playhead reaches the viewport edge —
+  // staying put for fine adjustments in the middle (centering on every move made the whole timeline
+  // shift under the cursor and was impossible to scrub precisely).
+  useEffect(() => {
+    const scroller = timelineScrollRef.current;
+    const track = timelineRef.current;
+    if (!scroller || !track || !timelineDuration) return;
+    const playX = track.offsetLeft + (currentTime / timelineDuration) * track.offsetWidth;
+    const margin = 40;
+    const left = scroller.scrollLeft;
+    const right = left + scroller.clientWidth;
+    if (playX < left + margin) scroller.scrollLeft = Math.max(0, playX - margin);
+    else if (playX > right - margin) scroller.scrollLeft = playX - scroller.clientWidth + margin;
+  }, [currentTime, timelineDuration]);
+
+  // On ZOOM, centre the playhead (zoom is an explicit action that zooms AROUND the red line).
   useEffect(() => {
     const scroller = timelineScrollRef.current;
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
     const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
     scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
-  }, [currentTime, timelineDuration, timelineZoom]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timelineZoom]);
 
   const startTimelineDrag = useCallback(
     (event: React.PointerEvent, annotation: ReviewAnnotation, mode: TimelineDrag['mode']) => {
       event.preventDefault();
       event.stopPropagation();
       selectAnnotation(annotation.id, event.shiftKey || event.ctrlKey || event.metaKey);
+      // Freeze lane geometry for stable vertical hit-testing (no reflow oscillation while dragging).
+      dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g }));
       setTimelineDrag({
         id: annotation.id,
         mode,
@@ -1284,7 +2045,7 @@ export function VideoReviewEditor({
       const nextDuration = Math.max(0, ...tracks.flatMap((track) => (track.clips || []).map((clip) => clip.timeline_end || 0)));
       return { ...current, duration: Number(nextDuration.toFixed(3)), tracks };
     });
-  }, []);
+  }, [nativeShell, nativeSend]);
 
   const updateSequenceClip = useCallback((clipId: string, patch: Partial<SequenceClip>) => {
     updateSequenceClips(new Set([clipId]), patch);
@@ -1296,6 +2057,299 @@ export function VideoReviewEditor({
     const ids = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
     updateSequenceClips(ids, patch);
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
+
+  // --- pop-out effect preview: when 飛び出し is applied/changed, prepare a browser-playable
+  // alpha overlay (matted person breaking out of the wipe box) once, so the editor preview can
+  // show it without per-frame matting. Keyed by clip id; the SAME layer is used at export. ---
+  type PopoutPrep = {
+    url?: string; preparing?: boolean; progress?: number; key?: string; error?: string;
+    pendingUrl?: string; pendingParams?: Record<string, unknown>;
+  };
+  const [popoutPreviews, setPopoutPreviews] = useState<Record<string, PopoutPrep>>({});
+  const currentFormat = editSequence?.format || initialSequence?.format || '9:16';
+  // Merge params into a clip's popout effect via the LATEST sequence state (the clip object a
+  // bake started from may be stale by the time it finishes — e.g. it was split meanwhile).
+  // The bake canvas extends beyond the frame by `margins` (so off-screen card parts / the head /
+  // the shadow keep real pixels instead of a hard cut) — when the margins change vs what the
+  // clip's display position was composed for, re-express the position so nothing moves on screen.
+  type PopoutMargins = { l: number; t: number; r: number; b: number };
+  const mergePopoutParams = useCallback((clipId: string, params: Record<string, unknown>, margins?: PopoutMargins) => {
+    setEditSequence((current) => {
+      if (!current) return current;
+      const tracks = (current.tracks || []).map((track) => ({
+        ...track,
+        clips: (track.clips || []).map((c) => {
+          if (String(c.id) !== clipId) return c;
+          const effects = (c.effects || []).map((e) =>
+            e.type === 'popout'
+              ? { ...e, params: { ...(e.params || {}), ...params, ...(margins ? { margins } : {}) } }
+              : e);
+          let position = c.position;
+          if (margins) {
+            const oldM = ((c.effects || []).find((e) => e.type === 'popout')?.params?.margins || {}) as Partial<PopoutMargins>;
+            const o = { l: Number(oldM.l || 0), t: Number(oldM.t || 0), r: Number(oldM.r || 0), b: Number(oldM.b || 0) };
+            if (o.l !== margins.l || o.t !== margins.t || o.r !== margins.r || o.b !== margins.b) {
+              const p = position || { x: 0, y: 0, width: 1, height: 1 };
+              // undo the OLD margins' compose to recover the base-frame rect, then apply the new
+              const bw = p.width / (1 + o.l + o.r);
+              const bh = p.height / (1 + o.t + o.b);
+              const bx = p.x + bw * o.l;
+              const by = p.y + bh * o.t;
+              position = {
+                x: Number((bx - bw * margins.l).toFixed(4)),
+                y: Number((by - bh * margins.t).toFixed(4)),
+                width: Number((bw * (1 + margins.l + margins.r)).toFixed(4)),
+                height: Number((bh * (1 + margins.t + margins.b)).toFixed(4)),
+              };
+            }
+          }
+          return { ...c, effects, ...(position !== c.position ? { position } : {}) };
+        }),
+      }));
+      return { ...current, tracks };
+    });
+  }, []);
+  const preparePopout = useCallback(async (clip: SequenceClip | null) => {
+    if (!clip) return;
+    const eff = (clip.effects || []).find((e) => e.type === 'popout');
+    if (!eff) { setPopoutPreviews((m) => { const n = { ...m }; delete n[clip.id]; return n; }); return; }
+    if (!roomId || !clip.asset_id) return;  // preview needs room-based source; export still works
+    // Bake from the effect's CARD BOX (params.box), not the clip's display position — the display
+    // position is the user's free move/scale and must not drive re-generation. Look params are a
+    // fixed template (no live knobs); stored values are honored for backward compat.
+    const box = popoutBox(clip);
+    const intensity = (eff.params?.intensity as string) || 'mid';
+    const shadow = (eff.params?.shadow as boolean | undefined) ?? true;
+    setPopoutPreviews((m) => ({ ...m, [clip.id]: { ...m[clip.id], preparing: true, progress: 0, error: undefined } }));
+    try {
+      const res = await fetch('/api/v1/production-assets/popout-overlay', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ room_id: roomId, asset_id: clip.asset_id, position: box,
+          source_start: clip.source_start, source_end: clip.source_end, format: currentFormat, intensity, shadow }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      // What gets persisted on the effect once the bake is READY: the cache key + the padded
+      // bake window (trims inside it never re-bake; the native inpoint is relative to it).
+      const baked = {
+        overlay_key: String(data.key || ''), bake_start: Number(data.bake_start),
+        bake_end: Number(data.bake_end), baked_format: currentFormat, box,
+        bake_v: Number(data.bake_v || 0),
+      };
+      if (data.ready) {
+        setPopoutPreviews((m) => ({ ...m, [clip.id]: { url: String(data.url || ''), preparing: false, progress: 100, key: baked.overlay_key } }));
+        mergePopoutParams(String(clip.id), baked, asPopoutMargins(data.margins));
+      } else {
+        setPopoutPreviews((m) => ({ ...m, [clip.id]: {
+          ...m[clip.id], preparing: true, progress: Number(data.progress || 0),
+          key: baked.overlay_key, pendingUrl: String(data.url || ''), pendingParams: baked,
+        } }));
+      }
+    } catch {
+      setPopoutPreviews((m) => ({ ...m, [clip.id]: { preparing: false, error: '生成に失敗しました' } }));
+    }
+  }, [roomId, currentFormat, mergePopoutParams]);
+
+  // Poll the bake progress for every in-flight clip (the server writes 0→100 as frames are
+  // matted) and finalize: store the overlay URL for the preview + persist the key/bake window
+  // on the clip so the native engine and the export pick the SAME cached file.
+  useEffect(() => {
+    const waiting = Object.entries(popoutPreviews).filter(([, v]) => v?.preparing && v.key);
+    if (!waiting.length || !roomId) return;
+    let cancelled = false;
+    const tick = async () => {
+      for (const [clipId, st] of waiting) {
+        try {
+          const res = await fetch(
+            `/api/v1/production-assets/popout-overlay/status?room_id=${encodeURIComponent(roomId)}&key=${encodeURIComponent(st.key || '')}`,
+            { credentials: 'include' });
+          if (!res.ok) continue;
+          const d = await res.json();
+          if (cancelled) return;
+          if (d.ready) {
+            setPopoutPreviews((m) => ({ ...m, [clipId]: { url: st.pendingUrl, preparing: false, progress: 100, key: st.key } }));
+            if (st.pendingParams) mergePopoutParams(clipId, st.pendingParams, asPopoutMargins(d.margins));
+          } else if (d.error) {
+            setPopoutPreviews((m) => ({ ...m, [clipId]: { preparing: false, error: String(d.error) } }));
+          } else if (d.stale) {
+            // the server restarted mid-bake — clear so the scheduler re-requests it
+            setPopoutPreviews((m) => ({ ...m, [clipId]: {} }));
+          } else {
+            setPopoutPreviews((m) => ({ ...m, [clipId]: { ...m[clipId], progress: Number(d.progress || 0) } }));
+          }
+        } catch { /* transient network error — next tick retries */ }
+      }
+    };
+    const t = window.setInterval(tick, 700);
+    return () => { cancelled = true; window.clearInterval(t); };
+  }, [popoutPreviews, roomId, mergePopoutParams]);
+
+  // Auto-prepare overlays for clips that already carry the pop-out effect (loaded content / preset)
+  // so the preview shows them without a manual re-apply. ONE AT A TIME — matting is heavy (4K),
+  // firing all clips at once storms the GPU. Prioritize the clip under the playhead so what you're
+  // looking at is ready first; the rest fill in serially as each finishes.
+  useEffect(() => {
+    const anyPreparing = Object.values(popoutPreviews).some((p) => p?.preparing);
+    if (anyPreparing) return;
+    // pending = a pop-out clip with no overlay yet, OR one whose geometry/timing changed since its
+    // overlay was baked (sig mismatch) — i.e. it was just resized/cropped/trimmed and needs re-baking.
+    const pending = allSequenceClips.filter((c) => {
+      if (!(c.effects || []).some((e) => e.type === 'popout')) return false;
+      const st = popoutPreviews[String(c.id)];
+      if (st?.preparing || st?.error) return false;  // error → manual 再試行 from the inspector
+      return popoutNeedsBake(c, currentFormat) || !st?.url;
+    });
+    if (!pending.length) return;
+    const atHead = pending.find((c) =>
+      currentTime >= Number(c.timeline_start || 0) - 0.05 && currentTime <= Number(c.timeline_end || 0) + 0.05);
+    preparePopout(atHead || pending[0]);
+  }, [allSequenceClips, popoutPreviews, preparePopout, currentTime, currentFormat]);
+
+  // One-time migration of LEGACY pop-out clips (baked before the effect became an ordinary alpha
+  // overlay clip): they carry an overlay_key but no params.box and still sit at their card box.
+  // Move the card box into params.box and place the clip full-frame so its full-canvas .mov renders
+  // 1:1 and is then freely editable. Guarded by `!box` so it runs once per clip (no loop).
+  useEffect(() => {
+    const legacy = allSequenceClips.filter((c) => {
+      const eff = (c.effects || []).find((e) => e.type === 'popout');
+      return Boolean(eff?.params?.overlay_key) && !eff?.params?.box;
+    });
+    if (!legacy.length) return;
+    for (const c of legacy) {
+      const box = (c.position as Box | null) || POPOUT_DEFAULT_BOX;
+      const nextEffects = (c.effects || []).map((e) =>
+        e.type === 'popout' ? { ...e, params: { ...(e.params || {}), box } } : e);
+      updateSequenceClip(String(c.id), { effects: nextEffects, position: POPOUT_FULL_FRAME, crop: null });
+    }
+  }, [allSequenceClips, updateSequenceClip]);
+
+  // Active pop-out overlay for the preview: the prepared popout clip covering `currentTime`.
+  // The bake is two HW-decodable H.264 streams (color + matte-as-luma) played by two hidden
+  // <video>s merged on a canvas — full-canvas geometry baked in, so lay it over the stage and
+  // sync both clocks to the playhead. Local time = (t - clip start) + (clip source_start -
+  // bake_start), because the bake covers a padded window. No per-frame matting, no VP9.
+  const popoutVideoRef = useRef<HTMLVideoElement | null>(null);
+  const popoutAlphaRef = useRef<HTMLVideoElement | null>(null);
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const activePopout = useMemo(() => {
+    const popClips = allSequenceClips.filter((c) => (c.effects || []).some((e) => e.type === 'popout'));
+    for (const c of popClips) {
+      const url = popoutPreviews[String(c.id)]?.url;
+      if (!url) continue;
+      const ts = Number(c.timeline_start || 0), te = Number(c.timeline_end || 0);
+      if (currentTime >= ts - 0.05 && currentTime <= te + 0.05) {
+        const p = ((c.effects || []).find((e) => e.type === 'popout')?.params || {}) as Record<string, unknown>;
+        const off = typeof p.bake_start === 'number'
+          ? Math.max(0, Number(c.source_start || 0) - (p.bake_start as number)) : 0;
+        // the canvas draws at the clip's display rect (margins are composed into it), so
+        // moving/scaling the clip in web mode matches the native/export framing
+        const pos = c.position || { x: 0, y: 0, width: 1, height: 1 };
+        return { url, alphaUrl: `${url}&stream=alpha`, ts, off, pos };
+      }
+    }
+    return null;
+  }, [allSequenceClips, popoutPreviews, currentTime]);
+  useEffect(() => {
+    if (!activePopout) return;
+    // Slave the overlay to the master playhead: play WITH the main preview, pause WHEN it pauses,
+    // and seek to the exact frame while scrubbing. During playback only correct large drift so we
+    // don't re-seek every frame (which would stutter). Color and alpha share encoder settings and
+    // keyframes, so the same corrections keep them within a frame of each other.
+    const local = Math.max(0, currentTime - activePopout.ts + activePopout.off);
+    for (const v of [popoutVideoRef.current, popoutAlphaRef.current]) {
+      if (!v) continue;
+      if (playing) {
+        if (v.paused) { try { v.currentTime = local; } catch { /* seeking */ } v.play().catch(() => {}); }
+        else if (Math.abs(v.currentTime - local) > 0.12) { try { v.currentTime = local; } catch { /* seeking */ } }
+      } else {
+        if (!v.paused) v.pause();
+        if (Math.abs(v.currentTime - local) > 0.05) { try { v.currentTime = local; } catch { /* seeking */ } }
+      }
+    }
+  }, [activePopout, currentTime, playing]);
+
+  // Draw the (playhead-controlled) overlay onto a canvas each frame: color video first, then cut
+  // it by the matte video (its LUMA is the alpha) via an SVG luminanceToAlpha filter on an
+  // offscreen canvas + destination-in. drawImage renders even a PAUSED/seeked video reliably —
+  // a bare paused <video> can stay blank — so the popout shows while scrubbing AND freezes when
+  // the main preview is paused. A legacy .webm (own alpha, no matte track) just skips the cut.
+  const popoutCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const popoutLumaRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!activePopout) return;
+    let raf = 0;
+    const draw = () => {
+      const v = popoutVideoRef.current, a = popoutAlphaRef.current, c = popoutCanvasRef.current;
+      if (v && c && v.videoWidth && v.videoHeight) {
+        if (c.width !== v.videoWidth) c.width = v.videoWidth;
+        if (c.height !== v.videoHeight) c.height = v.videoHeight;
+        const ctx = c.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, c.width, c.height);
+          try {
+            ctx.drawImage(v, 0, 0, c.width, c.height);
+            if (a && a.videoWidth && a.readyState >= 2) {
+              let off = popoutLumaRef.current;
+              if (!off) { off = document.createElement('canvas'); popoutLumaRef.current = off; }
+              if (off.width !== c.width) off.width = c.width;
+              if (off.height !== c.height) off.height = c.height;
+              const octx = off.getContext('2d');
+              if (octx) {
+                octx.clearRect(0, 0, off.width, off.height);
+                octx.filter = 'url(#dan-popout-luma-alpha)';
+                octx.drawImage(a, 0, 0, off.width, off.height);
+                octx.filter = 'none';
+                ctx.globalCompositeOperation = 'destination-in';
+                ctx.drawImage(off, 0, 0);
+                ctx.globalCompositeOperation = 'source-over';
+              }
+            }
+          } catch { /* frame not ready */ }
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [activePopout]);
+
+  // Speech-following captions (karaoke / typewriter) auto-sync to the actual voice — no manual
+  // step. Whenever such a caption lacks up-to-date per-word timings for its current position, we
+  // derive them once (debounced). Keyed by id+span+animation so a moved or re-styled caption
+  // re-syncs but it never loops (the words we write don't change the key).
+  const autoSyncSigRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!onSyncCaptionAudio) return;
+    const need = allSequenceClips
+      .filter((c) => {
+        if (c.track !== 'caption' && typeof c.text !== 'string') return false;
+        const anim = (c.style as CaptionDesign | null | undefined)?.animation;
+        if (anim !== 'karaoke' && anim !== 'typewriter') return false;
+        const sig = `${c.timeline_start}|${c.timeline_end}|${anim}`;
+        return autoSyncSigRef.current.get(String(c.id)) !== sig;
+      })
+      .map((c) => String(c.id));
+    if (!need.length) return;
+    const timer = window.setTimeout(async () => {
+      const byId = new Map(allSequenceClips.map((c) => [String(c.id), c]));
+      need.forEach((id) => {
+        const c = byId.get(id);
+        if (!c) return;
+        const anim = (c.style as CaptionDesign | null | undefined)?.animation;
+        autoSyncSigRef.current.set(id, `${c.timeline_start}|${c.timeline_end}|${anim}`);
+      });
+      try {
+        const map = await onSyncCaptionAudio(need);
+        Object.entries(map).forEach(([cid, words]) => {
+          updateSequenceClips(new Set([cid]), { words: words && words.length ? words : null });
+        });
+      } catch {
+        need.forEach((id) => autoSyncSigRef.current.delete(id)); // allow a retry on the next change
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [allSequenceClips, onSyncCaptionAudio, updateSequenceClips]);
 
   // Insert a new clip from a dragged source asset at the drop time/lane. Video assets only for
   // now (the dominant case; the material list is video-content). The video lands on the 'video'
@@ -1442,18 +2496,39 @@ export function VideoReviewEditor({
       ? allOrig.find((c) => c.id !== draggedId && c.link_id === original.link_id)
       : null;
     if (partner) {
-      // Apply the same timeline delta + matching source trim to the partner.
+      // Mirror the drag to the linked partner. CRITICAL: only shift the partner's SOURCE when
+      // the dragged clip's source is also changing (a trim of the start/end handle). On a pure
+      // MOVE (timeline shifts, source stays) the partner's source must NOT shift — otherwise
+      // its timeline and source move by the same delta and cancel out, so the audio looks moved
+      // but plays the exact same content at the same instant (the "voice doesn't follow" bug).
       const dStart = Number(fields.timeline_start ?? original.timeline_start) - original.timeline_start;
       const dEnd = Number(fields.timeline_end ?? original.timeline_end) - original.timeline_end;
       const pf: Partial<SequenceClip> = {};
       if (fields.timeline_start !== undefined) {
         pf.timeline_start = r(partner.timeline_start + dStart);
-        if (Number.isFinite(partner.source_start as number)) pf.source_start = r(Number(partner.source_start || 0) + dStart);
+        if (fields.source_start !== undefined && Number.isFinite(partner.source_start as number)) {
+          pf.source_start = r(Number(partner.source_start || 0) + dStart);
+        }
       }
       if (fields.timeline_end !== undefined) {
         pf.timeline_end = r(partner.timeline_end + dEnd);
-        if (Number.isFinite(partner.source_end as number)) pf.source_end = r(Number(partner.source_end || 0) + dEnd);
+        if (fields.source_end !== undefined && Number.isFinite(partner.source_end as number)) {
+          pf.source_end = r(Number(partner.source_end || 0) + dEnd);
+        }
       }
+      // Collision avoidance: the partner follows the drag automatically (you didn't grab it), so
+      // it must NOT delete other clips it lands on. If its new range overlaps a clip on its lane,
+      // bump it down to the first free lane (auto-created — a clip on a new layer makes its lane).
+      const pStart = Number(pf.timeline_start ?? partner.timeline_start);
+      const pEnd = Number(pf.timeline_end ?? partner.timeline_end);
+      const pTrack = partner.track || '';
+      const overlapsAt = (L: number) => allOrig.some((c) =>
+        c.id !== partner.id && !moved.has(c.id) && (c.track || '') === pTrack && (c.layer ?? 0) === L &&
+        pEnd > c.timeline_start + 0.001 && pStart < c.timeline_end - 0.001);
+      let pLayer = partner.layer ?? 0;
+      let guard = 0;
+      while (overlapsAt(pLayer) && guard++ < 50) pLayer += 1;
+      if (pLayer !== (partner.layer ?? 0)) pf.layer = pLayer;
       moved.set(partner.id, pf);
     }
     commitMovedSet(snap, moved);
@@ -1503,7 +2578,10 @@ export function VideoReviewEditor({
         mode,
         startClientX: event.clientX,
         startClientY: event.clientY,
-        zone: clip.track === 'audio' || clip.role ? 'audio' : 'visual',
+        // Zone is the clip's TRACK only — NOT its role. dan_plan video clips carry a role too,
+        // and keying off role wrongly put video clips in the audio zone, so the lane hit-test
+        // never matched the visual lanes and video clips couldn't move up/down at all.
+        zone: clip.track === 'audio' ? 'audio' : 'visual',
         originalLayer: clip.layer ?? clipDefaultLayer(clip),
         originalTimelineStart: clip.timeline_start,
         originalTimelineEnd: clip.timeline_end,
@@ -1531,28 +2609,65 @@ export function VideoReviewEditor({
       if (!clip) return;
       const isVideoClip = clip.track === 'video' || Number.isFinite(clip.source_end);
       const sourceDuration = clip.source_duration || Math.max(Number(clip.source_end || 0), sequenceClipDrag.originalSourceEnd);
+      // Magnet: snap a time to the nearest neighbour edge / playhead / ends within ~8px. Returns the
+      // time unchanged when snapping is off or nothing is close (so free movement still works).
+      const exclude = new Set(dragSelectionRef.current.length > 1 ? dragSelectionRef.current : [sequenceClipDrag.id]);
+      const snapTargets: number[] = snapEnabled ? [0, sequenceDuration, Number(currentTime.toFixed(3))] : [];
+      if (snapEnabled) for (const c of allSequenceClips) { if (exclude.has(c.id)) continue; snapTargets.push(c.timeline_start, c.timeline_end); }
+      const snapTol = (8 / rect.width) * timelineDuration;
+      const snap = (t: number) => {
+        let best = t; let bd = snapTol;
+        for (const g of snapTargets) { const d = Math.abs(t - g); if (d < bd) { bd = d; best = g; } }
+        return best;
+      };
       // The dragged clip moves/resizes freely; applyDragOverwrite then trims, deletes, or
       // splits any same-lane neighbour it now overlaps (DaVinci/Premiere overwrite).
       if (sequenceClipDrag.mode === 'start') {
-        const nextTimelineStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, sequenceClipDrag.originalTimelineEnd - 0.1);
+        const snappedStart = snap(sequenceClipDrag.originalTimelineStart + delta);
+        const nextTimelineStart = clamp(snappedStart, 0, sequenceClipDrag.originalTimelineEnd - 0.1);
+        const effDelta = nextTimelineStart - sequenceClipDrag.originalTimelineStart;
         const fields: Partial<SequenceClip> = { timeline_start: Number(nextTimelineStart.toFixed(2)) };
         if (isVideoClip) {
-          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + delta, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(2));
+          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + effDelta, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(2));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (sequenceClipDrag.mode === 'end') {
-        const nextTimelineEnd = clamp(sequenceClipDrag.originalTimelineEnd + delta, sequenceClipDrag.originalTimelineStart + 0.1, timelineDuration);
+        const snappedEnd = snap(sequenceClipDrag.originalTimelineEnd + delta);
+        const nextTimelineEnd = clamp(snappedEnd, sequenceClipDrag.originalTimelineStart + 0.1, timelineDuration);
+        const effDelta = nextTimelineEnd - sequenceClipDrag.originalTimelineEnd;
         const fields: Partial<SequenceClip> = { timeline_end: Number(nextTimelineEnd.toFixed(2)) };
         if (isVideoClip) {
-          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + delta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
+          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + effDelta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (dragSelectionRef.current.length > 1) {
-        // Block move: shift the whole selection together (no lane change, no overwrite).
-        applyBlockMove(delta, dragSelectionRef.current);
+        // Block move: shift the whole selection together (no lane change, no overwrite). Magnet:
+        // snap the BLOCK's leading or trailing edge (whichever is closer) to a neighbour/playhead/
+        // end, using the original block bounds from the drag-start snapshot.
+        let blockDelta = delta;
+        if (snapEnabled) {
+          const sel = new Set(dragSelectionRef.current);
+          const selClips = (dragSnapshotRef.current?.tracks || [])
+            .flatMap((t) => t.clips || [])
+            .filter((c) => sel.has(c.id));
+          if (selClips.length) {
+            const blockStart = Math.min(...selClips.map((c) => c.timeline_start));
+            const blockEnd = Math.max(...selClips.map((c) => c.timeline_end));
+            const adjStart = snap(blockStart + delta) - (blockStart + delta);
+            const adjEnd = snap(blockEnd + delta) - (blockEnd + delta);
+            blockDelta = delta + (Math.abs(adjStart) <= Math.abs(adjEnd) ? adjStart : adjEnd);
+          }
+        }
+        applyBlockMove(blockDelta, dragSelectionRef.current);
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
-        const nextStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, Math.max(0, timelineDuration - length));
+        const rawStart = sequenceClipDrag.originalTimelineStart + delta;
+        // Snap whichever EDGE (leading or trailing) is closest to a target, so a clip clicks into
+        // place against its neighbour on either side.
+        const sStart = snap(rawStart);
+        const sEnd = snap(rawStart + length);
+        const snappedStart = Math.abs(sStart - rawStart) <= Math.abs(sEnd - (rawStart + length)) ? sStart : sEnd - length;
+        const nextStart = clamp(snappedStart, 0, Math.max(0, timelineDuration - length));
         const fields: Partial<SequenceClip> = {
           timeline_start: Number(nextStart.toFixed(2)),
           timeline_end: Number((nextStart + length).toFixed(2)),
@@ -1591,7 +2706,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime]);
 
   // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
   // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
@@ -1611,6 +2726,8 @@ export function VideoReviewEditor({
   useEffect(() => {
     if (!marqueeActive) return;
     const move = (event: PointerEvent) => {
+      const start = marqueeStartRef.current;
+      if (start && (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5)) rightDragRef.current = true;
       setMarquee((m) => (m ? { ...m, x1: event.clientX, y1: event.clientY } : m));
     };
     const up = (event: PointerEvent) => {
@@ -1621,19 +2738,24 @@ export function VideoReviewEditor({
       const left = Math.min(start.x, event.clientX), right = Math.max(start.x, event.clientX);
       const top = Math.min(start.y, event.clientY), bottom = Math.max(start.y, event.clientY);
       if (right - left < 5 && bottom - top < 5) return; // plain right-click, not a drag
-      const ids: string[] = [];
-      document.querySelectorAll('[data-clip-id]').forEach((el) => {
+      const intersects = (el: Element) => {
         const r = el.getBoundingClientRect();
-        if (r.right >= left && r.left <= right && r.bottom >= top && r.top <= bottom) {
-          const id = el.getAttribute('data-clip-id');
-          if (id) ids.push(id);
-        }
+        return r.right >= left && r.left <= right && r.bottom >= top && r.top <= bottom;
+      };
+      const clipIds: string[] = [];
+      const annIds: string[] = [];
+      // Marquee selects EVERY clip kind it covers — sequence clips AND annotation/blur clips.
+      document.querySelectorAll('[data-clip-id]').forEach((el) => {
+        if (intersects(el)) { const id = el.getAttribute('data-clip-id'); if (id) clipIds.push(id); }
       });
-      if (ids.length > 0) {
-        setSelectedId(null);
-        setSelectedIds([]);
-        setSelectedSequenceClipIds(ids);
-        setSelectedSequenceClipId(ids[ids.length - 1]);
+      document.querySelectorAll('[data-annotation-id]').forEach((el) => {
+        if (intersects(el)) { const id = el.getAttribute('data-annotation-id'); if (id) annIds.push(id); }
+      });
+      if (clipIds.length > 0 || annIds.length > 0) {
+        setSelectedSequenceClipIds(clipIds);
+        setSelectedSequenceClipId(clipIds.length ? clipIds[clipIds.length - 1] : null);
+        setSelectedIds(annIds);
+        setSelectedId(annIds.length ? annIds[annIds.length - 1] : null);
       }
     };
     window.addEventListener('pointermove', move);
@@ -1647,7 +2769,7 @@ export function VideoReviewEditor({
   }, [marqueeActive]);
 
   return (
-    <div className={`flex h-full bg-background text-foreground ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
+    <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
       {marquee ? (
         <div
           className="pointer-events-none fixed z-50 border border-sky-400 bg-sky-400/15"
@@ -1658,6 +2780,18 @@ export function VideoReviewEditor({
             height: Math.abs(marquee.y1 - marquee.y0),
           }}
         />
+      ) : null}
+      {clipMenu ? (
+        <>
+          <div className="fixed inset-0 z-50" onClick={() => setClipMenu(null)} onContextMenu={(e) => { e.preventDefault(); setClipMenu(null); }} />
+          <div className="fixed z-[51] min-w-[180px] rounded-md border border-border bg-popover py-1 text-sm shadow-lg"
+            style={{ left: Math.min(clipMenu.x, window.innerWidth - 200), top: Math.min(clipMenu.y, window.innerHeight - 80) }}>
+            <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted"
+              onClick={() => { const c = clipMenu.clip; setClipMenu(null); insertFreezeRipple(c); }}>
+              ⏸ ここを静止画にする（5秒・以降をずらす）
+            </button>
+          </div>
+        </>
       ) : null}
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
@@ -1696,26 +2830,120 @@ export function VideoReviewEditor({
         </div>
 
         <div className="flex flex-1 overflow-hidden">
-          <div className="flex min-w-0 flex-1 flex-col bg-neutral-950">
-            <div className="flex min-h-0 flex-1 items-center justify-center p-4">
+          <div className={`flex min-w-0 flex-1 flex-col ${nativeShell ? '' : 'bg-neutral-950'}`}>
+            <div className="relative flex min-h-0 flex-1 items-center justify-center p-4">
+              {previewTopLeft ? (
+                <div className="absolute left-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
+                  {previewTopLeft}
+                </div>
+              ) : null}
               <div
                 ref={stageRef}
-                className="relative h-full max-h-full max-w-full overflow-hidden bg-black"
+                className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
                 style={{ aspectRatio: previewAspect }}
+                onContextMenu={(event) => event.preventDefault()}
               >
-                <TimelinePreview
-                  sequence={editSequence}
-                  assets={sequenceAssets || []}
-                  currentTime={currentTime}
-                  playing={playing}
-                  format={editSequence?.format || initialSequence?.format || '9:16'}
-                  onTimeChange={handlePreviewTime}
-                  onEnded={handlePreviewEnded}
-                  className="h-full w-full"
-                  selectedClipId={selectedSequenceClipId}
-                  onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
-                  onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
-                />
+                {nativeShell ? (
+                  // native engine composites the real video BELOW this transparent stage (the page
+                  // is transparent here so it shows through); the web CaptionLayer renders on top,
+                  // synced to the playhead. Anything opaque here would hide the video, so only the
+                  // (transparent) caption overlay is drawn.
+                  renderCaptions.length && stageCssW > 0 ? (
+                    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                      <div style={{ transformOrigin: 'top left', transform: `scale(${stageCssW / captionDims.w})` }}>
+                        <CaptionLayer outW={captionDims.w} outH={captionDims.h} captions={renderCaptions} time={currentTime} />
+                      </div>
+                    </div>
+                  ) : null
+                ) : (
+                  <TimelinePreview
+                    sequence={editSequence}
+                    assets={sequenceAssets || []}
+                    blurRegionsAt={blurRegionsAt}
+                    currentTime={currentTime}
+                    playing={playing}
+                    format={editSequence?.format || initialSequence?.format || '9:16'}
+                    onTimeChange={handlePreviewTime}
+                    onEnded={handlePreviewEnded}
+                    className="h-full w-full"
+                    selectedClipId={selectedSequenceClipId}
+                    onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
+                    onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
+                  />
+                )}
+                {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
+                    (same clock = no drift, replaces the wipe). See project_production_native_rewrite_intent.
+                    Two hidden videos (color + matte-as-luma, both HW-decoded H.264) are merged on
+                    the canvas — see the draw effect above. */}
+                {!nativeShell && activePopout ? (
+                  <>
+                    <svg width="0" height="0" className="absolute" aria-hidden>
+                      <filter id="dan-popout-luma-alpha"><feColorMatrix type="luminanceToAlpha" /></filter>
+                    </svg>
+                    <video
+                      key={activePopout.url}
+                      ref={popoutVideoRef}
+                      src={activePopout.url}
+                      muted
+                      playsInline
+                      preload="auto"
+                      onCanPlay={() => {
+                        // prime a decoded frame (a never-played <video> has none for the canvas to
+                        // draw), then honor the current play state so it still stops with the main.
+                        const v = popoutVideoRef.current;
+                        if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
+                      }}
+                      className="pointer-events-none absolute h-px w-px opacity-0"
+                    />
+                    <video
+                      key={activePopout.alphaUrl}
+                      ref={popoutAlphaRef}
+                      src={activePopout.alphaUrl}
+                      muted
+                      playsInline
+                      preload="auto"
+                      onCanPlay={() => {
+                        const v = popoutAlphaRef.current;
+                        if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
+                      }}
+                      className="pointer-events-none absolute h-px w-px opacity-0"
+                    />
+                    <canvas
+                      ref={popoutCanvasRef}
+                      className="pointer-events-none absolute z-10"
+                      style={{
+                        left: `${activePopout.pos.x * 100}%`,
+                        top: `${activePopout.pos.y * 100}%`,
+                        width: `${activePopout.pos.width * 100}%`,
+                        height: `${activePopout.pos.height * 100}%`,
+                      }}
+                    />
+                  </>
+                ) : null}
+                {/* pop-out bake progress: 0→100% HUD over the card position while the person is
+                    being matted. This DOM layer sits above the native video in the app too, so
+                    the bar is visible in both. */}
+                {(() => {
+                  const entry = allSequenceClips
+                    .map((c) => ({ c, st: popoutPreviews[String(c.id)] }))
+                    .find(({ st }) => st?.preparing);
+                  if (!entry) return null;
+                  const box = popoutBox(entry.c);
+                  const pct = Math.max(0, Math.min(100, entry.st?.progress ?? 0));
+                  return (
+                    <div
+                      className="pointer-events-none absolute z-20 flex items-center justify-center"
+                      style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
+                    >
+                      <div className="w-3/4 max-w-[260px] rounded-md bg-black/70 px-3 py-2 text-center">
+                        <div className="mb-1 text-[10px] text-white">飛び出しを生成中… {pct}%</div>
+                        <div className="h-1.5 w-full overflow-hidden rounded bg-white/20">
+                          <div className="h-full rounded bg-sky-400 transition-[width] duration-500" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div
                   className={`absolute ${tool === 'select' ? 'pointer-events-none' : 'pointer-events-auto'}`}
@@ -1728,6 +2956,13 @@ export function VideoReviewEditor({
                 <div className="pointer-events-none absolute" style={videoContentStyle}>
                   {annotations.filter(isActiveAnnotation).map((a) => {
                     if (a.kind === 'rect') {
+                      const bd = (a.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[]; kfMode?: boolean };
+                      // box position priority: manual keyframes > OCR track path > static box.
+                      const kf = a.intent === 'blur' && bd.keyframes && bd.keyframes.length ? keyframeBoxAt(bd.keyframes, currentTime) : null;
+                      const tracked = !kf && a.intent === 'blur' && bd.track ? trackedBoxAt(bd.track_boxes, currentTime) : null;
+                      const isKf = a.intent === 'blur' && !!bd.kfMode;
+                      const selectedThis = selectedIds.includes(a.id);
+                      const editable = isKf && selectedThis;
                       return (
                         <button
                           key={a.id}
@@ -1736,12 +2971,30 @@ export function VideoReviewEditor({
                             e.stopPropagation();
                             selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
                           }}
-                          className={`pointer-events-auto absolute border-2 ${
-                            selectedIds.includes(a.id) ? 'border-yellow-300' : 'border-sky-400'
-                          } bg-red-500/15`}
-                          style={rectStyle(a.data)}
+                          onPointerDown={editable ? (e) => startBlurBoxDrag(e, a, 'move') : undefined}
+                          className={`pointer-events-auto absolute ${
+                            // Only show the outline when SELECTED — an unselected region needs no
+                            // chrome (the blur itself is already painted on the canvas). Still
+                            // clickable (transparent) so it can be picked.
+                            selectedThis
+                              ? `border-2 border-yellow-300 ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`
+                              : 'border-0 bg-transparent'
+                          } ${editable ? 'cursor-move' : ''}`}
+                          style={{
+                            // The blur itself is painted on the canvas (TimelinePreview blurRegions),
+                            // so this is just a thin selectable outline — NO backdrop-filter (which
+                            // flickered when the canvas repainted).
+                            ...rectStyle(kf || tracked || a.data),
+                          }}
                           title={a.note || a.intent}
-                        />
+                        >
+                          {editable ? (
+                            <span
+                              onPointerDown={(e) => startBlurBoxDrag(e, a, 'resize')}
+                              className="absolute -bottom-1 -right-1 h-3 w-3 cursor-nwse-resize rounded-sm border border-yellow-300 bg-yellow-300/80"
+                            />
+                          ) : null}
+                        </button>
                       );
                     }
                     if (a.kind === 'marker') {
@@ -1813,10 +3066,49 @@ export function VideoReviewEditor({
                         vectorEffect="non-scaling-stroke"
                       />
                     )}
+                    {typePicker?.kind === 'freehand' && (
+                      <path
+                        d={((typePicker.data.points as Point[] | undefined) || []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
+                        fill="none"
+                        stroke="#fb923c"
+                        strokeWidth="0.9"
+                        strokeDasharray="2 1.5"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    )}
                   </svg>
                   {draftRectStyle && (
                     <div className="absolute border-2 border-orange-400 bg-orange-500/15" style={draftRectStyle} />
                   )}
+                  {typePicker ? (
+                    <>
+                      {typePicker.kind === 'rect' ? (
+                        <div className="absolute border-2 border-dashed border-orange-300 bg-orange-500/15" style={rectStyle(typePicker.data)} />
+                      ) : null}
+                      <div
+                        className="pointer-events-auto absolute z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-white/15 bg-neutral-900/95 p-1 shadow-xl"
+                        style={{ left: `${clamp(typePicker.cx, 0.08, 0.92) * 100}%`, top: `${clamp(typePicker.cy, 0.04, 0.96) * 100}%` }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                      >
+                        {INTENTS.map((it) => (
+                          <button
+                            key={it.value}
+                            type="button"
+                            className="rounded px-2 py-1 text-xs font-medium text-white hover:bg-white/20"
+                            onClick={() => {
+                              commitAnnotation({ kind: typePicker.kind, label: it.value, data: typePicker.data }, it.value);
+                              setTypePicker(null);
+                            }}
+                          >
+                            {it.label}
+                          </button>
+                        ))}
+                        <button type="button" className="px-1 text-white/50 hover:text-white" title="取消" onClick={() => setTypePicker(null)}>
+                          ✕
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
                   {/* Captions are composited by TimelinePreview onto the canvas (matches the
                       final render); no separate HTML overlay needed here. */}
                 </div>
@@ -1846,19 +3138,19 @@ export function VideoReviewEditor({
                 <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" onClick={() => setTool('marker')}>
                   <MessageSquare className="h-4 w-4" />
                 </Button>
-                <select
-                  value={intent}
-                  onChange={(e) => setIntent(e.target.value as Intent)}
-                  className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                <Button
+                  variant={snapEnabled ? 'default' : 'outline'}
+                  size="sm"
+                  className="ml-auto h-7 px-2 text-xs"
+                  title={snapEnabled ? 'マグネット ON：クリップ端・赤線・再生ヘッドがつなぎ目に吸着。クリックでOFF（自由移動）' : 'マグネット OFF：自由に動かせます。クリックでON（吸着）'}
+                  onClick={() => setSnapEnabled((v) => !v)}
                 >
-                  {INTENTS.map((it) => (
-                    <option key={it.value} value={it.value}>{it.label}</option>
-                  ))}
-                </select>
+                  {snapEnabled ? '🧲 マグネット' : '🧲 OFF'}
+                </Button>
                 <Button
                   variant={linkAV ? 'default' : 'outline'}
                   size="sm"
-                  className="ml-auto h-7 px-2 text-xs"
+                  className="h-7 px-2 text-xs"
                   title={linkAV ? '映像と音声をリンク中（クリップを一緒に動かす）。クリックで解除' : '映像と音声のリンクは解除中。クリックでリンク'}
                   onClick={() => setLinkAV((v) => !v)}
                 >
@@ -1911,6 +3203,10 @@ export function VideoReviewEditor({
                     aria-label="タイムラインズーム"
                     onChange={(event) => setTimelineZoom(Number(clamp(Number(event.target.value), 1, 8).toFixed(2)))}
                     onDoubleClick={() => setTimelineZoom(1)}
+                    // Drop focus after dragging so a following Space goes to play/pause, not the
+                    // slider (a focused range input eats Space/arrow keys).
+                    onPointerUp={(event) => event.currentTarget.blur()}
+                    onMouseUp={(event) => event.currentTarget.blur()}
                     className="h-1 w-28 cursor-pointer accent-sky-500"
                   />
                   <span className="w-9 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(timelineZoom * 100)}%</span>
@@ -1949,6 +3245,7 @@ export function VideoReviewEditor({
                         if (event.button !== 2) return; // right button starts a rubber-band select
                         event.preventDefault();
                         event.stopPropagation();
+                        rightDragRef.current = false; // becomes true only once it moves >5px
                         marqueeStartRef.current = { x: event.clientX, y: event.clientY };
                         setMarquee({ x0: event.clientX, y0: event.clientY, x1: event.clientX, y1: event.clientY });
                       }}
@@ -1989,14 +3286,18 @@ export function VideoReviewEditor({
                             ) : null}
                             {lane.items.map((item) => {
                               const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
-                              const width = timelineDuration ? Math.max(0.8, ((item.end - item.start) / timelineDuration) * 100) : 1;
+                              // accurate width (% of timeline); a pixel minWidth keeps short clips
+                              // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
+                              // timeline, drew short clips seconds-wide and overlapped neighbours.
+                              const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
                               if (item.kind === 'annotation' && item.annotation) {
                                 const a = item.annotation;
                                 return (
                                   <div
                                     key={item.key}
+                                    data-annotation-id={a.id}
                                     className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
-                                    style={{ left: `${left}%`, width: `${width}%` }}
+                                    style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
                                     onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
                                     onDoubleClick={() => {
                                       selectAnnotation(a.id);
@@ -2058,16 +3359,23 @@ export function VideoReviewEditor({
                                         ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
                                         : 'border-white/30'
                                   }`}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
+                                    if (rightDragRef.current) return;
+                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
+                                  }}
                                   style={{
                                     left: `${left}%`,
                                     width: `${width}%`,
+                                    minWidth: '3px',
                                     top: 3,
                                     bottom: 3,
                                     ...(isVideo && clipAsset?.thumbnail_url
                                       ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
                                       : {}),
                                   }}
-                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}`}
+                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
                                 >
                                   <button
                                     type="button"
@@ -2124,6 +3432,7 @@ export function VideoReviewEditor({
                         );
                       })}
                       <div
+                        ref={playheadBarRef}
                         className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-destructive"
                         style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
                       />
@@ -2174,58 +3483,31 @@ export function VideoReviewEditor({
                       <option key={it.value} value={it.value}>{it.label}</option>
                     ))}
                   </select>
-                  <Textarea
-                    className="mt-2 bg-white"
-                    value={pendingAnnotation.note || ''}
-                    onChange={(e) => updatePending({ note: e.target.value })}
-                    rows={3}
-                    placeholder="この範囲でDanにやってほしいこと"
-                  />
+                  {pendingAnnotation.intent === 'blur' && pendingAnnotation.kind === 'rect' ? (
+                    <label className="mt-2 flex items-center gap-2 rounded-md border border-orange-200 bg-white p-2 text-xs text-orange-950">
+                      <input
+                        type="checkbox"
+                        checked={!!(pendingAnnotation.data as { track?: boolean } | undefined)?.track}
+                        onChange={(e) => updatePending({ data: { ...((pendingAnnotation.data as object) || {}), track: e.target.checked } })}
+                      />
+                      追従ぼかし（動く対象を追いかける／OFF＝静止のまま）
+                    </label>
+                  ) : null}
+                  {pendingAnnotation.intent === 'blur' ? null : (
+                    <Textarea
+                      className="mt-2 bg-white"
+                      value={pendingAnnotation.note || ''}
+                      onChange={(e) => updatePending({ note: e.target.value })}
+                      rows={3}
+                      placeholder="この範囲でDanにやってほしいこと"
+                    />
+                  )}
                   <Button className="mt-2 w-full" size="sm" onClick={confirmPendingAnnotation}>
                     <Check className="mr-1 h-4 w-4" />
-                    タイムラインに追加
+                    {pendingAnnotation.intent === 'blur' ? 'ぼかしを追加' : 'タイムラインに追加'}
                   </Button>
                 </div>
               ) : null}
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium">指示 ({annotations.length})</div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setAnnotations([]);
-                    clearSelection();
-                  }}
-                  disabled={annotations.length === 0}
-                >
-                  <Eraser className="mr-1 h-4 w-4" />
-                  全削除
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {annotations.map((a, index) => (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={(event) => {
-                      selectAnnotation(a.id, event.shiftKey || event.ctrlKey || event.metaKey);
-                      seekTimeline(a.start);
-                    }}
-                    className={`w-full rounded-md border p-2 text-left text-sm transition-colors ${
-                      selectedIds.includes(a.id) ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs tabular-nums">{index + 1}</span>
-                      <span className="font-medium">{INTENTS.find((it) => it.value === a.intent)?.label || a.intent}</span>
-                      <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-                        {fmtTime(a.start)} - {fmtTime(a.end)}
-                      </span>
-                    </div>
-                    {a.note ? <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{a.note}</div> : null}
-                  </button>
-                ))}
-              </div>
             </div>
 
             {selected && (
@@ -2237,18 +3519,34 @@ export function VideoReviewEditor({
                   </Button>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={selected.start}
-                    onChange={(e) => updateSelected({ start: Number(e.target.value) })}
-                  />
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={selected.end ?? selected.start}
-                    onChange={(e) => updateSelected({ end: Number(e.target.value) })}
-                  />
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span>開始（秒）</span>
+                      <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="開始を再生位置（赤線）に" onClick={() => updateSelected({ start: Number(currentTime.toFixed(2)) })}>
+                        ＝再生位置
+                      </button>
+                    </div>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={selected.start}
+                      onChange={(e) => updateSelected({ start: Number(e.target.value) })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span>終了（秒）</span>
+                      <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="終了を再生位置（赤線）に" onClick={() => updateSelected({ end: Number(currentTime.toFixed(2)) })}>
+                        ＝再生位置
+                      </button>
+                    </div>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={selected.end ?? selected.start}
+                      onChange={(e) => updateSelected({ end: Number(e.target.value) })}
+                    />
+                  </div>
                 </div>
                 <select
                   value={selected.intent}
@@ -2259,11 +3557,74 @@ export function VideoReviewEditor({
                     <option key={it.value} value={it.value}>{it.label}</option>
                   ))}
                 </select>
+                {selected.intent === 'blur' && selected.kind === 'rect' ? (() => {
+                  const sd = (selected.data || {}) as { track?: boolean; track_text?: string; kfMode?: boolean; keyframes?: Keyframe[]; x?: number; y?: number; width?: number; height?: number };
+                  const analyzed = typeof sd.track_text === 'string';
+                  const tracked = !!sd.track_text;
+                  const isTracking = trackingId === selected.id;
+                  const kfs = Array.isArray(sd.keyframes) ? sd.keyframes : [];
+                  const mode = sd.kfMode ? 'kf' : sd.track ? 'track' : 'static';
+                  const curBox = () => (kfs.length ? (keyframeBoxAt(kfs, currentTime) || { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) }) : { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) });
+                  const tab = (active: boolean) => `flex-1 rounded px-2 py-1 text-xs ${active ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`;
+                  return (
+                    <div className="space-y-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
+                      <div className="flex gap-1">
+                        <button type="button" className={tab(mode === 'static')} onClick={() => updateSelected({ data: { ...sd, track: false, kfMode: false } })}>静止</button>
+                        <button type="button" className={tab(mode === 'track')} onClick={() => updateSelected({ data: { ...sd, track: true, kfMode: false } })}>追従</button>
+                        <button type="button" className={tab(mode === 'kf')} onClick={() => updateSelected({ data: kfs.length ? { ...sd, kfMode: true, track: false } : { ...sd, kfMode: true, track: false, keyframes: [{ t: Number(currentTime.toFixed(2)), ...curBox() }] } })}>キーフレーム</button>
+                      </div>
+                      {mode === 'kf' ? (
+                        <div className="space-y-1">
+                          <Button size="sm" className="w-full" onClick={() => upsertKeyframe(selected.id, curBox())}>◆ 赤線にキーフレームを打つ</Button>
+                          <p className="text-[10px] text-muted-foreground">プレビューの枠をドラッグ（右下角でサイズ変更）すると、赤線の位置にキーフレームが打たれます。2点以上で間は自動補間。</p>
+                          {kfs.length ? (
+                            <div className="max-h-24 space-y-0.5 overflow-y-auto rounded border border-border bg-background/60 p-1">
+                              {kfs.map((k) => (
+                                <div key={k.t} className="flex items-center justify-between px-1 text-[10px]">
+                                  <button type="button" className="tabular-nums hover:underline" onClick={() => seekTimeline(k.t)}>◆ {fmtTime(k.t)}</button>
+                                  <button type="button" className="text-red-400 hover:text-red-300" onClick={() => removeKeyframe(selected.id, k.t)}>削除</button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : <p className="text-[10px] text-muted-foreground">まだキーフレームがありません。</p>}
+                        </div>
+                      ) : mode === 'track' ? (
+                        <div className="space-y-1">
+                          <Button size="sm" className="w-full" disabled={isTracking || !onTrackBlur} onClick={() => runTrackBlur(selected)}>
+                            {isTracking ? '解析中…' : analyzed ? '再解析' : '▶ 解析（文字を追跡）'}
+                          </Button>
+                          <p className="text-[10px] text-muted-foreground">
+                            {isTracking
+                              ? '解析中…文字を探して追跡しています。'
+                              : tracked
+                                ? `✓「${sd.track_text}」を追跡（${fmtTime(selected.start)}〜${fmtTime(selected.end)}）。クリップ尺はこの範囲に自動調整。`
+                                : analyzed
+                                  ? '文字が見つかりませんでした。枠を文字に合わせて再解析（任意物体の追従は近日対応）。'
+                                  : '隠したい文字を枠で囲んで「解析」を押すと、その文字を追ってぼかし、クリップ尺も自動で決まります。'}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-muted-foreground">この枠で静止ぼかし（機械処理・即時）。</p>
+                      )}
+                    </div>
+                  );
+                })() : null}
                 <Textarea
                   value={selected.note || ''}
                   onChange={(e) => updateSelected({ note: e.target.value })}
                   rows={3}
+                  placeholder={selected.intent === 'blur' ? 'メモ（任意）' : 'この範囲でDanにやってほしいこと（例: ここに商品のアップ映像を生成して）'}
                 />
+                {(selected.intent === 'generate' ? onGenerateClip : onExecuteClip) ? (
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    disabled={executingId === selected.id}
+                    onClick={() => runExecuteClip(selected)}
+                  >
+                    {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ Higgsfieldで生成' : '▶ 実行（Danに反映）'}
+                  </Button>
+                ) : null}
               </div>
             )}
 
@@ -2321,7 +3682,14 @@ export function VideoReviewEditor({
                   // the same three controls; we map them to whichever field the clip uses.
                   (() => {
                     const pos = selectedSequenceClip.position;
-                    const isPip = !!pos && !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999);
+                    // A pop-out is an alpha overlay positioned by its `position` box, so it's always a
+                    // PiP even at full-frame — otherwise the size/move sliders would (wrongly) write
+                    // `transform`, which the native overlay path ignores → edits do nothing. Treat any
+                    // clip carrying the pop-out effect as PiP so the sliders drive `position` (which
+                    // the engine applies instantly, no re-bake).
+                    const isPopoutClip = (selectedSequenceClip.effects || []).some((e) => e.type === 'popout');
+                    const isPip = !!pos && (isPopoutClip
+                      || !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999));
                     let size: number, lr: number, ud: number;
                     if (isPip && pos) {
                       size = (pos.width + pos.height) / 2;
@@ -2366,6 +3734,24 @@ export function VideoReviewEditor({
                               onChange={(e) => apply(size, lr, Number(e.target.value))} />
                           </label>
                         </div>
+                        {(
+                          <div className="space-y-1">
+                            <div className="text-[10px] text-muted-foreground">くり抜きの形</div>
+                            <div className="grid grid-cols-3 gap-1">
+                              {([['rect', '四角'], ['circle', '丸'], ['rounded', '写真風']] as const).map(([val, label]) => {
+                                const cur = (selectedSequenceClip.shape as string) || 'rect';
+                                return (
+                                  <button key={val} type="button"
+                                    className={`rounded px-1 py-1 text-[10px] ${cur === val ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                                    onClick={() => updateSelectedSequenceClip({ shape: val })}>
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <p className="text-[9px] text-muted-foreground">人型のくり抜きは近日対応（人物の自動切り抜きにはAIが要るため）。</p>
+                          </div>
+                        )}
                         {(selectedSequenceClip.transform || isPip) ? (
                           <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
                             onClick={() => updateSelectedSequenceClip(isPip ? { position: null } : { transform: null })}>
@@ -2378,8 +3764,17 @@ export function VideoReviewEditor({
                 ) : null}
                 {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
                   (() => {
-                    const cr = selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
-                    const setCrop = (p: Partial<typeof cr>) => updateSelectedSequenceClip({ crop: { ...cr, ...p } });
+                    // Live crop uses dragCrop (local, cheap) while dragging; falls back to the saved
+                    // value. onChange only touches local state + throttled native — NOT editSequence
+                    // — so the heavy editor doesn't re-render per tick. Commit on release.
+                    const clipId = String(selectedSequenceClip.id);
+                    const cr = dragCrop || selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
+                    const commitCrop = () => {
+                      if (dragCrop) {
+                        updateSelectedSequenceClip({ crop: dragCrop });
+                        setDragCrop(null);
+                      }
+                    };
                     return (
                       <div className="space-y-2 rounded-md border border-border p-2">
                         <div className="text-xs font-medium text-muted-foreground">クロップ（端を切り取る）</div>
@@ -2388,7 +3783,14 @@ export function VideoReviewEditor({
                             <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                               {label} {Math.round((cr[key] ?? 0) * 100)}%
                               <input type="range" min="0" max="0.9" step="0.01" value={cr[key] ?? 0}
-                                onChange={(e) => setCrop({ [key]: Number(e.target.value) })} />
+                                onChange={(e) => {
+                                  const next = { ...cr, [key]: Number(e.target.value) };
+                                  setDragCrop(next);
+                                  sendLiveCrop(clipId, next);
+                                }}
+                                onPointerUp={commitCrop}
+                                onPointerCancel={commitCrop}
+                                onBlur={commitCrop} />
                             </label>
                           ))}
                         </div>
@@ -2412,6 +3814,90 @@ export function VideoReviewEditor({
                     );
                   })()
                 ) : null}
+                {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                  (() => {
+                    const effects = selectedSequenceClip.effects || [];
+                    const popout = effects.find((e) => e.type === 'popout') || null;
+                    const intensity = (popout?.params?.intensity as string) || 'mid';
+                    const shadow = (popout?.params?.shadow as boolean | undefined) ?? true;
+                    const prep = popoutPreviews[selectedSequenceClip.id];
+                    // Apply/remove on EVERY selected clip, but PER CLIP: each captures ITS OWN
+                    // current position as the baked card box and keeps its own other effects
+                    // (a shared patch would bake every card at the primary clip's box). The
+                    // auto-scheduler then bakes the needy clips one by one (progress bar each).
+                    const setPopout = (patch: Record<string, unknown> | null) => {
+                      const ids = new Set(
+                        selectedSequenceClipIds.length > 0
+                          ? selectedSequenceClipIds
+                          : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+                      setEditSequence((current) => {
+                        if (!current) return current;
+                        const tracks = (current.tracks || []).map((track) => ({
+                          ...track,
+                          clips: (track.clips || []).map((c) => {
+                            if (!ids.has(String(c.id))) return c;
+                            if (c.track !== 'video' && c.track !== 'overlay') return c;
+                            if (!c.asset_id) return c;
+                            const own = (c.effects || []).filter((e) => e.type !== 'popout');
+                            const cur = (c.effects || []).find((e) => e.type === 'popout');
+                            if (patch === null) {
+                              // remove: drop the effect, put the clip back at its card box (a normal wipe)
+                              const box = cur?.params?.box as Box | undefined;
+                              return { ...c, effects: own.length ? own : null, ...(box ? { position: box, crop: null } : {}) };
+                            }
+                            // The card box a pop-out is baked with = THIS clip's current position at
+                            // apply (captured once into params.box). On FIRST apply the clip becomes a
+                            // full-frame alpha overlay the user then moves/scales/crops; a later param
+                            // tweak must NOT reset that display position.
+                            const box = (cur?.params?.box as Box | undefined) || c.position || POPOUT_DEFAULT_BOX;
+                            const next: ClipEffect = { type: 'popout', params: { intensity, shadow, box, ...(cur?.params || {}), ...patch } };
+                            return { ...c, effects: [...own, next], ...(cur ? {} : { position: POPOUT_FULL_FRAME, crop: null }) };
+                          }),
+                        }));
+                        return { ...current, tracks };
+                      });
+                      // removal leaves no bake to do; applying is picked up by the auto-scheduler,
+                      // which prioritizes the clip under the playhead and runs serially.
+                      if (patch === null) {
+                        setPopoutPreviews((m) => { const n = { ...m }; ids.forEach((id) => delete n[id]); return n; });
+                      }
+                    };
+                    return (
+                      <div className="space-y-2 rounded-md border border-border p-2">
+                        <div className="text-xs font-medium text-muted-foreground">エフェクト</div>
+                        <div className="grid grid-cols-2 gap-1">
+                          <button type="button"
+                            className={`rounded px-1 py-1 text-[10px] ${!popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                            onClick={() => setPopout(null)}>なし</button>
+                          <button type="button"
+                            className={`rounded px-1 py-1 text-[10px] ${popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                            onClick={() => setPopout({})}>飛び出し</button>
+                        </div>
+                        {popout ? (
+                          <div className="space-y-1">
+                            {prep?.preparing ? (
+                              <div className="space-y-1">
+                                <p className="text-[10px] text-amber-500">生成中… {Math.max(0, Math.min(100, prep.progress ?? 0))}%（人物を切り抜いています）</p>
+                                <div className="h-1 w-full overflow-hidden rounded bg-muted">
+                                  <div className="h-full rounded bg-amber-500 transition-[width] duration-500" style={{ width: `${Math.max(0, Math.min(100, prep.progress ?? 0))}%` }} />
+                                </div>
+                              </div>
+                            ) : prep?.error ? (
+                              <div className="flex items-center gap-2">
+                                <p className="text-[10px] text-red-500">{prep.error}</p>
+                                <button type="button" className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                                  onClick={() => preparePopout(selectedSequenceClip)}>再試行</button>
+                              </div>
+                            ) : prep?.url ? (
+                              <p className="text-[10px] text-emerald-500">飛び出し適用済み</p>
+                            ) : null}
+                            <p className="text-[9px] text-muted-foreground">人物を切り抜いてカードの上辺から飛び出させます。トリム・分割・移動は待ちなしで編集できます（大きく尺を伸ばした時だけ自動で作り直します）。</p>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })()
+                ) : null}
                 {selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string' ? (
                   <>
                     <Textarea
@@ -2427,6 +3913,136 @@ export function VideoReviewEditor({
                       return (
                         <div className="space-y-2 rounded-md border border-border p-2">
                           <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
+                          <style>{CAPTION_FONT_FACE_CSS}</style>
+                          <div className="space-y-1">
+                            <div className="text-[10px] text-muted-foreground">プリセット（クリックで適用・プレビュー＝書き出しと同じ見た目）</div>
+                            <div className="grid grid-cols-4 gap-1">
+                              {CAPTION_DESIGN_PRESETS.map((p) => {
+                                const d = p.design;
+                                const fnt = CAPTION_FONTS[d.font ?? 'noto-sans'];
+                                const active = captionMatchesPreset(st, d);
+                                return (
+                                  <button
+                                    key={p.id}
+                                    type="button"
+                                    title={`${p.label}${d.animation && d.animation !== 'none' ? '（動き）' : ''}`}
+                                    onClick={() => updateSelectedSequenceClip({
+                                      // Apply the preset's LOOK but keep the user's manual LAYOUT
+                                      // (size / position / nudge) — changing the design shouldn't
+                                      // reset where/how big the caption is.
+                                      style: {
+                                        ...d,
+                                        ...(st.fontSize !== undefined ? { fontSize: st.fontSize } : {}),
+                                        ...(st.position !== undefined ? { position: st.position } : {}),
+                                        ...(st.x !== undefined ? { x: st.x } : {}),
+                                        ...(st.y !== undefined ? { y: st.y } : {}),
+                                      },
+                                    })}
+                                    className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1.5 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
+                                  >
+                                    <span
+                                      className="leading-none"
+                                      style={{
+                                        fontFamily: `${fnt.css}, sans-serif`,
+                                        fontWeight: fnt.weight,
+                                        fontSize: '0.95rem',
+                                        WebkitTextStroke: `${0.5 * (d.outlineWidth ?? 1)}px ${d.outlineColor || '#000'}`,
+                                        paintOrder: 'stroke fill',
+                                        ...(d.gradient
+                                          ? { backgroundImage: `linear-gradient(180deg, ${d.gradient[0]}, ${d.gradient[1]})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
+                                          : { color: d.color || '#fff' }),
+                                      }}
+                                    >
+                                      あA
+                                    </span>
+                                    <span className="text-[8px] leading-tight text-muted-foreground">{p.label}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 w-full text-[10px]"
+                              disabled={!st || Object.keys(st).length === 0}
+                              onClick={() => {
+                                const capIds = new Set(
+                                  allSequenceClips
+                                    .filter((c) => c.track === 'caption' || typeof c.text === 'string')
+                                    .map((c) => String(c.id)),
+                                );
+                                if (st && Object.keys(st).length > 0) updateSequenceClips(capIds, { style: { ...st } });
+                              }}
+                            >
+                              この見た目を全テロップに適用
+                            </Button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
+                              フォント
+                              <select
+                                value={(st.font as CaptionFontId) || 'noto-sans'}
+                                onChange={(e) => setStyle({ font: e.target.value as CaptionFontId })}
+                                className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
+                              >
+                                {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).map((id) => (
+                                  <option key={id} value={id}>{CAPTION_FONTS[id].label}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
+                              動き
+                              <select
+                                value={st.animation || 'none'}
+                                onChange={(e) => setStyle({ animation: e.target.value as CaptionAnimation })}
+                                className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
+                              >
+                                {CAPTION_ANIM_OPTIONS.map((o) => (
+                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          {st.animation === 'karaoke' ? (
+                            <label className="flex items-center justify-between text-[10px] text-muted-foreground">
+                              ハイライト色（喋っている単語）
+                              <input
+                                type="color"
+                                value={st.highlightColor || '#ff3b6b'}
+                                onChange={(e) => setStyle({ highlightColor: e.target.value })}
+                                className="h-6 w-8 rounded border border-input bg-background"
+                              />
+                            </label>
+                          ) : null}
+                          {st.animation === 'karaoke' || st.animation === 'typewriter' ? (
+                            <div className="text-[9px] text-muted-foreground">🔊 実際の声に自動で追従します</div>
+                          ) : null}
+                          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                            <label className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                checked={!!st.bg}
+                                onChange={(e) => setStyle({ bg: e.target.checked ? { color: st.bg?.color || '#000000', opacity: st.bg?.opacity ?? 0.6, radius: 0.18, padX: 0.45, padY: 0.16 } : undefined })}
+                              />
+                              背景箱
+                            </label>
+                            {st.bg ? (
+                              <input
+                                type="color"
+                                value={st.bg.color || '#000000'}
+                                onChange={(e) => setStyle({ bg: { ...st.bg, color: e.target.value } })}
+                                className="h-5 w-7 rounded border border-input bg-background"
+                              />
+                            ) : null}
+                            <label className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                checked={!!st.shadow}
+                                onChange={(e) => setStyle({ shadow: e.target.checked ? { color: 'rgba(0,0,0,0.55)', blur: 16, dy: 6 } : undefined })}
+                              />
+                              影
+                            </label>
+                          </div>
                           <div className="grid grid-cols-2 gap-2">
                             <label className="flex items-center gap-2 text-xs">
                               文字色
@@ -2451,7 +4067,7 @@ export function VideoReviewEditor({
                             大きさ {Math.round((st.fontSize ?? 1) * 100)}%
                             <input
                               type="range"
-                              min="0.5"
+                              min="0"
                               max="2.5"
                               step="0.1"
                               value={st.fontSize ?? 1}
@@ -2459,6 +4075,31 @@ export function VideoReviewEditor({
                               className="w-full"
                             />
                           </label>
+                          <label className="block text-xs">
+                            横幅 {Math.round((st.maxWidth ?? 0.88) * 100)}%
+                            <input
+                              type="range"
+                              min="0.05"
+                              max="1.5"
+                              step="0.01"
+                              value={st.maxWidth ?? 0.88}
+                              onChange={(e) => setStyle({ maxWidth: Number(e.target.value) })}
+                              className="w-full"
+                            />
+                          </label>
+                          <div className="flex items-center gap-1 text-xs">
+                            <span className="mr-1">文字揃え</span>
+                            {(['left', 'center', 'right'] as const).map((align) => (
+                              <button
+                                key={align}
+                                type="button"
+                                onClick={() => setStyle({ textAlign: align })}
+                                className={`rounded border px-2 py-1 ${(st.textAlign ?? 'center') === align ? 'bg-accent' : 'bg-background'}`}
+                              >
+                                {align === 'left' ? '左' : align === 'center' ? '中央' : '右'}
+                              </button>
+                            ))}
+                          </div>
                           <label className="block text-xs">
                             フチの太さ {Math.round((st.outlineWidth ?? 1) * 100)}%
                             <input
@@ -2472,15 +4113,6 @@ export function VideoReviewEditor({
                             />
                           </label>
                           <div className="flex items-center gap-2">
-                            <select
-                              value={st.position || 'bottom'}
-                              onChange={(e) => setStyle({ position: e.target.value as CaptionStyle['position'] })}
-                              className="h-8 flex-1 rounded-md border border-input bg-background px-2 text-xs"
-                            >
-                              <option value="bottom">下</option>
-                              <option value="center">中央</option>
-                              <option value="top">上</option>
-                            </select>
                             <label className="flex items-center gap-1 text-xs">
                               <input
                                 type="checkbox"
@@ -2497,8 +4129,8 @@ export function VideoReviewEditor({
                                 onChange={(e) => setStyle({ x: Number(e.target.value) })} />
                             </label>
                             <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                              上下 {Math.round((st.y ?? 0) * 100)}%
-                              <input type="range" min="-0.5" max="0.5" step="0.01" value={st.y ?? 0}
+                              上下 {Math.round((st.y ?? 0.08) * 100)}%（下0〜上92）
+                              <input type="range" min="0" max="0.92" step="0.01" value={st.y ?? 0.08}
                                 onChange={(e) => setStyle({ y: Number(e.target.value) })} />
                             </label>
                           </div>

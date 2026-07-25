@@ -1,12 +1,13 @@
 'use client';
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clapperboard,
   File,
   FileText,
   FolderKanban,
@@ -50,6 +51,7 @@ import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/
 import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { VoiceConsole } from '@/components/voice/voice-console';
+import { ProductionWorkspace } from '@/components/production/production-workspace';
 
 interface ProjectChatPanelProps {
   projectId: string;
@@ -254,7 +256,7 @@ const MUTED_PROSE_CLASS =
   'prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-muted-foreground/80 ' +
   '[&_p]:my-1 [&_pre]:max-h-60 [&_pre]:overflow-auto [&_pre]:text-xs';
 
-function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   return (
     <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
       <ReactMarkdown
@@ -266,9 +268,9 @@ function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onIma
       >{text}</ReactMarkdown>
     </div>
   );
-}
+});
 
-function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
@@ -282,7 +284,7 @@ function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; 
       {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} muted={muted} />}
     </>
   );
-}
+});
 
 function TurnToolRow({ block }: { block: TurnBlock }) {
   const [show, setShow] = useState(false);
@@ -328,7 +330,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
   );
 }
 
-function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean }) {
+const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -351,7 +353,7 @@ function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: Tur
         : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
-}
+});
 
 // Live in-progress steps (execution events) → the same block shape so the
 // live turn renders with the identical inline-timeline UI as the finished one.
@@ -540,6 +542,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
 });
 
 type DanSkill = { name: string; display_name: string; description: string };
+type TimelineReference = { content_id: string; title: string; updated_at?: string };
 
 function ChatInput({
   projectId,
@@ -574,6 +577,10 @@ function ChatInput({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const skillsCacheRef = useRef<DanSkill[] | null>(null);
   const [skills, setSkills] = useState<DanSkill[]>([]);
+  const [timelineRefs, setTimelineRefs] = useState<TimelineReference[]>([]);
+  const [timelineChoices, setTimelineChoices] = useState<TimelineReference[]>([]);
+  const [timelineMenuOpen, setTimelineMenuOpen] = useState(false);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // 追い連絡の下書きがある時、1回目の Esc は停止せず下書きを保持（armed）、
   // 2回目の Esc で本当に停止する。escStopHint は「もう一度Escで停止」表示。
@@ -587,6 +594,7 @@ function ChatInput({
   const replaceMessageIdRef = useRef<string | null>(null);
   // 今回のSSEで受信したサーバー上のメッセージID
   const serverMessageIdRef = useRef<string | null>(null);
+  const optimisticMessageIdRef = useRef<string | null>(null);
   const titleGeneratedRef = useRef(false);
   const streamRequestRef = useRef(0);
   const queryClient = useQueryClient();
@@ -602,6 +610,7 @@ function ChatInput({
   useEffect(() => {
     replaceMessageIdRef.current = null;
     serverMessageIdRef.current = null;
+    optimisticMessageIdRef.current = null;
   }, [roomId]);
 
   // Focus textarea when reply is selected
@@ -630,6 +639,24 @@ function ChatInput({
       // ignore
     }
   }, []);
+
+  const openTimelineMenu = useCallback(async () => {
+    setTimelineMenuOpen((open) => !open);
+    if (timelineChoices.length || timelineLoading) return;
+    setTimelineLoading(true);
+    try {
+      const res = await fetch(`/api/v1/production-assets/contents?room_id=${encodeURIComponent(roomId)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(await res.text());
+      const rows = await res.json();
+      setTimelineChoices((Array.isArray(rows) ? rows : []).map((row) => ({
+        content_id: String(row.id), title: String(row.title || 'Untitled timeline'), updated_at: row.updated_at,
+      })));
+    } catch (error) {
+      toast.error('タイムライン一覧を取得できませんでした', { description: String(error).slice(0, 140) });
+    } finally {
+      setTimelineLoading(false);
+    }
+  }, [roomId, timelineChoices.length, timelineLoading]);
 
   const skillFilter = message.startsWith('/') ? message.slice(1).toLowerCase() : '';
   const filteredSkills = useMemo(
@@ -809,7 +836,7 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null) => {
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = []) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
@@ -831,7 +858,13 @@ function ChatInput({
     setInterrupted(projectId, false);
     setWarmupMode(projectId, isBusy ? 'switching' : 'thinking');
 
-    const tempUserMessageId = `temp-user-${Date.now()}`;
+    // 完全形: 送信の瞬間にフロントが本物のUUIDを発行し、サーバーはこれを
+    // そのまま行IDにする。キャンセルはいつでもこのIDで確実に削除できる。
+    const tempUserMessageId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    optimisticMessageIdRef.current = tempUserMessageId;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
       room_id: roomId,
@@ -875,11 +908,12 @@ function ChatInput({
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}) },
+        { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}) },
         {
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
             serverMessageIdRef.current = msg.id;
+            optimisticMessageIdRef.current = msg.id;
             if (currentReplaceId) {
               // replace: 既存メッセージの内容をサーバー版で上書き
               queryClient.setQueryData(
@@ -918,7 +952,11 @@ function ChatInput({
                 ],
               })
             );
-            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            // NOTE: ここで project-messages を invalidate/refetch しない。
+            // 直上で SSE の実メッセージ（DB保存済み・実ID）をキャッシュへ挿入
+            // 済みであり、直後の再取得は保存ラグの古いスナップショットで最新
+            // 回答を数秒消す事故の温床だった（queryFn の一方通行マージが二重の
+            // 保険だが、そもそも即時再取得に意味がない）。
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
             queryClient.invalidateQueries({ queryKey: ['projects'] });
@@ -934,6 +972,7 @@ function ChatInput({
             aiRespondedRef.current = true;
             pendingMessageRef.current = null;
             replaceMessageIdRef.current = null;
+            optimisticMessageIdRef.current = null;
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
@@ -1013,6 +1052,13 @@ function ChatInput({
       setWarmupMode(projectId, null);
       if (error instanceof Error && error.name !== 'AbortError') {
         toast.error('メッセージ送信中に問題が発生しました');
+      }
+    } finally {
+      // ストリームが終わったら必ず ref を破棄する（残骸が「ダン作業中」と
+      // 誤判定され、停止後の送信が追い連絡に誤ルーティングされるのを防ぐ）。
+      // 次の送信がすでに新しい controller をセットしている場合は触らない。
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
       }
     }
   }, [
@@ -1139,31 +1185,56 @@ function ChatInput({
     onClearReply?.();
     // Immediately bump this project to top of sidebar
     queryClient.invalidateQueries({ queryKey: ['projects'] });
-    await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo);
-  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply]);
+    const refs = timelineRefs;
+    setTimelineRefs([]);
+    await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply, timelineRefs]);
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
     const wasBeforeAI = !aiRespondedRef.current && !!pending;
+    const userMessageIdToRemove = serverMessageIdRef.current || optimisticMessageIdRef.current;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
+    // 自分の操作は自分が真実（ターミナルのEscと同じ）: サーバーへの取消依頼を
+    // 待たず、押した瞬間に thinking/ライブ表示を消す。従来はサーバー往復後に
+    // 消灯し、さらに run 状態キャッシュが次のポーリング(2s)まで running のままで
+    // 「キャンセルしたのにthinkingが数秒流れる」見た目になっていた。
+    syncActiveStatus(false);
+    setWarmupMode(projectId, null);
+    queryClient.setQueryData(
+      ['current-run', projectId],
+      (old: { state?: string } | null | undefined) =>
+        old && old.state === 'running' ? { ...old, state: 'paused' } : old
+    );
+
     // AI未応答キャンセル → テキストを入力欄に復元 + 次回送信でUPDATEするIDを記録
     if (wasBeforeAI) {
       setMessage(pending.text);
       setAttachedFiles(pending.files);
-      if (serverMessageIdRef.current) {
-        replaceMessageIdRef.current = serverMessageIdRef.current;
+      replaceMessageIdRef.current = null;
+      if (userMessageIdToRemove) {
+        queryClient.setQueryData(
+          ['project-messages', roomId],
+          (old: { messages: MessageResponse[] } | undefined) =>
+            old
+              ? { messages: old.messages.filter((m) => m.id !== userMessageIdToRemove) }
+              : old
+        );
       }
     }
     pendingMessageRef.current = null;
     serverMessageIdRef.current = null;
+    optimisticMessageIdRef.current = null;
 
     try {
-      await api.sm.cancelSession(roomId);
+      await api.sm.cancelSession(roomId, {
+        cancelledUserMessageId: wasBeforeAI ? userMessageIdToRemove : null,
+      });
     } catch (error) {
       console.error('Failed to cancel session:', error);
     }
@@ -1176,7 +1247,7 @@ function ChatInput({
     if (!wasBeforeAI) {
       toast.info('処理を中断しました');
     }
-  }, [invalidateProjectQueries, onSseStateChange, projectId, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
+  }, [invalidateProjectQueries, onSseStateChange, projectId, queryClient, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -1353,8 +1424,30 @@ function ChatInput({
           <span>をもう一度押すと作業を停止します。</span>
         </div>
       )}
+      {timelineRefs.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1.5 px-1">
+          {timelineRefs.map((ref) => (
+            <span key={ref.content_id} className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-foreground">
+              <Clapperboard className="h-3 w-3 text-primary" />@{ref.title}
+              <button type="button" onClick={() => setTimelineRefs((current) => current.filter((item) => item.content_id !== ref.content_id))} className="text-muted-foreground hover:text-foreground" aria-label="タイムライン参照を外す"><X className="h-3 w-3" /></button>
+            </span>
+          ))}
+        </div>
+      )}
+      {timelineMenuOpen && (
+        <div className="mb-1.5 max-h-44 overflow-y-auto rounded-lg border bg-popover p-1 shadow-lg">
+          {timelineLoading ? <div className="px-2 py-2 text-xs text-muted-foreground">タイムラインを読み込み中…</div> : timelineChoices.length ? timelineChoices.map((ref) => (
+            <button key={ref.content_id} type="button" className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm hover:bg-muted" onClick={() => { setTimelineRefs([ref]); setTimelineMenuOpen(false); }}>
+              <Clapperboard className="h-3.5 w-3.5 text-primary" /><span className="truncate">{ref.title}</span>
+            </button>
+          )) : <div className="px-2 py-2 text-xs text-muted-foreground">参照できるタイムラインはありません</div>}
+        </div>
+      )}
       <div className={`flex items-end gap-2 rounded-xl border bg-input/30 p-2 transition-colors ${isCommentMode ? 'border-primary/40' : 'border-border focus-within:border-primary/50'}`}>
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="*/*" />
+        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={() => void openTimelineMenu()} disabled={isCommentMode} title="タイムラインをメンション">
+          <Clapperboard className="h-3.5 w-3.5" />
+        </Button>
         <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading || isCommentMode} title="ファイルを添付">
           {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
         </Button>
@@ -1501,6 +1594,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const isNearBottomRef = useRef(true);
+  const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_CHAT_RENDER_COUNT);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -1510,6 +1604,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'production'>(() => {
+    if (typeof window === 'undefined') return 'chat';
+    const params = new URLSearchParams(window.location.search);
+    return params.get('production') === '1' || params.has('content_id') ? 'production' : 'chat';
+  });
   const pendingJumpRef = useRef<string | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
 
@@ -1616,7 +1715,47 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const { data: messagesData, isLoading: isLoadingMessages } = useQuery({
     queryKey: ['project-messages', project?.room_id],
-    queryFn: () => api.rooms.getMessages(project!.room_id!, { limit: 500 }),
+    // 画面＝実体の一方通行マージ。サーバー取得は「追いつき」専用で、画面に既に
+    // ある新しい内容をスナップショットの古さで消してはならない。SSEで直接挿入
+    // した直後の refetch が保存直後の行をまだ含まないスナップショットを返し、
+    // 丸ごと置換で最新回答が数秒消える（→次のポーリングで復元）のがこれまでの
+    // 「一瞬消える」画面バグの正体だった。fetch結果はキャッシュと id で結合し、
+    // ローカルにしか無い行（SSE直挿入・楽観表示）は必ず生き残る。
+    queryFn: async () => {
+      const fresh = await api.rooms.getMessages(project!.room_id!, { limit: 500 });
+      const old = queryClient.getQueryData<{ messages: MessageResponse[] }>(
+        ['project-messages', project?.room_id],
+      );
+      if (!old?.messages?.length) return fresh;
+      // オブジェクト同一性の安定化: 内容が変わっていない行は「前回と同じ
+      // オブジェクト」を使い回す。これが無いとポーリングのたびに全行が新しい
+      // オブジェクトになり、MessageBubble の memo が全滅して毎回500件を再描画・
+      // マークダウン再解析していた（長い部屋で送信直後に自分のメッセージが
+      // 数秒遅れて出る/全体が重い、の主犯）。再描画は変わった行だけになる。
+      const prevById = new Map(old.messages.map((m) => [m.id, m]));
+      const stabilized = fresh.messages.map((m) => {
+        const prev = prevById.get(m.id);
+        return prev
+          && prev.content === m.content
+          && prev.pendingFollowup === m.pendingFollowup
+          && prev.reply_to_id === m.reply_to_id
+          ? prev
+          : m;
+      });
+      const freshIds = new Set(fresh.messages.map((m) => m.id));
+      // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
+      // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
+      // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
+      const cutoff = Date.now() - 120_000;
+      const localOnly = old.messages.filter(
+        (m) => !freshIds.has(m.id) && new Date(m.created_at).getTime() >= cutoff,
+      );
+      if (localOnly.length === 0) return { messages: stabilized };
+      const merged = [...stabilized, ...localOnly].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+      return { messages: merged };
+    },
     enabled: !!project?.room_id,
     staleTime: 5 * 1000,
     retry: 1,
@@ -1648,15 +1787,27 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: () => (sseConnectedRef.current ? 10000 : 3000),
   });
 
-  const isActiveExecution = !!activeStatus?.active;
+  const isBackendSessionActive = !!activeStatus?.active;
 
   const { data: currentRun } = useQuery({
     queryKey: ['current-run', projectId],
     queryFn: () => api.projects.currentRun(projectId),
     enabled: !!projectId,
     retry: false,
-    refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
+    // session-active はコアのin-memory状態のみで、SSE切断後の常駐セッション
+    // 継続ターンを見失う。自分のレスポンス(run.state)も実行中の根拠にして、
+    // チャットを開き直してもライブ表示とポーリングが止まらないようにする。
+    refetchInterval: (query) => (
+      (isBackendSessionActive || query.state.data?.state === 'running')
+        ? (query.state.error ? 10000 : 2000)
+        : false
+    ),
   });
+
+  // 「実行中」= バックエンドのセッション状態 or DBのrun状態のどちらか。
+  // 前者はSSE切断や常駐セッション経路で false になりうるが、後者(DB)は
+  // 処理がsinkで続いている限り running なので、開き直し後も表示が消えない。
+  const isActiveExecution = isBackendSessionActive || currentRun?.state === 'running';
 
   const { data: allExecutionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
@@ -1718,8 +1869,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     // drags the live block below it, so Dan's in-progress output appears to jump
     // ABOVE the follow-up. Anchoring to the run start keeps chronological order:
     // [starting message] → [Dan's live output] → [follow-up].
+    //
+    // ただし RUN が実際に RUNNING の時だけ。送信直後（新runがまだ無い瞬間）に
+    // ここへ「前回のrun」の開始時刻が入り、thinkingが過去に括り付けられて
+    // 送信メッセージの上に出ていた（2026-07-24 実測）。トリガーとなった
+    // メッセージと同じ時刻(liveAnchorTime)+subKeyで直下に固定するのが原則。
     const runStart = (currentRun as { created_at?: string } | null)?.created_at;
-    const liveBlockSortKey = runStart ? new Date(runStart).getTime() : liveAnchorTime;
+    const runIsLiveNow = !!currentRun && isActiveExecution && currentRun.state === 'running';
+    const liveBlockSortKey = runIsLiveNow && runStart ? new Date(runStart).getTime() : liveAnchorTime;
 
     for (const msg of chronologicalMessages) {
       const content = msg.content || '';
@@ -1745,52 +1902,61 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       });
     }
 
-    // Keep the live execution block anchored to the user message so the UI
-    // transitions from Thinking to tools/text without jumping through history.
     let liveBlockRendered = false;
 
-    // Group all execution events by run_id and create a block per run
-    const eventsByRun = new Map<string, ExecutionEvent[]>();
-    for (const event of allExecutionEvents) {
-      const rid = event.run_id || 'unknown';
-      if (!eventsByRun.has(rid)) eventsByRun.set(rid, []);
-      eventsByRun.get(rid)!.push(event);
-    }
+    const savedTurnIds = new Set(
+      chronologicalMessages
+        .filter((msg) => msg.sender_type === 'ai' && msg.ai_context?.turn_id)
+        .map((msg) => msg.ai_context!.turn_id!)
+    );
+    const isCurrentRunLive = runIsLiveNow;
 
-    for (const [runId, events] of eventsByRun) {
-      const steps = events
-        .filter((event) => event.event_type !== 'done' && event.event_type !== 'phase')
-        .map(eventToStep);
+    if (isCurrentRunLive) {
+      const eventsByTurn = new Map<string, ExecutionEvent[]>();
+      for (const event of allExecutionEvents) {
+        if (event.run_id !== currentRun.id) continue;
+        if (event.event_type === 'done' || event.event_type === 'phase') continue;
+        const turnId = event.turn_id || (typeof event.metadata?.turn_id === 'string' ? event.metadata.turn_id : null);
+        if (turnId && savedTurnIds.has(turnId)) continue;
+        const key = turnId || `run:${event.run_id || 'unknown'}`;
+        const list = eventsByTurn.get(key);
+        if (list) list.push(event);
+        else eventsByTurn.set(key, [event]);
+      }
 
-      const isLiveRun =
-        !!currentRun &&
-        runId === currentRun.id &&
-        isActiveExecution &&
-        currentRun.state === 'running';
+      const liveGroups = [...eventsByTurn.entries()]
+        .map(([key, events]) => ({
+          key,
+          events: [...events].sort(
+            (left, right) =>
+              (left.seq ?? 0) - (right.seq ?? 0) ||
+              new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+          ),
+        }))
+        .sort((left, right) => {
+          const leftTime = new Date(left.events[0]?.created_at || '').getTime() || liveBlockSortKey;
+          const rightTime = new Date(right.events[0]?.created_at || '').getTime() || liveBlockSortKey;
+          return leftTime - rightTime;
+        });
 
-      // Only show the separate process block while a run is LIVE. Once the run
-      // finishes, the completed AI message carries the same tools/text inline
-      // via ai_context.blocks (AiTurnBlocks), so keeping the standalone block
-      // would just duplicate it.
-      if (isLiveRun && (steps.length > 0 || !!warmupMode)) {
+      liveGroups.forEach((group, index) => {
+        const steps = group.events.map(eventToStep);
+        if (steps.length === 0) return;
         liveBlockRendered = true;
         timedItems.push({
           item: {
             kind: 'execution-block',
-            id: `live-${projectId}`,
-            steps: steps.length > 0 ? steps : [{
-              label: transitionLabel,
-              type: 'reasoning',
-            }],
-            isLive: isLiveRun,
+            id: `live-${projectId}-${group.key}`,
+            steps,
+            isLive: index === liveGroups.length - 1,
           },
-          sortKey: liveBlockSortKey,
+          sortKey: new Date(group.events[0]?.created_at || '').getTime() || liveBlockSortKey,
           subKey: 2,
         });
-      }
+      });
     }
 
-    if (showWarmupBlock && !liveBlockRendered) {
+    if (!liveBlockRendered && (showWarmupBlock || isCurrentRunLive)) {
       timedItems.push({
         item: {
           kind: 'execution-block',
@@ -1801,7 +1967,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           }],
           isLive: true,
         },
-        sortKey: liveAnchorTime,
+        sortKey: showWarmupBlock ? liveBlockSortKey : liveAnchorTime,
         subKey: 2,
       });
     }
@@ -1828,6 +1994,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const hiddenOlderCount = Math.max(0, displayItems.length - visibleDisplayItems.length);
 
+  useLayoutEffect(() => {
+    const pending = pendingPrependScrollRef.current;
+    if (!pending) return;
+    pendingPrependScrollRef.current = null;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTop = pending.top + (el.scrollHeight - pending.height);
+  }, [visibleItemCount]);
+
   useEffect(() => {
     if (isNearBottomRef.current) {
       requestAnimationFrame(() => {
@@ -1846,6 +2021,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     isNearBottomRef.current = nearBottom;
     if (nearBottom) setHasNewMessages(false);
     if (el.scrollTop < 240) {
+      pendingPrependScrollRef.current = {
+        height: el.scrollHeight,
+        top: el.scrollTop,
+      };
       setVisibleItemCount((count) =>
         count >= displayItems.length
           ? count
@@ -2008,6 +2187,32 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         )}
         {project?.room_id && (
           <button
+            onClick={() => {
+              // 制作 = launch the desktop production app for this room ONLY (no inline browser
+              // workspace, no chat toggle). Pass the chat's auth token so the app reuses this
+              // login (no re-login). No-op if the app/protocol isn't installed.
+              const rid = project?.room_id;
+              if (!rid) return;
+              try {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
+                const a = document.createElement('a');
+                a.href = `done://production?room_id=${rid}&token=${encodeURIComponent(token)}`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              } catch {
+                /* app not installed */
+              }
+            }}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+            title="制作アプリで開く"
+          >
+            <Clapperboard className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">制作</span>
+          </button>
+        )}
+        {project?.room_id && (
+          <button
             onClick={() => setSearchOpen((v) => !v)}
             className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
               searchOpen
@@ -2069,7 +2274,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       </div>
 
-      {searchOpen && (
+      {searchOpen && workspaceMode === 'chat' && (
         <div className="shrink-0 border-b border-border bg-background px-3 py-2">
           <div className="flex items-center gap-2">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -2134,6 +2339,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       )}
 
+      {workspaceMode === 'production' && project?.room_id ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ProductionWorkspace
+            roomId={project.room_id}
+          />
+        </div>
+      ) : (
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
         {hasNewMessages && (
           <button
@@ -2184,10 +2396,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </div>
         )}
       </div>
+      )}
 
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
-      {project?.room_id ? (
+      {project?.room_id && workspaceMode === 'chat' ? (
         <ChatInput
           projectId={projectId}
           roomId={project.room_id}

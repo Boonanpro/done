@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
+import time
 import uuid
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -36,7 +43,10 @@ class ProductionAsset(BaseModel):
     id: str
     room_id: str
     kind: Literal["video", "image", "audio", "file"]
-    source_type: Literal["local_path", "nas_path", "cloud_url", "upload", "generated"]
+    # "agent_workspace"/"ready" are written by timeline_mcp_server (ダン指示エージェント)
+    # — the response model must accept every value that exists in assets.json on disk,
+    # or listing the room 500s and the native editor shows an empty library.
+    source_type: Literal["local_path", "nas_path", "cloud_url", "upload", "generated", "agent_workspace"]
     original_uri: str
     local_path: str | None = None
     proxy_path: str | None = None
@@ -44,7 +54,7 @@ class ProductionAsset(BaseModel):
     thumbnail_path: str | None = None
     thumbnail_url: str | None = None
     filename: str | None = None
-    status: Literal["registered", "processing", "proxy_ready", "failed", "missing"] = "registered"
+    status: Literal["registered", "processing", "proxy_ready", "failed", "missing", "ready"] = "registered"
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     created_at: str
@@ -188,6 +198,35 @@ def _read_contents(room_id: str) -> list[dict[str, Any]]:
     if changed:
         _write_json_list(_contents_path(room_id), contents)
     return contents
+
+
+_TIMELINE_FPS_CHOICES = (23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0)
+
+
+def _timeline_frame_rate(value: Any) -> float:
+    """Return a supported sequence rate; old projects intentionally remain 30fps."""
+    try:
+        requested = float(value)
+    except (TypeError, ValueError):
+        return 30.0
+    if not 1.0 < requested <= 120.0:
+        return 30.0
+    nearest = min(_TIMELINE_FPS_CHOICES, key=lambda candidate: abs(candidate - requested))
+    return nearest if abs(nearest - requested) <= 1.0 else 30.0
+
+
+def _sequence_frame_rate(sequence: dict[str, Any] | None) -> float:
+    return _timeline_frame_rate(sequence.get("frame_rate") if isinstance(sequence, dict) else None)
+
+
+def _room_frame_rate(room_id: str) -> float:
+    """Use the first content's persisted sequence setting while an asset proxy is made."""
+    for content in _read_contents(room_id):
+        timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else None
+        sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+        if isinstance(sequence, dict) and sequence.get("frame_rate") is not None:
+            return _sequence_frame_rate(sequence)
+    return 30.0
 
 
 def _write_contents(room_id: str, contents: list[dict[str, Any]]) -> None:
@@ -347,17 +386,47 @@ def _is_identity_transform(scale: float, tx: float, ty: float) -> bool:
     return abs(scale - 1.0) < 1e-4 and abs(tx) < 1e-4 and abs(ty) < 1e-4
 
 
-def _sequence_video_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _asset_is_image_kind(asset: dict[str, Any]) -> bool:
+    if not isinstance(asset, dict):
+        return False
+    if asset.get("kind") == "image":
+        return True
+    p = str(asset.get("local_path") or asset.get("filename") or "")
+    return Path(p).suffix.lower() in _IMAGE_EXTS
+
+
+def _sequence_visual_media_lanes(sequence: dict[str, Any] | None) -> list[list[dict[str, Any]]]:
+    """Media clips grouped in back-to-front visual-lane order.
+
+    Legacy lane names (video/overlay/effect/caption) are labels only. Clip contents
+    determine their role; audio remains the sole lane-level exception.
+    """
     if not isinstance(sequence, dict):
         return []
-    clips: list[dict[str, Any]] = []
+    lanes: list[list[dict[str, Any]]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "video":
+        if not isinstance(track, dict) or track.get("type") == "audio" or track.get("hidden"):
             continue
+        clips: list[dict[str, Any]] = []
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict):
+            if isinstance(clip, dict) and clip.get("asset_id") and clip.get("video_enabled") is not False:
                 clips.append(clip)
+        if clips:
+            lanes.append(clips)
+    return lanes
+
+
+def _sequence_video_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    clips = [clip for lane in _sequence_visual_media_lanes(sequence) for clip in lane]
     return sorted(clips, key=lambda item: float(item.get("timeline_start") or 0))
+
+
+def _sequence_base_media_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    lanes = _sequence_visual_media_lanes(sequence)
+    return sorted(lanes[0], key=lambda item: float(item.get("timeline_start") or 0)) if lanes else []
 
 
 def _sequence_caption_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -365,7 +434,7 @@ def _sequence_caption_clips(sequence: dict[str, Any] | None) -> list[dict[str, A
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "caption":
+        if not isinstance(track, dict) or track.get("type") != "caption" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
             if isinstance(clip, dict) and str(clip.get("text") or "").strip():
@@ -450,9 +519,12 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
     parts: list[str] = []
     font_px = base_font
     try:
-        if style.get("fontSize"):
-            font_px = max(10, round(base_font * float(style["fontSize"])))
+        if style.get("fontSize") is not None:
+            scale = float(style["fontSize"])
+            font_px = max(1, round(base_font * max(0.0, scale)))
             parts.append(f"\\fs{font_px}")
+            if scale <= 0:
+                parts.append("\\alpha&HFF&")
     except Exception:
         pass
     if style.get("color"):
@@ -466,9 +538,7 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
         pass
     if style.get("bold") is False:
         parts.append("\\b0")
-    pos = style.get("position") or "bottom"
-    an = 8 if pos == "top" else 5 if pos == "center" else 2
-    # free x/y offset via absolute \pos (clamp x so the caption stays on screen).
+    # Anchored bottom-centre (\an2); the user moves it freely with x/y (no top/center/bottom preset).
     try:
         ox = float(style.get("x") or 0)
         oy = float(style.get("y") or 0)
@@ -476,13 +546,13 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
         ox = oy = 0.0
     if (abs(ox) > 1e-4 or abs(oy) > 1e-4) and width and height:
         ox = max(-0.3, min(0.3, ox))
-        margin_v = max(54, round(height * 0.08))
-        anchor_y = margin_v if pos == "top" else (height // 2 if pos == "center" else height - margin_v)
+        # y = fraction UP from the screen bottom (positive = up); ~0.08 is the default lower spot.
+        yf = max(0.0, min(0.92, oy)) if abs(oy) > 1e-4 else 0.08
         px = round(width / 2 + ox * width)
-        py = round(anchor_y + oy * height)
-        parts.append(f"\\an{an}\\pos({px},{py})")
+        py = round(height - yf * height)
+        parts.append(f"\\an2\\pos({px},{py})")
     else:
-        parts.append(f"\\an{an}")
+        parts.append("\\an2")
     return ("{" + "".join(parts) + "}" if parts else ""), font_px
 
 
@@ -513,10 +583,71 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
         # escape first (turns literal newlines into \N and protects braces), THEN wrap —
         # _wrap_caption_ass only inserts additional \N which must survive as-is.
         escaped = _ass_escape(str(caption.get("text") or "").strip())
-        wrapped = _wrap_caption_ass(escaped, font_px, max_px)
+        style = caption.get("style") if isinstance(caption.get("style"), dict) else {}
+        try:
+            caption_max_px = width * max(0.05, min(2.0, float(style.get("maxWidth", max_px / width))))
+        except (TypeError, ValueError):
+            caption_max_px = max_px
+        wrapped = _wrap_caption_ass(escaped, font_px, caption_max_px)
         text = override + wrapped if override else wrapped
         lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+_ANIMATED_CAPTIONS = {"pop", "fade", "slide", "typewriter", "karaoke"}
+_CAPTION_ANIM_FPS = float(os.environ.get("DAN_CAPTION_ANIM_FPS", "20"))
+
+
+def _render_caption_overlays(
+    captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path
+) -> list[dict[str, Any]]:
+    """Render designed captions by screenshotting the Next.js /caption-frame route (same
+    <CaptionLayer> as the live preview => pixel parity). A STATIC caption -> one transparent PNG;
+    an ANIMATED caption -> a PNG sequence sampled over its duration. Returns a list of overlay
+    specs ({kind:'static'|'anim', ...}). Raises on any failure so the caller can fall back to .ass."""
+    web_base = os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000")
+    items: list[dict[str, Any]] = []
+    specs: list[dict[str, Any]] = []
+    for i, cap in enumerate(captions):
+        text = str(cap.get("text") or "").strip()
+        if not text:
+            continue
+        start = max(0.0, float(cap.get("timeline_start") or 0))
+        end = max(start + 0.2, float(cap.get("timeline_end") or start + 2))
+        style = cap.get("style") or {}
+        words = cap.get("words") if isinstance(cap.get("words"), list) else []
+        animated = str(style.get("animation") or "") in _ANIMATED_CAPTIONS
+        if animated:
+            seq_dir = job_dir / f"caption_{i:03d}_seq"
+            items.append({"seq_dir": str(seq_dir), "text": text, "start": start, "end": end,
+                          "fps": _CAPTION_ANIM_FPS, "design": style, "words": words})
+            specs.append({"kind": "anim", "seq_dir": seq_dir, "fps": _CAPTION_ANIM_FPS, "start": start, "end": end})
+        else:
+            png = job_dir / f"caption_{i:03d}.png"
+            items.append({"png": str(png), "text": text, "time": 0.0, "design": style, "words": words})
+            specs.append({"kind": "static", "png": png, "start": start, "end": end})
+    if not items:
+        return []
+    spec_path = job_dir / "captions_spec.json"
+    spec_path.write_text(
+        json.dumps({"outW": output_width, "outH": output_height, "web_base": web_base, "items": items},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        [sys.executable, str(script), str(spec_path)],
+        capture_output=True, text=True, timeout=600, creationflags=cflags,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"caption png render failed: {(result.stdout or '')[-400:]} | {(result.stderr or '')[-300:]}")
+    for spec in specs:
+        if spec["kind"] == "static" and not spec["png"].exists():
+            raise RuntimeError(f"caption PNG missing: {spec['png']}")
+        if spec["kind"] == "anim" and not any(spec["seq_dir"].glob("*.png")):
+            raise RuntimeError(f"caption sequence empty: {spec['seq_dir']}")
+    return specs
 
 
 def _asset_source_path(asset: dict[str, Any]) -> Path:
@@ -527,6 +658,17 @@ def _asset_source_path(asset: dict[str, Any]) -> Path:
     if not path.exists():
         raise RuntimeError(f"Video file not found: {path}")
     return path
+
+
+def _asset_hires_path(asset: dict[str, Any]) -> Path:
+    """Prefer the ORIGINAL (full-res) source over the proxy — used for pop-out matting so the
+    cutout edges stay clean (the proxy can be ~406x720; matting on it looks coarse). Falls back
+    to the proxy if the original is missing."""
+    for key in ("local_path", "proxy_path"):
+        v = asset.get(key)
+        if v and Path(v).exists():
+            return Path(v).resolve()
+    return _asset_source_path(asset)
 
 
 def _attach_output_asset(
@@ -560,11 +702,17 @@ def _attach_output_asset(
 
 
 def _blur_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
+    """Manual STATIC blur rectangles (ffmpeg/_blur_chain). Tracked (data.track) and KEYFRAMED
+    (data.keyframes) ones are excluded here — they're followed per-frame in a post-pass instead
+    (see _apply_tracked_blur)."""
     annotations = ((instruction.get("timeline") or {}).get("annotations") or [])
     return [
         annotation
         for annotation in annotations
-        if annotation.get("intent") == "blur" and annotation.get("kind") == "rect" and isinstance(annotation.get("data"), dict)
+        if annotation.get("intent") == "blur" and annotation.get("kind") == "rect"
+        and isinstance(annotation.get("data"), dict)
+        and not annotation["data"].get("track")
+        and not (isinstance(annotation["data"].get("keyframes"), list) and annotation["data"]["keyframes"])
     ]
 
 
@@ -573,45 +721,51 @@ def _is_overlay_clip(clip: dict[str, Any]) -> bool:
 
 
 def _sequence_overlay_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Clips that should be composited ON TOP of the base video (PiP / wipe).
-    From overlay-type tracks, plus video-track clips marked composition pip/overlay."""
-    if not isinstance(sequence, dict):
-        return []
-    clips: list[dict[str, Any]] = []
-    for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict):
-            continue
-        ttype = track.get("type")
-        for clip in track.get("clips") or []:
-            if not isinstance(clip, dict):
-                continue
-            if ttype == "overlay" or (ttype == "video" and _is_overlay_clip(clip)):
-                clips.append(clip)
-    return sorted(clips, key=lambda c: (float(c.get("layer") or 0), float(c.get("timeline_start") or 0)))
+    """All media above the backmost visual media lane, in stacking order."""
+    lanes = _sequence_visual_media_lanes(sequence)
+    return [clip for lane in lanes[1:] for clip in sorted(lane, key=lambda c: float(c.get("timeline_start") or 0))]
 
 
 def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(sequence, dict):
         return []
+    tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
+    # link_id -> the visual lane that owns the linked audio (unified A/V rule)
+    link_owner: dict[str, dict[str, Any]] = {}
+    for t in tracks:
+        if t.get("type") == "audio":
+            continue
+        for cl in t.get("clips") or []:
+            if isinstance(cl, dict) and cl.get("link_id") and cl["link_id"] not in link_owner:
+                link_owner[cl["link_id"]] = t
+    any_solo = any(t.get("solo") for t in tracks)
     clips: list[dict[str, Any]] = []
-    for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "audio":
+    for track in tracks:
+        if track.get("type") != "audio":
             continue
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict) and clip.get("asset_id"):
-                clips.append(clip)
+            if not (isinstance(clip, dict) and clip.get("asset_id")):
+                continue
+            gov = link_owner.get(clip.get("link_id") or "", track)
+            if gov.get("muted"):
+                continue
+            if any_solo and not gov.get("solo"):
+                continue
+            clips.append(clip)
     return sorted(clips, key=lambda c: float(c.get("timeline_start") or 0))
 
 
 def _sequence_effect_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Region-bearing clips from ANY non-audio lane — lanes are just layers; the editor
+    places blur clips wherever there is free space (no effect-lane special casing)."""
     if not isinstance(sequence, dict):
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "effect":
+        if not isinstance(track, dict) or track.get("type") == "audio" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict) and isinstance(clip.get("region"), dict):
+            if isinstance(clip, dict) and isinstance(clip.get("region"), dict) and not clip.get("asset_id"):
                 clips.append(clip)
     return clips
 
@@ -644,6 +798,84 @@ def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[
     return source_start, source_start + 0.04, max(0.05, tl_dur or 2.0), 0.0, True
 
 
+def _blur_style_proc(style: str, w: int, h: int) -> str:
+    style = (style or "").lower()
+    if "mosaic" in style:
+        return f"scale={max(2, w // 12)}:{max(2, h // 12)}:flags=neighbor,scale={w}:{h}:flags=neighbor"
+    return "gblur=sigma=20"
+
+
+def _blur_chain_masked(video_in: str, idx: int, mask_path: Path, bt: dict[str, Any],
+                       clip: dict[str, Any], media_clips: list[dict[str, Any]],
+                       w: int, h: int, style: str, fps: float = 30.0) -> tuple[str, str] | None:
+    """Tracked blur for the EXPORT: blur the full frame, alpha it by the baked SAM mask
+    video, overlay back — per base-cut segment so mask time (source-anchored) aligns with
+    output time. Mirrors what ps_blur_masked does live in the editor. Returns None when
+    no segment of the effect window is covered (caller falls back to the static rect)."""
+    ts = float(clip.get("timeline_start") or 0)
+    te = float(clip.get("timeline_end") or 0)
+    bs = float(bt.get("bake_start") or 0)
+    be = float(bt.get("bake_end") or 0) or float("inf")
+    baid = str(bt.get("asset_id") or "")
+    segs: list[tuple[float, float, float]] = []  # (out t0, out t1, mask m0)
+    target_id = str(bt.get("target_clip_id") or "")
+    exact = [c for c in media_clips if target_id and str(c.get("id") or "") == target_id]
+    candidates = exact or [c for c in media_clips if str(c.get("asset_id") or "") == baid]
+    for bc in candidates:
+        if str(bc.get("asset_id") or "") != baid:
+            continue
+        bts = float(bc.get("timeline_start") or 0)
+        bte = float(bc.get("timeline_end") or 0)
+        bss = float(bc.get("source_start") or 0)
+        bse = float(bc.get("source_end") or 0)
+        if bse <= bss:  # freeze clips: static mask would be wrong more often than right
+            continue
+        t0, t1 = max(ts, bts), min(te, bte)
+        if t1 - t0 < 0.05:
+            continue
+        s0 = bss + (t0 - bts)
+        s1 = bss + (t1 - bts)
+        # clamp to the baked window (outside it there is no mask data)
+        lo, hi = max(s0, bs), min(s1, be)
+        if hi - lo < 0.05:
+            continue
+        t0 += lo - s0
+        t1 -= s1 - hi
+        segs.append((round(t0, 3), round(t1, 3), round(lo - bs, 3)))
+    if not segs:
+        return None
+    proc = _blur_style_proc(style, w, h)
+    fps_filter = f"{fps:g}"
+    n = len(segs)
+    fsplit = "".join(f"[tf{idx}_{j}]" for j in range(n))
+    parts = [f"[{video_in}]split={n + 1}[tb{idx}]{fsplit}"]
+    cur = f"tb{idx}"
+    for j, (t0, t1, m0) in enumerate(segs):
+        d = t1 - t0
+        # blurred picture for this segment (30fps so alphamerge's frame zip matches the mask)
+        parts.append(
+            f"[tf{idx}_{j}]fps={fps_filter},trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,{proc}[tfb{idx}_{j}]"
+        )
+        # mask frames for the same span (mask video timeline = bake window, CFR 30).
+        # The mask lives in SOURCE-frame space: run it through the SAME cover-crop the
+        # base video gets (plain scale=W:H stretched it and the blur landed offset).
+        parts.append(
+            f"{_movie_input(mask_path, max(0.0, m0 - 0.6))},fps={fps_filter},"
+            f"trim=start={m0:.3f}:end={m0 + d:.3f},setpts=PTS-STARTPTS,"
+            f"format=gray,scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h}[tmk{idx}_{j}]"
+        )
+        parts.append(
+            f"[tfb{idx}_{j}][tmk{idx}_{j}]alphamerge,setpts=PTS+{t0:.3f}/TB[tov{idx}_{j}]"
+        )
+        nxt = f"tc{idx}_{j}"
+        parts.append(
+            f"[{cur}][tov{idx}_{j}]overlay=0:0:enable='between(t\\,{t0:.3f}\\,{t1:.3f})':eof_action=pass[{nxt}]"
+        )
+        cur = nxt
+    return ";\n".join(parts), cur
+
+
 def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: float, end: float, style: str) -> tuple[str, str]:
     """Return (filter_string, out_label) for a time-gated regional blur/mosaic overlay."""
     out = f"vblur{idx}"
@@ -653,10 +885,9 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
         down_w = max(2, w // 12)
         down_h = max(2, h // 12)
         proc = f"crop={w}:{h}:{x}:{y},scale={down_w}:{down_h}:flags=neighbor,scale={w}:{h}:flags=neighbor"
-    elif "gaussian" in style or "gblur" in style or "soft" in style:
-        proc = f"crop={w}:{h}:{x}:{y},gblur=sigma=18"
     else:
-        proc = f"crop={w}:{h}:{x}:{y},boxblur=18:2"
+        # gaussian is the default look (was a boxy boxblur) — soft, content-obscuring.
+        proc = f"crop={w}:{h}:{x}:{y},gblur=sigma=20"
     filt = (
         f"[{video_in}]split[{base}][{crop}];"
         f"[{crop}]{proc}[{blurred}];"
@@ -665,13 +896,542 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
     return filt, out
 
 
+def _focus_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int,
+                 frame_w: int, frame_h: int, start: float, end: float, style: str,
+                 fps: float, strength: float | None, opacity: float | None) -> tuple[str, str]:
+    """注目演出 (attention effects) — preview parity with the native compositor:
+    spotlight = keep the region, dim outside; marker = highlighter wash on the
+    region + subtle outside dim; zoom = punch-in toward the region's centre."""
+    out = f"vfx{idx}"
+    fps_s = f"{fps:g}"
+    en = f"enable='between(t\\,{start:.3f}\\,{end:.3f})'"
+    x0, x1, y0, y1 = x, x + w, y, y + h
+    if style == "zoom":
+        z = max(1.1, min(3.0, float(strength or 1.6)))
+        cw = max(2, round(frame_w / z))
+        ch = max(2, round(frame_h / z))
+        cx = max(0, min(frame_w - cw, round((x + w / 2) * (1 - 1 / z))))
+        cy = max(0, min(frame_h - ch, round((y + h / 2) * (1 - 1 / z))))
+        filt = (
+            f"[{video_in}]split[zb{idx}][zf{idx}];"
+            f"[zf{idx}]crop={cw}:{ch}:{cx}:{cy},scale={frame_w}:{frame_h}:flags=bicubic[zz{idx}];"
+            f"[zb{idx}][zz{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
+        )
+        return filt, out
+    op = max(0.0, min(1.0, float(opacity if opacity is not None else 1.0)))
+    if style == "spotlight":
+        dim = 1.0 - 0.55 * op
+        filt = (
+            f"[{video_in}]split[sb{idx}][sd{idx}];"
+            f"[sd{idx}]lutyuv=y=val*{dim:.3f}[sdim{idx}];"
+            f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+            f"geq=lum='255*(1-between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1}))',"
+            f"gblur=sigma=8[smask{idx}];"
+            f"[sdim{idx}][smask{idx}]alphamerge[sov{idx}];"
+            f"[sb{idx}][sov{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
+        )
+        return filt, out
+    # marker: outside dim 0.85 + warm wash (0.30 * strength slider) inside
+    wash = 0.30 * op
+    filt = (
+        f"[{video_in}]split[mb{idx}][md{idx}];"
+        f"[md{idx}]lutyuv=y=val*0.85[mdim{idx}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+        f"geq=lum='255*(1-between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1}))',"
+        f"gblur=sigma=8[mmsk{idx}];"
+        f"[mdim{idx}][mmsk{idx}]alphamerge[mdov{idx}];"
+        f"[mb{idx}][mdov{idx}]overlay=0:0:{en}:eof_action=pass[mb2{idx}];"
+        f"color=c=0xFFEDA0:s={frame_w}x{frame_h}:r={fps_s},format=rgb24[mwc{idx}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+        f"geq=lum='{wash * 255:.0f}*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})',"
+        f"gblur=sigma=8[mim{idx}];"
+        f"[mwc{idx}][mim{idx}]alphamerge[mwov{idx}];"
+        f"[mb2{idx}][mwov{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
+    )
+    return filt, out
+
+
+def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int, tvar: str = "t") -> str:
+    """Piecewise-linear ffmpeg expression over time variable `tvar` (t for overlay/crop,
+    T for geq) from (abs_time, normalized_value) keyframes. Ends clamp to first/last key."""
+    def px(v: float) -> int:
+        return max(0, min(maxv, round(v * scale)))
+    if len(keys) == 1:
+        return str(px(keys[0][1]))
+    expr = str(px(keys[-1][1]))
+    for (t0, v0), (t1, v1) in reversed(list(zip(keys, keys[1:]))):
+        seg = f"lerp({px(v0)}\\,{px(v1)}\\,({tvar}-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
+        expr = f"if(lt({tvar}\\,{t1:.3f})\\,{seg}\\,{expr})"
+    return f"if(lt({tvar}\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,{expr})"
+
+
+def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, float, float, float]],
+                         frame_w: int, frame_h: int, start: float, end: float, style: str,
+                         fps: float = 30.0) -> tuple[str, str]:
+    """Keyframed regional blur with ANIMATED SIZE: crop/overlay cannot animate w/h, so
+    blur the whole frame and alpha-mask it with a per-frame geq box (edges are the
+    piecewise-linear x / x+w / y / y+h expressions over geq's T). kf = [(t_abs, x, y, w, h)]."""
+    out = f"vblur{idx}"
+    base, full, blurred, mask, bm = (
+        f"bbase{idx}", f"bfull{idx}", f"bblur{idx}", f"bmsk{idx}", f"bbm{idx}",
+    )
+    x0 = _kf_expr([(t, x) for t, x, _, _, _ in kf], frame_w, frame_w, tvar="T")
+    x1 = _kf_expr([(t, x + w) for t, x, _, w, _ in kf], frame_w, frame_w, tvar="T")
+    y0 = _kf_expr([(t, y) for t, _, y, _, _ in kf], frame_h, frame_h, tvar="T")
+    y1 = _kf_expr([(t, y + h) for t, _, y, _, h in kf], frame_h, frame_h, tvar="T")
+    style = (style or "").lower()
+    if "mosaic" in style:
+        # mosaic block from the largest keyed width (the block size cannot animate)
+        block = max(2, round(max(w for _, _, _, w, _ in kf) * frame_w) // 12)
+        proc = f"scale={max(2, frame_w // block)}:{max(2, frame_h // block)}:flags=neighbor,scale={frame_w}:{frame_h}:flags=neighbor"
+    else:
+        proc = "gblur=sigma=20"
+    fps_filter = f"{fps:g}"
+    filt = (
+        f"[{video_in}]split[{base}][{full}];"
+        f"[{full}]fps={fps_filter},{proc}[{blurred}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_filter},format=gray,"
+        f"geq=lum='255*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})'[{mask}];"
+        f"[{blurred}][{mask}]alphamerge[{bm}];"
+        f"[{base}][{bm}]overlay=0:0:enable='between(t\\,{start:.3f}\\,{end:.3f})':eof_action=pass[{out}]"
+    )
+    return filt, out
+
+
+def _blur_chain_kf(video_in: str, idx: int, xe: str, ye: str, w: int, h: int,
+                   frame_w: int, frame_h: int, start: float, end: float, style: str) -> tuple[str, str]:
+    """Keyframed regional blur: blur the whole frame once, then crop+overlay it at a
+    MOVING position (piecewise-linear x/y expressions). Mirrors Clip::region_at live."""
+    out = f"vblur{idx}"
+    base, full, blurred = f"bbase{idx}", f"bfull{idx}", f"bblur{idx}"
+    style = (style or "").lower()
+    if "mosaic" in style:
+        block = max(2, w // 12)
+        proc = f"scale={max(2, frame_w // block)}:{max(2, frame_h // block)}:flags=neighbor,scale={frame_w}:{frame_h}:flags=neighbor"
+    else:
+        proc = "gblur=sigma=20"
+    filt = (
+        f"[{video_in}]split[{base}][{full}];"
+        f"[{full}]{proc},crop={w}:{h}:x='{xe}':y='{ye}'[{blurred}];"
+        f"[{base}][{blurred}]overlay=x='{xe}':y='{ye}':enable='between(t\\,{start:.3f}\\,{end:.3f})'[{out}]"
+    )
+    return filt, out
+
+
+def _apply_screen_blur(out_path: Path, spec: dict[str, Any], job_dir: Path) -> bool:
+    """Post-pass: blur sensitive on-screen text (credentials etc.) in the FINAL rendered video by
+    OCR-detecting it per frame (scripts/screen_blur.py). Runs ON THE OUTPUT, so it follows whatever
+    is actually shown (scrolling, PiP, scaling) with no coordinate mapping. Replaces out_path."""
+    targets = [str(t).strip() for t in (spec.get("targets") or []) if str(t).strip()]
+    patterns = [str(p).strip() for p in (spec.get("patterns") or []) if str(p).strip()]
+    regex = str(spec.get("regex") or "").strip()
+    if not targets and not patterns and not regex:
+        return False
+    tmp = job_dir / "screenblur_out.mp4"
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    args = [sys.executable, str(script), str(out_path), str(tmp),
+            "--fps", str(spec.get("fps") or 4), "--pad", str(spec.get("pad") or 0.35),
+            "--style", str(spec.get("style") or "gaussian"), "--ffmpeg", _ffmpeg()]
+    if targets:
+        args += ["--targets", ",".join(targets)]
+    if patterns:
+        args += ["--patterns", ",".join(patterns)]
+    if regex:
+        args += ["--regex", regex]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=1800, creationflags=cflags)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen blur post-pass crashed: %s", exc)
+        return False
+    if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        shutil.move(str(tmp), str(out_path))
+        return True
+    logger.warning("screen blur post-pass failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+    return False
+
+
+def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_dir: Path) -> bool:
+    """Post-pass: human-drawn TRACKED blur boxes (data.track) bake their PRE-COMPUTED OCR path
+    (data.track_boxes, set when the user pressed 解析) onto the FINAL video, gaussian-blurred. The
+    boxes are normalized output coords (drawn on the preview) so they map to the final video
+    directly. No re-tracking here — the editor already tracked and the user confirmed the range."""
+    tracks: list[dict[str, Any]] = []
+    for ann in annotations:
+        if ann.get("intent") != "blur" or ann.get("kind") != "rect":
+            continue
+        data = ann.get("data") if isinstance(ann.get("data"), dict) else {}
+        style = str(data.get("blur_style") or data.get("style") or "gaussian")
+        # Manual keyframes win: densely sample the linear interpolation between them (output coords,
+        # timeline time) so the box glides exactly as the editor previewed it.
+        kfs = data.get("keyframes")
+        if isinstance(kfs, list) and len(kfs) >= 1:
+            pts = sorted(
+                [{"t": float(k.get("t") or 0), "x": float(k.get("x") or 0), "y": float(k.get("y") or 0),
+                  "w": float(k.get("width") or 0), "h": float(k.get("height") or 0)} for k in kfs if isinstance(k, dict)],
+                key=lambda p: p["t"],
+            )
+            if pts:
+                boxes: dict[str, list] = {}
+                if len(pts) == 1:
+                    p = pts[0]
+                    boxes[f"{p['t']:.3f}"] = [p["x"], p["y"], p["w"], p["h"]]
+                else:
+                    t = pts[0]["t"]
+                    step = 1.0 / 30.0  # 30 fps sampling so the baked box tracks per-frame (no peeking)
+                    while t <= pts[-1]["t"] + 1e-6:
+                        k0, k1 = pts[0], pts[-1]
+                        for i in range(len(pts) - 1):
+                            if pts[i]["t"] <= t <= pts[i + 1]["t"]:
+                                k0, k1 = pts[i], pts[i + 1]
+                                break
+                        span = (k1["t"] - k0["t"]) or 1.0
+                        f = (t - k0["t"]) / span
+                        boxes[f"{t:.3f}"] = [
+                            k0["x"] + (k1["x"] - k0["x"]) * f, k0["y"] + (k1["y"] - k0["y"]) * f,
+                            k0["w"] + (k1["w"] - k0["w"]) * f, k0["h"] + (k1["h"] - k0["h"]) * f,
+                        ]
+                        t += step
+                tracks.append({"boxes": boxes, "style": style})
+            continue
+        if not data.get("track"):
+            continue
+        boxes = data.get("track_boxes")
+        if isinstance(boxes, dict) and boxes:
+            tracks.append({"boxes": boxes, "style": style})
+    if not tracks:
+        return False
+    spec_path = job_dir / "trackblur_spec.json"
+    spec_path.write_text(json.dumps({"tracks": tracks}), encoding="utf-8")
+    tmp = job_dir / "trackblur_out.mp4"
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        r = subprocess.run(
+            [sys.executable, str(script), str(out_path), str(tmp), "--render-spec", str(spec_path), "--ffmpeg", _ffmpeg()],
+            capture_output=True, text=True, timeout=1800, creationflags=cflags,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tracked blur post-pass crashed: %s", exc)
+        return False
+    if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        shutil.move(str(tmp), str(out_path))
+        return True
+    logger.warning("tracked blur post-pass failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+    return False
+
+
+def _shape_cut_filter(shape: str | None, w: int, h: int, alpha: bool) -> str:
+    """ffmpeg filter that cuts a clip to a circle / rounded 'photo' frame. alpha=True -> transparent
+    outside (overlays); alpha=False -> BLACK outside (base layer, keeps yuv420p for the concat).
+    Matches the canvas clip in the preview. '' for rect/None."""
+    s = str(shape or "rect")
+    if s == "circle":
+        cond = f"lte(((X-{w}/2)/({w}/2))^2+((Y-{h}/2)/({h}/2))^2\\,1)"
+    elif s == "rounded":
+        rr = max(2, round(min(w, h) * 0.12))
+        cond = (
+            f"clip(gte(X\\,{rr})*lte(X\\,{w - 1 - rr})+gte(Y\\,{rr})*lte(Y\\,{h - 1 - rr})"
+            f"+lte(hypot(X-{rr}\\,Y-{rr})\\,{rr})+lte(hypot(X-{w - 1 - rr}\\,Y-{rr})\\,{rr})"
+            f"+lte(hypot(X-{rr}\\,Y-{h - 1 - rr})\\,{rr})+lte(hypot(X-{w - 1 - rr}\\,Y-{h - 1 - rr})\\,{rr})\\,0\\,1)"
+        )
+    else:
+        return ""
+    if alpha:
+        return f",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*{cond}'"
+    return f",geq=lum='if({cond}\\,lum(X,Y)\\,16)':cb='if({cond}\\,cb(X,Y)\\,128)':cr='if({cond}\\,cr(X,Y)\\,128)'"
+
+
+def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | None = None, fmt: str | None = None) -> str:
+    """movie=/amovie= source for the filtergraph SCRIPT — replaces a command-line -i input.
+
+    With hundreds of clips the per-clip "-i path" args alone blow Windows' 32K argv limit
+    (WinError 206); the script file has no such cap. seek_point additionally avoids decoding
+    every source from t=0 (a bare -i + trim= drops frames only AFTER decoding them).
+    """
+    # two-level parse: the graph parser strips the quotes, then the OPTION parser still
+    # splits on ':' — so the drive colon must be escaped even inside quotes ('C\:/...')
+    p = str(path).replace("\\", "/").replace("'", "\\'").replace(":", "\\:")
+    out = ("amovie" if audio else "movie") + f"=filename='{p}'"
+    if seek > 0.001:
+        out += f":seek_point={seek:.3f}"
+    if streams:
+        out += f":streams={streams}"
+    if fmt:
+        out += f":format_name={fmt}"
+    return out
+
+
+# --- Native-compositor export -------------------------------------------------------
+# The editor preview and the export MUST be the same renderer. The native app's
+# compose() (D3D/GPU) draws captions, blur, mosaic, tracked masks and pop-outs for the
+# preview; `--export-preview-video` runs that same compose() headless per frame and
+# hands ffmpeg ONLY compression. The FFmpeg filtergraph re-creation below
+# (_render_sequence_job) stays as a fallback for machines without the native exe or
+# non-9:16 formats — it is known NOT to match the preview.
+
+_NATIVE_EXPORT_CANVAS = (1080, 1920)
+
+
+def _native_export_exe() -> str | None:
+    candidates = [
+        os.environ.get("DAN_NATIVE_UI_EXE") or "",
+        r"C:\Users\Owner\.done\bin\native_ui_export.exe",
+        r"C:\Users\Owner\.done\bin\native_ui.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _native_caption_items(sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every designed caption in the sequence with the exact cache key the native
+    compositor computes: sha1(json of {w,h,t,d,words}) with design = style minus x/y.
+    Text is hashed UNTRIMMED (parity with Rust's caption_cache_key)."""
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for track in sequence.get("tracks") or []:
+        if not isinstance(track, dict) or track.get("kind") == "audio" or track.get("hidden"):
+            continue
+        for clip in track.get("clips") or []:
+            if not isinstance(clip, dict) or clip.get("asset_id") or clip.get("region"):
+                continue
+            text = str(clip.get("text") or "")
+            if not text.strip():
+                continue
+            style = clip.get("style") if isinstance(clip.get("style"), dict) else {}
+            design = {k: v for k, v in style.items() if k not in ("x", "y")}
+            words = clip.get("words") if isinstance(clip.get("words"), list) else []
+            key_src = json.dumps(
+                {"w": _NATIVE_EXPORT_CANVAS[0], "h": _NATIVE_EXPORT_CANVAS[1],
+                 "t": text, "d": design, "words": words},
+                ensure_ascii=False, sort_keys=True,
+            )
+            key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"key": key, "text": text, "design": design, "words": words})
+    return items
+
+
+def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any]) -> list[str]:
+    """Render any caption PNG the native exporter will need (synchronously — the export
+    hard-fails on missing captions rather than dropping them). Returns keys still
+    missing after the render attempt."""
+    cache_dir = _room_dir(room_id) / "caption-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _ready(key: str) -> bool:
+        png = cache_dir / f"{key}.png"
+        return png.exists() and png.stat().st_size > 0
+
+    items = _native_caption_items(sequence)
+    missing = [it for it in items if not _ready(it["key"])]
+    if not missing:
+        return []
+    spec_path = cache_dir / f"_export_spec_{missing[0]['key']}.json"
+    spec_path.write_text(
+        json.dumps({
+            "outW": _NATIVE_EXPORT_CANVAS[0], "outH": _NATIVE_EXPORT_CANVAS[1],
+            "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
+            "items": [
+                {"png": str(cache_dir / f"{it['key']}.png"), "text": it["text"],
+                 "time": 0.0, "design": it["design"], "words": it["words"]}
+                for it in missing
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    try:
+        script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
+        cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run([sys.executable, str(script), str(spec_path)],
+                       capture_output=True, timeout=900, creationflags=cflags)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("native export caption render failed: %s", exc)
+    finally:
+        try:
+            spec_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+    return [it["key"] for it in missing if not _ready(it["key"])]
+
+
+def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
+    """Preview-parity export through the native GPU compositor. Returns None only when
+    the native path is NOT APPLICABLE (no exe / non-9:16 / no sequence) so the caller
+    falls back to the FFmpeg re-creation; a real export failure raises instead — the
+    FFmpeg path does not match the preview and must not silently replace it."""
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+    if not isinstance(sequence, dict):
+        return None
+    tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
+    if not any(t.get("clips") for t in tracks):
+        return None
+    fmt = str(sequence.get("format") or timeline.get("format") or "9:16")
+    if fmt != "9:16":
+        return None  # native canvas is fixed 9:16 (1080x1920); other formats keep the ffmpeg path
+    if os.environ.get("DAN_EXPORT_DISABLE_NATIVE"):
+        return None
+    exe = _native_export_exe()
+    if not exe:
+        return None
+
+    _append_job_event(room_id, job_id, {"type": "status", "text": "プレビューと同じ合成器で書き出しています…"})
+    still_missing = _ensure_native_caption_cache(room_id, sequence)
+    if still_missing:
+        raise RuntimeError("テロップ画像の生成に失敗しました: " + ", ".join(still_missing[:5]))
+
+    room_dir = _room_dir(room_id)
+    contents_path = job_dir / f"{job_id}_native_contents.json"
+    contents_path.write_text(
+        json.dumps([{"id": content_id, "timeline": {"sequence": sequence}}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    out_path = job_dir / f"{job_id}_sequence.mp4"
+
+    duration = 0.0
+    for track in tracks:
+        for clip in track.get("clips") or []:
+            try:
+                duration = max(duration, float(clip.get("timeline_end") or 0))
+            except (TypeError, ValueError):
+                continue
+
+    cmd = [
+        exe,
+        str(contents_path).replace("\\", "/"),
+        str(room_dir).replace("\\", "/"),
+        "--export-preview-video",
+        str(out_path).replace("\\", "/"),
+    ]
+    # DaVinci-style render range from the editor (in/out seconds): forwarded as the
+    # CLI's start/end args. Invalid or missing -> whole content.
+    rng = instruction.get("export_range")
+    if (isinstance(rng, list) and len(rng) == 2):
+        try:
+            r0, r1 = float(rng[0]), float(rng[1])
+            if 0 <= r0 < r1:
+                cmd += [f"{r0:.3f}", f"{r1:.3f}"]
+                duration = r1 - r0
+                _append_job_event(room_id, job_id, {"type": "status", "text": f"範囲書き出し: {r0:.1f}s〜{r1:.1f}s"})
+        except (TypeError, ValueError):
+            pass
+    timeout = max(1800.0, duration * 10.0 + 600.0)
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # stderr carries the native app's chatty diagnostics (JUMPSEEK etc.) — send it to a
+    # file, NOT a pipe nobody drains (a full 64KB pipe buffer deadlocks the export).
+    err_path = job_dir / f"{job_id}_native_export.stderr.log"
+    with open(err_path, "w", encoding="utf-8", errors="replace") as err_file:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=err_file,
+            text=True, encoding="utf-8", errors="replace", creationflags=cflags,
+        )
+        tail: list[str] = []
+        deadline = time.monotonic() + timeout
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                tail.append(line)
+                del tail[:-40]
+                if line.startswith("EXPORT_PROGRESS"):
+                    _append_job_event(room_id, job_id, {"type": "status", "text": f"書き出し中… {line.removeprefix('EXPORT_PROGRESS').strip()}"})
+                if time.monotonic() > deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+            proc.wait(timeout=max(10.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError(f"ネイティブ書き出しがタイムアウトしました ({int(timeout)}s)")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    if proc.returncode != 0:
+        err = ""
+        try:
+            err = err_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(
+            "ネイティブ書き出しに失敗しました: "
+            + "; ".join([*tail[-3:], err.strip()[-500:]]).strip("; ")
+        )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise RuntimeError("ネイティブ書き出しの出力ファイルがありません")
+
+    # Same privacy post-passes as the ffmpeg path (screen-recording blur spec / legacy
+    # tracked annotation blur) — they only ADD privacy blur the preview doesn't show.
+    try:
+        _content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
+        _tl = (_content or {}).get("timeline") or {}
+        _sb = _tl.get("screen_blur") or (_tl.get("sequence") or {}).get("screen_blur")
+        if isinstance(_sb, dict) and _sb.get("enabled"):
+            _append_job_event(room_id, job_id, {"type": "status", "text": "映像は完成。個人情報の自動ぼかし確認中…（動画の長さにより10〜30分。この間は進捗表示なし）"})
+            _apply_screen_blur(out_path, _sb, job_dir)
+        _anns = _tl.get("annotations") or []
+        if any(isinstance(a, dict) and a.get("intent") == "blur" and (a.get("data") or {}).get("track") for a in _anns):
+            _apply_tracked_blur(out_path, _anns, job_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen blur post-pass skipped: %s", exc)
+
+    output_asset = _add_generated_video_asset(
+        room_id,
+        out_path,
+        filename=f"draft_{content_id[:8]}_{job_id[:8]}.mp4",
+    )
+    _attach_output_asset(room_id, content_id, job_id, output_asset, out_path, kind="sequence_render")
+    # User-chosen destination from the export dialog: copy the finished file there
+    # (never overwrite — append _2, _3 on collision). Registration above is unchanged.
+    user_copy: str | None = None
+    dest = instruction.get("output_copy_path")
+    if isinstance(dest, str) and dest.strip().lower().endswith(".mp4"):
+        try:
+            dest_p = Path(dest.strip())
+            dest_p.parent.mkdir(parents=True, exist_ok=True)
+            final = dest_p
+            n = 2
+            while final.exists():
+                final = dest_p.with_name(f"{dest_p.stem}_{n}{dest_p.suffix}")
+                n += 1
+            shutil.copy2(out_path, final)
+            user_copy = str(final)
+            _append_job_event(room_id, job_id, {"type": "status", "text": f"保存先へコピーしました: {final}"})
+        except Exception as exc:  # noqa: BLE001
+            _append_job_event(room_id, job_id, {"type": "status", "text": f"指定の保存先へコピーできませんでした（動画は制作タブに残っています）: {exc}"})
+    return {
+        "output_asset_id": output_asset["id"],
+        "output_path": str(out_path),
+        "user_output_path": user_copy or str(out_path),
+        "output_url": output_asset.get("proxy_url"),
+        "render_engine": "native_compositor",
+        "render_size": f"{_NATIVE_EXPORT_CANVAS[0]}x{_NATIVE_EXPORT_CANVAS[1]}",
+    }
+
+
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
+    # HARD GUARD: every caller lands on the preview-parity native exporter whenever it
+    # is applicable — Dan once imported this function directly (bypassing the jobs API
+    # and the skill rule) and spent hours on the legacy filtergraph producing a
+    # preview-mismatched video. The legacy renderer below survives ONLY as the
+    # fallback for non-9:16 timelines or machines without the native exe.
+    native = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+    if native:
+        return native
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
         return None
 
-    base_clips = [c for c in _sequence_video_clips(sequence) if not _is_overlay_clip(c)]
+    timeline_fps = _sequence_frame_rate(sequence)
+    fps_filter = f"{timeline_fps:g}"
+
+    visual_media_clips = _sequence_video_clips(sequence)
+    base_clips = _sequence_base_media_clips(sequence)
     if not base_clips:
         return None
 
@@ -686,19 +1446,38 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
 
     command = [_ffmpeg(), "-y"]
     filters: list[str] = []
-    input_index = 0
 
     # --- base video: concat the full-frame clips (pip/overlay clips excluded) ---
     concat_parts: list[str] = []
     rendered_count = 0
     for clip in base_clips:
         asset = assets.get(str(clip.get("asset_id") or ""))
+        if asset and _asset_is_image_kind(asset):
+            # STILL IMAGE base clip (generated CTA art etc.): loop the picture for the
+            # clip's duration, cover-cropped to the canvas — parity with the preview.
+            img_path = _asset_source_path(asset)
+            out_dur = max(0.05, float(clip.get("timeline_end") or 0) - float(clip.get("timeline_start") or 0))
+            filters.append(
+                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.3f},"
+                f"setpts=PTS-STARTPTS,fps={fps_filter},"
+                f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},setsar=1,format=yuv420p[v{rendered_count}]"
+            )
+            if has_audio_track:
+                concat_parts.append(f"[v{rendered_count}]")
+            else:
+                filters.append(
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.3f},asetpts=PTS-STARTPTS"
+                    f"[a{rendered_count}]"
+                )
+                concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
+            rendered_count += 1
+            continue
         if not asset or asset.get("kind") != "video":
             continue
         source_path = _asset_source_path(asset)
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
         source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
-        command.extend(["-i", str(source_path)])
         pad_needed = 0.0 if is_freeze else max(0.0, out_dur - src_dur)
         bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
         is_full_pos = (not bpos) or (
@@ -716,18 +1495,20 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         c_b = max(0.0, min(0.9, float(bcrop.get("bottom") or 0))) if bcrop else 0.0
         has_crop = (c_l + c_r + c_t + c_b) > 0.001
         identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty) and not has_crop
+        # Wipe shape on a BASE clip: black outside the cutout (this layer has no alpha).
+        base_shape = _shape_cut_filter(clip.get("shape"), output_width, output_height, alpha=False)
         if identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
-            _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
+            _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps={fps_filter}"
             if is_freeze:
                 setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
             else:
                 _pad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}" if pad_needed > 0.02 else ""
                 setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
             filters.append(
-                f"[{input_index}:v]"
+                _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"{setpts},format=yuv420p"
+                f"{setpts},format=yuv420p{base_shape}"
                 f"[v{rendered_count}]"
             )
         else:
@@ -760,14 +1541,14 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             elif pad_needed > 0.02:
                 tpad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
             filters.append(
-                f"[{input_index}:v]"
+                _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30,{crop_filt}setsar=1{tpad},format=yuv420p"
+                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad},format=yuv420p"
                 f"[src{rendered_count}]"
             )
-            filters.append(f"color=c=black:s={output_width}x{output_height}:r=30:d={out_dur:.3f}[bg{rendered_count}]")
+            filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur:.3f}[bg{rendered_count}]")
             filters.append(
-                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p[v{rendered_count}]"
+                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p{base_shape}[v{rendered_count}]"
             )
         if not has_audio_track:
             if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze:
@@ -777,7 +1558,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                     vol = 1.0
                 vol_filt = f",volume={vol:.3f}" if abs(vol - 1.0) > 1e-3 else ""
                 filters.append(
-                    f"[{input_index}:a]"
+                    _movie_input(source_path, source_start, audio=True) + ","
                     f"atrim=start={source_start:.3f}:end={source_end:.3f},"
                     f"asetpts=PTS-STARTPTS,apad,atrim=duration={out_dur:.3f},aresample=48000,aformat=channel_layouts=stereo{vol_filt}"
                     f"[a{rendered_count}]"
@@ -790,7 +1571,6 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
         else:
             concat_parts.append(f"[v{rendered_count}]")
-        input_index += 1
         rendered_count += 1
 
     if rendered_count == 0:
@@ -807,10 +1587,13 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     # --- regional blur / mosaic: effect-track clips + blur annotations (honor style) ---
     blur_specs: list[dict[str, Any]] = []
     for clip in effect_clips:
+        if clip.get("style") == "note":
+            continue  # 指示クリップ: 範囲情報の器であり画には出さない
         region = clip.get("region") if isinstance(clip.get("region"), dict) else {}
         blur_specs.append({
             "x": region.get("x"), "y": region.get("y"), "width": region.get("width"), "height": region.get("height"),
             "start": clip.get("timeline_start"), "end": clip.get("timeline_end"), "style": clip.get("style"),
+            "clip": clip,  # carries blur_track for the SAM-tracked export path
         })
     for annotation in _blur_annotations(instruction):
         data = annotation.get("data") or {}
@@ -819,19 +1602,111 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             "start": annotation.get("start"), "end": annotation.get("end"),
             "style": data.get("blur_style") or data.get("style"),
         })
+    overlay_ids = {str(c.get("id") or "") for c in overlay_clips}
+    deferred_tracked: list[tuple[int, dict[str, Any], dict[str, Any], Path]] = []
     for bi, spec in enumerate(blur_specs, start=1):
+        # SAM-tracked clip: blur follows the baked mask video (what the preview shows);
+        # the static rectangle below stays the fallback when no mask covers the window
+        eclip = spec.get("clip") if isinstance(spec.get("clip"), dict) else None
+        bt = (eclip or {}).get("blur_track") if isinstance((eclip or {}).get("blur_track"), dict) else None
+        if bt and bt.get("key"):
+            mask_path = _blur_cache_dir(room_id) / f"{re.sub(r'[^0-9a-f]', '', str(bt['key']))[:16]}.mask.mp4"
+            if mask_path.exists() and mask_path.stat().st_size > 0:
+                target_id = str(bt.get("target_clip_id") or "")
+                if not target_id:
+                    ets, ete = float(eclip.get("timeline_start") or 0), float(eclip.get("timeline_end") or 0)
+                    target_id = next((str(c.get("id") or "") for c in overlay_clips
+                                      if str(c.get("asset_id") or "") == str(bt.get("asset_id") or "")
+                                      and float(c.get("timeline_start") or 0) < ete
+                                      and float(c.get("timeline_end") or 0) > ets), "")
+                if target_id in overlay_ids:
+                    # Native preview applies region effects after composing all media.
+                    # Defer this one so a blur bound to media on an upper visual lane is
+                    # not immediately covered by the sharp overlay it is meant to blur.
+                    deferred_tracked.append((bi, spec, bt, mask_path))
+                    continue
+                masked = _blur_chain_masked(
+                    video_out, bi, mask_path, bt, eclip, visual_media_clips,
+                    output_width, output_height, str(spec.get("style") or ""), timeline_fps)
+                if masked:
+                    filt, video_out = masked
+                    filters.append(filt)
+                    continue
         x = max(0, min(output_width - 2, round(float(spec.get("x") or 0) * output_width)))
         y = max(0, min(output_height - 2, round(float(spec.get("y") or 0) * output_height)))
         w = max(2, min(output_width - x, round(float(spec.get("width") or 0) * output_width)))
         h = max(2, min(output_height - y, round(float(spec.get("height") or 0) * output_height)))
         start = max(0.0, float(spec.get("start") or 0))
         end = max(start + 0.01, float(spec.get("end") or (start + 0.5)))
-        filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
+        # 注目演出（マーカー/スポットライト/ズーム）: 静的矩形で適用（プレビュー同等）。
+        # キーフレームは v1 では基準矩形にフォールバック。
+        style_s = str(spec.get("style") or "").lower()
+        if style_s in ("marker", "spotlight", "zoom"):
+            filt, video_out = _focus_chain(
+                video_out, bi, x, y, w, h, output_width, output_height, start, end,
+                style_s, timeline_fps,
+                (eclip or {}).get("effect_strength"), (eclip or {}).get("effect_opacity"))
+            filters.append(filt)
+            continue
+        # キーフレーム（手動追従）: 位置＋サイズを区分線形で動かす。キーにw/hが
+        # 無い旧形式は基準矩形のサイズで補完（region_at と同じ規則）
+        kf: list[tuple[float, float, float, float, float]] = []
+        if eclip and isinstance(eclip.get("region_keys"), list):
+            ts0 = float(eclip.get("timeline_start") or 0)
+            bw = float(spec.get("width") or 0.1)
+            bh = float(spec.get("height") or 0.1)
+            for k in eclip["region_keys"]:
+                try:
+                    kf.append((ts0 + float(k["t"]), float(k["x"]), float(k["y"]),
+                               float(k.get("w", bw)), float(k.get("h", bh))))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            kf.sort(key=lambda p: p[0])
+        if kf:
+            ws = [k[3] for k in kf]
+            hs = [k[4] for k in kf]
+            if max(ws) - min(ws) < 1e-4 and max(hs) - min(hs) < 1e-4:
+                # 固定サイズ: 従来の crop/overlay（軽い）。サイズはキーの値を優先
+                kw = max(2, min(output_width, round(ws[0] * output_width)))
+                kh = max(2, min(output_height, round(hs[0] * output_height)))
+                xe = _kf_expr([(t, vx) for t, vx, _, _, _ in kf], output_width, output_width - kw)
+                ye = _kf_expr([(t, vy) for t, _, vy, _, _ in kf], output_height, output_height - kh)
+                filt, video_out = _blur_chain_kf(video_out, bi, xe, ye, kw, kh,
+                                                 output_width, output_height, start, end,
+                                                 str(spec.get("style") or ""))
+            else:
+                filt, video_out = _blur_chain_kf_sized(video_out, bi, kf,
+                                                       output_width, output_height, start, end,
+                                                       str(spec.get("style") or ""), timeline_fps)
+        else:
+            filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
         filters.append(filt)
 
     # --- overlay / PiP (wipe): composite on top, ascending layer = closer to front ---
     for oi, clip in enumerate(overlay_clips, start=1):
         asset = assets.get(str(clip.get("asset_id") or ""))
+        if asset and _asset_is_image_kind(asset):
+            # STILL IMAGE overlay (logo etc.): loop the picture, CONTAIN-fit inside the
+            # position box (aspect preserved, centered), alpha kept — preview parity.
+            img_path = _asset_source_path(asset)
+            pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+            iow = max(2, round(float(pos.get("width") or 0.3) * output_width))
+            ioh = max(2, round(float(pos.get("height") or 0.15) * output_height))
+            ipx = round(float(pos.get("x") or 0.05) * output_width)
+            ipy = round(float(pos.get("y") or 0.05) * output_height)
+            its = max(0.0, float(clip.get("timeline_start") or 0))
+            ite = max(its + 0.05, float(clip.get("timeline_end") or (its + 3.0)))
+            filters.append(
+                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={ite - its:.3f},"
+                f"setpts=PTS-STARTPTS+{its:.3f}/TB,fps={fps_filter},format=rgba,"
+                f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease[img{oi}]"
+            )
+            filters.append(
+                f"[{video_out}][img{oi}]overlay=x={ipx}+({iow}-w)/2:y={ipy}+({ioh}-h)/2"
+                f":enable='between(t\\,{its:.3f}\\,{ite:.3f})':eof_action=pass[vimg{oi}]"
+            )
+            video_out = f"vimg{oi}"
+            continue
         if not asset or asset.get("kind") != "video":
             continue
         source_path = _asset_source_path(asset)
@@ -844,34 +1719,184 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         # offsets and windows the overflow against the frame.
         px = round(float(pos.get("x") or 0.27) * output_width)
         py = round(float(pos.get("y") or 0.835) * output_height)
+        # Manual per-edge crop = MASK: the wipe stays at its box size/position; we only cut the
+        # trimmed strips away (cut edges reveal the main video behind). The picture does NOT move or
+        # resize. Computed here (in box pixels), applied after the cover scale below. Mirrors the
+        # native engine so the desktop preview and the export frame the wipe identically.
+        _crop = clip.get("crop") if isinstance(clip.get("crop"), dict) else None
+        _mask = None
+        if _crop:
+            _cl = max(0.0, min(0.9, float(_crop.get("left") or 0)))
+            _cr = max(0.0, min(0.9, float(_crop.get("right") or 0)))
+            _ct = max(0.0, min(0.9, float(_crop.get("top") or 0)))
+            _cb = max(0.0, min(0.9, float(_crop.get("bottom") or 0)))
+            if (_cl + _cr + _ct + _cb) > 1e-4:
+                _ml = round(ow * _cl)
+                _mt = round(oh * _ct)
+                _mkw = max(2, ow - _ml - round(ow * _cr))
+                _mkh = max(2, oh - _mt - round(oh * _cb))
+                _mask = (_ml, _mt, _mkw, _mkh)
         ts = max(0.0, float(clip.get("timeline_start") or 0))
         te = max(ts + 0.05, float(clip.get("timeline_end") or (ts + ov_dur)))
+        # --- pop-out effect (v4): composite the SAME cached bake the preview uses
+        # (popout-cache/{key}.pv.mp4 = color track + alpha track) — alphamerge, apply the clip's
+        # display transform, overlay. No re-matting at export; bakes on demand only if the cache
+        # is missing (cleaned disk / legacy clip). Falls back to a plain wipe if the bake fails
+        # (e.g. no person / no GPU). ---
+        _popout = next((e for e in (clip.get("effects") or [])
+                        if isinstance(e, dict) and e.get("type") == "popout"), None)
+        if _popout:
+            _pp = _popout.get("params") if isinstance(_popout.get("params"), dict) else {}
+            # bake geometry = the CARD box captured at apply (params.box), NOT the display position
+            _box_px = _popout_box_px(_pp.get("box") or clip.get("position"), output_width, output_height)
+            if isinstance(_pp.get("bake_start"), (int, float)) and isinstance(_pp.get("bake_end"), (int, float)):
+                _bs, _be = float(_pp["bake_start"]), float(_pp["bake_end"])
+            else:
+                _bs, _be = _popout_bake_range(asset, source_start, source_end)
+            _intensity = str(_pp.get("intensity") or "mid")
+            _shadow = _pp.get("shadow") is True  # default OFF (parity with the live look)
+            _key = _popout_key(str(clip.get("asset_id") or ""), _bs, _be, _box_px,
+                               output_width, output_height, _intensity, _shadow)
+            _pv = _popout_cache_dir(room_id) / f"{_key}.pv.mp4"
+            # >4KB, not >0: an interrupted bake leaves a tiny headerless stub (moov atom
+            # missing) that movie= can't open — treat it as missing and re-bake over it
+            if not (_pv.exists() and _pv.stat().st_size > 4096):
+                try:
+                    _popout_bake_sync(_asset_hires_path(asset), _pv, _box_px,
+                                      output_width, output_height, _bs, _be,
+                                      _intensity, _shadow, None)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("popout overlay failed for clip %s: %s — using plain wipe",
+                                   clip.get("id"), exc)
+                    _popout = None
+            if _popout and _pv.exists() and _pv.stat().st_size > 4096:
+                _off = max(0.0, source_start - _bs)
+                _pdur = max(0.1, source_end - source_start)
+                # the pv bake has 2 video tracks (color + alpha) — pull both from one movie=
+                # source, trim each to the clip window, and alphamerge the pair. Index specs
+                # (0+1), NOT "v:0+v:1": the option parser splits on ':' even when escaped.
+                filters.append(
+                    _movie_input(_pv, _off, streams="0+1") + f"[pvc{oi}][pva{oi}]"
+                )
+                filters.append(
+                    f"[pvc{oi}]trim=start={_off:.3f}:end={_off + _pdur:.3f},setpts=PTS-STARTPTS[pvct{oi}]"
+                )
+                filters.append(
+                    f"[pva{oi}]trim=start={_off:.3f}:end={_off + _pdur:.3f},setpts=PTS-STARTPTS[pvat{oi}]"
+                )
+                # display transform: the bake is full-canvas, so scale to the clip's box, cut the
+                # per-edge crop strips in place (parity with the native videocrop), overlay at x/y
+                _dis = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+                _dx = round(float(_dis.get("x") or 0) * output_width)
+                _dy = round(float(_dis.get("y") or 0) * output_height)
+                _dw = max(2, round(float(_dis.get("width") or 1) * output_width))
+                _dh = max(2, round(float(_dis.get("height") or 1) * output_height))
+                _chain = [f"[pvct{oi}][pvat{oi}]alphamerge"]
+                if (_dw, _dh) != (output_width, output_height):
+                    _chain.append(f"scale={_dw}:{_dh}")
+                if _mask is not None:
+                    _pl, _pt, _pkw, _pkh = (round(_dw * _cl), round(_dh * _ct),
+                                            max(2, _dw - round(_dw * _cl) - round(_dw * _cr)),
+                                            max(2, _dh - round(_dh * _ct) - round(_dh * _cb)))
+                    _chain.append(f"crop={_pkw}:{_pkh}:{_pl}:{_pt}")
+                    _dx, _dy = _dx + _pl, _dy + _pt
+                _chain.append(f"setpts=PTS-STARTPTS+{ts:.3f}/TB")
+                filters.append(",".join(_chain) + f"[pov{oi}]")
+                filters.append(
+                    f"[{video_out}][pov{oi}]overlay={_dx}:{_dy}:format=auto:"
+                    f"enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+                )
+                video_out = f"vov{oi}"
+                continue
         ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src)
         if ov_freeze:
             ov_pre = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={ov_dur:.3f},"
         else:
             ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
-        command.extend(["-i", str(source_path)])
+        # Wipe shape: clip the PiP to a circle / rounded frame via a transparent alpha mask.
+        shape_filt = _shape_cut_filter(clip.get("shape"), ow, oh, alpha=True)
+        # COVER by default: keep the source's aspect ratio (fill the box, crop the overflow) instead
+        # of stretching it to the box's width AND height independently — the latter squished a 9:16
+        # wipe into a 0.4×0.3 box (the "潰れ" bug). fit=="stretch" opts back into free-deform.
+        if str(clip.get("fit") or "cover") == "stretch":
+            _scale = f"scale={ow}:{oh}"
+        else:
+            _scale = f"scale={ow}:{oh}:force_original_aspect_ratio=increase,crop={ow}:{oh}"
+        # MASK: cut the trimmed strips off the covered (and shaped) box; the kept pixels keep their
+        # place, and the overlay origin shifts by the trimmed left/top so nothing moves or resizes.
+        if _mask:
+            _ml, _mt, _mkw, _mkh = _mask
+            _maskcrop = f",crop={_mkw}:{_mkh}:{_ml}:{_mt}"
+            _mx, _my = px + _ml, py + _mt
+        else:
+            _maskcrop = ""
+            _mx, _my = px, py
         filters.append(
-            f"[{input_index}:v]"
+            _movie_input(source_path, source_start) + ","
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
             f"{ov_pre}"
-            f"scale={ow}:{oh},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
+            f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
+            f"{shape_filt}"
+            f"{_maskcrop}"
             f"[ov{oi}]"
         )
         filters.append(
-            f"[{video_out}][ov{oi}]overlay={px}:{py}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
         )
         video_out = f"vov{oi}"
-        input_index += 1
+
+    # Tracked effects whose target lives above the backmost media lane run after media
+    # compositing, matching the native compositor's lane-name-independent behavior.
+    for bi, spec, bt, mask_path in deferred_tracked:
+        eclip = spec["clip"]
+        masked = _blur_chain_masked(
+            video_out, 10000 + bi, mask_path, bt, eclip, visual_media_clips,
+            output_width, output_height, str(spec.get("style") or ""), timeline_fps)
+        if masked:
+            filt, video_out = masked
+            filters.append(filt)
 
     captions = _sequence_caption_clips(sequence)
     if captions:
-        ass_path = job_dir / f"{job_id}_captions.ass"
-        _write_caption_ass(ass_path, captions, output_width, output_height)
-        escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
-        filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
-        video_out = "vcap"
+        # Designed captions: burn the SAME HTML/CSS render the editor preview shows (via the
+        # /caption-frame route, screenshotted to transparent PNGs) so preview == export. Falls
+        # back to the libass .ass path if the caption renderer is unavailable.
+        overlays: list[tuple[Path, float, float]] = []
+        try:
+            overlays = _render_caption_overlays(captions, output_width, output_height, job_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)
+            overlays = []
+        if overlays:
+            for ci, ov in enumerate(overlays):
+                cs = float(ov["start"])
+                ce = float(ov["end"])
+                if ov["kind"] == "anim":
+                    # PNG sequence -> a moving overlay. Read at the sampling fps, then shift its
+                    # PTS so frame 0 lands at the caption's start time.
+                    fps = float(ov["fps"])
+                    pattern = str(ov["seq_dir"] / "%05d.png")
+                    # image2 defaults to 25fps — retime from the frame INDEX so the sampling
+                    # fps is exact, then shift frame 0 to the caption start
+                    filters.append(
+                        _movie_input(pattern, 0.0, fmt="image2")
+                        + f",format=rgba,setpts=N/({fps:g}*TB)+{cs:.3f}/TB[capsrc{ci}]"
+                    )
+                else:
+                    # single frame: overlay's default eof_action=repeat holds it, enable= gates it
+                    filters.append(_movie_input(ov["png"], 0.0) + f",format=rgba[capsrc{ci}]")
+                filters.append(
+                    f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
+                )
+                video_out = f"vcap{ci}"
+            filters.append(f"[{video_out}]format=yuv420p[vcapf]")
+            video_out = "vcapf"
+        else:
+            ass_path = job_dir / f"{job_id}_captions.ass"
+            _write_caption_ass(ass_path, captions, output_width, output_height)
+            escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
+            filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
+            video_out = "vcap"
 
     # --- audio: when an audio track exists, mix its clips (replaces base clip audio) ---
     audio_out = base_audio_out
@@ -879,7 +1904,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         audio_labels: list[str] = []
         for clip in audio_clips:
             asset = assets.get(str(clip.get("asset_id") or ""))
-            if not asset or asset.get("kind") != "video":
+            if not asset or asset.get("kind") not in {"video", "audio"}:
                 continue
             source_path = _asset_source_path(asset)
             metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
@@ -890,20 +1915,18 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 continue
             ts_ms = max(0, round(float(clip.get("timeline_start") or 0) * 1000))
             label = f"au{len(audio_labels)}"
-            command.extend(["-i", str(source_path)])
             try:
                 avol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
             except Exception:
                 avol = 1.0
             avol_filt = f",volume={avol:.3f}" if abs(avol - 1.0) > 1e-3 else ""
             filters.append(
-                f"[{input_index}:a]"
+                _movie_input(source_path, source_start, audio=True) + ","
                 f"atrim=start={source_start:.3f}:end={source_end:.3f},"
                 f"asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{avol_filt},adelay={ts_ms}|{ts_ms}"
                 f"[{label}]"
             )
             audio_labels.append(label)
-            input_index += 1
         if len(audio_labels) == 1:
             audio_out = audio_labels[0]
         elif len(audio_labels) > 1:
@@ -924,11 +1947,16 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         maps += ["-map", f"[{audio_out}]"]
         audio_args = ["-c:a", "aac", "-b:a", "128k"]
 
+    # Pass the filtergraph via a SCRIPT FILE, not the command line: with hundreds of clips the
+    # graph is tens of KB and a single -filter_complex arg blows past Windows' command-line limit
+    # (surfaces as WinError 206 "filename or extension too long").
+    fg_path = job_dir / f"{job_id}_filtergraph.txt"
+    fg_path.write_text(";".join(filters), encoding="utf-8")
     subprocess.run(
         [
             *command,
-            "-filter_complex",
-            ";".join(filters),
+            "-filter_complex_script",
+            str(fg_path),
             *maps,
             "-c:v",
             "libx264",
@@ -936,6 +1964,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             "veryfast",
             "-crf",
             "22",
+            "-pix_fmt",
+            "yuv420p",
             *audio_args,
             "-movflags",
             "+faststart",
@@ -947,6 +1977,22 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         creationflags=creationflags,
         check=True,
     )
+
+    # Privacy: bake in screen-recording blur (credentials/sensitive text) as a post-pass on the
+    # final video, if the content has it enabled. Reads the authoritative stored spec.
+    try:
+        _content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
+        _tl = (_content or {}).get("timeline") or {}
+        # spec can live on the timeline (set directly) OR on the assembled sequence (Dan-driven).
+        _sb = _tl.get("screen_blur") or (_tl.get("sequence") or {}).get("screen_blur")
+        if isinstance(_sb, dict) and _sb.get("enabled"):
+            _apply_screen_blur(out_path, _sb, job_dir)
+        # manual TRACKED blur boxes the human drew on the timeline (follow the region per-frame).
+        _anns = _tl.get("annotations") or []
+        if any(isinstance(a, dict) and a.get("intent") == "blur" and (a.get("data") or {}).get("track") for a in _anns):
+            _apply_tracked_blur(out_path, _anns, job_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen blur post-pass skipped: %s", exc)
 
     output_asset = _add_generated_video_asset(
         room_id,
@@ -1426,6 +2472,43 @@ def _segment_id(asset_index: int, seg_index: int) -> str:
     return f"a{asset_index}_s{seg_index:02d}"
 
 
+SILENCE_DB = float(os.environ.get("DAN_SILENCE_DB", "-30"))   # noise floor for silence
+SILENCE_MIN = float(os.environ.get("DAN_SILENCE_MIN", "0.04"))  # detect spans this short (assembly filters by the user's threshold)
+
+
+def _detect_silence(src: str, noise_db: float = SILENCE_DB, min_dur: float = SILENCE_MIN) -> list[list[float]]:
+    """Audio-level (waveform) silence regions in SOURCE seconds via ffmpeg silencedetect: spans
+    where the audio stays below noise_db for >= min_dur. This is FireCut-style detection — far
+    tighter than Whisper word gaps — so dead air can be cut right up to the waveform."""
+    try:
+        proc = subprocess.run(
+            [_ffmpeg(), "-hide_banner", "-nostats", "-i", src, "-af",
+             f"silencedetect=noise={noise_db}dB:d={min_dur}", "-f", "null", "-"],
+            capture_output=True, timeout=900, check=False,
+        )
+        err = (proc.stderr or b"").decode("utf-8", "ignore")
+    except Exception:
+        return []
+    out: list[list[float]] = []
+    cur_start: float | None = None
+    for line in err.splitlines():
+        line = line.strip()
+        if "silence_start:" in line:
+            try:
+                cur_start = float(line.split("silence_start:")[1].strip().split()[0])
+            except Exception:
+                cur_start = None
+        elif "silence_end:" in line and cur_start is not None:
+            try:
+                end = float(line.split("silence_end:")[1].split("|")[0].strip().split()[0])
+                if end > cur_start:
+                    out.append([round(cur_start, 3), round(end, 3)])
+            except Exception:
+                pass
+            cur_start = None
+    return out
+
+
 def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str, Any]]) -> dict[str, Any]:
     """Give Dan 'ears' as STRUCTURED data: run dan_audio_check.py on each video asset up
     front (not via Dan's own tool call) so we hold a segment-timestamped transcript with
@@ -1435,12 +2518,9 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
     assets = _read_assets(room_id)
     by_id = {str(a.get("id")): a for a in assets if a.get("id")}
     script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
-    # Model choice: large-v3 (the script default) needs ~10GB VRAM and overflows an 8GB
-    # GPU -> CPU fallback -> minutes/asset. 'medium' (~2.7GB) fits the GPU, runs fast, and
-    # segments finely enough that 言い直し land in SEPARATE segments (so the restatement
-    # safety net in _assemble_sequence_from_decisions can drop the earlier take) — and it
-    # transcribes captions far more accurately than 'base'. Override via DAN_PLAN_WHISPER_MODEL.
-    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "medium")
+    # Prefer accuracy for timeline captions. Override with DAN_PLAN_WHISPER_MODEL when speed
+    # matters more for a machine/project.
+    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL") or os.environ.get("DAN_WHISPER_MODEL") or "large-v3"
     results: dict[str, Any] = {}
     dirty = False
     asset_index = 0
@@ -1456,10 +2536,22 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             continue
         live = by_id.get(aid)
         meta = (live.get("metadata") if live and isinstance(live.get("metadata"), dict) else {}) or {}
+        # Waveform silence regions (model-independent), cached separately so a Whisper-model
+        # change doesn't force re-detection. Computed once per source, reused everywhere.
+        sil = meta.get("silence_regions") if meta.get("silence_src") == str(src) else None
+        if sil is None:
+            sil = _detect_silence(str(src))
+            if live is not None:
+                meta = dict(meta)
+                meta["silence_regions"] = sil
+                meta["silence_src"] = str(src)
+                live["metadata"] = meta
+                dirty = True
         cached = meta.get("audio_analysis")
         if isinstance(cached, dict) and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model:
             cached = dict(cached)
             cached["asset_index"] = asset_index
+            cached["silence_regions"] = sil
             for j, s in enumerate(cached.get("segments") or [], start=1):
                 s["id"] = _segment_id(asset_index, j)
                 s["asset_id"] = aid
@@ -1470,7 +2562,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             subprocess.run(
                 [sys.executable, str(script), str(src), "--words", "--json-only", "--model", whisper_model],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=900, check=False,
+                timeout=900, check=False, env=_caption_transcribe_env(room_id),
             )
             data = json.loads(out_json.read_text(encoding="utf-8")) if out_json.exists() else {}
         except Exception:
@@ -1486,6 +2578,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             "segments": segs,
             "dead_air": data.get("dead_air") or [],
             "restatements": data.get("restatements") or [],
+            "silence_regions": sil,
         }
         results[aid] = entry
         if live is not None:
@@ -1568,8 +2661,16 @@ def _build_dan_plan(
     except Exception:
         edit_policy = ""
 
+    user_brief = str(instruction.get("brief") or timeline.get("brief") or "").strip()
+    brief_banner = (
+        "ユーザーの指示（このジョブで最優先。既定の作り方・テンプレより必ずこちらに従う）:\n"
+        + user_brief
+        + "\n\n"
+        if user_brief
+        else ""
+    )
     prompt = f"""
-You are DAN, a video editor. Your deliverable is EDITING DECISIONS for a timeline — NOT a rendered video, and NOT a timeline JSON with exact numbers. Do NOT run ffmpeg. Do NOT render anything. A program will assemble the exact timeline from your decisions and the word-level transcript below, and the user will fine-tune it and export to MP4 later.
+{brief_banner}You are DAN, a video editor. Your deliverable is EDITING DECISIONS for a timeline — NOT a rendered video, and NOT a timeline JSON with exact numbers. Do NOT run ffmpeg. Do NOT render anything. A program will assemble the exact timeline from your decisions and the word-level transcript below, and the user will fine-tune it and export to MP4 later.
 
 Work in TWO steps, in this order:
 
@@ -1579,20 +2680,32 @@ STEP 2 — AFTER your reasoning, output ONE json object (and nothing after it) w
 
 DECISIONS schema:
 {{
-  "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 or null=発話そのまま"}} ],
+  "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 | null=発話をそのまま表示 | \"\"(空文字)=このセグメントはテロップ無し"}} ],
+  "no_captions": false,
   "cuts": [ {{"asset_id": "<asset id>", "start": <sec>, "end": <sec>, "reason": "restatement|filler"}} ],
   "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
-  "blur": [ {{"asset_id": "<asset id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "soft"}} ],
+  "blur": [ {{"target_text": "<exact on-screen text to hide; follows it as it moves>", "pattern": "email|phone|key", "target_object": "<SHORT ENGLISH noun phrase for a VISUAL object to blur. Use '<noun> in <attribute>' form, e.g. 'person in red shirt', 'license plate', 'face' — NEVER the word 'wearing'>", "asset_id": "<id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "mosaic|soft"}} ],
   "silence_threshold": 0.45
 }}
 
 Rules:
+- CAPTIONS ARE OPTIONAL: if the user's brief asks for no captions (テロップ不要/入れるな 等), set "no_captions": true — then NO caption clips are generated at all, regardless of per-segment values. For selective omission use caption: "" on those segments. Follow the user's instruction over any default.
 - spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of a CROSS-segment restatement by omitting that segment.
 - cuts = WORD-LEVEL removals WITHIN kept segments. The transcript below has word-level timestamps; use cuts (in the asset's own seconds) to remove a 言い直し/stutter that happens INSIDE a single segment (e.g. the segment says "スタイル名や…スタイル名や…" — cut the first occurrence) or an obvious repeated filler run. The assembler trims exactly those spans. This is how you remove duplicates that survive the spine — listen via the transcript and cut them.
 - Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts. Set silence_threshold lower (e.g. 0.3) for tighter pacing or higher for relaxed, following the user's request; omit it to use the default (0.45).
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
-- region/source coords for blur are 0..1 normalized and in the screen asset's own seconds.
+- blur = hide something on screen. Pick the field by WHAT is hidden:
+  * specific TEXT/info (認証情報/メール/電話/ID/口座/氏名 など) — ESPECIALLY in a screen recording
+    where it scrolls — emit "target_text" (the exact text you see) and/or "pattern"
+    ("email"/"phone"/"key"). Detected per-frame at export and FOLLOWS the text.
+  * a VISUAL object/person (「赤い服の人」「通行人」「顔」「ナンバープレート」「商品」など) — emit
+    "target_object" as a SHORT ENGLISH noun phrase + "asset_id" + "source_start"/"source_end"
+    (the asset's own seconds where it appears). An AI tracker (SAM) segments EVERY instance of
+    that concept and the blur follows their pixel silhouettes. Prefer this over "region"
+    whenever the thing can move.
+  * a fixed area that never moves — static "region" (0..1 normalized).
+  Do NOT blur unless the user asked to hide something.
 - Output the json LAST, after the reasoning. It must be valid JSON.
 
 EDITING POLICY (必読):
@@ -1641,6 +2754,28 @@ Brief / existing timeline:
     if not isinstance(decisions, dict) or not decisions.get("spine"):
         decisions = None
     return decisions, transcripts
+
+
+def _caption_words_timeline(segment: dict[str, Any], seg_pieces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map a segment's Whisper words (asset seconds) onto the TIMELINE using the segment's
+    assembled pieces (which carry source_start/end -> timeline_start/end). Words inside cut-out
+    gaps are dropped. Returns [{text, start, end}] for caption karaoke / typewriter sync."""
+    out: list[dict[str, Any]] = []
+    for w in (segment.get("words") or []):
+        txt = str(w.get("word") or "").strip()
+        if not txt:
+            continue
+        ws = float(w.get("start") or 0.0)
+        we = float(w.get("end") or ws)
+        for pc in seg_pieces:
+            ss = float(pc["source_start"])
+            se = float(pc["source_end"])
+            if ws < se and we > ss:  # word overlaps this kept piece
+                t0 = float(pc["timeline_start"]) + (max(ws, ss) - ss)
+                t1 = float(pc["timeline_start"]) + (min(we, se) - ss)
+                out.append({"text": txt, "start": round(t0, 3), "end": round(max(t1, t0 + 0.05), 3)})
+                break
+    return out
 
 
 def _assemble_sequence_from_decisions(
@@ -1735,13 +2870,47 @@ def _assemble_sequence_from_decisions(
     def _in_cut(aid: str, t: float) -> bool:
         return any(cs <= t <= ce for cs, ce in cuts_by_asset.get(aid, []))
 
+    # Waveform silence regions per asset (from ffmpeg silencedetect, cached in the analysis).
+    silence_by_asset: dict[str, list[tuple[float, float]]] = {}
+    for _aid, t in transcripts.items():
+        regs = t.get("silence_regions") or []
+        silence_by_asset[str(t.get("asset_id") or _aid)] = [
+            (float(r[0]), float(r[1])) for r in regs if isinstance(r, (list, tuple)) and len(r) >= 2
+        ]
+
+    def _subtract(a: float, b: float, removes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """[a,b] minus the (clipped, merged) removal spans -> the kept spans."""
+        clipped = sorted((max(a, x), min(b, y)) for x, y in removes if min(b, y) > max(a, x) + 0.001)
+        merged: list[list[float]] = []
+        for x, y in clipped:
+            if merged and x <= merged[-1][1] + 0.001:
+                merged[-1][1] = max(merged[-1][1], y)
+            else:
+                merged.append([x, y])
+        out: list[tuple[float, float]] = []
+        cur = a
+        for x, y in merged:
+            if x > cur + 0.02:
+                out.append((cur, x))
+            cur = max(cur, y)
+        if b > cur + 0.02:
+            out.append((cur, b))
+        return out
+
     def _runs_for_segment(s: dict[str, Any]) -> list[tuple[float, float]]:
-        """Contiguous kept-word runs in source time: split at internal silences > SIL and
-        drop words inside Dan's cut spans. Falls back to the whole segment if no word data."""
+        """Kept speech runs (source seconds) for a segment. Prefer WAVEFORM silence: subtract
+        silence regions >= SIL and Dan's cut spans from the segment span — this cuts dead air
+        right up to the audio, tighter than Whisper word gaps. Falls back to word gaps (then the
+        whole segment) when silence data is unavailable."""
         aid = str(s.get("asset_id") or "")
+        a, b = float(s.get("start") or 0), float(s.get("end") or 0)
+        sils = silence_by_asset.get(aid)
+        if sils:
+            removes = list(cuts_by_asset.get(aid, []))
+            removes += [(rs, re) for rs, re in sils if re - rs >= SIL]
+            return [(rs, re) for rs, re in _subtract(a, b, removes) if re - rs > 0.05]
         words = s.get("words") or []
         if not words:
-            a, b = float(s.get("start") or 0), float(s.get("end") or 0)
             return [] if _in_cut(aid, (a + b) / 2) else [(a, b)]
         runs: list[tuple[float, float]] = []
         cs = ce = None
@@ -1820,7 +2989,10 @@ def _assemble_sequence_from_decisions(
             continue
         seg_span[sid] = {
             "timeline_start": seg_ts, "timeline_end": seg_te,
-            "caption": (cap.strip() if cap else str(s.get("text") or "").strip()),
+            # caption: explicit string = styled text, None = fall back to the spoken text,
+            # EMPTY string = no caption for this segment (the user can opt out — a null
+            # fallback used to make captions structurally mandatory)
+            "caption": ("" if (isinstance(cap, str) and not cap.strip()) else (cap.strip() if cap else str(s.get("text") or "").strip())),
         }
         order.append(sid)
     if not pieces:
@@ -1880,14 +3052,23 @@ def _assemble_sequence_from_decisions(
             "timeline_start": p["timeline_start"], "timeline_end": p["timeline_end"],
             "link_id": link_id,
         })
-    # Captions: one per kept (non-overlay) segment, spanning its full timeline range.
+    # Captions: one per kept (non-overlay) segment, spanning its full timeline range. Attach
+    # per-word timings (segment Whisper words mapped to the timeline) so a karaoke / typewriter
+    # caption syncs to the actual speech without any extra UI step.
+    pieces_by_sid: dict[str, list[dict[str, Any]]] = {}
+    for p in pieces:
+        pieces_by_sid.setdefault(p["sid"], []).append(p)
     for sid in order:
         if sid in covered:
             continue
         sp = seg_span[sid]
-        if sp["caption"]:
-            caption_clips.append({"id": _cid("c"), "text": sp["caption"], "track": "caption",
-                                  "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]})
+        if sp["caption"] and not decisions.get("no_captions"):
+            clip: dict[str, Any] = {"id": _cid("c"), "text": sp["caption"], "track": "caption",
+                                    "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]}
+            words = _caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, []))
+            if words:
+                clip["words"] = words
+            caption_clips.append(clip)
 
     # Pass 3: screen background clips (fullscreen base) under each overlay span.
     for ov in overlays:
@@ -1906,8 +3087,83 @@ def _assemble_sequence_from_decisions(
             "composition": "background", "layer": 0, "auto_edit_reason": "screen_overlay",
         })
 
-    # Pass 4: blur regions → effect clips, mapping screen source time → timeline time.
+    # Pass 4: blur → effect clips (fixed region) OR an OCR-follow screen-blur spec (text/pattern
+    # that may move/scroll). Dan emits target_text/pattern when the user asks to hide specific
+    # info ("○○を隠して"); those are detected per-frame at export so they never leak.
+    _PAT = {"phone": "digits", "number": "digits", "tel": "digits", "数字": "digits", "メール": "email"}
+    sb_targets: list[str] = []
+    sb_patterns: list[str] = []
     for b in (decisions.get("blur") or []):
+        tt = str(b.get("target_text") or "").strip()
+        pat = str(b.get("pattern") or "").strip().lower()
+        if tt or pat:
+            if tt:
+                sb_targets.append(tt)
+            if pat:
+                sb_patterns.append(_PAT.get(pat, pat))
+            continue
+        tobj = str(b.get("target_object") or "").strip()
+        if tobj:
+            # VISUAL object ("person in red shirt") -> SAM-tracked blur: find where the
+            # (asset, source range) lands on the FINAL timeline, start one mask bake over
+            # the whole needed source span, and bind blur_track effect clips — the same
+            # data the editor's 追従ぼかし produces, so preview/export/re-bake all work.
+            tobj = _blur_prompt_to_english(tobj)
+            baid = str(b.get("asset_id") or "")
+            b_ss = float(b.get("source_start") or 0)
+            b_se = float(b.get("source_end") or 0)
+            runs: list[list[float]] = []  # [tl0, tl1, src0, src1]
+            for vc in video_clips + overlay_clips:
+                if str(vc.get("asset_id")) != baid:
+                    continue
+                v_ss = float(vc.get("source_start") or 0)
+                v_se = float(vc.get("source_end") or 0)
+                v_ts = float(vc.get("timeline_start") or 0)
+                if v_se <= v_ss:
+                    continue
+                lo = max(v_ss, b_ss) if b_se > b_ss else v_ss
+                hi = min(v_se, b_se) if b_se > b_ss else v_se
+                if hi - lo < 0.05:
+                    continue
+                runs.append([v_ts + (lo - v_ss), v_ts + (hi - v_ss), lo, hi])
+            if not runs:
+                logger.info("target_object %r: asset %s range not on final timeline", tobj, baid)
+                continue
+            runs.sort()
+            merged: list[list[float]] = []
+            for r in runs:
+                if merged and r[0] - merged[-1][1] < 0.25:
+                    merged[-1][1] = max(merged[-1][1], r[1])
+                    merged[-1][3] = max(merged[-1][3], r[3])
+                else:
+                    merged.append(list(r))
+            bake = None
+            try:
+                t_asset = _assets_by_id(room_id).get(baid)
+                if t_asset:
+                    bake = _ensure_blur_mask_started(
+                        room_id, t_asset,
+                        {"prompt": tobj, "box": None, "points": None, "keep_ids": None,
+                         "feather": None, "dilate": None, "anchor": None},
+                        min(r[2] for r in runs), max(r[3] for r in runs))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("target_object bake start failed (%r): %s", tobj, exc)
+            for m in merged:
+                clip_e: dict[str, Any] = {
+                    "id": _cid("e"), "track": "effect",
+                    # stand-in rectangle until the mask lands (center field of view)
+                    "region": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                    "style": str(b.get("style") or "soft"),
+                    "timeline_start": round(m[0], 3), "timeline_end": round(m[1], 3),
+                }
+                if bake:
+                    clip_e["blur_track"] = {
+                        "asset_id": baid, "key": bake["key"],
+                        "bake_start": bake["bake_start"], "bake_end": bake["bake_end"],
+                        "prompt": tobj,
+                    }
+                effect_clips.append(clip_e)
+            continue
         region = b.get("region") if isinstance(b.get("region"), dict) else None
         if not region:
             continue
@@ -1931,7 +3187,7 @@ def _assemble_sequence_from_decisions(
             "timeline_start": ts, "timeline_end": te,
         })
 
-    return {
+    seq_out: dict[str, Any] = {
         "version": 1,
         "format": fmt,
         "duration": total,
@@ -1949,6 +3205,15 @@ def _assemble_sequence_from_decisions(
             {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": effect_clips},
         ],
     }
+    if sb_targets or sb_patterns:
+        # OCR-follow blur Dan was asked to apply ("○○を隠して"); baked at export (post-pass).
+        seq_out["screen_blur"] = {
+            "enabled": True,
+            "targets": sorted(set(sb_targets)),
+            "patterns": sorted(set(sb_patterns)),
+            "style": "gaussian",
+        }
+    return seq_out
 
 
 def _clips_in_scope(sequence: dict[str, Any], regions: list[dict[str, Any]]) -> set[str]:
@@ -1978,7 +3243,90 @@ def _clips_in_scope(sequence: dict[str, Any], regions: list[dict[str, Any]]) -> 
     return scope
 
 
-def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allowed_ids: set[str]) -> dict[str, Any]:
+def _revision_needs_agent(text: str) -> bool:
+    """Capability-based routing: the fast one-shot patch can only rewrite existing
+    clip text/style/times. Anything needing new material, spatial placement,
+    generation, structure changes or content understanding goes to the agent.
+    Undecidable → agent (the heavier, safer path)."""
+    t = str(text or "")
+    if re.search(r"ぼかし|ボカシ|モザイク|blur", t, re.I):
+        return False  # dedicated SAM-bake fast flow handles these
+    agent_kw = (
+        r"追加|作成|作って|生成|挿入|入れて|出して|置いて|配置|CTA|ロゴ|画像|イラスト|素材|"
+        r"差し替え|置き換え|並び替え|移動|削除|消して|カット|短く|詰めて|伸ば|"
+        r"フリーズ|静止|オーバーレイ|PiP|BGM|音楽|効果音|まとめ|要約|構成"
+    )
+    if re.search(agent_kw, t):
+        return True
+    fast_kw = r"テロップ|字幕|文字|誤字|タイポ|フォント|色|大きさ|サイズ|スタイル|直して|修正|変えて"
+    if re.search(fast_kw, t):
+        return False
+    return True
+
+
+def _agent_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
+    """revision_regions / annotations → the agent's annotation shape
+    {t0,t1,x,y,width,height,note} (normalized canvas coords)."""
+    out: list[dict[str, Any]] = []
+    for ann in (instruction.get("revision_regions") or []) + (instruction.get("annotations") or []):
+        if not isinstance(ann, dict):
+            continue
+        d = ann.get("data") if isinstance(ann.get("data"), dict) else ann
+        out.append({
+            "t0": ann.get("start"), "t1": ann.get("end"),
+            "x": d.get("x"), "y": d.get("y"),
+            "width": d.get("width"), "height": d.get("height"),
+            "note": ann.get("note") or "",
+        })
+    return out
+
+
+def _sanitize_av_clip_edit(nc: dict[str, Any], orig: dict[str, Any], assets: dict[str, dict[str, Any]] | None) -> None:
+    """Guard for LLM-authored clip edits: an asset-backed (video/audio) clip must stay
+    playable. Dan once 'extended' a clip by writing source_end BEFORE source_start —
+    the implicit-freeze convention then froze the picture while audio wandered. Rule:
+    for a non-freeze A/V clip, the source span always equals the timeline span
+    (se = ss + (te - ts)), clamped to the asset's real duration (te shrinks with it)."""
+    if not nc.get("asset_id") or nc.get("freeze"):
+        return
+    try:
+        ts = float(nc.get("timeline_start") or 0)
+        te = float(nc.get("timeline_end") or 0)
+        ss = float(nc.get("source_start") or 0)
+    except (TypeError, ValueError):
+        return
+    if nc.get("source_end") is None or te <= ts:
+        return
+    # explicit freeze by the OLD implicit convention on the ORIGINAL clip stays as-is
+    try:
+        oss = float(orig.get("source_start") or 0)
+        ose = float(orig.get("source_end") or 0)
+        if orig.get("source_end") is not None and ose <= oss + 1e-6:
+            return
+    except (TypeError, ValueError):
+        pass
+    need = te - ts
+    se = ss + need
+    asset = (assets or {}).get(str(nc.get("asset_id")))
+    meta = asset.get("metadata") if isinstance(asset, dict) and isinstance(asset.get("metadata"), dict) else {}
+    try:
+        adur = float(meta.get("duration") or 0)
+    except (TypeError, ValueError):
+        adur = 0.0
+    if adur > 0 and se > adur:
+        se = adur
+        te = ts + max(0.05, se - ss)
+    if abs(float(nc.get("source_end") or 0) - se) > 1e-3 or te != float(nc.get("timeline_end") or 0):
+        logger.warning(
+            "revision clip %s sanitized: src %.3f->%.3f tl %.3f-%.3f",
+            nc.get("id"), ss, se, ts, te,
+        )
+    nc["source_end"] = round(se, 3)
+    nc["timeline_end"] = round(te, 3)
+
+
+def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allowed_ids: set[str],
+                          assets: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Apply Dan's per-clip revision patch to the sequence, preserving every clip outside the
     allowed scope verbatim. Edits/removes targeting ids NOT in allowed_ids are ignored (this is
     the guard that stops Dan from silently mutating the rest of the timeline)."""
@@ -2017,6 +3365,7 @@ def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allow
                         nc[k] = merged_style
                     else:
                         nc[k] = e[k]
+                _sanitize_av_clip_edit(nc, clip, assets)
                 out_clips.append(nc)
             else:
                 out_clips.append(clip)  # untouched, verbatim
@@ -2048,6 +3397,91 @@ def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allow
             dur = max(dur, float(c.get("timeline_end") or 0))
     seq2["duration"] = round(dur, 3)
     return seq2
+
+
+def _apply_blur_objects(sequence: dict[str, Any], blur_objects: list[dict[str, Any]], room_id: str) -> int:
+    """「〜をぼかして」(dan_revise): for each visual-target entry, start SAM mask bakes for
+    every asset shown in the requested timeline range and add blur_track effect clips —
+    the exact data the editor's 追従ぼかし produces (preview/export/re-bake all work).
+    Mutates `sequence`; returns the number of effect clips added."""
+    tracks = sequence.get("tracks") or []
+
+    def _place_on_free_lane(clip: dict[str, Any]) -> None:
+        """Front-most (display top) non-audio lane with free span; else a new top lane —
+        the same no-overlap placement the editor's ◱ uses."""
+        t0, t1 = float(clip["timeline_start"]), float(clip["timeline_end"])
+        for tr in reversed(tracks):
+            if tr.get("type") == "audio" or tr.get("hidden") or tr.get("locked"):
+                continue
+            cs = tr.get("clips") or []
+            if all(float(c.get("timeline_end") or 0) <= t0 + 1e-3
+                   or float(c.get("timeline_start") or 0) >= t1 - 1e-3 for c in cs):
+                tr.setdefault("clips", []).append(clip)
+                return
+        idx = max((i for i, tr in enumerate(tracks) if tr.get("type") != "audio"),
+                  default=len(tracks) - 1) + 1
+        tracks.insert(idx, {"type": "overlay", "clips": [clip]})
+
+    assets = _assets_by_id(room_id)
+    seq_dur = max((float(c.get("timeline_end") or 0)
+                   for t in tracks for c in (t.get("clips") or [])), default=0.0)
+    added = 0
+    for bo in blur_objects:
+        target = _blur_prompt_to_english(str(bo.get("target") or "").strip())
+        if not target:
+            continue
+        ts = max(0.0, float(bo.get("timeline_start") or 0.0))
+        te = float(bo.get("timeline_end") or 0.0) or seq_dur
+        te = min(max(te, ts + 0.1), seq_dur or (ts + 0.1))
+        # visual clips per asset inside [ts, te] -> merged timeline runs + union source window
+        by_asset: dict[str, list[list[float]]] = {}
+        for t in tracks:
+            if t.get("type") not in {"video", "overlay"} or t.get("hidden"):
+                continue
+            for c in t.get("clips") or []:
+                aid = str(c.get("asset_id") or "")
+                v_ss = float(c.get("source_start") or 0)
+                v_se = float(c.get("source_end") or 0)
+                v_ts = float(c.get("timeline_start") or 0)
+                v_te = float(c.get("timeline_end") or 0)
+                if not aid or v_se <= v_ss or v_te <= max(ts, v_ts) or min(te, v_te) <= v_ts:
+                    continue
+                t0, t1 = max(ts, v_ts), min(te, v_te)
+                by_asset.setdefault(aid, []).append(
+                    [t0, t1, v_ss + (t0 - v_ts), v_ss + (t1 - v_ts)])
+        for aid, runs in by_asset.items():
+            asset = assets.get(aid)
+            if not asset or asset.get("kind") != "video":
+                continue
+            runs.sort()
+            merged: list[list[float]] = []
+            for r in runs:
+                if merged and r[0] - merged[-1][1] < 0.25:
+                    merged[-1][1] = max(merged[-1][1], r[1])
+                    merged[-1][3] = max(merged[-1][3], r[3])
+                else:
+                    merged.append(list(r))
+            try:
+                bake = _ensure_blur_mask_started(
+                    room_id, asset,
+                    {"prompt": target, "box": None, "points": None, "keep_ids": None,
+                     "feather": None, "dilate": None, "anchor": None},
+                    min(r[2] for r in runs), max(r[3] for r in runs))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("blur_objects bake start failed (%r/%s): %s", target, aid, exc)
+                continue
+            for m in merged:
+                _place_on_free_lane({
+                    "id": f"fxo_{uuid.uuid4().hex[:8]}",
+                    "region": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                    "style": "soft",
+                    "timeline_start": round(m[0], 3), "timeline_end": round(m[1], 3),
+                    "blur_track": {"asset_id": aid, "key": bake["key"],
+                                   "bake_start": bake["bake_start"],
+                                   "bake_end": bake["bake_end"], "prompt": target},
+                })
+                added += 1
+    return added
 
 
 def _build_dan_revision(
@@ -2100,9 +3534,14 @@ Return ONE json object with your edits (and nothing after it). Only reference id
   "edits": [
     {{"id": "<clip id>", "text": "新しいテロップ or 省略", "style": {{"color":"#RRGGBB","fontSize":1.2,"position":"top|center|bottom","bold":true,"outlineColor":"#RRGGBB","outlineWidth":1.0}}, "timeline_start": <sec or 省略>, "timeline_end": <sec or 省略>, "remove": true/false}}
   ],
-  "new_captions": [ {{"text": "...", "timeline_start": <sec>, "timeline_end": <sec>}} ]
+  "new_captions": [ {{"text": "...", "timeline_start": <sec>, "timeline_end": <sec>}} ],
+  "blur_objects": [ {{"target": "<SHORT ENGLISH noun phrase for the VISUAL thing to blur. Use '<noun> in <attribute>' form, e.g. 'person in red shirt', 'license plate', 'face' — NEVER the word 'wearing'>", "timeline_start": <sec>, "timeline_end": <sec>}} ]
 }}
 Rules:
+- 「〜をぼかして/隠して」で見た目の物体（人・顔・服装で特定された人・ナンバー・商品など）を指され
+  たら "blur_objects" を出す。target はあなたが英語の短い名詞句に翻訳する。timeline_start/end は
+  ユーザーが範囲を指定していればその範囲、なければタイムライン全体。AIトラッカーが該当する物体を
+  全部追跡してぼかす（blur_objects は視覚的な物体専用。特定の文字列はここでは扱わない）。
 - Caption text/style/position/size: edit the caption clip's fields.
 - IMPORTANT — style is MERGED, not replaced: only include the style fields you are CHANGING.
   The clip's other existing style fields (shown above) are kept automatically. e.g. to move a
@@ -2133,14 +3572,153 @@ Rules:
     patch = _extract_json_object(output)
     if not isinstance(patch, dict):
         return None
-    merged = _merge_revision_patch(sequence, patch, allowed)
+    assets_by_id = {str(a.get("id")): a for a in _read_assets(room_id) if isinstance(a, dict)}
+    merged = _merge_revision_patch(sequence, patch, allowed, assets_by_id)
+    # visual-object blur requests ride the same patch: start SAM bakes + bind effect clips
+    blur_objects = patch.get("blur_objects") if isinstance(patch.get("blur_objects"), list) else []
+    if merged and blur_objects:
+        n_blur = _apply_blur_objects(merged, blur_objects, room_id)
+        if n_blur:
+            _append_job_event(room_id, job_id, {
+                "type": "status",
+                "text": f"追従ぼかしを{n_blur}箇所に適用（AIが対象を追跡中。ベイク完了までプレビューは仮矩形）。",
+            })
     _append_job_event(room_id, job_id, {"type": "status", "text": f"部分編集を適用（対象クリップ {len(allowed)}個・範囲外は保持）。"})
     return merged
 
 
-def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
+def _higgsfield_result_url(value: Any) -> str | None:
+    """Find the delivered video URL in the CLI's version-dependent JSON shape."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower() in {"url", "video_url", "download_url"} and isinstance(item, str) and item.startswith("http"):
+                return item
+            found = _higgsfield_result_url(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _higgsfield_result_url(item)
+            if found:
+                return found
+    return None
+
+
+def _run_higgsfield_generation_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any]) -> None:
+    """Generate, register, and place one editable Higgsfield video clip."""
     _update_job(room_id, job_id, {"status": "running"})
-    _update_content(room_id, content_id, {"status": "running", "timeline": instruction.get("timeline") or {}})
+    _update_content(room_id, content_id, {"status": "running"})
+    try:
+        prompt = str(instruction.get("prompt") or "").strip()
+        model = str(instruction.get("model") or "seedance_2_0")
+        aspect = str(instruction.get("aspect_ratio") or "9:16")
+        duration = int(float(instruction.get("duration") or 5))
+        if not prompt:
+            raise RuntimeError("生成指示を入力してください")
+        if model not in {"seedance_2_0", "kling3_0"}:
+            raise RuntimeError("Unsupported Higgsfield model")
+        if aspect not in {"9:16", "16:9", "1:1"}:
+            aspect = "9:16"
+        duration = 10 if duration >= 8 else 5
+
+        job_dir = _room_dir(room_id) / "jobs" / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"Higgsfield ({'Seedance 2.0' if model == 'seedance_2_0' else 'Kling 3.0'}) に生成を依頼しました…"})
+        cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
+               "--aspect_ratio", aspect, "--duration", str(duration), "--wait", "--json"]
+        if model == "seedance_2_0":
+            cmd.extend(["--resolution", "720p"])
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=1260, creationflags=flags)
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "Higgsfield generation failed")[-700:])
+        try:
+            result_data = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Higgsfield の応答を読み取れませんでした") from exc
+        source_url = _higgsfield_result_url(result_data)
+        if not source_url:
+            raise RuntimeError("Higgsfield の生成結果に動画URLがありません")
+
+        _append_job_event(room_id, job_id, {"type": "status", "text": "生成が完了しました。編集用素材を登録しています…"})
+        out_path = job_dir / "higgsfield.mp4"
+        with urllib.request.urlopen(source_url, timeout=180) as response, out_path.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        if not out_path.exists() or out_path.stat().st_size < 1024:
+            raise RuntimeError("生成動画のダウンロードに失敗しました")
+        asset = _add_generated_video_asset(
+            room_id, out_path, filename=f"higgsfield_{job_id[:8]}.mp4",
+            metadata={**_probe_video(out_path), "provider": "higgsfield", "model": model, "prompt": prompt, "source_url": source_url},
+        )
+
+        contents = _read_contents(room_id)
+        content = next((item for item in contents if str(item.get("id")) == str(content_id)), None)
+        if not content:
+            raise RuntimeError("Content not found")
+        timeline = dict(content.get("timeline") or {})
+        # The editor removes the one-shot annotation after the job is accepted. Do the
+        # same server-side so a fast worker can never write an old polling snapshot back.
+        consumed_id = str(annotation.get("id") or "")
+        if consumed_id and isinstance(timeline.get("annotations"), list):
+            timeline["annotations"] = [a for a in timeline["annotations"] if not isinstance(a, dict) or str(a.get("id")) != consumed_id]
+        sequence = dict(timeline.get("sequence") or {})
+        tracks = list(sequence.get("tracks") or [])
+        annotation = instruction.get("annotation") if isinstance(instruction.get("annotation"), dict) else {}
+        start = max(0.0, float(annotation.get("start") or instruction.get("timeline_start") or 0))
+        requested_end = annotation.get("end") if annotation.get("end") is not None else instruction.get("timeline_end")
+        asset_duration = float((asset.get("metadata") or {}).get("duration") or duration)
+        end = float(requested_end) if requested_end is not None else start + min(duration, asset_duration)
+        end = max(start + 0.1, min(end, start + max(0.1, asset_duration)))
+        position = None
+        data = annotation.get("data") if isinstance(annotation.get("data"), dict) else {}
+        if annotation.get("kind") == "rect" and all(key in data for key in ("x", "y", "width", "height")):
+            position = {key: float(data[key]) for key in ("x", "y", "width", "height")}
+        track = {"id": f"video_higgsfield_{job_id[:8]}", "type": "video", "label": "Higgsfield", "clips": []}
+        clip = {
+            "id": f"clip_higgsfield_{job_id[:8]}", "asset_id": asset["id"], "label": "Higgsfield generated",
+            "source_start": 0, "source_end": round(end - start, 3),
+            "timeline_start": round(start, 3), "timeline_end": round(end, 3),
+            "track": "video", "composition": "overlay" if position else "fullscreen",
+            **({"position": position} if position else {}),
+        }
+        track["clips"].append(clip)
+        tracks.append(track)
+        sequence["tracks"] = tracks
+        sequence["duration"] = max(float(sequence.get("duration") or 0), end)
+        timeline["sequence"] = sequence
+        asset_ids = [str(v) for v in (content.get("asset_ids") or [])]
+        if asset["id"] not in asset_ids:
+            asset_ids.append(asset["id"])
+        _update_content(room_id, content_id, {"timeline": timeline, "asset_ids": asset_ids, "status": "ready"})
+        result = {"asset_id": asset["id"], "clip_id": clip["id"], "timeline_start": clip["timeline_start"], "timeline_end": clip["timeline_end"], "model": model}
+        _append_job_event(room_id, job_id, {"type": "status", "text": "素材登録と映像レーンへの配置が完了しました。タイムライン上で手動調整できます。"})
+        _update_job(room_id, job_id, {"status": "done", "result": result, "error": None})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Higgsfield generation failed room=%s job=%s", room_id, job_id)
+        message = str(exc)
+        _append_job_event(room_id, job_id, {"type": "error", "text": message})
+        _update_job(room_id, job_id, {"status": "failed", "error": message})
+        _update_content(room_id, content_id, {"status": "failed"})
+
+
+def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
+    # Higgsfield is deliberately a first-class production job instead of a synchronous
+    # HTTP request: a real video generation can take several minutes, while the existing
+    # job/event polling UI keeps the editor usable and reports its terminal state.
+    if instruction.get("mode") == "higgsfield_generate":
+        _run_higgsfield_generation_job(room_id, job_id, content_id, instruction)
+        return
+    _update_job(room_id, job_id, {"status": "running"})
+    # NEVER blow away the stored timeline with an empty/partial instruction payload —
+    # a job posted without a full timeline (e.g. plain export test) must not wipe the
+    # user's edit (this exact accident deleted a rebuilt 324-clip timeline once)
+    def _timeline_patch() -> dict:
+        tl = instruction.get("timeline")
+        if isinstance(tl, dict) and isinstance(tl.get("sequence"), dict) and tl["sequence"].get("tracks"):
+            return {"timeline": tl}
+        return {}
+
+    _update_content(room_id, content_id, {"status": "running", **_timeline_patch()})
     job_dir = _room_dir(room_id) / "jobs" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     instruction_path = job_dir / "timeline_instruction.json"
@@ -2248,7 +3826,33 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             # Partial, non-destructive edit: Dan patches only the in-scope clips; everything
             # else is preserved. The deliverable is the updated TIMELINE — no MP4 is rendered
             # (the user sees the change in the live preview; export to MP4 is a separate step).
-            merged = _build_dan_revision(room_id, user_id, job_id, instruction, instruction_path)
+            revision_text = str(instruction.get("revision_text") or instruction.get("brief") or "")
+            if _is_caption_generation_request(revision_text):
+                merged = _build_caption_generation(room_id, job_id, instruction)
+            elif _revision_needs_agent(revision_text):
+                from app.services.timeline_agent import run_timeline_agent
+                _append_job_event(room_id, job_id, {"type": "status", "text": "編集エージェントで実行します（動画内容を理解して編集・数分かかることがあります）"})
+                agent_res = run_timeline_agent(
+                    room_id=room_id, user_id=user_id, content_id=content_id, job_id=job_id,
+                    instruction=revision_text,
+                    annotations=_agent_annotations(instruction),
+                    selected_clips=[c for c in (instruction.get("selected_clips") or []) if isinstance(c, dict)],
+                    on_event=lambda e: _append_job_event(room_id, job_id, e),
+                )
+                if not agent_res.get("ok"):
+                    raise RuntimeError("エージェント編集は反映されませんでした: " + "; ".join((agent_res.get("problems") or ["unknown"])[:3]))
+                # the commit already wrote contents.json — reload for bookkeeping
+                merged = None
+                for c in _read_contents(room_id):
+                    if str(c.get("id")) == str(content_id):
+                        tl = c.get("timeline") if isinstance(c.get("timeline"), dict) else {}
+                        merged = tl.get("sequence") if isinstance(tl.get("sequence"), dict) else None
+                if not merged:
+                    raise RuntimeError("反映後のタイムラインが読めませんでした")
+                if agent_res.get("summary"):
+                    _append_job_event(room_id, job_id, {"type": "text", "text": str(agent_res["summary"])[:2000]})
+            else:
+                merged = _build_dan_revision(room_id, user_id, job_id, instruction, instruction_path)
             if not merged:
                 raise RuntimeError("部分編集の適用に失敗しました（対象クリップなし or 差分なし）")
             sequence_result = merged
@@ -2262,7 +3866,18 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             instruction_path.write_text(json.dumps(instruction, ensure_ascii=False, indent=2), encoding="utf-8")
             _update_content(room_id, content_id, {"timeline": timeline})
         if mode in {"render_timeline", "export", "blur_render"}:
-            render_result = _render_sequence_job(room_id, job_id, content_id, instruction, job_dir)
+            # Preview-parity first: the native compositor renders exactly what the
+            # editor preview shows. FFmpeg re-creation only when native isn't applicable.
+            # One automatic retry: a transient hiccup (decoder/encoder process dying
+            # once) must self-heal instead of surfacing to the user — a real defect
+            # will fail twice with the same recorded reason.
+            try:
+                render_result = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+            except Exception as first_exc:  # noqa: BLE001
+                _append_job_event(room_id, job_id, {"type": "status", "text": f"書き出しが一度失敗したため自動で再試行します（1回目の理由: {str(first_exc)[:200]}）"})
+                render_result = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+            if not render_result:
+                render_result = _render_sequence_job(room_id, job_id, content_id, instruction, job_dir)
             if not render_result:
                 render_result = _render_blur_job(room_id, job_id, content_id, instruction, job_dir)
         result = {
@@ -2283,10 +3898,18 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             result.update(render_result)
         _append_job_event(room_id, job_id, {"type": "status", "text": result["message"]})
         _update_job(room_id, job_id, {"status": "done", "result": result, "error": None})
-        _update_content(room_id, content_id, {"status": "ready", "timeline": instruction.get("timeline") or {}})
+        _update_content(room_id, content_id, {"status": "ready", **_timeline_patch()})
     except Exception as exc:
-        _append_job_event(room_id, job_id, {"type": "error", "text": str(exc)})
-        _update_job(room_id, job_id, {"status": "failed", "error": str(exc)})
+        # 事故区分をユーザーの言葉で。NameError/ImportError 等はコード側の欠陥で、
+        # 指示や素材が悪いわけではない — 生の例外文字列だけを見せると「何が悪かった
+        # のか分からない」まま終わる（実際に起きた）。原文は括弧で残す。
+        if isinstance(exc, (NameError, ImportError, AttributeError, SyntaxError, UnboundLocalError, KeyError, TypeError)):
+            msg = f"システム側の不具合で実行できませんでした。指示や素材の問題ではありません。開発側で修正が必要です（詳細: {exc}）"
+        else:
+            msg = str(exc)
+        logger.exception("production job failed room=%s job=%s", room_id, job_id)
+        _append_job_event(room_id, job_id, {"type": "error", "text": msg})
+        _update_job(room_id, job_id, {"status": "failed", "error": msg})
         _update_content(room_id, content_id, {"status": "failed"})
 
 
@@ -2401,39 +4024,69 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
     out_dir = _room_dir(room_id)
     proxy = out_dir / f"{asset_id}_proxy.mp4"
     thumb = out_dir / f"{asset_id}_thumb.jpg"
+    timeline_fps = _room_frame_rate(room_id)
+    fps_filter = f"{timeline_fps:g}"
 
     try:
         creationflags = 0
         if hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
             creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS  # type: ignore[attr-defined]
 
-        subprocess.run(
-            [
-                _ffmpeg(),
-                "-y",
-                "-i",
-                str(src),
-                "-vf",
-                "scale=-2:720",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "28",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "96k",
-                "-movflags",
-                "+faststart",
-                str(proxy),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            check=True,
-        )
+        # fps=30 forces a CONSTANT frame rate. Source phone screen recordings are often
+        # variable-frame-rate (VFR), and VFR breaks seek-by-time everywhere: the editor's
+        # preview seeks to the wrong frame / freezes, and our OCR/ffmpeg trackers land on the
+        # wrong timestamp. A CFR proxy makes seeking reliable across the board.
+        #
+        # LONG SIDE 1920 + high quality (was 720p CRF28): this proxy is what the native
+        # editor shows WHILE SCRUBBING (originals are long-GOP 4K = ~200ms per seek flush,
+        # physically unable to track a fast drag; the proxy seeks in ~20ms). At preview-pane
+        # size a 1080x1920 CRF~19 proxy is indistinguishable from the original — the old
+        # 406x720 CRF28 one is what read as "proxy-ish mush". Filmora ships the same trick
+        # (auto proxies at ~1/2 source res) — its scrubbing only LOOKS like original 4K.
+        #
+        # SHORT GOP (keyframe every 15 frames = 0.5s) + no B-frames. A long GOP is the
+        # heavy part of scrubbing/seeking: to show a random frame the decoder must decode
+        # the whole group from its keyframe.
+        # 0.2s GOP (was 0.5s): reverse frame-stepping decodes ≤1/5s of frames — the
+        # editor's backward arrow feels instant instead of "walking the group".
+        _common = ["-g", str(max(1, round(timeline_fps * 0.2))), "-bf", "0", "-vsync", "cfr",
+                   "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(proxy)]
+        _vf = ["-vf", f"scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps_filter}"]
+        _encoders = [
+            ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "16", "-b:v", "0", "-preset", "p4"],
+            ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17"],
+        ]
+        _done = False
+        for _enc in _encoders:
+            _r = subprocess.run(
+                [_ffmpeg(), "-y", "-i", str(src), *_vf, *_enc, *_common],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                check=False,
+            )
+            if _r.returncode == 0 and proxy.exists() and proxy.stat().st_size > 0:
+                _done = True
+                break
+        if not _done:
+            raise RuntimeError("proxy encode failed (nvenc and libx264)")
+        # PTS sidecar (Filmora keeps the same table next to its proxies): every source video
+        # frame's pts in seconds. The native editor snaps proxy->original switches to these
+        # so VFR sources can't flicker by one frame when a scrub settles.
+        try:
+            _pr = subprocess.run(
+                [_ffmpeg().replace("ffmpeg.exe", "ffprobe.exe"), "-v", "error",
+                 "-select_streams", "v:0", "-show_entries", "packet=pts_time",
+                 "-of", "csv=p=0", str(src)],
+                capture_output=True, text=True, creationflags=creationflags, check=False,
+            )
+            _pts = sorted(float(x) for x in _pr.stdout.split() if x and x != "N/A")
+            if _pts:
+                _tmp = out_dir / f"{asset_id}_proxy.pts.json.tmp"
+                _tmp.write_text(json.dumps({"v": 1, "pts": [round(x, 6) for x in _pts]}))
+                _tmp.replace(out_dir / f"{asset_id}_proxy.pts.json")
+        except Exception:
+            pass  # sidecar is an enhancement, never block the proxy
         subprocess.run(
             [
                 _ffmpeg(),
@@ -2464,7 +4117,7 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
                 "thumbnail_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=thumbnail"
                 if thumb.exists()
                 else None,
-                "metadata": _probe_video(src),
+                "metadata": {**_probe_video(src), "proxy_fps": timeline_fps},
                 "error": None,
             },
         )
@@ -2545,6 +4198,43 @@ async def create_proxy(
     return next(a for a in _read_assets(room_id) if a.get("id") == asset_id)
 
 
+def _contents_using_asset(room_id: str, asset_id: str) -> list[dict[str, Any]]:
+    """Contents (projects) whose timeline references this asset — so deleting it doesn't silently
+    break a project the user still wants."""
+    out: list[dict[str, Any]] = []
+    for content in _read_contents(room_id):
+        ids: set[str] = {str(a) for a in (content.get("asset_ids") or [])}
+        seq = (content.get("timeline") or {}).get("sequence") or {}
+        for track in seq.get("tracks", []) or []:
+            for clip in track.get("clips", []) or []:
+                if clip.get("asset_id"):
+                    ids.add(str(clip["asset_id"]))
+        if asset_id in ids:
+            out.append({"id": content.get("id"), "title": content.get("title") or "(無題)"})
+    return out
+
+
+@router.delete("/{asset_id}")
+async def delete_asset(
+    asset_id: str,
+    room_id: str = Query(...),
+    force: bool = Query(False),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Delete a source asset: removes its record AND its files (local copy, proxy, thumbnail).
+    Refuses (409) if a project still uses it, unless `force=true`."""
+    assets = _read_assets(room_id)
+    asset = next((a for a in assets if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    using = _contents_using_asset(room_id, asset_id)
+    if using and not force:
+        raise HTTPException(status_code=409, detail={"message": "asset in use", "contents": using})
+    _remove_asset_files(asset)
+    _write_assets(room_id, [a for a in assets if a.get("id") != asset_id])
+    return {"ok": True, "removed_from_contents": using}
+
+
 @router.get("/media")
 async def get_asset_media(
     request: Request,
@@ -2567,6 +4257,475 @@ async def get_asset_media(
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Media file not found")
     return _range_file_response(path, request)
+
+
+# --- pop-out overlay bake (v4) -------------------------------------------------------------
+# One bake per (asset, padded source range, card box, canvas, look) produces a single
+# `{key}.pv.mp4` with TWO H.264 tracks (v:0 color / v:1 alpha-as-luma). Everything derives
+# from it with no re-matting: the native engine composites it directly (HW decode — the old
+# ProRes 4444 .mov was 200+Mbps CPU-only and dragged the whole timeline down), the browser
+# preview plays per-track `-c copy` remuxes, and the export alphamerges the two tracks.
+# The range is padded so trim/split/move NEVER re-bake (only growing past the pad does).
+POPOUT_BAKE_PAD_S = 3.0
+_POPOUT_BAKING: dict[str, bool] = {}  # f"{room_id}/{key}" -> in-flight (this process)
+
+
+def _popout_cache_dir(room_id: str) -> Path:
+    d = ASSET_ROOT / room_id / "popout-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _popout_box_px(box: dict[str, Any] | None, W: int, H: int) -> tuple[int, int, int, int]:
+    b = box if isinstance(box, dict) else {}
+    ow = max(2, round(float(b.get("width") or 0.46) * W))
+    oh = max(2, round(float(b.get("height") or 0.145) * H))
+    px = round(float(b.get("x") or 0.27) * W)
+    py = round(float(b.get("y") or 0.835) * H)
+    return px, py, ow, oh
+
+
+def _popout_bake_range(asset: dict[str, Any], ss: float, se: float) -> tuple[float, float]:
+    """Padded bake window clamped to the asset, so trims within the pad need no re-bake."""
+    bs = max(0.0, ss - POPOUT_BAKE_PAD_S)
+    be = se + POPOUT_BAKE_PAD_S
+    meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    dur = float(meta.get("duration") or 0)
+    if dur > 0:
+        be = min(be, dur)
+    return round(bs, 3), round(max(be, bs + 0.1), 3)
+
+
+def _popout_key(asset_id: str, bs: float, be: float, box_px: tuple[int, int, int, int],
+                W: int, H: int, intensity: str, shadow: Any) -> str:
+    # v7: accurate-seek time base (lipsync) + matte-only twin for the native live
+    # compositor. v6 short-GOP, v5 full-range alpha +
+    # auto-extended canvas (margins). Bumping re-bakes older caches on next editor open.
+    px, py, ow, oh = box_px
+    key_src = f"v7|{asset_id}|{bs:.3f}|{be:.3f}|{px},{py},{ow},{oh}|{W}x{H}|{intensity}|{bool(shadow is not False)}"
+    return hashlib.sha1(key_src.encode()).hexdigest()[:16]
+
+
+def _popout_bake_sync(source_path: Path, out_pv: Path, box_px: tuple[int, int, int, int],
+                      W: int, H: int, bs: float, be: float, intensity: str, shadow: Any,
+                      progress_file: Path | None) -> None:
+    """Run the bake script to a temp file, then atomically publish. Blocking — call in a thread."""
+    px, py, ow, oh = box_px
+    part = out_pv.with_suffix(".part.mp4")
+    script = PROJECT_ROOT / "scripts" / "popout_overlay.py"
+    args = [sys.executable, str(script), str(source_path), "--out", str(part),
+            "--W", str(W), "--H", str(H), "--box", f"{px},{py},{ow},{oh}",
+            "--start", f"{bs:.3f}", "--duration", f"{max(0.1, be - bs):.3f}",
+            "--intensity", intensity, "--fps", "30",
+            "--meta-file", str(out_pv.parent / f"{out_pv.name.split('.')[0]}.json"),
+            "--matte-out", str(out_pv.parent / f"{out_pv.name.split('.')[0]}.mt.mp4")]
+    if shadow is False:
+        args.append("--no-shadow")
+    if progress_file is not None:
+        args.extend(["--progress-file", str(progress_file)])
+    subprocess.run(args, check=True)
+    os.replace(part, out_pv)
+
+
+def _popout_margins(cache_dir: Path, key: str) -> dict[str, float]:
+    """Canvas-extension margins the bake recorded ({key}.json), normalized to the base frame.
+    The editor composes these into the clip's display position so the extended canvas lands
+    exactly where the un-extended one did."""
+    try:
+        with open(cache_dir / f"{key}.json", encoding="utf-8") as f:
+            m = (json.load(f) or {}).get("margins") or {}
+    except (OSError, ValueError):
+        m = {}
+    return {k: float(m.get(k) or 0.0) for k in ("l", "t", "r", "b")}
+
+
+def _popout_read_progress(progress_file: Path) -> dict[str, Any]:
+    try:
+        with open(progress_file, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+@router.post("/popout-overlay")
+async def generate_popout_overlay(payload: dict = Body(...)):
+    """Start (or reuse) the pop-out overlay bake for one clip and return immediately with the
+    cache key + bake window; the editor polls /popout-overlay/status and shows a progress bar.
+    The card box / intensity / shadow are captured once at apply (template look) — the display
+    position is the user's and never triggers a re-bake; neither do trims within the pad."""
+    room_id = str(payload.get("room_id") or "")
+    asset_id = str(payload.get("asset_id") or "")
+    if not room_id or not asset_id:
+        raise HTTPException(status_code=400, detail="room_id and asset_id required")
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    source_path = _asset_hires_path(asset)  # matte from the ORIGINAL, not the low-res proxy
+    fmt = str(payload.get("format") or "9:16")
+    W, H = _output_size(fmt)
+    box_px = _popout_box_px(payload.get("position"), W, H)
+    ss = max(0.0, float(payload.get("source_start") or 0.0))
+    se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
+    intensity = str(payload.get("intensity") or "mid")
+    # contact shadow is opt-in now (user: no black ring / no translucent silhouette)
+    shadow = payload.get("shadow") is True
+    bs, be = _popout_bake_range(asset, ss, se)
+    key = _popout_key(asset_id, bs, be, box_px, W, H, intensity, shadow)
+    cache_dir = _popout_cache_dir(room_id)
+    out_pv = cache_dir / f"{key}.pv.mp4"
+    progress_file = cache_dir / f"{key}.progress.json"
+    resp = {"key": key, "bake_start": bs, "bake_end": be, "format": fmt, "bake_v": 6,
+            "url": f"/api/v1/production-assets/popout-overlay/media?room_id={room_id}&key={key}"}
+    if out_pv.exists() and out_pv.stat().st_size > 0:
+        return {**resp, "ready": True, "progress": 100, "cached": True,
+                "margins": _popout_margins(cache_dir, key)}
+    flight_key = f"{room_id}/{key}"
+    prog = _popout_read_progress(progress_file)
+    if _POPOUT_BAKING.get(flight_key):
+        return {**resp, "ready": False, "progress": int(prog.get("pct") or 0)}
+
+    async def _bake() -> None:
+        try:
+            await asyncio.to_thread(
+                _popout_bake_sync, source_path, out_pv, box_px, W, H, bs, be,
+                intensity, shadow, progress_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("popout overlay generation failed (%s): %s", key, exc)
+            try:
+                with open(progress_file, "w", encoding="utf-8") as f:
+                    json.dump({"done": 0, "total": 1, "pct": 0, "error": str(exc)}, f)
+            except OSError:
+                pass
+        finally:
+            _POPOUT_BAKING.pop(flight_key, None)
+
+    _POPOUT_BAKING[flight_key] = True
+    asyncio.create_task(_bake())
+    return {**resp, "ready": False, "progress": 0}
+
+
+@router.get("/popout-overlay/status")
+async def get_popout_overlay_status(room_id: str = Query(...), key: str = Query(...)):
+    safe = re.sub(r"[^0-9a-f]", "", key)[:32]
+    cache_dir = ASSET_ROOT / room_id / "popout-cache"
+    out_pv = cache_dir / f"{safe}.pv.mp4"
+    if out_pv.exists() and out_pv.stat().st_size > 0:
+        return {"ready": True, "progress": 100, "margins": _popout_margins(cache_dir, safe)}
+    prog = _popout_read_progress(cache_dir / f"{safe}.progress.json")
+    if prog.get("error"):
+        return {"ready": False, "progress": 0, "error": str(prog["error"])}
+    running = _POPOUT_BAKING.get(f"{room_id}/{safe}", False)
+    # a progress file without a live bake (e.g. server restarted mid-bake) is stale — tell the
+    # editor so it can re-POST instead of watching a frozen bar
+    if not running and prog:
+        return {"ready": False, "progress": int(prog.get("pct") or 0), "stale": True}
+    return {"ready": False, "progress": int(prog.get("pct") or 0), "running": running}
+
+
+@router.get("/popout-overlay/media")
+async def get_popout_overlay(request: Request, room_id: str = Query(...), key: str = Query(...),
+                             stream: str = Query("color")):
+    """Serve a single-track remux of the bake for the browser preview: `stream=color` (v:0) or
+    `stream=alpha` (v:1, matte in luma). Both are plain H.264 → HW-decoded <video> elements;
+    the editor merges them on a canvas (no VP9 encode anywhere). Legacy pre-v4 keys still serve
+    their .webm so old clips keep previewing until they are auto-upgraded."""
+    safe = re.sub(r"[^0-9a-f]", "", key)[:32]
+    cache_dir = ASSET_ROOT / room_id / "popout-cache"
+    out_pv = cache_dir / f"{safe}.pv.mp4"
+    if not out_pv.exists():
+        # legacy fallback serves the .webm for the COLOR stream only — it carries its own alpha,
+        # and handing it out as the matte would cut the color by its luma (wrong)
+        legacy = (cache_dir / f"{safe}.webm").resolve()
+        if stream != "alpha" and legacy.exists() and legacy.is_file():
+            return _range_file_response(legacy, request)
+        raise HTTPException(status_code=404, detail="overlay not found")
+    which = "alpha" if stream == "alpha" else "color"
+    track = 1 if which == "alpha" else 0
+    remux = cache_dir / f"{safe}.{which}.mp4"
+    if not remux.exists() or remux.stat().st_size == 0 or remux.stat().st_mtime < out_pv.stat().st_mtime:
+        part = cache_dir / f"{safe}.{which}.part.mp4"
+        await asyncio.to_thread(subprocess.run, [
+            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(out_pv),
+            "-map", f"0:v:{track}", "-c", "copy", "-movflags", "+faststart", str(part)], check=True)
+        os.replace(part, remux)
+    return _range_file_response(remux.resolve(), request)
+
+
+# --- SAM 3 tracked blur-mask bake ------------------------------------------------------------
+# One bake per (asset, padded source range, target spec) produces `{key}.mask.mp4` — a
+# grayscale H.264 mask video (255 = blur here), CFR 30, aligned to the padded window.
+# scripts/blur_mask_bake.py runs in the dedicated venv_sam3 env (SAM 3.1 needs py3.12+;
+# the sandbox is py3.10). Two engines inside the script: box/points-only -> fast
+# tracker-only (~0.5s/frame), text concept -> multiplex PCS (~4s/frame/object).
+# The native editor and export consume the mask directly (mask x blur / maskedmerge).
+BLUR_BAKE_PAD_S = 1.5
+_BLUR_BAKING: dict[str, bool] = {}  # f"{room_id}/{key}" -> in-flight (this process)
+VENV_SAM3_PY = PROJECT_ROOT / "venv_sam3" / "Scripts" / "python.exe"
+
+
+def _blur_cache_dir(room_id: str) -> Path:
+    d = ASSET_ROOT / room_id / "blur-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _blur_read_progress(progress_file: Path) -> dict[str, Any]:
+    """blur_mask_bake.py writes {"stage": str, "progress": 0..1}."""
+    try:
+        with open(progress_file, encoding="utf-8") as f:
+            p = json.load(f) or {}
+        return {"pct": int(float(p.get("progress") or 0) * 100), "stage": p.get("stage")}
+    except (OSError, ValueError):
+        return {}
+
+
+BLUR_WORKER_PORT = 8876
+
+
+def _blur_job_payload(source_path: Path, out_mask: Path, spec: dict[str, Any],
+                      bs: float, be: float, progress_file: Path) -> dict[str, Any]:
+    """The bake job in blur_mask_bake CLI vocabulary (shared by the resident worker and
+    the classic one-shot subprocess)."""
+    job: dict[str, Any] = {
+        "src": str(source_path), "out": str(out_mask),
+        "start": round(bs, 3), "duration": round(max(0.1, be - bs), 3), "fps": 30,
+        "feather": int(spec.get("feather") or 3), "dilate": int(spec.get("dilate") or 2),
+        "progress_file": str(progress_file),
+    }
+    # anchor = the SOURCE second whose frame defines "the object inside the box"
+    # (the editor sends the playhead frame the user was looking at). Script wants it
+    # relative to the window start.
+    if spec.get("anchor") is not None:
+        job["anchor"] = round(min(max(0.0, float(spec["anchor"]) - bs), max(0.0, be - bs - 0.05)), 3)
+    if spec.get("prompt"):
+        job["prompt"] = str(spec["prompt"])
+    if spec.get("box"):
+        x, y, w, h = [float(v) for v in spec["box"]]
+        job["box"] = f"{x:.4f},{y:.4f},{w:.4f},{h:.4f}"
+    pts = [f"{float(p[0]):.4f},{float(p[1]):.4f},{'+' if int(p[2]) else '-'}"
+           for p in (spec.get("points") or [])]
+    if pts:
+        job["point"] = pts
+    if spec.get("keep_ids"):
+        job["keep_ids"] = ",".join(str(int(v)) for v in spec["keep_ids"])
+    return job
+
+
+def _blur_worker_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any] | None:
+    """POST to the resident worker; None when it is not reachable (spawn or fall back)."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{BLUR_WORKER_PORT}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        # worker reached but the bake failed — surface it, don't silently re-run cold
+        try:
+            detail = json.loads(e.read() or b"{}").get("error")
+        except ValueError:
+            detail = str(e)
+        raise RuntimeError(f"blur worker bake failed: {detail}")
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+        return None
+
+
+def _ensure_blur_worker() -> bool:
+    """Spawn the resident worker DETACHED (it must survive sandbox restarts) and wait for
+    /health. Returns False when it cannot be started (caller falls back to one-shot)."""
+    import urllib.request
+    script = PROJECT_ROOT / "scripts" / "blur_mask_worker.py"
+    if not VENV_SAM3_PY.exists() or not script.exists():
+        return False
+    try:
+        # `cmd /c start` breaks the parent-child chain: the sandbox restarts with
+        # taskkill /T (tree kill) and a directly-spawned worker died with it every time.
+        # cmd exits immediately, the worker is orphaned, the tree walk can't reach it.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            ["cmd", "/c", "start", "/b", "", str(VENV_SAM3_PY), "-u", str(script)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=flags, close_fds=True)
+    except OSError as exc:
+        logger.warning("blur worker spawn failed: %s", exc)
+        return False
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{BLUR_WORKER_PORT}/health", timeout=2):
+                return True
+        except OSError:
+            time.sleep(0.5)
+    return False
+
+
+def _blur_mask_bake_sync(source_path: Path, out_mask: Path, spec: dict[str, Any],
+                         bs: float, be: float, progress_file: Path) -> None:
+    """Blocking bake — call in a thread. Three rungs: resident worker (models stay on the
+    GPU, ~0s start) -> spawn the worker then retry -> classic one-shot subprocess (pays
+    the ~24s model load). Files are published atomically by the bake itself."""
+    job = _blur_job_payload(source_path, out_mask, spec, bs, be, progress_file)
+    r = _blur_worker_post("/bake", job, timeout=3600)
+    if r is None and _ensure_blur_worker():
+        r = _blur_worker_post("/bake", job, timeout=3600)
+    if r is not None:
+        if not r.get("ok"):
+            raise RuntimeError(f"blur worker bake failed: rc={r.get('rc')}")
+        return
+    logger.warning("blur worker unavailable — one-shot subprocess fallback (cold load)")
+    script = PROJECT_ROOT / "scripts" / "blur_mask_bake.py"
+    if not VENV_SAM3_PY.exists():
+        raise RuntimeError(f"venv_sam3 missing ({VENV_SAM3_PY}) — see scripts/blur_mask_bake.py header")
+    args = [str(VENV_SAM3_PY), "-u", str(script), job["src"], "--out", job["out"],
+            "--start", str(job["start"]), "--duration", str(job["duration"]),
+            "--fps", "30", "--feather", str(job["feather"]), "--dilate", str(job["dilate"]),
+            "--progress-file", job["progress_file"]]
+    if "anchor" in job:
+        args += ["--anchor", str(job["anchor"])]
+    if job.get("prompt"):
+        args += ["--prompt", job["prompt"]]
+    if job.get("box"):
+        args += ["--box", job["box"]]
+    for p in job.get("point") or []:
+        args += ["--point", p]
+    if job.get("keep_ids"):
+        args += ["--keep-ids", job["keep_ids"]]
+    subprocess.run(args, check=True)
+
+
+def _blur_prompt_to_english(prompt: str) -> str:
+    """SAM 3's text encoder is trained on ENGLISH noun phrases — translate non-ASCII
+    prompts via the flat-rate CLI (never the metered API). Blocking; call in a thread."""
+    p = (prompt or "").strip()
+    if not p or all(ord(ch) < 128 for ch in p):
+        return p
+    try:
+        from app.agent.cli_runner import run_oneshot_cli
+        out = run_oneshot_cli(
+            "Translate this Japanese description of a VISUAL object into a SHORT English "
+            "noun phrase for an open-vocabulary object detector (examples: 'person in red "
+            "shirt', 'license plate', 'coffee cup'). Use the pattern '<noun> in <attribute>' "
+            "for clothing/appearance — NEVER the word 'wearing' (it breaks the detector). "
+            "Reply with the noun phrase ONLY.\n\n" + p,
+            "haiku", 45)
+        out = (out or "").strip().strip('"').strip()
+        return out or p
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("blur prompt translation failed (%s); using raw prompt", exc)
+        return p
+
+
+def _ensure_blur_mask_started(room_id: str, asset: dict[str, Any], spec: dict[str, Any],
+                              ss: float, se: float) -> dict[str, Any]:
+    """Start (or reuse) a tracked blur-mask bake. Sync-safe: usable from the async endpoint
+    AND from the Dan assembler (plain thread, no event loop needed). Returns the same shape
+    the endpoint responds with; the mask lands in blur-cache/{key}.mask.mp4."""
+    source_path = _asset_hires_path(asset)
+    asset_id = str(asset.get("id"))
+    bs = max(0.0, ss - BLUR_BAKE_PAD_S)
+    be = se + BLUR_BAKE_PAD_S
+    meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    dur = float(meta.get("duration") or 0)
+    if dur > 0:
+        be = min(be, dur)
+    bs, be = round(bs, 3), round(max(be, bs + 0.1), 3)
+    key_src = f"v2|{asset_id}|{bs:.3f}|{be:.3f}|{json.dumps(spec, sort_keys=True)}"
+    key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+    cache_dir = _blur_cache_dir(room_id)
+    out_mask = cache_dir / f"{key}.mask.mp4"
+    progress_file = cache_dir / f"{key}.progress.json"
+    resp = {"key": key, "bake_start": bs, "bake_end": be, "fps": 30,
+            "path": str(out_mask),
+            "url": f"/api/v1/production-assets/blur-mask/media?room_id={room_id}&key={key}"}
+    if out_mask.exists() and out_mask.stat().st_size > 0:
+        return {**resp, "ready": True, "progress": 100, "cached": True}
+    flight_key = f"{room_id}/{key}"
+    prog = _blur_read_progress(progress_file)
+    if _BLUR_BAKING.get(flight_key):
+        return {**resp, "ready": False, "progress": int(prog.get("pct") or 0)}
+
+    def _bake() -> None:
+        try:
+            _blur_mask_bake_sync(source_path, out_mask, spec, bs, be, progress_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("blur mask bake failed (%s): %s", key, exc)
+            try:
+                with open(progress_file, "w", encoding="utf-8") as f:
+                    json.dump({"stage": "error", "progress": 0, "error": str(exc)}, f)
+            except OSError:
+                pass
+        finally:
+            _BLUR_BAKING.pop(flight_key, None)
+
+    _BLUR_BAKING[flight_key] = True
+    threading.Thread(target=_bake, daemon=True, name=f"blur-bake-{key}").start()
+    return {**resp, "ready": False, "progress": 0}
+
+
+@router.post("/blur-mask")
+async def generate_blur_mask(payload: dict = Body(...)):
+    """Start (or reuse) a tracked blur-mask bake for one clip window and return immediately
+    with the cache key; the editor polls /blur-mask/status. Target = box (fast single-object)
+    or prompt (noun phrase -> ALL instances; Japanese is auto-translated) or points."""
+    room_id = str(payload.get("room_id") or "")
+    asset_id = str(payload.get("asset_id") or "")
+    if not room_id or not asset_id:
+        raise HTTPException(status_code=400, detail="room_id and asset_id required")
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    prompt = str(payload.get("prompt") or "").strip() or None
+    if prompt:
+        prompt = await asyncio.to_thread(_blur_prompt_to_english, prompt)
+    spec = {
+        "prompt": prompt,
+        "box": payload.get("box"),
+        "points": payload.get("points"),
+        "keep_ids": payload.get("keep_ids"),
+        "feather": payload.get("feather"),
+        "dilate": payload.get("dilate"),
+        "anchor": payload.get("anchor"),
+    }
+    if not spec["prompt"] and not spec["box"] and not spec["points"]:
+        raise HTTPException(status_code=400, detail="prompt, box or points required")
+    ss = max(0.0, float(payload.get("source_start") or 0.0))
+    se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
+    resp = _ensure_blur_mask_started(room_id, asset, spec, ss, se)
+    return {**resp, "prompt_used": prompt} if prompt else resp
+
+
+@router.get("/blur-mask/status")
+async def get_blur_mask_status(room_id: str = Query(...), key: str = Query(...)):
+    safe = re.sub(r"[^0-9a-f]", "", key)[:16]
+    cache_dir = ASSET_ROOT / room_id / "blur-cache"
+    out_mask = cache_dir / f"{safe}.mask.mp4"
+    if out_mask.exists() and out_mask.stat().st_size > 0:
+        return {"ready": True, "progress": 100, "path": str(out_mask)}
+    prog = _blur_read_progress(cache_dir / f"{safe}.progress.json")
+    try:
+        with open(cache_dir / f"{safe}.progress.json", encoding="utf-8") as f:
+            err = (json.load(f) or {}).get("error")
+    except (OSError, ValueError):
+        err = None
+    if err:
+        return {"ready": False, "progress": 0, "error": str(err)}
+    running = _BLUR_BAKING.get(f"{room_id}/{safe}", False)
+    if not running and prog:
+        return {"ready": False, "progress": int(prog.get("pct") or 0), "stale": True}
+    return {"ready": False, "progress": int(prog.get("pct") or 0),
+            "stage": prog.get("stage"), "running": running}
+
+
+@router.get("/blur-mask/media")
+async def get_blur_mask_media(request: Request, room_id: str = Query(...), key: str = Query(...)):
+    safe = re.sub(r"[^0-9a-f]", "", key)[:16]
+    out_mask = (ASSET_ROOT / room_id / "blur-cache" / f"{safe}.mask.mp4").resolve()
+    if not out_mask.exists():
+        raise HTTPException(status_code=404, detail="mask not found")
+    return _range_file_response(out_mask, request)
 
 
 @router.post("/upload", response_model=ProductionAsset)
@@ -2742,6 +4901,84 @@ def _recut_assemble(room_id: str, content_id: str, decisions: dict[str, Any], as
     return _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
 
 
+_CAPTION_CACHE_GUARD = __import__("threading").Lock()
+_CAPTION_INFLIGHT: set[str] = set()
+
+
+@router.post("/caption-cache")
+async def caption_cache(
+    payload: dict[str, Any] = Body(...),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Designed-caption PNGs for the NATIVE preview — the exact /caption-frame render the
+    export burns in, cached per (canvas, text, words, design). Returns key/path/ready per
+    item immediately; missing ones render in a background thread (one browser launch for
+    the whole batch) and appear on disk, where the native app picks them up."""
+    room_id = str(payload.get("room_id") or "")
+    if not room_id:
+        raise HTTPException(status_code=400, detail="room_id required")
+    out_w = int(payload.get("outW") or 1080)
+    out_h = int(payload.get("outH") or 1920)
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    cache_dir = _room_dir(room_id) / "caption-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, Any]] = []
+    to_render: list[dict[str, Any]] = []
+    render_keys: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "").strip()
+        design = it.get("design") if isinstance(it.get("design"), dict) else {}
+        words = it.get("words") if isinstance(it.get("words"), list) else []
+        key_src = json.dumps(
+            {"w": out_w, "h": out_h, "t": text, "d": design, "words": words},
+            ensure_ascii=False, sort_keys=True,
+        )
+        key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+        png = cache_dir / f"{key}.png"
+        ready = png.exists() and png.stat().st_size > 0
+        results.append({"key": key, "ready": ready})
+        if not ready and text:
+            with _CAPTION_CACHE_GUARD:
+                if key in _CAPTION_INFLIGHT:
+                    continue
+                _CAPTION_INFLIGHT.add(key)
+            render_keys.append(key)
+            # animated designs get their MID frame — a designed still beats plain text;
+            # the export still burns the full animation
+            to_render.append({"png": str(png), "text": text, "time": 0.0,
+                              "design": design, "words": words})
+    if to_render:
+        spec_path = cache_dir / f"_spec_{render_keys[0]}.json"
+        spec_path.write_text(
+            json.dumps({"outW": out_w, "outH": out_h,
+                        "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
+                        "items": to_render}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        def _run(spec=spec_path, keys=tuple(render_keys)) -> None:
+            try:
+                script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
+                cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                subprocess.run([sys.executable, str(script), str(spec)],
+                               capture_output=True, timeout=600, creationflags=cflags)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("caption-cache render failed: %s", exc)
+            finally:
+                with _CAPTION_CACHE_GUARD:
+                    for k in keys:
+                        _CAPTION_INFLIGHT.discard(k)
+                try:
+                    spec.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        __import__("threading").Thread(target=_run, daemon=True).start()
+    return {"results": results, "rendering": len(to_render)}
+
+
 @router.post("/contents/{content_id}/recut")
 async def recut_content(
     content_id: str,
@@ -2798,6 +5035,966 @@ async def recut_content(
     }
 
 
+def _caption_sync_source_clips(sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Clips carrying the speech + source mapping used to time a caption: prefer dialogue audio
+    clips; fall back to base (non-PiP) video clips. One set only, so words aren't double-counted."""
+    audio: list[dict[str, Any]] = []
+    video: list[dict[str, Any]] = []
+    for track in sequence.get("tracks") or []:
+        tt = track.get("type")
+        for cl in track.get("clips") or []:
+            if not isinstance(cl, dict):
+                continue
+            if tt == "audio" and cl.get("role") in (None, "dialogue", "main"):
+                audio.append(cl)
+            elif tt == "video" and str(cl.get("composition") or "") != "pip":
+                video.append(cl)
+    return audio or video
+
+
+def _words_for_caption(
+    sequence: dict[str, Any], caption: dict[str, Any], analysis_by_asset: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Per-word timeline timings for a caption, by reading the Whisper words of the speech clips
+    under it and mapping their asset-seconds to the timeline via each clip's source mapping."""
+    cts = float(caption.get("timeline_start") or 0)
+    cte = float(caption.get("timeline_end") or cts)
+    out: list[dict[str, Any]] = []
+    for cl in _caption_sync_source_clips(sequence):
+        ts = float(cl.get("timeline_start") or 0)
+        te = float(cl.get("timeline_end") or ts)
+        if te <= cts or ts >= cte:
+            continue
+        analysis = analysis_by_asset.get(str(cl.get("asset_id") or ""))
+        if not analysis:
+            continue
+        src0 = float(cl.get("source_start") or 0)
+        s_lo = src0 + (max(cts, ts) - ts)
+        s_hi = src0 + (min(cte, te) - ts)
+        for seg in analysis.get("segments") or []:
+            for w in seg.get("words") or []:
+                ws = float(w.get("start") or 0)
+                we = float(w.get("end") or ws)
+                if ws < s_hi and we > s_lo:
+                    txt = str(w.get("word") or "").strip()
+                    if not txt:
+                        continue
+                    t0 = ts + (max(ws, s_lo) - src0)
+                    t1 = ts + (min(we, s_hi) - src0)
+                    out.append({"text": txt, "start": round(t0, 3), "end": round(max(t1, t0 + 0.05), 3)})
+    out.sort(key=lambda x: x["start"])
+    return out
+
+
+def _ensure_audio_analysis(room_id: str, asset_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Return {asset_id: analysis(segments with words)} using cached metadata.audio_analysis when
+    present, else running dan_audio_check --words once and caching it on the asset."""
+    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL") or os.environ.get("DAN_WHISPER_MODEL") or "large-v3"
+    assets = _read_assets(room_id)
+    by_id = {a.get("id"): a for a in assets}
+    script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    out: dict[str, dict[str, Any]] = {}
+    dirty = False
+    for aid in dict.fromkeys(asset_ids):
+        a = by_id.get(aid)
+        if not a or a.get("kind") != "video":
+            continue
+        meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
+        src = a.get("proxy_path") or a.get("local_path")
+        cached = meta.get("audio_analysis")
+        cached_has_words = any((seg.get("words") or []) for seg in ((cached or {}).get("segments") or [])) if isinstance(cached, dict) else False
+        if (isinstance(cached, dict) and cached.get("segments") and cached_has_words
+                and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model):
+            out[aid] = cached
+            continue
+        if not src or not Path(src).exists():
+            continue
+        out_json = Path(src).with_name(Path(src).stem + "_audiocheck.json")
+        try:
+            subprocess.run(
+                [sys.executable, str(script), str(src), "--words", "--json-only", "--model", whisper_model],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900, check=False, creationflags=cflags,
+                env=_caption_transcribe_env(room_id),
+            )
+            data = json.loads(out_json.read_text(encoding="utf-8")) if out_json.exists() else {}
+        except Exception:
+            data = {}
+        entry = {"asset_id": aid, "duration": data.get("duration"), "segments": data.get("segments") or []}
+        out[aid] = entry
+        meta = dict(meta)
+        meta["audio_analysis"] = entry
+        meta["audio_analysis_src"] = str(src)
+        meta["audio_analysis_model"] = whisper_model
+        a["metadata"] = meta
+        dirty = True
+    if dirty:
+        _write_assets(room_id, assets)
+    return out
+
+
+CAPTION_GENERATE_TERMS = (
+    "テロップ", "字幕", "キャプション", "caption", "subtitle", "subtitles",
+)
+CAPTION_NEGATIVE_TERMS = (
+    "不要", "いらない", "入れない", "付けない", "つけない", "消して", "削除", "なし", "無し", "外して",
+)
+
+
+def _is_caption_generation_request(text: str) -> bool:
+    low = text.lower()
+    generate_terms = (
+        "\u30c6\u30ed\u30c3\u30d7", "\u5b57\u5e55", "\u30ad\u30e3\u30d7\u30b7\u30e7\u30f3",
+        "caption", "subtitle", "subtitles",
+    )
+    negative_terms = (
+        "\u4e0d\u8981", "\u3044\u3089\u306a\u3044", "\u5165\u308c\u306a\u3044",
+        "\u4ed8\u3051\u306a\u3044", "\u3064\u3051\u306a\u3044", "\u6d88\u3057\u3066",
+        "\u524a\u9664", "\u306a\u3057", "\u7121\u3057", "\u5916\u3057\u3066",
+    )
+    if not any(term.lower() in low for term in generate_terms):
+        return False
+    return not any(term in text for term in negative_terms)
+
+
+def _caption_text_len(text: str) -> int:
+    return len(re.sub(r"\s+", "", text))
+
+
+def _caption_whisper_model() -> str:
+    return (
+        os.environ.get("DAN_CAPTION_WHISPER_MODEL")
+        or os.environ.get("DAN_PLAN_WHISPER_MODEL")
+        or os.environ.get("DAN_WHISPER_MODEL")
+        or "large-v3"
+    )
+
+
+def _caption_glossary(room_id: str | None) -> list[tuple[str, str]]:
+    """Optional project glossary for transcript cleanup.
+
+    Supported files:
+      - uploads/production-assets/<room_id>/caption_terms.json
+      - path in DAN_CAPTION_TERMS_JSON
+
+    Formats:
+      {"replacements": [{"from": "ライン", "to": "LINE"}]}
+      {"ライン": "LINE"}
+    """
+    paths: list[Path] = []
+    if room_id:
+        paths.append(_room_dir(room_id) / "caption_terms.json")
+    env_path = os.environ.get("DAN_CAPTION_TERMS_JSON")
+    if env_path:
+        paths.append(Path(env_path))
+    replacements: list[tuple[str, str]] = []
+    for path in paths:
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        items: list[tuple[Any, Any]] = []
+        if isinstance(data, dict) and isinstance(data.get("replacements"), list):
+            for item in data.get("replacements") or []:
+                if isinstance(item, dict):
+                    items.append((item.get("from"), item.get("to")))
+        elif isinstance(data, dict):
+            items.extend(data.items())
+        for src, dst in items:
+            src_s = str(src or "").strip()
+            dst_s = str(dst or "").strip()
+            if src_s and dst_s and src_s != dst_s:
+                replacements.append((src_s, dst_s))
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    return replacements
+
+
+def _caption_apply_glossary(text: str, glossary: list[tuple[str, str]] | None = None) -> str:
+    clean = re.sub(r"\s+", " ", text).strip()
+    for src, dst in glossary or []:
+        clean = clean.replace(src, dst)
+    return clean
+
+
+def _caption_transcribe_env(room_id: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    if env.get("DAN_WHISPER_INITIAL_PROMPT"):
+        return env
+    terms: list[str] = []
+    for src, dst in _caption_glossary(room_id):
+        terms.extend([src, dst])
+    terms = [t for t in dict.fromkeys(t.strip() for t in terms) if t]
+    if terms:
+        env["DAN_WHISPER_INITIAL_PROMPT"] = "日本語の会話です。固有名詞と専門用語: " + "、".join(terms[:80])
+    return env
+
+
+def _caption_join_words(words: list[dict[str, Any]], glossary: list[tuple[str, str]] | None = None) -> str:
+    raw = "".join(str(w.get("text") or "").strip() for w in words).strip()
+    return _caption_apply_glossary(raw, glossary)
+
+
+def _caption_display_text(text: str, max_line_chars: int = 13) -> str:
+    """A readable two-line Japanese caption. Prefer natural punctuation; fall back to a
+    balanced split so long captions don't become one heavy block."""
+    clean = re.sub(r"\s+", " ", text).strip()
+    if _caption_text_len(clean) <= max_line_chars:
+        return clean
+    chars = list(clean)
+    mid = len(chars) // 2
+    candidates: list[int] = [i + 1 for i, ch in enumerate(chars) if ch in "。！？!?、，,・ "]
+    for marker in (
+        "という", "っていう", "なんです", "ですね", "ですよ", "ます", "です", "ました", "でした",
+        "ので", "けど", "から", "まで", "には", "では", "なら", "って",
+        "とか", "への", "より", "は", "が", "を", "に", "で", "と", "も", "の", "へ",
+    ):
+        start = 0
+        while True:
+            idx = clean.find(marker, start)
+            if idx < 0:
+                break
+            candidates.append(idx + len(marker))
+            start = idx + len(marker)
+    candidates = [
+        i for i in set(candidates)
+        if 4 <= i <= len(chars) - 4 and _caption_text_len("".join(chars[:i])) <= max_line_chars + 3
+    ]
+    def split_penalty(i: int) -> int:
+        left = chars[i - 1] if i > 0 else ""
+        right = chars[i] if i < len(chars) else ""
+        penalty = abs(i - mid)
+        if re.match(r"[A-Za-z0-9ァ-ヶー]", left) and re.match(r"[A-Za-z0-9ァ-ヶー]", right):
+            penalty += 100
+        if right in "んゃゅょっぁぃぅぇぉー":
+            penalty += 80
+        if right in "かがはをにでともの":
+            penalty += 50
+        if left in "ゃゅょっぁぃぅぇぉ":
+            penalty += 80
+        return penalty
+    if candidates:
+        split = min(candidates, key=split_penalty)
+    else:
+        fallback = [
+            i for i in range(4, len(chars) - 3)
+            if _caption_text_len("".join(chars[:i])) <= max_line_chars + 4
+        ]
+        split = min(fallback, key=split_penalty, default=mid)
+    return "".join(chars[:split]).strip(" 、,") + "\n" + "".join(chars[split:]).strip(" 、,")
+
+
+def _caption_text_chunks(text: str, max_chars: int = 22) -> list[str]:
+    clean = re.sub(r"\s+", " ", text).strip()
+    chunks: list[str] = []
+    while _caption_text_len(clean) > max_chars:
+        chars = list(clean)
+        candidates: list[int] = [i + 1 for i, ch in enumerate(chars) if ch in "。！？!?、，,・ "]
+        for marker in (
+            "という", "っていう", "なんです", "ですね", "ですよ", "ですか", "ます", "です",
+            "ました", "でした", "ので", "けど", "から", "まで", "には", "では", "なら",
+            "って", "とか", "への", "より", "は", "が", "を", "に", "で", "と", "も", "の", "へ",
+        ):
+            start = 0
+            while True:
+                idx = clean.find(marker, start)
+                if idx < 0:
+                    break
+                candidates.append(idx + len(marker))
+                start = idx + len(marker)
+        candidates = [i for i in set(candidates) if 5 <= i <= len(chars) - 5 and _caption_text_len(clean[:i]) <= max_chars]
+        if candidates:
+            split = max(candidates, key=lambda i: (_caption_text_len(clean[:i]), -abs(i - max_chars)))
+        else:
+            split = max(5, min(len(chars) - 5, max_chars))
+            while split > 5 and chars[split] in "んゃゅょっぁぃぅぇぉーかがはをにでとも":
+                split -= 1
+        chunk = clean[:split].strip(" 、,")
+        if chunk:
+            chunks.append(chunk)
+        clean = clean[split:].strip(" 、,")
+    if clean:
+        chunks.append(clean)
+    return chunks or [text]
+
+
+def _caption_default_style() -> dict[str, Any]:
+    return {
+        "font": "noto-sans",
+        "color": "#ffffff",
+        "outlineColor": "#000000",
+        "outlineWidth": 1.65,
+        "fontSize": 1.04,
+        "y": 0.14,
+        "shadow": {"color": "rgba(0,0,0,0.85)", "blur": 10, "dy": 3},
+        "animation": "none",
+    }
+
+
+def _caption_boundary_strength(text: str) -> int:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return 0
+    if re.search(r"[。！？!?]$", compact):
+        return 100
+    if re.search(r"[、，,]$", compact):
+        return 72
+    strong_suffixes = (
+        "ました", "でした", "します", "できます", "あります", "います",
+        "ですね", "ですよ", "です", "ます", "なんです",
+    )
+    medium_suffixes = (
+        "という", "っていう", "なので", "ので", "けど", "から", "なら",
+        "ところで", "場合", "とき", "時", "あと", "まず",
+    )
+    weak_suffixes = ("は", "が", "を", "に", "で", "と", "も", "の", "へ")
+    if compact.endswith(strong_suffixes):
+        return 86
+    if compact.endswith(medium_suffixes):
+        return 64
+    if compact.endswith(weak_suffixes):
+        return 28
+    return 0
+
+
+def _caption_bad_group_boundary(cur: list[dict[str, Any]], nxt: dict[str, Any]) -> bool:
+    cur_word = str((cur[-1] or {}).get("text") or "").strip()
+    next_word = str(nxt.get("text") or "").strip()
+    if not cur_word or not next_word:
+        return False
+    if next_word[0] in "んゃゅょっぁぃぅぇぉー":
+        return True
+    if re.match(r"^[ぁ-ん]+$", cur_word[-1:]) and re.match(r"^[ぁ-ん]+$", next_word[:1]):
+        return True
+    if re.match(r"^[ァ-ヶーA-Za-z0-9]+$", cur_word[-1:]) and re.match(r"^[ァ-ヶーA-Za-z0-9]+$", next_word[:1]):
+        return True
+    if len(re.sub(r"\s+", "", cur_word)) == 1 and not re.search(r"[。！？!?、，,]$", cur_word):
+        return True
+    return False
+
+
+def _caption_should_break(
+    cur: list[dict[str, Any]],
+    nxt: dict[str, Any],
+    *,
+    glossary: list[tuple[str, str]] | None,
+    max_chars: int,
+    max_duration: float,
+    min_duration: float,
+) -> bool:
+    candidate = cur + [nxt]
+    text = _caption_join_words(candidate, glossary)
+    cur_text = _caption_join_words(cur, glossary)
+    cur_len = _caption_text_len(cur_text)
+    cand_len = _caption_text_len(text)
+    dur = float(candidate[-1]["end"]) - float(candidate[0]["start"])
+    cur_dur = float(cur[-1]["end"]) - float(cur[0]["start"])
+    gap = float(nxt["start"]) - float(cur[-1]["end"])
+    segment_break = nxt.get("segment_index") != cur[-1].get("segment_index")
+    if gap > 0.38 and cur_dur >= 0.45:
+        return True
+    if segment_break and cur_dur >= min_duration:
+        return True
+    if cand_len > max_chars:
+        if _caption_bad_group_boundary(cur, nxt) and cand_len <= max_chars + 9 and dur <= max_duration + 0.8:
+            return False
+        return True
+    if dur > max_duration:
+        if _caption_bad_group_boundary(cur, nxt) and cand_len <= max_chars + 7 and dur <= max_duration + 0.8:
+            return False
+        return True
+    strength = _caption_boundary_strength(cur_text)
+    if strength >= 100 and cur_len >= 3:
+        return True
+    if strength >= 80 and cur_len >= 8 and cur_dur >= min_duration:
+        return True
+    if strength >= 60 and cur_len >= 12 and cur_dur >= min_duration:
+        return True
+    return False
+
+
+def _timeline_speech_words(sequence: dict[str, Any], analysis_by_asset: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Words in the already-edited timeline, mapped from source seconds to timeline seconds."""
+    out: list[dict[str, Any]] = []
+    for cl in _caption_sync_source_clips(sequence):
+        aid = str(cl.get("asset_id") or "")
+        analysis = analysis_by_asset.get(aid)
+        if not analysis:
+            continue
+        ts = float(cl.get("timeline_start") or 0)
+        te = float(cl.get("timeline_end") or ts)
+        src0 = float(cl.get("source_start") or 0)
+        src1 = float(cl.get("source_end") or src0 + max(0.0, te - ts))
+        for seg in analysis.get("segments") or []:
+            for w in seg.get("words") or []:
+                ws = float(w.get("start") or 0)
+                we = float(w.get("end") or ws)
+                if we <= src0 or ws >= src1:
+                    continue
+                text = str(w.get("word") or w.get("text") or "").strip()
+                if not text:
+                    continue
+                t0 = ts + (max(ws, src0) - src0)
+                t1 = ts + (min(we, src1) - src0)
+                if t1 <= t0:
+                    t1 = t0 + 0.05
+                out.append({"text": text, "start": round(t0, 3), "end": round(t1, 3)})
+    out.sort(key=lambda x: x["start"])
+    monotonic: list[dict[str, Any]] = []
+    last_end = -1.0
+    for word in out:
+        start = float(word["start"])
+        end = float(word["end"])
+        if end <= last_end + 0.02:
+            continue
+        if start < last_end:
+            start = last_end
+        end = max(end, start + 0.05)
+        monotonic.append({**word, "start": round(start, 3), "end": round(end, 3)})
+        last_end = end
+    return monotonic
+
+
+def _group_caption_words(
+    words: list[dict[str, Any]],
+    *,
+    glossary: list[tuple[str, str]] | None = None,
+    max_chars: int = 22,
+    max_duration: float = 2.75,
+    min_duration: float = 0.72,
+) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    for w in words:
+        if not cur:
+            cur = [w]
+            continue
+        if _caption_should_break(
+            cur,
+            w,
+            glossary=glossary,
+            max_chars=max_chars,
+            max_duration=max_duration,
+            min_duration=min_duration,
+        ):
+            groups.append(cur)
+            cur = [w]
+        else:
+            cur = cur + [w]
+    if cur:
+        groups.append(cur)
+    # Avoid unreadably short flashes by merging tiny captions when possible.
+    merged: list[list[dict[str, Any]]] = []
+    for g in groups:
+        if merged:
+            prev = merged[-1]
+            joined = prev + g
+            dur = float(joined[-1]["end"]) - float(joined[0]["start"])
+            joined_len = _caption_text_len(_caption_join_words(joined, glossary))
+            if (
+                float(g[-1]["end"]) - float(g[0]["start"]) < min_duration
+                and joined_len <= max_chars + 2
+                and dur <= max_duration + 0.25
+                and _caption_boundary_strength(_caption_join_words(prev, glossary)) < 80
+            ):
+                merged[-1] = joined
+                continue
+        merged.append(g)
+    balanced: list[list[dict[str, Any]]] = []
+    i = 0
+    while i < len(merged):
+        g = merged[i]
+        text_len = _caption_text_len(_caption_join_words(g, glossary))
+        if text_len < 5 and i + 1 < len(merged):
+            joined = g + merged[i + 1]
+            dur = float(joined[-1]["end"]) - float(joined[0]["start"])
+            if _caption_text_len(_caption_join_words(joined, glossary)) <= max_chars + 6 and dur <= max_duration + 0.7:
+                balanced.append(joined)
+                i += 2
+                continue
+        if text_len < 5 and balanced:
+            joined = balanced[-1] + g
+            dur = float(joined[-1]["end"]) - float(joined[0]["start"])
+            if _caption_text_len(_caption_join_words(joined, glossary)) <= max_chars + 6 and dur <= max_duration + 0.7:
+                balanced[-1] = joined
+                i += 1
+                continue
+        balanced.append(g)
+        i += 1
+    return balanced
+
+
+def _generate_caption_sequence_from_words(
+    sequence: dict[str, Any],
+    words: list[dict[str, Any]],
+    room_id: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    glossary = _caption_glossary(room_id)
+    groups = _group_caption_words(words, glossary=glossary)
+    style = _caption_default_style()
+    captions: list[dict[str, Any]] = []
+    last_end = 0.0
+    cap_index = 1
+    for i, group in enumerate(groups, start=1):
+        if not group:
+            continue
+        raw_text = _caption_join_words(group, glossary)
+        if not raw_text:
+            continue
+        next_start = float(groups[i][0]["start"]) if i < len(groups) and groups[i] else None
+        lead = 0.04
+        tail = 0.12
+        group_start = max(float(group[0]["start"]) - lead, last_end)
+        end_target = max(float(group[-1]["end"]) + tail, group_start + 0.72)
+        if next_start is not None:
+            end_target = min(end_target, max(group_start + 0.55, next_start - 0.02))
+        chunks = _caption_text_chunks(raw_text, max_chars=22)
+        total_len = max(1, sum(_caption_text_len(chunk) for chunk in chunks))
+        cursor = group_start
+        elapsed_chars = 0
+        for j, chunk in enumerate(chunks):
+            chunk_len = max(1, _caption_text_len(chunk))
+            elapsed_chars += chunk_len
+            if j == len(chunks) - 1:
+                chunk_end = end_target
+            else:
+                chunk_end = group_start + (end_target - group_start) * (elapsed_chars / total_len)
+                chunk_end = max(chunk_end, cursor + 0.55)
+            start = round(cursor, 3)
+            end = round(max(chunk_end, cursor + 0.55), 3)
+            captions.append({
+                "id": f"clip_cap_{cap_index:04d}",
+                "track": "caption",
+                "text": _caption_display_text(chunk, max_line_chars=16),
+                "timeline_start": start,
+                "timeline_end": end,
+                "style": style,
+                "words": group if len(chunks) == 1 else [],
+            })
+            cap_index += 1
+            cursor = end
+            last_end = end
+    balanced_captions: list[dict[str, Any]] = []
+    i = 0
+    while i < len(captions):
+        cap = dict(captions[i])
+        text = str(cap.get("text") or "").replace("\n", "")
+        if _caption_text_len(text) < 5:
+            if balanced_captions:
+                prev = dict(balanced_captions[-1])
+                joined = str(prev.get("text") or "").replace("\n", "") + text
+                if _caption_text_len(joined) <= 22:
+                    prev["text"] = _caption_display_text(joined, max_line_chars=16)
+                    prev["timeline_end"] = cap.get("timeline_end")
+                    balanced_captions[-1] = prev
+                    i += 1
+                    continue
+            if i + 1 < len(captions):
+                nxt = dict(captions[i + 1])
+                joined = text + str(nxt.get("text") or "").replace("\n", "")
+                if _caption_text_len(joined) <= 22:
+                    nxt["text"] = _caption_display_text(joined, max_line_chars=16)
+                    nxt["timeline_start"] = cap.get("timeline_start")
+                    balanced_captions.append(nxt)
+                    i += 2
+                    continue
+        balanced_captions.append(cap)
+        i += 1
+    captions = balanced_captions
+    tracks = []
+    has_caption_track = False
+    for track in sequence.get("tracks") or []:
+        if track.get("type") == "caption":
+            tracks.append({**track, "clips": captions, "hidden": False})
+            has_caption_track = True
+        else:
+            tracks.append(track)
+    if not has_caption_track:
+        tracks.append({"id": "caption_1", "type": "caption", "label": "Captions", "clips": captions})
+    seq2 = {**sequence, "tracks": tracks}
+    return seq2, len(captions)
+
+
+def _generate_caption_sequence(
+    sequence: dict[str, Any],
+    analysis_by_asset: dict[str, dict[str, Any]],
+    room_id: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    return _generate_caption_sequence_from_words(sequence, _timeline_speech_words(sequence, analysis_by_asset), room_id)
+
+
+def _timeline_dialogue_wav(room_id: str, sequence: dict[str, Any], work_dir: Path) -> Path | None:
+    """Render the EDITED dialogue timeline to one mono wav. This lets Whisper transcribe the
+    final cut only (not all raw source footage) and returns timestamps in timeline seconds."""
+    clips = _caption_sync_source_clips(sequence)
+    if not clips:
+        return None
+    assets = _assets_by_id(room_id)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    cursor = 0.0
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    for idx, clip in enumerate(clips):
+        ts = float(clip.get("timeline_start") or 0)
+        te = float(clip.get("timeline_end") or ts)
+        if te <= ts:
+            continue
+        if ts > cursor + 0.02:
+            silence = work_dir / f"cap_silence_{idx:04d}.wav"
+            subprocess.run([
+                _ffmpeg(), "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                "-t", f"{ts - cursor:.3f}", "-c:a", "pcm_s16le", str(silence),
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=cflags)
+            if silence.exists() and silence.stat().st_size > 0:
+                parts.append(silence)
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset:
+            cursor = max(cursor, te)
+            continue
+        src = asset.get("proxy_path") or asset.get("local_path")
+        if not src or not Path(src).exists():
+            cursor = max(cursor, te)
+            continue
+        dur = max(0.05, te - ts)
+        part = work_dir / f"cap_part_{idx:04d}.wav"
+        subprocess.run([
+            _ffmpeg(), "-y", "-ss", f"{float(clip.get('source_start') or 0):.3f}",
+            "-t", f"{dur:.3f}", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le", str(part),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=cflags)
+        if part.exists() and part.stat().st_size > 0:
+            parts.append(part)
+        cursor = max(cursor, te)
+    if not parts:
+        return None
+    list_path = work_dir / "caption_audio_list.txt"
+    list_path.write_text("\n".join(f"file '{p.as_posix()}'" for p in parts), encoding="utf-8")
+    out = work_dir / "caption_dialogue_timeline.wav"
+    subprocess.run([
+        _ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-c:a", "pcm_s16le", str(out),
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=cflags)
+    return out if out.exists() and out.stat().st_size > 0 else None
+
+
+def _timeline_caption_words(room_id: str, job_id: str, sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    work_dir = _room_dir(room_id) / "jobs" / job_id / "caption-gen"
+    wav = _timeline_dialogue_wav(room_id, sequence, work_dir)
+    if not wav:
+        return []
+    model = _caption_whisper_model()
+    script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run([
+        sys.executable, str(script), str(wav), "--words", "--json-only", "--model", model,
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False, creationflags=cflags,
+       env=_caption_transcribe_env(room_id))
+    out_json = wav.with_name(wav.stem + "_audiocheck.json")
+    if result.returncode != 0 or not out_json.exists():
+        return []
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    words: list[dict[str, Any]] = []
+    for segment_index, seg in enumerate(data.get("segments") or []):
+        for w in seg.get("words") or []:
+            text = str(w.get("word") or w.get("text") or "").strip()
+            if not text:
+                continue
+            start = round(float(w.get("start") or 0), 3)
+            end = round(max(float(w.get("end") or start), start + 0.05), 3)
+            words.append({"text": text, "start": start, "end": end, "segment_index": segment_index})
+    return words
+
+
+def _build_caption_generation(room_id: str, job_id: str, instruction: dict[str, Any]) -> dict[str, Any] | None:
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline.get("sequence"), dict) else None
+    if not isinstance(sequence, dict):
+        return None
+    words = _timeline_caption_words(room_id, job_id, sequence)
+    if words:
+        seq2, count = _generate_caption_sequence_from_words(sequence, words, room_id)
+    else:
+        asset_ids = [str(c.get("asset_id")) for c in _caption_sync_source_clips(sequence) if c.get("asset_id")]
+        analysis = _ensure_audio_analysis(room_id, asset_ids)
+        seq2, count = _generate_caption_sequence(sequence, analysis, room_id)
+    _append_job_event(room_id, job_id, {
+        "type": "status",
+        "text": f"カット済み音声からテロップを生成しました（{count}件）。",
+    })
+    return seq2
+
+
+class CaptionSyncRequest(BaseModel):
+    room_id: str
+    caption_ids: list[str] | None = None  # None / empty = all captions
+
+
+@router.post("/contents/{content_id}/caption-sync")
+async def caption_sync(
+    content_id: str,
+    payload: CaptionSyncRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Attach per-word timings (from the speech under each caption) so karaoke / typewriter sync
+    to the actual voice. Uses cached Whisper analysis when available (instant), else runs it."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    timeline = dict(content.get("timeline") or {})
+    sequence = timeline.get("sequence")
+    if not isinstance(sequence, dict):
+        raise HTTPException(status_code=400, detail="シーケンスがありません")
+    caps = _sequence_caption_clips(sequence)
+    want = set(payload.caption_ids or [])
+    targets = [c for c in caps if not want or str(c.get("id")) in want]
+    if not targets:
+        raise HTTPException(status_code=400, detail="対象のテロップがありません")
+    asset_ids = [str(c.get("asset_id")) for c in _caption_sync_source_clips(sequence) if c.get("asset_id")]
+    analysis = await asyncio.to_thread(_ensure_audio_analysis, payload.room_id, asset_ids)
+    words_by_caption: dict[str, list[dict[str, Any]]] = {}
+    for cap in targets:
+        cid = str(cap.get("id"))
+        words = _words_for_caption(sequence, cap, analysis)
+        words_by_caption[cid] = words
+    return {"words_by_caption": words_by_caption, "synced": sum(1 for v in words_by_caption.values() if v)}
+
+
+class ScreenBlurRequest(BaseModel):
+    room_id: str
+    enabled: bool = True
+    targets: list[str] = Field(default_factory=list)   # exact strings to hide
+    patterns: list[str] = Field(default_factory=list)  # email / digits / key
+    regex: str | None = None
+    style: str = "mosaic"
+    pad: float = 0.35
+    fps: float = 4.0
+
+
+class TrackBlurRequest(BaseModel):
+    room_id: str
+    x: float           # normalized 0-1 box the user drew
+    y: float
+    width: float
+    height: float
+    anchor: float = 0.0  # time (s) the box was drawn = the frame to read the target text from
+    start: float = 0.0   # scan window start (0 = whole clip)
+    end: float = 0.0     # scan window end (0 = to the end)
+    fps: float = 4.0
+
+
+def _content_source_video(room_id: str, content: dict[str, Any]) -> str | None:
+    assets = _assets_by_id(room_id)
+    for aid in content.get("asset_ids") or []:
+        a = assets.get(str(aid))
+        if a and a.get("kind") == "video":
+            src = a.get("proxy_path") or a.get("local_path")
+            if src and Path(src).exists():
+                return str(src)
+    return None
+
+
+@router.post("/contents/{content_id}/screen-blur")
+async def set_screen_blur(
+    content_id: str, payload: ScreenBlurRequest, current_user: TokenData = Depends(get_current_user)
+):
+    """Save the screen-blur spec on the content; it is baked into the next export (post-pass)."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    timeline = dict(content.get("timeline") or {})
+    timeline["screen_blur"] = {
+        "enabled": bool(payload.enabled), "targets": payload.targets, "patterns": payload.patterns,
+        "regex": payload.regex, "style": payload.style, "pad": payload.pad, "fps": payload.fps,
+    }
+    _update_content(payload.room_id, content_id, {"timeline": timeline})
+    return {"ok": True, "screen_blur": timeline["screen_blur"]}
+
+
+@router.post("/contents/{content_id}/screen-blur/probe")
+async def probe_screen_blur(
+    content_id: str, payload: ScreenBlurRequest, current_user: TokenData = Depends(get_current_user)
+):
+    """Detect-only: report which on-screen texts WOULD be blurred (+ a sample of all detected text)
+    so the editor can show the user what will be hidden before exporting."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    src = _content_source_video(payload.room_id, content)
+    if not src:
+        raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # 8 frames keeps the interactive probe under the dev proxy's ~30s timeout (OCR ~2.8s/frame on
+    # CPU). The probe is only a PREVIEW of what will be hidden; the export post-pass checks the
+    # whole video (no timeout) and is authoritative.
+    args = [sys.executable, str(script), str(src), "--probe", "--probe-frames", "8"]
+    if payload.targets:
+        args += ["--targets", ",".join(payload.targets)]
+    if payload.patterns:
+        args += ["--patterns", ",".join(payload.patterns)]
+    if payload.regex:
+        args += ["--regex", payload.regex]
+    r = await asyncio.to_thread(
+        subprocess.run, args, capture_output=True, text=True, timeout=300, creationflags=cflags
+    )
+    data: dict[str, Any] = {"matched": [], "sample_texts": [], "frames": 0}
+    try:
+        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip().startswith("{")]
+        if lines:
+            data = json.loads(lines[-1])
+    except Exception:  # noqa: BLE001
+        pass
+    return data
+
+
+def _active_video_clip_at(sequence: dict[str, Any], anchor: float, box_cx: float, box_cy: float) -> dict[str, Any] | None:
+    """The video clip the user is actually looking at: among clips active at the anchor timeline
+    time, prefer an overlay/PiP whose output rect contains the box centre (higher layer wins),
+    else the fullscreen base clip. Returns None if there's no usable sequence."""
+    active = [c for c in _sequence_video_clips(sequence)
+              if float(c.get("timeline_start") or 0) <= anchor < float(c.get("timeline_end") or 0)]
+    if not active:
+        return None
+    def rect(c: dict[str, Any]) -> tuple[float, float, float, float]:
+        p = c.get("position") if isinstance(c.get("position"), dict) else None
+        if p:
+            return float(p.get("x") or 0), float(p.get("y") or 0), float(p.get("width") or 1), float(p.get("height") or 1)
+        return 0.0, 0.0, 1.0, 1.0
+    overlays = sorted([c for c in active if _is_overlay_clip(c)], key=lambda c: -(c.get("layer") or 0))
+    for c in overlays:
+        rx, ry, rw, rh = rect(c)
+        if rx <= box_cx <= rx + rw and ry <= box_cy <= ry + rh:
+            return c
+    base = [c for c in active if not _is_overlay_clip(c)]
+    return base[0] if base else active[0]
+
+
+@router.post("/contents/{content_id}/blur/track")
+async def track_blur_region(
+    content_id: str, payload: TrackBlurRequest, current_user: TokenData = Depends(get_current_user)
+):
+    """OCR-track the TEXT inside the drawn box, ACROSS the composition. Finds the clip shown at the
+    playhead, uses THAT asset, maps playhead-time -> that clip's source-time, and maps the drawn box
+    (output coords) -> source coords via the clip's cover-fit — so we read the right asset, the right
+    frame, the right region even when clips have source offsets or a different aspect. Returns the
+    output-normalized path keyed by TIMELINE time + the visible time range (which DEFINES the clip)."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+    out_w, out_h = _output_size(str((sequence or {}).get("format") or timeline.get("format") or content.get("format") or "9:16"))
+
+    box_cx = payload.x + payload.width / 2.0
+    box_cy = payload.y + payload.height / 2.0
+    clip = _active_video_clip_at(sequence, payload.anchor, box_cx, box_cy) if isinstance(sequence, dict) else None
+
+    if clip:
+        assets = _assets_by_id(payload.room_id)
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset:
+            raise HTTPException(status_code=400, detail="クリップの素材が見つかりません")
+        try:
+            src = str(_asset_source_path(asset))
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+        tl_start = float(clip.get("timeline_start") or 0)
+        tl_end = float(clip.get("timeline_end") or 0)
+        src_start = float(clip.get("source_start") or 0)
+        # The renderer trims a long source to the SLOT length at 1x speed (see _clip_source_range),
+        # so source time maps 1:1 and the effective source range is just the timeline span.
+        clip_src_end = src_start + max(0.05, tl_end - tl_start)
+        src_anchor = src_start + max(0.0, payload.anchor - tl_start)
+        t_offset = tl_start - src_start
+        # Scan a BOUNDED window around the anchor (not the whole clip) so the interactive call stays
+        # responsive — OCR costs ~1s PER FRAME (fixed model cost), so a full-clip scan timed out
+        # (300s). Keep the frame count small; the user re-analyses elsewhere if the text spans more.
+        scan_lead, scan_window = 1.0, 9.0
+        src_scan_start = max(src_start, src_anchor - scan_lead)
+        src_end = min(clip_src_end, src_anchor + scan_window)
+        pos = clip.get("position") if isinstance(clip.get("position"), dict) else None
+        clip_rect = (
+            f"{float(pos.get('x') or 0)},{float(pos.get('y') or 0)},{float(pos.get('width') or 1)},{float(pos.get('height') or 1)}"
+            if pos else "0,0,1,1"
+        )
+    else:
+        # No sequence (single raw clip) — fall back to the first source, anchor as source time.
+        src = _content_source_video(payload.room_id, content)
+        if not src:
+            raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+        src_anchor, t_offset, clip_rect = payload.anchor, 0.0, "0,0,1,1"
+        src_scan_start = max(0.0, payload.anchor - 1.5)
+        src_end = (payload.anchor + 18.0) if payload.end <= 0 else min(payload.end, payload.anchor + 18.0)
+
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    scan_fps = min(max(0.5, payload.fps), 1.5)  # cap: OCR is ~1s/frame, so keep the sample count low
+    args = [
+        sys.executable, str(script), str(src), "--ocr-track",
+        "--box", f"{payload.x},{payload.y},{payload.width},{payload.height}",
+        "--anchor", str(src_anchor), "--start", str(src_scan_start), "--end", str(src_end),
+        "--out-w", str(out_w), "--out-h", str(out_h), "--clip-rect", clip_rect,
+        "--t-offset", str(t_offset), "--fps", str(scan_fps), "--ffmpeg", _ffmpeg(),
+    ]
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, args, capture_output=True, text=True, timeout=90, creationflags=cflags
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="解析がタイムアウトしました（範囲を狭めて再試行してください）")
+    data: dict[str, Any] = {"found": False, "boxes": {}}
+    try:
+        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip().startswith("{")]
+        if lines:
+            data = json.loads(lines[-1])
+    except Exception:  # noqa: BLE001
+        logger.warning("ocr-track parse failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+    return data
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_production_job(job_id: str, room_id: str) -> dict[str, Any]:
+    """Cancel a running agent job. The draft is discarded; the live timeline stays
+    exactly as it was (agent edits are draft-only until commit)."""
+    from app.services.timeline_agent import cancel_job
+    killed = cancel_job(job_id)
+    _update_job(room_id, job_id, {"status": "failed", "error": "canceled by user"})
+    _append_job_event(room_id, job_id, {"type": "status", "text": "キャンセルしました（タイムラインは無変更）"})
+    return {"ok": True, "killed": killed}
+
+
+def _recover_stale_running_jobs() -> None:
+    """Sandbox restart safety: jobs left 'running' by a dead process would spin
+    forever in the UI. At import time mark them failed (their threads are gone)."""
+    try:
+        for room_dir in ASSET_ROOT.iterdir():
+            jp = room_dir / "jobs.json"
+            if not jp.exists():
+                continue
+            try:
+                jobs = json.loads(jp.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            changed = False
+            for j in jobs:
+                if isinstance(j, dict) and j.get("status") == "running":
+                    j["status"] = "failed"
+                    j["error"] = "server restarted while running"
+                    changed = True
+            if changed:
+                jp.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — recovery must never block startup
+        logger.warning("stale job recovery failed", exc_info=True)
+
+
+_recover_stale_running_jobs()
+
+
 @router.post("/jobs", response_model=ProductionJob)
 async def create_job(
     data: CreateJobRequest,
@@ -2841,9 +6038,8 @@ async def list_job_events(
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
-    jobs = _read_jobs(room_id)
-    if not any(str(job.get("id")) == job_id for job in jobs):
-        raise HTTPException(status_code=404, detail="Job not found")
+    # 起動直後はジョブ登録がまだディスクに見えないことがある（送信直後の
+    # 最初のポーリングが404になりUIにエラーが残った）→「まだ無い=空」で200
     path = _job_events_path(room_id, job_id)
     if not path.exists():
         return []

@@ -6,6 +6,30 @@
       "sourceType": "github",
       "computedHash": "3d7c49c1f4ea5c5bbfcc85e24e9459b19beadfc01acc64a2ff1111d149c8d069"
     },
+    "higgsfield-generate": {
+      "source": "higgsfield-ai/skills",
+      "sourceType": "github",
+      "skillPath": "higgsfield-generate/SKILL.md",
+      "computedHash": "6d9ac3d71608b56492fe193fb0d4151b97a25376379940e2e5f76c5d3636a011"
+    },
+    "higgsfield-marketplace-cards": {
+      "source": "higgsfield-ai/skills",
+      "sourceType": "github",
+      "skillPath": "higgsfield-marketplace-cards/SKILL.md",
+      "computedHash": "bfc8753f857d0cedb630d3f9c0801ecb2f6ba799de093b8cefccf1550cf7608b"
+    },
+    "higgsfield-product-photoshoot": {
+      "source": "higgsfield-ai/skills",
+      "sourceType": "github",
+      "skillPath": "higgsfield-product-photoshoot/SKILL.md",
+      "computedHash": "b1ad2f39573cd04eb32af603a641a87b114ad69b83c0ee0e38ff37dbbe9663b3"
+    },
+    "higgsfield-soul-id": {
+      "source": "higgsfield-ai/skills",
+      "sourceType": "github",
+      "skillPath": "higgsfield-soul-id/SKILL.md",
+      "computedHash": "6d468aafc15bacee9f4e86c2726e8351e18fe588301974332535db5a666de7c6"
+    },
     "next-best-practices": {
       "source": "vercel-labs/next-skills",
       "sourceType": "github",

@@ -58,6 +58,40 @@ def build_message_preview(content: Optional[str], limit: int = 80) -> str:
     return text
 
 
+def refresh_room_preview_sync(sb, room_id: str) -> None:
+    """キャンセル削除の後始末: 部屋一覧のプレビューを実際に残っている最新
+    メッセージで書き直す。
+
+    last_message_preview は保存時に焼き込まれるコピーなので、キャンセルで
+    メッセージ行を削除しても一覧のサムネに取り消した文言が残り続ける
+    （2026-07-25 実測）。ベストエフォート・失敗しても呼び出し元は落とさない。
+    """
+    try:
+        latest = (
+            sb.table("chat_messages")
+            .select("content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if latest:
+            sb.table("chat_rooms").update({
+                "last_message_preview": build_message_preview(latest[0].get("content")),
+                "last_message_at": latest[0].get("created_at"),
+            }).eq("id", room_id).execute()
+        else:
+            sb.table("chat_rooms").update({
+                "last_message_preview": "",
+                "last_message_at": None,
+            }).eq("id", room_id).execute()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "room preview refresh failed for %s", room_id, exc_info=True
+        )
+
+
 def record_message_delivery_sync(
     sb,
     room_id: str,
@@ -540,13 +574,18 @@ class ChatService:
         except Exception as exc:
             self.logger.warning("Unread counter update failed: %s", exc)
     
-    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None) -> dict:
+    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None, message_id: str = None) -> dict:
         """Send a message to a room
 
         created_at: 明示指定時はその時刻で保存（既定はDBの now()）。並列保存パス
         （DAN_PARALLEL_SEND）は run 作成や CLI 起動の後に insert するため、DB任せだと
         メッセージの時刻が run より後に逆転し、フロントの時系列表示が崩れる。
         リクエスト到着時刻を渡して実際の送信時刻を保つ。
+
+        message_id: クライアント発行のUUIDをそのまま行IDにする（完全形の早期
+        キャンセル対応: フロントは送信の瞬間から本物のIDを知っているので、
+        いつキャンセルしてもIDで確実に削除できる。対応表は不要）。
+        UUID形式でない値は無視して従来通りDB採番。
         """
         # Verify membership
         member = await self._execute_with_retry(
@@ -570,6 +609,10 @@ class ChatService:
             "sender_type": sender_type,
             "content": content,
         }
+        if message_id:
+            import re as _re
+            if _re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", message_id):
+                insert_data["id"] = message_id
         if reply_to_id:
             insert_data["reply_to"] = reply_to_id
         if created_at:

@@ -1,122 +1,95 @@
 ---
 name: studio
-description: >
-  動画の企画・生成・編集を行うスキル。
-  デモ動画、紹介動画、チュートリアル、SNSショート等あらゆる種類に対応する。
-  ユーザーが「動画」「映像」「ムービー」「スタジオ」「動画にして」と言った場合に使用する。
-display_name: ダンスタジオ
-updated: 2026-04-24
+description: Dan video studio compatibility skill. Use for video production requests, operation demo capture, timeline assembly, Remotion editing, screen recording, tutorial/demo videos, and when existing Dan tools like studio_record, studio_encode, studio_probe, studio_extract_frame, and send_file are needed. For broad creative requests, route through creative-studio first.
 ---
 
-# ダンスタジオ
+# studio
 
-動画の企画・生成・編集を行う汎用スキル。build スキルが UI / バックエンド成果物全般を扱うように、このスキルは動画を伴う成果物全般を扱う。
+This skill remains the execution layer for real capture and timeline assembly. For new broad creative work, start with `creative-studio`, then return here when real screen capture or Remotion editing is needed.
 
-> 提案動画を作る場合は `actions/proposal_video.md` を参照 (ユーザーが「提案動画作って」と明示要求した時のみ)。
+## Role In The New System
 
----
+| Skill | Responsibility |
+|---|---|
+| `creative-studio` | Top-level creative routing |
+| `video-direction` | Plan, script, storyboard, shot list |
+| `brand-asset-kit` | Exact assets and fidelity constraints |
+| `media-gen` | Higgsfield/OpenAI generation |
+| `studio` | Real capture and timeline assembly |
+| `post-production` | Reframe, subtitles, audio, color, LUT, final export |
 
-## 共通ルール
+## Use Studio For
 
-### 品質チェック
+- App/SaaS/site operation demos
+- Screen recordings and click/type/scroll flows
+- Remotion timeline assembly
+- Cursor overlays, zooms, text cards, BGM/SE placement
+- Final file handoff through Dan chat tools
 
-レンダリング後、ユーザーに提出する前にGemini APIで品質チェックする。ダン自身は動画を視聴できないため必ずGeminiに委託する。
+## Existing Tools
 
-**チェックプロンプトのルール:**
-- 「合格/不合格で答えて」のような甘いプロンプトは禁止（全部合格になる）
-- 「厳しく」「具体的なタイムスタンプ付きで」「カーソル表示箇所を全て列挙して意味があるか判定して」と指示する
+| Tool | Use |
+|---|---|
+| `studio_record` | Record HTML/browser content with Playwright -> WebM |
+| `studio_encode` | Convert WebM/MP4, resize, re-encode |
+| `studio_probe` | Inspect video metadata |
+| `studio_extract_frame` | Extract PNG frame at timecode |
+| `send_file` | Send finished media to chat UI |
 
-**チェック項目:**
-- [ ] 操作と画面遷移の因果関係が自然か？
-- [ ] 字幕・ナレーション無しでも何をしているか伝わるか？
-- [ ] BGMが映像と同じ長さで終わっているか？
-- [ ] 動画の目的に対して必要なシーンが全て含まれているか？
+Do not run large Playwright/FFmpeg jobs directly in foreground if Dan tool wrappers exist; raw output can flood the CLI context.
 
-1つでも不合格なら修正してから提出する。
+## ⚠️ 制作ルーム（制作タブ）のタイムライン書き出しは必ず export ジョブを使う ⚠️
 
-### 音声
+制作ルームのタイムライン（contents.json の timeline）を動画に書き出す依頼を受けたら、
+**自分で ffmpeg を組んではいけない**。必ずバックエンドの書き出しジョブを使う：
 
-- **BGM**: 著作権フリーの実際の楽曲を使う。Pythonで生成したサイン波は禁止。映像の長さに合わせてトリムする
-- **SE（効果音）**: 著作権フリーの実際の音源を使う。合成音禁止。Mixkit等からダウンロード
-- まず字幕もナレーションも無しで内容が伝わる動画を目指す。非言語情報だけでは伝わらない場合に限り追加する
+```
+POST /api/v1/production-assets/jobs
+{"room_id": <room>, "content_id": <content>,
+ "instruction": {"mode": "export", "timeline": <そのcontentのtimeline>}}
+```
 
-### 文字起こし・字幕生成
+- この経路はプレビューと同一のネイティブ合成器で描く（テロップ・ぼかし・モザイク・
+  追従・音声ミックスすべてプレビュー一致が保証される）。約30fpsで書き出せる
+  （5分の動画≒5〜7分）。完了は同エンドポイントのジョブ一覧をポーリング、
+  結果の result.output_path / result.user_output_path が完成ファイル。
+- 部分書き出しは instruction に "export_range": [開始秒, 終了秒] を足す。
+- 保存先指定は "output_copy_path": "<フルパス>.mp4" を足す。
+- **ffmpeg で filtergraph を自作してタイムラインを再現するのは禁止**（見た目が
+  プレビューと一致せず、過去に5分の動画へ3時間かけて不一致動画を作った）。
+  ffmpeg 直接使用は素材の変換・切り出しなど「タイムライン再現以外」に限る。
 
-字幕・テロップ生成のために音声→テキスト変換が必要なときのルール。
+## Screen Capture Rules
 
-- **Whisper を CPU で実行しない**。`whisper`/`faster-whisper` の `--device cpu` や CUDA 非搭載環境での large-v3/large-v2 推論は禁止。6 分動画で 5〜15 分かかり、ダンの番犬タイムアウト（10 分）に引っかかって `処理が中断されました` で死ぬ。
-- **優先順位**:
-  1. **OpenAI Whisper API** (`whisper-1`) を使う。CPU/GPU を気にせず数十秒で完了する。日本語精度も large-v3 とほぼ同等
-  2. CUDA GPU が使える環境なら `faster-whisper` の `--device cuda` で OK（large-v3 でも 6 分動画なら数分以内）
-  3. CPU しか無い環境では `tiny` または `base` モデルに落とす（精度は落ちるが動く）
-- **長時間処理を避けられない場合**: Bash を foreground で動かさず、バックグラウンドジョブ + `ScheduleWakeup` で 270 秒（番犬閾値以下）刻みでポーリングする。`wait` で待ってはいけない
+- Select real UI elements with selectors, not hand-guessed coordinates.
+- Use `bounding_box()` for cursor and zoom targets.
+- Record full-resolution source footage; do zoom/crop in edit.
+- Show cursor only for meaningful actions.
+- Avoid instant scroll jumps; use smooth scroll and keep the next action group visible.
+- Record click/type timing for SE placement when possible.
 
-### その他
+## Demo Story Rules
 
-- **言語**: 指定がない限りユーザーと会話している言語に合わせる
-- **動画の長さ**: 基本3分以内。尺に無理に収めて内容不足になることを避ける
+For operation demos, follow `actions/video_guidelines.md`:
 
----
+1. Hook within 5 seconds.
+2. Show where the product/tool is accessed.
+3. Complete one real task end to end.
+4. Insert concise text cards only when they clarify the story.
+5. End with product name/logo/CTA.
 
-## 制作技術
+## Quality Check
 
-### フロー
+Before delivery:
 
-1. Playwrightで操作録画（PNG連番）
-2. カーソル合成（Pillowで後付け）
-3. Remotionで編集（テキスト挿入、BGM、SE、トランジション）
-4. `npx remotion render` でMP4出力
+- Operation and screen transitions must be causally clear.
+- UI text must remain readable.
+- BGM/SE must not outlast the video.
+- Required scenes from the plan must be present.
+- If input fields, customer data, account data, or private notifications must be hidden, send the timeline to `post-production` privacy blur/redaction before final delivery.
+- Do not treat privacy blur as complete from tracking alone; require review frames or an approved redaction status from `post-production`.
+- If the video was generated or heavily edited, ask `post-production` to inspect key frames and variants.
 
-### 操作録画のルール
+## Proposal Videos
 
-**要素の特定:**
-- Playwrightは`query_selector`で実際のUI要素を見つけて操作する。座標の手書き・推測は禁止
-- `bounding_box()`で取得した実座標を使う
-
-**操作の範囲:**
-- シーン設計書に書かれた操作だけを行う。設計書にない操作は入れない
-
-**スクロール:**
-- 瞬間移動（`window.scrollTo`で一気にジャンプ）は禁止。必ず滑らかなアニメーションスクロールを使う
-- セクション移動は見出しを`query_selector`で見つけて`scroll_into_view`で移動する（Y座標の手書き禁止）
-- スクロール判断はグループ単位で行う: これから操作する要素グループ全体が画面内に収まっているかを事前チェックし、収まっていればスクロールしない。個々の要素単位ではなく、操作グループ全体で判断する
-
-**カーソル:**
-- 意味のある操作時のみ表示（クリック、入力、ホバー）。無操作時は非表示
-- 通常より大きく見やすいサイズ（28px）
-- 録画時にmouse_positionsを記録し、Pillowで後付け合成
-
-**SE用イベント記録:**
-- 録画中にクリック・タイピング開始/終了のフレーム番号をevents.jsonに記録する
-- Remotionでそのフレームにクリック音・タイピング音を`<Audio>`+`<Sequence>`で配置する
-
-### Remotion編集
-
-**テキスト挿入:** 操作デモの間に無地背景+テキストのシーンを挿入し、重要なメッセージを伝える
-**BGM:** `<Audio>`でフェードイン/アウト付きで配置
-**SE:** events.jsonのフレーム番号に基づいて`<Sequence>`+`<Audio>`で配置
-
-### 汎用ツール（HTML録画方式）
-
-| ツール | 用途 |
-|--------|------|
-| `studio_record` | HTMLをPlaywright headlessで録画 → .webm生成 |
-| `studio_encode` | FFmpegで変換（WebM→MP4、解像度変更等） |
-| `studio_probe` | 動画のメタ情報取得 |
-| `studio_extract_frame` | 指定時刻のフレームをPNG抽出 |
-| `send_file` | 完成動画をチャットUIに送信 |
-
-**⚠️ Bash で Playwright/FFmpeg を直接実行しない。** 出力データがCLIメモリに蓄積してクラッシュする。
-
----
-
-## パターン別ガイド
-
-### 提案動画 (明示要求時のみ)
-
-ユーザーが「提案動画作って」と明示的に依頼した時のみ `actions/proposal_video.md` を参照する。
-通常の機能制作・成果物提示には絡めない。
-
-### 紹介動画 / チュートリアル / SNS ショート
-
-(追加予定)
+Only when the user explicitly says "提案動画作って", read `actions/proposal_video.md`.

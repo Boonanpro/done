@@ -275,5 +275,26 @@
       "D:\\done\\supabase\\migrations5_personal_info.sql",
       "D:\\done\u0007pp\\services\\personal_info_service.py"
     ]
+  },
+  "meta_ad_accounts": {
+    "name": "meta_ad_accounts",
+    "description": "Internal infra (no UI/CRUD/artifact). Multi-tenant Meta (Instagram/Facebook) ad-account connection store. SaaS model: one operator-owned Meta Developer App (account_label='__app__' row holds app_id/app_secret), and each tenant connects their own ad account via OAuth, keeping their own long-lived/system-user token. Secrets (access_token, app_secret) are Fernet-encrypted in encrypted_data; ad_account_id/page_id/ig_user_id/currency are plaintext for selection. Decrypted only by scripts/meta_ads_cli.py at launch/insights time. Paired with the meta-ads skill.",
+    "created_at": "2026-06-18T00:00:00.000000",
+    "mode": "internal-infra",
+    "files": [
+      "D:\\done\\supabase\\migrations\\068_meta_ad_accounts.sql",
+      "D:\\done\\app\\services\\meta_ads_service.py",
+      "D:\\done\\scripts\\meta_ads_cli.py"
+    ]
+  },
+  "meta_ads": {
+    "name": "meta_ads",
+    "description": "Internal infra (no UI/CRUD/artifact). Alias slug for the Meta ads CLI integration (app/services/meta_ads_service.py + scripts/meta_ads_cli.py). See feature 'meta_ad_accounts' for the storage table. Thin wrapper over the facebook-business SDK + Graph API: connect/whoami/accounts/campaign/adset/ad/publish/pause/insights and Instagram organic ig-post (3-step container flow). publish/ig-post require an explicit --confirm spend/publish approval gate.",
+    "created_at": "2026-06-18T00:00:00.000000",
+    "mode": "internal-infra",
+    "files": [
+      "D:\\done\\app\\services\\meta_ads_service.py",
+      "D:\\done\\scripts\\meta_ads_cli.py"
+    ]
   }
 }

@@ -65,12 +65,46 @@ async def stop_sandbox() -> dict:
 class RestartRequest(BaseModel):
     """テスト用に env を一時注入できる。例: {"extra_env": {"DAN_DEV_NO_AUTH": "1"}}"""
     extra_env: Optional[dict[str, str]] = None
+    force: bool = False
+
+
+def _running_production_jobs() -> list[str]:
+    """制作ジョブ実行中のサンドボックス再起動はユーザーの編集作業を全損させる
+    （実発生2回: CTAジョブ・サイドスーパージョブが 'server restarted while running' で死亡）。
+    呼び出し元が誰でも（別開発セッション・auto_deploy・手動curl）守れるようAPI側で門番する。"""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3] / "uploads" / "production-assets"
+    running: list[str] = []
+    if not root.exists():
+        return running
+    for jp in root.glob("*/jobs.json"):
+        try:
+            jobs = json.loads(jp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for j in jobs:
+            if isinstance(j, dict) and j.get("status") == "running":
+                running.append(f"{jp.parent.name[:12]}:{str(j.get('id'))[:8]}")
+    return running
 
 
 @router.post("/restart")
 async def restart_sandbox(payload: Optional[RestartRequest] = None) -> dict:
     mgr = _require_manager()
     extra = payload.extra_env if payload else None
+    force = bool(payload.force) if payload else False
+    if not force:
+        running = _running_production_jobs()
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"制作ジョブ実行中のため再起動を拒否しました: {', '.join(running[:5])} — "
+                    "ジョブ完了を待つか、全損を許容するなら {\"force\": true} で再実行してください"
+                ),
+            )
     try:
         mgr.restart(extra_env=extra)
     except RuntimeError as e:
