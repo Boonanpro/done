@@ -3267,6 +3267,9 @@ enum Screen {
 
 #[derive(Default)]
 struct Library {
+    /// first assets fetch finished — gates the empty-room guide so it never
+    /// flashes while the initial list is still loading
+    loaded: bool,
     assets: Vec<serde_json::Value>,
     contents: Vec<serde_json::Value>,
     selected_assets: Vec<String>,
@@ -3297,6 +3300,10 @@ struct App {
     lib: Library,
     lib_poll: Instant,
     lib_sink: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
+    /// files chosen in the native file picker (background thread) awaiting register
+    picked_files: std::sync::Arc<Mutex<Vec<std::path::PathBuf>>>,
+    /// a picker dialog is currently open (prevents double dialogs)
+    picker_open: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
@@ -3545,6 +3552,8 @@ impl App {
             lib: Library { format: "9:16".into(), ..Default::default() },
             lib_poll: Instant::now(),
             lib_sink: Default::default(),
+            picked_files: Default::default(),
+            picker_open: Default::default(),
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
@@ -9546,6 +9555,7 @@ impl App {
             match (tag.as_str(), res) {
                 ("assets", Ok(v)) => {
                     self.lib.assets = v.as_array().cloned().unwrap_or_default();
+                    self.lib.loaded = true;
                 }
                 ("contents", Ok(v)) => {
                     self.lib.contents = v.as_array().cloned().unwrap_or_default();
@@ -9691,6 +9701,35 @@ impl App {
         }
     }
 
+    /// Windows 標準のファイル選択ダイアログを背景スレッドで開く（UIは固まらない）。
+    /// 選択結果は picked_files 経由で library_ui が拾って register する。
+    fn open_file_picker(&self) {
+        use std::sync::atomic::Ordering;
+        if self.picker_open.swap(true, Ordering::SeqCst) {
+            return; // already open
+        }
+        let sink = self.picked_files.clone();
+        let flag = self.picker_open.clone();
+        std::thread::spawn(move || {
+            let files = pick_media_files();
+            if !files.is_empty() {
+                sink.lock().unwrap().extend(files);
+            }
+            flag.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// picked_files / dropped files 共通の register 送信
+    fn register_media_path(&mut self, pth: &std::path::Path) {
+        let body = serde_json::json!({
+            "room_id": self.room_id(),
+            "uri": pth.to_string_lossy().replace(char::from(92), "/"),
+            "source_type": "local_path",
+            "make_proxy": true,
+        });
+        self.lib_post("act", "/api/v1/production-assets/register".into(), body);
+    }
+
     fn library_ui(&mut self, ctx: &egui::Context) {
         if let Ok(cid) = std::env::var("NATIVE_LIB_OPEN") {
             if !cid.is_empty() {
@@ -9807,6 +9846,9 @@ impl App {
                         .small()
                         .weak(),
                 );
+                if ui.button("📁 ファイルを選ぶ…").clicked() {
+                    self.open_file_picker();
+                }
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.lib.register_path)
@@ -9826,6 +9868,88 @@ impl App {
                 });
             });
         });
+        // 新規部屋（素材もコンテンツも無い）はリスト画面ではなく案内画面を出す。
+        // lib.loaded で初回取得完了を待つので、読込中に一瞬出ることはない。
+        let room_empty = self.lib.loaded && self.lib.assets.is_empty() && self.lib.contents.is_empty();
+        let dragging_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if room_empty {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let avail = ui.available_size();
+                ui.vertical_centered(|ui| {
+                    ui.add_space((avail.y * 0.16).clamp(24.0, 120.0));
+                    ui.label(egui::RichText::new("素材を入れて動画づくりを始めましょう").size(20.0).strong());
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("入れた素材から、ダンが丸ごと編集した動画を作れます")
+                            .weak(),
+                    );
+                    ui.add_space(18.0);
+                    // --- drop zone ---
+                    let zone = egui::vec2(
+                        (avail.x - 80.0).clamp(320.0, 720.0),
+                        (avail.y * 0.42).clamp(200.0, 340.0),
+                    );
+                    let (rect, resp) = ui.allocate_exact_size(zone, egui::Sense::click());
+                    let hov = resp.hovered() || dragging_files;
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(
+                        rect,
+                        14.0,
+                        if hov { egui::Color32::from_rgb(24, 40, 36) } else { egui::Color32::from_rgb(24, 24, 28) },
+                    );
+                    // 破線ボーダー（egui に破線rectは無いので4辺を dashed_line で描く）
+                    let bcol = if hov { UI_ACCENT } else { egui::Color32::from_gray(90) };
+                    let bs = egui::Stroke::new(if hov { 2.0 } else { 1.5 }, bcol);
+                    let r2 = rect.shrink(6.0);
+                    for (a, b) in [
+                        (r2.left_top(), r2.right_top()),
+                        (r2.right_top(), r2.right_bottom()),
+                        (r2.right_bottom(), r2.left_bottom()),
+                        (r2.left_bottom(), r2.left_top()),
+                    ] {
+                        p.add(egui::Shape::dashed_line(&[a, b], bs, 8.0, 6.0));
+                    }
+                    let cy = rect.center().y;
+                    p.text(
+                        egui::pos2(rect.center().x, cy - 34.0),
+                        egui::Align2::CENTER_CENTER,
+                        "🎞",
+                        egui::FontId::proportional(42.0),
+                        egui::Color32::from_gray(190),
+                    );
+                    p.text(
+                        egui::pos2(rect.center().x, cy + 12.0),
+                        egui::Align2::CENTER_CENTER,
+                        if dragging_files { "ここにドロップして追加" } else { "動画・画像をここにドラッグ＆ドロップ" },
+                        egui::FontId::proportional(16.0),
+                        if hov { UI_ACCENT } else { egui::Color32::from_gray(220) },
+                    );
+                    p.text(
+                        egui::pos2(rect.center().x, cy + 38.0),
+                        egui::Align2::CENTER_CENTER,
+                        "またはクリックしてファイルを選択",
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::from_gray(140),
+                    );
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        self.open_file_picker();
+                    }
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new("① 素材を入れる　→　② 右の「▶ ダンに作らせる」で自動編集　→　③ できた動画を開いて仕上げ")
+                            .size(12.5)
+                            .color(egui::Color32::from_gray(150)),
+                    );
+                });
+            });
+            // drop / picker はガイド画面でも下の共通ハンドラが処理する
+            self.library_ingest(ctx);
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+            return;
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -9915,19 +10039,23 @@ impl App {
                 ui.add_space(20.0);
             });
         });
+        self.library_ingest(ctx);
+        ctx.request_repaint_after(std::time::Duration::from_millis(300));
+    }
+
+    /// ライブラリへの素材取り込み共通ハンドラ: ドラッグ&ドロップと
+    /// ファイル選択ダイアログの結果を register する（通常/空部屋ガイド共通）
+    fn library_ingest(&mut self, ctx: &egui::Context) {
         // drag & drop: local files register by path (no upload roundtrip needed)
         let dropped: Vec<std::path::PathBuf> =
             ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         for pth in dropped {
-            let body = serde_json::json!({
-                "room_id": self.room_id(),
-                "uri": pth.to_string_lossy().replace(char::from(92), "/"),
-                "source_type": "local_path",
-                "make_proxy": true,
-            });
-            self.lib_post("act", "/api/v1/production-assets/register".into(), body);
+            self.register_media_path(&pth);
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        let picked: Vec<std::path::PathBuf> = std::mem::take(&mut *self.picked_files.lock().unwrap());
+        for pth in picked {
+            self.register_media_path(&pth);
+        }
     }
 }
 
@@ -11179,6 +11307,57 @@ impl eframe::App for App {
 /// Positional CLI args (contents.json path, asset dir) end at the first `--flag`;
 /// everything after belongs to flags and their values. A done:// deep link is a flag-like
 /// launch too, not a path.
+/// Windows IFileOpenDialog（複数選択）。必ず背景スレッドから呼ぶこと —
+/// COM のモーダルダイアログなので UI スレッドで呼ぶと描画が止まる。
+fn pick_media_files() -> Vec<std::path::PathBuf> {
+    use windows::core::w;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM,
+        SIGDN_FILESYSPATH,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    let mut out = Vec::new();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(dlg): windows::core::Result<IFileOpenDialog> =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+        else {
+            return out;
+        };
+        let filters = [
+            COMDLG_FILTERSPEC {
+                pszName: w!("動画・画像"),
+                pszSpec: w!("*.mp4;*.mov;*.m4v;*.webm;*.mkv;*.avi;*.png;*.jpg;*.jpeg;*.webp"),
+            },
+            COMDLG_FILTERSPEC { pszName: w!("すべてのファイル"), pszSpec: w!("*.*") },
+        ];
+        let _ = dlg.SetFileTypes(&filters);
+        if let Ok(opts) = dlg.GetOptions() {
+            let _ = dlg.SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM);
+        }
+        if dlg.Show(None).is_err() {
+            return out; // cancelled
+        }
+        let Ok(items) = dlg.GetResults() else { return out };
+        let n = items.GetCount().unwrap_or(0);
+        for i in 0..n {
+            if let Ok(item) = items.GetItemAt(i) {
+                if let Ok(pw) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                    if let Ok(s) = pw.to_string() {
+                        out.push(std::path::PathBuf::from(s));
+                    }
+                    CoTaskMemFree(Some(pw.as_ptr() as _));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn positional_args(args: &[String]) -> Vec<String> {
     args.iter()
         .skip(1)
