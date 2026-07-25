@@ -39,6 +39,7 @@ import {
   type MessageResponse,
   type MessagesListResponse,
   type ProcessStep,
+  type ProjectListResponse,
   type ProjectStatusType,
   type ReplyToMessage,
   type TurnBlock,
@@ -1678,6 +1679,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryKey: ['project', projectId],
     queryFn: () => api.projects.get(projectId),
     enabled: !!projectId,
+    // サイドバーの一覧キャッシュには room_id を含む同型のプロジェクトが既に
+    // あるので、それを種にして即座に立ち上げる。これが無いと「プロジェクト
+    // 取得→room_id判明→メッセージ取得」の直列2段になり、1段目の間は
+    // メッセージクエリが disabled=データ無し扱いで「メッセージを送信して
+    // 開始してください」が一瞬表示される（誤った空判定）。
+    // updatedAt=0 で即 stale 扱いにし、正式な取得は必ず裏で走る。
+    initialData: () =>
+      queryClient
+        .getQueryData<ProjectListResponse>(['projects'])
+        ?.projects?.find((p) => p.id === projectId),
+    initialDataUpdatedAt: 0,
     retry: 1,
     refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
@@ -1713,7 +1725,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   }, [artifacts, projectId, openArtifact]);
 
-  const { data: messagesData, isLoading: isLoadingMessages } = useQuery({
+  const { data: messagesData } = useQuery({
     queryKey: ['project-messages', project?.room_id],
     // 画面＝実体の一方通行マージ。サーバー取得は「追いつき」専用で、画面に既に
     // ある新しい内容をスナップショットの古さで消してはならない。SSEで直接挿入
@@ -2375,7 +2387,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             新しいメッセージ
           </button>
         )}
-        {isLoadingMessages ? (
+        {/* 「空の部屋」の文言は、取得が成功して本当に0件だった時だけ出す。
+            プロジェクト情報の取得中（=メッセージクエリが未開始）や
+            メッセージ初回取得中は「読み込み中」であって「空」ではない。
+            従来は未開始状態を空と誤判定し、チャット切替のたびに
+            「メッセージを送信して開始してください」が一瞬表示されていた。 */}
+        {!project || (project.room_id && messagesData === undefined) ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>

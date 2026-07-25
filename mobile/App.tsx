@@ -1094,6 +1094,23 @@ function AppMain() {
   useEffect(() => {
     currentProjectIdRef.current = currentProjectId;
   }, [currentProjectId]);
+  // 一覧の最新スナップショット（loadProjectMessages が room_id を即参照する
+  // ためのref。stateを直接依存に入れると関数の同一性が毎回変わり、これを
+  // 依存に持つ通知リスナー等が再購読を繰り返すため）。
+  const projectsRef = useRef<ProjectResponse[]>([]);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+  // 部屋ごとのメッセージキャッシュ（画面＝実体の即表示用）。開いた瞬間は
+  // ここから描き、裏で最新を取得して差し替える。SSEで直接挿入された分も
+  // 下のミラー効果で常に取り込まれる。
+  const messagesCacheRef = useRef<Record<string, MessageResponse[]>>({});
+  useEffect(() => {
+    const roomId = currentProject?.room_id;
+    if (roomId && messages.length > 0) {
+      messagesCacheRef.current[roomId] = messages;
+    }
+  }, [messages, currentProject?.room_id]);
   // タイムライン参照は部屋ごとの概念なので、部屋を移動したら選択と一覧
   // キャッシュを捨てる（前の部屋のタイムラインを誤って添付しない）。
   useEffect(() => {
@@ -1333,32 +1350,65 @@ function AppMain() {
 
   const loadProjectMessages = useCallback(
     async (activeToken: string, projectId: string) => {
+      // 【画面＝実体・直列の解消】従来は「プロジェクト詳細→メッセージ→既読」
+      // の直列3往復（トンネル経由で各0.5〜1秒）で、その間は前回表示の古い
+      // 状態が残っていた。一覧が既に room_id を持っているので:
+      // ① 開いた瞬間に一覧キャッシュでプロジェクトを確定し、部屋ごとの
+      //    メッセージキャッシュを即表示（無ければ空＝前の部屋の残像を出さない）
+      // ② メッセージ取得を即時開始（詳細取得は並行・待たない）
+      // ③ 既読送信も待たない
+      const known = projectsRef.current.find((p) => p.id === projectId) || null;
+      const knownRoom = known?.room_id || null;
+      if (known) {
+        setCurrentProject(known);
+        setCurrentProjectId(known.id);
+      }
+      // 開いた瞬間に対象の部屋のキャッシュを描く。部屋が未知なら空にする
+      // （前に見ていた部屋のメッセージを新しい部屋に残像として出さない）。
+      setMessages(knownRoom ? messagesCacheRef.current[knownRoom] ?? [] : []);
+      SecureStore.setItemAsync(PROJECT_KEY, projectId).catch(() => null);
+      void refreshArtifacts(activeToken, projectId);
       setLoadingMessages(true);
       try {
-        const project = await apiRequest<ProjectResponse>(`/projects/${projectId}`, {}, activeToken);
-        setCurrentProject(project);
-        setCurrentProjectId(project.id);
-        await SecureStore.setItemAsync(PROJECT_KEY, project.id);
-        void refreshArtifacts(activeToken, project.id);
+        // プロジェクト詳細は裏で更新（メッセージ取得をブロックしない）
+        const projectPromise = apiRequest<ProjectResponse>(`/projects/${projectId}`, {}, activeToken);
+        projectPromise
+          .then((p) => {
+            if (currentProjectIdRef.current !== projectId) return;
+            setCurrentProject((cur) => (cur?.id === p.id ? { ...p, unread_count: cur.unread_count } : p));
+            setCurrentProjectId(p.id);
+          })
+          .catch(() => null);
 
-        if (!project.room_id) {
-          setMessages([]);
-          return project;
+        let roomId = knownRoom;
+        if (!roomId) {
+          // 一覧に無い部屋（通知起動・新規作成直後など）だけ詳細を待つ
+          const project = await projectPromise;
+          if (!project.room_id) {
+            setMessages([]);
+            return project;
+          }
+          roomId = project.room_id;
         }
 
         const data = await apiRequest<MessagesListResponse>(
-          `/chat/rooms/${project.room_id}/messages?limit=120`,
+          `/chat/rooms/${roomId}/messages?limit=120`,
           {},
           activeToken,
         );
-        setMessages(data.messages ?? []);
-        await apiRequest(`/chat/rooms/${project.room_id}/read`, { method: 'POST' }, activeToken).catch(() => null);
+        // 取得中に別の部屋へ移動していたら適用しない（残像・取り違え防止）
+        if (currentProjectIdRef.current === projectId) {
+          setMessages(data.messages ?? []);
+        }
+        messagesCacheRef.current[roomId] = data.messages ?? [];
+        // 既読は応答を待たずに送る
+        apiRequest(`/chat/rooms/${roomId}/read`, { method: 'POST' }, activeToken).catch(() => null);
         setCurrentProject((current) =>
-          current?.id === project.id ? { ...current, unread_count: 0 } : current,
+          current?.id === projectId ? { ...current, unread_count: 0 } : current,
         );
-        markProjectReadLocally(project.id);
-        void dismissNotificationsForProject(project.id);
-        return project;
+        markProjectReadLocally(projectId);
+        void dismissNotificationsForProject(projectId);
+        return known ?? (await projectPromise.catch(() => null));
       } catch (error) {
         Alert.alert('Load failed', String((error as Error).message));
         return null;
@@ -1598,11 +1648,21 @@ function AppMain() {
     };
   }, [token, screen, currentProject?.id, pollRun]);
 
-  // Reset the live run view immediately when switching chats so a previous
-  // chat's timeline never flashes in the newly-opened one before the first poll.
+  // 画面＝実体: チャット画面に入るたび（部屋の切替だけでなく、一覧から同じ
+  // 部屋を開き直した時も）ライブ実行表示をリセットする。従来は「プロジェクト
+  // IDの変化」でしか消していなかったため、ダン作業中に部屋を出て開き直すと
+  // その時点の古い「実行中」（thinking・停止ボタン）が数秒表示され、最初の
+  // ポーリングが届いてやっと実態に直っていた。リセット後、本当に実行中なら
+  // 直後のポーリング（画面遷移で即発火）が正しく点灯させる。
   useEffect(() => {
+    if (screen !== 'chat') return;
     setCurrentRun(null);
     setRunEvents([]);
+  }, [screen, currentProject?.id]);
+
+  // 仮送信フラグと同期カーソルは部屋の切替時のみリセット（同じ部屋の
+  // 開き直しで消すと、ダン未読の追い連絡の半透明表示が失われる）。
+  useEffect(() => {
     setPendingFollowups({});
     lastSyncedMsgIdRef.current = null;
   }, [currentProject?.id]);
