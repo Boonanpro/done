@@ -3857,7 +3857,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                 from app.services.timeline_agent import run_timeline_agent
                 _append_job_event(room_id, job_id, {"type": "status", "text": "編集エージェントで実行します（動画内容を理解して編集・数分かかることがあります）"})
                 agent_res = run_timeline_agent(
-                    room_id=room_id, content_id=content_id, job_id=job_id,
+                    room_id=room_id, user_id=user_id, content_id=content_id, job_id=job_id,
                     instruction=revision_text,
                     annotations=_agent_annotations(instruction),
                     selected_clips=[c for c in (instruction.get("selected_clips") or []) if isinstance(c, dict)],
