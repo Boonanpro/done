@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import asyncio
@@ -6070,3 +6071,68 @@ async def list_job_events(
         except Exception:
             continue
     return events
+
+
+# --- Desktop editor launch ----------------------------------------------------------
+# The chat 制作 button used to fire a done:// protocol link, which makes the browser
+# show an "open this app?" confirmation every click — the single biggest chunk of the
+# perceived launch time, and a silent no-op when dismissed. This backend runs on the
+# same machine as the editor, so it can spawn the app directly: no browser dialog,
+# no protocol registration dependency, and a definite HTTP answer either way.
+
+
+class LaunchEditorRequest(BaseModel):
+    room_id: str
+
+
+def _launch_editor_process(url: str) -> bool:
+    home = Path(os.environ.get("USERPROFILE") or str(Path.home()))
+    exe = Path(os.environ.get("DAN_NATIVE_EDITOR_EXE") or (home / ".done" / "bin" / "native_ui.exe"))
+    if not exe.exists():
+        logger.warning("launch-editor: exe not found: %s", exe)
+        return False
+    # keep the same diagnostics trail as done_app_launcher.bat (stderr appended to
+    # %TEMP%\done_app.log with a launch marker), but skip cmd/bat: argv is passed
+    # straight to the exe, so the & in the done:// query needs no shell quoting.
+    log_path = Path(os.environ.get("TEMP") or str(home)) / "done_app.log"
+    try:
+        with open(log_path, "a", encoding="utf-8", errors="replace") as lg:
+            lg.write(f"---- launch (api) {time.strftime('%Y/%m/%d %H:%M:%S')} ----\n")
+        stderr_f = open(log_path, "a")
+    except OSError:
+        stderr_f = subprocess.DEVNULL
+    flags = (
+        subprocess.DETACHED_PROCESS
+        | subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.CREATE_NO_WINDOW
+    )
+    try:
+        subprocess.Popen(
+            [str(exe), url],
+            creationflags=flags,
+            cwd=str(exe.parent),
+            env={**os.environ, "RUST_BACKTRACE": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_f,
+        )
+        return True
+    except OSError as e:
+        logger.warning("launch-editor: spawn failed: %s", e)
+        return False
+
+
+@router.post("/launch-editor")
+def launch_editor(
+    data: LaunchEditorRequest,
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+):
+    _room_dir(data.room_id)  # 400 on malformed room_id
+    url = f"done://production?room_id={data.room_id}"
+    # forward the caller's own bearer token so the app persists it exactly like the
+    # old deep-link path did (native_token.txt stays fresh for bare launches)
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        url += "&token=" + urllib.parse.quote(auth[7:], safe="")
+    return {"launched": _launch_editor_process(url)}
