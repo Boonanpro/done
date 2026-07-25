@@ -1905,6 +1905,9 @@ def _check_cancel_tombstone(room_id: str, message_id: str | None, service) -> bo
     try:
         service.supabase.table("chat_messages").delete().eq("id", message_id).eq("sender_type", "human").execute()
         logger.info("early-cancelled user message deleted on save: %s", message_id)
+        # 一覧サムネの巻き戻し: 保存時に焼き込まれたプレビューを実際の最新で書き直す
+        from app.services.chat_service import refresh_room_preview_sync
+        refresh_room_preview_sync(service.supabase, room_id)
     except Exception as e:
         logger.warning("early-cancel delete failed for %s: %s", message_id, e)
     return True
@@ -2956,7 +2959,15 @@ async def cancel_dan_session(
                 .execute()
             )
             deleted_user_message = bool(delete_result.data)
-            if not deleted_user_message:
+            if deleted_user_message:
+                # 一覧サムネの巻き戻し: プレビューは保存時の焼き込みコピーで、
+                # 行削除では戻らない（取り消した文言が一覧に残り続ける）。
+                # 実際に残っている最新メッセージで書き直す。
+                from app.services.chat_service import refresh_room_preview_sync
+                await asyncio.to_thread(
+                    refresh_room_preview_sync, ChatService().supabase, request.session_id
+                )
+            else:
                 # 保存より先にキャンセルが届いた: 墓標を残して保存直後に取り消させる
                 import time as _t
                 _tombstone_prune()

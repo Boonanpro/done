@@ -58,6 +58,40 @@ def build_message_preview(content: Optional[str], limit: int = 80) -> str:
     return text
 
 
+def refresh_room_preview_sync(sb, room_id: str) -> None:
+    """キャンセル削除の後始末: 部屋一覧のプレビューを実際に残っている最新
+    メッセージで書き直す。
+
+    last_message_preview は保存時に焼き込まれるコピーなので、キャンセルで
+    メッセージ行を削除しても一覧のサムネに取り消した文言が残り続ける
+    （2026-07-25 実測）。ベストエフォート・失敗しても呼び出し元は落とさない。
+    """
+    try:
+        latest = (
+            sb.table("chat_messages")
+            .select("content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if latest:
+            sb.table("chat_rooms").update({
+                "last_message_preview": build_message_preview(latest[0].get("content")),
+                "last_message_at": latest[0].get("created_at"),
+            }).eq("id", room_id).execute()
+        else:
+            sb.table("chat_rooms").update({
+                "last_message_preview": "",
+                "last_message_at": None,
+            }).eq("id", room_id).execute()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "room preview refresh failed for %s", room_id, exc_info=True
+        )
+
+
 def record_message_delivery_sync(
     sb,
     room_id: str,
