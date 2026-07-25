@@ -22,6 +22,10 @@ from pathlib import Path
 DAN_CORE_PORT = 9000
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# ウィンドウ無しの親(タスクスケジューラ/pythonw/watchdog)から呼ばれても
+# 子コンソールの可視ウィンドウを作らせない。
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 
 def is_port_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -49,6 +53,7 @@ def _ensure_git_hooks_installed() -> None:
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=_NO_WINDOW,
         )
     except Exception as e:  # noqa: BLE001
         print(f"[dan-core] WARN: install_git_hooks failed (non-fatal): {e}")
@@ -87,7 +92,8 @@ def main() -> None:
     log_path = PROJECT_ROOT / "dan_core.log"
     log_file = open(log_path, "w", encoding="utf-8")
     process = subprocess.Popen(
-        cmd, cwd=str(PROJECT_ROOT), stdout=log_file, stderr=subprocess.STDOUT, env=clean_env
+        cmd, cwd=str(PROJECT_ROOT), stdout=log_file, stderr=subprocess.STDOUT, env=clean_env,
+        creationflags=_NO_WINDOW,
     )
     print(f"[dan-core] uvicorn started with PID {process.pid}")
 

@@ -21,6 +21,10 @@ CLOUDFLARED = os.path.join(
 )
 CORE_PORT = 9000
 SANDBOX_PORT = 8000
+
+# ウィンドウ無しの親(watchdog/pythonw)から起動された場合でも、cloudflared や
+# taskkill / vercel.cmd などコンソール系の子に可視ウィンドウを作らせない。
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 VERCEL_PROJECT_DIR = REPO_ROOT
 ENV_FILE = os.path.join(REPO_ROOT, ".env")
@@ -66,7 +70,7 @@ def kill_existing_tunnels():
     try:
         subprocess.run(
             ["taskkill", "/F", "/IM", "cloudflared.exe"],
-            capture_output=True, timeout=10
+            capture_output=True, timeout=10, creationflags=_NO_WINDOW
         )
     except Exception:
         pass
@@ -86,6 +90,7 @@ def start_tunnel(name: str, port: int) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=_NO_WINDOW,
     )
 
     url = None
@@ -161,7 +166,8 @@ def get_vercel_url() -> str:
         result = subprocess.run(
             [VERCEL_CMD, "project", "ls"],
             capture_output=True, text=True, timeout=15,
-            cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+            cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
         )
         for line in result.stdout.splitlines():
             if "frontend" in line:
@@ -179,14 +185,16 @@ def set_vercel_env(name: str, value: str):
     subprocess.run(
         [VERCEL_CMD, "env", "rm", name, "production", "--yes"],
         capture_output=True, timeout=15,
-        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW,
     )
 
     result = subprocess.run(
         [VERCEL_CMD, "env", "add", name, "production"],
         input=value,
         capture_output=True, text=True, timeout=15,
-        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW,
     )
     if result.returncode != 0:
         print(f"[tunnel] Warning: Vercel env update failed for {name}: {result.stderr}")
@@ -219,7 +227,8 @@ def _repoint_public_aliases(deploy_stdout: str) -> None:
         r = subprocess.run(
             [VERCEL_CMD, "alias", "set", dep, alias],
             capture_output=True, text=True, timeout=60,
-            cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+            cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
         )
         if r.returncode == 0:
             print(f"[tunnel] Alias re-pointed: {alias}")
@@ -236,7 +245,8 @@ def update_vercel_env(core_url: str, sandbox_url: str):
     subprocess.run(
         [VERCEL_CMD, "env", "rm", "NEXT_PUBLIC_API_URL", "production", "--yes"],
         capture_output=True, timeout=15,
-        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW,
     )
 
     # Trigger redeploy
@@ -244,7 +254,8 @@ def update_vercel_env(core_url: str, sandbox_url: str):
     result = subprocess.run(
         [VERCEL_CMD, "deploy", "--prod", "--yes"],
         capture_output=True, text=True, timeout=300,
-        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW,
     )
     if result.returncode == 0:
         print("[tunnel] Vercel redeploy complete")

@@ -27,6 +27,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# コアは pythonw(ウィンドウ無し)で動くため、コンソール系の子プロセス
+# (python.exe / taskkill / netstat 等)を素の Popen で起こすと Windows が
+# 新しい可視コンソールを割り当ててターミナルが「勝手に開く」。
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 
 @dataclass
 class SandboxStatus:
@@ -139,6 +144,7 @@ class SandboxManager:
             ["taskkill", "/F", "/T", "/PID", str(pid)],
             capture_output=True,
             timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
 
         # multiprocessing spawn 子を探して個別 kill
@@ -147,6 +153,7 @@ class SandboxManager:
                 ["wmic", "process", "where", "name='python.exe'",
                  "get", "processid,commandline"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=_NO_WINDOW,
             )
             target = f"parent_pid={pid}"
             for line in result.stdout.splitlines():
@@ -161,6 +168,7 @@ class SandboxManager:
                             subprocess.run(
                                 ["taskkill", "/F", "/PID", str(child_pid)],
                                 capture_output=True, timeout=3,
+                                creationflags=_NO_WINDOW,
                             )
                             logger.info("killed orphan spawn child PID %s (parent=%s)",
                                         child_pid, pid)
@@ -228,6 +236,7 @@ class SandboxManager:
             stdout=log_file,
             stderr=subprocess.STDOUT,
             env=env,
+            creationflags=_NO_WINDOW,
         )
 
     def _is_running(self) -> bool:
@@ -243,7 +252,8 @@ class SandboxManager:
             return
         try:
             result = subprocess.run(
-                ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5,
+                creationflags=_NO_WINDOW,
             )
             target_pids: set[int] = set()
             needle = f":{port} "
@@ -261,6 +271,7 @@ class SandboxManager:
                 subprocess.run(
                     ["taskkill", "/F", "/PID", str(pid)],
                     capture_output=True, timeout=3,
+                    creationflags=_NO_WINDOW,
                 )
                 logger.info("killed orphan listener PID %s on port %s", pid, port)
         except Exception as e:
