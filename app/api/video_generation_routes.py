@@ -51,6 +51,8 @@ async def generate_video(
             aspect_ratio=data.aspect_ratio,
             duration=data.duration,
             reference_image_url=data.reference_image_url,
+            provider=data.provider,
+            model=data.model,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"動画生成失敗: {e}")

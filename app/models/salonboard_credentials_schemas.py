@@ -32,3 +32,6 @@ class SalonboardCredentialsStatus(BaseModel):
     stylist_name: Optional[str] = None
     last_used_at: Optional[datetime] = None
     consent_at: Optional[datetime] = None
+    # サーバー発行の長期クッキーから本人を復元できた場合、採用すべき device_id を返す。
+    # 端末側(localStorage)の記憶が iOS の自動削除等で消えても、これで無入力復帰できる。
+    device_id: Optional[str] = None

@@ -76,7 +76,11 @@ def start_tunnel(name: str, port: int) -> str:
     """Start cloudflared tunnel and return the public URL."""
     print(f"[tunnel] Starting Cloudflare Tunnel for {name} on port {port}...")
     proc = subprocess.Popen(
-        [CLOUDFLARED, "tunnel", "--url", f"http://127.0.0.1:{port}"],
+        # --protocol http2: quick tunnels default to QUIC (UDP 7844). On networks
+        # where UDP is blocked/unstable this flaps with "control stream encountered
+        # a failure while serving" and never serves requests. http2 (TCP 443) is
+        # reliable here.
+        [CLOUDFLARED, "tunnel", "--protocol", "http2", "--url", f"http://127.0.0.1:{port}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -188,6 +192,41 @@ def set_vercel_env(name: str, value: str):
         print(f"[tunnel] Warning: Vercel env update failed for {name}: {result.stderr}")
 
 
+# 公開URL（プロジェクトの公開ドメイン）。再デプロイのたびに、新しいビルドへ
+# このエイリアスを張り替える。これを怠ると、env(BACKEND_URL)は新しくても公開URLが
+# 古いビルドを指したままになり、公開ツールのAPIが 404(DNS_HOSTNAME_RESOLVED_PRIVATE)
+# になる（2026-07-04 の障害の直接原因）。
+# salonboard-styleup-done.vercel.app: StyleUp をクライアント(SHUN氏ら)に共有済みの
+# 旧エイリアス。done-studio と同じく毎回張り替えないと古いビルドに固定され、
+# 「保存に失敗しました」で締め出される（2026-07-05 の SHUN 氏ログイン不可の直接原因）。
+PUBLIC_ALIASES = [
+    "done-studio.vercel.app",
+    "salonboard-styleup-done.vercel.app",
+]
+
+
+def _repoint_public_aliases(deploy_stdout: str) -> None:
+    """`vercel deploy --prod` が出す本番デプロイURLを、公開エイリアスに張り替える。"""
+    m = re.search(r"Production:\s*(https://[a-z0-9-]+\.vercel\.app)", deploy_stdout or "")
+    if not m:
+        m = re.search(r"(https://frontend-[a-z0-9-]+\.vercel\.app)", deploy_stdout or "")
+    if not m:
+        print("[tunnel] Warning: could not parse deployment URL; skipping alias re-point")
+        return
+    dep = m.group(1)
+    for alias in PUBLIC_ALIASES:
+        print(f"[tunnel] Re-pointing {alias} -> {dep}")
+        r = subprocess.run(
+            [VERCEL_CMD, "alias", "set", dep, alias],
+            capture_output=True, text=True, timeout=60,
+            cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+        )
+        if r.returncode == 0:
+            print(f"[tunnel] Alias re-pointed: {alias}")
+        else:
+            print(f"[tunnel] Warning: alias set failed for {alias}: {r.stderr[:200]}")
+
+
 def update_vercel_env(core_url: str, sandbox_url: str):
     """Update Vercel env vars and trigger redeploy."""
     set_vercel_env("CORE_BACKEND_URL", core_url)
@@ -209,6 +248,8 @@ def update_vercel_env(core_url: str, sandbox_url: str):
     )
     if result.returncode == 0:
         print("[tunnel] Vercel redeploy complete")
+        # 新しいビルドへ公開URLを張り替える（これが無いと公開URLが古いビルドのまま）。
+        _repoint_public_aliases(result.stdout)
     else:
         print(f"[tunnel] Warning: Redeploy may have failed: {result.stderr[:200]}")
 

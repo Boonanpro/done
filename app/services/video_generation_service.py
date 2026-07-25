@@ -10,6 +10,8 @@ import os
 import uuid
 import asyncio
 import logging
+import json
+import subprocess
 from typing import Optional, List
 
 import httpx
@@ -103,6 +105,8 @@ class VideoGenerationService:
         aspect_ratio: str = "16:9",
         duration: str = "5",
         reference_image_url: Optional[str] = None,
+        provider: str = "fal_kling",
+        model: Optional[str] = None,
     ) -> dict:
         """動画を生成する。reference_image_url 指定時は image-to-video、無ければ text-to-video。
 
@@ -112,6 +116,11 @@ class VideoGenerationService:
             duration: "5" or "10" (秒、文字列)
             reference_image_url: 参照画像 (image-to-video モードで使用)
         """
+        if provider == "higgsfield":
+            return await self._generate_higgsfield(
+                prompt=prompt, user_id=user_id, project_id=project_id, message_id=message_id,
+                aspect_ratio=aspect_ratio, duration=duration, model=model or "seedance_2_0",
+            )
         if duration not in SUPPORTED_DURATIONS:
             duration = "5"
 
@@ -177,6 +186,47 @@ class VideoGenerationService:
             except Exception:
                 logger.exception("dan-notion sync failed for video %s", record.get("id"))
         return record
+
+    async def _generate_higgsfield(self, *, prompt: str, user_id: str, project_id: Optional[str],
+                                   message_id: Optional[str], aspect_ratio: str, duration: str,
+                                   model: str) -> dict:
+        if model not in {"seedance_2_0", "kling3_0"}:
+            raise RuntimeError("Unsupported Higgsfield video model")
+        cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
+               "--aspect_ratio", aspect_ratio, "--duration", str(duration), "--wait", "--json"]
+        if model == "seedance_2_0":
+            cmd += ["--resolution", "720p"]
+        result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=1260)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "Higgsfield generation failed")[-500:])
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Higgsfield returned an invalid response") from exc
+        def find_url(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key.lower() in {"url", "video_url", "download_url"} and isinstance(item, str) and item.startswith("http"):
+                        return item
+                    found = find_url(item)
+                    if found: return found
+            if isinstance(value, list):
+                for item in value:
+                    found = find_url(item)
+                    if found: return found
+            return None
+        video_url = find_url(payload)
+        if not video_url:
+            raise RuntimeError("Higgsfield returned no video URL")
+        video_bytes = await self._download_video(video_url)
+        url, path = await self._upload_to_storage(video_bytes, "higgsfield")
+        row = {"prompt": prompt, "url": url, "storage_path": path, "model": model,
+               "kind": "higgsfield-video", "mime_type": "video/mp4", "aspect_ratio": aspect_ratio,
+               "created_by": user_id}
+        if project_id: row["project_id"] = str(project_id)
+        if message_id: row["message_id"] = str(message_id)
+        saved = self.supabase.table(self.table).insert(row).execute()
+        return saved.data[0] if saved.data else row
 
     async def list(
         self,

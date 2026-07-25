@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 import asyncio
 import hashlib
@@ -514,9 +515,12 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
     parts: list[str] = []
     font_px = base_font
     try:
-        if style.get("fontSize"):
-            font_px = max(10, round(base_font * float(style["fontSize"])))
+        if style.get("fontSize") is not None:
+            scale = float(style["fontSize"])
+            font_px = max(1, round(base_font * max(0.0, scale)))
             parts.append(f"\\fs{font_px}")
+            if scale <= 0:
+                parts.append("\\alpha&HFF&")
     except Exception:
         pass
     if style.get("color"):
@@ -575,7 +579,12 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
         # escape first (turns literal newlines into \N and protects braces), THEN wrap —
         # _wrap_caption_ass only inserts additional \N which must survive as-is.
         escaped = _ass_escape(str(caption.get("text") or "").strip())
-        wrapped = _wrap_caption_ass(escaped, font_px, max_px)
+        style = caption.get("style") if isinstance(caption.get("style"), dict) else {}
+        try:
+            caption_max_px = width * max(0.05, min(2.0, float(style.get("maxWidth", max_px / width))))
+        except (TypeError, ValueError):
+            caption_max_px = max_px
+        wrapped = _wrap_caption_ass(escaped, font_px, caption_max_px)
         text = override + wrapped if override else wrapped
         lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}")
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -901,6 +910,61 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
         f"[{video_in}]split[{base}][{crop}];"
         f"[{crop}]{proc}[{blurred}];"
         f"[{base}][{blurred}]overlay={x}:{y}:enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[{out}]"
+    )
+    return filt, out
+
+
+def _focus_chain(video_in: str, idx: int | str, x: int, y: int, w: int, h: int,
+                 frame_w: int, frame_h: int, start: float, end: float, style: str,
+                 fps: float, strength: float | None, opacity: float | None) -> tuple[str, str]:
+    """注目演出 (attention effects) — preview parity with the native compositor:
+    spotlight = keep the region, dim outside; marker = highlighter wash on the
+    region + subtle outside dim; zoom = punch-in toward the region's centre."""
+    out = f"vfx{idx}"
+    fps_s = f"{fps:g}"
+    en = f"enable='between(t\\,{start:.3f}\\,{end:.3f})'"
+    x0, x1, y0, y1 = x, x + w, y, y + h
+    if style == "zoom":
+        z = max(1.1, min(3.0, float(strength or 1.6)))
+        cw = max(2, round(frame_w / z))
+        ch = max(2, round(frame_h / z))
+        cx = max(0, min(frame_w - cw, round((x + w / 2) * (1 - 1 / z))))
+        cy = max(0, min(frame_h - ch, round((y + h / 2) * (1 - 1 / z))))
+        filt = (
+            f"[{video_in}]split[zb{idx}][zf{idx}];"
+            f"[zf{idx}]crop={cw}:{ch}:{cx}:{cy},scale={frame_w}:{frame_h}:flags=bicubic[zz{idx}];"
+            f"[zb{idx}][zz{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
+        )
+        return filt, out
+    op = max(0.0, min(1.0, float(opacity if opacity is not None else 1.0)))
+    if style == "spotlight":
+        dim = 1.0 - 0.55 * op
+        filt = (
+            f"[{video_in}]split[sb{idx}][sd{idx}];"
+            f"[sd{idx}]lutyuv=y=val*{dim:.3f}[sdim{idx}];"
+            f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+            f"geq=lum='255*(1-between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1}))',"
+            f"gblur=sigma=8[smask{idx}];"
+            f"[sdim{idx}][smask{idx}]alphamerge[sov{idx}];"
+            f"[sb{idx}][sov{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
+        )
+        return filt, out
+    # marker: outside dim 0.85 + warm wash (0.30 * strength slider) inside
+    wash = 0.30 * op
+    filt = (
+        f"[{video_in}]split[mb{idx}][md{idx}];"
+        f"[md{idx}]lutyuv=y=val*0.85[mdim{idx}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+        f"geq=lum='255*(1-between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1}))',"
+        f"gblur=sigma=8[mmsk{idx}];"
+        f"[mdim{idx}][mmsk{idx}]alphamerge[mdov{idx}];"
+        f"[mb{idx}][mdov{idx}]overlay=0:0:{en}:eof_action=pass[mb2{idx}];"
+        f"color=c=0xFFEDA0:s={frame_w}x{frame_h}:r={fps_s},format=rgb24[mwc{idx}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_s},format=gray,"
+        f"geq=lum='{wash * 255:.0f}*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})',"
+        f"gblur=sigma=8[mim{idx}];"
+        f"[mwc{idx}][mim{idx}]alphamerge[mwov{idx}];"
+        f"[mb2{idx}][mwov{idx}]overlay=0:0:{en}:eof_action=pass[{out}]"
     )
     return filt, out
 
@@ -1565,6 +1629,16 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         h = max(2, min(output_height - y, round(float(spec.get("height") or 0) * output_height)))
         start = max(0.0, float(spec.get("start") or 0))
         end = max(start + 0.01, float(spec.get("end") or (start + 0.5)))
+        # 注目演出（マーカー/スポットライト/ズーム）: 静的矩形で適用（プレビュー同等）。
+        # キーフレームは v1 では基準矩形にフォールバック。
+        style_s = str(spec.get("style") or "").lower()
+        if style_s in ("marker", "spotlight", "zoom"):
+            filt, video_out = _focus_chain(
+                video_out, bi, x, y, w, h, output_width, output_height, start, end,
+                style_s, timeline_fps,
+                (eclip or {}).get("effect_strength"), (eclip or {}).get("effect_opacity"))
+            filters.append(filt)
+            return
         # キーフレーム（手動追従）: 位置＋サイズを区分線形で動かす。キーにw/hが
         # 無い旧形式は基準矩形のサイズで補完（region_at と同じ規則）
         kf: list[tuple[float, float, float, float, float]] = []
@@ -1850,7 +1924,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         audio_labels: list[str] = []
         for clip in audio_clips:
             asset = assets.get(str(clip.get("asset_id") or ""))
-            if not asset or asset.get("kind") != "video":
+            if not asset or asset.get("kind") not in {"video", "audio"}:
                 continue
             source_path = _asset_source_path(asset)
             metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
@@ -2511,7 +2585,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             subprocess.run(
                 [sys.executable, str(script), str(src), "--words", "--json-only", "--model", whisper_model],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=900, check=False,
+                timeout=900, check=False, env=_caption_transcribe_env(room_id),
             )
             data = json.loads(out_json.read_text(encoding="utf-8")) if out_json.exists() else {}
         except Exception:
@@ -3536,7 +3610,127 @@ Rules:
     return merged
 
 
+def _higgsfield_result_url(value: Any) -> str | None:
+    """Find the delivered video URL in the CLI's version-dependent JSON shape."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower() in {"url", "video_url", "download_url"} and isinstance(item, str) and item.startswith("http"):
+                return item
+            found = _higgsfield_result_url(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _higgsfield_result_url(item)
+            if found:
+                return found
+    return None
+
+
+def _run_higgsfield_generation_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any]) -> None:
+    """Generate, register, and place one editable Higgsfield video clip."""
+    _update_job(room_id, job_id, {"status": "running"})
+    _update_content(room_id, content_id, {"status": "running"})
+    try:
+        prompt = str(instruction.get("prompt") or "").strip()
+        model = str(instruction.get("model") or "seedance_2_0")
+        aspect = str(instruction.get("aspect_ratio") or "9:16")
+        duration = int(float(instruction.get("duration") or 5))
+        if not prompt:
+            raise RuntimeError("生成指示を入力してください")
+        if model not in {"seedance_2_0", "kling3_0"}:
+            raise RuntimeError("Unsupported Higgsfield model")
+        if aspect not in {"9:16", "16:9", "1:1"}:
+            aspect = "9:16"
+        duration = 10 if duration >= 8 else 5
+
+        job_dir = _room_dir(room_id) / "jobs" / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"Higgsfield ({'Seedance 2.0' if model == 'seedance_2_0' else 'Kling 3.0'}) に生成を依頼しました…"})
+        cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
+               "--aspect_ratio", aspect, "--duration", str(duration), "--wait", "--json"]
+        if model == "seedance_2_0":
+            cmd.extend(["--resolution", "720p"])
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=1260, creationflags=flags)
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "Higgsfield generation failed")[-700:])
+        try:
+            result_data = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Higgsfield の応答を読み取れませんでした") from exc
+        source_url = _higgsfield_result_url(result_data)
+        if not source_url:
+            raise RuntimeError("Higgsfield の生成結果に動画URLがありません")
+
+        _append_job_event(room_id, job_id, {"type": "status", "text": "生成が完了しました。編集用素材を登録しています…"})
+        out_path = job_dir / "higgsfield.mp4"
+        with urllib.request.urlopen(source_url, timeout=180) as response, out_path.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        if not out_path.exists() or out_path.stat().st_size < 1024:
+            raise RuntimeError("生成動画のダウンロードに失敗しました")
+        asset = _add_generated_video_asset(
+            room_id, out_path, filename=f"higgsfield_{job_id[:8]}.mp4",
+            metadata={**_probe_video(out_path), "provider": "higgsfield", "model": model, "prompt": prompt, "source_url": source_url},
+        )
+
+        contents = _read_contents(room_id)
+        content = next((item for item in contents if str(item.get("id")) == str(content_id)), None)
+        if not content:
+            raise RuntimeError("Content not found")
+        timeline = dict(content.get("timeline") or {})
+        annotation = instruction.get("annotation") if isinstance(instruction.get("annotation"), dict) else {}
+        # The editor removes the one-shot annotation after the job is accepted. Do the
+        # same server-side so a fast worker can never write an old polling snapshot back.
+        consumed_id = str(annotation.get("id") or "")
+        if consumed_id and isinstance(timeline.get("annotations"), list):
+            timeline["annotations"] = [a for a in timeline["annotations"] if not isinstance(a, dict) or str(a.get("id")) != consumed_id]
+        sequence = dict(timeline.get("sequence") or {})
+        tracks = list(sequence.get("tracks") or [])
+        start = max(0.0, float(annotation.get("start") or instruction.get("timeline_start") or 0))
+        requested_end = annotation.get("end") if annotation.get("end") is not None else instruction.get("timeline_end")
+        asset_duration = float((asset.get("metadata") or {}).get("duration") or duration)
+        end = float(requested_end) if requested_end is not None else start + min(duration, asset_duration)
+        end = max(start + 0.1, min(end, start + max(0.1, asset_duration)))
+        position = None
+        data = annotation.get("data") if isinstance(annotation.get("data"), dict) else {}
+        if annotation.get("kind") == "rect" and all(key in data for key in ("x", "y", "width", "height")):
+            position = {key: float(data[key]) for key in ("x", "y", "width", "height")}
+        track = {"id": f"video_higgsfield_{job_id[:8]}", "type": "video", "label": "Higgsfield", "clips": []}
+        clip = {
+            "id": f"clip_higgsfield_{job_id[:8]}", "asset_id": asset["id"], "label": "Higgsfield generated",
+            "source_start": 0, "source_end": round(end - start, 3),
+            "timeline_start": round(start, 3), "timeline_end": round(end, 3),
+            "track": "video", "composition": "overlay" if position else "fullscreen",
+            **({"position": position} if position else {}),
+        }
+        track["clips"].append(clip)
+        tracks.append(track)
+        sequence["tracks"] = tracks
+        sequence["duration"] = max(float(sequence.get("duration") or 0), end)
+        timeline["sequence"] = sequence
+        asset_ids = [str(v) for v in (content.get("asset_ids") or [])]
+        if asset["id"] not in asset_ids:
+            asset_ids.append(asset["id"])
+        _update_content(room_id, content_id, {"timeline": timeline, "asset_ids": asset_ids, "status": "ready"})
+        result = {"asset_id": asset["id"], "clip_id": clip["id"], "timeline_start": clip["timeline_start"], "timeline_end": clip["timeline_end"], "model": model}
+        _append_job_event(room_id, job_id, {"type": "status", "text": "素材登録と映像レーンへの配置が完了しました。タイムライン上で手動調整できます。"})
+        _update_job(room_id, job_id, {"status": "done", "result": result, "error": None})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Higgsfield generation failed room=%s job=%s", room_id, job_id)
+        message = str(exc)
+        _append_job_event(room_id, job_id, {"type": "error", "text": message})
+        _update_job(room_id, job_id, {"status": "failed", "error": message})
+        _update_content(room_id, content_id, {"status": "failed"})
+
+
 def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
+    # Higgsfield is deliberately a first-class production job instead of a synchronous
+    # HTTP request: a real video generation can take several minutes, while the existing
+    # job/event polling UI keeps the editor usable and reports its terminal state.
+    if instruction.get("mode") == "higgsfield_generate":
+        _run_higgsfield_generation_job(room_id, job_id, content_id, instruction)
+        return
     _update_job(room_id, job_id, {"status": "running"})
     # NEVER blow away the stored timeline with an empty/partial instruction payload —
     # a job posted without a full timeline (e.g. plain export test) must not wipe the
@@ -3657,7 +3851,9 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             #  - anything needing new material / structure / generation / content
             #    understanding -> full agent on a DRAFT, committed once with CAS
             revision_text = str(instruction.get("revision_text") or instruction.get("brief") or "")
-            if _revision_needs_agent(revision_text):
+            if _is_caption_generation_request(revision_text):
+                merged = _build_caption_generation(room_id, job_id, instruction)
+            elif _revision_needs_agent(revision_text):
                 from app.services.timeline_agent import run_timeline_agent
                 _append_job_event(room_id, job_id, {"type": "status", "text": "編集エージェントで実行します（動画内容を理解して編集・数分かかることがあります）"})
                 agent_res = run_timeline_agent(
@@ -4931,7 +5127,8 @@ def _ensure_audio_analysis(room_id: str, asset_ids: list[str]) -> dict[str, dict
         meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
         src = a.get("proxy_path") or a.get("local_path")
         cached = meta.get("audio_analysis")
-        if (isinstance(cached, dict) and cached.get("segments")
+        cached_has_words = any((seg.get("words") or []) for seg in ((cached or {}).get("segments") or [])) if isinstance(cached, dict) else False
+        if (isinstance(cached, dict) and cached.get("segments") and cached_has_words
                 and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model):
             out[aid] = cached
             continue
@@ -4942,6 +5139,7 @@ def _ensure_audio_analysis(room_id: str, asset_ids: list[str]) -> dict[str, dict
             subprocess.run(
                 [sys.executable, str(script), str(src), "--words", "--json-only", "--model", whisper_model],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900, check=False, creationflags=cflags,
+                env=_caption_transcribe_env(room_id),
             )
             data = json.loads(out_json.read_text(encoding="utf-8")) if out_json.exists() else {}
         except Exception:
@@ -4957,6 +5155,592 @@ def _ensure_audio_analysis(room_id: str, asset_ids: list[str]) -> dict[str, dict
     if dirty:
         _write_assets(room_id, assets)
     return out
+
+
+def _is_caption_generation_request(text: str) -> bool:
+    low = text.lower()
+    generate_terms = (
+        "テロップ", "字幕", "キャプション",
+        "caption", "subtitle", "subtitles",
+    )
+    negative_terms = (
+        "不要", "いらない", "入れない",
+        "付けない", "つけない", "消して",
+        "削除", "なし", "無し", "外して",
+    )
+    if not any(term.lower() in low for term in generate_terms):
+        return False
+    return not any(term in text for term in negative_terms)
+
+
+def _caption_text_len(text: str) -> int:
+    return len(re.sub(r"\s+", "", text))
+
+
+def _caption_whisper_model() -> str:
+    # 'medium' fits an 8GB GPU (large-v3 needs ~10GB VRAM -> CPU fallback -> minutes/asset);
+    # override per machine via the env vars below.
+    return (
+        os.environ.get("DAN_CAPTION_WHISPER_MODEL")
+        or os.environ.get("DAN_PLAN_WHISPER_MODEL")
+        or os.environ.get("DAN_WHISPER_MODEL")
+        or "medium"
+    )
+
+
+def _caption_glossary(room_id: str | None) -> list[tuple[str, str]]:
+    """Optional project glossary for transcript cleanup.
+
+    Supported files:
+      - uploads/production-assets/<room_id>/caption_terms.json
+      - path in DAN_CAPTION_TERMS_JSON
+
+    Formats:
+      {"replacements": [{"from": "ライン", "to": "LINE"}]}
+      {"ライン": "LINE"}
+    """
+    paths: list[Path] = []
+    if room_id:
+        paths.append(_room_dir(room_id) / "caption_terms.json")
+    env_path = os.environ.get("DAN_CAPTION_TERMS_JSON")
+    if env_path:
+        paths.append(Path(env_path))
+    replacements: list[tuple[str, str]] = []
+    for path in paths:
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        items: list[tuple[Any, Any]] = []
+        if isinstance(data, dict) and isinstance(data.get("replacements"), list):
+            for item in data.get("replacements") or []:
+                if isinstance(item, dict):
+                    items.append((item.get("from"), item.get("to")))
+        elif isinstance(data, dict):
+            items.extend(data.items())
+        for src, dst in items:
+            src_s = str(src or "").strip()
+            dst_s = str(dst or "").strip()
+            if src_s and dst_s and src_s != dst_s:
+                replacements.append((src_s, dst_s))
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    return replacements
+
+
+def _caption_apply_glossary(text: str, glossary: list[tuple[str, str]] | None = None) -> str:
+    clean = re.sub(r"\s+", " ", text).strip()
+    for src, dst in glossary or []:
+        clean = clean.replace(src, dst)
+    return clean
+
+
+def _caption_transcribe_env(room_id: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    if env.get("DAN_WHISPER_INITIAL_PROMPT"):
+        return env
+    terms: list[str] = []
+    for src, dst in _caption_glossary(room_id):
+        terms.extend([src, dst])
+    terms = [t for t in dict.fromkeys(t.strip() for t in terms) if t]
+    if terms:
+        env["DAN_WHISPER_INITIAL_PROMPT"] = "日本語の会話です。固有名詞と専門用語: " + "、".join(terms[:80])
+    return env
+
+
+def _caption_join_words(words: list[dict[str, Any]], glossary: list[tuple[str, str]] | None = None) -> str:
+    raw = "".join(str(w.get("text") or "").strip() for w in words).strip()
+    return _caption_apply_glossary(raw, glossary)
+
+
+def _caption_display_text(text: str, max_line_chars: int = 13) -> str:
+    """A readable two-line Japanese caption. Prefer natural punctuation; fall back to a
+    balanced split so long captions don't become one heavy block."""
+    clean = re.sub(r"\s+", " ", text).strip()
+    if _caption_text_len(clean) <= max_line_chars:
+        return clean
+    chars = list(clean)
+    mid = len(chars) // 2
+    candidates: list[int] = [i + 1 for i, ch in enumerate(chars) if ch in "。！？!?、，,・ "]
+    for marker in (
+        "という", "っていう", "なんです", "ですね", "ですよ", "ます", "です", "ました", "でした",
+        "ので", "けど", "から", "まで", "には", "では", "なら", "って",
+        "とか", "への", "より", "は", "が", "を", "に", "で", "と", "も", "の", "へ",
+    ):
+        start = 0
+        while True:
+            idx = clean.find(marker, start)
+            if idx < 0:
+                break
+            candidates.append(idx + len(marker))
+            start = idx + len(marker)
+    candidates = [
+        i for i in set(candidates)
+        if 4 <= i <= len(chars) - 4 and _caption_text_len("".join(chars[:i])) <= max_line_chars + 3
+    ]
+    def split_penalty(i: int) -> int:
+        left = chars[i - 1] if i > 0 else ""
+        right = chars[i] if i < len(chars) else ""
+        penalty = abs(i - mid)
+        if re.match(r"[A-Za-z0-9ァ-ヶー]", left) and re.match(r"[A-Za-z0-9ァ-ヶー]", right):
+            penalty += 100
+        if right in "んゃゅょっぁぃぅぇぉー":
+            penalty += 80
+        if right in "かがはをにでともの":
+            penalty += 50
+        if left in "ゃゅょっぁぃぅぇぉ":
+            penalty += 80
+        return penalty
+    if candidates:
+        split = min(candidates, key=split_penalty)
+    else:
+        fallback = [
+            i for i in range(4, len(chars) - 3)
+            if _caption_text_len("".join(chars[:i])) <= max_line_chars + 4
+        ]
+        split = min(fallback, key=split_penalty, default=mid)
+    return "".join(chars[:split]).strip(" 、,") + "\n" + "".join(chars[split:]).strip(" 、,")
+
+
+def _caption_text_chunks(text: str, max_chars: int = 22) -> list[str]:
+    clean = re.sub(r"\s+", " ", text).strip()
+    chunks: list[str] = []
+    while _caption_text_len(clean) > max_chars:
+        chars = list(clean)
+        candidates: list[int] = [i + 1 for i, ch in enumerate(chars) if ch in "。！？!?、，,・ "]
+        for marker in (
+            "という", "っていう", "なんです", "ですね", "ですよ", "ですか", "ます", "です",
+            "ました", "でした", "ので", "けど", "から", "まで", "には", "では", "なら",
+            "って", "とか", "への", "より", "は", "が", "を", "に", "で", "と", "も", "の", "へ",
+        ):
+            start = 0
+            while True:
+                idx = clean.find(marker, start)
+                if idx < 0:
+                    break
+                candidates.append(idx + len(marker))
+                start = idx + len(marker)
+        candidates = [i for i in set(candidates) if 5 <= i <= len(chars) - 5 and _caption_text_len(clean[:i]) <= max_chars]
+        if candidates:
+            split = max(candidates, key=lambda i: (_caption_text_len(clean[:i]), -abs(i - max_chars)))
+        else:
+            split = max(5, min(len(chars) - 5, max_chars))
+            while split > 5 and chars[split] in "んゃゅょっぁぃぅぇぉーかがはをにでとも":
+                split -= 1
+        chunk = clean[:split].strip(" 、,")
+        if chunk:
+            chunks.append(chunk)
+        clean = clean[split:].strip(" 、,")
+    if clean:
+        chunks.append(clean)
+    return chunks or [text]
+
+
+def _caption_default_style() -> dict[str, Any]:
+    return {
+        "font": "noto-sans",
+        "color": "#ffffff",
+        "outlineColor": "#000000",
+        "outlineWidth": 1.65,
+        "fontSize": 1.04,
+        "y": 0.14,
+        "shadow": {"color": "rgba(0,0,0,0.85)", "blur": 10, "dy": 3},
+        "animation": "none",
+    }
+
+
+def _caption_boundary_strength(text: str) -> int:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return 0
+    if re.search(r"[。！？!?]$", compact):
+        return 100
+    if re.search(r"[、，,]$", compact):
+        return 72
+    strong_suffixes = (
+        "ました", "でした", "します", "できます", "あります", "います",
+        "ですね", "ですよ", "です", "ます", "なんです",
+    )
+    medium_suffixes = (
+        "という", "っていう", "なので", "ので", "けど", "から", "なら",
+        "ところで", "場合", "とき", "時", "あと", "まず",
+    )
+    weak_suffixes = ("は", "が", "を", "に", "で", "と", "も", "の", "へ")
+    if compact.endswith(strong_suffixes):
+        return 86
+    if compact.endswith(medium_suffixes):
+        return 64
+    if compact.endswith(weak_suffixes):
+        return 28
+    return 0
+
+
+def _caption_bad_group_boundary(cur: list[dict[str, Any]], nxt: dict[str, Any]) -> bool:
+    cur_word = str((cur[-1] or {}).get("text") or "").strip()
+    next_word = str(nxt.get("text") or "").strip()
+    if not cur_word or not next_word:
+        return False
+    if next_word[0] in "んゃゅょっぁぃぅぇぉー":
+        return True
+    if re.match(r"^[ぁ-ん]+$", cur_word[-1:]) and re.match(r"^[ぁ-ん]+$", next_word[:1]):
+        return True
+    if re.match(r"^[ァ-ヶーA-Za-z0-9]+$", cur_word[-1:]) and re.match(r"^[ァ-ヶーA-Za-z0-9]+$", next_word[:1]):
+        return True
+    if len(re.sub(r"\s+", "", cur_word)) == 1 and not re.search(r"[。！？!?、，,]$", cur_word):
+        return True
+    return False
+
+
+def _caption_should_break(
+    cur: list[dict[str, Any]],
+    nxt: dict[str, Any],
+    *,
+    glossary: list[tuple[str, str]] | None,
+    max_chars: int,
+    max_duration: float,
+    min_duration: float,
+) -> bool:
+    candidate = cur + [nxt]
+    text = _caption_join_words(candidate, glossary)
+    cur_text = _caption_join_words(cur, glossary)
+    cur_len = _caption_text_len(cur_text)
+    cand_len = _caption_text_len(text)
+    dur = float(candidate[-1]["end"]) - float(candidate[0]["start"])
+    cur_dur = float(cur[-1]["end"]) - float(cur[0]["start"])
+    gap = float(nxt["start"]) - float(cur[-1]["end"])
+    segment_break = nxt.get("segment_index") != cur[-1].get("segment_index")
+    if gap > 0.38 and cur_dur >= 0.45:
+        return True
+    if segment_break and cur_dur >= min_duration:
+        return True
+    if cand_len > max_chars:
+        if _caption_bad_group_boundary(cur, nxt) and cand_len <= max_chars + 9 and dur <= max_duration + 0.8:
+            return False
+        return True
+    if dur > max_duration:
+        if _caption_bad_group_boundary(cur, nxt) and cand_len <= max_chars + 7 and dur <= max_duration + 0.8:
+            return False
+        return True
+    strength = _caption_boundary_strength(cur_text)
+    if strength >= 100 and cur_len >= 3:
+        return True
+    if strength >= 80 and cur_len >= 8 and cur_dur >= min_duration:
+        return True
+    if strength >= 60 and cur_len >= 12 and cur_dur >= min_duration:
+        return True
+    return False
+
+
+def _timeline_speech_words(sequence: dict[str, Any], analysis_by_asset: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Words in the already-edited timeline, mapped from source seconds to timeline seconds."""
+    out: list[dict[str, Any]] = []
+    for cl in _caption_sync_source_clips(sequence):
+        aid = str(cl.get("asset_id") or "")
+        analysis = analysis_by_asset.get(aid)
+        if not analysis:
+            continue
+        ts = float(cl.get("timeline_start") or 0)
+        te = float(cl.get("timeline_end") or ts)
+        src0 = float(cl.get("source_start") or 0)
+        src1 = float(cl.get("source_end") or src0 + max(0.0, te - ts))
+        for seg in analysis.get("segments") or []:
+            for w in seg.get("words") or []:
+                ws = float(w.get("start") or 0)
+                we = float(w.get("end") or ws)
+                if we <= src0 or ws >= src1:
+                    continue
+                text = str(w.get("word") or w.get("text") or "").strip()
+                if not text:
+                    continue
+                t0 = ts + (max(ws, src0) - src0)
+                t1 = ts + (min(we, src1) - src0)
+                if t1 <= t0:
+                    t1 = t0 + 0.05
+                out.append({"text": text, "start": round(t0, 3), "end": round(t1, 3)})
+    out.sort(key=lambda x: x["start"])
+    monotonic: list[dict[str, Any]] = []
+    last_end = -1.0
+    for word in out:
+        start = float(word["start"])
+        end = float(word["end"])
+        if end <= last_end + 0.02:
+            continue
+        if start < last_end:
+            start = last_end
+        end = max(end, start + 0.05)
+        monotonic.append({**word, "start": round(start, 3), "end": round(end, 3)})
+        last_end = end
+    return monotonic
+
+
+def _group_caption_words(
+    words: list[dict[str, Any]],
+    *,
+    glossary: list[tuple[str, str]] | None = None,
+    max_chars: int = 22,
+    max_duration: float = 2.75,
+    min_duration: float = 0.72,
+) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    for w in words:
+        if not cur:
+            cur = [w]
+            continue
+        if _caption_should_break(
+            cur,
+            w,
+            glossary=glossary,
+            max_chars=max_chars,
+            max_duration=max_duration,
+            min_duration=min_duration,
+        ):
+            groups.append(cur)
+            cur = [w]
+        else:
+            cur = cur + [w]
+    if cur:
+        groups.append(cur)
+    # Avoid unreadably short flashes by merging tiny captions when possible.
+    merged: list[list[dict[str, Any]]] = []
+    for g in groups:
+        if merged:
+            prev = merged[-1]
+            joined = prev + g
+            dur = float(joined[-1]["end"]) - float(joined[0]["start"])
+            joined_len = _caption_text_len(_caption_join_words(joined, glossary))
+            if (
+                float(g[-1]["end"]) - float(g[0]["start"]) < min_duration
+                and joined_len <= max_chars + 2
+                and dur <= max_duration + 0.25
+                and _caption_boundary_strength(_caption_join_words(prev, glossary)) < 80
+            ):
+                merged[-1] = joined
+                continue
+        merged.append(g)
+    balanced: list[list[dict[str, Any]]] = []
+    i = 0
+    while i < len(merged):
+        g = merged[i]
+        text_len = _caption_text_len(_caption_join_words(g, glossary))
+        if text_len < 5 and i + 1 < len(merged):
+            joined = g + merged[i + 1]
+            dur = float(joined[-1]["end"]) - float(joined[0]["start"])
+            if _caption_text_len(_caption_join_words(joined, glossary)) <= max_chars + 6 and dur <= max_duration + 0.7:
+                balanced.append(joined)
+                i += 2
+                continue
+        if text_len < 5 and balanced:
+            joined = balanced[-1] + g
+            dur = float(joined[-1]["end"]) - float(joined[0]["start"])
+            if _caption_text_len(_caption_join_words(joined, glossary)) <= max_chars + 6 and dur <= max_duration + 0.7:
+                balanced[-1] = joined
+                i += 1
+                continue
+        balanced.append(g)
+        i += 1
+    return balanced
+
+
+def _generate_caption_sequence_from_words(
+    sequence: dict[str, Any],
+    words: list[dict[str, Any]],
+    room_id: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    glossary = _caption_glossary(room_id)
+    groups = _group_caption_words(words, glossary=glossary)
+    style = _caption_default_style()
+    captions: list[dict[str, Any]] = []
+    last_end = 0.0
+    cap_index = 1
+    for i, group in enumerate(groups, start=1):
+        if not group:
+            continue
+        raw_text = _caption_join_words(group, glossary)
+        if not raw_text:
+            continue
+        next_start = float(groups[i][0]["start"]) if i < len(groups) and groups[i] else None
+        lead = 0.04
+        tail = 0.12
+        group_start = max(float(group[0]["start"]) - lead, last_end)
+        end_target = max(float(group[-1]["end"]) + tail, group_start + 0.72)
+        if next_start is not None:
+            end_target = min(end_target, max(group_start + 0.55, next_start - 0.02))
+        chunks = _caption_text_chunks(raw_text, max_chars=22)
+        total_len = max(1, sum(_caption_text_len(chunk) for chunk in chunks))
+        cursor = group_start
+        elapsed_chars = 0
+        for j, chunk in enumerate(chunks):
+            chunk_len = max(1, _caption_text_len(chunk))
+            elapsed_chars += chunk_len
+            if j == len(chunks) - 1:
+                chunk_end = end_target
+            else:
+                chunk_end = group_start + (end_target - group_start) * (elapsed_chars / total_len)
+                chunk_end = max(chunk_end, cursor + 0.55)
+            start = round(cursor, 3)
+            end = round(max(chunk_end, cursor + 0.55), 3)
+            captions.append({
+                "id": f"clip_cap_{cap_index:04d}",
+                "track": "caption",
+                "text": _caption_display_text(chunk, max_line_chars=16),
+                "timeline_start": start,
+                "timeline_end": end,
+                "style": style,
+                "words": group if len(chunks) == 1 else [],
+            })
+            cap_index += 1
+            cursor = end
+            last_end = end
+    balanced_captions: list[dict[str, Any]] = []
+    i = 0
+    while i < len(captions):
+        cap = dict(captions[i])
+        text = str(cap.get("text") or "").replace("\n", "")
+        if _caption_text_len(text) < 5:
+            if balanced_captions:
+                prev = dict(balanced_captions[-1])
+                joined = str(prev.get("text") or "").replace("\n", "") + text
+                if _caption_text_len(joined) <= 22:
+                    prev["text"] = _caption_display_text(joined, max_line_chars=16)
+                    prev["timeline_end"] = cap.get("timeline_end")
+                    balanced_captions[-1] = prev
+                    i += 1
+                    continue
+            if i + 1 < len(captions):
+                nxt = dict(captions[i + 1])
+                joined = text + str(nxt.get("text") or "").replace("\n", "")
+                if _caption_text_len(joined) <= 22:
+                    nxt["text"] = _caption_display_text(joined, max_line_chars=16)
+                    nxt["timeline_start"] = cap.get("timeline_start")
+                    balanced_captions.append(nxt)
+                    i += 2
+                    continue
+        balanced_captions.append(cap)
+        i += 1
+    captions = balanced_captions
+    tracks = []
+    has_caption_track = False
+    for track in sequence.get("tracks") or []:
+        if track.get("type") == "caption":
+            tracks.append({**track, "clips": captions, "hidden": False})
+            has_caption_track = True
+        else:
+            tracks.append(track)
+    if not has_caption_track:
+        tracks.append({"id": "caption_1", "type": "caption", "label": "Captions", "clips": captions})
+    seq2 = {**sequence, "tracks": tracks}
+    return seq2, len(captions)
+
+
+def _generate_caption_sequence(
+    sequence: dict[str, Any],
+    analysis_by_asset: dict[str, dict[str, Any]],
+    room_id: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    return _generate_caption_sequence_from_words(sequence, _timeline_speech_words(sequence, analysis_by_asset), room_id)
+
+
+def _timeline_dialogue_wav(room_id: str, sequence: dict[str, Any], work_dir: Path) -> Path | None:
+    """Render the EDITED dialogue timeline to one mono wav. This lets Whisper transcribe the
+    final cut only (not all raw source footage) and returns timestamps in timeline seconds."""
+    clips = _caption_sync_source_clips(sequence)
+    if not clips:
+        return None
+    assets = _assets_by_id(room_id)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    cursor = 0.0
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    for idx, clip in enumerate(clips):
+        ts = float(clip.get("timeline_start") or 0)
+        te = float(clip.get("timeline_end") or ts)
+        if te <= ts:
+            continue
+        if ts > cursor + 0.02:
+            silence = work_dir / f"cap_silence_{idx:04d}.wav"
+            subprocess.run([
+                _ffmpeg(), "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                "-t", f"{ts - cursor:.3f}", "-c:a", "pcm_s16le", str(silence),
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=cflags)
+            if silence.exists() and silence.stat().st_size > 0:
+                parts.append(silence)
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset:
+            cursor = max(cursor, te)
+            continue
+        src = asset.get("proxy_path") or asset.get("local_path")
+        if not src or not Path(src).exists():
+            cursor = max(cursor, te)
+            continue
+        dur = max(0.05, te - ts)
+        part = work_dir / f"cap_part_{idx:04d}.wav"
+        subprocess.run([
+            _ffmpeg(), "-y", "-ss", f"{float(clip.get('source_start') or 0):.3f}",
+            "-t", f"{dur:.3f}", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le", str(part),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=cflags)
+        if part.exists() and part.stat().st_size > 0:
+            parts.append(part)
+        cursor = max(cursor, te)
+    if not parts:
+        return None
+    list_path = work_dir / "caption_audio_list.txt"
+    list_path.write_text("\n".join(f"file '{p.as_posix()}'" for p in parts), encoding="utf-8")
+    out = work_dir / "caption_dialogue_timeline.wav"
+    subprocess.run([
+        _ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-c:a", "pcm_s16le", str(out),
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=cflags)
+    return out if out.exists() and out.stat().st_size > 0 else None
+
+
+def _timeline_caption_words(room_id: str, job_id: str, sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    work_dir = _room_dir(room_id) / "jobs" / job_id / "caption-gen"
+    wav = _timeline_dialogue_wav(room_id, sequence, work_dir)
+    if not wav:
+        return []
+    model = _caption_whisper_model()
+    script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run([
+        sys.executable, str(script), str(wav), "--words", "--json-only", "--model", model,
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False, creationflags=cflags,
+       env=_caption_transcribe_env(room_id))
+    out_json = wav.with_name(wav.stem + "_audiocheck.json")
+    if result.returncode != 0 or not out_json.exists():
+        return []
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    words: list[dict[str, Any]] = []
+    for segment_index, seg in enumerate(data.get("segments") or []):
+        for w in seg.get("words") or []:
+            text = str(w.get("word") or w.get("text") or "").strip()
+            if not text:
+                continue
+            start = round(float(w.get("start") or 0), 3)
+            end = round(max(float(w.get("end") or start), start + 0.05), 3)
+            words.append({"text": text, "start": start, "end": end, "segment_index": segment_index})
+    return words
+
+
+def _build_caption_generation(room_id: str, job_id: str, instruction: dict[str, Any]) -> dict[str, Any] | None:
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline.get("sequence"), dict) else None
+    if not isinstance(sequence, dict):
+        return None
+    words = _timeline_caption_words(room_id, job_id, sequence)
+    if words:
+        seq2, count = _generate_caption_sequence_from_words(sequence, words, room_id)
+    else:
+        asset_ids = [str(c.get("asset_id")) for c in _caption_sync_source_clips(sequence) if c.get("asset_id")]
+        analysis = _ensure_audio_analysis(room_id, asset_ids)
+        seq2, count = _generate_caption_sequence(sequence, analysis, room_id)
+    _append_job_event(room_id, job_id, {
+        "type": "status",
+        "text": f"カット済み音声からテロップを生成しました（{count}件）。",
+    })
+    return seq2
 
 
 class CaptionSyncRequest(BaseModel):

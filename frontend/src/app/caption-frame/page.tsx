@@ -53,13 +53,21 @@ function Inner() {
   useEffect(() => {
     window.__renderCaptionAt = (t: number, hiddenCaptionIds?: string[]) =>
       new Promise<void>((resolve) => {
-        setPayload((current) =>
-          current ? { ...current, time: t, hiddenCaptionIds: hiddenCaptionIds ?? current.hiddenCaptionIds ?? [] } : current,
-        );
+        setPayload((current) => {
+          if (!current) return current;
+          const next = {
+            ...current,
+            time: t,
+            hiddenCaptionIds: hiddenCaptionIds ?? current.hiddenCaptionIds ?? [],
+          };
+          window.__nativeCaptionPayload = next;
+          return next;
+        });
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
     window.__setCaptionPayload = (next: Payload) =>
       new Promise<void>((resolve) => {
+        window.__nativeCaptionPayload = next;
         setPayload(next);
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
