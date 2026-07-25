@@ -29,8 +29,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AGENT_TIMEOUT_S = int(os.environ.get("DAN_TIMELINE_AGENT_TIMEOUT", "1200"))  # 20 min
 # 知識・調査系は自由（Web検索/ページ取得/ファイル読み）。書き込みだけが一本線:
 # タイムラインへの変更は timeline_* コマンド経由のみ（Bash/Write/Editは不許可のまま）
-ALLOWED_TOOLS = "mcp__timeline__*,Read,Glob,Grep,WebSearch,WebFetch"
-
 # job_id -> subprocess (for cancel); content_id -> job_id (for serialization)
 _running_procs: dict[str, subprocess.Popen] = {}
 _content_jobs: dict[str, str] = {}
@@ -128,6 +126,7 @@ def _system_prompt() -> str:
 def run_timeline_agent(
     *,
     room_id: str,
+    user_id: str,
     content_id: str,
     job_id: str,
     instruction: str,
@@ -169,7 +168,7 @@ def run_timeline_agent(
         )
         td.save_draft(draft)
         emit({"type": "status", "text": f"draft {draft['draft_id']} を作成（本番は無変更のまま作業します）"})
-        result = _run_session(room_id, content_id, job_id, draft, instruction, annotations or [],
+        result = _run_session(room_id, user_id, content_id, job_id, draft, instruction, annotations or [],
                               selected_clips or [], emit, model)
         return result
     finally:
@@ -178,26 +177,32 @@ def run_timeline_agent(
             _running_procs.pop(job_id, None)
 
 
-def _run_session(room_id, content_id, job_id, draft, instruction, annotations, selected_clips, emit, model) -> dict[str, Any]:
+def _run_session(room_id, user_id, content_id, job_id, draft, instruction, annotations, selected_clips, emit, model) -> dict[str, Any]:
     draft_id = draft["draft_id"]
     room_dir = td._room_dir(room_id)
     job_dir = room_dir / "drafts" / f"job_{job_id[:12]}"
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # MCP config: ONLY the timeline server
-    mcp_cfg = {
-        "mcpServers": {
-            "timeline": {
-                "command": "python",
-                "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
-                "env": {
-                    "DAN_ROOM_ID": room_id,
-                    "DAN_DRAFT_ID": draft_id,
-                    "DAN_JOB_ID": job_id,
-                    "PYTHONIOENCODING": "utf-8",
-                },
-            }
-        }
+    # Start from Dan's normal MCP configuration (browser, connected services and
+    # the rest of the user's enabled tools), then ADD the draft-only timeline
+    # server.  Timeline safety is provided by the draft/CAS transaction, not by
+    # replacing Dan with a restricted read-only persona.
+    from app.agent.cli_runner import _build_mcp_config
+    common_cfg = Path(_build_mcp_config(room_id, user_id))
+    try:
+        mcp_cfg = json.loads(common_cfg.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        mcp_cfg = {"mcpServers": {}}
+    mcp_cfg.setdefault("mcpServers", {})["timeline"] = {
+        "command": "python",
+        "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
+        "env": {
+            "DAN_ROOM_ID": room_id,
+            "DAN_DRAFT_ID": draft_id,
+            "DAN_JOB_ID": job_id,
+            "DAN_CONTENT_ID": content_id,
+            "PYTHONIOENCODING": "utf-8",
+        },
     }
     cfg_path = job_dir / "mcp.json"
     cfg_path.write_text(json.dumps(mcp_cfg), encoding="utf-8")
@@ -233,8 +238,8 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
         "--model", model,
         "--max-turns", "80",
         "--mcp-config", str(cfg_path),
-        "--allowedTools", ALLOWED_TOOLS,
-        "--disallowedTools", "Bash,Write,Edit,NotebookEdit,Task,ExitPlanMode,AskUserQuestion",
+        "--dangerously-skip-permissions",
+        "--disallowedTools", "ExitPlanMode,AskUserQuestion",
         "--append-system-prompt", _system_prompt(),
     ]
     emit({"type": "status", "text": "編集エージェントを起動しました（動画の内容を読んでから編集します）"})
@@ -294,13 +299,14 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
         return {"ok": False, "committed": False, "conflict": False,
                 "problems": ["timeout"], "summary": "", "draft_id": draft_id}
 
-    # did the agent actually change anything?
+    # A timeline edit is optional.  The unified Dan can also export, inspect, or
+    # perform an external action, and those successful requests must not be
+    # reported as failures merely because the draft itself stayed unchanged.
     latest = td.load_draft(room_id, draft_id)
     if not latest.get("log"):
-        emit({"type": "status", "text": "エージェントは編集を行いませんでした（本番は無変更）"})
-        _gc(room_id, draft_id)
-        return {"ok": False, "committed": False, "conflict": False,
-                "problems": ["エージェントが編集コマンドを1つも実行しませんでした"],
+        emit({"type": "status", "text": "タイムラインは変更されませんでした。依頼の実行結果を確認しています。"})
+        return {"ok": True, "committed": False, "conflict": False,
+                "problems": [],
                 "summary": "\n".join(summary_chunks[-3:]), "draft_id": draft_id}
 
     assets_now = {str(a.get("id")): a for a in _read_assets_file(room_dir)}

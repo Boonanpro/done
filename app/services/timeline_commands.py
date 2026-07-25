@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"}
 MIN_CLIP = 0.05
 
 
@@ -107,6 +108,15 @@ def _asset_is_image(asset: dict[str, Any] | None) -> bool:
     return Path(p).suffix.lower() in IMAGE_EXTS
 
 
+def _asset_is_audio(asset: dict[str, Any] | None) -> bool:
+    if not isinstance(asset, dict):
+        return False
+    if asset.get("kind") == "audio":
+        return True
+    p = str(asset.get("local_path") or asset.get("filename") or "")
+    return Path(p).suffix.lower() in AUDIO_EXTS
+
+
 def _sorted(track: dict[str, Any]) -> None:
     (track.get("clips") or []).sort(key=lambda c: _f(c.get("timeline_start")))
 
@@ -121,6 +131,8 @@ def append_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, source_star
     if a is None:
         hint = ", ".join(f"{k}({v.get('filename')})" for k, v in list(assets.items())[:12])
         return {"ok": False, "error": f"asset not found: {asset_id}. available: {hint}"}
+    if _asset_is_audio(a):
+        return {"ok": False, "error": "audio assets belong on an audio lane; use add_audio"}
     duration = max(MIN_CLIP, _f(duration))
     is_image = _asset_is_image(a)
     if not is_image:
@@ -162,6 +174,41 @@ def append_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, source_star
     _sorted(base)
     _recompute_duration(seq)
     return {"ok": True, "clip_id": vid, "timeline_start": clip["timeline_start"], "timeline_end": clip["timeline_end"]}
+
+
+def add_audio(seq: dict[str, Any], assets: dict, *, asset_id: str, source_start: float,
+              duration: float, at: float = 0.0, volume: float = 0.22,
+              role: str = "music") -> dict[str, Any]:
+    """Place any registered audio asset on the first free audio lane.
+
+    This deliberately has no BGM-specific knowledge: music, SFX, voiceovers and
+    externally created audio all use the same validated media-placement command.
+    """
+    asset = _asset(assets, asset_id)
+    if asset is None:
+        return {"ok": False, "error": f"asset not found: {asset_id}"}
+    if not _asset_is_audio(asset):
+        return {"ok": False, "error": f"asset {asset_id} is not audio"}
+    source_start = max(0.0, _f(source_start))
+    duration = max(MIN_CLIP, _f(duration))
+    available = _asset_duration(asset)
+    if available > 0:
+        if source_start >= available:
+            return {"ok": False, "error": "source_start is beyond audio duration"}
+        duration = min(duration, available - source_start)
+    ts = max(0.0, _f(at))
+    te = ts + duration
+    track = _place_on_lane(seq, "audio", ts, te)
+    clip = {
+        "id": _new_id("clip_ag_audio"), "asset_id": asset_id,
+        "timeline_start": round(ts, 3), "timeline_end": round(te, 3),
+        "source_start": round(source_start, 3), "source_end": round(source_start + duration, 3),
+        "volume": max(0.0, min(2.0, _f(volume, 0.22))), "role": str(role or "audio"),
+    }
+    track.setdefault("clips", []).append(clip)
+    _sorted(track)
+    _recompute_duration(seq)
+    return {"ok": True, "clip_id": clip["id"], "timeline_start": clip["timeline_start"], "timeline_end": clip["timeline_end"]}
 
 
 def insert_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, source_start: float,
@@ -292,7 +339,7 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     return {"ok": True, "clip_id": cid}
 
 
-_CAPTION_STYLE_KEYS = {"font", "fontSize", "color", "outlineColor", "outlineWidth", "x", "y"}
+_CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "x", "y"}
 
 
 def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -312,7 +359,15 @@ def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | No
                 continue
             if fv > 8.0:  # px指定と思われる値は相対単位へ換算（64px ≈ 1.0）
                 fv = fv / 64.0
-            out[k] = max(0.3, min(3.0, fv))
+            out[k] = max(0.0, min(3.0, fv))
+        elif k == "maxWidth":
+            try:
+                out[k] = max(0.05, min(2.0, float(v)))
+            except (TypeError, ValueError):
+                continue
+        elif k == "textAlign":
+            if v in {"left", "center", "right"}:
+                out[k] = v
         else:
             out[k] = v
     return out or None

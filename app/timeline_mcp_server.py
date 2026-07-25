@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 ROOM_ID = os.environ.get("DAN_ROOM_ID", "")
 DRAFT_ID = os.environ.get("DAN_DRAFT_ID", "")
 JOB_ID = os.environ.get("DAN_JOB_ID", "")
+CONTENT_ID = os.environ.get("DAN_CONTENT_ID", "")
 MAX_TOOL_CALLS = int(os.environ.get("DAN_MAX_TOOL_CALLS", "120"))
 MAX_GENERATIONS = int(os.environ.get("DAN_MAX_GENERATIONS", "6"))
 
@@ -127,9 +129,18 @@ async def list_tools() -> list[types.Tool]:
               {"clip_id": _STR, "text": _STR, "style": {"type": "object"}}, ["clip_id"]),
         _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す（CTAアート・ロゴ風カード等）。日本語文字を入れる場合はpromptに正確な文字列を指定。aspect_ratioは 9:16 等。",
               {"prompt": _STR, "aspect_ratio": _STR}, ["prompt"]),
+        _tool("generate_video", "Generate a short Higgsfield video and register it as an editable video asset. Use the returned asset_id with append_clip, insert_clip, or add_overlay.",
+              {"prompt": _STR, "aspect_ratio": _STR, "duration": _NUM, "model": _STR,
+               "reference_path": _STR, "resolution": _STR}, ["prompt"]),
         _tool("import_image", "実在の画像を部屋の素材として取り込み asset_id を返す。url にはWeb上の画像URL"
               "（WebSearch/WebFetchで見つけた本物のロゴ等）またはローカルファイルパスを指定。生成ではなく本物が必要な時はこちらを使う。",
               {"url": _STR, "name": _STR}, ["url"]),
+        _tool("import_media", "Danが検索・生成・Bash処理などで得たローカル動画または音声を、この部屋の素材として取り込む。返るasset_idをappend_clipまたはadd_audioへ渡す。",
+              {"path": _STR, "name": _STR}, ["path"]),
+        _tool("add_audio", "登録済みの任意音声を音声レーンへ置く。BGM、効果音、ナレーションは同じ操作で扱う。",
+              {"asset_id": _STR, "source_start": _NUM, "duration": _NUM, "at": _NUM,
+               "volume": _NUM, "role": _STR}, ["asset_id", "duration"]),
+        _tool("export_timeline", "現在のドラフトを最終動画として書き出し、通常Danが投稿・共有などに使える成果物アセットを返す。タイムラインを変更しない。", {}),
         _tool("validate_draft", "ドラフト全体を検証して問題リストを返す。作業の締めに必ず実行し、空になるまで直すこと。", {}),
         _tool("watch_video", "指定範囲の映像を『動画として』視聴する（動き・テンポ・話し方・音声込み。静止画のrender_frameでは分からないもの用）。"
               "questionに知りたいことを書くと視聴結果を答える。1回1〜2分かかるので範囲は要点に絞る（最大120秒）。",
@@ -210,8 +221,28 @@ async def _dispatch(name: str, a: dict) -> list:
         _generations += 1
         return _ok(_generate_image(draft, str(a.get("prompt") or ""), str(a.get("aspect_ratio") or "9:16")))
 
+    if name == "generate_video":
+        if _generations >= MAX_GENERATIONS:
+            return _ok({"ok": False, "error": f"generation limit ({MAX_GENERATIONS}) reached"})
+        _generations += 1
+        return _ok(_generate_video(
+            draft,
+            prompt=str(a.get("prompt") or ""),
+            aspect=str(a.get("aspect_ratio") or "9:16"),
+            duration=float(a.get("duration") or 5),
+            model=str(a.get("model") or "seedance_2_0"),
+            reference_path=str(a.get("reference_path") or ""),
+            resolution=str(a.get("resolution") or "720p"),
+        ))
+
     if name == "import_image":
         return _ok(_import_image(draft, str(a.get("url") or ""), str(a.get("name") or "")))
+
+    if name == "import_media":
+        return _ok(_import_media(draft, str(a.get("path") or ""), str(a.get("name") or "")))
+
+    if name == "export_timeline":
+        return _ok(_export_timeline(draft))
 
     if name == "watch_video":
         return _ok(_watch_video(seq, assets, float(a["t0"]), float(a["t1"]),
@@ -249,6 +280,11 @@ async def _dispatch(name: str, a: dict) -> list:
         "set_clip": lambda: tc.set_clip(seq, clip_id=str(a["clip_id"]),
                                         text=(str(a["text"]) if a.get("text") is not None else None),
                                         style=a.get("style") if isinstance(a.get("style"), dict) else None),
+        "add_audio": lambda: tc.add_audio(seq, assets, asset_id=str(a["asset_id"]),
+                                            source_start=float(a.get("source_start") or 0),
+                                            duration=float(a["duration"]), at=float(a.get("at") or 0),
+                                            volume=float(a.get("volume") or 0.22),
+                                            role=str(a.get("role") or "music")),
     }.get(name)
     if cmd is None:
         return _ok({"ok": False, "error": f"unknown tool: {name}"})
@@ -387,6 +423,104 @@ def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
     return {"ok": True, "asset_id": aid, "path": str(dest), "note": "add_overlay / append_clip でタイムラインに配置できます"}
 
 
+def _find_generated_video_url(payload: object) -> str | None:
+    """Find a downloadable video URL without depending on one CLI response shape."""
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key.lower() in {"url", "video_url", "download_url"} and isinstance(value, str):
+                if value.startswith(("https://", "http://")):
+                    return value
+            found = _find_generated_video_url(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _find_generated_video_url(value)
+            if found:
+                return found
+    return None
+
+
+def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
+                    model: str, reference_path: str, resolution: str) -> dict:
+    """Generate an editable video asset through Higgsfield.
+
+    It intentionally returns only an asset. Placement, trimming, cropping, and
+    approval remain normal timeline operations instead of provider side-effects.
+    """
+    if not prompt.strip():
+        return {"ok": False, "error": "empty prompt"}
+    supported_models = {"seedance_2_0", "kling3_0"}
+    if model not in supported_models:
+        return {"ok": False, "error": f"unsupported Higgsfield video model: {model}"}
+    if aspect not in {"16:9", "9:16", "4:3", "3:4", "1:1", "21:9", "auto"}:
+        return {"ok": False, "error": f"unsupported aspect ratio: {aspect}"}
+    if resolution not in {"480p", "720p", "1080p", "4k"}:
+        return {"ok": False, "error": f"unsupported resolution: {resolution}"}
+
+    clip_duration = max(1, min(15, int(round(duration))))
+    cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
+           "--aspect_ratio", aspect, "--duration", str(clip_duration),
+           "--wait", "--wait-timeout", "20m", "--json"]
+    if model == "seedance_2_0":
+        cmd += ["--resolution", resolution]
+    elif aspect not in {"16:9", "9:16", "1:1"}:
+        return {"ok": False, "error": "kling3_0 supports only 16:9, 9:16, or 1:1"}
+    if reference_path:
+        ref = Path(reference_path).expanduser()
+        if not ref.is_file():
+            return {"ok": False, "error": f"reference file not found: {reference_path}"}
+        is_video = ref.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+        if model == "kling3_0":
+            if is_video:
+                return {"ok": False, "error": "kling3_0 reference video is not supported here; use seedance_2_0"}
+            cmd += ["--start-image", str(ref)]
+        else:
+            cmd += ["--video" if is_video else "--image", str(ref)]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1260,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Higgsfield video generation timed out (21m)"}
+    if result.returncode != 0:
+        detail = ((result.stderr or result.stdout or "generation failed").strip())[-500:]
+        return {"ok": False, "error": f"Higgsfield generation failed: {detail}"}
+    try:
+        url = _find_generated_video_url(json.loads(result.stdout))
+    except json.JSONDecodeError:
+        url = None
+    if not url:
+        candidates = re.findall(r"https?://[^\s\"']+", (result.stdout or "") + "\n" + (result.stderr or ""))
+        url = next((candidate for candidate in candidates if ".mp4" in candidate.lower()), None)
+    if not url:
+        return {"ok": False, "error": "Higgsfield returned no downloadable video URL"}
+
+    aid = uuid.uuid4().hex[:12]
+    dest = _room_dir() / f"higgs_{aid}.mp4"
+    try:
+        urllib.request.urlretrieve(url, dest)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"generated video download failed: {exc}"}
+    if not dest.exists() or dest.stat().st_size == 0:
+        return {"ok": False, "error": "generated video download was empty"}
+    meta: dict = {"generator": "higgsfield", "model": model, "prompt": prompt,
+                  "requested_duration": clip_duration, "source_url": url}
+    try:
+        probe = subprocess.run(
+            [_ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "json", str(dest)],
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        meta["duration"] = float((json.loads(probe.stdout).get("format") or {}).get("duration") or 0)
+    except Exception:
+        pass
+    _register_media_asset(draft, aid, dest, "video", filename_hint=f"Higgsfield {model} clip", metadata=meta)
+    return {"ok": True, "asset_id": aid, "kind": "video", "path": str(dest), "metadata": meta,
+            "note": "Generated clip is ready. Place it with append_clip, insert_clip, or add_overlay."}
+
+
 def _import_image(draft: dict, url: str, name: str) -> dict:
     """Bring a REAL image into the room (web URL or local path) — the general
     entry gate for authentic material (logos, product shots) as opposed to
@@ -429,12 +563,77 @@ def _import_image(draft: dict, url: str, name: str) -> dict:
             "note": "add_overlay / append_clip でタイムラインに配置できます"}
 
 
+def _import_media(draft: dict, path: str, name: str) -> dict:
+    """Promote a media file produced or obtained by the general Dan toolset into
+    a room asset.  This is intentionally media-generic rather than a BGM feature."""
+    src = Path(path).expanduser()
+    if not src.is_file():
+        return {"ok": False, "error": f"media file not found: {path}"}
+    suffix = src.suffix.lower()
+    audio_exts = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"}
+    video_exts = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+    kind = "audio" if suffix in audio_exts else "video" if suffix in video_exts else ""
+    if not kind:
+        return {"ok": False, "error": f"unsupported media extension: {suffix or '(none)'}"}
+    aid = uuid.uuid4().hex[:12]
+    dest = _room_dir() / f"agent_{aid}{suffix}"
+    try:
+        shutil.copy2(src, dest)
+    except OSError as exc:
+        return {"ok": False, "error": f"copy failed: {exc}"}
+    meta: dict = {}
+    try:
+        probe = subprocess.run(
+            [_ffprobe(), "-v", "error", "-show_entries",
+             "format=duration", "-of", "json", str(dest)],
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        meta["duration"] = float((json.loads(probe.stdout).get("format") or {}).get("duration") or 0)
+    except Exception:
+        pass
+    _register_media_asset(draft, aid, dest, kind, filename_hint=name, metadata=meta)
+    return {"ok": True, "asset_id": aid, "kind": kind, "path": str(dest), "metadata": meta,
+            "note": "use add_audio for audio, or append_clip/insert_clip for video"}
+
+
 def _ffmpeg() -> str:
     import shutil as _sh
     for c in (_sh.which("ffmpeg"), r"C:\Users\Owner\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"):
         if c and Path(c).exists():
             return c
     raise RuntimeError("ffmpeg not found")
+
+
+def _ffprobe() -> str:
+    """Find ffprobe next to the selected ffmpeg binary when possible."""
+    ffmpeg = _ffmpeg()
+    candidates = (
+        str(Path(ffmpeg).with_name("ffprobe.exe")),
+        shutil.which("ffprobe"),
+        r"C:\Users\Owner\ffmpeg\bin\ffprobe.exe",
+        r"C:\ffmpeg\bin\ffprobe.exe",
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise RuntimeError("ffprobe not found")
+
+
+def _export_timeline(draft: dict) -> dict:
+    """Render the isolated draft and publish its output as a room artifact."""
+    if not CONTENT_ID:
+        return {"ok": False, "error": "timeline export has no content context"}
+    from app.api.production_asset_routes import _render_sequence_job
+
+    export_id = f"{JOB_ID}_export"
+    export_dir = _room_dir() / "jobs" / export_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+    instruction = {"timeline": {"sequence": json.loads(json.dumps(draft["sequence"]))}}
+    result = _render_sequence_job(ROOM_ID, export_id, CONTENT_ID, instruction, export_dir)
+    if not result:
+        return {"ok": False, "error": "timeline has no renderable base video clips"}
+    return {"ok": True, **result, "note": "export is a reusable room asset"}
 
 
 def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -> dict:
@@ -531,6 +730,25 @@ def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
             "thumbnail_path": None, "thumbnail_url": None,
             "status": "proxy_ready", "metadata": {},
             "created_at": now, "updated_at": now,
+            "generated_by": f"agent:{JOB_ID}",
+        })
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    td.track_generated_asset(draft, aid)
+
+
+def _register_media_asset(draft: dict, aid: str, dest: Path, kind: str,
+                          filename_hint: str = "", metadata: dict | None = None) -> None:
+    with td.ContentsLock(ROOM_ID):
+        p = _room_dir() / "assets.json"
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        data.append({
+            "id": aid, "room_id": ROOM_ID, "kind": kind, "source_type": "agent_workspace",
+            "original_uri": str(dest.resolve()), "local_path": str(dest.resolve()),
+            "filename": filename_hint or dest.name, "proxy_path": None, "proxy_url": None,
+            "thumbnail_path": None, "thumbnail_url": None, "status": "ready",
+            "metadata": metadata or {}, "created_at": now, "updated_at": now,
             "generated_by": f"agent:{JOB_ID}",
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
