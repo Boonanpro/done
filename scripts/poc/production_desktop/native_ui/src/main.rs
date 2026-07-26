@@ -3389,6 +3389,8 @@ struct Library {
     started: bool,
     /// 削除確認中の素材 (asset_id, filename, 使用中につきforce提案)
     confirm_delete: Option<(String, String, bool)>,
+    /// コンテンツ削除の確認中 (content_id, title)
+    confirm_delete_content: Option<(String, String)>,
 }
 
 /// Short-lived IME/editing state. It is intentionally separate from the document: a
@@ -8545,29 +8547,33 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // index 0 = back. Display shows visual tracks top=front (reverse array order);
         // audio tracks sit below the visual stack (universal NLE convention). No
         // kind-based pinning — reorder/move clips and the render follows.
+        // ロールフリー表示: レーンの太さは「役割(kind)」では決めない。太いのは
+        // 映像メインレーン（配列先頭＝最背面の視覚レーン）1本だけで、それ以外は
+        // 種類にかかわらず一律スリム。空のレーンは畳む（役割ごとの常設レーンは
+        // 廃止済みの名残）が、クリップのMoveドラッグ中だけはドロップ先として
+        // 出現させる（既存の「最上段より上=新規レーン」ゾーンと併用）。
+        let moving = matches!(self.drag, Drag::Move { .. });
         let visual: Vec<usize> = (0..self.doc.seq.tracks.len())
             .rev()
             .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
+            .filter(|&i| moving || !self.doc.seq.tracks[i].clips.is_empty())
             .collect();
         let audio: Vec<usize> = (0..self.doc.seq.tracks.len())
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
+            .filter(|&i| moving || !self.doc.seq.tracks[i].clips.is_empty())
             .collect();
         let order: Vec<usize> = visual.into_iter().chain(audio).collect();
-        let kind_h = |kind: &str| match kind {
-            "video" => 54.0f32,
-            "overlay" => 46.0,
-            "audio" => 30.0,
-            "caption" => 22.0,
-            _ => 20.0,
-        };
-        let total_h: f32 = order.iter().map(|&i| kind_h(&self.doc.seq.tracks[i].kind) + 3.0).sum();
+        let main_visual: Option<usize> =
+            (0..self.doc.seq.tracks.len()).find(|&i| self.doc.seq.tracks[i].kind != "audio");
+        let lane_h_for = |i: usize| -> f32 { if Some(i) == main_visual { 54.0 } else { 26.0 } };
+        let total_h: f32 = order.iter().map(|&i| lane_h_for(i) + 3.0).sum();
         let avail = h - ruler_h - 6.0;
-        let squeeze = (avail / total_h).min(1.0);
+        let squeeze = (avail / total_h.max(1.0)).min(1.0);
         let mut lane_tops: Vec<(usize, f32, f32)> = Vec::new(); // (track idx, y0, height)
         {
             let mut y = rect.top() + ruler_h + 3.0;
             for &i in &order {
-                let lh = kind_h(&self.doc.seq.tracks[i].kind) * squeeze;
+                let lh = lane_h_for(i) * squeeze;
                 lane_tops.push((i, y, lh));
                 y += lh + 3.0 * squeeze;
             }
@@ -9927,6 +9933,14 @@ impl App {
                         self.lib.confirm_delete = None;
                     }
                 }
+                ("delc", Ok(_)) => {
+                    self.lib.confirm_delete_content = None;
+                    self.lib_refresh();
+                }
+                ("delc", Err(e)) => {
+                    self.lib.error = Some(format!("コンテンツの削除に失敗: {e}"));
+                    self.lib.confirm_delete_content = None;
+                }
                 ("capcache", Ok(v)) => {
                     if let Some(res) = v.get("results").and_then(|r| r.as_array()) {
                         for (i, r) in res.iter().enumerate() {
@@ -10233,6 +10247,7 @@ impl App {
                             .map(|t| t.iter().map(|tr| tr.get("clips").and_then(|c| c.as_array()).map(|c| c.len()).unwrap_or(0)).sum())
                             .unwrap_or(0);
                         let dur = sq.and_then(|sq| sq.get("duration")).and_then(|d| d.as_f64()).unwrap_or(0.0);
+                        let generating = c.get("status").and_then(|v| v.as_str()) == Some("running");
                         // 動画サムネ: タイムライン先頭の映像クリップの素材サムネを流用
                         let thumb = sq
                             .and_then(|sq| sq.get("tracks"))
@@ -10273,13 +10288,34 @@ impl App {
                         pp.text(egui::pos2(rect.left() + 8.0, rect.bottom() - 12.0), egui::Align2::LEFT_CENTER,
                                 format!("{nclips}クリップ・{:.0}:{:02}", dur as i64 / 60, dur as i64 % 60),
                                 egui::FontId::proportional(10.0), egui::Color32::from_gray(140));
+                        // hover時のみ左上に削除✕（生成中はジョブと衝突するため出さない）
+                        let del_r = egui::Rect::from_center_size(
+                            egui::pos2(rect.left() + 13.0, rect.top() + 13.0),
+                            egui::vec2(18.0, 18.0),
+                        );
+                        let can_delete = hov && !generating && !cid.is_empty();
+                        if can_delete {
+                            let on_del = resp.hover_pos().map_or(false, |p| del_r.contains(p));
+                            pp.circle_filled(del_r.center(), 9.0, if on_del {
+                                egui::Color32::from_rgb(190, 60, 60)
+                            } else {
+                                egui::Color32::from_black_alpha(170)
+                            });
+                            pp.text(del_r.center(), egui::Align2::CENTER_CENTER, "✕", egui::FontId::proportional(11.0), egui::Color32::from_gray(230));
+                        }
                         if hov {
                             pp.text(egui::pos2(rect.right() - 8.0, rect.bottom() - 12.0), egui::Align2::RIGHT_CENTER,
                                     "開く ▶", egui::FontId::proportional(11.0), UI_ACCENT);
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if resp.clicked() && !cid.is_empty() {
-                            self.open_content(&cid);
+                            let del_clicked = can_delete
+                                && resp.interact_pointer_pos().map_or(false, |p| del_r.contains(p));
+                            if del_clicked {
+                                self.lib.confirm_delete_content = Some((cid.clone(), title.clone()));
+                            } else {
+                                self.open_content(&cid);
+                            }
                         }
                     }
                     if contents.is_empty() {
@@ -10388,6 +10424,39 @@ impl App {
     /// 素材削除の確認モーダル。データ実削除（コピー/プロキシ/サムネ+登録）を
     /// 伴うので必ずワンクッション置く。コンテンツ使用中(409)は二段目の確認へ。
     fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
+        // コンテンツ削除の確認モーダル（素材削除とは独立の状態）
+        if let Some((cid, title)) = self.lib.confirm_delete_content.clone() {
+            egui::Window::new("コンテンツを削除")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let short: String = title.chars().take(30).collect();
+                    ui.label(format!("「{short}」を削除しますか？"));
+                    ui.label(
+                        egui::RichText::new("タイムラインのデータごと削除されます。素材ファイルは残ります。")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("削除する").color(egui::Color32::WHITE))
+                                .fill(egui::Color32::from_rgb(170, 50, 50)))
+                            .clicked()
+                        {
+                            let room = self.room_id();
+                            self.lib_del(
+                                "delc",
+                                format!("/api/v1/production-assets/contents/{cid}?room_id={room}"),
+                            );
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            self.lib.confirm_delete_content = None;
+                        }
+                    });
+                });
+        }
         let Some((id, name, force_offer)) = self.lib.confirm_delete.clone() else {
             return;
         };
