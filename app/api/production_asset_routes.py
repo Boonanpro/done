@@ -2812,6 +2812,10 @@ def _assemble_sequence_from_decisions(
     transcripts: dict[str, Any],
     room_id: str,
     fmt: str,
+    *,
+    brief: str | None = None,
+    job_id: str | None = None,
+    llm_captions: bool = True,
 ) -> dict[str, Any] | None:
     """Deterministically build the exact timeline sequence from Dan's DECISIONS plus the
     Whisper segment timestamps. Dan never computes timeline seconds — this does."""
@@ -3087,17 +3091,50 @@ def _assemble_sequence_from_decisions(
     pieces_by_sid: dict[str, list[dict[str, Any]]] = {}
     for p in pieces:
         pieces_by_sid.setdefault(p["sid"], []).append(p)
-    for sid in order:
-        if sid in covered:
-            continue
-        sp = seg_span[sid]
-        if sp["caption"] and not decisions.get("no_captions"):
-            clip: dict[str, Any] = {"id": _cid("c"), "text": sp["caption"], "track": "caption",
-                                    "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]}
-            words = _caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, []))
-            if words:
-                clip["words"] = words
-            caption_clips.append(clip)
+    # Dan がプランで明示的にテロップ文言を書いた場合はそれを尊重する。
+    # 書いていない（= Whisper 生テキストへのフォールバック）場合のみ、
+    # テロップ設計 LLM パスで「区切り＋誤認識修正」を作り直す。
+    has_explicit_caption = any(
+        isinstance(it, dict) and isinstance(it.get("caption"), str) and it["caption"].strip()
+        for it in (decisions.get("spine") or [])
+    )
+    designed = False
+    if llm_captions and not decisions.get("no_captions") and not has_explicit_caption:
+        all_words: list[dict[str, Any]] = []
+        for sid in order:
+            if sid in covered:
+                continue
+            if not seg_span[sid]["caption"]:
+                continue  # opted-out segment: no caption, no words
+            all_words.extend(_caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, [])))
+        if all_words:
+            if job_id:
+                _append_job_event(room_id, job_id, {"type": "status", "text": "テロップをダンが設計しています…"})
+            glossary = _caption_glossary(room_id)
+            context_terms = [t for pair in glossary for t in pair]
+            context_terms += [str(a.get("filename") or "") for a in _read_assets(room_id)]
+            design = _design_captions_with_llm(
+                all_words, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
+            )
+            if design:
+                caption_clips.extend(
+                    _caption_clips_from_design(design, all_words, make_id=lambda: _cid("c"))
+                )
+                designed = True
+            elif job_id:
+                _append_job_event(room_id, job_id, {"type": "status", "text": "テロップ設計をスキップ（自動区切りで生成）"})
+    if not designed:
+        for sid in order:
+            if sid in covered:
+                continue
+            sp = seg_span[sid]
+            if sp["caption"] and not decisions.get("no_captions"):
+                clip: dict[str, Any] = {"id": _cid("c"), "text": sp["caption"], "track": "caption",
+                                        "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]}
+                words = _caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, []))
+                if words:
+                    clip["words"] = words
+                caption_clips.append(clip)
 
     # Pass 3: screen background clips (fullscreen base) under each overlay span.
     for ov in overlays:
@@ -3840,7 +3877,10 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             if not decisions:
                 raise RuntimeError("Dan did not produce usable editing decisions")
             fmt = str((instruction.get("timeline") or {}).get("format") or instruction.get("format") or "9:16")
-            sequence_result = _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
+            plan_brief = str((instruction.get("timeline") or {}).get("brief") or instruction.get("brief") or "")
+            sequence_result = _assemble_sequence_from_decisions(
+                decisions, transcripts, room_id, fmt, brief=plan_brief, job_id=job_id
+            )
             if not sequence_result:
                 raise RuntimeError("Could not assemble a timeline from the decisions")
             # Keep the decisions on the content so the cut-adjust UI can re-assemble with a new
@@ -4928,7 +4968,8 @@ def _recut_assemble(room_id: str, content_id: str, decisions: dict[str, Any], as
         for a in assets if str(a.get("id")) in wanted
     ]
     transcripts = _run_audio_analysis(room_id, f"recut_{content_id}", src_assets)
-    return _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
+    # recut は高速性が売り（docstring どおり LLM を使わない）— テロップは従来経路
+    return _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt, llm_captions=False)
 
 
 _CAPTION_CACHE_GUARD = __import__("threading").Lock()
@@ -5549,12 +5590,264 @@ def _group_caption_words(
     return balanced
 
 
+def _design_captions_with_llm(
+    words: list[dict[str, Any]],
+    *,
+    brief: str | None = None,
+    context_terms: list[str] | None = None,
+    room_id: str | None = None,
+    job_id: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """テロップの「区切り」と「誤認識修正」をダン（定額CLIワンショット）に設計させる。
+
+    機械的な単語グルーピング（_group_caption_words）は語中改行や ASR 誤字を
+    直せない。チャットでダンにテロップを頼んだときと同じく、単語タイム
+    スタンプを渡して LLM に自然な句境界と表記修正を判断させる。
+
+    words: [{text, start, end}]（タイムライン秒・順序どおり）
+    返り値: [{"text": 表示テキスト, "start": 語index, "end": 語index}] / 失敗時 None
+    （失敗時は呼び出し元が従来の機械的グルーピングにフォールバックする）
+    """
+    if not words:
+        return None
+    try:
+        from app.agent.cli_runner import run_oneshot_cli
+    except Exception:
+        return None
+    # 部屋のプロジェクト名は固有名詞修正の最重要ヒント（例: 吉川特装HP制作 →
+    # ASRが「キッカートク層」と書いた社名を直せる）
+    label = _room_project_label(room_id) if room_id else None
+    if label:
+        context_terms = [label, *(context_terms or [])]
+    # 長尺は1回のワンショットに収まらない（実測: 847語で240sタイムアウト）。
+    # 無音の切れ目でバッチに割り、順に設計して index を通しに戻す。
+    if len(words) > 220:
+        batches: list[tuple[int, list[dict[str, Any]]]] = []
+        start = 0
+        while start < len(words):
+            end = min(start + 200, len(words))
+            if end < len(words):
+                # end 前後±40語で一番大きい無音ギャップを境界にする
+                lo, hi = max(start + 60, end - 40), min(len(words) - 1, end + 30)
+                best, best_gap = end, -1.0
+                for k in range(lo, hi):
+                    gap = float(words[k + 1]["start"]) - float(words[k]["end"])
+                    if gap > best_gap:
+                        best, best_gap = k + 1, gap
+                end = best
+            batches.append((start, words[start:end]))
+            start = end
+        # バッチは独立なので並列実行（sonnet 1コール約90-150秒 × 直列だと長すぎる）
+        from concurrent.futures import ThreadPoolExecutor
+        def _one(pair):
+            off, batch = pair
+            part = _design_captions_with_llm(
+                batch, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
+            )
+            return off, part
+        out_all: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            for off, part in ex.map(_one, batches):
+                if not part:
+                    return None
+                for ch in part:
+                    out_all.append({"text": ch["text"], "start": ch["start"] + off, "end": ch["end"] + off})
+        return out_all
+    lines = "\n".join(f"{i}|{str(w.get('text') or '').strip()}" for i, w in enumerate(words))
+    terms = [t for t in dict.fromkeys((context_terms or [])) if t]
+    ctx = (
+        "この動画に出る正しい固有名詞・用語（音が近い誤認識はこの表記へ直す）: "
+        + " / ".join(terms[:40])
+        + "\n"
+    ) if terms else ""
+    brief_line = f"編集の指示: {brief.strip()}\n" if brief and brief.strip() else ""
+    prompt = (
+        "あなたは日本語動画のテロップ（字幕）設計者です。音声認識の単語列（index|語）から、"
+        "画面に出すテロップの区切りを設計してください。\n"
+        f"{brief_line}{ctx}"
+        "ルール:\n"
+        "- 1テロップ= だいたい8〜22文字。文・句の自然な切れ目で区切る\n"
+        "- 16文字を超えるテロップは text 内の自然な位置（文節の切れ目）に改行 \\n を1つ入れる。"
+        "語の途中での改行は禁止\n"
+        "- 語の途中で切らない。テロップの先頭が助詞（が・を・に・は・で 等）や"
+        "「ついて」「という」「ような」等の複合表現の後半になる分割は禁止\n"
+        "- 表記の修正は次の2種類だけ: ①上記の固有名詞リストと**読みが近い**誤認識をリストの表記に直す"
+        "（カタカナ化・別漢字化された社名・用語に特に注意。読みの揺れ・濁音違いも一致とみなす） "
+        "②明らかな同音異義の誤変換。**それ以外は音声認識の表記をそのまま使う（勝手に漢字や語を変えない）**\n"
+        "- 話者の言い回しは変えない。要約・創作をしない。内容は全て順番どおりカバーする\n"
+        "- 「えー」「あの」などの意味のないフィラーだけは省いてよい\n"
+        "出力は JSON 配列のみ（説明文・コードフェンス不要）:\n"
+        '[{"text": "表示テキスト", "start": 最初の語のindex, "end": 最後の語のindex}, ...]\n\n'
+        "単語列:\n" + lines
+    )
+    # haiku は実測で品質不足（誤変換をさらに崩す・句の途中切り）。sonnet を既定に。
+    model = os.environ.get("DAN_CAPTION_DESIGN_MODEL", "sonnet")
+    raw = run_oneshot_cli(prompt, model=model, timeout=300)
+    if not raw:
+        # CLI 起動やキュー待ちの揺らぎがあるので1回だけ再試行
+        raw = run_oneshot_cli(prompt, model=model, timeout=300)
+    if not raw:
+        return None
+    txt = raw.strip()
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        if txt.lower().startswith("json"):
+            txt = txt[4:]
+    a, b = txt.find("["), txt.rfind("]")
+    if a < 0 or b <= a:
+        return None
+    try:
+        data = json.loads(txt[a : b + 1])
+    except Exception:
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    out: list[dict[str, Any]] = []
+    prev_end = -1
+    for item in data:
+        if not isinstance(item, dict):
+            return None
+        text = str(item.get("text") or "").strip()
+        try:
+            s, e = int(item.get("start")), int(item.get("end"))
+        except (TypeError, ValueError):
+            return None
+        if not text or s < 0 or e < s or e >= len(words) or s <= prev_end:
+            return None
+        prev_end = e
+        out.append({"text": text, "start": s, "end": e})
+    out = _caption_design_polish(out)
+    logger.info("caption design: %d chunks from %d words (room=%s)", len(out), len(words), room_id)
+    return out
+
+
+_CAPTION_BAD_HEADS = (
+    "が", "を", "に", "は", "で", "と", "も", "や", "の",
+    "とか", "ついて", "という", "ような", "際に", "ということ",
+)
+
+
+def _caption_design_polish(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """LLM設計の決定論的な仕上げ: 助詞・複合表現の後半で始まるチャンクは
+    前のチャンクへ併合する（LLMが数%の割合で残す不自然な区切りの後始末）。"""
+    polished: list[dict[str, Any]] = []
+    for ch in chunks:
+        head = ch["text"].replace("\n", "")
+        bad = any(
+            head.startswith(h) and not head.startswith(("はい", "とにかく", "でも", "ということで"))
+            for h in _CAPTION_BAD_HEADS
+        )
+        if bad and polished:
+            prev = polished[-1]
+            joined = prev["text"].replace("\n", "") + head
+            if len(joined) <= 24 and ch["start"] == prev["end"] + 1:
+                mid = len(prev["text"].replace("\n", ""))
+                # 併合後が16文字超なら旧チャンク境界を改行位置として使う
+                text = joined if len(joined) <= 16 else f"{joined[:mid]}\n{joined[mid:]}"
+                polished[-1] = {"text": text, "start": prev["start"], "end": ch["end"]}
+                continue
+        polished.append(dict(ch))
+    return polished
+
+
+def _room_project_label(room_id: str) -> str | None:
+    """この部屋のプロジェクト名（テロップの固有名詞修正ヒント）。失敗は None。"""
+    try:
+        from app.services.project_service import ProjectService
+        rows = (
+            ProjectService()
+            .supabase.table("projects")
+            .select("title")
+            .eq("room_id", room_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if rows:
+            t = str(rows[0].get("title") or "").strip()
+            return t or None
+    except Exception:
+        pass
+    return None
+
+
+def _caption_clips_from_design(
+    design: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+    *,
+    style: dict[str, Any] | None = None,
+    make_id=None,
+) -> list[dict[str, Any]]:
+    """LLM設計のチャンクをテロップクリップにする。表示タイミングの流儀
+    （わずかな先行表示・次のテロップ直前まで・最短0.72s・単調増加）は
+    機械的グルーピング版と同じ。"""
+    captions: list[dict[str, Any]] = []
+    last_end = 0.0
+    for i, ch in enumerate(design):
+        seg = words[ch["start"] : ch["end"] + 1]
+        if not seg:
+            continue
+        next_start = None
+        if i + 1 < len(design):
+            nxt = words[design[i + 1]["start"] : design[i + 1]["start"] + 1]
+            next_start = float(nxt[0]["start"]) if nxt else None
+        lead, tail = 0.04, 0.12
+        start = max(float(seg[0]["start"]) - lead, last_end)
+        end = max(float(seg[-1]["end"]) + tail, start + 0.72)
+        if next_start is not None:
+            end = min(end, max(start + 0.55, next_start - 0.02))
+        cid = make_id() if make_id else f"clip_cap_{i + 1:04d}"
+        # LLM が改行位置まで指定した場合はそのまま使う（機械折返しは語中で割れる）
+        text = ch["text"]
+        display = text if "\n" in text else _caption_display_text(text, max_line_chars=16)
+        clip: dict[str, Any] = {
+            "id": cid,
+            "track": "caption",
+            "text": display,
+            "timeline_start": round(start, 3),
+            "timeline_end": round(end, 3),
+            "words": seg,
+        }
+        if style is not None:
+            clip["style"] = style
+        captions.append(clip)
+        last_end = end
+    return captions
+
+
 def _generate_caption_sequence_from_words(
     sequence: dict[str, Any],
     words: list[dict[str, Any]],
     room_id: str | None = None,
+    *,
+    brief: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     glossary = _caption_glossary(room_id)
+    # まずダンにテロップ設計させる（チャット品質）。失敗時のみ機械的区切り。
+    context_terms = [t for pair in glossary for t in pair]
+    if room_id:
+        context_terms += [str(a.get("filename") or "") for a in _read_assets(room_id)]
+    if room_id and job_id:
+        _append_job_event(room_id, job_id, {"type": "status", "text": "テロップをダンが設計しています…"})
+    design = _design_captions_with_llm(
+        words, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
+    )
+    if design:
+        captions = _caption_clips_from_design(design, words, style=_caption_default_style())
+        tracks_d = []
+        has_cap = False
+        for track in sequence.get("tracks") or []:
+            if track.get("type") == "caption":
+                tracks_d.append({**track, "clips": captions, "hidden": False})
+                has_cap = True
+            else:
+                tracks_d.append(track)
+        if not has_cap:
+            tracks_d.append({"id": "caption_1", "type": "caption", "label": "Captions", "clips": captions})
+        return {**sequence, "tracks": tracks_d}, len(captions)
+    if room_id and job_id:
+        _append_job_event(room_id, job_id, {"type": "status", "text": "テロップ設計をスキップ（自動区切りで生成）"})
     groups = _group_caption_words(words, glossary=glossary)
     style = _caption_default_style()
     captions: list[dict[str, Any]] = []
@@ -5644,8 +5937,13 @@ def _generate_caption_sequence(
     sequence: dict[str, Any],
     analysis_by_asset: dict[str, dict[str, Any]],
     room_id: str | None = None,
+    *,
+    brief: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[dict[str, Any], int]:
-    return _generate_caption_sequence_from_words(sequence, _timeline_speech_words(sequence, analysis_by_asset), room_id)
+    return _generate_caption_sequence_from_words(
+        sequence, _timeline_speech_words(sequence, analysis_by_asset), room_id, brief=brief, job_id=job_id
+    )
 
 
 def _timeline_dialogue_wav(room_id: str, sequence: dict[str, Any], work_dir: Path) -> Path | None:
@@ -5735,13 +6033,16 @@ def _build_caption_generation(room_id: str, job_id: str, instruction: dict[str, 
     sequence = timeline.get("sequence") if isinstance(timeline.get("sequence"), dict) else None
     if not isinstance(sequence, dict):
         return None
+    cap_brief = str(timeline.get("brief") or instruction.get("brief") or instruction.get("revision_text") or "")
     words = _timeline_caption_words(room_id, job_id, sequence)
     if words:
-        seq2, count = _generate_caption_sequence_from_words(sequence, words, room_id)
+        seq2, count = _generate_caption_sequence_from_words(
+            sequence, words, room_id, brief=cap_brief, job_id=job_id
+        )
     else:
         asset_ids = [str(c.get("asset_id")) for c in _caption_sync_source_clips(sequence) if c.get("asset_id")]
         analysis = _ensure_audio_analysis(room_id, asset_ids)
-        seq2, count = _generate_caption_sequence(sequence, analysis, room_id)
+        seq2, count = _generate_caption_sequence(sequence, analysis, room_id, brief=cap_brief, job_id=job_id)
     _append_job_event(room_id, job_id, {
         "type": "status",
         "text": f"カット済み音声からテロップを生成しました（{count}件）。",
