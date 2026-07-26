@@ -3411,6 +3411,12 @@ struct App {
     /// このエディタが紐づくチャットルーム名（タイトルバー表示用）
     room_label: Option<String>,
     title_set: bool,
+    /// 生成中コンテンツid（ライブ組み上がり表示＋編集ロックの対象）
+    generating_content: Option<String>,
+    /// 生成中の contents.json 変更検知（中間保存＝カット済みタイムラインの反映）
+    gen_contents_mtime: Option<std::time::SystemTime>,
+    /// 新規クリップの出現アニメ: クリップid → 表示開始時刻（時差でポポポッと出す）
+    clip_spawn: std::collections::HashMap<String, Instant>,
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
@@ -3664,6 +3670,9 @@ impl App {
             picker_open: Default::default(),
             room_label: None,
             title_set: false,
+            generating_content: None,
+            gen_contents_mtime: None,
+            clip_spawn: Default::default(),
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
@@ -3847,6 +3856,11 @@ impl App {
     }
 
     fn apply_edit(&mut self, snapshot: bool, f: impl FnOnce(&mut serde_json::Value)) {
+        // 生成中コンテンツは読み取り専用（ダンの中間保存と衝突させない）
+        if self.is_generating_open() {
+            self.toast("🎬 ダンが制作中です。編集は完成後に可能になります");
+            return;
+        }
         if snapshot {
             self.pending_undo = None;
             self.undo.push(self.doc.raw.to_string());
@@ -3911,6 +3925,10 @@ impl App {
     /// edits are written by another process, so an unconditional save-on-exit would
     /// otherwise erase them with this window's stale in-memory document.
     fn save_document(&mut self) -> anyhow::Result<bool> {
+        if self.is_generating_open() {
+            // 生成中は書き込まない（ダンの中間保存が唯一の書き手）
+            return Ok(false);
+        }
         let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&self.doc.contents_path)?)?;
         let fingerprint = serde_json::to_string(&on_disk)?;
         if fingerprint != self.disk_fingerprint {
@@ -7031,10 +7049,65 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
     }
 
+    /// 現在の doc の全クリップid（ライブ再読込時の「新規クリップ」検出用）
+    fn clip_id_set(&self) -> std::collections::HashSet<String> {
+        self.doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter().map(|c| c.id.clone()))
+            .collect()
+    }
+
+    /// 再読込で増えたクリップに時差の出現時刻を割り当てる（60ms間隔のフェードイン）
+    fn stagger_new_clips(&mut self, before: &std::collections::HashSet<String>) {
+        let mut delay = 0u64;
+        let ids: Vec<String> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter().map(|c| c.id.clone()))
+            .collect();
+        for id in ids {
+            if !before.contains(&id) {
+                self.clip_spawn
+                    .insert(id, Instant::now() + std::time::Duration::from_millis(delay));
+                delay += 60;
+            }
+        }
+    }
+
+    /// 出現アニメ中クリップのベール透明度（None=アニメ完了/対象外）。
+    /// フェード0.4秒。開始時刻が未来（時差待ち）の間は完全に隠す。
+    fn spawn_veil(&self, id: &str) -> Option<u8> {
+        let t0 = self.clip_spawn.get(id)?;
+        let el = t0.elapsed().as_secs_f32(); // 未来のInstantは0に飽和
+        let a = (el / 0.4).clamp(0.0, 1.0);
+        if a >= 1.0 { None } else { Some(((1.0 - a) * 235.0) as u8) }
+    }
+
+    /// 開いているコンテンツが生成中（＝ライブ表示・編集ロック対象）か
+    fn is_generating_open(&self) -> bool {
+        self.generating_content.is_some()
+            && self.generating_content.as_deref() == Some(self.content_id().as_str())
+    }
+
     fn open_content(&mut self, content_id: &str) {
         let path = format!("{}/contents.json", self.doc.asset_dir);
         let Ok(txt) = std::fs::read_to_string(&path) else { return };
         let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(&txt) else { return };
+        // いまディスクから読んだ内容が新しい基準：外部更新検出の指紋も更新する
+        // （生成のライブ反映で再オープンした後、保存が永久にブロックされないように）
+        let disk_fp = serde_json::to_string(&raw).unwrap_or_default();
+        // 生成中(status=running)のコンテンツを開いたら、経路を問わずライブ表示
+        // ＋編集ロックに入る（ライブラリから手動で開いた場合も同じ体験にする）
+        let open_status = raw
+            .as_array()
+            .and_then(|arr| arr.iter().find(|c| c.get("id").and_then(|v| v.as_str()) == Some(content_id)))
+            .and_then(|c| c.get("status"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
         if let Some(arr) = raw.as_array_mut() {
             if let Some(idx) = arr.iter().position(|c| c.get("id").and_then(|v| v.as_str()) == Some(content_id)) {
                 let c = arr.remove(idx);
@@ -7043,6 +7116,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             let nd = Arc::new(nd);
+            self.disk_fingerprint = disk_fp;
+            self.generating_content = match open_status.as_deref() {
+                Some("running") => Some(content_id.to_string()),
+                // 開始直後はジョブがまだ status を running に切り替えていない
+                // （既定 draft）。自動遷移で既に生成中と分かっている場合は維持する
+                Some("draft") if self.generating_content.as_deref() == Some(content_id) => {
+                    Some(content_id.to_string())
+                }
+                _ => None,
+            };
             self.doc = nd.clone();
             *self.shared.doc.lock().unwrap() = nd;
             self.dur = self.doc.duration();
@@ -8669,6 +8752,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     egui::pos2(x0.max(body.left()), y0),
                     egui::pos2(x1.min(body.right()), y0 + lane_h),
                 );
+                // ライブ組み上がり: 新規クリップは背景色ベールを上層に重ねて
+                // フェードイン（時差つき）。上層レイヤなので装飾ごと隠れる。
+                if let Some(v) = self.spawn_veil(&c.id) {
+                    let vp = ui.ctx().layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::new("clip_spawn_veil"),
+                    ));
+                    vp.rect_filled(r, 4.0, egui::Color32::from_rgba_unmultiplied(15, 15, 18, v));
+                    ui.ctx().request_repaint();
+                }
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
                 let is_blur_bake = c.blur_track.is_some();
                 let pop_state = if is_pop {
@@ -9731,6 +9824,12 @@ impl App {
                         },
                     });
                     self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
+                    // ライブ組み上がり: 開始と同時にエディタへ遷移（最初は空の
+                    // タイムライン）。中間保存が届くたびに live reload で育つ。
+                    self.generating_content = Some(cid.clone());
+                    self.gen_contents_mtime = None;
+                    self.clip_spawn.clear();
+                    self.open_content(&cid);
                 }
                 ("gen_job", Ok(v)) => {
                     self.lib.gen_job = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -9750,7 +9849,10 @@ impl App {
                             self.lib.started = false;
                             self.lib.gen_job = None;
                             self.lib.events.push("完成。開いています…".into());
+                            let before = self.clip_id_set();
                             self.open_content(&cid);
+                            self.stagger_new_clips(&before);
+                            self.generating_content = None;
                         }
                         "failed" => {
                             let msg = job.get("error").and_then(|e| e.as_str()).unwrap_or("失敗").to_string();
@@ -9761,6 +9863,9 @@ impl App {
                             self.lib.error = Some(msg);
                             self.lib.started = false;
                             self.lib.gen_job = None;
+                            // 失敗時は編集ロックを解除（途中まで出来たカット済み
+                            // タイムラインがあればそのまま編集できる）
+                            self.generating_content = None;
                         }
                         _ => {}
                     }
@@ -9875,6 +9980,20 @@ impl App {
                     format!("/api/v1/production-assets/jobs/{job}/events?room_id={room}"),
                 );
             }
+            // ライブ組み上がり: 生成中は中間保存（カット済みタイムライン等）を
+            // mtime 変化で検知して開き直す。新しく現れたクリップは時差フェードイン。
+            if let Some(gcid) = self.generating_content.clone() {
+                let path = format!("{}/contents.json", self.doc.asset_dir);
+                if let Ok(mt) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    if self.gen_contents_mtime.map_or(true, |prev| mt > prev) {
+                        self.gen_contents_mtime = Some(mt);
+                        let before = self.clip_id_set();
+                        self.open_content(&gcid);
+                        self.stagger_new_clips(&before);
+                    }
+                }
+            }
+            self.clip_spawn.retain(|_, t| t.elapsed().as_secs_f32() < 3.0);
             if self.screen == Screen::Library
                 && self
                     .lib
@@ -10367,6 +10486,23 @@ impl eframe::App for App {
             }
             self.library_ui(ctx);
             return;
+        }
+        // 生成中バナー: ダンの進捗を出しつつ「今は見るだけ」を明示
+        if self.is_generating_open() {
+            egui::TopBottomPanel::top("gen_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    let ev = self.lib.events.last().cloned().unwrap_or_default();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "🎬 ダンが制作中… {ev}　（タイムラインは出来上がり順に表示。編集は完成後に可能になります）"
+                        ))
+                        .size(12.5)
+                        .color(egui::Color32::from_rgb(120, 220, 190)),
+                    );
+                });
+            });
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
         }
         // Caption text edits stay in memory while typing (the WebView overlay renders
         // those live) — but the GPU compositor needs the cache PNGs to draw captions at
