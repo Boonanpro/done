@@ -3379,12 +3379,19 @@ def _assemble_sequence_from_decisions(
         # where source time was removed (final-timeline seconds), for the FireCut-style animation.
         "cut_meta": cut_meta,
         "removed_total": round(sum(c["removed"] for c in cut_meta), 3),
+        # 役割ごとの常設レーンは廃止: 中身のあるレーンだけ出す（映像メインは
+        # タイムラインの土台なので常に出す）。空のオーバーレイ/エフェクト等を
+        # 常設していたのは旧5トラック骨組みの名残で、UI に空レーンが並ぶ原因だった。
         "tracks": [
-            {"id": "video_1", "type": "video", "label": "Main video", "clips": video_clips},
-            {"id": "overlay_1", "type": "overlay", "label": "Overlay/PiP", "clips": overlay_clips},
-            {"id": "caption_1", "type": "caption", "label": "Captions", "clips": caption_clips},
-            {"id": "audio_1", "type": "audio", "label": "Audio", "clips": audio_clips},
-            {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": effect_clips},
+            t
+            for t in [
+                {"id": "video_1", "type": "video", "label": "Main video", "clips": video_clips},
+                {"id": "overlay_1", "type": "overlay", "label": "Overlay/PiP", "clips": overlay_clips},
+                {"id": "caption_1", "type": "caption", "label": "Captions", "clips": caption_clips},
+                {"id": "audio_1", "type": "audio", "label": "Audio", "clips": audio_clips},
+                {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": effect_clips},
+            ]
+            if t["id"] == "video_1" or t["clips"]
         ],
     }
     if sb_targets or sb_patterns:
