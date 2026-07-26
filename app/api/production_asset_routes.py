@@ -2730,7 +2730,7 @@ Rules:
 - spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of a CROSS-segment restatement by omitting that segment.
 - cuts = WORD-LEVEL removals WITHIN kept segments. The transcript below has word-level timestamps; use cuts (in the asset's own seconds) to remove a 言い直し/stutter that happens INSIDE a single segment (e.g. the segment says "スタイル名や…スタイル名や…" — cut the first occurrence) or an obvious repeated filler run. The assembler trims exactly those spans. This is how you remove duplicates that survive the spine — listen via the transcript and cut them.
 - Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts.
-- CUT POLICY（つなぎのリズム）: カットして良いのは ①言い直し・NGテイク ②「えー」「あの」等のフィラー ③明らかに長い間（目安0.6秒超）だけ。文中の短い間・息継ぎはカットしない（細切れの継ぎ接ぎ感が出て見づらい）。テイクはできるだけ連続で残す。ユーザーのブリーフに「テンポ良く」「サクサク」「間を詰めて」等の明示があるときだけ "tempo_priority": true を出し、silence_threshold を 0.35〜0.5 に下げて攻める。指定が無ければ自然さ優先で silence_threshold は 0.65 目安（省略時の既定も 0.65）。任意で "pause_style": {{"remainder": 秒, "midsentence_min": 秒}} も指定できる。省略時の既定: 圧縮した間は 0.3 秒だけ呼吸として残し（ゼロ結合しない）、文末表現（です/ます等）で終わらない発話の直後の間は 1.2 秒未満ならカットしない。tempo_priority 時は remainder 0.08 秒・文中保護なしでテンポ最優先。
+- CUT POLICY（つなぎのリズム）: 言い直し・フィラーの検出は後段の専任パスが全文を精査して行う。あなたは構成（どの話をどの順で使うか・話題ごと不要な区間の除外）に集中し、cuts には「明らかに丸ごと不要な区間」だけを書けばよい（細かい言い直し拾いは不要）。文中の短い間・息継ぎはカットしない（細切れの継ぎ接ぎ感が出て見づらい）。ユーザーのブリーフに「テンポ良く」「サクサク」「間を詰めて」等の明示があるときだけ "tempo_priority": true を出し、silence_threshold を 0.35〜0.5 に下げて攻める。指定が無ければ自然さ優先で silence_threshold は 0.65 目安（省略時の既定も 0.65）。任意で "pause_style": {{"remainder": 秒, "midsentence_min": 秒}} も指定できる。省略時の既定: 圧縮した間は 0.3 秒だけ呼吸として残し（ゼロ結合しない）、文末表現（です/ます等）で終わらない発話の直後の間は 1.2 秒未満ならカットしない。tempo_priority 時は remainder 0.08 秒・文中保護なしでテンポ最優先。
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
 - blur = hide something on screen. Pick the field by WHAT is hidden:
@@ -3978,6 +3978,25 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                 raise RuntimeError("Dan did not produce usable editing decisions")
             fmt = str((instruction.get("timeline") or {}).get("format") or instruction.get("format") or "9:16")
             plan_brief = str((instruction.get("timeline") or {}).get("brief") or instruction.get("brief") or "")
+            # 専任パス: 言い直し・フィラーの検出は構成判断と分離して全文を精査させる
+            # （計画と同時にやらせると漏れる。検出結果は decisions.cuts に合流し、
+            #   既存の組み立てがそのまま尊重する）
+            _append_job_event(room_id, job_id, {"type": "status", "text": "不要部分（言い直し・フィラー）をダンが検出しています…"})
+            removals = _detect_removals_with_llm(
+                transcripts, brief=plan_brief, room_id=room_id, job_id=job_id
+            )
+            if removals:
+                decisions["cuts"] = list(decisions.get("cuts") or []) + removals
+                removed_total = sum(float(r["end"]) - float(r["start"]) for r in removals)
+                _append_job_event(room_id, job_id, {
+                    "type": "status",
+                    "text": f"不要部分 {len(removals)}箇所を検出（計{removed_total:.1f}秒）",
+                })
+            else:
+                _append_job_event(room_id, job_id, {
+                    "type": "status",
+                    "text": "不要部分の追加検出なし（計画のカットのみ使用）",
+                })
             sequence_result = _assemble_sequence_from_decisions(
                 decisions, transcripts, room_id, fmt, brief=plan_brief, job_id=job_id
             )
@@ -5691,6 +5710,163 @@ def _group_caption_words(
         balanced.append(g)
         i += 1
     return balanced
+
+
+_REMOVAL_MAX_SPAN = 30.0  # 安全弁: 1箇所の削除は最長30秒（内容ごと消す事故防止）
+
+
+def _norm_quote(t: str) -> str:
+    drop = set(" 　\t\n、。･・「」()（）!?！？.,")
+    return "".join(ch for ch in str(t or "") if ch not in drop)
+
+
+def _align_quote_to_span(quote: str, words: list[dict[str, Any]]) -> tuple[float, float] | None:
+    """verbatim 引用を単語タイムスタンプ列に照合し、源動画の秒区間を返す。
+    正規化した文字列同士の difflib 比で最良一致の連続単語範囲を探す
+    （しきい値 0.75、見つからなければ None＝その検出は不採用）。"""
+    import difflib
+
+    q = _norm_quote(quote)
+    if not q or not words:
+        return None
+    toks = [_norm_quote(str(w.get("word") or w.get("text") or "")) for w in words]
+    best_r, best_ij = 0.0, None
+    n = len(words)
+    for i in range(n):
+        acc = ""
+        for j in range(i, n):
+            acc += toks[j]
+            if len(acc) < len(q) * 0.6:
+                continue
+            if len(acc) > len(q) * 1.6 + 4:
+                break
+            r = difflib.SequenceMatcher(None, q, acc).ratio()
+            if r > best_r:
+                best_r, best_ij = r, (i, j)
+            if best_r > 0.98:
+                break
+        if best_r > 0.98:
+            break
+    if best_ij is None or best_r < 0.75:
+        return None
+    i, j = best_ij
+    try:
+        return float(words[i]["start"]), float(words[j]["end"])
+    except Exception:
+        return None
+
+
+def _detect_removals_with_llm(
+    transcripts: dict[str, Any],
+    *,
+    brief: str | None = None,
+    room_id: str | None = None,
+    job_id: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """言い直し・フィラー・言いかけ断片の削除区間を「専任」のワンショット LLM に
+    全文を読ませて検出する。返り値は decisions.cuts と同じ
+    {asset_id, start, end}（源動画の秒）のリスト。失敗時 None。
+
+    計画 LLM（構成判断）と同時にやらせると検出が漏れる（動画7で言い直しが
+    残存した実測）ため、チェックリスト1本に絞ったパスに分離した。検出は
+    quote（一字一句引用）+ segment 指定で受け、単語タイムスタンプへの照合は
+    こちらで行う（LLM は言葉の判断だけ、数字は機械の分担）。"""
+    try:
+        from app.agent.cli_runner import run_oneshot_cli
+    except Exception:
+        return None
+    label = _room_project_label(room_id) if room_id else None
+    out: list[dict[str, Any]] = []
+    for aid, t in (transcripts or {}).items():
+        segs = [s for s in ((t or {}).get("segments") or []) if s.get("words")]
+        if not segs:
+            continue
+        lines = [
+            f"{s['id']} [{float(s.get('start') or 0):.2f}-{float(s.get('end') or 0):.2f}] {s.get('text') or ''}"
+            for s in segs
+        ]
+        ctx = f"動画の文脈: {label}\n" if label else ""
+        brief_line = f"編集の指示: {brief.strip()}\n" if brief and brief.strip() else ""
+        prompt = (
+            "あなたは動画編集者です。以下は動画の音声認識全文（セグメント番号・秒付き）です。\n"
+            + ctx
+            + brief_line
+            + "この中から削除すべき「不要部分」だけを漏れなく列挙してください。不要部分とは:\n"
+            "1. 言い直し・撮り直し: 同じ内容を言い直している場合の、先に言った方（噛んだ・未完成の方）。残すのは後のテイク\n"
+            "2. フィラー: 「えー」「あー」「あの」「まあ」「なんか」等、意味を持たない発話（文意に効いている場合は残す）\n"
+            "3. 言いかけて中断した断片\n"
+            "ルール:\n"
+            "- 意味のある内容は絶対に削除しない。迷ったら列挙しない（精度優先）\n"
+            "- quote は認識テキストから一字一句そのままコピーする（言い換え・要約禁止）\n"
+            "- segment はその発話が始まるセグメント番号\n"
+            "出力は JSON 配列のみ（説明文・コードフェンス不要）。無ければ []:\n"
+            '[{"quote": "えーっとですね", "segment": "a1_s03", "reason": "フィラー"}]\n\n'
+            "音声認識全文:\n" + "\n".join(lines)
+        )
+        model = os.environ.get("DAN_CUT_DETECT_MODEL", "sonnet")
+        raw = run_oneshot_cli(prompt, model=model, timeout=600)
+        if not raw:
+            raw = run_oneshot_cli(prompt, model=model, timeout=600)
+        if not raw:
+            continue
+        txt = raw.strip()
+        if txt.startswith("```"):
+            txt = txt.strip("`")
+            if txt.lower().startswith("json"):
+                txt = txt[4:]
+        a, b = txt.find("["), txt.rfind("]")
+        if a < 0 or b < a:
+            continue
+        try:
+            data = json.loads(txt[a : b + 1])
+        except Exception:
+            continue
+        if not isinstance(data, list):
+            continue
+        seg_index = {str(s["id"]): k for k, s in enumerate(segs)}
+        spans: list[tuple[float, float]] = []
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            quote = str(it.get("quote") or "")
+            k = seg_index.get(str(it.get("segment") or ""))
+            if k is None or not quote.strip():
+                continue
+            window_words: list[dict[str, Any]] = []
+            for s in segs[max(0, k - 1) : k + 2]:
+                window_words.extend(s.get("words") or [])
+            span = _align_quote_to_span(quote, window_words)
+            if not span:
+                continue
+            t0, t1 = span
+            if not (0.0 <= t1 - t0 <= _REMOVAL_MAX_SPAN):
+                continue
+            spans.append((t0, t1))
+        if not spans:
+            continue
+        # 過検出ガード: 発話全体の4割超を消す提案は不採用（精度優先）
+        total_speech = sum(
+            max(0.0, float(s.get("end") or 0) - float(s.get("start") or 0)) for s in segs
+        )
+        removed = sum(t1 - t0 for t0, t1 in spans)
+        if total_speech > 0 and removed > total_speech * 0.4:
+            logger.warning(
+                "removal detect: over-detection (%.1fs of %.1fs speech) — skipped for %s",
+                removed, total_speech, aid,
+            )
+            continue
+        spans.sort()
+        merged: list[list[float]] = []
+        for t0, t1 in spans:
+            if merged and t0 <= merged[-1][1] + 0.05:
+                merged[-1][1] = max(merged[-1][1], t1)
+            else:
+                merged.append([t0, t1])
+        out.extend(
+            {"asset_id": aid, "start": round(a2, 3), "end": round(b2, 3), "source": "auto_detect"}
+            for a2, b2 in merged
+        )
+    return out or None
 
 
 def _design_captions_with_llm(
