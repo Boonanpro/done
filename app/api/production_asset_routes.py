@@ -3098,15 +3098,30 @@ def _assemble_sequence_from_decisions(
     pieces_by_sid: dict[str, list[dict[str, Any]]] = {}
     for p in pieces:
         pieces_by_sid.setdefault(p["sid"], []).append(p)
-    # Dan がプランで明示的にテロップ文言を書いた場合はそれを尊重する。
-    # 書いていない（= Whisper 生テキストへのフォールバック）場合のみ、
-    # テロップ設計 LLM パスで「区切り＋誤認識修正」を作り直す。
-    has_explicit_caption = any(
-        isinstance(it, dict) and isinstance(it.get("caption"), str) and it["caption"].strip()
-        for it in (decisions.get("spine") or [])
-    )
+    # Dan がプランで「創作した」テロップ（書き起こしに無い文言）だけを尊重する。
+    # プランのテロップは実際には Whisper セグメント文のほぼコピーであることが
+    # 大半で（音響的な区切りをそのまま継承＝「りとか」等の変な切れ目の正体）、
+    # 単なる有無で判定すると設計 LLM パスが一度も走らない（2026-07-26 実発生）。
+    # 正規化した類似度でコピーか創作かを見分ける。
+    def _norm_cap(t: str) -> str:
+        return re.sub(r"[\s、。･・]", "", str(t or ""))
+
+    import difflib as _difflib
+
+    novel = 0
+    cap_count = 0
+    for it in decisions.get("spine") or []:
+        if not (isinstance(it, dict) and str(it.get("caption") or "").strip()):
+            continue
+        cap_count += 1
+        raw = str((seg_by_id.get(str(it.get("segment_id"))) or {}).get("text") or "")
+        ratio = _difflib.SequenceMatcher(None, _norm_cap(it["caption"]), _norm_cap(raw)).ratio()
+        if ratio < 0.6:
+            novel += 1
+    # 3割以上が書き起こしと乖離 = 意図的に書いたテロップとみなし設計をスキップ
+    has_authored_captions = cap_count > 0 and novel >= max(1, int(cap_count * 0.3))
     designed = False
-    if llm_captions and not decisions.get("no_captions") and not has_explicit_caption:
+    if llm_captions and not decisions.get("no_captions") and not has_authored_captions:
         all_words: list[dict[str, Any]] = []
         for sid in order:
             if sid in covered:
