@@ -1946,7 +1946,35 @@ fn warm_upcoming(
 
 /// Tiny localhost-only HTTP client (the sandbox popout endpoints are auth-free local
 /// APIs) — a dependency-free TcpStream request beats pulling a whole HTTP stack.
-static API_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+// RwLock（OnceLockでない）: トークンは24時間で失効する。制作ボタンから
+// 起動するたび native_token.txt が新しくなるので、401 を受けたらファイルを
+// 読み直して自己復帰する（開きっぱなしのエディタが翌日サイレントに
+// 使えなくなる問題の根治）。
+static API_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+fn token_file_path() -> String {
+    format!(
+        "{}/.done/native_token.txt",
+        std::env::var("USERPROFILE").unwrap_or_default().replace(char::from(92), "/")
+    )
+}
+
+/// 401 を受けたとき: 保存ファイルのトークンが今より新しければ差し替えて true
+fn refresh_api_token_from_file() -> bool {
+    let Some(fresh) = std::fs::read_to_string(token_file_path())
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    else {
+        return false;
+    };
+    let mut guard = API_TOKEN.write().unwrap();
+    if guard.as_deref() == Some(fresh.as_str()) {
+        return false;
+    }
+    *guard = Some(fresh);
+    true
+}
 
 /// Auth token for the local server: --token arg > DONE_TOKEN env > ~/.done/native_token.txt
 /// (long-lived token minted server-side; done:// launches will inject their own).
@@ -1973,17 +2001,38 @@ fn load_api_token(args: &[String]) {
             std::fs::read_to_string(p).ok().map(|t| t.trim().to_string())
         })
         .filter(|t| !t.is_empty());
-    let _ = API_TOKEN.set(tok);
+    *API_TOKEN.write().unwrap() = tok;
 }
 
 fn http_local(method: &str, path: &str, json_body: Option<&str>) -> anyhow::Result<String> {
+    let used = API_TOKEN.read().unwrap().clone();
+    match http_local_once(method, path, json_body) {
+        Err(e) if format!("{e:#}").contains(" 401 ") => {
+            // トークン失効 → ファイルの新トークンで一度だけリトライ。
+            // 並行リクエストが同時に401になった場合、ファイル読み直しに
+            // 「勝つ」のは1本だけなので、他スレッドが更新済みで現在の
+            // トークンが自分の使った物と違う場合もリトライ対象にする。
+            let refreshed = refresh_api_token_from_file();
+            let now = API_TOKEN.read().unwrap().clone();
+            if refreshed || now != used {
+                http_local_once(method, path, json_body)
+            } else {
+                Err(e)
+            }
+        }
+        other => other,
+    }
+}
+
+fn http_local_once(method: &str, path: &str, json_body: Option<&str>) -> anyhow::Result<String> {
     use std::io::{Read, Write};
     let mut st = std::net::TcpStream::connect(("127.0.0.1", 8000))?;
     st.set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
     let body = json_body.unwrap_or("");
     let auth = API_TOKEN
-        .get()
-        .and_then(|t| t.as_ref())
+        .read()
+        .unwrap()
+        .as_ref()
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
     let req = format!(
@@ -3306,6 +3355,9 @@ struct App {
     picked_files: std::sync::Arc<Mutex<Vec<std::path::PathBuf>>>,
     /// a picker dialog is currently open (prevents double dialogs)
     picker_open: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// このエディタが紐づくチャットルーム名（タイトルバー表示用）
+    room_label: Option<String>,
+    title_set: bool,
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
@@ -3556,6 +3608,8 @@ impl App {
             lib_sink: Default::default(),
             picked_files: Default::default(),
             picker_open: Default::default(),
+            room_label: None,
+            title_set: false,
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
@@ -6842,6 +6896,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let room = self.room_id();
         self.lib_get("assets", format!("/api/v1/production-assets?room_id={room}"));
         self.lib_get("contents", format!("/api/v1/production-assets/contents?room_id={room}"));
+        if self.room_label.is_none() {
+            // どのチャットルームのエディタかをタイトルバーに出すための部屋名解決
+            self.lib_get("projects", "/api/v1/projects".into());
+        }
     }
 
     /// Open a content in the editor. The editor machinery assumes index 0, so the picked
@@ -9667,7 +9725,32 @@ impl App {
                     }
                 }
                 ("act", Ok(_)) => {
+                    self.lib.error = None;
                     self.lib_refresh();
+                }
+                ("act", Err(e)) => {
+                    // 素材登録の失敗をサイレントにしない（トークン失効が代表例）
+                    self.lib.error = Some(if e.contains(" 401 ") {
+                        "ログインの有効期限が切れています。チャットの「制作」ボタンから開き直すと復帰します".into()
+                    } else {
+                        format!("素材の登録に失敗: {e}")
+                    });
+                }
+                ("projects", Ok(v)) => {
+                    let arr = v
+                        .as_array()
+                        .cloned()
+                        .or_else(|| v.get("projects").and_then(|p| p.as_array()).cloned())
+                        .unwrap_or_default();
+                    let rid = self.room_id();
+                    if let Some(name) = arr
+                        .iter()
+                        .find(|p| p.get("room_id").and_then(|r| r.as_str()) == Some(rid.as_str()))
+                        .and_then(|p| p.get("name").or_else(|| p.get("title")))
+                        .and_then(|n| n.as_str())
+                    {
+                        self.room_label = Some(name.to_string());
+                    }
                 }
                 ("del", Ok(_)) => {
                     self.lib.confirm_delete = None;
@@ -10002,6 +10085,10 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("制作ライブラリ");
+                if let Some(l) = &self.room_label {
+                    let short: String = l.chars().take(24).collect();
+                    ui.label(egui::RichText::new(format!("｜ {short}")).weak().size(13.0));
+                }
                 if ui
                     .add(egui::Button::new("🔄").frame(false))
                     .on_hover_text("一覧を更新")
@@ -10218,6 +10305,17 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _uistat = UiStatGuard::begin(self);
+        // 部屋名が判明したらタイトルバーへ（どの部屋のエディタか一目で分かる）
+        if !self.title_set {
+            if let Some(label) = self.room_label.clone() {
+                let short: String = label.chars().take(28).collect();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "{short} — done Studio  [{}]",
+                    env!("NATIVE_BUILD_TAG")
+                )));
+                self.title_set = true;
+            }
+        }
         // IME変換の確定Enterがそのまま改行として入る（egui 0.29のIMEリーク）。
         // このフレームにIMEイベントがある間はEnter/改行テキストを握り潰す —
         // 確定済みテキストで押す普通のEnterはIMEイベントが無いので通る
