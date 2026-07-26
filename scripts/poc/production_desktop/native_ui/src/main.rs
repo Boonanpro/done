@@ -34,8 +34,46 @@ const UI_PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(255, 74, 85);
 const UI_PANEL: egui::Color32 = egui::Color32::from_rgb(24, 24, 27);
 const UI_STAGE: egui::Color32 = egui::Color32::from_rgb(12, 12, 14);
 
-const CANVAS_W: u32 = 1080;
-const CANVAS_H: u32 = 1920;
+/// キャンバス寸法はコンテンツの「形式」に追従する（旧: 1080x1920 固定で
+/// 16:9 を選んでも縦型に描画されていた）。sequence の width/height が
+/// あればそれを優先し、無ければ timeline.format から引く。
+static CANVAS_DIMS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new((1080u64 << 32) | 1920u64);
+
+fn canvas_w() -> u32 {
+    (CANVAS_DIMS.load(std::sync::atomic::Ordering::Relaxed) >> 32) as u32
+}
+
+fn canvas_h() -> u32 {
+    (CANVAS_DIMS.load(std::sync::atomic::Ordering::Relaxed) & 0xffff_ffff) as u32
+}
+
+fn canvas_for_format(fmt: &str) -> (u32, u32) {
+    match fmt {
+        "16:9" => (1920, 1080),
+        "1:1" => (1080, 1080),
+        "4:5" => (1080, 1350),
+        _ => (1080, 1920), // 9:16 と未知はこれまで通り縦型
+    }
+}
+
+/// contents.json（配列・先頭がアクティブ）からキャンバス寸法を決めて反映する。
+/// ドキュメントの読み込み/切替のたびに呼ぶこと（media スレッドが寸法変化を
+/// 検知してコンポジタを作り直す）。
+fn set_canvas_from_content(raw: &serde_json::Value) {
+    let c = raw.get(0).unwrap_or(raw);
+    let tl = c.get("timeline");
+    let seq = tl.and_then(|t| t.get("sequence"));
+    let mut w = seq.and_then(|s| s.get("width")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let mut h = seq.and_then(|s| s.get("height")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if w == 0 || h == 0 {
+        let fmt = tl.and_then(|t| t.get("format")).and_then(|v| v.as_str()).unwrap_or("9:16");
+        let d = canvas_for_format(fmt);
+        w = d.0;
+        h = d.1;
+    }
+    CANVAS_DIMS.store(((w as u64) << 32) | h as u64, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[derive(Clone)]
 struct Req {
@@ -665,11 +703,11 @@ fn contain_box(
     if src_wh.0 == 0 || src_wh.1 == 0 || dst.2 <= 0.0 || dst.3 <= 0.0 {
         return dst;
     }
-    let (bw, bh) = (dst.2 * CANVAS_W as f64, dst.3 * CANVAS_H as f64);
+    let (bw, bh) = (dst.2 * canvas_w() as f64, dst.3 * canvas_h() as f64);
     let scale = (bw / src_wh.0 as f64).min(bh / src_wh.1 as f64);
     let (dw, dh) = (
-        (src_wh.0 as f64 * scale) / CANVAS_W as f64,
-        (src_wh.1 as f64 * scale) / CANVAS_H as f64,
+        (src_wh.0 as f64 * scale) / canvas_w() as f64,
+        (src_wh.1 as f64 * scale) / canvas_h() as f64,
     );
     (dst.0 + (dst.2 - dw) / 2.0, dst.1 + (dst.3 - dh) / 2.0, dw, dh)
 }
@@ -1295,8 +1333,8 @@ fn compose(
                     used.push(path);
                     continue;
                 }
-                let box_px_w = bw * CANVAS_W as f64;
-                let box_px_h = bh * CANVAS_H as f64;
+                let box_px_w = bw * canvas_w() as f64;
+                let box_px_h = bh * canvas_h() as f64;
                 let (mut dw, mut dh) = (bw, bh);
                 if iw > 0 && ih > 0 && box_px_w > 1.0 && box_px_h > 1.0 {
                     let ia = iw as f64 / ih as f64;
@@ -1671,8 +1709,8 @@ fn caption_cache_key(c: &model::Clip, text: &str, style: &serde_json::Value) -> 
     let design = caption_render_style(style);
     let words = if c.words.is_array() { c.words.clone() } else { serde_json::json!([]) };
     let spec = serde_json::json!({
-        "w": CANVAS_W,
-        "h": CANVAS_H,
+        "w": canvas_w(),
+        "h": canvas_h(),
         "t": text,
         "d": design,
         "words": words,
@@ -1687,8 +1725,8 @@ fn caption_legacy_cache_key(c: &model::Clip, text: &str, style: &serde_json::Val
     let design = if style.is_object() { style.clone() } else { serde_json::json!({}) };
     let words = if c.words.is_array() { c.words.clone() } else { serde_json::json!([]) };
     let spec = serde_json::json!({
-        "w": CANVAS_W,
-        "h": CANVAS_H,
+        "w": canvas_w(),
+        "h": canvas_h(),
         "t": text,
         "d": design,
         "words": words,
@@ -2551,10 +2589,10 @@ fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
         let mut pool = media::VideoPool::new();
-        let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
+        let mut comp = compositor::Compositor::new(&d3d, canvas_w(), canvas_h())?;
         // Presentation pool on the SAME device as the compositor: publishing a
         // frame is one GPU-side CopyResource, never a Map.
-        let gpu_pool = Arc::new(gpu_present::TexPool::new(d3d.device.clone(), CANVAS_W, CANVAS_H));
+        let mut gpu_pool = Arc::new(gpu_present::TexPool::new(d3d.device.clone(), canvas_w(), canvas_h()));
         *shared.gpu_pool.lock().unwrap() = Some(gpu_pool.clone());
         let mut was_playing;
         let mut last_gen = u64::MAX;
@@ -2651,6 +2689,23 @@ fn media_thread(shared: Arc<Shared>) {
             if ptr != last_doc_ptr {
                 last_doc_ptr = ptr;
                 warm_done = false;
+                // 形式の違うコンテンツへ切替: キャンバス寸法が変わったら
+                // コンポジタと提示プールを作り直す（旧寸法のテクスチャは全て無効）
+                if comp.width != canvas_w() || comp.height != canvas_h() {
+                    eprintln!(
+                        "CANVAS_RESIZE {}x{} -> {}x{}",
+                        comp.width, comp.height, canvas_w(), canvas_h()
+                    );
+                    comp = compositor::Compositor::new(&d3d, canvas_w(), canvas_h())?;
+                    gpu_pool = Arc::new(gpu_present::TexPool::new(
+                        d3d.device.clone(), canvas_w(), canvas_h(),
+                    ));
+                    *shared.gpu_pool.lock().unwrap() = Some(gpu_pool.clone());
+                    fcache.clear();
+                    shared.ring.lock().unwrap().clear();
+                    shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                    shared.ring_level.store(0, Ordering::Relaxed);
+                }
                 edit_cooldown_until = Instant::now() + std::time::Duration::from_millis(1500);
                 // edited: never show a stale composed frame — but only the frames at/after
                 // the earliest change are stale; everything before survives (Filmora keeps
@@ -3540,6 +3595,7 @@ impl App {
         edits::remove_orphan_linked_audio(&mut raw);
         edits::quantize_timeline_frames(&mut raw);
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
+        set_canvas_from_content(&raw);
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
         // Do this before playback threads start. Existing direct drops are upgraded in
         // the background; until their atomic proxy appears, the original remains usable.
@@ -3549,7 +3605,7 @@ impl App {
             req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, speed: 1.0, gen: 0 }),
             frame: Mutex::new(FrameOut {
                 tex: None,
-                rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
+                rgba: vec![0; (canvas_w() * canvas_h() * 4) as usize],
                 seq: 0,
                 t: 0.0,
                 eff_t: 0.0,
@@ -3840,6 +3896,7 @@ impl App {
     fn restore(&mut self, raw: serde_json::Value) {
         let mut raw = raw;
         edits::quantize_timeline_frames(&mut raw);
+        set_canvas_from_content(&raw);
         if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             let nd = Arc::new(nd);
             self.doc = nd.clone();
@@ -4426,7 +4483,7 @@ impl App {
         let dims = self.doc.asset_dims.get(&aid).copied().unwrap_or((0, 0));
         let bb = b.display_box_at(t_anchor);
         let sbox = compositor::canvas_box_to_source(
-            (CANVAS_W, CANVAS_H),
+            (canvas_w(), canvas_h()),
             dims,
             (bb.x, bb.y, bb.width, bb.height),
             !b.stretches_to_box(),
@@ -4785,8 +4842,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let web_ready = self.caption_web_ready.load(Ordering::Relaxed);
         if (sig != self.caption_web_sig || !web_ready) && captions.is_some() {
             let payload = serde_json::json!({
-                "outW": CANVAS_W,
-                "outH": CANVAS_H,
+                "outW": canvas_w(),
+                "outH": canvas_h(),
                 "fps": self.doc.seq.frame_rate.unwrap_or(30.0),
                 "time": t,
                 "hiddenCaptionIds": hidden_caption_ids,
@@ -4891,8 +4948,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         "words": cl.get("words").cloned().unwrap_or(serde_json::json!([])),
                     });
                     let key_src = serde_json::json!({
-                        "w": CANVAS_W,
-                        "h": CANVAS_H,
+                        "w": canvas_w(),
+                        "h": canvas_h(),
                         "t": text,
                         "d": spec.get("design").cloned().unwrap_or_else(|| serde_json::json!({})),
                         "words": spec.get("words").cloned().unwrap_or_else(|| serde_json::json!([])),
@@ -4951,8 +5008,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let items: Vec<serde_json::Value> = specs.into_iter().map(|(_, sp)| sp).collect();
         let body = serde_json::json!({
             "room_id": self.room_id(),
-            "outW": CANVAS_W,
-            "outH": CANVAS_H,
+            "outW": canvas_w(),
+            "outH": canvas_h(),
             "items": items,
         });
         self.lib_post("capcache", "/api/v1/production-assets/caption-cache".into(), body);
@@ -5013,10 +5070,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         };
         let snap = |app: &App, name: &str| {
             let f = app.shared.frame.lock().unwrap();
-            if f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+            if f.rgba.len() == (canvas_w() * canvas_h() * 4) as usize {
                 let p = format!("{out_dir}/{name}.png");
                 let _ = std::fs::create_dir_all(&out_dir);
-                let _ = image::save_buffer(&p, &f.rgba, CANVAS_W, CANVAS_H, image::ColorType::Rgba8);
+                let _ = image::save_buffer(&p, &f.rgba, canvas_w(), canvas_h(), image::ColorType::Rgba8);
                 eprintln!("STEPPROBE snap {name} t={:.4} seq={}", app.t, f.seq);
             } else {
                 eprintln!("STEPPROBE snap {name} EMPTY");
@@ -6681,7 +6738,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 let dir = format!("{}/stills", self.doc.asset_dir);
                 std::thread::spawn(move || {
                     let _ = std::fs::create_dir_all(&dir);
-                    let (w, h) = (CANVAS_W, CANVAS_H);
+                    let (w, h) = (canvas_w(), canvas_h());
                     if rgba.len() == (w * h * 4) as usize {
                         let _ = image::save_buffer(&out, &rgba, w, h, image::ColorType::Rgba8);
                         eprintln!("PRESS_FRAME saved {out}");
@@ -7434,7 +7491,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // centered) — resp.rect is the whole justified panel and drawing into it put
         // the outline outside the picture (same letterbox trap as the caption PNGs).
         let vid = {
-            let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
+            let (cw, ch) = (canvas_w() as f32, canvas_h() as f32);
             let scale = (img.width() / cw).min(img.height() / ch);
             egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
         };
@@ -7584,7 +7641,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 let p = ui.painter_at(vid);
                 for (sx, sy, pos) in &self.corr_points {
                     let cb = compositor::source_box_to_canvas(
-                        (CANVAS_W, CANVAS_H),
+                        (canvas_w(), canvas_h()),
                         dims,
                         (bb.x, bb.y, bb.width, bb.height),
                         !b.stretches_to_box(),
@@ -7625,7 +7682,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             let cx = ((pt.x - vid.left()) / vid.width()) as f64;
                             let cy = ((pt.y - vid.top()) / vid.height()) as f64;
                             let (sx, sy) = compositor::canvas_point_to_source(
-                                (CANVAS_W, CANVAS_H),
+                                (canvas_w(), canvas_h()),
                                 dims,
                                 (bb.x, bb.y, bb.width, bb.height),
                                 !b.stretches_to_box(),
@@ -7728,7 +7785,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
                                 let bb = b.display_box_at(t_disp);
                                 draw_box = compositor::source_box_to_canvas(
-                                    (CANVAS_W, CANVAS_H),
+                                    (canvas_w(), canvas_h()),
                                     dims,
                                     (bb.x, bb.y, bb.width, bb.height),
                                     !b.stretches_to_box(),
@@ -10579,7 +10636,7 @@ impl eframe::App for App {
                     self.gap_max = f.gap_max;
                     self.quality = f.quality;
                     self.display_tex = Some(tex);
-                } else if f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+                } else if f.rgba.len() == (canvas_w() * canvas_h() * 4) as usize {
                     self.last_seq = f.seq;
                     self.comp_ms = f.comp_ms;
                     self.comp_max = f.comp_max;
@@ -10587,7 +10644,7 @@ impl eframe::App for App {
                     self.quality = f.quality;
                     self.display_tex = None;
                     let img = egui::ColorImage::from_rgba_unmultiplied(
-                        [CANVAS_W as usize, CANVAS_H as usize],
+                        [canvas_w() as usize, canvas_h() as usize],
                         &f.rgba,
                     );
                     match &mut self.tex {
@@ -11056,7 +11113,7 @@ impl eframe::App for App {
                 let avail = ui.available_size();
                 let gpu_frame = self.display_tex.clone();
                 if gpu_frame.is_some() || self.tex.is_some() {
-                    let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
+                    let (cw, ch) = (canvas_w() as f32, canvas_h() as f32);
                     let scale = (avail.x / cw).min(avail.y / ch);
                     let size = egui::vec2(cw * scale, ch * scale);
                     ui.centered_and_justified(|ui| {
@@ -11209,7 +11266,7 @@ impl eframe::App for App {
                             let vid_img = egui::Rect::from_center_size(resp.rect.center(), size);
                             let insp = {
                                 let img = resp.rect;
-                                let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
+                                let (cw, ch) = (canvas_w() as f32, canvas_h() as f32);
                                 let scale = (img.width() / cw).min(img.height() / ch);
                                 egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
                             };
@@ -11658,6 +11715,7 @@ fn main() -> eframe::Result<()> {
         let t0: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let t1: f64 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(t0 + 1.0);
         let doc = model::Doc::load(&contents, &dir).expect("doc load");
+        set_canvas_from_content(&doc.raw);
         let any_solo = doc.seq.tracks.iter().any(|tr| tr.solo);
         let mut checked = 0usize;
         let mut audible = 0usize;
@@ -11692,6 +11750,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc load");
+        set_canvas_from_content(&doc.raw);
         for tr in &doc.seq.tracks {
             for c in &tr.clips {
                 if c.text.is_none() || c.asset_id.is_some() || c.region.is_some() {
@@ -11736,6 +11795,7 @@ fn main() -> eframe::Result<()> {
             use anyhow::Context;
             use std::io::Write;
             let doc = model::Doc::load(&contents, &dir).context("doc load")?;
+            set_canvas_from_content(&doc.raw);
             // Default end = where CONTENT ends (max clip end), NOT doc.duration():
             // seq.duration is a sticky ruler-length field that never shrinks after a
             // clip is dragged shorter — exporting it appended 36s of black+silence.
@@ -11782,7 +11842,7 @@ fn main() -> eframe::Result<()> {
             }
             let d3d = media::D3d::new().context("d3d")?;
             let mut pool = media::VideoPool::new();
-            let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).context("compositor")?;
+            let mut comp = compositor::Compositor::new(&d3d, canvas_w(), canvas_h()).context("compositor")?;
             let mut masks: MaskMap = Default::default();
             while mask_build_pass(&doc, &d3d, &mut masks, None) {}
             let mut pts_maps: PtsMap = Default::default();
@@ -11806,7 +11866,7 @@ fn main() -> eframe::Result<()> {
                 .args([
                     "-y",
                     "-f", "rawvideo", "-pix_fmt", "rgba",
-                    "-s", &format!("{CANVAS_W}x{CANVAS_H}"),
+                    "-s", &format!("{}x{}", canvas_w(), canvas_h()),
                     "-r", &format!("{fps}"), "-i", "-",
                     "-f", "f32le", "-ar", &format!("{arate}"), "-ac", &format!("{ach}"), "-i", &pcm,
                     "-map", "0:v:0", "-map", "1:a:0",
@@ -11889,9 +11949,10 @@ fn main() -> eframe::Result<()> {
         let r = (|| -> anyhow::Result<()> {
             use anyhow::Context;
             let doc = model::Doc::load(&contents, &dir).context("doc load")?;
+            set_canvas_from_content(&doc.raw);
             let d3d = media::D3d::new().context("d3d")?;
             let mut pool = media::VideoPool::new();
-            let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).context("compositor")?;
+            let mut comp = compositor::Compositor::new(&d3d, canvas_w(), canvas_h()).context("compositor")?;
             let mut masks: MaskMap = Default::default();
             while mask_build_pass(&doc, &d3d, &mut masks, None) {}
             let mut pts_maps: PtsMap = Default::default();
@@ -11910,9 +11971,9 @@ fn main() -> eframe::Result<()> {
                 };
                 if path.to_lowercase().ends_with(".png") {
                     // PNG for consumers that read images (the agent's eyes)
-                    image::save_buffer(&path, &comp.rgba, CANVAS_W, CANVAS_H, image::ColorType::Rgba8)?;
+                    image::save_buffer(&path, &comp.rgba, canvas_w(), canvas_h(), image::ColorType::Rgba8)?;
                 } else {
-                    let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
+                    let mut ppm = format!("P6\n{} {}\n255\n", canvas_w(), canvas_h()).into_bytes();
                     for px in comp.rgba.chunks(4) {
                         ppm.extend_from_slice(&px[..3]);
                     }
@@ -12048,9 +12109,10 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).unwrap();
+        set_canvas_from_content(&doc.raw);
         let d3d = media::D3d::new().unwrap();
         let mut pool = media::VideoPool::new();
-        let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).unwrap();
+        let mut comp = compositor::Compositor::new(&d3d, canvas_w(), canvas_h()).unwrap();
         let mut masks: MaskMap = Default::default();
         while mask_build_pass(&doc, &d3d, &mut masks, None) {}
         let mut pts_maps: PtsMap = Default::default();
@@ -12202,6 +12264,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
+        set_canvas_from_content(&doc.raw);
         let overlaps = |d: &model::Doc| -> i64 {
             let mut n = 0i64;
             for tr in &d.seq.tracks {
@@ -12349,6 +12412,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
+        set_canvas_from_content(&doc.raw);
         // pick a main-lane clip that has at least one caption whose HEAD sits inside it
         let main_ti = doc.seq.tracks.iter().position(|t| t.kind == "video").expect("video lane");
         let caps: Vec<(String, f64)> = doc
@@ -12440,6 +12504,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
+        set_canvas_from_content(&doc.raw);
         let v = doc
             .seq
             .tracks
@@ -12692,6 +12757,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
+        set_canvas_from_content(&doc.raw);
         let count_fz = |d: &model::Doc| -> usize {
             d.seq.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.is_freeze()).count()
         };
@@ -12754,6 +12820,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
+        set_canvas_from_content(&doc.raw);
         let mut cache: PtsCache = Default::default();
         let mut fails = 0;
         let mut check = |name: &str, ok: bool, detail: String| {
@@ -12901,6 +12968,7 @@ fn main() -> eframe::Result<()> {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
+        set_canvas_from_content(&doc.raw);
         let count_overlaps = |d: &model::Doc| -> i64 {
             let mut n = 0i64;
             for tr in &d.seq.tracks {
