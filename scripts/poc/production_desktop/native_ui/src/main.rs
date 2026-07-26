@@ -10057,19 +10057,48 @@ impl App {
                             .map(|t| t.iter().map(|tr| tr.get("clips").and_then(|c| c.as_array()).map(|c| c.len()).unwrap_or(0)).sum())
                             .unwrap_or(0);
                         let dur = sq.and_then(|sq| sq.get("duration")).and_then(|d| d.as_f64()).unwrap_or(0.0);
-                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(200.0, 62.0), egui::Sense::click());
+                        // 動画サムネ: タイムライン先頭の映像クリップの素材サムネを流用
+                        let thumb = sq
+                            .and_then(|sq| sq.get("tracks"))
+                            .and_then(|t| t.as_array())
+                            .and_then(|ts| {
+                                ts.iter()
+                                    .flat_map(|tr| {
+                                        tr.get("clips").and_then(|c| c.as_array()).cloned().unwrap_or_default()
+                                    })
+                                    .find_map(|cl| {
+                                        cl.get("asset_id").and_then(|a| a.as_str()).map(|s| s.to_string())
+                                    })
+                            })
+                            .and_then(|aid| self.lib.thumbs.get(&aid).cloned());
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(200.0, 150.0), egui::Sense::click());
                         let pp = ui.painter_at(rect);
                         let hov = resp.hovered();
                         pp.rect_filled(rect, 8.0, if hov { egui::Color32::from_rgb(42, 42, 48) } else { egui::Color32::from_rgb(32, 32, 37) });
+                        let img_r = egui::Rect::from_min_max(
+                            rect.min + egui::vec2(4.0, 4.0),
+                            egui::pos2(rect.right() - 4.0, rect.bottom() - 40.0),
+                        );
+                        if let Some(t) = &thumb {
+                            pp.image(
+                                t.id(),
+                                img_r,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        } else {
+                            pp.rect_filled(img_r, 6.0, egui::Color32::from_rgb(18, 18, 21));
+                            pp.text(img_r.center(), egui::Align2::CENTER_CENTER, "🎬", egui::FontId::proportional(26.0), egui::Color32::from_gray(80));
+                        }
                         pp.rect_stroke(rect, 8.0, egui::Stroke::new(1.0, if hov { UI_ACCENT } else { egui::Color32::from_gray(50) }));
                         let tshort: String = title.chars().take(14).collect();
-                        pp.text(egui::pos2(rect.left() + 10.0, rect.top() + 14.0), egui::Align2::LEFT_CENTER,
-                                format!("🎬 {tshort}"), egui::FontId::proportional(12.5), egui::Color32::from_gray(230));
-                        pp.text(egui::pos2(rect.left() + 10.0, rect.bottom() - 15.0), egui::Align2::LEFT_CENTER,
+                        pp.text(egui::pos2(rect.left() + 8.0, rect.bottom() - 28.0), egui::Align2::LEFT_CENTER,
+                                tshort, egui::FontId::proportional(12.0), egui::Color32::from_gray(230));
+                        pp.text(egui::pos2(rect.left() + 8.0, rect.bottom() - 12.0), egui::Align2::LEFT_CENTER,
                                 format!("{nclips}クリップ・{:.0}:{:02}", dur as i64 / 60, dur as i64 % 60),
                                 egui::FontId::proportional(10.0), egui::Color32::from_gray(140));
                         if hov {
-                            pp.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER,
+                            pp.text(egui::pos2(rect.right() - 8.0, rect.bottom() - 12.0), egui::Align2::RIGHT_CENTER,
                                     "開く ▶", egui::FontId::proportional(11.0), UI_ACCENT);
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
