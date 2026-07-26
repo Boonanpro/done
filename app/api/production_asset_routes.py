@@ -2721,14 +2721,16 @@ DECISIONS schema:
   "cuts": [ {{"asset_id": "<asset id>", "start": <sec>, "end": <sec>, "reason": "restatement|filler"}} ],
   "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
   "blur": [ {{"target_text": "<exact on-screen text to hide; follows it as it moves>", "pattern": "email|phone|key", "target_object": "<SHORT ENGLISH noun phrase for a VISUAL object to blur. Use '<noun> in <attribute>' form, e.g. 'person in red shirt', 'license plate', 'face' — NEVER the word 'wearing'>", "asset_id": "<id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "mosaic|soft"}} ],
-  "silence_threshold": 0.45
+  "silence_threshold": 0.65,
+  "tempo_priority": false
 }}
 
 Rules:
 - CAPTIONS ARE OPTIONAL: if the user's brief asks for no captions (テロップ不要/入れるな 等), set "no_captions": true — then NO caption clips are generated at all, regardless of per-segment values. For selective omission use caption: "" on those segments. Follow the user's instruction over any default.
 - spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of a CROSS-segment restatement by omitting that segment.
 - cuts = WORD-LEVEL removals WITHIN kept segments. The transcript below has word-level timestamps; use cuts (in the asset's own seconds) to remove a 言い直し/stutter that happens INSIDE a single segment (e.g. the segment says "スタイル名や…スタイル名や…" — cut the first occurrence) or an obvious repeated filler run. The assembler trims exactly those spans. This is how you remove duplicates that survive the spine — listen via the transcript and cut them.
-- Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts. Set silence_threshold lower (e.g. 0.3) for tighter pacing or higher for relaxed, following the user's request; omit it to use the default (0.45).
+- Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts.
+- CUT POLICY（つなぎのリズム）: カットして良いのは ①言い直し・NGテイク ②「えー」「あの」等のフィラー ③明らかに長い間（目安0.6秒超）だけ。文中の短い間・息継ぎはカットしない（細切れの継ぎ接ぎ感が出て見づらい）。テイクはできるだけ連続で残す。ユーザーのブリーフに「テンポ良く」「サクサク」「間を詰めて」等の明示があるときだけ "tempo_priority": true を出し、silence_threshold を 0.35〜0.5 に下げて攻める。指定が無ければ自然さ優先で silence_threshold は 0.65 目安（省略時の既定も 0.65）。
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
 - blur = hide something on screen. Pick the field by WHAT is hidden:
@@ -2823,6 +2825,7 @@ def _assemble_sequence_from_decisions(
     brief: str | None = None,
     job_id: str | None = None,
     llm_captions: bool = True,
+    enforce_pause_floor: bool = True,
 ) -> dict[str, Any] | None:
     """Deterministically build the exact timeline sequence from Dan's DECISIONS plus the
     Whisper segment timestamps. Dan never computes timeline seconds — this does."""
@@ -2878,10 +2881,19 @@ def _assemble_sequence_from_decisions(
     # when the user asks for tighter/looser pacing. Each kept segment yields 1+ word-runs,
     # each a clip; runs are placed contiguously (no drift, no boundary replay).
     try:
-        SIL = float(decisions.get("silence_threshold") or os.environ.get("DAN_PLAN_SILENCE_GAP", "0.45"))
+        SIL = float(decisions.get("silence_threshold") or os.environ.get("DAN_PLAN_SILENCE_GAP", "0.65"))
     except Exception:
-        SIL = 0.45
+        SIL = 0.65
     SIL = max(0.2, SIL)
+    # つなぎのリズム保護: 文中の短い間まで削ると細切れの継ぎ接ぎ感が出る
+    # （2026-07-26 ユーザー指摘）。初回 dan_plan では 0.6 秒未満の間は切らない。
+    # Dan がブリーフのテンポ指定を受けて tempo_priority を立てた場合と、
+    # recut（ユーザーがスライダーで明示指定）は floor を適用しない。
+    if enforce_pause_floor and not decisions.get("tempo_priority"):
+        try:
+            SIL = max(SIL, float(os.environ.get("DAN_MIN_CUT_PAUSE", "0.6")))
+        except Exception:
+            SIL = max(SIL, 0.6)
     # Tiny pads kept around each word-run. Overridable so the cut-adjust UI can loosen/tighten
     # the breathing room around cuts (decisions.lead / decisions.tail, in seconds).
     try:
@@ -4993,8 +5005,11 @@ def _recut_assemble(room_id: str, content_id: str, decisions: dict[str, Any], as
         for a in assets if str(a.get("id")) in wanted
     ]
     transcripts = _run_audio_analysis(room_id, f"recut_{content_id}", src_assets)
-    # recut は高速性が売り（docstring どおり LLM を使わない）— テロップは従来経路
-    return _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt, llm_captions=False)
+    # recut は高速性が売り（docstring どおり LLM を使わない）— テロップは従来経路。
+    # スライダーの明示しきい値が最優先なので pause floor も適用しない
+    return _assemble_sequence_from_decisions(
+        decisions, transcripts, room_id, fmt, llm_captions=False, enforce_pause_floor=False
+    )
 
 
 _CAPTION_CACHE_GUARD = __import__("threading").Lock()
@@ -5635,50 +5650,39 @@ def _design_captions_with_llm(
     """
     if not words:
         return None
-    try:
-        from app.agent.cli_runner import run_oneshot_cli
-    except Exception:
-        return None
     # 部屋のプロジェクト名は固有名詞修正の最重要ヒント（例: 吉川特装HP制作 →
     # ASRが「キッカートク層」と書いた社名を直せる）
     label = _room_project_label(room_id) if room_id else None
     if label:
         context_terms = [label, *(context_terms or [])]
-    # 長尺は1回のワンショットに収まらない（実測: 847語で240sタイムアウト）。
-    # 無音の切れ目でバッチに割り、順に設計して index を通しに戻す。
-    if len(words) > 220:
-        batches: list[tuple[int, list[dict[str, Any]]]] = []
-        start = 0
-        while start < len(words):
-            end = min(start + 200, len(words))
-            if end < len(words):
-                # end 前後±40語で一番大きい無音ギャップを境界にする
-                lo, hi = max(start + 60, end - 40), min(len(words) - 1, end + 30)
-                best, best_gap = end, -1.0
-                for k in range(lo, hi):
-                    gap = float(words[k + 1]["start"]) - float(words[k]["end"])
-                    if gap > best_gap:
-                        best, best_gap = k + 1, gap
-                end = best
-            batches.append((start, words[start:end]))
-            start = end
-        # バッチは独立なので並列実行（sonnet 1コール約90-150秒 × 直列だと長すぎる）
-        from concurrent.futures import ThreadPoolExecutor
-        def _one(pair):
-            off, batch = pair
-            part = _design_captions_with_llm(
-                batch, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
-            )
-            return off, part
-        out_all: list[dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            for off, part in ex.map(_one, batches):
-                if not part:
-                    return None
-                for ch in part:
-                    out_all.append({"text": ch["text"], "start": ch["start"] + off, "end": ch["end"] + off})
-        return out_all
-    lines = "\n".join(f"{i}|{str(w.get('text') or '').strip()}" for i, w in enumerate(words))
+    # 素の Claude に全文を一回で読ませるのが最高品質（バッチ境界は不自然な
+    # 区切りを強制する）。長尺だけ意味段落で分割する。
+    if len(words) > 1500:
+        return _design_captions_paragraph_batched(
+            words, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
+        )
+    return _design_captions_oneshot(
+        words, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
+    )
+
+
+def _design_captions_oneshot(
+    words: list[dict[str, Any]],
+    *,
+    brief: str | None = None,
+    context_terms: list[str] | None = None,
+    room_id: str | None = None,
+    job_id: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """全文ワンショット設計。モデルには走り書きテキストを渡し、テロップ列
+    （text のみ）を自由に書かせる。語 index への割り付けはこちらで行う
+    （_align_captions_to_words）ので、モデルは index 管理から解放され、
+    チャットで頼んだときと同じ「素の Claude」の区切り品質が出る。"""
+    try:
+        from app.agent.cli_runner import run_oneshot_cli
+    except Exception:
+        return None
+    text_stream = "".join(str(w.get("text") or "") for w in words)
     terms = [t for t in dict.fromkeys((context_terms or [])) if t]
     ctx = (
         "この動画に出る正しい固有名詞・用語（音が近い誤認識はこの表記へ直す）: "
@@ -5687,30 +5691,28 @@ def _design_captions_with_llm(
     ) if terms else ""
     brief_line = f"編集の指示: {brief.strip()}\n" if brief and brief.strip() else ""
     prompt = (
-        "あなたは日本語動画のテロップ（字幕）設計者です。音声認識の単語列（index|語）から、"
-        "画面に出すテロップの区切りを設計してください。\n"
+        "あなたは日本語動画のテロップ（字幕）設計者です。以下は動画の音声認識テキスト"
+        "（句読点なしの走り書き）です。これを画面に出すテロップの列に区切ってください。\n"
         f"{brief_line}{ctx}"
         "ルール:\n"
-        "- 1テロップ= だいたい8〜22文字。文・句の自然な切れ目で区切る\n"
-        "- 16文字を超えるテロップは text 内の自然な位置（文節の切れ目）に改行 \\n を1つ入れる。"
-        "語の途中での改行は禁止\n"
-        "- 語の途中で切らない。テロップの先頭が助詞（が・を・に・は・で 等）や"
-        "「ついて」「という」「ような」等の複合表現の後半になる分割は禁止\n"
-        "- 表記の修正は次の2種類だけ: ①上記の固有名詞リストと**読みが近い**誤認識をリストの表記に直す"
-        "（カタカナ化・別漢字化された社名・用語に特に注意。読みの揺れ・濁音違いも一致とみなす） "
-        "②明らかな同音異義の誤変換。**それ以外は音声認識の表記をそのまま使う（勝手に漢字や語を変えない）**\n"
-        "- 話者の言い回しは変えない。要約・創作をしない。内容は全て順番どおりカバーする\n"
+        "- 1テロップ= だいたい8〜22文字。文・句の自然な切れ目で区切る（意味のまとまり優先）\n"
+        "- 16文字を超えるテロップは text 内の自然な位置（文節の切れ目）に改行 \\n を1つ入れる\n"
+        "- テロップの先頭が助詞や複合表現の後半（〜が/〜を/〜について 等）になる区切りは禁止\n"
+        "- 表記の修正は次の2種類だけ: ①上記の固有名詞リストと読みが近い誤認識をリストの表記に直す"
+        "（カタカナ化・別漢字化された社名・用語、読みの揺れ・濁音違いも一致とみなす） "
+        "②明らかな同音異義の誤変換。それ以外は元の表記をそのまま使う（勝手に言い換えない）\n"
+        "- 話者の言い回しは変えない。要約・創作をしない。内容は最初から最後まで順番どおり全てカバーする\n"
         "- 「えー」「あの」などの意味のないフィラーだけは省いてよい\n"
         "出力は JSON 配列のみ（説明文・コードフェンス不要）:\n"
-        '[{"text": "表示テキスト", "start": 最初の語のindex, "end": 最後の語のindex}, ...]\n\n'
-        "単語列:\n" + lines
+        '[{"text": "テロップ1"}, {"text": "テロップ2"}, ...]\n\n'
+        "音声認識テキスト:\n" + text_stream
     )
     # haiku は実測で品質不足（誤変換をさらに崩す・句の途中切り）。sonnet を既定に。
     model = os.environ.get("DAN_CAPTION_DESIGN_MODEL", "sonnet")
-    raw = run_oneshot_cli(prompt, model=model, timeout=300)
+    raw = run_oneshot_cli(prompt, model=model, timeout=600)
     if not raw:
         # CLI 起動やキュー待ちの揺らぎがあるので1回だけ再試行
-        raw = run_oneshot_cli(prompt, model=model, timeout=300)
+        raw = run_oneshot_cli(prompt, model=model, timeout=600)
     if not raw:
         return None
     txt = raw.strip()
@@ -5727,23 +5729,140 @@ def _design_captions_with_llm(
         return None
     if not isinstance(data, list) or not data:
         return None
-    out: list[dict[str, Any]] = []
-    prev_end = -1
-    for item in data:
-        if not isinstance(item, dict):
-            return None
-        text = str(item.get("text") or "").strip()
-        try:
-            s, e = int(item.get("start")), int(item.get("end"))
-        except (TypeError, ValueError):
-            return None
-        if not text or s < 0 or e < s or e >= len(words) or s <= prev_end:
-            return None
-        prev_end = e
-        out.append({"text": text, "start": s, "end": e})
-    out = _caption_design_polish(out)
+    texts = [str(it.get("text") or "").strip() for it in data if isinstance(it, dict)]
+    texts = [t for t in texts if t]
+    if not texts:
+        return None
+    out = _align_captions_to_words(texts, words)
+    if not out:
+        logger.warning("caption design: alignment failed (%d texts, %d words)", len(texts), len(words))
+        return None
+    if os.environ.get("DAN_CAPTION_POLISH") == "1":
+        out = _caption_design_polish(out)
+    else:
+        # 既定は書き換えない（素の設計を尊重）。気付けるようにログだけ残す
+        bad = sum(
+            1 for ch in out
+            if any(ch["text"].replace("\n", "").startswith(h) for h in _CAPTION_BAD_HEADS)
+            and not ch["text"].replace("\n", "").startswith(("はい", "とにかく", "でも", "ということで"))
+        )
+        if bad:
+            logger.info("caption design: %d/%d chunks start with a particle (kept as-is)", bad, len(out))
     logger.info("caption design: %d chunks from %d words (room=%s)", len(out), len(words), room_id)
     return out
+
+
+def _align_captions_to_words(
+    texts: list[str], words: list[dict[str, Any]]
+) -> list[dict[str, Any]] | None:
+    """モデルが自由に書いたテロップ列を、順序を保ったまま単語ストリームへ
+    貪欲にファジー割り付けする。モデルの誤字修正・フィラー省略があっても
+    正規化文字列の類似度ピークで語範囲が決まる。低信頼が2割を超えたら None
+    （呼び出し元が機械的グルーピングへフォールバック）。"""
+    import difflib
+
+    drop = set(" 　\t\n、。･・!?！？「」『』（）()・…‥,.")
+
+    def norm(s: str) -> str:
+        return "".join(ch for ch in str(s or "") if ch not in drop)
+
+    wn = [norm(str(w.get("text") or "")) for w in words]
+    out: list[dict[str, Any]] = []
+    pos = 0
+    poor = 0
+    for text in texts:
+        target = norm(text)
+        if not target:
+            continue
+        if pos >= len(words):
+            break
+        acc = ""
+        best_r, best_j = -1.0, None
+        limit = len(target) * 1.8 + 8
+        j = pos
+        while j < len(words):
+            acc += wn[j]
+            r = difflib.SequenceMatcher(None, acc, target).ratio()
+            if r > best_r:
+                best_r, best_j = r, j
+            if len(acc) > limit:
+                break
+            j += 1
+        if best_j is None:
+            return None
+        if best_r < 0.55:
+            poor += 1
+        out.append({"text": text, "start": pos, "end": best_j})
+        pos = best_j + 1
+    if not out:
+        return None
+    if poor > max(1, int(len(out) * 0.2)):
+        logger.warning("caption alignment: %d/%d low-confidence chunks", poor, len(out))
+        return None
+    # 末尾の取りこぼし（モデルが語尾フィラーを省いた等）は許容するが、
+    # 大きく余るのはカバレッジ違反
+    if pos < int(len(words) * 0.85):
+        logger.warning("caption alignment: coverage %d/%d words", pos, len(words))
+        return None
+    return out
+
+
+def _design_captions_paragraph_batched(
+    words: list[dict[str, Any]],
+    *,
+    brief: str | None = None,
+    context_terms: list[str] | None = None,
+    room_id: str | None = None,
+    job_id: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """1500語超の長尺のみ: まずモデルに意味段落の境界（語index）だけを出させ、
+    段落ごとにワンショット設計する。無音位置ではなく意味の切れ目で割るので、
+    バッチ境界の不自然な区切りは発生しない。"""
+    try:
+        from app.agent.cli_runner import run_oneshot_cli
+    except Exception:
+        return None
+    marked: list[str] = []
+    for i, w in enumerate(words):
+        if i and i % 25 == 0:
+            marked.append(f"⟨{i}⟩")
+        marked.append(str(w.get("text") or ""))
+    prompt = (
+        "以下は動画の音声認識テキストで、25語ごとに ⟨index⟩ マーカーが入っています。"
+        "話題・段落の切れ目に最も近いマーカー index を昇順の JSON 配列で返してください"
+        "（説明不要・配列のみ）。段落は 300〜600 語程度を目安に。\n\n" + "".join(marked)
+    )
+    model = os.environ.get("DAN_CAPTION_DESIGN_MODEL", "sonnet")
+    raw = run_oneshot_cli(prompt, model=model, timeout=240)
+    if not raw:
+        return None
+    a, b = raw.find("["), raw.rfind("]")
+    if a < 0 or b <= a:
+        return None
+    try:
+        splits = [int(x) for x in json.loads(raw[a : b + 1])]
+    except Exception:
+        return None
+    splits = sorted({s for s in splits if 0 < s < len(words)})
+    bounds = [0, *splits, len(words)]
+    paras = [(bounds[k], bounds[k + 1]) for k in range(len(bounds) - 1) if bounds[k + 1] > bounds[k]]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(pair: tuple[int, int]):
+        s, e = pair
+        part = _design_captions_oneshot(
+            words[s:e], brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
+        )
+        return s, part
+
+    out_all: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for off, part in ex.map(_one, paras):
+            if not part:
+                return None
+            for ch in part:
+                out_all.append({"text": ch["text"], "start": ch["start"] + off, "end": ch["end"] + off})
+    return out_all
 
 
 _CAPTION_BAD_HEADS = (
