@@ -3326,8 +3326,6 @@ struct Library {
     brief: String,
     title: String,
     format: String,
-    preset: usize,
-    register_path: String,
     thumb_tried: std::collections::HashSet<String>,
     gen_content: Option<String>,
     gen_job: Option<String>,
@@ -7133,17 +7131,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn start_generation(&mut self) {
         let room = self.room_id();
-        let presets: [(&str, &str, &str); 5] = [
-            ("映像→UGC", "9:16", "UGC風の縦型ショート動画にしてください。テンポ良く、無音や間はカットしてください。"),
-            ("映像→ストーリー", "9:16", "ストーリー性のある縦型動画に編集してください。"),
-            ("映像→映画風", "16:9", "映画の予告編のような雰囲気の横型動画にしてください。"),
-            ("画像→広告画像", "4:5", "商品広告向けの画像コンテンツを作ってください。"),
-            ("自由制作", "9:16", ""),
-        ];
-        let (pname, _, pbrief) = presets[self.lib.preset.min(4)];
-        let brief = if self.lib.brief.trim().is_empty() { pbrief.to_string() } else { self.lib.brief.clone() };
+        // 旧「作りたいもの」プリセットは実体が「アスペクト比＋定型ブリーフ文」
+        // だけだった（workflow_preset はバックエンドで未参照）ので廃止。
+        // ブリーフ空のときだけ無難な既定指示を入れる。
+        let brief = if self.lib.brief.trim().is_empty() {
+            "テンポ良く無音や間をカットして、テロップを付けた動画にしてください。".to_string()
+        } else {
+            self.lib.brief.clone()
+        };
+        let pname = "video";
         let title = if self.lib.title.trim().is_empty() {
-            format!("{pname} {}", self.lib.contents.len() + 1)
+            format!("動画 {}", self.lib.contents.len() + 1)
         } else {
             self.lib.title.clone()
         };
@@ -9883,45 +9881,17 @@ impl App {
                 ui.add_space(10.0);
                 ui.heading("新しく作る");
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("素材を選んでダンに丸ごと編集させます").weak().small());
+                ui.label(egui::RichText::new("素材を選んで、どう作ってほしいかを書くだけ").weak().small());
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new("1. 作りたいもの").strong());
-                let presets = [
-                    ("映像→UGC", "9:16", "テンポ良く無音をカットした縦型ショート"),
-                    ("映像→ストーリー", "9:16", "ストーリー仕立ての縦型動画"),
-                    ("映像→映画風", "16:9", "予告編のような横型動画"),
-                    ("画像→広告画像", "4:5", "商品広告向けの画像"),
-                    ("自由制作", "9:16", "ブリーフの指示だけで自由に"),
-                ];
-                for (i, (name, fmt, desc)) in presets.iter().enumerate() {
-                    let on = self.lib.preset == i;
-                    let fill = if on { egui::Color32::from_rgb(0, 84, 66) } else { egui::Color32::from_rgb(34, 34, 39) };
-                    let resp = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{name}  {fmt}\n{desc}")).size(11.5),
-                        )
-                        .min_size(egui::vec2(330.0, 40.0))
-                        .fill(fill)
-                        .stroke(if on {
-                            egui::Stroke::new(1.5, UI_ACCENT)
-                        } else {
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(50))
-                        }),
-                    );
-                    if resp.clicked() {
-                        self.lib.preset = i;
-                        self.lib.format = fmt.to_string();
-                    }
-                }
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("2. 内容（任意）").strong());
-                ui.add(egui::TextEdit::singleline(&mut self.lib.title).hint_text("タイトル（空なら自動）").desired_width(f32::INFINITY));
+                ui.label(egui::RichText::new("どう作ってほしいか").strong());
                 ui.add(
                     egui::TextEdit::multiline(&mut self.lib.brief)
-                        .desired_rows(3)
+                        .desired_rows(4)
                         .desired_width(f32::INFINITY)
-                        .hint_text("どう作ってほしいか（例: 冒頭3秒で結論、テロップ大きめ）"),
+                        .hint_text("例: カットしてテロップを付けて\n（空なら: テンポ良く無音をカットしてテロップ付き）"),
                 );
+                ui.add_space(6.0);
+                ui.add(egui::TextEdit::singleline(&mut self.lib.title).hint_text("タイトル（空なら自動）").desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("形式").weak());
                     for f in ["9:16", "16:9", "1:1", "4:5"] {
@@ -9969,34 +9939,6 @@ impl App {
                 if let Some(e) = &self.lib.error {
                     ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
                 }
-                ui.add_space(14.0);
-                ui.separator();
-                ui.label(egui::RichText::new("素材を追加").strong());
-                ui.label(
-                    egui::RichText::new("動画ファイルをこのウィンドウにドラッグ&ドロップ")
-                        .small()
-                        .weak(),
-                );
-                if ui.button("📁 ファイルを選ぶ…").clicked() {
-                    self.open_file_picker();
-                }
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.lib.register_path)
-                            .hint_text("またはPC内のパスを貼り付け")
-                            .desired_width(250.0),
-                    );
-                    if ui.button("追加").clicked() && !self.lib.register_path.trim().is_empty() {
-                        let body = serde_json::json!({
-                            "room_id": self.room_id(),
-                            "uri": self.lib.register_path.trim(),
-                            "source_type": "local_path",
-                            "make_proxy": true,
-                        });
-                        self.lib.register_path.clear();
-                        self.lib_post("act", "/api/v1/production-assets/register".into(), body);
-                    }
-                });
             });
         });
         // 新規部屋（素材もコンテンツも無い）はリスト画面ではなく案内画面を出す。
