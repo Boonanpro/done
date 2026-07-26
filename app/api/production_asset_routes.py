@@ -2730,7 +2730,7 @@ Rules:
 - spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of a CROSS-segment restatement by omitting that segment.
 - cuts = WORD-LEVEL removals WITHIN kept segments. The transcript below has word-level timestamps; use cuts (in the asset's own seconds) to remove a 言い直し/stutter that happens INSIDE a single segment (e.g. the segment says "スタイル名や…スタイル名や…" — cut the first occurrence) or an obvious repeated filler run. The assembler trims exactly those spans. This is how you remove duplicates that survive the spine — listen via the transcript and cut them.
 - Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts.
-- CUT POLICY（つなぎのリズム）: カットして良いのは ①言い直し・NGテイク ②「えー」「あの」等のフィラー ③明らかに長い間（目安0.6秒超）だけ。文中の短い間・息継ぎはカットしない（細切れの継ぎ接ぎ感が出て見づらい）。テイクはできるだけ連続で残す。ユーザーのブリーフに「テンポ良く」「サクサク」「間を詰めて」等の明示があるときだけ "tempo_priority": true を出し、silence_threshold を 0.35〜0.5 に下げて攻める。指定が無ければ自然さ優先で silence_threshold は 0.65 目安（省略時の既定も 0.65）。
+- CUT POLICY（つなぎのリズム）: カットして良いのは ①言い直し・NGテイク ②「えー」「あの」等のフィラー ③明らかに長い間（目安0.6秒超）だけ。文中の短い間・息継ぎはカットしない（細切れの継ぎ接ぎ感が出て見づらい）。テイクはできるだけ連続で残す。ユーザーのブリーフに「テンポ良く」「サクサク」「間を詰めて」等の明示があるときだけ "tempo_priority": true を出し、silence_threshold を 0.35〜0.5 に下げて攻める。指定が無ければ自然さ優先で silence_threshold は 0.65 目安（省略時の既定も 0.65）。任意で "pause_style": {"remainder": 秒, "midsentence_min": 秒} も指定できる。省略時の既定: 圧縮した間は 0.3 秒だけ呼吸として残し（ゼロ結合しない）、文末表現（です/ます等）で終わらない発話の直後の間は 1.2 秒未満ならカットしない。tempo_priority 時は remainder 0.08 秒・文中保護なしでテンポ最優先。
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
 - blur = hide something on screen. Pick the field by WHAT is hidden:
@@ -2903,6 +2903,42 @@ def _assemble_sequence_from_decisions(
         LEAD, TAIL = 0.06, 0.10
     LEAD = max(0.0, min(1.0, LEAD))
     TAIL = max(0.0, min(1.5, TAIL))
+    # 呼吸の残し方（2026-07-26「デフォルトで切り過ぎ」対策）:
+    #  - 圧縮した間はゼロ結合（butt-join）せず REMAINDER 秒だけ実素材の間を残す
+    #  - 文の途中（直前の発話が文末表現で終わらない）の間は MIDSENT 秒未満なら切らない
+    # いずれも Dan が decisions.pause_style で明示指定でき、tempo_priority と
+    # recut（ユーザー明示閾値 = enforce_pause_floor=False）では従来挙動に寄せる。
+    pause_style = decisions.get("pause_style") if isinstance(decisions.get("pause_style"), dict) else {}
+
+    def _pausef(v: Any, env: str, default: float) -> float:
+        try:
+            if v is not None:
+                return float(v)
+            return float(os.environ.get(env, str(default)))
+        except Exception:
+            return default
+
+    REMAINDER = _pausef(pause_style.get("remainder"), "DAN_PAUSE_REMAINDER", 0.3)
+    if decisions.get("tempo_priority") and pause_style.get("remainder") is None:
+        REMAINDER = 0.08
+    REMAINDER = max(0.0, min(1.0, REMAINDER))
+    MIDSENT = _pausef(pause_style.get("midsentence_min"), "DAN_MIDSENTENCE_PAUSE", 1.2)
+    if pause_style.get("midsentence_min") is None and (not enforce_pause_floor or decisions.get("tempo_priority")):
+        MIDSENT = SIL
+    MIDSENT = max(SIL, min(3.0, MIDSENT))
+
+    _SENT_SUFFIXES = ("です", "ます", "でした", "ました", "ですね", "ますね", "ください")
+
+    def _ends_sentence(tail_text: str) -> bool:
+        """直前発話の連結文字列（Whisper語は1文字トークンのことがある）の末尾で判定。"""
+        raw = str(tail_text or "").strip()
+        if not raw:
+            return True  # 発話前の先頭無音などは文間扱い（従来閾値）
+        if raw[-1] in "。．.!?！？":
+            return True
+        t = raw.rstrip("、。．.!?！？」』）)　 ")
+        return t.endswith(_SENT_SUFFIXES)
+
     # cut_meta records how much source time was removed (and where, in final-timeline seconds)
     # so the UI can animate the silence/dead-air being cut out FireCut-style.
     cut_meta: list[dict[str, Any]] = []
@@ -2956,28 +2992,40 @@ def _assemble_sequence_from_decisions(
         whole segment) when silence data is unavailable."""
         aid = str(s.get("asset_id") or "")
         a, b = float(s.get("start") or 0), float(s.get("end") or 0)
+        words = s.get("words") or []
         sils = silence_by_asset.get(aid)
         if sils:
+            def _region_thr(rs_: float) -> float:
+                # 無音区間の直前発話の末尾（連結）で文末/文中を判定して閾値を選ぶ
+                tail = "".join(
+                    str(w.get("word") or w.get("text") or "")
+                    for w in words
+                    if float(w.get("end") or 0) <= rs_ + 0.15
+                )[-14:]
+                return SIL if _ends_sentence(tail) else MIDSENT
             removes = list(cuts_by_asset.get(aid, []))
-            removes += [(rs, re) for rs, re in sils if re - rs >= SIL]
+            removes += [(rs, re) for rs, re in sils if re - rs >= _region_thr(rs)]
             return [(rs, re) for rs, re in _subtract(a, b, removes) if re - rs > 0.05]
-        words = s.get("words") or []
         if not words:
             return [] if _in_cut(aid, (a + b) / 2) else [(a, b)]
         runs: list[tuple[float, float]] = []
         cs = ce = None
+        tail = ""
         for w in words:
             ws, we = float(w.get("start") or 0), float(w.get("end") or 0)
             if _in_cut(aid, (ws + we) / 2):
                 if cs is not None:
                     runs.append((cs, ce)); cs = ce = None
+                tail = ""
                 continue
             if cs is None:
                 cs, ce = ws, we
-            elif ws - ce > SIL:           # internal silence -> split (drop the gap)
+            elif ws - ce > (SIL if _ends_sentence(tail) else MIDSENT):
+                # internal silence -> split (drop the gap); 文中の間は高い閾値で保護
                 runs.append((cs, ce)); cs, ce = ws, we
             else:
                 ce = we
+            tail = (tail + str(w.get("word") or w.get("text") or ""))[-14:]
         if cs is not None:
             runs.append((cs, ce))
         return runs
@@ -3017,7 +3065,22 @@ def _assemble_sequence_from_decisions(
                 if src_start < pe:
                     src_start = pe
                 else:
-                    removed_here = src_start - pe  # silence/dead-air skipped before this run
+                    # 圧縮する間から REMAINDER 秒だけ実素材の呼吸を残す（ゼロ結合禁止）。
+                    # 直前ピースが同素材ならその末尾（話し終わりの余韻）を伸ばすのが自然。
+                    gap = src_start - pe
+                    keep = min(gap, REMAINDER)
+                    if ad:
+                        keep = min(keep, max(0.0, ad - pe))
+                    if keep > 0.01:
+                        if pieces and pieces[-1]["asset_id"] == aid and abs(pieces[-1]["source_end"] - pe) < 0.005:
+                            pieces[-1]["source_end"] = round(pe + keep, 3)
+                            pieces[-1]["timeline_end"] = round(pieces[-1]["timeline_end"] + keep, 3)
+                            cursor = pieces[-1]["timeline_end"]
+                            pe = round(pe + keep, 3)
+                            prev_end_by_asset[aid] = pe
+                        else:
+                            src_start = max(0.0, src_start - keep)
+                    removed_here = max(0.0, src_start - pe)  # silence/dead-air skipped before this run
             if ad:
                 src_end = min(src_end, ad)
             if src_end <= src_start:
