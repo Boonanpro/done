@@ -3103,8 +3103,11 @@ def _assemble_sequence_from_decisions(
     # 大半で（音響的な区切りをそのまま継承＝「りとか」等の変な切れ目の正体）、
     # 単なる有無で判定すると設計 LLM パスが一度も走らない（2026-07-26 実発生）。
     # 正規化した類似度でコピーか創作かを見分ける。
+    # NOTE: この関数内には `rs, re = ...` というローカル変数があり `re` モジュールが
+    # シャドウされる（'float' object has no attribute 'sub' 実発生）ため re は使わない
     def _norm_cap(t: str) -> str:
-        return re.sub(r"[\s、。･・]", "", str(t or ""))
+        drop = set(" 　\t\n、。･・")
+        return "".join(ch for ch in str(t or "") if ch not in drop)
 
     import difflib as _difflib
 
