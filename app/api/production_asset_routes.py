@@ -2826,9 +2826,15 @@ def _assemble_sequence_from_decisions(
     job_id: str | None = None,
     llm_captions: bool = True,
     enforce_pause_floor: bool = True,
+    defer_captions: bool = False,
 ) -> dict[str, Any] | None:
     """Deterministically build the exact timeline sequence from Dan's DECISIONS plus the
-    Whisper segment timestamps. Dan never computes timeline seconds — this does."""
+    Whisper segment timestamps. Dan never computes timeline seconds — this does.
+
+    defer_captions=True: テロップ設計（LLM・数分かかる）を呼ばずに、設計に必要な
+    材料を `seq_out["_deferred_captions"]` に載せて即座にカット済みシーケンスを返す。
+    呼び出し側が中間保存→設計→caption トラックへ差し込む（ライブ組み上がり表示用）。
+    設計失敗時のフォールバック用に機械分割テロップも fallback_clips として同梱する。"""
     import os
     PIP_POS = {"x": 0.30, "y": 0.655, "width": 0.40, "height": 0.30}
 
@@ -3199,6 +3205,7 @@ def _assemble_sequence_from_decisions(
     # 3割以上が書き起こしと乖離 = 意図的に書いたテロップとみなし設計をスキップ
     has_authored_captions = cap_count > 0 and novel >= max(1, int(cap_count * 0.3))
     designed = False
+    _defer_caption_info: dict[str, Any] | None = None
     if llm_captions and not decisions.get("no_captions") and not has_authored_captions:
         all_words: list[dict[str, Any]] = []
         for sid in order:
@@ -3208,21 +3215,30 @@ def _assemble_sequence_from_decisions(
                 continue  # opted-out segment: no caption, no words
             all_words.extend(_caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, [])))
         if all_words:
-            if job_id:
-                _append_job_event(room_id, job_id, {"type": "status", "text": "テロップをダンが設計しています…"})
             glossary = _caption_glossary(room_id)
             context_terms = [t for pair in glossary for t in pair]
             context_terms += [str(a.get("filename") or "") for a in _read_assets(room_id)]
-            design = _design_captions_with_llm(
-                all_words, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
-            )
-            if design:
-                caption_clips.extend(
-                    _caption_clips_from_design(design, all_words, make_id=lambda: _cid("c"))
+            if defer_captions:
+                # 設計は呼び出し側が後段で実行。designed=False のまま進み、下の機械
+                # 分割がフォールバック用テロップとして caption_clips に入る。
+                _defer_caption_info = {
+                    "all_words": all_words,
+                    "context_terms": context_terms,
+                    "brief": brief,
+                }
+            else:
+                if job_id:
+                    _append_job_event(room_id, job_id, {"type": "status", "text": "テロップをダンが設計しています…"})
+                design = _design_captions_with_llm(
+                    all_words, brief=brief, context_terms=context_terms, room_id=room_id, job_id=job_id
                 )
-                designed = True
-            elif job_id:
-                _append_job_event(room_id, job_id, {"type": "status", "text": "テロップ設計をスキップ（自動区切りで生成）"})
+                if design:
+                    caption_clips.extend(
+                        _caption_clips_from_design(design, all_words, make_id=lambda: _cid("c"))
+                    )
+                    designed = True
+                elif job_id:
+                    _append_job_event(room_id, job_id, {"type": "status", "text": "テロップ設計をスキップ（自動区切りで生成）"})
     if not designed:
         for sid in order:
             if sid in covered:
@@ -3379,6 +3395,15 @@ def _assemble_sequence_from_decisions(
             "patterns": sorted(set(sb_patterns)),
             "style": "gaussian",
         }
+    if _defer_caption_info is not None:
+        # 中間保存はテロップ空で返し、機械分割テロップは設計失敗時の
+        # フォールバックとして持ち出す（呼び出し側が後段で差し込む）
+        for tr in seq_out["tracks"]:
+            if tr.get("id") == "caption_1":
+                _defer_caption_info["fallback_clips"] = tr["clips"]
+                tr["clips"] = []
+                break
+        seq_out["_deferred_captions"] = _defer_caption_info
     return seq_out
 
 
@@ -3998,10 +4023,48 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                     "text": "不要部分の追加検出なし（計画のカットのみ使用）",
                 })
             sequence_result = _assemble_sequence_from_decisions(
-                decisions, transcripts, room_id, fmt, brief=plan_brief, job_id=job_id
+                decisions, transcripts, room_id, fmt, brief=plan_brief, job_id=job_id,
+                defer_captions=True,
             )
             if not sequence_result:
                 raise RuntimeError("Could not assemble a timeline from the decisions")
+            deferred_caps = sequence_result.pop("_deferred_captions", None)
+            # ライブ組み上がり表示: テロップ設計（数分）を待たずに、カット済みの
+            # タイムラインを先にコンテンツへ保存する。エディタは running 中の
+            # 外部更新を検知して段階的に表示する。status は running のまま。
+            stage_timeline = dict(instruction.get("timeline") or {})
+            stage_timeline["sequence"] = sequence_result
+            stage_timeline["decisions"] = decisions
+            _update_content(room_id, content_id, {"timeline": stage_timeline})
+            _append_job_event(room_id, job_id, {"type": "status", "text": "カット済みタイムラインを反映しました（テロップはこの後に載ります）。"})
+            if deferred_caps:
+                _append_job_event(room_id, job_id, {"type": "status", "text": "テロップをダンが設計しています…"})
+                caption_clips: list[dict[str, Any]] = []
+                try:
+                    design = _design_captions_with_llm(
+                        deferred_caps["all_words"],
+                        brief=deferred_caps.get("brief"),
+                        context_terms=deferred_caps.get("context_terms") or [],
+                        room_id=room_id,
+                        job_id=job_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    design = None
+                if design:
+                    _cap_n = [0]
+                    def _cap_id() -> str:
+                        _cap_n[0] += 1
+                        return f"clip_cd{_cap_n[0]:03d}_{uuid.uuid4().hex[:6]}"
+                    caption_clips = _caption_clips_from_design(
+                        design, deferred_caps["all_words"], make_id=_cap_id
+                    )
+                else:
+                    _append_job_event(room_id, job_id, {"type": "status", "text": "テロップ設計をスキップ（自動区切りで生成）"})
+                    caption_clips = deferred_caps.get("fallback_clips") or []
+                for tr in sequence_result.get("tracks", []):
+                    if tr.get("id") == "caption_1":
+                        tr["clips"] = caption_clips
+                        break
             # Keep the decisions on the content so the cut-adjust UI can re-assemble with a new
             # silence threshold / pads later (no re-running Dan or Whisper).
             timeline_result = {"sequence": sequence_result, "decisions": decisions}
