@@ -1191,10 +1191,18 @@ def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | 
 # compose() (D3D/GPU) draws captions, blur, mosaic, tracked masks and pop-outs for the
 # preview; `--export-preview-video` runs that same compose() headless per frame and
 # hands ffmpeg ONLY compression. The FFmpeg filtergraph re-creation below
-# (_render_sequence_job) stays as a fallback for machines without the native exe or
-# non-9:16 formats — it is known NOT to match the preview.
+# (_render_sequence_job) stays as a fallback for machines without the native exe —
+# it is known NOT to match the preview. (formats: the native canvas follows the
+# content format now, so every aspect ratio uses the native path)
 
-_NATIVE_EXPORT_CANVAS = (1080, 1920)
+def _native_export_canvas(format_value: str | None) -> tuple[int, int]:
+    """コンテンツの形式に応じた書き出しキャンバス。native側 canvas_for_format と
+    同一マッピングを保つこと（テロップキャッシュキーの w/h パリティ条件）。"""
+    return {
+        "16:9": (1920, 1080),
+        "1:1": (1080, 1080),
+        "4:5": (1080, 1350),
+    }.get(str(format_value or "9:16"), (1080, 1920))
 
 
 def _native_export_exe() -> str | None:
@@ -1209,7 +1217,7 @@ def _native_export_exe() -> str | None:
     return None
 
 
-def _native_caption_items(sequence: dict[str, Any]) -> list[dict[str, Any]]:
+def _native_caption_items(sequence: dict[str, Any], canvas: tuple[int, int]) -> list[dict[str, Any]]:
     """Every designed caption in the sequence with the exact cache key the native
     compositor computes: sha1(json of {w,h,t,d,words}) with design = style minus x/y.
     Text is hashed UNTRIMMED (parity with Rust's caption_cache_key)."""
@@ -1228,7 +1236,7 @@ def _native_caption_items(sequence: dict[str, Any]) -> list[dict[str, Any]]:
             design = {k: v for k, v in style.items() if k not in ("x", "y")}
             words = clip.get("words") if isinstance(clip.get("words"), list) else []
             key_src = json.dumps(
-                {"w": _NATIVE_EXPORT_CANVAS[0], "h": _NATIVE_EXPORT_CANVAS[1],
+                {"w": canvas[0], "h": canvas[1],
                  "t": text, "d": design, "words": words},
                 ensure_ascii=False, sort_keys=True,
             )
@@ -1240,7 +1248,7 @@ def _native_caption_items(sequence: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any]) -> list[str]:
+def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any], canvas: tuple[int, int]) -> list[str]:
     """Render any caption PNG the native exporter will need (synchronously — the export
     hard-fails on missing captions rather than dropping them). Returns keys still
     missing after the render attempt."""
@@ -1251,14 +1259,14 @@ def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any]) -> list
         png = cache_dir / f"{key}.png"
         return png.exists() and png.stat().st_size > 0
 
-    items = _native_caption_items(sequence)
+    items = _native_caption_items(sequence, canvas)
     missing = [it for it in items if not _ready(it["key"])]
     if not missing:
         return []
     spec_path = cache_dir / f"_export_spec_{missing[0]['key']}.json"
     spec_path.write_text(
         json.dumps({
-            "outW": _NATIVE_EXPORT_CANVAS[0], "outH": _NATIVE_EXPORT_CANVAS[1],
+            "outW": canvas[0], "outH": canvas[1],
             "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
             "items": [
                 {"png": str(cache_dir / f"{it['key']}.png"), "text": it["text"],
@@ -1296,8 +1304,7 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
     if not any(t.get("clips") for t in tracks):
         return None
     fmt = str(sequence.get("format") or timeline.get("format") or "9:16")
-    if fmt != "9:16":
-        return None  # native canvas is fixed 9:16 (1080x1920); other formats keep the ffmpeg path
+    canvas = _native_export_canvas(fmt)  # native側は形式追従キャンバス（全形式対応）
     if os.environ.get("DAN_EXPORT_DISABLE_NATIVE"):
         return None
     exe = _native_export_exe()
@@ -1305,14 +1312,14 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
         return None
 
     _append_job_event(room_id, job_id, {"type": "status", "text": "プレビューと同じ合成器で書き出しています…"})
-    still_missing = _ensure_native_caption_cache(room_id, sequence)
+    still_missing = _ensure_native_caption_cache(room_id, sequence, canvas)
     if still_missing:
         raise RuntimeError("テロップ画像の生成に失敗しました: " + ", ".join(still_missing[:5]))
 
     room_dir = _room_dir(room_id)
     contents_path = job_dir / f"{job_id}_native_contents.json"
     contents_path.write_text(
-        json.dumps([{"id": content_id, "timeline": {"sequence": sequence}}], ensure_ascii=False),
+        json.dumps([{"id": content_id, "timeline": {"format": fmt, "sequence": sequence}}], ensure_ascii=False),
         encoding="utf-8",
     )
     out_path = job_dir / f"{job_id}_sequence.mp4"
@@ -1433,7 +1440,7 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
         "user_output_path": user_copy or str(out_path),
         "output_url": output_asset.get("proxy_url"),
         "render_engine": "native_compositor",
-        "render_size": f"{_NATIVE_EXPORT_CANVAS[0]}x{_NATIVE_EXPORT_CANVAS[1]}",
+        "render_size": f"{canvas[0]}x{canvas[1]}",
     }
 
 
