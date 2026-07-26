@@ -3464,6 +3464,11 @@ struct App {
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
     /// 初手で別レーンへテレポートする回帰（#591）の根治。
     drag_lane_tops: Option<Vec<(usize, f32, f32)>>,
+    /// Move ドラッグの押下位置。実移動（8px超 or レーン帯離脱）までは
+    /// ドロップレーンを展開しない＝長押しだけで画面が動かない（ユーザー報告対応）
+    drag_press: Option<egui::Pos2>,
+    /// 実移動が始まったか。false の間クリップは選択状態のまま何も動かさない
+    drag_engaged: bool,
     /// 直前の非ドラッグ時レイアウト（凍結時のアンカー整列に使う）
     last_lane_tops: Vec<(usize, f32, f32)>,
     // undo/redo hold SERIALIZED documents, not Value trees: a 60-deep history of
@@ -3716,6 +3721,8 @@ impl App {
             asset_drag: None,
             drag: Drag::None,
             drag_lane_tops: None,
+            drag_press: None,
+            drag_engaged: false,
             last_lane_tops: Vec::new(),
             undo: Vec::new(),
             pending_undo: None,
@@ -8560,7 +8567,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // 種類にかかわらず一律スリム。空のレーンは畳む（役割ごとの常設レーンは
         // 廃止済みの名残）が、クリップのMoveドラッグ中だけはドロップ先として
         // 出現させる（既存の「最上段より上=新規レーン」ゾーンと併用）。
-        let moving = matches!(self.drag, Drag::Move { .. });
+        // 「押しただけ」ではレイアウトを一切変えない: 実移動（drag_engaged）が
+        // 始まって初めてドロップレーン展開＋凍結レイアウトに切り替える
+        let moving = matches!(self.drag, Drag::Move { .. }) && self.drag_engaged;
         let visual: Vec<usize> = (0..self.doc.seq.tracks.len())
             .rev()
             .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
@@ -8662,7 +8671,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         };
         let mut flag_click: Option<(usize, String, bool)> = None;
         for &(ti, y0, lane_h) in &lane_tops {
-            let tr = &self.doc.seq.tracks[ti];
+            // 凍結レイアウト使用中にレーン移動でトラックが消えることがある
+            // （空トラックの自動削除）。古いインデックスは1フレームだけ読み飛ばす
+            let Some(tr) = self.doc.seq.tracks.get(ti) else { continue };
             // lane header itself is draggable: reorder tracks (stacking order)
             let hdr = egui::Rect::from_min_max(
                 egui::pos2(rect.left(), y0),
@@ -9373,6 +9384,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     orig: ts,
                                     applied: 0.0,
                                 };
+                                self.drag_press = Some(pos);
+                                self.drag_engaged = false;
+                                self.hover_lane = None;
                             }
                         }
                     }
@@ -9435,7 +9449,29 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         self.t = nt;
                         self.push_req(true);
                     }
-                    Drag::Move { ids, anchor_id, grab, orig, applied } => {
+                    Drag::Move { ids, anchor_id, grab, orig, applied } => 'move_gate: {
+                        // 実移動（8px超 or 押下レーンの帯から離脱）までは一切動かさない:
+                        // 長押しだけでドロップレーンが展開して画面が動く現象の根治。
+                        // 未発火のまま離せば従来どおり「クリック＝選択」で終わる。
+                        if !self.drag_engaged {
+                            let press = self.drag_press.unwrap_or(pos);
+                            let band = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .position(|tr| tr.clips.iter().any(|c| c.id == anchor_id))
+                                .and_then(|at| {
+                                    self.last_lane_tops.iter().find(|&&(i, _, _)| i == at).copied()
+                                })
+                                .map(|(_, y0, lh)| (y0, y0 + lh));
+                            let dist = ((pos.x - press.x).powi(2) + (pos.y - press.y).powi(2)).sqrt();
+                            let outside = band.map_or(false, |(y0, y1)| pos.y < y0 || pos.y > y1);
+                            if dist > 8.0 || outside {
+                                self.drag_engaged = true; // 次フレームから凍結展開レイアウトで移動処理
+                            }
+                            break 'move_gate;
+                        }
                         // vertical: the clip FOLLOWS the pointer's lane live (not on release)
                         let prev_hover = self.hover_lane;
                         self.hover_lane = if new_top_drop.map(|r| r.contains(pos)).unwrap_or(false) {
@@ -9496,6 +9532,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 if !vids.is_empty() {
                                     eprintln!("LANEMOVE fired: {} clip(s) -> track {}", vids.len(), target);
                                     self.apply_edit(false, move |raw| edits::move_group_to_track(raw, &vids, &anchor_id, target));
+                                    // 移動で空トラックが消えて構成が変わりうる。
+                                    // 凍結レイアウトを作り直す（NEWLANE側と同じ扱い）
+                                    self.drag_lane_tops = None;
                                 }
                             }
                             }
@@ -9681,8 +9720,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 .find(|&&(ti, y0, lh)| {
                     pt.y >= y0
                         && pt.y <= y0 + lh
-                        && self.doc.seq.tracks[ti].kind != "audio"
-                        && !self.doc.seq.tracks[ti].locked
+                        && self
+                            .doc
+                            .seq
+                            .tracks
+                            .get(ti)
+                            .map(|t| t.kind != "audio" && !t.locked)
+                            .unwrap_or(false)
                 })
                 .map(|&(ti, _, _)| ti)
         });
@@ -9715,7 +9759,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // pointer is horizontally — the vertical lane is fixed).
         if hovered_os_audio {
             if let (Some(&(_, y0, lh)), Some(t)) = (
-                lane_tops.iter().find(|&&(ti, _, _)| self.doc.seq.tracks[ti].kind == "audio"),
+                lane_tops.iter().find(|&&(ti, _, _)| {
+                    self.doc.seq.tracks.get(ti).map(|t| t.kind == "audio").unwrap_or(false)
+                }),
                 drop_time,
             ) {
                 let lane_rect = egui::Rect::from_min_max(
