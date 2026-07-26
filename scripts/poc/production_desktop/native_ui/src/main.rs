@@ -3460,6 +3460,12 @@ struct App {
     /// Asset currently being dragged from the editor's media menu toward the timeline.
     asset_drag: Option<serde_json::Value>,
     drag: Drag,
+    /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
+    /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
+    /// 初手で別レーンへテレポートする回帰（#591）の根治。
+    drag_lane_tops: Option<Vec<(usize, f32, f32)>>,
+    /// 直前の非ドラッグ時レイアウト（凍結時のアンカー整列に使う）
+    last_lane_tops: Vec<(usize, f32, f32)>,
     // undo/redo hold SERIALIZED documents, not Value trees: a 60-deep history of
     // Value clones held hundreds of MB of long-lived small allocations (a real NLE
     // keeps compact undo storage); a compact String is ~8x smaller and parses back
@@ -3709,6 +3715,8 @@ impl App {
             selected: Vec::new(),
             asset_drag: None,
             drag: Drag::None,
+            drag_lane_tops: None,
+            last_lane_tops: Vec::new(),
             undo: Vec::new(),
             pending_undo: None,
             redo: Vec::new(),
@@ -8560,7 +8568,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .collect();
         let audio: Vec<usize> = (0..self.doc.seq.tracks.len())
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
-            .filter(|&i| moving || !self.doc.seq.tracks[i].clips.is_empty())
+            // 音声レーンへのドロップは許可していないので、ドラッグ中でも
+            // 空の音声レーンは出さない（無意味なレイアウトのズレを減らす）
+            .filter(|&i| !self.doc.seq.tracks[i].clips.is_empty())
             .collect();
         let order: Vec<usize> = visual.into_iter().chain(audio).collect();
         let main_visual: Option<usize> =
@@ -8577,6 +8587,39 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 lane_tops.push((i, y, lh));
                 y += lh + 3.0 * squeeze;
             }
+        }
+        // --- Moveドラッグ中はレイアウトを凍結する -----------------------------
+        // 空レーンの出現でレイアウトが毎フレーム変わると、押下時のポインタ座標が
+        // 別レーンを指してしまい、ライブ追従が初手でクリップをテレポートさせる。
+        // 開始時に「アンカーのレーンが押下時と同じ y に来る」よう全体をオフセット
+        // した展開レイアウトを一度だけ作り、ドラッグ終了まで使い続ける。
+        if moving {
+            if let Some(frozen) = &self.drag_lane_tops {
+                lane_tops = frozen.clone();
+            } else {
+                if let Drag::Move { anchor_id, .. } = &self.drag {
+                    let anchor_track = self
+                        .doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .position(|tr| tr.clips.iter().any(|c| &c.id == anchor_id));
+                    if let Some(at) = anchor_track {
+                        let pre = self.last_lane_tops.iter().find(|&&(i, _, _)| i == at).map(|&(_, y, _)| y);
+                        let post = lane_tops.iter().find(|&&(i, _, _)| i == at).map(|&(_, y, _)| y);
+                        if let (Some(a), Some(b)) = (pre, post) {
+                            let off = a - b;
+                            for lt in lane_tops.iter_mut() {
+                                lt.1 += off;
+                            }
+                        }
+                    }
+                }
+                self.drag_lane_tops = Some(lane_tops.clone());
+            }
+        } else {
+            self.drag_lane_tops = None;
+            self.last_lane_tops = lane_tops.clone();
         }
         let mut clips_drawn = 0usize;
         let mut hits: Vec<(egui::Rect, String)> = Vec::new();
@@ -9394,6 +9437,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     Drag::Move { ids, anchor_id, grab, orig, applied } => {
                         // vertical: the clip FOLLOWS the pointer's lane live (not on release)
+                        let prev_hover = self.hover_lane;
                         self.hover_lane = if new_top_drop.map(|r| r.contains(pos)).unwrap_or(false) {
                             Some(NEW_TOP_LANE)
                         } else {
@@ -9414,9 +9458,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     .filter(|c| ids.contains(&c.id))
                                     .map(|c| c.id.clone())
                                     .collect();
-                                if !vids.is_empty() {
+                                // ゾーン滞在中に毎フレーム発火させない（edits側の
+                                // 二重生成ガードで無害だが、毎回のapply_editが
+                                // CACHE_CLEARを起こして無駄）→ ゾーン進入時のみ
+                                if !vids.is_empty() && prev_hover != Some(NEW_TOP_LANE) {
                                     eprintln!("NEWLANE drop fired for {} clip(s)", vids.len());
                                     self.apply_edit(false, move |raw| edits::move_group_to_new_top_track(raw, &vids, &anchor_id));
+                                    // トラック構成が変わったので凍結レイアウトを作り直す
+                                    self.drag_lane_tops = None;
                                 }
                             } else {
                             let tk_ok = self
@@ -9445,6 +9494,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     .map(|c| c.id.clone())
                                     .collect();
                                 if !vids.is_empty() {
+                                    eprintln!("LANEMOVE fired: {} clip(s) -> track {}", vids.len(), target);
                                     self.apply_edit(false, move |raw| edits::move_group_to_track(raw, &vids, &anchor_id, target));
                                 }
                             }
