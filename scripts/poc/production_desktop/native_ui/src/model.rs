@@ -5,6 +5,10 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Root {
+    // 生成失敗した直後のコンテンツ等は timeline/sequence を持たないことがある。
+    // 1件の不完全なコンテンツで部屋ごと開けなくなるのを防ぐため寛容に読む
+    // （missing field `sequence` で AppCreation 即死した実事故 2026-07-26）。
+    #[serde(default)]
     pub timeline: TimelineWrap,
 }
 
@@ -56,8 +60,9 @@ mod frame_boundary_tests {
         assert!(!doc.clip_active_at(right, 2.0));
     }
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct TimelineWrap {
+    #[serde(default)]
     pub sequence: Sequence,
 }
 #[derive(Debug, Default, Deserialize)]
