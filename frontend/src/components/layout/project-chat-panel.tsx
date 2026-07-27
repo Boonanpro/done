@@ -549,6 +549,7 @@ function ChatInput({
   projectId,
   roomId,
   isSessionActive,
+  activeOriginMessageId,
   sendMessageRef,
   onSseStateChange,
   replyTo,
@@ -558,6 +559,7 @@ function ChatInput({
   projectId: string;
   roomId: string;
   isSessionActive: boolean;
+  activeOriginMessageId?: string | null;
   sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
   onSseStateChange?: (connected: boolean) => void;
   replyTo?: MessageResponse | null;
@@ -701,7 +703,7 @@ function ChatInput({
   );
 
   // ローカル状態を優先。ローカルがfalseならpropsに関係なくfalse
-  const isBusy = isInterrupted || localActive;
+  const isBusy = isInterrupted || localActive || isSessionActive;
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -1193,8 +1195,12 @@ function ChatInput({
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
-    const wasBeforeAI = !aiRespondedRef.current && !!pending;
-    const userMessageIdToRemove = serverMessageIdRef.current || optimisticMessageIdRef.current;
+    const restoredMessage = !pending && activeOriginMessageId
+      ? queryClient.getQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId])?.messages
+        .find((m) => m.id === activeOriginMessageId && m.sender_type === 'human')
+      : null;
+    const wasBeforeAI = !aiRespondedRef.current && (!!pending || !!restoredMessage);
+    const userMessageIdToRemove = serverMessageIdRef.current || optimisticMessageIdRef.current || activeOriginMessageId || null;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -1215,8 +1221,8 @@ function ChatInput({
 
     // AI未応答キャンセル → テキストを入力欄に復元 + 次回送信でUPDATEするIDを記録
     if (wasBeforeAI) {
-      setMessage(pending.text);
-      setAttachedFiles(pending.files);
+      setMessage(pending?.text ?? restoredMessage?.content ?? '');
+      setAttachedFiles(pending?.files ?? []);
       replaceMessageIdRef.current = null;
       if (userMessageIdToRemove) {
         queryClient.setQueryData(
@@ -1248,7 +1254,7 @@ function ChatInput({
     if (!wasBeforeAI) {
       toast.info('処理を中断しました');
     }
-  }, [invalidateProjectQueries, onSseStateChange, projectId, queryClient, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
+  }, [activeOriginMessageId, invalidateProjectQueries, onSseStateChange, projectId, queryClient, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -2440,6 +2446,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           projectId={projectId}
           roomId={project.room_id}
           isSessionActive={isActiveExecution}
+          activeOriginMessageId={activeStatus?.origin_message_id}
           sendMessageRef={sendMessageRef}
           onSseStateChange={(connected) => { sseConnectedRef.current = connected; }}
           replyTo={replyTo}

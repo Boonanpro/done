@@ -2225,6 +2225,10 @@ async def send_dan_message_stream(
                     run = await run_service.create_run(
                         project_id=project_info["id"],
                         room_id=room_id,
+                        # The UI-generated message ID is durable even when the
+                        # request is cancelled before its DB write completes.
+                        # It is the canonical cancellation/restoration target.
+                        origin_message_id=(message or {}).get("id") or request.client_message_id,
                         parent_run_id=current_project_run["id"] if current_project_run else None,
                         metadata=run_metadata or None,
                     )
@@ -2875,12 +2879,16 @@ async def get_active_session_status(
     from app.services.cancellation import CancellationRegistry
     from app.agent.cli_runner import is_cli_active
 
+    from app.services.run_service import RunService
+    active_run = await RunService().get_current_run_for_room(session_id)
+    origin_message_id = active_run.get("origin_message_id") if active_run else None
     info = CancellationRegistry.get_active_info(session_id)
     if info:
         return {
             "active": True,
             "session_id": session_id,
             "started_at": info["started_at"],
+            "origin_message_id": origin_message_id,
         }
 
     # Registry にないが CLI プロセスがまだ動いている場合
@@ -2889,6 +2897,7 @@ async def get_active_session_status(
             "active": True,
             "session_id": session_id,
             "started_at": None,
+            "origin_message_id": origin_message_id,
         }
 
     # 常駐ストリーミングセッション（追い連絡経路）のターン実行中。
@@ -2904,6 +2913,7 @@ async def get_active_session_status(
                     "active": True,
                     "session_id": session_id,
                     "started_at": None,
+                    "origin_message_id": origin_message_id,
                 }
     except Exception:
         pass
@@ -2912,6 +2922,7 @@ async def get_active_session_status(
         "active": False,
         "session_id": session_id,
         "started_at": None,
+        "origin_message_id": None,
     }
 
 

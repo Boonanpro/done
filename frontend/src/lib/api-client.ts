@@ -393,6 +393,7 @@ export interface ActiveSessionStatus {
   active: boolean;
   session_id: string;
   started_at: number | null;
+  origin_message_id?: string | null;
 }
 
 export type AgentRunState =

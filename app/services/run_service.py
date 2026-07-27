@@ -37,6 +37,7 @@ class RunService:
         self,
         project_id: str,
         room_id: str,
+        origin_message_id: Optional[str] = None,
         claude_session_id: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         state: str = AgentRunState.RUNNING.value,
@@ -45,6 +46,7 @@ class RunService:
         row = {
             "project_id": project_id,
             "room_id": room_id,
+            "origin_message_id": origin_message_id,
             "claude_session_id": claude_session_id,
             "parent_run_id": parent_run_id,
             "state": state,
@@ -91,6 +93,17 @@ class RunService:
             if not row.get("superseded_by_run_id"):
                 return row
         return rows[0]
+
+    async def get_current_run_for_room(self, room_id: str) -> Optional[dict]:
+        query = (
+            self.supabase.table("agent_runs").select("*").eq("room_id", room_id)
+            .order("created_at", desc=True).limit(20)
+        )
+        result = await asyncio.to_thread(query.execute)
+        for row in result.data or []:
+            if row.get("state") in ACTIVE_RUN_STATES and not row.get("superseded_by_run_id"):
+                return row
+        return None
 
     @staticmethod
     def _is_run_stale(row: dict) -> bool:
