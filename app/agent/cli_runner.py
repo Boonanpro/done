@@ -1364,7 +1364,7 @@ _ABSOLUTE_RULES = """## 絶対ルール
 3. 同じアプローチで2回失敗したら、回避策を試すのではなく根本原因を特定しろ。自分のソースコード（D:/done配下）をRead/Edit/Bashで調査・修正できる。
 4. browserツールで実現できない非対話操作（ダウンロード等）だけはBashでPythonスクリプトを書いて直接Playwrightを使え。対話操作・ログイン・認証には必ずbrowserツールを使え。直接Playwrightからbrowserツール用の共有プロファイル `~/.ai_secretary/browser_data` を開いてはいけない。補助スクリプトには別の一時プロファイルを使い、処理後に必ずブラウザを閉じろ。
 5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。
-6. ターンが終わると次のユーザー発言まで二度と自分から発言できない。だから「完了したら報告します」「少々お待ちください」と言ってターンを終えると続報は永遠に届かない。完了をその場で待てるなら待って実結果を報告せよ。待てない長時間処理（デプロイ/ビルド/外部処理の完了待ち等）の時は、**必ず `schedule_followup(note, delay_seconds)` で続報を予約してから**終われ。予約せずに後で報告すると約束してはならない。
+6. Claude Code自身が起動した背景作業の完了は、常駐セッションが完了イベントを受けて続報する。`schedule_followup(note, delay_seconds)` は、デプロイ・DNS反映など**外部サービスの状態を後で再確認する必要があり、確認対象を具体的に示せる時だけ**使え。単に「報告します」「お待ちください」と書いただけで予約してはならない。ユーザーの返答待ちでは絶対に使わない。
 7. ユーザーが個人情報（電話番号・クレジットカード・住所・誕生日・メール等）を口にしたら、その場で即座に `remember_personal_info` で保存しろ。一度教われば二度と聞き返すな。システムプロンプトの「保存済み個人情報」一覧にある情報は既に保有済みなので、実値が要る操作の直前にだけ `get_personal_info` で取り出して使え。ログインID/パスワードは従来通り `save_credentials`。"""
 
 
@@ -2386,19 +2386,6 @@ def _run_cli_in_thread(
                     content="completed",
                 )
             _update_run_sync(run_id, state="failed" if is_error else "completed")
-            # Safety net: if Dan ended the turn promising a later report (e.g.
-            # "完了したら報告します" after kicking off a background generation) but
-            # didn't book a follow-up, book one automatically so the report can't
-            # silently vanish at the turn boundary. No-ops unless the text
-            # promises a report AND no follow-up is already queued.
-            if not is_error:
-                try:
-                    from app.services.followups import maybe_autoschedule_for_promise
-                    if maybe_autoschedule_for_promise(room_id, user_id, text):
-                        _cli_debug("auto-scheduled promise follow-up (one-shot)")
-                except Exception as e:
-                    _cli_debug(f"auto-followup check failed (non-fatal): {e}")
-
     except Exception as e:
         import traceback
         from app.services.cancellation import CancellationRegistry
@@ -2901,17 +2888,6 @@ async def _process_via_streaming_session(
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
-                    # Safety net: auto-book a follow-up when Dan ended the turn
-                    # promising a later report (e.g. "完了したら報告します" after a
-                    # background generation) but didn't schedule one. See
-                    # maybe_autoschedule_for_promise for the why.
-                    if not is_error:
-                        try:
-                            from app.services.followups import maybe_autoschedule_for_promise
-                            if maybe_autoschedule_for_promise(room_id, user_id, text):
-                                _cli_debug("[STREAMING] auto-scheduled promise follow-up")
-                        except Exception as e:
-                            _cli_debug(f"[STREAMING] auto-followup check failed: {e}")
                 _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []

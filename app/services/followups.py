@@ -10,7 +10,6 @@ with `asyncio.to_thread` when they must not block the event loop.
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -125,109 +124,6 @@ def mark_status(followup_id: str, status: str) -> None:
         }).eq("id", followup_id).execute()
     except Exception as e:
         logger.warning("mark_status(%s, %s) failed: %s", followup_id, status, e)
-
-
-# ---------------------------------------------------------------------------
-# Auto-scheduling: catch "I'll report when done" promises the model forgot to
-# back with a schedule_followup call.
-#
-# Root cause this addresses (confirmed 2026-06-05, 2 incidents): Dan kicks off
-# long work (e.g. a background image-generation task) and ends its turn saying
-# "完了したら報告します", expecting Claude Code's background-task completion
-# notification to wake it. That notification does NOT survive Dan's per-turn
-# `--resume` boundary, and the only cross-turn wake mechanism (this poller) is
-# opt-in. So when Dan promises a report but doesn't call schedule_followup, the
-# report silently never comes (run ends `completed`, pending_followups empty).
-#
-# Fix: at clean turn completion, if the final user-facing text makes a
-# forward-looking promise and no follow-up is already queued for the room, book
-# one automatically. When it fires, the poller's prompt tells Dan to verify the
-# work and either report or re-schedule — so a promise can't end in silence.
-# ---------------------------------------------------------------------------
-
-AUTO_FOLLOWUP_DELAY_SECONDS = 90
-
-# Forward-looking promises: Dan says it will come back with a result/report, or
-# that work is still in progress. Deliberately broad — a false positive only
-# costs one extra wake-up that finds nothing to do; a false negative is the
-# silent-stall bug we're fixing.
-_PROMISE_PATTERNS = [
-    r"完了したら",
-    r"完了次第",
-    r"終わ(っ|り)たら",
-    r"でき(たら|次第)",
-    r"出来(たら|次第)",
-    r"生成(中|でき次第)",
-    r"作成中",
-    r"処理中",
-    r"進行中",
-    r"お待ちください",
-    r"お待ちを",
-    r"少々お待ち",
-    r"待っていてください",
-    r"待っています",
-    r"完了通知を待",
-    r"後ほど",
-    r"のちほど",
-    r"後で(ご)?(報告|連絡|共有|お知らせ)",
-    r"(報告|連絡|共有|お知らせ)します",
-    r"(続けて|引き続き|このまま)[^。\n]{0,16}(報告|反映|進め|出します)",
-]
-_PROMISE_RE = re.compile("|".join(_PROMISE_PATTERNS))
-
-
-def text_promises_followup(text: Optional[str]) -> bool:
-    """True when `text` reads like Dan promising a later report / still working."""
-    if not text:
-        return False
-    return bool(_PROMISE_RE.search(text))
-
-
-def has_queued_followup(room_id: str) -> bool:
-    """True if the room already has a *pending* follow-up queued (so we don't
-    stack a duplicate).
-
-    Counts only `pending`, NOT `firing`: a `firing` row is the one the poller is
-    consuming RIGHT NOW (its re-invoked turn is what's calling us). If Dan
-    promises again during that fired turn, we must be free to queue the next
-    pending one — otherwise the self-correcting chain would break the moment the
-    firing row flips to `done`. Fails open (False) on error: better a rare
-    duplicate than to skip the safety net.
-    """
-    try:
-        r = (
-            _sb().table(TABLE).select("id", count="exact")
-            .eq("room_id", room_id).eq("status", "pending").execute()
-        )
-        return (r.count or 0) > 0
-    except Exception as e:
-        logger.warning("has_queued_followup(%s) failed: %s", room_id, e)
-        return False
-
-
-def maybe_autoschedule_for_promise(
-    room_id: str,
-    user_id: Optional[str],
-    final_text: Optional[str],
-) -> bool:
-    """Auto-book a follow-up when Dan ended a turn promising a later report but
-    didn't schedule one itself. Returns True if a follow-up was scheduled.
-
-    Safe to call on every clean (non-error, non-cancelled) turn completion: it
-    no-ops unless the text promises a report AND no follow-up is already queued.
-    """
-    if not room_id or not text_promises_followup(final_text):
-        return False
-    if has_queued_followup(room_id):
-        return False
-    # The note becomes the "what you were doing" line in the poller's prompt, so
-    # feed it Dan's own promise (collapsed whitespace, trimmed).
-    note = " ".join((final_text or "").split())[:300]
-    res = schedule_followup(room_id, note, AUTO_FOLLOWUP_DELAY_SECONDS, user_id)
-    if res.get("scheduled"):
-        logger.info("auto-scheduled promise follow-up for room %s", room_id)
-        return True
-    return False
 
 
 def cancel_pending_for_room(room_id: str) -> int:
