@@ -9711,22 +9711,27 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 f.path.as_deref().map(is_audio_path).unwrap_or(false)
             })
         });
+        // A file drag must not require the pointer to land in the exact few pixels of
+        // a lane.  Native window backends often report the release point just outside
+        // the row (or on a clip/header), which used to produce the misleading
+        // "drop onto a video lane" toast even while visibly over the timeline.
+        // Once horizontally inside the timeline, snap to the closest unlocked visual
+        // lane.  This is also the target used by the live ghost and by the final drop.
         let drop_target = media_pointer.and_then(|pt| {
             if pt.x < body.left() || pt.x > body.right() {
                 return None;
             }
             lane_tops
                 .iter()
-                .find(|&&(ti, y0, lh)| {
-                    pt.y >= y0
-                        && pt.y <= y0 + lh
-                        && self
-                            .doc
-                            .seq
-                            .tracks
-                            .get(ti)
-                            .map(|t| t.kind != "audio" && !t.locked)
-                            .unwrap_or(false)
+                .filter(|&&(ti, _, _)| {
+                    self.doc.seq.tracks.get(ti)
+                        .map(|t| t.kind != "audio" && !t.locked)
+                        .unwrap_or(false)
+                })
+                .min_by(|&&(_, y_a, h_a), &&(_, y_b, h_b)| {
+                    let d_a = (pt.y - (y_a + h_a * 0.5)).abs();
+                    let d_b = (pt.y - (y_b + h_b * 0.5)).abs();
+                    d_a.partial_cmp(&d_b).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|&(ti, _, _)| ti)
         });
@@ -9749,6 +9754,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             p.rect_filled(lane_rect, 0.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 35));
             p.rect_stroke(lane_rect, 0.0, egui::Stroke::new(1.5, UI_ACCENT));
             let x = body.left() + drop_time.unwrap() as f32 * self.pps - self.scroll_x;
+            // Materialise the prospective clip before release.  Library assets have
+            // a known duration; OS-file drags use a light 5-second proxy here and
+            // probe the real duration only after the user drops (never while dragging).
+            let preview_len = self.asset_drag.as_ref()
+                .and_then(|a| a.get("duration").and_then(|d| d.as_f64()))
+                .unwrap_or(5.0) as f32;
+            let w = (preview_len * self.pps).max(36.0).min(body.right() - x);
+            let clip_rect = egui::Rect::from_min_size(egui::pos2(x, y0 + 3.0), egui::vec2(w.max(0.0), (lh - 6.0).max(4.0)));
+            p.rect_filled(clip_rect, 3.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 110));
+            p.rect_stroke(clip_rect, 3.0, egui::Stroke::new(1.5, UI_ACCENT));
             p.line_segment(
                 [egui::pos2(x, y0), egui::pos2(x, y0 + lh)],
                 egui::Stroke::new(2.0, UI_ACCENT),
