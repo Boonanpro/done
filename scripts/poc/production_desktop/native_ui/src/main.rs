@@ -3459,6 +3459,9 @@ struct App {
     selected: Vec<String>,
     /// Asset currently being dragged from the editor's media menu toward the timeline.
     asset_drag: Option<serde_json::Value>,
+    /// Last pointer position while an OS media drag is over the timeline. egui clears
+    /// hover/interact_pos on the release frame, so this survives that one-frame gap.
+    last_os_media_pointer: Option<egui::Pos2>,
     drag: Drag,
     /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
@@ -3719,6 +3722,7 @@ impl App {
             shared,
             selected: Vec::new(),
             asset_drag: None,
+            last_os_media_pointer: None,
             drag: Drag::None,
             drag_lane_tops: None,
             drag_press: None,
@@ -9700,7 +9704,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // the timeline, but its release had no target and was silently discarded.
         // `interact_pos` retains the pointer position through that release frame;
         // fall back to hover for an OS file drag, which has no egui interaction.
-        let media_pointer = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
+        let raw_media_pointer = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
         let hovered_os_media = ui.input(|i| {
             i.raw.hovered_files.iter().any(|f| {
                 f.path.as_deref().map(is_timeline_media_path).unwrap_or(false)
@@ -9711,6 +9715,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 f.path.as_deref().map(is_audio_path).unwrap_or(false)
             })
         });
+        if hovered_os_media {
+            if let Some(pos) = raw_media_pointer {
+                self.last_os_media_pointer = Some(pos);
+            }
+        }
+        let media_pointer = raw_media_pointer.or(self.last_os_media_pointer);
         // A file drag must not require the pointer to land in the exact few pixels of
         // a lane.  Native window backends often report the release point just outside
         // the row (or on a clip/header), which used to produce the misleading
@@ -9849,6 +9859,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             } else {
                 self.toast("画像・映像はタイムラインの映像レーンへドロップしてください");
             }
+            self.last_os_media_pointer = None;
         }
 
         p.text(
