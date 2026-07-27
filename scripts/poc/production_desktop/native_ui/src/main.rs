@@ -2300,6 +2300,20 @@ fn iso8601_utc_now() -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}+00:00")
 }
 
+/// OS cursor position in egui points for this window, straight from Win32.
+/// winit's Windows file-drop handler discards the OLE drag coordinates
+/// (DragEnter/DragOver/Drop all ignore their POINTL argument) and the OLE mouse
+/// capture means no WM_MOUSEMOVE reaches the window either, so for the whole
+/// OS drag gesture — including the drop frame — egui's interact_pos/hover_pos
+/// are None. GetCursorPos is the only live position source during that window.
+fn os_cursor_in_ui(ctx: &egui::Context) -> Option<egui::Pos2> {
+    let (inner, ppp) = ctx.input(|i| (i.viewport().inner_rect, i.pixels_per_point()));
+    let inner = inner?;
+    let mut p = windows::Win32::Foundation::POINT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p).ok()? };
+    Some(egui::pos2(p.x as f32 / ppp - inner.min.x, p.y as f32 / ppp - inner.min.y))
+}
+
 fn is_timeline_media_path(path: &std::path::Path) -> bool {
     is_image_path(path)
         || matches!(
@@ -3459,9 +3473,9 @@ struct App {
     selected: Vec<String>,
     /// Asset currently being dragged from the editor's media menu toward the timeline.
     asset_drag: Option<serde_json::Value>,
-    /// Last pointer position while an OS media drag is over the timeline. egui clears
-    /// hover/interact_pos on the release frame, so this survives that one-frame gap.
-    last_os_media_pointer: Option<egui::Pos2>,
+    /// Probed duration per OS-dragged file path, so the timeline ghost shows the real
+    /// clip length while hovering (probe once per path, not per frame).
+    os_drag_durations: std::collections::HashMap<String, f64>,
     drag: Drag,
     /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
@@ -3722,7 +3736,7 @@ impl App {
             shared,
             selected: Vec::new(),
             asset_drag: None,
-            last_os_media_pointer: None,
+            os_drag_durations: std::collections::HashMap::new(),
             drag: Drag::None,
             drag_lane_tops: None,
             drag_press: None,
@@ -9715,20 +9729,47 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 f.path.as_deref().map(is_audio_path).unwrap_or(false)
             })
         });
-        if hovered_os_media {
-            if let Some(pos) = raw_media_pointer {
-                self.last_os_media_pointer = Some(pos);
-            }
-        }
-        let media_pointer = raw_media_pointer.or(self.last_os_media_pointer);
-        // A file drag must not require the pointer to land in the exact few pixels of
-        // a lane.  Native window backends often report the release point just outside
-        // the row (or on a clip/header), which used to produce the misleading
-        // "drop onto a video lane" toast even while visibly over the timeline.
-        // Once horizontally inside the timeline, snap to the closest unlocked visual
-        // lane.  This is also the target used by the live ghost and by the final drop.
+        let os_dropped_any = ui.input(|i| !i.raw.dropped_files.is_empty());
+        // While an OS file drag is over the window (or dropping this frame) egui has
+        // no pointer at all — see os_cursor_in_ui. Prefer the live Win32 cursor there;
+        // internal library-card drags keep using the normal egui pointer.
+        let os_cursor = if hovered_os_media || hovered_os_audio || os_dropped_any {
+            // Nothing but the initial HoveredFile event arrives during an OS drag, so
+            // keep frames coming ourselves or the ghost/lane highlight freezes.
+            ui.ctx().request_repaint();
+            os_cursor_in_ui(ui.ctx())
+        } else {
+            None
+        };
+        let media_pointer = os_cursor.or(raw_media_pointer);
+        // The ghost must show the REAL clip length from the moment it appears, or the
+        // user cannot judge where it will land / what it will cover. Probe each hovered
+        // file once and cache by path — the drop itself re-probes authoritatively.
+        let os_hover_len = if hovered_os_media {
+            let first: Option<std::path::PathBuf> = ui.input(|i| {
+                i.raw
+                    .hovered_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .find(|p| is_timeline_media_path(p))
+            });
+            first.map(|p| {
+                let key = p.to_string_lossy().replace(char::from(92), "/");
+                *self.os_drag_durations.entry(key.clone()).or_insert_with(|| {
+                    if is_image_path(&p) { 5.0 } else { probe_duration(&key).unwrap_or(5.0) }
+                })
+            })
+        } else {
+            None
+        };
+        // The drag only becomes a CLIP once the pointer actually enters the timeline
+        // body: outside it (preview, panels…) the gesture stays "just a file" and both
+        // ghost and drop resolution are off. Inside, a release must not require the
+        // exact few pixels of a lane — backends report the point just outside the row
+        // (or on a clip/header) — so snap to the closest unlocked visual lane. This is
+        // the target used by the live ghost and by the final drop alike.
         let drop_target = media_pointer.and_then(|pt| {
-            if pt.x < body.left() || pt.x > body.right() {
+            if !body.contains(pt) {
                 return None;
             }
             lane_tops
@@ -9745,7 +9786,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 })
                 .map(|&(ti, _, _)| ti)
         });
-        let drop_time = media_pointer.map(|pt| {
+        let drop_time = media_pointer.filter(|pt| body.contains(*pt)).map(|pt| {
             self.snap(
                 ((self.scroll_x + pt.x - body.left()) / self.pps).max(0.0) as f64,
                 &[],
@@ -9764,13 +9805,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             p.rect_filled(lane_rect, 0.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 35));
             p.rect_stroke(lane_rect, 0.0, egui::Stroke::new(1.5, UI_ACCENT));
             let x = body.left() + drop_time.unwrap() as f32 * self.pps - self.scroll_x;
-            // Materialise the prospective clip before release.  Library assets have
-            // a known duration; OS-file drags use a light 5-second proxy here and
-            // probe the real duration only after the user drops (never while dragging).
+            // Materialise the prospective clip before release, at its TRUE length:
+            // library assets carry a duration, OS-file drags use the probed cache
+            // above. 5s only remains as the image/probe-failure fallback.
             let preview_len = self.asset_drag.as_ref()
                 .and_then(|a| a.get("duration").and_then(|d| d.as_f64()))
+                .or(os_hover_len)
                 .unwrap_or(5.0) as f32;
-            let w = (preview_len * self.pps).max(36.0).min(body.right() - x);
+            let w = (preview_len * self.pps).max(2.0).min(body.right() - x);
             let clip_rect = egui::Rect::from_min_size(egui::pos2(x, y0 + 3.0), egui::vec2(w.max(0.0), (lh - 6.0).max(4.0)));
             p.rect_filled(clip_rect, 3.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 110));
             p.rect_stroke(clip_rect, 3.0, egui::Stroke::new(1.5, UI_ACCENT));
@@ -9824,6 +9866,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             })
             .into_iter()
             .partition(|path| is_audio_path(path));
+        if !dropped_audio.is_empty() || !dropped_media.is_empty() {
+            // Permanent evidence line for drop failures: says WHICH condition was
+            // missing (egui pointer vs Win32 cursor vs lane/time resolution).
+            eprintln!(
+                "OSDROP media={} audio={} raw={:?} os_cursor={:?} target={:?} time={:?} body_x={:.0}..{:.0}",
+                dropped_media.len(),
+                dropped_audio.len(),
+                raw_media_pointer,
+                os_cursor,
+                drop_target,
+                drop_time,
+                body.left(),
+                body.right()
+            );
+        }
         if !dropped_audio.is_empty() {
             if let Some(t) = drop_time {
                 for path in dropped_audio {
@@ -9833,7 +9890,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                 }
             } else {
-                self.toast("音声はタイムライン上へドロップしてください");
+                // Released outside the timeline: the file stays "just a file" —
+                // register it as room material, never place a clip.
+                for path in dropped_audio {
+                    self.register_media_path(&path);
+                }
+                self.toast("タイムライン外なので素材ライブラリに追加しました");
             }
         }
         if !dropped_media.is_empty() {
@@ -9857,9 +9919,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                 }
             } else {
-                self.toast("画像・映像はタイムラインの映像レーンへドロップしてください");
+                // Same "just a file" contract for visual media dropped outside the
+                // timeline (or into a room with no visible lane yet).
+                for path in dropped_media {
+                    self.register_media_path(&path);
+                }
+                self.toast("タイムライン外なので素材ライブラリに追加しました");
             }
-            self.last_os_media_pointer = None;
         }
 
         p.text(
