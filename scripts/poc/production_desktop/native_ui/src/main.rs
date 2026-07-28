@@ -14271,6 +14271,32 @@ fn main() -> eframe::Result<()> {
         check("B: 2nd drag W.ts", get(&raw, "W", "timeline_start"), 1.5);
         check("B: 2nd drag W.src", get(&raw, "W", "source_start"), 0.0);
         check("B: V tail eaten", get(&raw, "V", "timeline_end"), 1.5);
+        // C) 非メインレーン(オーバーレイ)のクリップ: 縮小0.5 → 新規ドラッグで左0.8
+        let mkc = || -> serde_json::Value {
+            serde_json::json!([{ "timeline": { "sequence": { "duration": 10.0, "frame_rate": 30, "tracks": [
+                { "id": "v0", "type": "video", "clips": [
+                    { "id": "base", "asset_id": "vid", "track": "video",
+                      "source_start": 0.0, "source_end": 8.0, "timeline_start": 0.0, "timeline_end": 8.0 }]},
+                { "id": "ov", "type": "video", "clips": [
+                    { "id": "P", "asset_id": "vid", "track": "video",
+                      "source_start": 0.0, "source_end": 2.0, "timeline_start": 2.0, "timeline_end": 4.0 }]},
+                { "id": "a0", "type": "audio", "clips": [] }
+            ]}}}])
+        };
+        let idsp = vec!["P".to_string()];
+        let mut raw = mkc();
+        let mut last_t = 2.0;
+        let mut mouse = 2.0;
+        for _ in 0..5 { mouse += 0.1; last_t += edits::trim_clip_live_from(&mut raw, &idsp, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &idsp);
+        println!("TRIMSEQ C mid: P {}-{} src {}", get(&raw,"P","timeline_start"), get(&raw,"P","timeline_end"), get(&raw,"P","source_start"));
+        check("C: shrink advanced src", get(&raw, "P", "source_start"), 0.5);
+        let mut last_t = get(&raw, "P", "timeline_start");
+        let mut mouse = last_t;
+        for _ in 0..8 { mouse -= 0.1; last_t += edits::trim_clip_live_from(&mut raw, &idsp, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &idsp);
+        check("C: 2nd drag P.ts", get(&raw, "P", "timeline_start"), 2.0);
+        check("C: 2nd drag P.src", get(&raw, "P", "source_start"), 0.0);
         println!("TRIMSEQ ALL {}", if ok { "PASS" } else { "FAIL" });
         std::process::exit(if ok { 0 } else { 1 });
     }

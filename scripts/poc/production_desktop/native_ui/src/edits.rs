@@ -675,11 +675,14 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64, still: bool) {
             d = d.min((se - ss - 0.05) / rate);
         }
         let nts = (ts + d).max(0.0);
-        setf(c, "timeline_start", nts);
+        // ソース位置は timeline_start を書き換える「前」に計算する。後だと
+        // raw_src_at の相対位置が常に0になり、縮小しても source_start が進まず
+        // 「縮めたのに左へ広げ直せない」回帰の原因になった
         if has_ss {
-            let new_ss = if d >= 0.0 { raw_src_at(c, ts + d) } else { ss + d * rate };
+            let new_ss = if d >= 0.0 { raw_src_at(c, nts) } else { ss + d * rate };
             setf(c, "source_start", new_ss.max(0.0));
         }
+        setf(c, "timeline_start", nts);
         // position keyframes are clip-relative: keep each pinned to the same
         // TIMELINE moment when the clip's left edge moves
         shift_region_keys(c, ts - nts);
