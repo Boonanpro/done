@@ -253,145 +253,204 @@ fn track_magnet(root: &Value, ti: usize) -> bool {
     tr.get("type").and_then(|v| v.as_str()) == Some("video") && main_video_track(root) == Some(ti)
 }
 
+/// メインレーンのブロックシフトを実行しつつ ops に記録する（前面レーンへの
+/// ミラー適用 shift_front_lanes の入力になる）。
+fn shift_block_rec(
+    clips: &mut Vec<Value>,
+    ops: &mut Vec<(Option<bool>, f64, f64)>,
+    side_left: bool,
+    pivot: f64,
+    delta: f64,
+    skip: usize,
+) {
+    if delta.abs() < 1e-6 {
+        return;
+    }
+    for (i, c) in clips.iter_mut().enumerate() {
+        if i == skip {
+            continue;
+        }
+        let cs = f(c, "timeline_start");
+        let ce = f(c, "timeline_end");
+        let belongs = if side_left {
+            ce <= pivot + 0.002
+        } else {
+            cs >= pivot - 0.002
+        };
+        if belongs {
+            setf(c, "timeline_start", cs + delta);
+            setf(c, "timeline_end", ce + delta);
+        }
+    }
+    ops.push((Some(side_left), pivot, delta));
+}
+
+fn pin_start_to_zero_rec(clips: &mut Vec<Value>, ops: &mut Vec<(Option<bool>, f64, f64)>) {
+    let min_start = clips
+        .iter()
+        .map(|c| f(c, "timeline_start"))
+        .fold(f64::MAX, f64::min);
+    if min_start.is_finite() && min_start > 1e-6 {
+        for c in clips.iter_mut() {
+            let cs = f(c, "timeline_start");
+            let ce = f(c, "timeline_end");
+            setf(c, "timeline_start", cs - min_start);
+            setf(c, "timeline_end", ce - min_start);
+        }
+        ops.push((None, 0.0, -min_start));
+    }
+}
+
+/// メインレーンのリップルを前面レーン（テロップ/オーバーレイ=付着クリップの
+/// 居場所）へ同じ量だけミラーする。削除は付着ごと消えるのに移動/トリムでは
+/// テロップが置き去りになりズレる、という非対称の解消。頭(timeline_start)基準、
+/// 音声レーンとロック済みレーンは対象外（BGMは独立）。
+fn shift_front_lanes(root: &mut Value, main_ti: usize, ops: &[(Option<bool>, f64, f64)]) {
+    if ops.is_empty() {
+        return;
+    }
+    let Some(tracks) = tracks_mut(root) else { return };
+    for (ti, tr) in tracks.iter_mut().enumerate() {
+        if ti <= main_ti {
+            continue;
+        }
+        let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "audio" || tr.get("locked").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else { continue };
+        for c in clips.iter_mut() {
+            for &(side, pivot, delta) in ops {
+                let cs = f(c, "timeline_start");
+                let belongs = match side {
+                    Some(true) => cs <= pivot + 0.002,
+                    Some(false) => cs >= pivot - 0.002,
+                    None => true,
+                };
+                if belongs {
+                    let ce = f(c, "timeline_end");
+                    // 0秒より前へは出さない（メインレーンのpinと同じ最低保証）
+                    let fix = (-(cs + delta)).max(0.0);
+                    setf(c, "timeline_start", cs + delta + fix);
+                    setf(c, "timeline_end", ce + delta + fix);
+                }
+            }
+        }
+    }
+}
+
 fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) -> bool {
     let Some(main_ti) = main_video_track(root) else { return false };
     let magnet = track_magnet(root, main_ti);
-    let Some(tracks) = tracks_mut(root) else { return false };
-    let Some(clips) = tracks
-        .get_mut(main_ti)
-        .and_then(|tr| tr.get_mut("clips"))
-        .and_then(|c| c.as_array_mut())
-    else {
-        return false;
-    };
-    let selected: Vec<usize> = clips
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| ids.contains(&sid(c)) && c.get("asset_id").is_some() && !is_freeze_v(c))
-        .map(|(i, _)| i)
-        .collect();
-    if selected.len() != 1 {
-        return false;
-    }
-    let idx = selected[0];
-    let ts = f(&clips[idx], "timeline_start");
-    let te = f(&clips[idx], "timeline_end");
-    let ss = f(&clips[idx], "source_start");
-    let has_se = clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
-    let se = f(&clips[idx], "source_end");
-    let old_edge = if left { from_t.unwrap_or(ts) } else { from_t.unwrap_or(te) };
-    let mut d = new_t - old_edge;
-    if d.abs() < 1e-6 {
-        return true;
-    }
-
-    let shift_block = |clips: &mut Vec<Value>, side_left: bool, pivot: f64, delta: f64, skip: usize| {
-        if delta.abs() < 1e-6 {
-            return;
-        }
-        for (i, c) in clips.iter_mut().enumerate() {
-            if i == skip {
-                continue;
-            }
-            let cs = f(c, "timeline_start");
-            let ce = f(c, "timeline_end");
-            let belongs = if side_left {
-                ce <= pivot + 0.002
-            } else {
-                cs >= pivot - 0.002
-            };
-            if belongs {
-                setf(c, "timeline_start", cs + delta);
-                setf(c, "timeline_end", ce + delta);
-            }
-        }
-    };
-    let pin_start_to_zero = |clips: &mut Vec<Value>| {
-        let min_start = clips
-            .iter()
-            .map(|c| f(c, "timeline_start"))
-            .fold(f64::MAX, f64::min);
-        if min_start.is_finite() && min_start > 1e-6 {
-            for c in clips.iter_mut() {
-                let cs = f(c, "timeline_start");
-                let ce = f(c, "timeline_end");
-                setf(c, "timeline_start", cs - min_start);
-                setf(c, "timeline_end", ce - min_start);
-            }
-        }
-    };
-
-    if !left {
-        d = d.max(-(te - ts - 0.05));
-        if has_se {
-            d = d.max(ss + 0.05 - se);
-        }
-        if d.abs() < 1e-6 {
-            return true;
-        }
-        setf(&mut clips[idx], "timeline_end", te + d);
-        if has_se {
-            setf(&mut clips[idx], "source_end", se + d);
-        }
-        if d > 0.0 || magnet {
-            shift_block(clips, false, te, d, idx);
-        }
-        return true;
-    }
-
-    if d > 0.0 {
-        d = d.min(te - ts - 0.05);
-        if has_se {
-            d = d.min(se - ss - 0.05);
-        }
-        if d.abs() < 1e-6 {
-            return true;
-        }
-        if magnet {
-            shift_block(clips, true, ts, d, idx);
-        }
-        setf(&mut clips[idx], "timeline_start", ts + d);
-        setf(&mut clips[idx], "source_start", ss + d);
-        // keyframes are clip-relative and glued to SOURCE frames: the in-point moved
-        // by d, so every key slides back by d (same rule as trim_one_clip)
-        shift_region_keys(&mut clips[idx], -d);
-        if magnet {
-            pin_start_to_zero(clips);
-        }
-        return true;
-    }
-
-    let mut grow = (-d).min(ss);
-    if grow <= 1e-6 {
-        return true;
-    }
-    if magnet {
-        let left_min_start = clips
+    // メインレーンに適用したリップルの記録。トリム完了後に前面レーンへミラーして
+    // テロップ等の付着クリップを親と同期させる。
+    let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
+    let handled = 'edit: {
+        let Some(tracks) = tracks_mut(root) else { break 'edit false };
+        let Some(clips) = tracks
+            .get_mut(main_ti)
+            .and_then(|tr| tr.get_mut("clips"))
+            .and_then(|c| c.as_array_mut())
+        else {
+            break 'edit false;
+        };
+        let selected: Vec<usize> = clips
             .iter()
             .enumerate()
-            .filter(|(i, c)| *i != idx && f(c, "timeline_end") <= ts + 0.002)
-            .map(|(_, c)| f(c, "timeline_start"))
-            .fold(f64::MAX, f64::min);
-        let restore = if left_min_start.is_finite() { grow.min(left_min_start) } else { 0.0 };
-        if restore > 1e-6 {
-            shift_block(clips, true, ts, -restore, idx);
-            setf(&mut clips[idx], "timeline_start", ts - restore);
-            setf(&mut clips[idx], "source_start", ss - restore);
-            shift_region_keys(&mut clips[idx], restore);
-            grow -= restore;
+            .filter(|(_, c)| ids.contains(&sid(c)) && c.get("asset_id").is_some() && !is_freeze_v(c))
+            .map(|(i, _)| i)
+            .collect();
+        if selected.len() != 1 {
+            break 'edit false;
         }
+        let idx = selected[0];
+        let ts = f(&clips[idx], "timeline_start");
+        let te = f(&clips[idx], "timeline_end");
+        let ss = f(&clips[idx], "source_start");
+        let has_se = clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
+        let se = f(&clips[idx], "source_end");
+        let old_edge = if left { from_t.unwrap_or(ts) } else { from_t.unwrap_or(te) };
+        let mut d = new_t - old_edge;
+        if d.abs() < 1e-6 {
+            break 'edit true;
+        }
+
+        if !left {
+            d = d.max(-(te - ts - 0.05));
+            if has_se {
+                d = d.max(ss + 0.05 - se);
+            }
+            if d.abs() < 1e-6 {
+                break 'edit true;
+            }
+            setf(&mut clips[idx], "timeline_end", te + d);
+            if has_se {
+                setf(&mut clips[idx], "source_end", se + d);
+            }
+            if d > 0.0 || magnet {
+                shift_block_rec(clips, &mut ops, false, te, d, idx);
+            }
+            break 'edit true;
+        }
+
+        if d > 0.0 {
+            d = d.min(te - ts - 0.05);
+            if has_se {
+                d = d.min(se - ss - 0.05);
+            }
+            if d.abs() < 1e-6 {
+                break 'edit true;
+            }
+            if magnet {
+                shift_block_rec(clips, &mut ops, true, ts, d, idx);
+            }
+            setf(&mut clips[idx], "timeline_start", ts + d);
+            setf(&mut clips[idx], "source_start", ss + d);
+            // keyframes are clip-relative and glued to SOURCE frames: the in-point moved
+            // by d, so every key slides back by d (same rule as trim_one_clip)
+            shift_region_keys(&mut clips[idx], -d);
+            if magnet {
+                pin_start_to_zero_rec(clips, &mut ops);
+            }
+            break 'edit true;
+        }
+
+        let mut grow = (-d).min(ss);
+        if grow <= 1e-6 {
+            break 'edit true;
+        }
+        if magnet {
+            let left_min_start = clips
+                .iter()
+                .enumerate()
+                .filter(|(i, c)| *i != idx && f(c, "timeline_end") <= ts + 0.002)
+                .map(|(_, c)| f(c, "timeline_start"))
+                .fold(f64::MAX, f64::min);
+            let restore = if left_min_start.is_finite() { grow.min(left_min_start) } else { 0.0 };
+            if restore > 1e-6 {
+                shift_block_rec(clips, &mut ops, true, ts, -restore, idx);
+                setf(&mut clips[idx], "timeline_start", ts - restore);
+                setf(&mut clips[idx], "source_start", ss - restore);
+                shift_region_keys(&mut clips[idx], restore);
+                grow -= restore;
+            }
+        }
+        if grow > 1e-6 {
+            let cur_end = f(&clips[idx], "timeline_end");
+            let cur_ss = f(&clips[idx], "source_start");
+            setf(&mut clips[idx], "source_start", (cur_ss - grow).max(0.0));
+            setf(&mut clips[idx], "timeline_end", cur_end + grow);
+            // in-point moved earlier by grow while timeline_start stayed: the same source
+            // frame now sits grow seconds LATER in clip-relative time
+            shift_region_keys(&mut clips[idx], grow);
+            shift_block_rec(clips, &mut ops, false, cur_end, grow, idx);
+        }
+        true
+    };
+    if handled {
+        shift_front_lanes(root, main_ti, &ops);
     }
-    if grow > 1e-6 {
-        let cur_end = f(&clips[idx], "timeline_end");
-        let cur_ss = f(&clips[idx], "source_start");
-        setf(&mut clips[idx], "source_start", (cur_ss - grow).max(0.0));
-        setf(&mut clips[idx], "timeline_end", cur_end + grow);
-        // in-point moved earlier by grow while timeline_start stayed: the same source
-        // frame now sits grow seconds LATER in clip-relative time
-        shift_region_keys(&mut clips[idx], grow);
-        shift_block(clips, false, cur_end, grow, idx);
-    }
-    true
+    handled
 }
 
 pub fn settle_overlaps(root: &mut Value, ids: &[String]) {

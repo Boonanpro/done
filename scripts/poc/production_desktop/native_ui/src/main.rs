@@ -3506,6 +3506,9 @@ struct App {
     /// Probed duration per OS-dragged file path, so the timeline ghost shows the real
     /// clip length while hovering (probe once per path, not per frame).
     os_drag_durations: std::collections::HashMap<String, f64>,
+    /// Moveドラッグ開始時に確定した付着クリップ（親=メインレーンの移動対象に頭が
+    /// 載っている前面レーンのクリップ+リンク音声）。水平移動のdtだけ一緒に動く。
+    move_attached: Vec<String>,
     drag: Drag,
     /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
@@ -3771,6 +3774,7 @@ impl App {
             selected: Vec::new(),
             asset_drag: None,
             os_drag_durations: std::collections::HashMap::new(),
+            move_attached: Vec::new(),
             drag: Drag::None,
             drag_lane_tops: None,
             drag_press: None,
@@ -9443,6 +9447,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     .find(|c| c.id == *id)
                                     .map(|c| c.timeline_start)
                                     .unwrap_or(0.0);
+                                // 付着クリップ(メインレーンのクリップに頭が載っている
+                                // 前面レーンのクリップ+そのリンク音声)は削除と同様、
+                                // 移動でも親と一緒に時間シフトさせる（Filmoraの規則）。
+                                // メンバーはドラッグ開始時に確定。
+                                self.move_attached = {
+                                    let a = edits::attached_to(&self.doc.raw, &ids);
+                                    if a.is_empty() {
+                                        a
+                                    } else {
+                                        edits::expand_links(&self.doc.raw, &a)
+                                            .into_iter()
+                                            .filter(|i| !ids.contains(i))
+                                            .collect()
+                                    }
+                                };
                                 self.drag = Drag::Move {
                                     ids,
                                     anchor_id: id.clone(),
@@ -9613,18 +9632,25 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let want = self.snap(raw_t, &ids);
                         self.snap_line = ((want - raw_t).abs() > 1e-9).then_some(want);
                         let dt = want - orig - applied;
+                        // 付着クリップも同じ時間シフトに含める（レーンは変えない —
+                        // レーン変更(LANEMOVE/NEWLANE)は選択本体だけに適用される）
+                        let move_ids: Vec<String> = ids
+                            .iter()
+                            .cloned()
+                            .chain(self.move_attached.iter().cloned())
+                            .collect();
                         let min_start = self
                             .doc
                             .seq
                             .tracks
                             .iter()
                             .flat_map(|tr| tr.clips.iter())
-                            .filter(|c| ids.contains(&c.id))
+                            .filter(|c| move_ids.contains(&c.id))
                             .map(|c| c.timeline_start)
                             .fold(f64::MAX, f64::min);
                         let actual_dt = if min_start.is_finite() { dt.max(-min_start) } else { dt };
                         if actual_dt.abs() > 1e-4 {
-                            self.apply_edit(false, |raw| edits::move_clips(raw, &ids, actual_dt));
+                            self.apply_edit(false, |raw| edits::move_clips(raw, &move_ids, actual_dt));
                             if let Drag::Move { applied, .. } = &mut self.drag {
                                 *applied += actual_dt;
                             }
@@ -9782,6 +9808,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 _ => {}
             }
             let _ = &prev; // lane moves happen LIVE during the drag now
+            self.move_attached.clear();
             self.hover_lane = None;
             self.snap_line = None;
             if self.resume_on_release {
