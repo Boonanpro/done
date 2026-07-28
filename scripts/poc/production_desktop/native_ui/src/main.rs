@@ -3525,6 +3525,9 @@ struct App {
     /// Moveドラッグ開始時に確定した付着クリップ（親=メインレーンの移動対象に頭が
     /// 載っている前面レーンのクリップ+リンク音声）。水平移動のdtだけ一緒に動く。
     move_attached: Vec<String>,
+    /// 複数選択中のクリップを押した時の「離したら単独選択に絞る」予約。
+    /// 実移動(drag_engaged)が始まったら破棄＝グループ移動は従来どおり。
+    click_collapse: Option<String>,
     drag: Drag,
     /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
@@ -3791,6 +3794,7 @@ impl App {
             asset_drag: None,
             os_drag_durations: std::collections::HashMap::new(),
             move_attached: Vec::new(),
+            click_collapse: None,
             drag: Drag::None,
             drag_lane_tops: None,
             drag_press: None,
@@ -9710,6 +9714,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             } else {
                                 self.selected = vec![id.clone()];
                             }
+                            self.click_collapse = None;
+                        } else if self.selected.len() > 1 && !ui.input(|i| i.modifiers.ctrl) {
+                            // 複数選択中のクリップを「動かさずにクリック」したら、離した
+                            // 時点でそのクリップ単独選択に絞る。押下時に絞らないのは
+                            // グループごと掴んでドラッグ移動する操作を殺さないため
+                            self.click_collapse = Some(id.clone());
+                        } else {
+                            self.click_collapse = None;
                         }
                         let ids = edits::expand_links(&self.doc.raw, &self.selected);
                         if self.drag == Drag::None {
@@ -10171,6 +10183,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 }
                 _ => {}
             }
+            // 複数選択中クリップの単純クリック（実移動なし）→ 単独選択へ絞る
+            if matches!(&prev, Drag::Move { .. }) && !self.drag_engaged {
+                if let Some(cid) = self.click_collapse.take() {
+                    self.selected = vec![cid];
+                }
+            }
+            self.click_collapse = None;
             let _ = &prev; // lane moves happen LIVE during the drag now
             self.move_attached.clear();
             self.hover_lane = None;
