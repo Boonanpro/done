@@ -470,45 +470,27 @@ fn trim_main_lane_live(
             break 'edit Some(d);
         }
 
-        // 左方向への拡大。静止画はソース制限なし、映像はソース頭の余白まで
-        let mut grow = if still { -d } else { (-d).min(ss / head_rate) };
+        // 左方向への拡大: 左端がマウスに追従して左へ動く。前のクリップとは一旦
+        // 重なり、リリース時の settle で前の尻が削れる（上書きトリム）。
+        // 以前の「端は固定のまま尻が右へ伸びる」リップル方式は、ユーザーには
+        // “全く広がらない”ようにしか見えなかった（報告バグ）。
+        // 静止画はソース制限なし、映像はソース頭の余白まで。タイムライン0で停止。
+        let grow = if still { -d } else { (-d).min(ss / head_rate) };
         if grow <= 1e-6 {
             break 'edit Some(0.0);
         }
-        let mut consumed = 0.0;
-        if magnet {
-            let left_min_start = clips
-                .iter()
-                .enumerate()
-                .filter(|(i, c)| *i != idx && f(c, "timeline_end") <= ts + 0.002)
-                .map(|(_, c)| f(c, "timeline_start"))
-                .fold(f64::MAX, f64::min);
-            let restore = if left_min_start.is_finite() { grow.min(left_min_start) } else { 0.0 };
-            if restore > 1e-6 {
-                shift_block_rec(clips, &mut ops, true, ts, -restore, idx);
-                setf(&mut clips[idx], "timeline_start", ts - restore);
-                if !still {
-                    setf(&mut clips[idx], "source_start", (ss - restore * head_rate).max(0.0));
-                }
-                shift_region_keys(&mut clips[idx], restore);
-                grow -= restore;
-                consumed += restore;
-            }
+        let new_ts = (ts - grow).max(0.0);
+        let actual = ts - new_ts;
+        if actual <= 1e-6 {
+            break 'edit Some(0.0);
         }
-        if grow > 1e-6 {
-            let cur_end = f(&clips[idx], "timeline_end");
-            let cur_ss = f(&clips[idx], "source_start");
-            if !still {
-                setf(&mut clips[idx], "source_start", (cur_ss - grow * head_rate).max(0.0));
-            }
-            setf(&mut clips[idx], "timeline_end", cur_end + grow);
-            // in-point moved earlier while timeline_start stayed: keys are timeline-
-            // relative so they slide by the timeline grow
-            shift_region_keys(&mut clips[idx], grow);
-            shift_block_rec(clips, &mut ops, false, cur_end, grow, idx);
-            consumed += grow;
+        setf(&mut clips[idx], "timeline_start", new_ts);
+        if !still {
+            setf(&mut clips[idx], "source_start", (ss - actual * head_rate).max(0.0));
         }
-        Some(-consumed)
+        // keyframes are clip-relative TIMELINE times: the left edge moved by -actual
+        shift_region_keys(&mut clips[idx], actual);
+        Some(-actual)
     };
     if applied.is_some() {
         shift_front_lanes(root, main_ti, &ops);

@@ -9846,6 +9846,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     Drag::Trim { ids, left, last_t } => {
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
                         let nt = self.snap(raw_t, &ids);
+                        let requested = nt - last_t;
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
                         // 静止画クリップにはソース時間の概念が無い＝両方向へ自由に
                         // 伸ばせる（従来は source_start=0 の制限で左拡大が常にゼロ）
@@ -9875,6 +9876,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // マウス移動を溜めない＝「見えない幅」と反転時の空白の根治
                         if let Drag::Trim { last_t, .. } = &mut self.drag {
                             *last_t += applied.get();
+                        }
+                        // 伸ばせない限界を超えた領域では、動いているかのような
+                        // 黄色いスナップ線を出さない（誤解の元＝報告バグ）
+                        if (applied.get() - requested).abs() > 1e-4 {
+                            self.snap_line = None;
                         }
                     }
                     Drag::Volume { ids, start_y, start_vol } => {
