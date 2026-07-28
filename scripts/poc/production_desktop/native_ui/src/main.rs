@@ -9623,6 +9623,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     .map(|c| if left { c.timeline_start } else { c.timeline_end });
                                 let last_t = if left { edges.fold(f64::MAX, f64::min) } else { edges.fold(f64::MIN, f64::max) };
                                 let last_t = if last_t.is_finite() { last_t } else { to_t(self.scroll_x, self.pps, pos.x) };
+                                eprintln!(
+                                    "TRIMPRESS left={left} edge_t={last_t:.3} ids={:?}",
+                                    ids.first()
+                                );
                                 self.drag = Drag::Trim { ids, left, last_t };
                             } else {
                                 let ts = self
@@ -9845,7 +9849,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     Drag::Trim { ids, left, last_t } => {
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
-                        let nt = self.snap(raw_t, &ids);
+                        let mut nt = self.snap(raw_t, &ids);
+                        // スナップ許容は 8px/pps ＝ズームが荒いと1秒超になり、エッジ密集
+                        // タイムラインでは nt が常にカット点へ量子化されて微調整トリムが
+                        // d=0 に潰される（「左に広げられない」の一因）。トリム中は
+                        // 実時間 0.25s を上限にする
+                        if (nt - raw_t).abs() > 0.25 {
+                            nt = self.grid_quantize(raw_t);
+                        }
                         let requested = nt - last_t;
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
                         // 静止画クリップにはソース時間の概念が無い＝両方向へ自由に
@@ -9876,6 +9887,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // マウス移動を溜めない＝「見えない幅」と反転時の空白の根治
                         if let Drag::Trim { last_t, .. } = &mut self.drag {
                             *last_t += applied.get();
+                        }
+                        // 常設ログ: トリムが「効かない」報告の一次証拠（%TEMP%\done_app.log）
+                        if applied.get().abs() > 1e-9 || (nt - last_t).abs() > 1e-9 {
+                            eprintln!(
+                                "TRIM_DBG left={left} last_t={last_t:.3} nt={nt:.3} applied={:.3} ids={:?}",
+                                applied.get(),
+                                ids.first()
+                            );
                         }
                         // 伸ばせない限界を超えた領域では、動いているかのような
                         // 黄色いスナップ線を出さない（誤解の元＝報告バグ）
@@ -14199,6 +14218,61 @@ fn main() -> eframe::Result<()> {
         let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
         println!("TKF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
+    }
+    if args.iter().any(|a| a == "--selftest-trimseq") {
+        // 右→左トリムのUI相当シーケンス検証（Drag::Trimアームと同じ last_t 簿記）
+        let mk = || -> serde_json::Value {
+            serde_json::json!([{ "timeline": { "sequence": { "duration": 10.0, "frame_rate": 30, "tracks": [
+                { "id": "v0", "type": "video", "clips": [
+                    { "id": "V", "asset_id": "img", "track": "video",
+                      "source_start": 0.0, "source_end": 2.0, "timeline_start": 0.0, "timeline_end": 2.0 },
+                    { "id": "W", "asset_id": "vid", "track": "video",
+                      "source_start": 0.0, "source_end": 2.0, "timeline_start": 2.0, "timeline_end": 4.0 }]},
+                { "id": "a0", "type": "audio", "clips": [] }
+            ]}}}])
+        };
+        let get = |raw: &serde_json::Value, id: &str, key: &str| -> f64 {
+            raw[0]["timeline"]["sequence"]["tracks"]
+                .as_array().unwrap().iter()
+                .flat_map(|t| t["clips"].as_array().unwrap().iter())
+                .find(|c| c["id"] == id)
+                .and_then(|c| c[key].as_f64())
+                .unwrap_or(-1.0)
+        };
+        let ids = vec!["W".to_string()];
+        let mut ok = true;
+        let mut check = |name: &str, got: f64, want: f64| {
+            let pass = (got - want).abs() <= 0.02;
+            println!("TRIMSEQ {name:<32} {} got={got:.3} want={want:.3}", if pass { "PASS" } else { "FAIL" });
+            if !pass { ok = false; }
+        };
+        // A) 単一ドラッグ: 右0.5 → 左0.8 (マウス 2.0→2.5→1.7)
+        let mut raw = mk();
+        let mut last_t = 2.0;
+        let mut mouse = 2.0;
+        for _ in 0..5 { mouse += 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        for _ in 0..8 { mouse -= 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &ids);
+        // 縮小0.5で頭ソース0.5sが余白化 → 反転0.8のうち0.5が消化されて停止
+        check("A: single r->l W.ts", get(&raw, "W", "timeline_start"), 1.5);
+        check("A: single r->l W.src", get(&raw, "W", "source_start"), 0.0);
+        // B) 2ドラッグ: 縮小0.5+settle → 新規ドラッグで左0.8
+        let mut raw = mk();
+        let mut last_t = 2.0;
+        let mut mouse = 2.0;
+        for _ in 0..5 { mouse += 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &ids);
+        println!("TRIMSEQ B mid: W {}-{} src {}", get(&raw,"W","timeline_start"), get(&raw,"W","timeline_end"), get(&raw,"W","source_start"));
+        let mut last_t = 2.0; // 新規ドラッグ: エッジ(2.0)から
+        let mut mouse = 2.0;
+        for _ in 0..8 { mouse -= 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &ids);
+        // 縮小で頭0.5sを捨てた後の再拡大: 余白0.5sぶん左へ戻れる
+        check("B: 2nd drag W.ts", get(&raw, "W", "timeline_start"), 1.5);
+        check("B: 2nd drag W.src", get(&raw, "W", "source_start"), 0.0);
+        check("B: V tail eaten", get(&raw, "V", "timeline_end"), 1.5);
+        println!("TRIMSEQ ALL {}", if ok { "PASS" } else { "FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
     }
     if args.iter().any(|a| a == "--selftest-speed") {
         // クリップ速度写像の数値検証: 等速・ランプ積分・単調性・カーブ幅
