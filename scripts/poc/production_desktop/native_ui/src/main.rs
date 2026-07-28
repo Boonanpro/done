@@ -2306,6 +2306,19 @@ fn iso8601_utc_now() -> String {
 /// capture means no WM_MOUSEMOVE reaches the window either, so for the whole
 /// OS drag gesture — including the drop frame — egui's interact_pos/hover_pos
 /// are None. GetCursorPos is the only live position source during that window.
+/// Timeline thumbnail for IMAGE assets. The normal thumbnailer decodes via Media
+/// Foundation, which has no still-image path — every image clip therefore fell
+/// back to the flat grey placeholder. Decode with the image crate instead.
+fn image_thumb(path: &str, max_w: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let img = image::open(path).ok()?;
+    let w = img.width().max(1);
+    let scale = (max_w as f32 / w as f32).min(1.0);
+    let tw = ((w as f32 * scale) as u32).max(1);
+    let th = ((img.height().max(1) as f32 * scale) as u32).max(1);
+    let small = img.thumbnail(tw, th).to_rgba8();
+    Some((small.width() as usize, small.height() as usize, small.into_raw()))
+}
+
 fn os_cursor_in_ui(ctx: &egui::Context) -> Option<egui::Pos2> {
     let (inner, ppp) = ctx.input(|i| (i.viewport().inner_rect, i.pixels_per_point()));
     let inner = inner?;
