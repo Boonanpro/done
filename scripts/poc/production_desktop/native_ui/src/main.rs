@@ -5718,7 +5718,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // the selection resized the central area and made the preview jump every time a
         // clip was selected or created ("パネルが出るたびプレビューの位置が変わる")
         if selected.is_empty() {
-            egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
+            egui::SidePanel::right("inspector").resizable(true).default_width(250.0).width_range(180.0..=560.0).show(ctx, |ui| {
                 ui.add_space(12.0);
                 ui.label(
                     egui::RichText::new("クリップを選択すると\nここに編集パネルが出ます")
@@ -5746,7 +5746,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let (clip, kind) = selected[0].clone();
         let id = clip.id.clone();
         let edit_ids: Vec<String> = selected.iter().map(|(c, _)| c.id.clone()).collect();
-        egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
+        egui::SidePanel::right("inspector").resizable(true).default_width(250.0).width_range(180.0..=560.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
                 let title = if multi {
@@ -8872,6 +8872,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 .collect()
         };
         let mut flag_click: Option<(usize, String, bool)> = None;
+        let mut lane_delete: Option<usize> = None;
         for &(ti, y0, lane_h) in &lane_tops {
             // 凍結レイアウト使用中にレーン移動でトラックが消えることがある
             // （空トラックの自動削除）。古いインデックスは1フレームだけ読み飛ばす
@@ -8960,6 +8961,29 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         flag_click = Some((ti, key, !cur));
                     }
                     x += 18.0;
+                }
+                // 空レーンはヘッダ右端の小さな×で削除できる
+                if tr.clips.is_empty() {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + GUTTER - 20.0, y0 + lane_h * 0.5 - 8.0),
+                        egui::vec2(16.0, 16.0),
+                    );
+                    let xresp =
+                        ui.interact(r, egui::Id::new(("lane_del", ti)), egui::Sense::click());
+                    p.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "✖",
+                        egui::FontId::proportional(12.0),
+                        if xresp.hovered() {
+                            egui::Color32::from_rgb(240, 110, 110)
+                        } else {
+                            egui::Color32::from_gray(110)
+                        },
+                    );
+                    if xresp.on_hover_text("この空レーンを削除").clicked() {
+                        lane_delete = Some(ti);
+                    }
                 }
             }
             p.line_segment(
@@ -9491,6 +9515,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
         if let Some((ti, key, val)) = flag_click {
             self.apply_edit(true, move |raw| edits::set_track_flag(raw, ti, &key, val));
+            self.push_req(false);
+        }
+        if let Some(ti) = lane_delete {
+            self.apply_edit(true, move |raw| edits::delete_track(raw, ti));
+            self.drag_lane_tops = None;
             self.push_req(false);
         }
         // ---- interactions: trim edges > move body > scrub empty space ----

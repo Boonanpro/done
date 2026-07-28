@@ -3347,3 +3347,19 @@ pub fn set_speed_keys(raw: &mut Value, ids: &[String], keys: &[crate::model::Spe
     shift_front_lanes(raw, main_ti, &ops);
     normalize_linked_audio(raw);
 }
+
+/// 空レーンの明示削除（レーンヘッダの×ボタン）。クリップが残るレーンは対象外。
+pub fn delete_track(raw: &mut Value, ti: usize) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    if ti >= tracks.len() {
+        return;
+    }
+    let empty = tracks[ti]
+        .get("clips")
+        .and_then(|c| c.as_array())
+        .map(|c| c.is_empty())
+        .unwrap_or(true);
+    if empty {
+        tracks.remove(ti);
+    }
+}
