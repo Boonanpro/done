@@ -9847,9 +9847,34 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
                         let nt = self.snap(raw_t, &ids);
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
-                        self.apply_edit(false, |raw| edits::trim_clip_live_from(raw, &ids, left, last_t, nt));
+                        // 静止画クリップにはソース時間の概念が無い＝両方向へ自由に
+                        // 伸ばせる（従来は source_start=0 の制限で左拡大が常にゼロ）
+                        let stills: Vec<String> = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .filter(|c| {
+                                ids.contains(&c.id)
+                                    && c.asset_id
+                                        .as_ref()
+                                        .map(|a| self.doc.asset_images.contains(a))
+                                        .unwrap_or(false)
+                            })
+                            .map(|c| c.id.clone())
+                            .collect();
+                        let applied = std::cell::Cell::new(0.0f64);
+                        {
+                            let ap = &applied;
+                            self.apply_edit(false, |raw| {
+                                ap.set(edits::trim_clip_live_from(raw, &ids, left, last_t, nt, &stills));
+                            });
+                        }
+                        // 実際に消化できた分だけ追跡値を進める。限界で止まった分の
+                        // マウス移動を溜めない＝「見えない幅」と反転時の空白の根治
                         if let Drag::Trim { last_t, .. } = &mut self.drag {
-                            *last_t = nt;
+                            *last_t += applied.get();
                         }
                     }
                     Drag::Volume { ids, start_y, start_vol } => {
@@ -13340,7 +13365,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&right_shrink, "d", "timeline_start") - 4.0).abs() < 0.001;
 
         let mut live_left_drag = base.clone();
-        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0);
+        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0, &[]);
         let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
@@ -13348,7 +13373,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&live_left_drag, "e", "timeline_start") - 7.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0);
+        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0, &[]);
         let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
@@ -13361,7 +13386,7 @@ fn main() -> eframe::Result<()> {
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
-        edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0);
+        edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0, &[]);
         let ok_live_left_grow_keeps_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 4.0).abs() < 0.001
@@ -13375,7 +13400,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 9.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
-        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0);
+        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0, &[]);
         edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
         let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
@@ -13390,7 +13415,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0);
+        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0, &[]);
         edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
         let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
@@ -13405,7 +13430,7 @@ fn main() -> eframe::Result<()> {
 
         let mut main_magnet_off = base.clone();
         main_magnet_off[0]["timeline"]["sequence"]["tracks"][0]["magnet"] = serde_json::Value::Bool(false);
-        edits::trim_clip_live_from(&mut main_magnet_off, &["b".to_string()], true, 4.0, 5.0);
+        edits::trim_clip_live_from(&mut main_magnet_off, &["b".to_string()], true, 4.0, 5.0, &[]);
         let ok_main_off_left_shrink_gap = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&main_magnet_off, "b", "timeline_start") - 5.0).abs() < 0.001
             && (clip(&main_magnet_off, "b", "timeline_end") - 8.0).abs() < 0.001
@@ -13418,7 +13443,7 @@ fn main() -> eframe::Result<()> {
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
-        edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0);
+        edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0, &[]);
         let ok_main_off_left_grow_keeps_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "timeline_end") - 9.0).abs() < 0.001
@@ -13874,12 +13899,12 @@ fn main() -> eframe::Result<()> {
         edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.2, 0.1);
         let before_x = x_at(&clip_of(&raw), 12.0);
         let ids: Vec<String> = vec!["fx1".into()];
-        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0, &[]);
         let c = clip_of(&raw);
         let ok4 = (c.timeline_start - 11.0).abs() < 1e-6 && (x_at(&c, 12.0) - before_x).abs() < 1e-3;
         println!("KF trim-pin   {} (ts={} x@12={:.4} want {:.4})",
                  if ok4 { "PASS" } else { "FAIL" }, c.timeline_start, x_at(&c, 12.0), before_x);
-        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 9.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 9.0, &[]);
         let c = clip_of(&raw);
         let ok5 = (c.timeline_start - 9.0).abs() < 1e-6 && (x_at(&c, 12.0) - before_x).abs() < 1e-3;
         println!("KF extend-pin {} (ts={} x@12={:.4})", if ok5 { "PASS" } else { "FAIL" }, c.timeline_start, x_at(&c, 12.0));
@@ -14060,12 +14085,12 @@ fn main() -> eframe::Result<()> {
         edits::set_transform_key(&mut raw, "vc1", 4.0, 0.5, 0.2, 0.4, 0.3, None);
         let before_x = bx(&clip_of(&raw), 12.0).x;
         let ids: Vec<String> = vec!["vc1".into()];
-        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0, &[]);
         let c = clip_of(&raw);
         let ok5 = (c.timeline_start - 11.0).abs() < 1e-6 && (bx(&c, 12.0).x - before_x).abs() < 1e-3;
         println!("TKF trim-pin  {} (ts={} x@12={:.4} want {:.4})",
                  if ok5 { "PASS" } else { "FAIL" }, c.timeline_start, bx(&c, 12.0).x, before_x);
-        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 10.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 10.0, &[]);
         // main magnet lane: ripple trim goes through trim_main_lane_live — keys must
         // stay glued to the same SOURCE frame (the lane also pins itself to t=0)
         let mut rawm = json!([{ "timeline": { "sequence": { "tracks": [
@@ -14078,7 +14103,7 @@ fn main() -> eframe::Result<()> {
         edits::set_transform_key(&mut rawm, "vm1", 0.0, 0.1, 0.2, 0.4, 0.3, None);
         edits::set_transform_key(&mut rawm, "vm1", 4.0, 0.5, 0.2, 0.4, 0.3, None);
         let idsm: Vec<String> = vec!["vm1".into()];
-        edits::trim_clip_live_from(&mut rawm, &idsm, true, 10.0, 11.0);
+        edits::trim_clip_live_from(&mut rawm, &idsm, true, 10.0, 11.0, &[]);
         let cm: model::Clip =
             serde_json::from_value(rawm[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone())
                 .expect("vm1 parse");

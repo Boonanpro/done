@@ -163,24 +163,44 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
     settle_overlaps(root, ids);
 }
 
-pub fn trim_clip_live_from(root: &mut Value, ids: &[String], left: bool, from_t: f64, new_t: f64) {
-    trim_clip_live_impl(root, ids, left, Some(from_t), new_t);
+/// 戻り値 = 実際に消化したタイムラインデルタ（from_t 起点）。限界（ソース頭切れ・
+/// 最小尺）で止まった分は含まれない。呼び出し側はこの分だけ追跡値を進めること —
+/// マウス位置で進めると「拡大できなかった移動量」が蓄積し、反転時にその幅の
+/// 空白を保ったまま縮む（報告バグ）。`still_ids` は静止画クリップ（ソース時間の
+/// 概念が無い＝両方向に自由に伸ばせる）。
+pub fn trim_clip_live_from(
+    root: &mut Value,
+    ids: &[String],
+    left: bool,
+    from_t: f64,
+    new_t: f64,
+    still_ids: &[String],
+) -> f64 {
+    trim_clip_live_impl(root, ids, left, Some(from_t), new_t, still_ids)
 }
 
 /// Live trim during a mouse drag. Only the selected clip changes shape; overlap
 /// erasure is settled on mouse release so covered clips do not disappear mid-drag.
 pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
-    trim_clip_live_impl(root, ids, left, None, new_t);
+    trim_clip_live_impl(root, ids, left, None, new_t, &[]);
 }
 
-fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) {
-    if trim_main_lane_live(root, ids, left, from_t, new_t) {
+fn trim_clip_live_impl(
+    root: &mut Value,
+    ids: &[String],
+    left: bool,
+    from_t: Option<f64>,
+    new_t: f64,
+    still_ids: &[String],
+) -> f64 {
+    if let Some(applied) = trim_main_lane_live(root, ids, left, from_t, new_t, still_ids) {
         normalize_linked_audio(root);
         remove_orphan_linked_audio(root);
-        return;
+        return applied;
     }
+    let mut applied_ret: Option<f64> = None;
     {
-        let Some(tracks) = tracks_mut(root) else { return };
+        let Some(tracks) = tracks_mut(root) else { return 0.0 };
         for tr in tracks.iter_mut() {
             let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
                 continue;
@@ -190,13 +210,17 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 if !clips.iter().any(|c| ids.contains(&sid(c))) {
                     continue;
                 }
-                // source-less clips (region effects) have no in-point: no left-extension limit
+                // source-less clips (region effects) and stills have no in-point:
+                // no left-extension limit
                 let min_source_room = clips
                     .iter()
                     .filter(|c| ids.contains(&sid(c)))
                     .map(|c| {
-                        if c.get("source_start").map(|v| v.is_number()).unwrap_or(false) {
-                            f(c, "source_start")
+                        if still_ids.contains(&sid(c)) {
+                            f64::INFINITY
+                        } else if c.get("source_start").map(|v| v.is_number()).unwrap_or(false) {
+                            // 速度対応: ソース頭の余白をタイムライン秒へ換算
+                            f(c, "source_start") / clip_avg_rate(c)
                         } else {
                             f64::INFINITY
                         }
@@ -215,8 +239,12 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                         if !ids.contains(&sid(c)) {
                             continue;
                         }
-                        trim_one_clip(c, left, f(c, "timeline_start") + d);
+                        let still = still_ids.contains(&sid(c));
+                        trim_one_clip(c, left, f(c, "timeline_start") + d, still);
                     }
+                }
+                if applied_ret.is_none() {
+                    applied_ret = Some(d);
                 }
                 continue;
             }
@@ -230,12 +258,17 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 if !ids.contains(&sid(c)) {
                     continue;
                 }
-                trim_one_clip(c, left, new_t);
+                let still = still_ids.contains(&sid(c));
+                trim_one_clip(c, left, new_t, still);
+            }
+            if applied_ret.is_none() {
+                applied_ret = Some(new_t - from_t.unwrap_or(new_t));
             }
         }
     }
     normalize_linked_audio(root);
     remove_orphan_linked_audio(root);
+    applied_ret.unwrap_or(0.0)
 }
 
 fn main_video_track(root: &Value) -> Option<usize> {
@@ -339,20 +372,30 @@ fn shift_front_lanes(root: &mut Value, main_ti: usize, ops: &[(Option<bool>, f64
     }
 }
 
-fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) -> bool {
-    let Some(main_ti) = main_video_track(root) else { return false };
+/// 戻り値: Some(消化したタイムラインデルタ) = メインレーンとして処理した /
+/// None = 汎用トリムへフォールバック。still_ids の静止画はソース時間の概念が
+/// 無いので両方向とも制限なし（ソースフィールドは触らない）。
+fn trim_main_lane_live(
+    root: &mut Value,
+    ids: &[String],
+    left: bool,
+    from_t: Option<f64>,
+    new_t: f64,
+    still_ids: &[String],
+) -> Option<f64> {
+    let main_ti = main_video_track(root)?;
     let magnet = track_magnet(root, main_ti);
     // メインレーンに適用したリップルの記録。トリム完了後に前面レーンへミラーして
     // テロップ等の付着クリップを親と同期させる。
     let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
-    let handled = 'edit: {
-        let Some(tracks) = tracks_mut(root) else { break 'edit false };
+    let applied: Option<f64> = 'edit: {
+        let Some(tracks) = tracks_mut(root) else { break 'edit None };
         let Some(clips) = tracks
             .get_mut(main_ti)
             .and_then(|tr| tr.get_mut("clips"))
             .and_then(|c| c.as_array_mut())
         else {
-            break 'edit false;
+            break 'edit None;
         };
         let selected: Vec<usize> = clips
             .iter()
@@ -361,18 +404,20 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             .map(|(i, _)| i)
             .collect();
         if selected.len() != 1 {
-            break 'edit false;
+            break 'edit None;
         }
         let idx = selected[0];
+        let still = still_ids.contains(&sid(&clips[idx]));
         let ts = f(&clips[idx], "timeline_start");
         let te = f(&clips[idx], "timeline_end");
         let ss = f(&clips[idx], "source_start");
-        let has_se = clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
+        let has_se =
+            !still && clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
         let se = f(&clips[idx], "source_end");
         let old_edge = if left { from_t.unwrap_or(ts) } else { from_t.unwrap_or(te) };
         let mut d = new_t - old_edge;
         if d.abs() < 1e-6 {
-            break 'edit true;
+            break 'edit Some(0.0);
         }
         // 速度対応: タイムライン方向の d をソース方向へ換算する係数（等速=speed、
         // ランプは平均。端の値は raw_src_at で正確に求める）
@@ -388,7 +433,7 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 d = d.max((ss + 0.05 - se) / rate_avg);
             }
             if d.abs() < 1e-6 {
-                break 'edit true;
+                break 'edit Some(0.0);
             }
             let new_se = raw_src_at(&clips[idx], te + d).max(ss + 0.05);
             setf(&mut clips[idx], "timeline_end", te + d);
@@ -398,7 +443,7 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             if d > 0.0 || magnet {
                 shift_block_rec(clips, &mut ops, false, te, d, idx);
             }
-            break 'edit true;
+            break 'edit Some(d);
         }
 
         if d > 0.0 {
@@ -407,26 +452,30 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 d = d.min((se - ss - 0.05) / rate_avg);
             }
             if d.abs() < 1e-6 {
-                break 'edit true;
+                break 'edit Some(0.0);
             }
             let new_ss = raw_src_at(&clips[idx], ts + d).max(0.0);
             if magnet {
                 shift_block_rec(clips, &mut ops, true, ts, d, idx);
             }
             setf(&mut clips[idx], "timeline_start", ts + d);
-            setf(&mut clips[idx], "source_start", new_ss);
+            if !still {
+                setf(&mut clips[idx], "source_start", new_ss);
+            }
             // keyframes are clip-relative TIMELINE times: the left edge moved by d
             shift_region_keys(&mut clips[idx], -d);
             if magnet {
                 pin_start_to_zero_rec(clips, &mut ops);
             }
-            break 'edit true;
+            break 'edit Some(d);
         }
 
-        let mut grow = (-d).min(ss / head_rate);
+        // 左方向への拡大。静止画はソース制限なし、映像はソース頭の余白まで
+        let mut grow = if still { -d } else { (-d).min(ss / head_rate) };
         if grow <= 1e-6 {
-            break 'edit true;
+            break 'edit Some(0.0);
         }
+        let mut consumed = 0.0;
         if magnet {
             let left_min_start = clips
                 .iter()
@@ -438,27 +487,33 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             if restore > 1e-6 {
                 shift_block_rec(clips, &mut ops, true, ts, -restore, idx);
                 setf(&mut clips[idx], "timeline_start", ts - restore);
-                setf(&mut clips[idx], "source_start", (ss - restore * head_rate).max(0.0));
+                if !still {
+                    setf(&mut clips[idx], "source_start", (ss - restore * head_rate).max(0.0));
+                }
                 shift_region_keys(&mut clips[idx], restore);
                 grow -= restore;
+                consumed += restore;
             }
         }
         if grow > 1e-6 {
             let cur_end = f(&clips[idx], "timeline_end");
             let cur_ss = f(&clips[idx], "source_start");
-            setf(&mut clips[idx], "source_start", (cur_ss - grow * head_rate).max(0.0));
+            if !still {
+                setf(&mut clips[idx], "source_start", (cur_ss - grow * head_rate).max(0.0));
+            }
             setf(&mut clips[idx], "timeline_end", cur_end + grow);
             // in-point moved earlier while timeline_start stayed: keys are timeline-
             // relative so they slide by the timeline grow
             shift_region_keys(&mut clips[idx], grow);
             shift_block_rec(clips, &mut ops, false, cur_end, grow, idx);
+            consumed += grow;
         }
-        true
+        Some(-consumed)
     };
-    if handled {
+    if applied.is_some() {
         shift_front_lanes(root, main_ti, &ops);
     }
-    handled
+    applied
 }
 
 pub fn settle_overlaps(root: &mut Value, ids: &[String]) {
@@ -604,11 +659,11 @@ pub fn normalize_linked_audio(root: &mut Value) {
     }
 }
 
-fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
+fn trim_one_clip(c: &mut Value, left: bool, new_t: f64, still: bool) {
     let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
     let ss = f(c, "source_start");
-    let has_ss = c.get("source_start").map(|v| v.is_number()).unwrap_or(false);
-    let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
+    let has_ss = !still && c.get("source_start").map(|v| v.is_number()).unwrap_or(false);
+    let has_se = !still && c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
     if is_freeze_v(c) {
         // a freeze's length is TIMELINE-only: never touch its source fields.
         // (the old video math turned an extended freeze back into moving video)
