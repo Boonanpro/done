@@ -3273,7 +3273,11 @@ fn media_thread(shared: Arc<Shared>) {
                 match job {
                     Some(AuxJob::Thumb { asset_id, path, bucket }) => {
                         let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
-                        let got = media::thumbnail(&d3d, &path, tt, 96).ok();
+                        let got = if is_image_path(std::path::Path::new(&path)) {
+                            image_thumb(&path, 96)
+                        } else {
+                            media::thumbnail(&d3d, &path, tt, 96).ok()
+                        };
                         {
                             let mut a = shared.aux.lock().unwrap();
                             if let Some(t) = got {
@@ -3333,7 +3337,11 @@ fn aux_thread(shared: Arc<Shared>) {
             match job {
                 Some(AuxJob::Thumb { asset_id, path, bucket }) => {
                     let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
-                    let got = thumbnailer.thumbnail(&d3d, &path, tt, 96).ok();
+                    let got = if is_image_path(std::path::Path::new(&path)) {
+                        image_thumb(&path, 96)
+                    } else {
+                        thumbnailer.thumbnail(&d3d, &path, tt, 96).ok()
+                    };
                     {
                         let mut a = shared.aux.lock().unwrap();
                         if let Some(t) = got {
@@ -8582,16 +8590,15 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // kind-based pinning — reorder/move clips and the render follows.
         // ロールフリー表示: レーンの太さは「役割(kind)」では決めない。太いのは
         // 映像メインレーン（配列先頭＝最背面の視覚レーン）1本だけで、それ以外は
-        // 種類にかかわらず一律スリム。空のレーンは畳む（役割ごとの常設レーンは
-        // 廃止済みの名残）が、クリップのMoveドラッグ中だけはドロップ先として
-        // 出現させる（既存の「最上段より上=新規レーン」ゾーンと併用）。
-        // 「押しただけ」ではレイアウトを一切変えない: 実移動（drag_engaged）が
-        // 始まって初めてドロップレーン展開＋凍結レイアウトに切り替える
+        // 種類にかかわらず一律スリム。空のレーンは常に畳む — Moveドラッグ中も
+        // 展開しない（かつては「ドロップ先候補」として出現させていたが、doc内の
+        // 不可視な空レーンが挿入されてレーン番号がズレる幽霊レーンに見えるため
+        // 廃止。新しいレーンが欲しい移動は「最上段より上=新規レーン」ゾーンで足りる）。
         let moving = matches!(self.drag, Drag::Move { .. }) && self.drag_engaged;
         let visual: Vec<usize> = (0..self.doc.seq.tracks.len())
             .rev()
             .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
-            .filter(|&i| moving || !self.doc.seq.tracks[i].clips.is_empty())
+            .filter(|&i| !self.doc.seq.tracks[i].clips.is_empty())
             .collect();
         let audio: Vec<usize> = (0..self.doc.seq.tracks.len())
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
@@ -8608,7 +8615,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let squeeze = (avail / total_h.max(1.0)).min(1.0);
         let mut lane_tops: Vec<(usize, f32, f32)> = Vec::new(); // (track idx, y0, height)
         {
-            let mut y = rect.top() + ruler_h + 3.0;
+            // レーン束は余った縦空間の中央に置く。上（ルーラー直下）にギチギチ、
+            // 下に広大な余白という頭でっかちを避け、パネルをどう広げても
+            // シーケンスがバランスの良い中間に来る。
+            let mut y = rect.top() + ruler_h + 3.0 + ((avail - total_h).max(0.0) * 0.5);
             for &i in &order {
                 let lh = lane_h_for(i) * squeeze;
                 lane_tops.push((i, y, lh));
