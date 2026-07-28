@@ -1081,6 +1081,22 @@ fn compose(
                         let _ = comp.apply_spotlight(d3d, rg, 1.0 - 0.55 * opacity);
                     } else if style == "marker" {
                         let _ = comp.apply_marker(d3d, rg, opacity);
+                    } else if style == "frame" {
+                        // 矩形枠: 囲むだけで周囲を暗くしない。マーカー/スポットの
+                        // 重ね掛けで注目以外がどんどん沈む問題への答え（同一シーンで
+                        // 複数箇所を目立たせる用途）。solid の帯4本＝新シェーダ不要
+                        let (x, y, w, h) = rg;
+                        let t = c.effect_strength.unwrap_or(4.0).clamp(1.0, 24.0) / canvas_h() as f64;
+                        let tx = t * canvas_h() as f64 / canvas_w() as f64;
+                        let fcol = effect_rgb(c.effect_color.as_deref().unwrap_or("#ffe14d"));
+                        for s in [
+                            (x - tx, y - t, w + 2.0 * tx, t),
+                            (x - tx, y + h, w + 2.0 * tx, t),
+                            (x - tx, y, tx, h),
+                            (x + w, y, tx, h),
+                        ] {
+                            let _ = comp.apply_solid_rect(d3d, s, fcol, opacity);
+                        }
                     } else if style == "zoom" {
                         let z = c.effect_strength.unwrap_or(1.6).clamp(1.1, 3.0);
                         let _ = comp.apply_zoom(d3d, rg, z);
@@ -5821,7 +5837,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     ui.label(egui::RichText::new("変更は選択中の全クリップに適用されます。").small().weak());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
                     ui.horizontal(|ui| {
-                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid"), ("マーカー", "marker"), ("スポットライト", "spotlight"), ("ズーム", "zoom")] {
+                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid"), ("マーカー", "marker"), ("スポットライト", "spotlight"), ("枠", "frame"), ("ズーム", "zoom")] {
                             let all_same = selected.iter().all(|(c, _)| c.style.as_ref().and_then(|v| v.as_str()) == Some(val));
                             if ui.selectable_label(all_same, label).clicked() {
                                 let ids = edit_ids.clone();
@@ -5895,6 +5911,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         for (label, val) in [
                             ("マーカー", "marker"),
                             ("スポットライト", "spotlight"),
+                            ("枠", "frame"),
                             ("ズーム", "zoom"),
                         ] {
                             if ui.selectable_label(cur == val, label).clicked() {
@@ -5907,6 +5924,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     let is_solid = cur == "solid";
                     let is_focus = cur == "marker" || cur == "spotlight";
                     let is_zoom = cur == "zoom";
+                    let is_frame = cur == "frame";
                     let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
                     if is_zoom {
                         let mut z = clip.effect_strength.unwrap_or(1.6) as f32;
@@ -5929,6 +5947,48 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             if resp.changed() {
                                 let cid = id.clone();
                                 self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64)));
+                            }
+                        });
+                    } else if is_frame {
+                        let mut colour = hex_color32(
+                            clip.effect_color.as_deref().unwrap_or("#ffe14d"),
+                            egui::Color32::from_rgb(255, 225, 77),
+                        );
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        let mut th = clip.effect_strength.unwrap_or(4.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("色");
+                            if ui.color_edit_button_srgba(&mut colour).changed() {
+                                let cid = id.clone();
+                                let hex = color32_hex(colour);
+                                self.apply_edit(true, move |raw| {
+                                    edits::set_effect_options(raw, &cid, None, Some(hex), None)
+                                });
+                            }
+                            ui.label("太さ");
+                            let r = ui.add(egui::Slider::new(&mut th, 1.0..=24.0).suffix(" px"));
+                            if r.drag_started() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            if r.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| {
+                                    edits::set_effect_options(raw, &cid, Some(th as f64), None, None)
+                                });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("不透明度");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| {
+                                    edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64))
+                                });
                             }
                         });
                     } else if !is_solid {
@@ -5965,7 +6025,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         });
                     }
-                    ui.label(egui::RichText::new(if is_focus || is_zoom {
+                    ui.label(egui::RichText::new(if is_frame {
+                        "枠=範囲を四角い線で囲むだけ（周囲は暗くしない）。同一シーンで複数箇所を目立たせても画面が沈みません。"
+                    } else if is_focus || is_zoom {
                         "マーカー/スポットライト=範囲を目立たせる、ズーム=範囲へパンチイン。移動する対象は下の手動追従（キーフレーム）で追えます。"
                     } else {
                         "単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。"
@@ -5975,7 +6037,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     // mask then follows it (pixel silhouette), replacing the static rect
                     // (隠す系スタイル専用 — 注目演出はマスク追従の対象外)
                     let has_track = clip.blur_track.is_some();
-                    if !(is_focus || is_zoom) {
+                    if !(is_focus || is_zoom || is_frame) {
                     ui.label(egui::RichText::new("AI追従（SAM）").strong());
                     ui.horizontal(|ui| {
                         let blabel = if has_track { "再ベイク" } else { "囲んだ物体を追従ぼかし" };
@@ -9135,6 +9197,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 "note" => "📝 指示",
                                 "marker" => "マーカー",
                                 "spotlight" => "スポット",
+                                "frame" => "枠",
                                 "zoom" => "ズーム",
                                 s if s.contains("mosaic") => "モザイク",
                                 _ => "ぼかし",
@@ -12393,7 +12456,26 @@ impl eframe::App for App {
         // media-cache and PNG-cache paths. This runs after all text widgets have seen
         // this frame's IME events, never in the keystroke handler itself.
         self.commit_caption_drafts(None);
-        ctx.request_repaint();
+        // 再描画ポリシー: かつては無条件 request_repaint() で常時約100fps＝停止中でも
+        // 1コアを食い続けていた（実測83%CPU）。操作・再生・ドラッグ中だけ全速、
+        // アイドルは10fpsに落とす。ポーラー類(保存デバウンス/ベイク回収/HTTP結果)は
+        // 100msティックで十分回り、入力イベントが来れば即座にフレームが走る。
+        let busy = self.playing
+            || !matches!(self.drag, Drag::None)
+            || self.resume_pending.is_some()
+            || self.resume_on_release
+            || self.toast.is_some()
+            || self.eyedrop.is_some()
+            || self.lane_reorder.is_some()
+            || self.range_drag.is_some()
+            || ctx.input(|i| {
+                i.pointer.any_down() || !i.raw.hovered_files.is_empty() || !i.raw.events.is_empty()
+            });
+        if busy {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
