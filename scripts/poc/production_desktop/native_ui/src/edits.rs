@@ -3363,3 +3363,65 @@ pub fn delete_track(raw: &mut Value, ti: usize) {
         tracks.remove(ti);
     }
 }
+
+/// テロップの選択範囲 [s, e)（charインデックス、BMP文字ではJSのUTF-16単位と一致）
+/// に文字色を設定する。既存スパンと重なる部分は分割して上書き。color=None で解除。
+/// スキーマ: style.colorSpans = [{s, e, color}]（Web CaptionLayer が描画）。
+pub fn set_caption_color_span(raw: &mut Value, id: &str, s: usize, e: usize, color: Option<&str>) {
+    if e <= s {
+        return;
+    }
+    for c in clips_iter_mut(raw) {
+        if sid(c) != id {
+            continue;
+        }
+        let Some(obj) = c.as_object_mut() else { continue };
+        let style = obj.entry("style").or_insert_with(|| serde_json::json!({}));
+        let Some(so) = style.as_object_mut() else { continue };
+        let spans: Vec<(usize, usize, String)> = so
+            .get("colorSpans")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        Some((
+                            x.get("s")?.as_u64()? as usize,
+                            x.get("e")?.as_u64()? as usize,
+                            x.get("color")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 既存スパンから [s,e) を減算（必要なら分割）してから新しい色を載せる
+        let mut next: Vec<(usize, usize, String)> = Vec::new();
+        for (a, b, col) in spans {
+            if b <= s || a >= e {
+                next.push((a, b, col));
+                continue;
+            }
+            if a < s {
+                next.push((a, s, col.clone()));
+            }
+            if b > e {
+                next.push((e, b, col));
+            }
+        }
+        if let Some(col) = color {
+            next.push((s, e, col.to_string()));
+        }
+        next.sort_by_key(|x| x.0);
+        if next.is_empty() {
+            so.remove("colorSpans");
+        } else {
+            so.insert(
+                "colorSpans".into(),
+                Value::Array(
+                    next.into_iter()
+                        .map(|(a, b, col)| serde_json::json!({"s": a, "e": b, "color": col}))
+                        .collect(),
+                ),
+            );
+        }
+    }
+}

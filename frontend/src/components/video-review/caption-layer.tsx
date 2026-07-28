@@ -75,6 +75,47 @@ function tokenize(cap: RenderCaption): CaptionWord[] {
   }));
 }
 
+type ColorSpan = { s: number; e: number; color: string };
+
+// 範囲色: idx を含む最後のスパンが勝つ
+function spanColorAt(spans: ColorSpan[] | undefined, idx: number): string | undefined {
+  if (!spans) return undefined;
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const sp = spans[i];
+    if (idx >= sp.s && idx < sp.e) return sp.color;
+  }
+  return undefined;
+}
+
+// テキストをスパン境界で分割し、色付き区間を <span> で包む。gradient 使用時は
+// WebkitTextFillColor が transparent になっているため両方上書きする。
+function renderSpanned(text: string, spans?: ColorSpan[]): React.ReactNode {
+  if (!spans || !spans.length) return text;
+  const cuts = new Set<number>([0, text.length]);
+  for (const sp of spans) {
+    cuts.add(Math.max(0, Math.min(text.length, sp.s)));
+    cuts.add(Math.max(0, Math.min(text.length, sp.e)));
+  }
+  const pts = [...cuts].sort((a, b) => a - b);
+  const segs: React.ReactNode[] = [];
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    if (a >= b) continue;
+    const col = spanColorAt(spans, a);
+    segs.push(
+      col ? (
+        <span key={a} style={{ color: col, WebkitTextFillColor: col }}>
+          {text.slice(a, b)}
+        </span>
+      ) : (
+        text.slice(a, b)
+      ),
+    );
+  }
+  return segs;
+}
+
 // One caption box (position/animation/karaoke). Extracted so the layer can draw EVERY
 // active caption — the old "last active wins" single-pick made overlapping captions
 // (e.g. a side-super lane above the subtitle lane) hide each other in the preview.
@@ -89,6 +130,19 @@ function SingleCaption({ cap, time, outH }: { cap: RenderCaption; time: number; 
   const textStyle = captionTextStyle(design, outH);
   const highlight = design.highlightColor || '#ffe14d';
   const hlScale = num(design.highlightScale, 1.12);
+  const colorSpans = design.colorSpans;
+  // トークン先頭の文字インデックス（範囲色をトークン単位に対応付ける）。Whisper 語は
+  // 空白がトークンに含まれないことがあるので progressive indexOf で照合する
+  const tokenOffsets = useMemo(() => {
+    if (!tokens) return null;
+    let cur = 0;
+    return tokens.map((t) => {
+      const at = cap.text.indexOf(t.text, cur);
+      const s = at >= 0 ? at : cur;
+      cur = s + t.text.length;
+      return s;
+    });
+  }, [tokens, cap.text]);
 
   let content: React.ReactNode;
   if (tokens) {
@@ -97,22 +151,32 @@ function SingleCaption({ cap, time, outH }: { cap: RenderCaption; time: number; 
         {tokens.map((tok, i) => {
           const spoken = time >= tok.end;
           const activeWord = time >= tok.start && time < tok.end;
+          const spanCol = spanColorAt(colorSpans, tokenOffsets ? tokenOffsets[i] : 0);
           if (anim === 'typewriter') {
             // reveal: hide tokens not yet reached (keep layout stable via visibility)
             const shown = time >= tok.start;
             return (
-              <span key={i} style={{ visibility: shown ? 'visible' : 'hidden' }}>
+              <span
+                key={i}
+                style={{
+                  visibility: shown ? 'visible' : 'hidden',
+                  color: spanCol,
+                  WebkitTextFillColor: spanCol,
+                }}
+              >
                 {tok.text}
               </span>
             );
           }
           // karaoke: dim upcoming words, highlight the one being spoken
+          const col = activeWord ? highlight : spanCol;
           return (
             <span
               key={i}
               style={{
                 display: 'inline-block',
-                color: activeWord ? highlight : undefined,
+                color: col,
+                WebkitTextFillColor: col,
                 opacity: spoken || activeWord ? 1 : 0.45,
                 transform: activeWord ? `scale(${hlScale})` : undefined,
                 transition: 'none',
@@ -125,7 +189,7 @@ function SingleCaption({ cap, time, outH }: { cap: RenderCaption; time: number; 
       </p>
     );
   } else {
-    content = <p style={textStyle}>{cap.text}</p>;
+    content = <p style={textStyle}>{renderSpanned(cap.text, colorSpans)}</p>;
   }
 
   return (
