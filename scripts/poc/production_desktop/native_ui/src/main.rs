@@ -4055,6 +4055,18 @@ impl App {
 
     /// Register a dropped file as an asset and insert it at the playhead on the first
     /// visual lane. Exact timeline drops use `import_file_at` below.
+    /// 素材ドロップ/カードドロップの「最上段より上」ゾーン: 新規最前面ビジュアル
+    /// レーンを挿入して、その index を返す（レーンは上へ何本でも増やせる）。
+    fn insert_new_top_lane(&mut self) -> usize {
+        let target = (0..self.doc.seq.tracks.len())
+            .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
+            .max()
+            .map(|f| f + 1)
+            .unwrap_or(0);
+        self.apply_edit(false, |raw| edits::insert_top_visual_track(raw));
+        target
+    }
+
     fn import_file(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
         let target = self
             .doc
@@ -9515,7 +9527,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         }
                         // vertical: the clip FOLLOWS the pointer's lane live (not on release)
                         let prev_hover = self.hover_lane;
-                        self.hover_lane = if new_top_drop.map(|r| r.contains(pos)).unwrap_or(false) {
+                        // 最上段レーンより上なら帯の外でも新規レーン扱い
+                        // （上へは何本でも増やせる）
+                        let above_top = body.contains(pos)
+                            && lane_tops.first().map(|&(_, y0, _)| pos.y < y0).unwrap_or(false);
+                        self.hover_lane = if above_top {
                             Some(NEW_TOP_LANE)
                         } else {
                             lane_tops
@@ -9795,6 +9811,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             if !body.contains(pt) {
                 return None;
             }
+            // 「最上段レーンより上」は常に新規レーン行き。クリップ移動と同じ規則で、
+            // 素材ドロップでもレーンを上へ何本でも増やせる。
+            if lane_tops.first().map(|&(_, y0, _)| pt.y < y0).unwrap_or(false) {
+                return Some(NEW_TOP_LANE);
+            }
             lane_tops
                 .iter()
                 .filter(|&&(ti, _, _)| {
@@ -9820,7 +9841,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             && drop_time.is_some()
         {
             let ti = drop_target.unwrap();
-            let (_, y0, lh) = lane_tops.iter().find(|&&(i, _, _)| i == ti).copied().unwrap();
+            let (y0, lh) = if ti == NEW_TOP_LANE {
+                // 新規レーンの着地帯: 現在の最上段のすぐ上に仮のレーン枠を描く
+                let band = 26.0 * squeeze;
+                let top = lane_tops.first().map(|&(_, y, _)| y).unwrap_or(body.top() + 30.0);
+                ((top - band - 3.0).max(body.top()), band)
+            } else {
+                let (_, y0, lh) =
+                    lane_tops.iter().find(|&&(i, _, _)| i == ti).copied().unwrap();
+                (y0, lh)
+            };
             let lane_rect = egui::Rect::from_min_max(
                 egui::pos2(body.left(), y0),
                 egui::pos2(body.right(), y0 + lh),
@@ -9874,6 +9904,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         if released_now && self.asset_drag.is_some() {
             let dragged = self.asset_drag.take();
             if let (Some(asset), Some(ti), Some(t)) = (dragged, drop_target, drop_time) {
+                let ti = if ti == NEW_TOP_LANE { self.insert_new_top_lane() } else { ti };
                 self.place_library_asset_at(&asset, t, ti);
             }
         }
@@ -9934,6 +9965,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         .collect();
                     self.pending_initial_imports.extend(dropped_media);
                 } else {
+                    let ti = if ti == NEW_TOP_LANE { self.insert_new_top_lane() } else { ti };
                     for path in dropped_media {
                         if let Err(e) = self.import_file_at(&path, t, ti) {
                             eprintln!("import: {e:#}");

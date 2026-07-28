@@ -3024,3 +3024,18 @@ mod tests {
         assert!(clip.get("opacity").is_none());
     }
 }
+
+/// 素材ドロップの「最上段より上」ゾーン: 最前面に空のビジュアルトラックを挿入する。
+/// クリップMoveの move_group_to_new_top_track と同じ位置規則（front+1）。
+pub fn insert_top_visual_track(raw: &mut Value) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    let at = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
+        .map(|(i, _)| i)
+        .max()
+        .map(|f| f + 1)
+        .unwrap_or(0);
+    tracks.insert(at, serde_json::json!({"type": "overlay", "clips": []}));
+}
