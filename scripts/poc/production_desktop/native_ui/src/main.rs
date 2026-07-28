@@ -6657,6 +6657,135 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     ui.add_space(6.0);
                 }
+                // ---- 再生速度 ----
+                if !clip.is_freeze() && clip.asset_id.is_some() && clip.source_end.is_some() {
+                    ui.label(egui::RichText::new("再生速度").strong());
+                    let has_ramp = !clip.speed_keys.is_empty();
+                    let mut spd = clip.speed * 100.0;
+                    ui.horizontal(|ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut spd)
+                                .speed(1.0)
+                                .range(5.0..=1600.0)
+                                .suffix("%"),
+                        );
+                        if r.gained_focus() || r.drag_started() {
+                            self.pending_undo = Some(self.doc.raw.clone());
+                        }
+                        let mut set_to: Option<f64> = None;
+                        if r.changed() {
+                            set_to = Some(spd / 100.0);
+                        }
+                        for (lbl, v) in [("0.5x", 0.5), ("1x", 1.0), ("1.5x", 1.5), ("2x", 2.0)] {
+                            if ui.small_button(lbl).clicked() {
+                                self.pending_undo = None;
+                                set_to = Some(v);
+                            }
+                        }
+                        if let Some(v) = set_to {
+                            let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                            self.apply_edit(true, move |raw| edits::set_clip_speed(raw, &ids, v));
+                            self.push_req(false);
+                        }
+                    });
+                    if has_ramp {
+                        ui.label(
+                            egui::RichText::new("※ランプ設定中（等速の変更でランプは解除）")
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    // ---- スピードランプ ----
+                    if !multi {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("スピードランプ").strong());
+                            if ui.small_button("＋ 再生ヘッドにキー").clicked() {
+                                let mut keys = clip.speed_keys.clone();
+                                let u = if self.t > clip.timeline_start + 0.05
+                                    && self.t < clip.timeline_end - 0.05
+                                {
+                                    clip.src_at(self.t)
+                                } else {
+                                    clip.source_start
+                                };
+                                let v = if keys.is_empty() {
+                                    clip.speed.max(0.05)
+                                } else {
+                                    clip.rate_at(self.t)
+                                };
+                                keys.push(model::SpeedKey { u, v, ease: 0.5 });
+                                keys.sort_by(|a, b| a.u.total_cmp(&b.u));
+                                let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                                self.apply_edit(true, move |raw| edits::set_speed_keys(raw, &ids, &keys));
+                                self.push_req(false);
+                            }
+                        });
+                        if !clip.speed_keys.is_empty() {
+                            let mut keys = clip.speed_keys.clone();
+                            let mut kchanged = false;
+                            let mut remove: Option<usize> = None;
+                            let css = clip.source_start;
+                            for (i, k) in keys.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("{}", i + 1)).weak().small());
+                                    ui.label(egui::RichText::new("位置").weak().small());
+                                    let mut pos = k.u - css;
+                                    let r1 = ui.add(
+                                        egui::DragValue::new(&mut pos).speed(0.05).suffix("s"),
+                                    );
+                                    if r1.changed() {
+                                        k.u = css + pos.max(0.0);
+                                        kchanged = true;
+                                    }
+                                    ui.label(egui::RichText::new("速度").weak().small());
+                                    let mut v = k.v;
+                                    let r2 = ui.add(
+                                        egui::DragValue::new(&mut v)
+                                            .speed(0.02)
+                                            .range(0.1..=8.0)
+                                            .suffix("x"),
+                                    );
+                                    if r2.changed() {
+                                        k.v = v;
+                                        kchanged = true;
+                                    }
+                                    ui.label(egui::RichText::new("カーブ").weak().small());
+                                    let mut e = k.ease;
+                                    let r3 = ui.add(
+                                        egui::DragValue::new(&mut e).speed(0.02).range(0.0..=1.0),
+                                    );
+                                    if r3.changed() {
+                                        k.ease = e;
+                                        kchanged = true;
+                                    }
+                                    if r1.drag_started() || r2.drag_started() || r3.drag_started() {
+                                        self.pending_undo = Some(self.doc.raw.clone());
+                                    }
+                                    if ui.small_button("✖").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                            }
+                            if let Some(i) = remove {
+                                keys.remove(i);
+                                kchanged = true;
+                            }
+                            if kchanged {
+                                keys.sort_by(|a, b| a.u.total_cmp(&b.u));
+                                let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                                self.apply_edit(false, move |raw| edits::set_speed_keys(raw, &ids, &keys));
+                                self.push_req(false);
+                            }
+                            ui.label(
+                                egui::RichText::new("位置=クリップ内ソース秒 / カーブ=つなぎ目の滑らかさ(0=急,1=なだらか)")
+                                    .weak()
+                                    .small(),
+                            );
+                        }
+                    }
+                    ui.add_space(6.0);
+                }
                 // ---- crop ----
                 ui.label(egui::RichText::new("クロップ（端を切る %）").strong());
                 let (l, t, r_, bm) = if has_tkeys {
@@ -9181,6 +9310,48 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             egui::Color32::from_white_alpha(235),
                         );
                     }
+                    // 速度バッジ: 等速≠1x は「1.5x」、ランプは「⚡」
+                    let spd_badge = if !c.speed_keys.is_empty() {
+                        Some("⚡ランプ".to_string())
+                    } else if (c.speed - 1.0).abs() > 1e-9 {
+                        Some(format!("{}x", (c.speed * 100.0).round() / 100.0))
+                    } else {
+                        None
+                    };
+                    if let Some(b) = spd_badge {
+                        if strip.width() > 60.0 {
+                            p.text(
+                                egui::pos2(strip.right() - 4.0, strip.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                b,
+                                egui::FontId::proportional(9.0),
+                                egui::Color32::from_rgb(255, 220, 120),
+                            );
+                        }
+                    }
+                }
+                // スピードランプの速度カーブ帯（対数スケール 0.25x..4x を高さへ）
+                if !c.speed_keys.is_empty() && tr.kind != "audio" && r.width() > 20.0 {
+                    let n = ((r.width() / 3.0) as usize).max(2);
+                    let mut prev: Option<egui::Pos2> = None;
+                    for i in 0..=n {
+                        let frac = i as f64 / n as f64;
+                        let t = c.timeline_start + frac * (c.timeline_end - c.timeline_start);
+                        let v = c.rate_at(t).clamp(0.25, 4.0);
+                        let y01 = ((v.ln() - 0.25f64.ln()) / (4.0f64.ln() - 0.25f64.ln())) as f32;
+                        let y = r.bottom() - 2.0 - y01 * (r.height() - strip_h - 4.0).max(4.0);
+                        let pt = egui::pos2(r.left() + (frac as f32) * r.width(), y);
+                        if let Some(pp) = prev {
+                            p.line_segment(
+                                [pp, pt],
+                                egui::Stroke::new(
+                                    1.5,
+                                    egui::Color32::from_rgba_unmultiplied(255, 220, 120, 200),
+                                ),
+                            );
+                        }
+                        prev = Some(pt);
+                    }
                 }
                 if tr.kind != "audio" && c.link_id.is_some() {
                     // unified A/V: waveform ribbon along the clip's bottom quarter
@@ -9190,8 +9361,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let n = ((r.width() / 2.0) as usize).max(1);
                         for i in 0..n {
                             let x = r.left() + (i as f32) * 2.0;
-                            let tt = c.source_start
-                                + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
+                            let tt = c.src_at(
+                                c.timeline_start
+                                    + (i as f64 / n as f64) * (c.timeline_end - c.timeline_start),
+                            );
                             let idx = (tt / spb) as usize;
                             let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0);
                             p.line_segment(
@@ -9208,8 +9381,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let n = ((r.width() / 2.0) as usize).max(1);
                         for i in 0..n {
                             let x = r.left() + (i as f32) * 2.0;
-                            let tt = c.source_start
-                                + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
+                            let tt = c.src_at(
+                                c.timeline_start
+                                    + (i as f64 / n as f64) * (c.timeline_end - c.timeline_start),
+                            );
                             let idx = (tt / spb) as usize;
                             let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0).max(0.04);
                             p.line_segment(
@@ -11218,7 +11393,10 @@ impl eframe::App for App {
                         let Some(aid) = c.asset_id.clone() else { continue };
                         if tr.kind != "audio" {
                             let s0 = c.source_start;
-                            let s1 = c.source_start + (c.timeline_end - c.timeline_start);
+                            // 速度対応: サムネの対象ソース範囲は source_end が正
+                            let s1 = c
+                                .source_end
+                                .unwrap_or(c.source_start + (c.timeline_end - c.timeline_start));
                             let (b0, b1) = ((s0 / THUMB_BUCKET_S) as i64, (s1 / THUMB_BUCKET_S) as i64);
                             for b in b0..=b1 {
                                 if !self.thumbs.contains_key(&(aid.clone(), b)) {
@@ -13978,6 +14156,74 @@ fn main() -> eframe::Result<()> {
         let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
         println!("TKF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
+    }
+    if args.iter().any(|a| a == "--selftest-speed") {
+        // クリップ速度写像の数値検証: 等速・ランプ積分・単調性・カーブ幅
+        let mut ok = true;
+        let mut check = |name: &str, got: f64, want: f64, tol: f64| {
+            let pass = (got - want).abs() <= tol;
+            println!(
+                "SPD {name:<24} {} got={got:.4} want={want:.4}",
+                if pass { "PASS" } else { "FAIL" }
+            );
+            if !pass {
+                ok = false;
+            }
+            pass
+        };
+        let c: model::Clip = serde_json::from_value(serde_json::json!({
+            "id": "s1", "asset_id": "a", "source_start": 10.0, "source_end": 18.0,
+            "timeline_start": 5.0, "timeline_end": 9.0, "speed": 2.0
+        }))
+        .expect("clip");
+        check("const2x t=7 -> src14", c.src_at(7.0), 14.0, 1e-9);
+        check("const2x rate", c.rate_at(6.0), 2.0, 1e-9);
+        let mut r: model::Clip = serde_json::from_value(serde_json::json!({
+            "id": "s2", "asset_id": "a", "source_start": 0.0, "source_end": 10.0,
+            "timeline_start": 0.0, "timeline_end": 7.0,
+            "speed_keys": [{"u": 0.0, "v": 1.0}, {"u": 4.0, "v": 2.0, "ease": 0.0}]
+        }))
+        .expect("ramp clip");
+        r.ramp = model::build_ramp(&r.speed_keys, 0.0, 10.0).map(std::sync::Arc::new);
+        let total = r.ramp.as_ref().map(|l| l.total_t).unwrap_or(0.0);
+        check("ramp total 1x4s+2x3s", total, 7.0, 0.03);
+        check("ramp t=2 -> src2", r.src_at(2.0), 2.0, 0.03);
+        check("ramp t=6 -> src8", r.src_at(6.0), 8.0, 0.06);
+        check("ramp rate head 1x", r.rate_at(1.0), 1.0, 0.05);
+        check("ramp rate tail 2x", r.rate_at(6.0), 2.0, 0.1);
+        let mut sm: model::Clip = serde_json::from_value(serde_json::json!({
+            "id": "s3", "asset_id": "a", "source_start": 0.0, "source_end": 10.0,
+            "timeline_start": 0.0, "timeline_end": 7.0,
+            "speed_keys": [{"u": 0.0, "v": 1.0}, {"u": 5.0, "v": 2.0, "ease": 1.0}]
+        }))
+        .expect("smooth clip");
+        sm.ramp = model::build_ramp(&sm.speed_keys, 0.0, 10.0).map(std::sync::Arc::new);
+        let tt = sm.ramp.as_ref().map(|l| l.total_t).unwrap_or(0.0);
+        let in_range = tt > 6.5 && tt < 8.0;
+        println!("SPD ease1 total in range   {} got={tt:.3}", if in_range { "PASS" } else { "FAIL" });
+        ok &= in_range;
+        let mut mono = true;
+        let mut prevv = -1.0;
+        for i in 0..=720 {
+            let s = sm.src_at(i as f64 * 0.01);
+            if s < prevv - 1e-9 {
+                mono = false;
+            }
+            prevv = s;
+        }
+        println!("SPD ramp monotonic         {}", if mono { "PASS" } else { "FAIL" });
+        ok &= mono;
+        // カーブ度合い: ease=1 は ease=0 より遷移が広い（t=3.5 時点の速度で判定）
+        let v_sharp = r.rate_at(3.2);
+        let v_smooth = sm.rate_at(3.2);
+        let spread = v_smooth > v_sharp + 0.05;
+        println!(
+            "SPD ease widens transition {} sharp={v_sharp:.3} smooth={v_smooth:.3}",
+            if spread { "PASS" } else { "FAIL" }
+        );
+        ok &= spread;
+        println!("SPD ALL {}", if ok { "PASS" } else { "FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
     }
     if args.iter().any(|a| a == "--selftest-newlane") {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));

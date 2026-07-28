@@ -162,6 +162,16 @@ pub struct Clip {
     pub words: serde_json::Value,
     #[serde(default)]
     pub link_id: Option<String>,
+    /// 再生速度（等速）。timeline尺 = source尺 / speed。speed_keys があればそちらが優先。
+    #[serde(default = "one")]
+    pub speed: f64,
+    /// スピードランプのキー列。u=ソース絶対秒（トリム不変・内容に接着）、v=速度、
+    /// ease=つなぎカーブの幅 0..1（到着キー側が受け持つ）。空なら等速。
+    #[serde(default)]
+    pub speed_keys: Vec<SpeedKey>,
+    /// speed_keys から from_raw で構築される timeline→source の累積LUT。
+    #[serde(skip)]
+    pub ramp: Option<std::sync::Arc<RampLut>>,
     #[serde(default = "one")]
     pub volume: f64,
     /// Visual opacity. Missing means fully opaque for existing projects.
@@ -190,6 +200,116 @@ pub struct Tf {
 }
 fn one() -> f64 {
     1.0
+}
+fn half() -> f64 {
+    0.5
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpeedKey {
+    #[serde(default)]
+    pub u: f64, // ソース絶対秒
+    #[serde(default = "one")]
+    pub v: f64, // このキー以降の速度（プラトー）
+    #[serde(default = "half")]
+    pub ease: f64, // 直前区間からのつなぎカーブ幅 0..1
+}
+
+/// スピードランプの timeline→source 対応表。ソース域で 1/v を数値積分して構築。
+/// src[i] = クリップ相対タイムライン i*STEP 秒時点のソースオフセット（source_start 起点）。
+#[derive(Debug)]
+pub struct RampLut {
+    pub step: f64,
+    pub src: Vec<f64>,
+    /// クリップのソース範囲全体が占めるタイムライン尺
+    pub total_t: f64,
+    /// 末尾プラトーの速度（LUT範囲を超えた外挿に使う）
+    pub tail_rate: f64,
+}
+
+pub const RAMP_STEP: f64 = 1.0 / 240.0;
+
+/// キー列からソース位置 u（絶対秒）での速度を返す。キーはプラトー、到着キー u_k の
+/// 周りに幅 w = ease_k * min(隣接区間) の smoothstep ブレンドを置く。
+pub fn ramp_v_at(keys: &[SpeedKey], u: f64) -> f64 {
+    let cv = |v: f64| v.clamp(0.05, 16.0);
+    if keys.is_empty() {
+        return 1.0;
+    }
+    if keys.len() == 1 {
+        return cv(keys[0].v);
+    }
+    // 各ジャンクション k のブレンド帯 [u_k - w/2, u_k + w/2]。w/2 ≤ 隣接区間/2 なので
+    // 帯同士は重ならない。帯より手前=前プラトー、帯内=smoothstep、以降は次へ。
+    for k in 1..keys.len() {
+        let (a, b) = (&keys[k - 1], &keys[k]);
+        let seg_l = (b.u - a.u).max(1e-6);
+        let seg_r = keys.get(k + 1).map(|n| (n.u - b.u).max(1e-6)).unwrap_or(seg_l);
+        let w = (b.ease.clamp(0.0, 1.0) * seg_l.min(seg_r)).max(0.02);
+        let lo = b.u - w * 0.5;
+        if u < lo {
+            return cv(a.v);
+        }
+        if u <= lo + w {
+            let x = ((u - lo) / w).clamp(0.0, 1.0);
+            let s = x * x * (3.0 - 2.0 * x); // smoothstep
+            return cv(a.v) + (cv(b.v) - cv(a.v)) * s;
+        }
+    }
+    cv(keys.last().unwrap().v)
+}
+
+/// ソース範囲 [src0, src1] とキー列から LUT を構築する。
+pub fn build_ramp(keys: &[SpeedKey], src0: f64, src1: f64) -> Option<RampLut> {
+    if keys.is_empty() || src1 <= src0 + 1e-6 {
+        return None;
+    }
+    // ソース域を細分し、タイムライン経過 τ(u) = ∫ 1/v du を積算
+    let du = RAMP_STEP.min((src1 - src0) / 16.0).max(1e-4);
+    let mut samples: Vec<(f64, f64)> = Vec::new(); // (τ, source offset)
+    let mut tau = 0.0;
+    let mut u = src0;
+    samples.push((0.0, 0.0));
+    while u < src1 - 1e-9 {
+        let h = du.min(src1 - u);
+        let v_mid = ramp_v_at(keys, u + h * 0.5).max(0.05);
+        tau += h / v_mid;
+        u += h;
+        samples.push((tau, u - src0));
+    }
+    let total_t = tau;
+    // タイムライン等間隔グリッドへ再標本化
+    let n = (total_t / RAMP_STEP).ceil() as usize + 1;
+    let mut src = Vec::with_capacity(n + 1);
+    let mut j = 0usize;
+    for i in 0..=n {
+        let t = (i as f64 * RAMP_STEP).min(total_t);
+        while j + 1 < samples.len() && samples[j + 1].0 < t {
+            j += 1;
+        }
+        let (t_a, s_a) = samples[j];
+        let (t_b, s_b) = samples.get(j + 1).copied().unwrap_or((total_t.max(t_a + 1e-9), src1 - src0));
+        let f = ((t - t_a) / (t_b - t_a).max(1e-12)).clamp(0.0, 1.0);
+        src.push(s_a + (s_b - s_a) * f);
+    }
+    let tail_rate = ramp_v_at(keys, src1);
+    Some(RampLut { step: RAMP_STEP, src, total_t, tail_rate })
+}
+
+impl RampLut {
+    /// クリップ相対タイムライン rel 秒 → ソースオフセット
+    pub fn src_off(&self, rel: f64) -> f64 {
+        if self.src.is_empty() {
+            return rel;
+        }
+        let x = (rel / self.step).clamp(0.0, (self.src.len() - 1) as f64);
+        let i = x as usize;
+        if i + 1 >= self.src.len() {
+            return *self.src.last().unwrap() + (rel - self.total_t).max(0.0) * self.tail_rate;
+        }
+        let f = x - i as f64;
+        self.src[i] + (self.src[i + 1] - self.src[i]) * f
+    }
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct Effect {
@@ -309,12 +429,31 @@ impl Clip {
         self.source_end.map(|se| se <= self.source_start + 1e-6).unwrap_or(false)
     }
     /// Source time shown at timeline time t — a freeze clip holds its one frame.
+    /// 速度対応の唯一の写像点: 等速は rel*speed、ランプは LUT（1/v のソース域積分）。
     pub fn src_at(&self, t: f64) -> f64 {
         if self.is_freeze() {
-            self.source_start
-        } else {
-            self.source_start + (t - self.timeline_start)
+            return self.source_start;
         }
+        let rel = (t - self.timeline_start).max(0.0);
+        if let Some(r) = &self.ramp {
+            return self.source_start + r.src_off(rel);
+        }
+        if (self.speed - 1.0).abs() > 1e-9 {
+            return self.source_start + rel * self.speed.clamp(0.05, 16.0);
+        }
+        self.source_start + rel
+    }
+    /// タイムライン時刻 t 近傍の局所再生レート（ソース秒/タイムライン秒）。
+    /// 音声のブロック単位ストレッチレシオに使う。
+    pub fn rate_at(&self, t: f64) -> f64 {
+        if self.is_freeze() {
+            return 0.0;
+        }
+        if self.ramp.is_some() {
+            let e = 0.02;
+            return ((self.src_at(t + e) - self.src_at(t)) / e).max(0.01);
+        }
+        self.speed.clamp(0.05, 16.0)
     }
     /// Per-edge crop fractions (left, top, right, bottom), clamped like the exporter.
     pub fn crop_ltrb(&self) -> Option<(f64, f64, f64, f64)> {
@@ -512,11 +651,23 @@ impl Doc {
     /// Re-derive the typed view from a (possibly edited) raw document.
     pub fn from_raw(raw: serde_json::Value, contents_path: &str, asset_dir: &str) -> anyhow::Result<Self> {
         let roots: Vec<Root> = serde_json::from_value(raw.clone())?;
-        let seq = roots
+        let mut seq = roots
             .into_iter()
             .next()
             .map(|r| r.timeline.sequence)
             .unwrap_or_default();
+        // スピードランプの LUT をここで一度だけ構築（編集の度に from_raw が走るので
+        // 常に最新のキー列と一致する）
+        for tr in &mut seq.tracks {
+            for c in &mut tr.clips {
+                if !c.speed_keys.is_empty() {
+                    if let Some(se) = c.source_end {
+                        c.ramp = build_ramp(&c.speed_keys, c.source_start, se)
+                            .map(std::sync::Arc::new);
+                    }
+                }
+            }
+        }
         let dir = asset_dir.replace(char::from(92), "/");
         // originals from assets.json: preview decodes the SOURCE file (no proxy softness),
         // falling back to the proxy when the original is missing

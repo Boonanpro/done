@@ -374,18 +374,26 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
         if d.abs() < 1e-6 {
             break 'edit true;
         }
+        // 速度対応: タイムライン方向の d をソース方向へ換算する係数（等速=speed、
+        // ランプは平均。端の値は raw_src_at で正確に求める）
+        let rate_avg = clip_avg_rate(&clips[idx]);
+        let head_rate = {
+            let k = clip_keys_of(&clips[idx]);
+            if k.is_empty() { clip_speed_of(&clips[idx]) } else { crate::model::ramp_v_at(&k, ss) }
+        };
 
         if !left {
             d = d.max(-(te - ts - 0.05));
             if has_se {
-                d = d.max(ss + 0.05 - se);
+                d = d.max((ss + 0.05 - se) / rate_avg);
             }
             if d.abs() < 1e-6 {
                 break 'edit true;
             }
+            let new_se = raw_src_at(&clips[idx], te + d).max(ss + 0.05);
             setf(&mut clips[idx], "timeline_end", te + d);
             if has_se {
-                setf(&mut clips[idx], "source_end", se + d);
+                setf(&mut clips[idx], "source_end", new_se);
             }
             if d > 0.0 || magnet {
                 shift_block_rec(clips, &mut ops, false, te, d, idx);
@@ -396,18 +404,18 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
         if d > 0.0 {
             d = d.min(te - ts - 0.05);
             if has_se {
-                d = d.min(se - ss - 0.05);
+                d = d.min((se - ss - 0.05) / rate_avg);
             }
             if d.abs() < 1e-6 {
                 break 'edit true;
             }
+            let new_ss = raw_src_at(&clips[idx], ts + d).max(0.0);
             if magnet {
                 shift_block_rec(clips, &mut ops, true, ts, d, idx);
             }
             setf(&mut clips[idx], "timeline_start", ts + d);
-            setf(&mut clips[idx], "source_start", ss + d);
-            // keyframes are clip-relative and glued to SOURCE frames: the in-point moved
-            // by d, so every key slides back by d (same rule as trim_one_clip)
+            setf(&mut clips[idx], "source_start", new_ss);
+            // keyframes are clip-relative TIMELINE times: the left edge moved by d
             shift_region_keys(&mut clips[idx], -d);
             if magnet {
                 pin_start_to_zero_rec(clips, &mut ops);
@@ -415,7 +423,7 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             break 'edit true;
         }
 
-        let mut grow = (-d).min(ss);
+        let mut grow = (-d).min(ss / head_rate);
         if grow <= 1e-6 {
             break 'edit true;
         }
@@ -430,7 +438,7 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             if restore > 1e-6 {
                 shift_block_rec(clips, &mut ops, true, ts, -restore, idx);
                 setf(&mut clips[idx], "timeline_start", ts - restore);
-                setf(&mut clips[idx], "source_start", ss - restore);
+                setf(&mut clips[idx], "source_start", (ss - restore * head_rate).max(0.0));
                 shift_region_keys(&mut clips[idx], restore);
                 grow -= restore;
             }
@@ -438,10 +446,10 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
         if grow > 1e-6 {
             let cur_end = f(&clips[idx], "timeline_end");
             let cur_ss = f(&clips[idx], "source_start");
-            setf(&mut clips[idx], "source_start", (cur_ss - grow).max(0.0));
+            setf(&mut clips[idx], "source_start", (cur_ss - grow * head_rate).max(0.0));
             setf(&mut clips[idx], "timeline_end", cur_end + grow);
-            // in-point moved earlier by grow while timeline_start stayed: the same source
-            // frame now sits grow seconds LATER in clip-relative time
+            // in-point moved earlier while timeline_start stayed: keys are timeline-
+            // relative so they slide by the timeline grow
             shift_region_keys(&mut clips[idx], grow);
             shift_block_rec(clips, &mut ops, false, cur_end, grow, idx);
         }
@@ -473,7 +481,7 @@ pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
 
 pub fn normalize_linked_audio(root: &mut Value) {
     use std::collections::HashMap;
-    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>, String)> = HashMap::new();
+    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>, String, Value)> = HashMap::new();
     let mut audio_links: Vec<String> = Vec::new();
     let mut audio_assets: Vec<String> = Vec::new();
     let mut used_ids: Vec<String> = Vec::new();
@@ -517,6 +525,12 @@ pub fn normalize_linked_audio(root: &mut Value) {
                                 f(c, "source_start"),
                                 c.get("source_end").and_then(|v| v.as_f64()),
                                 aid.to_string(),
+                                // 速度はリンク音声にも複製する（音声側のマッピングも
+                                // 同じ写像で動く必要がある）
+                                serde_json::json!({
+                                    "speed": c.get("speed").cloned().unwrap_or(Value::Null),
+                                    "speed_keys": c.get("speed_keys").cloned().unwrap_or(Value::Null),
+                                }),
                             ),
                         );
                     }
@@ -526,7 +540,7 @@ pub fn normalize_linked_audio(root: &mut Value) {
     }
     let Some(tracks) = tracks_mut(root) else { return };
     let mut missing = Vec::new();
-    for (l, (ts, te, ss, se, aid)) in &visual {
+    for (l, (ts, te, ss, se, aid, _spd)) in &visual {
         if audio_links.contains(l) || !audio_assets.contains(aid) {
             continue;
         }
@@ -569,12 +583,22 @@ pub fn normalize_linked_audio(root: &mut Value) {
         };
         for c in clips {
             let Some(l) = link(c) else { continue };
-            let Some((ts, te, ss, se, _)) = visual.get(&l) else { continue };
+            let Some((ts, te, ss, se, _, spd)) = visual.get(&l) else { continue };
             setf(c, "timeline_start", *ts);
             setf(c, "timeline_end", *te);
             setf(c, "source_start", *ss);
             if let Some(se) = *se {
                 setf(c, "source_end", se);
+            }
+            if let Some(o) = c.as_object_mut() {
+                match spd.get("speed") {
+                    Some(Value::Null) | None => { o.remove("speed"); }
+                    Some(v) => { o.insert("speed".into(), v.clone()); }
+                }
+                match spd.get("speed_keys") {
+                    Some(Value::Null) | None => { o.remove("speed_keys"); }
+                    Some(v) => { o.insert("speed_keys".into(), v.clone()); }
+                }
             }
         }
     }
@@ -597,36 +621,40 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
         }
         return;
     }
+    // 速度対応: タイムライン方向の d をソース方向へ換算（等速=speed、ランプ=平均）
+    let rate = clip_avg_rate(c);
     if left {
         let nt = new_t.clamp(0.0, te - 0.05);
         let mut d = nt - ts;
         if has_ss {
             // real media: can't extend before the source's first frame. Source-less
             // clips (region effects) have no such limit — they extend freely.
-            d = d.max(-ss);
+            d = d.max(-ss / rate);
         }
         if has_se {
             // never push the in-point past the out-point (that flipped the clip
             // into an accidental freeze by the implicit se<=ss convention)
             let se = f(c, "source_end");
-            d = d.min(se - ss - 0.05);
+            d = d.min((se - ss - 0.05) / rate);
         }
         let nts = (ts + d).max(0.0);
         setf(c, "timeline_start", nts);
         if has_ss {
-            setf(c, "source_start", (ss + d).max(0.0));
+            let new_ss = if d >= 0.0 { raw_src_at(c, ts + d) } else { ss + d * rate };
+            setf(c, "source_start", new_ss.max(0.0));
         }
         // position keyframes are clip-relative: keep each pinned to the same
         // TIMELINE moment when the clip's left edge moves
         shift_region_keys(c, ts - nts);
     } else {
         let nt = new_t.max(ts + 0.05);
-        setf(c, "timeline_end", nt);
         if has_se {
             let se = f(c, "source_end");
+            let new_se = if nt <= te { raw_src_at(c, nt) } else { se + (nt - te) * rate };
             // clamp: the out-point stays after the in-point
-            setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
+            setf(c, "source_end", new_se.max(ss + 0.05));
         }
+        setf(c, "timeline_end", nt);
     }
 }
 
@@ -800,19 +828,19 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
                     let d = t - ts;
                     let fz = is_freeze_v(&c);
                     let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
+                    // 速度対応: カット点のソース位置は写像で求める（等速/ランプ共通）
+                    let cut_src = raw_src_at(&c, t);
                     let mut leftv = c.clone();
                     setf(&mut leftv, "timeline_end", t);
                     if has_se && !fz {
-                        let ss = f(&c, "source_start");
-                        setf(&mut leftv, "source_end", ss + d);
+                        setf(&mut leftv, "source_end", cut_src);
                     }
                     let mut rightv = c.clone();
                     n += 1;
                     rightv["id"] = Value::from(format!("{}__ns_{}_{}", sid(&c), salt, n));
                     setf(&mut rightv, "timeline_start", t);
                     if has_se && !fz {
-                        let ss = f(&c, "source_start");
-                        setf(&mut rightv, "source_start", ss + d);
+                        setf(&mut rightv, "source_start", cut_src);
                     }
                     if let Some(l) = link(&c) {
                         let nl = right_links
@@ -3122,4 +3150,155 @@ pub fn promote_unnamed_occupied_tracks(raw: &mut serde_json::Value, salt: u64) {
             }
         }
     }
+}
+
+// ---- クリップ再生速度 ----------------------------------------------------------
+
+/// raw JSON クリップの等速値（speed_keys があっても等速フィールドのみ返す）
+fn clip_speed_of(c: &Value) -> f64 {
+    c.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.05, 16.0)
+}
+
+fn clip_keys_of(c: &Value) -> Vec<crate::model::SpeedKey> {
+    c.get("speed_keys")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// タイムライン t → ソース秒（raw JSON 版。model::Clip::src_at と同じ写像）
+pub fn raw_src_at(c: &Value, t: f64) -> f64 {
+    let ss = f(c, "source_start");
+    let rel = (t - f(c, "timeline_start")).max(0.0);
+    let keys = clip_keys_of(c);
+    if !keys.is_empty() {
+        if let Some(se) = c.get("source_end").and_then(|v| v.as_f64()) {
+            if let Some(l) = crate::model::build_ramp(&keys, ss, se) {
+                return ss + l.src_off(rel);
+            }
+        }
+    }
+    ss + rel * clip_speed_of(c)
+}
+
+/// クリップの平均レート（ソース秒/タイムライン秒）。トリムのクランプ換算に使う。
+fn clip_avg_rate(c: &Value) -> f64 {
+    let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
+    let ss = f(c, "source_start");
+    if let Some(se) = c.get("source_end").and_then(|v| v.as_f64()) {
+        if te - ts > 1e-6 && se - ss > 1e-6 {
+            return ((se - ss) / (te - ts)).clamp(0.05, 16.0);
+        }
+    }
+    clip_speed_of(c)
+}
+
+/// 等速の再生速度を設定する。素材内容(ソース範囲)は保ったままタイムライン尺を
+/// 伸縮し、メインレーン+磁石なら後続をリップル（前面レーンへもミラー=付着追従）。
+/// link_id を共有する音声にも同じ速度が複製される(normalize_linked_audio)。
+pub fn set_clip_speed(raw: &mut Value, ids: &[String], new_speed: f64) {
+    let new_speed = new_speed.clamp(0.05, 16.0);
+    let Some(main_ti) = main_video_track(raw) else { return };
+    let magnet = track_magnet(raw, main_ti);
+    let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
+    {
+        let Some(tracks) = tracks_mut(raw) else { return };
+        for ti in 0..tracks.len() {
+            let is_main = ti == main_ti;
+            let Some(clips) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for i in 0..clips.len() {
+                if !ids.contains(&sid(&clips[i])) || is_freeze_v(&clips[i]) {
+                    continue;
+                }
+                let (ts, te) = (f(&clips[i], "timeline_start"), f(&clips[i], "timeline_end"));
+                let ss = f(&clips[i], "source_start");
+                let src_span = clips[i]
+                    .get("source_end")
+                    .and_then(|v| v.as_f64())
+                    .map(|se| se - ss)
+                    .unwrap_or((te - ts) * clip_speed_of(&clips[i]));
+                if src_span <= 1e-6 {
+                    continue;
+                }
+                let new_len = (src_span / new_speed).max(0.05);
+                let d = new_len - (te - ts);
+                if let Some(o) = clips[i].as_object_mut() {
+                    if (new_speed - 1.0).abs() < 1e-9 {
+                        o.remove("speed");
+                    } else {
+                        o.insert("speed".into(), serde_json::json!(new_speed));
+                    }
+                    o.remove("speed_keys");
+                }
+                setf(&mut clips[i], "timeline_end", te + d);
+                if is_main && (d > 0.0 || magnet) && d.abs() > 1e-6 {
+                    // 尺変化ぶん後続をリップル（右トリムと同じ規則）
+                    shift_block_rec(clips, &mut ops, false, te, d, i);
+                }
+            }
+        }
+    }
+    shift_front_lanes(raw, main_ti, &ops);
+    normalize_linked_audio(raw);
+}
+
+/// スピードランプのキー列を設定し、タイムライン尺を積分で再計算する。
+/// キー u はソース絶対秒。空配列でランプ解除（等速 speed に戻る）。
+pub fn set_speed_keys(raw: &mut Value, ids: &[String], keys: &[crate::model::SpeedKey]) {
+    let Some(main_ti) = main_video_track(raw) else { return };
+    let magnet = track_magnet(raw, main_ti);
+    let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
+    {
+        let Some(tracks) = tracks_mut(raw) else { return };
+        for ti in 0..tracks.len() {
+            let is_main = ti == main_ti;
+            let Some(clips) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for i in 0..clips.len() {
+                if !ids.contains(&sid(&clips[i])) || is_freeze_v(&clips[i]) {
+                    continue;
+                }
+                let (ts, te) = (f(&clips[i], "timeline_start"), f(&clips[i], "timeline_end"));
+                let ss = f(&clips[i], "source_start");
+                let Some(se) = clips[i].get("source_end").and_then(|v| v.as_f64()) else {
+                    continue; // ランプはソース範囲必須
+                };
+                let new_len = if keys.is_empty() {
+                    (se - ss) / clip_speed_of(&clips[i])
+                } else {
+                    crate::model::build_ramp(keys, ss, se)
+                        .map(|l| l.total_t)
+                        .unwrap_or(te - ts)
+                }
+                .max(0.05);
+                let d = new_len - (te - ts);
+                if let Some(o) = clips[i].as_object_mut() {
+                    if keys.is_empty() {
+                        o.remove("speed_keys");
+                    } else {
+                        let arr: Vec<Value> = keys
+                            .iter()
+                            .map(|k| {
+                                serde_json::json!({
+                                    "u": (k.u * 1000.0).round() / 1000.0,
+                                    "v": (k.v * 1000.0).round() / 1000.0,
+                                    "ease": (k.ease * 100.0).round() / 100.0,
+                                })
+                            })
+                            .collect();
+                        o.insert("speed_keys".into(), Value::Array(arr));
+                    }
+                }
+                setf(&mut clips[i], "timeline_end", te + d);
+                if is_main && (d > 0.0 || magnet) && d.abs() > 1e-6 {
+                    shift_block_rec(clips, &mut ops, false, te, d, i);
+                }
+            }
+        }
+    }
+    shift_front_lanes(raw, main_ti, &ops);
+    normalize_linked_audio(raw);
 }
