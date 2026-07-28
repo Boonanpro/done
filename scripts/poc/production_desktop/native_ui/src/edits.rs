@@ -1494,7 +1494,9 @@ pub fn freeze_frame_with_still(
         for (ti, tr) in tracks.iter().enumerate() {
             for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
                 if sid(c) == id {
-                    let src = f(c, "source_start") + (t - f(c, "timeline_start"));
+                    // 速度対応: 再生ヘッド下のソース時刻は写像で求める（1:1固定だと
+                    // 速度変更クリップで静止画が別の場所になる）
+                    let src = raw_src_at(c, t);
                     if let Some(aid) = c.get("asset_id").and_then(|v| v.as_str()) {
                         info = Some((aid.to_string(), src));
                         track_idx = Some(ti);
@@ -1621,6 +1623,9 @@ pub fn freeze_frame_with_still(
     setf(&mut clip, "source_end", fsrc);
     if let Some(o) = clip.as_object_mut() {
         o.remove("link_id"); // no linked audio: a freeze is silent
+        // 静止画に速度は無意味（テンプレのクローンから引き継がない）
+        o.remove("speed");
+        o.remove("speed_keys");
         o.insert("freeze".into(), Value::from(true));
         if let Some(p) = still_rel {
             o.insert("freeze_still".into(), Value::from(p));

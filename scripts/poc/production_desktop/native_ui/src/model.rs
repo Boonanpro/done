@@ -443,6 +443,35 @@ impl Clip {
         }
         self.source_start + rel
     }
+    /// src_at の逆写像: ソース秒 → タイムライン秒（コマ送り等の逆変換用）。
+    pub fn t_at_src(&self, src: f64) -> f64 {
+        if self.is_freeze() {
+            return self.timeline_start;
+        }
+        let off = (src - self.source_start).max(0.0);
+        if let Some(r) = &self.ramp {
+            let v = &r.src;
+            if v.len() < 2 {
+                return self.timeline_start + off;
+            }
+            let i = v.partition_point(|s| *s < off);
+            if i == 0 {
+                return self.timeline_start;
+            }
+            if i >= v.len() {
+                return self.timeline_start
+                    + r.total_t
+                    + (off - v[v.len() - 1]).max(0.0) / r.tail_rate.max(0.05);
+            }
+            let (s0, s1) = (v[i - 1], v[i]);
+            let f = ((off - s0) / (s1 - s0).max(1e-12)).clamp(0.0, 1.0);
+            return self.timeline_start + ((i - 1) as f64 + f) * r.step;
+        }
+        if (self.speed - 1.0).abs() > 1e-9 {
+            return self.timeline_start + off / self.speed.clamp(0.05, 16.0);
+        }
+        self.timeline_start + off
+    }
     /// タイムライン時刻 t 近傍の局所再生レート（ソース秒/タイムライン秒）。
     /// 音声のブロック単位ストレッチレシオに使う。
     pub fn rate_at(&self, t: f64) -> f64 {

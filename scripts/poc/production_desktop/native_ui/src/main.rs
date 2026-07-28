@@ -820,9 +820,9 @@ fn step_enter(doc: &model::Doc, cache: &mut PtsCache, edge: f64, dir: f64) -> Op
     }
     let aid = c.asset_id.clone()?;
     let pts = cached_pts(doc, cache, &aid)?;
-    let src_edge = c.source_start + (edge.clamp(c.timeline_start, c.timeline_end) - c.timeline_start);
+    let src_edge = c.src_at(edge.clamp(c.timeline_start, c.timeline_end));
     let k = edge_frame(&pts, src_edge, dir);
-    let nt = c.timeline_start + (frame_mid(&pts, k)? - c.source_start);
+    let nt = c.t_at_src(frame_mid(&pts, k)?);
     Some(nt.clamp(c.timeline_start, (c.timeline_end - 1e-3).max(c.timeline_start)))
 }
 
@@ -844,12 +844,12 @@ fn step_target(doc: &model::Doc, cache: &mut PtsCache, t: f64, dir: f64) -> Opti
     }
     let aid = c.asset_id.clone()?;
     let pts = cached_pts(doc, cache, &aid)?;
-    let src = c.source_start + (t - c.timeline_start);
+    let src = c.src_at(t);
     let k2 = nearest_idx(&pts, src) as i64 + dir as i64;
     if k2 < 0 {
         return step_enter(doc, cache, c.timeline_start, -1.0);
     }
-    let nt = c.timeline_start + (frame_mid(&pts, k2 as usize)? - c.source_start);
+    let nt = c.t_at_src(frame_mid(&pts, k2 as usize)?);
     if nt >= c.timeline_end - 1e-6 {
         return step_enter(doc, cache, c.timeline_end, 1.0);
     }
@@ -1151,7 +1151,7 @@ fn compose(
                 let opath = doc.asset_path_q(aid, original);
                 let src_t = c.src_at(t);
                 let mt_path = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
-                let mt_t = if c.is_freeze() { off } else { off + (t - c.timeline_start) };
+                let mt_t = if c.is_freeze() { off } else { off + (c.src_at(t) - c.source_start) };
                 // ONE pool.get per stream: a second get in the same compose sees the
                 // instance as busy-this-frame and OPENS A SPARE (~50ms + an empty texture)
                 // — that was 110ms/frame of the pop-out scrub cost
@@ -1250,7 +1250,7 @@ fn compose(
                 continue;
             }
             let pv_draw = (|pool: &mut media::VideoPool, comp: &mut compositor::Compositor, used: &mut Vec<String>| -> anyhow::Result<()> {
-                let src_t = if c.is_freeze() { off } else { off + (t - c.timeline_start) };
+                let src_t = if c.is_freeze() { off } else { off + (c.src_at(t) - c.source_start) };
                 const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
                 const MATTE: u32 = 0;
                 let (ctex, cwh) = {
@@ -4371,7 +4371,7 @@ impl App {
                 "format": fmt,
                 "position": {"x": box_.x, "y": box_.y, "width": box_.width, "height": box_.height},
                 "source_start": c.source_start,
-                "source_end": c.source_start + (c.timeline_end - c.timeline_start),
+                "source_end": c.source_end.unwrap_or(c.source_start + (c.timeline_end - c.timeline_start)),
                 "intensity": "mid", "shadow": true,
             })
             .to_string();
@@ -6900,7 +6900,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .find(|c| c.id == id)
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
-                let src = c.source_start + (t - c.timeline_start);
+                // 速度対応: ヘッド下のソース時刻・フレーム端→タイムラインの換算は
+                // クリップの写像/局所レート経由（1:1だと速度クリップでズレる）
+                let src = c.src_at(t);
                 let p = format!("{}/{aid}_proxy.pts.json", self.doc.asset_dir);
                 let txt = std::fs::read_to_string(p).ok()?;
                 let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
@@ -6933,8 +6935,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // hole near the end could otherwise push the split outside the clip and
                 // leave a gap). When clamped, `back` shrinks so the rewind still lands
                 // exactly on the displayed frame's pts.
-                let tn = (t + (chosen + fd + 0.0002 - src)).min(c.timeline_end - 0.05);
-                let new_src = c.source_start + (tn - c.timeline_start);
+                let rate = c.rate_at(t).max(0.01);
+                let tn = (t + (chosen + fd + 0.0002 - src) / rate).min(c.timeline_end - 0.05);
+                let new_src = c.src_at(tn);
                 Some((tn - t, (new_src - chosen).max(0.0)))
             })
             .unwrap_or((0.0, 0.0));
@@ -6954,7 +6957,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .find(|c| c.id == id)
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
-                let src = (c.source_start + (t - c.timeline_start) - frame_back).max(0.0);
+                let src = (c.src_at(t) - frame_back).max(0.0);
                 let srcp = self.doc.asset_path_q(aid, false);
                 Some((src, srcp))
             });
@@ -12419,7 +12422,7 @@ fn main() -> eframe::Result<()> {
             let tr = &doc.seq.tracks[gov];
             let ct0 = c.timeline_start.max(t0);
             let ct1 = c.timeline_end.min(t1);
-            let src_t = c.source_start + ct0 - c.timeline_start;
+            let src_t = c.src_at(ct0);
             let dur = (ct1 - ct0).min(0.5);
             checked += 1;
             if tr.muted || (any_solo && !tr.solo) || c.volume <= 0.001 {
@@ -14178,6 +14181,7 @@ fn main() -> eframe::Result<()> {
         .expect("clip");
         check("const2x t=7 -> src14", c.src_at(7.0), 14.0, 1e-9);
         check("const2x rate", c.rate_at(6.0), 2.0, 1e-9);
+        check("const2x inverse", c.t_at_src(14.0), 7.0, 1e-9);
         let mut r: model::Clip = serde_json::from_value(serde_json::json!({
             "id": "s2", "asset_id": "a", "source_start": 0.0, "source_end": 10.0,
             "timeline_start": 0.0, "timeline_end": 7.0,
@@ -14191,6 +14195,8 @@ fn main() -> eframe::Result<()> {
         check("ramp t=6 -> src8", r.src_at(6.0), 8.0, 0.06);
         check("ramp rate head 1x", r.rate_at(1.0), 1.0, 0.05);
         check("ramp rate tail 2x", r.rate_at(6.0), 2.0, 0.1);
+        check("ramp inverse src8->t6", r.t_at_src(8.0), 6.0, 0.05);
+        check("roundtrip t=3.3", r.t_at_src(r.src_at(3.3)), 3.3, 0.02);
         let mut sm: model::Clip = serde_json::from_value(serde_json::json!({
             "id": "s3", "asset_id": "a", "source_start": 0.0, "source_end": 10.0,
             "timeline_start": 0.0, "timeline_end": 7.0,
