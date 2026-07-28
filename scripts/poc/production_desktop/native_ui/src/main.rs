@@ -3509,8 +3509,6 @@ struct App {
     /// Moveドラッグ開始時に確定した付着クリップ（親=メインレーンの移動対象に頭が
     /// 載っている前面レーンのクリップ+リンク音声）。水平移動のdtだけ一緒に動く。
     move_attached: Vec<String>,
-    /// テロップの「選択範囲の色」ピッカーの現在色
-    span_color: egui::Color32,
     drag: Drag,
     /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
@@ -3777,7 +3775,6 @@ impl App {
             asset_drag: None,
             os_drag_durations: std::collections::HashMap::new(),
             move_attached: Vec::new(),
-            span_color: egui::Color32::from_rgb(255, 225, 77),
             drag: Drag::None,
             drag_lane_tops: None,
             drag_press: None,
@@ -6313,12 +6310,46 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             egui::Color32::WHITE,
                         );
                         if ui.color_edit_button_srgba(&mut tc).changed() {
+                            // 本文欄で文字を選択していればその範囲だけ、無ければ全体。
+                            // （egui の TextEditState はフォーカスが外れても選択範囲を
+                            // 保持するので、ピッカー操作後でも範囲が取れる）
+                            let sel = if multi {
+                                None
+                            } else {
+                                egui::TextEdit::load_state(ui.ctx(), egui::Id::new("cap_text_edit"))
+                                    .and_then(|st| st.cursor.char_range())
+                                    .map(|cr| {
+                                        (
+                                            cr.primary.index.min(cr.secondary.index),
+                                            cr.primary.index.max(cr.secondary.index),
+                                        )
+                                    })
+                                    .filter(|(a, b)| b > a)
+                            };
                             let ids = edit_ids.clone();
                             self.remember_caption_fallbacks(&ids);
-                            // a plain color pick must WIN: a leftover gradient overrides
-                            // `color` in the renderer, so it is cleared explicitly
-                            let patch = serde_json::json!({"color": color32_hex(tc), "gradient": null});
-                            self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                            if let (Some((a, b)), Some(cid)) = (sel, edit_ids.first().cloned()) {
+                                let col = color32_hex(tc);
+                                self.apply_edit(false, move |raw| {
+                                    edits::set_caption_color_span(raw, &cid, a, b, Some(&col))
+                                });
+                                // ピッカー操作でフォーカスが移っても選択が見えたままに
+                                ui.ctx().memory_mut(|m| {
+                                    m.request_focus(egui::Id::new("cap_text_edit"))
+                                });
+                            } else {
+                                // a plain color pick must WIN: a leftover gradient overrides
+                                // `color` in the renderer, so it is cleared explicitly.
+                                // 選択なしの全体変更は範囲色(colorSpans)もリセット＝見たまま
+                                let patch = serde_json::json!({
+                                    "color": color32_hex(tc),
+                                    "gradient": null,
+                                    "colorSpans": null,
+                                });
+                                self.apply_edit(false, move |raw| {
+                                    edits::patch_caption_style(raw, &ids, patch)
+                                });
+                            }
                             self.push_req(false);
                         }
                         if ui
@@ -6349,66 +6380,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             self.eyedrop = Some((1, edit_ids.clone()));
                         }
                     });
-                    // ---- 選択範囲の色（本文エディタで選択した文字だけ変える）----
-                    if !multi {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("選択範囲の色").weak().small());
-                            ui.color_edit_button_srgba(&mut self.span_color);
-                            let sel = egui::TextEdit::load_state(
-                                ui.ctx(),
-                                egui::Id::new("cap_text_edit"),
-                            )
-                            .and_then(|st| st.cursor.char_range())
-                            .map(|cr| {
-                                (
-                                    cr.primary.index.min(cr.secondary.index),
-                                    cr.primary.index.max(cr.secondary.index),
-                                )
-                            })
-                            .filter(|(a, b)| b > a);
-                            let cur_id = edit_ids.first().cloned();
-                            if ui
-                                .small_button("適用")
-                                .on_hover_text("本文欄で選択した文字にこの色を付ける")
-                                .clicked()
-                            {
-                                if let (Some((a, b)), Some(cid)) = (sel, cur_id.clone()) {
-                                    let col = color32_hex(self.span_color);
-                                    self.apply_edit(true, move |raw| {
-                                        edits::set_caption_color_span(raw, &cid, a, b, Some(&col))
-                                    });
-                                    self.push_req(false);
-                                } else {
-                                    self.toast("本文欄で色を変えたい文字を選択してから「適用」してください");
-                                }
-                            }
-                            if ui
-                                .small_button("解除")
-                                .on_hover_text("選択範囲の色指定を外す")
-                                .clicked()
-                            {
-                                if let (Some((a, b)), Some(cid)) = (sel, cur_id) {
-                                    self.apply_edit(true, move |raw| {
-                                        edits::set_caption_color_span(raw, &cid, a, b, None)
-                                    });
-                                    self.push_req(false);
-                                } else {
-                                    self.toast("本文欄で解除したい範囲を選択してください");
-                                }
-                            }
-                            if ui.small_button("全解除").clicked() {
-                                let ids2 = edit_ids.clone();
-                                self.apply_edit(true, move |raw| {
-                                    edits::patch_caption_style(
-                                        raw,
-                                        &ids2,
-                                        serde_json::json!({"colorSpans": null}),
-                                    )
-                                });
-                                self.push_req(false);
-                            }
-                        });
-                    }
                     // ---- 四角枠（テロップの背景ボックス）----
                     let bg = style.get("bg").filter(|v| v.is_object()).cloned();
                     let mut boxed = bg.is_some();
