@@ -9531,7 +9531,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             return None;
                         }
                         let inside = r.contains(pos);
-                        if !inside && hits.iter().any(|(rb, _)| rb.contains(pos)) {
+                        let selected = self.selected.contains(id);
+                        // ポインタが別クリップの本体内なら外側キャプチャは譲る — ただし
+                        // 「選択中クリップのエッジ」だけは例外。密着カットでは左端の白い
+                        // ハンドル(境界中央)の左半分が前のクリップの本体に落ち、掴んだ
+                        // つもりの左端が前クリップの右端トリムに化けていた（右へ=前が
+                        // 重なって頭が消え短縮に見える/左へ=前が縮んで隙間、の報告バグ）
+                        if !inside && !selected && hits.iter().any(|(rb, _)| rb.contains(pos)) {
                             return None; // pointer is in another clip's body
                         }
                         let edge_px = (r.width() * 0.33).clamp(4.0, 10.0);
@@ -9539,10 +9545,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let dr = (pos.x - r.right()).abs();
                         let dist = dl.min(dr);
                         let hit_edge = if inside { dist <= edge_px } else { dist <= 10.0 };
-                        hit_edge.then_some((dist, *r, id.clone(), dl <= dr))
+                        hit_edge.then_some((selected, dist, *r, id.clone(), dl <= dr))
                     })
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-                    .map(|(_, r, id, left)| (r, id, Some(left)));
+                    // 選択中クリップのエッジを最優先、その中で距離最小
+                    .min_by(|a, b| {
+                        (!a.0, a.1).partial_cmp(&(!b.0, b.1)).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(_, _, r, id, left)| (r, id, Some(left)));
                 let body_hit = edge_hit.or_else(|| {
                     hits.iter()
                         .rev()
