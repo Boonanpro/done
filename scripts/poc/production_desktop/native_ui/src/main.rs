@@ -2306,6 +2306,15 @@ fn iso8601_utc_now() -> String {
 /// capture means no WM_MOUSEMOVE reaches the window either, so for the whole
 /// OS drag gesture — including the drop frame — egui's interact_pos/hover_pos
 /// are None. GetCursorPos is the only live position source during that window.
+/// レーンid採番用のソルト。プロセス内カウンタだとセッションを跨いで衝突するので
+/// エポックms（1回のドラッグ/ドロップ/ロード毎に1つ）を使う。
+fn lane_salt() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Timeline thumbnail for IMAGE assets. The normal thumbnailer decodes via Media
 /// Foundation, which has no still-image path — every image clip therefore fell
 /// back to the flat grey placeholder. Decode with the image crate instead.
@@ -3651,6 +3660,10 @@ impl App {
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
         edits::quantize_timeline_frames(&mut raw);
+        // 無名レーンは「ジェスチャ中の仮レーン」だけという不変条件をロード時に確立。
+        // 過去に作られたクリップ載りの無名レーンへ id を付与しておかないと、
+        // 最初のドラッグで仮レーン扱い(already_provisionalガード/prune)に巻き込まれる。
+        edits::promote_unnamed_occupied_tracks(&mut raw, lane_salt());
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         set_canvas_from_content(&raw);
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
@@ -4063,7 +4076,8 @@ impl App {
             .max()
             .map(|f| f + 1)
             .unwrap_or(0);
-        self.apply_edit(false, |raw| edits::insert_top_visual_track(raw));
+        let salt = lane_salt();
+        self.apply_edit(false, move |raw| edits::insert_top_visual_track(raw, salt));
         target
     }
 
@@ -8615,15 +8629,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // kind-based pinning — reorder/move clips and the render follows.
         // ロールフリー表示: レーンの太さは「役割(kind)」では決めない。太いのは
         // 映像メインレーン（配列先頭＝最背面の視覚レーン）1本だけで、それ以外は
-        // 種類にかかわらず一律スリム。空のレーンは常に畳む — Moveドラッグ中も
-        // 展開しない（かつては「ドロップ先候補」として出現させていたが、doc内の
-        // 不可視な空レーンが挿入されてレーン番号がズレる幽霊レーンに見えるため
-        // 廃止。新しいレーンが欲しい移動は「最上段より上=新規レーン」ゾーンで足りる）。
+        // 種類にかかわらず一律スリム。ビジュアルレーンは空でも常に表示する
+        // （普通のNLEの持続的トラック）。ドラッグ中だけ出没する幽霊レーンも、
+        // 「最上段の唯一のクリップを上へ引いても±0に見える」問題も、これで消える。
+        // 同一ジェスチャ中の仮レーン(無名・空)だけは edits 側の prune が畳む。
         let moving = matches!(self.drag, Drag::Move { .. }) && self.drag_engaged;
         let visual: Vec<usize> = (0..self.doc.seq.tracks.len())
             .rev()
             .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
-            .filter(|&i| !self.doc.seq.tracks[i].clips.is_empty())
             .collect();
         let audio: Vec<usize> = (0..self.doc.seq.tracks.len())
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
@@ -9736,7 +9749,36 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // Moving must never erase either an unselected destination clip or another
                 // member of a multi-selection. Overlaps remain explicit and editable; trim
                 // retains its established overwrite-on-settle behaviour.
-                Drag::Move { .. } => {}
+                Drag::Move { .. } => {
+                    // ジェスチャ確定: クリップが載ったままの無名(仮)レーンへ id を
+                    // 付与して恒久レーンに昇格させる。以後そのレーンは空になっても
+                    // prune に消されず表示され続ける＝レーンは減らない。
+                    let needs_promote = self
+                        .doc
+                        .raw
+                        .get(0)
+                        .and_then(|r| r.get("timeline"))
+                        .and_then(|t| t.get("sequence"))
+                        .and_then(|s| s.get("tracks"))
+                        .and_then(|t| t.as_array())
+                        .map(|ts| {
+                            ts.iter().any(|tr| {
+                                tr.get("id").and_then(|v| v.as_str()).is_none()
+                                    && tr
+                                        .get("clips")
+                                        .and_then(|c| c.as_array())
+                                        .map(|c| !c.is_empty())
+                                        .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if needs_promote {
+                        let s = lane_salt();
+                        self.apply_edit(false, move |raw| {
+                            edits::promote_unnamed_occupied_tracks(raw, s)
+                        });
+                    }
+                }
                 _ => {}
             }
             let _ = &prev; // lane moves happen LIVE during the drag now

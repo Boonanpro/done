@@ -3027,7 +3027,9 @@ mod tests {
 
 /// 素材ドロップの「最上段より上」ゾーン: 最前面に空のビジュアルトラックを挿入する。
 /// クリップMoveの move_group_to_new_top_track と同じ位置規則（front+1）。
-pub fn insert_top_visual_track(raw: &mut Value) {
+/// ドロップは即確定なので id を最初から与える＝prune(空の無名レーン掃除)の対象外の
+/// 恒久レーンとして生まれる。
+pub fn insert_top_visual_track(raw: &mut Value, salt: u64) {
     let Some(tracks) = tracks_mut(raw) else { return };
     let at = tracks
         .iter()
@@ -3037,5 +3039,28 @@ pub fn insert_top_visual_track(raw: &mut Value) {
         .max()
         .map(|f| f + 1)
         .unwrap_or(0);
-    tracks.insert(at, serde_json::json!({"type": "overlay", "clips": []}));
+    tracks.insert(
+        at,
+        serde_json::json!({"id": format!("lane_drop{salt}"), "type": "overlay", "clips": []}),
+    );
+}
+
+/// クリップが載ったまま確定した無名レーンへ id を付与して恒久化する。
+/// これで「無名」は同一ジェスチャ中の仮レーンだけを意味し、空の無名レーンを
+/// 畳む prune が確定済みレーンを巻き込まない（レーンが勝手に減らない）。
+pub fn promote_unnamed_occupied_tracks(raw: &mut serde_json::Value, salt: u64) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    for (i, tr) in tracks.iter_mut().enumerate() {
+        let unnamed = tr.get("id").and_then(|v| v.as_str()).is_none();
+        let occupied = tr
+            .get("clips")
+            .and_then(|c| c.as_array())
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        if unnamed && occupied {
+            if let Some(o) = tr.as_object_mut() {
+                o.insert("id".into(), serde_json::json!(format!("lane{salt}_{i}")));
+            }
+        }
+    }
 }
