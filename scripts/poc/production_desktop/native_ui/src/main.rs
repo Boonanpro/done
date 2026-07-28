@@ -678,7 +678,9 @@ fn draw_plain_pip(
             }
             tw
         };
-        comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
+        comp.set_grade(grade_params(c));
+        comp.set_grade(grade_params(c));
+    comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
         return Ok(None);
     }
     let vs = pool.get(d3d, &p2, 0, false, src_t)?;
@@ -1362,6 +1364,7 @@ fn compose(
                     }
                 }
                 let dst = (bx + (bw - dw) / 2.0, by + (bh - dh) / 2.0, dw, dh);
+                comp.set_grade(grade_params(c));
                 let _ = comp.draw_alpha_opacity(d3d, &tex, (iw, ih), dst, c.visual_opacity());
             }
             used.push(path);
@@ -1413,7 +1416,9 @@ fn compose(
                 }
                 let dst = (b.x, b.y, b.width, b.height);
                 let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
-                comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+                comp.set_grade(grade_params(c));
+                comp.set_grade(grade_params(c));
+            comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
                 used.push(path);
                 continue;
             }
@@ -2329,6 +2334,25 @@ fn lane_salt() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// クリップのカラーグレード係数（コンポジタの set_grade へ渡す形）。
+/// 全て既定値なら None（グレード無効＝コストゼロ）。
+fn grade_params(c: &model::Clip) -> Option<[f32; 6]> {
+    let g = c.grade.as_ref()?;
+    let f = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let mode = match g.get("log").and_then(|v| v.as_str()).unwrap_or("") {
+        "slog3" => 2.0f32,
+        "vlog" => 3.0,
+        "clog3" => 4.0,
+        _ => 1.0,
+    };
+    let (ev, ct, sat, temp, tint) =
+        (f("ev", 0.0), f("contrast", 1.0), f("sat", 1.0), f("temp", 0.0), f("tint", 0.0));
+    if mode == 1.0 && ev == 0.0 && ct == 1.0 && sat == 1.0 && temp == 0.0 && tint == 0.0 {
+        return None;
+    }
+    Some([mode, ev as f32, ct as f32, sat as f32, temp as f32, tint as f32])
 }
 
 /// Timeline thumbnail for IMAGE assets. The normal thumbnailer decodes via Media
@@ -6885,6 +6909,114 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             );
                         }
                     }
+                    ui.add_space(6.0);
+                }
+                // ---- カラー（グレード）----
+                if clip.asset_id.is_some() {
+                    ui.label(egui::RichText::new("カラー").strong());
+                    let g = clip.grade.clone().unwrap_or_else(|| serde_json::json!({}));
+                    let gf = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+                    let cur_log = g.get("log").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("Log変換").weak().small());
+                        for (label, val) in
+                            [("なし", ""), ("S-Log3", "slog3"), ("V-Log", "vlog"), ("C-Log3", "clog3")]
+                        {
+                            if ui.selectable_label(cur_log == val, label).clicked() {
+                                let ids = edit_ids.clone();
+                                let patch = if val.is_empty() {
+                                    serde_json::json!({"log": null})
+                                } else {
+                                    serde_json::json!({"log": val})
+                                };
+                                self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("プリセット").weak().small());
+                        for (label, patch) in [
+                            ("シネマ", serde_json::json!({"contrast":1.15,"sat":0.95,"temp":0.15,"tint":0.0})),
+                            ("ティール&オレンジ", serde_json::json!({"contrast":1.12,"sat":1.1,"temp":0.35,"tint":-0.08})),
+                            ("ビビッド", serde_json::json!({"contrast":1.1,"sat":1.35,"temp":0.0,"tint":0.0})),
+                            ("フィルム", serde_json::json!({"contrast":0.92,"sat":0.85,"temp":0.08,"tint":0.05})),
+                            ("モノクロ", serde_json::json!({"sat":0.0,"contrast":1.05})),
+                        ] {
+                            if ui.small_button(label).clicked() {
+                                let ids = edit_ids.clone();
+                                self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    let mut ev = gf("ev", 0.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut ev, -2.0..=2.0).text("露出").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"ev": ev as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut ct = gf("contrast", 1.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut ct, 0.5..=1.8).text("コントラスト").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"contrast": ct as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut sat = gf("sat", 1.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut sat, 0.0..=2.0).text("彩度").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"sat": sat as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut temp = gf("temp", 0.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut temp, -1.0..=1.0).text("色温度").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"temp": temp as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut tint = gf("tint", 0.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut tint, -1.0..=1.0).text("ティント").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"tint": tint as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    if ui.small_button("カラーをリセット").clicked() {
+                        let ids = edit_ids.clone();
+                        self.apply_edit(true, move |raw| {
+                            edits::set_grade(raw, &ids, &serde_json::Value::Null)
+                        });
+                        self.push_req(false);
+                    }
+                    ui.label(
+                        egui::RichText::new("複数選択中は選択した全クリップに適用されます")
+                            .weak()
+                            .small(),
+                    );
                     ui.add_space(6.0);
                 }
                 // ---- crop ----

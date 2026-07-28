@@ -172,6 +172,10 @@ pub struct Clip {
     /// speed_keys から from_raw で構築される timeline→source の累積LUT。
     #[serde(skip)]
     pub ramp: Option<std::sync::Arc<RampLut>>,
+    /// カラーグレード: {log:"slog3"|"vlog"|"clog3"|null, ev, contrast, sat, temp, tint}
+    /// GPUコンポジタのクリップ描画シェーダで適用（プレビュー/書き出し共通）。
+    #[serde(default)]
+    pub grade: Option<serde_json::Value>,
     #[serde(default = "one")]
     pub volume: f64,
     /// Visual opacity. Missing means fully opaque for existing projects.

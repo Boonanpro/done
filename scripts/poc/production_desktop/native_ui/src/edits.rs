@@ -3425,3 +3425,32 @@ pub fn set_caption_color_span(raw: &mut Value, id: &str, s: usize, e: usize, col
         }
     }
 }
+
+/// カラーグレードのパッチ適用。patch のキーをマージ、値 null でキー削除、
+/// patch 自体が null なら grade ごと削除（リセット）。
+pub fn set_grade(raw: &mut Value, ids: &[String], patch: &Value) {
+    for c in clips_iter_mut(raw) {
+        if !ids.contains(&sid(c)) {
+            continue;
+        }
+        let Some(obj) = c.as_object_mut() else { continue };
+        if patch.is_null() {
+            obj.remove("grade");
+            continue;
+        }
+        let g = obj.entry("grade").or_insert_with(|| serde_json::json!({}));
+        let Some(go) = g.as_object_mut() else { continue };
+        if let Some(po) = patch.as_object() {
+            for (k, v) in po {
+                if v.is_null() {
+                    go.remove(k);
+                } else {
+                    go.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        if go.is_empty() {
+            obj.remove("grade");
+        }
+    }
+}

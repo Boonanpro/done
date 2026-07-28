@@ -32,13 +32,48 @@ Texture2D tex1 : register(t1);
 Texture2D tex2 : register(t2);
 Texture2D tex3 : register(t3);
 SamplerState smp : register(s0);
+// カラーグレード（プレビュー/書き出し共通）。opt.y=モード(0=無効,1=素材のまま,
+// 2=S-Log3,3=V-Log,4=C-Log3)、opt.z=露出EV、opt.w=コントラスト、
+// aff.x=彩度、aff.y=色温度(-1..1 暖<->寒)、aff.z=ティント(-1..1 緑<->マゼンタ)。
+// Log変換は各社公式カーブの主要セグメント→2.2ガンマの"見れる"変換（厳密な
+// カラーマネジメントではなくざっくりノーマライズが目的）。
+float3 apply_grade(float3 c) {
+  int mode = (int)round(opt.y);
+  if (mode == 0) return c;
+  if (mode >= 2) {
+    float3 x = c;
+    float3 lin;
+    if (mode == 2) {        // Sony S-Log3
+      lin = (x >= 0.1712) ? (pow(10.0, (x - 0.4205) / 0.2556) - 0.0526) / 4.7368
+                          : (x - 0.0929) / 5.3676;
+    } else if (mode == 3) { // Panasonic V-Log
+      lin = (x < 0.181) ? (x - 0.125) / 5.6
+                        : pow(10.0, (x - 0.598206) / 0.241514) - 0.00873;
+    } else {                // Canon C-Log3（主要セグメント近似）
+      lin = (x < 0.097) ? (x - 0.0730) / 2.3069
+                        : (pow(10.0, (x - 0.0698) / 0.42889) - 1.0) / 14.98325;
+    }
+    lin = max(lin, 0.0) * exp2(opt.z);
+    // ハイライトに軽い肩を付けて白飛びを緩和してから2.2ガンマへ
+    lin = lin / (1.0 + max(lin - 0.85, 0.0) * 0.65);
+    c = pow(saturate(lin), 1.0 / 2.2);
+  } else {
+    c = saturate(c * exp2(opt.z));
+  }
+  c = (c - 0.4135) * opt.w + 0.4135;
+  float lum = dot(c, float3(0.2126, 0.7152, 0.0722));
+  c = lerp(float3(lum, lum, lum), c, aff.x);
+  float t = aff.y, m = aff.z;
+  c *= float3(1.0 + 0.22 * t + 0.10 * m, 1.0 - 0.12 * m, 1.0 - 0.22 * t + 0.10 * m);
+  return saturate(c);
+}
 float4 ps_plain(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
-  return float4(c.rgb * opt.x, opt.x);
+  return float4(apply_grade(c.rgb) * opt.x, opt.x);
 }
 float4 ps_alpha(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
-  return float4(c.rgb * c.a * opt.x, c.a * opt.x);
+  return float4(apply_grade(c.rgb) * c.a * opt.x, c.a * opt.x);
 }
 float4 ps_popout(VOut i) : SV_Target {
   float3 c = tex0.Sample(smp, i.uv).rgb;
@@ -257,6 +292,9 @@ struct Cb {
 pub struct Compositor {
     pub width: u32,
     pub height: u32,
+    /// 次の draw_* 1回に適用するカラーグレード係数（ワンショット）。
+    /// [mode, ev, contrast, sat, temp, tint]
+    grade: std::cell::Cell<Option<[f32; 6]>>,
     canvas: ID3D11Texture2D,
     rtv: ID3D11RenderTargetView,
     staging: [ID3D11Texture2D; 3],
@@ -428,6 +466,7 @@ impl Compositor {
             Ok(Self {
                 width,
                 height,
+                grade: std::cell::Cell::new(None),
                 canvas,
                 rtv: rtv.unwrap(),
                 staging: [staging0.unwrap(), staging1.unwrap(), staging2.unwrap()],
@@ -481,6 +520,12 @@ impl Compositor {
     /// Draw into a canvas box. `cover` preserves source aspect and crops overflow;
     /// `opacity` is applied in the same premultiplied-alpha pass.
     #[allow(clippy::too_many_arguments)]
+    /// 次の draw_* 1回だけに適用するグレード係数を仕込む（描画時に take で消費）。
+    /// [mode, ev, contrast, sat, temp, tint]
+    pub fn set_grade(&self, g: Option<[f32; 6]>) {
+        self.grade.set(g);
+    }
+
     pub fn draw_opacity(
         &self,
         d3d: &D3d,
@@ -576,11 +621,18 @@ impl Compositor {
                     dst.3 * (1.0 - t - b).max(0.02),
                 );
             }
+            // ワンショットのグレード係数（set_grade → 直後の draw 1回で消費）
+            let g = self.grade.take();
             let cbv = Cb {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],
                 uvr: [u0, v0, uw, vh],
-                aff: [0.0, 0.0, 1.0, 1.0],
-                opt: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                aff: g.map(|g| [g[3], g[4], g[5], 0.0]).unwrap_or([0.0, 0.0, 1.0, 1.0]),
+                opt: [
+                    opacity.clamp(0.0, 1.0),
+                    g.map(|g| g[0]).unwrap_or(0.0),
+                    g.map(|g| g[1]).unwrap_or(0.0),
+                    g.map(|g| g[2]).unwrap_or(1.0),
+                ],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&views));
