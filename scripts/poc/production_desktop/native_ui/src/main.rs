@@ -3656,6 +3656,9 @@ struct App {
     sub_in: Option<f64>,
     /// 区間ジャンプ直後の音声クロック再アンカー待ち（この間は再ジャンプしない）
     sub_jump_until: Option<Instant>,
+    /// この再生セッションが「区間だけ飛び飛び」かどうか。再生開始位置で決まる:
+    /// 緑区間の中から開始=飛び飛び／区間の外から開始=普通の全体再生（素材の下見）
+    sub_skip_active: bool,
     /// render progress 0..1 while the server reports frame=N/M; None = no bar
     /// (queued / finishing phase / idle)
     export_progress: Option<f32>,
@@ -3894,6 +3897,7 @@ impl App {
             sub_mode: false,
             sub_in: None,
             sub_jump_until: None,
+            sub_skip_active: false,
             range_drag: None,
             export_progress: None,
             export_done_path: None,
@@ -5340,6 +5344,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
         }
         self.playing = !self.playing;
+        if self.playing {
+            // サブタイムライン: 再生開始位置で意図を汲む — 緑区間の中から始めたら
+            // 「区間だけ飛び飛び」、外（暗転部分）から始めたら普通の全体再生。
+            // 判定は再生セッション開始時に一度だけ。
+            self.sub_skip_active = self.sub_mode
+                && self
+                    .sub_ranges()
+                    .iter()
+                    .any(|&(a, b)| self.t >= a - 0.001 && self.t < b);
+        }
         self.resume_pending = None;
         self.push_req(false);
     }
@@ -11927,7 +11941,8 @@ impl eframe::App for App {
             }
             // サブタイムライン: 再生ヘッドが区間の外に出たら次の区間頭へジャンプ
             // ＝飛び飛び再生。最後の区間を出たら最終区間の末尾で停止。
-            if self.sub_mode && !jump_hold {
+            // （区間の外から始めた再生セッションでは何もしない＝普通の全体再生）
+            if self.sub_mode && self.sub_skip_active && !jump_hold {
                 let rs = self.sub_ranges();
                 if !rs.is_empty() && !rs.iter().any(|&(a, b)| self.t >= a - 0.001 && self.t < b) {
                     if let Some(&(a, b)) = rs.iter().find(|&&(a, _)| a > self.t) {
@@ -12262,7 +12277,22 @@ impl eframe::App for App {
                     self.sub_mode = !self.sub_mode;
                     self.sub_in = None;
                     if self.sub_mode {
-                        self.toast("サブタイムライン: Iでイン点→Oで区間追加（飛び飛び可）。再生は区間だけ流れます。緑帯を右クリックで削除");
+                        self.toast("サブタイムライン: Iでイン点→Oで区間追加（飛び飛び可）・緑帯を右クリックで削除。緑帯の中から再生=区間だけ／外から再生=全体そのまま");
+                    }
+                }
+                if self.sub_mode && sub_n > 0 {
+                    if ui
+                        .small_button("▶ 区間を通しで再生")
+                        .on_hover_text("最初の区間の頭から、区間だけを繋げて再生します（仕上がり確認）")
+                        .clicked()
+                    {
+                        if let Some(&(a, _)) = self.sub_ranges().first() {
+                            self.t = a;
+                            self.playing = true;
+                            self.sub_skip_active = true;
+                            self.resume_pending = None;
+                            self.push_req(false);
+                        }
                     }
                 }
                 let exporting = self.export_job.is_some();
