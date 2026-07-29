@@ -221,6 +221,26 @@ def _is_thinking_desync_error(text: Optional[str]) -> bool:
     )
 
 
+def _has_tool_call_leak(text: Optional[str]) -> bool:
+    """成功扱いで終わったターンの本文にツール呼び出しがテキストとして漏れて
+    いるか（「court」化けの本体）。合図が化けてツール実行がされないまま
+    ターンが正常終了するため is_error にならず、既存の復旧網（parse-error /
+    thinking-desync / ループガード）のどれにも掛からない。漏れた本文は
+    transcript と DB に残り、次ターンのモデルがその書式を真似して再発する。
+    検知したら呼び出し側でセッションを手放し、次ターンを新規+DB reseed
+    （汚染行は _RESEED_SKIP_MARKERS で除外）にする。
+
+    判定は「行頭が <invoke name=" で始まる行がある」こと。通常の回答が
+    ツール呼び出しXMLを行頭から生で書くことはまず無い（説明で引用する場合は
+    コードフェンス内でも行頭一致し得るが、誤検知コストはセッション1回の
+    作り直しだけで会話は失われない）。"""
+    if not text:
+        return False
+    return any(
+        line.lstrip().startswith('<invoke name="') for line in text.splitlines()
+    )
+
+
 # Lines from history that would re-poison a fresh session if fed back verbatim.
 _RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
 
@@ -2324,6 +2344,12 @@ def _run_cli_in_thread(
             elif is_error and _is_thinking_desync_error(result_text):
                 text = _recovery_message("thinking_desync", _detect_user_lang(content))
                 _clear_cli_session(room_id)
+            elif not is_error and _has_tool_call_leak(text):
+                # 成功扱いに化けた汚染ターン（「court」リーク）。回答の保存は
+                # そのまま行い、セッションだけ手放して次ターンを新規+reseedに
+                # する（放置すると次ターンが漏れた書式を真似して再発する）。
+                _clear_cli_session(room_id)
+                _cli_debug(f"tool-call text leak on successful turn; session cleared (room {room_id[:8]})")
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
@@ -2628,6 +2654,40 @@ async def _process_via_streaming_session(
 
     from app.agent.streaming_session import get_session
     existing = get_session(room_id)
+    # 履歴肥大ガード（one-shot 経路 2213行付近と同じ掃除をこの常駐経路にも適用）。
+    # 常駐化(2026-07)以降ここが素通りだったため transcript が無制限に育ち
+    # （電管ルームで実測 24MB / 画像56枚 ≒ 閾値1.5MBの16倍）、巨大 prefill で
+    # モデルが崩れてツール呼び出しがテキスト化する（「court」リーク）主因だった。
+    if existing is not None and existing.is_alive():
+        # 稼働中プロセスの transcript jsonl は書き換えできない（CLIが追記中）。
+        # ターン開始前の境界で閾値超過を検知したらプロセスごと畳み、
+        # 新規セッション + DB reseed に切り替える。会話は chat_messages に
+        # あるので文脈は失われない。ターン実行中はスキップ（次の境界で拾う）。
+        if (
+            not existing.is_turn_active()
+            and resume_session_id
+            and _transcript_exceeds_limit(resume_session_id)
+        ):
+            _cli_debug(
+                f"[STREAMING] transcript over limit; recycling live session (room {room_id[:8]})"
+            )
+            try:
+                existing.stop()
+            except Exception:
+                pass
+            _clear_cli_session(room_id)
+            resume_session_id = None
+    elif resume_session_id:
+        # これから --resume する transcript は、先に古いスクリーンショットを
+        # 間引く（画像が肥大の主因）。それでも巨大なら resume を諦めて
+        # DB reseed の新規セッションで開始する。
+        _compact_transcript_images(resume_session_id)
+        if _transcript_exceeds_limit(resume_session_id):
+            _cli_debug(
+                f"[STREAMING] transcript over limit; dropping resume and reseeding (room {room_id[:8]})"
+            )
+            _clear_cli_session(room_id)
+            resume_session_id = None
     session_is_fresh = existing is None or not existing.is_alive()
     session = get_or_create_session(room_id, build_cmd, env, run_cwd)
     # (Re)install the autonomous-turn receiver with this call's freshest
@@ -2976,6 +3036,19 @@ async def _process_via_streaming_session(
                 except Exception:
                     pass
                 _cli_debug(f"[STREAMING] parse-error poisoned session cleared for room {room_id[:8]}")
+            elif res and not res.get("is_error") and _has_tool_call_leak(res.get("result") or ""):
+                # 成功扱いに化けた汚染ターン: ツール呼び出しの合図が化けて
+                # （「court」等）、呼び出し本体がテキストのまま本文に残った。
+                # エラーにならないので上の復旧網に掛からず、放置すると次ターン
+                # 以降が漏れた書式を真似して再発し続ける。回答は sink が保存済み
+                # なので、ここではセッションだけ手放す（次ターンは新規+DB reseed。
+                # reseed は汚染行を除外するので持ち越さない）。
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                _cli_debug(f"[STREAMING] tool-call text leak on successful turn; session cleared for room {room_id[:8]}")
             elif res and res.get("subtype") == "cancelled_before_start":
                 # ユーザーが送信直後にキャンセルし、ターンが始まる前に握りつぶした。
                 # 正常なキャンセルであって「セッション即死」ではないので、下の
