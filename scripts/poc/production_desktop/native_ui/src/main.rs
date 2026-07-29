@@ -8290,7 +8290,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
             return;
         }
-        let mut editable: Vec<(String, egui::Rect, [egui::Pos2; 4])> = Vec::new();
+        let mut editable: Vec<(String, egui::Rect, [egui::Pos2; 4], f64)> = Vec::new();
         for (_cid, rg, tracked, bt, on_key, rot) in outlines {
             // while a bake is live, the outline FOLLOWS the tracked object: the mask
             // meta records the object's box per mask frame — look up the box for the
@@ -8447,15 +8447,19 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             // rect is not draggable (解除 first to hand-adjust).
             if !following {
                 for c4 in hs4 {
-                    p.rect_filled(egui::Rect::from_center_size(c4, egui::vec2(8.0, 8.0)), 1.0, col);
+                    p.rect_filled(egui::Rect::from_center_size(c4, egui::vec2(10.0, 10.0)), 1.0, col);
                 }
-                editable.push((_cid.clone(), r, hs4));
+                editable.push((_cid.clone(), r, hs4, rot));
             }
         }
         // --- region rect editing: corners = resize, inside = move (shape preserved) ---
         if preview_drag_started && self.region_drag.is_none() {
-            if let Some(pt) = pointer_pos {
-                'hit: for (cid, r, hs4) in &editable {
+            // ヒット判定は「押した瞬間の位置」で行う。egui の drag_started は数px
+            // 動いてから発火するため、現在位置だと速いドラッグでハンドル(12pt)を
+            // 外れて掴み損ねる（掴んだ後のデルタ基準も press 起点に揃える）
+            let press_pt = ui.input(|i| i.pointer.press_origin()).or(pointer_pos);
+            if let Some(pt) = press_pt {
+                'hit: for (cid, r, hs4, ed_rot) in &editable {
                     // (timeline_start, keys snapshot) of a keyframe-able clip (no AI track)
                     let key_info = self
                         .doc
@@ -8472,18 +8476,31 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     // 厳密に成立する。
                     // corner hit zones shrink with the rect so a small rect keeps a
                     // grabbable BODY (10px corners used to swallow short rects whole)
-                    let cr = 10.0f32.min(r.width() / 3.0).min(r.height() / 3.0).max(4.0);
-                    // corners = 表示しているハンドル位置（回転時は回転後の角）
-                    // 極細矩形（疑似ライン）でも本体を掴めるよう、当たりは最低8px幅
+                    // 角の当たりは12pt固定（細い矩形で判定が消えて掴めない問題の根治。
+                    // 角が優先、本体は角に近くない場合のみ）。ハンドル位置=表示位置
+                    // （回転時は回転後の角）なので、見えている所がそのまま掴める
+                    let cr = 12.0f32;
+                    // 本体判定は無回転ローカル空間で（回転した細線は軸平行バウンディング
+                    // ボックスとズレるため、ポインタを逆回転してから判定する）
+                    let ptl = if ed_rot.abs() > 1e-3 {
+                        let (sn, cs) =
+                            ((-ed_rot).to_radians().sin() as f32, (-ed_rot).to_radians().cos() as f32);
+                        let ctr = r.center();
+                        let d = pt - ctr;
+                        egui::pos2(ctr.x + cs * d.x - sn * d.y, ctr.y + sn * d.x + cs * d.y)
+                    } else {
+                        pt
+                    };
+                    // 極細矩形（疑似ライン）でも本体を掴めるよう、当たりは最低12px幅
                     let body = r.expand2(egui::vec2(
-                        (8.0 - r.width()).max(0.0) * 0.5,
-                        (8.0 - r.height()).max(0.0) * 0.5,
+                        (12.0 - r.width()).max(0.0) * 0.5,
+                        (12.0 - r.height()).max(0.0) * 0.5,
                     ));
                     let mode = hs4
                         .iter()
                         .position(|cp| cp.distance(pt) <= cr)
                         .map(|ci| ci as u8 + 1)
-                        .unwrap_or(if body.contains(pt) { 0 } else { u8::MAX });
+                        .unwrap_or(if body.contains(ptl) { 0 } else { u8::MAX });
                     if mode == u8::MAX {
                         continue;
                     }
@@ -8533,35 +8550,28 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             if let Some(pt) = pointer_pos {
                 let dx = ((pt.x - grab.x) / vid.width()) as f64;
                 let dy = ((pt.y - grab.y) / vid.height()) as f64;
+                let (ox, oy, ow, oh) = orig;
                 let (mut x, mut y, mut w, mut h) = orig;
-                match mode {
-                    0 => {
-                        x += dx;
-                        y += dy;
-                    }
-                    1 => {
-                        x += dx;
-                        y += dy;
-                        w -= dx;
-                        h -= dy;
-                    }
-                    2 => {
-                        y += dy;
-                        w += dx;
-                        h -= dy;
-                    }
-                    3 => {
-                        x += dx;
-                        w -= dx;
-                        h += dy;
-                    }
-                    _ => {
-                        w += dx;
-                        h += dy;
-                    }
+                if mode == 0 {
+                    x += dx;
+                    y += dy;
+                } else {
+                    // 角ドラッグ＝掴んだ角を自由に動かし、対角をアンカーに正規化。
+                    // 反対側へ突き抜けたら矩形が反転して逆方向に伸びる＝細さの下限が
+                    // 操作として存在しない（0通過はregion_atの「矩形なし」判定を
+                    // 避けるため極小値で一瞬止まるだけ）
+                    let (gx, gy, ax, ay) = match mode {
+                        1 => (ox, oy, ox + ow, oy + oh),      // NW を掴む / SE 固定
+                        2 => (ox + ow, oy, ox, oy + oh),      // NE を掴む / SW 固定
+                        3 => (ox, oy + oh, ox + ow, oy),      // SW を掴む / NE 固定
+                        _ => (ox + ow, oy + oh, ox, oy),      // SE を掴む / NW 固定
+                    };
+                    let (mx, my) = (gx + dx, gy + dy);
+                    x = mx.min(ax);
+                    y = my.min(ay);
+                    w = (mx - ax).abs();
+                    h = (my - ay).abs();
                 }
-                // 細さの下限は実質なし（1280px縦で約0.26px）。疑似ラインは1px級まで
-                // 潰せる。ゼロは region_at が「矩形なし」と解釈するので僅かに残す
                 w = w.clamp(0.0002, 1.0);
                 h = h.clamp(0.0002, 1.0);
                 // 画面外へのはみ出しOK（端ギリギリを隠す用）。ただし最低5%は画面内に
