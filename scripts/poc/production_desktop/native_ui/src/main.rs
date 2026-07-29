@@ -6935,17 +6935,27 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         }
                     });
+                    // プリセット=スライダー5本の値の束。トグル式: もう一度押すと
+                    // オフ＝調整値を全部外してスライダーが初期位置に戻る（Logは維持）。
+                    // 束は5キー全指定（マージ残りで前のプリセットの色が混ざらないように）。
+                    let cur5 = [gf("ev", 0.0), gf("contrast", 1.0), gf("sat", 1.0), gf("temp", 0.0), gf("tint", 0.0)];
                     ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new("プリセット").weak().small());
-                        for (label, patch) in [
-                            ("シネマ", serde_json::json!({"contrast":1.15,"sat":0.95,"temp":0.15,"tint":0.0})),
-                            ("ティール&オレンジ", serde_json::json!({"contrast":1.12,"sat":1.1,"temp":0.35,"tint":-0.08})),
-                            ("ビビッド", serde_json::json!({"contrast":1.1,"sat":1.35,"temp":0.0,"tint":0.0})),
-                            ("フィルム", serde_json::json!({"contrast":0.92,"sat":0.85,"temp":0.08,"tint":0.05})),
-                            ("モノクロ", serde_json::json!({"sat":0.0,"contrast":1.05})),
+                        for (label, p) in [
+                            ("シネマ", [0.0, 1.15, 0.95, 0.15, 0.0]),
+                            ("ティール&オレンジ", [0.0, 1.12, 1.1, 0.35, -0.08]),
+                            ("ビビッド", [0.0, 1.1, 1.35, 0.0, 0.0]),
+                            ("フィルム", [0.0, 0.92, 0.85, 0.08, 0.05]),
+                            ("モノクロ", [0.0, 1.05, 0.0, 0.0, 0.0]),
                         ] {
-                            if ui.small_button(label).clicked() {
+                            let active = cur5.iter().zip(p).all(|(a, b)| (a - b).abs() < 1e-4);
+                            if ui.selectable_label(active, label).clicked() {
                                 let ids = edit_ids.clone();
+                                let patch = if active {
+                                    serde_json::json!({"ev": null, "contrast": null, "sat": null, "temp": null, "tint": null})
+                                } else {
+                                    serde_json::json!({"ev": p[0], "contrast": p[1], "sat": p[2], "temp": p[3], "tint": p[4]})
+                                };
                                 self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
                                 self.push_req(false);
                             }
@@ -7006,13 +7016,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
                         self.push_req(false);
                     }
-                    if ui.small_button("カラーをリセット").clicked() {
-                        let ids = edit_ids.clone();
-                        self.apply_edit(true, move |raw| {
-                            edits::set_grade(raw, &ids, &serde_json::Value::Null)
-                        });
-                        self.push_req(false);
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("調整をリセット").clicked() {
+                            let ids = edit_ids.clone();
+                            let patch = serde_json::json!({"ev": null, "contrast": null, "sat": null, "temp": null, "tint": null});
+                            self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
+                            self.push_req(false);
+                        }
+                        if ui.small_button("すべてリセット").clicked() {
+                            let ids = edit_ids.clone();
+                            self.apply_edit(true, move |raw| {
+                                edits::set_grade(raw, &ids, &serde_json::Value::Null)
+                            });
+                            self.push_req(false);
+                        }
+                    });
                     ui.label(
                         egui::RichText::new("複数選択中は選択した全クリップに適用されます")
                             .weak()
