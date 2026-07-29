@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 import { CUSTOM_DOMAIN_SLUG_MAP } from './lib/custom-domain-rewrites.generated';
+import { deliverySlugFromHost, isCustomDomainHost, normalizeHost } from './lib/seo-host';
 
 const ACCESS_TOKEN_COOKIE = 'done_access_token';
 
@@ -66,10 +67,27 @@ async function fetchDynamicDomainMap(origin: string): Promise<Record<string, str
   return dynamicDomainCache.map;
 }
 
-function deliverySlugFromHost(host: string): string | null {
-  if (!host.endsWith('-done.vercel.app')) return null;
-  const slug = host.slice(0, -'-done.vercel.app'.length);
-  return slug || null;
+/**
+ * 同じ成果物が複数の外部URLで見えるとき、検索エンジンに「こちらが正規」と伝える
+ * ホストを決める。独自ドメインが接続済みならそれを優先し、無ければ現在のホスト。
+ */
+async function canonicalHostFor(
+  slug: string,
+  currentHost: string,
+  origin: string,
+): Promise<string> {
+  if (isCustomDomainHost(currentHost)) return currentHost;
+  const map = await fetchDynamicDomainMap(origin);
+  for (const [domain, mappedSlug] of Object.entries(map)) {
+    if (mappedSlug === slug && isCustomDomainHost(domain)) return domain;
+  }
+  return currentHost;
+}
+
+/** 内部用URL（ダン本体ホストのプレビュー・編集画面）を検索対象から外す。 */
+function markNoIndex(response: NextResponse): NextResponse {
+  response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+  return response;
 }
 
 const DEFAULT_PUBLIC_ARTIFACT_SLUGS = ['kittoku', 'test-edit', 'salonboard-styleup', 'bookings'];
@@ -84,7 +102,7 @@ const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const host = (request.headers.get('host') || '').split(':')[0].toLowerCase();
+  const host = normalizeHost(request.headers.get('host'));
   const deliverySlug = deliverySlugFromHost(host);
 
   // ホスト解決: 静的マップ → 納品ホスト → DB 由来の動的マップ の順に確認する。
@@ -131,6 +149,22 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(url);
     }
 
+    // ここから先は外部公開ホスト（<slug>-done.vercel.app / 独自ドメイン）で
+    // 実際に成果物を配信する経路。検索エンジンに開放し、同一内容が複数URLで
+    // 見えても評価が割れないよう正規URL（canonical）を明示する。
+    const canonicalHost = await canonicalHostFor(
+      customDomainSlug,
+      host,
+      request.nextUrl.origin,
+    );
+    const withCanonical = (response: NextResponse): NextResponse => {
+      response.headers.append(
+        'Link',
+        `<https://${canonicalHost}${pathname === '/' ? '/' : pathname}>; rel="canonical"`,
+      );
+      return response;
+    };
+
     // ルート (/) は /artifacts/<slug>（[slug]動的ルートが解決）に rewrite。
     // サブパス (/business 等) は middleware が直接 /artifacts/<slug>/<sub> に rewrite
     // するとネスト静的ルートが解決されず404になるため、ここでは next() で素通しし、
@@ -139,28 +173,24 @@ export async function middleware(request: NextRequest) {
     if (pathname === '/') {
       const url = request.nextUrl.clone();
       url.pathname = `/artifacts/${customDomainSlug}`;
-      const response = NextResponse.rewrite(url);
-      if (deliverySlug) response.headers.set('X-Robots-Tag', 'noindex, nofollow');
-      return response;
+      return withCanonical(NextResponse.rewrite(url));
     }
-    const response = NextResponse.next();
-    // 納品URL (<slug>-done.vercel.app) は確認用なので検索インデックスから除外する。
-    if (deliverySlug) {
-      response.headers.set('X-Robots-Tag', 'noindex, nofollow');
-    }
-    return response;
+    return withCanonical(NextResponse.next());
   }
 
   if (pathname === '/') {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
+  // ここから先はダン本体ホスト（done-studio.vercel.app / localhost 等）。
+  // /preview/<slug> はチャット横の編集用プレビュー、/artifacts/<slug> はその実体で、
+  // どちらも内部用URL。外部公開URLと中身が重複するため必ず検索対象から外す。
   if (pathname.startsWith('/preview/')) {
     const segments = pathname.split('/').filter(Boolean);
     if (segments.length >= 2) {
       const url = request.nextUrl.clone();
       url.pathname = `/artifacts/${segments.slice(1).join('/')}`;
-      return NextResponse.rewrite(url);
+      return markNoIndex(NextResponse.rewrite(url));
     }
   }
 
@@ -168,7 +198,7 @@ export async function middleware(request: NextRequest) {
     const segments = pathname.split('/').filter(Boolean);
     const slug = segments[1];
     if (slug && PUBLIC_ARTIFACT_SLUGS.has(slug)) {
-      return NextResponse.next();
+      return markNoIndex(NextResponse.next());
     }
 
     const token = request.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
@@ -177,7 +207,7 @@ export async function middleware(request: NextRequest) {
       loginUrl.searchParams.set('redirect', pathname);
       return NextResponse.redirect(loginUrl);
     }
-    return NextResponse.next();
+    return markNoIndex(NextResponse.next());
   }
 
   return NextResponse.next();
