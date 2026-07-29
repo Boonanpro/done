@@ -679,8 +679,7 @@ fn draw_plain_pip(
             tw
         };
         comp.set_grade(grade_params(c));
-        comp.set_grade(grade_params(c));
-    comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
+        comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
         return Ok(None);
     }
     let vs = pool.get(d3d, &p2, 0, false, src_t)?;
@@ -691,6 +690,7 @@ fn draw_plain_pip(
             .map_err(|e| e.context(format!("plain-pip {} src_t={src_t:.2}", vs.name)))?;
     }
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
+    comp.set_grade(grade_params(c));
     comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
     Ok(Some(p2))
 }
@@ -1341,6 +1341,7 @@ fn compose(
                 // switches to stretch and the source fills the edited box itself.
                 let (bx, by, bw, bh) = (b.x, b.y, b.width, b.height);
                 if c.stretches_to_box() {
+                    comp.set_grade(grade_params(c));
                     let _ = comp.draw_alpha_opacity(
                         d3d,
                         &tex,
@@ -1417,8 +1418,7 @@ fn compose(
                 let dst = (b.x, b.y, b.width, b.height);
                 let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
                 comp.set_grade(grade_params(c));
-                comp.set_grade(grade_params(c));
-            comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+                comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
                 used.push(path);
                 continue;
             }
@@ -1469,6 +1469,7 @@ fn compose(
             }
             let dst = (b.x, b.y, b.width, b.height);
             let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+            comp.set_grade(grade_params(c));
             comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
             used.push(path);
         }
