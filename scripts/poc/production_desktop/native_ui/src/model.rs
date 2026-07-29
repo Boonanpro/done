@@ -361,7 +361,9 @@ impl Clip {
         let r = self.region.as_ref()?;
         let g = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
         let (w, h) = (g("width"), g("height"));
-        if w > 1e-3 && h > 1e-3 {
+        // 1e-4: 疑似ライン用の極細矩形（〜0.02%）を「矩形なし」扱いにしない。
+        // 欠損キーは g() が 0.0 を返すので従来どおり None になる
+        if w > 1e-4 && h > 1e-4 {
             // x/y may be negative / past 1: the rect can hang partly off-screen to
             // cover objects at the very edge (writers keep at least 5% visible)
             Some((g("x"), g("y"), w.min(1.0), h.min(1.0)))

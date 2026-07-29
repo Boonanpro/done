@@ -8082,9 +8082,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // half a frame on VFR sources, which on fast keyed motion reads as "the frame
         // is offset from the blur" (30px+ at their hand-keyed speeds).
         let t_disp = self.displayed_grid_t();
-        // (id, rect, baked, blur_track, on_key) — on_key = playhead sits on a position
-        // keyframe of this clip (within half a frame)
-        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool)> = self
+        // (id, rect, baked, blur_track, on_key, rot) — on_key = playhead sits on a position
+        // keyframe of this clip (within half a frame)。rot = effect_rot（描画が回る
+        // スタイルのみ。枠線/ハンドルも同角度で回して見た目を一致させる）
+        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool, f64)> = self
             .doc
             .seq
             .tracks
@@ -8101,12 +8102,22 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 let kts = c.region_key_times();
                 let rel = self.keyed_grid_t(c.timeline_start, &kts) - c.timeline_start;
                 let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
+                // 回転が描画に効くスタイル（単色/枠/ぼかし系）だけ枠線も回す
+                let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                let rot = if style.contains("mosaic")
+                    || matches!(style, "marker" | "spotlight" | "zoom" | "note")
+                {
+                    0.0
+                } else {
+                    c.effect_rot.unwrap_or(0.0)
+                };
                 (
                     c.id.clone(),
                     rg,
                     matches!(self.blur_states.get(&c.id), Some(PopState::Ready)),
                     c.blur_track.clone(),
                     on_key,
+                    rot,
                 )
             }))
             .collect();
@@ -8279,8 +8290,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
             return;
         }
-        let mut editable: Vec<(String, egui::Rect)> = Vec::new();
-        for (_cid, rg, tracked, bt, on_key) in outlines {
+        let mut editable: Vec<(String, egui::Rect, [egui::Pos2; 4])> = Vec::new();
+        for (_cid, rg, tracked, bt, on_key, rot) in outlines {
             // while a bake is live, the outline FOLLOWS the tracked object: the mask
             // meta records the object's box per mask frame — look up the box for the
             // frame the preview is showing and map it source -> canvas
@@ -8390,10 +8401,36 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 egui::Color32::from_rgb(255, 170, 60)
             };
             let p = ui.painter_at(vid);
-            p.rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            // 回転スタイルは枠線・ハンドルも同角度で回す（見た目の角度を確認できる
+            // ように）。回転は描画と同じ「矩形中心・時計回り」。プレビュー枠 vid は
+            // キャンバスと同アスペクトなのでスクリーン空間の回転角=描画の回転角。
+            let rot_corner = |p0: egui::Pos2| -> egui::Pos2 {
+                if rot.abs() < 1e-3 {
+                    return p0;
+                }
+                let (sn, cs) = (rot.to_radians().sin() as f32, rot.to_radians().cos() as f32);
+                let ctr = r.center();
+                let d = p0 - ctr;
+                egui::pos2(ctr.x + cs * d.x - sn * d.y, ctr.y + sn * d.x + cs * d.y)
+            };
+            // NW, NE, SW, SE（ヒット判定 mode 1..4 と同順）
+            let hs4 = [
+                rot_corner(r.left_top()),
+                rot_corner(r.right_top()),
+                rot_corner(r.left_bottom()),
+                rot_corner(r.right_bottom()),
+            ];
+            if rot.abs() < 1e-3 {
+                p.rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            } else {
+                p.add(egui::Shape::closed_line(
+                    vec![hs4[0], hs4[1], hs4[3], hs4[2]],
+                    egui::Stroke::new(2.0, col),
+                ));
+            }
             if on_key && !following {
                 // small key diamond on the rect's top edge so the state reads at a glance
-                let cpt = egui::pos2(r.center().x, r.top());
+                let cpt = rot_corner(egui::pos2(r.center().x, r.top()));
                 p.add(egui::Shape::convex_polygon(
                     vec![
                         cpt + egui::vec2(0.0, -5.0),
@@ -8409,16 +8446,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             // drag. A green following box is the TRACKED object, not the region — its
             // rect is not draggable (解除 first to hand-adjust).
             if !following {
-                for c4 in [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()] {
+                for c4 in hs4 {
                     p.rect_filled(egui::Rect::from_center_size(c4, egui::vec2(8.0, 8.0)), 1.0, col);
                 }
-                editable.push((_cid.clone(), r));
+                editable.push((_cid.clone(), r, hs4));
             }
         }
         // --- region rect editing: corners = resize, inside = move (shape preserved) ---
         if preview_drag_started && self.region_drag.is_none() {
             if let Some(pt) = pointer_pos {
-                'hit: for (cid, r) in &editable {
+                'hit: for (cid, r, hs4) in &editable {
                     // (timeline_start, keys snapshot) of a keyframe-able clip (no AI track)
                     let key_info = self
                         .doc
@@ -8436,12 +8473,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     // corner hit zones shrink with the rect so a small rect keeps a
                     // grabbable BODY (10px corners used to swallow short rects whole)
                     let cr = 10.0f32.min(r.width() / 3.0).min(r.height() / 3.0).max(4.0);
-                    let corners = [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
-                    let mode = corners
+                    // corners = 表示しているハンドル位置（回転時は回転後の角）
+                    // 極細矩形（疑似ライン）でも本体を掴めるよう、当たりは最低8px幅
+                    let body = r.expand2(egui::vec2(
+                        (8.0 - r.width()).max(0.0) * 0.5,
+                        (8.0 - r.height()).max(0.0) * 0.5,
+                    ));
+                    let mode = hs4
                         .iter()
                         .position(|cp| cp.distance(pt) <= cr)
                         .map(|ci| ci as u8 + 1)
-                        .unwrap_or(if r.contains(pt) { 0 } else { u8::MAX });
+                        .unwrap_or(if body.contains(pt) { 0 } else { u8::MAX });
                     if mode == u8::MAX {
                         continue;
                     }
@@ -8518,9 +8560,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         h += dy;
                     }
                 }
-                // 最小0.3%（1280px縦で約4px）: 細い単色矩形＝疑似ライン用途を許す
-                w = w.clamp(0.003, 1.0);
-                h = h.clamp(0.003, 1.0);
+                // 細さの下限は実質なし（1280px縦で約0.26px）。疑似ラインは1px級まで
+                // 潰せる。ゼロは region_at が「矩形なし」と解釈するので僅かに残す
+                w = w.clamp(0.0002, 1.0);
+                h = h.clamp(0.0002, 1.0);
                 // 画面外へのはみ出しOK（端ギリギリを隠す用）。ただし最低5%は画面内に
                 // 残す＝完全に出て掴めなくなる事故を防ぐ
                 x = x.clamp(0.05 - w, 0.95);
