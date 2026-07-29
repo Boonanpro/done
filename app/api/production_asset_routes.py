@@ -1339,10 +1339,32 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
         "--export-preview-video",
         str(out_path).replace("\\", "/"),
     ]
+    # 選択クリップ書き出し（飛び飛び複数区間を1本に結合）: [[a,b],...] を
+    # --export-ranges "a-b,c-d" として native へ転送。指定があれば単一 export_range
+    # より優先。
+    rngs = instruction.get("export_ranges")
+    multi_spec: list[str] = []
+    if isinstance(rngs, list) and rngs:
+        total = 0.0
+        for r in rngs:
+            try:
+                r0, r1 = float(r[0]), float(r[1])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            if 0 <= r0 < r1:
+                multi_spec.append(f"{r0:.3f}-{r1:.3f}")
+                total += r1 - r0
+        if multi_spec:
+            cmd += ["--export-ranges", ",".join(multi_spec)]
+            duration = total
+            _append_job_event(room_id, job_id, {
+                "type": "status",
+                "text": f"選択範囲書き出し: {len(multi_spec)}区間 計{total:.1f}s",
+            })
     # DaVinci-style render range from the editor (in/out seconds): forwarded as the
     # CLI's start/end args. Invalid or missing -> whole content.
     rng = instruction.get("export_range")
-    if (isinstance(rng, list) and len(rng) == 2):
+    if not multi_spec and (isinstance(rng, list) and len(rng) == 2):
         try:
             r0, r1 = float(rng[0]), float(rng[1])
             if 0 <= r0 < r1:

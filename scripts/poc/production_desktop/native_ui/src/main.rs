@@ -3632,6 +3632,8 @@ struct App {
     /// DaVinci-style render range (in/out, timeline seconds). None = whole content.
     /// Session-local: I/O keys set the edges at the playhead; ruler band edges drag.
     export_range: Option<(f64, f64)>,
+    /// 書き出しダイアログ「選択クリップの範囲だけ繋げて書き出す」チェック状態
+    export_use_selection: bool,
     /// render progress 0..1 while the server reports frame=N/M; None = no bar
     /// (queued / finishing phase / idle)
     export_progress: Option<f32>,
@@ -3866,6 +3868,7 @@ impl App {
             export_status: None,
             export_poll: Instant::now(),
             export_range: None,
+            export_use_selection: false,
             range_drag: None,
             export_progress: None,
             export_done_path: None,
@@ -7857,6 +7860,34 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         self.export_dialog_open = true;
     }
 
+    /// 選択クリップの時間帯から「飛び飛び書き出し」の範囲リストを作る。
+    /// 開始順にソートし、重なり・隣接はマージ。境界を任意の場所にしたい場合は
+    /// ハサミでクリップを割ってから選べばよい。
+    fn selected_export_ranges(&self) -> Vec<(f64, f64)> {
+        let mut v: Vec<(f64, f64)> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| self.selected.contains(&c.id))
+            .map(|c| (c.timeline_start, c.timeline_end))
+            .filter(|(a, b)| b > a)
+            .collect();
+        v.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut m: Vec<(f64, f64)> = Vec::new();
+        for r in v {
+            if let Some(last) = m.last_mut() {
+                if r.0 <= last.1 + 1e-6 {
+                    last.1 = last.1.max(r.1);
+                    continue;
+                }
+            }
+            m.push(r);
+        }
+        m
+    }
+
     fn start_export(&mut self) {
         // mode "export" renders the CURRENT timeline server-side (the sequence rides in
         // the instruction — what you see is exactly what gets rendered)
@@ -7868,7 +7899,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .cloned()
             .unwrap_or(serde_json::json!({}));
         let mut instruction = serde_json::json!({"mode": "export", "timeline": timeline});
-        if let Some((ra, rb)) = self.export_range {
+        let sel_ranges = if self.export_use_selection { self.selected_export_ranges() } else { Vec::new() };
+        if !sel_ranges.is_empty() {
+            // 選択クリップの範囲だけを（飛び飛びでも）繋げて1本に書き出す
+            instruction["export_ranges"] =
+                serde_json::json!(sel_ranges.iter().map(|(a, b)| vec![*a, *b]).collect::<Vec<_>>());
+        } else if let Some((ra, rb)) = self.export_range {
             // in/out render range (DaVinci-style): backend forwards it to the native
             // exporter as start/end; unset = whole content
             instruction["export_range"] = serde_json::json!([ra, rb]);
@@ -12068,12 +12104,52 @@ impl eframe::App for App {
                                 .map(|c| c.timeline_end)
                                 .fold(0.0f64, f64::max);
                             let (r0, r1) = self.export_range.unwrap_or((0.0, content_end));
-                            let dur = (r1 - r0).max(0.0);
+                            let sel_ranges = self.selected_export_ranges();
+                            let sel_total: f64 = sel_ranges.iter().map(|(a, b)| b - a).sum();
+                            let dur = if self.export_use_selection && !sel_ranges.is_empty() {
+                                sel_total
+                            } else {
+                                (r1 - r0).max(0.0)
+                            };
                             ui.label(format!(
                                 "解像度 1080x1920 / 30fps   長さ {:02}:{:02}",
                                 dur as i64 / 60, dur as i64 % 60
                             ));
-                            if self.export_range.is_some() {
+                            // 飛び飛び書き出し: 選択クリップの時間帯だけを繋げて1本に。
+                            // 境界を自由に切りたい時はハサミで割ってから選ぶ
+                            if !sel_ranges.is_empty() {
+                                ui.checkbox(
+                                    &mut self.export_use_selection,
+                                    format!(
+                                        "選択クリップの範囲だけ繋げて書き出す（{}区間・計{:02}:{:02}）",
+                                        sel_ranges.len(),
+                                        sel_total as i64 / 60,
+                                        sel_total as i64 % 60
+                                    ),
+                                );
+                            } else if self.export_use_selection {
+                                self.export_use_selection = false;
+                            }
+                            if self.export_use_selection && !sel_ranges.is_empty() {
+                                let list = sel_ranges
+                                    .iter()
+                                    .take(6)
+                                    .map(|(a, b)| {
+                                        format!(
+                                            "{:02}:{:02}-{:02}:{:02}",
+                                            *a as i64 / 60, *a as i64 % 60, *b as i64 / 60, *b as i64 % 60
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let more = if sel_ranges.len() > 6 { " …" } else { "" };
+                                ui.label(
+                                    egui::RichText::new(format!("区間: {list}{more}"))
+                                        .color(egui::Color32::from_rgb(110, 190, 255))
+                                        .small(),
+                                );
+                            }
+                            if !self.export_use_selection && self.export_range.is_some() {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "範囲書き出し: {:02}:{:02} 〜 {:02}:{:02}（解除はダイアログを閉じて✕）",
@@ -12996,13 +13072,65 @@ fn main() -> eframe::Result<()> {
             while mask_build_pass(&doc, &d3d, &mut masks, None) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
-            // Audio first: the SAME timeline through the playback mixer's rules, into a
-            // raw PCM sidecar that ffmpeg only compresses.
             let end = end.max(start);
+            // --export-ranges "a-b,c-d,...": タイムラインの飛び飛びの区間だけを順に
+            // 繋げて1本に書き出す（選択クリップ書き出し）。開始順ソート＋重なりマージ。
+            // 映像・音声とも同じフレーム格子（ceil(t*fps)）に量子化するので、区間毎の
+            // AVズレが累積しない。指定なし＝従来どおり [start, end) の単一区間。
+            let ranges: Vec<(f64, f64)> = if let Some(spec) = args
+                .iter()
+                .position(|a| a == "--export-ranges")
+                .and_then(|k| args.get(k + 1))
+            {
+                let mut v: Vec<(f64, f64)> = spec
+                    .split(',')
+                    .filter_map(|s| {
+                        let (a, b) = s.split_once('-')?;
+                        let (a, b): (f64, f64) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+                        (b > a && a >= 0.0).then_some((a, b))
+                    })
+                    .collect();
+                v.sort_by(|x, y| x.0.total_cmp(&y.0));
+                let mut m: Vec<(f64, f64)> = Vec::new();
+                for r in v {
+                    if let Some(last) = m.last_mut() {
+                        if r.0 <= last.1 + 1e-6 {
+                            last.1 = last.1.max(r.1);
+                            continue;
+                        }
+                    }
+                    m.push(r);
+                }
+                anyhow::ensure!(!m.is_empty(), "--export-ranges: 有効な区間がありません");
+                m
+            } else {
+                vec![(start, end)]
+            };
+            let fr = |t: f64| (t * fps).ceil() as u64;
+            let franges: Vec<(u64, u64)> = ranges
+                .iter()
+                .map(|&(s, e)| (fr(s), fr(e)))
+                .filter(|(a, b)| b > a)
+                .collect();
+            anyhow::ensure!(!franges.is_empty(), "書き出し区間が空です");
+            // Audio first: the SAME timeline through the playback mixer's rules, into a
+            // raw PCM sidecar that ffmpeg only compresses. 区間ごとにミックスして
+            // 連結（f32le 生PCMなので単純結合で継ぎ目なし）。
             let (arate, ach) = (48_000u32, 2usize);
             let pcm = format!("{out}.pcm");
-            media::mix_timeline_audio(&doc, start, end, arate, ach, &pcm).context("mix audio")?;
-            println!("EXPORT_AUDIO pcm={pcm} rate={arate} ch={ach}");
+            {
+                let mut pcm_out = std::fs::File::create(&pcm).context("create pcm")?;
+                for (k, &(fa, fb)) in franges.iter().enumerate() {
+                    let seg = format!("{out}.seg{k}.pcm");
+                    media::mix_timeline_audio(&doc, fa as f64 / fps, fb as f64 / fps, arate, ach, &seg)
+                        .context("mix audio")?;
+                    let mut f = std::fs::File::open(&seg).context("open pcm seg")?;
+                    std::io::copy(&mut f, &mut pcm_out).context("concat pcm seg")?;
+                    drop(f);
+                    let _ = std::fs::remove_file(&seg);
+                }
+            }
+            println!("EXPORT_AUDIO pcm={pcm} rate={arate} ch={ach} ranges={}", franges.len());
             let ffmpeg = std::env::var("FFMPEG").unwrap_or_else(|_| "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe".into());
             // ffmpeg's stderr goes to a sidecar log, NOT null: an encoder that dies
             // mid-stream otherwise fails as an unexplained "パイプは終了しました" with
@@ -13032,8 +13160,7 @@ fn main() -> eframe::Result<()> {
                 .spawn()
                 .context("start ffmpeg")?;
             let stdin = child.stdin.as_mut().context("ffmpeg stdin")?;
-            let first = (start * fps).ceil() as u64;
-            let last = (end * fps).ceil() as u64;
+            let total: u64 = franges.iter().map(|(a, b)| b - a).sum();
             let t_render = Instant::now();
             // PROXY quality, exactly like the interactive preview (original=false).
             // The user aligns blur keys against the PREVIEW picture; VFR sources
@@ -13046,26 +13173,28 @@ fn main() -> eframe::Result<()> {
             let use_original = std::env::var("NATIVE_EXPORT_ORIGINAL")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            for n in first..last {
-                let t = n as f64 / fps;
-                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, use_original, false, Rb::Sync)
-                    .context("compose export frame")?;
-                if let Err(e) = stdin.write_all(&comp.rgba) {
-                    // ffmpeg died mid-stream — surface ITS last words, not just EPIPE
-                    let tail = std::fs::read_to_string(&fflog_path)
-                        .map(|s| s.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>())
-                        .unwrap_or_default();
-                    anyhow::bail!("write export frame at t={t:.2}: {e} | ffmpeg says: {tail}");
-                }
-                let done = n - first + 1;
-                if done % 150 == 0 || n + 1 == last {
-                    let el = t_render.elapsed().as_secs_f64().max(0.001);
-                    println!(
-                        "EXPORT_PROGRESS frame={done}/{} t={t:.2} render_fps={:.1}",
-                        last - first,
-                        done as f64 / el
-                    );
-                    let _ = std::io::stdout().flush(); // backend tails this pipe live
+            let mut done: u64 = 0;
+            for &(fa, fb) in &franges {
+                for n in fa..fb {
+                    let t = n as f64 / fps;
+                    compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, use_original, false, Rb::Sync)
+                        .context("compose export frame")?;
+                    if let Err(e) = stdin.write_all(&comp.rgba) {
+                        // ffmpeg died mid-stream — surface ITS last words, not just EPIPE
+                        let tail = std::fs::read_to_string(&fflog_path)
+                            .map(|s| s.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>())
+                            .unwrap_or_default();
+                        anyhow::bail!("write export frame at t={t:.2}: {e} | ffmpeg says: {tail}");
+                    }
+                    done += 1;
+                    if done % 150 == 0 || done == total {
+                        let el = t_render.elapsed().as_secs_f64().max(0.001);
+                        println!(
+                            "EXPORT_PROGRESS frame={done}/{total} t={t:.2} render_fps={:.1}",
+                            done as f64 / el
+                        );
+                        let _ = std::io::stdout().flush(); // backend tails this pipe live
+                    }
                 }
             }
             drop(child.stdin.take());
