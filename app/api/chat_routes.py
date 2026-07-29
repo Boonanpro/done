@@ -2198,6 +2198,7 @@ async def send_dan_message_stream(
             if True:
                 from app.agent.cli_runner import process_message_cli
                 from app.api.project_routes import _format_tool_label
+                from app.services.project_service import ProjectService
                 from app.services.run_service import RunService
 
                 project_service = ProjectService()
@@ -2492,8 +2493,11 @@ async def send_dan_message_stream(
                         ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
                         if cli_saved_ai_message:
                             ai_context = {"turn_id": event.get("turn_id")} if event.get("turn_id") else None
+                            # DB保存済み行の実IDをそのまま返す。合成ID(cli-saved-*)だと
+                            # ポーリングで取得したDB行とキャッシュ上で別メッセージ扱いに
+                            # なり、同じ回答が二重表示される（refreshするまで残る）。
                             ai_message = {
-                                "id": f"cli-saved-{event.get('turn_id') or 'latest'}",
+                                "id": event.get("saved_message_id") or f"cli-saved-{event.get('turn_id') or 'latest'}",
                                 "room_id": room_id,
                                 "sender_id": None,
                                 "sender_name": "ダン",

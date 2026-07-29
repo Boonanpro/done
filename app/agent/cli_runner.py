@@ -1084,8 +1084,12 @@ def _save_ai_message_sync(
     blocks: Optional[list] = None,
     created_at: Optional[str] = None,
     turn_id: Optional[str] = None,
-) -> bool:
-    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。
+) -> Any:
+    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。disconnect時は1度だけリトライ。
+
+    成功時は保存された行のメッセージID(str)を返す（idが取れない場合はTrue）。失敗=False。
+    IDはSSEの ai_message イベントでフロントに渡し、ポーリング取得行とキャッシュ上で
+    同一視させるために使う（合成IDだと同じ回答が二重表示される）。
 
     created_at: 明示指定時はその時刻で保存（既定はDBの now()）。ストリーミング経路が
     「ターン開始時刻」を渡すために使う。保存=ターン終了時刻だと、追い連絡で割り込まれた
@@ -1141,7 +1145,7 @@ def _save_ai_message_sync(
                 _cli_debug(
                     f"_save_ai_message_sync OK (attempt {attempt}): msg_id={msg_id or '?'}"
                 )
-                return True
+                return msg_id or True
             _cli_debug(f"_save_ai_message_sync: insert returned no data (attempt {attempt})")
             if attempt == 2:
                 return False
@@ -2373,7 +2377,8 @@ def _run_cli_in_thread(
                 "turns": result_data.get("num_turns", 0),
                 "duration_ms": result_data.get("duration_ms", 0),
                 "is_error": is_error,
-                "cli_saved": cli_saved,
+                "cli_saved": bool(cli_saved),
+                "saved_message_id": cli_saved if isinstance(cli_saved, str) else None,
                 "turn_id": turn_id,
             })
             if project_id:
@@ -2888,7 +2893,7 @@ async def _process_via_streaming_session(
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
-                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
+                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": bool(cli_saved), "saved_message_id": cli_saved if isinstance(cli_saved, str) else None, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
                 state["final_text_parts"] = []
@@ -2925,8 +2930,9 @@ async def _process_via_streaming_session(
                 text = (partial + "\n\n" + note) if partial else note
                 t_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 t_id = state["turn_id"] or str(uuid.uuid4())
+                hang_saved = False
                 if not skip_save:
-                    _save_ai_message_sync(
+                    hang_saved = _save_ai_message_sync(
                         room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"],
                         blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id,
                     )
@@ -2939,7 +2945,9 @@ async def _process_via_streaming_session(
                     _update_run_sync(run_id, state="failed")
                 _emit({
                     "type": "result", "text": text, "session_id": state["session_id"],
-                    "is_error": True, "cli_saved": not skip_save, "created_at": t_start,
+                    "is_error": True, "cli_saved": bool(hang_saved),
+                    "saved_message_id": hang_saved if isinstance(hang_saved, str) else None,
+                    "created_at": t_start,
                     "continuation": False, "turn_id": t_id,
                 })
                 state["written_file_paths"] = []
@@ -3021,11 +3029,14 @@ async def _process_via_streaming_session(
                     "前回の会話の復元に失敗したため、セッションを作り直しました。"
                     "お手数ですが、もう一度同じ内容を送ってください。"
                 )
+                recreate_saved = False
                 if not skip_save:
-                    _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()))
+                    recreate_saved = _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()))
                 _emit({
                     "type": "result", "text": text, "session_id": None,
-                    "is_error": True, "cli_saved": not skip_save, "continuation": False,
+                    "is_error": True, "cli_saved": bool(recreate_saved),
+                    "saved_message_id": recreate_saved if isinstance(recreate_saved, str) else None,
+                    "continuation": False,
                 })
         except Exception as e:  # noqa: BLE001
             _emit({"type": "error", "message": str(e)})
