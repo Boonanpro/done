@@ -3650,8 +3650,6 @@ struct App {
     export_range: Option<(f64, f64)>,
     /// 書き出しダイアログ「サブタイムラインの区間だけ繋げて書き出す」チェック状態
     export_use_sub: bool,
-    /// サブタイムライン編集モード（I/Oで飛び飛びの再生区間を組む＋区間だけ再生）
-    sub_mode: bool,
     /// サブタイムラインの I キーで置いた「イン点待ち」（O で区間として確定）
     sub_in: Option<f64>,
     /// 区間ジャンプ直後の音声クロック再アンカー待ち（この間は再ジャンプしない）
@@ -3900,7 +3898,6 @@ impl App {
             export_poll: Instant::now(),
             export_range: None,
             export_use_sub: false,
-            sub_mode: false,
             sub_in: None,
             sub_jump_until: None,
             sub_skip_active: false,
@@ -5359,7 +5356,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             // サブタイムライン: 再生開始位置で意図を汲む — 緑区間の中から始めたら
             // 「区間だけ飛び飛び」、外（暗転部分）から始めたら普通の全体再生。
             // 判定は再生セッション開始時に一度だけ。
-            self.sub_skip_active = self.sub_mode
+            self.sub_skip_active = self.on_sub_tab()
                 && self
                     .sub_ranges()
                     .iter()
@@ -7960,8 +7957,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let title = if title.trim().is_empty() { "動画".to_string() } else { title };
         self.export_dest = format!("{dir}\\{title}_{}.mp4", jst_timestamp_compact());
         // サブタイムライン編集中に書き出しを開いたら、既定でその区間だけを書き出す
-        self.export_use_sub = self.sub_mode && !self.sub_ranges().is_empty();
+        self.export_use_sub = self.on_sub_tab() && !self.sub_ranges().is_empty();
         self.export_dialog_open = true;
+    }
+
+    /// サブタブを開いているか。タブが役割を決める: メイン=I/Oで青い単一書き出し
+    /// 範囲、サブ=I/Oで緑の飛び飛び区間＋区間だけ再生（モードボタンは廃止）。
+    fn on_sub_tab(&self) -> bool {
+        self.active_seq_id() != "main"
     }
 
     /// 今開いているシーケンスタブのid（"main" またはサブid）。
@@ -8097,7 +8100,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         self.restore(raw);
         self.switch_seq(&new_id);
-        self.toast("サブを作成しました。ここは自由に編集できます（元のタイムラインは変わりません）");
+        self.toast("サブを作成: 自由に編集できます（メインは変わりません）。I→Oで緑の区間を組めば区間だけ再生・書き出し");
     }
 
     /// サブタブ削除（右クリック2回で確定済み）。アクティブならメインへ戻ってから。
@@ -8176,9 +8179,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             // サブタイムラインの区間だけを（飛び飛びでも）繋げて1本に書き出す
             instruction["export_ranges"] =
                 serde_json::json!(sel_ranges.iter().map(|(a, b)| vec![*a, *b]).collect::<Vec<_>>());
-        } else if let Some((ra, rb)) = self.export_range {
-            // in/out render range (DaVinci-style): backend forwards it to the native
-            // exporter as start/end; unset = whole content
+        } else if let Some((ra, rb)) = (!self.on_sub_tab()).then_some(self.export_range).flatten() {
+            // in/out render range (DaVinci-style, メインタブ専用): backend forwards it
+            // to the native exporter as start/end; unset = whole content
             instruction["export_range"] = serde_json::json!([ra, rb]);
         }
         if self.export_dest.trim().to_ascii_lowercase().ends_with(".mp4") {
@@ -9360,7 +9363,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // ---- render range band (DaVinci-style in/out) on the ruler ----
         // I/O keys set the edges at the playhead; the edge flags drag; export uses
         // only this span when set. Session-local state (not written to the timeline).
-        if let Some((ra, rb)) = self.export_range {
+        // メインタブ専用（サブタブの I/O は緑の飛び飛び区間）
+        if let Some((ra, rb)) = (!self.on_sub_tab()).then_some(self.export_range).flatten() {
             let x0 = (body.left() + ra as f32 * self.pps - self.scroll_x).max(body.left());
             let x1 = (body.left() + rb as f32 * self.pps - self.scroll_x).min(body.right());
             if x1 > body.left() && x0 < body.right() {
@@ -9395,10 +9399,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
-        // ---- サブタイムライン区間帯（飛び飛び再生区間）----
-        // 緑帯=再生・書き出しの対象。モード中は区間外のレーン本体を暗転して
+        // ---- サブタイムライン区間帯（飛び飛び再生区間・サブタブ専用）----
+        // 緑帯=再生・書き出しの対象。区間外のレーン本体は暗転して
         // 「ここは流れない」を見せる。イン点待ちは緑の縦線。
-        {
+        if self.on_sub_tab() {
             let subs = self.sub_ranges();
             let x_of = |t: f64| body.left() + t as f32 * self.pps - self.scroll_x;
             for &(a, b) in &subs {
@@ -9413,10 +9417,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         egui::pos2(x1, body.top() + 16.0),
                     ),
                     2.0,
-                    egui::Color32::from_rgba_unmultiplied(0, 210, 140, if self.sub_mode { 170 } else { 90 }),
+                    egui::Color32::from_rgba_unmultiplied(0, 210, 140, 170),
                 );
                 // モード中は端をドラッグハンドルとして見せる（縦線＋内向き三角）
-                if self.sub_mode {
+                if self.on_sub_tab() {
                     let ec = egui::Color32::from_rgb(0, 230, 155);
                     for (t_edge, is_in) in [(a, true), (b, false)] {
                         let x = x_of(t_edge);
@@ -10171,7 +10175,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
         // サブタイムラインモード: 区間外のレーンを暗転（クリップより前面に塗る＝
         // 「ここは再生・書き出しに含まれない」を見せる）＋イン点待ちの緑縦線
-        if self.sub_mode {
+        if self.on_sub_tab() {
             let subs = self.sub_ranges();
             let x_of = |t: f64| body.left() + t as f32 * self.pps - self.scroll_x;
             if !subs.is_empty() {
@@ -10250,7 +10254,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // ---- interactions: trim edges > move body > scrub empty space ----
         let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - body.left())) / pps).max(0.0) as f64;
         // サブタイムライン: ルーラーの緑帯を右クリック=その区間を削除
-        if self.sub_mode && resp.secondary_clicked() {
+        if self.on_sub_tab() && resp.secondary_clicked() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if pos.y <= body.top() + 18.0 {
                     let t = to_t(self.scroll_x, self.pps, pos.x);
@@ -10455,7 +10459,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             // サブタイムラインの緑帯の端（イン点/アウト点）ドラッグが最優先。
                             // ドラッグ中は掴んだ時点の区間リスト（未マージ）を基準に編集し、
                             // 隣の区間に触れた瞬間に合体して index がズレるのを防ぐ
-                            if self.sub_mode {
+                            if self.on_sub_tab() {
                                 let subs = self.sub_ranges();
                                 let mut best: Option<(usize, bool, f32)> = None;
                                 for (k, &(a, b)) in subs.iter().enumerate() {
@@ -10473,7 +10477,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 }
                             }
                             // render-range edge flags win over scrub within ±6px
-                            if self.sub_edge_drag.is_none() {
+                            // （青帯はメインタブ専用）
+                            if self.sub_edge_drag.is_none() && !self.on_sub_tab() {
                                 if let Some((ra, rb)) = self.export_range {
                                     let xa = body.left() + ra as f32 * self.pps - self.scroll_x;
                                     let xb = body.left() + rb as f32 * self.pps - self.scroll_x;
@@ -12165,7 +12170,7 @@ impl eframe::App for App {
         // The other edge defaults to the content edge so a single keypress makes a
         // valid span; the export button then renders only this range.
         // サブタイムラインモード中は I/O が「区間の追加」になる（飛び飛び可）。
-        if !typing && self.sub_mode {
+        if !typing && self.on_sub_tab() {
             let f = 1.0 / self.timeline_fps();
             let t_now = self.grid_quantize(self.t);
             if ctx.input(|i| i.key_pressed(egui::Key::I)) {
@@ -12235,7 +12240,7 @@ impl eframe::App for App {
             // サブタイムライン: 再生ヘッドが区間の外に出たら次の区間頭へジャンプ
             // ＝飛び飛び再生。最後の区間を出たら最終区間の末尾で停止。
             // （区間の外から始めた再生セッションでは何もしない＝普通の全体再生）
-            if self.sub_mode && self.sub_skip_active && !jump_hold {
+            if self.on_sub_tab() && self.sub_skip_active && !jump_hold {
                 let rs = self.sub_ranges();
                 if !rs.is_empty() && !rs.iter().any(|&(a, b)| self.t >= a - 0.001 && self.t < b) {
                     if let Some(&(a, b)) = rs.iter().find(|&&(a, _)| a > self.t) {
@@ -12554,26 +12559,9 @@ impl eframe::App for App {
                         self.lib_refresh();
                     }
                 }
-                // サブタイムライン: 全体はそのまま、飛び飛びの再生区間を組んで
-                // 「その区間だけ再生→確認→書き出し」する切り出しモード
-                let sub_n = self.sub_ranges().len();
-                let sub_label = if sub_n > 0 {
-                    format!("✂ サブタイムライン({sub_n})")
-                } else {
-                    "✂ サブタイムライン".to_string()
-                };
-                if ui
-                    .selectable_label(self.sub_mode, sub_label)
-                    .on_hover_text("飛び飛びの再生区間を組んで、その区間だけ再生・書き出しできます。\nI=イン点 → O=区間追加 / ルーラーの緑帯を右クリック=区間削除")
-                    .clicked()
-                {
-                    self.sub_mode = !self.sub_mode;
-                    self.sub_in = None;
-                    if self.sub_mode {
-                        self.toast("サブタイムライン: Iでイン点→Oで区間追加（飛び飛び可）・緑帯を右クリックで削除。緑帯の中から再生=区間だけ／外から再生=全体そのまま");
-                    }
-                }
-                if self.sub_mode && sub_n > 0 {
+                // サブタブでは I/O=緑の飛び飛び区間（モードボタンは廃止。
+                // タブが役割を決める: メイン=青い単一書き出し範囲／サブ=緑区間）
+                if self.on_sub_tab() && !self.sub_ranges().is_empty() {
                     if ui
                         .small_button("▶ 区間を通しで再生")
                         .on_hover_text("最初の区間の頭から、区間だけを繋げて再生します（仕上がり確認）")
@@ -12611,7 +12599,11 @@ impl eframe::App for App {
                                 .flat_map(|t| t.clips.iter())
                                 .map(|c| c.timeline_end)
                                 .fold(0.0f64, f64::max);
-                            let (r0, r1) = self.export_range.unwrap_or((0.0, content_end));
+                            // 青い単一範囲はメインタブ専用（サブタブでは無視）
+                            let (r0, r1) = (!self.on_sub_tab())
+                                .then_some(self.export_range)
+                                .flatten()
+                                .unwrap_or((0.0, content_end));
                             let sel_ranges = self.sub_ranges();
                             let sel_total: f64 = sel_ranges.iter().map(|(a, b)| b - a).sum();
                             let dur = if self.export_use_sub && !sel_ranges.is_empty() {
@@ -12639,7 +12631,8 @@ impl eframe::App for App {
                                 );
                             }
                             // サブタイムライン書き出し: 組んだ再生区間だけを繋げて1本に
-                            if !sel_ranges.is_empty() {
+                            // （緑区間はサブタブ専用）
+                            if self.on_sub_tab() && !sel_ranges.is_empty() {
                                 ui.checkbox(
                                     &mut self.export_use_sub,
                                     format!(
@@ -12671,7 +12664,7 @@ impl eframe::App for App {
                                         .small(),
                                 );
                             }
-                            if !self.export_use_sub && self.export_range.is_some() {
+                            if !self.export_use_sub && !self.on_sub_tab() && self.export_range.is_some() {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "範囲書き出し: {:02}:{:02} 〜 {:02}:{:02}（解除はダイアログを閉じて✕）",
@@ -12679,6 +12672,12 @@ impl eframe::App for App {
                                     ))
                                     .color(egui::Color32::from_rgb(110, 190, 255))
                                     .small(),
+                                );
+                            } else if self.on_sub_tab() {
+                                ui.label(
+                                    egui::RichText::new("範囲: 全体（Iでイン点→Oで区間追加＝緑の区間だけ書き出せます）")
+                                        .weak()
+                                        .small(),
                                 );
                             } else {
                                 ui.label(egui::RichText::new("範囲: 全体（I/Oキーで範囲指定できます）").weak().small());
@@ -12749,7 +12748,7 @@ impl eframe::App for App {
                         self.export_dialog_open = false;
                     }
                 }
-                if let Some((ra, rb)) = self.export_range {
+                if let Some((ra, rb)) = (!self.on_sub_tab()).then_some(self.export_range).flatten() {
                     ui.label(
                         egui::RichText::new(format!(
                             "範囲 {:02}:{:02}–{:02}:{:02}",
