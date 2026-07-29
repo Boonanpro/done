@@ -3659,6 +3659,8 @@ struct App {
     /// この再生セッションが「区間だけ飛び飛び」かどうか。再生開始位置で決まる:
     /// 緑区間の中から開始=飛び飛び／区間の外から開始=普通の全体再生（素材の下見）
     sub_skip_active: bool,
+    /// 緑帯の端ドラッグ中: (掴んだ時点の区間リスト, 区間index, イン点か)
+    sub_edge_drag: Option<(Vec<(f64, f64)>, usize, bool)>,
     /// render progress 0..1 while the server reports frame=N/M; None = no bar
     /// (queued / finishing phase / idle)
     export_progress: Option<f32>,
@@ -3898,6 +3900,7 @@ impl App {
             sub_in: None,
             sub_jump_until: None,
             sub_skip_active: false,
+            sub_edge_drag: None,
             range_drag: None,
             export_progress: None,
             export_done_path: None,
@@ -9186,6 +9189,30 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     2.0,
                     egui::Color32::from_rgba_unmultiplied(0, 210, 140, if self.sub_mode { 170 } else { 90 }),
                 );
+                // モード中は端をドラッグハンドルとして見せる（縦線＋内向き三角）
+                if self.sub_mode {
+                    let ec = egui::Color32::from_rgb(0, 230, 155);
+                    for (t_edge, is_in) in [(a, true), (b, false)] {
+                        let x = x_of(t_edge);
+                        if x < body.left() - 8.0 || x > body.right() + 8.0 {
+                            continue;
+                        }
+                        p.line_segment(
+                            [egui::pos2(x, body.top() + 1.0), egui::pos2(x, body.top() + 17.0)],
+                            egui::Stroke::new(2.0, ec),
+                        );
+                        let dir = if is_in { 5.0 } else { -5.0 };
+                        p.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(x, body.top() + 1.0),
+                                egui::pos2(x + dir, body.top() + 5.0),
+                                egui::pos2(x, body.top() + 9.0),
+                            ],
+                            ec,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                }
             }
         }
 
@@ -10199,17 +10226,39 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // ruler strip keeps the press-scrub feel; empty LANE space arms a
                         // marquee (drag = box-select, a tiny click still seeks on release)
                         if pos.y <= body.top() + 18.0 {
-                            // render-range edge flags win over scrub within ±6px
-                            if let Some((ra, rb)) = self.export_range {
-                                let xa = body.left() + ra as f32 * self.pps - self.scroll_x;
-                                let xb = body.left() + rb as f32 * self.pps - self.scroll_x;
-                                if (pos.x - xa).abs() <= 6.0 {
-                                    self.range_drag = Some(true);
-                                } else if (pos.x - xb).abs() <= 6.0 {
-                                    self.range_drag = Some(false);
+                            // サブタイムラインの緑帯の端（イン点/アウト点）ドラッグが最優先。
+                            // ドラッグ中は掴んだ時点の区間リスト（未マージ）を基準に編集し、
+                            // 隣の区間に触れた瞬間に合体して index がズレるのを防ぐ
+                            if self.sub_mode {
+                                let subs = self.sub_ranges();
+                                let mut best: Option<(usize, bool, f32)> = None;
+                                for (k, &(a, b)) in subs.iter().enumerate() {
+                                    for (t_edge, is_in) in [(a, true), (b, false)] {
+                                        let x = body.left() + t_edge as f32 * self.pps - self.scroll_x;
+                                        let d = (pos.x - x).abs();
+                                        if d <= 6.0 && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+                                            best = Some((k, is_in, d));
+                                        }
+                                    }
+                                }
+                                if let Some((k, is_in, _)) = best {
+                                    self.pending_undo = Some(self.doc.raw.clone());
+                                    self.sub_edge_drag = Some((subs, k, is_in));
                                 }
                             }
-                            if self.range_drag.is_none() {
+                            // render-range edge flags win over scrub within ±6px
+                            if self.sub_edge_drag.is_none() {
+                                if let Some((ra, rb)) = self.export_range {
+                                    let xa = body.left() + ra as f32 * self.pps - self.scroll_x;
+                                    let xb = body.left() + rb as f32 * self.pps - self.scroll_x;
+                                    if (pos.x - xa).abs() <= 6.0 {
+                                        self.range_drag = Some(true);
+                                    } else if (pos.x - xb).abs() <= 6.0 {
+                                        self.range_drag = Some(false);
+                                    }
+                                }
+                            }
+                            if self.sub_edge_drag.is_none() && self.range_drag.is_none() {
                                 self.selected.clear();
                                 self.drag = Drag::Scrub;
                                 let raw_t = to_t(self.scroll_x, self.pps, pos.x);
@@ -10233,6 +10282,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         if resp.dragged() {
             if let Some(pos) = resp.interact_pointer_pos() {
+                if let Some((base, k, is_in)) = self.sub_edge_drag.clone() {
+                    // 緑帯の端ドラッグ: フレーム量子化・1フレーム最小幅。掴んだ時点の
+                    // リスト base を毎フレーム基準にする（保存時に読み側でマージされる）
+                    let f = 1.0 / self.timeline_fps();
+                    let t_new = self.grid_quantize(to_t(self.scroll_x, self.pps, pos.x).max(0.0));
+                    let mut rs = base;
+                    if let Some(r) = rs.get_mut(k) {
+                        if is_in {
+                            r.0 = t_new.min(r.1 - f).max(0.0);
+                        } else {
+                            r.1 = t_new.max(r.0 + f);
+                        }
+                        self.apply_edit(false, move |raw| edits::set_subtimeline_ranges(raw, &rs));
+                    }
+                }
                 if let Some(is_in) = self.range_drag {
                     // drag a render-range edge: frame-quantized, kept ordered with a
                     // one-frame minimum span
@@ -10509,6 +10573,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let released_now = ui.input(|i| i.pointer.any_released());
         if released_now {
             self.range_drag = None;
+            if self.sub_edge_drag.take().is_some() {
+                self.push_req(false);
+            }
         }
         if resp.drag_stopped() || (released_now && self.drag != Drag::None) {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
