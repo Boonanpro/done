@@ -3661,6 +3661,8 @@ struct App {
     sub_skip_active: bool,
     /// 緑帯の端ドラッグ中: (掴んだ時点の区間リスト, 区間index, イン点か)
     sub_edge_drag: Option<(Vec<(f64, f64)>, usize, bool)>,
+    /// サブタブ削除の二段確認（右クリック2回）: (サブid, 1回目の時刻)
+    sub_del_arm: Option<(String, Instant)>,
     /// render progress 0..1 while the server reports frame=N/M; None = no bar
     /// (queued / finishing phase / idle)
     export_progress: Option<f32>,
@@ -3737,6 +3739,8 @@ impl App {
     fn new(contents: &str, dir: &str) -> anyhow::Result<Self> {
         let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(contents)?)?;
         let disk_fingerprint = serde_json::to_string(&raw).unwrap_or_default();
+        // 前回開いていたタブ（サブ）をメモリ上の sequence スロットへスワップイン
+        edits::seq_swap_in(&mut raw);
         let before_norm = serde_json::to_string(&raw).unwrap_or_default();
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
@@ -3901,6 +3905,7 @@ impl App {
             sub_jump_until: None,
             sub_skip_active: false,
             sub_edge_drag: None,
+            sub_del_arm: None,
             range_drag: None,
             export_progress: None,
             export_done_path: None,
@@ -4095,8 +4100,11 @@ impl App {
             eprintln!("save blocked: contents.json changed outside this editor instance");
             return Ok(false);
         }
-        edits::save(&self.doc.raw, &self.doc.contents_path)?;
-        self.disk_fingerprint = self.doc.raw.to_string();
+        // メモリはアクティブタブが sequence に入っているので、ディスク形
+        // （sequence=メイン・サブは subseqs）へ変換して書く
+        let disk_form = edits::seq_swap_out(&self.doc.raw);
+        edits::save(&disk_form, &self.doc.contents_path)?;
+        self.disk_fingerprint = disk_form.to_string();
         Ok(true)
     }
 
@@ -5671,6 +5679,57 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             if mresp.on_hover_text("Snap playhead and clips to edges").clicked() {
                 self.playhead_snap = !self.playhead_snap;
                 self.snap_line = None;
+            }
+            ui.separator();
+            // ---- シーケンスタブ: メイン | サブ… | ＋ ----
+            // サブ=独立した複製（素材はID共有＝軽い）。編集してもメインは不変。
+            {
+                let active = self.active_seq_id();
+                let tabs = self.seq_tabs();
+                if ui.selectable_label(active == "main", "メイン").clicked() && active != "main" {
+                    self.switch_seq("main");
+                }
+                let mut want_switch: Option<String> = None;
+                let mut want_delete: Option<String> = None;
+                let mut arm: Option<(String, String)> = None;
+                for (id, name) in &tabs {
+                    let sel = *id == active;
+                    let armed = matches!(&self.sub_del_arm, Some((aid, at)) if aid == id && at.elapsed().as_secs() < 2);
+                    let label = if armed { format!("🗑 {name}?") } else { name.clone() };
+                    let resp = ui
+                        .selectable_label(sel, label)
+                        .on_hover_text("クリック=切替 / 右クリック2回=削除。サブは独立した複製で、編集してもメインは変わりません");
+                    if resp.clicked() && !sel {
+                        want_switch = Some(id.clone());
+                    }
+                    if resp.secondary_clicked() {
+                        if armed {
+                            want_delete = Some(id.clone());
+                        } else {
+                            arm = Some((id.clone(), name.clone()));
+                        }
+                    }
+                }
+                if let Some((id, name)) = arm {
+                    self.sub_del_arm = Some((id, Instant::now()));
+                    self.toast(&format!("「{name}」を削除するにはもう一度右クリック"));
+                }
+                if want_delete.is_some() {
+                    self.sub_del_arm = None;
+                }
+                if ui
+                    .small_button("＋")
+                    .on_hover_text("今開いているタイムラインを複製してサブを作る（元は変更されない・素材は共有）")
+                    .clicked()
+                {
+                    self.create_sub();
+                }
+                if let Some(id) = want_switch {
+                    self.switch_seq(&id);
+                }
+                if let Some(id) = want_delete {
+                    self.delete_sub(&id);
+                }
             }
             ui.separator();
             ui.label(
@@ -7651,6 +7710,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 arr.insert(0, c);
             }
         }
+        edits::seq_swap_in(&mut raw);
         if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             let nd = Arc::new(nd);
             self.disk_fingerprint = disk_fp;
@@ -7904,6 +7964,170 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         self.export_dialog_open = true;
     }
 
+    /// 今開いているシーケンスタブのid（"main" またはサブid）。
+    fn active_seq_id(&self) -> String {
+        self.doc
+            .raw
+            .get(0)
+            .and_then(|c| c.pointer("/timeline/active_seq"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_string()
+    }
+
+    /// サブタブの一覧 (id, 表示名)。順序は timeline.seq_order。
+    fn seq_tabs(&self) -> Vec<(String, String)> {
+        let tl = self.doc.raw.get(0).and_then(|c| c.get("timeline"));
+        let order: Vec<String> = tl
+            .and_then(|t| t.get("seq_order"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let names = tl.and_then(|t| t.get("seq_names"));
+        order
+            .into_iter()
+            .map(|id| {
+                let name = names
+                    .and_then(|n| n.get(&id))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("サブ")
+                    .to_string();
+                (id, name)
+            })
+            .collect()
+    }
+
+    /// シーケンスタブ切替。sequence スロットの中身を入れ替えるだけなので、
+    /// 既存の編集・描画・保存コードは何も知らなくてよい。undo履歴はタブ間で
+    /// 混ぜない（切替時にクリア）。
+    fn switch_seq(&mut self, target: &str) {
+        if self.is_generating_open() {
+            self.toast("🎬 ダンが制作中です。完成後に切り替えられます");
+            return;
+        }
+        let mut raw = self.doc.raw.clone();
+        {
+            let Some(tl) = raw
+                .get_mut(0)
+                .and_then(|c| c.get_mut("timeline"))
+                .and_then(|t| t.as_object_mut())
+            else {
+                return;
+            };
+            let active = tl.get("active_seq").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+            if active == target {
+                return;
+            }
+            // 対象を先に取り出す（無ければ何もしない）
+            let next = if target == "main" {
+                tl.remove("main_seq")
+            } else {
+                tl.get_mut("subseqs").and_then(|s| s.as_object_mut()).and_then(|s| s.remove(target))
+            };
+            let Some(next) = next else {
+                return;
+            };
+            // 今の sequence を退避してから入れ替え
+            if let Some(cur) = tl.insert("sequence".into(), next) {
+                if active == "main" {
+                    tl.insert("main_seq".into(), cur);
+                } else if let Some(s) = tl
+                    .entry("subseqs")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                {
+                    s.insert(active, cur);
+                }
+            }
+            tl.insert("active_seq".into(), serde_json::Value::from(target));
+        }
+        self.undo.clear();
+        self.redo.clear();
+        self.pending_undo = None;
+        self.selected.clear();
+        self.sub_in = None;
+        self.sub_edge_drag = None;
+        self.playing = false;
+        self.resume_pending = None;
+        self.restore(raw);
+        self.t = self.t.min(self.dur);
+        self.push_req(false);
+    }
+
+    /// 今開いているタイムラインを複製してサブタブを作り、そこへ切り替える。
+    /// 素材はID参照の共有なので複製されるのはJSONのクリップ並びだけ＝軽い。
+    fn create_sub(&mut self) {
+        if self.is_generating_open() {
+            self.toast("🎬 ダンが制作中です。完成後に作成できます");
+            return;
+        }
+        let mut raw = self.doc.raw.clone();
+        let new_id = format!("sub{}", lane_salt());
+        {
+            let Some(tl) = raw
+                .get_mut(0)
+                .and_then(|c| c.get_mut("timeline"))
+                .and_then(|t| t.as_object_mut())
+            else {
+                return;
+            };
+            let seq = tl.get("sequence").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let n = tl.get("seq_order").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) + 1;
+            if let Some(s) = tl
+                .entry("subseqs")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            {
+                s.insert(new_id.clone(), seq);
+            }
+            if let Some(a) = tl
+                .entry("seq_order")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+            {
+                a.push(serde_json::Value::from(new_id.clone()));
+            }
+            if let Some(s) = tl
+                .entry("seq_names")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            {
+                s.insert(new_id.clone(), serde_json::Value::from(format!("サブ{n}")));
+            }
+        }
+        self.restore(raw);
+        self.switch_seq(&new_id);
+        self.toast("サブを作成しました。ここは自由に編集できます（元のタイムラインは変わりません）");
+    }
+
+    /// サブタブ削除（右クリック2回で確定済み）。アクティブならメインへ戻ってから。
+    fn delete_sub(&mut self, id: &str) {
+        if self.active_seq_id() == id {
+            self.switch_seq("main");
+        }
+        let mut raw = self.doc.raw.clone();
+        {
+            let Some(tl) = raw
+                .get_mut(0)
+                .and_then(|c| c.get_mut("timeline"))
+                .and_then(|t| t.as_object_mut())
+            else {
+                return;
+            };
+            if let Some(s) = tl.get_mut("subseqs").and_then(|s| s.as_object_mut()) {
+                s.remove(id);
+            }
+            if let Some(s) = tl.get_mut("seq_names").and_then(|s| s.as_object_mut()) {
+                s.remove(id);
+            }
+            if let Some(a) = tl.get_mut("seq_order").and_then(|v| v.as_array_mut()) {
+                a.retain(|v| v.as_str() != Some(id));
+            }
+        }
+        self.restore(raw);
+        self.toast("サブを削除しました");
+    }
+
     /// サブタイムラインの再生区間（開始順ソート・マージ済み）。
     /// contents.json の sequence.subtimeline.ranges に永続化されている。
     fn sub_ranges(&self) -> Vec<(f64, f64)> {
@@ -7936,14 +8160,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn start_export(&mut self) {
         // mode "export" renders the CURRENT timeline server-side (the sequence rides in
-        // the instruction — what you see is exactly what gets rendered)
-        let timeline = self
-            .doc
-            .raw
-            .get(0)
-            .and_then(|r| r.get("timeline"))
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
+        // the instruction — what you see is exactly what gets rendered).
+        // sequence スロットには「開いているタブ」が入っている＝タブごとの書き出しが
+        // 自動で成立。退避中の main_seq/subseqs は送らない（payload節約）
+        let tl = self.doc.raw.get(0).and_then(|r| r.get("timeline"));
+        let mut timeline = serde_json::json!({
+            "sequence": tl.and_then(|t| t.get("sequence")).cloned().unwrap_or_else(|| serde_json::json!({})),
+        });
+        if let Some(fmt) = tl.and_then(|t| t.get("format")).cloned() {
+            timeline["format"] = fmt;
+        }
         let mut instruction = serde_json::json!({"mode": "export", "timeline": timeline});
         let sel_ranges = if self.export_use_sub { self.sub_ranges() } else { Vec::new() };
         if !sel_ranges.is_empty() {
@@ -12397,6 +12623,21 @@ impl eframe::App for App {
                                 "解像度 1080x1920 / 30fps   長さ {:02}:{:02}",
                                 dur as i64 / 60, dur as i64 % 60
                             ));
+                            // どのタブを書き出すか（sequenceスロット=開いているタブ）
+                            let active_tab = self.active_seq_id();
+                            if active_tab != "main" {
+                                let tname = self
+                                    .seq_tabs()
+                                    .into_iter()
+                                    .find(|(id, _)| *id == active_tab)
+                                    .map(|(_, n)| n)
+                                    .unwrap_or_else(|| "サブ".into());
+                                ui.label(
+                                    egui::RichText::new(format!("書き出し対象: {tname}（開いているタブ）"))
+                                        .color(egui::Color32::from_rgb(0, 210, 140))
+                                        .small(),
+                                );
+                            }
                             // サブタイムライン書き出し: 組んだ再生区間だけを繋げて1本に
                             if !sel_ranges.is_empty() {
                                 ui.checkbox(

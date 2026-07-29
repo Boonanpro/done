@@ -3492,3 +3492,68 @@ pub fn set_subtimeline_ranges(raw: &mut Value, ranges: &[(f64, f64)]) {
         );
     }
 }
+
+/// シーケンスタブ（サブタイムライン複製）。ディスク形式は常に
+/// timeline.sequence=メイン、サブは timeline.subseqs={id:sequence}・
+/// timeline.active_seq=開いていたタブ・seq_order/seq_names がタブ一覧。
+/// エディタのメモリ上では sequence=アクティブタブの中身（既存の編集・描画・
+/// undoコードは sequence だけを見るため無変更で全機能が効く）で、アクティブが
+/// サブの間はメインを timeline.main_seq に退避する。
+/// ロード直後に swap_in、保存直前に swap_out。
+pub fn seq_swap_in(raw: &mut Value) {
+    let Some(tl) = raw
+        .get_mut(0)
+        .and_then(|c| c.get_mut("timeline"))
+        .and_then(|t| t.as_object_mut())
+    else {
+        return;
+    };
+    let active = tl.get("active_seq").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+    if active == "main" {
+        return;
+    }
+    let sub = tl
+        .get_mut("subseqs")
+        .and_then(|s| s.as_object_mut())
+        .and_then(|s| s.remove(&active));
+    match sub {
+        Some(sub) => {
+            if let Some(main) = tl.insert("sequence".into(), sub) {
+                tl.insert("main_seq".into(), main);
+            }
+        }
+        None => {
+            // 参照先が無い（壊れている）→ メインへフォールバック
+            tl.insert("active_seq".into(), Value::from("main"));
+        }
+    }
+}
+
+/// 保存用スナップショット: メモリ形（sequence=アクティブ）→ディスク形（sequence=メイン）。
+/// メイン以外を開いていても、他の読者（Web制作タブ・ダン）には常にメインが見える。
+pub fn seq_swap_out(raw: &Value) -> Value {
+    let mut out = raw.clone();
+    let Some(tl) = out
+        .get_mut(0)
+        .and_then(|c| c.get_mut("timeline"))
+        .and_then(|t| t.as_object_mut())
+    else {
+        return out;
+    };
+    let active = tl.get("active_seq").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+    if active == "main" {
+        return out;
+    }
+    let (Some(cur), Some(main)) = (tl.remove("sequence"), tl.remove("main_seq")) else {
+        return out;
+    };
+    tl.insert("sequence".into(), main);
+    if let Some(s) = tl
+        .entry("subseqs")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    {
+        s.insert(active, cur);
+    }
+    out
+}
