@@ -107,6 +107,10 @@ pub struct Clip {
     pub effect_color: Option<String>,
     #[serde(default)]
     pub effect_opacity: Option<f64>,
+    /// 範囲エフェクト矩形の回転角（度・時計回り）。単色/枠/ぼかしの描画に適用。
+    /// 細い単色矩形＋角度で斜めの疑似ラインが引ける。
+    #[serde(default)]
+    pub effect_rot: Option<f64>,
     // SAM tracked-blur bake bound to this region-effect clip:
     // {asset_id, key, bake_start} — mask video = {asset_dir}/blur-cache/{key}.mask.mp4
     #[serde(default)]

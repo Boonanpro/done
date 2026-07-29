@@ -3454,3 +3454,22 @@ pub fn set_grade(raw: &mut Value, ids: &[String], patch: &Value) {
         }
     }
 }
+
+/// 範囲エフェクト矩形の回転角（度）。None または ~0 でフィールド削除（=無回転）。
+pub fn set_effect_rot(raw: &mut Value, id: &str, rot: Option<f64>) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        if let Some(map) = c.as_object_mut() {
+            match rot {
+                Some(r) if r.abs() > 1e-3 => {
+                    map.insert("effect_rot".into(), Value::from(r));
+                }
+                _ => {
+                    map.remove("effect_rot");
+                }
+            }
+        }
+    });
+}

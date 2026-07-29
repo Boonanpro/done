@@ -1091,13 +1091,16 @@ fn compose(
                         let t = c.effect_strength.unwrap_or(4.0).clamp(1.0, 24.0) / canvas_h() as f64;
                         let tx = t * canvas_h() as f64 / canvas_w() as f64;
                         let fcol = effect_rgb(c.effect_color.as_deref().unwrap_or("#ffe14d"));
+                        // 回転は枠全体の中心を共通pivotに（帯4本がバラけないように）
+                        let rot = c.effect_rot.unwrap_or(0.0);
+                        let pivot = (x + w * 0.5, y + h * 0.5);
                         for s in [
                             (x - tx, y - t, w + 2.0 * tx, t),
                             (x - tx, y + h, w + 2.0 * tx, t),
                             (x - tx, y, tx, h),
                             (x + w, y, tx, h),
                         ] {
-                            let _ = comp.apply_solid_rect(d3d, s, fcol, opacity);
+                            let _ = comp.apply_solid_rect_rot(d3d, s, fcol, opacity, rot, pivot);
                         }
                     } else if style == "zoom" {
                         let z = c.effect_strength.unwrap_or(1.6).clamp(1.1, 3.0);
@@ -1105,9 +1108,11 @@ fn compose(
                     } else if is_mosaic && c.blur_track.is_none() {
                         let _ = comp.apply_mosaic(d3d, rg, strength);
                     } else if is_solid {
-                        let _ = comp.apply_solid_rect(d3d, rg, solid, opacity);
+                        let rot = c.effect_rot.unwrap_or(0.0);
+                        let pivot = (rg.0 + rg.2 * 0.5, rg.1 + rg.3 * 0.5);
+                        let _ = comp.apply_solid_rect_rot(d3d, rg, solid, opacity, rot, pivot);
                     } else {
-                        let _ = comp.apply_blur_rect(d3d, rg, strength);
+                        let _ = comp.apply_blur_rect(d3d, rg, strength, c.effect_rot.unwrap_or(0.0));
                     }
                 }
             }
@@ -6054,12 +6059,29 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         });
                     }
+                    // 角度: 単色/枠/ぼかしの矩形を回す（細い単色＋角度＝斜めの疑似ライン）
+                    if is_solid || is_frame || cur == "gaussian" {
+                        let mut rot = clip.effect_rot.unwrap_or(0.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("角度");
+                            let r = ui.add(egui::Slider::new(&mut rot, -90.0..=90.0).suffix("°").fixed_decimals(1));
+                            if r.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if r.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_rot(raw, &cid, Some(rot as f64)));
+                            }
+                            if ui.small_button("0°").clicked() {
+                                let cid = id.clone();
+                                self.apply_edit(true, move |raw| edits::set_effect_rot(raw, &cid, None));
+                            }
+                        });
+                    }
                     ui.label(egui::RichText::new(if is_frame {
                         "枠=範囲を四角い線で囲むだけ（周囲は暗くしない）。同一シーンで複数箇所を目立たせても画面が沈みません。"
                     } else if is_focus || is_zoom {
                         "マーカー/スポットライト=範囲を目立たせる、ズーム=範囲へパンチイン。移動する対象は下の手動追従（キーフレーム）で追えます。"
                     } else {
-                        "単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。"
+                        "単色は静的範囲にもAI追従にも使えます。細くして角度をつければ斜めの線・帯としても使えます。ぼかし・モザイクは強度を調整できます。"
                     }).small().weak());
                     ui.add_space(6.0);
                     // ---- SAM tracked blur: the rectangle picks the OBJECT; the baked
@@ -8496,8 +8518,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         h += dy;
                     }
                 }
-                w = w.clamp(0.02, 1.0);
-                h = h.clamp(0.02, 1.0);
+                // 最小0.3%（1280px縦で約4px）: 細い単色矩形＝疑似ライン用途を許す
+                w = w.clamp(0.003, 1.0);
+                h = h.clamp(0.003, 1.0);
                 // 画面外へのはみ出しOK（端ギリギリを隠す用）。ただし最低5%は画面内に
                 // 残す＝完全に出て掴めなくなる事故を防ぐ
                 x = x.clamp(0.05 - w, 0.95);
