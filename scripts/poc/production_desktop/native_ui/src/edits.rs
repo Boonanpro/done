@@ -3473,3 +3473,22 @@ pub fn set_effect_rot(raw: &mut Value, id: &str, rot: Option<f64>) {
         }
     });
 }
+
+/// サブタイムライン（飛び飛び再生区間セット）: sequence.subtimeline.ranges を
+/// 丸ごと差し替える。空なら subtimeline ごと削除。
+pub fn set_subtimeline_ranges(raw: &mut Value, ranges: &[(f64, f64)]) {
+    let Some(seq) = raw.get_mut(0).and_then(|c| c.pointer_mut("/timeline/sequence")) else {
+        return;
+    };
+    let Some(obj) = seq.as_object_mut() else { return };
+    if ranges.is_empty() {
+        obj.remove("subtimeline");
+    } else {
+        obj.insert(
+            "subtimeline".into(),
+            serde_json::json!({
+                "ranges": ranges.iter().map(|(a, b)| vec![*a, *b]).collect::<Vec<_>>()
+            }),
+        );
+    }
+}

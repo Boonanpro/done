@@ -2342,6 +2342,22 @@ fn lane_salt() -> u64 {
         .unwrap_or(0)
 }
 
+/// 時間区間の開始順ソート＋重なり・隣接マージ。
+fn merge_time_ranges(mut v: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    v.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut m: Vec<(f64, f64)> = Vec::new();
+    for r in v {
+        if let Some(last) = m.last_mut() {
+            if r.0 <= last.1 + 1e-6 {
+                last.1 = last.1.max(r.1);
+                continue;
+            }
+        }
+        m.push(r);
+    }
+    m
+}
+
 /// クリップのカラーグレード係数（コンポジタの set_grade へ渡す形）。
 /// 全て既定値なら None（グレード無効＝コストゼロ）。
 fn grade_params(c: &model::Clip) -> Option<[f32; 6]> {
@@ -3632,8 +3648,14 @@ struct App {
     /// DaVinci-style render range (in/out, timeline seconds). None = whole content.
     /// Session-local: I/O keys set the edges at the playhead; ruler band edges drag.
     export_range: Option<(f64, f64)>,
-    /// 書き出しダイアログ「選択クリップの範囲だけ繋げて書き出す」チェック状態
-    export_use_selection: bool,
+    /// 書き出しダイアログ「サブタイムラインの区間だけ繋げて書き出す」チェック状態
+    export_use_sub: bool,
+    /// サブタイムライン編集モード（I/Oで飛び飛びの再生区間を組む＋区間だけ再生）
+    sub_mode: bool,
+    /// サブタイムラインの I キーで置いた「イン点待ち」（O で区間として確定）
+    sub_in: Option<f64>,
+    /// 区間ジャンプ直後の音声クロック再アンカー待ち（この間は再ジャンプしない）
+    sub_jump_until: Option<Instant>,
     /// render progress 0..1 while the server reports frame=N/M; None = no bar
     /// (queued / finishing phase / idle)
     export_progress: Option<f32>,
@@ -3868,7 +3890,10 @@ impl App {
             export_status: None,
             export_poll: Instant::now(),
             export_range: None,
-            export_use_selection: false,
+            export_use_sub: false,
+            sub_mode: false,
+            sub_in: None,
+            sub_jump_until: None,
             range_drag: None,
             export_progress: None,
             export_done_path: None,
@@ -7857,35 +7882,39 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .collect();
         let title = if title.trim().is_empty() { "動画".to_string() } else { title };
         self.export_dest = format!("{dir}\\{title}_{}.mp4", jst_timestamp_compact());
+        // サブタイムライン編集中に書き出しを開いたら、既定でその区間だけを書き出す
+        self.export_use_sub = self.sub_mode && !self.sub_ranges().is_empty();
         self.export_dialog_open = true;
     }
 
-    /// 選択クリップの時間帯から「飛び飛び書き出し」の範囲リストを作る。
-    /// 開始順にソートし、重なり・隣接はマージ。境界を任意の場所にしたい場合は
-    /// ハサミでクリップを割ってから選べばよい。
-    fn selected_export_ranges(&self) -> Vec<(f64, f64)> {
-        let mut v: Vec<(f64, f64)> = self
+    /// サブタイムラインの再生区間（開始順ソート・マージ済み）。
+    /// contents.json の sequence.subtimeline.ranges に永続化されている。
+    fn sub_ranges(&self) -> Vec<(f64, f64)> {
+        let v: Vec<(f64, f64)> = self
             .doc
-            .seq
-            .tracks
-            .iter()
-            .flat_map(|tr| tr.clips.iter())
-            .filter(|c| self.selected.contains(&c.id))
-            .map(|c| (c.timeline_start, c.timeline_end))
-            .filter(|(a, b)| b > a)
-            .collect();
-        v.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let mut m: Vec<(f64, f64)> = Vec::new();
-        for r in v {
-            if let Some(last) = m.last_mut() {
-                if r.0 <= last.1 + 1e-6 {
-                    last.1 = last.1.max(r.1);
-                    continue;
-                }
-            }
-            m.push(r);
-        }
-        m
+            .raw
+            .get(0)
+            .and_then(|c| c.pointer("/timeline/sequence/subtimeline/ranges"))
+            .and_then(|r| r.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| {
+                        let x = r.as_array()?;
+                        let (a, b) = (x.first()?.as_f64()?, x.get(1)?.as_f64()?);
+                        (b > a && a >= 0.0).then_some((a, b))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        merge_time_ranges(v)
+    }
+
+    /// サブタイムラインへ区間を追加して保存（undo対象）。
+    fn sub_add_range(&mut self, a: f64, b: f64) {
+        let mut rs = self.sub_ranges();
+        rs.push((a.min(b), a.max(b)));
+        let rs = merge_time_ranges(rs);
+        self.apply_edit(true, move |raw| edits::set_subtimeline_ranges(raw, &rs));
     }
 
     fn start_export(&mut self) {
@@ -7899,9 +7928,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .cloned()
             .unwrap_or(serde_json::json!({}));
         let mut instruction = serde_json::json!({"mode": "export", "timeline": timeline});
-        let sel_ranges = if self.export_use_selection { self.selected_export_ranges() } else { Vec::new() };
+        let sel_ranges = if self.export_use_sub { self.sub_ranges() } else { Vec::new() };
         if !sel_ranges.is_empty() {
-            // 選択クリップの範囲だけを（飛び飛びでも）繋げて1本に書き出す
+            // サブタイムラインの区間だけを（飛び飛びでも）繋げて1本に書き出す
             instruction["export_ranges"] =
                 serde_json::json!(sel_ranges.iter().map(|(a, b)| vec![*a, *b]).collect::<Vec<_>>());
         } else if let Some((ra, rb)) = self.export_range {
@@ -9123,6 +9152,29 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
+        // ---- サブタイムライン区間帯（飛び飛び再生区間）----
+        // 緑帯=再生・書き出しの対象。モード中は区間外のレーン本体を暗転して
+        // 「ここは流れない」を見せる。イン点待ちは緑の縦線。
+        {
+            let subs = self.sub_ranges();
+            let x_of = |t: f64| body.left() + t as f32 * self.pps - self.scroll_x;
+            for &(a, b) in &subs {
+                let x0 = x_of(a).max(body.left());
+                let x1 = x_of(b).min(body.right());
+                if x1 <= body.left() || x0 >= body.right() {
+                    continue;
+                }
+                p.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, body.top() + 9.0),
+                        egui::pos2(x1, body.top() + 16.0),
+                    ),
+                    2.0,
+                    egui::Color32::from_rgba_unmultiplied(0, 210, 140, if self.sub_mode { 170 } else { 90 }),
+                );
+            }
+        }
+
         // Layered-track model (Filmora/Olive): the tracks array IS the stacking order,
         // index 0 = back. Display shows visual tracks top=front (reverse array order);
         // audio tracks sit below the visual stack (universal NLE convention). No
@@ -9850,6 +9902,47 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
+        // サブタイムラインモード: 区間外のレーンを暗転（クリップより前面に塗る＝
+        // 「ここは再生・書き出しに含まれない」を見せる）＋イン点待ちの緑縦線
+        if self.sub_mode {
+            let subs = self.sub_ranges();
+            let x_of = |t: f64| body.left() + t as f32 * self.pps - self.scroll_x;
+            if !subs.is_empty() {
+                let mut edges: Vec<(f64, f64)> = Vec::new();
+                let mut prev = 0.0f64;
+                for &(a, b) in &subs {
+                    if a > prev {
+                        edges.push((prev, a));
+                    }
+                    prev = prev.max(b);
+                }
+                edges.push((prev, f64::MAX));
+                for (a, b) in edges {
+                    let x0 = x_of(a).max(body.left());
+                    let x1 = if b == f64::MAX { body.right() } else { x_of(b).min(body.right()) };
+                    if x1 <= x0 {
+                        continue;
+                    }
+                    p.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(x0, body.top() + 18.0),
+                            egui::pos2(x1, rect.bottom()),
+                        ),
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 110),
+                    );
+                }
+            }
+            if let Some(a) = self.sub_in {
+                let x = x_of(a);
+                if x >= body.left() && x <= body.right() {
+                    p.line_segment(
+                        [egui::pos2(x, body.top()), egui::pos2(x, rect.bottom())],
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 210, 140)),
+                    );
+                }
+            }
+        }
         let hx = body.left() + (self.t as f32) * self.pps - self.scroll_x;
         if hx >= body.left() && hx <= body.right() {
             p.line_segment(
@@ -9889,6 +9982,26 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         // ---- interactions: trim edges > move body > scrub empty space ----
         let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - body.left())) / pps).max(0.0) as f64;
+        // サブタイムライン: ルーラーの緑帯を右クリック=その区間を削除
+        if self.sub_mode && resp.secondary_clicked() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                if pos.y <= body.top() + 18.0 {
+                    let t = to_t(self.scroll_x, self.pps, pos.x);
+                    let rs = self.sub_ranges();
+                    if let Some(k) = rs.iter().position(|&(a, b)| t >= a && t <= b) {
+                        let (a, b) = rs[k];
+                        let mut rest = rs.clone();
+                        rest.remove(k);
+                        self.apply_edit(true, move |raw| edits::set_subtimeline_ranges(raw, &rest));
+                        self.toast(&format!(
+                            "区間を削除: {:02}:{:02}〜{:02}:{:02}",
+                            a as i64 / 60, a as i64 % 60, b as i64 / 60, b as i64 % 60
+                        ));
+                        self.push_req(false);
+                    }
+                }
+            }
+        }
         // selection & drag arming happen ON PRESS (standard NLE feel) — the old
         // clicked()/drag_started() pair depended on release timing and a clean previous
         // drag state, which made selection feel unreliable
@@ -11744,7 +11857,29 @@ impl eframe::App for App {
         // Render range (DaVinci-style): I = in point, O = out point at the playhead.
         // The other edge defaults to the content edge so a single keypress makes a
         // valid span; the export button then renders only this range.
-        if !typing {
+        // サブタイムラインモード中は I/O が「区間の追加」になる（飛び飛び可）。
+        if !typing && self.sub_mode {
+            let f = 1.0 / self.timeline_fps();
+            let t_now = self.grid_quantize(self.t);
+            if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+                self.sub_in = Some(t_now);
+                self.toast(&format!(
+                    "サブタイムライン イン点 {:02}:{:02} — Oキーで区間確定",
+                    t_now as i64 / 60, t_now as i64 % 60
+                ));
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
+                let a = self.sub_in.take().unwrap_or(0.0);
+                let (a, b) = (a.min(t_now), a.max(t_now).max(a.min(t_now) + f));
+                self.sub_add_range(a, b);
+                let n = self.sub_ranges().len();
+                self.toast(&format!(
+                    "区間を追加: {:02}:{:02}〜{:02}:{:02}（計{}区間）",
+                    a as i64 / 60, a as i64 % 60, b as i64 / 60, b as i64 % 60, n
+                ));
+                self.push_req(false);
+            }
+        } else if !typing {
             let f = 1.0 / self.timeline_fps();
             let t_now = self.grid_quantize(self.t);
             if ctx.input(|i| i.key_pressed(egui::Key::I)) {
@@ -11775,8 +11910,39 @@ impl eframe::App for App {
             let c = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
             // the audio clock re-anchors a beat after a seek/play request — until it does,
             // showing it would flash the playhead bar back to the OLD position
-            if (c - self.t).abs() < 0.3 || self.last_push.elapsed().as_secs_f32() > 1.2 {
+            // （サブタイムラインの区間ジャンプ直後も同じ理屈で保持し、ホールド明けは
+            // クロックを強制採用する。0.3ゲート任せだと短い区間で古い t が区間内に
+            // 見え続け、区間末で止まらずタイムライン末尾まで流れてしまう）
+            let mut jump_hold = false;
+            if let Some(u) = self.sub_jump_until {
+                if Instant::now() >= u {
+                    self.sub_jump_until = None;
+                    self.t = c;
+                } else {
+                    jump_hold = true;
+                }
+            }
+            if !jump_hold && ((c - self.t).abs() < 0.3 || self.last_push.elapsed().as_secs_f32() > 1.2) {
                 self.t = c;
+            }
+            // サブタイムライン: 再生ヘッドが区間の外に出たら次の区間頭へジャンプ
+            // ＝飛び飛び再生。最後の区間を出たら最終区間の末尾で停止。
+            if self.sub_mode && !jump_hold {
+                let rs = self.sub_ranges();
+                if !rs.is_empty() && !rs.iter().any(|&(a, b)| self.t >= a - 0.001 && self.t < b) {
+                    if let Some(&(a, b)) = rs.iter().find(|&&(a, _)| a > self.t) {
+                        self.t = a;
+                        // ホールドは区間長より短く（短い区間でも区間末チェックが生きる）
+                        let hold = ((b - a) * 800.0).clamp(150.0, 700.0) as u64;
+                        self.sub_jump_until =
+                            Some(Instant::now() + std::time::Duration::from_millis(hold));
+                        self.push_req(false);
+                    } else {
+                        self.playing = false;
+                        self.t = rs.last().map(|&(_, b)| b).unwrap_or(self.t).min(self.dur);
+                        self.push_req(false);
+                    }
+                }
             }
             if self.t >= self.dur - 0.05 {
                 self.playing = false;
@@ -12080,6 +12246,25 @@ impl eframe::App for App {
                         self.lib_refresh();
                     }
                 }
+                // サブタイムライン: 全体はそのまま、飛び飛びの再生区間を組んで
+                // 「その区間だけ再生→確認→書き出し」する切り出しモード
+                let sub_n = self.sub_ranges().len();
+                let sub_label = if sub_n > 0 {
+                    format!("✂ サブタイムライン({sub_n})")
+                } else {
+                    "✂ サブタイムライン".to_string()
+                };
+                if ui
+                    .selectable_label(self.sub_mode, sub_label)
+                    .on_hover_text("飛び飛びの再生区間を組んで、その区間だけ再生・書き出しできます。\nI=イン点 → O=区間追加 / ルーラーの緑帯を右クリック=区間削除")
+                    .clicked()
+                {
+                    self.sub_mode = !self.sub_mode;
+                    self.sub_in = None;
+                    if self.sub_mode {
+                        self.toast("サブタイムライン: Iでイン点→Oで区間追加（飛び飛び可）。再生は区間だけ流れます。緑帯を右クリックで削除");
+                    }
+                }
                 let exporting = self.export_job.is_some();
                 if ui
                     .add_enabled(!exporting, egui::Button::new("📤 書き出し"))
@@ -12104,9 +12289,9 @@ impl eframe::App for App {
                                 .map(|c| c.timeline_end)
                                 .fold(0.0f64, f64::max);
                             let (r0, r1) = self.export_range.unwrap_or((0.0, content_end));
-                            let sel_ranges = self.selected_export_ranges();
+                            let sel_ranges = self.sub_ranges();
                             let sel_total: f64 = sel_ranges.iter().map(|(a, b)| b - a).sum();
-                            let dur = if self.export_use_selection && !sel_ranges.is_empty() {
+                            let dur = if self.export_use_sub && !sel_ranges.is_empty() {
                                 sel_total
                             } else {
                                 (r1 - r0).max(0.0)
@@ -12115,22 +12300,21 @@ impl eframe::App for App {
                                 "解像度 1080x1920 / 30fps   長さ {:02}:{:02}",
                                 dur as i64 / 60, dur as i64 % 60
                             ));
-                            // 飛び飛び書き出し: 選択クリップの時間帯だけを繋げて1本に。
-                            // 境界を自由に切りたい時はハサミで割ってから選ぶ
+                            // サブタイムライン書き出し: 組んだ再生区間だけを繋げて1本に
                             if !sel_ranges.is_empty() {
                                 ui.checkbox(
-                                    &mut self.export_use_selection,
+                                    &mut self.export_use_sub,
                                     format!(
-                                        "選択クリップの範囲だけ繋げて書き出す（{}区間・計{:02}:{:02}）",
+                                        "サブタイムラインの区間だけ繋げて書き出す（{}区間・計{:02}:{:02}）",
                                         sel_ranges.len(),
                                         sel_total as i64 / 60,
                                         sel_total as i64 % 60
                                     ),
                                 );
-                            } else if self.export_use_selection {
-                                self.export_use_selection = false;
+                            } else if self.export_use_sub {
+                                self.export_use_sub = false;
                             }
-                            if self.export_use_selection && !sel_ranges.is_empty() {
+                            if self.export_use_sub && !sel_ranges.is_empty() {
                                 let list = sel_ranges
                                     .iter()
                                     .take(6)
@@ -12149,7 +12333,7 @@ impl eframe::App for App {
                                         .small(),
                                 );
                             }
-                            if !self.export_use_selection && self.export_range.is_some() {
+                            if !self.export_use_sub && self.export_range.is_some() {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "範囲書き出し: {:02}:{:02} 〜 {:02}:{:02}（解除はダイアログを閉じて✕）",
