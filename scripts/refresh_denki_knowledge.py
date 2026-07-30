@@ -16,10 +16,8 @@
 import json
 import os
 import re
-import shutil
 import sys
 import io
-import subprocess
 import time
 from datetime import datetime, timezone
 from urllib.parse import urljoin
@@ -34,13 +32,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 # スクリプトの位置を基準にした絶対パス（タスクスケジューラ等、作業フォルダがD:\done以外でも動くように）
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_PATH = os.path.join(ROOT, "frontend", "public", "denki-knowledge-index.json")
-# 公開サイト (denki-knowledge-done.vercel.app) を配信しているのは done-artifacts
-# リポジトリ / Vercel プロジェクト。索引はここへ同期して初めて公開に反映される。
-ARTIFACTS_REPO = os.path.abspath(
-    os.environ.get("DAN_ARTIFACTS_REPO")
-    or os.path.join(os.path.dirname(ROOT), "done-artifacts")
-)
-ARTIFACTS_INDEX_REL = "public/denki-knowledge-index.json"
+# 公開サイトを配信しているのは done-artifacts リポジトリ / Vercel プロジェクト。
+# ただしこのスクリプトから done-artifacts を直接触ってはいけない（publish_index の
+# docstring 参照）。反映は app.services.artifact_git_publish に任せる。
 UA = "Mozilla/5.0 (compatible; DenkiKnowledgeBot/1.0; +blog cross-search)"
 HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.8"}
 TEXT_CAP = 1500
@@ -343,22 +337,11 @@ def fetch_newest(src, known):
     return []
 
 
-def _run(cmd, cwd, timeout=1200):
-    # Windows 既定の cp932 で読むと git/vercel の日本語出力で落ちるので utf-8 固定。
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-    )
-
-
 def _verify_published(generated_at: str, attempts: int = 12, wait: int = 30) -> bool:
     """公開URLの索引が新しい generated_at に切り替わるまで確認する。"""
-    url = "https://denki-knowledge-done.vercel.app/denki-knowledge-index.json"
+    # <slug>-done.vercel.app の alias は廃止済み（RULES.md）。索引は public 直下に
+    # 置かれるので、成果物本体を配信している done-artifacts のホストで確認する。
+    url = "https://done-artifacts.vercel.app/denki-knowledge-index.json"
     for _ in range(attempts):
         try:
             r = session.get(url, headers={"Range": "bytes=0-200"}, timeout=TIMEOUT)
@@ -373,40 +356,39 @@ def _verify_published(generated_at: str, attempts: int = 12, wait: int = 30) -> 
 
 
 def publish_index() -> bool:
-    """索引を done-artifacts へ同期し、公開サイトへ反映する。
+    """索引を正規の公開経路（artifact_git_publish）で公開する。
 
-    公開サイトを配信しているのは done-artifacts プロジェクトなので、
-    D:/done 側の frontend/public を更新しただけでは公開に出ない。
-    通常は main へ push すれば Vercel が自動ビルドする。push できない時は
-    Vercel へ直接反映して公開を止めない。
+    ここで done-artifacts の作業ツリー main へ直接 commit し、push が失敗したら
+    その作業ツリーをそのまま `vercel --prod` で上げる、という実装をしてはいけない。
+    ローカル main が origin/main から分岐していると、本番が「分岐した古い main」で
+    丸ごと置き換わり、他の成果物（吉川特装など）が巻き戻る。
+    2026-07-30 に吉川特装のトップが6月18日の v1 に戻った事故の原因はこれだった。
+
+    artifact_git_publish は origin/main（push できない間は publish-pending）を
+    土台に隔離 worktree を作り、denki-knowledge のファイルだけを載せて公開するので、
+    他の成果物を巻き戻さない。索引 frontend/public/denki-knowledge-index.json は
+    denki-knowledge 所有ファイルとして公開対象に含まれている。
     """
-    if not os.path.isdir(ARTIFACTS_REPO):
-        print(f"[publish] 成果物リポジトリが見つかりません: {ARTIFACTS_REPO}")
-        return False
-
     with open(INDEX_PATH, encoding="utf-8") as f:
         generated_at = json.load(f)["generated_at"]
 
-    shutil.copyfile(INDEX_PATH, os.path.join(ARTIFACTS_REPO, *ARTIFACTS_INDEX_REL.split("/")))
-    _run(["git", "add", ARTIFACTS_INDEX_REL], ARTIFACTS_REPO)
-    commit = _run(
-        ["git", "commit", "-m", f"chore(denki-knowledge): 索引を {generated_at} へ更新"],
-        ARTIFACTS_REPO,
-    )
-    out = (commit.stdout or "") + (commit.stderr or "")
-    if commit.returncode != 0 and "nothing to commit" not in out:
-        print("[publish] commit に失敗:", out.strip()[:1000])
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    try:
+        from app.services.artifact_git_publish import publish_artifacts_via_git
+    except Exception as e:  # noqa: BLE001
+        print("[publish] 公開処理を読み込めません:", e)
         return False
 
-    push = _run(["git", "push", "origin", "main"], ARTIFACTS_REPO)
-    if push.returncode != 0:
-        print("[publish] push できないため Vercel へ直接反映します")
-        npx = shutil.which("npx") or shutil.which("npx.cmd") or "npx"
-        dep = _run([npx, "vercel", "--prod", "--yes"], ARTIFACTS_REPO)
-        if dep.returncode != 0:
-            tail = ((dep.stdout or "") + (dep.stderr or "")).strip()[-1500:]
-            print("[publish] Vercel 反映に失敗:", tail)
-            return False
+    results = publish_artifacts_via_git(["denki-knowledge"], push=True, wait_live=True)
+    result = results[0] if results else {}
+    status = result.get("status")
+    if status not in ("live", "pushed", "skipped"):
+        print("[publish] 公開に失敗:", str(result.get("error", ""))[:1000])
+        return False
+    if not result.get("changed"):
+        print("[publish] 索引に差分なし（公開はすでに最新）")
+        return True
 
     return _verify_published(generated_at)
 
