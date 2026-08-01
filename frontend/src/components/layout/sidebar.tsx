@@ -415,6 +415,15 @@ export function Sidebar({
                           >
                             {project.icon || '📁'}
                           </button>
+                          {project.has_active_run && (
+                            <span
+                              className="absolute -top-0.5 -right-1 flex h-2.5 w-2.5 pointer-events-none"
+                              title="ダンが作業中"
+                            >
+                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                            </span>
+                          )}
                           {emojiPickerProjectId === project.id && (
                             <div
                               ref={emojiPickerRef}
@@ -461,7 +470,11 @@ export function Sidebar({
                                     <p className="truncate">{project.title}</p>
                                   </div>
                                   <p className="text-xs text-muted-foreground truncate">
-                                    {formatRelativeTime(project.last_message_at || project.updated_at || project.created_at)}
+                                    {project.has_active_run ? (
+                                      <span className="animate-pulse font-medium text-emerald-500">ダンが作業中…</span>
+                                    ) : (
+                                      formatRelativeTime(project.last_message_at || project.updated_at || project.created_at)
+                                    )}
                                   </p>
                                 </div>
                                 {(project.unread_count || 0) > 0 && (

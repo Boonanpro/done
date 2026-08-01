@@ -4,11 +4,14 @@ Agent run persistence for project chat.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.models.project_schemas import AgentRunState
 from app.services.supabase_client import get_supabase_client
+
+logger = logging.getLogger(__name__)
 
 
 ACTIVE_RUN_STATES = {

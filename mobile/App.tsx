@@ -13,6 +13,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   AppState,
   BackHandler,
   FlatList,
@@ -146,6 +147,8 @@ type ProjectResponse = {
   last_message_at?: string | null;
   last_message_preview?: string | null;
   pinned_at?: string | null;
+  // ダンがこのプロジェクトで今まさに作業中か（一覧の「作業中」インジケーター用）
+  has_active_run?: boolean;
   updated_at?: string | null;
   created_at: string;
 };
@@ -1009,6 +1012,29 @@ function ProjectActionSheet({
         </View>
       </View>
     </Modal>
+  );
+}
+
+// チャット一覧の「ダンが作業中」インジケーター。緑の点から波紋が広がり続ける
+// （Webサイドバーの animate-ping 相当）。
+function RunningDot({ style }: { style?: StyleProp<ViewStyle> }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(anim, { toValue: 1, duration: 1200, useNativeDriver: true }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [anim]);
+  const ringScale = anim.interpolate({ inputRange: [0, 1], outputRange: [1, 2.4] });
+  const ringOpacity = anim.interpolate({ inputRange: [0, 0.7, 1], outputRange: [0.7, 0.15, 0] });
+  return (
+    <View style={[styles.runningDotWrap, style]} pointerEvents="none">
+      <Animated.View
+        style={[styles.runningDotRing, { opacity: ringOpacity, transform: [{ scale: ringScale }] }]}
+      />
+      <View style={styles.runningDotCore} />
+    </View>
   );
 }
 
@@ -2753,7 +2779,11 @@ function AppMain() {
               </View>
             ) : null
           }
-          renderItem={({ item }) => (
+          renderItem={({ item }) => {
+            // サーバーの has_active_run は一覧ポーリング(20s)で更新されるので、
+            // この端末から送った直後は streamingProjectId で即時に点灯させる。
+            const running = !!item.has_active_run || streamingProjectId === item.id;
+            return (
             <Pressable
               onPress={() => handleSelectProject(item.id)}
               onLongPress={() => handleProjectLongPress(item)}
@@ -2765,6 +2795,7 @@ function AppMain() {
             >
               <View style={styles.chatAvatar}>
                 <Text style={styles.chatAvatarText}>{item.icon || 'D'}</Text>
+                {running ? <RunningDot /> : null}
               </View>
               <View style={styles.chatListBody}>
                 <View style={styles.chatListTopRow}>
@@ -2778,8 +2809,11 @@ function AppMain() {
                   </View>
                   <Text style={styles.chatListTime}>{formatTime(projectTime(item))}</Text>
                 </View>
-                <Text style={styles.chatListPreview} numberOfLines={1}>
-                  {item.last_message_preview || 'メッセージはまだありません'}
+                <Text
+                  style={[styles.chatListPreview, running && styles.chatListPreviewRunning]}
+                  numberOfLines={1}
+                >
+                  {running ? 'ダンが作業中…' : item.last_message_preview || 'メッセージはまだありません'}
                 </Text>
               </View>
               {(item.unread_count || 0) > 0 ? (
@@ -2790,7 +2824,8 @@ function AppMain() {
                 </View>
               ) : null}
             </Pressable>
-          )}
+            );
+          }}
         />
 
         <Pressable
@@ -3836,6 +3871,32 @@ const styles = StyleSheet.create({
   chatListBody: {
     flex: 1,
     minWidth: 0,
+  },
+  runningDotWrap: {
+    alignItems: 'center',
+    height: 12,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: 12,
+  },
+  runningDotRing: {
+    backgroundColor: '#34d399',
+    borderRadius: 6,
+    height: 12,
+    position: 'absolute',
+    width: 12,
+  },
+  runningDotCore: {
+    backgroundColor: '#10b981',
+    borderRadius: 4.5,
+    height: 9,
+    width: 9,
+  },
+  chatListPreviewRunning: {
+    color: '#34d399',
+    fontWeight: '600',
   },
   chatListTopRow: {
     alignItems: 'center',

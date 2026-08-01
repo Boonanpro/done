@@ -353,6 +353,8 @@ export interface ProjectResponse {
   unread_count: number;
   last_message_at: string | null;
   pinned_at: string | null;
+  // ダンがこのプロジェクトで今まさに作業中か（一覧の「作業中」インジケーター用）
+  has_active_run?: boolean;
   created_at: string;
   updated_at: string | null;
 }

@@ -9,6 +9,8 @@ import logging
 
 from app.services.supabase_client import get_supabase_client
 from app.services.execution_events import normalize_event_type
+from app.services.run_service import RunService
+from app.models.project_schemas import AgentRunState
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +181,39 @@ class ProjectService:
             enriched.append(item)
         return enriched
 
+    def _attach_active_run_state(self, projects: list[dict]) -> list[dict]:
+        """一覧の各プロジェクトに has_active_run（ダンが今動いているか）を付ける。
+
+        サイドバー/アプリのチャット一覧の「作業中」インジケーター用。
+        state=='running' かつハートビート(updated_at)が生きている run がある
+        プロジェクトだけ True。承認待ち・paused は「動いている」ではないので
+        含めない。一覧の読み取りパスなので stale run の後始末（FAILED 更新）は
+        ここでは行わない（開いた時の get_current_run が担当）。
+        """
+        ids = [p.get("id") for p in projects if p.get("id")]
+        if not ids:
+            return projects
+        try:
+            rows = (
+                self.supabase.table("agent_runs")
+                .select("project_id,state,updated_at,created_at")
+                .in_("project_id", ids)
+                .eq("state", AgentRunState.RUNNING.value)
+                .is_("superseded_by_run_id", "null")
+                .execute()
+            )
+            running = {
+                row["project_id"]
+                for row in (rows.data or [])
+                if not RunService._is_run_stale(row)
+            }
+        except Exception as exc:
+            logger.debug("Active-run enrichment skipped: %s", exc)
+            running = set()
+        for p in projects:
+            p["has_active_run"] = p.get("id") in running
+        return projects
+
     # ==================== Projects ====================
 
     async def create_project(
@@ -263,6 +298,7 @@ class ProjectService:
 
         result = query.order("updated_at", desc=True).execute()
         enriched = self._enrich_projects_read_state(result.data or [], user_id)
+        enriched = self._attach_active_run_state(enriched)
         # LINE-style ordering: pinned items first (newer pins on top), then
         # the rest by activity. We do this in Python rather than SQL because
         # _enrich_projects_read_state already loads everything anyway.
