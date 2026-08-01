@@ -80,8 +80,6 @@ class ArtifactPublicationService:
 
     def ensure_draft_release(self, artifact_id: str) -> dict[str, Any]:
         latest = self.latest(artifact_id)
-        if latest and latest.get("status") in {"draft", "shared", "deploying", "live"}:
-            return latest
         # A failed attempt made before the project ID was recorded must not
         # cause the next retry to create a second destination.  Reuse the most
         # recent provisioned release for this artifact; it is the durable
@@ -98,6 +96,8 @@ class ArtifactPublicationService:
             )
             if previous.data:
                 return previous.data[0]
+        if latest and latest.get("status") in {"draft", "shared", "deploying", "live"}:
+            return latest
         return self.create_release(artifact_id)
 
     def delivery_project_for(self, artifact_id: str, *, legacy_project: str) -> str:
