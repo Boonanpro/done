@@ -158,12 +158,18 @@ class ArtifactPublicationService:
         from app.tools.publish_site.vercel_domains import get_vercel
 
         vercel = await get_vercel(user_id)
+        # Older saved Vercel credentials may contain a token but no team ID.
+        # The project itself still belongs to DAN's configured Vercel team, so
+        # retain the process-level team fallback instead of overwriting it with
+        # an empty string.  Without this, a perfectly valid dedicated project
+        # cannot be redeployed after a credential migration.
+        vercel_team_id = vercel.team_id or os.environ.get("VERCEL_ORG_ID") or os.environ.get("VERCEL_TEAM_ID") or ""
         env = os.environ.copy()
         env.update(
             {
                 "VERCEL_TOKEN": vercel.token,
                 "VERCEL_PROJECT_ID": project_id,
-                "VERCEL_ORG_ID": vercel.team_id or "",
+                "VERCEL_ORG_ID": vercel_team_id,
                 "ARTIFACT_ONLY_SLUG": str(artifact.get("slug") or ""),
             }
         )
