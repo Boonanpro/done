@@ -1,6 +1,6 @@
 """Register Windows Startup entries for Dan auxiliary processes.
 
-- pythonw 系（auto_deploy / observer_scheduler）はターミナル無しで起動する .bat を生成
+- pythonw 系（observer_scheduler）はターミナル無しで起動する .bat を生成
 - shell 系（DanFrontend）はリポジトリ内の .bat を call する薄いラッパーを生成
 
 DanCore.lnk と DanFrontend は Windows Update 等で PC が再起動した後に
@@ -19,11 +19,6 @@ startup_dir = os.path.join(
 
 # pythonw で起動する Python スクリプト系
 PYTHONW_TASKS = [
-    {
-        "name": "DanAutoDeploy",
-        "script": "scripts\\auto_deploy.py",
-        "args": "--bg",
-    },
     {
         "name": "DanObserverScheduler",
         "script": "scripts\\observer_scheduler.py",

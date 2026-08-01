@@ -150,6 +150,21 @@ class NameComRegistrar:
             "purchaseType": "registration",
             "years": max(int(years or 1), 1),
         }
+        # Name.com keeps an account address book, but sending the registrant
+        # explicitly makes purchase behavior deterministic just like Cloudflare.
+        if contact:
+            postal = contact.get("postal_info") or {}
+            address = postal.get("address") or {}
+            name = str(postal.get("name") or "").strip().split(" ", 1)
+            body["contacts"] = {"registrant": {
+                "firstName": name[0] if name else "",
+                "lastName": name[1] if len(name) > 1 else "-",
+                "companyName": postal.get("organization") or "",
+                "email": contact.get("email"), "phone": contact.get("phone"),
+                "address1": address.get("street"), "city": address.get("city"),
+                "state": address.get("state"), "zip": address.get("postal_code"),
+                "country": address.get("country_code"),
+            }}
         return await self._request("POST", "/domains", body)
 
     async def get_registration_status(self, domain: str) -> dict[str, Any]:

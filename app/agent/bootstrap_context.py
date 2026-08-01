@@ -168,7 +168,7 @@ def load_artifact_publish_state(room_id: str = "") -> str:
         rows = (
             sb.table("chat_artifact")
             .select(
-                "slug, share_url, delivery_status, custom_domain, last_publish_error, created_at"
+                "id, slug, share_url, delivery_status, custom_domain, last_publish_error, created_at"
             )
             .eq("room_id", room_id)
             .order("created_at", desc=False)
@@ -180,10 +180,31 @@ def load_artifact_publish_state(room_id: str = "") -> str:
     if not rows:
         return ""
 
+    # The publication ledger is the source for each site's dedicated public
+    # Vercel URL.  ``chat_artifact.share_url`` may still hold a retired
+    # /preview path from before the per-site migration.
+    releases: dict[str, str] = {}
+    try:
+        ids = [str(r.get("id")) for r in rows if r.get("id")]
+        if ids:
+            publication_rows = (
+                sb.table("artifact_publication")
+                .select("artifact_id,shared_url,published_at")
+                .in_("artifact_id", ids)
+                .order("published_at", desc=True)
+                .execute().data
+            ) or []
+            for publication in publication_rows:
+                artifact_id = str(publication.get("artifact_id") or "")
+                if artifact_id and artifact_id not in releases and publication.get("shared_url"):
+                    releases[artifact_id] = str(publication["shared_url"])
+    except Exception:
+        pass
+
     lines = []
     for r in rows:
         slug = r.get("slug") or "?"
-        share = r.get("share_url") or f"/preview/{slug}"
+        share = releases.get(str(r.get("id") or "")) or r.get("share_url") or "公開URLを準備中"
         status = r.get("delivery_status") or "preview"
         custom = r.get("custom_domain")
         if custom:
@@ -199,7 +220,7 @@ def load_artifact_publish_state(room_id: str = "") -> str:
 
     return (
         "## この部屋の成果物の公開状態（DBの真実）\n\n"
-        "成果物は登録された時点で自動的に `<host>/preview/<slug>` で仮公開されます。"
+        "成果物は登録後、専用Vercelプロジェクトへ公開され、その専用URLはすでに誰でも閲覧できます。"
         "現在の状態は以下です。公開状態やURLを聞かれたら、まずこれを根拠に直接答えてください"
         "（既に公開済みのものに「公開しましょうか？」と聞き返さない）。"
         "独自ドメインでの本公開はユーザーが別途「独自ドメインを取得」から行います。\n\n"

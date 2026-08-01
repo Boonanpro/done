@@ -100,6 +100,13 @@ def _boot_selfcheck() -> None:
 async def lifespan(app: FastAPI):
     logger.info("sandbox started")
     _boot_selfcheck()
+    try:
+        from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
+        resumed = await recover_paid_domain_registrations()
+        if resumed:
+            logger.info("resumed %s paid domain registration(s)", resumed)
+    except Exception:
+        logger.exception("paid domain registration recovery failed")
     yield
 
 

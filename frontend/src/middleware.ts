@@ -90,7 +90,13 @@ function markNoIndex(response: NextResponse): NextResponse {
   return response;
 }
 
-const DEFAULT_PUBLIC_ARTIFACT_SLUGS = ['kittoku', 'test-edit', 'salonboard-styleup', 'bookings'];
+const DEFAULT_PUBLIC_ARTIFACT_SLUGS = [
+  'kittoku',
+  'test-edit',
+  'salonboard-styleup',
+  'bookings',
+  'oku-yukadanbou',
+];
 
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
   ...DEFAULT_PUBLIC_ARTIFACT_SLUGS,
@@ -104,10 +110,13 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const host = normalizeHost(request.headers.get('host'));
   const deliverySlug = deliverySlugFromHost(host);
+  // A dedicated project serves exactly one artifact. Unlike the legacy shared
+  // host, it needs neither a database lookup nor a generated global rewrite.
+  const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
 
   // ホスト解決: 静的マップ → 納品ホスト → DB 由来の動的マップ の順に確認する。
   // 静的マップ / 納品ホストで決まる場合は外部 fetch を避ける。
-  let customDomainSlug: string | null = STATIC_DOMAIN_TO_ARTIFACT.get(host) ?? deliverySlug ?? null;
+  let customDomainSlug: string | null = dedicatedArtifactSlug ?? STATIC_DOMAIN_TO_ARTIFACT.get(host) ?? deliverySlug ?? null;
   if (!customDomainSlug) {
     const dynamicMap = await fetchDynamicDomainMap(request.nextUrl.origin);
     customDomainSlug = dynamicMap[host] ?? null;
@@ -182,7 +191,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  // ここから先はダン本体ホスト（done-studio.vercel.app / localhost 等）。
+  // ここから先はダン本体ホスト（localhost 等）。
   // /preview/<slug> はチャット横の編集用プレビュー、/artifacts/<slug> はその実体で、
   // どちらも内部用URL。外部公開URLと中身が重複するため必ず検索対象から外す。
   if (pathname.startsWith('/preview/')) {

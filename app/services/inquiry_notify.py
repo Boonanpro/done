@@ -94,7 +94,7 @@ def send_inquiry_notification(
 
 # 登録・送信した本人へ送る自動確認メール（控え）。営業メールではなく受付確認のみ。
 OWNER_REPLY_TO = "shub6923@gmail.com"
-PAINA_SITE_URL = "https://done-studio.vercel.app/preview/paina"
+PAINA_SITE_URL = "https://paina.info"
 
 
 def _autoreply_content(scope: str, name: str) -> Optional[tuple[str, str]]:

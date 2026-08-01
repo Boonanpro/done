@@ -107,6 +107,7 @@ interface PreviewState {
 
 interface PreviewActions {
   openArtifact: (projectId: string, artifact: ArtifactRecord) => void;
+  updateArtifact: (artifact: ArtifactRecord) => void;
   closePreview: () => void;
   toggleEditMode: () => void;
   /** iframe からの選択 snapshot を受けて選択状態を更新する。 */
@@ -183,6 +184,9 @@ export const usePreviewStore = create<PreviewStore>()(
           inspectorMode: 'comment',
         });
       },
+      updateArtifact: (artifact) => set((state) => (
+        state.artifact?.id === artifact.id ? { artifact: { ...state.artifact, ...artifact } } : {}
+      )),
 
       closePreview: () => {
         useEditHistoryStore.getState().clear();

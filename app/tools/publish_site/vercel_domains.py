@@ -11,7 +11,10 @@ Cloudflare Registrar で購入 → DNS設定 → このモジュールで Vercel
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -94,6 +97,39 @@ class VercelDomains:
 
     async def get_project(self, project_id_or_name: str) -> dict[str, Any]:
         return await self._request("GET", f"/v9/projects/{project_id_or_name}")
+
+    async def create_project(self, name: str) -> dict[str, Any]:
+        """Create an unlinked Next.js project for one artifact.
+
+        Deliberately no Git repository is attached: DAN promotes explicit,
+        immutable deployments and a Git provider outage must not publish a
+        different version behind its back.
+        """
+        return await self._request(
+            "POST",
+            "/v9/projects",
+            json={"name": name, "framework": "nextjs"},
+        )
+
+    async def create_project_environment_variable(
+        self,
+        project_id_or_name: str,
+        *,
+        key: str,
+        value: str,
+        targets: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Set a build/runtime variable on a dedicated project."""
+        return await self._request(
+            "POST",
+            f"/v10/projects/{project_id_or_name}/env",
+            json={
+                "key": key,
+                "value": value,
+                "type": "encrypted",
+                "target": targets or ["production", "preview"],
+            },
+        )
 
     async def list_deployments(
         self,
@@ -185,10 +221,35 @@ class VercelDomains:
         return await self._request("GET", f"/v6/domains/{domain}/config")
 
 
+def _detect_team_id() -> Optional[str]:
+    """デプロイ先のチーム(org)IDを解決する。
+
+    プロジェクトがチーム配下にあると、個人スコープで API を叩いても
+    "Project not found" になるため、チームIDを必ず付けて呼ぶ必要がある。
+    """
+    env_team = os.getenv("VERCEL_TEAM_ID") or os.getenv("VERCEL_ORG_ID")
+    if env_team:
+        return env_team
+    # .vercel/project.json の orgId が実際のデプロイ先スコープ。
+    root = Path(__file__).resolve().parents[3]
+    for candidate in (
+        root / "frontend" / ".vercel" / "project.json",
+        root / ".vercel" / "project.json",
+    ):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        org = data.get("orgId")
+        if isinstance(org, str) and org.startswith("team_"):
+            return org
+    return None
+
+
 async def get_vercel(user_id: Optional[str] = None) -> VercelDomains:
     """credentials DB から token を取得して :class:`VercelDomains` を返す。
 
-    team_id は user.json から自動取得 (将来チームを使う場合は明示渡しに変更)。
+    team_id は VERCEL_TEAM_ID か .vercel/project.json の orgId から解決する。
     """
     cred = await get_credentials_service().get_credential(
         user_id or DEFAULT_USER_ID, "vercel"
@@ -198,5 +259,4 @@ async def get_vercel(user_id: Optional[str] = None) -> VercelDomains:
             "Vercel credentials が credentials DB に存在しません。"
             "service=vercel で token を保存してください。"
         )
-    # 個人アカウントスコープで返す (team_id 指定はオプション)
-    return VercelDomains(token=cred["password"])
+    return VercelDomains(token=cred["password"], team_id=_detect_team_id())

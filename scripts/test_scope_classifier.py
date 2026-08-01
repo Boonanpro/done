@@ -18,7 +18,6 @@ CASES: list[tuple[str, str]] = [
     ("app/api/chat_routes.py", "infra"),
     ("app/services/inspector_writeback_core.py", "infra"),
     ("app/core/main.py", "infra"),
-    ("scripts/auto_deploy.py", "infra"),
     ("scripts/hook_destructive_guard.py", "infra"),
     ("tests/test_salonboard_browser_policy.py", "infra"),
     ("tests_e2e/test_project_chat_recovery.py", "infra"),

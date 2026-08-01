@@ -13,6 +13,7 @@
 
 朝1回、Windowsタスクスケジューラから --deploy 付きで実行する想定。
 """
+import asyncio
 import json
 import os
 import re
@@ -341,7 +342,7 @@ def _verify_published(generated_at: str, attempts: int = 12, wait: int = 30) -> 
     """公開URLの索引が新しい generated_at に切り替わるまで確認する。"""
     # <slug>-done.vercel.app の alias は廃止済み（RULES.md）。索引は public 直下に
     # 置かれるので、成果物本体を配信している done-artifacts のホストで確認する。
-    url = "https://done-artifacts.vercel.app/denki-knowledge-index.json"
+    url = "https://denki-knowledge-done.vercel.app/denki-knowledge-index.json"
     for _ in range(attempts):
         try:
             r = session.get(url, headers={"Range": "bytes=0-200"}, timeout=TIMEOUT)
@@ -375,12 +376,21 @@ def publish_index() -> bool:
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
     try:
-        from app.services.artifact_git_publish import publish_artifacts_via_git
+        from app.services.artifact_publication_service import ArtifactPublicationService
+        from app.services.chat_artifact_service import ChatArtifactService
+
+        def deploy_dedicated_index():
+            rows = (ChatArtifactService().supabase.table("chat_artifact").select("*")
+                    .eq("slug", "denki-knowledge").order("created_at", desc=True).limit(1).execute())
+            if not rows.data:
+                return [{"status": "error", "error": "denki-knowledge artifact is not registered"}]
+            asyncio.run(ArtifactPublicationService().deploy_dedicated_release(rows.data[0]))
+            return [{"status": "live", "changed": True}]
     except Exception as e:  # noqa: BLE001
         print("[publish] 公開処理を読み込めません:", e)
         return False
 
-    results = publish_artifacts_via_git(["denki-knowledge"], push=True, wait_live=True)
+    results = deploy_dedicated_index()
     result = results[0] if results else {}
     status = result.get("status")
     if status not in ("live", "pushed", "skipped"):

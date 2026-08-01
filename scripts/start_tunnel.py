@@ -205,10 +205,9 @@ def set_vercel_env(name: str, value: str):
 # 古いビルドを指したままになり、公開ツールのAPIが 404(DNS_HOSTNAME_RESOLVED_PRIVATE)
 # になる（2026-07-04 の障害の直接原因）。
 # salonboard-styleup-done.vercel.app: StyleUp をクライアント(SHUN氏ら)に共有済みの
-# 旧エイリアス。done-studio と同じく毎回張り替えないと古いビルドに固定され、
+# 旧エイリアス。毎回張り替えないと古いビルドに固定され、
 # 「保存に失敗しました」で締め出される（2026-07-05 の SHUN 氏ログイン不可の直接原因）。
 PUBLIC_ALIASES = [
-    "done-studio.vercel.app",
     "salonboard-styleup-done.vercel.app",
 ]
 

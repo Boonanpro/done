@@ -141,6 +141,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const closePreview = usePreviewStore((s) => s.closePreview);
   const toggleEditMode = usePreviewStore((s) => s.toggleEditMode);
   const openArtifact = usePreviewStore((s) => s.openArtifact);
+  const updateArtifact = usePreviewStore((s) => s.updateArtifact);
   const contentVersion = usePreviewStore((s) => s.contentVersion);
   const bumpContentVersion = usePreviewStore((s) => s.bumpContentVersion);
 
@@ -218,13 +219,25 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     staleTime: 10_000,
   });
 
+  // A paid domain setup updates the artifact from the server in the background.
+  // Keep an already-open full-screen preview in sync and reload it at its new
+  // production URL as soon as that update arrives.
+  useEffect(() => {
+    if (!artifact) return;
+    const latest = artifacts.find((candidate) => candidate.id === artifact.id);
+    if (!latest) return;
+    if (latest.production_url !== artifact.production_url || latest.custom_domain !== artifact.custom_domain) {
+      updateArtifact(latest);
+    }
+  }, [artifacts, artifact, updateArtifact]);
+
   const loaded = artifact ? loadedArtifactId === artifact.id : false;
 
   const publicPreviewUrl = artifact ? artifactSharePath(artifact.preview_url || artifact.slug) : '';
   const draftUrl = artifact ? artifact.draft_url || publicPreviewUrl : '';
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
   const publicShareUrl = artifact && shareUrl ? cleanArtifactUrl(artifact, shareUrl) : '';
-  // クロスオリジン化: プレビューiframe は成果物配信オリジン(done-studio/done-artifacts)を
+  // クロスオリジン化: プレビューiframe は成果物配信オリジンを
   // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
   const baseIframeSrc = absolutePublicUrl(draftUrl || publicPreviewUrl || shareUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。

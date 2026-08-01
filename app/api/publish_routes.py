@@ -22,6 +22,7 @@ from app.models.publish_schemas import (
     DomainCheckResponse,
     DomainCheckoutRequest,
     DomainCheckoutResponse,
+    DomainRegistrantRequest,
     DomainSetupCreateRequest,
     DomainSetupResponse,
     PaymentConfirmRequest,
@@ -31,6 +32,8 @@ from app.models.publish_schemas import (
 )
 from app.services.auth_service import TokenData, decode_access_token
 from app.services.chat_artifact_service import ChatArtifactService
+from app.services.artifact_publication_service import ArtifactPublicationService
+from app.config import settings
 from app.tools.publish_site.orchestrator import (
     check_domain,
     confirm_domain_payment,
@@ -47,6 +50,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/publish", tags=["publish"])
 security = HTTPBearer(auto_error=False)
 ACCESS_TOKEN_COOKIE = "done_access_token"
+
+
+async def _delivery_project_for_artifact(artifact_id: str, user_id: str) -> str:
+    """Authorize the artifact and resolve its delivery target server-side."""
+    artifact = await ChatArtifactService().get(artifact_id, user_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    publications = ArtifactPublicationService()
+    release = publications.latest(artifact_id)
+    if release and release.get("deployment_project"):
+        return str(release["deployment_project"])
+    # A domain-publication request is the explicit opt-in to dedicated delivery.
+    # Merely creating an artifact never creates a Vercel project or a billable
+    # external resource.
+    release = await publications.provision_dedicated_project(artifact, user_id=user_id)
+    project = (release.get("deployment_project") or "").strip()
+    if not project:
+        raise HTTPException(status_code=500, detail="Dedicated delivery project was not created")
+    return project
+
+
+async def _deploy_dedicated_artifact(artifact_id: str, user_id: str) -> dict:
+    artifact = await ChatArtifactService().get(artifact_id, user_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return await ArtifactPublicationService().deploy_dedicated_release(artifact, user_id=user_id)
 
 
 async def get_current_user(
@@ -90,12 +119,18 @@ async def run(
 
     クライアントが自分でドメインを用意する場合は ``/publish/domain-setup`` を使う。
     """
+    vercel_project = await _delivery_project_for_artifact(data.artifact_id, user.user_id)
+    await _deploy_dedicated_artifact(data.artifact_id, user.user_id)
+    # Owner-paid purchases use the owner's verified profile, never whatever
+    # default happens to be present in a registrar dashboard.
+    from app.services.domain_registrant_profile_service import get_domain_registrant_profile_service
+    owner_contact = await get_domain_registrant_profile_service().get_or_bootstrap(user.user_id)
     result = await publish_with_custom_domain(
         artifact_id=data.artifact_id,
         domain=data.domain,
-        vercel_project=data.vercel_project,
+        vercel_project=vercel_project,
         business_info=data.business_info,  # type: ignore[arg-type]
-        contact=data.contact,  # type: ignore[arg-type]
+        contact=owner_contact,
         years=data.years,
         auto_renew=data.auto_renew,
         artifact_dir=data.artifact_dir,
@@ -124,10 +159,12 @@ async def connect(
     Vercel紐付け→DNSをVercelへ向ける（Name.com/Cloudflareは自動・外部は手動レコード案内）
     →成果物にマッピング→反映確認。
     """
+    vercel_project = await _delivery_project_for_artifact(data.artifact_id, user.user_id)
+    await _deploy_dedicated_artifact(data.artifact_id, user.user_id)
     result = await connect_existing_domain(
         artifact_id=data.artifact_id,
         domain=data.domain,
-        vercel_project=data.vercel_project,
+        vercel_project=vercel_project,
         user_id=user.user_id,
         replace=data.replace,
     )
@@ -180,6 +217,7 @@ def _setup_to_response(
         success=success,
         token=token,
         setup_path=f"/domain-setup/{token}" if token else None,
+        setup_url=(f"{settings.PUBLIC_APP_URL.rstrip('/')}/domain-setup/{token}" if token else None),
         artifact_id=artifact_id,
         artifact_label=artifact_label,
         domain=setup.get("domain"),
@@ -189,6 +227,7 @@ def _setup_to_response(
         production_url=production_url,
         detail=detail or setup.get("last_error"),
         error=error,
+        registrant_saved=bool(setup.get("registrant_saved")),
     )
 
 
@@ -199,10 +238,11 @@ async def domain_setup_create(
 ):
     """クライアント向けドメイン取得の案内URLを発行する (オーナー操作)。"""
     try:
+        vercel_project = await _delivery_project_for_artifact(data.artifact_id, user.user_id)
         result = await create_domain_setup(
             artifact_id=data.artifact_id,
             domain=data.domain,
-            vercel_project=data.vercel_project,
+            vercel_project=vercel_project,
             user_id=user.user_id,
         )
     except Exception as e:
@@ -250,6 +290,24 @@ async def domain_setup_checkout(token: str, data: DomainCheckoutRequest):
     )
 
 
+@router.post("/domain-setup/{token}/registrant")
+async def domain_setup_registrant(token: str, data: DomainRegistrantRequest):
+    state = await get_domain_setup_state(token)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Domain setup not found")
+    setup = state["setup"]
+    if setup.get("status") != "pending" or setup.get("registrant_mode") not in (None, "client"):
+        raise HTTPException(status_code=409, detail="This invitation cannot accept registrant information")
+    contact = {"email": data.email.strip(), "phone": data.phone.strip(), "postal_info": {"name": data.name.strip(), "organization": data.organization.strip(), "address": {"street": data.street.strip(), "city": data.city.strip(), "state": data.state.strip(), "postal_code": data.postal_code.strip(), "country_code": data.country_code.strip().upper()}}}
+    from app.services.domain_registrant_profile_service import get_domain_registrant_profile_service
+    await get_domain_registrant_profile_service().save_for_setup(token, contact)
+    setup["registrant_mode"] = "client"
+    setup["registrant_saved"] = True
+    svc = ChatArtifactService()
+    svc.supabase.table(svc.table).update({"domain_setup": setup}).eq("id", state["artifact_id"]).execute()
+    return {"success": True}
+
+
 @router.post("/domain-setup/{token}/confirm", response_model=DomainSetupResponse)
 async def domain_setup_confirm(token: str, data: PaymentConfirmRequest):
     """決済完了の確認 → ドメイン取得・公開を開始する (公開・認証なし)。"""
@@ -279,6 +337,48 @@ async def domain_setup_confirm(token: str, data: PaymentConfirmRequest):
         detail=res.get("error"),
         error=None if res.get("success") else res.get("error"),
     )
+
+
+@router.post("/domain-setup/stripe-webhook")
+async def domain_setup_stripe_webhook(request: Request):
+    """Start registration from Stripe's signed payment event.
+
+    The browser return is retained for immediate feedback, while this endpoint
+    ensures a completed payment is still processed when the payer closes the
+    Checkout tab before returning to the invitation page.
+    """
+    from app.tools.publish_site.stripe_payments import StripeError, verify_webhook
+
+    try:
+        event = await verify_webhook(
+            await request.body(), request.headers.get("stripe-signature", "")
+        )
+    except StripeError as e:
+        logger.error("domain Stripe webhook unavailable: %s", e)
+        raise HTTPException(status_code=503, detail="domain payment webhook is not configured")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("invalid domain Stripe webhook: %s", e)
+        raise HTTPException(status_code=400, detail="invalid Stripe signature")
+
+    if event.get("type") != "checkout.session.completed":
+        return {"received": True, "started": False}
+
+    session = ((event.get("data") or {}).get("object") or {})
+    token = str(((session.get("metadata") or {}).get("token") or "")).strip()
+    session_id = str(session.get("id") or "").strip()
+    if not token or not session_id:
+        logger.warning("domain Stripe event missing token or session id")
+        return {"received": True, "started": False}
+
+    result = await confirm_domain_payment(token, session_id)
+    if not result.get("success"):
+        # A stale or malformed event should be acknowledged so Stripe does not
+        # retry it indefinitely; the application log retains the reason.
+        logger.error("domain payment confirmation failed for %s: %s", token, result.get("error"))
+        return {"received": True, "started": False}
+    if result.get("start"):
+        asyncio.create_task(run_paid_registration(token))
+    return {"received": True, "started": bool(result.get("start"))}
 
 
 @router.get("/custom-domains")

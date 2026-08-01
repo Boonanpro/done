@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     # Deploy: external frontend/CORS
     ALLOWED_ORIGINS: str = ""  # comma-separated extra origins
     FRONTEND_URL: str = ""     # e.g. https://xxx.vercel.app
+    # One canonical, externally reachable origin for client-facing flows.
+    # Never derive this from the operator's localhost browser URL.
+    PUBLIC_APP_URL: str = "https://frontend-mikis-projects-86652663.vercel.app"
 
     # Umami analytics (運営者所有・マルチテナント計測基盤)
     # 1 つの運営者 admin で全テナントの公開ドメインを website 登録・集計する。

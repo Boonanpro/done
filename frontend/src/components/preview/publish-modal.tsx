@@ -28,7 +28,6 @@ import { Label } from '@/components/ui/label';
 import type { ArtifactRecord } from '@/stores/preview-store';
 
 // 公開先の Vercel プロジェクト。内部固定値（UI には出さない）。
-const VERCEL_PROJECT = 'frontend';
 
 type Stage = 'domain' | 'payer' | 'confirm' | 'publishing' | 'done' | 'guide';
 
@@ -65,6 +64,7 @@ interface PublishResponse {
 interface DomainSetupResponse {
   success: boolean;
   setup_path?: string | null;
+  setup_url?: string | null;
   error?: string | null;
 }
 
@@ -159,7 +159,6 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         body: JSON.stringify({
           artifact_id: artifact.id,
           domain,
-          vercel_project: VERCEL_PROJECT,
           artifact_dir: `frontend/src/app/artifacts/${artifact.slug}`,
           write_seo_files: true,
           years: 1,
@@ -195,7 +194,6 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         body: JSON.stringify({
           artifact_id: artifact.id,
           domain,
-          vercel_project: VERCEL_PROJECT,
           replace,
         }),
       });
@@ -226,7 +224,6 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         body: JSON.stringify({
           artifact_id: artifact.id,
           domain,
-          vercel_project: VERCEL_PROJECT,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -237,8 +234,13 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         toast.error('発行に失敗しました', { description: data.error?.slice(0, 140) });
         return;
       }
-      const origin = typeof window !== 'undefined' ? window.location.origin : '';
-      setClientUrl(`${origin}${data.setup_path}`);
+      // The backend owns the canonical public origin.  Never infer a client
+      // payment URL from localhost, preview, or the currently open artifact.
+      if (!data.setup_url) {
+        toast.error('案内URLを確定できませんでした');
+        return;
+      }
+      setClientUrl(data.setup_url);
       setStage('guide');
       onPublished?.();
     },

@@ -37,8 +37,10 @@ class ChatArtifactService:
             payload.setdefault("draft_url", default_share_url)
             payload["share_url"] = self._to_preview_url(payload.get("share_url"), slug)
             payload["draft_url"] = self._to_preview_url(payload.get("draft_url"), slug)
-        payload.setdefault("publish_status", "preview_live")
-        payload.setdefault("delivery_status", "preview")
+        # Registration means that the artifact exists locally.  It does not
+        # mean that an external Vercel deployment has already answered.
+        payload.setdefault("publish_status", "created")
+        payload.setdefault("delivery_status", "created")
         payload.setdefault("delivery_mode", "preview")
         payload.setdefault("target_audience", "internal")
         payload.setdefault("requires_auth", False)
@@ -312,6 +314,19 @@ class ChatArtifactService:
             payload["message_id"] = str(payload["message_id"])
         result = self.supabase.table(self.table).insert(payload).execute()
         artifact = result.data[0] if result.data else None
+
+        # Keep delivery history separately from the artifact card.  This is
+        # best-effort during the migration so a missing migration can never
+        # prevent a user from receiving their newly created artifact.
+        if artifact:
+            try:
+                from app.services.artifact_publication_service import ArtifactPublicationService
+                ArtifactPublicationService().ensure_draft_release(artifact["id"])
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "publication ledger initialization failed for artifact %s", artifact.get("id")
+                )
 
         # dan-notion 自動整理: project 配下に block を追加
         # 失敗しても artifact 作成自体は成功扱いにする（best-effort）

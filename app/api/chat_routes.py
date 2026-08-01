@@ -698,19 +698,6 @@ def _artifact_slugs_from_written_paths(written_file_paths: list[str]) -> list[st
     return artifact_slugs_from_written_paths(written_file_paths)
 
 
-def _schedule_artifact_alias_deploy(written_file_paths: list[str]) -> None:
-    """Run the stable artifact deployment flow in the background.
-
-    This makes the alias update a harness behavior instead of relying on the LLM
-    to remember a deployment command after editing an artifact.
-    """
-    from app.services.chat_artifact_registration import (
-        schedule_artifact_alias_deploy_from_written_paths,
-    )
-
-    schedule_artifact_alias_deploy_from_written_paths(written_file_paths)
-
-
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
     """指定ルームの最新ユーザーメッセージを取得する（旧データ互換を含む）。"""
     if not room_id:

@@ -99,23 +99,18 @@ def artifact_slugs_from_written_paths(written_file_paths: Iterable[str]) -> list
     return slugs
 
 
-def schedule_artifact_alias_deploy_from_written_paths(written_file_paths: Iterable[str]) -> None:
-    """Schedule the provisional publish for any artifact root touched by writes.
+def schedule_artifact_delivery(artifacts: Iterable[dict], user_id: str) -> None:
+    """Send newly registered artifacts to their own Vercel delivery projects.
 
-    The moment an artifact is registered it should be publicly viewable at
-    ``<host>/preview/<slug>``. We achieve that by committing the artifact to the
-    production branch (``main``) so Vercel builds and serves it — see
-    ``app.services.artifact_git_publish``.
-
-    Historically this assigned a ``<slug>-done.vercel.app`` Vercel alias. That
-    alias path is retired (RULES.md): it created a second URL that pinned to a
-    stale deployment and 404'd. The clean single URL is ``/preview/<slug>``.
-    The function name is kept so existing callers (chat routes, registration)
-    keep working without changes.
+    There is intentionally no shared repository, shared Vercel project, or
+    alias rewrite in this path. A publish for site A cannot alter site B.
     """
-    from app.services.artifact_git_publish import schedule_artifact_git_publish
+    from app.services.artifact_publication_service import schedule_dedicated_deploy
 
-    schedule_artifact_git_publish(artifact_slugs_from_written_paths(written_file_paths))
+    for artifact in artifacts:
+        artifact_id = str(artifact.get("id") or "")
+        if artifact_id:
+            schedule_dedicated_deploy(artifact_id, user_id)
 
 
 def _page_exists(preview_url: str) -> bool:
@@ -153,7 +148,7 @@ def _payload_for_candidate(
         "artifact_type": service.infer_artifact_type(slug=slug, path=source_path),
         "label": slug.replace("-", " ").replace("_", " "),
         "preview_url": preview_url,
-        "publish_status": "preview_live",
+        "publish_status": "created",
     }
 
 
@@ -201,7 +196,7 @@ def register_written_chat_artifacts_sync(
         except Exception as e:  # noqa: BLE001 - registration must not break chat completion
             logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
-    schedule_artifact_alias_deploy_from_written_paths(written_paths)
+    schedule_artifact_delivery(created, user_id)
     return created
 
 
@@ -246,5 +241,5 @@ async def register_written_chat_artifacts(
         except Exception as e:  # noqa: BLE001 - registration must not break chat completion
             logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
-    schedule_artifact_alias_deploy_from_written_paths(written_paths)
+    schedule_artifact_delivery(created, user_id)
     return created

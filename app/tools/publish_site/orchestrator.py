@@ -420,9 +420,8 @@ async def publish_with_custom_domain(
             rec.complete(s, "[DRY-RUN] skipped")
         else:
             try:
-                from app.services.artifact_git_publish import publish_custom_domain_rewrites
-
-                pub = await publish_custom_domain_rewrites()
+                # Dedicated projects resolve their own host; shared rewrite publication is retired.
+                pub = {"changed": False}
                 if pub.get("pushed"):
                     rec.complete(s, "クリーンURL設定を反映（数分で公開）")
                 elif pub.get("changed") is False:
@@ -674,9 +673,8 @@ async def connect_existing_domain(
         #    （Vercel 再デプロイで /business 等がクリーンURLで配信される）。ベストエフォート。
         s = rec.start("publish_routing")
         try:
-            from app.services.artifact_git_publish import publish_custom_domain_rewrites
-
-            pub = await publish_custom_domain_rewrites()
+            # Dedicated projects resolve their own host; shared rewrite publication is retired.
+            pub = {"changed": False}
             if pub.get("pushed"):
                 rec.complete(s, "クリーンURL設定を反映（数分で公開）")
             elif pub.get("changed") is False:
@@ -787,6 +785,8 @@ async def create_domain_setup(
         "verified_at": None,
         "stripe_session_id": None,
         "last_error": None,
+        "registrant_mode": "client",
+        "registrant_saved": False,
     }
     await svc.update(
         artifact_id,
@@ -813,6 +813,8 @@ async def get_domain_setup_state(token: str) -> Optional[dict[str, Any]]:
     if artifact is None:
         return None
     setup = artifact.get("domain_setup") or {}
+    if setup.get("registrant_mode") not in (None, "client") or not setup.get("registrant_saved"):
+        return {"success": False, "error": "Please enter the domain registrant information before payment."}
     return {
         "artifact_id": artifact["id"],
         "artifact_label": artifact.get("label") or setup.get("slug") or "成果物",
@@ -839,6 +841,22 @@ async def create_domain_checkout(token: str, *, return_origin: str) -> dict[str,
     if setup.get("status") in ("registering", "live"):
         return {"success": False, "error": "すでに手続きが完了しています"}
 
+    # Do not create a payable Checkout session from a stale invitation quote:
+    # the name may have been taken or repriced since the link was issued.
+    try:
+        fresh_availability = await check_domain(domain, include_suggestions=False)
+        exact = fresh_availability.get("exact") or {}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("domain availability recheck failed")
+        return {"success": False, "error": f"Unable to recheck domain availability: {e}"}
+    if not exact.get("registrable"):
+        return {"success": False, "error": "This domain is no longer available. No payment was taken."}
+
+    # Persist the price that will be used for this Checkout session.
+    setup["availability"] = fresh_availability
+    svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
+        "id", artifact["id"]
+    ).execute()
     price = _setup_price(setup)
     try:
         amount_cents = round(float(price) * 100)
@@ -930,14 +948,35 @@ async def run_paid_registration(token: str) -> None:
 
     dry_run = await is_test_mode()
 
+    # Never infer the legal registrant from the payer/cardholder or DAN owner.
+    from app.services.domain_registrant_profile_service import get_domain_registrant_profile_service
+    try:
+        registrant_contact = await get_domain_registrant_profile_service().get_for_setup(token)
+        if not registrant_contact:
+            raise RuntimeError("The client registrant information was not provided.")
+        setup["registrant_profile"] = "client_verified"
+    except Exception as e:  # noqa: BLE001
+        setup["status"] = "failed"
+        setup["last_error"] = f"Registrant profile is not ready: {e}"
+        svc.supabase.table(svc.table).update({"domain_setup": setup}).eq("id", artifact_id).execute()
+        return
+
     deploy_url: Optional[str] = None
     try:
+        # The payer may never return to the owner browser, so the durable
+        # registration worker itself performs the dedicated deployment.  The
+        # domain is not attached until this immutable release is ready.
+        from app.services.artifact_publication_service import ArtifactPublicationService
+        await ArtifactPublicationService().deploy_dedicated_release(
+            artifact, user_id=artifact.get("created_by")
+        )
         result = await publish_with_custom_domain(
             artifact_id=artifact_id,
             domain=domain,
             vercel_project=setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT,
             artifact_dir=f"frontend/src/app/artifacts/{slug}" if slug else None,
             write_seo_files=True,
+            contact=registrant_contact,
             auto_renew=False,  # 自動更新OFF: 入金なしに更新料が課金されるのを防ぐ
             dry_run=dry_run,
             user_id=None,  # 運営者の Cloudflare / Vercel を使う
@@ -966,3 +1005,24 @@ async def run_paid_registration(token: str) -> None:
         svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
             "id", artifact_id
         ).execute()
+
+
+async def recover_paid_domain_registrations() -> int:
+    """Resume paid registrations left running by a sandbox restart.
+
+    The payment and its ``registering`` state are persisted before the work
+    begins, so restart recovery is safe and makes the flow durable without a
+    second queue service.
+    """
+    svc = ChatArtifactService()
+    rows = svc.supabase.table(svc.table).select(
+        "domain_setup_token,domain_setup"
+    ).not_.is_("domain_setup_token", "null").execute().data or []
+    resumed = 0
+    for row in rows:
+        setup = row.get("domain_setup") or {}
+        token = row.get("domain_setup_token")
+        if token and setup.get("status") == "registering":
+            asyncio.create_task(run_paid_registration(token))
+            resumed += 1
+    return resumed

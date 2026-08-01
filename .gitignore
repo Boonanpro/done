@@ -217,3 +217,18 @@ nul
 # Claude Code local settings (may contain API keys)
 .claude/settings.local.json
 .vercel
+
+# Local recovery copies, agent worktrees, research captures and generated runs.
+# These are deliberately kept on this machine but must never be committed as
+# application source or deployed with DAN.
+/.backup/
+/_codex_backups/
+/_codex_worktrees/
+/_research/
+/.agents/
+/.gojo_chunks/
+/*.out
+/scripts/*.out
+/scripts/*.err.txt
+/scripts/igserve/
+/frontend/public/*.mp4

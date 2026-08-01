@@ -105,7 +105,7 @@ async def publish_overrides(
 
     Inspector のライブ編集を「公開ボタンを押さずに」本番反映するための自動公開トリガ。
     フロントが編集保存後にデバウンスして叩く。焼き込み(DB→JSX)後に
-    schedule_artifact_git_publish で done-artifacts へ push し、Vercel 再ビルドで
+    dedicated deployment job で、この成果物のVercelプロジェクトだけを更新する。
     公開URL/クライアントに反映される（〜1〜2分）。DB の override は消さない
     （ライブプレビューの継続適用のため。JSX と内容一致で無害）。
     """
@@ -129,9 +129,22 @@ async def publish_overrides(
 
     publish_scheduled = False
     try:
-        from app.services.artifact_git_publish import schedule_artifact_git_publish
-        schedule_artifact_git_publish([slug])
-        publish_scheduled = True
+        artifact_result = (
+            service.supabase.table("chat_artifact")
+            .select("id")
+            .eq("slug", slug)
+            .eq("created_by", user.user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if artifact_result.data:
+            from app.services.artifact_publication_service import schedule_dedicated_deploy
+
+            schedule_dedicated_deploy(str(artifact_result.data[0]["id"]), user.user_id)
+            publish_scheduled = True
+        else:
+            skipped.append("artifact was not registered; no dedicated deployment target exists")
     except Exception as e:  # noqa: BLE001
         skipped.append(f"publish schedule failed: {e}")
 

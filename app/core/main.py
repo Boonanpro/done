@@ -92,6 +92,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("run recovery failed to schedule: %s", e)
 
+    # Paid domain work is persisted before it starts.  Resume it here after a
+    # process restart; this is independent of the payer's browser return.
+    try:
+        from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
+        asyncio.create_task(recover_paid_domain_registrations())
+    except Exception as e:
+        logger.warning("domain publication recovery failed to schedule: %s", e)
+
     yield
 
     # シャットダウン時にサンドボックスも止める
