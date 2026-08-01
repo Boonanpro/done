@@ -91,4 +91,3 @@ For brands, apps, and SaaS demos:
 - Exact logo/icon/UI text should be composited in `post-production`.
 
 Do not promise a generative model will faithfully reproduce UI text or logos unless a final compositing step is planned.
-

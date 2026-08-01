@@ -231,4 +231,5 @@ nul
 /scripts/*.out
 /scripts/*.err.txt
 /scripts/igserve/
+/scripts/*.mp4
 /frontend/public/*.mp4

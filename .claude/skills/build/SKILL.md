@@ -124,6 +124,27 @@ import { HeroMedia } from "@/components/templates";
 
 **通常の画像表示** (記事中の挿絵、商品サムネ等) は `<img>` / `<Image>` を直接書いて OK。overlay 不要なら `<HeroMedia>` も不要。
 
+### 4.5. 成果物で新しいクラスが効かない時は Tailwind のスキャン漏れを疑う
+
+`frontend/src/app/artifacts/<slug>/` は `.gitignore` で除外されている。Tailwind v4 の自動ソース
+検出は `.gitignore` を尊重するため、**成果物の中でしか使っていないクラス（arbitrary値
+`max-w-[34rem]` や `xl:` などの珍しい variant）は一切コンパイルされず、指定したレイアウトが
+無言で無視される**。エラーも警告も出ない。
+
+対策は導入済み: `scripts/wire_artifact_tailwind_sources.py` が slug ごとの `@source` を
+`frontend/src/app/artifact-sources.css` に書き出し、`globals.css` がそれを import する。
+`hook_register_artifact.py` が成果物作成時に自動で走らせる。
+
+**新しい slug を手で作った直後にレイアウトが効かない場合**は、まず
+`python scripts/wire_artifact_tailwind_sources.py` を実行すること。
+`artifacts/**` を起点にした glob では直らない（walker が ignore 対象の `<slug>/` で
+枝刈りされるため）。glob の起点は必ず `<slug>/` の内側に置く。
+
+（経緯: 2026-08-01、置く床暖房LPで非対称スプリットや `max-w-[34rem]` を指定したのに
+すべて無視され、縦積みのままの「ダサい」ページになっていた）
+
+---
+
 ### 5. 編集対象要素には **`data-edit-id` を必ず付ける**
 
 ライブペイント（インスペクタ）でユーザーが編集する可能性のあるテキスト要素・CTA・主要画像には、必ず一意の `data-edit-id` 属性を付ける。

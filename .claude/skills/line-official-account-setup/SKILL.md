@@ -97,6 +97,25 @@ Agency/制作会社 creating and building a client's account is a legitimate, LI
 
 **Pre-existing client account with unknown login:** you can't delete what you can't log into, and recovery needs the reset link sent to whatever email/phone made it. The pragmatic move is to **abandon it and create fresh** (a stray unverified OA is harmless) rather than chase recovery.
 
+## 応答メッセージ / あいさつメッセージ に画像・動画を入れる（manager のアップローダ）
+
+リッチメニュー画像は Messaging API で入れられるが、**応答メッセージ(自動応答)の写真/動画は Messaging API では設定できない**（応答メッセージは manager 側の機能）。manager のアップローダはネイティブのファイル選択なので MCP `browser` では入れられない。実績のある手順（吉川特装 2026-07-29）:
+
+1. **別プロファイルの Playwright を Bash から起動**（`launch_persistent_context(<一時ディレクトリ>, headless=False)`）。MCP browser の共有プロファイル `~/.ai_secretary/browser_data` は開かない。
+2. ログインは `get_credentials_service().get_credential(user_id, "line")` で取り出したメール＋パスワードを直接 fill → password 欄で Enter（`[data-email-login-button]` を先にクリックしてフォームを出す）。
+3. **2段階認証（`/login/verification`）が出る。** ログインコードは Business ID のメール（shub6923@gmail.com）に届くので、
+   `get_otp_service().extract_otp_from_email_imap(user_id, email_address=<そのアドレス>, max_age_minutes=3)` をポーリングして自動入力する。
+   ※古いコードを掴まないよう、**Enter を押した時刻より後の `extracted_at` だけ採用**すること。
+4. 編集画面で `＋追加` → 2ブロック目のツールバーで `写真` → `写真をアップロード` → モーダル内の `input[type=file]` に `set_input_files()`。**確定ボタンは不要**（選んだ時点でブロックに入る）。
+5. `変更を適用` は **2回クリック**が要る（ヘッダのボタン → 確認モーダル内の同名ボタン）。1回目だけだと保存されず、リロードで元に戻る。
+6. 終わったらブラウザを閉じ、一時プロファイルを削除する。
+
+やってはいけない: ローカル HTTP サーバを立てて manager のページから `fetch('http://127.0.0.1:...')` させ、`DataTransfer` で File を流し込む方法。**Chrome のローカルネットワークアクセス制限でリクエストが出ず、`page.evaluate` が返らないまま MCP browser のエグゼキュータごとハングする**（2026-07-29 に発生）。
+
+### リッチメニューのボタンから自動返信させる構成
+webhook サーバは要らない。リッチメニューのボタンを `action.type = "message"`（例 `text: "部品を注文する"`）にし、manager 側で**同じ文字列をキーワードにした応答メッセージ**を作る（キーワード応答＝完全一致）。応答は LINE 側で動くので PC が落ちていても返る。
+前提: 設定→応答設定 の 応答方法が「手動チャット＋応答メッセージ」（時間内）／「応答メッセージ」（時間外）になっていること。
+
 ## Pitfalls
 
 - MCP `browser(action="select")` on this site often times out. Set `<select>` values via `evaluate`: find the select, set `.value` via the native setter, dispatch `input`+`change`. Pick options by visible text.
