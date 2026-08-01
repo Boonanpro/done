@@ -76,6 +76,21 @@ const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
 // チャットごとの入力下書き（Web版 dan-chat-draft:<projectId> と同等）
 const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
+
+// サーバー取得のスナップショットでメッセージ一覧を置き換える時、送信直後で
+// まだサーバーに保存されていない楽観メッセージ（id が local-*）を残す。
+// 送信ボタンを押す直前に発射済みだったポーリング応答が数百ms遅れて着弾すると、
+// 丸ごと置き換えでは送ったばかりの吹き出しが一瞬消える（SSEのエコーが届いて
+// 復活するまで数秒、thinkingだけが見える）。エコー到着時に local-* は実IDの
+// 行へ置き換えられるので、ここで残しても二重表示にはならない。
+function keepLocalOptimistic(
+  server: MessageResponse[],
+  current: MessageResponse[],
+  roomId: string,
+): MessageResponse[] {
+  const locals = current.filter((m) => m.id.startsWith('local-') && m.room_id === roomId);
+  return locals.length > 0 ? [...server, ...locals] : server;
+}
 const EAS_PROJECT_ID = 'db295575-26c1-4088-99aa-4887eb27e2e2';
 const DanSmsForwarder = NativeModules.DanSmsForwarder as
   | {
@@ -1441,7 +1456,8 @@ function AppMain() {
         );
         // 取得中に別の部屋へ移動していたら適用しない（残像・取り違え防止）
         if (currentProjectIdRef.current === projectId) {
-          setMessages(data.messages ?? []);
+          const fetchedRoomId = roomId;
+          setMessages((current) => keepLocalOptimistic(data.messages ?? [], current, fetchedRoomId));
         }
         messagesCacheRef.current[roomId] = data.messages ?? [];
         // 既読は応答を待たずに送る
@@ -1652,7 +1668,7 @@ function AppMain() {
       apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=120`, {}, token)
         .then((data) => {
           if (!data?.messages) return;
-          setMessages(data.messages);
+          setMessages((current) => keepLocalOptimistic(data.messages, current, roomId));
           // The chat is open ⇒ a reply that just arrived is already read. Mark it
           // read on the server (only when the newest message actually changed) so
           // leaving the chat doesn't leave a phantom unread badge behind.
