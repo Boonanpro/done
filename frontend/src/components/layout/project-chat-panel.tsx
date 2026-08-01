@@ -73,9 +73,10 @@ type DisplayItem =
 
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
 // a finished turn (text segments + a collapsible tool group), so there's no
-// separate "process monitor" box anymore. While live, the tool group is open
-// (watch it work) and a spinner trails the steps; once the run finishes this
-// block is dropped and the saved message's blocks take over (tools collapsed).
+// separate "process monitor" box anymore. The tool group starts collapsed even
+// while live（「〇件の作業」をタップで開ける）; a spinner trails the steps as the
+// working indicator. Once the run finishes this block is dropped and the saved
+// message's blocks take over (also collapsed).
 function InlineProcessBlock({
   steps,
   isLive = false,
@@ -89,7 +90,7 @@ function InlineProcessBlock({
 
   return (
     <div className="my-1">
-      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} toolsOpen={isLive} /> : null}
+      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} /> : null}
       {isLive ? (
         <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
