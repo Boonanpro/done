@@ -82,6 +82,22 @@ class ArtifactPublicationService:
         latest = self.latest(artifact_id)
         if latest and latest.get("status") in {"draft", "shared", "deploying", "live"}:
             return latest
+        # A failed attempt made before the project ID was recorded must not
+        # cause the next retry to create a second destination.  Reuse the most
+        # recent provisioned release for this artifact; it is the durable
+        # identity of the site's Vercel project.
+        if latest and not (latest.get("deployment_project") or "").strip():
+            previous = (
+                self.supabase.table(self.table)
+                .select("*")
+                .eq("artifact_id", artifact_id)
+                .not_.is_("deployment_project", "null")
+                .order("release_number", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if previous.data:
+                return previous.data[0]
         return self.create_release(artifact_id)
 
     def delivery_project_for(self, artifact_id: str, *, legacy_project: str) -> str:
