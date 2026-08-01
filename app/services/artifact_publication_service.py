@@ -107,20 +107,31 @@ class ArtifactPublicationService:
         if existing:
             return release
 
-        from app.tools.publish_site.vercel_domains import get_vercel
+        from app.tools.publish_site.vercel_domains import VercelError, get_vercel
 
         slug = re.sub(r"[^a-z0-9-]+", "-", str(artifact.get("slug") or "site").lower()).strip("-") or "site"
         project_name = f"dan-site-{slug[:34]}-{artifact_id.replace('-', '')[:8]}"
         now = datetime.now(timezone.utc).isoformat()
+        created_project = False
         try:
             vercel = await get_vercel(user_id)
-            project = await vercel.create_project(project_name)
+            try:
+                project = await vercel.create_project(project_name)
+                created_project = True
+            except VercelError as exc:
+                # A prior process can have created the project but failed before
+                # writing its ID to the ledger.  Recover that exact project;
+                # never invent a second destination for the same artifact.
+                if exc.status != 409:
+                    raise
+                project = await vercel.get_project(project_name)
             project_id = str(project.get("id") or project.get("name") or project_name)
             # This variable makes the same frontend source a one-site delivery
             # application in this project, without global host routing.
-            await vercel.create_project_environment_variable(
-                project_id, key="ARTIFACT_ONLY_SLUG", value=slug
-            )
+            if created_project:
+                await vercel.create_project_environment_variable(
+                    project_id, key="ARTIFACT_ONLY_SLUG", value=slug
+                )
         except Exception as exc:
             self.mark_failed(artifact_id, f"dedicated project provisioning failed: {exc}")
             raise
