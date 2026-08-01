@@ -289,10 +289,11 @@ class ChatArtifactService:
         elif project_id:
             query = query.eq("project_id", project_id)
         result = query.order("created_at", desc=True).limit(limit).execute()
-        return [
+        rows = [
             row for row in (result.data or [])
             if self._local_route_exists(row.get("preview_url"))
         ]
+        return self._attach_delivery_urls(rows)
 
     async def get(self, artifact_id: str, user_id: str) -> Optional[dict]:
         result = (
@@ -302,7 +303,49 @@ class ChatArtifactService:
             .eq("created_by", user_id)
             .execute()
         )
-        return result.data[0] if result.data else None
+        rows = self._attach_delivery_urls(result.data or [])
+        return rows[0] if rows else None
+
+    def _attach_delivery_urls(self, artifacts: List[dict]) -> List[dict]:
+        """Add each artifact's actual release URL without altering its card.
+
+        Older cards still contain the former /preview/<slug> route.  The
+        durable publication ledger is the only record that can tell us whether
+        a dedicated Vercel release exists, so API readers receive that URL as
+        ``delivery_url``.  This makes old and new artifacts follow the same
+        source of truth without a risky bulk rewrite of user records.
+        """
+        if not artifacts:
+            return artifacts
+
+        ids = [str(row.get("id")) for row in artifacts if row.get("id")]
+        if not ids:
+            return artifacts
+        try:
+            result = (
+                self.supabase.table("artifact_publication")
+                .select("artifact_id,shared_url,release_number,published_at")
+                .in_("artifact_id", ids)
+                .not_.is_("shared_url", "null")
+                .order("release_number", desc=True)
+                .execute()
+            )
+        except Exception:
+            # The artifact card remains usable while a deployment record is
+            # unavailable (for example during a migration rollout).
+            return artifacts
+
+        latest_urls: dict[str, str] = {}
+        for release in result.data or []:
+            artifact_id = str(release.get("artifact_id") or "")
+            shared_url = str(release.get("shared_url") or "").strip()
+            if artifact_id and shared_url.startswith(("https://", "http://")):
+                latest_urls.setdefault(artifact_id, shared_url.rstrip("/"))
+
+        return [
+            {**row, "delivery_url": latest_urls.get(str(row.get("id"))) }
+            for row in artifacts
+        ]
 
     def create_sync(self, data: dict, user_id: str) -> Optional[dict]:
         payload = self._normalize_payload({**data, "created_by": user_id})

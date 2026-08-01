@@ -77,20 +77,15 @@ function absolutePublicUrl(pathOrUrl: string): string {
 }
 
 function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
-  // Provisional delivery URL: <origin>/preview/<slug>. This is the clean single
-  // public URL (RULES.md). It is served by the production deployment once the
-  // artifact is committed to main, and locally from disk meanwhile — so it never
-  // 404s. We do NOT fabricate a per-slug <slug>-done.vercel.app alias (retired:
-  // that second URL pinned to stale deployments and 404'd as DEPLOYMENT_NOT_FOUND).
-  const previewUrl = absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug));
+  const releaseUrl = absolutePublicUrl(pathOrUrl || artifactSharePath(artifact.slug));
 
-  // Only a custom-domain publish overrides the /preview URL. production_url is
-  // set only for custom domains; KNOWN_CUSTOM_DOMAINS are known-live.
+  // A custom domain is the public address once it has been attached.  Until
+  // then, use the concrete URL recorded for this artifact's dedicated release.
   const hasCustomDomain =
     !!artifact.production_url ||
     !!artifact.custom_domain ||
     (KNOWN_CUSTOM_DOMAINS[artifact.slug]?.length ?? 0) > 0;
-  if (!hasCustomDomain) return previewUrl;
+  if (!hasCustomDomain) return releaseUrl;
 
   return (
     artifactProductionUrl({
@@ -98,7 +93,7 @@ function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
       pathOrUrl,
       productionUrl: artifact.production_url,
       customDomain: artifact.custom_domain,
-    }) || previewUrl
+    }) || releaseUrl
   );
 }
 
@@ -226,7 +221,11 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     if (!artifact) return;
     const latest = artifacts.find((candidate) => candidate.id === artifact.id);
     if (!latest) return;
-    if (latest.production_url !== artifact.production_url || latest.custom_domain !== artifact.custom_domain) {
+    if (
+      latest.production_url !== artifact.production_url ||
+      latest.custom_domain !== artifact.custom_domain ||
+      latest.delivery_url !== artifact.delivery_url
+    ) {
       updateArtifact(latest);
     }
   }, [artifacts, artifact, updateArtifact]);
@@ -236,10 +235,14 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const publicPreviewUrl = artifact ? artifactSharePath(artifact.preview_url || artifact.slug) : '';
   const draftUrl = artifact ? artifact.draft_url || publicPreviewUrl : '';
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
-  const publicShareUrl = artifact && shareUrl ? cleanArtifactUrl(artifact, shareUrl) : '';
+  // delivery_url comes from the release ledger.  It is the same actual Vercel
+  // release used by the full-screen view, and takes precedence over retired
+  // shared /preview paths left on older artifact cards.
+  const releaseUrl = artifact?.delivery_url || draftUrl || shareUrl || publicPreviewUrl;
+  const publicShareUrl = artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '';
   // クロスオリジン化: プレビューiframe は成果物配信オリジンを
   // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
-  const baseIframeSrc = absolutePublicUrl(draftUrl || publicPreviewUrl || shareUrl);
+  const baseIframeSrc = absolutePublicUrl(releaseUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
   // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
   // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。

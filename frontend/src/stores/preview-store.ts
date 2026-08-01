@@ -55,6 +55,8 @@ export interface ArtifactRecord {
   artifact_type: 'website' | 'dashboard' | 'tool' | string;
   label: string | null;
   preview_url: string;
+  /** Latest verified dedicated release URL, supplied by the publication ledger. */
+  delivery_url?: string | null;
   share_url?: string | null;
   draft_url?: string | null;
   production_url?: string | null;
