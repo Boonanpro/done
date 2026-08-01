@@ -3087,10 +3087,11 @@ function AppMain() {
             ref={listRef}
             removeClippedSubviews
             renderItem={({ item }) => {
-              // Live in-progress turn: render the timeline as it builds (tool
-              // steps expanded) with a spinner, like the web chat's live view.
-              // Anchored chronologically — a follow-up message sent mid-run
-              // stays BELOW the work that happened before it.
+              // Live in-progress turn: render the timeline as it builds with a
+              // spinner, like the web chat's live view. Tool steps start
+              // COLLAPSED even while live（「〇件の作業」タップで開ける — Webと
+              // 同じ挙動）. Anchored chronologically — a follow-up message sent
+              // mid-run stays BELOW the work that happened before it.
               if (item.kind === 'live') {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.wideBubble]}>
@@ -3098,7 +3099,7 @@ function AppMain() {
                       <Text style={styles.messageSender}>DAN</Text>
                     </View>
                     {item.blocks.length > 0 ? (
-                      <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} defaultOpen />
+                      <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                     ) : null}
                     {/* The "running now" spinner sits at the bottom next to the
                         latest log line, so it's obvious which step is live. */}
