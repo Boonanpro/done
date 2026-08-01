@@ -74,6 +74,8 @@ const KNOWN_ARTIFACT_URLS: Record<string, string> = {
 const TOKEN_KEY = 'done_mobile_access_token';
 const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
+// チャットごとの入力下書き（Web版 dan-chat-draft:<projectId> と同等）
+const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
 const EAS_PROJECT_ID = 'db295575-26c1-4088-99aa-4887eb27e2e2';
 const DanSmsForwarder = NativeModules.DanSmsForwarder as
   | {
@@ -1093,6 +1095,47 @@ function AppMain() {
   const currentProjectIdRef = useRef<string | null>(null);
   useEffect(() => {
     currentProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
+  // ---- チャットごとの入力下書き退避・復元 ----
+  // AppMain は再マウントされず draft は1つだけなので、そのままだと
+  // 「書きかけの文が別のチャットにそのまま持ち越される」。切替時に
+  // プロジェクト単位で退避し、戻ってきた時に復元する。
+  // - 即時性: メモリ上の draftCacheRef（切替のたび同期更新）
+  // - 永続性: SecureStore（アプリ強制終了・再起動後も残す。書込は400ms
+  //   デバウンス。encrypted prefs への毎キー書込を避ける）
+  const draftCacheRef = useRef<Record<string, string>>({});
+  // いま draft state がどのプロジェクトの文章かを示す。切替直後の1コミットは
+  // draft がまだ前のチャットの文章なので、これで照合しないと保存効果が
+  // 新しいチャットのキャッシュを前の文章で汚染する。
+  const draftProjectRef = useRef<string | null>(null);
+  // ⚠️ この保存効果は下の復元効果より先に宣言すること。逆にすると切替コミットで
+  // 復元効果が先に draftProjectRef を新IDへ進め、直後に走る保存効果が
+  // 「前のチャットの draft」を新しいチャットのキーに保存してしまう。
+  useEffect(() => {
+    const pid = draftProjectRef.current;
+    if (!pid || pid !== currentProjectId) return;
+    draftCacheRef.current[pid] = draft;
+    const timer = setTimeout(() => {
+      if (draft) SecureStore.setItemAsync(draftStoreKey(pid), draft).catch(() => null);
+      else SecureStore.deleteItemAsync(draftStoreKey(pid)).catch(() => null);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [draft, currentProjectId]);
+  useEffect(() => {
+    if (!currentProjectId || draftProjectRef.current === currentProjectId) return;
+    draftProjectRef.current = currentProjectId;
+    const cached = draftCacheRef.current[currentProjectId];
+    setDraft(cached ?? '');
+    if (cached === undefined) {
+      // このセッションで初めて開くチャットだけ永続ストアを読む
+      SecureStore.getItemAsync(draftStoreKey(currentProjectId))
+        .then((saved) => {
+          if (!saved || draftProjectRef.current !== currentProjectId) return;
+          draftCacheRef.current[currentProjectId] = saved;
+          setDraft((d) => (d ? d : saved));
+        })
+        .catch(() => null);
+    }
   }, [currentProjectId]);
   // 一覧の最新スナップショット（loadProjectMessages が room_id を即参照する
   // ためのref。stateを直接依存に入れると関数の同一性が毎回変わり、これを

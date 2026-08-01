@@ -545,6 +545,8 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
 type DanSkill = { name: string; display_name: string; description: string };
 type TimelineReference = { content_id: string; title: string; updated_at?: string };
 
+const chatDraftKey = (projectId: string) => `dan-chat-draft:${projectId}`;
+
 function ChatInput({
   projectId,
   roomId,
@@ -615,6 +617,29 @@ function ChatInput({
     serverMessageIdRef.current = null;
     optimisticMessageIdRef.current = null;
   }, [roomId]);
+
+  // 入力中の下書きをプロジェクトごとに永続化する。
+  // パネルは key={selectedProjectId} で切替のたびアンマウントされるため、
+  // state だけだと書きかけのメッセージが消える → localStorage に退避・復元。
+  // 注意: 復元effectを保存effectより先に宣言すること（マウント直後の
+  // message='' で保存effectが先にキーを消すと下書きを読む前に失われる）。
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(chatDraftKey(projectId));
+      if (saved) setMessage((cur) => cur || saved);
+    } catch {
+      // localStorage が使えない環境では下書き保存なしで動く
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    try {
+      if (message) localStorage.setItem(chatDraftKey(projectId), message);
+      else localStorage.removeItem(chatDraftKey(projectId));
+    } catch {
+      // ignore
+    }
+  }, [message, projectId]);
 
   // Focus textarea when reply is selected
   useEffect(() => {
