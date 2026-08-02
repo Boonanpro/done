@@ -1,0 +1,25 @@
+/* 自動生成 — 直接編集しないこと。
+ * 生成元: scripts/wire_artifact_tailwind_sources.py
+ *
+ * 成果物ディレクトリは .gitignore で除外されており、Tailwind v4 の自動ソース検出
+ * （.gitignore を尊重する）から漏れる。artifacts/ を起点にした glob では walker が
+ * ignore 対象の <slug>/ で枝刈りされるため効かない。glob の起点を <slug>/ の内側に
+ * 置くと ignore 判定を回避できるので、slug ごとに 1 行ずつ列挙する。
+ */
+@source "./artifacts/[slug]/manifest.webmanifest/route.ts";
+@source "./artifacts/aix-dashboard/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/arm-roll/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/bookings/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/denki-knowledge/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/inspection-report/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/kittoku/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/new-attack/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/oku-yukadanbou/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/paina/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/publish/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/salonboard-monitor/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/salonboard-styleup/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/test-edit/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/yonago-gojo/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/yonago-gojo-comp/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/yonago-gojo-v1/**/*.{ts,tsx,js,jsx,mdx}";

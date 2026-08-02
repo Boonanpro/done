@@ -13,6 +13,46 @@ export const CUSTOM_DOMAIN_REWRITES: HostRewrite[] = [
     "has": [
       {
         "type": "host",
+        "value": "denkiouen.com"
+      }
+    ],
+    "destination": "/artifacts/denki-knowledge"
+  },
+  {
+    "source": "/:path+",
+    "has": [
+      {
+        "type": "host",
+        "value": "denkiouen.com"
+      }
+    ],
+    "destination": "/artifacts/denki-knowledge/:path+"
+  },
+  {
+    "source": "/",
+    "has": [
+      {
+        "type": "host",
+        "value": "kittoku.vercel.app"
+      }
+    ],
+    "destination": "/artifacts/kittoku"
+  },
+  {
+    "source": "/:path+",
+    "has": [
+      {
+        "type": "host",
+        "value": "kittoku.vercel.app"
+      }
+    ],
+    "destination": "/artifacts/kittoku/:path+"
+  },
+  {
+    "source": "/",
+    "has": [
+      {
+        "type": "host",
         "value": "paina.info"
       }
     ],
@@ -27,6 +67,46 @@ export const CUSTOM_DOMAIN_REWRITES: HostRewrite[] = [
       }
     ],
     "destination": "/artifacts/paina/:path+"
+  },
+  {
+    "source": "/",
+    "has": [
+      {
+        "type": "host",
+        "value": "www.denkiouen.com"
+      }
+    ],
+    "destination": "/artifacts/denki-knowledge"
+  },
+  {
+    "source": "/:path+",
+    "has": [
+      {
+        "type": "host",
+        "value": "www.denkiouen.com"
+      }
+    ],
+    "destination": "/artifacts/denki-knowledge/:path+"
+  },
+  {
+    "source": "/",
+    "has": [
+      {
+        "type": "host",
+        "value": "www.kittoku.vercel.app"
+      }
+    ],
+    "destination": "/artifacts/kittoku"
+  },
+  {
+    "source": "/:path+",
+    "has": [
+      {
+        "type": "host",
+        "value": "www.kittoku.vercel.app"
+      }
+    ],
+    "destination": "/artifacts/kittoku/:path+"
   },
   {
     "source": "/",
@@ -53,6 +133,14 @@ export const CUSTOM_DOMAIN_REWRITES: HostRewrite[] = [
 // 独自ドメインの host 解決を静的にする（middleware の動的fetch依存を補強し、
 // /artifacts/<slug> 直アクセスが /login に落ちる事故を防ぐ）。
 export const CUSTOM_DOMAIN_SLUG_MAP: Record<string, string[]> = {
+  "denki-knowledge": [
+    "denkiouen.com",
+    "www.denkiouen.com"
+  ],
+  "kittoku": [
+    "kittoku.vercel.app",
+    "www.kittoku.vercel.app"
+  ],
   "paina": [
     "paina.info",
     "www.paina.info"

@@ -2,6 +2,14 @@
 @import "tw-animate-css";
 @plugin "@tailwindcss/typography";
 
+/* 成果物 (frontend/src/app/artifacts/<slug>/) は .gitignore で除外されているため、
+   Tailwind v4 の自動ソース検出の対象外になる。@source を slug 単位で宣言しないと、
+   成果物側でしか使っていないクラス（arbitrary値・珍しい variant）が一切
+   コンパイルされず、指定したはずのレイアウトが無言で無視される。
+   artifact-sources.css は scripts/wire_artifact_tailwind_sources.py が自動生成し、
+   成果物を作るたびに hook_register_artifact.py が更新する。 */
+@import "./artifact-sources.css";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

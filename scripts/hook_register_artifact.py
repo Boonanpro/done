@@ -62,6 +62,18 @@ def main() -> int:
         except Exception as e:
             sys.stderr.write(f"[artifact icon] failed: {e}\n")
 
+        # 成果物ディレクトリは .gitignore 済みで Tailwind の自動ソース検出から漏れる。
+        # slug 単位の @source を書き出しておかないと、成果物でしか使っていないクラスが
+        # コンパイルされず、指定したレイアウトが無言で無視される。
+        try:
+            sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+            from wire_artifact_tailwind_sources import wire as wire_tw_sources
+
+            tw_status = wire_tw_sources()
+            sys.stderr.write(f"[artifact tailwind sources] {tw_status}\n")
+        except Exception as e:
+            sys.stderr.write(f"[artifact tailwind sources] failed: {e}\n")
+
     room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
     if not room_id or not project_id:

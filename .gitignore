@@ -193,6 +193,7 @@ tests/**/screenshot_*.png
 !/frontend/src/app/artifacts/publish/
 !/frontend/src/app/artifacts/\[slug\]/
 /frontend/src/app/api/denki-qa/
+/frontend/src/app/api/denki-auth/
 /frontend/src/app/api/kittoku/
 /frontend/public/artifacts/
 /frontend/public/kikkawa/
