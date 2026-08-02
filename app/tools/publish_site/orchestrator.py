@@ -454,6 +454,15 @@ async def publish_with_custom_domain(
             except Exception as e:  # noqa: BLE001
                 rec.fail(s, f"ルーティング反映でエラー: {e}")
 
+        # Record the externally observed publication facts in the durable
+        # ledger.  Chat answers and UI must read this, never infer SEO state
+        # from a legacy Vercel URL.
+        try:
+            from app.services.publication_status_service import get_publication_status_service
+
+            await get_publication_status_service().reconcile(artifact_id, user_id=user_id)
+        except Exception as exc:  # A reporting outage must not undo a live site.
+            logger.warning("publication state reconciliation failed for %s: %s", artifact_id, exc)
         result.success = True
         result.deploy_url = base_url
         return result

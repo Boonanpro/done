@@ -419,6 +419,23 @@ async def search_performance(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/status/{artifact_id}")
+async def publication_status(
+    artifact_id: str,
+    user: TokenData = Depends(get_current_user),
+):
+    """Return one reconciled publication fact record for an artifact."""
+    from app.services.publication_status_service import get_publication_status_service
+
+    try:
+        return await get_publication_status_service().reconcile(artifact_id, user_id=user.user_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("publication state reconciliation failed")
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @router.get("/analytics-stats")
 async def analytics_stats(
     domain: str,
