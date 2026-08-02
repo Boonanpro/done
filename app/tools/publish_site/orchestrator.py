@@ -59,6 +59,10 @@ REGISTRATION_POLL_TIMEOUT_SEC = 180
 DNS_VERIFY_POLL_INTERVAL_SEC = 5
 DNS_VERIFY_TIMEOUT_SEC = 180
 DEFAULT_VERCEL_PROJECT = "frontend"
+# One process may receive a repeated click and a restart-recovery scan at nearly
+# the same time.  The persisted state protects across restarts; this guard
+# prevents duplicate workers while this process is alive.
+_ACTIVE_DOMAIN_REGISTRATION_TOKENS: set[str] = set()
 
 
 @dataclass
@@ -197,6 +201,7 @@ async def publish_with_custom_domain(
     write_seo_files: bool = True,
     dry_run: bool = False,
     user_id: Optional[str] = None,
+    preferred_registrar: Optional[str] = None,
 ) -> PublishResult:
     """カスタムドメインで artifact を公開するフルフロー。
 
@@ -223,19 +228,37 @@ async def publish_with_custom_domain(
 
         # 1. 空き確認（両レジストラを比較し、初年度が安い方を採用）
         s = rec.start("check_availability")
-        exact, provider = await resolve_domain(domain, user_id)
-        if provider is None or not exact.get("registrable"):
-            reason = (exact or {}).get("reason", "unavailable")
-            rec.fail(s, f"{domain} is not registrable ({reason})")
-            result.error = f"{domain} is not available ({reason})"
-            return result
-        registrar = await get_registrar_by_name(provider, user_id)
-        result.pricing = exact.get("pricing")
-        rec.complete(s, f"${(result.pricing or {}).get('registration_cost')}/y via {provider}")
+        already_owned = False
+        provider = preferred_registrar
+        registrar = None
+        # On recovery, a registration API call may already have succeeded just
+        # before the process stopped.  Check the same registrar account first
+        # instead of treating the now-taken name as a fresh failure.
+        if provider:
+            registrar = await get_registrar_by_name(provider, user_id)
+            try:
+                already_owned = domain in await registrar.list_owned_domains()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("could not check owned domain %s via %s: %s", domain, provider, e)
+        if already_owned:
+            rec.complete(s, f"already owned via {provider}")
+        else:
+            exact, resolved_provider = await resolve_domain(domain, user_id)
+            if resolved_provider is None or not exact.get("registrable"):
+                reason = (exact or {}).get("reason", "unavailable")
+                rec.fail(s, f"{domain} is not registrable ({reason})")
+                result.error = f"{domain} is not available ({reason})"
+                return result
+            provider = resolved_provider
+            registrar = await get_registrar_by_name(provider, user_id)
+            result.pricing = exact.get("pricing")
+            rec.complete(s, f"${(result.pricing or {}).get('registration_cost')}/y via {provider}")
 
         # 2. 購入
         s = rec.start("register_domain")
-        if dry_run:
+        if already_owned:
+            rec.complete(s, "already registered in this account")
+        elif dry_run:
             rec.complete(s, "[DRY-RUN] skipped actual registration")
         else:
             await registrar.register(
@@ -806,6 +829,94 @@ async def create_domain_setup(
     }
 
 
+async def create_owner_domain_registration(
+    *,
+    artifact_id: str,
+    domain: str,
+    vercel_project: str,
+    user_id: str,
+    years: int = 1,
+    auto_renew: bool = True,
+    artifact_dir: Optional[str] = None,
+    write_seo_files: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Record an owner-paid request before doing external work.
+
+    The browser receives a quick acknowledgement.  Deployment, registration,
+    DNS, and SEO then continue from the persisted record, so a dropped browser
+    connection cannot be mistaken for a failed purchase.
+    """
+    svc = ChatArtifactService()
+    artifact = await svc.get(artifact_id, user_id)
+    if artifact is None:
+        raise RuntimeError("Artifact not found")
+    domain = _normalize_domain(domain)
+    if "." not in domain:
+        raise RuntimeError("A full domain such as example.com is required")
+
+    existing = dict(artifact.get("domain_setup") or {})
+    existing_token = artifact.get("domain_setup_token")
+    if (
+        existing_token
+        and existing.get("domain") == domain
+        and existing.get("registrant_mode") == "owner"
+        and existing.get("status") in ("registering", "live")
+    ):
+        # Repeated clicks join the existing durable job; they never initiate a
+        # second domain purchase.
+        return {"token": existing_token, "setup": existing, "start": False}
+
+    # Confirm the encrypted owner profile exists, without copying legal
+    # contact data into the artifact record.
+    from app.services.domain_registrant_profile_service import get_domain_registrant_profile_service
+    await get_domain_registrant_profile_service().get_or_bootstrap(user_id)
+
+    # Store the chosen registrar before the long-running work starts.  It is
+    # required to recognize an already-completed purchase after a restart.
+    exact, provider = await resolve_domain(domain, user_id)
+    if provider is None or not exact.get("registrable"):
+        reason = (exact or {}).get("reason", "unavailable")
+        raise RuntimeError(f"{domain} is not available ({reason})")
+
+    token = secrets.token_urlsafe(24)
+    setup = {
+        "domain": domain,
+        "vercel_project": vercel_project,
+        "slug": artifact.get("slug") or "",
+        "status": "registering",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "paid_at": None,
+        "verified_at": None,
+        "last_error": None,
+        "availability": {"exact": exact},
+        "registrar_provider": provider,
+        "registrant_mode": "owner",
+        "registrant_saved": True,
+        "worker_options": {
+            "years": years,
+            "auto_renew": auto_renew,
+            "artifact_dir": artifact_dir,
+            "write_seo_files": write_seo_files,
+            "dry_run": dry_run,
+        },
+    }
+    await svc.update(
+        artifact_id,
+        {
+            "domain_setup_token": token,
+            "domain_setup": setup,
+            "payment_responsibility": "owner_pays",
+            "delivery_mode": "owner_domain",
+            "publish_status": "domain_pending",
+            "last_publish_error": None,
+        },
+        user_id,
+    )
+    return {"token": token, "setup": setup, "start": True}
+
+
 async def get_domain_setup_state(token: str) -> Optional[dict[str, Any]]:
     """案内トークンからセッション状態を取得する (公開ページ用・認証なし)。"""
     svc = ChatArtifactService()
@@ -927,7 +1038,7 @@ async def confirm_domain_payment(token: str, session_id: str) -> dict[str, Any]:
     return {"success": True, "status": "registering", "start": True, "error": None}
 
 
-async def run_paid_registration(token: str) -> None:
+async def _run_domain_registration(token: str) -> None:
     """決済済みドメインの取得〜公開を実行する (バックグラウンドタスク)。
 
     運営者の Cloudflare でドメインを取得し、Vercel 紐付け・DNS・SEO・Search Console
@@ -941,20 +1052,24 @@ async def run_paid_registration(token: str) -> None:
     domain = setup.get("domain")
     slug = setup.get("slug")
     artifact_id = artifact["id"]
+    if not domain or not slug or setup.get("status") != "registering":
+        return
+    options = dict(setup.get("worker_options") or {})
+    owner_pays = setup.get("registrant_mode") == "owner"
 
     # Stripe テストモード (sk_test_) では実ドメイン取得を行わず空実行する。
     # 本番キー (sk_live_) の時だけ Cloudflare で実際に取得する。
-    from app.tools.publish_site.stripe_payments import is_test_mode
-
-    dry_run = await is_test_mode()
-
-    # Never infer the legal registrant from the payer/cardholder or DAN owner.
     from app.services.domain_registrant_profile_service import get_domain_registrant_profile_service
     try:
-        registrant_contact = await get_domain_registrant_profile_service().get_for_setup(token)
+        profiles = get_domain_registrant_profile_service()
+        registrant_contact = (
+            await profiles.get_or_bootstrap(str(artifact.get("created_by") or ""))
+            if owner_pays
+            else await profiles.get_for_setup(token)
+        )
         if not registrant_contact:
-            raise RuntimeError("The client registrant information was not provided.")
-        setup["registrant_profile"] = "client_verified"
+            raise RuntimeError("The domain registrant information was not provided.")
+        setup["registrant_profile"] = "owner_verified" if owner_pays else "client_verified"
     except Exception as e:  # noqa: BLE001
         setup["status"] = "failed"
         setup["last_error"] = f"Registrant profile is not ready: {e}"
@@ -970,16 +1085,23 @@ async def run_paid_registration(token: str) -> None:
         await ArtifactPublicationService().deploy_dedicated_release(
             artifact, user_id=artifact.get("created_by")
         )
+        if owner_pays:
+            dry_run = bool(options.get("dry_run", False))
+        else:
+            from app.tools.publish_site.stripe_payments import is_test_mode
+            dry_run = await is_test_mode()
         result = await publish_with_custom_domain(
             artifact_id=artifact_id,
             domain=domain,
             vercel_project=setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT,
-            artifact_dir=f"frontend/src/app/artifacts/{slug}" if slug else None,
-            write_seo_files=True,
+            artifact_dir=options.get("artifact_dir") or f"frontend/src/app/artifacts/{slug}",
+            write_seo_files=bool(options.get("write_seo_files", True)),
             contact=registrant_contact,
-            auto_renew=False,  # 自動更新OFF: 入金なしに更新料が課金されるのを防ぐ
+            years=int(options.get("years") or 1),
+            auto_renew=bool(options.get("auto_renew", False)),
             dry_run=dry_run,
             user_id=None,  # 運営者の Cloudflare / Vercel を使う
+            preferred_registrar=setup.get("registrar_provider"),
         )
         ok, err, deploy_url = result.success, result.error, result.deploy_url
     except Exception as e:  # noqa: BLE001
@@ -1007,6 +1129,22 @@ async def run_paid_registration(token: str) -> None:
         ).execute()
 
 
+async def run_domain_registration(token: str) -> None:
+    """Run one persisted domain job at most once in this process."""
+    if token in _ACTIVE_DOMAIN_REGISTRATION_TOKENS:
+        return
+    _ACTIVE_DOMAIN_REGISTRATION_TOKENS.add(token)
+    try:
+        await _run_domain_registration(token)
+    finally:
+        _ACTIVE_DOMAIN_REGISTRATION_TOKENS.discard(token)
+
+
+async def run_paid_registration(token: str) -> None:
+    """Compatibility wrapper for callers of the former client-paid worker."""
+    await run_domain_registration(token)
+
+
 async def recover_paid_domain_registrations() -> int:
     """Resume paid registrations left running by a sandbox restart.
 
@@ -1023,6 +1161,6 @@ async def recover_paid_domain_registrations() -> int:
         setup = row.get("domain_setup") or {}
         token = row.get("domain_setup_token")
         if token and setup.get("status") == "registering":
-            asyncio.create_task(run_paid_registration(token))
+            asyncio.create_task(run_domain_registration(token))
             resumed += 1
     return resumed

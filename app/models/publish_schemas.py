@@ -82,6 +82,8 @@ class PublishResponse(BaseModel):
     conflict_label: Optional[str] = None  # 同じドメインを使用中の別成果物名
     verified: bool = True  # 外部DNSが反映済みか（false=本番URL未確定）
 
+    status: Optional[Literal["registering", "live", "failed"]] = None
+
 
 class DeliveryUrlResponse(BaseModel):
     success: bool

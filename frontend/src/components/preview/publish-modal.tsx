@@ -60,6 +60,7 @@ interface PublishResponse {
   dns_instructions?: { a?: DnsRecord; cname?: DnsRecord } | null;
   conflict_label?: string | null;
   verified?: boolean;
+  status?: 'registering' | 'live' | 'failed' | null;
 }
 interface DomainSetupResponse {
   success: boolean;
@@ -174,7 +175,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
       setResult(data);
       setStage('done');
       if (data.success) {
-        toast.success('公開しました');
+        toast.success(data.status === 'registering' ? '公開処理を開始しました。画面を閉じても続きます。' : '公開しました');
         onPublished?.();
       }
     },
@@ -462,8 +463,15 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3">
                 <div className="flex items-center gap-2 font-medium text-emerald-700">
                   <CheckCircle2 className="h-5 w-5" />
-                  {result.verified === false ? 'DNS設定後に公開されます' : '公開しました'}
+                  {result.status === 'registering'
+                    ? '公開処理を開始しました'
+                    : result.verified === false ? 'DNS設定後に公開されます' : '公開しました'}
                 </div>
+                {result.status === 'registering' && (
+                  <p className="mt-1 text-sm text-emerald-800">
+                    この画面を閉じても、ドメイン取得・URL設定・検索エンジンへの登録は続きます。
+                  </p>
+                )}
                 {result.deploy_url && (
                   <a
                     href={result.deploy_url}

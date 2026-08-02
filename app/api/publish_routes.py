@@ -40,8 +40,9 @@ from app.tools.publish_site.orchestrator import (
     connect_existing_domain,
     create_domain_checkout,
     create_domain_setup,
+    create_owner_domain_registration,
     get_domain_setup_state,
-    publish_with_custom_domain,
+    run_domain_registration,
     run_paid_registration,
 )
 
@@ -119,33 +120,35 @@ async def run(
 
     クライアントが自分でドメインを用意する場合は ``/publish/domain-setup`` を使う。
     """
-    vercel_project = await _delivery_project_for_artifact(data.artifact_id, user.user_id)
-    await _deploy_dedicated_artifact(data.artifact_id, user.user_id)
-    # Owner-paid purchases use the owner's verified profile, never whatever
-    # default happens to be present in a registrar dashboard.
-    from app.services.domain_registrant_profile_service import get_domain_registrant_profile_service
-    owner_contact = await get_domain_registrant_profile_service().get_or_bootstrap(user.user_id)
-    result = await publish_with_custom_domain(
-        artifact_id=data.artifact_id,
-        domain=data.domain,
-        vercel_project=vercel_project,
-        business_info=data.business_info,  # type: ignore[arg-type]
-        contact=owner_contact,
-        years=data.years,
-        auto_renew=data.auto_renew,
-        artifact_dir=data.artifact_dir,
-        write_seo_files=data.write_seo_files,
-        dry_run=data.dry_run,
-        user_id=user.user_id,
-    )
+    try:
+        vercel_project = await _delivery_project_for_artifact(data.artifact_id, user.user_id)
+        queued = await create_owner_domain_registration(
+            artifact_id=data.artifact_id,
+            domain=data.domain,
+            vercel_project=vercel_project,
+            user_id=user.user_id,
+            years=data.years,
+            auto_renew=data.auto_renew,
+            artifact_dir=data.artifact_dir,
+            write_seo_files=data.write_seo_files,
+            dry_run=data.dry_run,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.exception("owner domain registration could not be started")
+        return PublishResponse(
+            success=False, artifact_id=data.artifact_id, domain=data.domain,
+            error=str(e), status="failed",
+        )
+    if queued["start"]:
+        asyncio.create_task(run_domain_registration(queued["token"]))
     return PublishResponse(
-        success=result.success,
-        artifact_id=result.artifact_id,
-        domain=result.domain,
-        deploy_url=result.deploy_url,
-        steps=[PublishStepDTO(**s.__dict__) for s in result.steps],
-        error=result.error,
-        pricing=result.pricing,
+        success=True,
+        artifact_id=data.artifact_id,
+        domain=queued["setup"]["domain"],
+        steps=[PublishStepDTO(name="start", status="running", detail="Publication continues even if this window is closed.")],
+        status=queued["setup"].get("status", "registering"),
     )
 
 
