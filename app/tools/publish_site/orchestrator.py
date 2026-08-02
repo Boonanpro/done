@@ -808,6 +808,7 @@ async def create_domain_setup(
         "verified_at": None,
         "stripe_session_id": None,
         "last_error": None,
+        "previous_publish_status": artifact.get("publish_status") or "preview_live",
         "registrant_mode": "client",
         "registrant_saved": False,
     }
@@ -890,6 +891,7 @@ async def create_owner_domain_registration(
         "paid_at": None,
         "verified_at": None,
         "last_error": None,
+        "previous_publish_status": artifact.get("publish_status") or "preview_live",
         "availability": {"exact": exact},
         "registrar_provider": provider,
         "registrant_mode": "owner",
@@ -1056,6 +1058,12 @@ async def _run_domain_registration(token: str) -> None:
         return
     options = dict(setup.get("worker_options") or {})
     owner_pays = setup.get("registrant_mode") == "owner"
+    setup["progress"] = "preparing_site"
+    svc.supabase.table(svc.table).update({
+        "domain_setup": setup,
+        "publish_status": "domain_preparing",
+        "last_publish_error": None,
+    }).eq("id", artifact_id).execute()
 
     # Stripe テストモード (sk_test_) では実ドメイン取得を行わず空実行する。
     # 本番キー (sk_live_) の時だけ Cloudflare で実際に取得する。
@@ -1073,7 +1081,11 @@ async def _run_domain_registration(token: str) -> None:
     except Exception as e:  # noqa: BLE001
         setup["status"] = "failed"
         setup["last_error"] = f"Registrant profile is not ready: {e}"
-        svc.supabase.table(svc.table).update({"domain_setup": setup}).eq("id", artifact_id).execute()
+        svc.supabase.table(svc.table).update({
+            "domain_setup": setup,
+            "publish_status": "domain_failed",
+            "last_publish_error": setup["last_error"],
+        }).eq("id", artifact_id).execute()
         return
 
     deploy_url: Optional[str] = None
@@ -1090,6 +1102,11 @@ async def _run_domain_registration(token: str) -> None:
         else:
             from app.tools.publish_site.stripe_payments import is_test_mode
             dry_run = await is_test_mode()
+        setup["progress"] = "registering_domain"
+        svc.supabase.table(svc.table).update({
+            "domain_setup": setup,
+            "publish_status": "domain_registering",
+        }).eq("id", artifact_id).execute()
         result = await publish_with_custom_domain(
             artifact_id=artifact_id,
             domain=domain,
@@ -1110,13 +1127,16 @@ async def _run_domain_registration(token: str) -> None:
     latest = await svc.get_by_domain_setup_token(token)
     setup = dict((latest or {}).get("domain_setup") or setup)
     if ok:
-        setup["status"] = "live"
+        setup["status"] = "test_complete" if dry_run else "live"
         setup["verified_at"] = datetime.now(timezone.utc).isoformat()
         setup["last_error"] = None
+        setup["progress"] = "test_complete" if dry_run else "complete"
         setup["dry_run"] = dry_run
         update: dict[str, Any] = {"domain_setup": setup}
         # dry-run でも完了画面に表示できるよう production_url を入れる
-        if deploy_url:
+        if dry_run:
+            update["publish_status"] = setup.get("previous_publish_status") or "preview_live"
+        if deploy_url and not dry_run:
             update["production_url"] = deploy_url
             update["custom_domain"] = domain
             update["publish_status"] = "live"
@@ -1124,9 +1144,12 @@ async def _run_domain_registration(token: str) -> None:
     else:
         setup["status"] = "failed"
         setup["last_error"] = err
-        svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
-            "id", artifact_id
-        ).execute()
+        setup["progress"] = "failed"
+        svc.supabase.table(svc.table).update({
+            "domain_setup": setup,
+            "publish_status": "domain_failed",
+            "last_publish_error": err,
+        }).eq("id", artifact_id).execute()
 
 
 async def run_domain_registration(token: str) -> None:

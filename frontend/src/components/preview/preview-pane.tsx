@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ClipboardList, Copy, Edit3, ExternalLink, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
+import { ChevronDown, ClipboardList, Copy, Edit3, ExternalLink, Loader2, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -17,6 +17,17 @@ import { PublishModal } from './publish-modal';
 import { DeliveryModal } from './delivery-modal';
 
 const LEGACY_SHARE_ORIGIN = 'https://frontend-mikis-projects-86652663.vercel.app';
+
+const DOMAIN_PUBLICATION_LABEL: Record<string, string> = {
+  domain_pending: '公開を開始中…',
+  domain_preparing: 'サイトを準備中…',
+  domain_registering: 'ドメインを取得・設定中…',
+  domain_failed: '公開を確認中',
+};
+
+function isDomainPublicationRunning(status?: string | null) {
+  return status === 'domain_pending' || status === 'domain_preparing' || status === 'domain_registering';
+}
 
 /** Undo / Redo ボタン。編集中のみ表示。 */
 function UndoRedoButtons() {
@@ -212,6 +223,9 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     },
     enabled: !!artifactRoomId || !!projectId,
     staleTime: 10_000,
+    // The button itself is the status display.  While it is working, refresh
+    // this artifact automatically; no separate "check status" action exists.
+    refetchInterval: isDomainPublicationRunning(artifact?.publish_status) ? 2_500 : false,
   });
 
   // A paid domain setup updates the artifact from the server in the background.
@@ -224,7 +238,9 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     if (
       latest.production_url !== artifact.production_url ||
       latest.custom_domain !== artifact.custom_domain ||
-      latest.delivery_url !== artifact.delivery_url
+      latest.delivery_url !== artifact.delivery_url ||
+      latest.publish_status !== artifact.publish_status ||
+      latest.last_publish_error !== artifact.last_publish_error
     ) {
       updateArtifact(latest);
     }
@@ -424,11 +440,24 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         {isWebsite && (
           <button
             onClick={() => setShowPublishModal(true)}
-            className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-            title="独自ドメイン公開"
+            className={`shrink-0 rounded px-2 py-1 text-xs font-medium text-primary-foreground ${
+              isDomainPublicationRunning(artifact.publish_status)
+                ? 'cursor-default bg-amber-600'
+                : artifact.publish_status === 'domain_failed'
+                  ? 'bg-amber-600 hover:bg-amber-600/90'
+                  : 'bg-primary hover:bg-primary/90'
+            }`}
+            disabled={isDomainPublicationRunning(artifact.publish_status)}
+            title={DOMAIN_PUBLICATION_LABEL[artifact.publish_status || ''] || '独自ドメイン公開'}
           >
-            <Rocket className="mr-1 inline h-3 w-3" />
-            独自ドメイン公開
+            {isDomainPublicationRunning(artifact.publish_status) ? (
+              <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+            ) : (
+              <Rocket className="mr-1 inline h-3 w-3" />
+            )}
+            {artifact.custom_domain
+              ? `${artifact.custom_domain} を公開中`
+              : DOMAIN_PUBLICATION_LABEL[artifact.publish_status || ''] || '独自ドメイン公開'}
           </button>
         )}
         {isEditMode && (

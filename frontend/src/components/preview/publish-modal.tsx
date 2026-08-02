@@ -172,6 +172,13 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
     },
     onMutate: () => setStage('publishing'),
     onSuccess: (data) => {
+      if (data.success && data.status === 'registering') {
+        // Publication is durable after this response.  Return to the preview,
+        // where the domain-publication control becomes the status display.
+        onPublished?.();
+        close(false);
+        return;
+      }
       setResult(data);
       setStage('done');
       if (data.success) {
