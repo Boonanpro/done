@@ -24,7 +24,7 @@ from app.services.auth_service import (
 from app.services.chat_service import ChatService, parse_datetime
 from app.models.chat_schemas import (
     # Auth
-    RegisterRequest, LoginRequest, TokenResponse,
+    RegisterRequest, LoginRequest, TokenResponse, RefreshTokenRequest,
     UserResponse, UserUpdateRequest,
     # Invite
     InviteCreateRequest, InviteResponse, InviteInfoResponse, InviteAcceptResponse,
@@ -1378,28 +1378,44 @@ async def login(
         except Exception:
             pass  # Non-critical
 
-    token_pair = create_token_pair(user_id=user["id"], email=user["email"])
+    # remember_me=True: リフレッシュトークンを30日にする。False だと1日で切れ、
+    # APK が毎日ログアウトする原因だった。使うたびにローテーションで30日延びる
+    # ので、日常的に使っている限りログアウトしない。
+    token_pair = create_token_pair(user_id=user["id"], email=user["email"], remember_me=True)
     set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
-    return TokenResponse(access_token=token_pair.access_token)
+    return TokenResponse(
+        access_token=token_pair.access_token,
+        refresh_token=token_pair.refresh_token,
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token_endpoint(
     request: Request,
     response: Response,
+    payload: Optional[RefreshTokenRequest] = None,
 ):
-    """Refresh access token using refresh token from cookie"""
-    refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
+    """Refresh access token using refresh token from body (mobile) or cookie (web)"""
+    # APK は Cookie を使えないのでボディで明示的に渡す。ボディ優先にするのは、
+    # RN の fetch が過去レスポンスの Set-Cookie を勝手に保持していても
+    # 古い Cookie が明示トークンを上書きしないようにするため。
+    refresh_token_value = (
+        (payload.refresh_token if payload else None)
+        or request.cookies.get(REFRESH_TOKEN_COOKIE)
+    )
     if not refresh_token_value:
         raise HTTPException(status_code=401, detail="Refresh token not found")
-    
+
     token_pair = refresh_tokens(refresh_token_value)
     if not token_pair:
         clear_auth_cookies(response)
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-    
+
     set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
-    return TokenResponse(access_token=token_pair.access_token)
+    return TokenResponse(
+        access_token=token_pair.access_token,
+        refresh_token=token_pair.refresh_token,
+    )
 
 
 @router.get("/me", response_model=UserResponse)

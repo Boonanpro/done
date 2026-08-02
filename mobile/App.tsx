@@ -73,6 +73,7 @@ const KNOWN_ARTIFACT_URLS: Record<string, string> = {
   kittoku: 'https://kittoku.vercel.app',
 };
 const TOKEN_KEY = 'done_mobile_access_token';
+const REFRESH_TOKEN_KEY = 'done_mobile_refresh_token';
 const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
 // チャットごとの入力下書き（Web版 dan-chat-draft:<projectId> と同等）
@@ -287,10 +288,60 @@ function mediaTag(kind: PendingAttachment['kind'], name: string, url: string): s
   return `[添付ファイル: ${name} (${url})]`;
 }
 
+// ---- セッション自動更新 ----
+// アクセストークンは24時間で失効する。失効(401)を検知したらリフレッシュ
+// トークンで新しいペアを取得してリクエストを1回だけ再試行し、使い続ける
+// 限りログイン状態を維持する（リフレッシュトークンは使うたび30日延長）。
+// リフレッシュも失敗した時だけ本当のログアウト: AppMain が登録する
+// onAuthFailure がエラーアラート無しで即ログイン画面へ切り替える。
+let onAuthFailure: (() => void) | null = null;
+let onTokenRefreshed: ((token: string) => void) | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function tryRefreshSession(): Promise<string | null> {
+  // 同時多発の401（ポーリング群）で refresh を連打しない。1本に相乗りする。
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const stored = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+        if (!stored) return null;
+        const response = await fetch(`${API_BASE_URL}/api/v1/chat/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: stored }),
+        });
+        if (!response.ok) return null;
+        const pair = (await response.json()) as {
+          access_token?: string;
+          refresh_token?: string;
+        };
+        if (!pair.access_token) return null;
+        await SecureStore.setItemAsync(TOKEN_KEY, pair.access_token);
+        if (pair.refresh_token) {
+          await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, pair.refresh_token);
+        }
+        onTokenRefreshed?.(pair.access_token);
+        return pair.access_token;
+      } catch {
+        return null;
+      }
+    })();
+    refreshInFlight.finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+function isAuthError(error: unknown): boolean {
+  return (error as { status?: number } | null)?.status === 401;
+}
+
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {},
   token?: string,
+  isRetryAfterRefresh = false,
 ): Promise<T> {
   const response = await fetch(`${API_BASE_URL}/api/v1${endpoint}`, {
     ...options,
@@ -302,6 +353,15 @@ async function apiRequest<T>(
   });
 
   if (!response.ok) {
+    // アクセストークン失効: 自動リフレッシュして1回だけ再試行。
+    // リフレッシュ不能なら onAuthFailure がログイン画面へ切り替える。
+    if (response.status === 401 && token && !isRetryAfterRefresh) {
+      const renewed = await tryRefreshSession();
+      if (renewed && renewed !== token) {
+        return apiRequest<T>(endpoint, options, renewed, true);
+      }
+      onAuthFailure?.();
+    }
     let detail = '';
     try {
       const body = await response.json();
@@ -1221,6 +1281,25 @@ function AppMain() {
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
 
+  // apiRequest のセッションハンドラ登録。リフレッシュ成功時は新トークンを
+  // 状態へ反映し、失敗時（=本当のセッション切れ）はエラーアラート無しで
+  // 即ログイン画面へ切り替える。従来はエラーメッセージが出るだけで、
+  // アプリを再起動しないとログイン画面が出なかった。
+  useEffect(() => {
+    onTokenRefreshed = (newToken: string) => {
+      setAuth((prev) => (prev.status === 'signed_in' ? { ...prev, token: newToken } : prev));
+    };
+    onAuthFailure = () => {
+      void SecureStore.deleteItemAsync(TOKEN_KEY).catch(() => null);
+      void SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY).catch(() => null);
+      setAuth((prev) => (prev.status === 'signed_in' ? { status: 'signed_out' } : prev));
+    };
+    return () => {
+      onTokenRefreshed = null;
+      onAuthFailure = null;
+    };
+  }, []);
+
   useEffect(() => {
     if (!token || Platform.OS !== 'android' || !DanSmsForwarder) {
       setSmsForwardingStatus('Off');
@@ -1495,6 +1574,9 @@ function AppMain() {
         void dismissNotificationsForProject(projectId);
         return known ?? (await projectPromise.catch(() => null));
       } catch (error) {
+        // セッション切れ(401)は onAuthFailure がログイン画面へ切替済み。
+        // その上にエラーアラートを重ねない（以下の各catchも同様）。
+        if (isAuthError(error)) return null;
         Alert.alert('Load failed', String((error as Error).message));
         return null;
       } finally {
@@ -1521,6 +1603,7 @@ function AppMain() {
         );
         setSearchResults(data.messages ?? []);
       } catch (error) {
+        if (isAuthError(error)) return;
         Alert.alert('検索失敗', String((error as Error).message));
         setSearchResults([]);
       } finally {
@@ -1847,14 +1930,19 @@ function AppMain() {
         try {
           const restoredUser = await apiRequest<UserResponse>('/chat/me', {}, storedToken);
           if (!alive) return;
-          setAuth({ status: 'signed_in', token: storedToken, user: restoredUser });
+          // apiRequest 内部の自動リフレッシュでトークンが更新されている場合が
+          // あるので、保存済みの最新トークンで状態を作る（期限切れ間近の
+          // storedToken を状態に固定しない）。
+          const activeToken = (await SecureStore.getItemAsync(TOKEN_KEY)) ?? storedToken;
+          setAuth({ status: 'signed_in', token: activeToken, user: restoredUser });
           // navigateHome=false: don't force the projects list on cold start, so a
           // notification-tap launch isn't bounced out of its chat (see loadInitialData).
-          await loadInitialData(storedToken, false);
+          await loadInitialData(activeToken, false);
           return;
         } catch (error) {
           if ((error as { status?: number }).status === 401) {
             await SecureStore.deleteItemAsync(TOKEN_KEY);
+            await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
             await SecureStore.deleteItemAsync(PROJECT_KEY);
             if (alive) setAuth({ status: 'signed_out' });
             return;
@@ -1895,11 +1983,14 @@ function AppMain() {
 
     setLoginBusy(true);
     try {
-      const result = await apiRequest<{ access_token: string }>('/chat/login', {
+      const result = await apiRequest<{ access_token: string; refresh_token?: string }>('/chat/login', {
         method: 'POST',
         body: JSON.stringify({ email: cleanEmail, password }),
       });
       await SecureStore.setItemAsync(TOKEN_KEY, result.access_token);
+      if (result.refresh_token) {
+        await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, result.refresh_token);
+      }
       const signedInUser = await apiRequest<UserResponse>('/chat/me', {}, result.access_token);
       setAuth({ status: 'signed_in', token: result.access_token, user: signedInUser });
       setPassword('');
@@ -1917,6 +2008,7 @@ function AppMain() {
       await DanSmsForwarder.disable().catch(() => null);
     }
     await SecureStore.deleteItemAsync(TOKEN_KEY);
+    await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
     await SecureStore.deleteItemAsync(PROJECT_KEY);
     setMessages([]);
     setProjects([]);
@@ -1961,6 +2053,7 @@ function AppMain() {
       setScreen('chat');
       setDrawerOpen(false);
     } catch (error) {
+      if (isAuthError(error)) return;
       Alert.alert('Could not create project', String((error as Error).message));
     }
   }
@@ -1975,6 +2068,7 @@ function AppMain() {
       );
       await refreshProjects(token).catch(() => null);
     } catch (error) {
+      if (isAuthError(error)) return;
       Alert.alert('Pin failed', String((error as Error).message));
     }
   }
@@ -1993,6 +2087,7 @@ function AppMain() {
       }
       await refreshProjects(token).catch(() => null);
     } catch (error) {
+      if (isAuthError(error)) return;
       Alert.alert('Delete failed', String((error as Error).message));
     }
   }
@@ -2365,6 +2460,7 @@ function AppMain() {
         setDraft(content);
         setAttachments(pending);
         setTimelineRefs(sentTimelineRefs);
+        if (isAuthError(error)) return;
         Alert.alert('アップロード失敗', String((error as Error).message));
         return;
       }
@@ -2642,6 +2738,7 @@ function AppMain() {
   async function handleRefreshProjectList() {
     if (!token) return;
     await refreshProjects(token).catch((error) => {
+      if (isAuthError(error)) return;
       Alert.alert('Refresh failed', String((error as Error).message));
     });
   }

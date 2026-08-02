@@ -59,6 +59,9 @@ class TokenResponse(BaseModel):
     """JWT token response (Bearer token - for backwards compatibility)"""
     access_token: str
     token_type: str = "bearer"
+    # Cookieを使えないクライアント（APK）が長期セッションを維持するための
+    # リフレッシュトークン。Webはこのフィールドを無視してCookieの方を使う。
+    refresh_token: Optional[str] = None
 
 
 class TokenPairResponse(BaseModel):
