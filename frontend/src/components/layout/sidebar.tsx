@@ -210,6 +210,37 @@ export function Sidebar({
     refetchInterval: 10 * 1000,
   });
 
+  // 「作業中」のチャットは開かれる前に中身を先読みしておく。開いた瞬間に
+  // キャッシュから完成形（メッセージ＋run状態＋作業イベント）を一発描画
+  // するため。prefetchQuery は staleTime 内なら何もしないので、10秒ごとの
+  // 一覧ポーリングで無駄な再取得は走らない。メッセージだけはキャッシュが
+  // 既にある場合スキップ必須: チャットパネルはSSE直挿入行をキャッシュ上で
+  // 一方通行マージしており、素のスナップショットで上書きすると最新回答が
+  // 数秒消える既知バグが再発する。
+  useEffect(() => {
+    const activeProjects = (projectsData?.projects ?? []).filter((p) => p.has_active_run).slice(0, 5);
+    for (const p of activeProjects) {
+      queryClient.prefetchQuery({
+        queryKey: ['current-run', p.id],
+        queryFn: () => api.projects.currentRun(p.id),
+        staleTime: 5 * 1000,
+      });
+      queryClient.prefetchQuery({
+        queryKey: ['execution-events', p.id],
+        queryFn: () => api.projects.executionEvents.list(p.id, 500),
+        staleTime: 15 * 1000,
+      });
+      const roomId = p.room_id;
+      if (roomId && !queryClient.getQueryData(['project-messages', roomId])) {
+        queryClient.prefetchQuery({
+          queryKey: ['project-messages', roomId],
+          queryFn: () => api.rooms.getMessages(roomId, { limit: 500 }),
+          staleTime: 15 * 1000,
+        });
+      }
+    }
+  }, [projectsData, queryClient]);
+
   const filteredProjects = projectsData?.projects?.filter((p) =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];

@@ -1061,6 +1061,8 @@ function ChatInput({
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
             onSseStateChange?.(false);
+            // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -1080,6 +1082,8 @@ function ChatInput({
       setInterrupted(projectId, false);
       setWarmupMode(projectId, null);
       if (error instanceof Error && error.name !== 'AbortError') {
+        // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
+        queryClient.invalidateQueries({ queryKey: ['projects'] });
         toast.error('メッセージ送信中に問題が発生しました');
       }
     } finally {
@@ -1212,12 +1216,30 @@ function ChatInput({
     setMessage('');
     setAttachedFiles([]);
     onClearReply?.();
-    // Immediately bump this project to top of sidebar
-    queryClient.invalidateQueries({ queryKey: ['projects'] });
+    // サイドバーの「ダンが作業中…」を送信の瞬間に点灯させる楽観更新。
+    // 即時 invalidate だとサーバーの run 作成(送信後 約1.1〜1.4s)より先に
+    // refetch が着いて has_active_run=false を持ち帰り、次の10sポーリング
+    // まで点灯しなかった。キャッシュを直接 true にし、run 作成完了後の
+    // 遅延 invalidate でサーバー真実（run状態＋並び順）に収束させる。
+    queryClient.setQueryData(
+      ['projects'],
+      (old: ProjectListResponse | undefined) =>
+        old
+          ? {
+              ...old,
+              projects: old.projects.map((p) =>
+                p.id === projectId ? { ...p, has_active_run: true } : p
+              ),
+            }
+          : old
+    );
+    setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    }, 2000);
     const refs = timelineRefs;
     setTimelineRefs([]);
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
-  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply, timelineRefs]);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs]);
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
@@ -1277,6 +1299,8 @@ function ChatInput({
     resetRecovery(projectId);
     setWarmupMode(projectId, null);
     invalidateProjectQueries();
+    // 取消完了 → サイドバーの「ダンが作業中…」も次ポーリングを待たず消灯
+    queryClient.invalidateQueries({ queryKey: ['projects'] });
     if (!wasBeforeAI) {
       toast.info('処理を中断しました');
     }
@@ -1833,7 +1857,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const isBackendSessionActive = !!activeStatus?.active;
 
-  const { data: currentRun } = useQuery({
+  const { data: currentRun, isLoading: isLoadingCurrentRun } = useQuery({
     queryKey: ['current-run', projectId],
     queryFn: () => api.projects.currentRun(projectId),
     enabled: !!projectId,
@@ -1853,7 +1877,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // 処理がsinkで続いている限り running なので、開き直し後も表示が消えない。
   const isActiveExecution = isBackendSessionActive || currentRun?.state === 'running';
 
-  const { data: allExecutionEvents = [] } = useQuery({
+  const { data: allExecutionEvents = [], isLoading: isLoadingExecutionEvents } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId, 500),
     enabled: !!projectId,
@@ -2424,7 +2448,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             メッセージ初回取得中は「読み込み中」であって「空」ではない。
             従来は未開始状態を空と誤判定し、チャット切替のたびに
             「メッセージを送信して開始してください」が一瞬表示されていた。 */}
-        {!project || (project.room_id && messagesData === undefined) ? (
+        {/* run状態・作業イベントの初回取得も待ってから一発で描画する。
+            メッセージだけ先に出すと、後から「実行中…」→「〇件の作業」が
+            順に挿入されて画面が組み変わって見える（到着順のバラつき）。
+            isLoading は初回取得中のみ true なので、以降のポーリングや
+            キャッシュ済みの開き直しではスピナーに戻らない。 */}
+        {!project || (project.room_id && messagesData === undefined) || isLoadingCurrentRun || isLoadingExecutionEvents ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
