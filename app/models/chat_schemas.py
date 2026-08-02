@@ -74,7 +74,8 @@ class TokenPairResponse(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     """Refresh token request (when not using cookies)"""
-    refresh_token: str
+    # 省略時はCookieのリフレッシュトークンにフォールバックする（422にしない）
+    refresh_token: Optional[str] = None
 
 
 class UserResponse(BaseModel):
