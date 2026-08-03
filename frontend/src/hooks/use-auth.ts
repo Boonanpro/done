@@ -88,7 +88,10 @@ export function useAuth() {
         setImmediateToken(null);
         setStoredToken(null);
         if (error instanceof ApiError) {
-          return { success: false, error: error.data };
+          // status を返して呼び出し側が「認証情報が違う(401)」と「サーバーに
+          // 届かない(502/503等)」を表示し分けられるようにする。従来は全部
+          // まとめて「認証情報が正しくない」と誤表示していた。
+          return { success: false, error: error.data, status: error.status };
         }
         throw error;
       }
