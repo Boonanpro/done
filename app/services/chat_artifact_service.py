@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from typing import Optional, List
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 from app.services.artifact_public_assets import ensure_artifact_icons
+from app.services.artifact_url_guard import is_legacy_alias_url, public_url_for_slug
 from app.services.supabase_client import get_supabase_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DELIVERY_DOMAIN_SUFFIX = "-done.vercel.app"
 
 
 class ChatArtifactService:
@@ -58,13 +59,27 @@ class ChatArtifactService:
             ensure_artifact_icons(slug, payload.get("label") or slug)
         return payload
 
-    @staticmethod
-    def _delivery_domain_for(slug: str) -> str:
-        return f"{slug}{DELIVERY_DOMAIN_SUFFIX}"
-
     @classmethod
-    def _delivery_url_for(cls, slug: str) -> str:
-        return f"https://{cls._delivery_domain_for(slug)}/"
+    def _delivery_url_for(cls, slug: str, share_url: str | None = None) -> str:
+        """成果物の実在する公開URL。
+
+        専用 Vercel プロジェクトの URL（= share_url）が最優先。まだ公開前なら
+        相対パス /preview/<slug> を返す。廃止済みの <slug>-done.vercel.app は
+        404 を返すので、ここで作らない・引き継がない。
+        """
+        candidate = str(share_url or "").strip()
+        if candidate.startswith(("http://", "https://")) and not is_legacy_alias_url(candidate):
+            return candidate.rstrip("/")
+        return public_url_for_slug(slug)
+
+    @staticmethod
+    def _delivery_domain_for(public_url: str) -> str:
+        if not public_url.startswith(("http://", "https://")):
+            return ""
+        try:
+            return urlsplit(public_url).netloc
+        except Exception:
+            return ""
 
     @classmethod
     def _merge_public_profile(
@@ -82,12 +97,12 @@ class ChatArtifactService:
         if not slug:
             return checklist
 
-        public_url = cls._delivery_url_for(slug)
+        public_url = cls._delivery_url_for(slug, share_url)
         profile = {
             **(checklist.get("public_profile") if isinstance(checklist.get("public_profile"), dict) else {}),
             "artifact_slug": slug,
             "public_url": public_url,
-            "alias_domain": cls._delivery_domain_for(slug),
+            "alias_domain": cls._delivery_domain_for(public_url),
             "title": label or slug.replace("-", " ").replace("_", " "),
             "manifest_path": f"/artifacts/{slug}/manifest.webmanifest",
             "start_url": f"/preview/{slug}",
@@ -95,11 +110,23 @@ class ChatArtifactService:
             "auth_policy": "auth_required" if requires_auth else "public",
             "artifact_type": artifact_type,
         }
+        recorded_delivery = str(checklist.get("delivery_url") or "").strip()
+        if not recorded_delivery or is_legacy_alias_url(recorded_delivery):
+            recorded_delivery = public_url
+        # share_path は「サイト内のパス」。絶対URLが来たら共有パスに戻す。
+        recorded_share_path = str(checklist.get("share_path") or "").strip()
+        if not recorded_share_path or is_legacy_alias_url(recorded_share_path):
+            candidate = str(share_url or "").strip()
+            recorded_share_path = (
+                f"/preview/{slug}"
+                if not candidate or candidate.startswith(("http://", "https://"))
+                else candidate
+            )
         return {
             **checklist,
             "public_profile": profile,
-            "delivery_url": checklist.get("delivery_url") or public_url,
-            "share_path": checklist.get("share_path") or share_url or f"/preview/{slug}",
+            "delivery_url": recorded_delivery,
+            "share_path": recorded_share_path,
             "preview_url": checklist.get("preview_url") or preview_url or f"/artifacts/{slug}",
         }
 

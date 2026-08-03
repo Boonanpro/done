@@ -1327,6 +1327,10 @@ def _build_system_prompt(
     # Absolute rules — placed LAST for maximum attention.
     parts.append(
         "## Deliverable Placement Rules\n\n"
+        "- These rules define only WHERE deliverables live and how they are delivered. "
+        "HOW to build a deliverable (method, design approach, tooling) is defined by the "
+        "`build` skill (`D:/done/.claude/skills/build/SKILL.md`) — read it before "
+        "starting any deliverable.\n"
         "- Treat DAN itself and user deliverables as separate codebases, even when "
         "both live under this repository.\n"
         "- `frontend/src/app/artifacts/<slug>/` and `~/.dan/workspace/artifacts/<room>/` "

@@ -529,8 +529,11 @@ if __name__ == "__main__":
                 )
                 if not exists.data:
                     artifact_type = "dashboard" if "dashboard" in kebab else ("website" if any(t in kebab for t in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")) else "tool")
-                    delivery_url = f"https://{kebab}-done.vercel.app/"
                     share_url = preview_url if demo else f"/preview/{kebab}"
+                    # 公開URLは publish 時に専用 Vercel プロジェクトが決まってから
+                    # 入る。作成時点では相対パスのまま置く（廃止済みの
+                    # <slug>-done.vercel.app を書き込むと 404 の案内になる）。
+                    delivery_url = share_url
                     sb.table("chat_artifact").insert({
                         "room_id": room_id,
                         "project_id": project_id,
@@ -555,7 +558,7 @@ if __name__ == "__main__":
                             "public_profile": {
                                 "artifact_slug": kebab,
                                 "public_url": delivery_url,
-                                "alias_domain": f"{kebab}-done.vercel.app",
+                                "alias_domain": "",
                                 "title": feature_name,
                                 "manifest_path": f"/artifacts/{kebab}/manifest.webmanifest",
                                 "start_url": f"/preview/{kebab}",

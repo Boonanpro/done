@@ -96,6 +96,7 @@ const DEFAULT_PUBLIC_ARTIFACT_SLUGS = [
   'salonboard-styleup',
   'bookings',
   'oku-yukadanbou',
+  'moonbox-jp',
 ];
 
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
@@ -150,7 +151,11 @@ export async function middleware(request: NextRequest) {
 
     if (first === 'artifacts' && slug === customDomainSlug) {
       const rest = segments.slice(2).join('/');
-      if (rest === 'manifest.webmanifest' || /^icon-\d+\.png$/.test(rest)) {
+      // 成果物の静的アセット（画像・動画・フォント・manifest 等、拡張子を持つもの）は
+      // clean path へ redirect せずそのまま配信する。ページだけを clean path に寄せる。
+      // ここを redirect にすると /artifacts/<slug>/tiles/t1.webp が /tiles/t1.webp へ
+      // 飛ばされて 404 になり、画像ファーストLPのタイルが公開サイトで全滅する。
+      if (/\.[a-z0-9]+$/i.test(rest)) {
         return NextResponse.next();
       }
       const url = request.nextUrl.clone();

@@ -1,9 +1,10 @@
 ---
 name: build
 description: >
-  Next.js + shadcn/ui + Tailwind で UI とバックエンドを実装するスキル。
-  ダッシュボード・HP・管理画面・LP・問い合わせフォーム付き機能ページなど、
-  見せて使える成果物が必要な時に使う。
+  UIとバックエンドを実装するスキル。ダッシュボード・HP・管理画面・LP・
+  問い合わせフォーム付き機能ページなど、見せて使える成果物が必要な時に使う。
+  LP・広告LP・ドライテストLPは T0 画像ファースト方式（GPT Image 2でタイル生成→
+  操作箇所だけ実HTML化）が既定。作り始める前に必ずこのスキルを読むこと。
 display_name: ビルド
 updated: 2026-04-24
 ---
@@ -337,6 +338,21 @@ shadcn/uiのchartコンポーネント（Recharts統合）を使う。`npx shadc
 
 ### B. HP / LP / ツール（Next.js）
 
+#### ⚠️ LP・広告LP・ドライテストLPは T0 画像ファースト方式が既定 ⚠️
+
+**縦スクロール1枚もの（広告LP・ドライテスト・キャンペーン）は、コードでデザインを
+組まず、GPT Image 2 で画像として生成して操作箇所だけ実HTML化する。**
+手順は `recipes/image-first-lp.md`（2026-08-03 置く床暖房LPで通し検証済み）。
+
+- 鉄則: **1タイル(9:16)＝スマホ1画面＝1メッセージ**。情報を詰め込まない
+- この方式ではリファレンス収集(HM5)・自己採点ループは**適用しない**。代わりに文字QA必須
+- 修正は `scripts/lp_image_patch.py`（タイル再生成→領域合成）。Inspector編集は不可
+- コード方式(T1〜T4)を使うのは: 多ページ企業HP / SEO主目的 / 機能ページ / ダッシュボード
+
+以下のコード方式のルールは、コード方式を選んだ場合にのみ適用する。
+
+---
+
 ダッシュボードと同じNext.js + shadcn/uiで作る。Astroは使わない。
 同じコンポーネント（Card, Button, Badge等）を使い、**CSS変数でクライアントごとの配色・雰囲気を変える**。
 
@@ -346,7 +362,8 @@ HP/LP は「どんな見た目か」の前に **どの作り方（技法）で�
 
 | 技法 | 使うもの | 向く案件 | 重さ | レシピ |
 |---|---|---|---|---|
-| **T1 コンバージョン・フラット**（既定） | shadcn/Tailwind + framer-motion | 集客HP・地域ビジネス・情報サイト（速度/SEO/モバイル最優先） | 軽 | `recipes/conversion-flat.md` |
+| **T0 画像ファーストLP**（LP系の既定） | GPT Image 2 + 具現化オーバーレイ | 広告LP・ドライテスト・キャンペーン（縦1枚もの） | 軽 | `recipes/image-first-lp.md` |
+| **T1 コンバージョン・フラット**（HP系の既定） | shadcn/Tailwind + framer-motion | 集客HP・地域ビジネス・情報サイト（速度/SEO/モバイル最優先） | 軽 | `recipes/conversion-flat.md` |
 | **T2 スクロールナラティブ** | GSAP(ScrollTrigger) + Lenis + framer-motion | ブランドストーリー・製品ローンチ | 中 | `recipes/scroll-narrative.md` |
 | **T3 スクロール動画ヒーロー** | T2 + スクロールスクラブ動画（media-gen） | プレミアム製品ショーケース | 重 | `recipes/scroll-video.md` |
 | **T4 3Dイマーシブ** | R3F + drei + three | 製品コンフィギュレータ・体験型 | 重 | `recipes/3d-immersive.md` |

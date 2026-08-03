@@ -13,9 +13,11 @@
 @source "./artifacts/denki-knowledge/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/inspection-report/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/kittoku/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/moonbox-jp/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/new-attack/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/oku-yukadanbou/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/paina/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/pornblocker-guard-beacon/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/publish/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/salonboard-monitor/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/salonboard-styleup/**/*.{ts,tsx,js,jsx,mdx}";

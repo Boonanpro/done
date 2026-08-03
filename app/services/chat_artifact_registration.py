@@ -119,7 +119,8 @@ def _page_exists(preview_url: str) -> bool:
     return page_path.exists()
 
 
-def _artifact_exists(service: ChatArtifactService, room_id: str, preview_url: str) -> bool:
+def _existing_artifact(service: ChatArtifactService, room_id: str, preview_url: str) -> Optional[dict]:
+    """Return the artifact card already registered for this route, if any."""
     existing = (
         service.supabase.table("chat_artifact")
         .select("id")
@@ -128,7 +129,7 @@ def _artifact_exists(service: ChatArtifactService, room_id: str, preview_url: st
         .limit(1)
         .execute()
     )
-    return bool(existing.data)
+    return existing.data[0] if existing.data else None
 
 
 def _payload_for_candidate(
@@ -168,6 +169,7 @@ def register_written_chat_artifacts_sync(
     written_paths = list(written_file_paths)
     service = ChatArtifactService()
     created: list[dict] = []
+    touched: list[dict] = []
     seen: set[str] = set()
 
     for slug, preview_url, source_path in artifact_candidates_from_written_paths(written_paths):
@@ -178,7 +180,12 @@ def register_written_chat_artifacts_sync(
             if not _page_exists(preview_url):
                 logger.info("Skipping chat artifact registration for %s: page.tsx not found", slug)
                 continue
-            if _artifact_exists(service, room_id, preview_url):
+            existing = _existing_artifact(service, room_id, preview_url)
+            if existing:
+                # A rewrite of an already-registered site still has to reach its
+                # dedicated delivery project, otherwise the public URL keeps
+                # serving the previous build.
+                touched.append(existing)
                 continue
             artifact = service.create_sync(
                 _payload_for_candidate(
@@ -196,7 +203,7 @@ def register_written_chat_artifacts_sync(
         except Exception as e:  # noqa: BLE001 - registration must not break chat completion
             logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
-    schedule_artifact_delivery(created, user_id)
+    schedule_artifact_delivery(created + touched, user_id)
     return created
 
 
@@ -213,6 +220,7 @@ async def register_written_chat_artifacts(
     written_paths = list(written_file_paths)
     service = ChatArtifactService()
     created: list[dict] = []
+    touched: list[dict] = []
     seen: set[str] = set()
 
     for slug, preview_url, source_path in artifact_candidates_from_written_paths(written_paths):
@@ -223,7 +231,12 @@ async def register_written_chat_artifacts(
             if not _page_exists(preview_url):
                 logger.info("Skipping chat artifact registration for %s: page.tsx not found", slug)
                 continue
-            if _artifact_exists(service, room_id, preview_url):
+            existing = _existing_artifact(service, room_id, preview_url)
+            if existing:
+                # A rewrite of an already-registered site still has to reach its
+                # dedicated delivery project, otherwise the public URL keeps
+                # serving the previous build.
+                touched.append(existing)
                 continue
             artifact = await service.create(
                 _payload_for_candidate(
@@ -241,5 +254,5 @@ async def register_written_chat_artifacts(
         except Exception as e:  # noqa: BLE001 - registration must not break chat completion
             logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
-    schedule_artifact_delivery(created, user_id)
+    schedule_artifact_delivery(created + touched, user_id)
     return created
