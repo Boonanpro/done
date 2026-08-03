@@ -1654,6 +1654,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_CHAT_RENDER_COUNT);
   const [hasNewMessages, setHasNewMessages] = useState(false);
+  // 最下部から離れているか（「最新へ」ジャンプボタンの表示用）
+  const [isAwayFromBottom, setIsAwayFromBottom] = useState(false);
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
   const [voiceOpen, setVoiceOpen] = useState(false);
@@ -2051,6 +2054,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     const frame = requestAnimationFrame(() => {
       setVisibleItemCount(INITIAL_CHAT_RENDER_COUNT);
       setHasNewMessages(false);
+      setIsAwayFromBottom(false);
     });
     return () => cancelAnimationFrame(frame);
   }, [projectId]);
@@ -2082,11 +2086,35 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   }, [displayItems.length]);
 
+  // チャットを開いた瞬間に最新（一番下）を表示する。ペイント前に位置を
+  // 決めるので、上の方が一瞬見えてから飛ぶちらつきが無い。
+  useLayoutEffect(() => {
+    if (!hasAnyContent) return;
+    const el = scrollContainerRef.current;
+    if (el && isNearBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [projectId, hasAnyContent]);
+
+  // 開いた直後の「最下部へ合わせたのに途中で止まる」の根治。画像・動画・
+  // マークダウンの遅延レイアウトで後から中身の高さが伸びると、一度合わせた
+  // 位置が相対的に上へずれる。ユーザーが自分で上へスクロールするまで
+  // （isNearBottomRef が true の間）は、高さが変わるたび最下部へ貼り直す。
+  useEffect(() => {
+    const content = messagesContentRef.current;
+    const el = scrollContainerRef.current;
+    if (!content || !el) return;
+    const observer = new ResizeObserver(() => {
+      if (isNearBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [projectId, hasAnyContent]);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     isNearBottomRef.current = nearBottom;
+    setIsAwayFromBottom(!nearBottom);
     if (nearBottom) setHasNewMessages(false);
     if (el.scrollTop < 240) {
       pendingPrependScrollRef.current = {
@@ -2433,14 +2461,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       ) : (
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
-        {hasNewMessages && (
+        {/* 新着が無くても、上へスクロール中は常に「最新へ」ジャンプを出す */}
+        {(hasNewMessages || isAwayFromBottom) && (
           <button
             onClick={scrollToBottom}
             className="sticky top-[calc(100%-3rem)] z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90"
             style={{ display: 'block', marginLeft: 'auto', marginRight: 'auto', width: 'fit-content' }}
           >
             <ChevronDown className="h-3.5 w-3.5" />
-            新しいメッセージ
+            {hasNewMessages ? '新しいメッセージ' : '最新へ'}
           </button>
         )}
         {/* 「空の部屋」の文言は、取得が成功して本当に0件だった時だけ出す。
@@ -2463,7 +2492,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
-          <div className="flex flex-col gap-2 p-4">
+          <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(
                 (last, item, index) => (item.kind === 'execution-block' ? index : last),
