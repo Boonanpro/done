@@ -56,22 +56,8 @@ const API_BASE_URL =
   Constants.expoConfig.extra.apiBaseUrl.trim()
     ? Constants.expoConfig.extra.apiBaseUrl.trim().replace(/\/+$/, '')
     : DEFAULT_API_BASE_URL;
-// Clean, name-bearing host for provisional artifact share/full-screen URLs.
-// Must match the web NEXT_PUBLIC_SHARE_ORIGIN so PC and mobile show the SAME
-// URL. Kept separate from API_BASE_URL: this alias is re-pointed to the latest
-// production on every artifact publish, whereas API calls use an auto-following
-// host. Override via expoConfig.extra.shareBaseUrl.
-const SHARE_BASE_URL =
-  typeof Constants.expoConfig?.extra?.shareBaseUrl === 'string' &&
-  Constants.expoConfig.extra.shareBaseUrl.trim()
-    ? Constants.expoConfig.extra.shareBaseUrl.trim().replace(/\/+$/, '')
-    : 'https://done-studio.vercel.app';
 const LEGACY_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
 const LEGACY_VERCEL_HOST_PATTERN = /^https?:\/\/frontend-[^.]*mikis-projects-86652663\.vercel\.app/i;
-const KNOWN_ARTIFACT_URLS: Record<string, string> = {
-  'salonboard-styleup': 'https://salonboard-styleup-done.vercel.app',
-  kittoku: 'https://kittoku.vercel.app',
-};
 const TOKEN_KEY = 'done_mobile_access_token';
 const REFRESH_TOKEN_KEY = 'done_mobile_refresh_token';
 const PROJECT_KEY = 'done_mobile_project_id';
@@ -167,6 +153,9 @@ type ChatArtifactResponse = {
   slug: string;
   label?: string | null;
   preview_url?: string | null;
+  // The release ledger is the sole authority for where an artifact is served.
+  // It is populated only after the dedicated Vercel deployment is live.
+  delivery_url?: string | null;
   share_url?: string | null;
   draft_url?: string | null;
   production_url?: string | null;
@@ -432,46 +421,22 @@ function normalizeUrl(raw: string) {
   return value;
 }
 
-function artifactRouteParts(raw?: string | null) {
-  if (!raw) return null;
-  try {
-    const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, API_BASE_URL);
-    const match = url.pathname.match(/^\/(?:artifacts|preview)\/([^/?#]+)(.*)$/);
-    if (!match) return null;
-    return {
-      slug: decodeURIComponent(match[1]),
-      rest: `${match[2] || ''}${url.search || ''}${url.hash || ''}`,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function cleanArtifactUrl(artifact: ChatArtifactResponse) {
-  const path = artifact.share_url || artifact.draft_url || artifact.preview_url || `/preview/${artifact.slug}`;
-  const route = artifactRouteParts(path);
-  const routeSlug = route?.slug || artifact.slug;
-  const base =
+function cleanArtifactUrl(artifact: ChatArtifactResponse): string | null {
+  // Never construct a URL from the artifact name.  That was the old APK
+  // behaviour: it silently sent an artifact without a release to the retired
+  // done-studio/preview/<slug> route and presented its 404 as an app failure.
+  // The server supplies delivery_url from the publication ledger once the
+  // dedicated Vercel release has actually been promoted.
+  const authoritative =
     artifact.production_url ||
     (artifact.custom_domain ? `https://${artifact.custom_domain}` : null) ||
-    KNOWN_ARTIFACT_URLS[routeSlug];
+    artifact.delivery_url;
 
-  if (base) {
-    try {
-      return new URL(route?.rest || '/', base).toString();
-    } catch {
-      return base;
-    }
-  }
-
-  // No custom domain: provisional preview lives on the shared name-bearing host
-  // (done-studio), the same host the web dashboard uses, so PC and mobile show
-  // an identical URL for the same full-screen button.
-  const previewPath = (path || `/preview/${artifact.slug}`).replace('/artifacts/', '/preview/');
+  if (!authoritative) return null;
   try {
-    return new URL(previewPath.startsWith('/') ? previewPath : `/${previewPath}`, SHARE_BASE_URL).toString();
+    return new URL(authoritative).toString();
   } catch {
-    return normalizeUrl(path);
+    return null;
   }
 }
 
@@ -2743,14 +2708,22 @@ function AppMain() {
     });
   }
 
-  function artifactUrl(artifact: ChatArtifactResponse) {
+  function artifactUrl(artifact: ChatArtifactResponse): string | null {
     return cleanArtifactUrl(artifact);
   }
 
   function handleOpenArtifact(artifact: ChatArtifactResponse) {
+    const url = artifactUrl(artifact);
+    if (!url) {
+      // A tab may appear a moment before the background deployment has been
+      // promoted. Refresh the factual state, but never open a guessed URL.
+      if (token && currentProjectId) void refreshArtifacts(token, currentProjectId);
+      Alert.alert('公開準備中', 'この成果物は公開先を準備しています。少し待ってからもう一度開いてください。');
+      return;
+    }
     setArtifactView({
       title: artifact.label || artifact.slug || 'Artifact',
-      url: artifactUrl(artifact),
+      url,
     });
     setScreen('artifact');
   }
