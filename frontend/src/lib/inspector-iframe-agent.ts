@@ -165,7 +165,10 @@ function buildSnapshot(target: Element): SelectionSnapshot {
     elementKey: computeElementKey(target),
     tagName,
     rect: toRect(target),
-    text: (target.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+    // Keep the full text for the parent-side editor.  Presentation components
+    // truncate it themselves, but truncating the protocol payload here would
+    // silently destroy the latter half of a long paragraph on save.
+    text: (target.textContent || '').trim().replace(/\s+/g, ' '),
     className: target.getAttribute('class') || '',
     outerHtmlSnippet: (target.outerHTML || '').slice(0, 2000),
     ancestors,
