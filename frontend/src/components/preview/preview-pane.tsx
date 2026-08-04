@@ -282,7 +282,18 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     const iframe = iframeRef.current;
     if (!iframe || !loaded) return;
     const shareOrigin = publicShareOrigin();
-    const allowed = [shareOrigin].filter(Boolean) as string[];
+    // The inspector message originates from the iframe, not from the
+    // dashboard's public-share origin.  Dedicated artifact projects each
+    // have their own Vercel origin, so accept the origin of the iframe we
+    // actually mounted as well.  `attachInspectorBridge` additionally checks
+    // event.source against this exact iframe; this is not a broad allow-list.
+    let iframeOrigin = '';
+    try {
+      iframeOrigin = new URL(iframe.src, window.location.origin).origin;
+    } catch {
+      // An invalid iframe URL cannot produce a valid inspector message.
+    }
+    const allowed = [shareOrigin, iframeOrigin].filter(Boolean) as string[];
 
     const fetchOverrides = async (slug: string): Promise<OverrideRow[]> => {
       try {
