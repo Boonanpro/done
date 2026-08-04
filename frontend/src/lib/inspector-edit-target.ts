@@ -17,8 +17,36 @@
  *   <strong data-edit-id="..."> や <span data-edit-id="..."> のように
  *   装飾部分を独立した編集単位に分割する責任を artifact が持つ。
  */
+const TEXTUAL_TAGS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'p', 'span', 'a', 'li', 'label', 'button', 'strong', 'em',
+  'td', 'th', 'figcaption',
+]);
+
+// These tags only decorate or break a sentence. A layout or media child is
+// intentionally excluded: replacing its parent text could erase page content.
+const INLINE_TEXT_TAGS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'del', 'em',
+  'i', 'ins', 'kbd', 'mark', 'q', 's', 'small', 'span', 'strong', 'sub',
+  'sup', 'time', 'u', 'var', 'wbr',
+]);
+
+function hasOnlyInlineTextContent(el: Element): boolean {
+  for (const child of Array.from(el.children)) {
+    if (!INLINE_TEXT_TAGS.has(child.tagName.toLowerCase())) return false;
+    if (!hasOnlyInlineTextContent(child)) return false;
+  }
+  return true;
+}
+
+/**
+ * A semantic text element, such as a paragraph containing <strong> or a
+ * heading containing <br>, is one editable text unit.  Layout wrappers and
+ * media remain excluded, so editing text cannot remove page structure.
+ */
 export function isEditableTextLeaf(el: Element | null | undefined): boolean {
   if (!el) return false;
-  if (!el.getAttribute || !el.getAttribute('data-edit-id')) return false;
-  return el.children.length === 0;
+  const tag = el.tagName.toLowerCase();
+  if (TEXTUAL_TAGS.has(tag)) return hasOnlyInlineTextContent(el);
+  return !!el.getAttribute?.('data-edit-id') && el.children.length === 0;
 }
