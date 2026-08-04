@@ -53,7 +53,11 @@ export const metadata: Metadata = {
   },
 };
 
-const prePaintScript = `
+function prePaintScript(fallbackSlug: string | null): string {
+  // JSON serialization is intentional: this value becomes a JavaScript
+  // literal inside the blocking script below, not executable source.
+  const serializedFallbackSlug = JSON.stringify(fallbackSlug || '');
+  return `
 (function(){
   try {
     // 公開閲覧モード (iframe 外、トップレベル訪問) では何もしない。
@@ -64,6 +68,9 @@ const prePaintScript = `
     if (!inIframe) return;
     var match = location.pathname.match(/\\/(?:artifacts|preview)\\/([^/]+)/);
     var slug = match && match[1];
+    // A dedicated Vercel project serves its artifact from the root path. Its project
+    // configuration is the authoritative identity in that case.
+    if (!slug) slug = ${serializedFallbackSlug};
     if (!slug) {
       var hosts = ${publicArtifactHostMap};
       slug = hosts[location.host];
@@ -110,6 +117,7 @@ const prePaintScript = `
   } catch (err) { /* ignore */ }
 })();
 `.trim();
+}
 
 const scrollResetStyle = `
 html, body {
@@ -119,14 +127,17 @@ html, body {
 `.trim();
 
 export default function ArtifactsLayout({ children }: { children: React.ReactNode }) {
+  // This is deliberately server-only. ARTIFACT_ONLY_SLUG is set on every
+  // one-artifact Vercel project and must not be copied into a public host map.
+  const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: scrollResetStyle }} />
-      <script dangerouslySetInnerHTML={{ __html: prePaintScript }} />
+      <script dangerouslySetInnerHTML={{ __html: prePaintScript(dedicatedArtifactSlug) }} />
       <ArtifactStructuredData />
       <ArtifactAnalytics />
       {children}
-      <InspectorRuntimeLoader />
+      <InspectorRuntimeLoader fallbackSlug={dedicatedArtifactSlug} />
     </>
   );
 }
