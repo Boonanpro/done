@@ -27,12 +27,12 @@ _executor_shutdown = threading.Event()
 _executor_page_proxy = None
 _executor_browser_alive = threading.Event()  # ブラウザ生存フラグ
 _executor_start_error: Optional[str] = None
+_executor_cdp_port: Optional[int] = None
 
-_EXECUTOR_CDP_ENDPOINT = "http://127.0.0.1:9223"
-_EXECUTOR_CDP_ARGS = [
-    "--remote-debugging-address=127.0.0.1",
-    "--remote-debugging-port=9223",
-]
+# 部屋（DAN_SESSION_ID）が無いレガシー実行（scripts/tests）だけが使う固定ポート。
+# 部屋付きプロセスは部屋ごとに動的ポートを割り当てるので、ここには来ない。
+_LEGACY_CDP_PORT = 9223
+_PORT_FILE_NAME = "dan_cdp_port.txt"
 _EXECUTOR_LOCK_NAMES = (
     "lockfile",
     "SingletonLock",
@@ -42,8 +42,176 @@ _EXECUTOR_LOCK_NAMES = (
 )
 
 
-def _executor_profile_dir() -> Path:
+def _browser_room_id() -> str:
+    """このプロセスが担当する部屋。MCPサーバは部屋ごとに別プロセスで
+    DAN_SESSION_ID を env に持って起動される（cli_runner._build_mcp_config）。"""
+    return (os.getenv("DAN_BROWSER_ROOM") or os.getenv("DAN_SESSION_ID") or "").strip()
+
+
+def _safe_room_slug(room_id: str) -> str:
+    import hashlib
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "", room_id)[:40]
+    digest = hashlib.sha1(room_id.encode("utf-8")).hexdigest()[:8]
+    return f"{slug}-{digest}" if slug else digest
+
+
+def _master_profile_dir() -> Path:
     return Path.home() / ".ai_secretary" / "browser_data"
+
+
+def _executor_profile_dir() -> Path:
+    # 部屋ごとに独立プロファイル。`browser_data--<room>` の兄弟ディレクトリにする
+    # （browser_data の下に掘ると、レガシー復旧のパス一致が全部屋を巻き込むため）。
+    room = _browser_room_id()
+    if room:
+        return Path.home() / ".ai_secretary" / f"browser_data--{_safe_room_slug(room)}"
+    return _master_profile_dir()
+
+
+def _executor_port_file() -> Path:
+    return _executor_profile_dir() / _PORT_FILE_NAME
+
+
+def _port_listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _save_executor_cdp_port(port: int) -> None:
+    try:
+        port_file = _executor_port_file()
+        port_file.parent.mkdir(parents=True, exist_ok=True)
+        port_file.write_text(str(port), encoding="utf-8")
+    except OSError as exc:
+        _write_browser_recovery_log("port_file_write_failed", port=port, error=str(exc))
+
+
+def _resolve_executor_cdp_port() -> int:
+    """この部屋のCDPポートを決める。プロセス再起動後も同じ部屋のブラウザに
+    再接続できるよう、選んだポートはプロファイル内のファイルに永続化する。"""
+    global _executor_cdp_port
+    if _executor_cdp_port is not None:
+        return _executor_cdp_port
+    if not _browser_room_id():
+        _executor_cdp_port = _LEGACY_CDP_PORT
+        return _executor_cdp_port
+    try:
+        saved = int(_executor_port_file().read_text(encoding="utf-8").strip())
+        if 1024 <= saved <= 65535:
+            _executor_cdp_port = saved
+            return _executor_cdp_port
+    except (OSError, ValueError):
+        pass
+    _executor_cdp_port = _pick_free_port()
+    _save_executor_cdp_port(_executor_cdp_port)
+    return _executor_cdp_port
+
+
+def _reassign_executor_cdp_port() -> int:
+    """保存済みポートが無関係のプロセスに取られていた場合に新しい空きポートへ移す。"""
+    global _executor_cdp_port
+    _executor_cdp_port = _pick_free_port()
+    _save_executor_cdp_port(_executor_cdp_port)
+    return _executor_cdp_port
+
+
+def _executor_window_position() -> tuple[int, int]:
+    """部屋ごとにウィンドウ位置をずらし、複数部屋のヘッドフルChromeが
+    完全に重なって見分けられなくなるのを避ける。"""
+    import hashlib
+
+    room = _browser_room_id()
+    if not room:
+        return (40, 40)
+    h = int(hashlib.sha1(room.encode("utf-8")).hexdigest()[:8], 16)
+    return (40 + (h % 5) * 90, 40 + ((h // 5) % 4) * 70)
+
+
+# シードでCookieファイルをコピーできなかった時に立つ。起動後にマスターの
+# CDP経由でCookieを注入する（マスター稼働中はファイルが排他ロックされるため）。
+_pending_cookie_import = False
+
+
+def _seed_profile_from_master(profile_dir: Path) -> None:
+    """部屋プロファイル初回作成時にマスタープロファイルからログイン状態を引き継ぐ。
+
+    全コピーはキャッシュ込みで数百MB級×部屋数に膨らむため、ログインに効く
+    ものだけ選択コピーする。Cookie の復号には "Local State" 内のキーが必須。
+    ベストエフォート：マスターのブラウザが起動中でロックされたファイルは
+    スキップし、失敗しても（再ログインが必要になるだけなので）起動は続行する。
+    """
+    import shutil
+
+    if profile_dir.exists():
+        return
+    master = _master_profile_dir()
+    if not master.exists() or profile_dir == master:
+        return
+
+    seed_files = [
+        "Local State",                # Cookie暗号鍵（無いとCookieが復号できない）
+        "Default/Preferences",
+        "Default/Secure Preferences",
+        "Default/Network/Cookies",
+        "Default/Network/Cookies-journal",
+        "Default/Login Data",
+        "Default/Login Data-journal",
+        "Default/Web Data",
+        "Default/Web Data-journal",
+    ]
+    seed_dirs = [
+        "Default/Local Storage",      # localStorageにセッションを持つサイト用
+        "Default/Session Storage",
+    ]
+
+    global _pending_cookie_import
+    copied: list[str] = []
+    try:
+        for rel in seed_files:
+            src = master / rel
+            if not src.is_file():
+                continue
+            dst = profile_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+                copied.append(rel)
+            except OSError:
+                # 稼働中のマスターに排他ロックされている。Cookieは起動後に
+                # マスターのCDPから注入してリカバーする。
+                if rel == "Default/Network/Cookies":
+                    _pending_cookie_import = True
+        for rel in seed_dirs:
+            src = master / rel
+            if not src.is_dir():
+                continue
+
+            def _copy(s: str, d: str) -> None:
+                try:
+                    shutil.copy2(s, d)
+                except OSError:
+                    pass
+
+            shutil.copytree(src, profile_dir / rel, copy_function=_copy, dirs_exist_ok=True)
+            copied.append(rel)
+        _write_browser_recovery_log(
+            "profile_seeded_from_master", profile=str(profile_dir), copied=copied
+        )
+    except Exception as exc:
+        _write_browser_recovery_log(
+            "profile_seed_failed", profile=str(profile_dir), copied=copied, error=str(exc)
+        )
 
 
 def _encode_browser_screenshot(png_bytes: bytes) -> tuple[str, str]:
@@ -119,12 +287,8 @@ def _write_browser_recovery_log(event: str, **details: Any) -> None:
         logger.exception("[EXECUTOR_BROWSER] Failed to write recovery log")
 
 
-def _is_executor_cdp_available() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 9223), timeout=0.5):
-            return True
-    except OSError:
-        return False
+def _is_executor_cdp_available(port: Optional[int] = None) -> bool:
+    return _port_listening(port if port is not None else _resolve_executor_cdp_port())
 
 
 def _list_dedicated_browser_processes() -> tuple[list[dict[str, Any]], bool]:
@@ -163,7 +327,17 @@ def _list_dedicated_browser_processes() -> tuple[list[dict[str, Any]], bool]:
         matches = []
         for row in rows:
             command_line = str(row.get("CommandLine") or "").lower().replace("/", "\\")
-            if profile_marker in command_line:
+            # 前方一致の巻き込み防止: `browser_data` は `browser_data--<room>` の
+            # 接頭辞なので、マーカーの直後がパス継続文字でないことまで確認する。
+            idx = command_line.find(profile_marker)
+            is_exact = False
+            while idx != -1:
+                end = idx + len(profile_marker)
+                if end == len(command_line) or command_line[end] in ('"', "'", " "):
+                    is_exact = True
+                    break
+                idx = command_line.find(profile_marker, idx + 1)
+            if is_exact:
                 matches.append({
                     "pid": int(row["ProcessId"]),
                     "parent_pid": int(row.get("ParentProcessId") or 0),
@@ -265,6 +439,73 @@ def _recover_stale_executor_profile() -> bool:
     return bool(terminated or removed_locks)
 
 
+async def _fetch_master_cookies_raw() -> list[dict]:
+    """稼働中マスターブラウザから生CDPでCookie一覧を取得する。
+
+    Playwrightのconnect_over_cdpはブラウザ内の全ページへのアタッチを伴い、
+    ビジー状態のマスターではハングするため使わない（実測でtimeout）。
+    Storage.getCookiesはブラウザレベルの読み取りのみでタブに一切触れない。
+    """
+    import urllib.request
+
+    import websockets
+
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{_LEGACY_CDP_PORT}/json/version", timeout=3
+    ) as resp:
+        ws_url = json.loads(resp.read())["webSocketDebuggerUrl"]
+    async with websockets.connect(
+        ws_url, max_size=64 * 1024 * 1024, open_timeout=5, close_timeout=2
+    ) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+        while True:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if msg.get("id") == 1:
+                return msg.get("result", {}).get("cookies", [])
+
+
+def _cdp_cookie_to_playwright(cookie: dict) -> dict:
+    out = {
+        "name": cookie["name"],
+        "value": cookie["value"],
+        "domain": cookie["domain"],
+        "path": cookie.get("path", "/"),
+        "httpOnly": bool(cookie.get("httpOnly")),
+        "secure": bool(cookie.get("secure")),
+    }
+    expires = cookie.get("expires")
+    if isinstance(expires, (int, float)) and expires > 0:
+        out["expires"] = expires
+    if cookie.get("sameSite") in ("Strict", "Lax", "None"):
+        out["sameSite"] = cookie["sameSite"]
+    return out
+
+
+async def _import_master_cookies(context) -> None:
+    """稼働中マスターブラウザからCookieを取得して部屋コンテキストへ注入する。
+    失敗しても（再ログインが必要になるだけなので）起動は続行。"""
+    global _pending_cookie_import
+    if not _port_listening(_LEGACY_CDP_PORT):
+        _write_browser_recovery_log("cookie_import_skipped_master_offline")
+        _pending_cookie_import = False
+        return
+    try:
+        cookies = await _fetch_master_cookies_raw()
+        added = 0
+        for cookie in cookies:
+            try:
+                await context.add_cookies([_cdp_cookie_to_playwright(cookie)])
+                added += 1
+            except Exception:
+                continue  # 変換できない特殊Cookieはスキップ
+        _write_browser_recovery_log(
+            "cookie_import_from_master", total=len(cookies), added=added
+        )
+        _pending_cookie_import = False
+    except Exception as exc:
+        _write_browser_recovery_log("cookie_import_failed", error=str(exc))
+
+
 def _executor_thread_main():
     """Executor用Playwright専用スレッド"""
     # Windows用のProactorEventLoopを設定
@@ -307,18 +548,39 @@ async def _executor_worker():
         print("[EXECUTOR_BROWSER] Starting Playwright...")
         playwright = await async_playwright().start()
 
-        user_data_dir = str(_executor_profile_dir())
+        profile_dir = _executor_profile_dir()
+        _seed_profile_from_master(profile_dir)
+        user_data_dir = str(profile_dir)
         os.makedirs(user_data_dir, exist_ok=True)
 
-        try:
-            browser = await playwright.chromium.connect_over_cdp(
-                _EXECUTOR_CDP_ENDPOINT,
-                timeout=1000,
-            )
-            context = browser.contexts[0]
-            attached_to_existing_browser = True
-            print("[EXECUTOR_BROWSER] Reconnected to existing browser")
-        except Exception as connect_exc:
+        cdp_port = _resolve_executor_cdp_port()
+
+        # 再接続は「この部屋のポート」が実際に開いている時だけ試す。
+        # 以前は 9223 固定で、別部屋が立てたブラウザに相乗りしてタブを
+        # 奪い合っていた。ポートが部屋ごとに違う今、ここで繋がるのは
+        # 自室のブラウザだけ。
+        connect_exc: Optional[Exception] = None
+        if _port_listening(cdp_port):
+            try:
+                browser = await playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{cdp_port}",
+                    timeout=1000,
+                )
+                context = browser.contexts[0]
+                attached_to_existing_browser = True
+                print(f"[EXECUTOR_BROWSER] Reconnected to existing browser (port {cdp_port})")
+            except Exception as exc:
+                connect_exc = exc
+
+        if not attached_to_existing_browser:
+            if connect_exc is not None and _browser_room_id():
+                # ポートは開いているのにCDP接続できない＝無関係のプロセスが
+                # 使っている。この部屋のポートを取り直す。
+                cdp_port = _reassign_executor_cdp_port()
+                _write_browser_recovery_log("cdp_port_reassigned", port=cdp_port, error=str(connect_exc))
+
+            window_x, window_y = _executor_window_position()
+
             async def launch_persistent_context():
                 return await playwright.chromium.launch_persistent_context(
                     user_data_dir=user_data_dir,
@@ -326,7 +588,9 @@ async def _executor_worker():
                     slow_mo=100,
                     args=[
                         "--disable-blink-features=AutomationControlled",
-                        *_EXECUTOR_CDP_ARGS,
+                        "--remote-debugging-address=127.0.0.1",
+                        f"--remote-debugging-port={cdp_port}",
+                        f"--window-position={window_x},{window_y}",
                     ],
                     viewport={"width": 1440, "height": 900},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -348,6 +612,9 @@ async def _executor_worker():
                 context = await launch_persistent_context()
                 _write_browser_recovery_log("launch_retry_succeeded", profile=user_data_dir)
             browser = context  # persistent contextではcontextがbrowser相当
+
+            if _pending_cookie_import:
+                await _import_master_cookies(context)
 
         # 新しいタブを検知するリスナーを登録
         context.on("page", on_new_page)

@@ -101,7 +101,7 @@ Agency/制作会社 creating and building a client's account is a legitimate, LI
 
 リッチメニュー画像は Messaging API で入れられるが、**応答メッセージ(自動応答)の写真/動画は Messaging API では設定できない**（応答メッセージは manager 側の機能）。manager のアップローダはネイティブのファイル選択なので MCP `browser` では入れられない。実績のある手順（吉川特装 2026-07-29）:
 
-1. **別プロファイルの Playwright を Bash から起動**（`launch_persistent_context(<一時ディレクトリ>, headless=False)`）。MCP browser の共有プロファイル `~/.ai_secretary/browser_data` は開かない。
+1. **別プロファイルの Playwright を Bash から起動**（`launch_persistent_context(<一時ディレクトリ>, headless=False)`）。MCP browser の専用プロファイル（`~/.ai_secretary/browser_data` および部屋別の `browser_data--<room>`）は開かない。
 2. ログインは `get_credentials_service().get_credential(user_id, "line")` で取り出したメール＋パスワードを直接 fill → password 欄で Enter（`[data-email-login-button]` を先にクリックしてフォームを出す）。
 3. **2段階認証（`/login/verification`）が出る。** ログインコードは Business ID のメール（shub6923@gmail.com）に届くので、
    `get_otp_service().extract_otp_from_email_imap(user_id, email_address=<そのアドレス>, max_age_minutes=3)` をポーリングして自動入力する。
