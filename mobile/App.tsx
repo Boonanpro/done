@@ -529,17 +529,6 @@ function parseRichContent(content: string): ParsedMediaContent {
   return { images, videos, files, parts };
 }
 
-// 「テキストを選択」モーダルに出す本文。メディアタグはファイル名だけ残して
-// URLを落とす（コピー対象として意味があるのは文章とファイル名）。
-function messagePlainText(content: string): string {
-  return content
-    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
-    .replace(/\[添付画像: ([^\]]+)\]/g, '')
-    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, '$1')
-    .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, '$1')
-    .trim();
-}
-
 function openUrl(url: string) {
   void Linking.openURL(url).catch(() => {
     Alert.alert('Open failed', url);
@@ -766,10 +755,10 @@ function RichMessageContent({
       ))}
 
       {parsed.parts.length > 0 ? (
-        // ⚠️ selectable は付けない: 上下反転FlatList内の直接選択はAndroidで
-        // 初回長押しに複数メッセージがまとめて選択される暴発を起こす。
-        // コピーは吹き出し長押し→「テキストを選択」モーダル（反転リストの外）で行う。
-        <Text style={[styles.messageText, mine && styles.myMessageText]}>
+        // 直接なぞり選択。初回長押しで複数メッセージへ選択が飛び散る暴発は
+        // リスト側の removeClippedSubviews を無効化して抑えている（選択状態が
+        // クリップ済み行の TextView に残って再利用されるのが原因）。
+        <Text selectable style={[styles.messageText, mine && styles.myMessageText]}>
           {parsed.parts.map((part, index) =>
             part.kind === 'link' ? (
               <Text
@@ -1284,7 +1273,6 @@ function AppMain() {
   } | null>(null);
   // メッセージ長押し→「テキストを選択」モーダルの本文。反転FlatListの外で
   // 選択させる（吹き出し内の直接選択はAndroidで初回長押しが暴発するため）。
-  const [textSelection, setTextSelection] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatListItem>>(null);
   // Live-tracking ref for the notification listener (which we don't want to
   // re-subscribe on every project switch).
@@ -3439,7 +3427,11 @@ function AppMain() {
             keyExtractor={(item) => item.key}
             maxToRenderPerBatch={8}
             ref={listRef}
-            removeClippedSubviews
+            // 画面外行のクリップ/再利用は Android の文字選択と相性が最悪で、
+            // 初回長押しに複数メッセージへ選択がぐちゃぐちゃに飛び散る
+            // （クリップされた行の TextView に選択状態が残ったまま再利用される）。
+            // 吹き出し内の直接なぞり選択を成立させるため明示的に無効化する。
+            removeClippedSubviews={false}
             renderItem={({ item }) => {
               // Live in-progress turn: render the timeline as it builds with a
               // spinner, like the web chat's live view. Tool steps start
@@ -3483,14 +3475,7 @@ function AppMain() {
                 (blocks.some((b) => b.type === 'tool' || b.type === 'error') ||
                   blocks.filter((b) => b.type === 'text' || b.type === 'reasoning').length > 1);
               return (
-                <Pressable
-                  // 長押しで「テキストを選択」モーダル（反転リストの外）を開く。
-                  // 吹き出し内の直接選択はAndroidで初回長押しが暴発するので廃止。
-                  onLongPress={() => {
-                    const text = messagePlainText(msg.content || '');
-                    if (text) setTextSelection(text);
-                  }}
-                  delayLongPress={350}
+                <View
                   style={[
                     styles.messageBubble,
                     mine ? styles.myBubble : styles.aiBubble,
@@ -3520,7 +3505,7 @@ function AppMain() {
                   {pendingFollowup ? (
                     <Text style={styles.pendingFollowupLabel}>仮送信・次の区切りで反映</Text>
                   ) : null}
-                </Pressable>
+                </View>
               );
             }}
             updateCellsBatchingPeriod={30}
@@ -3719,34 +3704,6 @@ function AppMain() {
         </View>
       </Modal>
 
-      {/* メッセージ長押し→テキスト選択。反転FlatListの外の素直なText 1つなので
-          Androidの初回長押し暴発（複数メッセージがまとめて選択される）が起きない。
-          選択したらOSの選択ツールバーからコピーできる。 */}
-      <Modal
-        visible={textSelection !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setTextSelection(null)}
-        statusBarTranslucent
-      >
-        <View style={[styles.textSelectRoot, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
-          <Pressable style={styles.sheetBackdrop} onPress={() => setTextSelection(null)} />
-          <View style={styles.textSelectCard}>
-            <View style={styles.textSelectHeader}>
-              <Text style={styles.textSelectTitle}>テキストを選択</Text>
-              <Pressable onPress={() => setTextSelection(null)} hitSlop={8}>
-                <Text style={styles.searchCancel}>閉じる</Text>
-              </Pressable>
-            </View>
-            <ScrollView style={styles.textSelectScroll} contentContainerStyle={styles.textSelectContent}>
-              <Text selectable style={styles.textSelectText}>
-                {textSelection ?? ''}
-              </Text>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-
       <Modal
         visible={timelineSheetOpen}
         transparent
@@ -3896,43 +3853,6 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
     paddingHorizontal: 12,
     paddingTop: 8,
-  },
-  textSelectRoot: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-  },
-  textSelectCard: {
-    backgroundColor: '#1d1b18',
-    borderRadius: 20,
-    flexShrink: 1,
-    overflow: 'hidden',
-  },
-  textSelectHeader: {
-    alignItems: 'center',
-    borderBottomColor: 'rgba(255, 255, 255, 0.08)',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  textSelectTitle: {
-    color: '#a7a19a',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  textSelectScroll: {
-    flexGrow: 0,
-  },
-  textSelectContent: {
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  textSelectText: {
-    color: '#f4f0e8',
-    fontSize: 15,
-    lineHeight: 22,
   },
   sheetGrabber: {
     alignSelf: 'center',
