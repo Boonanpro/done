@@ -1366,7 +1366,12 @@ def _build_system_prompt(
         "- Public artifacts must not inherit DAN's app identity. Add or preserve "
         "artifact-specific metadata and PWA manifest settings; the public manifest must "
         "not be `/manifest.json`, must not use `Done - AI Secretary`, and must not set "
-        "`start_url` to `/chat`."
+        "`start_url` to `/chat`.\n"
+        "- For user-visible text, links, and media in a new artifact, use the native-tag "
+        "helpers from `@/components/dan/editable` (`EditableText`, `EditableLink`, "
+        "`editableMediaProps`) with a unique editId. They do not add layout wrappers; "
+        "they make the element reliably editable after publication. Text baked into an "
+        "image is the only exception."
     )
     parts.append(_ABSOLUTE_RULES)
     parts.append(_BROWSER_AUTH_RULES)
@@ -1400,6 +1405,7 @@ _BROWSER_AUTH_RULES = """## Browser authentication handoff rules
 - When an OTP / verification code is required, preserve the current browser page. Do not close the browser, navigate away, or resend a code unless the current page has been checked and the code is expired or the user explicitly asks for a resend.
 - **SMS code** → `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` (default source=sms; the Android app forwards and enters it without exposing it). Forwarding only works for codes sent to the phone that runs the Dan app with SMS forwarding ON — a code sent to anyone else's phone number can never be auto-forwarded, so confirm the destination number is the registered device's before relying on it.
 - **Email code** (a code mailed to an inbox, e.g. a Gmail address) → you CAN read email inboxes directly via IMAP. Call `browser(action="wait_for_otp_from_app", source="email", email_address="<the inbox the code was sent to>", ref="...")` FIRST, before deciding the auth method — if the inbox is enabled it auto-reads the code; if not, the tool itself returns one-time setup guidance (`needs_app_password`) to relay to the user, then retry. NEVER claim you cannot read email codes, and NEVER switch to phone/SMS auth just to avoid email verification. Asking the user to read a code manually is a last resort (tool unusable, or no code within the timeout).
+- **One-time LINK instead of a code** (e.g. "Tap to reset your Instagram password: https://ig.me/...", magic sign-in links) → `browser(action="wait_for_link_from_app")` (default source=sms; add `source="email", email_address="..."` for a mailed link). It waits for the forwarded message, extracts the URL, and opens it in the SAME browser page — no `ref` needed. These links are single-use and expire fast, so call it BEFORE triggering the send if possible, and never ask the user to tap the link on their phone (tapping it there burns it).
 - When the user sends an OTP manually, inspect the still-open page first and enter it into the existing challenge. If the page is no longer usable, explain that before requesting a new code.
 - **CAPTCHA** (reCAPTCHA v2/v3/Enterprise, hCaptcha, Cloudflare Turnstile, or a distorted-text image captcha on a form / login page) → you CAN solve these yourself. Call `browser(action="solve_captcha")` BEFORE clicking submit/login — it detects every widget on the page, solves it via 2captcha, and injects the token (then click submit/login). The 2captcha API key is already configured server-side: NEVER ask the user for a 2captcha API key, and NEVER claim captcha solving is unavailable or unconfigured. Asking the user to click or solve a captcha for you is a last resort, allowed only after `solve_captcha` has actually been called and returned an error.
 - Never print, log, or persist OTP values beyond the immediate authentication step."""

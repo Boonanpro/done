@@ -53,6 +53,11 @@ class DetectedCaptcha:
     min_score: float = 0.3
     enterprise: bool = False
     raw: dict = field(default_factory=dict)
+    # フレーム情報。captchaがiframe内に描画されている場合（Instagram/Metaの
+    # 「本人確認にご協力ください」は fbsbx.com のiframe内）、2captchaへ渡す
+    # pageurl も、トークンを注入する先も、親ページではなくこのフレームになる。
+    frame: Any = None
+    frame_url: Optional[str] = None
 
     def key(self) -> tuple:
         return (self.type, self.sitekey)
@@ -107,34 +112,89 @@ _DETECT_JS = r"""
     if (m) push({ type: 'hcaptcha', sitekey: m[1], source: 'iframe' });
   }
 
+  // --- child recaptcha anchor iframes (widget rendered by the JS API, no
+  //     [data-sitekey] element present) ---
+  for (const f of document.querySelectorAll('iframe[src*="/recaptcha/"]')) {
+    const src = f.src || '';
+    const m = src.match(/[?&]k=([^&]+)/);
+    if (!m) continue;
+    const isEnt = /recaptcha\/enterprise\/(anchor|bframe)/i.test(src);
+    push({ type: isEnt ? 'recaptcha_enterprise' : 'recaptcha_v2',
+           sitekey: m[1], enterprise: isEnt, source: 'anchor-iframe' });
+  }
+
   // --- response field presence (helps injection) ---
-  out._fields = {
+  const fields = {
     recaptcha: !!document.querySelector('textarea[name="g-recaptcha-response"], textarea#g-recaptcha-response, textarea[id^="g-recaptcha-response"]'),
     hcaptcha: !!document.querySelector('textarea[name="h-captcha-response"], input[name="h-captcha-response"]'),
     turnstile: !!document.querySelector('input[name="cf-turnstile-response"]'),
   };
-  return out;
+  return { url: location.href, items: out, fields };
 }
 """
 
 
+async def _iter_frames(page) -> list:
+    """Return every frame of the page, main frame first.
+
+    Works with three page flavours:
+      * a real Playwright Page      -> page.frames
+      * the executor page proxy     -> await page.get_frames()
+      * anything else               -> [page] (main document only)
+    """
+    getter = getattr(page, "get_frames", None)
+    if getter is not None:
+        try:
+            frames = await getter()
+            if frames:
+                return list(frames)
+        except Exception:
+            logger.warning("get_frames() failed; falling back to main frame", exc_info=True)
+        return [page]
+    frames = getattr(page, "frames", None)
+    if frames:
+        return list(frames)
+    return [page]
+
+
 async def detect_captchas(page) -> list[DetectedCaptcha]:
-    """Inspect the live DOM and return every captcha widget found."""
-    raw = await page.evaluate(_DETECT_JS)
-    items = [x for x in raw if isinstance(x, dict)]
+    """Inspect the live DOM of every frame and return each captcha widget found.
+
+    Scanning child frames matters: Instagram/Meta render their reCAPTCHA inside
+    a cross-origin `iframe` (www.fbsbx.com), so a main-frame-only scan reports
+    "no captcha detected" while the checkbox is plainly visible on screen.
+    """
     result: list[DetectedCaptcha] = []
-    for it in items:
-        result.append(
-            DetectedCaptcha(
-                type=it["type"],
-                sitekey=it["sitekey"],
-                action=it.get("action"),
-                enterprise=bool(it.get("enterprise")),
-                raw=it,
+    seen: set[tuple] = set()
+    for frame in await _iter_frames(page):
+        try:
+            raw = await frame.evaluate(_DETECT_JS)
+        except Exception as exc:  # detached / restricted frame
+            logger.debug("detect_captchas: frame eval failed: %s", exc)
+            continue
+        if not isinstance(raw, dict):
+            continue
+        frame_url = raw.get("url") or getattr(frame, "url", None) or None
+        for it in raw.get("items") or []:
+            if not isinstance(it, dict) or not it.get("sitekey"):
+                continue
+            k = (it["type"], it["sitekey"])
+            if k in seen:
+                continue
+            seen.add(k)
+            result.append(
+                DetectedCaptcha(
+                    type=it["type"],
+                    sitekey=it["sitekey"],
+                    action=it.get("action"),
+                    enterprise=bool(it.get("enterprise")),
+                    raw=it,
+                    frame=frame,
+                    frame_url=frame_url,
+                )
             )
-        )
     logger.info("detect_captchas: found %d widget(s): %s",
-                len(result), [(c.type, c.sitekey[:12]) for c in result])
+                len(result), [(c.type, c.sitekey[:12], c.frame_url) for c in result])
     return result
 
 
@@ -236,19 +296,43 @@ _INJECT_RECAPTCHA_JS = r"""
   fields.forEach(f => { f.value = token; f.innerHTML = token;
     f.dispatchEvent(new Event('input', {bubbles:true}));
     f.dispatchEvent(new Event('change', {bubbles:true})); });
-  // override grecaptcha.execute so v3/invisible flows that re-run at submit
-  // return our pre-solved token instead of generating a new one.
+  // override grecaptcha.execute/getResponse so flows that re-read the answer at
+  // submit time get our pre-solved token instead of generating a new one.
   try {
     const make = (g) => {
       if (!g || g.__danPatched) return;
-      const origExec = g.execute ? g.execute.bind(g) : null;
       g.execute = function() { return Promise.resolve(token); };
+      g.getResponse = function() { return token; };
       g.__danPatched = true;
       if (g.enterprise) make(g.enterprise);
     };
     if (typeof grecaptcha !== 'undefined') make(grecaptcha);
   } catch (e) {}
-  return fields.length;
+  // v2 checkbox: fire the callback the site handed to grecaptcha.render().
+  // Filling the textarea alone leaves the submit button disabled on sites that
+  // wait for that callback (Instagram/Meta's verification dialog does).
+  let fired = 0;
+  try {
+    const cfg = window.___grecaptcha_cfg;
+    const roots = [];
+    if (cfg && cfg.clients) { for (const k in cfg.clients) roots.push(cfg.clients[k]); }
+    const visited = new Set();
+    const walk = (o, depth) => {
+      if (!o || depth > 6 || typeof o !== 'object' || visited.has(o)) return;
+      visited.add(o);
+      for (const k in o) {
+        let v;
+        try { v = o[k]; } catch (e) { continue; }
+        if (typeof v === 'function') {
+          if (/callback/i.test(k)) { try { v(token); fired++; } catch (e) {} }
+        } else if (v && typeof v === 'object') {
+          walk(v, depth + 1);
+        }
+      }
+    };
+    roots.forEach(r => walk(r, 0));
+  } catch (e) {}
+  return { filled: fields.length, callbacks: fired };
 }
 """
 
@@ -283,13 +367,16 @@ _INJECT_TURNSTILE_JS = r"""
 """
 
 
-async def inject_token(page, c: DetectedCaptcha, token: str) -> int:
+async def inject_token(page, c: DetectedCaptcha, token: str) -> dict:
+    """Write the token into the frame that actually hosts the widget."""
+    target = c.frame or page
     if c.type in ("recaptcha_v2", "recaptcha_v3", "recaptcha_enterprise"):
-        return await page.evaluate(_INJECT_RECAPTCHA_JS, token)
+        res = await target.evaluate(_INJECT_RECAPTCHA_JS, token)
+        return res if isinstance(res, dict) else {"filled": res, "callbacks": 0}
     if c.type == "hcaptcha":
-        return await page.evaluate(_INJECT_HCAPTCHA_JS, token)
+        return {"filled": await target.evaluate(_INJECT_HCAPTCHA_JS, token), "callbacks": 0}
     if c.type == "turnstile":
-        return await page.evaluate(_INJECT_TURNSTILE_JS, token)
+        return {"filled": await target.evaluate(_INJECT_TURNSTILE_JS, token), "callbacks": 0}
     raise CaptchaError(f"Unsupported captcha type: {c.type}")
 
 
@@ -360,7 +447,17 @@ async def solve_image_captcha(
     Returns {"found": bool, "text": str|None, "filled": int}.
     Raises CaptchaError if an image is found but cannot be captured/solved.
     """
-    extracted = await page.evaluate(_EXTRACT_IMG_JS, image_selector)
+    # 画像CAPTCHAもiframe内に置かれることがあるので、見つかるまで全フレームを見る。
+    target = None
+    extracted = None
+    for frame in await _iter_frames(page):
+        try:
+            found = await frame.evaluate(_EXTRACT_IMG_JS, image_selector)
+        except Exception:
+            continue
+        if found:
+            target, extracted = frame, found
+            break
     if not extracted:
         return {"found": False, "text": None, "filled": 0}
     if not extracted.get("ok"):
@@ -374,7 +471,7 @@ async def solve_image_captcha(
     text = await client.solve_image(b64, **opts)
     filled = 0
     if fill:
-        filled = await page.evaluate(_FILL_INPUT_JS, {"selector": input_selector, "value": text})
+        filled = await target.evaluate(_FILL_INPUT_JS, {"selector": input_selector, "value": text})
     logger.info("image captcha solved: %r (filled %d input)", text, filled)
     return {"found": True, "text": text, "filled": filled}
 
@@ -403,12 +500,22 @@ async def solve_page_captchas(
     client = TwoCaptchaClient(api_key=api_key)
     solved, tokens = [], {}
     for c in detected:
-        params = build_in_params(c, page_url)
+        # 2captcha must be told the URL of the document the widget lives in.
+        # For an in-iframe widget that is the frame URL, not the top page URL.
+        target_url = c.frame_url or page_url
+        params = build_in_params(c, target_url)
         token = await client.solve(params)
         injected = await inject_token(page, c, token)
-        solved.append({"type": c.type, "sitekey": c.sitekey, "injected_fields": injected})
+        solved.append({
+            "type": c.type,
+            "sitekey": c.sitekey,
+            "pageurl": target_url,
+            "injected_fields": injected.get("filled", 0),
+            "callbacks_fired": injected.get("callbacks", 0),
+        })
         tokens[c.type] = token
-        logger.info("solved+injected %s (%d field(s))", c.type, injected)
+        logger.info("solved+injected %s at %s (%s field(s), %s callback(s))",
+                    c.type, target_url, injected.get("filled"), injected.get("callbacks"))
 
     return {"solved": solved, "count": len(solved), "tokens": tokens}
 

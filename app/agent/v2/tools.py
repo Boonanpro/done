@@ -362,13 +362,13 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
 BROWSER_TOOL = {
     "name": "browser",
-    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。wait_for_otp_from_app: SMS/メールで届く数字コードを自動取得して入力欄(ref)に入れる。wait_for_link_from_app: 数字コードではなく「タップして再設定/認証」形式のワンタイムURLが届くサービス（Instagramのパスワード再設定等）向け。届いたリンクを自動取得してこのブラウザで開く（refは不要）。リンクを本人に読ませない。",
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "wait_for_otp_from_app", "wait_for_link_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）。action=fill_credentialではログイン先URLで保存済み認証情報を照合するのに使える"},
@@ -376,10 +376,10 @@ BROWSER_TOOL = {
             "text": {"type": "string", "description": "入力テキスト（action=type）"},
             "field": {"type": "string", "enum": ["password", "username"], "description": "action=fill_credentialで入れる項目。password=保存済みパスワード, username=保存済みログインID（既定: password）"},
             "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type / fill_credential, デフォルト: false）"},
-            "timeout_seconds": {"type": "integer", "description": "OTP待機のタイムアウト秒数（action=wait_for_otp_from_app, デフォルト: 30）"},
+            "timeout_seconds": {"type": "integer", "description": "待機のタイムアウト秒数（action=wait_for_otp_from_app は既定30 / wait_for_link_from_app は既定60）"},
             "service": {"type": "string", "description": "OTPのサービス絞り込み（例: amazon, ex_reservation）"},
-            "source": {"type": "string", "enum": ["sms", "email"], "description": "OTPの受信元（action=wait_for_otp_from_app）。SMS(Androidアプリ転送)=sms（既定）、メールに届くコード=email。emailの場合は email_address を指定"},
-            "email_address": {"type": "string", "description": "メールOTPの受信箱アドレス（action=wait_for_otp_from_app, source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
+            "source": {"type": "string", "enum": ["sms", "email"], "description": "OTP/リンクの受信元（action=wait_for_otp_from_app, wait_for_link_from_app）。SMS(Androidアプリ転送)=sms（既定）、メール=email。emailの場合は email_address を指定"},
+            "email_address": {"type": "string", "description": "メールOTP/リンクの受信箱アドレス（source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
             "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向（action=scroll）"},
             "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
             "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
@@ -3008,6 +3008,85 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             state["content"].insert(0, {
                 "type": "text",
                 "text": "OTP was received from the Android app and entered without exposing the code.",
+            })
+            return state
+
+        elif action == "wait_for_link_from_app":
+            # 数字コードではなく「タップして再設定」形式のワンタイムURLが届く
+            # サービス向け。届いたリンクをこのブラウザで開くところまでやる。
+            timeout_seconds = max(1, min(int(params.get("timeout_seconds", 60)), 180))
+            user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+            source = (params.get("source") or "sms").lower()
+            email_address = params.get("email_address")
+
+            from app.services.otp_service import get_otp_service
+            otp_service = get_otp_service()
+
+            if source == "email" and email_address:
+                if not await otp_service.has_imap_access(user_id, email_address):
+                    from app.services.otp_service import app_password_guidance
+                    g = app_password_guidance(email_address)
+                    return {
+                        "success": False,
+                        "needs_app_password": True,
+                        "email_address": email_address,
+                        "error": (
+                            f"{email_address} の受信箱を読む手段（アプリパスワード）が未登録のため、"
+                            f"メールに届くワンタイムURLを自動取得できません。ユーザーにこう案内してください:\n"
+                            f"「{g['note']} で発行したアプリパスワードを、ここに貼ってください」\n"
+                            f"貼られたら save_credentials(service=\"{g['service']}\", login_id=\"{email_address}\", "
+                            f"password=\"<アプリパスワード>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
+                        ),
+                    }
+
+            link_url = await otp_service.wait_for_link(
+                user_id=user_id,
+                service=params.get("service"),
+                source=source,
+                email_address=email_address,
+                timeout_seconds=timeout_seconds,
+                poll_interval=2,
+            )
+
+            if not link_url:
+                state = await _get_browser_state(page)
+                state["success"] = False
+                src_label = "メール" if source == "email" else "Androidアプリ(SMS)"
+                hint = ""
+                if source == "sms":
+                    try:
+                        dev = await otp_service.get_apk_otp_device_status(user_id)
+                        hint = (
+                            f" Forwarder device status: enabled={dev.get('enabled')}, "
+                            f"device={dev.get('device_name')}, last_received_at={dev.get('last_received_at')}."
+                            " If the user says the SMS DID arrive on their phone, the app's local"
+                            " forwarding setting was probably lost (reinstall/logout) — ask them to"
+                            " open the Dan app once (opening it self-repairs the setting) and then"
+                            " resend the link."
+                        )
+                    except Exception:
+                        pass
+                state["error"] = (
+                    f"No one-time link arrived from {src_label} within {timeout_seconds} seconds."
+                    + hint
+                    + " Keep this browser page open. Ask the user to paste the link only as a last resort."
+                )
+                return state
+
+            await page.goto(link_url)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
+            except Exception:
+                await page.wait_for_timeout(1000)
+
+            link_host = link_url.split("//", 1)[-1].split("/", 1)[0]
+            state = await _get_browser_state(page)
+            state["content"].insert(0, {
+                "type": "text",
+                "text": (
+                    f"One-time link received from the Android app ({link_host}) and opened in this browser. "
+                    "The link itself is single-use and is not shown here."
+                ),
             })
             return state
 

@@ -556,6 +556,37 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             result = await page.evaluate(args["expression"])
         return {"result": result}
 
+    elif cmd == "list_frames":
+        # captcha等がiframe内にある場合に、中のドキュメントへ届くようにする。
+        out = []
+        for i, f in enumerate(page.frames):
+            try:
+                out.append({"index": i, "url": f.url or "", "name": f.name or ""})
+            except Exception:
+                continue
+        return {"frames": out}
+
+    elif cmd == "frame_evaluate":
+        frames = page.frames
+        target = None
+        frame_url = args.get("frame_url")
+        idx = args.get("frame_index")
+        if isinstance(idx, int) and 0 <= idx < len(frames):
+            target = frames[idx]
+        # インデックスがずれている場合はURLで引き直す
+        if frame_url and (target is None or (target.url or "") != frame_url):
+            for f in frames:
+                if (f.url or "") == frame_url:
+                    target = f
+                    break
+        if target is None:
+            return {"result": None, "error": "frame not found"}
+        if args.get("arg") is not None:
+            result = await target.evaluate(args["expression"], args["arg"])
+        else:
+            result = await target.evaluate(args["expression"])
+        return {"result": result}
+
     elif cmd == "wait_for_selector":
         try:
             element = await page.wait_for_selector(
@@ -972,6 +1003,21 @@ class ExecutorPageProxy:
         )
         return result.get("result")
 
+    async def get_frames(self) -> list:
+        """ページ内の全フレーム（iframe含む）をプロキシとして返す。
+
+        captcha_solver がiframe内のcaptchaを検出・突破するために使う。
+        メインフレームも含まれ、先頭がメインフレーム。
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("list_frames")
+        )
+        return [
+            ExecutorFrameProxy(f.get("index", i), f.get("url", ""))
+            for i, f in enumerate(result.get("frames", []))
+        ]
+
     async def save_image(self, url: str, path: str):
         """URLから画像をダウンロードしてファイルに保存"""
         loop = asyncio.get_event_loop()
@@ -1188,6 +1234,34 @@ class ExecutorPageProxy:
             "interactive_elements": elements[:50],  # 最大50要素
             "element_count": len(elements),
         }
+
+
+class ExecutorFrameProxy:
+    """1つのフレーム（メインドキュメント or iframe）へのProxy。
+
+    Playwright の Frame と同じく `.url` と `evaluate()` を持つので、
+    captcha_solver からは実フレームと同じように扱える。
+    """
+
+    def __init__(self, index: int, url: str = ""):
+        self.index = index
+        self.url = url
+
+    async def evaluate(self, expression: str, arg=None):
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: _send_executor_command(
+                "frame_evaluate",
+                frame_index=self.index,
+                frame_url=self.url,
+                expression=expression,
+                arg=arg,
+            ),
+        )
+        if result.get("error"):
+            raise RuntimeError(f"frame_evaluate failed: {result['error']}")
+        return result.get("result")
 
 
 class ExecutorLocatorProxy:
