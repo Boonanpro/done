@@ -296,5 +296,43 @@
       "D:\\done\\app\\services\\meta_ads_service.py",
       "D:\\done\\scripts\\meta_ads_cli.py"
     ]
+  },
+  "pornblocker_guard_beacon": {
+    "name": "pornblocker_guard_beacon",
+    "description": "ポルノブロッカー端末の守りが立っているかを運営側で見張る仕組み",
+    "created_at": "2026-08-03T14:35:34.797057",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\072_pornblocker_guard_beacon.sql",
+      "D:\\done\\app\\models\\pornblocker_guard_beacon_schemas.py",
+      "D:\\done\\app\\services\\pornblocker_guard_beacon_service.py",
+      "D:\\done\\app\\api\\pornblocker_guard_beacon_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\pornblocker-guard-beacon\\page.tsx",
+      "D:\\done\\scripts\\seed_pornblocker_guard_beacon.py"
+    ]
+  },
+  "pornblocker_billing": {
+    "name": "pornblocker_billing",
+    "description": "ポルノブロッカーの月額課金（保護ロックの鍵）と解約・問い合わせ",
+    "created_at": "2026-08-03T17:12:15.947421",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\073_pornblocker_billing.sql",
+      "D:\\done\\app\\models\\pornblocker_billing_schemas.py",
+      "D:\\done\\app\\services\\pornblocker_billing_service.py",
+      "D:\\done\\app\\api\\pornblocker_billing_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\pornblocker-billing\\page.tsx",
+      "D:\\done\\scripts\\seed_pornblocker_billing.py"
+    ]
+  },
+  "pornblocker_cancellation": {
+    "name": "pornblocker_cancellation",
+    "description": "解約の申し出をAIが受けて、引き止め・時間差返信・解除コード発行まで人手なしで完結させる",
+    "created_at": "2026-08-06T13:19:20.608757",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\078_pornblocker_cancellation.sql",
+      "D:\\done\\app\\services\\pornblocker_cancellation_service.py"
+    ]
   }
 }
