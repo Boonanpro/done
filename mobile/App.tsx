@@ -529,6 +529,17 @@ function parseRichContent(content: string): ParsedMediaContent {
   return { images, videos, files, parts };
 }
 
+// 「テキストを選択」モーダルに出す本文。メディアタグはファイル名だけ残して
+// URLを落とす（コピー対象として意味があるのは文章とファイル名）。
+function messagePlainText(content: string): string {
+  return content
+    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
+    .replace(/\[添付画像: ([^\]]+)\]/g, '')
+    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, '$1')
+    .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, '$1')
+    .trim();
+}
+
 function openUrl(url: string) {
   void Linking.openURL(url).catch(() => {
     Alert.alert('Open failed', url);
@@ -755,13 +766,15 @@ function RichMessageContent({
       ))}
 
       {parsed.parts.length > 0 ? (
-        <Text selectable style={[styles.messageText, mine && styles.myMessageText]}>
+        // ⚠️ selectable は付けない: 上下反転FlatList内の直接選択はAndroidで
+        // 初回長押しに複数メッセージがまとめて選択される暴発を起こす。
+        // コピーは吹き出し長押し→「テキストを選択」モーダル（反転リストの外）で行う。
+        <Text style={[styles.messageText, mine && styles.myMessageText]}>
           {parsed.parts.map((part, index) =>
             part.kind === 'link' ? (
               <Text
                 key={`${part.url}-${index}`}
                 onPress={() => onOpenUrl(part.url)}
-                selectable
                 style={[styles.messageLink, mine && styles.myMessageLink]}
               >
                 {part.label}
@@ -1153,17 +1166,14 @@ function AppMain() {
   const [attachSheetOpen, setAttachSheetOpen] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
-  const [sending, setSending] = useState(false);
-  // Which project the in-flight stream belongs to. Lets the user navigate away
-  // to other chats while Dan is still working, and only renders the live
-  // timeline / activity in the chat that is actually streaming. null when idle.
-  const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
-  // AppState リスナー（再購読させたくない）から最新値を読むためのミラー。
-  const streamingProjectIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    streamingProjectIdRef.current = streamingProjectId;
-  }, [streamingProjectId]);
-  const [activity, setActivity] = useState('');
+  // この端末発のストリームが生きているプロジェクトの集合（部屋別）。
+  // 以前は sending + streamingProjectId のグローバル単一ストリームで、
+  // どこかの部屋がストリーミング中は他の全部屋の Send が塞がれていた
+  // （ダンの長いターン中ずっと押せない＝「たまに送れない」の正体）。
+  // 部屋単位にしたので、どの部屋からでも常に送信できる。
+  const [streamingProjects, setStreamingProjects] = useState<string[]>([]);
+  // 作業ラベルもプロジェクト別（部屋を切り替えても他室のラベルが混ざらない）。
+  const [activityMap, setActivityMap] = useState<Record<string, string>>({});
   // 追い連絡（ダンのターン実行中に送ったメッセージ）の仮送信状態。
   // message id → 送信時刻(ms)。ダンが次の区切りで読み込むと、それ以降の作業
   // （新しいターン）がこのメッセージより後に始まるので、それを検知して解除する。
@@ -1186,19 +1196,49 @@ function AppMain() {
         optimisticId: string;
         draft: string;
         roomId: string;
+        projectId: string;
       }
     >(),
   );
-  // 同時に生きている送信フローの数。最後の1本が終わった時だけ sending を
-  // 解除する（従来の「最初の送信だけが所有する」方式は、最初のフローが固まる
-  // と追い連絡が正常終了しても解除されなかった）。
-  const inFlightSendsRef = useRef(0);
-  // キャンセル世代。停止ボタン（や復帰ウォッチドッグの強制解除）が押される
-  // たびに進む。各送信フローは開始時の世代を覚えておき、世代がずれていたら
-  // 「自分より後にキャンセルが走った」＝reconcile も送信状態の解除も
-  // 触らない（キャンセル側が全リセット済み。二重解除すると、その間に始まった
-  // 新しい送信の状態を巻き添えで消す）。
-  const cancelGenRef = useRef(0);
+  // プロジェクト別の同時送信フロー数。その部屋の最後の1本が終わった時だけ
+  // その部屋のストリーミング状態を解除する（「最初の送信だけが所有」方式は、
+  // 最初のフローが固まると追い連絡が正常終了しても解除されなかった）。
+  const inFlightSendsRef = useRef(new Map<string, number>());
+  // キャンセル世代（プロジェクト別）。その部屋の停止ボタン（や復帰ウォッチ
+  // ドッグの強制解除）が押されるたびに進む。各送信フローは開始時の世代を
+  // 覚えておき、世代がずれていたら「自分より後にこの部屋のキャンセルが
+  // 走った」＝reconcile も送信状態の解除も触らない（キャンセル側がその部屋を
+  // リセット済み。二重解除すると、その間に始まった新しい送信を巻き添えで消す）。
+  // 部屋別なのは、部屋Aの停止が部屋Bのフローの後始末を放棄させないため。
+  const cancelGenRef = useRef(new Map<string, number>());
+  const genOf = (pid: string) => cancelGenRef.current.get(pid) ?? 0;
+  // 部屋の作業ラベルを更新（null で消去）。
+  const setProjectActivity = useCallback((pid: string, label: string | null) => {
+    setActivityMap((current) => {
+      if (label === null) {
+        if (!(pid in current)) return current;
+        const next = { ...current };
+        delete next[pid];
+        return next;
+      }
+      if (current[pid] === label) return current;
+      return { ...current, [pid]: label };
+    });
+  }, []);
+  // 部屋の送信フローを1本確保 / 返却。最後の1本が返った時だけその部屋の
+  // ストリーミング状態と作業ラベルを畳む。
+  const acquireSendSlot = useCallback((pid: string) => {
+    inFlightSendsRef.current.set(pid, (inFlightSendsRef.current.get(pid) ?? 0) + 1);
+    setStreamingProjects((current) => (current.includes(pid) ? current : [...current, pid]));
+  }, []);
+  const dropStreamingProject = useCallback(
+    (pid: string) => {
+      inFlightSendsRef.current.delete(pid);
+      setStreamingProjects((current) => current.filter((id) => id !== pid));
+      setProjectActivity(pid, null);
+    },
+    [setProjectActivity],
+  );
   // 制作エディタのタイムライン参照（Web版の入力欄と同じ）。選択して送ると
   // 「このタイムラインを編集して」の対象として指示に添付される。
   const [timelineRefs, setTimelineRefs] = useState<{ content_id: string; title: string }[]>([]);
@@ -1242,6 +1282,9 @@ function AppMain() {
     project: ProjectResponse;
     mode: 'menu' | 'confirm-delete';
   } | null>(null);
+  // メッセージ長押し→「テキストを選択」モーダルの本文。反転FlatListの外で
+  // 選択させる（吹き出し内の直接選択はAndroidで初回長押しが暴発するため）。
+  const [textSelection, setTextSelection] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatListItem>>(null);
   // Live-tracking ref for the notification listener (which we don't want to
   // re-subscribe on every project switch).
@@ -1397,6 +1440,12 @@ function AppMain() {
   // must not render twice.
   const savedTurnIds = useMemo(() => collectSavedTurnIds(messages), [messages]);
 
+  // 現在開いている部屋が、この端末発のストリーミング中か（部屋別）。
+  const streamingHere = !!currentProject && streamingProjects.includes(currentProject.id);
+  // 現在の部屋の作業ラベル。部屋別 Map から引くので、部屋を切り替えても
+  // 他室のストリームのラベルが混ざらない。
+  const activity = (currentProject && activityMap[currentProject.id]) || '';
+
   // Live in-progress turn for the OPEN chat, rebuilt from the server poll. Shows
   // whenever this chat's run is "running" — independent of the SSE stream — so
   // it persists across navigating away and back, and across SSE drops.
@@ -1416,9 +1465,9 @@ function AppMain() {
     liveRunActive ||
     // 送信した瞬間に出す（PC の warmupMode 相当の即時フィードバック）。前回ターンの
     // 完了済み currentRun が残っていても instant 経路をブロックしないよう、currentRun の
-    // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。sending は送信
-    // フローの finally で false になる＝ターン完了でこの経路は自然に閉じる。
-    (sending && !uploadProgress && streamingProjectId === currentProject?.id);
+    // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。streamingHere は
+    // この部屋の送信フローの決着で false になる＝ターン完了でこの経路は自然に閉じる。
+    (streamingHere && !uploadProgress);
 
   // まだダンに読み込まれていない追い連絡。読み込まれるまで半透明＋「仮送信」表示。
   const activePendingIds = useMemo(
@@ -1429,9 +1478,9 @@ function AppMain() {
   // run が終わった（完了・停止・中断）のに残った仮送信フラグは意味を失うので捨てる。
   useEffect(() => {
     if (Object.keys(pendingFollowups).length === 0) return;
-    if (liveRunActive || sending) return;
+    if (liveRunActive || streamingHere) return;
     setPendingFollowups({});
-  }, [liveRunActive, sending, pendingFollowups]);
+  }, [liveRunActive, streamingHere, pendingFollowups]);
 
   // チャットの行リスト。保存済みメッセージとライブのターン吹き出しを「実際に
   // 起きた時刻」で1本のタイムラインに混ぜる。これにより、ダン作業中に送った
@@ -1441,10 +1490,6 @@ function AppMain() {
     () => buildChatListItems({ messages, liveTurnGroups, showLiveTurn }),
     [messages, liveTurnGroups, showLiveTurn],
   );
-
-  // 送信ボタンを塞ぐのは「別チャット宛のストリームが生きている間」だけ。
-  // このチャットのターン実行中は追い連絡として送れる。
-  const sendBlocked = sending && streamingProjectId !== currentProject?.id;
 
   const unreadTotal = useMemo(
     () =>
@@ -1822,20 +1867,22 @@ function AppMain() {
             // 「まだ run が立ち上がっていない」瞬間を誤爆しないよう、
             // 送信から15秒は様子を見る。
             if (
-              inFlightSendsRef.current > 0 &&
+              inFlightSendsRef.current.size > 0 &&
               Date.now() - lastSendAtRef.current > 15_000
             ) {
-              const pid = streamingProjectIdRef.current;
-              const target = pid ? list.find((p) => p.id === pid) : undefined;
-              if (!target?.has_active_run) {
-                cancelGenRef.current += 1; // 生き残りフローに後始末を放棄させる
-                const actives = Array.from(activeStreamsRef.current.values());
-                activeStreamsRef.current.clear();
-                for (const stream of actives) stream.close();
-                inFlightSendsRef.current = 0;
-                setSending(false);
-                setStreamingProjectId(null);
-                setActivity('');
+              // 部屋別に照合し、固着した部屋だけを解除する（他室の生きた
+              // ストリームは無傷で続行させる）。
+              for (const pid of Array.from(inFlightSendsRef.current.keys())) {
+                const target = list.find((p) => p.id === pid);
+                if (target?.has_active_run) continue;
+                // 生き残りフローに後始末を放棄させる（この部屋の世代だけ進める）
+                cancelGenRef.current.set(pid, (cancelGenRef.current.get(pid) ?? 0) + 1);
+                for (const [key, stream] of Array.from(activeStreamsRef.current.entries())) {
+                  if (stream.projectId !== pid) continue;
+                  activeStreamsRef.current.delete(key);
+                  stream.close();
+                }
+                dropStreamingProject(pid);
                 setUploadProgress(null);
               }
             }
@@ -1853,7 +1900,7 @@ function AppMain() {
       }
     });
     return () => subscription.remove();
-  }, [refreshProjects, loadProjectMessages, token]);
+  }, [refreshProjects, loadProjectMessages, dropStreamingProject, token]);
 
   // Keep the unread badge honest even when the room is read on another device
   // (e.g. the PC). Without this poll the local projects cache — and therefore
@@ -1882,7 +1929,7 @@ function AppMain() {
     if (!token || screen !== 'chat') return;
     const roomId = currentProject?.room_id;
     if (!roomId) return;
-    if (sending && streamingProjectId === currentProject?.id) return;
+    if (streamingHere) return;
     const projectId = currentProject?.id;
     const id = setInterval(() => {
       if (AppState.currentState !== 'active') return;
@@ -1903,7 +1950,7 @@ function AppMain() {
         .catch(() => null);
     }, 4000);
     return () => clearInterval(id);
-  }, [token, screen, sending, streamingProjectId, currentProject?.room_id, currentProject?.id, markProjectReadLocally]);
+  }, [token, screen, streamingHere, currentProject?.room_id, currentProject?.id, markProjectReadLocally]);
 
   // Poll the live run for the OPEN chat so the in-progress timeline shows even
   // when the SSE stream isn't this device's (e.g. we navigated back into a chat
@@ -2164,8 +2211,8 @@ function AppMain() {
   }
 
   async function handleSelectProject(projectId: string) {
-    // No `sending` guard: a stream in another chat must not block navigation.
-    // The stream is scoped to streamingProjectId, so switching chats is safe.
+    // No streaming guard: streams are per-project (streamingProjects), so
+    // navigating between chats never blocks or disturbs a live stream.
     if (!token) return;
     const project = projects.find((item) => item.id === projectId) ?? null;
     setDrawerOpen(false);
@@ -2473,29 +2520,30 @@ function AppMain() {
     const tappedAt = Date.now();
     if (tappedAt - lastSendAtRef.current < 700) return;
     lastSendAtRef.current = tappedAt;
-    // 送信中でも「いまストリーミング中のこのチャット」へは追い連絡として送れる。
-    // 別チャット宛のストリームが生きている間は従来どおりブロック。
-    if (sending && streamingProjectId !== currentProject?.id) return;
-    // このチャットのストリームが生きている間の送信＝追い連絡（仮送信表示用）。
-    const isFollowup = sending && streamingProjectId === currentProject?.id;
-    // このフロー開始時点のキャンセル世代。以降で世代がずれていたら停止ボタン
-    // （または復帰ウォッチドッグ）が全リセット済みなので、このフローは
-    // 送信状態に触らず静かに退場する。
-    const cancelGenAtSend = cancelGenRef.current;
-    // 送信状態の解除はカウンタ方式: 各フローが開始時に1本確保し、決着時に
-    // 1本返す。最後の1本が返った時だけ sending を解除する（従来の「最初の
-    // フローだけが所有」方式は、最初のフローが固まると追い連絡が正常終了
-    // しても解除できなかった）。released ガードで二重返却を防ぐ。
+    // ストリームは部屋ごとに独立。この部屋のストリーム中の送信＝追い連絡
+    // （仮送信表示用）。他の部屋のストリームはこの送信を一切妨げない。
+    const isFollowup = !!currentProject && streamingProjects.includes(currentProject.id);
+    // このフローが属する部屋と、開始時点のその部屋のキャンセル世代。
+    // 以降で世代がずれていたらこの部屋の停止ボタン（または復帰ウォッチ
+    // ドッグ）がリセット済みなので、このフローは送信状態に触らず静かに退場。
+    // slotPid は created_project_id イベント（サーバー側で部屋が差し替わる
+    // 稀な経路）で移行されるため let。
+    let slotPid: string | null = null;
+    let cancelGenAtSend = 0;
+    // 送信状態の解除は部屋別カウンタ方式: 各フローが開始時にその部屋の枠を
+    // 1本確保し、決着時に1本返す。その部屋の最後の1本が返った時だけその
+    // 部屋のストリーミング状態を畳む。released ガードで二重返却を防ぐ。
     let sendSlotReleased = false;
     const releaseSendSlot = () => {
-      if (sendSlotReleased) return;
+      if (sendSlotReleased || !slotPid) return;
       sendSlotReleased = true;
-      if (cancelGenRef.current !== cancelGenAtSend) return; // キャンセル側が全リセット済み
-      inFlightSendsRef.current = Math.max(0, inFlightSendsRef.current - 1);
-      if (inFlightSendsRef.current === 0) {
-        setSending(false);
-        setStreamingProjectId(null);
-        setActivity('');
+      const pid = slotPid;
+      if (genOf(pid) !== cancelGenAtSend) return; // この部屋のキャンセル側がリセット済み
+      const left = Math.max(0, (inFlightSendsRef.current.get(pid) ?? 0) - 1);
+      if (left === 0) {
+        dropStreamingProject(pid);
+      } else {
+        inFlightSendsRef.current.set(pid, left);
       }
     };
     const content = draft.trim();
@@ -2551,11 +2599,10 @@ function AppMain() {
     setDraft('');
     setAttachments([]);
     setTimelineRefs([]);
-    // 追い連絡でも1本として数える（値はどのフローでも同じ project.id なので
-    // 上書きは無害）。
-    inFlightSendsRef.current += 1;
-    setSending(true);
-    setStreamingProjectId(project.id);
+    // この部屋の送信フローを1本確保（追い連絡でも1本として数える）。
+    slotPid = project.id;
+    cancelGenAtSend = genOf(project.id);
+    acquireSendSlot(project.id);
 
     // LINE風: 送信した瞬間に動画/画像入りのメッセージを画面に出し、アップロードは
     // その動画の上の円形リングが満ちていく形で進める。完了したらローカルURIを
@@ -2634,7 +2681,7 @@ function AppMain() {
       }
     }
 
-    setActivity('Thinking...');
+    setProjectActivity(project.id, 'Thinking...');
 
     let selectedProjectId = project.id;
     // Becomes true once the server has acked the message via the stream (echoes
@@ -2654,8 +2701,19 @@ function AppMain() {
     try {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
         if (event.created_project_id && event.created_project_id !== selectedProjectId) {
+          const oldPid = selectedProjectId;
           selectedProjectId = event.created_project_id;
-          setStreamingProjectId(event.created_project_id);
+          // 送信枠を旧部屋から新部屋へ移す（サーバー側で部屋が差し替わる稀な
+          // 経路）。旧部屋の枠を返し、新部屋の枠を確保して世代も取り直す。
+          if (slotPid === oldPid && !sendSlotReleased) {
+            releaseSendSlot();
+            sendSlotReleased = false;
+            slotPid = event.created_project_id;
+            cancelGenAtSend = genOf(event.created_project_id);
+            acquireSendSlot(event.created_project_id);
+          }
+          const handle = activeStreamsRef.current.get(clientMessageId);
+          if (handle) handle.projectId = event.created_project_id;
           setCurrentProjectId(event.created_project_id);
           SecureStore.setItemAsync(PROJECT_KEY, event.created_project_id).catch(() => null);
         }
@@ -2671,7 +2729,9 @@ function AppMain() {
         if (event.type === 'process') {
           const step = event.step as { label?: string } | undefined;
           const label = (step?.label || '').trim();
-          if (viewing) setActivity(label || 'Thinking...');
+          // 作業ラベルは部屋別 Map なので viewing に関係なく更新してよい
+          // （表示側が現在の部屋の分だけを読む）。
+          setProjectActivity(selectedProjectId, label || 'Thinking...');
           // Refetch the live run immediately for low latency (don't wait for the
           // 2.5s interval). Only when viewing this chat — otherwise the open
           // chat's own poll owns currentRun. The timeline renders from server state.
@@ -2724,15 +2784,15 @@ function AppMain() {
           if (viewing) setMessages((current) => upsertMessage(current, incoming));
         } else if (event.type === 'done') {
           sent = true;
+          setProjectActivity(selectedProjectId, null);
           if (viewing) {
-            setActivity('Done');
             void pollRun(token, selectedProjectId);
           }
         } else if (event.type === 'cancelled') {
           // ターン中断（この端末または別端末からのキャンセル）。
           // エラー扱いにせず、後段の reconcile がサーバーの実状態を反映する。
           sent = true;
-          if (viewing) setActivity('');
+          setProjectActivity(selectedProjectId, null);
         }
       }, {
         clientMessageId,
@@ -2744,6 +2804,7 @@ function AppMain() {
             optimisticId,
             draft: content,
             roomId: project!.room_id!,
+            projectId: selectedProjectId,
           });
         },
       });
@@ -2772,11 +2833,11 @@ function AppMain() {
     // it. This is connection-state-independent, so a dropped SSE on an
     // already-saved message never resurrects the text in the input.
     try {
-      // ユーザーが停止ボタンで中断した場合（＝キャンセル世代が進んでいる）、
-      // 後始末（楽観行の削除・入力欄への復元・サーバーへの取消依頼）は
-      // handleCancelTurn が済ませている。ここで reconcile すると「送信失敗」
-      // 誤判定でアラートが出るのでスキップ。
-      if (cancelGenRef.current !== cancelGenAtSend) return;
+      // ユーザーがこの部屋の停止ボタンで中断した場合（＝この部屋のキャンセル
+      // 世代が進んでいる）、後始末（楽観行の削除・入力欄への復元・サーバーへの
+      // 取消依頼）は handleCancelTurn が済ませている。ここで reconcile すると
+      // 「送信失敗」誤判定でアラートが出るのでスキップ。
+      if (!slotPid || genOf(slotPid) !== cancelGenAtSend) return;
       const list = await refreshProjects(token).catch(() => projects);
       const nextProject =
         list.find((item) => item.id === selectedProjectId) ||
@@ -2834,13 +2895,19 @@ function AppMain() {
   // メッセージごと取り消され、作業中なら作業がその場で止まる。
   async function handleCancelTurn() {
     if (!token) return;
-    // 生きているストリームを全部止める（追い連絡があると複数本ある）。
+    // 停止は「いま開いている部屋」のターンだけに効く。他の部屋で生きている
+    // ストリームには一切触れない（部屋Bの停止で部屋Aの作業を巻き添えにしない）。
+    const pid = currentProject?.id;
+    if (!pid) return;
+    // この部屋の生きているストリームを全部止める（追い連絡があると複数本ある）。
     // 挿入順＝送信順なので、先頭がこのターンの最初の送信。
-    const actives = Array.from(activeStreamsRef.current.values());
+    const actives = Array.from(activeStreamsRef.current.values()).filter(
+      (stream) => stream.projectId === pid,
+    );
     const active = actives[0] ?? null;
-    // 世代を進める＝実行中の各送信フローに「キャンセルが後始末を引き取った。
-    // お前たちは送信状態に触るな」と伝える（reconcile もスキップされる）。
-    cancelGenRef.current += 1;
+    // この部屋の世代を進める＝この部屋の各送信フローに「キャンセルが後始末を
+    // 引き取った。お前たちは送信状態に触るな」と伝える（reconcile もスキップ）。
+    cancelGenRef.current.set(pid, genOf(pid) + 1);
     const roomId = active?.roomId || currentProject?.room_id;
     // Web版と同じ判定: ダンの応答（返信 or 作業ステップ）がまだ無ければ
     // 「送信の取り消し」＝メッセージごと消して入力欄へ復元。すでに動き出して
@@ -2852,8 +2919,10 @@ function AppMain() {
       (activity !== '' && activity !== 'Thinking...');
     const beforeReply = !!active && !replied;
     if (actives.length > 0) {
-      activeStreamsRef.current.clear();
-      for (const stream of actives) stream.close();
+      for (const stream of actives) {
+        activeStreamsRef.current.delete(stream.clientMessageId);
+        stream.close();
+      }
       if (beforeReply && active) {
         setMessages((current) =>
           current.filter((m) => m.id !== active.optimisticId && m.id !== active.clientMessageId),
@@ -2861,10 +2930,7 @@ function AppMain() {
         setDraft((d) => (d ? d : active.draft));
       }
     }
-    inFlightSendsRef.current = 0;
-    setSending(false);
-    setStreamingProjectId(null);
-    setActivity('');
+    dropStreamingProject(pid);
     setCurrentRun(null);
     if (!roomId) return;
     try {
@@ -3060,8 +3126,8 @@ function AppMain() {
           }
           renderItem={({ item }) => {
             // サーバーの has_active_run は一覧ポーリング(20s)で更新されるので、
-            // この端末から送った直後は streamingProjectId で即時に点灯させる。
-            const running = !!item.has_active_run || streamingProjectId === item.id;
+            // この端末から送った直後は streamingProjects で即時に点灯させる。
+            const running = !!item.has_active_run || streamingProjects.includes(item.id);
             return (
             <Pressable
               onPress={() => handleSelectProject(item.id)}
@@ -3417,7 +3483,14 @@ function AppMain() {
                 (blocks.some((b) => b.type === 'tool' || b.type === 'error') ||
                   blocks.filter((b) => b.type === 'text' || b.type === 'reasoning').length > 1);
               return (
-                <View
+                <Pressable
+                  // 長押しで「テキストを選択」モーダル（反転リストの外）を開く。
+                  // 吹き出し内の直接選択はAndroidで初回長押しが暴発するので廃止。
+                  onLongPress={() => {
+                    const text = messagePlainText(msg.content || '');
+                    if (text) setTextSelection(text);
+                  }}
+                  delayLongPress={350}
                   style={[
                     styles.messageBubble,
                     mine ? styles.myBubble : styles.aiBubble,
@@ -3447,7 +3520,7 @@ function AppMain() {
                   {pendingFollowup ? (
                     <Text style={styles.pendingFollowupLabel}>仮送信・次の区切りで反映</Text>
                   ) : null}
-                </View>
+                </Pressable>
               );
             }}
             updateCellsBatchingPeriod={30}
@@ -3535,9 +3608,6 @@ function AppMain() {
         <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
           <Pressable
             onPress={() => setAttachSheetOpen(true)}
-            // Send と同じ基準（別チャット宛ストリーム中のみ塞ぐ）。生の sending
-            // だと、このチャットへの追い連絡時まで「＋」が押せなくなる。
-            disabled={sendBlocked}
             hitSlop={6}
             style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
           >
@@ -3564,8 +3634,7 @@ function AppMain() {
           />
           {/* Web版と同じ切替: 入力が空でダンが動いている間は停止ボタン。
               文字を打ち始めたら Send に戻る（＝追い連絡）。 */}
-          {!draft.trim() && attachments.length === 0 &&
-          ((sending && streamingProjectId === currentProject?.id) || liveRunActive) ? (
+          {!draft.trim() && attachments.length === 0 && (streamingHere || liveRunActive) ? (
             <Pressable
               onPress={handleCancelTurn}
               style={({ pressed }) => [styles.stopButton, pressed && styles.buttonPressed]}
@@ -3575,11 +3644,11 @@ function AppMain() {
             </Pressable>
           ) : (
             <Pressable
-              disabled={sendBlocked || (!draft.trim() && attachments.length === 0)}
+              disabled={!draft.trim() && attachments.length === 0}
               onPress={handleSend}
               style={({ pressed }) => [
                 styles.sendButton,
-                (pressed || sendBlocked || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
+                (pressed || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
               ]}
             >
               {/* No spinner here — the live "working" indicator already shows in
@@ -3647,6 +3716,34 @@ function AppMain() {
               ) : null
             }
           />
+        </View>
+      </Modal>
+
+      {/* メッセージ長押し→テキスト選択。反転FlatListの外の素直なText 1つなので
+          Androidの初回長押し暴発（複数メッセージがまとめて選択される）が起きない。
+          選択したらOSの選択ツールバーからコピーできる。 */}
+      <Modal
+        visible={textSelection !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTextSelection(null)}
+        statusBarTranslucent
+      >
+        <View style={[styles.textSelectRoot, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
+          <Pressable style={styles.sheetBackdrop} onPress={() => setTextSelection(null)} />
+          <View style={styles.textSelectCard}>
+            <View style={styles.textSelectHeader}>
+              <Text style={styles.textSelectTitle}>テキストを選択</Text>
+              <Pressable onPress={() => setTextSelection(null)} hitSlop={8}>
+                <Text style={styles.searchCancel}>閉じる</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={styles.textSelectScroll} contentContainerStyle={styles.textSelectContent}>
+              <Text selectable style={styles.textSelectText}>
+                {textSelection ?? ''}
+              </Text>
+            </ScrollView>
+          </View>
         </View>
       </Modal>
 
@@ -3799,6 +3896,43 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
     paddingHorizontal: 12,
     paddingTop: 8,
+  },
+  textSelectRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  textSelectCard: {
+    backgroundColor: '#1d1b18',
+    borderRadius: 20,
+    flexShrink: 1,
+    overflow: 'hidden',
+  },
+  textSelectHeader: {
+    alignItems: 'center',
+    borderBottomColor: 'rgba(255, 255, 255, 0.08)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  textSelectTitle: {
+    color: '#a7a19a',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  textSelectScroll: {
+    flexGrow: 0,
+  },
+  textSelectContent: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  textSelectText: {
+    color: '#f4f0e8',
+    fontSize: 15,
+    lineHeight: 22,
   },
   sheetGrabber: {
     alignSelf: 'center',
