@@ -238,12 +238,29 @@ function uploadAttachment(
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE_URL}/api/v1/files/upload`);
     xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    // タイムアウトは2段構え（どちらも無いと、ストールしたアップロードの上で
+    // 送信フローが永久に待ち続ける＝Send固着の一因になる）:
+    // - xhr.timeout: 総時間の上限30分（500MB動画の正常な長時間送信は殺さない）
+    // - 無進捗タイマー: 進捗イベントが2分止まったら中断（実質の死活判定）
+    xhr.timeout = 30 * 60 * 1000;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => xhr.abort(), 120_000);
+    };
+    const clearStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = null;
+    };
+    armStallTimer();
     xhr.upload.onprogress = (e) => {
+      armStallTimer();
       if (onProgress && e.lengthComputable && e.total > 0) {
         onProgress(e.loaded / e.total);
       }
     };
     xhr.onload = () => {
+      clearStallTimer();
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const data = JSON.parse(xhr.responseText) as { url: string };
@@ -263,8 +280,18 @@ function uploadAttachment(
         reject(new Error(detail || `Upload failed: ${xhr.status}`));
       }
     };
-    xhr.onerror = () => reject(new Error('Network error during upload'));
-    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.onerror = () => {
+      clearStallTimer();
+      reject(new Error('Network error during upload'));
+    };
+    xhr.ontimeout = () => {
+      clearStallTimer();
+      reject(new Error('Upload timed out'));
+    };
+    xhr.onabort = () => {
+      clearStallTimer();
+      reject(new Error('Upload stalled (no progress for 2 minutes)'));
+    };
     const form = new FormData();
     form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
     xhr.send(form);
@@ -332,14 +359,30 @@ async function apiRequest<T>(
   token?: string,
   isRetryAfterRefresh = false,
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/api/v1${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
+  // 全API呼び出しに30秒のタイムアウトを敷く。素の fetch は TCP がストール
+  // すると永久に返らず、それを await している送信フローごと固まる
+  // （Send固着の一因）。abort されたら通常のネットワークエラーとして投げる。
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30_000);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1${endpoint}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Request timed out: ${endpoint}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     // アクセストークン失効: 自動リフレッシュして1回だけ再試行。
@@ -897,30 +940,54 @@ async function streamDanMessage(
       pollingInterval: 0,
     });
 
-    // Idle-based timeout: re-armed on every event (incl. keepalive) so a long
-    // but actively-streaming turn is never cut off — mirrors the backend's
-    // idle-timeout fix. Only a genuinely silent/dead connection trips it, and
-    // the chat-screen poll is a further backstop that surfaces the reply even
-    // if this ever fires early.
-    let timeout: ReturnType<typeof setTimeout>;
-    const armTimeout = () => {
-      if (timeout) clearTimeout(timeout);
-      timeout = setTimeout(() => {
-        source.close();
-        reject(new Error('DAN response timed out.'));
-      }, 1000 * 60 * 10);
+    // ---- 決着保証（Send永久固着の根治） ----
+    // この Promise が pending のまま残ると呼び出し側の後始末が走らず、送信中
+    // フラグが立ちっぱなしになる（＝全チャットの Send が死に、アプリ再起動で
+    // しか直らない）。react-native-sse は pollingInterval:0 だと「HTTP 200 の
+    // まま途中切断」（Vercel/トンネルのストリーム打ち切り）で message も error
+    // も close も一切発火しない。そこでイベント任せをやめ、ウォッチドッグが
+    // XHR の実状態を直接見て必ず有限時間で決着させる:
+    //   ① readyState=DONE なのに done/cancelled 未着 → 途中切断として reject
+    //   ② 受信バイトが90秒伸びない → 死んだ接続として reject
+    // サーバーは20秒ごとに keepalive コメント行を流す。コメント行はライブラリ
+    // が message として dispatch しないが responseText は伸びるので、②の判定は
+    // 無言の長い作業中でも keepalive だけで生き続ける（誤爆＝4回連続欠落時のみ）。
+    // reject は「送信失敗」の確定ではない: 成否は呼び出し側のサーバー照合
+    // （reconcile）が決める。
+    let settled = false;
+    let watchdog: ReturnType<typeof setInterval> | null = null;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearInterval(watchdog);
+      source.close();
+      finish();
     };
-    armTimeout();
+    let lastActivityAt = Date.now();
+    let lastSeenBytes = 0;
+    watchdog = setInterval(() => {
+      const xhr = (source as unknown as { _xhr?: XMLHttpRequest | null })._xhr;
+      if (!xhr) return; // 初回接続前（ライブラリは500ms後にopenする）
+      const bytes = typeof xhr.responseText === 'string' ? xhr.responseText.length : 0;
+      if (bytes !== lastSeenBytes) {
+        lastSeenBytes = bytes;
+        lastActivityAt = Date.now();
+        return;
+      }
+      if (xhr.readyState === 4 /* DONE */) {
+        settle(() => reject(new Error('Connection to DAN was interrupted.')));
+        return;
+      }
+      if (Date.now() - lastActivityAt > 90_000) {
+        settle(() => reject(new Error('DAN response timed out.')));
+      }
+    }, 5_000);
     // ユーザーの停止操作用ハンドル。閉じたら正常終了として解決する
     // （中断の後始末は呼び出し側のキャンセル処理が行う）。
-    options?.registerCancel?.(() => {
-      clearTimeout(timeout);
-      source.close();
-      resolve();
-    });
+    options?.registerCancel?.(() => settle(resolve));
 
     source.addEventListener('message', (event) => {
-      armTimeout();
+      lastActivityAt = Date.now();
       if (!event.data) return;
       let parsed: StreamEvent;
       try {
@@ -932,22 +999,22 @@ async function streamDanMessage(
       onEvent(parsed);
 
       if (parsed.type === 'error') {
-        clearTimeout(timeout);
-        source.close();
-        reject(new Error(typeof parsed.message === 'string' ? parsed.message : 'DAN returned an error.'));
+        settle(() =>
+          reject(new Error(typeof parsed.message === 'string' ? parsed.message : 'DAN returned an error.')),
+        );
       } else if (parsed.type === 'done' || parsed.type === 'cancelled') {
         // cancelled = ターンが中断された（この端末または別端末のキャンセル）。
         // エラーではなく正常終了として扱う（Web版と同じ）。
-        clearTimeout(timeout);
-        source.close();
-        resolve();
+        settle(resolve);
       }
     });
 
     source.addEventListener('error', () => {
-      clearTimeout(timeout);
-      source.close();
-      reject(new Error('Could not connect to DAN.'));
+      settle(() => reject(new Error('Could not connect to DAN.')));
+    });
+    // 何らかの経路で接続が閉じられた場合の最終防衛（未決着なら切断扱い）。
+    source.addEventListener('close', () => {
+      settle(() => reject(new Error('Connection to DAN was closed.')));
     });
   });
 }
@@ -1091,6 +1158,11 @@ function AppMain() {
   // to other chats while Dan is still working, and only renders the live
   // timeline / activity in the chat that is actually streaming. null when idle.
   const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
+  // AppState リスナー（再購読させたくない）から最新値を読むためのミラー。
+  const streamingProjectIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    streamingProjectIdRef.current = streamingProjectId;
+  }, [streamingProjectId]);
   const [activity, setActivity] = useState('');
   // 追い連絡（ダンのターン実行中に送ったメッセージ）の仮送信状態。
   // message id → 送信時刻(ms)。ダンが次の区切りで読み込むと、それ以降の作業
@@ -1102,16 +1174,31 @@ function AppMain() {
   // 実行中ストリームの停止ハンドル一式（Web版のキャンセルボタン相当）。
   // close: SSE接続を閉じる / clientMessageId: 取消対象メッセージID /
   // optimisticId: 画面上の楽観行 / draft: 入力欄へ復元するテキスト
-  const activeStreamRef = useRef<{
-    close: () => void;
-    clientMessageId: string;
-    optimisticId: string;
-    draft: string;
-    roomId: string;
-  } | null>(null);
-  // ユーザーが停止を押した直後フラグ。reconcile が「送信失敗」扱いで
-  // アラートを出さないようにする。
-  const userCancelledRef = useRef(false);
+  // 追い連絡で同時に複数のストリームが生きるため、clientMessageId をキーに
+  // 全部持つ（単一スロットだと追い連絡が最初のストリームのハンドルを潰し、
+  // 停止ボタンで最初のSSEが閉じられなくなる）。挿入順＝送信順。
+  const activeStreamsRef = useRef(
+    new Map<
+      string,
+      {
+        close: () => void;
+        clientMessageId: string;
+        optimisticId: string;
+        draft: string;
+        roomId: string;
+      }
+    >(),
+  );
+  // 同時に生きている送信フローの数。最後の1本が終わった時だけ sending を
+  // 解除する（従来の「最初の送信だけが所有する」方式は、最初のフローが固まる
+  // と追い連絡が正常終了しても解除されなかった）。
+  const inFlightSendsRef = useRef(0);
+  // キャンセル世代。停止ボタン（や復帰ウォッチドッグの強制解除）が押される
+  // たびに進む。各送信フローは開始時の世代を覚えておき、世代がずれていたら
+  // 「自分より後にキャンセルが走った」＝reconcile も送信状態の解除も
+  // 触らない（キャンセル側が全リセット済み。二重解除すると、その間に始まった
+  // 新しい送信の状態を巻き添えで消す）。
+  const cancelGenRef = useRef(0);
   // 制作エディタのタイムライン参照（Web版の入力欄と同じ）。選択して送ると
   // 「このタイムラインを編集して」の対象として指示に添付される。
   const [timelineRefs, setTimelineRefs] = useState<{ content_id: string; title: string }[]>([]);
@@ -1214,6 +1301,10 @@ function AppMain() {
   // ここから描き、裏で最新を取得して差し替える。SSEで直接挿入された分も
   // 下のミラー効果で常に取り込まれる。
   const messagesCacheRef = useRef<Record<string, MessageResponse[]>>({});
+  // プロジェクトごとのライブ実行キャッシュ（run + 作業ログ）。作業中の部屋を
+  // 開いた瞬間に前回ポーリングの内容を即描画するため（メッセージキャッシュと
+  // 同じ「画面＝実体の即表示」の発想）。run が終わったら消す。
+  const runCacheRef = useRef<Record<string, { run: AgentRun; events: ExecutionEvent[] }>>({});
   useEffect(() => {
     const roomId = currentProject?.room_id;
     if (roomId && messages.length > 0) {
@@ -1440,7 +1531,7 @@ function AppMain() {
   // 復活→次のポーリングでまた消える」という、回答が出る瞬間のちらつきになる。
   // 対策: 後から開始したリクエストが結果を適用済みなら、古いリクエストの
   // 結果は捨てる（applied = 適用済みリクエストの開始順）。
-  const pollRunSeqRef = useRef({ issued: 0, applied: 0 });
+  const pollRunSeqRef = useRef({ issued: 0, applied: 0, running: false });
   const pollRun = useCallback(async (activeToken: string, projectId: string) => {
     const guard = pollRunSeqRef.current;
     const seq = ++guard.issued;
@@ -1448,31 +1539,55 @@ function AppMain() {
     // （プロジェクト切替時の setCurrentRun(null) リセットを上書きしないため）。
     const stale = () => seq < guard.applied || currentProjectIdRef.current !== projectId;
     try {
+      // 実行中と分かっている（直前ポーリング or 一覧の has_active_run）なら
+      // current-run と execution-events を並列に取り、作業ログの表示を
+      // 1往復ぶん早める。アイドル中は従来どおり current-run だけ（2.5秒ごとの
+      // ポーリングなので、無駄な2本目を毎回投げない）。
+      const expectRunning =
+        guard.running ||
+        !!projectsRef.current.find((p) => p.id === projectId)?.has_active_run;
+      const eventsPromise = expectRunning
+        ? apiRequest<ExecutionEvent[]>(
+            `/projects/${projectId}/execution-events?limit=200`,
+            {},
+            activeToken,
+          ).catch(() => null)
+        : null;
       const run = await apiRequest<AgentRun>(`/projects/${projectId}/current-run`, {}, activeToken);
       if (stale()) return;
       guard.applied = seq;
+      guard.running = !!run && run.state === 'running';
       setCurrentRun(run);
       if (run && run.state === 'running') {
-        const events = await apiRequest<ExecutionEvent[]>(
-          `/projects/${projectId}/execution-events?limit=200`,
-          {},
-          activeToken,
-        ).catch(() => null);
+        const events = await (eventsPromise ??
+          apiRequest<ExecutionEvent[]>(
+            `/projects/${projectId}/execution-events?limit=200`,
+            {},
+            activeToken,
+          ).catch(() => null));
         if (stale()) return;
         guard.applied = seq;
         // 一時的な取得失敗（null）ではクリアしない。成功時もイベントは増える
         // 方向にだけマージし、limit やレスポンス順による欠けが吹き出しの
         // 消失・位置ジャンプにならないようにする。
-        if (events) setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
+        if (events) {
+          setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
+          // 部屋を出て戻った時に即描画するためのキャッシュ（開き直しの
+          // 「数秒間ダンが止まって見える」対策の一部）。
+          runCacheRef.current[projectId] = { run, events };
+        }
       } else {
         setRunEvents([]);
+        delete runCacheRef.current[projectId];
       }
     } catch {
       if (stale()) return;
       guard.applied = seq;
+      guard.running = false;
       // 404 = no run for this project (the common idle case).
       setCurrentRun(null);
       setRunEvents([]);
+      delete runCacheRef.current[projectId];
     }
   }, []);
 
@@ -1489,8 +1604,11 @@ function AppMain() {
       const knownRoom = known?.room_id || null;
       if (known) {
         setCurrentProject(known);
-        setCurrentProjectId(known.id);
       }
+      // 一覧に無い部屋（通知からのコールド起動など）でも即 ID を確定する。
+      // pollRun のポーリング効果はこの ID で起動するので、詳細取得の1往復を
+      // 待たずにライブ実行状態の取得が始まる。
+      setCurrentProjectId(projectId);
       // 開いた瞬間に対象の部屋のキャッシュを描く。部屋が未知なら空にする
       // （前に見ていた部屋のメッセージを新しい部屋に残像として出さない）。
       setMessages(knownRoom ? messagesCacheRef.current[knownRoom] ?? [] : []);
@@ -1693,7 +1811,36 @@ function AppMain() {
     if (!token) return;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        refreshProjects(token).catch(() => null);
+        refreshProjects(token)
+          .then((list) => {
+            // 復帰ウォッチドッグ（Send固着の最終防衛）: 送信中フラグが立って
+            // いるのに、サーバーはその部屋で何も実行していない＝ストリームが
+            // バックグラウンド中に死んで固着した状態。ウォッチドッグや
+            // タイムアウトはバックグラウンドではタイマーが進まず発火できない
+            // ことがあるので、フォアグラウンド復帰時にサーバーの実状態
+            // (has_active_run) と照合して強制解除する。送信直後の
+            // 「まだ run が立ち上がっていない」瞬間を誤爆しないよう、
+            // 送信から15秒は様子を見る。
+            if (
+              inFlightSendsRef.current > 0 &&
+              Date.now() - lastSendAtRef.current > 15_000
+            ) {
+              const pid = streamingProjectIdRef.current;
+              const target = pid ? list.find((p) => p.id === pid) : undefined;
+              if (!target?.has_active_run) {
+                cancelGenRef.current += 1; // 生き残りフローに後始末を放棄させる
+                const actives = Array.from(activeStreamsRef.current.values());
+                activeStreamsRef.current.clear();
+                for (const stream of actives) stream.close();
+                inFlightSendsRef.current = 0;
+                setSending(false);
+                setStreamingProjectId(null);
+                setActivity('');
+                setUploadProgress(null);
+              }
+            }
+          })
+          .catch(() => null);
         // Reload the open chat too: a reply that finished while the app was
         // backgrounded never streams in (the SSE connection is suspended).
         // Only do this when the user is *actually viewing* that chat — doing
@@ -1765,7 +1912,10 @@ function AppMain() {
   // calls pollRun directly for low latency while actively streaming here.
   useEffect(() => {
     if (!token || screen !== 'chat') return;
-    const projectId = currentProject?.id;
+    // currentProject（詳細）ではなく currentProjectId（開いた瞬間に確定）で
+    // 起動する。通知起動などで一覧に無い部屋を開いた場合、従来は詳細取得の
+    // 1往復が終わるまでポーリングが始まらなかった。
+    const projectId = currentProjectId;
     if (!projectId) return;
     let cancelled = false;
     const tick = () => {
@@ -1779,18 +1929,47 @@ function AppMain() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [token, screen, currentProject?.id, pollRun]);
+  }, [token, screen, currentProjectId, pollRun]);
 
   // 画面＝実体: チャット画面に入るたび（部屋の切替だけでなく、一覧から同じ
-  // 部屋を開き直した時も）ライブ実行表示をリセットする。従来は「プロジェクト
-  // IDの変化」でしか消していなかったため、ダン作業中に部屋を出て開き直すと
-  // その時点の古い「実行中」（thinking・停止ボタン）が数秒表示され、最初の
-  // ポーリングが届いてやっと実態に直っていた。リセット後、本当に実行中なら
-  // 直後のポーリング（画面遷移で即発火）が正しく点灯させる。
+  // 部屋を開き直した時も）ライブ実行表示を「その時点で分かっている実態」に
+  // 合わせる。
+  // - 一覧が「作業中」(has_active_run) を知っている部屋: 前回ポーリングの
+  //   キャッシュ（本物の run + 作業ログ）があればそれを即描画、無ければ
+  //   プレースホルダ run で停止ボタン＋スピナーだけ即点灯する。従来は無条件で
+  //   null にリセット→2往復のポーリングが届くまで数秒間「ダンが止まっている」
+  //   ように見えた（既に手元にある情報を捨てていた）。詳細は直後のポーリング
+  //   （画面遷移で即発火）が差し替える。
+  // - それ以外の部屋: 従来どおり即リセットし、古い「実行中」を残さない
+  //   （da4932b の残像対策はこちら側で維持）。
   useEffect(() => {
     if (screen !== 'chat') return;
-    setCurrentRun(null);
-    setRunEvents([]);
+    const pid = currentProject?.id;
+    // currentProjectIdRef との照合: 通知起動などで「開いた部屋のID」だけ
+    // 先に確定し currentProject がまだ前の部屋を指している間は、前の部屋の
+    // 実行状態を新しい部屋に点灯させない（ref はこの効果より先に宣言された
+    // 効果で同一コミット内に更新済み）。
+    if (pid && pid === currentProjectIdRef.current && currentProject?.has_active_run) {
+      const cached = runCacheRef.current[pid];
+      if (cached && cached.run.state === 'running') {
+        setCurrentRun(cached.run);
+        setRunEvents(cached.events);
+      } else {
+        setCurrentRun({
+          id: `placeholder-${pid}`,
+          project_id: pid,
+          state: 'running',
+          created_at: new Date().toISOString(),
+        });
+        setRunEvents([]);
+      }
+    } else {
+      setCurrentRun(null);
+      setRunEvents([]);
+    }
+    // has_active_run は「開いた瞬間の一覧の知識」を読みたいだけなので依存に
+    // 入れない（部屋を見ている最中の一覧更新でこの効果を再発火させない —
+    // 見ている間の実態は pollRun が所有する）。
   }, [screen, currentProject?.id]);
 
   // 仮送信フラグと同期カーソルは部屋の切替時のみリセット（同じ部屋の
@@ -2297,10 +2476,28 @@ function AppMain() {
     // 送信中でも「いまストリーミング中のこのチャット」へは追い連絡として送れる。
     // 別チャット宛のストリームが生きている間は従来どおりブロック。
     if (sending && streamingProjectId !== currentProject?.id) return;
-    // このチャットの最初のストリームがまだ生きている間の送信（=追い連絡）は、
-    // sending / streamingProjectId を触らない。これらは最初の送信フローが所有
-    // していて、追い連絡側の finally で先に false に戻すと表示が崩れるため。
-    const ownsSendingState = !(sending && streamingProjectId === currentProject?.id);
+    // このチャットのストリームが生きている間の送信＝追い連絡（仮送信表示用）。
+    const isFollowup = sending && streamingProjectId === currentProject?.id;
+    // このフロー開始時点のキャンセル世代。以降で世代がずれていたら停止ボタン
+    // （または復帰ウォッチドッグ）が全リセット済みなので、このフローは
+    // 送信状態に触らず静かに退場する。
+    const cancelGenAtSend = cancelGenRef.current;
+    // 送信状態の解除はカウンタ方式: 各フローが開始時に1本確保し、決着時に
+    // 1本返す。最後の1本が返った時だけ sending を解除する（従来の「最初の
+    // フローだけが所有」方式は、最初のフローが固まると追い連絡が正常終了
+    // しても解除できなかった）。released ガードで二重返却を防ぐ。
+    let sendSlotReleased = false;
+    const releaseSendSlot = () => {
+      if (sendSlotReleased) return;
+      sendSlotReleased = true;
+      if (cancelGenRef.current !== cancelGenAtSend) return; // キャンセル側が全リセット済み
+      inFlightSendsRef.current = Math.max(0, inFlightSendsRef.current - 1);
+      if (inFlightSendsRef.current === 0) {
+        setSending(false);
+        setStreamingProjectId(null);
+        setActivity('');
+      }
+    };
     const content = draft.trim();
     const pending = attachments;
     if (!content && pending.length === 0) return;
@@ -2321,14 +2518,23 @@ function AppMain() {
 
     let project = currentProject;
     if (!project) {
-      project = await apiRequest<ProjectResponse>(
-        '/projects',
-        {
-          method: 'POST',
-          body: JSON.stringify({ title: '新しいプロジェクト' }),
-        },
-        token,
-      );
+      try {
+        project = await apiRequest<ProjectResponse>(
+          '/projects',
+          {
+            method: 'POST',
+            body: JSON.stringify({ title: '新しいプロジェクト' }),
+          },
+          token,
+        );
+      } catch (error) {
+        // ここは送信フラグ確保前なので固着はしないが、失敗を握りつぶすと
+        // 「押しても無反応」になる（unhandled rejection）。
+        if (!isAuthError(error)) {
+          Alert.alert('Send failed', String((error as Error).message));
+        }
+        return;
+      }
       setCurrentProject(project);
       setCurrentProjectId(project.id);
       await SecureStore.setItemAsync(PROJECT_KEY, project.id);
@@ -2345,10 +2551,11 @@ function AppMain() {
     setDraft('');
     setAttachments([]);
     setTimelineRefs([]);
-    if (ownsSendingState) {
-      setSending(true);
-      setStreamingProjectId(project.id);
-    }
+    // 追い連絡でも1本として数える（値はどのフローでも同じ project.id なので
+    // 上書きは無害）。
+    inFlightSendsRef.current += 1;
+    setSending(true);
+    setStreamingProjectId(project.id);
 
     // LINE風: 送信した瞬間に動画/画像入りのメッセージを画面に出し、アップロードは
     // その動画の上の円形リングが満ちていく形で進める。完了したらローカルURIを
@@ -2371,7 +2578,7 @@ function AppMain() {
     // 仮送信表示にする（エコーが届いたら実IDへ引き継ぐ。万一 run がその間に
     // 終わって普通の送信として扱われても、次ターン開始の検知で自然に解除）。
     const expectFollowup =
-      project.id === currentProject?.id && (liveRunActive || !ownsSendingState);
+      project.id === currentProject?.id && (liveRunActive || isFollowup);
     if (expectFollowup) {
       const queuedMs = followupQueuedMsAtSend({
         nowMs: Date.now(),
@@ -2410,11 +2617,7 @@ function AppMain() {
         setUploadProgress(null);
       } catch (error) {
         setUploadProgress(null);
-        if (ownsSendingState) {
-          setSending(false);
-          setStreamingProjectId(null);
-          setActivity('');
-        }
+        releaseSendSlot();
         setMessages((current) => current.filter((m) => m.id !== optimisticId));
         setPendingFollowups((current) => {
           if (!(optimisticId in current)) return current;
@@ -2447,7 +2650,6 @@ function AppMain() {
     // 送信の瞬間に発行する本物のメッセージID（サーバーはこれを行IDにする）。
     // 停止ボタンはこのIDで「送ったメッセージごと取消」ができる。
     const clientMessageId = uuidv4();
-    userCancelledRef.current = false;
 
     try {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
@@ -2536,13 +2738,13 @@ function AppMain() {
         clientMessageId,
         timelineRefs: sentTimelineRefs,
         registerCancel: (close) => {
-          activeStreamRef.current = {
+          activeStreamsRef.current.set(clientMessageId, {
             close,
             clientMessageId,
             optimisticId,
             draft: content,
             roomId: project!.room_id!,
-          };
+          });
         },
       });
     } catch (error) {
@@ -2555,16 +2757,26 @@ function AppMain() {
       streamFailure = error as Error;
     }
 
+    // ストリーム決着＝その場で送信状態を解除する（Send固着の根治の核心）。
+    // 以前はこの解除が下の reconcile（ネットワーク往復）の finally にあり、
+    // reconcile のどれかの await が返ってこないと送信中フラグが永久に残った。
+    // 解除はネットワークに依存しない同期処理だけで行い、reconcile は後段の
+    // ベストエフォートに格下げする。
+    activeStreamsRef.current.delete(clientMessageId);
+    setUploadProgress(null);
+    releaseSendSlot();
+
     // Reconcile from the server (the source of truth). Pull the saved messages
     // and check whether OUR message actually landed. Only treat it as a real
     // failure — and only then restore the draft — if the server has no record of
     // it. This is connection-state-independent, so a dropped SSE on an
     // already-saved message never resurrects the text in the input.
     try {
-      // ユーザーが停止ボタンで中断した場合、後始末（楽観行の削除・入力欄への
-      // 復元・サーバーへの取消依頼）は handleCancelTurn が済ませている。
-      // ここで reconcile すると「送信失敗」誤判定でアラートが出るのでスキップ。
-      if (userCancelledRef.current) return;
+      // ユーザーが停止ボタンで中断した場合（＝キャンセル世代が進んでいる）、
+      // 後始末（楽観行の削除・入力欄への復元・サーバーへの取消依頼）は
+      // handleCancelTurn が済ませている。ここで reconcile すると「送信失敗」
+      // 誤判定でアラートが出るのでスキップ。
+      if (cancelGenRef.current !== cancelGenAtSend) return;
       const list = await refreshProjects(token).catch(() => projects);
       const nextProject =
         list.find((item) => item.id === selectedProjectId) ||
@@ -2611,17 +2823,8 @@ function AppMain() {
         void maybeGenerateTitle(nextProject.id, nextProject.room_id);
       }
     } catch {
-      // best-effort reconcile
-    } finally {
-      if (activeStreamRef.current?.clientMessageId === clientMessageId) {
-        activeStreamRef.current = null;
-      }
-      setUploadProgress(null);
-      if (ownsSendingState) {
-        setSending(false);
-        setStreamingProjectId(null);
-        setActivity('');
-      }
+      // best-effort reconcile（送信状態は上で解除済み。ここで失敗しても
+      // メッセージ一覧は開いているチャットの定期ポーリングが追いつかせる）
     }
   }
 
@@ -2631,8 +2834,13 @@ function AppMain() {
   // メッセージごと取り消され、作業中なら作業がその場で止まる。
   async function handleCancelTurn() {
     if (!token) return;
-    const active = activeStreamRef.current;
-    userCancelledRef.current = true;
+    // 生きているストリームを全部止める（追い連絡があると複数本ある）。
+    // 挿入順＝送信順なので、先頭がこのターンの最初の送信。
+    const actives = Array.from(activeStreamsRef.current.values());
+    const active = actives[0] ?? null;
+    // 世代を進める＝実行中の各送信フローに「キャンセルが後始末を引き取った。
+    // お前たちは送信状態に触るな」と伝える（reconcile もスキップされる）。
+    cancelGenRef.current += 1;
     const roomId = active?.roomId || currentProject?.room_id;
     // Web版と同じ判定: ダンの応答（返信 or 作業ステップ）がまだ無ければ
     // 「送信の取り消し」＝メッセージごと消して入力欄へ復元。すでに動き出して
@@ -2643,16 +2851,17 @@ function AppMain() {
       ) ||
       (activity !== '' && activity !== 'Thinking...');
     const beforeReply = !!active && !replied;
-    if (active) {
-      activeStreamRef.current = null;
-      active.close();
-      if (beforeReply) {
+    if (actives.length > 0) {
+      activeStreamsRef.current.clear();
+      for (const stream of actives) stream.close();
+      if (beforeReply && active) {
         setMessages((current) =>
           current.filter((m) => m.id !== active.optimisticId && m.id !== active.clientMessageId),
         );
         setDraft((d) => (d ? d : active.draft));
       }
     }
+    inFlightSendsRef.current = 0;
     setSending(false);
     setStreamingProjectId(null);
     setActivity('');
@@ -3136,6 +3345,15 @@ function AppMain() {
           </View>
         ) : null}
 
+        {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
+            これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
+        {loadingMessages && messages.length > 0 ? (
+          <View style={styles.messagesRefreshBar}>
+            <ActivityIndicator color="#7fd1c7" size="small" />
+            <Text style={styles.messagesRefreshText}>最新の状態を取得中…</Text>
+          </View>
+        ) : null}
+
         {loadingMessages && messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <ActivityIndicator color="#f4f0e8" />
@@ -3317,7 +3535,9 @@ function AppMain() {
         <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
           <Pressable
             onPress={() => setAttachSheetOpen(true)}
-            disabled={sending}
+            // Send と同じ基準（別チャット宛ストリーム中のみ塞ぐ）。生の sending
+            // だと、このチャットへの追い連絡時まで「＋」が押せなくなる。
+            disabled={sendBlocked}
             hitSlop={6}
             style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
           >
@@ -4132,6 +4352,20 @@ const styles = StyleSheet.create({
     gap: 10,
     justifyContent: 'center',
     paddingHorizontal: 24,
+  },
+  messagesRefreshBar: {
+    alignItems: 'center',
+    backgroundColor: '#211f1b',
+    borderBottomColor: '#282520',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  messagesRefreshText: {
+    color: '#a7a19a',
+    fontSize: 12,
   },
   emptyTitle: {
     color: '#f4f0e8',

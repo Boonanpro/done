@@ -10,6 +10,10 @@
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+// Vercel の関数実行上限。未設定だと既定値（短い）で長いターンのストリームが
+// HTTP 200 のまま途中でブツ切りされ、クライアント側は done を受け取れない
+// （モバイルの Send 固着の主因だった）。
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const body = await request.text();
