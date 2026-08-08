@@ -39,6 +39,11 @@ def _host(u: Optional[str]) -> str:
     return urlparse(u).netloc.lower().split(":")[0]
 
 
+def _strip_www(host: str) -> str:
+    """先頭の www. を落とす（instagram.com と www.instagram.com は同じログイン先）。"""
+    return host[4:] if host.startswith("www.") else host
+
+
 def _base_domain(host: str) -> str:
     parts = host.split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
@@ -54,6 +59,18 @@ def _domains_match(h1: str, h2: str) -> bool:
         or h2.endswith("." + h1)
         or _base_domain(h1) == _base_domain(h2)
     )
+
+
+def narrow_url_matches(matches: list) -> list:
+    """
+    URL照合の結果を絞り込む。
+
+    ベースドメインが同じだけの別サービス（account.line.biz と manager.line.biz 等）が
+    混ざることがあるため、ホストまで完全一致した記録があればそちらを優先する。
+    それでも複数残る場合は絞り込まない（呼び出し元が service 名で選ぶ）。
+    """
+    exact = [m for m in matches if m.get("host_exact")]
+    return exact if exact else matches
 
 
 def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
@@ -234,27 +251,29 @@ class CredentialsService:
             logger.error(f"Failed to get credentials: {e}")
             return None
 
-    async def find_credential_by_url(
+    async def find_credentials_by_url(
         self,
         user_id: str,
         url: str,
-    ) -> Optional[dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
-        ログインページのURL/ドメインに一致する認証情報を返す。
+        ログインページのURL/ドメインに一致する認証情報を「全件」返す。
 
-        同じメールアドレスが複数サービスに登録されていても、保存済みの
-        login_url のドメインで照合するため、正しい1件を曖昧さなく引ける。
+        同じドメインに複数アカウントを保存していることがある（例: Instagram の
+        個人用と事業用）。1件目を黙って返すと別アカウントのパスワードを
+        使ってしまうため、照合結果は全件返し、どれを使うかは呼び出し元が決める。
 
         Args:
             user_id: ユーザーID
             url: 現在のログインページURL（例 https://account.line.biz/login）
 
         Returns:
-            一致した認証情報（id, password, service, credential_type, login_url）、無ければNone
+            一致した認証情報のリスト（id, password, service, credential_type, login_url）
         """
         target = _host(url)
         if not target:
-            return None
+            return []
+        matches: list[dict[str, Any]] = []
         try:
             result = self.supabase.table(self.TABLE_NAME).select("*").eq(
                 "user_id", user_id
@@ -271,17 +290,42 @@ class CredentialsService:
                     continue
                 credential_type = decrypted.pop("_credential_type", "login")
                 normalized = _normalize_credentials(decrypted)
-                return {
+                matches.append({
                     "id": normalized.get("id"),
                     "password": normalized.get("password"),
                     "service": row["service_name"],
                     "credential_type": credential_type,
                     "login_url": stored_url,
-                }
-            return None
+                    # ホストまで同じか（ベースドメインだけ同じ別サービスと区別する）。
+                    # www の有無は同じログイン先なので無視する。
+                    "host_exact": _strip_www(_host(stored_url)) == _strip_www(target),
+                })
+            return matches
         except Exception as e:
-            logger.error(f"Failed to find credential by url: {e}")
-            return None
+            logger.error(f"Failed to find credentials by url: {e}")
+            return []
+
+    async def find_credential_by_url(
+        self,
+        user_id: str,
+        url: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        URL照合で一意に定まる場合だけ、その1件を返す。
+
+        複数一致した場合は None を返す（どれか1つを勝手に選ぶと別アカウントの
+        パスワードを使ってしまうため）。呼び出し元は service 名で指定し直すこと。
+        """
+        matches = narrow_url_matches(await self.find_credentials_by_url(user_id, url))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                "URL %s に複数の認証情報が一致: %s — service 名の指定が必要",
+                url,
+                [m.get("service") for m in matches],
+            )
+        return None
 
     async def list_credentials(
         self,

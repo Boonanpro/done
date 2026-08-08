@@ -492,6 +492,79 @@ def _normalize_service_name(service: str) -> str:
     s = s.replace(" ", "_").replace("-", "_")
     return s
 
+
+# 照合語として意味を持たない一般語（これだけで一致させると無関係な記録を拾う）
+_SERVICE_TOKEN_STOPWORDS = {
+    "jp", "com", "co", "net", "org", "www", "login", "app", "web",
+    "my", "account", "official", "biz", "site",
+}
+
+
+def _service_tokens(value: str) -> set:
+    """サービス名から照合用の語を取り出す。"amazon_biz" → {"amazon_biz", "amazon"}"""
+    s = _normalize_service_name(value)
+    tokens = {
+        t for t in re.split(r"[^a-z0-9]+", s)
+        if len(t) >= 3 and t not in _SERVICE_TOKEN_STOPWORDS
+    }
+    if len(s) >= 3:
+        tokens.add(s)
+    return tokens
+
+
+async def _suggest_credential_services(
+    creds_service,
+    user_id: str,
+    service: Optional[str],
+    url: Optional[str],
+) -> List[str]:
+    """
+    完全一致で見つからなかった時に、保存済みのサービス名から近い候補を返す。
+
+    取得は完全一致しか見ないため、名前を少し外すと「保存されていない」と読めてしまい、
+    実際には保存済みの認証情報を「無い」と誤って断定する事故が起きた。
+    ここでは名前だけを返す（パスワードは返さない）。
+    """
+    try:
+        stored = await creds_service.list_credentials(user_id)
+    except Exception as e:
+        logger.warning(f"Failed to list credentials for suggestion: {e}")
+        return []
+
+    names = [row.get("service") for row in stored if row.get("service")]
+    if not names:
+        return []
+
+    queries = set()
+    if service:
+        queries |= _service_tokens(service)
+    if url:
+        try:
+            from app.services.credentials_service import _base_domain, _host
+            host = _host(url)
+            if host:
+                queries |= _service_tokens(_base_domain(host))
+        except Exception:
+            pass
+
+    matched: List[str] = []
+    for name in names:
+        low = name.strip().lower()
+        if any(q in low or low in q for q in queries):
+            matched.append(name)
+
+    # 打ち間違い・語順違いも拾う
+    if service:
+        import difflib
+        for name in difflib.get_close_matches(
+            _normalize_service_name(service), names, n=3, cutoff=0.6
+        ):
+            if name not in matched:
+                matched.append(name)
+
+    return matched[:5]
+
+
 # ============================================
 # 認証情報保存ツール
 # ============================================
@@ -1758,9 +1831,26 @@ async def execute_tool(
 
         # 1) URL（ログイン先ドメイン）で照合 — 同一メール複数サービスの取り違えを防ぐ最優先経路
         if url:
-            stored_creds = await creds_service.find_credential_by_url(user_id, url)
-            if stored_creds:
+            from app.services.credentials_service import narrow_url_matches
+            url_matches = narrow_url_matches(
+                await creds_service.find_credentials_by_url(user_id, url)
+            )
+            if len(url_matches) == 1:
+                stored_creds = url_matches[0]
                 matched_service = stored_creds.get("service")
+            elif len(url_matches) > 1 and not service:
+                # 同一ドメインに複数アカウント（例: Instagram の個人用と事業用）。
+                # 1件目を黙って返すと別アカウントのパスワードを渡すことになる。
+                names = [m.get("service") for m in url_matches if m.get("service")]
+                return {
+                    "success": False,
+                    "service": None,
+                    "suggestions": names,
+                    "message": (
+                        f"{url} には複数の認証情報が保存されています: {', '.join(names)}。"
+                        "どれを使うか service で指定して取り直すこと。"
+                    ),
+                }
 
         # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
         if not stored_creds and service:
@@ -1781,10 +1871,23 @@ async def execute_tool(
             }
         else:
             label = service or url
+            suggestions = await _suggest_credential_services(
+                creds_service, user_id, service, url
+            )
+            if suggestions:
+                message = (
+                    f"{label} という名前では見つかりませんでした。"
+                    f"似た名前で保存済み: {', '.join(suggestions)}。"
+                    "この中に目的のものがあれば service をその名前にして取り直すこと。"
+                    "候補を確認せずに「保存されていない」と判断しないこと。"
+                )
+            else:
+                message = f"{label} の認証情報は保存されていません。ユーザーに聞いてください。"
             return {
                 "success": False,
                 "service": matched_service,
-                "message": f"{label} の認証情報は保存されていません。ユーザーに聞いてください。",
+                "suggestions": suggestions,
+                "message": message,
             }
 
     # ★★★ 認証情報保存 ★★★
@@ -2890,7 +2993,23 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             stored_creds = None
             # 1) ログイン先URLで照合（同一メール複数サービスの取り違え防止・最優先）
             if url:
-                stored_creds = await creds_service.find_credential_by_url(user_id, url)
+                from app.services.credentials_service import narrow_url_matches
+                url_matches = narrow_url_matches(
+                    await creds_service.find_credentials_by_url(user_id, url)
+                )
+                if len(url_matches) == 1:
+                    stored_creds = url_matches[0]
+                elif len(url_matches) > 1 and not service:
+                    # 同一ドメインに複数アカウント。取り違えたパスワードを流し込むと
+                    # ログイン失敗が続くだけでなく、アカウントがロックされることもある。
+                    names = [m.get("service") for m in url_matches if m.get("service")]
+                    return {
+                        "success": False,
+                        "error": (
+                            f"{url} には複数の認証情報が保存されています: {', '.join(names)}。"
+                            "どれを入力するか service で指定してください。"
+                        ),
+                    }
             # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
             if not stored_creds and service:
                 service_normalized = _normalize_service_name(service)
@@ -2900,7 +3019,14 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 
             if not stored_creds:
                 label = service or url
-                return {"success": False, "error": f"{label} の認証情報が保存されていません。ユーザーに聞いてください。"}
+                suggestions = await _suggest_credential_services(
+                    creds_service, user_id, service, url
+                )
+                hint = (
+                    f" 似た名前で保存済み: {', '.join(suggestions)}。service を指定し直してください。"
+                    if suggestions else " ユーザーに聞いてください。"
+                )
+                return {"success": False, "error": f"{label} の認証情報が保存されていません。{hint}"}
 
             value = stored_creds.get("password", "") if field == "password" else stored_creds.get("id", "")
             if not value:
