@@ -118,11 +118,19 @@ class VercelDomains:
         key: str,
         value: str,
         targets: Optional[list[str]] = None,
+        upsert: bool = False,
     ) -> dict[str, Any]:
-        """Set a build/runtime variable on a dedicated project."""
+        """Set a build/runtime variable on a dedicated project.
+
+        ``upsert=True`` overwrites an existing value instead of failing with
+        409/ENV_CONFLICT.  Required for variables that legitimately change over
+        time — the tunnel URL rotates on every PC reboot, so a create-only call
+        would leave dedicated sites pointing at a dead address forever.
+        """
         return await self._request(
             "POST",
             f"/v10/projects/{project_id_or_name}/env",
+            params={"upsert": "true"} if upsert else None,
             json={
                 "key": key,
                 "value": value,
