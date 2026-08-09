@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
   Check,
@@ -372,10 +372,31 @@ function stepsToBlocks(steps: StepInfo[]): TurnBlock[] {
 // バックエンドの DAN_STREAMING_INPUT と揃えて有効化する（OFF時は従来挙動）。
 const STREAMING_INPUT = process.env.NEXT_PUBLIC_DAN_STREAMING_INPUT === '1';
 
+/** LINE風の送信時刻（例: 9:41 / 14:23）。日付は日付セパレータ側が担当する。 */
+function formatMessageTime(createdAt: string | undefined): string | null {
+  if (!createdAt) return null;
+  const d = new Date(createdAt);
+  if (isNaN(d.getTime())) return null;
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** LINE風の日付区切りラベル。今日/昨日、それ以外は「8月7日(木)」（年が違えば年も）。 */
+function formatDateSeparator(d: Date): string {
+  const now = new Date();
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000);
+  if (diffDays === 0) return '今日';
+  if (diffDays === 1) return '昨日';
+  const weekday = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()];
+  const base = `${d.getMonth() + 1}月${d.getDate()}日(${weekday})`;
+  return d.getFullYear() === now.getFullYear() ? base : `${d.getFullYear()}年${base}`;
+}
+
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
 
   // 追い連絡の仮送信状態（クライアント側フラグ）。半透明＋バッジで表示。
   const pending = !!msg.pendingFollowup;
+  const timeLabel = formatMessageTime(msg.created_at);
 
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
@@ -391,6 +412,11 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
             >
               <Reply className="h-3.5 w-3.5" />
             </button>
+          )}
+          {timeLabel && (
+            <span className="self-end mb-0.5 shrink-0 text-[10px] leading-none text-muted-foreground">
+              {timeLabel}
+            </span>
           )}
           <div className="flex flex-col items-end gap-1">
           {images.map((url, i) => (
@@ -538,6 +564,9 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
             </a>
           ))}
         </div>
+      )}
+      {timeLabel && (
+        <div className="mt-1 text-[10px] leading-none text-muted-foreground">{timeLabel}</div>
       )}
     </div>
   );
@@ -2514,9 +2543,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 -1
               );
 
-              return visibleDisplayItems.map((item, index) => {
+              // LINE風の日付区切り: 日付が変わった最初のメッセージの前にだけ
+              // 「今日」「昨日」「8月7日(木)」のチップを挟む。作業ブロックは
+              // 日付を持たないので判定を進めない（前後のメッセージに任せる）。
+              let prevDateKey: string | null = null;
+              const nodes: ReactNode[] = [];
+              visibleDisplayItems.forEach((item, index) => {
                 if (item.kind === 'execution-block') {
-                  return (
+                  nodes.push(
                     <InlineProcessBlock
                       key={item.id}
                       steps={item.steps}
@@ -2524,10 +2558,29 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                       defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
                     />
                   );
+                  return;
                 }
 
-                return <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
+                const d = item.msg.created_at ? new Date(item.msg.created_at) : null;
+                if (d && !isNaN(d.getTime())) {
+                  const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+                  if (dateKey !== prevDateKey) {
+                    nodes.push(
+                      <div key={`date-${dateKey}`} className="my-2 flex justify-center">
+                        <span className="rounded-full bg-muted px-3 py-1 text-[11px] text-muted-foreground">
+                          {formatDateSeparator(d)}
+                        </span>
+                      </div>
+                    );
+                    prevDateKey = dateKey;
+                  }
+                }
+
+                nodes.push(
+                  <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
+                );
               });
+              return nodes;
             })()}
             {hiddenOlderCount > 0 ? (
               <div className="h-1" aria-hidden="true" />
