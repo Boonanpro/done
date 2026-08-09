@@ -2049,6 +2049,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const hasAnyContent = displayItems.length > 0;
 
+  // 初回読み込み中（下のJSXでスピナーを出す条件と同一）。メッセージだけ先に
+  // 届いた時点ではまだリストがDOMに無いので、この間に「最下部へ」を発火させると
+  // スピナー相手に空振りして二度と発火しない。リスト描画後に揃えるための旗。
+  const isBooting =
+    !project ||
+    (!!project.room_id && messagesData === undefined) ||
+    isLoadingCurrentRun ||
+    isLoadingExecutionEvents;
+
   useEffect(() => {
     isNearBottomRef.current = true;
     const frame = requestAnimationFrame(() => {
@@ -2088,26 +2097,32 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   // チャットを開いた瞬間に最新（一番下）を表示する。ペイント前に位置を
   // 決めるので、上の方が一瞬見えてから飛ぶちらつきが無い。
+  // isBooting を依存に含めるのが要: メッセージ取得完了(hasAnyContent=true)は
+  // run/イベント取得完了より先に来ることがあり、その時点ではまだスピナー表示中で
+  // リストがDOMに無い。スピナーが消えた後のコミットでもう一度発火させる。
   useLayoutEffect(() => {
-    if (!hasAnyContent) return;
+    if (isBooting || !hasAnyContent) return;
     const el = scrollContainerRef.current;
     if (el && isNearBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [projectId, hasAnyContent]);
+  }, [projectId, hasAnyContent, isBooting]);
 
   // 開いた直後の「最下部へ合わせたのに途中で止まる」の根治。画像・動画・
   // マークダウンの遅延レイアウトで後から中身の高さが伸びると、一度合わせた
   // 位置が相対的に上へずれる。ユーザーが自分で上へスクロールするまで
   // （isNearBottomRef が true の間）は、高さが変わるたび最下部へ貼り直す。
   useEffect(() => {
+    if (isBooting) return;
     const content = messagesContentRef.current;
     const el = scrollContainerRef.current;
+    // スピナー表示中は messagesContentRef が null で observer 登録に失敗する。
+    // isBooting を依存に含め、リスト描画後に必ず登録し直す。
     if (!content || !el) return;
     const observer = new ResizeObserver(() => {
       if (isNearBottomRef.current) el.scrollTop = el.scrollHeight;
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [projectId, hasAnyContent]);
+  }, [projectId, hasAnyContent, isBooting]);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -2482,7 +2497,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             順に挿入されて画面が組み変わって見える（到着順のバラつき）。
             isLoading は初回取得中のみ true なので、以降のポーリングや
             キャッシュ済みの開き直しではスピナーに戻らない。 */}
-        {!project || (project.room_id && messagesData === undefined) || isLoadingCurrentRun || isLoadingExecutionEvents ? (
+        {isBooting ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
