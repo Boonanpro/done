@@ -98,13 +98,33 @@ async def suggest_project_title(
     room_id: Optional[str] = Query(default=None),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """チャット内容からプロジェクトタイトルを自動生成"""
+    """チャット内容からプロジェクトタイトルを自動生成（初回のみ）
+
+    タイトルは最初の1回だけAIが付ける。既にタイトルが付いている部屋には
+    現在のタイトルをそのまま返す（LLM生成もしない）。会話が進むたびに
+    名前がころころ変わると目的のチャットを見失う、というユーザー要望による。
+    クライアント側（Web/モバイル）にも同種のガードはあるが、キャッシュ未取得の
+    タイミングですり抜けて改名される事故が実際に起きたため、サーバー側で確実に守る。
+    """
     from app.services.chat_service import ChatService
 
     service = ChatService()
     raw_messages: list[dict] = []
 
     if room_id:
+        try:
+            proj = (
+                service.supabase.table("projects")
+                .select("title")
+                .eq("room_id", room_id)
+                .limit(1)
+                .execute()
+            )
+            current_title = (proj.data[0].get("title") or "").strip() if proj.data else ""
+            if current_title and current_title != "新しいプロジェクト":
+                return {"title": current_title}
+        except Exception:
+            pass
         try:
             raw = await service.get_messages(room_id, current_user.user_id, limit=20)
             # 古い→新しい順に並べ替え、空メッセージは除外
