@@ -105,11 +105,14 @@ _DETECT_JS = r"""
     }
   }
 
-  // --- hcaptcha / turnstile via scripts when no data-sitekey element seen ---
-  if ([...document.querySelectorAll('iframe[src]')].some(f => /hcaptcha\.com/i.test(f.src))) {
-    const f = [...document.querySelectorAll('iframe[src]')].find(f => /hcaptcha\.com/i.test(f.src));
-    const m = f && f.src.match(/sitekey=([^&]+)/);
-    if (m) push({ type: 'hcaptcha', sitekey: m[1], source: 'iframe' });
+  // --- hcaptcha via its own iframes (JS-rendered widget, no [data-sitekey]) ---
+  // invisible hCaptcha renders TWO iframes: the checkbox one carries no sitekey,
+  // the challenge one does. Scan every hcaptcha frame instead of only the first,
+  // otherwise a visible challenge is reported as "no captcha detected".
+  for (const f of document.querySelectorAll('iframe[src]')) {
+    if (!/hcaptcha\.com/i.test(f.src)) continue;
+    const m = f.src.match(/sitekey=([^&#]+)/);
+    if (m) push({ type: 'hcaptcha', sitekey: decodeURIComponent(m[1]), source: 'iframe' });
   }
 
   // --- child recaptcha anchor iframes (widget rendered by the JS API, no
