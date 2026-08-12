@@ -11,7 +11,9 @@ Use this as Dan's AI media generation router. It chooses the generation engine a
 
 Prefer Higgsfield CLI for new image/video generation:
 
-- Generic images/design/text: `higgsfield-generate` with GPT Image 2
+- Generic images/design/text: **`python scripts/gpt_image.py`（OpenAI API直のGPT Image 2）**。
+  プロンプトは標準入力、`--size WxH --quality low|medium|high --image 参照 --mask 修正 --out out.png`。
+  Higgsfield経由のGPT Image 2は使わない（2026-08-11 API一本化。品質同等・高速・自由サイズ）
 - Serious video/image-to-video: `higgsfield-generate` with Seedance 2.0 by default
 - Ads/UGC/product demos: `higgsfield-generate` Marketing Studio
 - Product photos: `higgsfield-product-photoshoot`

@@ -68,7 +68,10 @@ If the user says "analyze this video", "score this ad", "evaluate the hook", or 
 
 1. **Pick a model.** Start with the core defaults unless the brief clearly needs a specialist:
 
-   - **GPT Image 2** → default image model for high-fidelity general generation, graphic design, UI, banners, typography, and on-image text.
+   - **GPT Image 2 → Higgsfield経由では使わない（2026-08-11 API一本化）。** 汎用画像・デザイン・
+     タイポグラフィ・文字入り画像は `echo <prompt> | python scripts/gpt_image.py --out out.png`
+     （OpenAI API直。品質同等・高速・自由サイズ・マスク修正対応）。Higgsfieldは動画・Soul・
+     Nano Banana・Marketing Studio 専用。
    - **Seedance 2.0** → default video model for serious motion, cinematic clips, multi-shot work, image-to-video, and 4–15s production-quality output. 12s is valid.
    - **Nano Banana 2/Pro** → default for character, cartoon, stylized, and reference-driven image work; use Pro for harder briefs.
    - **Marketing Studio** → default for ads, UGC, product demos, unboxing, TV spots, presenter videos, and brand/product workflows.
@@ -85,7 +88,7 @@ If the user says "analyze this video", "score this ad", "evaluate the hook", or 
    - Soul Character (reference id from `higgsfield-soul-id`) → Soul 2.0 for stills, Soul Cinema for cinematic
    - Character or cartoon-style work → Nano Banana 2; step up to Nano Banana Pro on hard cases
    - Fast and cheap iteration → Z Image
-   - **Default for everything else → GPT Image 2.** Graphic design, UI, banners, typography, and high-fidelity general generation.
+   - **Default for everything else → GPT Image 2 via `scripts/gpt_image.py`（OpenAI API直。Higgsfieldでは叩かない）.**
 
    **Video:**
    - All advertising / commercial / branded ad video → Marketing Studio (see Marketing Studio below)
@@ -128,7 +131,6 @@ Each flag accepts either a local file path (auto-uploaded) or a UUID (upload id 
 Flags pass through to model schema. Use `higgsfield model get <jst>` to discover.
 
 ```bash
-higgsfield generate create gpt_image_2 --prompt "neon city at dusk" --aspect_ratio 16:9 --resolution 2k --wait
 higgsfield generate create nano_banana_2 --prompt "anime character concept, expressive pose" --image ./ref.png --wait
 higgsfield generate create seedance_2_0 --prompt "camera dollies in" --start-image ./first.png --duration 12 --wait
 higgsfield generate create text2image_soul_v2 --prompt "..." --soul-id <soul_ref_id> --quality 2k --wait
