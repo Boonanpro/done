@@ -9,6 +9,7 @@ import imaplib
 import email as email_lib
 import hashlib
 import secrets
+from email import utils as email_utils
 from email.header import decode_header
 from typing import Optional, List, Tuple
 from datetime import datetime, timedelta, timezone
@@ -65,6 +66,64 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
             return datetime.fromisoformat(main_part + tz_part)
         except Exception:
             return datetime.now(timezone.utc)
+
+
+def _raw_message_from_fetch(msg_data) -> Optional[bytes]:
+    """IMAP fetch の応答から生メッセージを取り出す。
+
+    応答の形はサーバによって違い、iCloud は本文を持たない要素を混ぜてくる。
+    先頭要素を決め打ちすると取りこぼすので、bytes 本文を持つ最初のタプルを拾う。
+    """
+    for part in msg_data or []:
+        if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], (bytes, bytearray)):
+            return bytes(part[1])
+    return None
+
+
+def _message_datetime(email_message) -> Optional[datetime]:
+    """メールの送信日時を tz-aware で返す。読めなければ None。"""
+    raw = email_message.get("Date")
+    if not raw:
+        return None
+    try:
+        dt = email_utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# CSSやJSは本文扱いしない。色指定の #595959 が6桁コードとして拾われるため。
+_HTML_NOISE_RE = re.compile(r'<(style|script|head)[^>]*>.*?</\1>', re.S | re.I)
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+
+
+def _message_text(email_message) -> str:
+    """メールから本文テキストを取り出す。
+
+    text/plain が無いメール（Epic の認証メールなど HTML のみ）でも
+    コードやリンクを拾えるよう、無ければ HTML から起こす。
+    """
+    plain = ""
+    html = ""
+    parts = email_message.walk() if email_message.is_multipart() else [email_message]
+    for part in parts:
+        content_type = part.get_content_type()
+        if content_type not in ("text/plain", "text/html"):
+            continue
+        payload = part.get_payload(decode=True) or b""
+        text = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+        if content_type == "text/plain":
+            plain += text
+        else:
+            html += text
+
+    if plain.strip():
+        return plain
+    if not html:
+        return ""
+    return _HTML_TAG_RE.sub(" ", _HTML_NOISE_RE.sub(" ", html))
 
 
 # メールプロバイダ別の IMAP ホスト（ドメイン → host）
@@ -455,13 +514,25 @@ class OTPService:
 
             # 最新のメールから確認（最新10件）
             message_ids = list(reversed(message_ids[-10:]))
-            cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
 
             for msg_id in message_ids:
-                _, msg_data = imap.fetch(msg_id, '(RFC822)')
+                # iCloud は (RFC822) に空応答を返して本文が一切取れないため
+                # BODY.PEEK[] を使う。PEEK は既読フラグを立てないので、OTPを
+                # 採用したメールだけ下で明示的に既読にする従来の挙動は保たれる。
+                _, msg_data = imap.fetch(msg_id, '(BODY.PEEK[])')
 
-                email_body = msg_data[0][1]
+                email_body = _raw_message_from_fetch(msg_data)
+                if not email_body:
+                    logger.debug(f"[IMAP] No body in fetch response for {msg_id}")
+                    continue
                 email_message = email_lib.message_from_bytes(email_body)
+
+                # 認証待ちの時間内に届いたメールだけを見る。未読が大量にある
+                # 受信箱では、広告メールの数字をOTPとして掴む事故が起きるため。
+                sent_at = _message_datetime(email_message)
+                if sent_at and sent_at < cutoff_time:
+                    continue
 
                 # 件名をデコード
                 subject_raw = email_message.get('Subject', '')
@@ -479,14 +550,7 @@ class OTPService:
                 from_header = email_message.get('From', '')
 
                 # 本文を取得
-                body = ""
-                if email_message.is_multipart():
-                    for part in email_message.walk():
-                        if part.get_content_type() == "text/plain":
-                            body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                            break
-                else:
-                    body = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+                body = _message_text(email_message)
 
                 # OTP抽出
                 logger.debug(f"[IMAP] Checking email - Subject: {subject[:50] if subject else 'None'}...")
