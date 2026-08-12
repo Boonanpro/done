@@ -2829,6 +2829,14 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 }
             await page.goto(url)
             await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
+            if action == "open_target" and not _looks_like_login_url(page.url):
+                # Apple等はDOM構築後にJSでログイン画面へ飛ぶ。ここで待たずにURLを見ると
+                # 「ログイン済み」と誤判定し、後続のclickがログインガードでgo_backされる。
+                # networkidleは常時通信のあるサイトでは来ないので、URL自体をポーリングする。
+                for _ in range(30):
+                    await page.wait_for_timeout(200)
+                    if _looks_like_login_url(page.url):
+                        break
             state = await _get_browser_state(page)
             if action == "open_target":
                 _browser_auth_state["target_url"] = url
