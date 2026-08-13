@@ -339,6 +339,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         SCHEDULE_FOLLOWUP_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
+        SAVE_TOTP_SECRET_TOOL,
         REMEMBER_PERSONAL_INFO_TOOL,
         GET_PERSONAL_INFO_TOOL,
         CHECK_SKILL_TOOL,
@@ -633,6 +634,47 @@ GET_CREDENTIALS_TOOL = {
                 "description": "現在のログインページURL（例: https://account.line.biz/login）。ドメイン照合で正しい認証情報を引く"
             }
         },
+    },
+}
+
+SAVE_TOTP_SECRET_TOOL = {
+    "name": "save_totp_secret",
+    "description": """認証アプリ(TOTP)のシードを暗号化保存する。以後そのサービスの2段階認証は
+`browser(action="fill_totp_code")` だけで突破でき、SMSもメールも一切不要になる。
+
+★シードとは: 認証アプリの登録画面に一度だけ表示される英数字の文字列（QRコードの中身）。
+6桁コードは「シード＋現在時刻」から計算されているだけなので、シードを持てばダン自身が
+同じコードを生成できる。6桁コード自体は使い捨てなので保存しない（保存するのはシード）。
+
+★使うタイミング（重要）:
+- サービスの2段階認証を新規に設定する時、SMSではなく必ず「認証アプリ」を選び、
+  表示されたシード（またはQRの otpauth:// URI）をこのツールで保存してから有効化を完了する
+- ユーザーがシード/QRの文字列を渡してきた時
+- 既にSMS認証になっているサービスにログインできた時、設定画面から認証アプリ方式へ
+  切り替えてシードを保存しておく（次回以降スマホが不要になる）
+
+secret には以下のどちらを渡してもよい:
+- otpauth://totp/... の URI 全体（QRを読めた場合はこれが確実。桁数や周期も自動で読む）
+- 素のシード文字列（"abcd efgh ijkl" のような空白区切り・小文字でもよい）
+
+保存済みのID/パスワードは消えない（統合される）。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "service": {
+                "type": "string",
+                "description": "サービス名（例: meta, google, amazon）。既存の認証情報と同じ名前にすると1件に統合される"
+            },
+            "secret": {
+                "type": "string",
+                "description": "otpauth:// URI 全体、または素のbase32シード文字列"
+            },
+            "login_url": {
+                "type": "string",
+                "description": "ログインページのURL/ドメイン（例: facebook.com）。指定するとURL照合でも引ける"
+            },
+        },
+        "required": ["service", "secret"],
     },
 }
 
@@ -946,6 +988,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "get_credentials":
         return ("_get_credentials", "get")
+
+    if tool_name == "save_totp_secret":
+        return ("_save_totp_secret", "save")
 
     if tool_name == "remember_personal_info":
         return ("_remember_personal_info", "save")
@@ -1948,6 +1993,59 @@ async def execute_tool(
         )
 
         return {"success": True}
+
+    # ★★★ 認証アプリ(TOTP)シードの保存 ★★★
+    if skill_name == "_save_totp_secret":
+        service = params.get("service")
+        secret = params.get("secret")
+        if not service or not secret:
+            return {"success": False, "error": "service と secret が必要です"}
+
+        service = _normalize_service_name(service)
+
+        from app.services.totp_service import parse_totp_uri, generate_code, TOTPError
+        try:
+            parsed = parse_totp_uri(secret)
+        except TOTPError as exc:
+            # 値そのものは返さない
+            return {"success": False, "error": str(exc)}
+
+        from app.services.credentials_service import get_credentials_service
+        creds_service = get_credentials_service()
+        result = await creds_service.save_totp_secret(
+            user_id=user_id,
+            service=service,
+            secret=parsed["secret"],
+            digits=parsed["digits"],
+            period=parsed["period"],
+            algorithm=parsed["algorithm"],
+            login_url=params.get("login_url"),
+        )
+        if not result.get("success"):
+            return {"success": False, "error": result.get("message", "保存に失敗しました")}
+
+        # 保存直後に一度生成して、実際にコードが作れる状態か確かめる（値は返さない）。
+        # 登録画面で確認コードを求められた時、ここで失敗に気付けないと詰む。
+        try:
+            generate_code(
+                parsed["secret"],
+                digits=parsed["digits"],
+                period=parsed["period"],
+                algorithm=parsed["algorithm"],
+            )
+        except TOTPError as exc:
+            return {"success": False, "error": f"保存しましたがコード生成に失敗します: {exc}"}
+
+        return {
+            "success": True,
+            "service": service,
+            "message": (
+                f"{service} の認証アプリのシードを保存しました。"
+                f"以後は browser(action=\"fill_totp_code\", service=\"{service}\", ref=\"...\") で"
+                "SMSを待たずに2段階認証を突破できます。"
+                "登録画面で確認コードを求められている場合は、そのまま fill_totp_code で入力してください。"
+            ),
+        }
 
     # ★★★ 個人情報の保存（電話・カード・住所等）★★★
     if skill_name == "_remember_personal_info":
@@ -3069,6 +3167,127 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                         f"保存済みの{field_label}を {ref} に入力しました（値は非表示）。"
                         "続けて必要ならサインイン/送信ボタンを click してください。"
                         "状態を見る場合は screenshot を呼ぶ（パスワード欄の値はマスクされます）。"
+                    ),
+                }],
+            }
+
+        elif action in ("human_click", "human_drag"):
+            # 人間らしいポインタ操作。CAPTCHAは「答えが合っているか」だけでなく
+            # 「どう操作したか」も採点する。座標へ瞬間移動して押すだけの操作は
+            # 機械と判定され、正しい位置に置いても「誤った返答」で弾かれる。
+            # 曲線を描いて近づき、緩急と微細なブレを混ぜ、押下前後に間を置く。
+            x, y = params.get("x"), params.get("y")
+            if x is None or y is None:
+                return {"success": False, "error": "x と y が必要です"}
+
+            from app.tools.human_pointer import HumanPointer
+            pointer = HumanPointer(page)
+
+            if action == "human_drag":
+                to_x, to_y = params.get("to_x"), params.get("to_y")
+                if to_x is None or to_y is None:
+                    return {"success": False, "error": "human_drag には to_x と to_y が必要です"}
+                await pointer.drag(float(x), float(y), float(to_x), float(to_y))
+                note = f"({x},{y}) から ({to_x},{to_y}) へ人間らしい軌道でドラッグしました。"
+            else:
+                await pointer.click(float(x), float(y))
+                note = f"({x},{y}) を人間らしい動きでクリックしました。"
+
+            state = await _get_browser_state(page)
+            state["success"] = True
+            state["content"] = [{"type": "text", "text": note}] + (state.get("content") or [])
+            return state
+
+        elif action == "fill_totp_code":
+            # 認証アプリ(TOTP)のコードをサーバー側で生成して入力欄へ直接入れる。
+            # シードと現在時刻から計算するだけなので、SMS/メールの到着を待つ必要がない。
+            # fill_credential と同様、生成した値はモデルに一切返さない。
+            ref = params.get("ref")
+            service = params.get("service")
+            url = params.get("url")
+            if not ref:
+                return {"success": False, "error": "ref が必要です"}
+            if not service and not url:
+                return {"success": False, "error": "service または url が必要です"}
+
+            user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+            from app.services.credentials_service import get_credentials_service
+            creds_service = get_credentials_service()
+
+            stored_creds = None
+            # 1) ログイン先URLで照合（同一ドメイン複数アカウントの取り違え防止）
+            if url:
+                from app.services.credentials_service import narrow_url_matches
+                url_matches = narrow_url_matches(
+                    await creds_service.find_credentials_by_url(user_id, url)
+                )
+                with_totp = [m for m in url_matches if m.get("totp_secret")]
+                if len(with_totp) == 1:
+                    stored_creds = with_totp[0]
+                elif len(with_totp) > 1 and not service:
+                    names = [m.get("service") for m in with_totp if m.get("service")]
+                    return {
+                        "success": False,
+                        "error": (
+                            f"{url} には認証アプリのシードが複数保存されています: {', '.join(names)}。"
+                            "どれを使うか service で指定してください。"
+                        ),
+                    }
+            # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
+            if not stored_creds and service:
+                service_normalized = _normalize_service_name(service)
+                stored_creds = await creds_service.get_credential(user_id, service_normalized)
+                if not stored_creds and service_normalized != service:
+                    stored_creds = await creds_service.get_credential(user_id, service)
+
+            if not stored_creds or not stored_creds.get("totp_secret"):
+                label = service or url
+                return {
+                    "success": False,
+                    "error": (
+                        f"{label} には認証アプリ(TOTP)のシードが保存されていません。"
+                        "このサービスはまだ認証アプリ方式になっていない可能性があります。"
+                        "SMS/メールで認証を進め、ログインできたら設定画面で認証アプリ方式に切り替えて "
+                        "save_totp_secret でシードを保存してください（次回からSMS不要になります）。"
+                    ),
+                }
+
+            from app.services.totp_service import (
+                generate_from_stored,
+                seconds_remaining,
+                TOTPError,
+            )
+            try:
+                generated = generate_from_stored(stored_creds)
+                # 残り僅かだと入力中に切り替わって弾かれる。次の窓まで待ってから入れる。
+                if generated["seconds_remaining"] <= 3:
+                    await page.wait_for_timeout(
+                        (generated["seconds_remaining"] + 1) * 1000
+                    )
+                    generated = generate_from_stored(stored_creds)
+            except TOTPError as exc:
+                return {"success": False, "error": str(exc)}
+
+            await page.fill_by_ref(ref, generated["code"])
+
+            if params.get("press_enter", False):
+                await page.keyboard.press("Enter")
+                try:
+                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
+                except Exception:
+                    await page.wait_for_timeout(2000)
+
+            # 値は絶対に返さない。入力できたことと、残り有効秒数だけ伝える。
+            return {
+                "success": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"認証アプリのコードを生成して {ref} に入力しました（値は非表示・"
+                        f"残り約{generated['seconds_remaining']}秒有効）。"
+                        "続けて送信ボタンを click してください。"
+                        "コードが拒否された場合は時刻ずれの可能性があるので、もう一度この操作を呼べば"
+                        "新しいコードが入ります。"
                     ),
                 }],
             }

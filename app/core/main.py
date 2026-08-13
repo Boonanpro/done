@@ -67,6 +67,40 @@ async def lifespan(app: FastAPI):
         except RuntimeError as e:
             logger.warning("sandbox auto-start failed: %s", e)
 
+    # 放置ブラウザの掃除: ブラウザは detached 起動でターンをまたいで生き残るので
+    # （ログイン途中やOTP入力画面を失わないための設計）、誰かが片付けないと部屋の
+    # 数だけ Chrome が残り続ける。最終使用から一定時間経ったものだけを正常終了で
+    # 閉じる。判定を時刻だけにするのは、「まだ使う」を推測して外すと今回直した
+    # 「肝心な場面で消える」が再発するため。
+    browser_reaper_task = None
+    try:
+        idle_seconds = int(os.environ.get("DAN_BROWSER_IDLE_CLOSE_SECONDS", "1800"))
+        interval = max(60, min(idle_seconds // 3, 600))
+
+        async def _browser_reaper():
+            from app.tools.browser import close_idle_browsers
+            while True:
+                try:
+                    await asyncio.sleep(interval)
+                    closed = await close_idle_browsers(idle_seconds)
+                    for c in closed:
+                        logger.info(
+                            "idle browser closed: %s (idle %.1f min, graceful=%s)",
+                            c["profile"], c["idle_minutes"], c["graceful"],
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("browser reaper error (non-fatal): %s", exc)
+
+        if idle_seconds > 0:
+            browser_reaper_task = asyncio.create_task(_browser_reaper())
+            logger.info(
+                "browser reaper started (idle=%ss, interval=%ss)", idle_seconds, interval
+            )
+    except Exception as e:
+        logger.warning("browser reaper failed to start: %s", e)
+
     # 続報ポーラー: 予約された follow-up を期限到来時に発火し、ダンを再起動して
     # チャットに報告させる（ターン制エージェントが「完了したら報告します」を守れる
     # ようにする土台）。失敗してもコア起動は妨げない。
@@ -101,6 +135,9 @@ async def lifespan(app: FastAPI):
         logger.warning("domain publication recovery failed to schedule: %s", e)
 
     yield
+
+    if browser_reaper_task:
+        browser_reaper_task.cancel()
 
     # シャットダウン時にサンドボックスも止める
     try:

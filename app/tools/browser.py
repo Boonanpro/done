@@ -291,18 +291,23 @@ def _is_executor_cdp_available(port: Optional[int] = None) -> bool:
     return _port_listening(port if port is not None else _resolve_executor_cdp_port())
 
 
-def _list_dedicated_browser_processes() -> tuple[list[dict[str, Any]], bool]:
+def _list_dedicated_browser_processes(
+    profile_dir: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], bool]:
     """
     List only browser processes that explicitly use DAN's dedicated profile.
 
     Child processes are terminated through taskkill /T after the verified root
     process is selected. Regular Chrome uses a different profile and is never
     returned here.
+
+    ``profile_dir`` defaults to this process's room. The idle reaper runs inside
+    dan-core, which belongs to no room, so it passes the profile explicitly.
     """
     if os.name != "nt":
         return [], False
 
-    profile_marker = str(_executor_profile_dir()).lower().replace("/", "\\")
+    profile_marker = str(profile_dir or _executor_profile_dir()).lower().replace("/", "\\")
     command = (
         "Get-CimInstance Win32_Process | "
         "Where-Object { $_.Name -match '^(chrome|chromium|msedge|headless_shell)\\.exe$' } | "
@@ -437,6 +442,85 @@ def _recover_stale_executor_profile() -> bool:
         removed_locks=removed_locks,
     )
     return bool(terminated or removed_locks)
+
+
+def _chrome_executable_path(playwright) -> str:
+    """起動する実行ファイルを決める。実Chrome優先（H.264/AAC同梱）、無ければ同梱Chromium。"""
+    channel = os.environ.get("DAN_BROWSER_CHANNEL", "chrome")
+    if channel == "chrome":
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+    return playwright.chromium.executable_path
+
+
+def _spawn_detached_browser(
+    executable: str,
+    user_data_dir: str,
+    cdp_port: int,
+    window_x: int,
+    window_y: int,
+) -> None:
+    """
+    ブラウザを「このプロセスの子」にせず独立プロセスとして起動する。
+
+    Playwright に起動させると、親プロセス（部屋ごとのMCPサーバ）が終了した
+    瞬間にブラウザも道連れで殺される。ダンの常駐セッションは transcript 肥大
+    ・パースエラー・ハングのたびに畳まれるため、そのたびにログイン途中の
+    ページやOTP入力欄ごとブラウザが消え、ユーザーが渡したコードが無駄になって
+    いた。detached で起動して CDP で外から繋ぐ形にすると、ターンをまたいでも
+    同じブラウザ・同じタブが生き残る。
+    """
+    args = [
+        executable,
+        f"--remote-debugging-port={cdp_port}",
+        "--remote-debugging-address=127.0.0.1",
+        f"--user-data-dir={user_data_dir}",
+        "--disable-blink-features=AutomationControlled",
+        f"--window-position={window_x},{window_y}",
+        "--window-size=1440,900",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "about:blank",
+    ]
+    creationflags = 0
+    if os.name == "nt":
+        # DETACHED_PROCESS: 親が死んでも道連れにしない
+        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(
+        args,
+        creationflags=creationflags,
+        close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+async def _connect_detached_browser(playwright, cdp_port: int, timeout: float = 30.0):
+    """detached 起動したブラウザの CDP が開くまで待って接続する。"""
+    deadline = time.time() + timeout
+    last_exc: Optional[Exception] = None
+    while time.time() < deadline:
+        if _port_listening(cdp_port):
+            try:
+                return await playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{cdp_port}", timeout=5000
+                )
+            except Exception as exc:  # 起動直後は CDP がまだ応答しないことがある
+                last_exc = exc
+        await asyncio.sleep(0.25)
+    raise RuntimeError(
+        f"detached browser did not expose CDP on port {cdp_port} within {timeout}s"
+        + (f": {last_exc}" if last_exc else "")
+    )
 
 
 async def _fetch_master_cookies_raw() -> list[dict]:
@@ -581,23 +665,20 @@ async def _executor_worker():
 
             window_x, window_y = _executor_window_position()
 
-            async def launch_persistent_context():
-                return await playwright.chromium.launch_persistent_context(
-                    user_data_dir=user_data_dir,
-                    headless=False,
-                    slow_mo=100,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--remote-debugging-address=127.0.0.1",
-                        f"--remote-debugging-port={cdp_port}",
-                        f"--window-position={window_x},{window_y}",
-                    ],
-                    viewport={"width": 1440, "height": 900},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            # ブラウザは detached で起動して CDP で「外から」繋ぐ。Playwright に
+            # 起動させるとこのプロセス（部屋ごとのMCPサーバ）の子になり、常駐
+            # セッションが畳まれるたびにブラウザごと道連れで死ぬ。ログイン途中の
+            # ページやOTP入力欄が消える主因だった。詳細は _spawn_detached_browser。
+            executable = _chrome_executable_path(playwright)
+
+            async def launch_detached_and_connect():
+                _spawn_detached_browser(
+                    executable, user_data_dir, cdp_port, window_x, window_y
                 )
+                return await _connect_detached_browser(playwright, cdp_port)
 
             try:
-                context = await launch_persistent_context()
+                browser = await launch_detached_and_connect()
             except Exception as launch_exc:
                 _write_browser_recovery_log(
                     "launch_failed",
@@ -609,9 +690,13 @@ async def _executor_worker():
                 if not _recover_stale_executor_profile():
                     raise
                 _write_browser_recovery_log("launch_retry_started", profile=user_data_dir)
-                context = await launch_persistent_context()
+                browser = await launch_detached_and_connect()
                 _write_browser_recovery_log("launch_retry_succeeded", profile=user_data_dir)
-            browser = context  # persistent contextではcontextがbrowser相当
+
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            # 自前起動＝このプロセスの所有物ではない。終了時に閉じてはいけない
+            # （閉じると元の「毎ターン消える」問題に戻る）。
+            attached_to_existing_browser = True
 
             if _pending_cookie_import:
                 await _import_master_cookies(context)
@@ -795,7 +880,15 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         return {}
 
     elif cmd == "mouse_move":
-        await page.mouse.move(args["x"], args["y"])
+        await page.mouse.move(args["x"], args["y"], steps=args.get("steps", 1))
+        return {}
+
+    elif cmd == "mouse_down":
+        await page.mouse.down()
+        return {}
+
+    elif cmd == "mouse_up":
+        await page.mouse.up()
         return {}
 
     elif cmd == "go_back":
@@ -1146,9 +1239,31 @@ def _ensure_executor_thread():
             raise RuntimeError(f"Executor browser failed to start: {_executor_start_error}")
 
 
+_LAST_USE_FILE_NAME = "dan_last_use.txt"
+
+
+def _touch_browser_activity() -> None:
+    """この部屋のブラウザを「今使った」と記録する。
+
+    ブラウザは detached で動くのでプロセスが終わっても生き残る（それが狙い）。
+    その代わり誰も片付けないと部屋の数だけ Chrome が積み上がるため、常駐する
+    ダンコアが最終使用時刻を見て放置分を閉じる。時刻はプロセスをまたぐので
+    メモリではなくプロファイル内のファイルに置く。
+    """
+    try:
+        path = _executor_profile_dir() / _LAST_USE_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        # 掃除のための補助情報。書けなくてもブラウザ操作は止めない。
+        pass
+
+
 def _send_executor_command(cmd: str, **args) -> dict:
     """Executorスレッドにコマンドを送信（ブラウザクローズ時は自動再起動、キャンセル対応）"""
     from app.services.cancellation import CancellationRegistry, CancelledError
+
+    _touch_browser_activity()
 
     max_retries = 2  # ブラウザクローズ時のリトライ回数
 
@@ -1643,11 +1758,25 @@ class ExecutorMouseProxy:
             None, lambda: _send_executor_command("mouse_click", x=x, y=y)
         )
 
-    async def move(self, x: float, y: float):
-        """マウスを指定座標に移動（ホバー用）"""
+    async def move(self, x: float, y: float, steps: int = 1):
+        """マウスを指定座標に移動（ホバー用 / ドラッグの経路用）"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, lambda: _send_executor_command("mouse_move", x=x, y=y)
+            None, lambda: _send_executor_command("mouse_move", x=x, y=y, steps=steps)
+        )
+
+    async def down(self):
+        """ボタンを押し下げたままにする（ドラッグ開始）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("mouse_down")
+        )
+
+    async def up(self):
+        """ボタンを離す（ドラッグ終了）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("mouse_up")
         )
 
 
@@ -1657,12 +1786,128 @@ async def get_executor_page():
 
 
 async def close_executor_browser():
-    """Executor用ブラウザを閉じる"""
+    """Executor用ブラウザを閉じる。
+
+    ブラウザは detached 起動なのでワーカーを畳んでも生き残る（それが狙い）。
+    このAPIは「本当に閉じる」契約なので、この部屋のプロファイルを使っている
+    ブラウザプロセスを明示的に終了させる。
+    """
     global _executor_thread
     _executor_shutdown.set()
     if _executor_thread and _executor_thread.is_alive():
         _executor_thread.join(timeout=10)
     _executor_thread = None
+
+    processes, scan_ok = _list_dedicated_browser_processes()
+    if scan_ok and processes:
+        terminated = _terminate_dedicated_browser_processes(processes)
+        _write_browser_recovery_log("executor_browser_closed", terminated=terminated)
+
+
+async def close_idle_browsers(idle_seconds: int = 1800) -> list[dict]:
+    """放置されている部屋のブラウザを閉じる（ダンコアから定期的に呼ぶ）。
+
+    ブラウザはターンをまたいで生き残る設計なので、閉じる者がいないと部屋の数だけ
+    Chrome が残り続ける。一方で「OTP待ちの最中に閉じる」のは今回直したばかりの
+    事故そのものなので、判定は最終使用時刻だけで行い、賢く推測しようとしない。
+    待ち時間は数分〜十数分なので 30 分あれば十分に余裕がある。
+
+    閉じ方は CDP 経由の正常終了。強制終了は書き込み途中の Cookie を失い、次回起動
+    時に「前回異常終了」の復元バーを出すため、応答しない時だけの最終手段にする。
+    """
+    from playwright.async_api import async_playwright
+
+    closed: list[dict] = []
+    base = Path.home() / ".ai_secretary"
+    if not base.exists():
+        return closed
+
+    now = time.time()
+    for profile in sorted(base.glob("browser_data--*")):
+        port_file = profile / _PORT_FILE_NAME
+        if not port_file.exists():
+            continue
+        try:
+            port = int(port_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            continue
+        if not _port_listening(port):
+            continue  # 既に終了している
+
+        last_use_file = profile / _LAST_USE_FILE_NAME
+        try:
+            last_use = float(last_use_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            # 記録が無い＝この仕組みより前から動いているブラウザ。いきなり閉じると
+            # 進行中の作業を巻き込むので、まず時刻を刻んで次の周回から判定する。
+            _safe_write_last_use(last_use_file, now)
+            continue
+
+        idle = now - last_use
+        if idle < idle_seconds:
+            continue
+
+        ok = await _graceful_close_cdp(async_playwright, port)
+        if not ok:
+            processes, scan_ok = _list_dedicated_browser_processes(profile)
+            if scan_ok and processes:
+                _terminate_dedicated_browser_processes(processes)
+        closed.append({
+            "profile": profile.name,
+            "port": port,
+            "idle_minutes": round(idle / 60, 1),
+            "graceful": ok,
+        })
+        _write_browser_recovery_log(
+            "idle_browser_closed", profile=profile.name, port=port,
+            idle_minutes=round(idle / 60, 1), graceful=ok,
+        )
+    return closed
+
+
+def _safe_write_last_use(path: Path, value: float) -> None:
+    try:
+        path.write_text(str(value), encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def _graceful_close_cdp(async_playwright, port: int, wait_seconds: float = 10.0) -> bool:
+    """CDP に繋いで正常終了させる。Cookie を書き切らせるのが目的。
+
+    注意: connect_over_cdp した browser への close() は「接続を切る」だけで、
+    自分で起動していないブラウザは終了しない（Playwright の仕様）。実際に終了
+    させるには全ページを閉じる必要がある。最後のウィンドウが閉じると Chrome は
+    通常終了し、その過程で Cookie をディスクへ書き切る。
+
+    戻り値は「本当に終了したか」。ポートが閉じるまで確認し、閉じなければ False を
+    返して呼び出し側の強制終了にフォールバックさせる。
+    """
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{port}", timeout=5000
+            )
+            for context in browser.contexts:
+                for pg in list(context.pages):
+                    try:
+                        await pg.close()
+                    except Exception:
+                        pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("[EXECUTOR_BROWSER] graceful close failed on port %s: %s", port, exc)
+        return False
+
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if not _port_listening(port):
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 def abort_executor_session():

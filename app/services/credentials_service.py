@@ -26,6 +26,9 @@ ID_KEYS = ["id", "email", "member_id", "username", "login_id", "user_id"]
 PASSWORD_KEYS = ["password", "pass", "pw"]
 # ログインURLとして認識するキー（優先順）
 URL_KEYS = ["login_url", "url"]
+# 認証アプリ(TOTP)のシードと付随パラメータ。使い捨てのコードではなく、
+# コードを生成するための永続的な秘密なのでパスワードと同じ扱いで保管する。
+TOTP_KEYS = ["totp_secret", "totp_digits", "totp_period", "totp_algorithm"]
 
 
 def _host(u: Optional[str]) -> str:
@@ -115,6 +118,11 @@ def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
             normalized["login_url"] = credentials[key]
             break
 
+    # 認証アプリのシードがあれば保持（落とすとコード生成ができなくなる）
+    for key in TOTP_KEYS:
+        if credentials.get(key):
+            normalized[key] = credentials[key]
+
     return normalized
 
 
@@ -202,6 +210,64 @@ class CredentialsService:
                 "message": str(e),
             }
 
+    async def save_totp_secret(
+        self,
+        user_id: str,
+        service: str,
+        secret: str,
+        digits: int = 6,
+        period: int = 30,
+        algorithm: str = "SHA1",
+        login_url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        認証アプリ(TOTP)のシードを保存する。
+
+        save_credential は渡された辞書で暗号化データを丸ごと置き換えるため、
+        シードだけを渡すと保存済みのID/パスワードが消える。ここでは既存レコードを
+        読んでから統合して書き戻すので、パスワードを保持したままシードを追加できる。
+
+        Args:
+            user_id: ユーザーID
+            service: サービス名
+            secret: base32 のシード（正規化済みを渡すこと）
+            digits/period/algorithm: 認証アプリのパラメータ
+            login_url: ログインページのURL/ドメイン（URL照合用）
+
+        Returns:
+            保存結果
+        """
+        try:
+            existing = await self.get_credential(user_id, service)
+
+            merged: Dict[str, Any] = {
+                "totp_secret": secret,
+                "totp_digits": digits,
+                "totp_period": period,
+                "totp_algorithm": algorithm,
+            }
+            credential_type = "login"
+            if existing:
+                # 既存のID/パスワード/URLを引き継ぐ（消さない）
+                if existing.get("id"):
+                    merged["id"] = existing["id"]
+                if existing.get("password"):
+                    merged["password"] = existing["password"]
+                if existing.get("login_url"):
+                    merged["login_url"] = existing["login_url"]
+                credential_type = existing.get("credential_type") or "login"
+
+            return await self.save_credential(
+                user_id=user_id,
+                service=service,
+                credentials=merged,
+                credential_type=credential_type,
+                login_url=login_url,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save TOTP secret: {e}")
+            return {"success": False, "service": service, "message": str(e)}
+
     async def get_credential(
         self,
         user_id: str,
@@ -246,6 +312,10 @@ class CredentialsService:
                 "service": stored["service_name"],
                 "credential_type": credential_type,
                 "login_url": normalized.get("login_url"),
+                "totp_secret": normalized.get("totp_secret"),
+                "totp_digits": normalized.get("totp_digits"),
+                "totp_period": normalized.get("totp_period"),
+                "totp_algorithm": normalized.get("totp_algorithm"),
             }
         except Exception as e:
             logger.error(f"Failed to get credentials: {e}")
@@ -296,6 +366,10 @@ class CredentialsService:
                     "service": row["service_name"],
                     "credential_type": credential_type,
                     "login_url": stored_url,
+                    "totp_secret": normalized.get("totp_secret"),
+                    "totp_digits": normalized.get("totp_digits"),
+                    "totp_period": normalized.get("totp_period"),
+                    "totp_algorithm": normalized.get("totp_algorithm"),
                     # ホストまで同じか（ベースドメインだけ同じ別サービスと区別する）。
                     # www の有無は同じログイン先なので無視する。
                     "host_exact": _strip_www(_host(stored_url)) == _strip_www(target),
