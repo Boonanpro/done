@@ -2750,6 +2750,74 @@ def _looks_like_login_url(url: str) -> bool:
     ))
 
 
+# 確認コードの入力欄が「1桁ずつ6個」に分かれているサイト向け。
+# ref の欄へ6桁をまとめて入れると maxlength=1 で先頭1桁に切られ、
+# 「コードが未入力」として弾かれる（2captcha の 2FA 画面がこれ）。
+# 値は引数で渡し、戻り値には入れ方だけを返す（コードを外に出さない）。
+_FILL_CODE_JS = """
+(args) => {
+  const code = String(args.code || '').trim();
+  const target = document.querySelector(
+    '[data-dan-ref="' + String(args.ref || '').replace('@', '') + '"]'
+  );
+  if (!target || !code) return {mode: 'none'};
+
+  const setValue = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set;
+    setter.call(el, v);
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  const isDigitBox = (el) => el.tagName === 'INPUT' && el.maxLength === 1;
+
+  if (!isDigitBox(target)) return {mode: 'single'};
+
+  const scope = target.form || target.closest('form, fieldset, div') || document;
+  let boxes = [...scope.querySelectorAll('input')].filter(isDigitBox);
+  if (boxes.length < code.length) {
+    boxes = [...document.querySelectorAll('input')].filter(isDigitBox);
+  }
+  const start = Math.max(0, boxes.indexOf(target));
+  const slice = boxes.slice(start, start + code.length);
+  if (slice.length < code.length) return {mode: 'short'};
+
+  slice.forEach((el, i) => { el.focus(); setValue(el, code[i]); });
+  slice[slice.length - 1].focus();
+
+  // 分割UIの裏で実際に送信される集約欄にも同じ値を入れておく
+  const form = target.form;
+  if (form) {
+    for (const el of form.querySelectorAll('input')) {
+      if (isDigitBox(el)) continue;
+      const name = ((el.name || '') + ' ' + (el.id || '')).toLowerCase();
+      if (/code|otp|token|2fa/.test(name)) setValue(el, code);
+    }
+  }
+  return {mode: 'split', digits: slice.length};
+}
+"""
+
+
+async def _fill_code_into_inputs(page, ref: str, code: str) -> str:
+    """確認コードを入力欄へ入れる。1桁ずつに分かれたUIなら各桁へ配る。
+
+    分割されていない普通の欄なら従来どおり fill_by_ref に任せる。
+    """
+    try:
+        result = await page.evaluate(_FILL_CODE_JS, {"ref": ref, "code": code})
+    except Exception as exc:  # JS 実行に失敗しても通常入力で続行する
+        logger.warning(f"確認コードの分割入力に失敗、通常入力にフォールバック: {exc}")
+        result = None
+
+    if isinstance(result, dict) and result.get("mode") == "split":
+        return "split"
+
+    await page.fill_by_ref(ref, code)
+    return "single"
+
+
 async def _get_browser_state(page) -> Dict[str, Any]:
     """
     操作後のページ状態を取得（スクリーンショット + 要素リスト）
@@ -3268,7 +3336,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             except TOTPError as exc:
                 return {"success": False, "error": str(exc)}
 
-            await page.fill_by_ref(ref, generated["code"])
+            await _fill_code_into_inputs(page, ref, generated["code"])
 
             if params.get("press_enter", False):
                 await page.keyboard.press("Enter")
@@ -3359,7 +3427,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 )
                 return state
 
-            await page.fill_by_ref(ref, otp_code)
+            await _fill_code_into_inputs(page, ref, otp_code)
             if params.get("press_enter", False):
                 await page.keyboard.press("Enter")
                 try:
