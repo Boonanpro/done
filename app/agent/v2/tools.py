@@ -2868,6 +2868,18 @@ async def _get_browser_state(page) -> Dict[str, Any]:
     # テキスト部分: URL + タイトル + ページ状態 + 要素一覧
     text_parts = [f"URL: {url}", f"タイトル: {title}"]
 
+    # 添付する写真は縮小されている。写真から座標を読んで操作する時に換算を
+    # 忘れると、掴む位置が対象の外に落ちて「何も動かない」状態になるため、
+    # 倍率と「換算は自動」であることを毎回明示する。
+    if isinstance(screenshot, dict) and screenshot.get("shot_scale"):
+        s = float(screenshot["shot_scale"])
+        if abs(s - 1.0) > 0.001:
+            text_parts.append(
+                f"写真の縮小率: {s:.3f}（実座標の{s:.3f}倍で表示）。"
+                "human_click / human_drag は写真上の座標をそのまま渡せば自動換算されます"
+                "（手計算不要）。"
+            )
+
     # ページ状態セクション
     if page_context:
         text_parts.append("")
@@ -3249,18 +3261,70 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 return {"success": False, "error": "x と y が必要です"}
 
             from app.tools.human_pointer import HumanPointer
+            from app.tools.browser import get_last_shot_scale, image_to_css
+
+            # スクリーンショットは縮小して渡しているので、写真から読んだ座標と
+            # 実際のクリック座標は一致しない。既定を「写真の座標」にして、ここで
+            # 換算する。手計算に頼ると掴む位置が対象の外に落ち、図形が動かない
+            # まま時間だけ溶ける（実際にそれで何度も失敗した）。
+            coords = (params.get("coords") or "image").lower()
+            scale = get_last_shot_scale()
+            conv = image_to_css if coords == "image" else (lambda a, b: (a, b))
+
             pointer = HumanPointer(page)
+            cx, cy = conv(float(x), float(y))
 
             if action == "human_drag":
                 to_x, to_y = params.get("to_x"), params.get("to_y")
                 if to_x is None or to_y is None:
                     return {"success": False, "error": "human_drag には to_x と to_y が必要です"}
-                await pointer.drag(float(x), float(y), float(to_x), float(to_y))
-                note = f"({x},{y}) から ({to_x},{to_y}) へ人間らしい軌道でドラッグしました。"
+                tx, ty = conv(float(to_x), float(to_y))
+                await pointer.drag(cx, cy, tx, ty)
+                note = (
+                    f"({x},{y}) から ({to_x},{to_y}) へ人間らしい軌道でドラッグしました"
+                    f"（写真座標→実座標に換算: 倍率{scale:.3f} → 実際は ({cx:.0f},{cy:.0f})→({tx:.0f},{ty:.0f})）。"
+                )
             else:
-                await pointer.click(float(x), float(y))
-                note = f"({x},{y}) を人間らしい動きでクリックしました。"
+                await pointer.click(cx, cy)
+                note = (
+                    f"({x},{y}) を人間らしい動きでクリックしました"
+                    f"（写真座標→実座標に換算: 倍率{scale:.3f} → 実際は ({cx:.0f},{cy:.0f})）。"
+                )
 
+            state = await _get_browser_state(page)
+            state["success"] = True
+            state["content"] = [{"type": "text", "text": note}] + (state.get("content") or [])
+            return state
+
+        elif action == "puzzle_fit":
+            # 「図形をはめる」パズルを、確信が持てる時だけ答える。
+            # 撮影→形状の一致度計算→判定→ドラッグを1回の呼び出しで完結させる。
+            # 目視で座標を割り出していると、調べている間にチャレンジが時間切れに
+            # なって最初からやり直しになるため。
+            # 一致度が閾値に届かない時は答えず、『更新』で別の問題を引き直す。
+            # 誤答はEpic側の警戒を上げるので、精度の低い回答を出す方が損になる。
+            from app.tools.puzzle_fit import solve_shape_puzzle
+
+            result = await solve_shape_puzzle(
+                page,
+                threshold=float(params.get("threshold") or 0.85),
+                max_refresh=int(params.get("max_refresh") or 3),
+            )
+            if result.get("answered"):
+                note = (
+                    f"一致度 {result['score']}（次点 {result['runner_up']}）で確信が持てたので、"
+                    f"({result['from']['x']},{result['from']['y']}) から "
+                    f"({result['to']['x']},{result['to']['y']}) へ人間らしい軌道で運びました。"
+                    f"引き直し {len(result['attempts']) - 1} 回。"
+                )
+            else:
+                tried = " / ".join(
+                    f"{a['attempt']}問目 一致度{a['score']}" for a in result.get("attempts", [])
+                )
+                note = (
+                    f"確信が持てないので答えていません。{result.get('reason')}"
+                    + (f"（{tried}）" if tried else "")
+                )
             state = await _get_browser_state(page)
             state["success"] = True
             state["content"] = [{"type": "text", "text": note}] + (state.get("content") or [])

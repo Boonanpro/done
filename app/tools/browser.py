@@ -271,6 +271,42 @@ def _encode_browser_screenshot(png_bytes: bytes) -> tuple[str, str]:
         return base64.b64encode(png_bytes).decode("utf-8"), "image/png"
 
 
+# Ratio between the screenshot handed to the model and real CSS pixels, kept so
+# coordinate-based actions can convert without the caller doing arithmetic.
+# 1.0 until the first screenshot is taken.
+_last_shot_scale: float = 1.0
+
+
+def _measure_shot_scale(base64_str: str, viewport: Optional[dict]) -> float:
+    """image_width / css_width for the screenshot just produced."""
+    global _last_shot_scale
+    try:
+        import base64 as _b64
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(_b64.b64decode(base64_str))) as img:
+            width = img.width
+        css_w = float((viewport or {}).get("w") or 0)
+        if width and css_w:
+            _last_shot_scale = width / css_w
+    except Exception:
+        pass
+    return _last_shot_scale
+
+
+def get_last_shot_scale() -> float:
+    """Scale of the most recent screenshot (image px per CSS px)."""
+    return _last_shot_scale
+
+
+def image_to_css(x: float, y: float) -> tuple[float, float]:
+    """Convert a coordinate read off the screenshot into a clickable CSS point."""
+    s = _last_shot_scale or 1.0
+    return x / s, y / s
+
+
 def _write_browser_recovery_log(event: str, **details: Any) -> None:
     """Persist browser recovery diagnostics without relying on MCP stdout."""
     try:
@@ -873,7 +909,19 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
     elif cmd == "screenshot_base64":
         screenshot_bytes = await page.screenshot(full_page=args.get("full_page", False))
         base64_str, media_type = _encode_browser_screenshot(screenshot_bytes)
-        return {"base64": base64_str, "media_type": media_type}
+        # The image handed to the model is downscaled, but clicks are taken in CSS
+        # pixels. Reading a coordinate off the picture and clicking it therefore
+        # lands short of the target — the piece is never grabbed and the puzzle
+        # "does not move". Ship the ratio with the image so nobody has to
+        # remember or re-derive it.
+        scale = _measure_shot_scale(base64_str, await page.evaluate(
+            "() => ({w: window.innerWidth, h: window.innerHeight})"
+        ))
+        return {
+            "base64": base64_str,
+            "media_type": media_type,
+            "shot_scale": scale,
+        }
 
     elif cmd == "mouse_click":
         await page.mouse.click(args["x"], args["y"])
