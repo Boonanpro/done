@@ -13,8 +13,10 @@ import {
   FolderKanban,
   Loader2,
   MessageSquare,
+  MessageSquarePlus,
   Mic,
   Paperclip,
+  Plus,
   Reply,
   Search,
   Send,
@@ -49,7 +51,12 @@ import { useProjectRecovery } from '@/hooks/useProjectRecovery';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
-import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
+import {
+  usePreviewStore,
+  type ArtifactRecord,
+  type PendingComment,
+  type SelectedElement,
+} from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { VoiceConsole } from '@/components/voice/voice-console';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
@@ -586,7 +593,7 @@ function ChatInput({
   onSseStateChange,
   replyTo,
   onClearReply,
-  onSubmitComment,
+  onAddComment,
 }: {
   projectId: string;
   roomId: string;
@@ -596,12 +603,24 @@ function ChatInput({
   onSseStateChange?: (connected: boolean) => void;
   replyTo?: MessageResponse | null;
   onClearReply?: () => void;
-  onSubmitComment?: () => void;
+  onAddComment?: () => void;
 }) {
   const inspectorElement = usePreviewStore((s) => s.selectedElement);
+  const inspectorElements = usePreviewStore((s) => s.selectedElements);
   const inspectorDraft = usePreviewStore((s) => s.popoverDraft);
   const previewMode = usePreviewStore((s) => s.inspectorMode);
   const clearInspectorSelection = usePreviewStore((s) => s.clearSelection);
+  const allPendingComments = usePreviewStore((s) => s.pendingComments);
+  // コメントはルーム別に保持される（別ルームに移動しても消えず、戻ると再表示）。
+  // このルームで表示・送信するのは自ルーム分だけ。projectId 無しの古いデータは
+  // どのルームでも見える（取り残して消せなくなるよりまし）。
+  const pendingComments = useMemo(
+    () => allPendingComments.filter((c) => !c.projectId || c.projectId === projectId),
+    [allPendingComments, projectId]
+  );
+  const removePendingComment = usePreviewStore((s) => s.removePendingComment);
+  const clearPendingComments = usePreviewStore((s) => s.clearPendingComments);
+  const previewArtifactForComments = usePreviewStore((s) => s.artifact);
   // ChatInput のミラーモードは「コメントモードで要素選択中」の時だけ有効
   const isCommentMode = !!inspectorElement && previewMode === 'comment';
   const [message, setMessage] = useState('');
@@ -1218,13 +1237,18 @@ function ChatInput({
   }, [queryClient, roomId, user?.id, user?.display_name]);
 
   const handleSendMessage = useCallback(async () => {
-    if (!message.trim() && attachedFiles.length === 0) return;
+    if (!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0) return;
 
     const isImageFile = (name: string) => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name);
     const imageUrls = attachedFiles.filter(f => isImageFile(f.filename)).map(f => f.url);
     const fileUrls = attachedFiles.filter(f => !isImageFile(f.filename)).map(f => ({ name: f.filename, url: f.url }));
 
-    const content = message.trim();
+    // 溜めておいた要素コメントは、ここで初めて1通のメッセージに畳まれる。
+    // （1件ずつ送るとその都度ダンが走り出してしまうのでこの形にしている）
+    const content = pendingComments.length
+      ? composeCommentsMessage(pendingComments, previewArtifactForComments, message.trim())
+      : message.trim();
+    if (pendingComments.length) clearPendingComments(projectId);
     const currentReplyTo = replyTo;
 
     // 追い連絡: ダン作業中（進行中ストリームあり）の途中送信は、ストリームを
@@ -1239,7 +1263,8 @@ function ChatInput({
       return;
     }
 
-    pendingMessageRef.current = { text: message, files: [...attachedFiles], replyTo };
+    // キャンセル後の再送は「畳んだ後」の本文で行う（要素コメントを失わないため）
+    pendingMessageRef.current = { text: content, files: [...attachedFiles], replyTo };
     aiRespondedRef.current = false;
     serverMessageIdRef.current = null;
     setMessage('');
@@ -1268,7 +1293,7 @@ function ChatInput({
     const refs = timelineRefs;
     setTimelineRefs([]);
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
-  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs]);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs, pendingComments, clearPendingComments, previewArtifactForComments]);
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
@@ -1487,13 +1512,26 @@ function ChatInput({
       )}
       {isCommentMode && inspectorElement && (
         <div className="mb-2 flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/5 px-2 py-1 text-xs">
-          <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
-            @{inspectorElement.refId}
-          </span>
-          <span className="truncate text-muted-foreground">
-            &lt;{inspectorElement.tagName}&gt;
-            {inspectorElement.text ? ` "${inspectorElement.text}"` : ''}
-          </span>
+          {inspectorElements.length > 1 ? (
+            <>
+              <span className="shrink-0 rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
+                {inspectorElements.length}要素
+              </span>
+              <span className="truncate text-muted-foreground">
+                {inspectorElements.map((el) => `<${el.tagName}>`).join(' ')}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
+                @{inspectorElement.refId}
+              </span>
+              <span className="truncate text-muted-foreground">
+                &lt;{inspectorElement.tagName}&gt;
+                {inspectorElement.text ? ` "${inspectorElement.text}"` : ''}
+              </span>
+            </>
+          )}
           <button
             onClick={clearInspectorSelection}
             className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
@@ -1501,6 +1539,62 @@ function ChatInput({
           >
             <X className="h-3 w-3" />
           </button>
+        </div>
+      )}
+      {pendingComments.length > 0 && (
+        <div className="mb-1.5 space-y-1 rounded-lg border border-primary/30 bg-primary/5 p-2">
+          <div className="flex items-center gap-1.5 px-0.5 text-xs text-muted-foreground">
+            <MessageSquarePlus className="h-3.5 w-3.5 text-primary" />
+            <span>
+              要素コメント {pendingComments.length}件 — 送信ボタンでまとめて1通で送ります
+            </span>
+            <button
+              type="button"
+              onClick={() => clearPendingComments(projectId)}
+              className="ml-auto shrink-0 hover:text-foreground"
+            >
+              すべて削除
+            </button>
+          </div>
+          {pendingComments.map((c, i) => (
+            <div
+              key={c.id}
+              className="flex items-start gap-1.5 rounded-md bg-background/60 px-2 py-1.5 text-xs"
+            >
+              <span className="mt-px shrink-0 font-mono text-[10px] text-primary">{i + 1}</span>
+              {c.artifact && c.artifact.slug !== previewArtifactForComments?.slug && (
+                <span
+                  className="max-w-[7rem] shrink-0 truncate rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground"
+                  title={`成果物: ${c.artifact.label || c.artifact.slug}`}
+                >
+                  {c.artifact.slug}
+                </span>
+              )}
+              <span className="shrink-0 rounded bg-primary/15 px-1 font-mono text-[10px] text-primary">
+                {c.elements.length > 1
+                  ? `${c.elements.length}要素`
+                  : `<${c.elements[0]?.tagName}>`}
+              </span>
+              {c.elements.length > 1 ? (
+                <span className="max-w-[9rem] shrink-0 truncate text-muted-foreground">
+                  {c.elements.map((el) => `<${el.tagName}>`).join(' ')}
+                </span>
+              ) : c.elements[0]?.text ? (
+                <span className="max-w-[9rem] shrink-0 truncate text-muted-foreground">
+                  &quot;{c.elements[0].text}&quot;
+                </span>
+              ) : null}
+              <span className="min-w-0 flex-1 break-words">{c.text}</span>
+              <button
+                type="button"
+                onClick={() => removePendingComment(c.id)}
+                className="mt-px shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label="このコメントを外す"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {escStopHint && (
@@ -1557,14 +1651,20 @@ function ChatInput({
             if (isCommentMode) {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
-                if (inspectorDraft.trim()) onSubmitComment?.();
+                if (inspectorDraft.trim()) onAddComment?.();
               }
               return;
             }
             handleKeyDown(event);
           }}
           onPaste={handlePaste}
-          placeholder={isCommentMode ? '右ペインのコメント欄で入力...' : 'メッセージを入力...'}
+          placeholder={
+            isCommentMode
+              ? '右ペインのコメント欄で入力...'
+              : pendingComments.length > 0
+                ? '補足があれば入力（なくてもそのまま送れます）...'
+                : 'メッセージを入力...'
+          }
           rows={1}
           className={`min-h-[32px] max-h-[480px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px] ${isCommentMode ? 'cursor-not-allowed text-foreground/90' : ''}`}
         />
@@ -1572,13 +1672,13 @@ function ChatInput({
           <Button
             size="icon"
             className="h-7 w-7 shrink-0"
-            onClick={() => onSubmitComment?.()}
+            onClick={() => onAddComment?.()}
             disabled={!inspectorDraft.trim()}
-            title="コメント送信"
+            title="コメントを追加（まだ送信されません）"
           >
-            <Send className="h-3.5 w-3.5" />
+            <Plus className="h-3.5 w-3.5" />
           </Button>
-        ) : message.trim() || attachedFiles.length > 0 ? (
+        ) : message.trim() || attachedFiles.length > 0 || pendingComments.length > 0 ? (
           <Button
             size="icon"
             className="h-7 w-7 shrink-0"
@@ -1601,7 +1701,7 @@ function ChatInput({
             size="icon"
             className="h-7 w-7 shrink-0"
             onClick={handleSendMessage}
-            disabled={!message.trim() && attachedFiles.length === 0}
+            disabled={!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0}
           >
             <Send className="h-3.5 w-3.5" />
           </Button>
@@ -1620,53 +1720,137 @@ function slugToFilePath(slug: string, previewUrl: string): string {
   return `frontend/src/app/${trimmed}/page.tsx`;
 }
 
-function composeCommentMessage(
-  text: string,
-  element: SelectedElement,
-  artifact: ArtifactRecord | null
+/**
+ * 溜めた要素コメントを1通のメッセージに畳む。
+ *
+ * 1件でも複数件でも同じ形（selections の配列）にする。ダン側から見て
+ * 「この指示はこの要素に対応する」が1対1で読めることが要点で、
+ * 番号を振ってあるので複数箇所を1回の実行でまとめて直せる。
+ */
+function composeCommentsMessage(
+  items: PendingComment[],
+  artifact: ArtifactRecord | null,
+  tail: string
 ): string {
   const lines: string[] = ['<dan-context>'];
   lines.push('kind: element-comment');
+  lines.push(`count: ${items.length}`);
   lines.push('note: |');
   lines.push('  ユーザーは成果物上で要素を選択し、その要素について発言している。');
   lines.push('  発言の意図は文面から判断: 修正要望 / 質問 / 議論 / 提案 など自由。');
   lines.push('  修正を依頼された場合のみファイルを編集する。');
-  if (artifact) {
-    lines.push('artifact:');
-    lines.push(`  slug: ${artifact.slug}`);
-    lines.push(`  label: ${artifact.label || artifact.slug}`);
-    lines.push(`  file: ${slugToFilePath(artifact.slug, artifact.preview_url)}`);
-    lines.push(`  preview-url: ${artifact.preview_url}`);
+  if (items.length > 1) {
+    lines.push(`  今回は ${items.length} 件の指示がまとめて送られている。`);
+    lines.push('  それぞれ対応する要素が selections に番号付きで入っているので、');
+    lines.push('  指示されていない箇所には手を出さず、全件を1回の作業でまとめて処理する。');
   }
-  if (element.tagName === 'img' || element.tagName === 'video' || (element.className || '').match(/bg-\[url/)) {
+  if (items.some((it) => it.elements.length > 1)) {
+    lines.push('  複数要素を選択して書かれた指示がある（targets に複数入っている）。');
+    lines.push('  その instruction は targets 内の全要素に対する1つの指示なので、');
+    lines.push('  全対象要素に同じ変更/回答を適用すること（1要素だけ直して終わりにしない）。');
+  }
+  // 成果物情報はコメント追加時のスナップショットを最優先する。プレビューを
+  // 閉じた後や別成果物に切り替えた後の送信でも、コメントした時の成果物に紐づく。
+  const snapArtifacts = items
+    .map((it) => it.artifact)
+    .filter((a): a is NonNullable<PendingComment['artifact']> => !!a);
+  const uniqueSlugs = [...new Set(snapArtifacts.map((a) => a.slug))];
+  const headerArtifact =
+    uniqueSlugs.length === 1
+      ? snapArtifacts[0]
+      : uniqueSlugs.length === 0 && artifact
+        ? { slug: artifact.slug, label: artifact.label, preview_url: artifact.preview_url }
+        : null;
+  if (headerArtifact) {
+    lines.push('artifact:');
+    lines.push(`  slug: ${headerArtifact.slug}`);
+    lines.push(`  label: ${headerArtifact.label || headerArtifact.slug}`);
+    lines.push(`  file: ${slugToFilePath(headerArtifact.slug, headerArtifact.preview_url)}`);
+    lines.push(`  preview-url: ${headerArtifact.preview_url}`);
+  } else if (uniqueSlugs.length > 1) {
+    lines.push('note-artifacts: |');
+    lines.push('  複数の成果物にまたがるコメントが含まれる。');
+    lines.push('  各 selection の artifact-slug / file を見て対象ファイルを取り違えないこと。');
+  }
+  const isMedia = (el: SelectedElement) =>
+    el.tagName === 'img' || el.tagName === 'video' || (el.className || '').match(/bg-\[url/);
+  if (items.some((it) => it.elements.some(isMedia))) {
     lines.push('intent-hint: |');
-    lines.push('  選択要素は視覚メディア (<img> / <video> / 背景画像)。');
+    lines.push('  選択要素に視覚メディア (<img> / <video> / 背景画像) が含まれる。');
     lines.push('  文面が「画像を〜に変えて」なら image-gen スキル (/api/v1/images/edit) 経由で差し替え。');
     lines.push('  文面が「動画にして」「動かして」「アニメーションに」なら video-gen スキル');
     lines.push('  (/api/v1/videos/generate + reference_image_url で image-to-video) を使い、');
     lines.push('  対象ファイルの <img> を <video autoPlay loop muted playsInline> に書き換える。');
     lines.push('  文面が曖昧なら内容を優先して判断（静止画の修正 vs 動きが欲しい）。');
   }
-  lines.push('selection:');
-  lines.push(`  ref: @${element.refId}`);
-  lines.push(`  tag: ${element.tagName}`);
-  if (element.className) lines.push(`  class: ${JSON.stringify(element.className)}`);
-  if (element.bgColor) lines.push(`  computed-background: ${element.bgColor}`);
-  if (element.ancestors?.length) {
-    lines.push(`  ancestors: ${element.ancestors.join(' > ')}`);
-  }
-  lines.push(
-    `  bounding-rect: { x: ${Math.round(element.rect.x)}, y: ${Math.round(element.rect.y)}, w: ${Math.round(element.rect.width)}, h: ${Math.round(element.rect.height)} }`
-  );
-  if (element.text) lines.push(`  text-content: ${JSON.stringify(element.text)}`);
-  if (element.outerHtmlSnippet) {
-    lines.push('  html: |');
-    element.outerHtmlSnippet.split('\n').forEach((ln) => {
-      lines.push(`    ${ln}`);
-    });
-  }
+  // 1要素の詳細を YAML 行に書き出す（indent はネスト位置に合わせる）。
+  const pushElementLines = (element: SelectedElement, indent: string, listItem: boolean) => {
+    const pad = (first: boolean) => (listItem && first ? `${indent}- ` : listItem ? `${indent}  ` : indent);
+    let first = true;
+    const push = (line: string) => {
+      lines.push(`${pad(first)}${line}`);
+      first = false;
+    };
+    push(`ref: @${element.refId}`);
+    push(`tag: ${element.tagName}`);
+    if (element.elementKey?.startsWith('@')) push(`edit-id: ${JSON.stringify(element.elementKey)}`);
+    if (element.className) push(`class: ${JSON.stringify(element.className)}`);
+    if (element.bgColor) push(`computed-background: ${element.bgColor}`);
+    if (element.ancestors?.length) {
+      push(`ancestors: ${element.ancestors.join(' > ')}`);
+    }
+    push(
+      `bounding-rect: { x: ${Math.round(element.rect.x)}, y: ${Math.round(element.rect.y)}, w: ${Math.round(element.rect.width)}, h: ${Math.round(element.rect.height)} }`
+    );
+    if (element.text) push(`text-content: ${JSON.stringify(element.text)}`);
+    if (element.outerHtmlSnippet) {
+      push('html: |');
+      const htmlIndent = listItem ? `${indent}  ` : indent;
+      element.outerHtmlSnippet.split('\n').forEach((ln) => {
+        lines.push(`${htmlIndent}  ${ln}`);
+      });
+    }
+  };
+
+  lines.push('selections:');
+  items.forEach(({ elements, text, artifact: itemArtifact }, i) => {
+    lines.push(`  - no: ${i + 1}`);
+    if (uniqueSlugs.length > 1 && itemArtifact) {
+      lines.push(`    artifact-slug: ${itemArtifact.slug}`);
+      lines.push(`    file: ${slugToFilePath(itemArtifact.slug, itemArtifact.preview_url)}`);
+    }
+    if (elements.length > 1) {
+      // 複数要素への1指示: targets に全要素を列挙する。
+      lines.push(`    target-count: ${elements.length}`);
+      lines.push('    targets:');
+      elements.forEach((element) => pushElementLines(element, '      ', true));
+    } else if (elements[0]) {
+      // 単一要素は従来のフラットな形（後方互換）。
+      pushElementLines(elements[0], '    ', false);
+    }
+    lines.push('    instruction: |');
+    text.split('\n').forEach((ln) => lines.push(`      ${ln}`));
+  });
   lines.push('</dan-context>');
-  return `${lines.join('\n')}\n\n${text}`;
+
+  // 本文側にも人間が読める形で並べる（チャット履歴を見返した時に何を頼んだか分かる）
+  const body = items
+    .map(({ elements, text }, i) => {
+      const labelOf = (element: SelectedElement) =>
+        element.text
+          ? `<${element.tagName}> "${element.text.slice(0, 30)}"`
+          : `<${element.tagName}>`;
+      const label =
+        elements.length > 1
+          ? `${elements.map(labelOf).join(' + ')}（${elements.length}要素まとめて）`
+          : elements[0]
+            ? labelOf(elements[0])
+            : '';
+      return `${items.length > 1 ? `${i + 1}. ` : ''}${label}\n${text}`;
+    })
+    .join('\n\n');
+  const suffix = tail.trim() ? `\n\n${tail.trim()}` : '';
+  return `${lines.join('\n')}\n\n${body}${suffix}`;
 }
 
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
@@ -1704,11 +1888,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // Preview pane state
   const previewProjectId = usePreviewStore((s) => s.projectId);
   const previewArtifact = usePreviewStore((s) => s.artifact);
-  const selectedElement = usePreviewStore((s) => s.selectedElement);
-  const popoverDraft = usePreviewStore((s) => s.popoverDraft);
   const openArtifact = usePreviewStore((s) => s.openArtifact);
   const closePreview = usePreviewStore((s) => s.closePreview);
-  const consumeDraft = usePreviewStore((s) => s.consumeDraft);
+  const addPendingComment = usePreviewStore((s) => s.addPendingComment);
   const isPreviewOpenForProject =
     !!previewArtifact && previewProjectId === projectId;
 
@@ -1756,12 +1938,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     [chatWidth]
   );
 
-  const handleSubmitComment = useCallback(async () => {
-    const { text, element } = consumeDraft();
-    if (!element || !text.trim()) return;
-    const composed = composeCommentMessage(text, element, previewArtifact);
-    sendMessageRef.current?.(composed);
-  }, [consumeDraft, previewArtifact]);
+  // コメントは「追加」して溜めるだけ。実際の送信はチャットの送信ボタン
+  // （ChatInput.handleSendMessage）で、溜まった全件を1通にして行う。
+  const handleAddComment = useCallback(() => {
+    addPendingComment();
+  }, [addPendingComment]);
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -2603,7 +2784,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           onSseStateChange={(connected) => { sseConnectedRef.current = connected; }}
           replyTo={replyTo}
           onClearReply={() => setReplyTo(null)}
-          onSubmitComment={handleSubmitComment}
+          onAddComment={handleAddComment}
         />
       ) : null}
 
@@ -2629,7 +2810,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     </div>
     {isPreviewOpenForProject && isMobile && (
       <div className="h-full w-full min-w-0">
-        <PreviewPane onSubmitComment={handleSubmitComment} />
+        <PreviewPane onAddComment={handleAddComment} />
       </div>
     )}
     {isPreviewOpenForProject && !isMobile && (
@@ -2642,7 +2823,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           <div className="absolute inset-y-0 -left-1 w-3 group-hover:bg-primary/30 transition-colors" />
         </div>
         <div className="min-w-0 flex-1">
-          <PreviewPane onSubmitComment={handleSubmitComment} />
+          <PreviewPane onAddComment={handleAddComment} />
         </div>
       </>
     )}

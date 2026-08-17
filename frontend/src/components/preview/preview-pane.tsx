@@ -136,7 +136,7 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }) {
+export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
   const queryClient = useQueryClient();
   const artifact = usePreviewStore((s) => s.artifact);
   const projectId = usePreviewStore((s) => s.projectId);
@@ -226,6 +226,22 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     // The button itself is the status display.  While it is working, refresh
     // this artifact automatically; no separate "check status" action exists.
     refetchInterval: isDomainPublicationRunning(artifact?.publish_status) ? 2_500 : false,
+  });
+
+  const saveEditsMutation = useMutation({
+    mutationFn: async () => {
+      if (!artifact) throw new Error('No artifact selected');
+      if (!await flushInspectorEdits()) throw new Error('下書きの保存に失敗しました。公開は行っていません。');
+      const res = await fetch(`/api/v1/inspector-overrides/publish?slug=${encodeURIComponent(artifact.slug)}`, {
+        method: 'POST', credentials: 'include',
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ revision: number }>;
+    },
+    onSuccess: (release) => {
+      toast.success('保存しました', { description: `公開版 ${release.revision} を反映しました` });
+    },
+    onError: (err) => toast.error('保存できませんでした', { description: String(err).slice(0, 160) }),
   });
 
   // A paid domain setup updates the artifact from the server in the background.
@@ -330,7 +346,11 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         },
         onReloaded: () => { void pushModeAndOverrides(); },
         onSelected: (snap) => usePreviewStore.getState().selectFromSnapshot(snap),
-        onTextCommitted: (elementKey, text) => usePreviewStore.getState().commitText(elementKey, text),
+        onMultiSelected: (snaps) => usePreviewStore.getState().selectFromSnapshots(snaps),
+        onTextDrafted: (elementKey, text) =>
+          usePreviewStore.getState().commitText(elementKey, text, { applyToIframe: false }),
+        onTextCommitted: (elementKey, text) =>
+          usePreviewStore.getState().commitText(elementKey, text, { applyToIframe: false }),
         onSelectionRange: (payload) =>
           usePreviewStore.getState().setSelectionRange('elementKey' in payload && payload.elementKey ? payload : null),
       },
@@ -472,6 +492,15 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           </button>
         )}
         {isEditMode && (
+          <button
+            onClick={() => saveEditsMutation.mutate()}
+            disabled={saveEditsMutation.isPending}
+            className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+          >
+            {saveEditsMutation.isPending ? '保存中…' : '保存'}
+          </button>
+        )}
+        {isEditMode && (
           <div className="flex overflow-hidden rounded-md border border-border">
             <button
               onClick={() => setInspectorMode('comment')}
@@ -526,13 +555,13 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             title={artifact.label || artifact.slug}
           />
           {isEditMode && inspectorMode === 'comment' && (
-            <CommentPopover iframeRef={iframeRef} onSubmit={onSubmitComment} />
+            <CommentPopover iframeRef={iframeRef} onSubmit={onAddComment} />
           )}
           {isEditMode && (
             <div className="pointer-events-none absolute left-0 right-0 top-0 flex justify-center gap-2 p-2">
               <div className="pointer-events-auto rounded-full bg-primary/90 px-3 py-1 text-xs font-medium text-primary-foreground shadow">
                 {inspectorMode === 'comment'
-                  ? '編集モード — 要素をクリックしてコメント'
+                  ? '編集モード — クリックでコメント / Ctrl+クリックで複数選択'
                   : '編集モード — 要素をクリックして手動編集'}
               </div>
             </div>

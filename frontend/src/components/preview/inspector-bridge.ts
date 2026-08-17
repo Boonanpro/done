@@ -24,6 +24,9 @@ import {
 type BridgeHandlers = {
   onReady?: (slug: string) => void;
   onSelected?: (snap: SelectionSnapshot) => void;
+  /** 複数選択の全量更新（空配列=解除）。 */
+  onMultiSelected?: (snapshots: SelectionSnapshot[]) => void;
+  onTextDrafted?: (elementKey: string, text: string) => void;
   onTextCommitted?: (elementKey: string, text: string) => void;
   onSelectionRange?: (payload: { elementKey: string; start: number; end: number } | { elementKey: null }) => void;
   onReloaded?: () => void;
@@ -71,8 +74,14 @@ export function attachInspectorBridge(
       case 'inspector:selected':
         handlers.onSelected?.(msg.payload);
         break;
+      case 'inspector:multi-selected':
+        handlers.onMultiSelected?.(msg.payload.snapshots);
+        break;
       case 'inspector:text-committed':
         handlers.onTextCommitted?.(msg.payload.elementKey, msg.payload.text);
+        break;
+      case 'inspector:text-drafted':
+        handlers.onTextDrafted?.(msg.payload.elementKey, msg.payload.text);
         break;
       case 'inspector:selection-range':
         handlers.onSelectionRange?.(msg.payload);
