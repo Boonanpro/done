@@ -353,6 +353,33 @@ function isAuthError(error: unknown): boolean {
   return (error as { status?: number } | null)?.status === 401;
 }
 
+// ---- 送信前のトークン鮮度保証 ----
+// 受信系(ポーリング/既読)は Vercel の rewrite 経由で Cookie が届き、バック
+// エンドは Cookie を優先して認証するため、state の Bearer トークンが失効して
+// いても 401 を一度も踏まない＝自動リフレッシュが発火しない。一方、送信の
+// SSE だけは Route Handler 経由で Bearer のみが使われるので、失効した
+// トークンを掴んだまま送信だけが失敗し続ける。送信前に exp をローカルで
+// 確認し、失効済み/失効間近なら先にリフレッシュしてから送る。
+function tokenExpiresSoon(token: string, withinMs = 120_000): boolean {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return false;
+    const b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = JSON.parse(atob(b64)) as { exp?: number };
+    if (typeof decoded.exp !== 'number') return false;
+    return decoded.exp * 1000 - Date.now() < withinMs;
+  } catch {
+    // 読めないトークンはここで判定せず、失敗時の401リカバリに任せる。
+    return false;
+  }
+}
+
+async function ensureFreshAccessToken(token: string): Promise<string> {
+  if (!tokenExpiresSoon(token)) return token;
+  const renewed = await tryRefreshSession();
+  return renewed ?? token;
+}
+
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {},
@@ -1011,8 +1038,14 @@ async function streamDanMessage(
       }
     });
 
-    source.addEventListener('error', () => {
-      settle(() => reject(new Error('Could not connect to DAN.')));
+    source.addEventListener('error', (event) => {
+      // react-native-sse はエラーイベントに HTTP ステータス(xhrStatus)を載せる。
+      // 401 を「接続失敗」と混同すると認証切れから永遠に回復できないため、
+      // ステータスを error.status に引き継いで呼び出し側で判別できるようにする。
+      const status = (event as { xhrStatus?: number } | null)?.xhrStatus;
+      const err = new Error('Could not connect to DAN.') as Error & { status?: number };
+      if (typeof status === 'number' && status > 0) err.status = status;
+      settle(() => reject(err));
     });
     // 何らかの経路で接続が閉じられた場合の最終防衛（未決着なら切断扱い）。
     source.addEventListener('close', () => {
@@ -2686,8 +2719,12 @@ function AppMain() {
     // 停止ボタンはこのIDで「送ったメッセージごと取消」ができる。
     const clientMessageId = uuidv4();
 
+    // 送信のSSEはBearerだけで認証される（受信系と違いCookieに救われない）ので、
+    // 失効済み/失効間近のトークンはここで先に更新してから送る。
+    const sendToken = await ensureFreshAccessToken(token);
+
     try {
-      await streamDanMessage(token, finalContent, project.room_id, (event) => {
+      await streamDanMessage(sendToken, finalContent, project.room_id, (event) => {
         if (event.created_project_id && event.created_project_id !== selectedProjectId) {
           const oldPid = selectedProjectId;
           selectedProjectId = event.created_project_id;
@@ -2861,7 +2898,18 @@ function AppMain() {
           // clobber a new message the user may have started typing meanwhile).
           if (viewing) setMessages((current) => current.filter((m) => m.id !== optimistic.id));
           setDraft((d) => (d ? d : content));
-          Alert.alert('Send failed', streamFailure.message);
+          if (isAuthError(streamFailure)) {
+            // 認証切れによる送信失敗。リフレッシュできれば次の送信は通るので
+            // 再送を促し、できなければ本当のセッション切れ＝ログイン画面へ。
+            const renewed = await tryRefreshSession();
+            if (renewed) {
+              Alert.alert('Send failed', 'セッションを更新しました。もう一度送信してください。');
+            } else {
+              onAuthFailure?.();
+            }
+          } else {
+            Alert.alert('Send failed', streamFailure.message);
+          }
         }
       } else if (viewing && nextProject?.id) {
         // Clean finish (or server-acked): pull the saved messages into view.

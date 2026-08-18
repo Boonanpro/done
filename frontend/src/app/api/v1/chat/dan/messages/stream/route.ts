@@ -20,14 +20,22 @@ export async function POST(request: Request) {
 
   // チャットはダンコア(port 9000)へ。CORE_BACKEND_URL で上書き可（本番tunnel等）。
   const coreUrl = process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
+  // バックエンドの認証は Cookie(done_access_token) を Bearer より優先して見る。
+  // rewrites 経由の他の /api/v1/chat/* は Cookie がそのまま届くのに、この
+  // Route Handler だけ落とすと「受信は通るのに送信だけ 401」という非対称が
+  // 生まれる（モバイルの "Could not connect to DAN" の真因）。必ず転送する。
+  const headers: Record<string, string> = {
+    'Content-Type': request.headers.get('Content-Type') || 'application/json',
+  };
+  const authorization = request.headers.get('Authorization');
+  if (authorization) headers['Authorization'] = authorization;
+  const cookie = request.headers.get('Cookie');
+  if (cookie) headers['Cookie'] = cookie;
   const backendResponse = await fetch(
     `${coreUrl}/api/v1/chat/dan/messages/stream`,
     {
       method: 'POST',
-      headers: {
-        'Content-Type': request.headers.get('Content-Type') || 'application/json',
-        'Authorization': request.headers.get('Authorization') || '',
-      },
+      headers,
       body,
     },
   );
