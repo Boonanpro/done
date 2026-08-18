@@ -594,6 +594,7 @@ function ChatInput({
   replyTo,
   onClearReply,
   onAddComment,
+  onEditPendingComment,
 }: {
   projectId: string;
   roomId: string;
@@ -604,6 +605,7 @@ function ChatInput({
   replyTo?: MessageResponse | null;
   onClearReply?: () => void;
   onAddComment?: () => void;
+  onEditPendingComment?: (id: string) => void;
 }) {
   const inspectorElement = usePreviewStore((s) => s.selectedElement);
   const inspectorElements = usePreviewStore((s) => s.selectedElements);
@@ -620,6 +622,7 @@ function ChatInput({
   );
   const removePendingComment = usePreviewStore((s) => s.removePendingComment);
   const clearPendingComments = usePreviewStore((s) => s.clearPendingComments);
+  const editingCommentId = usePreviewStore((s) => s.editingCommentId);
   const previewArtifactForComments = usePreviewStore((s) => s.artifact);
   // ChatInput のミラーモードは「コメントモードで要素選択中」の時だけ有効
   const isCommentMode = !!inspectorElement && previewMode === 'comment';
@@ -1559,7 +1562,14 @@ function ChatInput({
           {pendingComments.map((c, i) => (
             <div
               key={c.id}
-              className="flex items-start gap-1.5 rounded-md bg-background/60 px-2 py-1.5 text-xs"
+              onClick={() => onEditPendingComment?.(c.id)}
+              role="button"
+              title="クリックで要素を再選択して編集"
+              className={`flex cursor-pointer items-start gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors ${
+                editingCommentId === c.id
+                  ? 'bg-primary/15 ring-1 ring-primary/50'
+                  : 'bg-background/60 hover:bg-background'
+              }`}
             >
               <span className="mt-px shrink-0 font-mono text-[10px] text-primary">{i + 1}</span>
               {c.artifact && c.artifact.slug !== previewArtifactForComments?.slug && (
@@ -1587,7 +1597,10 @@ function ChatInput({
               <span className="min-w-0 flex-1 break-words">{c.text}</span>
               <button
                 type="button"
-                onClick={() => removePendingComment(c.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removePendingComment(c.id);
+                }}
                 className="mt-px shrink-0 text-muted-foreground hover:text-foreground"
                 aria-label="このコメントを外す"
               >
@@ -1993,6 +2006,23 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       newOnes.forEach((a) => seen.add(a.id));
     }
   }, [artifacts, projectId, openArtifact]);
+
+  // たまりコメントのクリック = 編集モード。コメント元の成果物が閉じていれば
+  // 開き直してから、要素の再選択＋本文の下書き復元を行う。
+  const handleEditPendingComment = useCallback(
+    (id: string) => {
+      const st = usePreviewStore.getState();
+      const comment = st.pendingComments.find((c) => c.id === id);
+      if (!comment) return;
+      const slug = comment.artifact?.slug;
+      if (slug && (!st.artifact || st.artifact.slug !== slug)) {
+        const record = artifacts.find((a) => a.slug === slug);
+        if (record) openArtifact(projectId, record);
+      }
+      usePreviewStore.getState().beginEditPendingComment(id);
+    },
+    [artifacts, openArtifact, projectId]
+  );
 
   const { data: messagesData } = useQuery({
     queryKey: ['project-messages', project?.room_id],
@@ -2785,6 +2815,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           replyTo={replyTo}
           onClearReply={() => setReplyTo(null)}
           onAddComment={handleAddComment}
+          onEditPendingComment={handleEditPendingComment}
         />
       ) : null}
 

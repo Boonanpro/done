@@ -557,7 +557,8 @@ function handleParentMessage(msg: ParentToIframeMessage): void {
       clearMultiOverlays();
       break;
     case 'inspector:set-selection': {
-      // 親側UI（チップの×等）から選択集合を同期する。通知は返さない（ループ防止）。
+      // 親側UI（チップの×・たまりコメントのクリック等）から選択集合を同期する。
+      // 通知は返さない（ループ防止）。
       const els = (msg.payload.elementKeys || [])
         .map((k) => findElementByKey(document, k))
         .filter((el): el is Element => !!el);
@@ -570,6 +571,11 @@ function handleParentMessage(msg: ParentToIframeMessage): void {
         multiTargets = els;
         activeTarget = els[els.length - 1];
         syncMultiOverlays();
+      }
+      // 画面外の要素を選択し直した時に見えるよう、先頭要素へスクロールする。
+      // （オーバーレイはページ絶対座標なのでスクロールしてもズレない）
+      if (els[0]) {
+        try { els[0].scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* ignore */ }
       }
       break;
     }

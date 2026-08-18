@@ -115,6 +115,9 @@ interface PreviewState {
   /** 要素コメントは「追加」でここに溜まり、チャットの送信ボタンでまとめて1通になる。
    *  1コメント=1メッセージだと1件ごとにダンが走り出してしまうため。 */
   pendingComments: PendingComment[];
+  /** たまりリストのコメントをクリックして編集中の場合、その id。
+   *  この状態で「追加(更新)」すると新規追加ではなくそのコメントを上書きする。 */
+  editingCommentId: string | null;
   refCounter: number;
 
   inspectorMode: InspectorMode;
@@ -150,6 +153,9 @@ interface PreviewActions {
   removePendingComment: (id: string) => void;
   /** projectId を渡すとそのプロジェクト分だけ、省略時は全件削除。 */
   clearPendingComments: (projectId?: string) => void;
+  /** たまりリストのコメントを編集モードにする: 要素を再選択し、下書きに本文を戻す。
+   *  プレビューが開いていれば iframe のハイライトも復元される。 */
+  beginEditPendingComment: (id: string) => void;
 
   setInspectorMode: (mode: InspectorMode) => void;
   /** agent が ready で報告した「iframe実表示slug」を記録する。 */
@@ -182,6 +188,7 @@ const INITIAL: PreviewState = {
   selectedElements: [],
   popoverDraft: '',
   pendingComments: [],
+  editingCommentId: null,
   refCounter: 0,
   inspectorMode: 'comment',
   iframeSlug: null,
@@ -242,6 +249,7 @@ export const usePreviewStore = create<PreviewStore>()(
           selectedElement: null,
           selectedElements: [],
           popoverDraft: '',
+          editingCommentId: null,
           models: {},
           selectedRange: null,
           iframeSlug: null,
@@ -265,6 +273,7 @@ export const usePreviewStore = create<PreviewStore>()(
           selectedElement: null,
           selectedElements: [],
           popoverDraft: '',
+          editingCommentId: null,
           selectedRange: null,
         })),
 
@@ -324,7 +333,7 @@ export const usePreviewStore = create<PreviewStore>()(
       },
 
       clearSelection: () => {
-        set({ selectedElement: null, selectedElements: [], popoverDraft: '', selectedRange: null });
+        set({ selectedElement: null, selectedElements: [], popoverDraft: '', editingCommentId: null, selectedRange: null });
         sendToIframe({ type: 'inspector:clear-selection', payload: {} });
       },
 
@@ -332,12 +341,12 @@ export const usePreviewStore = create<PreviewStore>()(
 
       consumeDraft: () => {
         const { popoverDraft, selectedElement } = get();
-        set({ selectedElement: null, selectedElements: [], popoverDraft: '', selectedRange: null });
+        set({ selectedElement: null, selectedElements: [], popoverDraft: '', editingCommentId: null, selectedRange: null });
         return { text: popoverDraft, element: selectedElement };
       },
 
       addPendingComment: () => {
-        const { popoverDraft, selectedElement, selectedElements, pendingComments } = get();
+        const { popoverDraft, selectedElement, selectedElements, pendingComments, editingCommentId } = get();
         const text = popoverDraft.trim();
         const elements = selectedElements.length
           ? selectedElements
@@ -345,6 +354,26 @@ export const usePreviewStore = create<PreviewStore>()(
             ? [selectedElement]
             : [];
         if (!elements.length || !text) return false;
+
+        // 編集中なら新規追加ではなく、そのコメントを現在の選択＋本文で上書きする。
+        const editing = editingCommentId
+          ? pendingComments.find((c) => c.id === editingCommentId)
+          : undefined;
+        if (editing) {
+          set({
+            pendingComments: pendingComments.map((c) =>
+              c.id === editing.id ? { ...c, elements, text } : c
+            ),
+            selectedElement: null,
+            selectedElements: [],
+            popoverDraft: '',
+            editingCommentId: null,
+            selectedRange: null,
+          });
+          sendToIframe({ type: 'inspector:clear-selection', payload: {} });
+          return true;
+        }
+
         const id =
           typeof crypto !== 'undefined' && 'randomUUID' in crypto
             ? crypto.randomUUID()
@@ -376,7 +405,37 @@ export const usePreviewStore = create<PreviewStore>()(
       },
 
       removePendingComment: (id) =>
-        set((s) => ({ pendingComments: s.pendingComments.filter((c) => c.id !== id) })),
+        set((s) => ({
+          pendingComments: s.pendingComments.filter((c) => c.id !== id),
+          // 編集中のコメントを消したら編集状態も解除する
+          ...(s.editingCommentId === id ? { editingCommentId: null, popoverDraft: '' } : {}),
+        })),
+
+      beginEditPendingComment: (id) => {
+        const { pendingComments } = get();
+        const comment = pendingComments.find((c) => c.id === id);
+        if (!comment || !comment.elements.length) return;
+        set({
+          editingCommentId: id,
+          popoverDraft: comment.text,
+          selectedElements: comment.elements,
+          selectedElement: comment.elements[comment.elements.length - 1],
+          selectedRange: null,
+          // 編集ポップオーバーを出すため、コメントモードの編集ONへ強制する
+          isEditMode: true,
+          inspectorMode: 'comment',
+        });
+        // プレビューiframe が開いていれば要素ハイライトを復元する
+        // （閉じている/別成果物の場合、iframe 側で該当キーが見つからず単に何も出ない）。
+        sendToIframe({
+          type: 'inspector:set-selection',
+          payload: {
+            elementKeys: comment.elements
+              .map((el) => el.elementKey)
+              .filter((k): k is string => !!k),
+          },
+        });
+      },
 
       clearPendingComments: (projectId) =>
         set((s) => ({

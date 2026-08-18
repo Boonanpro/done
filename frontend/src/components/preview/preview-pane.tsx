@@ -335,6 +335,16 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
       }
       const s2 = usePreviewStore.getState();
       sendToIframe({ type: 'inspector:set-mode', payload: { mode: s2.isEditMode ? s2.inspectorMode : 'off' } });
+      // 選択集合が残っていれば（コメント編集中の開き直し/リロード後など）、
+      // iframe 側のハイライトを復元する。
+      if (s2.isEditMode && s2.selectedElements.length) {
+        const elementKeys = s2.selectedElements
+          .map((el) => el.elementKey)
+          .filter((k): k is string => !!k);
+        if (elementKeys.length) {
+          sendToIframe({ type: 'inspector:set-selection', payload: { elementKeys } });
+        }
+      }
     };
 
     const detach = attachInspectorBridge(

@@ -15,6 +15,7 @@ export function CommentPopover({
 }) {
   const selectedElement = usePreviewStore((s) => s.selectedElement);
   const selectedElements = usePreviewStore((s) => s.selectedElements);
+  const editingCommentId = usePreviewStore((s) => s.editingCommentId);
   const popoverDraft = usePreviewStore((s) => s.popoverDraft);
   const setPopoverDraft = usePreviewStore((s) => s.setPopoverDraft);
   const clearSelection = usePreviewStore((s) => s.clearSelection);
@@ -51,6 +52,11 @@ export function CommentPopover({
     >
       <div className="flex items-start gap-1.5 text-xs">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+          {editingCommentId && (
+            <span className="w-full text-[11px] font-medium text-amber-500">
+              コメントを編集中（更新で上書き / Esc でキャンセル）
+            </span>
+          )}
           {isMulti && (
             <span className="w-full text-[11px] font-medium text-foreground">
               {elements.length}個の要素を選択中
@@ -110,7 +116,11 @@ export function CommentPopover({
         disabled={!popoverDraft.trim()}
       >
         <Plus className="mr-1 h-3 w-3" />
-        {isMulti ? `${elements.length}要素まとめて追加` : '追加'}
+        {editingCommentId
+          ? 'コメントを更新'
+          : isMulti
+            ? `${elements.length}要素まとめて追加`
+            : '追加'}
       </Button>
       <p className="text-[11px] leading-snug text-muted-foreground">
         {pendingCount > 0
