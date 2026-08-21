@@ -17,6 +17,7 @@ Classify the request first:
 | "操作デモ/紹介動画を作って" | `video-direction` + `studio` + `post-production` | Real screen recording is the source of truth for UI. |
 | "映画っぽい/アニメっぽい映像" | `video-direction` + `media-gen` + `post-production` | Use cinematic/anime direction, references, and grading. |
 | "AIアバター/人物を一貫させたい" | `brand-asset-kit` + `higgsfield-soul-id` + `media-gen` | Build or reuse identity references. |
+| "解説動画/ドキュメンタリー調/ナレーション音声から動画" | `explainer-video` | Narration-driven explainer. Build in the production room (editor), not in chat. |
 | "縦を横に/横を縦にしたい" | `post-production` | Reframe, extend, crop, blur-fill, or regenerate missing sides. |
 | "色味を整えて/LUT作って" | `post-production` | Grade, generate LUT, export variants. |
 | "ロゴ/アイコン/商品を正確に出したい" | `brand-asset-kit` + `post-production` | Prefer exact overlay/compositing over generative approximation. |
