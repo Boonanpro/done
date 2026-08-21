@@ -3637,6 +3637,11 @@ struct App {
     playing: bool,
     playback_speed: f64,
     preview_fullscreen: bool,
+    /// 全画面プレビュー(P)の小型トランスポート: 最後にマウスが動いた時刻。
+    /// 再生中に触らなければ自動で消える（DaVinci流）。
+    fs_bar_last_move: Option<Instant>,
+    /// シークバーのドラッグ開始時に再生中だったら、離した時に再生を再開する
+    fs_resume_play: bool,
     show_help: bool,
     step_settle_at: Option<Instant>,
     // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
@@ -3897,6 +3902,8 @@ impl App {
             playing: false,
             playback_speed: 1.0,
             preview_fullscreen: false,
+            fs_bar_last_move: None,
+            fs_resume_play: false,
             show_help: false,
             step_settle_at: None,
             step_probe: None,
@@ -12536,6 +12543,98 @@ impl eframe::App for App {
         }
 
         self.poll_export();
+        // 全画面プレビュー(P): DaVinci風の小型トランスポートバー。
+        // 一時停止中は常に表示、再生中はマウスを動かした時だけ現れて自動で消える。
+        if self.preview_fullscreen {
+            let moved = ctx.input(|i| {
+                i.pointer.delta().length() > 0.5 || i.pointer.any_down() || i.pointer.any_click()
+            });
+            if moved {
+                self.fs_bar_last_move = Some(Instant::now());
+            }
+            let recent = self
+                .fs_bar_last_move
+                .map(|t| t.elapsed().as_secs_f32() < 2.2)
+                .unwrap_or(false);
+            if !self.playing || recent {
+                egui::Area::new(egui::Id::new("fs_transport"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_black_alpha(170))
+                            .rounding(10.0)
+                            .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let glyph = if self.playing { "⏸" } else { "▶" };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(glyph)
+                                                    .size(20.0)
+                                                    .color(egui::Color32::WHITE),
+                                            )
+                                            .frame(false)
+                                            .min_size(egui::vec2(30.0, 26.0)),
+                                        )
+                                        .on_hover_text("再生/停止 (Space)")
+                                        .clicked()
+                                    {
+                                        self.toggle_play();
+                                    }
+                                    let dur = self.dur.max(0.001);
+                                    let mut tv = self.t;
+                                    let w = (ctx.screen_rect().width() * 0.42).clamp(260.0, 760.0);
+                                    ui.spacing_mut().slider_width = w;
+                                    let sl = ui.add(
+                                        egui::Slider::new(&mut tv, 0.0..=dur)
+                                            .show_value(false)
+                                            .trailing_fill(true),
+                                    );
+                                    if sl.drag_started() {
+                                        self.fs_resume_play = self.playing;
+                                        self.playing = false;
+                                    }
+                                    if sl.changed() {
+                                        self.t = tv.clamp(0.0, dur);
+                                        self.push_req(true);
+                                    }
+                                    if sl.drag_stopped() {
+                                        if self.fs_resume_play {
+                                            self.fs_resume_play = false;
+                                            self.playing = true;
+                                        }
+                                        self.push_req(false);
+                                    }
+                                    let fps = self.timeline_fps();
+                                    let tc = |t: f64| {
+                                        let fr = ((t * fps).round() as i64).max(0);
+                                        let f = fps.round() as i64;
+                                        format!(
+                                            "{:02}:{:02}:{:02}",
+                                            fr / (f * 60),
+                                            (fr / f) % 60,
+                                            fr % f
+                                        )
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} / {}",
+                                            tc(self.t),
+                                            tc(self.dur)
+                                        ))
+                                        .color(egui::Color32::from_gray(220))
+                                        .monospace(),
+                                    );
+                                    if ui.ui_contains_pointer() {
+                                        self.fs_bar_last_move = Some(Instant::now());
+                                    }
+                                });
+                            });
+                    });
+            }
+        }
         if !self.preview_fullscreen {
             egui::TopBottomPanel::top("toolbar").exact_height(38.0).show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
