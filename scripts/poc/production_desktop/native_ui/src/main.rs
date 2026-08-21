@@ -714,6 +714,21 @@ fn contain_box(
     (dst.0 + (dst.2 - dw) / 2.0, dst.1 + (dst.3 - dh) / 2.0, dw, dh)
 }
 
+/// クリップの実効表示箱。contain クリップは素材実寸のアスペクトそのままの箱になる。
+/// 選択枠・ドラッグ・ジオメトリ写像・描画のすべてがこの箱を使うことで、キャンバスが
+/// どの形でも素材の形が保たれる（余白はクリップの一部ではない）。箱アスペクト==素材
+/// アスペクトになるため、下流の cover/contain 計算は恒等になり既存の写像は壊れない。
+fn effective_box(doc: &model::Doc, c: &model::Clip, t: f64) -> model::Pos {
+    let b = c.display_box_at(t);
+    if !c.contains_in_box() {
+        return b;
+    }
+    let Some(aid) = c.asset_id.as_deref() else { return b };
+    let dims = doc.asset_dims.get(aid).copied().unwrap_or((0, 0));
+    let (x, y, w, h) = contain_box((b.x, b.y, b.width, b.height), dims);
+    model::Pos { x, y, width: w, height: h }
+}
+
 /// Throttled diagnostics for the freeze paths (at most one line per 500ms) — cheap
 /// enough to stay on permanently; %TEMP%/native_ui.log captures real user sessions.
 /// Within ±1.2s of any freeze clip (diagnostic scope guard).
@@ -1029,7 +1044,7 @@ fn compose(
                         .active_video(t)
                         .0
                         .filter(|b| b.asset_id.as_deref() == Some(baid))
-                        .map(|b| (b.src_at(t), b.display_box_at(t_fx), b.crop_ltrb_at(t_fx)));
+                        .map(|b| (b.src_at(t), effective_box(doc, b, t_fx), b.crop_ltrb_at(t_fx)));
                     let mask_ok = !key.is_empty()
                         && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
                     if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
@@ -1164,7 +1179,7 @@ fn compose(
             }
             continue;
         }
-        let b = c.display_box_at(t_geo);
+        let b = effective_box(doc, c, t_geo);
         if let Some((key, off)) = c.popout_key() {
             // LIVE matte path: color sampled from the ORIGINAL frame — the same file and
             // the same src_t the AUDIO plays, so lips can't drift. The baked pv (30fps
@@ -1411,7 +1426,7 @@ fn compose(
                     }
                     tw
                 };
-                let b = c.display_box_at(t_geo);
+                let b = effective_box(doc, c, t_geo);
                 if near_fz {
                     eprintln!(
                         "FZ_SEAM t={t:.3} clip={} q={} tex={}x{} box={:.4},{:.4},{:.4},{:.4}",
@@ -3487,6 +3502,9 @@ struct Library {
     brief: String,
     title: String,
     format: String,
+    /// Library-first text-to-video. Unlike `start_generation`, this needs no source asset.
+    ai_model: String,
+    ai_duration: i32,
     thumb_tried: std::collections::HashSet<String>,
     gen_content: Option<String>,
     gen_job: Option<String>,
@@ -3810,7 +3828,7 @@ impl App {
         }
         Ok(Self {
             screen: Screen::Editor,
-            lib: Library { format: "9:16".into(), ..Default::default() },
+            lib: Library { format: "9:16".into(), ai_model: "seedance_2_5".into(), ai_duration: 30, ..Default::default() },
             lib_poll: Instant::now(),
             lib_sink: Default::default(),
             picked_files: Default::default(),
@@ -4041,6 +4059,10 @@ impl App {
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
         edits::quantize_timeline_frames(&mut raw);
+        // キャンバス寸法はドキュメント公開の「前」に確定させる。メディアスレッドは
+        // doc差し替えの瞬間に寸法変化を見てコンポジタを作り直すため、後から寸法だけ
+        // 変えると再構築されず、古い形の合成絵が新しい枠へ引き伸ばされる（形式切替の潰れ）。
+        set_canvas_from_content(&raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
                 let df = Self::dirty_from(&self.doc, &nd);
@@ -4617,7 +4639,7 @@ impl App {
             .rev()
             .copied()
             .find(|b| {
-                let p = b.display_box_at(mid);
+                let p = effective_box(&self.doc, b, mid);
                 cx >= p.x && cx <= p.x + p.width && cy >= p.y && cy <= p.y + p.height
             })
             .or_else(|| active.last().copied())
@@ -4675,7 +4697,7 @@ impl App {
             c.timeline_start.max(b.timeline_start)
         };
         let dims = self.doc.asset_dims.get(&aid).copied().unwrap_or((0, 0));
-        let bb = b.display_box_at(t_anchor);
+        let bb = effective_box(&self.doc, &b, t_anchor);
         let sbox = compositor::canvas_box_to_source(
             (canvas_w(), canvas_h()),
             dims,
@@ -6700,7 +6722,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // keyed clips: the fields show (and edit around) the DISPLAYED pose
                 let tkf_t_now = self.keyed_grid_t(clip.timeline_start, &clip.transform_key_times());
                 let has_tkeys = !clip.transform_key_times().is_empty();
-                let b = if has_tkeys { clip.display_box_at(tkf_t_now) } else { clip.display_box() };
+                let b = effective_box(&self.doc, &clip, tkf_t_now);
 
                 let mut xy = [b.x * 100.0, b.y * 100.0];
                 let mut xy_changed = false;
@@ -6839,7 +6861,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 .on_disabled_hover_text("再生ヘッドをこのクリップの範囲内に置いてください")
                                 .clicked()
                             {
-                                let kb = clip.display_box_at(tkf_t_now);
+                                let kb = effective_box(&self.doc, &clip, tkf_t_now);
                                 let kc = clip.crop_ltrb_at(tkf_t_now);
                                 let cid = id.clone();
                                 self.apply_edit(true, move |raw| {
@@ -7920,6 +7942,40 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         self.lib_gen_stash = Some(stash);
     }
 
+    /// Create an editable, source-less content and let the backend Higgsfield job fill
+    /// it with the first generated asset/clip. This is the native app's real entry point
+    /// for "AIで新しい動画を作る".
+    fn start_ai_video(&mut self) {
+        if self.lib.started || self.lib.brief.trim().is_empty() {
+            return;
+        }
+        let room = self.room_id();
+        let title = if self.lib.title.trim().is_empty() {
+            format!("AI動画 {}", self.lib.contents.len() + 1)
+        } else { self.lib.title.clone() };
+        let format = if self.lib.format == "4:5" { "9:16".to_string() } else { self.lib.format.clone() };
+        let prompt = self.lib.brief.clone();
+        // Selection is reference material for the AI (logo/photo/video), not a mode switch.
+        let reference_asset_ids: Vec<String> = self.lib.selected_assets.clone();
+        let timeline = serde_json::json!({
+            "brief": prompt, "format": format, "source_asset_ids": reference_asset_ids, "annotations": [],
+            "sequence": { "format": format, "duration": 0, "tracks": [] },
+        });
+        self.lib.started = true;
+        self.lib.error = None;
+        self.lib.events = vec!["AI動画の編集プロジェクトを作成しています…".into()];
+        self.lib.gen_content = None;
+        self.lib.gen_job = None;
+        self.lib_post("gen_content", "/api/v1/production-assets/contents".into(), serde_json::json!({
+            "room_id": room, "title": title, "format": format, "asset_ids": reference_asset_ids, "timeline": timeline,
+        }));
+        self.lib_gen_stash = Some(serde_json::json!({
+            "mode": "higgsfield_generate", "prompt": prompt, "model": self.lib.ai_model,
+            "duration": self.lib.ai_duration, "aspect_ratio": format, "timeline": timeline, "title": title,
+            "reference_asset_ids": reference_asset_ids,
+        }));
+    }
+
     fn content_id(&self) -> String {
         self.doc
             .raw
@@ -8532,7 +8588,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 .cloned();
             if let (true, Some(b)) = (inside_time, base) {
                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
-                let bb = b.display_box_at(self.t);
+                let bb = effective_box(&self.doc, &b, self.t);
                 let src_now = b.src_at(self.t);
                 // markers (source -> canvas)
                 let p = ui.painter_at(vid);
@@ -8680,7 +8736,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                             if x1 > x0 && y1 > y0 {
                                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
-                                let bb = b.display_box_at(t_disp);
+                                let bb = effective_box(&self.doc, &b, t_disp);
                                 draw_box = compositor::source_box_to_canvas(
                                     (canvas_w(), canvas_h()),
                                     dims,
@@ -9035,7 +9091,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             return;
         }
         // the frame follows the keyframed pose at the DISPLAYED frame (region 流儀)
-        let b = c.display_box_at(t_disp);
+        let b = effective_box(&self.doc, c, t_disp);
         let tkts = c.transform_key_times();
         let t_rel = t_disp - c.timeline_start;
         let on_tkey = tkts.iter().any(|kt| (kt - t_rel).abs() <= edits::KEY_REPLACE_EPS);
@@ -9103,7 +9159,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // drag starts from the DISPLAYED pose (keyframed clips: the evaluated box)
                 let starts: Vec<(String, model::Pos)> = sel
                     .iter()
-                    .map(|c| (c.id.clone(), c.display_box_at(t_disp)))
+                    .map(|c| (c.id.clone(), effective_box(&self.doc, c, t_disp)))
                     .collect();
                 if corner.is_some() || edge.is_some() || bx.contains(pt) {
                     // transform-key routing, armed per clip like the region editor:
@@ -11198,11 +11254,12 @@ impl App {
                     self.lib.gen_content = Some(cid.clone());
                     self.lib.events.push("ダンの計画ジョブを開始しています…".into());
                     let st = self.lib_gen_stash.clone().unwrap_or(serde_json::json!({}));
+                    let is_ai_video = st.get("mode").and_then(|v| v.as_str()) == Some("higgsfield_generate");
                     let body = serde_json::json!({
                         "room_id": self.room_id(),
                         "content_id": cid,
                         "instruction": {
-                            "mode": "dan_plan",
+                            "mode": if is_ai_video { "higgsfield_generate" } else { "dan_plan" },
                             "content_id": cid,
                             "content_title": st.get("title").cloned().unwrap_or_default(),
                             "asset_ids": st.get("asset_ids").cloned().unwrap_or_default(),
@@ -11210,15 +11267,22 @@ impl App {
                             "brief": st.get("brief").cloned().unwrap_or_default(),
                             "workflow_preset": st.get("workflow_preset").cloned().unwrap_or_default(),
                             "timeline": st.get("timeline").cloned().unwrap_or_default(),
+                            "prompt": st.get("prompt").cloned().unwrap_or_default(),
+                            "model": st.get("model").cloned().unwrap_or_default(),
+                            "duration": st.get("duration").cloned().unwrap_or_default(),
+                            "aspect_ratio": st.get("aspect_ratio").cloned().unwrap_or_default(),
+                            "reference_asset_ids": st.get("reference_asset_ids").cloned().unwrap_or_default(),
                         },
                     });
                     self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
                     // ライブ組み上がり: 開始と同時にエディタへ遷移（最初は空の
                     // タイムライン）。中間保存が届くたびに live reload で育つ。
-                    self.generating_content = Some(cid.clone());
-                    self.gen_contents_mtime = None;
-                    self.clip_spawn.clear();
-                    self.open_content(&cid);
+                    if !is_ai_video {
+                        self.generating_content = Some(cid.clone());
+                        self.gen_contents_mtime = None;
+                        self.clip_spawn.clear();
+                        self.open_content(&cid);
+                    }
                 }
                 ("gen_job", Ok(v)) => {
                     self.lib.gen_job = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -11473,7 +11537,51 @@ impl App {
                         }
                     }
                 });
-                ui.add_space(12.0);
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Create an AI video sequence").strong());
+                    ui.label(egui::RichText::new("Describe the 30s main video here. The result is registered as an editable video clip at the start of a new timeline.").small().weak());
+                    ui.label(egui::RichText::new("Selected images/videos remain reference material for the AI; selecting them never switches AI generation off.").small().weak());
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Model").weak());
+                    if ui.selectable_label(self.lib.ai_model == "seedance_2_5", "Seedance 2.5 (recommended)").clicked() {
+                        self.lib.ai_model = "seedance_2_5".into();
+                    }
+                    if ui.selectable_label(self.lib.ai_model == "seedance_2_0", "Seedance 2.0").clicked() {
+                        self.lib.ai_model = "seedance_2_0".into();
+                        if self.lib.ai_duration > 15 { self.lib.ai_duration = 15; }
+                    }
+                    if ui.selectable_label(self.lib.ai_model == "kling3_0", "Kling 3.0").clicked() {
+                        self.lib.ai_model = "kling3_0".into();
+                        if self.lib.ai_duration > 10 { self.lib.ai_duration = 10; }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Length").weak());
+                    for secs in [5, 10, 15, 30] {
+                        let supported = match self.lib.ai_model.as_str() {
+                            "seedance_2_5" => true,
+                            "seedance_2_0" => secs <= 15,
+                            _ => secs <= 10,
+                        };
+                        if ui.add_enabled(supported, egui::SelectableLabel::new(self.lib.ai_duration == secs, format!("{secs}s"))).clicked() {
+                            self.lib.ai_duration = secs;
+                        }
+                    }
+                });
+                if self.lib.ai_model != "seedance_2_5" {
+                    ui.label(egui::RichText::new("30s is available with Seedance 2.5.").small().color(egui::Color32::from_rgb(240, 190, 80)));
+                }
+                let can_ai = !self.lib.brief.trim().is_empty() && !self.lib.started;
+                if ui.add_enabled(can_ai, egui::Button::new(
+                    egui::RichText::new("AI video: create new").size(14.0).color(egui::Color32::WHITE),
+                ).min_size(egui::vec2(330.0, 40.0)).rounding(8.0).fill(if can_ai { egui::Color32::from_rgb(110, 75, 190) } else { egui::Color32::from_gray(45) })).clicked() {
+                    self.start_ai_video();
+                }
+                ui.add_space(8.0);
+                ui.separator();
                 let n = self.lib.selected_assets.len();
                 let can = n > 0 && !self.lib.started;
                 if ui
@@ -12549,6 +12657,35 @@ impl eframe::App for App {
                         }
                     });
                 });
+                // キャンバス形式（プレビュー枠=書き出しの形）。何度でも切替可。
+                // クリップは素材実寸ベースの実効箱で描くため、切替で素材は歪まない。
+                {
+                    let cur = self
+                        .doc
+                        .raw
+                        .get(0)
+                        .and_then(|c| c.get("timeline"))
+                        .and_then(|t| t.get("format"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("9:16")
+                        .to_string();
+                    let mut pick = cur.clone();
+                    egui::ComboBox::from_id_source("canvas_fmt")
+                        .width(70.0)
+                        .selected_text(format!("🖼 {cur}"))
+                        .show_ui(ui, |ui| {
+                            for f in ["9:16", "16:9", "1:1", "4:5"] {
+                                ui.selectable_value(&mut pick, f.to_string(), f);
+                            }
+                        })
+                        .response
+                        .on_hover_text("プレビュー枠と書き出しの形。何度でも切替でき、素材は歪みません");
+                    if pick != cur {
+                        let p2 = pick.clone();
+                        self.apply_edit(true, move |raw| edits::set_canvas_format(raw, &p2));
+                        self.push_req(false);
+                    }
+                }
                 if ui
                     .selectable_label(self.revise_open, "🤖 ダンに指示")
                     .on_hover_text("この動画への修正指示を言葉で送る（例: 冒頭をもっとテンポ良く）")
@@ -12840,7 +12977,17 @@ impl eframe::App for App {
                 let avail = ui.available_size();
                 let gpu_frame = self.display_tex.clone();
                 if gpu_frame.is_some() || self.tex.is_some() {
-                    let (cw, ch) = (canvas_w() as f32, canvas_h() as f32);
+                    // 枠の形は「今表示しているフレーム自身の寸法」から決める。形式切替の
+                    // 直後は新寸法のフレームが届くまで旧フレームを旧比率のまま見せ、
+                    // 届いた瞬間に枠ごと切り替える（一瞬の潰れ・黒抜けの根絶）。
+                    let (cw, ch) = if let Some(g) = &gpu_frame {
+                        (g.w as f32, g.h as f32)
+                    } else if let Some(t) = &self.tex {
+                        let s = t.size();
+                        (s[0] as f32, s[1] as f32)
+                    } else {
+                        (canvas_w() as f32, canvas_h() as f32)
+                    };
                     let scale = (avail.x / cw).min(avail.y / ch);
                     let size = egui::vec2(cw * scale, ch * scale);
                     ui.centered_and_justified(|ui| {

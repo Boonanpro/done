@@ -42,6 +42,11 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 pub struct GpuTex {
     pub tex: ID3D11Texture2D,
     pub id: u64,
+    /// このフレーム自身の寸法。キャンバス形式の切替直後、UIは「新しい枠」でなく
+    /// 「表示中フレームの寸法」で枠を決めることで、旧フレームの引き伸ばし
+    /// （一瞬の潰れ）と提示層の空描き（一瞬の黒）を両方なくす。
+    pub w: u32,
+    pub h: u32,
 }
 
 fn create_frame_tex(device: &ID3D11Device, w: u32, h: u32) -> Result<ID3D11Texture2D> {
@@ -86,7 +91,7 @@ impl TexPool {
         }
         let tex = create_frame_tex(&self.device, self.w, self.h)?;
         let entry =
-            Arc::new(GpuTex { tex, id: self.next_id.fetch_add(1, Ordering::Relaxed) });
+            Arc::new(GpuTex { tex, id: self.next_id.fetch_add(1, Ordering::Relaxed), w: self.w, h: self.h });
         self.entries.lock().unwrap().push(entry.clone());
         Ok(entry)
     }
@@ -197,6 +202,11 @@ struct Ready {
     /// id of the pooled frame currently held in `present` — skip the copies when
     /// egui repaints without a new video frame.
     shown_id: u64,
+    /// 初期化時のキャンバス寸法。プール寸法と食い違ったら提示層ごと作り直す
+    /// （固定寸法の共有テクスチャへの寸法不一致 CopyResource は無言の no-op で、
+    /// 形式切替後も最後の旧寸法フレームが新しい枠に引き伸ばされ続けるため）。
+    w: u32,
+    h: u32,
 }
 
 enum GlState {
@@ -363,6 +373,8 @@ impl GlVideo {
                 hobj: Hnd(hobj),
                 gname,
                 shown_id: 0,
+                w: pool.w,
+                h: pool.h,
             }))
         }
     }
@@ -376,6 +388,28 @@ impl GlVideo {
                 Ok(r) => GlState::Ready(r),
                 Err(e) => {
                     eprintln!("GPU_PRESENT unavailable, falling back to CPU preview: {e:#}");
+                    GlState::Failed
+                }
+            };
+        }
+        // キャンバス形式の切替でフレーム寸法が変わった: 旧寸法の interop リソースを
+        // 解放して同じ GL コンテキスト上で作り直す。判定は「これから描くフレーム」の
+        // 寸法と比べる — プール基準にすると、新プールへ切替わった直後も UI が
+        // まだ持っている旧寸法フレームを描けず一瞬黒が出る。
+        if matches!(&*state, GlState::Ready(r) if r.w != frame.w || r.h != frame.h) {
+            if let GlState::Ready(r) = std::mem::replace(&mut *state, GlState::Uninit) {
+                unsafe {
+                    (r.funcs.unregister_object)(r.hdev.0, r.hobj.0);
+                    gl.delete_texture(r.gname);
+                    gl.delete_vertex_array(r.vao);
+                    gl.delete_program(r.program);
+                }
+            }
+            eprintln!("GPU_PRESENT reinit for canvas resize -> {}x{}", pool.w, pool.h);
+            *state = match self.init(gl, pool) {
+                Ok(r) => GlState::Ready(r),
+                Err(e) => {
+                    eprintln!("GPU_PRESENT re-init after canvas resize failed: {e:#}");
                     GlState::Failed
                 }
             };

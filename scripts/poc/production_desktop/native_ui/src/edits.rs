@@ -1691,6 +1691,7 @@ pub fn insert_asset(raw: &mut Value, t: f64, dur: f64, asset_id: &str, has_audio
         "source_start": 0.0,
         "source_end": (dur * 1000.0).round() / 1000.0,
         "link_id": link,
+        "fit": "contain", // 挿入もD&Dと同じく素材の完全なフレームを保持する
     });
     let Some(tracks) = tracks_mut(raw) else { return };
     let vt = tracks
@@ -1887,6 +1888,128 @@ fn tracks_ref(root: &Value) -> Option<&Vec<Value>> {
         .get("sequence")?
         .get("tracks")?
         .as_array()
+}
+
+fn canvas_px_for_format(fmt: &str) -> (f64, f64) {
+    match fmt {
+        "16:9" => (1920.0, 1080.0),
+        "1:1" => (1080.0, 1080.0),
+        "4:5" => (1080.0, 1350.0),
+        _ => (1080.0, 1920.0),
+    }
+}
+
+/// キャンバス割合の箱を、形式変更後も**物理形状が保存される**よう補正する。
+/// 中心割合と高さ割合を保ち、幅割合だけ (旧アスペクト/新アスペクト) 倍する。
+/// 逆方向の切替で厳密に元へ戻る（完全可逆・累積誤差なし）。
+fn convert_frac_box(x: f64, w: f64, old: (f64, f64), new: (f64, f64)) -> (f64, f64) {
+    let k = (old.0 / old.1) * (new.1 / new.0);
+    let cx = x + w / 2.0;
+    let w2 = w * k;
+    (cx - w2 / 2.0, w2)
+}
+
+/// sequence 内の全クリップの明示ジオメトリ（position / transform / transform_keys）を
+/// 形式変更に合わせて物理形状保存で変換する。座標はキャンバス割合で保存されている
+/// ため、これをしないと枠の形を変えた瞬間に素材が歪む。
+fn convert_seq_geometry(seq: &mut Value, old: (f64, f64), new: (f64, f64)) {
+    let k = (old.0 / old.1) * (new.1 / new.0);
+    let Some(tracks) = seq.get_mut("tracks").and_then(|v| v.as_array_mut()) else { return };
+    for tr in tracks {
+        let Some(clips) = tr.get_mut("clips").and_then(|v| v.as_array_mut()) else { continue };
+        for cl in clips {
+            let Some(o) = cl.as_object_mut() else { continue };
+            // 旧 transform (uniform scale/pan) は正方スケールが非可逆になるため position に実体化
+            if let Some(t) = o.get("transform").cloned() {
+                let g = |n: &str, d: f64| t.get(n).and_then(|v| v.as_f64()).unwrap_or(d);
+                let (s, tx, ty) = (g("scale", 1.0), g("x", 0.0), g("y", 0.0));
+                if (s - 1.0).abs() > 1e-4 || tx.abs() > 1e-4 || ty.abs() > 1e-4 {
+                    o.insert(
+                        "position".into(),
+                        serde_json::json!({"x": (1.0 - s) / 2.0 + tx, "y": (1.0 - s) / 2.0 + ty, "width": s, "height": s}),
+                    );
+                }
+                o.remove("transform");
+            }
+            let base_w = o
+                .get("position")
+                .and_then(|p| p.get("width"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            if let Some(p) = o.get_mut("position").and_then(|v| v.as_object_mut()) {
+                let g = |p: &serde_json::Map<String, Value>, n: &str, d: f64| {
+                    p.get(n).and_then(|v| v.as_f64()).unwrap_or(d)
+                };
+                let (x, w) = (g(p, "x", 0.0), g(p, "width", 1.0));
+                let (x2, w2) = convert_frac_box(x, w, old, new);
+                p.insert("x".into(), serde_json::json!(x2));
+                p.insert("width".into(), serde_json::json!(w2));
+            }
+            if let Some(keys) = o.get_mut("transform_keys").and_then(|v| v.as_array_mut()) {
+                for key in keys {
+                    let Some(ko) = key.as_object_mut() else { continue };
+                    let Some(x) = ko.get("x").and_then(|v| v.as_f64()) else { continue };
+                    let wv = ko.get("w").and_then(|v| v.as_f64());
+                    let wu = wv.unwrap_or(base_w);
+                    let cx = x + wu / 2.0;
+                    ko.insert("x".into(), serde_json::json!(cx - wu * k / 2.0));
+                    if let Some(w) = wv {
+                        ko.insert("w".into(), serde_json::json!(w * k));
+                    }
+                }
+            }
+            // テロップ: 文字の物理pxは outH * 0.052 * fontSize で決まる（caption-design.ts）。
+            // 高さが変わる形式切替では fontSize を (旧H/新H) 倍して物理サイズを保存（可逆）。
+            if o.contains_key("text") {
+                let kh = old.1 / new.1;
+                if (kh - 1.0).abs() > 1e-9 {
+                    let style = o
+                        .entry("style")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(so) = style.as_object_mut() {
+                        let fs = so.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                        so.insert("fontSize".into(), serde_json::json!(fs * kh));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// プレビュー/書き出しキャンバスの形式を変更する（何度でも可）。timeline.format を
+/// 正とし、sequence 側の width/height 上書きは形式追従を妨げるので取り除く。
+/// 書き出しサーバーは sequence.format → timeline.format の順で読むため両方に書く。
+/// 全クリップの明示座標は物理形状保存で変換され、素材の形は変わらない。
+pub fn set_canvas_format(root: &mut Value, fmt: &str) {
+    let Some(c) = root.get_mut(0) else { return };
+    let Some(tl) = c.get_mut("timeline").and_then(|t| t.as_object_mut()) else { return };
+    let old_fmt = tl
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("9:16")
+        .to_string();
+    if old_fmt == fmt {
+        return;
+    }
+    let old = canvas_px_for_format(&old_fmt);
+    let new = canvas_px_for_format(fmt);
+    tl.insert("format".into(), Value::String(fmt.to_string()));
+    let mut fix_seq = |s: &mut Value| {
+        if let Some(o) = s.as_object_mut() {
+            o.insert("format".into(), Value::String(fmt.to_string()));
+            o.remove("width");
+            o.remove("height");
+        }
+        convert_seq_geometry(s, old, new);
+    };
+    if let Some(seq) = tl.get_mut("sequence") {
+        fix_seq(seq);
+    }
+    if let Some(subs) = tl.get_mut("subseqs").and_then(|v| v.as_object_mut()) {
+        for (_, s) in subs.iter_mut() {
+            fix_seq(s);
+        }
+    }
 }
 
 fn tracks_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
@@ -2931,6 +3054,37 @@ pub fn reorder_tracks(raw: &mut serde_json::Value, from: usize, to: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canvas_format_convert_preserves_shape_and_roundtrips() {
+        let mut raw = serde_json::json!([{"timeline": {"format": "9:16", "sequence": {"tracks": [
+            {"id": "v", "type": "video", "clips": [
+                {"id": "c1", "asset_id": "a", "timeline_start": 0.0, "timeline_end": 5.0,
+                 "position": {"x": 0.1, "y": 0.2, "width": 0.5, "height": 0.25},
+                 "transform_keys": [{"t": 1.0, "x": 0.3, "y": 0.1, "w": 0.4, "h": 0.2}]},
+            ]}]}}}]);
+        set_canvas_format(&mut raw, "16:9");
+        let p = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0]["position"].clone();
+        let (w2, h2) = (p["width"].as_f64().unwrap(), p["height"].as_f64().unwrap());
+        // 物理アスペクト保存: (w*W)/(h*H) が前後で一致する
+        let before = (0.5 * 1080.0) / (0.25 * 1920.0);
+        let after = (w2 * 1920.0) / (h2 * 1080.0);
+        assert!((before - after).abs() < 1e-9, "physical aspect changed: {before} -> {after}");
+        // 高さと中心は不変
+        assert!((p["y"].as_f64().unwrap() - 0.2).abs() < 1e-9);
+        assert!(((p["x"].as_f64().unwrap() + w2 / 2.0) - 0.35).abs() < 1e-9);
+        // 逆方向で厳密に元へ戻る（キーフレーム含む）
+        set_canvas_format(&mut raw, "9:16");
+        let c = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone();
+        assert!((c["position"]["x"].as_f64().unwrap() - 0.1).abs() < 1e-9);
+        assert!((c["position"]["width"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert!((c["transform_keys"][0]["x"].as_f64().unwrap() - 0.3).abs() < 1e-9);
+        assert!((c["transform_keys"][0]["w"].as_f64().unwrap() - 0.4).abs() < 1e-9);
+        // 同一形式への再設定は何もしない
+        let snap = raw.to_string();
+        set_canvas_format(&mut raw, "9:16");
+        assert_eq!(snap, raw.to_string());
+    }
 
     #[test]
     fn timeline_visual_boundaries_are_frame_quantized_and_idempotent() {

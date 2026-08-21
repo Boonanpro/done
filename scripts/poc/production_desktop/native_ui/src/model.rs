@@ -555,9 +555,11 @@ impl Clip {
         self.fit.as_deref() == Some("stretch")
     }
 
-    /// New drag-and-drop clips preserve the complete source frame.  Treat legacy
-    /// `drop_v_*` clips without an explicit fit as contain too, so clips already
-    /// dropped before this field was introduced are repaired on their next preview.
+    /// 素材の完全なフレームを保持するか。fit 未指定の既存クリップは cover のまま
+    /// （過去のレイアウトは cover 前提の明示ボックスで作られており、解釈を変えると
+    /// 旧コンテンツの見た目が壊れる — 2026-08-21 に既定containを試して実証）。
+    /// 「素材の形を保つ」原則は、新規作成の全経路が fit:"contain" を明示することで守る
+    /// （D&D / 挿入 / AI生成 / エージェント配置は明示済み）。
     pub fn contains_in_box(&self) -> bool {
         self.fit.as_deref() == Some("contain")
             || (self.fit.is_none() && self.id.starts_with("drop_v_"))
