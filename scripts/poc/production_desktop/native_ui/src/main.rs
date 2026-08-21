@@ -5382,6 +5382,25 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         self.playing = !self.playing;
         if self.playing {
+            // 末尾で止まった状態のSpace/▶: 再生範囲の先頭から再生し直す
+            // （in/out指定があればその頭、サブタブは最初の緑区間の頭、通常は0）。
+            // 自然停止はコーデック都合で末尾の1〜2フレーム手前に着地する（実測: 10.100s の
+            // 動画で 10.067s 停止）ため、余裕は2.5フレーム取る
+            let end_eps = 2.5 / self.timeline_fps().max(1.0);
+            let restart_to: Option<f64> = if !self.on_sub_tab() {
+                if let Some((ra, rb)) = self.export_range {
+                    (self.t >= rb - end_eps || self.t >= self.dur - end_eps).then_some(ra)
+                } else {
+                    (self.t >= self.dur - end_eps).then_some(0.0)
+                }
+            } else {
+                let first = self.sub_ranges().first().map(|&(a, _)| a).unwrap_or(0.0);
+                let last_end = self.sub_ranges().last().map(|&(_, b)| b).unwrap_or(self.dur);
+                (self.t >= last_end - end_eps || self.t >= self.dur - end_eps).then_some(first)
+            };
+            if let Some(a) = restart_to {
+                self.t = a;
+            }
             // サブタイムライン: 再生開始位置で意図を汲む — 緑区間の中から始めたら
             // 「区間だけ飛び飛び」、外（暗転部分）から始めたら普通の全体再生。
             // 判定は再生セッション開始時に一度だけ。
@@ -13128,6 +13147,51 @@ impl eframe::App for App {
                         if resp.clicked() || resp.drag_started() {
                             if let Some(id) = ui.memory(|mem| mem.focused()) {
                                 ui.memory_mut(|mem| mem.surrender_focus(id));
+                            }
+                        }
+                        // プレビュー上のクリックで素材を選択（タイムラインを触らずに選べる）。
+                        // clicked はドラッグ無しの離しでだけ真なので、範囲指定・移動ドラッグとは干渉しない。
+                        // 上のレーンから順に、クリック点を実効箱に含む一番手前のクリップを選ぶ。
+                        if resp.clicked() && !self.revise_pick && !self.blur_mode {
+                            if let Some(p) = resp.interact_pointer_pos() {
+                                let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                                let fx = ((p.x - vid.left()) / vid.width()).clamp(0.0, 1.0) as f64;
+                                let fy = ((p.y - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
+                                let t_disp = self.displayed_grid_t();
+                                let mut hit: Option<String> = None;
+                                'pick: for tr in self.doc.seq.tracks.iter().rev() {
+                                    if tr.hidden
+                                        || matches!(tr.kind.as_str(), "audio" | "caption" | "effect")
+                                    {
+                                        continue;
+                                    }
+                                    for c in tr.clips.iter().rev() {
+                                        if c.asset_id.is_none()
+                                            || t_disp < c.timeline_start
+                                            || t_disp >= c.timeline_end
+                                            || c.video_enabled == Some(false)
+                                        {
+                                            continue;
+                                        }
+                                        let b = effective_box(&self.doc, c, t_disp);
+                                        if fx >= b.x
+                                            && fx <= b.x + b.width
+                                            && fy >= b.y
+                                            && fy <= b.y + b.height
+                                        {
+                                            hit = Some(c.id.clone());
+                                            break 'pick;
+                                        }
+                                    }
+                                }
+                                match hit {
+                                    Some(id) => {
+                                        if !(self.selected.len() == 1 && self.selected[0] == id) {
+                                            self.selected = vec![id];
+                                        }
+                                    }
+                                    None => self.selected.clear(),
+                                }
                             }
                         }
                         let vid = egui::Rect::from_center_size(resp.rect.center(), size);
