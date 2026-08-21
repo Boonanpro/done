@@ -805,6 +805,66 @@ async def _executor_worker():
         print("[EXECUTOR_BROWSER] Browser closed")
 
 
+_EVAL_BLOCKED_MARKERS = (
+    "eval is disabled",
+    "unsafe-eval",
+    "Content Security Policy",
+    "call to eval() blocked",
+    "EvalError",
+)
+
+
+async def _cdp_evaluate(page, expression: str, arg=None):
+    """CSPやサイト側のパッチで window.eval が殺されたページ用の迂回路。
+
+    Playwright の page.evaluate は注入したユーティリティを eval で実行する。
+    American Express のように window.eval を自前で潰すサイトでは、要素一覧も
+    スクリーンショットの縮小率計算も全部落ちて、ページが一切操作できなくなる。
+    CDP の Runtime.evaluate は V8 インスペクタ側で走るのでその影響を受けない。
+    """
+    arg_js = json.dumps(arg) if arg is not None else "undefined"
+    wrapped = (
+        "(() => { const __danFn = ("
+        + expression
+        + "); return (typeof __danFn === 'function') ? __danFn("
+        + arg_js
+        + ") : __danFn; })()"
+    )
+    session = await page.context.new_cdp_session(page)
+    try:
+        res = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": wrapped,
+                "returnByValue": True,
+                "awaitPromise": True,
+                "userGesture": True,
+            },
+        )
+    finally:
+        try:
+            await session.detach()
+        except Exception:
+            pass
+    if res.get("exceptionDetails"):
+        detail = res["exceptionDetails"]
+        raise RuntimeError(detail.get("text") or str(detail))
+    return res.get("result", {}).get("value")
+
+
+async def _page_evaluate(page, expression: str, arg=None):
+    """通常は page.evaluate。eval が禁止されたページだけ CDP に落とす。"""
+    try:
+        if arg is not None:
+            return await page.evaluate(expression, arg)
+        return await page.evaluate(expression)
+    except Exception as exc:
+        message = str(exc)
+        if not any(marker in message for marker in _EVAL_BLOCKED_MARKERS):
+            raise
+        return await _cdp_evaluate(page, expression, arg)
+
+
 async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
     page = pages_state["current"]
@@ -865,6 +925,35 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             f.write(body)
         return {"saved": save_path, "size": len(body)}
 
+    elif cmd == "upload_file":
+        # ローカルファイルをページのアップロード欄に渡す。
+        # 1) 既に input[type=file] があればそこへ直接セット
+        # 2) 無ければ「アップロード」ボタンをクリックしてファイル選択ダイアログを捕まえる
+        files = args["files"]
+        if isinstance(files, str):
+            files = [files]
+        ref = args.get("ref")
+        selector = args.get("selector")
+        timeout = args.get("timeout", 20000)
+
+        file_inputs = page.locator("input[type=file]")
+        if not ref and not selector:
+            if await file_inputs.count() == 0:
+                raise RuntimeError("input[type=file] が見つかりません。ref か selector でアップロードボタンを指定してください")
+            await file_inputs.last.set_input_files(files)
+            return {"uploaded": files, "via": "input"}
+
+        if selector:
+            target = page.locator(selector)
+        else:
+            target = page.locator(f'[data-dan-ref="{str(ref).replace("@", "")}"]').last
+
+        async with page.expect_file_chooser(timeout=timeout) as fc_info:
+            await target.click()
+        chooser = await fc_info.value
+        await chooser.set_files(files)
+        return {"uploaded": files, "via": "file_chooser"}
+
     elif cmd == "locator_count":
         count = await page.locator(args["selector"]).count()
         return {"count": count}
@@ -914,8 +1003,8 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         # lands short of the target — the piece is never grabbed and the puzzle
         # "does not move". Ship the ratio with the image so nobody has to
         # remember or re-derive it.
-        scale = _measure_shot_scale(base64_str, await page.evaluate(
-            "() => ({w: window.innerWidth, h: window.innerHeight})"
+        scale = _measure_shot_scale(base64_str, await _page_evaluate(
+            page, "() => ({w: window.innerWidth, h: window.innerHeight})"
         ))
         return {
             "base64": base64_str,
@@ -959,9 +1048,9 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         # arg を渡せるようにする（captcha_solver のトークン注入等で使用）。
         # arg=None の従来呼び出しは引数なし evaluate にフォールバックして後方互換。
         if args.get("arg") is not None:
-            result = await page.evaluate(args["expression"], args["arg"])
+            result = await _page_evaluate(page, args["expression"], args["arg"])
         else:
-            result = await page.evaluate(args["expression"])
+            result = await _page_evaluate(page, args["expression"])
         return {"result": result}
 
     elif cmd == "list_frames":
@@ -1124,7 +1213,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             return elements;
         }
         """
-        elements = await page.evaluate(script)
+        elements = await _page_evaluate(page, script)
         return {"elements": elements, "count": len(elements)}
 
     elif cmd == "click_by_ref":
@@ -1156,7 +1245,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             return document.body.innerText.slice(0, 1000);
         }
         """
-        main_text = await page.evaluate(main_text_script)
+        main_text = await _page_evaluate(page, main_text_script)
 
         return {
             "title": title,
@@ -1235,7 +1324,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             return ctx;
         }
         """
-        result = await page.evaluate(script)
+        result = await _page_evaluate(page, script)
         return {"context": result}
 
     else:
@@ -1453,6 +1542,16 @@ class ExecutorPageProxy:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None, lambda: _send_executor_command("save_image", url=url, path=path)
+        )
+
+    async def upload_file(self, files, ref: str = None, selector: str = None, timeout: int = 20000):
+        """ローカルファイルをページのアップロード欄に渡す"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: _send_executor_command(
+                "upload_file", files=files, ref=ref, selector=selector, timeout=timeout
+            ),
         )
 
     async def wait_for_selector(self, selector: str, timeout: int = 30000, state: str = "visible"):
