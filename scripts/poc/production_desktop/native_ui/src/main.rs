@@ -5916,15 +5916,24 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // the panel is ALWAYS rendered at its fixed width — appearing/disappearing with
         // the selection resized the central area and made the preview jump every time a
         // clip was selected or created ("パネルが出るたびプレビューの位置が変わる")
+        // 幅は開閉どちらの状態でも完全固定。選択のたびに中央のプレビュー位置が
+        // 微妙に動く（ガクつく）のを防ぐ — パネルは常に同じ幅で存在し続ける。
+        const INSPECTOR_W: f32 = 320.0;
+        let placeholder = |ctx: &egui::Context| {
+            egui::SidePanel::right("inspector")
+                .resizable(false)
+                .exact_width(INSPECTOR_W)
+                .show(ctx, |ui| {
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("クリップを選択すると\nここに編集パネルが出ます")
+                            .small()
+                            .weak(),
+                    );
+                });
+        };
         if selected.is_empty() {
-            egui::SidePanel::right("inspector").resizable(true).default_width(250.0).width_range(180.0..=560.0).show(ctx, |ui| {
-                ui.add_space(12.0);
-                ui.label(
-                    egui::RichText::new("クリップを選択すると\nここに編集パネルが出ます")
-                        .small()
-                        .weak(),
-                );
-            });
+            placeholder(ctx);
             return;
         }
         let multi = selected.len() > 1;
@@ -5940,12 +5949,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 && c.style.as_ref().and_then(|v| v.as_str()) != Some("note")
         });
         if multi && !same_media && !same_caption && !same_region_effect {
+            placeholder(ctx);
             return;
         }
         let (clip, kind) = selected[0].clone();
         let id = clip.id.clone();
         let edit_ids: Vec<String> = selected.iter().map(|(c, _)| c.id.clone()).collect();
-        egui::SidePanel::right("inspector").resizable(true).default_width(250.0).width_range(180.0..=560.0).show(ctx, |ui| {
+        egui::SidePanel::right("inspector").resizable(false).exact_width(INSPECTOR_W).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
                 let title = if multi {
