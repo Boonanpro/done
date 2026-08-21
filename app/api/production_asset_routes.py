@@ -3829,27 +3829,54 @@ def _run_higgsfield_generation_job(room_id: str, job_id: str, content_id: str, i
     _update_job(room_id, job_id, {"status": "running"})
     _update_content(room_id, content_id, {"status": "running"})
     try:
-        prompt = str(instruction.get("prompt") or "").strip()
+        # .cmdシム経由では改行入り引数が後続引数ごと切断されるため空白に潰す
+        prompt = " ".join(str(instruction.get("prompt") or "").split())
         model = str(instruction.get("model") or "seedance_2_0")
         aspect = str(instruction.get("aspect_ratio") or "9:16")
         duration = int(float(instruction.get("duration") or 5))
         if not prompt:
             raise RuntimeError("生成指示を入力してください")
-        if model not in {"seedance_2_0", "kling3_0"}:
+        if model not in {"seedance_2_5", "seedance_2_0", "kling3_0"}:
             raise RuntimeError("Unsupported Higgsfield model")
         if aspect not in {"9:16", "16:9", "1:1"}:
             aspect = "9:16"
-        duration = 10 if duration >= 8 else 5
+        # A content may be 30 seconds while the timeline still stays fully editable.
+        # Seedance 2.5 is the provider's current long-clip option; Kling stays short.
+        allowed_durations = {"seedance_2_5": (5, 10, 15, 30), "seedance_2_0": (5, 10, 15), "kling3_0": (5, 10)}
+        choices = allowed_durations[model]
+        duration = min(choices, key=lambda value: abs(value - duration))
 
         job_dir = _room_dir(room_id) / "jobs" / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        _append_job_event(room_id, job_id, {"type": "status", "text": f"Higgsfield ({'Seedance 2.0' if model == 'seedance_2_0' else 'Kling 3.0'}) に生成を依頼しました…"})
-        cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
-               "--aspect_ratio", aspect, "--duration", str(duration), "--wait", "--json"]
+        display_model = {"seedance_2_5": "Seedance 2.5", "seedance_2_0": "Seedance 2.0", "kling3_0": "Kling 3.0"}[model]
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"Higgsfield（{display_model}・{duration}秒）に生成を依頼しました…"})
+        from app.services.higgsfield_cli import higgsfield_cli
+        cmd = [higgsfield_cli(), "generate", "create", model, "--prompt", prompt, "--duration", str(duration), "--wait", "--json"]
+        if model == "seedance_2_5":
+            dimensions = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}[aspect]
+            # width/heightだけだとサーバー側でaspect_ratio既定値(16:9)が勝つ(2026-08-21実測) — 両方渡す
+            cmd.extend(["--width", str(dimensions[0]), "--height", str(dimensions[1]), "--aspect_ratio", aspect, "--resolution", "720p", "--generate_audio", "true"])
+        else:
+            cmd.extend(["--aspect_ratio", aspect])
         if model == "seedance_2_0":
             cmd.extend(["--resolution", "720p"])
+        # Existing photos/videos are optional reference material, never a switch that
+        # disables AI. The CLI uploads local paths on demand.
+        ref_ids = [str(value) for value in instruction.get("reference_asset_ids") or []]
+        for asset in _read_assets(room_id):
+            if str(asset.get("id")) not in ref_ids:
+                continue
+            path = asset.get("local_path") or asset.get("proxy_path")
+            if not path or not Path(str(path)).exists():
+                continue
+            kind = asset.get("kind")
+            if kind == "image":
+                cmd.extend(["--image", str(path)])
+            elif kind == "video" and model != "kling3_0":
+                cmd.extend(["--video", str(path)])
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=1260, creationflags=flags)
+        # CLIはUTF-8を吐く。既定のcp932で読むとreaderスレッドが死にstdoutがNoneになる
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1260, creationflags=flags)
         if completed.returncode != 0:
             raise RuntimeError((completed.stderr or completed.stdout or "Higgsfield generation failed")[-700:])
         try:
@@ -3894,15 +3921,31 @@ def _run_higgsfield_generation_job(room_id: str, job_id: str, content_id: str, i
         if annotation.get("kind") == "rect" and all(key in data for key in ("x", "y", "width", "height")):
             position = {key: float(data[key]) for key in ("x", "y", "width", "height")}
         track = {"id": f"video_higgsfield_{job_id[:8]}", "type": "video", "label": "Higgsfield", "clips": []}
+        link_id = f"lk_hf_{job_id[:8]}"
         clip = {
             "id": f"clip_higgsfield_{job_id[:8]}", "asset_id": asset["id"], "label": "Higgsfield generated",
             "source_start": 0, "source_end": round(end - start, 3),
             "timeline_start": round(start, 3), "timeline_end": round(end, 3),
             "track": "video", "composition": "overlay" if position else "fullscreen",
+            # 素材本来のフレーム全体を保持する（coverで枠に切り抜かない）— エディタのD&Dと同じ既定
+            "fit": "contain", "link_id": link_id,
             **({"position": position} if position else {}),
         }
         track["clips"].append(clip)
         tracks.append(track)
+        # 生成音声があるならaudioトラックにリンク済みクリップを置く（無いと無音になる）
+        if (asset.get("metadata") or {}).get("audio_codec"):
+            aclip = {
+                "id": f"clip_higgsfield_a_{job_id[:8]}", "asset_id": asset["id"],
+                "source_start": 0, "source_end": round(end - start, 3),
+                "timeline_start": round(start, 3), "timeline_end": round(end, 3),
+                "link_id": link_id,
+            }
+            atrack = next((t for t in tracks if t.get("type") == "audio"), None)
+            if atrack is None:
+                atrack = {"id": f"audio_higgsfield_{job_id[:8]}", "type": "audio", "clips": []}
+                tracks.append(atrack)
+            atrack.setdefault("clips", []).append(aclip)
         sequence["tracks"] = tracks
         sequence["duration"] = max(float(sequence.get("duration") or 0), end)
         timeline["sequence"] = sequence
@@ -4431,8 +4474,12 @@ async def register_asset(
     if data.source_type in {"local_path", "nas_path", "upload", "generated"}:
         resolved = _resolve_local_uri(clean_uri)
         local_path = str(resolved)
-        if kind == "video":
+        if kind in {"video", "image"}:
+            # 不変条件: 登録された素材は必ず実寸(width/height)を持つ。
+            # クリップの「素材の形を保つ」計算がこの実寸を基準にするため、
+            # 欠落するとキャンバス形式切替で素材が歪む(2026-08-21実発生)。
             metadata = _probe_video(resolved)
+        if kind == "video":
             status = "processing" if data.make_proxy else "registered"
     elif data.source_type == "cloud_url":
         status = "registered"

@@ -397,15 +397,31 @@ def _load_analyses(assets: dict) -> dict:
     return out
 
 
+def _higgsfield_cli() -> str:
+    """PATHにnpm binが無い環境(タスクスケジューラ起動の子プロセス)でも実体を解決する。"""
+    found = shutil.which("higgsfield")
+    if found:
+        return found
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        for name in ("higgsfield.cmd", "higgsfield"):
+            cand = Path(appdata) / "npm" / name
+            if cand.exists():
+                return str(cand)
+    return "higgsfield"
+
+
 def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
-    if not prompt.strip():
+    prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
+    if not prompt:
         return {"ok": False, "error": "empty prompt"}
     try:
         r = subprocess.run(
-            ["higgsfield", "generate", "create", "gpt_image_2",
+            [_higgsfield_cli(), "generate", "create", "gpt_image_2",
              "--prompt", prompt, "--aspect_ratio", aspect,
              "--wait", "--wait-timeout", "10m", "--json"],
-            capture_output=True, text=True, timeout=660, shell=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=660, shell=True,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "image generation timeout (11m)"}
@@ -448,7 +464,8 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     It intentionally returns only an asset. Placement, trimming, cropping, and
     approval remain normal timeline operations instead of provider side-effects.
     """
-    if not prompt.strip():
+    prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
+    if not prompt:
         return {"ok": False, "error": "empty prompt"}
     supported_models = {"seedance_2_0", "kling3_0"}
     if model not in supported_models:
@@ -459,7 +476,7 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
         return {"ok": False, "error": f"unsupported resolution: {resolution}"}
 
     clip_duration = max(1, min(15, int(round(duration))))
-    cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
+    cmd = [_higgsfield_cli(), "generate", "create", model, "--prompt", prompt,
            "--aspect_ratio", aspect, "--duration", str(clip_duration),
            "--wait", "--wait-timeout", "20m", "--json"]
     if model == "seedance_2_0":
@@ -479,7 +496,7 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
             cmd += ["--video" if is_video else "--image", str(ref)]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=1260,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1260,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
@@ -713,6 +730,23 @@ def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -
                 pass
 
 
+def _media_dims(path: Path) -> dict:
+    """実寸(width/height)を返す。不変条件: 登録される素材は必ず実寸を持つ
+    （クリップの形状保持計算の基準。欠落するとキャンバス切替で歪む）。"""
+    try:
+        r = subprocess.run(
+            [_ffprobe(), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        s = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+        w, h = int(s.get("width") or 0), int(s.get("height") or 0)
+        return {"width": w, "height": h} if w and h else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
                           filename_hint: str = "") -> None:
     with td.ContentsLock(ROOM_ID):
@@ -728,7 +762,7 @@ def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
             "local_path": str(dest.resolve()), "filename": filename_hint or dest.name,
             "proxy_path": None, "proxy_url": None,
             "thumbnail_path": None, "thumbnail_url": None,
-            "status": "proxy_ready", "metadata": {},
+            "status": "proxy_ready", "metadata": _media_dims(dest),
             "created_at": now, "updated_at": now,
             "generated_by": f"agent:{JOB_ID}",
         })
@@ -748,7 +782,8 @@ def _register_media_asset(draft: dict, aid: str, dest: Path, kind: str,
             "original_uri": str(dest.resolve()), "local_path": str(dest.resolve()),
             "filename": filename_hint or dest.name, "proxy_path": None, "proxy_url": None,
             "thumbnail_path": None, "thumbnail_url": None, "status": "ready",
-            "metadata": metadata or {}, "created_at": now, "updated_at": now,
+            "metadata": {**(_media_dims(dest) if kind == "video" else {}), **(metadata or {})},
+            "created_at": now, "updated_at": now,
             "generated_by": f"agent:{JOB_ID}",
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

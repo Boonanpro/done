@@ -153,6 +153,8 @@ def append_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, source_star
     clip: dict[str, Any] = {
         "id": vid, "asset_id": asset_id,
         "timeline_start": round(ts, 3), "timeline_end": round(te, 3),
+        # 素材本来のフレーム全体を保持（キャンバス形状に切り抜かない）— D&D/生成配置と同じ規約
+        "fit": "contain",
     }
     if is_image:
         clip["kind"] = "image"
