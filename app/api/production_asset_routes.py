@@ -3964,12 +3964,200 @@ def _run_higgsfield_generation_job(room_id: str, job_id: str, content_id: str, i
         _update_content(room_id, content_id, {"status": "failed"})
 
 
+def _higgsfield_url_fallback(model: str, prompt: str) -> str | None:
+    """CLIの--wait応答から動画URLが取れなかった時の引き当て。
+    生成自体は成功していることがある（gemini_omniで実測）ため、ジョブ一覧から
+    同モデル・同プロンプト先頭一致の直近完了分を探す。"""
+    try:
+        from app.services.higgsfield_cli import higgsfield_cli
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        lst = subprocess.run([higgsfield_cli(), "generate", "list", "--json"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=60, creationflags=flags)
+        for item in json.loads(lst.stdout or "[]"):
+            if (item.get("job_set_type") == model and item.get("status") == "completed"
+                    and item.get("result_url")):
+                p = str((item.get("params") or {}).get("prompt") or "")
+                if p[:40] == prompt[:40]:
+                    return str(item["result_url"])
+    except Exception:  # noqa: BLE001
+        logger.warning("higgsfield url fallback failed", exc_info=True)
+    return None
+
+
+def _run_clip_regen_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any]) -> None:
+    """選択中クリップへの指示（プロンプト）でそのクリップを生成し直し、同じ枠に置き替える。
+
+    - 長さはクリップ長の切り上げ整数秒をモデル対応刻みへスナップ（トリムはしない方針）
+    - 既存クリップのソース中間フレームを参照画像として渡す（Seedance/Kling。Omniはプロンプトのみ）
+    - 周辺テロップ文をプロンプトへ文脈として添える
+    - 置き替えは同じ枠（位置・fit・リンク維持）。旧素材はライブラリに残る
+    """
+    _update_job(room_id, job_id, {"status": "running"})
+    _update_content(room_id, content_id, {"status": "running"})
+    try:
+        from app.services.higgsfield_cli import cli_arg_safe, higgsfield_cli
+        prompt = " ".join(str(instruction.get("prompt") or "").split())
+        model = str(instruction.get("model") or "seedance_2_5")
+        clip_id = str(instruction.get("clip_id") or "")
+        if not prompt:
+            raise RuntimeError("生成指示（プロンプト）を入力してください")
+        if model not in {"seedance_2_5", "seedance_2_0", "kling3_0", "gemini_omni"}:
+            raise RuntimeError("Unsupported model")
+
+        contents = _read_contents(room_id)
+        content = next((c for c in contents if str(c.get("id")) == str(content_id)), None)
+        if not content:
+            raise RuntimeError("Content not found")
+        timeline = dict(content.get("timeline") or {})
+        sequence = dict(timeline.get("sequence") or {})
+        tracks = sequence.get("tracks") or []
+        clip = None
+        for tr in tracks:
+            for c in tr.get("clips") or []:
+                if str(c.get("id")) == clip_id:
+                    clip = c
+        if clip is None:
+            raise RuntimeError("対象クリップが見つかりません")
+        ts, te = float(clip.get("timeline_start") or 0), float(clip.get("timeline_end") or 0)
+        clip_len = max(1.0, te - ts)
+
+        import math
+        # 生成尺: 既定はクリップ長の切り上げ。instruction.duration で明示上書き可
+        # （残高調整や「枠より短く作って後半は静止でよい」等の用途）。
+        want = int(instruction.get("duration") or math.ceil(clip_len))
+        allowed = {
+            "seedance_2_5": (5, 10, 15, 30),
+            "seedance_2_0": (5, 10, 15),
+            "kling3_0": (5, 10),
+        }
+        if model == "gemini_omni":
+            duration = max(2, min(10, want))  # API上限10秒（11でInput should be <= 10を実測）
+        else:
+            choices = [d for d in allowed[model] if d >= want] or [allowed[model][-1]]
+            duration = choices[0]
+
+        fmt = str(sequence.get("format") or timeline.get("format") or "9:16")
+        aspect = fmt if fmt in {"9:16", "16:9", "1:1"} else ("9:16" if fmt == "4:5" else "9:16")
+        if model == "gemini_omni" and aspect == "1:1":
+            aspect = "9:16"
+
+        # 周辺テロップを文脈として添える（±5秒に重なるテキスト）
+        ctx: list[str] = []
+        for tr in tracks:
+            for c in tr.get("clips") or []:
+                txt = str(c.get("text") or "").strip()
+                if txt and float(c.get("timeline_start") or 0) < te + 5 and float(c.get("timeline_end") or 0) > ts - 5:
+                    ctx.append(txt.replace("\n", " ")[:60])
+        full_prompt = prompt
+        if ctx:
+            full_prompt += " （場面の文脈テロップ: " + " / ".join(ctx[:4]) + "）"
+        full_prompt = cli_arg_safe(full_prompt)
+
+        job_dir = _room_dir(room_id) / "jobs" / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        # 参照フレーム: 対象クリップのソース中間フレーム
+        ref_path: Path | None = None
+        if model != "gemini_omni":
+            asset = next((a for a in _read_assets(room_id) if str(a.get("id")) == str(clip.get("asset_id"))), None)
+            src = (asset or {}).get("local_path") or (asset or {}).get("proxy_path")
+            if src and Path(str(src)).exists():
+                ss = float(clip.get("source_start") or 0)
+                se = float(clip.get("source_end") or (ss + clip_len))
+                mid = (ss + se) / 2.0
+                ref_path = job_dir / "ref.jpg"
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                subprocess.run(
+                    [_ffmpeg(), "-y", "-ss", f"{mid:.3f}", "-i", str(src), "-vframes", "1", str(ref_path)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags, check=False,
+                )
+                if not ref_path.exists() or ref_path.stat().st_size < 1024:
+                    ref_path = None
+
+        display = {"seedance_2_5": "Seedance 2.5", "seedance_2_0": "Seedance 2.0",
+                   "kling3_0": "Kling 3.0", "gemini_omni": "Gemini Omni Flash"}[model]
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"{display}（{duration}秒）でクリップを生成し直しています…"})
+        cmd = [higgsfield_cli(), "generate", "create", model, "--prompt", full_prompt,
+               "--duration", str(duration), "--wait", "--wait-timeout", "20m", "--json"]
+        if model == "seedance_2_5":
+            dims = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}[aspect]
+            cmd += ["--width", str(dims[0]), "--height", str(dims[1]), "--aspect_ratio", aspect,
+                    "--resolution", "720p", "--generate_audio", "true"]
+        else:
+            cmd += ["--aspect_ratio", aspect]
+        if model == "seedance_2_0":
+            cmd += ["--resolution", "720p"]
+        if ref_path is not None:
+            cmd += ["--image", str(ref_path)]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   timeout=1260, creationflags=flags)
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "generation failed")[-700:])
+        (job_dir / "cli_output.json").write_text(completed.stdout or "", encoding="utf-8")
+        try:
+            result_data = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            result_data = {}
+        source_url = _higgsfield_result_url(result_data) or _higgsfield_url_fallback(model, full_prompt)
+        if not source_url:
+            raise RuntimeError("生成結果に動画URLがありません")
+
+        _append_job_event(room_id, job_id, {"type": "status", "text": "生成完了。クリップを置き替えています…"})
+        out_path = job_dir / "regen.mp4"
+        with urllib.request.urlopen(source_url, timeout=180) as response, out_path.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        if not out_path.exists() or out_path.stat().st_size < 1024:
+            raise RuntimeError("生成動画のダウンロードに失敗しました")
+        asset = _add_generated_video_asset(
+            room_id, out_path, filename=f"regen_{job_id[:8]}.mp4",
+            metadata={**_probe_video(out_path), "provider": "higgsfield", "model": model,
+                      "prompt": prompt, "source_url": source_url, "regen_of_clip": clip_id},
+        )
+        gen_dur = float((asset.get("metadata") or {}).get("duration") or duration)
+
+        # 同じ枠に置き替え（位置・fit・リンクは維持。旧素材はライブラリに残る）
+        contents = _read_contents(room_id)
+        content = next((c for c in contents if str(c.get("id")) == str(content_id)), None)
+        timeline = dict((content or {}).get("timeline") or {})
+        sequence = dict(timeline.get("sequence") or {})
+        link_id = clip.get("link_id")
+        for tr in sequence.get("tracks") or []:
+            for c in tr.get("clips") or []:
+                if str(c.get("id")) == clip_id:
+                    c["asset_id"] = asset["id"]
+                    c["source_start"] = 0
+                    c["source_end"] = round(min(gen_dur, float(c.get("timeline_end") or 0) - float(c.get("timeline_start") or 0)), 3)
+                    c["fit"] = "contain"
+                elif link_id and c.get("link_id") == link_id and str(tr.get("type")) == "audio":
+                    # リンク音声も新素材へ（新素材に音が無ければ無音になるだけで安全）
+                    c["asset_id"] = asset["id"]
+                    c["source_start"] = 0
+                    c["source_end"] = round(min(gen_dur, float(c.get("timeline_end") or 0) - float(c.get("timeline_start") or 0)), 3)
+        timeline["sequence"] = sequence
+        asset_ids = [str(v) for v in ((content or {}).get("asset_ids") or [])]
+        if asset["id"] not in asset_ids:
+            asset_ids.append(asset["id"])
+        _update_content(room_id, content_id, {"timeline": timeline, "asset_ids": asset_ids, "status": "ready"})
+        _append_job_event(room_id, job_id, {"type": "status", "text": "クリップを置き替えました。旧素材はライブラリに残っています。"})
+        _update_job(room_id, job_id, {"status": "done", "result": {"asset_id": asset["id"], "clip_id": clip_id, "model": model, "duration": duration}, "error": None})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("clip regen failed room=%s job=%s", room_id, job_id)
+        _append_job_event(room_id, job_id, {"type": "error", "text": str(exc)})
+        _update_job(room_id, job_id, {"status": "failed", "error": str(exc)})
+        _update_content(room_id, content_id, {"status": "ready"})
+
+
 def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
     # Higgsfield is deliberately a first-class production job instead of a synchronous
     # HTTP request: a real video generation can take several minutes, while the existing
     # job/event polling UI keeps the editor usable and reports its terminal state.
     if instruction.get("mode") == "higgsfield_generate":
         _run_higgsfield_generation_job(room_id, job_id, content_id, instruction)
+        return
+    if instruction.get("mode") == "clip_regen":
+        _run_clip_regen_job(room_id, job_id, content_id, instruction)
         return
     _update_job(room_id, job_id, {"status": "running"})
     # NEVER blow away the stored timeline with an empty/partial instruction payload —
