@@ -3642,9 +3642,6 @@ struct App {
     fs_bar_last_move: Option<Instant>,
     /// シークバーのドラッグ開始時に再生中だったら、離した時に再生を再開する
     fs_resume_play: bool,
-    /// 選択クリップの「AIで作り直す」: 指示プロンプトと使用モデル
-    regen_prompt: String,
-    regen_model: String,
     show_help: bool,
     step_settle_at: Option<Instant>,
     // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
@@ -3907,8 +3904,6 @@ impl App {
             preview_fullscreen: false,
             fs_bar_last_move: None,
             fs_resume_play: false,
-            regen_prompt: String::new(),
-            regen_model: "gemini_omni".into(),
             show_help: false,
             step_settle_at: None,
             step_probe: None,
@@ -6934,55 +6929,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         });
                     }
                 }
-                // ---- AIで作り直す（選択クリップへの指示生成）----
-                if kind != "audio" && clip.asset_id.is_some() && clip.text.is_none() && !multi {
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.label(egui::RichText::new("🎬 AIで作り直す").strong());
-                    ui.label(
-                        egui::RichText::new(
-                            "このクリップの内容・長さ・周辺テロップを前提に、指示どおりの映像を生成して同じ枠に置き替えます（旧素材はライブラリに残ります）",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.regen_prompt)
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("例: この場面を、現場スタッフがスマホで手持ち撮影したワンテイクのBTS風映像に"),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("モデル").weak().small());
-                        let models = [
-                            ("gemini_omni", "Omni Flash (安い・24cr/8s)"),
-                            ("seedance_2_5", "Seedance 2.5 (高品質・65cr/10s)"),
-                            ("seedance_2_0", "Seedance 2.0 (45cr/10s)"),
-                            ("kling3_0", "Kling 3.0 (20cr/10s)"),
-                        ];
-                        let cur_label = models
-                            .iter()
-                            .find(|(id, _)| *id == self.regen_model)
-                            .map(|(_, l)| *l)
-                            .unwrap_or("選択");
-                        egui::ComboBox::from_id_source("regen_model")
-                            .selected_text(cur_label)
-                            .show_ui(ui, |ui| {
-                                for (mid, label) in models {
-                                    ui.selectable_value(&mut self.regen_model, mid.to_string(), label);
-                                }
-                            });
-                    });
-                    let can = !self.regen_prompt.trim().is_empty() && !self.lib.started;
-                    if ui
-                        .add_enabled(can, egui::Button::new("▶ この内容で作り直す"))
-                        .on_hover_text("生成には数分かかります。完了するとこの枠が自動で置き替わります")
-                        .on_disabled_hover_text("指示を書いてください（生成中は待ってください）")
-                        .clicked()
-                    {
-                        self.start_clip_regen(id.clone());
-                    }
-                }
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("不透明度").strong());
                 let mut opacity = clip.opacity * 100.0;
@@ -7973,30 +7919,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.apply_edit(true, move |raw| edits::delete_clips(raw, &note_ids));
             self.push_req(false);
         }
-    }
-
-    /// 選択クリップへの指示（プロンプト）で同じ枠の映像を生成し直すジョブを投げる。
-    /// 進捗と完了時の自動リロードは既存の生成ジョブポーリングに乗る。
-    fn start_clip_regen(&mut self, clip_id: String) {
-        let room = self.room_id();
-        let cid = self.content_id();
-        let body = serde_json::json!({
-            "room_id": room,
-            "content_id": cid,
-            "instruction": {
-                "mode": "clip_regen",
-                "clip_id": clip_id,
-                "prompt": self.regen_prompt,
-                "model": self.regen_model,
-            },
-        });
-        self.lib.gen_content = Some(cid);
-        self.lib.gen_job = None;
-        self.lib.error = None;
-        self.lib.started = true;
-        self.lib.events = vec!["クリップの作り直しを開始しました…".into()];
-        self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
-        self.toast("🎬 生成を開始しました。完了するとこの枠が自動で置き替わります");
     }
 
     fn start_generation(&mut self) {

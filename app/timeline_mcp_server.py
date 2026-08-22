@@ -129,7 +129,11 @@ async def list_tools() -> list[types.Tool]:
               {"clip_id": _STR, "text": _STR, "style": {"type": "object"}}, ["clip_id"]),
         _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す（CTAアート・ロゴ風カード等）。日本語文字を入れる場合はpromptに正確な文字列を指定。aspect_ratioは 9:16 等。",
               {"prompt": _STR, "aspect_ratio": _STR}, ["prompt"]),
-        _tool("generate_video", "Generate a short Higgsfield video and register it as an editable video asset. Use the returned asset_id with append_clip, insert_clip, or add_overlay.",
+        _tool("generate_video", "Higgsfieldで短尺動画を生成し編集可能なアセットとして登録、asset_idを返す。"
+              "配置は append_clip / insert_clip / add_overlay で。model: gemini_omni(最安24cr/8s・2〜10秒・音有無不定・参照不可) / "
+              "seedance_2_5(最高品質65cr/10s・5/10/15/30秒・音声付き・--image/--video参照可) / "
+              "seedance_2_0(45cr/10s・〜15秒・参照可) / kling3_0(20cr/10s・5/10秒・start-image可)。"
+              "既存クリップの作り直しでは、そのクリップが何を描いているか（元プロンプトや視聴内容）を必ずプロンプトに引き継ぐこと。",
               {"prompt": _STR, "aspect_ratio": _STR, "duration": _NUM, "model": _STR,
                "reference_path": _STR, "resolution": _STR}, ["prompt"]),
         _tool("import_image", "実在の画像を部屋の素材として取り込み asset_id を返す。url にはWeb上の画像URL"
@@ -179,8 +183,12 @@ async def _dispatch(name: str, a: dict) -> list:
         for aid, a in assets.items():
             meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
             dur = meta.get("duration")
+            # 生成素材は元プロンプトを見せる — 作り直し指示の時に「そのクリップが
+            # 何を描いているか」を引き継げる（欠落すると文脈が失われる: 2026-08-22実発生）
+            gp = str(meta.get("prompt") or "").replace("\n", " ")
             rows.append(f"{aid}: {a.get('filename')} kind={a.get('kind')}"
-                        + (f" duration={dur}s" if dur else ""))
+                        + (f" duration={dur}s" if dur else "")
+                        + (f" 生成元プロンプト=「{gp[:120]}」" if gp else ""))
         return [types.TextContent(type="text", text="\n".join(rows) or "(no assets)")]
 
     if name == "timeline_transcript":
@@ -467,7 +475,7 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
     if not prompt:
         return {"ok": False, "error": "empty prompt"}
-    supported_models = {"seedance_2_0", "kling3_0"}
+    supported_models = {"seedance_2_5", "seedance_2_0", "kling3_0", "gemini_omni"}
     if model not in supported_models:
         return {"ok": False, "error": f"unsupported Higgsfield video model: {model}"}
     if aspect not in {"16:9", "9:16", "4:3", "3:4", "1:1", "21:9", "auto"}:
@@ -475,19 +483,42 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     if resolution not in {"480p", "720p", "1080p", "4k"}:
         return {"ok": False, "error": f"unsupported resolution: {resolution}"}
 
-    clip_duration = max(1, min(15, int(round(duration))))
+    # モデルごとの尺制約（実測: omniは11秒で `duration <= 10` の事前拒否）
+    want = max(1, int(round(duration)))
+    if model == "seedance_2_5":
+        clip_duration = next((d for d in (5, 10, 15, 30) if d >= want), 30)
+    elif model == "kling3_0":
+        clip_duration = 5 if want <= 5 else 10
+    elif model == "gemini_omni":
+        clip_duration = max(2, min(10, want))
+    else:
+        clip_duration = min(15, want)
     cmd = [_higgsfield_cli(), "generate", "create", model, "--prompt", prompt,
-           "--aspect_ratio", aspect, "--duration", str(clip_duration),
-           "--wait", "--wait-timeout", "20m", "--json"]
+           "--duration", str(clip_duration), "--wait", "--wait-timeout", "20m", "--json"]
+    if model == "seedance_2_5":
+        # width/heightだけだと既定aspect(16:9)がサーバー側で勝つ — 両方渡す(実測)
+        if aspect not in {"16:9", "9:16", "1:1"}:
+            return {"ok": False, "error": "seedance_2_5 supports 16:9, 9:16, or 1:1 here"}
+        dims = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}[aspect]
+        cmd += ["--width", str(dims[0]), "--height", str(dims[1]), "--aspect_ratio", aspect,
+                "--resolution", "720p", "--generate_audio", "true"]
+    elif model == "gemini_omni":
+        if aspect not in {"16:9", "9:16"}:
+            return {"ok": False, "error": "gemini_omni supports only 16:9 or 9:16"}
+        cmd += ["--aspect_ratio", aspect]
+    else:
+        cmd += ["--aspect_ratio", aspect]
     if model == "seedance_2_0":
         cmd += ["--resolution", resolution]
-    elif aspect not in {"16:9", "9:16", "1:1"}:
+    elif model == "kling3_0" and aspect not in {"16:9", "9:16", "1:1"}:
         return {"ok": False, "error": "kling3_0 supports only 16:9, 9:16, or 1:1"}
     if reference_path:
         ref = Path(reference_path).expanduser()
         if not ref.is_file():
             return {"ok": False, "error": f"reference file not found: {reference_path}"}
         is_video = ref.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+        if model == "gemini_omni":
+            return {"ok": False, "error": "gemini_omni reference is not supported here; use seedance_2_5/2_0"}
         if model == "kling3_0":
             if is_video:
                 return {"ok": False, "error": "kling3_0 reference video is not supported here; use seedance_2_0"}
