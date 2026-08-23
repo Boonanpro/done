@@ -43,6 +43,7 @@ from app.api.image_generation_routes import router as image_generation_router
 from app.api.video_generation_routes import router as video_generation_router
 from app.api.inspector_routes import router as inspector_router
 from app.api.inspector_overrides_routes import router as inspector_overrides_router
+from app.api.voicelog_routes import router as voicelog_router
 from app.api.inquiry_routes import router as inquiry_router
 from app.api.aix_dashboard_routes import router as aix_dashboard_router
 from app.api.publish_routes import router as publish_router
@@ -159,6 +160,7 @@ app.include_router(image_generation_router, prefix="/api/v1")
 app.include_router(video_generation_router, prefix="/api/v1")
 app.include_router(inspector_router, prefix="/api/v1")
 app.include_router(inspector_overrides_router, prefix="/api/v1")
+app.include_router(voicelog_router, prefix="/api/v1")
 app.include_router(inquiry_router, prefix="/api/v1")
 app.include_router(aix_dashboard_router, prefix="/api/v1")
 app.include_router(publish_router, prefix="/api/v1")

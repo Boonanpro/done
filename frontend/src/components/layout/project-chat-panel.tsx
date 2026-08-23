@@ -58,7 +58,7 @@ import {
   type SelectedElement,
 } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
-import { VoiceConsole } from '@/components/voice/voice-console';
+import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
 interface ProjectChatPanelProps {
@@ -2470,7 +2470,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     <div className="relative flex h-full w-full overflow-hidden">
     {voiceOpen && project?.room_id && (
       <div className="fixed bottom-4 right-4 z-50 w-[360px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
-        <VoiceConsole
+        <VoiceSession
           roomId={project.room_id}
           chatTitle={project.title || undefined}
           onClose={() => setVoiceOpen(false)}
