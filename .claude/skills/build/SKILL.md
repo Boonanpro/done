@@ -390,7 +390,11 @@ shadcn/uiのchartコンポーネント（Recharts統合）を使う。`npx shadc
 - この方式ではリファレンス収集(HM5)・自己採点ループは**適用しない**。代わりに文字QA必須
 - 生成は `scripts/gpt_image.py`（OpenAI API直・GPT Image 2。2026-08-11一本化）。
   プロンプトは必ず標準入力で渡す。Higgsfield は動画・Soul・キャラ参照専用
-- 修正は `scripts/lp_image_patch.py`（タイル再生成→領域合成）。Inspector編集は不可
+- 修正は `scripts/lp_image_patch.py`（タイル再生成→領域合成）
+- **新規LPの納品は実テキスト化（`scripts/lp_textify.py`）まで込みが既定** —
+  文字を画像から消してwebフォントのEditableTextを重ね、チャット/手動編集モードで
+  文言を直せる状態で納める。検証ゲート（FAIL=劣化で不合格/WARN=比較画像を目視）
+  つき。手順はレシピ「5b. 実テキスト化」
 - コード方式(T1〜T4)を使うのは: 多ページ企業HP / SEO主目的 / 機能ページ / ダッシュボード
 
 以下のコード方式のルールは、コード方式を選んだ場合にのみ適用する。
