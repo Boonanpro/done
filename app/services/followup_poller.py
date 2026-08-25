@@ -48,6 +48,21 @@ _SYNTH_PROMPT = (
 
 _NO_CHANGE_SENTINEL = "WATCH_NO_CHANGE"
 
+_HANDOFF_PROMPT = (
+    "[システム自動再開 / 別チャットからの引き継ぎ]\n"
+    "これはユーザーの新規メッセージではありません。ユーザーが別のチャットで"
+    "「この話は新しいチャットで話そう」と言ったため、あなた自身がこの新しいチャットを作りました。"
+    "ここからはこの話題だけをこの部屋で続けます。\n\n"
+    "元のチャットからの引き継ぎメモ:\n"
+    "「{note}」\n\n"
+    "今すぐこの部屋での一言目を書いてください:\n"
+    "- まず「別のチャットから引き継いだ話題」であることが分かるよう、要点を2〜4行で短く再掲する。\n"
+    "- 引き継ぎメモに『次にやること』が書かれていればそれを実行または着手し、"
+    "質問が残っていればユーザーに聞く。\n"
+    "- 元のチャットの本題（別の話題）には触れない。この部屋はこの話題専用。\n"
+    "余計な前置きや内部思考は出さず、ユーザーへの本文だけを書くこと。"
+)
+
 _EVERY_PROMPT = (
     "[システム自動再開 / 定期見張り]\n"
     "これはユーザーの新規メッセージではなく、あなたが登録した定期見張りの定刻トリガーです。\n\n"
@@ -245,6 +260,21 @@ async def _fire_mail(row: Dict[str, Any]) -> None:
         reschedule_watch, row["id"], "mail", note, new_spec, now + timedelta(seconds=interval))
 
 
+async def _fire_handoff(row: Dict[str, Any]) -> None:
+    """One-shot wake in a freshly split room: Dan speaks first with the
+    handoff memo. No no-change discard here — the first message in the new
+    room is always new information."""
+    from app.services.followups import mark_status
+
+    note = row.get("plain_note") or ""
+    logger.info("[watch] handoff fires room=%s note=%r", row["room_id"][:8], note[:40])
+    try:
+        await _wake(row["room_id"], row.get("user_id") or "", _HANDOFF_PROMPT.format(note=note))
+    except Exception as e:  # noqa: BLE001
+        logger.error("[watch] handoff fire failed room=%s: %s", row["room_id"], e)
+    await asyncio.to_thread(mark_status, row["id"], "done")
+
+
 async def _fire(row: Dict[str, Any]) -> None:
     from app.services.followups import decode_watch_row
 
@@ -254,6 +284,8 @@ async def _fire(row: Dict[str, Any]) -> None:
         await _fire_mail(d)
     elif kind == "every":
         await _fire_every(d)
+    elif kind == "handoff":
+        await _fire_handoff(d)
     else:
         await _fire_at(d)
 

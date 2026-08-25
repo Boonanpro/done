@@ -133,7 +133,7 @@ def schedule_followup(
     }
 
 
-_VALID_KINDS = ("at", "every", "mail")
+_VALID_KINDS = ("at", "every", "mail", "handoff")
 
 JST = timezone(timedelta(hours=9))
 
@@ -232,6 +232,10 @@ def create_watch(
             spec["interval_seconds"] = DEFAULT_MAIL_INTERVAL
         # First check runs soon; it baselines last_uid without waking anyone.
         first = now + timedelta(seconds=MIN_DELAY_SECONDS)
+    elif kind == "handoff":
+        # 「この話は新しいチャットで」の引き継ぎ。新ルームでダンが一言目を話す
+        # ためのワンショット起動。待つ理由が無いので次のポーラー周期で即発火。
+        first = now
     else:  # at
         if fire_at is None:
             try:
@@ -273,7 +277,7 @@ def create_watch(
         return {"scheduled": False, "id": None, "fire_at": None,
                 "message": f"見張りの登録に失敗しました: {e}"}
 
-    label = {"at": "予約", "every": "定期見張り", "mail": "メール見張り"}[kind]
+    label = {"at": "予約", "every": "定期見張り", "mail": "メール見張り", "handoff": "引き継ぎ起動"}[kind]
     return {"scheduled": True, "id": watch_id, "fire_at": first.isoformat(),
             "message": f"{label}を登録しました（id={watch_id}, 次回={first.isoformat()}）。"}
 

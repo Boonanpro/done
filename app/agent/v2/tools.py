@@ -338,6 +338,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         READ_URL_TOOL,
         SCHEDULE_FOLLOWUP_TOOL,
         WATCH_TOOL,
+        SPLIT_TO_NEW_ROOM_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         SAVE_TOTP_SECRET_TOOL,
@@ -364,13 +365,13 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
 BROWSER_TOOL = {
     "name": "browser",
-    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。wait_for_otp_from_app: SMS/メールで届く数字コードを自動取得して入力欄(ref)に入れる。wait_for_link_from_app: 数字コードではなく「タップして再設定/認証」形式のワンタイムURLが届くサービス（Instagramのパスワード再設定等）向け。届いたリンクを自動取得してこのブラウザで開く（refは不要）。リンクを本人に読ませない。",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。fill_totp_code: 認証アプリ(TOTP)の6桁コードをサーバー側で生成して入力欄(ref)に直接入れる。シード保管済みのサービスなら**SMSもメールも待たずに即座に**2段階認証を突破できる最優先の手段（ref と、service または url を指定）。wait_for_otp_from_app: SMS/メールで届く数字コードを自動取得して入力欄(ref)に入れる。wait_for_link_from_app: 数字コードではなく「タップして再設定/認証」形式のワンタイムURLが届くサービス（Instagramのパスワード再設定等）向け。届いたリンクを自動取得してこのブラウザで開く（refは不要）。リンクを本人に読ませない。",
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "wait_for_otp_from_app", "wait_for_link_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "fill_totp_code", "wait_for_otp_from_app", "wait_for_link_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "upload_file", "solve_captcha", "human_click", "human_drag", "puzzle_fit"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）。action=fill_credentialではログイン先URLで保存済み認証情報を照合するのに使える"},
@@ -383,12 +384,18 @@ BROWSER_TOOL = {
             "source": {"type": "string", "enum": ["sms", "email"], "description": "OTP/リンクの受信元（action=wait_for_otp_from_app, wait_for_link_from_app）。SMS(Androidアプリ転送)=sms（既定）、メール=email。emailの場合は email_address を指定"},
             "email_address": {"type": "string", "description": "メールOTP/リンクの受信箱アドレス（source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
             "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向（action=scroll）"},
-            "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
-            "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
+            "x": {"type": "integer", "description": "X座標（action=click / human_click / human_drag の始点）"},
+            "y": {"type": "integer", "description": "Y座標（action=click / human_click / human_drag の始点）"},
+            "to_x": {"type": "integer", "description": "ドラッグ先のX座標（action=human_drag）"},
+            "to_y": {"type": "integer", "description": "ドラッグ先のY座標（action=human_drag）"},
+            "coords": {"type": "string", "enum": ["image", "css"], "description": "human_click/human_drag の座標系。既定 image=スクリーンショット上で読んだ座標をそのまま渡してよい（縮小率は自動換算される）。css=ブラウザの実座標を直接指定する場合のみ"},
+            "threshold": {"type": "number", "description": "答えてよい形状一致度の下限（action=puzzle_fit, 既定0.85）。これ未満なら答えずに『更新』で別の問題を引く"},
+            "max_refresh": {"type": "integer", "description": "パズルを引き直す上限回数（action=puzzle_fit, 既定3）"},
             "value": {"type": "string", "description": "選択する値（action=select）"},
             "expression": {"type": "string", "description": "実行するJavaScriptコード（action=evaluate）"},
             "key": {"type": "string", "description": "押すキー（action=keyboard_press, 例: Escape, Tab, Enter, ArrowDown）"},
-            "path": {"type": "string", "description": "保存先ファイルパス（action=save_image）"},
+            "path": {"type": "string", "description": "保存先ファイルパス（action=save_image）／アップロードするローカルファイルの絶対パス（action=upload_file）"},
+            "selector": {"type": "string", "description": "CSSセレクタ（action=upload_file でアップロードボタンをrefで指せない場合）"},
             "image_ref": {"type": "string", "description": "画像CAPTCHAの画像要素ref（action=solve_captcha, 任意。未指定なら自動検出）"},
             "input_ref": {"type": "string", "description": "画像CAPTCHAの入力欄ref（action=solve_captcha, 任意。未指定なら自動検出）"},
             "image_selector": {"type": "string", "description": "画像CAPTCHAの画像CSSセレクタ（action=solve_captcha, 任意）"},
@@ -464,6 +471,32 @@ Claude Code自身が起動した背景作業は常駐セッションの完了イ
             "delay_seconds": {"type": "integer", "description": "何秒後に起こすか（15以上）。デプロイ/ビルドなら90〜180が目安"},
         },
         "required": ["note", "delay_seconds"],
+    },
+}
+
+SPLIT_TO_NEW_ROOM_TOOL = {
+    "name": "split_to_new_room",
+    "description": """脱線した話題を新しいチャット（部屋）に切り出し、そこで自分（ダン）が続きを話し始める。
+
+【使う場面】ユーザーが「この話は新しいチャットで話そう」「別の部屋でやろう」「これは分けよう」等、
+今の話題を別チャットに移したいと言った時。ユーザーに部屋を作らせない。自分でこのツールを呼ぶ。
+
+【動作】新しいチャットを作成し、handoff の内容を持って数十秒以内にその部屋であなたが一言目を話し始める。
+画面は切り替わらない（ユーザーがサイドバーから自分で開く）。元の部屋はそのまま本題に戻る。
+
+【呼んだ後にやること】元の部屋では「『<title>』を新しいチャットに分けました。サイドバーから開けます」と
+短く伝えるだけにし、その話題の続きを元の部屋で書かない。
+
+【handoff の書き方】新しい部屋の自分は元の部屋の会話を読めない。だから handoff に、
+その話題の経緯・決まったこと・ユーザーの要望・次にやること・関係するURLやファイルパスを、
+続きが迷わず再開できる粒度で書く（生ログのコピーではなく要約）。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "新しいチャットの名前（話題が一目で分かる短い日本語。例:「経費精算アプリの相談」）"},
+            "handoff": {"type": "string", "description": "新しい部屋へ持ち込む引き継ぎメモ（経緯・決定事項・要望・次にやること・URL/パス）"},
+        },
+        "required": ["title", "handoff"],
     },
 }
 
@@ -1056,6 +1089,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "watch":
         return ("_watch", "manage")
+
+    if tool_name == "split_to_new_room":
+        return ("_split_room", "split")
 
     if tool_name == "attach_image":
         return ("_attach_image", "attach")
@@ -2212,6 +2248,10 @@ async def execute_tool(
     # ★★★ 見張り（未来の約束の登録・一覧・取消）★★★
     if skill_name == "_watch":
         return await _execute_watch(params, session_id, user_id)
+
+    # ★★★ 脱線した話題を新しいチャットに切り出す ★★★
+    if skill_name == "_split_room":
+        return await _execute_split_to_new_room(params, session_id, user_id)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -3673,6 +3713,25 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 "content": [{"type": "text", "text": f"画像を保存しました: {result}"}],
             }
 
+        elif action == "upload_file":
+            path = params.get("path")
+            if not path:
+                return {"success": False, "error": "path（アップロードするファイルの絶対パス）が必要です"}
+            import os as _os
+            if not _os.path.exists(path):
+                return {"success": False, "error": f"ファイルが見つかりません: {path}"}
+            try:
+                await page.upload_file(
+                    files=[path],
+                    ref=params.get("ref"),
+                    selector=params.get("selector"),
+                )
+            except Exception as e:
+                return {"success": False, "error": f"アップロードに失敗しました: {e}"}
+            state = await _get_browser_state(page)
+            state["content"].insert(0, {"type": "text", "text": f"ファイルを渡しました: {path}"})
+            return state
+
         elif action == "content":
             html = await page.content()
             if len(html) > 50000:
@@ -3874,6 +3933,101 @@ async def _execute_schedule_followup(
         "success": bool(res.get("scheduled")),
         "message": res.get("message", ""),
         "fire_at": res.get("fire_at"),
+    }
+
+
+async def _execute_split_to_new_room(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Split a drifted topic into a brand-new chat (project + room).
+
+    1. Create a project (= sidebar chat) whose room is the new home of the topic.
+       origin_room_id records where it was split from; the CLI model choice of
+       the origin project is inherited.
+    2. Register a `handoff` watch on the new room. The dan-core poller fires it on
+       its next cycle and Dan speaks first there with the handoff memo. (This runs
+       in the MCP subprocess, which dies with the turn — so the turn itself is
+       driven by dan-core via the watch table, not from here.)
+    The screen is NOT switched: the user opens the new chat from the sidebar
+    (sidebar polls /projects every 10s).
+    """
+    import asyncio as _aio
+    from app.services import followups as _fu
+    from app.services.project_service import ProjectService
+    from app.services.supabase_client import get_supabase_client
+
+    origin_room_id = session_id or ""
+    if not origin_room_id or not user_id:
+        return {"success": False, "error": "room_id/user_id が不明なため新しいチャットを作れません。"}
+
+    title = (params.get("title") or "").strip()[:80]
+    handoff = (params.get("handoff") or "").strip()
+    if not title:
+        return {"success": False, "error": "title（新しいチャットの名前）が必要です。"}
+    if not handoff:
+        return {"success": False, "error": "handoff（引き継ぎメモ）が空です。新しい部屋の自分は元の会話を読めないので、経緯と次にやることを書いてください。"}
+
+    def _origin_metadata() -> Optional[dict]:
+        try:
+            r = (
+                get_supabase_client().client.table("projects")
+                .select("metadata").eq("room_id", origin_room_id).limit(1).execute()
+            )
+            md = (r.data or [{}])[0].get("metadata") or {}
+            model = md.get("model")
+            return {"model": model} if model else None
+        except Exception:
+            return None
+
+    try:
+        metadata = await _aio.to_thread(_origin_metadata)
+        project = await ProjectService().create_project(
+            user_id=user_id,
+            title=title,
+            description=handoff[:2000],
+            origin_room_id=origin_room_id,
+            metadata=metadata,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"新しいチャットの作成に失敗しました: {e}"}
+
+    new_room_id = project.get("room_id")
+    if not new_room_id:
+        return {"success": False, "error": "新しいチャットは作れましたが部屋IDが取れませんでした。"}
+
+    try:
+        res = await _aio.to_thread(
+            _fu.create_watch, new_room_id, user_id, "handoff", handoff, spec={"origin_room_id": origin_room_id},
+        )
+    except Exception as e:
+        res = {"scheduled": False, "message": str(e)}
+
+    if not res.get("scheduled"):
+        return {
+            "success": True,
+            "project_id": project.get("id"),
+            "room_id": new_room_id,
+            "title": title,
+            "auto_start": False,
+            "message": (
+                f"新しいチャット「{title}」を作りました（サイドバーに表示されます）が、"
+                f"自動起動の登録に失敗しました: {res.get('message')}。ユーザーがその部屋を開いて話しかければ続きができます。"
+            ),
+        }
+
+    return {
+        "success": True,
+        "project_id": project.get("id"),
+        "room_id": new_room_id,
+        "title": title,
+        "auto_start": True,
+        "message": (
+            f"新しいチャット「{title}」を作りました。サイドバーに表示されます。"
+            f"数十秒以内にその部屋で自分（ダン）が引き継ぎの一言目を話し始めます。"
+            f"元の部屋ではそのことを短く伝えるだけにし、この話題の続きはここでは書かないこと。"
+        ),
     }
 
 
