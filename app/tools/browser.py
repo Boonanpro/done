@@ -1969,8 +1969,22 @@ async def close_idle_browsers(idle_seconds: int = 1800) -> list[dict]:
     if not base.exists():
         return closed
 
+    # 例外: 有効な見張り（一回きりの 'at' 予約、または hold_browser 指定）を持つ
+    # 部屋は「待機中」であって「放置」ではないので閉じない。時刻だけで判定する
+    # 原則は維持しつつ、待つという宣言がDBに登録されている場合のみ尊重する。
+    held_profiles: set[str] = set()
+    try:
+        import asyncio as _aio
+        from app.services.followups import held_room_ids
+        rooms = await _aio.to_thread(held_room_ids)
+        held_profiles = {f"browser_data--{_safe_room_slug(r)}" for r in rooms}
+    except Exception:
+        pass  # 判定に失敗しても掃除自体は続行（従来動作）
+
     now = time.time()
     for profile in sorted(base.glob("browser_data--*")):
+        if profile.name in held_profiles:
+            continue
         port_file = profile / _PORT_FILE_NAME
         if not port_file.exists():
             continue

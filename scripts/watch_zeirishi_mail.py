@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""税理士(金永哲税理士事務所)からの受信メールだけを監視し、経費仕訳ルームでダンを起こす。
+"""【廃止済み 2026-08-24】watch システム（app/services/followups.py の mail watch）に移行した。
+
+この監視は pending_followups の mail watch 行（経費仕訳ルーム, from=taxdr-kim.com）として
+dan-core の followup_poller が10分間隔で実行している。タスクスケジューラの
+\\DanZeirishiMailWatch は無効化済み。再有効化しないこと（二重検知になる）。
+以下は移行前の実装を参考として残す。
+
+税理士(金永哲税理士事務所)からの受信メールだけを監視し、経費仕訳ルームでダンを起こす。
 
 なぜ専用スクリプトなのか:
   dan-core の email_poller は iCloud を既定で巡回しない(自分の複数アドレスを

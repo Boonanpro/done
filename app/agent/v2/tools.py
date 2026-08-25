@@ -337,6 +337,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         BROWSER_TOOL,
         READ_URL_TOOL,
         SCHEDULE_FOLLOWUP_TOOL,
+        WATCH_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         SAVE_TOTP_SECRET_TOOL,
@@ -460,9 +461,47 @@ Claude Code自身が起動した背景作業は常駐セッションの完了イ
         "type": "object",
         "properties": {
             "note": {"type": "string", "description": "起こされた時に何を確認して報告すべきか（具体的に書く）"},
-            "delay_seconds": {"type": "integer", "description": "何秒後に起こすか（15〜21600）。デプロイ/ビルドなら90〜180が目安"},
+            "delay_seconds": {"type": "integer", "description": "何秒後に起こすか（15以上）。デプロイ/ビルドなら90〜180が目安"},
         },
         "required": ["note", "delay_seconds"],
+    },
+}
+
+WATCH_TOOL = {
+    "name": "watch",
+    "description": """見張り（未来の約束）の登録・一覧・取消。あなた（ダン）はターンが終わると眠るため、頭の中の「後で確認します」「メールが来たら報告します」は実行されない。未来の約束は必ずこのツールでDBに登録すること。登録した見張りはダンコアが監視し、時刻・条件が来たらこの部屋であなたを起こす。
+
+【3種類】
+- at: 一回きりの時刻予約（「明日10時に確認」）。at か delay_seconds を指定。
+- every: 定期実行。①秒間隔（interval_seconds、300以上）②毎月N日（monthly_day + time_of_day。31は月末に丸まる）③毎週X曜（weekly_day 0=月〜6=日 + time_of_day）。毎月の資料作成・送付、毎月の振込準備などの定期業務はこれで登録する。
+- mail: 特定の差出人からのメール着信で起こす（「税理士からメールが来たら」）。mail_from に差出人アドレスまたはドメイン（例 "taxdr-kim.com"）。現在 iCloud 受信箱のみ対応。登録時点より前の既読メールでは起きない。
+
+【使い方】
+- 登録: watch(action="create", note="起こされた時に何を確認・報告するか", ...)。kind は指定パラメータから自動判定される（mail_from があれば mail、interval_seconds のみなら every、それ以外は at）。
+- 一覧: watch(action="list") — この部屋の有効な見張りを返す。「今何を見張ってる？」に答える時に使う。
+- 取消: watch(action="cancel", watch_id="...")。
+- ブラウザ画面（OTP入力・ログイン途中など）を開いたまま待つ必要がある時だけ hold_browser=true。これを付けないと30分放置でブラウザは自動クローズされる。
+
+【承認の扱い】不可逆な操作（送金の実行・外部への送信など）を含む定期業務は、原則「準備まで自動＋実行は承認」。ただしユーザーが「承認なしで実行して報告だけでいい」と明示した場合は、その旨を note に必ず書き込むこと（例:「承認不要・実行して結果を報告のみ」）。起こされたダンは note の記載に従う。
+
+【規律】ユーザーの即時の返答待ちには使わない。定期見張りの起床ターン内で同じ見張りを再登録しない（自動継続する）。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "cancel"], "description": "create=登録 / list=一覧 / cancel=取消"},
+            "note": {"type": "string", "description": "create時必須。起こされた時に何を確認して何を報告するか（具体的に）"},
+            "at": {"type": "string", "description": "at用: 起こす日時 ISO形式（例 2026-08-25T10:00）。タイムゾーン無しはJSTと解釈"},
+            "delay_seconds": {"type": "integer", "description": "at用: 何秒後に起こすか（atの代わり）"},
+            "interval_seconds": {"type": "integer", "description": "every/mail用: 確認間隔秒（最小300。mailの既定600）"},
+            "monthly_day": {"type": "integer", "description": "every用: 毎月の実行日（1〜31。31は月末に丸まる）"},
+            "weekly_day": {"type": "integer", "description": "every用: 毎週の実行曜日（0=月〜6=日）"},
+            "time_of_day": {"type": "string", "description": "monthly_day/weekly_day用: 実行時刻 HH:MM（JST、既定09:00）"},
+            "mail_from": {"type": "string", "description": "mail用: 差出人アドレスまたはドメイン"},
+            "mail_subject_contains": {"type": "string", "description": "mail用: 件名に含まれるべき文字列（任意）"},
+            "hold_browser": {"type": "boolean", "description": "この部屋のブラウザを見張り解決まで自動クローズさせない（画面を開いたまま待つ時のみtrue）"},
+            "watch_id": {"type": "string", "description": "cancel用: 対象の見張りID"},
+        },
+        "required": ["action"],
     },
 }
 
@@ -1014,6 +1053,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "schedule_followup":
         return ("_followup", "schedule")
+
+    if tool_name == "watch":
+        return ("_watch", "manage")
 
     if tool_name == "attach_image":
         return ("_attach_image", "attach")
@@ -2166,6 +2208,10 @@ async def execute_tool(
     # ★★★ 続報の予約（後で自動で起こして報告させる）★★★
     if skill_name == "_followup":
         return await _execute_schedule_followup(params, session_id, user_id)
+
+    # ★★★ 見張り（未来の約束の登録・一覧・取消）★★★
+    if skill_name == "_watch":
+        return await _execute_watch(params, session_id, user_id)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -3829,6 +3875,106 @@ async def _execute_schedule_followup(
         "message": res.get("message", ""),
         "fire_at": res.get("fire_at"),
     }
+
+
+async def _execute_watch(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Manage watches (standing instructions). room_id = session_id, same as
+    schedule_followup. The dan-core poller fires them by kind (at/every/mail)."""
+    import asyncio as _aio
+    from datetime import datetime, timedelta, timezone
+    from app.services import followups as _fu
+
+    room_id = session_id or ""
+    if not room_id:
+        return {"success": False, "error": "room_id (session) が不明なため見張りを操作できません。"}
+
+    action = (params.get("action") or "").strip()
+
+    if action == "list":
+        rows = await _aio.to_thread(_fu.list_watches, room_id)
+        items = [
+            {
+                "id": r.get("id"),
+                "kind": r.get("kind"),
+                "note": r.get("plain_note"),
+                "next_fire_at": r.get("fire_at"),
+                "spec": {k: v for k, v in (r.get("spec") or {}).items()
+                         if k != "consecutive_errors"},
+            }
+            for r in rows
+        ]
+        return {"success": True, "count": len(items), "watches": items,
+                "message": f"この部屋の有効な見張りは {len(items)} 件です。"}
+
+    if action == "cancel":
+        wid = (params.get("watch_id") or "").strip()
+        if not wid:
+            return {"success": False, "error": "cancel には watch_id が必要です。"}
+        ok = await _aio.to_thread(_fu.cancel_watch, wid, room_id)
+        return {"success": ok,
+                "message": "見張りを取り消しました。" if ok
+                else "対象の見張りが見つかりません（既に完了・取消済みの可能性）。"}
+
+    if action != "create":
+        return {"success": False, "error": "action は create / list / cancel のいずれかです。"}
+
+    note = params.get("note") or ""
+    mail_from = (params.get("mail_from") or "").strip()
+    interval = params.get("interval_seconds")
+    spec: Dict[str, Any] = {}
+    if params.get("hold_browser"):
+        spec["hold_browser"] = True
+
+    fire_at_dt = None
+    at_raw = (params.get("at") or "").strip()
+    if at_raw:
+        try:
+            dt = datetime.fromisoformat(at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return {"success": False,
+                    "error": f"at の日時を解釈できません: {at_raw}（例 2026-08-25T10:00）"}
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=9)))  # タイムゾーン無しはJST
+        fire_at_dt = dt
+
+    monthly_day = params.get("monthly_day")
+    weekly_day = params.get("weekly_day")
+    if mail_from:
+        kind = "mail"
+        spec["from"] = mail_from
+        if (params.get("mail_subject_contains") or "").strip():
+            spec["subject_contains"] = params["mail_subject_contains"].strip()
+        if interval:
+            spec["interval_seconds"] = interval
+    elif monthly_day is not None or weekly_day is not None:
+        kind = "every"
+        if monthly_day is not None:
+            spec["monthly_day"] = int(monthly_day)
+        else:
+            spec["weekly_day"] = int(weekly_day)
+        if (params.get("time_of_day") or "").strip():
+            spec["time_of_day"] = params["time_of_day"].strip()
+    elif interval:
+        kind = "every"
+        spec["interval_seconds"] = interval
+    else:
+        kind = "at"
+
+    try:
+        res = await _aio.to_thread(
+            _fu.create_watch, room_id, user_id, kind, note,
+            fire_at=fire_at_dt, delay_seconds=params.get("delay_seconds"), spec=spec,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"見張りの登録に失敗しました: {e}"}
+
+    return {"success": bool(res.get("scheduled")), "id": res.get("id"),
+            "kind": kind, "fire_at": res.get("fire_at"),
+            "message": res.get("message", "")}
 
 
 # ============================================
