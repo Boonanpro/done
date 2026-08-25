@@ -39,6 +39,10 @@ _SYNTH_PROMPT = (
     "- 完了していれば、結果（成否・URL・確認した内容）を簡潔に報告する。\n"
     "- まだ完了していなければ、schedule_followup で短い遅延（60〜120秒）で再予約し、"
     "「まだ処理中です、もう少し待ってください」と一言だけ伝える。\n"
+    "- ただし、確認した結果がこの部屋の直近の会話で既に報告・解決済みの内容と同じで、"
+    "ユーザーに伝えるべき新情報が何もない場合は、本文を正確に「WATCH_NO_CHANGE」とだけ書くこと"
+    "（システムが破棄し、ユーザーには何も表示されない。同じ内容の繰り返し報告は迷惑になる。"
+    "余計な語を足すと破棄されず重複通知になってしまう）。\n"
     "余計な前置きや内部思考は出さず、ユーザーへの報告本文だけを書くこと。"
 )
 
@@ -124,8 +128,11 @@ async def _fire_at(row: Dict[str, Any]) -> None:
 
     note = row.get("plain_note") or ""
     logger.info("[watch] at fires room=%s note=%r", row["room_id"][:8], note[:40])
+    wake_start_iso = datetime.now(timezone.utc).isoformat()
     try:
         await _wake(row["room_id"], row.get("user_id") or "", _SYNTH_PROMPT.format(note=note))
+        if await _discard_no_change_report(row["room_id"], wake_start_iso):
+            logger.info("[watch] at no-change (silent) room=%s", row["room_id"][:8])
     except Exception as e:  # noqa: BLE001
         logger.error("[watch] at fire failed room=%s: %s", row["room_id"], e)
     # Done either way rather than risk an endless retry loop on a hard error.
