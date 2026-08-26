@@ -329,6 +329,9 @@ async def _notify_dan_completion(
 ) -> None:
     """Best-effort browser/PWA push when a Dan run finishes."""
     try:
+        # 👍リアクションだけのターンは通知しない（受領スタンプに通知価値はない）。
+        if (final_text or "").strip() == "👍":
+            return
         from app.services.push_service import get_push_service
 
         body = _compact_text(final_text, 120) if final_text else ""

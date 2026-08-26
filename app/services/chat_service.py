@@ -117,6 +117,10 @@ def record_message_delivery_sync(
             room_update["last_message_preview"] = build_message_preview(content)
         sb.table("chat_rooms").update(room_update).eq("id", room_id).execute()
 
+        # ダンの👍リアクション（受領スタンプ）は情報を運ばないので、部屋一覧の
+        # 未読バッジを増やさない。「数字が出たから見に行ったら👍だけだった」を防ぐ。
+        is_reaction = (content or "").strip() == "👍"
+
         members = sb.table("chat_room_members").select(
             "id,user_id,unread_count"
         ).eq("room_id", room_id).execute()
@@ -132,6 +136,8 @@ def record_message_delivery_sync(
                 sb.table("chat_room_members").update(update_data).eq("id", member["id"]).execute()
                 continue
 
+            if is_reaction:
+                continue
             current = member.get("unread_count") or 0
             sb.table("chat_room_members").update({
                 "unread_count": current + 1,
@@ -556,6 +562,9 @@ class ChatService:
                 room_update["last_message_preview"] = build_message_preview(content)
             self.supabase.table("chat_rooms").update(room_update).eq("id", room_id).execute()
 
+            # ダンの👍リアクションは未読バッジを増やさない（record_message_delivery_sync と同じ規約）。
+            is_reaction = (content or "").strip() == "👍"
+
             members = self.supabase.table("chat_room_members").select(
                 "id,user_id,unread_count"
             ).eq("room_id", room_id).execute()
@@ -569,6 +578,8 @@ class ChatService:
                     }).eq("id", member["id"]).execute()
                     continue
 
+                if is_reaction:
+                    continue
                 current = member.get("unread_count") or 0
                 self.supabase.table("chat_room_members").update({
                     "unread_count": current + 1,
