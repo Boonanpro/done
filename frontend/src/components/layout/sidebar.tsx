@@ -256,6 +256,14 @@ export function Sidebar({
   // 行う（Next は history.pushState をルーターと同期するので、リロード・共有・
   // 戻る/進むは従来通り動く。戻る/進むは通常の遷移として page.tsx が同期する）。
   const handleProjectClick = (project: ProjectResponse) => {
+    // /chat 以外のページ（/today 等）にいる時は pushState だけでは画面が
+    // 切り替わらない（描画するのは chat 配下のみ）ので通常遷移で飛ぶ。
+    if (!pathname.startsWith('/chat')) {
+      selectProject(project.id);
+      router.push(`/chat/${project.id}`);
+      if (isMobile) onToggleCollapse();
+      return;
+    }
     if (project.id === selectedProjectId) {
       selectProject(null);
       window.history.pushState(null, '', '/chat');
