@@ -407,10 +407,13 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
 
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
+    // 長文・URL・英数字の連続など折り返せない塊があると、items-end の
+    // flex 列では吹き出しが左へはみ出して左サイドバーの下に潜る。
+    // min-w-0 + break-words(anywhere) で必ず枠内で折り返す。
     return (
-      <div className={`flex flex-col items-end max-w-[85%] ml-auto${pending ? ' opacity-50' : ''}`}>
+      <div className={`flex min-w-0 max-w-[85%] ml-auto flex-col items-end${pending ? ' opacity-50' : ''}`}>
         {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-        <div className="group flex items-start gap-1">
+        <div className="group flex max-w-full min-w-0 items-start gap-1">
           {onReply && !msg.id.startsWith('temp-') && (
             <button
               onClick={() => onReply(msg)}
@@ -425,7 +428,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
               {timeLabel}
             </span>
           )}
-          <div className="flex flex-col items-end gap-1">
+          <div className="flex min-w-0 flex-col items-end gap-1">
           {images.map((url, i) => (
             <img
               key={i}
@@ -457,7 +460,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
             </a>
           ))}
           {text && (
-            <div className="rounded-lg bg-primary px-3 py-2 text-base leading-relaxed text-primary-foreground md:text-[17px] whitespace-pre-wrap">
+            <div className="max-w-full min-w-0 rounded-lg bg-primary px-3 py-2 text-base leading-relaxed text-primary-foreground md:text-[17px] whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
               {text}
             </div>
           )}
