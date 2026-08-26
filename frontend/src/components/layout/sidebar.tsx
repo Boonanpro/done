@@ -240,7 +240,7 @@ export function Sidebar({
       if (roomId && !queryClient.getQueryData(['project-messages', roomId])) {
         queryClient.prefetchQuery({
           queryKey: ['project-messages', roomId],
-          queryFn: () => api.rooms.getMessages(roomId, { limit: 50 }),
+          queryFn: () => api.rooms.getMessages(roomId, { limit: 20 }),
           staleTime: 15 * 1000,
         });
       }
@@ -250,13 +250,18 @@ export function Sidebar({
   const filteredProjects = projectsData?.projects?.filter((p) =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
+  // 部屋の切替はストアの selectedProjectId で描画が決まる（MainLayout）。
+  // router.push だと Next が /chat/[projectId] の RSC を取りに行き、その往復
+  // （dev サーバーで約0.5秒）が切替の最大の固定費だった。URL の書き換えだけ
+  // 行う（Next は history.pushState をルーターと同期するので、リロード・共有・
+  // 戻る/進むは従来通り動く。戻る/進むは通常の遷移として page.tsx が同期する）。
   const handleProjectClick = (project: ProjectResponse) => {
     if (project.id === selectedProjectId) {
       selectProject(null);
-      router.push('/chat');
+      window.history.pushState(null, '', '/chat');
     } else {
       selectProject(project.id);
-      router.push(`/chat/${project.id}`);
+      window.history.pushState(null, '', `/chat/${project.id}`);
       if (isMobile) {
         onToggleCollapse();
       }
