@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = int(os.environ.get("DAN_ACHIEVEMENT_POLL_INTERVAL", "300"))
 WAKE_DEBOUNCE = 8  # ターン完了通知から判定までの猶予 (メッセージ保存を待つ)
+ILLUST_ENABLED = os.environ.get("DAN_ACHIEVEMENT_ILLUST", "1") == "1"
+ILLUST_PER_CYCLE = int(os.environ.get("DAN_ACHIEVEMENT_ILLUST_PER_CYCLE", "3"))
 
 _started = False
 _task: Optional["asyncio.Task"] = None
@@ -52,6 +54,14 @@ async def run_once(force: bool = False) -> dict:
         try:
             _last_stats = await asyncio.to_thread(run_cycle, force)
             _last_error = _last_stats.get("error")
+            if ILLUST_ENABLED:
+                # 成果行の挿絵は判定とは別の後追い (失敗しても判定結果には影響しない)
+                try:
+                    from app.services.daily_achievements_service import generate_missing_illustrations, today_jst
+                    _last_stats["illustrated"] = await asyncio.to_thread(
+                        generate_missing_illustrations, today_jst(), ILLUST_PER_CYCLE)
+                except Exception as e:
+                    logger.warning("illustration step failed: %s", e)
             return _last_stats
         except Exception as e:
             _last_error = f"{type(e).__name__}: {e}"

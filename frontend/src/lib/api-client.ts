@@ -30,6 +30,8 @@ export interface AchievementItem {
   tags: string[];
   evidence: AchievementEvidence[];
   sources: string[];
+  icon: string;
+  illustration_status: 'none' | 'pending' | 'done' | 'failed';
   first_seen: string;
   done_at: string | null;
   updated_at: string;
@@ -1561,6 +1563,9 @@ export const api = {
       request<{ judged: boolean; changed: number }>('/achievements/refresh', { method: 'POST' }),
     patch: (id: string, data: { status?: string; title?: string; detail?: string; tags?: string[] }) =>
       request<AchievementItem>(`/achievements/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    illustrate: (id: string, force = false) =>
+      request<AchievementItem>(`/achievements/${id}/illustration${force ? '?force=true' : ''}`, { method: 'POST' }),
+    illustrationUrl: (id: string, v?: string | null) => `/api/v1/achievements/${id}/illustration${v ? `?v=${encodeURIComponent(v)}` : ''}`,
   },
 
   notes: {

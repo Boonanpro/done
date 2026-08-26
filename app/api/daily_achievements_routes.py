@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api.chat_routes import get_current_user
@@ -80,3 +81,26 @@ async def patch_achievement(row_id: str, body: AchievementPatch, _: TokenData = 
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     return row
+
+
+@router.get("/{row_id}/illustration")
+async def get_illustration(row_id: str, _: TokenData = Depends(get_current_user)):
+    """成果行の挿絵 PNG (無ければ 404)。<img> から Cookie 認証で読む。"""
+    import re
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", row_id):
+        raise HTTPException(status_code=400, detail="bad id")
+    path = svc.illustration_path(row_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="no illustration")
+    return FileResponse(str(path), media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.post("/{row_id}/illustration")
+async def make_illustration(row_id: str, force: bool = False, _: TokenData = Depends(get_current_user)) -> Dict[str, Any]:
+    """挿絵を今すぐ生成 (force=true で作り直し)。"""
+    import asyncio
+    ok = await asyncio.to_thread(svc.generate_illustration, row_id, force)
+    if not ok:
+        raise HTTPException(status_code=500, detail="illustration failed")
+    row = await asyncio.to_thread(svc.get_row, row_id)
+    return row or {"ok": True}

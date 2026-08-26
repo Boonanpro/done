@@ -234,3 +234,5 @@ nul
 /scripts/igserve/
 /scripts/*.mp4
 /frontend/public/*.mp4
+# 今日やったことページの挿絵 (生成物・ローカル専用)
+data/today_illust/

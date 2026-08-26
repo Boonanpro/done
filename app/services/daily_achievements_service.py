@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""「今日やったこと」台帳 — 証拠収集 + LLM判定 + 台帳更新。
+"""「今日やったこと」台帳 — 証拠収集 + LLM判定 + 台帳更新 + イラスト生成。
 
 証拠源 (全部「差分だけ」読む。読んだ位置は achievement_cursors に保存):
-  - dan  : chat_messages (ダンの各部屋の人/AI発言) + agent_runs の完了
+  - dan  : chat_messages (ダンの各部屋の人/AI発言)
   - cli  : ~/.claude/projects/*/*.jsonl (ターミナルの claude code セッション)
   - git  : D:/done, D:/done-artifacts, ~/.dan/workspace の新規 commit + 作業ツリー状態
   - watch: pending_followups の完了
+
+取りこぼし防止: 1回に読む量には上限があるが、上限に当たったら読み位置は
+「実際に読めた最後の証拠」までしか進めない (次のサイクルで続きを読む)。
+再判定 (force) は上限に当たらなくなるまで同じ日を何回かに分けて回す。
 
 判定は ~/.dan/workspace/ACHIEVEMENT_RULES.md を基準に run_oneshot_cli (定額CLI) が行い、
 当日の台帳に対して add / update の操作 JSON を返す。ここでは判断せず、LLM に丸ごと渡す。
@@ -17,9 +21,10 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +40,21 @@ GIT_REPOS: List[Path] = [
     Path(os.environ.get("DAN_DONE_ARTIFACTS_DIR") or "D:/done-artifacts"),
     WORKSPACE_DIR,
 ]
+ILLUST_DIR = _PROJECT_ROOT / "data" / "today_illust"
+GPT_IMAGE_SCRIPT = _PROJECT_ROOT / "scripts" / "gpt_image.py"
 
-# 1回の判定に渡す証拠の上限 (プロンプト肥大防止)
+# 1回の判定に渡す証拠の上限 (プロンプト肥大防止)。超えた分は次サイクルへ持ち越す。
 MAX_MSG_CHARS = 1200
 MAX_MSGS = 60
 MAX_CLI_LINES = 80
 MAX_CLI_CHARS = 800
 MAX_COMMITS = 40
 MAX_LEDGER = 60
+MAX_FORCE_ROUNDS = 8
 
 CURSOR_KEY = "achievement_poller"
+
+ICONS = ("mail", "publish", "fix", "build", "research", "money", "doc", "talk", "design", "video", "login", "other")
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +65,7 @@ def today_jst() -> date:
     return datetime.now(JST).date()
 
 
-def day_bounds_utc(day: date) -> tuple[datetime, datetime]:
+def day_bounds_utc(day: date) -> Tuple[datetime, datetime]:
     start = datetime(day.year, day.month, day.day, tzinfo=JST)
     return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
 
@@ -63,6 +73,25 @@ def day_bounds_utc(day: date) -> tuple[datetime, datetime]:
 def _sb():
     from app.services.supabase_client import get_supabase_client
     return get_supabase_client().client
+
+
+def _to_jst(iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.astimezone(JST).strftime("%H:%M")
+    except Exception:
+        return iso
+
+
+def _at_to_iso(day: date, hhmm: Any) -> Optional[str]:
+    """LLM が返す JST の HH:MM を当日の UTC ISO に。不正なら None。"""
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(hhmm or ""))
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (0 <= h < 24 and 0 <= mi < 60):
+        return None
+    return datetime(day.year, day.month, day.day, h, mi, tzinfo=JST).astimezone(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +105,11 @@ def list_for_day(day: date) -> List[Dict[str, Any]]:
         .order("first_seen").execute()
     )
     return r.data or []
+
+
+def get_row(row_id: str) -> Optional[Dict[str, Any]]:
+    r = _sb().table("daily_achievements").select("*").eq("id", row_id).limit(1).execute()
+    return r.data[0] if r.data else None
 
 
 def list_days(limit: int = 30) -> List[str]:
@@ -149,19 +183,23 @@ def _room_titles(room_ids: List[str]) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def collect_dan(since_iso: str, until_iso: str) -> List[Dict[str, Any]]:
-    """ダンの各部屋の発言 (人+AI) を since 以降で取得。"""
+def collect_dan(since_iso: str, until_iso: str) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+    """ダンの各部屋の発言 (人+AI) を since 以降で取得。
+    戻り値: (証拠, 読めた最後の created_at, 上限で切れたか)"""
     try:
         r = (
             _sb().table("chat_messages")
             .select("id,room_id,sender_type,content,created_at")
             .gt("created_at", since_iso).lte("created_at", until_iso)
-            .order("created_at").limit(MAX_MSGS).execute()
+            .order("created_at").limit(MAX_MSGS + 1).execute()
         )
     except Exception as e:
         logger.warning("chat_messages fetch failed: %s", e)
-        return []
+        return [], None, False
     rows = r.data or []
+    truncated = len(rows) > MAX_MSGS
+    rows = rows[:MAX_MSGS]
+    last_at = rows[-1]["created_at"] if rows else None
     rooms = _room_titles(sorted({m["room_id"] for m in rows}))
     out = []
     for m in rows:
@@ -176,7 +214,7 @@ def collect_dan(since_iso: str, until_iso: str) -> List[Dict[str, Any]]:
             "who": "user" if m.get("sender_type") == "human" else "dan",
             "text": _trunc(content, MAX_MSG_CHARS),
         })
-    return out
+    return out, last_at, truncated
 
 
 def collect_watch(since_iso: str, until_iso: str) -> List[Dict[str, Any]]:
@@ -192,14 +230,6 @@ def collect_watch(since_iso: str, until_iso: str) -> List[Dict[str, Any]]:
     return [{"at": _to_jst(w["updated_at"]), "id": w["id"], "note": _trunc(w.get("note"), 300)} for w in r.data or []]
 
 
-def _to_jst(iso: str) -> str:
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return dt.astimezone(JST).strftime("%H:%M")
-    except Exception:
-        return iso
-
-
 def _iter_cli_files() -> List[Path]:
     if not CLI_PROJECTS_DIR.exists():
         return []
@@ -211,23 +241,61 @@ def _iter_cli_files() -> List[Path]:
         if "oneshot" in proj.name.lower():
             continue
         files.extend(p for p in proj.glob("*.jsonl") if p.is_file())
-    return files
+    return sorted(files, key=lambda p: p.stat().st_mtime)
 
 
-def collect_cli(offsets: Dict[str, int], since_utc: datetime, until_utc: datetime) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """claude code のセッション jsonl を前回のバイト位置から読み、人の発言/最終テキスト/編集ファイルを抜く。"""
+def _short_path(p: str) -> str:
+    p = p.replace("\\", "/")
+    for root in ("D:/done/", "D:/done-artifacts/"):
+        if p.startswith(root):
+            return p[len(root):]
+    return p.split("/")[-1]
+
+
+def _cli_record_to_item(rec: Dict[str, Any], t: datetime, label: str) -> Optional[Dict[str, Any]]:
+    typ = rec.get("type")
+    msg = rec.get("message") or {}
+    at = t.astimezone(JST).strftime("%H:%M")
+    if typ == "user" and (rec.get("origin") or {}).get("kind") == "human":
+        c = msg.get("content")
+        if isinstance(c, list):
+            c = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+        if c and str(c).strip():
+            return {"at": at, "session": label, "who": "user", "text": _trunc(c, MAX_CLI_CHARS)}
+    elif typ == "assistant":
+        c = msg.get("content") or []
+        texts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"]
+        tools = [b.get("name") for b in c if isinstance(b, dict) and b.get("type") == "tool_use"]
+        text = " ".join(x for x in texts if x).strip()
+        if text and not tools:  # ツール呼び出しの合間の短文は捨て、ユーザー向けの本文だけ
+            return {"at": at, "session": label, "who": "claude", "text": _trunc(text, MAX_CLI_CHARS)}
+    elif typ == "file-history-delta":
+        files = list((rec.get("trackedFileBackups") or {}).keys())
+        if files:
+            return {"at": at, "session": label, "who": "edited_files",
+                    "text": ", ".join(_short_path(p) for p in files[:12])}
+    return None
+
+
+def collect_cli(offsets: Dict[str, int], since_utc: datetime, until_utc: datetime) -> Tuple[List[Dict[str, Any]], Dict[str, int], bool]:
+    """claude code のセッション jsonl を前回のバイト位置から読む。
+    上限 (MAX_CLI_LINES) に当たったらそのファイルの読み位置は「読めた行の直後」で止め、
+    残りのファイルは触らない (次サイクルで続きを読む)。戻り値: (証拠, 新しい読み位置, 切れたか)"""
     new_offsets = dict(offsets)
     out: List[Dict[str, Any]] = []
+    truncated = False
     for path in _iter_cli_files():
+        if truncated:
+            break
         try:
             st = path.stat()
         except OSError:
             continue
-        # 今日触られていないファイルは読まない
+        key = str(path)
         if datetime.fromtimestamp(st.st_mtime, tz=timezone.utc) < since_utc:
-            new_offsets.setdefault(str(path), st.st_size)
+            new_offsets.setdefault(key, st.st_size)
             continue
-        start = offsets.get(str(path), 0)
+        start = offsets.get(key, 0)
         if start > st.st_size:  # 切り詰め/新規
             start = 0
         if start == 0 and st.st_size > 2_000_000:
@@ -239,18 +307,25 @@ def collect_cli(offsets: Dict[str, int], since_utc: datetime, until_utc: datetim
                 blob = f.read()
         except OSError:
             continue
-        new_offsets[str(path)] = st.st_size
-        proj = path.parent.name
-        session = path.stem[:8]
-        for raw in blob.splitlines():
-            if len(out) >= MAX_CLI_LINES * 4:
+        label = f"{path.parent.name}/{path.stem[:8]}"
+        end = start + len(blob)
+        pos = start
+        consumed = start
+        for raw in blob.split(b"\n"):
+            line_len = len(raw) + 1
+            if pos + line_len > end:  # 末尾の改行無し断片 (書き込み途中) は次回へ
                 break
+            if len(out) >= MAX_CLI_LINES:
+                truncated = True
+                break
+            pos += line_len
+            consumed = pos
             try:
                 rec = json.loads(raw)
             except Exception:
                 continue
             ts = rec.get("timestamp")
-            if not ts:
+            if not ts or rec.get("isSidechain"):
                 continue
             try:
                 t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -258,45 +333,11 @@ def collect_cli(offsets: Dict[str, int], since_utc: datetime, until_utc: datetim
                 continue
             if t < since_utc or t > until_utc:
                 continue
-            if rec.get("isSidechain"):
-                continue
-            typ = rec.get("type")
-            msg = rec.get("message") or {}
-            if typ == "user" and (rec.get("origin") or {}).get("kind") == "human":
-                c = msg.get("content")
-                if isinstance(c, list):
-                    c = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
-                if c and str(c).strip():
-                    out.append({"at": t.astimezone(JST).strftime("%H:%M"), "session": f"{proj}/{session}",
-                                "who": "user", "text": _trunc(c, MAX_CLI_CHARS)})
-            elif typ == "assistant":
-                c = msg.get("content") or []
-                texts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"]
-                tools = [b.get("name") for b in c if isinstance(b, dict) and b.get("type") == "tool_use"]
-                text = " ".join(x for x in texts if x).strip()
-                if text and not tools:  # ツール呼び出しの合間の短文は捨て、ユーザー向けの本文だけ
-                    out.append({"at": t.astimezone(JST).strftime("%H:%M"), "session": f"{proj}/{session}",
-                                "who": "claude", "text": _trunc(text, MAX_CLI_CHARS)})
-            elif typ == "file-history-delta":
-                files = list((rec.get("trackedFileBackups") or {}).keys())
-                if files:
-                    out.append({"at": t.astimezone(JST).strftime("%H:%M"), "session": f"{proj}/{session}",
-                                "who": "edited_files", "text": ", ".join(_short_path(p) for p in files[:12])})
-    # 人の発言と本文を優先して上限に丸める
-    if len(out) > MAX_CLI_LINES:
-        pri = [o for o in out if o["who"] == "user"]
-        rest = [o for o in out if o["who"] != "user"]
-        out = (pri + rest)[:MAX_CLI_LINES]
-        out.sort(key=lambda o: o["at"])
-    return out, new_offsets
-
-
-def _short_path(p: str) -> str:
-    p = p.replace("\\", "/")
-    for root in ("D:/done/", "D:/done-artifacts/"):
-        if p.startswith(root):
-            return p[len(root):]
-    return p.split("/")[-1]
+            item = _cli_record_to_item(rec, t, label)
+            if item:
+                out.append(item)
+        new_offsets[key] = consumed if truncated else max(consumed, start)
+    return out, new_offsets, truncated
 
 
 def _git(repo: Path, *args: str, timeout: int = 20) -> str:
@@ -311,7 +352,7 @@ def _git(repo: Path, *args: str, timeout: int = 20) -> str:
         return ""
 
 
-def collect_git(seen_shas: List[str], since_utc: datetime) -> tuple[List[Dict[str, Any]], List[str]]:
+def collect_git(seen_shas: List[str], since_utc: datetime) -> Tuple[List[Dict[str, Any]], List[str]]:
     commits: List[Dict[str, Any]] = []
     seen = set(seen_shas)
     new_seen = list(seen_shas)
@@ -327,19 +368,16 @@ def collect_git(seen_shas: List[str], since_utc: datetime) -> tuple[List[Dict[st
             sha, at, subj = parts
             if sha in seen:
                 continue
+            if len(commits) >= MAX_COMMITS:
+                break  # 残りは次サイクル (seen に入れないので拾い直す)
             seen.add(sha)
             new_seen.append(sha)
-            # main に入っているか (push/merge 済みかの目安)
-            on_main = bool(_git(repo, "branch", "--contains", sha, "--format=%(refname:short)").strip())
             in_origin = "origin/" in _git(repo, "branch", "-r", "--contains", sha)
             stat = _trunc(_git(repo, "show", "--stat", "--format=", sha), 300)
             commits.append({
                 "repo": name, "sha": sha, "at": _to_jst(at), "subject": _trunc(subj, 160),
-                "pushed": in_origin, "on_branch": on_main, "files": stat,
+                "pushed": in_origin, "files": stat,
             })
-        if len(commits) >= MAX_COMMITS:
-            break
-    # 作業ツリーの現在状態 (未コミットの規模を伝える)
     wt: List[Dict[str, Any]] = []
     for repo in GIT_REPOS:
         if not (repo / ".git").exists():
@@ -369,6 +407,7 @@ def load_rules() -> str:
 def build_prompt(day: date, ledger: List[Dict[str, Any]], evidence: Dict[str, Any]) -> str:
     ledger_view = [
         {"id": r["id"], "title": r["title"], "status": r["status"], "tags": r.get("tags") or [],
+         "at": _to_jst(r.get("done_at") or r.get("first_seen") or ""), "icon": r.get("icon") or "other",
          "detail": r.get("detail") or "", "evidence": r.get("evidence") or []}
         for r in ledger[:MAX_LEDGER]
     ]
@@ -388,11 +427,16 @@ def build_prompt(day: date, ledger: List[Dict[str, Any]], evidence: Dict[str, An
         "## 出力\n"
         "JSON オブジェクトだけを出力 (前後に説明・コードフェンス禁止):\n"
         '{"ops":[\n'
-        '  {"op":"add","title":"…","detail":"…","status":"done|in_progress","at":"HH:MM","tags":["未コミット"],'
-        '"sources":["dan","cli","git","watch"],"evidence":[{"kind":"commit|room|cli|watch|url","label":"表示名","ref":"sha / project_id / session / url"}]},\n'
-        '  {"op":"update","id":"既存行id","status":"done","at":"HH:MM","title":"(変更時のみ)","detail":"(変更時のみ)","tags":["…"],"evidence_add":[…]}\n'
+        '  {"op":"add","title":"…","detail":"…","status":"done|in_progress","at":"HH:MM","icon":"種別",'
+        '"tags":["未コミット"],"evidence":[{"kind":"commit|room|cli|watch|url","label":"表示名","ref":"sha / project_id / session / url"}]},\n'
+        '  {"op":"update","id":"既存行id","status":"done","at":"HH:MM","icon":"種別","title":"(変更時のみ)","detail":"(変更時のみ)","tags":["…"],"evidence_add":[…]}\n'
         "]}\n"
-        "at は証拠から読み取れる「その作業が完了(done)または最後に動いた」JST時刻 HH:MM (不明なら省略)。"
+        "at は証拠から読み取れる「その作業が完了(done)または最後に動いた」JST時刻 HH:MM。"
+        "既存行の at が明らかに実作業時刻とずれていれば update で at を直してよい。"
+        "既存行の icon が other なら、内容に合う種別へ update で直すこと。\n"
+        f"icon は次から1つ: {', '.join(ICONS)} "
+        "(mail=送受信/連絡, publish=公開/デプロイ/提出, fix=不具合修正, build=機能実装, research=調査/検証, "
+        "money=会計/決済/銀行, doc=書類/資料, talk=打合せ/相談, design=デザイン/LP, video=動画/画像制作, login=認証/アカウント設定)。\n"
         "何も追加/更新する価値が無ければ {\"ops\":[]} を返す。evidence の room は ref に project_id、"
         "commit は ref に sha、cli は ref に session を入れる。title/detail は日本語。"
     )
@@ -413,73 +457,6 @@ def _parse_ops(text: Optional[str]) -> List[Dict[str, Any]]:
         return []
     ops = obj.get("ops") if isinstance(obj, dict) else None
     return [o for o in ops or [] if isinstance(o, dict)]
-
-
-def apply_ops(day: date, ledger: List[Dict[str, Any]], ops: List[Dict[str, Any]]) -> int:
-    by_id = {r["id"]: r for r in ledger}
-    now = datetime.now(timezone.utc).isoformat()
-    changed = 0
-    sb = _sb()
-    for op in ops:
-        kind = op.get("op")
-        if kind == "add":
-            title = _trunc(op.get("title"), 120)
-            if not title:
-                continue
-            status = op.get("status") if op.get("status") in ("done", "in_progress") else "in_progress"
-            at = _at_to_iso(day, op.get("at")) or now
-            row = {
-                "day": day.isoformat(), "title": title, "detail": _trunc(op.get("detail"), 400) or None,
-                "status": status, "tags": [str(t) for t in op.get("tags") or []][:6],
-                "sources": _infer_sources(op.get("sources"), _clean_evidence(op.get("evidence"))),
-                "evidence": _clean_evidence(op.get("evidence")),
-                "first_seen": at, "updated_at": now, "done_at": at if status == "done" else None,
-            }
-            try:
-                sb.table("daily_achievements").insert(row).execute()
-                changed += 1
-            except Exception as e:
-                logger.warning("achievement insert failed: %s", e)
-        elif kind == "update":
-            rid = op.get("id")
-            cur = by_id.get(rid)
-            if not cur:
-                continue
-            patch: Dict[str, Any] = {"updated_at": now}
-            if op.get("status") in ("done", "in_progress") and op["status"] != cur["status"]:
-                patch["status"] = op["status"]
-                if op["status"] == "done":
-                    patch["done_at"] = _at_to_iso(day, op.get("at")) or now
-            if op.get("title"):
-                patch["title"] = _trunc(op["title"], 120)
-            if op.get("detail"):
-                patch["detail"] = _trunc(op["detail"], 400)
-            if isinstance(op.get("tags"), list):
-                patch["tags"] = [str(t) for t in op["tags"]][:6]
-            add = _clean_evidence(op.get("evidence_add"))
-            if add:
-                existing = cur.get("evidence") or []
-                keys = {(e.get("kind"), e.get("ref")) for e in existing}
-                merged = existing + [e for e in add if (e.get("kind"), e.get("ref")) not in keys]
-                patch["evidence"] = merged[:12]
-            if len(patch) > 1:
-                try:
-                    sb.table("daily_achievements").update(patch).eq("id", rid).execute()
-                    changed += 1
-                except Exception as e:
-                    logger.warning("achievement update failed: %s", e)
-    return changed
-
-
-def _at_to_iso(day: date, hhmm: Any) -> Optional[str]:
-    """LLM が返す JST の HH:MM を当日の UTC ISO に。不正なら None。"""
-    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(hhmm or ""))
-    if not m:
-        return None
-    h, mi = int(m.group(1)), int(m.group(2))
-    if not (0 <= h < 24 and 0 <= mi < 60):
-        return None
-    return datetime(day.year, day.month, day.day, h, mi, tzinfo=JST).astimezone(timezone.utc).isoformat()
 
 
 _EVIDENCE_TO_SOURCE = {"commit": "git", "room": "dan", "cli": "cli", "watch": "watch"}
@@ -506,58 +483,198 @@ def _clean_evidence(items: Any) -> List[Dict[str, str]]:
     return out[:12]
 
 
+def _clean_icon(v: Any) -> Optional[str]:
+    v = str(v or "").strip().lower()
+    return v if v in ICONS else None
+
+
+def apply_ops(day: date, ledger: List[Dict[str, Any]], ops: List[Dict[str, Any]]) -> int:
+    by_id = {r["id"]: r for r in ledger}
+    now = datetime.now(timezone.utc).isoformat()
+    changed = 0
+    sb = _sb()
+    for op in ops:
+        kind = op.get("op")
+        if kind == "add":
+            title = _trunc(op.get("title"), 120)
+            if not title:
+                continue
+            status = op.get("status") if op.get("status") in ("done", "in_progress") else "in_progress"
+            ev = _clean_evidence(op.get("evidence"))
+            at = _at_to_iso(day, op.get("at")) or now
+            row = {
+                "day": day.isoformat(), "title": title, "detail": _trunc(op.get("detail"), 400) or None,
+                "status": status, "tags": [str(t) for t in op.get("tags") or []][:6],
+                "sources": _infer_sources(op.get("sources"), ev), "evidence": ev,
+                "icon": _clean_icon(op.get("icon")) or "other",
+                "first_seen": at, "updated_at": now, "done_at": at if status == "done" else None,
+            }
+            try:
+                sb.table("daily_achievements").insert(row).execute()
+                changed += 1
+            except Exception as e:
+                logger.warning("achievement insert failed: %s", e)
+        elif kind == "update":
+            rid = op.get("id")
+            cur = by_id.get(rid)
+            if not cur:
+                continue
+            patch: Dict[str, Any] = {"updated_at": now}
+            at = _at_to_iso(day, op.get("at"))
+            new_status = op.get("status") if op.get("status") in ("done", "in_progress") else None
+            if new_status and new_status != cur["status"]:
+                patch["status"] = new_status
+                if new_status == "done":
+                    patch["done_at"] = at or now
+            elif at:
+                # 時刻の訂正 (状態は変わらない)
+                if cur["status"] == "done" and at != cur.get("done_at"):
+                    patch["done_at"] = at
+                elif cur["status"] != "done" and at != cur.get("first_seen"):
+                    patch["first_seen"] = at
+            if op.get("title"):
+                patch["title"] = _trunc(op["title"], 120)
+            if op.get("detail"):
+                patch["detail"] = _trunc(op["detail"], 400)
+            if isinstance(op.get("tags"), list):
+                patch["tags"] = [str(t) for t in op["tags"]][:6]
+            icon = _clean_icon(op.get("icon"))
+            if icon and icon != cur.get("icon"):
+                patch["icon"] = icon
+            add = _clean_evidence(op.get("evidence_add"))
+            if add:
+                existing = cur.get("evidence") or []
+                keys = {(e.get("kind"), e.get("ref")) for e in existing}
+                merged = existing + [e for e in add if (e.get("kind"), e.get("ref")) not in keys]
+                if len(merged) != len(existing):
+                    patch["evidence"] = merged[:12]
+                    patch["sources"] = _infer_sources(cur.get("sources"), merged)
+            if len(patch) > 1:
+                try:
+                    sb.table("daily_achievements").update(patch).eq("id", rid).execute()
+                    changed += 1
+                except Exception as e:
+                    logger.warning("achievement update failed: %s", e)
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # 1サイクル (同期。ポーラーから to_thread で呼ぶ)
 # ---------------------------------------------------------------------------
 
+def _judge_batch(day: date, evidence: Dict[str, Any], model: str) -> Tuple[bool, int]:
+    """1回分の証拠を LLM に渡して台帳に反映。戻り値: (LLM成功, 変更数)"""
+    from app.agent.cli_runner import run_oneshot_cli
+    ledger = list_for_day(day)
+    text = run_oneshot_cli(build_prompt(day, ledger, evidence), model=model, timeout=180)
+    if text is None:
+        return False, 0
+    return True, apply_ops(day, ledger, _parse_ops(text))
+
+
 def run_cycle(force: bool = False, model: str = "sonnet") -> Dict[str, Any]:
-    """差分証拠を集めて判定し台帳を更新。戻り値は統計。"""
+    """差分証拠を集めて判定し台帳を更新。戻り値は統計。
+    force=True は当日 0時から全部読み直す (上限に当たる限り複数回に分けて判定)。"""
     day = today_jst()
-    day_start, day_end = day_bounds_utc(day)
+    day_start, _ = day_bounds_utc(day)
     now_utc = datetime.now(timezone.utc)
+    until_iso = now_utc.isoformat()
     cursor = load_cursor()
 
-    # 日付が変わったら差分位置は「今日の0時」に戻す (前日の残りは前日分として確定済み扱い)
-    if cursor.get("day") != day.isoformat():
-        cursor = {"day": day.isoformat(), "since": day_start.isoformat(), "cli_offsets": cursor.get("cli_offsets", {}), "git_seen": []}
-    since_iso = cursor.get("since") or day_start.isoformat()
-    since_utc = datetime.fromisoformat(since_iso)
-    until_iso = now_utc.isoformat()
+    if force or cursor.get("day") != day.isoformat():
+        # 日付が変わった / 再判定: 読み位置を今日の 0時に戻す
+        cursor = {"day": day.isoformat(), "since": day_start.isoformat(), "cli_offsets": {}, "git_seen": []}
 
-    if force:
-        # 再判定: 今日の証拠を全部読み直す (判定基準を直した後など)
-        since_iso, since_utc = day_start.isoformat(), day_start
-        dan = collect_dan(since_iso, until_iso)
+    stats: Dict[str, Any] = {"day": day.isoformat(), "dan": 0, "cli": 0, "commits": 0, "watch": 0,
+                             "judged": False, "changed": 0, "rounds": 0}
+    rounds_limit = MAX_FORCE_ROUNDS if force else 1
+    for _ in range(rounds_limit):
+        since_iso = cursor.get("since") or day_start.isoformat()
+        since_utc = max(datetime.fromisoformat(since_iso), day_start)
+
+        dan, dan_last, dan_trunc = collect_dan(since_iso, until_iso)
         watch = collect_watch(since_iso, until_iso)
-        cli, cli_offsets = collect_cli({}, day_start, now_utc)
-        git, git_seen = collect_git([], day_start)
-    else:
-        dan = collect_dan(since_iso, until_iso)
-        watch = collect_watch(since_iso, until_iso)
-        cli, cli_offsets = collect_cli(cursor.get("cli_offsets", {}), max(since_utc, day_start), now_utc)
+        cli, cli_offsets, cli_trunc = collect_cli(cursor.get("cli_offsets", {}), since_utc, now_utc)
         git, git_seen = collect_git(cursor.get("git_seen", []), day_start)
+        commits = git[0]["commits"]
 
-    has_new = bool(dan or watch or cli or git[0]["commits"])
-    stats = {"day": day.isoformat(), "dan": len(dan), "cli": len(cli), "commits": len(git[0]["commits"]),
-             "watch": len(watch), "judged": False, "changed": 0}
-    if not has_new and not force:
-        return stats
+        stats["dan"] += len(dan); stats["cli"] += len(cli); stats["commits"] += len(commits); stats["watch"] += len(watch)
+        has_new = bool(dan or watch or cli or commits)
+        if not has_new:
+            # 判定する材料は無いが、読み終えた位置は保存する (同じ行を毎回読み直さない)
+            cursor.update({"day": day.isoformat(), "since": until_iso, "cli_offsets": cli_offsets, "git_seen": git_seen})
+            save_cursor(cursor)
+            break
 
-    ledger = list_for_day(day)
-    evidence = {"dan": dan, "cli": cli, "git": git, "watch": watch}
-    prompt = build_prompt(day, ledger, evidence)
+        stats["rounds"] += 1
+        ok, changed = _judge_batch(day, {"dan": dan, "cli": cli, "git": git, "watch": watch}, model)
+        if not ok:
+            # CLI 失敗: 読み位置を進めず次回に同じ証拠で再挑戦する
+            stats["error"] = "oneshot_cli_failed"
+            break
+        stats["judged"] = True
+        stats["changed"] += changed
 
-    from app.agent.cli_runner import run_oneshot_cli
-    text = run_oneshot_cli(prompt, model=model, timeout=180)
-    if text is None:
-        # CLI 失敗: カーソルを進めず次回に同じ証拠で再挑戦する
-        stats["error"] = "oneshot_cli_failed"
-        return stats
-    ops = _parse_ops(text)
-    stats["judged"] = True
-    stats["changed"] = apply_ops(day, ledger, ops)
-
-    cursor.update({"day": day.isoformat(), "since": until_iso, "cli_offsets": cli_offsets,
-                   "git_seen": git_seen, "last_run": until_iso})
-    save_cursor(cursor)
+        # 読み位置は「実際に読めたところ」まで。dan が切れたら最後の発言時刻で止める。
+        next_since = dan_last if (dan_trunc and dan_last) else until_iso
+        cursor.update({"day": day.isoformat(), "since": next_since, "cli_offsets": cli_offsets,
+                       "git_seen": git_seen, "last_run": until_iso})
+        save_cursor(cursor)
+        stats["carry_over"] = bool(dan_trunc or cli_trunc)
+        if not (dan_trunc or cli_trunc):
+            break
     return stats
+
+
+# ---------------------------------------------------------------------------
+# イラスト生成 (成果行だけ、判定とは別の後追い処理)
+# ---------------------------------------------------------------------------
+
+def illustration_path(row_id: str) -> Path:
+    return ILLUST_DIR / f"{row_id}.png"
+
+
+def generate_illustration(row_id: str, force: bool = False) -> bool:
+    """gpt_image.py で 1024x768 low の挿絵を1枚生成して data/today_illust に保存。"""
+    row = get_row(row_id)
+    if not row:
+        return False
+    out = illustration_path(row_id)
+    if out.exists() and not force:
+        return True
+    ILLUST_DIR.mkdir(parents=True, exist_ok=True)
+    _sb().table("daily_achievements").update({"illustration_status": "pending"}).eq("id", row_id).execute()
+    prompt = (
+        f"{row['title']}。{row.get('detail') or ''}\n"
+        "この出来事を表す挿絵。文字は入れない。"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE",)}
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(GPT_IMAGE_SCRIPT), "--out", str(out), "--size", "1024x768", "--quality", "low"],
+            input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180, cwd=str(_PROJECT_ROOT), env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        ok = proc.returncode == 0 and out.exists()
+        if not ok:
+            logger.warning("illustration failed for %s: %s", row_id, _trunc(proc.stderr or proc.stdout, 300))
+    except Exception as e:
+        logger.warning("illustration error for %s: %s", row_id, e)
+        ok = False
+    _sb().table("daily_achievements").update({
+        "illustration_status": "done" if ok else "failed",
+        "illustration_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", row_id).execute()
+    return ok
+
+
+def generate_missing_illustrations(day: date, limit: int = 3) -> int:
+    """当日の成果行でイラスト未生成のものを最大 limit 件生成。"""
+    rows = [r for r in list_for_day(day)
+            if r["status"] == "done" and r.get("illustration_status") in (None, "none")]
+    n = 0
+    for r in rows[:limit]:
+        if generate_illustration(r["id"]):
+            n += 1
+    return n
