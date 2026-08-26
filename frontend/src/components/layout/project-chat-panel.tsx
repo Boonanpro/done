@@ -70,7 +70,7 @@ const CHAT_RENDER_INCREMENT = 80;
 // 部屋を開いた時に取る件数と、上端まで遡った時に追加で取る件数。
 // ダンの記憶（reseed）は UI の取得件数と無関係なので、画面は「一画面ぶん＋少し」で足りる。
 // 従来は毎回 500 件（大きい部屋で数MB）を丸ごと取っていて、部屋切替の主な重さだった。
-const CHAT_INITIAL_FETCH_LIMIT = 50;
+const CHAT_INITIAL_FETCH_LIMIT = 20;
 const CHAT_OLDER_FETCH_LIMIT = 100;
 
 type StepInfo = {
@@ -2460,6 +2460,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       }
     }
   }, [displayItems.length, visibleItemCount, project?.room_id, queryClient]);
+
+  // 初回20件が画面に収まってしまうとスクロールが発生せず遡れない。描画後に
+  // 画面が埋まっていなければ一度だけ handleScroll を通し、遡り読み込みを起動する。
+  useEffect(() => {
+    if (isBooting || !hasAnyContent) return;
+    const el = scrollContainerRef.current;
+    if (el && el.scrollHeight <= el.clientHeight + 240) handleScroll();
+  }, [projectId, isBooting, hasAnyContent, handleScroll]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;

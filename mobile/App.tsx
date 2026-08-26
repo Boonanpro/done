@@ -73,7 +73,7 @@ const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
 // 行へ置き換えられるので、ここで残しても二重表示にはならない。
 // 部屋を開いた時に取る件数と、上端まで遡った時に追加で取る件数。ダンの記憶は
 // UI の取得件数と無関係なので、画面は「一画面ぶん＋少し」で足りる。
-const CHAT_INITIAL_FETCH_LIMIT = 50;
+const CHAT_INITIAL_FETCH_LIMIT = 20;
 const CHAT_OLDER_FETCH_LIMIT = 100;
 
 function keepLocalOptimistic(
