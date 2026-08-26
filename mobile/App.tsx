@@ -3564,6 +3564,25 @@ function AppMain() {
                 );
               }
               const msg = item.msg;
+              // ダンのリアクション応答（👍のみ）: 吹き出しにせず、直前の自分の
+              // メッセージに押されたLINE風リアクションとして右寄せの小さな
+              // スタンプで描画する（Web版 project-chat-panel と同じ規約）。
+              if (msg.sender_type === 'ai' && (msg.content || '').trim() === '👍') {
+                return (
+                  <View style={{ alignItems: 'flex-end', marginTop: -6, marginBottom: 6, paddingRight: 8 }}>
+                    <View
+                      style={{
+                        backgroundColor: 'rgba(127,127,127,0.18)',
+                        borderRadius: 999,
+                        paddingHorizontal: 8,
+                        paddingVertical: 3,
+                      }}
+                    >
+                      <Text style={{ fontSize: 14 }}>👍</Text>
+                    </View>
+                  </View>
+                );
+              }
               const mine = msg.sender_type === 'human';
               // ダンが読み込むまでの追い連絡は半透明＋「仮送信」で、読み込まれた
               // 時点（次のターンが始まった時点）で通常表示に固定される。
