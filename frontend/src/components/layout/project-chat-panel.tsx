@@ -42,6 +42,7 @@ import {
   type MessagesListResponse,
   type ProcessStep,
   type ProjectListResponse,
+  type ProjectResponse,
   type ProjectStatusType,
   type ReplyToMessage,
   type TurnBlock,
@@ -2115,14 +2116,30 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const latestMessageId = messagesData?.messages?.[0]?.id;
 
+  // 既読は「未読がある時」だけ送る。従来は最新IDが変わるたび（開いた直後だけで
+  // 3〜4回）送り、成功のたびに一覧（/projects 114KB）を丸ごと取り直していて、
+  // 本命のメッセージ取得と帯域・DBを奪い合っていた。未読数は手元のキャッシュを
+  // 直接ゼロにする（見た目のタイミングは同じ、手段だけ変える）。
+  const markedReadRoomRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!project?.room_id) return;
-    api.rooms.markAsRead(project.room_id)
+    const roomId = project?.room_id;
+    if (!roomId) return;
+    const list = queryClient.getQueryData<ProjectListResponse>(['projects']);
+    const inList = list?.projects?.find((p) => p.id === projectId);
+    const unread = inList?.unread_count ?? project?.unread_count ?? 0;
+    const firstForRoom = markedReadRoomRef.current !== roomId;
+    if (!firstForRoom && unread <= 0) return;
+    markedReadRoomRef.current = roomId;
+    api.rooms.markAsRead(roomId)
       .then(() => {
-        queryClient.invalidateQueries({ queryKey: ['projects'] });
+        const zero = <T extends { unread_count?: number }>(p: T): T => ({ ...p, unread_count: 0 });
+        queryClient.setQueryData<ProjectListResponse>(['projects'], (cur) =>
+          cur ? { ...cur, projects: cur.projects.map((p) => (p.id === projectId ? zero(p) : p)) } : cur,
+        );
+        queryClient.setQueryData<ProjectResponse>(['project', projectId], (cur) => (cur ? zero(cur) : cur));
       })
       .catch(() => null);
-  }, [latestMessageId, project?.room_id, queryClient]);
+  }, [latestMessageId, project?.room_id, project?.unread_count, projectId, queryClient]);
 
   const { data: activeStatus } = useQuery({
     queryKey: ['session-active', project?.room_id],

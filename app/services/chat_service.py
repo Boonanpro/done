@@ -2,10 +2,12 @@
 Chat Service - Business Logic for Done Chat
 """
 from typing import Optional, Callable, Any
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import secrets
 import re
 import asyncio
+import time
 import random
 import logging
 
@@ -793,22 +795,41 @@ class ChatService:
 
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:
         """Get messages from a room"""
-        # Verify membership
-        member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute()
-        if not member.data:
-            raise ValueError("Not a member of this room")
-        
+        # 部屋を開くたびに通るホットパス。従来は「会員チェック→本文→返信元」を
+        # 同期 .execute() で直列に（しかもイベントループ上で）行い、20件でも
+        # 約1秒かかっていた。全体をスレッドに逃がし、独立な会員チェックと本文
+        # 取得は並列にする（DB往復 3直列 → 2並列+1）。戻り値・権限判定は不変。
+        return await asyncio.to_thread(self._get_messages_sync, room_id, user_id, limit, before)
+
+    def _get_messages_sync(self, room_id: str, user_id: str, limit: int, before: Optional[str]) -> list[dict]:
         query = self.supabase.table("chat_messages").select(
             "*, sender:users!sender_id(id, display_name, avatar_url)"
         ).eq("room_id", room_id).order("created_at", desc=True).limit(limit)
-
         if before:
             query = query.lt("created_at", before)
 
-        result = await self._execute_with_retry(
-            "get_messages.fetch_messages",
-            lambda: query.execute(),
-        )
+        def fetch_with_retry():
+            attempt = 0
+            while True:
+                try:
+                    return query.execute()
+                except Exception as exc:
+                    if attempt >= 2 or not self._is_transient_supabase_error(exc):
+                        raise
+                    time.sleep(0.2 * (2 ** attempt) + random.uniform(0, 0.15))
+                    attempt += 1
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            member_f = ex.submit(
+                lambda: self.supabase.table("chat_room_members").select("*")
+                .eq("room_id", room_id).eq("user_id", user_id).execute()
+            )
+            result_f = ex.submit(fetch_with_retry)
+            member = member_f.result()
+            result = result_f.result()
+        # Verify membership（本文は取得済みでも、非会員には返さない）
+        if not member.data:
+            raise ValueError("Not a member of this room")
 
         # 返信先メッセージを一括取得
         reply_to_ids = [msg["reply_to"] for msg in (result.data or []) if msg.get("reply_to")]
