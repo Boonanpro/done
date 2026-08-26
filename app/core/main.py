@@ -118,6 +118,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("email poller failed to start: %s", e)
 
+    # 「今日やったこと」ポーラー: ダン/CLI/git/見張りの証拠を定期(既定5分)+ターン完了時に
+    # 判定し daily_achievements を更新する。失敗してもコア起動は妨げない。
+    try:
+        from app.services.achievement_poller import start_poller as start_achievement_poller
+        start_achievement_poller()
+    except Exception as e:
+        logger.warning("achievement poller failed to start: %s", e)
+
     # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
     # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
     try:
@@ -185,6 +193,8 @@ app.include_router(gemini_voice_router)
 app.include_router(realtime_router)  # /api/v1/realtime prefix は router 側に定義
 app.include_router(realtime_ws_router)  # /ws/realtime-delegate
 app.include_router(public_chat_router, prefix="/api/v1")
+from app.api.daily_achievements_routes import router as achievements_router  # noqa: E402
+app.include_router(achievements_router, prefix="/api/v1")
 
 
 @app.get("/")

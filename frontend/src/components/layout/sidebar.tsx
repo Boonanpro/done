@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
+import { MessageSquare, Users, Settings, CalendarCheck, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -62,6 +62,12 @@ const navItems = [
     href: '/dan-notion',
     icon: Notebook,
     description: '情報管理 + 自律エージェント',
+  },
+  {
+    title: '今日',
+    href: '/today',
+    icon: CalendarCheck,
+    description: '今日やったこと (自動更新)',
   },
   {
     title: '設定',

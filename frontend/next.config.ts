@@ -109,6 +109,15 @@ const nextConfig: NextConfig = {
         source: '/api/v1/realtime/:path*',
         destination: `${coreBackendUrl}/api/v1/realtime/:path*`,
       },
+      // 「今日やったこと」台帳はダンコア (ポーラーと同居)
+      {
+        source: '/api/v1/achievements',
+        destination: `${coreBackendUrl}/api/v1/achievements`,
+      },
+      {
+        source: '/api/v1/achievements/:path*',
+        destination: `${coreBackendUrl}/api/v1/achievements/:path*`,
+      },
       // 上記以外の /api/* は業務系サンドボックスへ
       {
         source: '/api/:path*',

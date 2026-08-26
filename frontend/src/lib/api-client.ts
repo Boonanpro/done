@@ -15,6 +15,34 @@ const SSE_BASE_URL = '';
 
 export const OWNER_USER_ID = '2582a188-ff24-4a4f-b989-6063034d90b2';
 
+export interface AchievementEvidence {
+  kind: 'commit' | 'room' | 'cli' | 'watch' | 'url' | 'mail';
+  label: string;
+  ref: string;
+}
+
+export interface AchievementItem {
+  id: string;
+  day: string;
+  title: string;
+  detail: string | null;
+  status: 'done' | 'in_progress' | 'dismissed';
+  tags: string[];
+  evidence: AchievementEvidence[];
+  sources: string[];
+  first_seen: string;
+  done_at: string | null;
+  updated_at: string;
+}
+
+export interface AchievementsResponse {
+  day: string;
+  today: string;
+  items: AchievementItem[];
+  days: string[];
+  last_run: string | null;
+}
+
 export interface UserResponse {
   id: string;
   email: string;
@@ -1526,6 +1554,15 @@ export const api = {
   },
 
   // Notes endpoints
+  achievements: {
+    list: (day?: string) =>
+      request<AchievementsResponse>(`/achievements${day ? `?day=${day}` : ''}`),
+    refresh: () =>
+      request<{ judged: boolean; changed: number }>('/achievements/refresh', { method: 'POST' }),
+    patch: (id: string, data: { status?: string; title?: string; detail?: string; tags?: string[] }) =>
+      request<AchievementItem>(`/achievements/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  },
+
   notes: {
     // Drafts
     listDrafts: () =>

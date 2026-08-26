@@ -1619,6 +1619,15 @@ def _resolve_claude_cli() -> tuple[Optional[str], Optional[str]]:
     return claude_path, None
 
 
+def _notify_achievement_poller() -> None:
+    """ターン完了を「今日やったこと」ポーラーに知らせて判定を前倒しする (失敗は無視)。"""
+    try:
+        from app.services.achievement_poller import notify_activity
+        notify_activity()
+    except Exception:
+        pass
+
+
 def run_oneshot_cli(
     prompt: str,
     model: str = "haiku",
@@ -1642,8 +1651,11 @@ def run_oneshot_cli(
         return None
 
     cmd = [claude_cmd, cli_js] if cli_js else [claude_cmd]
+    # Windows のコマンドライン上限 (約32K) を超える長いプロンプトは stdin で渡す
+    # (`claude -p` は引数が無ければ stdin をプロンプトとして読む)。
+    use_stdin = len(prompt) > 16000
+    cmd.extend(["-p"] if use_stdin else ["-p", prompt])
     cmd.extend([
-        "-p", prompt,
         "--output-format", "text",
         "--model", model,
         "--dangerously-skip-permissions",
@@ -1660,7 +1672,7 @@ def run_oneshot_cli(
     try:
         proc = subprocess.run(
             cmd,
-            input="",
+            input=prompt if use_stdin else "",
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -3005,6 +3017,7 @@ async def _process_via_streaming_session(
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
+                _notify_achievement_poller()
                 _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": bool(cli_saved), "saved_message_id": cli_saved if isinstance(cli_saved, str) else None, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
