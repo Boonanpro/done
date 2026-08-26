@@ -613,14 +613,29 @@ class ChatService:
             import re as _re
             if _re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", message_id):
                 insert_data["id"] = message_id
+        if "id" not in insert_data:
+            # Client-assigned PK so _execute_with_retry cannot double-insert
+            # when the first INSERT landed but the response was lost.
+            import uuid as _uuid
+            insert_data["id"] = str(_uuid.uuid4())
         if reply_to_id:
             insert_data["reply_to"] = reply_to_id
         if created_at:
             insert_data["created_at"] = created_at
 
+        def _insert_idempotent():
+            try:
+                return self.supabase.table("chat_messages").insert(insert_data).execute()
+            except Exception as exc:
+                # 23505 = our own id already exists: a previous attempt landed
+                # but its response was lost. Read the row back instead of failing.
+                if "23505" in str(exc) or "duplicate key" in str(exc).lower():
+                    return self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
+                raise
+
         result = await self._execute_with_retry(
             "send_message.insert_message",
-            lambda: self.supabase.table("chat_messages").insert(insert_data).execute(),
+            _insert_idempotent,
         )
 
         if result.data:

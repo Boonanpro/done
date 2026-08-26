@@ -948,6 +948,23 @@ def _fresh_supabase_client():
     return sbmod.get_supabase_client().client
 
 
+def _is_duplicate_key_error(err: Exception) -> bool:
+    """PostgREST/Postgres unique-violation (23505) — the row already exists.
+
+    Used by the disconnect-retry paths: when the first INSERT reached the
+    server but the response was lost ("Server disconnected"), the retry hits
+    the client-assigned primary key and must be treated as *already saved*,
+    not as a failure and never as a second row (2026-08-26 二重表示の真因).
+    """
+    msg = str(err)
+    code = getattr(err, "code", None)
+    if code is None and getattr(err, "args", None):
+        a = err.args[0]
+        if isinstance(a, dict):
+            code = a.get("code")
+    return code == "23505" or "23505" in msg or "duplicate key" in msg.lower()
+
+
 def _save_execution_event_sync(
     room_id: str,
     event_type: str,
@@ -972,6 +989,9 @@ def _save_execution_event_sync(
     if turn_id:
         metadata["turn_id"] = turn_id
     row = {
+        # Client-side id makes the disconnect retry idempotent (PK conflict
+        # instead of a second row).
+        "id": str(uuid.uuid4()),
         "room_id": room_id,
         "run_id": run_id,
         "turn_id": turn_id,
@@ -993,6 +1013,9 @@ def _save_execution_event_sync(
             if attempt == 1 and _is_disconnect_error(e):
                 _cli_debug(f"_save_execution_event_sync disconnect, retrying: {e}")
                 continue
+            if attempt == 2 and _is_duplicate_key_error(e):
+                _cli_debug("_save_execution_event_sync: first attempt had landed (dup key on retry) — ok")
+                return
             _cli_debug(f"_save_execution_event_sync failed: {e}")
             return
 
@@ -1140,7 +1163,12 @@ def _save_ai_message_sync(
     if turn_id:
         ai_context = ai_context or {}
         ai_context["turn_id"] = turn_id
+    # Client-assigned primary key. The disconnect retry below re-sends the
+    # same payload; if attempt 1 actually landed (response lost), attempt 2
+    # now fails with 23505 instead of inserting an identical second row.
+    msg_id_local = str(uuid.uuid4())
     insert_data = {
+        "id": msg_id_local,
         "room_id": room_id,
         "sender_id": None,
         "sender_type": "ai",
@@ -1173,6 +1201,14 @@ def _save_ai_message_sync(
             if attempt == 1 and _is_disconnect_error(e):
                 _cli_debug(f"_save_ai_message_sync disconnect, retrying: {e}")
                 continue
+            if attempt == 2 and _is_duplicate_key_error(e):
+                # Attempt 1 reached the server; the row exists under our id.
+                _cli_debug(f"_save_ai_message_sync: first attempt had landed (dup key on retry): msg_id={msg_id_local}")
+                try:
+                    record_message_delivery_sync(sb, room_id, msg_id_local, content=content)
+                except Exception:
+                    pass
+                return msg_id_local
             _cli_debug(f"_save_ai_message_sync failed (attempt {attempt}): {e}")
             return False
     return False
