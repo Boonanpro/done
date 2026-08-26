@@ -410,6 +410,23 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
   const pending = !!msg.pendingFollowup;
   const timeLabel = formatMessageTime(msg.created_at);
 
+  // ダンのリアクション応答: 本文が「👍」だけのAIメッセージは吹き出しにせず、
+  // 直前のユーザー発言に押されたLINE風リアクションとして右寄せの小さな
+  // スタンプで描画する（純粋な了解・受領に定型文を返さないための仕組み。
+  // 履歴上は通常のAI応答なので送受信ペアは壊れない）。
+  if (msg.sender_type === 'ai' && (msg.content || '').trim() === '👍') {
+    return (
+      <div className="-mt-2 flex justify-end pr-1">
+        <span
+          className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 text-sm leading-none shadow-sm"
+          title="ダンが確認しました"
+        >
+          👍
+        </span>
+      </div>
+    );
+  }
+
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
     // 長文・URL・英数字の連続など折り返せない塊があると、items-end の
