@@ -764,6 +764,33 @@ class ChatService:
             import logging
             logging.getLogger(__name__).warning(f"Message detection failed: {e}")
     
+    # 作業ブロックの詳細（ツール出力）を一覧応答に含める上限文字数。
+    AI_CONTEXT_DETAIL_MAX = 600
+
+    @classmethod
+    def _slim_ai_context(cls, ai_context: dict) -> dict:
+        """一覧応答用に ai_context から表示に使わない/開くまで見えない大物を外す。
+
+        実測（2026-08-26, StyleUp 500件 4.95MB）で応答の92%が ai_context、
+        うち reasoning_steps/reasoning_full が1.7MB（チャット画面はどこでも
+        描画していない）、ツール block の detail が1.2MB（折りたたみを開いた
+        時だけ見える）。開いていない部屋はキャッシュが無く毎回丸ごと運ぶので、
+        スマホ/トンネル経由では30秒打ち切り→「Load failed」になっていた。
+        DB は触らず、送る時に外す・切るだけ。
+        """
+        if not isinstance(ai_context, dict):
+            return ai_context
+        slim = {k: v for k, v in ai_context.items() if k not in ("reasoning_steps", "reasoning_full")}
+        blocks = slim.get("blocks")
+        if isinstance(blocks, list):
+            out = []
+            for b in blocks:
+                if isinstance(b, dict) and isinstance(b.get("detail"), str) and len(b["detail"]) > cls.AI_CONTEXT_DETAIL_MAX:
+                    b = {**b, "detail": b["detail"][: cls.AI_CONTEXT_DETAIL_MAX] + "\n…（以下省略）"}
+                out.append(b)
+            slim["blocks"] = out
+        return slim
+
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:
         """Get messages from a room"""
         # Verify membership
@@ -814,9 +841,9 @@ class ChatService:
                 "content": msg["content"],
                 "created_at": msg["created_at"],
             }
-            # ai_contextがあれば追加（reasoning_steps等）
+            # ai_context は一覧表示に必要な分だけ送る（下記 _slim_ai_context）。
             if msg.get("ai_context"):
-                message_dict["ai_context"] = msg["ai_context"]
+                message_dict["ai_context"] = self._slim_ai_context(msg["ai_context"])
             # reply_to情報
             if msg.get("reply_to"):
                 message_dict["reply_to_id"] = msg["reply_to"]
