@@ -2295,11 +2295,16 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // 初回読み込み中（下のJSXでスピナーを出す条件と同一）。メッセージだけ先に
   // 届いた時点ではまだリストがDOMに無いので、この間に「最下部へ」を発火させると
   // スピナー相手に空振りして二度と発火しない。リスト描画後に揃えるための旗。
+  // run状態・作業イベントの初回取得を待つのは「実行中の部屋」だけ。待機中の
+  // 部屋は後から挿入される要素が無いので、メッセージが揃った時点で表示する。
+  // 実行中かどうかは一覧（サイドバー）が既に持つ has_active_run で判定し、
+  // 追加取得はしない。従来は待機中の部屋でも4本の完了を待っていて、一番遅い
+  // 1本（詰まった current-run 等）に切替時間が引きずられていた。
+  const waitForRunState = !!project?.has_active_run || isActiveExecution;
   const isBooting =
     !project ||
     (!!project.room_id && messagesData === undefined) ||
-    isLoadingCurrentRun ||
-    isLoadingExecutionEvents;
+    (waitForRunState && (isLoadingCurrentRun || isLoadingExecutionEvents));
 
   useEffect(() => {
     isNearBottomRef.current = true;

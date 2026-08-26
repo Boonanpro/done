@@ -271,6 +271,13 @@ class ProjectService:
 
     async def get_project(self, project_id: str, user_id: str) -> Optional[dict]:
         """プロジェクトを取得（所有者チェック付き）"""
+        # 同期 Supabase 呼び出しをイベントループの外で実行する。ここと
+        # list_projects は一覧ポーリング・部屋切替・current-run が毎秒通る
+        # ホットパスで、ループ上で .execute() を待つと全リクエストが直列化
+        # していた（8本同時で 3s、単独 0.3s）。処理内容・戻り値は不変。
+        return await asyncio.to_thread(self._get_project_sync, project_id, user_id)
+
+    def _get_project_sync(self, project_id: str, user_id: str) -> Optional[dict]:
         result = (
             self.supabase.table("projects")
             .select("*")
@@ -288,6 +295,14 @@ class ProjectService:
         status: Optional[str] = None,
     ) -> list[dict]:
         """ユーザーのプロジェクト一覧を取得"""
+        # get_project と同じ理由でスレッドに逃がす（3〜4回のDB往復）。
+        return await asyncio.to_thread(self._list_projects_sync, user_id, status)
+
+    def _list_projects_sync(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+    ) -> list[dict]:
         query = (
             self.supabase.table("projects")
             .select("*")
