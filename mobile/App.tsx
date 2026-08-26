@@ -71,13 +71,31 @@ const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
 // 丸ごと置き換えでは送ったばかりの吹き出しが一瞬消える（SSEのエコーが届いて
 // 復活するまで数秒、thinkingだけが見える）。エコー到着時に local-* は実IDの
 // 行へ置き換えられるので、ここで残しても二重表示にはならない。
+// 部屋を開いた時に取る件数と、上端まで遡った時に追加で取る件数。ダンの記憶は
+// UI の取得件数と無関係なので、画面は「一画面ぶん＋少し」で足りる。
+const CHAT_INITIAL_FETCH_LIMIT = 50;
+const CHAT_OLDER_FETCH_LIMIT = 100;
+
 function keepLocalOptimistic(
   server: MessageResponse[],
   current: MessageResponse[],
   roomId: string,
 ): MessageResponse[] {
   const locals = current.filter((m) => m.id.startsWith('local-') && m.room_id === roomId);
-  return locals.length > 0 ? [...server, ...locals] : server;
+  // 遡り読み込みで足した行はサーバーの取得窓（最新N件）より古いので server に
+  // 含まれないが、削除された訳ではない。窓の下端より古い行はそのまま残す。
+  const serverIds = new Set(server.map((m) => m.id));
+  const oldestServer = server.length
+    ? Math.min(...server.map((m) => new Date(m.created_at).getTime() || 0))
+    : Infinity;
+  const olderKept = current.filter(
+    (m) =>
+      m.room_id === roomId
+      && !m.id.startsWith('local-')
+      && !serverIds.has(m.id)
+      && (new Date(m.created_at).getTime() || 0) < oldestServer,
+  );
+  return locals.length > 0 || olderKept.length > 0 ? [...server, ...olderKept, ...locals] : server;
 }
 const EAS_PROJECT_ID = 'db295575-26c1-4088-99aa-4887eb27e2e2';
 const DanSmsForwarder = NativeModules.DanSmsForwarder as
@@ -1180,6 +1198,9 @@ function AppMain() {
   const [password, setPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [messages, setMessages] = useState<MessageResponse[]>([]);
+  // 遡り読み込み（上端到達で before=最古 created_at を追加取得）。
+  const hasMoreOlderRef = useRef(true);
+  const isLoadingOlderRef = useRef(false);
   const [projects, setProjects] = useState<ProjectResponse[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<ProjectResponse | null>(null);
@@ -1657,6 +1678,35 @@ function AppMain() {
     }
   }, []);
 
+  const loadOlderMessages = useCallback(() => {
+    const roomId = currentProject?.room_id;
+    if (!roomId || !token || !hasMoreOlderRef.current || isLoadingOlderRef.current) return;
+    const oldest = messages
+      .filter((m) => !m.id.startsWith('local-') && m.room_id === roomId)
+      .reduce<MessageResponse | null>((a, b) => (!a || b.created_at < a.created_at ? b : a), null);
+    if (!oldest) return;
+    isLoadingOlderRef.current = true;
+    apiRequest<MessagesListResponse>(
+      `/chat/rooms/${roomId}/messages?limit=${CHAT_OLDER_FETCH_LIMIT}&before=${encodeURIComponent(oldest.created_at)}`,
+      {},
+      token,
+    )
+      .then((data) => {
+        const older = data?.messages ?? [];
+        if (older.length < CHAT_OLDER_FETCH_LIMIT) hasMoreOlderRef.current = false;
+        if (older.length === 0 || currentProjectIdRef.current !== currentProject?.id) return;
+        setMessages((current) => {
+          const have = new Set(current.map((m) => m.id));
+          const add = older.filter((m) => !have.has(m.id));
+          return add.length ? [...current, ...add] : current;
+        });
+      })
+      .catch(() => null)
+      .finally(() => {
+        isLoadingOlderRef.current = false;
+      });
+  }, [currentProject?.id, currentProject?.room_id, messages, token]);
+
   const loadProjectMessages = useCallback(
     async (activeToken: string, projectId: string) => {
       // 【画面＝実体・直列の解消】従来は「プロジェクト詳細→メッセージ→既読」
@@ -1704,10 +1754,12 @@ function AppMain() {
         }
 
         const data = await apiRequest<MessagesListResponse>(
-          `/chat/rooms/${roomId}/messages?limit=120`,
+          `/chat/rooms/${roomId}/messages?limit=${CHAT_INITIAL_FETCH_LIMIT}`,
           {},
           activeToken,
         );
+        // 初回応答が上限未満なら、それより古い行はサーバーに無い。
+        hasMoreOlderRef.current = (data.messages ?? []).length >= CHAT_INITIAL_FETCH_LIMIT;
         // 取得中に別の部屋へ移動していたら適用しない（残像・取り違え防止）
         if (currentProjectIdRef.current === projectId) {
           const fetchedRoomId = roomId;
@@ -1954,7 +2006,7 @@ function AppMain() {
     const projectId = currentProject?.id;
     const id = setInterval(() => {
       if (AppState.currentState !== 'active') return;
-      apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=120`, {}, token)
+      apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=${CHAT_INITIAL_FETCH_LIMIT}`, {}, token)
         .then((data) => {
           if (!data?.messages) return;
           setMessages((current) => keepLocalOptimistic(data.messages, current, roomId));
@@ -3480,6 +3532,9 @@ function AppMain() {
             // （クリップされた行の TextView に選択状態が残ったまま再利用される）。
             // 吹き出し内の直接なぞり選択を成立させるため明示的に無効化する。
             removeClippedSubviews={false}
+            // inverted なので「末尾」= 画面上端（一番古い行）。そこまで来たら遡って取る。
+            onEndReached={loadOlderMessages}
+            onEndReachedThreshold={0.5}
             renderItem={({ item }) => {
               // Live in-progress turn: render the timeline as it builds with a
               // spinner, like the web chat's live view. Tool steps start

@@ -234,7 +234,7 @@ export function Sidebar({
       if (roomId && !queryClient.getQueryData(['project-messages', roomId])) {
         queryClient.prefetchQuery({
           queryKey: ['project-messages', roomId],
-          queryFn: () => api.rooms.getMessages(roomId, { limit: 500 }),
+          queryFn: () => api.rooms.getMessages(roomId, { limit: 50 }),
           staleTime: 15 * 1000,
         });
       }

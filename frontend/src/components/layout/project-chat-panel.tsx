@@ -67,6 +67,11 @@ interface ProjectChatPanelProps {
 
 const INITIAL_CHAT_RENDER_COUNT = 80;
 const CHAT_RENDER_INCREMENT = 80;
+// 部屋を開いた時に取る件数と、上端まで遡った時に追加で取る件数。
+// ダンの記憶（reseed）は UI の取得件数と無関係なので、画面は「一画面ぶん＋少し」で足りる。
+// 従来は毎回 500 件（大きい部屋で数MB）を丸ごと取っていて、部屋切替の主な重さだった。
+const CHAT_INITIAL_FETCH_LIMIT = 50;
+const CHAT_OLDER_FETCH_LIMIT = 100;
 
 type StepInfo = {
   label: string;
@@ -1881,6 +1886,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
+  // 遡り読み込み（APK と同じ方式）。上端まで来たら before=最古の created_at で
+  // 追加取得し、キャッシュの末尾に足す。取得中の二重発火と、無い時の再要求を防ぐ。
+  const hasMoreOlderRef = useRef(true);
+  const isLoadingOlderRef = useRef(false);
   const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_CHAT_RENDER_COUNT);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   // 最下部から離れているか（「最新へ」ジャンプボタンの表示用）
@@ -2036,7 +2045,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     // 「一瞬消える」画面バグの正体だった。fetch結果はキャッシュと id で結合し、
     // ローカルにしか無い行（SSE直挿入・楽観表示）は必ず生き残る。
     queryFn: async () => {
-      const fresh = await api.rooms.getMessages(project!.room_id!, { limit: 500 });
+      const fresh = await api.rooms.getMessages(project!.room_id!, { limit: CHAT_INITIAL_FETCH_LIMIT });
+      // 初回応答が上限未満なら、それより古い行はサーバーに無い。
+      if (fresh.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
       const old = queryClient.getQueryData<{ messages: MessageResponse[] }>(
         ['project-messages', project?.room_id],
       );
@@ -2060,10 +2071,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
       // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
       // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
+      // 遡り読み込みで足した行は fresh の取得窓（最新N件）より古いので fresh に
+      // 含まれないが、削除された訳ではない。窓の下端より古い行は無条件で残す。
       const cutoff = Date.now() - 120_000;
-      const localOnly = old.messages.filter(
-        (m) => !freshIds.has(m.id) && new Date(m.created_at).getTime() >= cutoff,
-      );
+      const oldestFresh = fresh.messages.length
+        ? Math.min(...fresh.messages.map((m) => new Date(m.created_at).getTime()))
+        : Infinity;
+      const localOnly = old.messages.filter((m) => {
+        if (freshIds.has(m.id)) return false;
+        const t = new Date(m.created_at).getTime();
+        return t >= cutoff || t < oldestFresh;
+      });
       if (localOnly.length === 0) return { messages: stabilized };
       const merged = [...stabilized, ...localOnly].sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -2308,6 +2326,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   useEffect(() => {
     isNearBottomRef.current = true;
+    hasMoreOlderRef.current = true;
+    isLoadingOlderRef.current = false;
     const frame = requestAnimationFrame(() => {
       setVisibleItemCount(INITIAL_CHAT_RENDER_COUNT);
       setHasNewMessages(false);
@@ -2389,8 +2409,40 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           ? count
           : Math.min(displayItems.length, count + CHAT_RENDER_INCREMENT)
       );
+      // 手元の行を全部描画し終えていて、まだサーバーに古い行があるなら取りに行く。
+      const roomId = project?.room_id;
+      if (
+        roomId
+        && visibleItemCount >= displayItems.length
+        && hasMoreOlderRef.current
+        && !isLoadingOlderRef.current
+      ) {
+        const queryKey = ['project-messages', roomId];
+        const cached = queryClient.getQueryData<{ messages: MessageResponse[] }>(queryKey);
+        const oldest = cached?.messages?.length
+          ? cached.messages.reduce((a, b) => (a.created_at < b.created_at ? a : b))
+          : null;
+        if (oldest) {
+          isLoadingOlderRef.current = true;
+          api.rooms.getMessages(roomId, { limit: CHAT_OLDER_FETCH_LIMIT, before: oldest.created_at })
+            .then((older) => {
+              if (older.messages.length < CHAT_OLDER_FETCH_LIMIT) hasMoreOlderRef.current = false;
+              if (older.messages.length === 0) return;
+              pendingPrependScrollRef.current = { height: el.scrollHeight, top: el.scrollTop };
+              queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (cur) => {
+                const have = new Set((cur?.messages ?? []).map((m) => m.id));
+                const add = older.messages.filter((m) => !have.has(m.id));
+                return { messages: [...(cur?.messages ?? []), ...add] };
+              });
+              // 足した分もそのまま描画対象にする（描画窓は別途スクロールで広がる）。
+              setVisibleItemCount((count) => count + older.messages.length);
+            })
+            .catch(() => null)
+            .finally(() => { isLoadingOlderRef.current = false; });
+        }
+      }
     }
-  }, [displayItems.length]);
+  }, [displayItems.length, visibleItemCount, project?.room_id, queryClient]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
