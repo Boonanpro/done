@@ -173,6 +173,12 @@ async def _discard_no_change_report(room_id: str, since_iso: str) -> bool:
             if _NO_CHANGE_SENTINEL in c and len(c) <= 200:
                 sb.table("chat_messages").delete().eq("id", m["id"]).execute()
                 deleted = True
+        if deleted:
+            # 部屋一覧のプレビューは保存時に焼き込まれるコピーなので、消した
+            # 番兵文言（WATCH_NO_CHANGE）が一覧に残り続ける。実在する最新
+            # メッセージで書き直す（2026-08-26 実測）。
+            from app.services.chat_service import refresh_room_preview_sync
+            refresh_room_preview_sync(sb, room_id)
         return deleted
 
     try:
