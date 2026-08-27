@@ -339,6 +339,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         SCHEDULE_FOLLOWUP_TOOL,
         WATCH_TOOL,
         SPLIT_TO_NEW_ROOM_TOOL,
+        COMPOSE_MESSAGE_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         SAVE_TOTP_SECRET_TOOL,
@@ -493,6 +494,38 @@ SPLIT_TO_NEW_ROOM_TOOL = {
             "handoff": {"type": "string", "description": "新しい部屋へ持ち込む引き継ぎメモ（経緯・決定事項・要望・次にやること・URL/パス）"},
         },
         "required": ["title", "handoff"],
+    },
+}
+
+COMPOSE_MESSAGE_TOOL = {
+    "name": "compose_message",
+    "description": """外部の相手（取引先・顧客・税理士など、この部屋の外の人）へ送るメッセージ（メール / Instagram DM / LINE / SMS）の文面を用意する。外部宛の文面はチャット本文に書かず、必ずこのツールで出すこと。
+
+【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
+
+【使い方】
+- propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。
+- send: 既に出した送信案を送る（ユーザーが「送って」「それでいい」と言った時）。proposal_id だけ渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。
+- mark_sent: メールではないチャネル（Instagram DM 等）をあなたが browser で送った後、送信済みとして記録する（本文は DB の現在の版）。
+- discard: 送信案を取り下げる。
+- list: この部屋の送信案（未送信/送信済み）を確認する。
+
+【規律】ユーザーが「送っておいて」と先に言っていた場合も、propose → 同じターン内で send の順で呼ぶ（本文をカードとして残すため）。相手の返事を待つなら送信後に watch を登録する。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["propose", "send", "mark_sent", "discard", "list"], "description": "propose=文面を出す / send=送る / mark_sent=自力送信を記録 / discard=取り下げ / list=一覧"},
+            "channel": {"type": "string", "enum": ["email", "instagram_dm", "line", "sms", "other"], "description": "propose時必須"},
+            "to": {"type": "string", "description": "propose時必須。宛先（メールアドレス / IGユーザーネーム / 電話番号など）"},
+            "to_name": {"type": "string", "description": "相手の表示名（例: 山田様、株式会社◯◯ 田中様）"},
+            "subject": {"type": "string", "description": "件名（emailでは必須）"},
+            "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
+            "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
+            "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
+            "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
+            "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
+        },
+        "required": ["action"],
     },
 }
 
@@ -1088,6 +1121,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "split_to_new_room":
         return ("_split_room", "split")
+
+    if tool_name == "compose_message":
+        return ("_compose_message", "manage")
 
     if tool_name == "attach_image":
         return ("_attach_image", "attach")
@@ -2248,6 +2284,10 @@ async def execute_tool(
     # ★★★ 脱線した話題を新しいチャットに切り出す ★★★
     if skill_name == "_split_room":
         return await _execute_split_to_new_room(params, session_id, user_id)
+
+    # ★★★ 外部宛メッセージの文面カード（送信案）★★★
+    if skill_name == "_compose_message":
+        return await _execute_compose_message(params, session_id, user_id)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -3930,6 +3970,100 @@ async def _execute_schedule_followup(
         "message": res.get("message", ""),
         "fire_at": res.get("fire_at"),
     }
+
+
+
+async def _execute_compose_message(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """外部宛メッセージの送信案カード。room_id = session_id。実体は
+    app.services.outbound_message_service（ユーザーの送信ボタンと同じ経路）。"""
+    import asyncio as _aio
+    from app.services.outbound_message_service import (
+        OutboundMessageService, CHANNELS, SERVER_SENDABLE,
+    )
+
+    room_id = session_id or ""
+    if not room_id or not user_id:
+        return {"success": False, "error": "room_id/user_id が不明なため送信案を扱えません。"}
+    svc = OutboundMessageService()
+    action = (params.get("action") or "").strip()
+
+    def _brief(row: Dict[str, Any]) -> Dict[str, Any]:
+        ad = row.get("action_data") or {}
+        return {
+            "proposal_id": row.get("id"), "status": row.get("status"),
+            "channel": ad.get("channel"), "to": ad.get("to"), "to_name": ad.get("to_name"),
+            "subject": ad.get("subject"), "user_edited": bool(ad.get("user_edited")),
+            "sent_by": ad.get("sent_by"), "body": row.get("content"),
+        }
+
+    try:
+        if action == "propose":
+            channel = (params.get("channel") or "").strip()
+            to = (params.get("to") or "").strip()
+            body = (params.get("body") or "").strip()
+            subject = (params.get("subject") or "").strip()
+            if channel not in CHANNELS:
+                return {"success": False, "error": f"channel は {', '.join(CHANNELS)} のいずれか。"}
+            if not to or not body:
+                return {"success": False, "error": "to と body は必須です。"}
+            if channel == "email" and not subject:
+                return {"success": False, "error": "email では subject が必須です。"}
+            row = await _aio.to_thread(
+                svc.create_draft, user_id=user_id, room_id=room_id, channel=channel, to=to,
+                body=body, subject=subject or None, intent=params.get("intent"),
+                to_name=params.get("to_name"), from_name=params.get("from_name"),
+            )
+            sendable = channel in SERVER_SENDABLE
+            tail = (
+                'ユーザーから「送って」と言われたら compose_message(action="send", proposal_id) で送れます。'
+                if sendable else
+                f'{CHANNELS[channel]} はサーバー送信不可。ユーザーが承認したらあなたが browser で送り、'
+                'compose_message(action="mark_sent", proposal_id) で記録してください。'
+            )
+            return {
+                "success": True, "proposal_id": row["id"],
+                "message": (
+                    "送信案カードをこの部屋に出しました。本文はチャットに繰り返さないこと。"
+                    "ユーザーはカード上で本文を直して送信ボタンを押せます（あなたを起こさずに送られます）。"
+                    + tail
+                ),
+            }
+
+        if action == "send":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            row = await svc.send(pid, user_id, sent_by="dan")
+            return {"success": True, "message": "送信しました（DBの現在本文＝ユーザーの編集を反映した版）。", "sent": _brief(row)}
+
+        if action == "mark_sent":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            row = await _aio.to_thread(svc.mark_sent, pid, user_id, sent_by="dan", note=params.get("note"))
+            return {"success": True, "message": "送信済みとして記録しました。", "sent": _brief(row)}
+
+        if action == "discard":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            await _aio.to_thread(svc.discard, pid, user_id, by="dan")
+            return {"success": True, "message": "送信案を取り下げました。", "proposal_id": pid}
+
+        if action == "list":
+            rows = await _aio.to_thread(svc.list_for_room, room_id)
+            items = [_brief(r) for r in rows]
+            return {"success": True, "count": len(items), "drafts": items}
+
+        return {"success": False, "error": "action は propose/send/mark_sent/discard/list のいずれか。"}
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": f"送信案の処理に失敗: {e}"}
 
 
 async def _execute_split_to_new_room(

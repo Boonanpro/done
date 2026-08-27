@@ -191,8 +191,8 @@ export interface SessionSwitchResponse {
 }
 
 // Proposal types
-export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired';
-export type ProposalType = 'reply' | 'action' | 'schedule' | 'reminder';
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'sent';
+export type ProposalType = 'reply' | 'action' | 'schedule' | 'reminder' | 'observation' | 'notify' | 'outbound';
 
 export interface ProposalResponse {
   id: string;
@@ -1025,6 +1025,17 @@ export const api = {
 
     get: (proposalId: string) =>
       request<ProposalResponse>(`/chat/proposals/${proposalId}`),
+
+    // 送信案カード（compose_message）
+    updateDraft: (proposalId: string, patch: { body?: string; subject?: string; to?: string }) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/draft`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    sendDraft: (proposalId: string) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/send`, { method: 'POST' }),
+    discardDraft: (proposalId: string) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/discard`, { method: 'POST' }),
 
     respond: (
       proposalId: string,

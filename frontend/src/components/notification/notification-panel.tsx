@@ -49,7 +49,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
   // 要対応の提案（フォーム/メール返信など）。情報通知(observation)は除外してバッジもこちらで数える
   const { data: proposalsData, isLoading } = useQuery({
     queryKey: ['proposals', 'pending', 'actionable'],
-    queryFn: () => api.proposals.list({ status: 'pending', limit: 20, excludeTypes: 'observation' }),
+    queryFn: () => api.proposals.list({ status: 'pending', limit: 20, excludeTypes: 'observation,outbound' }),
     refetchInterval: 30000, // Refetch every 30 seconds
   });
 

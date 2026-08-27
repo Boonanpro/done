@@ -2329,6 +2329,14 @@ async def send_dan_message_stream(
                 cli_content, video_analyses = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
+                # 送信案カード（compose_message）の編集/送信/破棄をダンの記憶へ合流
+                try:
+                    from app.services.outbound_message_service import OutboundMessageService
+                    outbound_digest = await asyncio.to_thread(OutboundMessageService().digest_for_turn, room_id)
+                    if outbound_digest:
+                        cli_content = outbound_digest + cli_content
+                except Exception:
+                    logger.warning("outbound digest failed room=%s", room_id, exc_info=True)
                 mark_latency("content_enriched")
 
                 # ── メディア永続化: CLI起動前に画像/動画をGeminiで抽出・保存 ──
@@ -3108,6 +3116,70 @@ async def respond_to_proposal(
 class InstructRequest(BaseModel):
     """提案へのユーザー自由指示"""
     instruction: str
+
+
+# ── 送信案カード（compose_message）: 編集オートセーブ / 送信 / 破棄 ──
+# ダンの compose_message(action="send") と同じ OutboundMessageService を通るので、
+# 誰が送っても部屋の履歴とダンの記憶に同じ形で残る。
+
+class OutboundDraftUpdateRequest(BaseModel):
+    body: Optional[str] = None
+    subject: Optional[str] = None
+    to: Optional[str] = None
+
+
+@router.patch("/proposals/{proposal_id}/draft", response_model=ProposalResponse)
+async def update_outbound_draft(
+    proposal_id: str,
+    request: OutboundDraftUpdateRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """送信案カードの本文/件名/宛先をオートセーブする（DB が唯一の正）。"""
+    from app.services.outbound_message_service import OutboundMessageService
+    try:
+        await asyncio.to_thread(
+            OutboundMessageService().update_draft, proposal_id, current_user.user_id,
+            body=request.body, subject=request.subject, to=request.to,
+        )
+        proposal = await service.get_proposal(proposal_id, current_user.user_id)
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/proposals/{proposal_id}/send", response_model=ProposalResponse)
+async def send_outbound_draft(
+    proposal_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """送信ボタン: DB の現在本文で実送信し、部屋に送信済みイベントを残す。ダンは起動しない。"""
+    from app.services.outbound_message_service import OutboundMessageService
+    try:
+        await OutboundMessageService().send(proposal_id, current_user.user_id, sent_by="user")
+        proposal = await service.get_proposal(proposal_id, current_user.user_id)
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("outbound send failed %s", proposal_id)
+        raise HTTPException(status_code=500, detail=f"送信に失敗しました: {e}")
+
+
+@router.post("/proposals/{proposal_id}/discard", response_model=ProposalResponse)
+async def discard_outbound_draft(
+    proposal_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    from app.services.outbound_message_service import OutboundMessageService
+    try:
+        await asyncio.to_thread(OutboundMessageService().discard, proposal_id, current_user.user_id, by="user")
+        proposal = await service.get_proposal(proposal_id, current_user.user_id)
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/proposals/{proposal_id}/instruct")

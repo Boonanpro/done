@@ -5,6 +5,17 @@ description: InstagramのDMを送る。送信後は必ず台帳に記録して�
 
 # Instagram DM 送受信
 
+## ⚠️ 手順0: 文面は compose_message で送信案カードにする
+
+DM の文面は `compose_message(action="propose", channel="instagram_dm", to="<相手ユーザーネーム>", body=..., intent=...)` で出す。
+チャット本文に文面を書いて「これで良ければ送ります」と聞かない。ユーザーはカード上で本文を直せる。
+
+Instagram はサーバーから直接送れないので、ユーザーが「送って」と言ったら
+1. `compose_message(action="list")` で **DB の現在本文**（ユーザーの編集版）を取り直す
+2. 下記の手順で `browser` ツールから送る（本文は必ず 1 で取った版）
+3. 送ったら `compose_message(action="mark_sent", proposal_id=...)` で送信済みを記録
+4. 続けて下記の台帳記録・見張り登録を行う
+
 ## 重要: 送ったら必ず記録する
 
 DMを送った**直後に必ず**これを実行する:

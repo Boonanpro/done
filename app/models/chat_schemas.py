@@ -339,6 +339,7 @@ class ProposalStatus(str, Enum):
     APPROVED = "approved"    # 承認済み
     REJECTED = "rejected"    # 却下済み
     EXPIRED = "expired"      # 期限切れ
+    SENT = "sent"            # 送信済み（outbound）
 
 
 class ProposalType(str, Enum):
@@ -349,6 +350,7 @@ class ProposalType(str, Enum):
     REMINDER = "reminder"        # リマインダー
     OBSERVATION = "observation"  # 観察者の事後報告
     NOTIFY = "notify"            # 返信不要だが知らせるべき重要情報(FYI通知)
+    OUTBOUND = "outbound"        # 外部宛メッセージの文面カード（compose_message）
 
 
 class ProposalCreateRequest(BaseModel):

@@ -59,6 +59,7 @@ import {
   type SelectedElement,
 } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
+import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent } from '@/components/chat/outbound-message-card';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -494,6 +495,16 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
         )}
       </div>
     );
+  }
+
+  // 送信案カード（compose_message）: `[送信案: <id>]` はカードとして描画する。
+  // 送信済み/破棄イベント（📤/🗑）は折り畳みの控えめな行にする。
+  const outboundCardId = parseOutboundCardMarker(msg.content);
+  if (outboundCardId) {
+    return <OutboundMessageCard proposalId={outboundCardId} />;
+  }
+  if (isOutboundEventContent(msg.content)) {
+    return <OutboundEventLine content={msg.content || ''} />;
   }
 
   const rawContent = msg.content || '';
