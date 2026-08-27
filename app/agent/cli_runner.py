@@ -1119,6 +1119,84 @@ def _tool_detail(inp, limit: int = 4000) -> str:
     return s[:limit]
 
 
+_DECL_CHECK_MARK = "[宣言未登録の自動確認]"
+_DECL_WATCH_TOOLS = {"watch", "schedule_followup"}
+
+
+def _check_unregistered_declaration(sb, room_id: str, content: str, blocks: list) -> None:
+    """嘘宣言の決定論的チェッカー: 返答本文に「見張りを入れておきます」等の
+    宣言パターンがあるのに、そのターンで watch / schedule_followup が一度も
+    呼ばれていない場合、60秒後の矯正起床を機械が登録する（登録し忘れたまま
+    眠ることを構造的に不可能にする）。
+
+    判断はダンに残す設計: 機械は「宣言文字列あり×登録ツール呼び出しなし」という
+    事実の照合しかしない。起こされたダンが登録するか、不要なら WATCH_NO_CHANGE
+    で黙って終わる（無言化が誤検知の安全弁になる）。
+    実例: 2026-08-26夜「明日の朝10時に聞く見張りを入れておきます」と宣言したのに
+    未登録で、翌朝何も起きなかった（財布紛失ルーム）。
+    """
+    import re as _re
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    try:
+        text = content or ""
+        matched = None
+        # P1: 「見張り/リマインド/続報/予約 を入れ・登録し ます/ました」系（完了主張の嘘も拾う）
+        m = _re.search(
+            r"(見張り|リマインド|続報|フォローアップ)[^\n。]{0,12}(入れ|登録|立て|設定|予約)(て|して)?(おき|し)?ま(す|した)",
+            text,
+        )
+        if m:
+            matched = m.group(0)
+        else:
+            # P2: 文単位判定 — 同一文内に「未来時刻マーカー」と「約束動詞（非過去）」が
+            # 両方あれば宣言とみなす。時刻と動詞の間に長い目的語が挟まっても拾える
+            # （固定距離窓は「10時にEpic Gamesの二段階認証が有効のままかを確認します」
+            # を取りこぼした実測があるため撤廃）。
+            future_re = _re.compile(
+                r"明日|今夜|今晩|後で|あとで|のちほど|後ほど|[0-9０-９]{1,3}\s*(分後|時間後)|[0-9０-９]{1,2}\s*時(半|[0-9０-９]{1,2}分)?\s*(に|頃|過ぎ)"
+            )
+            verb_re = _re.compile(
+                r"(確認|チェック|聞き|見に行き|様子を見|報告|連絡)(し|しに行き|に行き)?ます"
+            )
+            for sent in _re.split(r"[。\n]", text):
+                if future_re.search(sent) and verb_re.search(sent):
+                    matched = sent.strip()[:60]
+                    break
+        if not matched:
+            return
+        tool_names = {b.get("name", "") for b in (blocks or []) if b.get("type") == "tool"}
+        if tool_names & _DECL_WATCH_TOOLS:
+            return  # 宣言と同一ターンで登録済み＝正常
+        from app.services.followups import TABLE as _FU_TABLE, create_watch as _create_watch
+        # ループ天井: 同じ部屋への矯正起床は24時間に3回まで
+        day_ago = (_dt.now(_tz.utc) - _td(hours=24)).isoformat()
+        recent = (
+            sb.table(_FU_TABLE).select("note")
+            .eq("room_id", room_id).gte("created_at", day_ago).execute().data or []
+        )
+        if sum(1 for r in recent if _DECL_CHECK_MARK in (r.get("note") or "")) >= 3:
+            _cli_debug("decl-check: 24h corrective cap reached, skipping")
+            return
+        member = (
+            sb.table("chat_room_members").select("user_id")
+            .eq("room_id", room_id).limit(1).execute().data
+        )
+        uid = member[0]["user_id"] if member else None
+        note = (
+            f"{_DECL_CHECK_MARK} あなたは直前の返答で「{matched}」と宣言したが、"
+            "そのターンで watch / schedule_followup による登録が確認できなかった。"
+            "宣言を守るため、今すぐ watch(action=\"create\") で宣言どおりの時刻・内容の"
+            "見張り・予約を登録すること。既に別の形で登録済み、または実は登録不要だと"
+            "判断できる場合は、本文を正確に「WATCH_NO_CHANGE」とだけ書いて終わること。"
+            "登録した場合も改めてユーザーへ報告し直す必要はない（登録の宣言は済んでいる）。"
+            "本文は「WATCH_NO_CHANGE」のみとし、見張り登録のツール呼び出しだけを行うこと。"
+        )
+        res = _create_watch(room_id, uid, "at", note, delay_seconds=60)
+        _cli_debug(f"decl-check: promise without registration -> corrective watch {res.get('id')} ({matched[:30]!r})")
+    except Exception as e:  # noqa: BLE001
+        _cli_debug(f"decl-check failed (non-fatal): {e}")
+
+
 def _save_ai_message_sync(
     room_id: str,
     content: str,
@@ -1190,6 +1268,9 @@ def _save_ai_message_sync(
                 # does via _record_message_delivery; without it, AI replies
                 # stay invisible as "unread" because we bypass the service.
                 record_message_delivery_sync(sb, room_id, msg_id, content=content)
+                # 嘘宣言チェッカー: blocks が渡された保存（＝ターン確定の本文）のみ対象。
+                if blocks is not None:
+                    _check_unregistered_declaration(sb, room_id, content, blocks)
                 _cli_debug(
                     f"_save_ai_message_sync OK (attempt {attempt}): msg_id={msg_id or '?'}"
                 )
