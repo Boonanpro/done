@@ -167,19 +167,31 @@ async def _discard_no_change_report(room_id: str, since_iso: str) -> bool:
             .gte("created_at", since_iso)
             .order("created_at", desc=True).limit(3).execute().data or []
         )
-        deleted = False
+        deleted_count = 0
         for m in rows:
             c = (m.get("content") or "").strip()
             if _NO_CHANGE_SENTINEL in c and len(c) <= 200:
                 sb.table("chat_messages").delete().eq("id", m["id"]).execute()
-                deleted = True
-        if deleted:
+                deleted_count += 1
+        if deleted_count:
             # 部屋一覧のプレビューは保存時に焼き込まれるコピーなので、消した
             # 番兵文言（WATCH_NO_CHANGE）が一覧に残り続ける。実在する最新
             # メッセージで書き直す（2026-08-26 実測）。
             from app.services.chat_service import refresh_room_preview_sync
             refresh_room_preview_sync(sb, room_id)
-        return deleted
+            # 未読バッジも保存時に加算済みのコピーなので巻き戻す。これを忘れると
+            # 「数字が3出てるのに開いたら何もない」が起きる（2026-08-27 実測）。
+            members = (
+                sb.table("chat_room_members").select("id,unread_count")
+                .eq("room_id", room_id).execute().data or []
+            )
+            for mem in members:
+                cur = mem.get("unread_count") or 0
+                if cur > 0:
+                    sb.table("chat_room_members").update({
+                        "unread_count": max(0, cur - deleted_count),
+                    }).eq("id", mem["id"]).execute()
+        return deleted_count > 0
 
     try:
         return await asyncio.to_thread(_do)
