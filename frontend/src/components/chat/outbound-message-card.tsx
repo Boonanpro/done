@@ -31,7 +31,7 @@ const CHANNEL_LABEL: Record<string, string> = {
 const channelLabel = (c: string) => CHANNEL_LABEL[c] || c;
 
 // サーバーから直接送れるチャネル。それ以外はダンが browser で送る（カードは承認用）。
-const SERVER_SENDABLE = new Set(['email']);
+const SERVER_SENDABLE = new Set(['email', 'instagram_dm', 'instagram_comment']);
 
 type ActionData = {
   channel?: string;
@@ -41,7 +41,8 @@ type ActionData = {
   intent?: string | null;
   from_name?: string | null;
   original_body?: string;
-  reply_to?: { message_id?: string; subject?: string } | null;
+  reply_to?: { message_id?: string; subject?: string; thread_id?: string; post_url?: string; comment_id?: string; account?: string } | null;
+  from_account?: string | null;
   target?: { url?: string; note?: string } | null;
   user_edited?: boolean;
   sent_by?: 'user' | 'dan' | null;
@@ -70,7 +71,7 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
   const channel = ad.channel || 'other';
   const pending = proposal?.status === 'pending';
   const sendable = SERVER_SENDABLE.has(channel);
-  const isReply = !!ad.reply_to?.message_id || !!ad.reply_to?.subject;
+  const isReply = !!(ad.reply_to && Object.values(ad.reply_to).some(Boolean));
   // 件名欄はメールの新規送信だけ。返信は Re: 自動、DM/フォームは件名そのものが無い。
   const showSubject = channel === 'email' && !isReply;
 
@@ -176,6 +177,7 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
   }
 
   const Icon = channel === 'email' ? Mail : MessageCircle;
+  const label = channelLabel(channel);
   const status = proposal.status as string;
   const sent = status === 'sent';
   const discarded = status === 'rejected';
@@ -200,9 +202,16 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
             宛先: {ad.to_name ? `${ad.to_name} ` : ''}
             <span className="font-mono">{ad.to}</span>
             {ad.from_name ? ` ／ 差出人: ${ad.from_name}` : ''}
+            {ad.from_account ? ` ／ 送信元: @${ad.from_account}` : ''}
           </div>
-          {isReply && ad.reply_to?.subject && (
-            <div className="truncate text-[11px] text-muted-foreground">返信先: {ad.reply_to.subject}</div>
+          {isReply && (ad.reply_to?.subject || ad.reply_to?.thread_id || ad.reply_to?.post_url) && (
+            <div className="truncate text-[11px] text-muted-foreground">
+              返信先:{' '}
+              {ad.reply_to?.subject
+                || (ad.reply_to?.post_url
+                  ? <a href={ad.reply_to.post_url} target="_blank" rel="noopener noreferrer" className="underline">投稿{ad.reply_to.comment_id ? 'のコメント' : ''}</a>
+                  : `DMスレッド ${ad.reply_to?.thread_id}`)}
+            </div>
           )}
           {ad.target?.url && (
             <div className="truncate text-[11px] text-muted-foreground">
@@ -273,7 +282,7 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
             </button>
           ) : (
             <span className="text-xs text-muted-foreground">
-              {channelLabel(channel)} はここから直接送れません。チャットで「送って」と言えばダンが送ります。
+              {label} はここから直接送れません。チャットで「送って」と言えばダンが送ります。
             </span>
           )}
           <button

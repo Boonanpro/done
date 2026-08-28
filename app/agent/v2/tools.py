@@ -503,6 +503,7 @@ COMPOSE_MESSAGE_TOOL = {
 
 【返信の場合】受信したメール/DMへの返信なら reply_to_message_id（メールの Message-ID 等）と reply_to_subject を渡す。件名は不要（Re: を自動付与し、メールは同じスレッドに繋がる）。
 【フォーム送信の場合】channel="web_form"、target_url にフォームのURL、to にはフォームの持ち主（会社名など）を入れる。件名不要。
+【Instagram】DM は channel="instagram_dm"、to=相手のユーザーネーム、from_account=送信元アカウント。受信DMへの返信なら reply_to_thread_id（受信通知にある thread_id）も渡す。コメント返信は channel="instagram_comment"、reply_to_post_url=投稿URL、reply_to_comment_id=返信先コメントID。どちらもカードの送信ボタン／send でサーバーから直接送れる。
 
 【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
 
@@ -526,6 +527,10 @@ COMPOSE_MESSAGE_TOOL = {
             "reply_to_subject": {"type": "string", "description": "返信の場合: 元メッセージの件名（Re: を自動付与）"},
             "target_url": {"type": "string", "description": "web_form 等: 送信先フォームのURL"},
             "target_note": {"type": "string", "description": "web_form 等: どの欄に何を入れるか等の補足"},
+            "from_account": {"type": "string", "description": "SNS用: 送信元アカウント（例: ajp.gdw）。受信への返信なら受信通知の account"},
+            "reply_to_thread_id": {"type": "string", "description": "Instagram DM 返信用: 受信通知にある thread_id"},
+            "reply_to_post_url": {"type": "string", "description": "コメント返信用: 投稿URL"},
+            "reply_to_comment_id": {"type": "string", "description": "コメント返信用: 返信先コメントのID"},
             "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
@@ -4019,6 +4024,9 @@ async def _execute_compose_message(
             reply_to = {
                 "message_id": (params.get("reply_to_message_id") or "").strip() or None,
                 "subject": (params.get("reply_to_subject") or "").strip() or None,
+                "thread_id": (params.get("reply_to_thread_id") or "").strip() or None,
+                "post_url": (params.get("reply_to_post_url") or "").strip() or None,
+                "comment_id": (params.get("reply_to_comment_id") or "").strip() or None,
             }
             target = {
                 "url": (params.get("target_url") or "").strip() or None,
@@ -4029,6 +4037,7 @@ async def _execute_compose_message(
                 body=body, subject=subject or None, intent=params.get("intent"),
                 to_name=params.get("to_name"), from_name=params.get("from_name"),
                 reply_to=reply_to, target=target,
+                from_account=params.get("from_account"),
             )
             channel = (row.get("action_data") or {}).get("channel") or channel
             sendable = channel in SERVER_SENDABLE

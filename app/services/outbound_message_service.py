@@ -31,9 +31,15 @@ CHANNELS = {
     "instagram_dm": "Instagram DM",
     "line": "LINE",
     "sms": "SMS",
+    "instagram_comment": "Instagramコメント",
     "web_form": "Webフォーム",
     "other": "その他",
 }
+
+# 表記揺れの正規化
+_CHANNEL_ALIASES = {"instagram": "instagram_dm", "ig": "instagram_dm", "ig_dm": "instagram_dm",
+                    "insta": "instagram_dm", "ig_comment": "instagram_comment",
+                    "mail": "email", "gmail": "email", "form": "web_form", "webform": "web_form"}
 
 
 def channel_label(channel: Optional[str]) -> str:
@@ -48,7 +54,8 @@ def _reply_subject(subject: Optional[str]) -> Optional[str]:
     return s if s.lower().startswith("re:") else f"Re: {s}"
 
 # サーバー側で実送信できるチャネル。それ以外はダンが browser 等で送って mark_sent する。
-SERVER_SENDABLE = {"email"}
+# instagram_* は巡回用プロファイル（ログイン済み）から内部APIで送る（instagram_send）。
+SERVER_SENDABLE = {"email", "instagram_dm", "instagram_comment"}
 
 CARD_PREFIX = "[送信案: "
 
@@ -116,11 +123,13 @@ class OutboundMessageService:
         from_name: Optional[str] = None,
         reply_to: Optional[dict] = None,
         target: Optional[dict] = None,
+        from_account: Optional[str] = None,
     ) -> dict:
         """reply_to: 既存スレッドへの返信なら {message_id, references, subject, detected_message_id}。
         指定時は件名不要（Re: を自動付与し、email は In-Reply-To/References でスレッドに繋ぐ）。
         target: フォーム等の送信先 {url, note}。文面カードはそのまま、送信はダンが browser で行う。"""
         channel = (channel or "other").strip().lower().replace(" ", "_") or "other"
+        channel = _CHANNEL_ALIASES.get(channel, channel)
         subject = (subject or "").strip() or None
         # CLI/MCP 経由で "<id@host>" が "&lt;id@host&gt;" に化けて届くことがある（実測 2026-08-28）
         import html as _html
@@ -141,6 +150,7 @@ class OutboundMessageService:
             "in_reply_to": in_reply_to,
             "reply_to": reply_to,
             "target": target,
+            "from_account": (from_account or (reply_to or {}).get("account") or "").strip().lstrip("@") or None,
             "from_name": (from_name or "").strip() or None,
             "original_body": body,
             "original_subject": subject,
@@ -241,7 +251,55 @@ class OutboundMessageService:
             except Exception:
                 logger.warning("record_outbound failed for %s", proposal_id, exc_info=True)
 
+        if channel in ("instagram_dm", "instagram_comment"):
+            await self._send_instagram(row, ad, user_id=user_id, sent_by=sent_by, proposal_id=proposal_id)
+
         return self._finalize_sent(row, ad, sent_by=sent_by)
+
+    async def _send_instagram(self, row: dict, ad: dict, *, user_id: str, sent_by: str, proposal_id: str) -> None:
+        """Instagram DM / コメントを巡回用プロファイルから内部APIで送る。"""
+        from app.services import instagram_send
+        channel = ad.get("channel")
+        reply = ad.get("reply_to") or {}
+        target = ad.get("target") or {}
+        account = ad.get("from_account") or reply.get("account")
+        if not account:
+            try:
+                from app.services.instagram_poller import _watched_accounts
+                accs = _watched_accounts(user_id)
+                if len(accs) == 1:
+                    account = accs[0]
+            except Exception:
+                pass
+        if not account:
+            raise ValueError("どのInstagramアカウントから送るか（from_account）が未指定です")
+        body = row["content"]
+        if channel == "instagram_dm":
+            handle = (ad.get("to") or "").lstrip("@")
+            res = await instagram_send.send_dm(
+                account, body, thread_id=reply.get("thread_id"), handle=handle or None, user_id=user_id,
+            )
+            ad["send_result"] = res
+            try:
+                from app.services.external_message_routing import get_external_message_routing_service
+                await get_external_message_routing_service().record_outbound(
+                    user_id=user_id, channel="instagram", origin_room_id=row["source_room_id"],
+                    external_account_id=account, external_recipient_id=(res.get("handle") or handle or "").lower() or None,
+                    external_thread_id=res.get("thread_id") or reply.get("thread_id"),
+                    external_message_id=res.get("item_id"),
+                    metadata={"via": "outbound_card", "proposal_id": proposal_id, "sent_by": sent_by},
+                )
+            except Exception:
+                logger.warning("record_outbound (instagram) failed for %s", proposal_id, exc_info=True)
+        else:
+            post_url = target.get("url") or reply.get("post_url")
+            if not post_url:
+                raise ValueError("コメント先の投稿URL（target_url / reply_to_post_url）がありません")
+            res = await instagram_send.post_comment(
+                account, body, post_url=post_url, reply_to_comment_id=reply.get("comment_id"), user_id=user_id,
+            )
+            ad["send_result"] = {**res, "post_url": post_url}
+        ad["from_account"] = account
 
     def mark_sent(self, proposal_id: str, user_id: str, *, sent_by: str = "dan", note: Optional[str] = None) -> dict:
         """ダンが browser 等で自力送信した後の記録（本文は DB の現在本文）。"""
