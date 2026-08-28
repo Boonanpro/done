@@ -237,6 +237,15 @@ export default function TodayPage() {
     return [...list].sort((a, b) => itemTime(a).localeCompare(itemTime(b)));
   }, [data]);
   const doneCount = items.filter((i) => i.status === 'done').length;
+  // 時系列: 1時間ごとの段にまとめる (同じ時間帯のものだけ横に並ぶ)
+  const hourGroups = useMemo(() => {
+    const map = new Map<number, AchievementItem[]>();
+    for (const it of items) {
+      const h = Math.floor(jstMinutes(itemTime(it)) / 60);
+      map.set(h, [...(map.get(h) ?? []), it]);
+    }
+    return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([hour, list]) => ({ hour, list }));
+  }, [items]);
 
   return (
     <MainLayout showNotifications={false}>
@@ -289,12 +298,23 @@ export default function TodayPage() {
                 {items.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-3">まだありません。作業が進むと自動で並びます。</p>
                 ) : (
-                  <ul className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
-                    {items.map((it) => (
-                      <AchievementCard key={it.id} item={it} active={activeId === it.id} onHover={setActiveId}
-                        busy={patch.isPending} onPatch={(p) => patch.mutate({ id: it.id, p })} />
+                  <ol className="relative">
+                    {/* 時刻軸 */}
+                    <div className="absolute left-[52px] top-2 bottom-2 w-px bg-border" />
+                    {hourGroups.map(({ hour, list }) => (
+                      <li key={hour} className="relative flex gap-5 pb-6 last:pb-0">
+                        <div className="w-[52px] shrink-0 text-right pr-3 pt-2 text-xs tabular-nums text-muted-foreground">{String(hour).padStart(2, '0')}:00</div>
+                        <span className={cn('absolute left-[48px] top-[13px] size-[9px] rounded-full ring-2 ring-background',
+                          list.some((i) => i.status === 'done') ? 'bg-emerald-500' : 'bg-amber-400')} />
+                        <ul className="flex-1 grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 pl-3">
+                          {list.map((it) => (
+                            <AchievementCard key={it.id} item={it} active={activeId === it.id} onHover={setActiveId}
+                              busy={patch.isPending} onPatch={(p) => patch.mutate({ id: it.id, p })} />
+                          ))}
+                        </ul>
+                      </li>
                     ))}
-                  </ul>
+                  </ol>
                 )}
                 <p className="text-[11px] text-muted-foreground mt-8">
                   判定基準: <code>~/.dan/workspace/ACHIEVEMENT_RULES.md</code>。直したら「再判定」。カードにマウスを乗せると 部屋を開く/昇格/戻す/非表示。見出しにマウスを乗せると詳細。
