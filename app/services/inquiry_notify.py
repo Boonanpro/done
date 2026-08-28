@@ -33,6 +33,7 @@ def _send_smtp(
     *,
     from_name: str = "株式会社パイナ お問い合わせ",
     reply_to: Optional[str] = None,
+    headers: Optional[dict] = None,
 ) -> None:
     sender = settings.GMAIL_ADDRESS
     password = settings.GMAIL_APP_PASSWORD
@@ -46,6 +47,10 @@ def _send_smtp(
     msg["To"] = to_addr
     if reply_to:
         msg["Reply-To"] = reply_to
+    # スレッド返信用 (In-Reply-To / References 等)
+    for k, v in (headers or {}).items():
+        if v:
+            msg[k] = v
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
         server.login(sender, password)

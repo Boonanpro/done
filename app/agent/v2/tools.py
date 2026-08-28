@@ -499,12 +499,15 @@ SPLIT_TO_NEW_ROOM_TOOL = {
 
 COMPOSE_MESSAGE_TOOL = {
     "name": "compose_message",
-    "description": """外部の相手（取引先・顧客・税理士など、この部屋の外の人）へ送るメッセージ（メール / Instagram DM / LINE / SMS）の文面を用意する。外部宛の文面はチャット本文に書かず、必ずこのツールで出すこと。
+    "description": """外部の相手（取引先・顧客・税理士など、この部屋の外の人）へ送るメッセージの文面を用意する。手段は問わない（メール / Instagram DM / LINE / SMS / Chatwork / Slack / Webフォーム / X DM など何でも）。外部宛の文面はチャット本文に書かず、必ずこのツールで出すこと。
+
+【返信の場合】受信したメール/DMへの返信なら reply_to_message_id（メールの Message-ID 等）と reply_to_subject を渡す。件名は不要（Re: を自動付与し、メールは同じスレッドに繋がる）。
+【フォーム送信の場合】channel="web_form"、target_url にフォームのURL、to にはフォームの持ち主（会社名など）を入れる。件名不要。
 
 【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
 
 【使い方】
-- propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。
+- propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。件名が要るのは「メールの新規送信」だけ。
 - send: 既に出した送信案を送る（ユーザーが「送って」「それでいい」と言った時）。proposal_id だけ渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。
 - mark_sent: メールではないチャネル（Instagram DM 等）をあなたが browser で送った後、送信済みとして記録する（本文は DB の現在の版）。
 - discard: 送信案を取り下げる。
@@ -515,10 +518,14 @@ COMPOSE_MESSAGE_TOOL = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["propose", "send", "mark_sent", "discard", "list"], "description": "propose=文面を出す / send=送る / mark_sent=自力送信を記録 / discard=取り下げ / list=一覧"},
-            "channel": {"type": "string", "enum": ["email", "instagram_dm", "line", "sms", "other"], "description": "propose時必須"},
-            "to": {"type": "string", "description": "propose時必須。宛先（メールアドレス / IGユーザーネーム / 電話番号など）"},
+            "channel": {"type": "string", "description": "propose時必須。email / instagram_dm / line / sms / web_form / chatwork / slack / x_dm など（自由記述可。小文字スネークケース）"},
+            "to": {"type": "string", "description": "propose時必須。宛先（メールアドレス / IGユーザーネーム / 電話番号 / フォームなら会社名など）"},
             "to_name": {"type": "string", "description": "相手の表示名（例: 山田様、株式会社◯◯ 田中様）"},
-            "subject": {"type": "string", "description": "件名（emailでは必須）"},
+            "subject": {"type": "string", "description": "件名。メールの新規送信のみ必須。返信・DM・フォームでは不要"},
+            "reply_to_message_id": {"type": "string", "description": "返信の場合: 元メッセージのID（メールなら Message-ID ヘッダ。受信通知に書かれている）"},
+            "reply_to_subject": {"type": "string", "description": "返信の場合: 元メッセージの件名（Re: を自動付与）"},
+            "target_url": {"type": "string", "description": "web_form 等: 送信先フォームのURL"},
+            "target_note": {"type": "string", "description": "web_form 等: どの欄に何を入れるか等の補足"},
             "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
@@ -3982,7 +3989,7 @@ async def _execute_compose_message(
     app.services.outbound_message_service（ユーザーの送信ボタンと同じ経路）。"""
     import asyncio as _aio
     from app.services.outbound_message_service import (
-        OutboundMessageService, CHANNELS, SERVER_SENDABLE,
+        OutboundMessageService, SERVER_SENDABLE, channel_label,
     )
 
     room_id = session_id or ""
@@ -3996,7 +4003,8 @@ async def _execute_compose_message(
         return {
             "proposal_id": row.get("id"), "status": row.get("status"),
             "channel": ad.get("channel"), "to": ad.get("to"), "to_name": ad.get("to_name"),
-            "subject": ad.get("subject"), "user_edited": bool(ad.get("user_edited")),
+            "subject": ad.get("subject"), "reply_to": ad.get("reply_to"), "target": ad.get("target"),
+            "user_edited": bool(ad.get("user_edited")),
             "sent_by": ad.get("sent_by"), "body": row.get("content"),
         }
 
@@ -4006,22 +4014,28 @@ async def _execute_compose_message(
             to = (params.get("to") or "").strip()
             body = (params.get("body") or "").strip()
             subject = (params.get("subject") or "").strip()
-            if channel not in CHANNELS:
-                return {"success": False, "error": f"channel は {', '.join(CHANNELS)} のいずれか。"}
-            if not to or not body:
-                return {"success": False, "error": "to と body は必須です。"}
-            if channel == "email" and not subject:
-                return {"success": False, "error": "email では subject が必須です。"}
+            if not channel or not to or not body:
+                return {"success": False, "error": "channel, to, body は必須です。"}
+            reply_to = {
+                "message_id": (params.get("reply_to_message_id") or "").strip() or None,
+                "subject": (params.get("reply_to_subject") or "").strip() or None,
+            }
+            target = {
+                "url": (params.get("target_url") or "").strip() or None,
+                "note": (params.get("target_note") or "").strip() or None,
+            }
             row = await _aio.to_thread(
                 svc.create_draft, user_id=user_id, room_id=room_id, channel=channel, to=to,
                 body=body, subject=subject or None, intent=params.get("intent"),
                 to_name=params.get("to_name"), from_name=params.get("from_name"),
+                reply_to=reply_to, target=target,
             )
+            channel = (row.get("action_data") or {}).get("channel") or channel
             sendable = channel in SERVER_SENDABLE
             tail = (
                 'ユーザーから「送って」と言われたら compose_message(action="send", proposal_id) で送れます。'
                 if sendable else
-                f'{CHANNELS[channel]} はサーバー送信不可。ユーザーが承認したらあなたが browser で送り、'
+                f'{channel_label(channel)} はサーバー送信不可。ユーザーが承認したらあなたが browser で送り、'
                 'compose_message(action="mark_sent", proposal_id) で記録してください。'
             )
             return {

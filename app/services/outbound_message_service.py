@@ -25,13 +25,27 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# 既知チャネルの表示名。channel は自由文字列（chatwork, slack, web_form, x_dm ...）も可。
 CHANNELS = {
     "email": "メール",
     "instagram_dm": "Instagram DM",
     "line": "LINE",
     "sms": "SMS",
+    "web_form": "Webフォーム",
     "other": "その他",
 }
+
+
+def channel_label(channel: Optional[str]) -> str:
+    c = (channel or "other").strip().lower()
+    return CHANNELS.get(c, c)
+
+
+def _reply_subject(subject: Optional[str]) -> Optional[str]:
+    if not subject:
+        return None
+    s = subject.strip()
+    return s if s.lower().startswith("re:") else f"Re: {s}"
 
 # サーバー側で実送信できるチャネル。それ以外はダンが browser 等で送って mark_sent する。
 SERVER_SENDABLE = {"email"}
@@ -100,23 +114,36 @@ class OutboundMessageService:
         to_name: Optional[str] = None,
         in_reply_to: Optional[str] = None,
         from_name: Optional[str] = None,
+        reply_to: Optional[dict] = None,
+        target: Optional[dict] = None,
     ) -> dict:
-        channel = (channel or "other").strip().lower()
-        if channel not in CHANNELS:
-            channel = "other"
-        if channel == "email" and subject and not subject.strip():
-            subject = None
+        """reply_to: 既存スレッドへの返信なら {message_id, references, subject, detected_message_id}。
+        指定時は件名不要（Re: を自動付与し、email は In-Reply-To/References でスレッドに繋ぐ）。
+        target: フォーム等の送信先 {url, note}。文面カードはそのまま、送信はダンが browser で行う。"""
+        channel = (channel or "other").strip().lower().replace(" ", "_") or "other"
+        subject = (subject or "").strip() or None
+        # CLI/MCP 経由で "<id@host>" が "&lt;id@host&gt;" に化けて届くことがある（実測 2026-08-28）
+        import html as _html
+        reply_to = {k: (_html.unescape(v).strip() if isinstance(v, str) else v)
+                    for k, v in (reply_to or {}).items() if v} or None
+        target = {k: v for k, v in (target or {}).items() if v} or None
+        if reply_to and not subject:
+            subject = _reply_subject(reply_to.get("subject"))
+        if channel == "email" and not subject and not reply_to:
+            raise ValueError("email の新規送信には subject が必要です")
         action_data: dict[str, Any] = {
             "action": "outbound_draft",
             "channel": channel,
             "to": to.strip(),
             "to_name": (to_name or "").strip() or None,
-            "subject": (subject or "").strip() or None,
+            "subject": subject,
             "intent": (intent or "").strip() or None,
             "in_reply_to": in_reply_to,
+            "reply_to": reply_to,
+            "target": target,
             "from_name": (from_name or "").strip() or None,
             "original_body": body,
-            "original_subject": (subject or "").strip() or None,
+            "original_subject": subject,
             "user_edited": False,
             "sent_by": None,
             "sent_at": None,
@@ -124,9 +151,11 @@ class OutboundMessageService:
             "ack_status": "pending",
             "ack_body": body,
         }
-        title = f"{CHANNELS[channel]}: {to_name or to}"
+        title = f"{channel_label(channel)}: {to_name or to}"
         if subject:
             title += f" / {subject}"
+        elif reply_to:
+            title += " / 返信"
         r = self.sb.table("dan_proposals").insert({
             "user_id": user_id,
             "type": "outbound",
@@ -177,7 +206,7 @@ class OutboundMessageService:
         channel = ad.get("channel") or "other"
         if channel not in SERVER_SENDABLE:
             raise ValueError(
-                f"{CHANNELS.get(channel, channel)} はサーバーから直接送信できません。"
+                f"{channel_label(channel)} はサーバーから直接送信できません。"
                 "ダンが browser で送ってから compose_message(action=\"mark_sent\") で記録してください。"
             )
         body = row["content"]
@@ -188,18 +217,26 @@ class OutboundMessageService:
         if channel == "email":
             from app.config import settings
             from app.services.inquiry_notify import _send_smtp, OWNER_REPLY_TO
-            subject = ad.get("subject") or "(件名なし)"
+            reply = ad.get("reply_to") or {}
+            subject = ad.get("subject") or _reply_subject(reply.get("subject")) or "(件名なし)"
             from_name = ad.get("from_name") or settings.DAN_DEFAULT_FROM_NAME
+            headers = {}
+            if reply.get("message_id"):
+                headers["In-Reply-To"] = reply["message_id"]
+                refs = (reply.get("references") or "").strip()
+                headers["References"] = f"{refs} {reply['message_id']}".strip()
             await asyncio.to_thread(
                 _send_smtp, to, subject, body, from_name=from_name, reply_to=OWNER_REPLY_TO,
+                headers=headers or None,
             )
             try:
                 from app.services.external_message_routing import get_external_message_routing_service
                 await get_external_message_routing_service().record_outbound(
                     user_id=user_id, channel="gmail", origin_room_id=row["source_room_id"],
                     external_recipient_id=to,
+                    external_thread_id=(ad.get("reply_to") or {}).get("message_id"),
                     metadata={"via": "outbound_card", "proposal_id": proposal_id, "sent_by": sent_by,
-                              "subject": subject},
+                              "subject": subject, "reply_to": ad.get("reply_to")},
                 )
             except Exception:
                 logger.warning("record_outbound failed for %s", proposal_id, exc_info=True)
@@ -251,7 +288,7 @@ class OutboundMessageService:
     def _sent_event_text(self, row: dict, ad: dict) -> str:
         who = "ユーザーが送信ボタンで送信" if ad.get("sent_by") == "user" else "ダンが送信"
         edited = "・ユーザーが本文を修正" if ad.get("user_edited") else ""
-        ch = CHANNELS.get(ad.get("channel") or "other", "その他")
+        ch = channel_label(ad.get("channel"))
         head = f"📤 {ch}を送信済み（{who}{edited}・{_jst_label(ad.get('sent_at'))}）\n"
         head += f"宛先: {ad.get('to_name') or ''} {ad.get('to') or ''}".rstrip() + "\n"
         if ad.get("subject"):
@@ -274,7 +311,7 @@ class OutboundMessageService:
             body = row.get("content") or ""
             if ad.get("ack_status") == status and ad.get("ack_body") == body:
                 continue
-            label = f"{CHANNELS.get(ad.get('channel') or 'other')} → {ad.get('to_name') or ad.get('to')}"
+            label = f"{channel_label(ad.get('channel'))} → {ad.get('to_name') or ad.get('to')}"
             if ad.get("subject"):
                 label += f"「{ad['subject']}」"
             if status == "pending":

@@ -22,8 +22,13 @@ const CHANNEL_LABEL: Record<string, string> = {
   instagram_dm: 'Instagram DM',
   line: 'LINE',
   sms: 'SMS',
+  web_form: 'Webフォーム',
+  chatwork: 'Chatwork',
+  slack: 'Slack',
+  x_dm: 'X DM',
   other: 'メッセージ',
 };
+const channelLabel = (c: string) => CHANNEL_LABEL[c] || c;
 
 // サーバーから直接送れるチャネル。それ以外はダンが browser で送る（カードは承認用）。
 const SERVER_SENDABLE = new Set(['email']);
@@ -36,6 +41,8 @@ type ActionData = {
   intent?: string | null;
   from_name?: string | null;
   original_body?: string;
+  reply_to?: { message_id?: string; subject?: string } | null;
+  target?: { url?: string; note?: string } | null;
   user_edited?: boolean;
   sent_by?: 'user' | 'dan' | null;
   sent_at?: string | null;
@@ -63,6 +70,9 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
   const channel = ad.channel || 'other';
   const pending = proposal?.status === 'pending';
   const sendable = SERVER_SENDABLE.has(channel);
+  const isReply = !!ad.reply_to?.message_id || !!ad.reply_to?.subject;
+  // 件名欄はメールの新規送信だけ。返信は Re: 自動、DM/フォームは件名そのものが無い。
+  const showSubject = channel === 'email' && !isReply;
 
   // ローカル編集状態（サーバー値と同期）
   const [body, setBody] = useState('');
@@ -93,7 +103,7 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
         setSaving(true);
         const updated = await api.proposals.updateDraft(proposalId, {
           body,
-          ...(channel === 'email' ? { subject } : {}),
+          ...(showSubject ? { subject } : {}),
         });
         queryClient.setQueryData(queryKey, updated);
         lastServer.current = { body, subject };
@@ -113,13 +123,13 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
     if (!dirty) return;
     const updated = await api.proposals.updateDraft(proposalId, {
       body,
-      ...(channel === 'email' ? { subject } : {}),
+      ...(showSubject ? { subject } : {}),
     });
     queryClient.setQueryData(queryKey, updated);
     lastServer.current = { body, subject };
     setDirty(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, body, subject, proposalId, channel]);
+  }, [dirty, body, subject, proposalId, showSubject]);
 
   const sendMutation = useMutation({
     mutationFn: async () => {
@@ -182,7 +192,8 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
         <Icon className="h-4 w-4 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium text-foreground">
-            {CHANNEL_LABEL[channel] || channel}
+            {channelLabel(channel)}
+            {isReply ? '（返信）' : ''}
             {ad.intent ? <span className="text-muted-foreground"> — {ad.intent}</span> : null}
           </div>
           <div className="truncate text-[11px] text-muted-foreground">
@@ -190,6 +201,18 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
             <span className="font-mono">{ad.to}</span>
             {ad.from_name ? ` ／ 差出人: ${ad.from_name}` : ''}
           </div>
+          {isReply && ad.reply_to?.subject && (
+            <div className="truncate text-[11px] text-muted-foreground">返信先: {ad.reply_to.subject}</div>
+          )}
+          {ad.target?.url && (
+            <div className="truncate text-[11px] text-muted-foreground">
+              送信先:{' '}
+              <a href={ad.target.url} target="_blank" rel="noopener noreferrer" className="underline">
+                {ad.target.url}
+              </a>
+              {ad.target.note ? ` — ${ad.target.note}` : ''}
+            </div>
+          )}
         </div>
         <div className="shrink-0 text-[11px]">
           {sent && (
@@ -211,7 +234,7 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
 
       {/* 本文 */}
       <div className="flex flex-col gap-2 px-3 py-2">
-        {channel === 'email' && (
+        {showSubject && (
           pending ? (
             <input
               value={subject}
@@ -250,7 +273,7 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
             </button>
           ) : (
             <span className="text-xs text-muted-foreground">
-              {CHANNEL_LABEL[channel]} はここから直接送れません。チャットで「送って」と言えばダンが送ります。
+              {channelLabel(channel)} はここから直接送れません。チャットで「送って」と言えばダンが送ります。
             </span>
           )}
           <button
