@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = int(os.environ.get("DAN_ACHIEVEMENT_POLL_INTERVAL", "300"))
 WAKE_DEBOUNCE = 8  # ターン完了通知から判定までの猶予 (メッセージ保存を待つ)
-ILLUST_ENABLED = os.environ.get("DAN_ACHIEVEMENT_ILLUST", "1") == "1"
+ILLUST_ENABLED = os.environ.get("DAN_ACHIEVEMENT_ILLUST", "0") == "1"  # 既定OFF (ユーザー判断: 文字だけで良い)
 ILLUST_PER_CYCLE = int(os.environ.get("DAN_ACHIEVEMENT_ILLUST_PER_CYCLE", "3"))
 
 _started = False

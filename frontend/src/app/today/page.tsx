@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Loader2, RefreshCw, ChevronLeft, ChevronRight, MessageSquare,
   Mail, X, ArrowUpCircle, Clock, Rocket, Wrench, Hammer, Search, Banknote, FileText,
-  MessagesSquare, Palette, Clapperboard, KeyRound, Sparkles, Image as ImageIcon, ImageOff,
+  MessagesSquare, Palette, Clapperboard, KeyRound, Sparkles,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -20,7 +20,6 @@ import { useProjectStore } from '@/stores/project-store';
 import { cn } from '@/lib/utils';
 
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
-const ILLUST_PREF_KEY = 'today-illust';
 
 const ICONS: Record<string, { Icon: LucideIcon; label: string }> = {
   mail: { Icon: Mail, label: '連絡' },
@@ -138,64 +137,43 @@ function DayClock({ items, isToday, activeId, onHover }: {
 
 // ---------------------------------------------------------------- card
 
-function AchievementCard({ item, showIllust, active, onHover, onPatch, onIllustrate, busy }: {
-  item: AchievementItem; showIllust: boolean; active: boolean; onHover: (id: string | null) => void;
-  onPatch: (p: Record<string, unknown>) => void; onIllustrate: () => void; busy: boolean;
+function AchievementCard({ item, active, onHover, onPatch, busy }: {
+  item: AchievementItem; active: boolean; onHover: (id: string | null) => void;
+  onPatch: (p: Record<string, unknown>) => void; busy: boolean;
 }) {
   const router = useRouter();
   const selectProject = useProjectStore((s) => s.selectProject);
   const done = item.status === 'done';
   const { Icon, label } = ICONS[item.icon] ?? ICONS.other;
-  const [imgFailed, setImgFailed] = useState(false);
-  const hasIllust = showIllust && done && item.illustration_status === 'done' && !imgFailed;
   const room = item.evidence.find((e) => e.kind === 'room' && e.ref);
 
   return (
-    <li className={cn('group rounded-xl border overflow-hidden bg-card transition-shadow', active && 'ring-2 ring-emerald-500/60', !done && 'border-dashed border-amber-400/60')}
+    <li className={cn('group relative rounded-xl border bg-card p-4 flex flex-col gap-3 transition-shadow',
+        active && 'ring-2 ring-emerald-500/60', !done && 'border-dashed border-amber-400/60')}
         onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)}>
-      {/* 画像 */}
-      <div className={cn('relative aspect-[4/3] bg-muted/40 flex items-center justify-center', !showIllust && 'aspect-auto h-14')}>
-        {hasIllust ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={api.achievements.illustrationUrl(item.id, item.updated_at)} alt="" className="absolute inset-0 w-full h-full object-cover" onError={() => setImgFailed(true)} />
-        ) : showIllust && done && item.illustration_status === 'pending' ? (
-          <Loader2 className="size-5 animate-spin text-muted-foreground" />
-        ) : showIllust && done ? (
-          <button type="button" className="text-xs text-muted-foreground flex flex-col items-center gap-1 hover:text-foreground" disabled={busy} onClick={onIllustrate} title="挿絵を生成 (約3円)">
-            <ImageIcon className="size-6" />生成
-          </button>
-        ) : (
-          <Icon className={cn('size-8', done ? 'text-emerald-500/70' : 'text-amber-400/70')} />
-        )}
-        {/* 時刻・種別バッジ */}
-        <div className="absolute top-2 left-2 flex items-center gap-1.5">
-          <span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium backdrop-blur',
-            done ? 'bg-emerald-600/90 text-white' : 'bg-amber-500/90 text-black')}>
-            <Icon className="size-3" />{fmtTime(itemTime(item))}
-          </span>
-          {!done && <span className="rounded-full bg-black/60 text-amber-300 px-2 py-0.5 text-[11px] backdrop-blur">進行中</span>}
-          {item.tags.map((t) => <span key={t} className="rounded-full bg-black/60 text-white px-2 py-0.5 text-[11px] backdrop-blur">{t}</span>)}
-        </div>
-        {/* 操作 (hover) */}
-        <div className="absolute top-2 right-2 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          {room && (
-            <Button variant="secondary" size="icon" className="size-7" title={`部屋を開く: ${room.label}`}
-              onClick={() => { selectProject(room.ref); router.push(`/chat/${room.ref}`); }}>
-              <MessageSquare className="size-3.5" />
-            </Button>
-          )}
-          {!done ? (
-            <Button variant="secondary" size="icon" className="size-7" title="成果に昇格" disabled={busy} onClick={() => onPatch({ status: 'done' })}><ArrowUpCircle className="size-3.5" /></Button>
-          ) : (
-            <Button variant="secondary" size="icon" className="size-7" title="進行中に戻す" disabled={busy} onClick={() => onPatch({ status: 'in_progress' })}><Clock className="size-3.5" /></Button>
-          )}
-          <Button variant="secondary" size="icon" className="size-7" title="これは成果ではない (非表示)" disabled={busy} onClick={() => onPatch({ status: 'dismissed' })}><X className="size-3.5" /></Button>
-        </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+          done ? 'bg-emerald-600/90 text-white' : 'bg-amber-500/90 text-black')}>
+          <Icon className="size-3" />{fmtTime(itemTime(item))}
+        </span>
+        <span className="text-[11px] text-muted-foreground">{label}</span>
+        {!done && <span className="rounded-full border border-amber-400/60 text-amber-500 px-2 py-0.5 text-[11px]">進行中</span>}
+        {item.tags.map((t) => <span key={t} className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{t}</span>)}
       </div>
-      {/* 見出し */}
-      <div className="px-3 py-2.5">
-        <h3 className={cn('font-medium leading-snug text-[15px]', !done && 'text-foreground/75')} title={item.detail ?? undefined}>{item.title}</h3>
-        <p className="text-[11px] text-muted-foreground mt-1">{label}</p>
+      <h3 className={cn('font-medium leading-snug text-[17px]', !done && 'text-foreground/75')} title={item.detail ?? undefined}>{item.title}</h3>
+      <div className="absolute top-2 right-2 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+        {room && (
+          <Button variant="secondary" size="icon" className="size-7" title={`部屋を開く: ${room.label}`}
+            onClick={() => { selectProject(room.ref); router.push(`/chat/${room.ref}`); }}>
+            <MessageSquare className="size-3.5" />
+          </Button>
+        )}
+        {!done ? (
+          <Button variant="secondary" size="icon" className="size-7" title="成果に昇格" disabled={busy} onClick={() => onPatch({ status: 'done' })}><ArrowUpCircle className="size-3.5" /></Button>
+        ) : (
+          <Button variant="secondary" size="icon" className="size-7" title="進行中に戻す" disabled={busy} onClick={() => onPatch({ status: 'in_progress' })}><Clock className="size-3.5" /></Button>
+        )}
+        <Button variant="secondary" size="icon" className="size-7" title="これは成果ではない (非表示)" disabled={busy} onClick={() => onPatch({ status: 'dismissed' })}><X className="size-3.5" /></Button>
       </div>
     </li>
   );
@@ -220,19 +198,12 @@ export default function TodayPage() {
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
   const [day, setDay] = useState<string | undefined>(undefined);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [showIllust, setShowIllust] = useState(true);
 
   useEffect(() => {
     if (!isAuthenticated && !hasToken) router.push('/login');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, hasToken]);
 
-  useEffect(() => {
-    try { const v = localStorage.getItem(ILLUST_PREF_KEY); if (v !== null) setShowIllust(v === '1'); } catch { /* noop */ }
-  }, []);
-  const toggleIllust = () => {
-    setShowIllust((v) => { try { localStorage.setItem(ILLUST_PREF_KEY, v ? '0' : '1'); } catch { /* noop */ } return !v; });
-  };
 
   const q = useQuery({
     queryKey: ['achievements', day ?? 'today'],
@@ -254,10 +225,6 @@ export default function TodayPage() {
   const patch = useMutation({
     mutationFn: ({ id, p }: { id: string; p: Record<string, unknown> }) => api.achievements.patch(id, p),
     onSuccess: invalidate, onError: () => toast.error('更新に失敗しました'),
-  });
-  const illustrate = useMutation({
-    mutationFn: (id: string) => api.achievements.illustrate(id),
-    onSuccess: invalidate, onError: () => toast.error('挿絵の生成に失敗しました'),
   });
   const refresh = useMutation({
     mutationFn: () => api.achievements.refresh(),
@@ -288,10 +255,6 @@ export default function TodayPage() {
             </p>
           </div>
           <div className="flex items-center gap-1">
-            <Button variant={showIllust ? 'secondary' : 'ghost'} size="sm" onClick={toggleIllust} title="挿絵の表示/非表示">
-              {showIllust ? <ImageIcon className="size-4" /> : <ImageOff className="size-4" />}
-              <span className="ml-1">イラスト</span>
-            </Button>
             <Button variant="ghost" size="icon" title="前日" onClick={() => viewDay && setDay(shiftDay(viewDay, -1))}>
               <ChevronLeft className="size-4" />
             </Button>
@@ -328,15 +291,13 @@ export default function TodayPage() {
                 ) : (
                   <ul className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
                     {items.map((it) => (
-                      <AchievementCard key={it.id} item={it} showIllust={showIllust} active={activeId === it.id} onHover={setActiveId}
-                        busy={patch.isPending || illustrate.isPending}
-                        onPatch={(p) => patch.mutate({ id: it.id, p })}
-                        onIllustrate={() => illustrate.mutate(it.id)} />
+                      <AchievementCard key={it.id} item={it} active={activeId === it.id} onHover={setActiveId}
+                        busy={patch.isPending} onPatch={(p) => patch.mutate({ id: it.id, p })} />
                     ))}
                   </ul>
                 )}
                 <p className="text-[11px] text-muted-foreground mt-8">
-                  判定基準: <code>~/.dan/workspace/ACHIEVEMENT_RULES.md</code>。直したら「再判定」。カードにマウスを乗せると 部屋を開く/昇格/戻す/非表示。見出しにマウスを乗せると詳細。挿絵は成果になった件だけ自動生成（1枚約3円）。
+                  判定基準: <code>~/.dan/workspace/ACHIEVEMENT_RULES.md</code>。直したら「再判定」。カードにマウスを乗せると 部屋を開く/昇格/戻す/非表示。見出しにマウスを乗せると詳細。
                 </p>
               </div>
             </div>
