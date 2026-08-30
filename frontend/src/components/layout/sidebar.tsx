@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, CalendarCheck, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
+import { MessageSquare, Users, Settings, CalendarCheck, BookOpen, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -68,6 +68,12 @@ const navItems = [
     href: '/today',
     icon: CalendarCheck,
     description: '今日やったこと (自動更新)',
+  },
+  {
+    title: '物語',
+    href: '/api/v1/story',
+    icon: BookOpen,
+    description: 'ダン開発の物語 (週ごとの日記・新しいタブ)',
   },
   {
     title: '設定',
@@ -659,7 +665,7 @@ export function Sidebar({
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
               const showBadge = item.href === '/collab' && unreadCount > 0;
-              const openInNewTab = item.href === '/dan-notion';
+              const openInNewTab = item.href === '/dan-notion' || item.href === '/api/v1/story';
               const LinkWrapper = openInNewTab
                 ? ({ children }: { children: React.ReactNode }) => (
                     <a href={item.href} target="_blank" rel="noopener noreferrer">

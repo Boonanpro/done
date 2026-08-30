@@ -118,6 +118,11 @@ const nextConfig: NextConfig = {
         source: '/api/v1/achievements/:path*',
         destination: `${coreBackendUrl}/api/v1/achievements/:path*`,
       },
+      // ダン開発の物語 (静的HTMLをダンコア経由で配信)
+      {
+        source: '/api/v1/story',
+        destination: `${coreBackendUrl}/api/v1/story`,
+      },
       // 上記以外の /api/* は業務系サンドボックスへ
       {
         source: '/api/:path*',

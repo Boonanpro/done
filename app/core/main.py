@@ -195,6 +195,8 @@ app.include_router(realtime_ws_router)  # /ws/realtime-delegate
 app.include_router(public_chat_router, prefix="/api/v1")
 from app.api.daily_achievements_routes import router as achievements_router  # noqa: E402
 app.include_router(achievements_router, prefix="/api/v1")
+from app.api.story_routes import router as story_router  # noqa: E402
+app.include_router(story_router, prefix="/api/v1")
 
 
 @app.get("/")
