@@ -226,19 +226,31 @@ class OutboundMessageService:
 
         if channel == "email":
             from app.config import settings
-            from app.services.inquiry_notify import _send_smtp, OWNER_REPLY_TO
             reply = ad.get("reply_to") or {}
             subject = ad.get("subject") or _reply_subject(reply.get("subject")) or "(件名なし)"
             from_name = ad.get("from_name") or settings.DAN_DEFAULT_FROM_NAME
-            headers = {}
-            if reply.get("message_id"):
-                headers["In-Reply-To"] = reply["message_id"]
-                refs = (reply.get("references") or "").strip()
-                headers["References"] = f"{refs} {reply['message_id']}".strip()
-            await asyncio.to_thread(
-                _send_smtp, to, subject, body, from_name=from_name, reply_to=OWNER_REPLY_TO,
-                headers=headers or None,
-            )
+            acct = (ad.get("from_account") or "").strip().lower().lstrip("@")
+            if acct in ("gmail2", "icloud"):
+                # 相手が普段やり取りしているアドレスから出す。send_tracked_email が
+                # スレッド返信ヘッダ・送信済みフォルダへの控え・返信照合まで面倒を見る。
+                from app.services.email_send import send_tracked_email
+                await asyncio.to_thread(
+                    send_tracked_email, to, subject, body,
+                    user_id=user_id, origin_room_id=row["source_room_id"],
+                    from_name=from_name, from_account=acct,
+                    in_reply_to=reply.get("message_id"),
+                )
+            else:
+                from app.services.inquiry_notify import _send_smtp, OWNER_REPLY_TO
+                headers = {}
+                if reply.get("message_id"):
+                    headers["In-Reply-To"] = reply["message_id"]
+                    refs = (reply.get("references") or "").strip()
+                    headers["References"] = f"{refs} {reply['message_id']}".strip()
+                await asyncio.to_thread(
+                    _send_smtp, to, subject, body, from_name=from_name, reply_to=OWNER_REPLY_TO,
+                    headers=headers or None,
+                )
             try:
                 from app.services.external_message_routing import get_external_message_routing_service
                 await get_external_message_routing_service().record_outbound(
