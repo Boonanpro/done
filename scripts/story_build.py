@@ -435,6 +435,9 @@ def build_prompt(key: str, ev: Dict[str, Any], prev: Optional[Dict[str, Any]]) -
     prev_txt = ""
     if prev:
         prev_txt = f"## 前の週 ({prev.get('week')}) の要約 (文脈用。繰り返さない)\n{prev.get('title')}: {_trunc(prev.get('body'), 400)}\n\n"
+        unresolved = [t for t in prev.get("tried") or [] if t.get("result") in ("未決着", "放置")]
+        if unresolved:
+            prev_txt += "### 前週の未決着 (今週どうなったか必ず判定し tried に入れる。動きが無ければ result:放置 で再掲)" + chr(10) + json.dumps(unresolved, ensure_ascii=False) + chr(10)
     return (
         "あなたは開発者本人の代わりに「ダン（自分専用AIエージェント）開発の物語」の1週間ぶんの日記を書く係です。\n\n"
         f"## 書き方の規則\n{load_rules()}\n\n"
@@ -450,7 +453,7 @@ def build_prompt(key: str, ev: Dict[str, Any], prev: Optional[Dict[str, Any]]) -
         "- cli: ターミナルの Claude Code に本人が打った指示\n"
         f"{json.dumps({k: v for k, v in ev.items() if k != 'stats'}, ensure_ascii=False)}\n\n"
         f"## 統計\n{json.dumps(ev['stats'], ensure_ascii=False)}\n\n"
-        "## 出力\nJSON オブジェクトだけを出力 (前後に説明・コードフェンス禁止)。キー: title, body, stumbles(配列), turning_point(文字列, 無ければ空), evidence(配列)。"
+        "## 出力\nJSON オブジェクトだけを出力 (前後に説明・コードフェンス禁止)。キー: title, body, stumbles(配列), turning_point(文字列, 無ければ空), tried(配列: {what, why, result: 成功|失敗|未決着|放置, note}), ability_delta(文字列), evidence(配列)。"
     )
 
 
@@ -475,11 +478,19 @@ def judge_week(key: str, ev: Dict[str, Any], prev: Optional[Dict[str, Any]]) -> 
     if not obj or not obj.get("title"):
         log(f"judge failed {key}: {_trunc(text, 200)}")
         return None
+    tried = []
+    for t in obj.get("tried") or []:
+        if isinstance(t, dict) and str(t.get("what") or "").strip():
+            tried.append({"what": _trunc(t.get("what"), 90), "why": _trunc(t.get("why"), 160),
+                          "result": t.get("result") if t.get("result") in ("成功", "失敗", "未決着", "放置") else "未決着",
+                          "note": _trunc(t.get("note"), 160)})
     return {
         "title": _trunc(obj.get("title"), 60),
         "body": str(obj.get("body") or "").strip(),
         "stumbles": [str(x) for x in obj.get("stumbles") or [] if str(x).strip()],
         "turning_point": str(obj.get("turning_point") or "").strip(),
+        "tried": tried[:24],
+        "ability_delta": _trunc(obj.get("ability_delta"), 240),
         "evidence": [e for e in obj.get("evidence") or [] if isinstance(e, dict)][:16],
     }
 
@@ -511,7 +522,7 @@ def build_week(key: str, force: bool = False, dry: bool = False) -> Optional[Dic
     s, e = week_bounds(key)
     if not has_evidence(ev):
         rec = {"week": key, "start": s.isoformat(), "end": e.isoformat(), "empty": True,
-               "title": "動いていない週", "body": "", "stumbles": [], "turning_point": "", "evidence": [],
+               "title": "動いていない週", "body": "", "stumbles": [], "turning_point": "", "tried": [], "ability_delta": "", "evidence": [],
                "stats": ev["stats"], "provisional": provisional, "generated_at": datetime.now(JST).isoformat()}
         if not dry:
             WEEKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -543,17 +554,21 @@ def build_week(key: str, force: bool = False, dry: bool = False) -> Optional[Dic
 def build_chapters(weeks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     from app.agent.cli_runner import run_oneshot_cli
     items = [{"week": w["week"], "start": w["start"], "title": w["title"], "summary": _trunc(w.get("body"), 260),
-              "turning_point": w.get("turning_point") or ""} for w in weeks if not w.get("empty")]
+              "turning_point": w.get("turning_point") or "",
+              "ability_delta": w.get("ability_delta") or "",
+              "tried": [{"what": t.get("what"), "result": t.get("result")} for t in w.get("tried") or []]}
+             for w in weeks if not w.get("empty")]
     if not items:
         return None
     prompt = (
         "以下は「ダン（自分専用AIエージェント）開発」の週ごとの日記の要約です（本人の一人称）。"
         "これを 4〜9 個の「章」に区切り、章ごとに題名と 2〜3 文のあらすじを本人の一人称で書いてください。"
         "章の区切りは方針転換・新しい柱の着手・大きな事故など、物語として意味のある節目に。"
-        "全体を通した「これまでのあらすじ」も 5〜8 文で。証拠に無いことは書かない。\n\n"
+        "全体を通した「これまでのあらすじ」も 5〜8 文で。証拠に無いことは書かない。"
+        "各章に加えて abilities: その章が終わった時点で本当にダンにできること (3〜8個、ability_delta と本文の積み上げから)。faded: その章の間に始まったが以降語られなくなった/放置になった構想・機能 ({name, why_started, last_week})。tried の result=放置 や後の週に現れない what が候補。無ければ空配列。\n\n"
         f"{json.dumps(items, ensure_ascii=False)}\n\n"
         "JSON だけを出力 (コードフェンス禁止):\n"
-        '{"synopsis":"…","chapters":[{"title":"…","from_week":"2025-W45","to_week":"2025-W50","summary":"…"}]}'
+        '{"synopsis":"…","chapters":[{"title":"…","from_week":"2025-W45","to_week":"2025-W50","summary":"…","abilities":["…"],"faded":[{"name":"…","why_started":"…","last_week":"…"}]}]}'
     )
     obj = _parse_json(run_oneshot_cli(prompt, model=MODEL, timeout=420))
     if not obj or not obj.get("chapters"):
@@ -586,7 +601,7 @@ h2.ch{font-size:20px;margin:44px 0 6px;padding-top:18px;border-top:2px solid var
 .body{white-space:pre-wrap}.st{margin:10px 0 0;padding:10px 14px;border-left:3px solid var(--red);background:color-mix(in srgb,var(--red) 8%,transparent);border-radius:6px;font-size:14px}
 .tp{margin:10px 0 0;padding:10px 14px;border-left:3px solid var(--acc);background:color-mix(in srgb,var(--acc) 8%,transparent);border-radius:6px;font-size:14px}
 .ev{margin-top:10px;font-size:12px;color:var(--mut)}.ev span{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin:2px 4px 2px 0}
-.stats{font-size:11px;color:var(--mut);margin-top:6px}.foot{color:var(--mut);font-size:12px;margin-top:50px}
+.tried{margin-top:10px;font-size:13px}.tried li{margin:2px 0;color:var(--mut)}.tried .r{display:inline-block;width:4.2em;font-size:11px;border-radius:5px;text-align:center;padding:0 4px;margin-right:6px}.r-ok{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}.r-ng{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}.r-wip{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}.r-drop{background:var(--line);color:var(--mut)}.tried .why{opacity:.8}.abil{margin:10px 0 0;padding:10px 14px;border-left:3px solid #7aa2ff;background:color-mix(in srgb,#7aa2ff 8%,transparent);border-radius:6px;font-size:14px}.chmeta{font-size:13px;color:var(--mut);margin:0 0 14px}.chmeta b{color:var(--fg)}.chmeta .faded-x{color:var(--red)}.stats{font-size:11px;color:var(--mut);margin-top:6px}.foot{color:var(--mut);font-size:12px;margin-top:50px}
 """
 
 
@@ -607,6 +622,16 @@ def render(weeks: List[Dict[str, Any]], chapters: Optional[Dict[str, Any]]) -> P
             parts.append('<div class="st">つまずき: ' + " ／ ".join(esc(x) for x in w["stumbles"]) + "</div>")
         if w.get("turning_point"):
             parts.append(f'<div class="tp">転機: {esc(w["turning_point"])}</div>')
+        if w.get("tried"):
+            rmap = {"成功": "r-ok", "失敗": "r-ng", "未決着": "r-wip", "放置": "r-drop"}
+            lis = []
+            for t in w["tried"]:
+                why = f' <span class="why">— {esc(t.get("why"))}</span>' if t.get("why") else ""
+                note = f' <span class="why">({esc(t.get("note"))})</span>' if t.get("note") else ""
+                lis.append(f'<li><span class="r {rmap.get(t.get("result"), "r-wip")}">{esc(t.get("result"))}</span>{esc(t.get("what"))}{why}{note}</li>')
+            parts.append('<details class="tried"><summary style="cursor:pointer;color:var(--mut);font-size:12px">やろうとしたこと ' + str(len(lis)) + ' 件</summary><ul style="margin:6px 0 0;padding-left:18px">' + "".join(lis) + "</ul></details>")
+        if w.get("ability_delta"):
+            parts.append(f'<div class="abil">この週の変化: {esc(w["ability_delta"])}</div>')
         if w.get("evidence"):
             parts.append('<div class="ev">' + "".join(f'<span title="{esc(e.get("ref"))}">{esc(e.get("kind"))}: {esc(e.get("label") or e.get("ref"))}</span>' for e in w["evidence"]) + "</div>")
         parts.append(f'<div class="stats">{stats}</div></article>')
@@ -627,6 +652,14 @@ def render(weeks: List[Dict[str, Any]], chapters: Optional[Dict[str, Any]]) -> P
         for i, c in enumerate(chs):
             out.append(f'<h2 class="ch" id="ch{i}">{esc(c.get("title"))} <small style="font-weight:400;color:var(--mut);font-size:12px">{esc(c.get("from_week"))} 〜 {esc(c.get("to_week"))}</small></h2>')
             out.append(f'<p class="chsum">{esc(c.get("summary"))}</p>')
+            meta = []
+            if c.get("abilities"):
+                meta.append("<b>この時点のダンにできること:</b> " + " ／ ".join(esc(a) for a in c["abilities"]))
+            if c.get("faded"):
+                meta.append('<span class="faded-x"><b>立ち消えたもの:</b> ' + " ／ ".join(
+                    esc(f.get("name")) + (f"（{esc(f.get('why_started'))}）" if f.get("why_started") else "") for f in c["faded"]) + "</span>")
+            if meta:
+                out.append('<p class="chmeta">' + "<br>".join(meta) + "</p>")
             for k in keys:
                 if c.get("from_week", "") <= k <= c.get("to_week", "") and k not in covered:
                     covered.add(k)
