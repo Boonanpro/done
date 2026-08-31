@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 TABLE = "pending_followups"
 
 MIN_DELAY_SECONDS = 15
-MAX_ACTIVE_PER_ROOM = 12              # rate limit: reschedule loops can't run away
+MAX_ACTIVE_PER_ROOM = 100             # runaway-loop guard only; normal use should never hit this
 MIN_EVERY_INTERVAL = 300              # recurring watches: 5min floor
 MIN_MAIL_INTERVAL = 300               # mail checks: 5min floor
 DEFAULT_MAIL_INTERVAL = 600           # mail checks: 10min default
