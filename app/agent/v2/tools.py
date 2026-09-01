@@ -509,16 +509,17 @@ COMPOSE_MESSAGE_TOOL = {
 
 【使い方】
 - propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。件名が要るのは「メールの新規送信」だけ。
-- send: 既に出した送信案を送る（ユーザーが「送って」「それでいい」と言った時）。proposal_id だけ渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。
-- mark_sent: メールではないチャネル（Instagram DM 等）をあなたが browser で送った後、送信済みとして記録する（本文は DB の現在の版）。
+- send: 既に出した送信案を送る（ユーザーが「送って」「それでいい」と言った時）。proposal_id だけ渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
+- mark_sent: あなたが browser 等で自力送信した後、送信済みとして確定する（本文は DB の現在の版）。
+- release: 手動送信に失敗した時、「送信中」ロックを解除して下書きに戻す。
 - discard: 送信案を取り下げる。
 - list: この部屋の送信案（未送信/送信済み）を確認する。
 
-【規律】ユーザーが「送っておいて」と先に言っていた場合も、propose → 同じターン内で send の順で呼ぶ（本文をカードとして残すため）。相手の返事を待つなら送信後に watch を登録する。""",
+【規律】ユーザーが「送っておいて」と先に言っていた場合も、propose → 同じターン内で send の順で呼ぶ（本文をカードとして残すため）。外部宛の送信は必ずこのツールを通すこと。カードを無視して記憶の本文を browser で送ってはいけない（ユーザーの編集が反映されず、カードも未送信のまま残って二重送信の原因になる）。相手の返事を待つなら送信後に watch を登録する。""",
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["propose", "send", "mark_sent", "discard", "list"], "description": "propose=文面を出す / send=送る / mark_sent=自力送信を記録 / discard=取り下げ / list=一覧"},
+            "action": {"type": "string", "enum": ["propose", "send", "mark_sent", "release", "discard", "list"], "description": "propose=文面を出す / send=送る（手動チャネルはロック＋本文取得）/ mark_sent=自力送信を確定 / release=ロック解除 / discard=取り下げ / list=一覧"},
             "channel": {"type": "string", "description": "propose時必須。email / instagram_dm / line / sms / web_form / chatwork / slack / x_dm など（自由記述可。小文字スネークケース）"},
             "to": {"type": "string", "description": "propose時必須。宛先（メールアドレス / IGユーザーネーム / 電話番号 / フォームなら会社名など）"},
             "to_name": {"type": "string", "description": "相手の表示名（例: 山田様、株式会社◯◯ 田中様）"},
@@ -4044,8 +4045,9 @@ async def _execute_compose_message(
             tail = (
                 'ユーザーから「送って」と言われたら compose_message(action="send", proposal_id) で送れます。'
                 if sendable else
-                f'{channel_label(channel)} はサーバー送信不可。ユーザーが承認したらあなたが browser で送り、'
-                'compose_message(action="mark_sent", proposal_id) で記録してください。'
+                f'{channel_label(channel)} はサーバー送信不可。ユーザーが承認したらまず compose_message(action="send", proposal_id) を呼ぶこと'
+                '（カードがロックされ、送るべき本文が返る）→ その本文を browser で送る → action="mark_sent" で確定。'
+                '記憶の本文を直接 browser で送ってはいけない。'
             )
             return {
                 "success": True, "proposal_id": row["id"],
@@ -4061,7 +4063,26 @@ async def _execute_compose_message(
             if not pid:
                 return {"success": False, "error": "proposal_id が必要です。"}
             row = await svc.send(pid, user_id, sent_by="dan")
+            if row.get("status") == "sending":
+                # 手動チャネル: 送信の代わりにカードをロックして本文を渡した。
+                # ダンはこの本文（＝ユーザーの編集を反映した版）をそのまま送ること。
+                return {
+                    "success": True, "locked": True, "draft": _brief(row),
+                    "message": (
+                        "このチャネルはサーバーから送れないため、カードを「送信中」にロックしました"
+                        "（ユーザーはもう押せません）。上の draft の本文を一字も変えずに browser で送り、"
+                        '送れたら compose_message(action="mark_sent", proposal_id) で確定、'
+                        '送れなかったら action="release" で下書きに戻すこと。'
+                    ),
+                }
             return {"success": True, "message": "送信しました（DBの現在本文＝ユーザーの編集を反映した版）。", "sent": _brief(row)}
+
+        if action == "release":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            row = await _aio.to_thread(svc.release, pid, user_id)
+            return {"success": True, "message": "ロックを解除し、下書き（編集・送信可能）に戻しました。", "draft": _brief(row)}
 
         if action == "mark_sent":
             pid = (params.get("proposal_id") or "").strip()
@@ -4082,7 +4103,7 @@ async def _execute_compose_message(
             items = [_brief(r) for r in rows]
             return {"success": True, "count": len(items), "drafts": items}
 
-        return {"success": False, "error": "action は propose/send/mark_sent/discard/list のいずれか。"}
+        return {"success": False, "error": "action は propose/send/mark_sent/release/discard/list のいずれか。"}
     except ValueError as e:
         return {"success": False, "error": str(e)}
     except Exception as e:

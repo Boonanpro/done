@@ -180,13 +180,14 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
   const label = channelLabel(channel);
   const status = proposal.status as string;
   const sent = status === 'sent';
+  const sending = status === 'sending'; // ダンが手動送信のためロック中（編集・送信不可）
   const discarded = status === 'rejected';
   const busy = sendMutation.isPending || discardMutation.isPending;
 
   return (
     <div
       className={`my-1 w-full max-w-[640px] overflow-hidden rounded-xl border bg-card shadow-sm ${
-        sent ? 'border-emerald-500/40' : discarded ? 'border-border opacity-60' : 'border-primary/40'
+        sent ? 'border-emerald-500/40' : sending ? 'border-amber-500/40' : discarded ? 'border-border opacity-60' : 'border-primary/40'
       }`}
     >
       {/* ヘッダ */}
@@ -230,6 +231,12 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
               送信済み {fmtTime(ad.sent_at)}
               {ad.sent_by === 'user' ? '（あなた）' : '（ダン）'}
               {ad.user_edited ? '・修正あり' : ''}
+            </span>
+          )}
+          {sending && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-600 dark:text-amber-400">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              送信中（ダンが送信しています）
             </span>
           )}
           {discarded && <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground">破棄</span>}

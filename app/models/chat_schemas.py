@@ -340,6 +340,7 @@ class ProposalStatus(str, Enum):
     REJECTED = "rejected"    # 却下済み
     EXPIRED = "expired"      # 期限切れ
     SENT = "sent"            # 送信済み（outbound）
+    SENDING = "sending"      # 送信中ロック（outbound: ダンが手動送信作業中・操作不可）
 
 
 class ProposalType(str, Enum):

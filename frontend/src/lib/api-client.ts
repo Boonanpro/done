@@ -191,7 +191,7 @@ export interface SessionSwitchResponse {
 }
 
 // Proposal types
-export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'sent';
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'sent' | 'sending';
 export type ProposalType = 'reply' | 'action' | 'schedule' | 'reminder' | 'observation' | 'notify' | 'outbound';
 
 export interface ProposalResponse {

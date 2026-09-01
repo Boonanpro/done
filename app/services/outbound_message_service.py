@@ -187,6 +187,8 @@ class OutboundMessageService:
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
+        if row["status"] == "sending":
+            raise ValueError("送信中（ダンが送信作業中）のため編集できません")
         if row["status"] != "pending":
             raise ValueError("この送信案は既に確定しています")
         ad = dict(row.get("action_data") or {})
@@ -206,19 +208,26 @@ class OutboundMessageService:
     # 送信 / 送信済み記録 / 破棄
     # ------------------------------------------------------------------
     async def send(self, proposal_id: str, user_id: str, *, sent_by: str) -> dict:
-        """DB の現在本文で実送信する。sent_by = "user" | "dan"。"""
+        """DB の現在本文で実送信する。sent_by = "user" | "dan"。
+
+        サーバー送信できないチャネル（LINE 等）でダンが呼んだ場合は送信せず、
+        カードを "sending"（送信中・操作不可）にロックして本文を返す。
+        ダンは browser で送った後 mark_sent で確定する（失敗したら release で戻す）。
+        送信という行為の関門をこの1関数に一本化し、「送ったのに押せるカードが残る」
+        状態を作れなくするための設計（2026-08-31 二重送信事故の根本対策）。"""
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
+        if row["status"] == "sending":
+            raise ValueError("この送信案は送信中（ロック済み）です。完了なら mark_sent、失敗なら release。")
         if row["status"] != "pending":
             raise ValueError(f"この送信案は既に {row['status']} です（二重送信防止）")
         ad = dict(row.get("action_data") or {})
         channel = ad.get("channel") or "other"
         if channel not in SERVER_SENDABLE:
-            raise ValueError(
-                f"{channel_label(channel)} はサーバーから直接送信できません。"
-                "ダンが browser で送ってから compose_message(action=\"mark_sent\") で記録してください。"
-            )
+            if sent_by != "dan":
+                raise ValueError(f"{channel_label(channel)} はサーバーから直接送信できません。")
+            return self._claim_for_manual_send(row, ad)
         body = row["content"]
         to = ad.get("to")
         if not to:
@@ -313,12 +322,37 @@ class OutboundMessageService:
             ad["send_result"] = {**res, "post_url": post_url}
         ad["from_account"] = account
 
+    def _claim_for_manual_send(self, row: dict, ad: dict) -> dict:
+        """手動チャネルの送信前ロック。pending → sending（編集・ボタン無効）。
+        以後ダンが mark_sent を忘れても「押せるカード」には戻らない（fail-safe）。"""
+        ad["claimed_at"] = _now()
+        r = self.sb.table("dan_proposals").update({
+            "status": "sending", "action_data": ad,
+        }).eq("id", row["id"]).eq("status", "pending").execute()
+        if not r.data:
+            raise ValueError("ロックに失敗しました（他所で状態が変わった可能性）")
+        return r.data[0]
+
+    def release(self, proposal_id: str, user_id: str) -> dict:
+        """手動送信に失敗した時のロック解除。sending → pending に戻す。"""
+        row = self.get(proposal_id, user_id)
+        if not row:
+            raise ValueError("送信案が見つかりません")
+        if row["status"] != "sending":
+            raise ValueError(f"この送信案は sending ではなく {row['status']} です")
+        ad = dict(row.get("action_data") or {})
+        ad.pop("claimed_at", None)
+        r = self.sb.table("dan_proposals").update({
+            "status": "pending", "action_data": ad,
+        }).eq("id", proposal_id).execute()
+        return r.data[0]
+
     def mark_sent(self, proposal_id: str, user_id: str, *, sent_by: str = "dan", note: Optional[str] = None) -> dict:
         """ダンが browser 等で自力送信した後の記録（本文は DB の現在本文）。"""
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
-        if row["status"] != "pending":
+        if row["status"] not in ("pending", "sending"):
             raise ValueError(f"この送信案は既に {row['status']} です")
         ad = dict(row.get("action_data") or {})
         if note:
@@ -379,7 +413,8 @@ class OutboundMessageService:
             ad = dict(row.get("action_data") or {})
             status = row.get("status")
             body = row.get("content") or ""
-            if ad.get("ack_status") == status and ad.get("ack_body") == body:
+            # sending（送信中ロック）は確定されるまで毎ターン督促する（ack で黙らせない）
+            if status != "sending" and ad.get("ack_status") == status and ad.get("ack_body") == body:
                 continue
             label = f"{channel_label(ad.get('channel'))} → {ad.get('to_name') or ad.get('to')}"
             if ad.get("subject"):
@@ -387,6 +422,11 @@ class OutboundMessageService:
             if status == "pending":
                 lines.append(
                     f"- 送信案 {row['id']}（{label}）: ユーザーが本文を編集した（まだ未送信）。現在の本文:\n{body}"
+                )
+            elif status == "sending":
+                lines.append(
+                    f"- 送信案 {row['id']}（{label}）: 送信中ロックのまま未確定。あなたが browser で送信済みなら"
+                    " compose_message(action=\"mark_sent\") で確定、送れていないなら action=\"release\" で下書きに戻すこと。"
                 )
             elif status == "sent":
                 who = "ユーザーが送信ボタンで" if ad.get("sent_by") == "user" else "あなた（ダン）が"
