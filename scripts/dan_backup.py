@@ -121,6 +121,16 @@ def main() -> int:
         if bundle_repo(name, repo, out_dir) is None and name == "done":
             ok = False
     zip_cli_logs(out_dir)
+    # .env（合鍵の束）は git 管理外なので、gpg で暗号化したコピーを同梱する。
+    # 暗証番号は ~/.dan/env_backup_passphrase（本人のスマホにも控えあり）。
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from backup_env_encrypted import encrypt_env
+        for p in encrypt_env(out_dir):
+            log(f"encrypted .env -> {p}")
+    except Exception as e:  # noqa: BLE001
+        log(f"WARN: .env encryption skipped: {e}")
+        ok = False
     (out_dir / "README.txt").write_text(
         "restore: git clone <name>.bundle <dir>   /   unzip claude-cli-logs.zip into %USERPROFILE%\n"
         f"created: {datetime.now().isoformat()}\n", encoding="utf-8")
