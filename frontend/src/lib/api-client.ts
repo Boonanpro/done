@@ -369,6 +369,39 @@ export type ProjectStatusType =
   | 'paused'
   | 'cancelled';
 
+// 部屋ボード（現在地フリーボード）。projects.metadata.board に永続化され、
+// バックエンドのポーラーが会話を消化して付箋+矢印を更新する。
+export interface RoomBoardNote {
+  id: string;
+  title: string;
+  body?: string;
+  owner: 'you' | 'dan' | 'wait';
+  kind: 'action' | 'decision';
+  live?: string;
+  due?: string;
+  stale?: boolean;
+}
+
+export interface RoomBoardArrow {
+  from: string;
+  to: string;
+  label?: string;
+}
+
+export interface RoomBoardDoc {
+  notes: RoomBoardNote[];
+  arrows: RoomBoardArrow[];
+  positions: Record<string, { x: number; y: number }>;
+  recent_changes: { at: string; text: string }[];
+  updated_at: string | null;
+  version: number;
+}
+
+export interface RoomBoardResponse {
+  enabled: boolean;
+  board: RoomBoardDoc | null;
+}
+
 export interface ProjectResponse {
   id: string;
   user_id: string;
@@ -1411,6 +1444,24 @@ export const api = {
 
     currentRun: (projectId: string) =>
       request<AgentRunResponse>(`/projects/${projectId}/current-run`),
+
+    getBoard: (projectId: string) =>
+      request<RoomBoardResponse>(`/projects/${projectId}/board`),
+
+    refreshBoard: (projectId: string, force = false) =>
+      request<{ digested: boolean; reason: string; board: RoomBoardDoc | null }>(
+        `/projects/${projectId}/board/refresh${force ? '?force=true' : ''}`,
+        { method: 'POST' }
+      ),
+
+    updateBoardPositions: (
+      projectId: string,
+      positions: Record<string, { x: number; y: number }>
+    ) =>
+      request<{ positions: Record<string, { x: number; y: number }> }>(
+        `/projects/${projectId}/board/positions`,
+        { method: 'PATCH', body: JSON.stringify({ positions }) }
+      ),
 
     proposals: {
       list: (projectId: string) =>

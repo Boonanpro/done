@@ -108,6 +108,11 @@ async def lifespan(app: FastAPI):
             logger.info("resumed %s paid domain registration(s)", resumed)
     except Exception:
         logger.exception("paid domain registration recovery failed")
+    try:
+        from app.services.room_board_service import start_board_poller
+        start_board_poller()
+    except Exception:
+        logger.exception("room board poller start failed")
     yield
 
 

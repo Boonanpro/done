@@ -316,6 +316,60 @@ async def delete_project(
         )
 
 
+# ==================== Room Board（部屋ボード） ====================
+
+@router.get("/{project_id}/board")
+async def get_room_board(
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """部屋ボード（現在地ドキュメント）を取得"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from app.services.room_board_service import get_board
+    return await asyncio.to_thread(get_board, project_id)
+
+
+@router.post("/{project_id}/board/refresh")
+async def refresh_room_board(
+    project_id: str,
+    force: bool = Query(default=False),
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """部屋ボードを即時消化（テスト・手動更新用）。force=true でカーソル無視で再消化"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from app.services.room_board_service import digest_project, get_project_with_board
+    row = await asyncio.to_thread(get_project_with_board, project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    result = await asyncio.to_thread(digest_project, row, force)
+    return result
+
+
+@router.patch("/{project_id}/board/positions")
+async def update_room_board_positions(
+    project_id: str,
+    body: dict,
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """付箋のドラッグ配置を保存 {positions: {note_id: {x, y}}}"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    positions = body.get("positions") or {}
+    if not isinstance(positions, dict):
+        raise HTTPException(status_code=400, detail="positions must be an object")
+    from app.services.room_board_service import update_positions
+    board = await asyncio.to_thread(update_positions, project_id, positions)
+    return {"positions": board.get("positions", {})}
+
+
 # ==================== Execution Events ====================
 
 @router.get("/{project_id}/execution-events", response_model=list[ExecutionEventResponse])
