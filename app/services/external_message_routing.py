@@ -148,6 +148,10 @@ class ExternalMessageRoutingService:
         metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Register a sent external message as a routing target for replies."""
+        # 宛先は「素のアドレス小文字」に正規化して保存する。受信側の From は
+        # '名前 <a@b.com>' 形式で来るため、find_route 側も同じ正規化で突き合わせる。
+        if external_recipient_id:
+            external_recipient_id = (_extract_email(external_recipient_id) or external_recipient_id).lower()
         row = {
             "user_id": user_id,
             "channel": channel.lower(),
@@ -200,6 +204,27 @@ class ExternalMessageRoutingService:
             },
         }).eq("id", detected_id).execute()
 
+        # 強一致(ヘッダ/合言葉=事実)は通知タブではなく該当ルームでダンを起動し、
+        # ダン自身に進展報告と次アクションの提案をさせる。二重表示を避けるため
+        # wake できたら提案は作らない。弱一致は従来どおり通知タブ(提案)に倒す。
+        if match.reason in STRONG_REASONS:
+            try:
+                from app.services.inbound_wakeup import schedule_room_wakeup
+                if schedule_room_wakeup(detected_message, room_id, reason=match.reason):
+                    logger.info(
+                        "Routed detected message %s to room %s via %s (room wakeup)",
+                        detected_id, room_id, match.reason,
+                    )
+                    return {
+                        "route": match.route,
+                        "confidence": match.confidence,
+                        "reason": match.reason,
+                        "proposal": None,
+                        "wakeup": True,
+                    }
+            except Exception:
+                logger.exception("room wakeup scheduling failed; falling back to proposal")
+
         proposal = await self._create_proposal(detected_message, match)
         logger.info(
             "Routed detected message %s to room %s via %s",
@@ -233,13 +258,22 @@ class ExternalMessageRoutingService:
             sender_info.get("thread_id"),
             sender_info.get("conversation_id"),
         )
-        message_ref = _pick(
+        # In-Reply-To は通常1件だが References は複数の Message-ID を含む。
+        # '<id1> <id2>' をバラして候補列にする（.eq 照合は完全一致のため）。
+        message_refs: list[str] = []
+        for src in (
             metadata.get("in_reply_to_message_id"),
             metadata.get("in_reply_to"),
             metadata.get("reply_to_message_id"),
             metadata.get("references"),
             sender_info.get("in_reply_to"),
-        )
+        ):
+            normalized = _norm(src)
+            if not normalized:
+                continue
+            for mid in re.findall(r"<[^<>\s]+>", normalized) or [normalized]:
+                if mid not in message_refs:
+                    message_refs.append(mid)
         routing_key = _pick(
             metadata.get("routing_key"),
             sender_info.get("routing_key"),
@@ -254,13 +288,16 @@ class ExternalMessageRoutingService:
             sender_info.get("email"),
             _dig(sender_info, "from", "email"),
         )
+        # 台帳側は素のアドレス小文字で保存している(record_outbound)ので同じ正規化で照合
+        if recipient_id:
+            recipient_id = (_extract_email(recipient_id) or recipient_id).lower()
 
         if thread_id:
             route = self._latest_route(user_id, channel, "external_thread_id", thread_id)
             if route:
                 return RouteMatch(route=route, confidence=1.0, reason="external_thread_id")
 
-        if message_ref:
+        for message_ref in message_refs:
             route = self._latest_route(user_id, channel, "external_message_id", message_ref)
             if route:
                 return RouteMatch(route=route, confidence=0.98, reason="in_reply_to_message_id")

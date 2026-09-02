@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     GMAIL_APP_PASSWORD: str = ""
     GMAIL_ADDRESS: str = ""
 
+    # 2つ目の Gmail (0aw325171@gmail.com)。IMAP 巡回対象に含めるためのアプリパスワード。
+    GMAIL2_APP_PASSWORD: str = ""
+    GMAIL2_ADDRESS: str = ""
+
     # iCloud Mail App-specific Password (dan-notion IMAP fetch)
     ICLOUD_ADDRESS: str = ""
     ICLOUD_APP_PASSWORD: str = ""

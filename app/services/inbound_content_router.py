@@ -29,12 +29,29 @@ def _recent_rooms(sb, limit: int = _CANDIDATE_LIMIT) -> list[dict]:
     rows = (
         sb.table("chat_rooms")
         .select("id,name,last_message_preview,last_message_at")
-        .order("last_message_at", desc=True)
+        # desc は NULL が先頭に来る(PostgreSQL仕様)。nullsfirst=False にしないと
+        # last_message_at 無しの空ルームが15枠を全部食い潰し、実際に動いている
+        # 案件ルームが LLM に1件も渡らない。
+        .order("last_message_at", desc=True, nullsfirst=False)
         .limit(limit)
         .execute()
         .data
         or []
     )
+    # サイドバーの実体はプロジェクト。chat_rooms.name は大抵 None なので
+    # projects.title で補完しないと、LLMには「(無題)」の羅列しか見えず判定できない。
+    ids = [r["id"] for r in rows]
+    if ids:
+        try:
+            projs = (
+                sb.table("projects").select("room_id,title").in_("room_id", ids).execute().data or []
+            )
+            titles = {p["room_id"]: p["title"] for p in projs if p.get("title")}
+            for r in rows:
+                if not r.get("name") and r["id"] in titles:
+                    r["name"] = titles[r["id"]]
+        except Exception:
+            logger.exception("[content-route] project title lookup failed")
     return rows
 
 
@@ -142,6 +159,36 @@ async def classify_and_route(
             room_id = weak_room_id
         else:
             decision = "new"  # 番号不正なら新規扱い
+
+    # 既存案件のルームが特定できたら、通知タブではなくそのルームでダンを起動する。
+    # 草案は wake されたダンがルーム文脈込みで自分で書くので、ここでは作らない。
+    if decision == "existing" and room_id:
+        try:
+            from app.services.inbound_wakeup import schedule_room_wakeup
+            woke = schedule_room_wakeup(detected_message, room_id, reason=f"content:{decision}")
+        except Exception:
+            logger.exception("[content-route] room wakeup scheduling failed")
+            woke = False
+        if woke:
+            now = datetime.now(timezone.utc).isoformat()
+            pr = {**(detected_message.get("processing_result") or {}),
+                  "routing_attempted": True,
+                  "content_decision": decision,
+                  "content_reason": data.get("reason"),
+                  "wakeup": True}
+
+            def _mark_woken():
+                return sb.table("detected_messages").update({
+                    "processing_result": pr,
+                    "routed_at": now,
+                    "routed_room_id": room_id,
+                    "routing_reason": f"content:{decision}",
+                }).eq("id", detected_message["id"]).execute()
+
+            await asyncio.to_thread(_mark_woken)
+            logger.info("[content-route] decision=%s room=%s (room wakeup)", decision, room_id)
+            return {"decision": decision, "room_id": room_id, "proposal": None, "wakeup": True}
+        # wake できなければ従来の提案フローに落ちる
 
     # 概要（reply の場合は返信草案も）を生成
     sender_info = detected_message.get("sender_info") or {}

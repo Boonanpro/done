@@ -1720,6 +1720,21 @@ class ChatService:
         )
         logging.info("external email reply sent to=%s subject=%s", to_addr, subject)
 
+        # 送信台帳に記録（次にこの相手から返信が来た時、該当ルームへ照合できるように）
+        source_room_id = proposal.get("source_room_id")
+        if source_room_id:
+            try:
+                from app.services.external_message_routing import get_external_message_routing_service
+                await get_external_message_routing_service().record_outbound(
+                    user_id=proposal["user_id"],
+                    channel="gmail",
+                    origin_room_id=source_room_id,
+                    external_recipient_id=to_addr,
+                    metadata={"via": "proposal_reply", "proposal_id": proposal.get("id")},
+                )
+            except Exception as e:
+                logging.warning("record_outbound for reply proposal failed: %s", e)
+
         # inquiry を replied に
         inquiry_id = action_data.get("inquiry_id")
         if inquiry_id:

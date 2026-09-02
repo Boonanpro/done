@@ -31,6 +31,11 @@ def main():
     ap.add_argument("--from-name", default="Done", help="差出人表示名")
     ap.add_argument("--room", default=os.getenv("DAN_ROOM_ID"), help="紐づけるルームID（既定: $DAN_ROOM_ID）")
     ap.add_argument("--user", default=os.getenv("DAN_USER_ID"), help="ユーザーID（既定: $DAN_USER_ID）")
+    ap.add_argument("--attach", action="append", default=[],
+                    help="添付ファイルのパス（複数回指定可。合計20MBまで）")
+    ap.add_argument("--in-reply-to", help="相手のメールの Message-ID。指定すると同じスレッドへの返信として送る")
+    ap.add_argument("--from-account", default="gmail", choices=["gmail", "gmail2", "icloud"],
+                    help="送信元アカウント（既定: gmail）。相手が普段やり取りしているアドレスに合わせる")
     args = ap.parse_args()
 
     body = args.body
@@ -57,6 +62,9 @@ def main():
         result = send_tracked_email(
             to=args.to, subject=args.subject, body=body,
             user_id=user_id, origin_room_id=room_id, from_name=args.from_name,
+            attachments=args.attach,
+            from_account=args.from_account,
+            in_reply_to=args.in_reply_to,
         )
         print(json.dumps(result, ensure_ascii=False))
     except Exception as e:  # noqa: BLE001
