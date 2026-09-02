@@ -101,8 +101,8 @@ export function Sidebar({
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [showAllProjects, setShowAllProjects] = useState(false);
-  // 新チャットで使う Claude モデル（既定: opus）。Fable トライアル用トグル。
-  const [selectedModel, setSelectedModel] = useState<'opus' | 'fable'>('opus');
+  // 新チャットで使う Claude モデル（既定: fable）。Fable トライアル用トグル。
+  const [selectedModel, setSelectedModel] = useState<'opus' | 'fable'>('fable');
   const PROJECT_DISPLAY_LIMIT = 5;
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');

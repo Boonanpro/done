@@ -1785,17 +1785,56 @@ _ALLOWED_CLI_MODELS = {"opus", "sonnet", "haiku", "fable"}
 _room_model_cache: Dict[str, str] = {}
 
 
+def _dotenv_cli_model() -> str:
+    """プロジェクト .env の DAN_CLI_MODEL を読む（プロセス環境に無い時の既定）。
+
+    watchdog 経由の自動再起動はユーザー環境変数を引き継がないため、
+    .env を正とする (DAN_STREAMING_INPUT と同じ理由)。毎ターン1回の小さな
+    ファイル読みなのでキャッシュしない (= 再起動なしで切替が効く)。
+    """
+    try:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("DAN_CLI_MODEL="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _apply_fable_quota_guard(model: str) -> str:
+    """Fable 専用週次枠が閾値超なら opus に退避する (usage_guard 参照)。"""
+    if model != "fable":
+        return model
+    try:
+        from app.agent.usage_guard import fable_quota_exhausted
+        if fable_quota_exhausted():
+            return "opus"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("fable quota guard failed (keeping fable): %s", e)
+    return model
+
+
 def _resolve_cli_model(room_id: Optional[str] = None) -> str:
     """CLI を起動するモデル名を解決する。
 
     解決順（上が優先）:
       1. ルーム単位の選択（projects.metadata.model を room_id で引く）
-      2. `DAN_CLI_MODEL` 環境変数（全ルーム一括切替用）
+      2. `DAN_CLI_MODEL` 環境変数 → 無ければプロジェクト .env の同名キー
+         （全ルーム一括切替用）
       3. "opus"（デフォルト）
+
+    どの経路でも結果が "fable" の場合は Fable 専用週次枠のガードを通し、
+    枠が閾値 (DAN_FABLE_FALLBACK_PCT, 既定90%) 以上なら "opus" に退避する。
 
     許可リスト外の値は無視して次の手段にフォールバックする（--model への
     不正な引数混入を防ぐ安全弁）。
     """
+    return _apply_fable_quota_guard(_resolve_cli_model_raw(room_id))
+
+
+def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
     # 1. ルーム単位の選択（新チャット作成時に保存された値）
     if room_id:
         cached = _room_model_cache.get(room_id)
@@ -1818,10 +1857,13 @@ def _resolve_cli_model(room_id: Optional[str] = None) -> str:
         except Exception as e:
             logger.debug("resolve model failed for room %s: %s", room_id, e)
 
-    # 2. 環境変数による全ルーム一括切替
+    # 2. 環境変数 → .env による全ルーム一括切替
     env = (os.environ.get("DAN_CLI_MODEL") or "").strip().lower()
     if env in _ALLOWED_CLI_MODELS:
         return env
+    dotenv = _dotenv_cli_model()
+    if dotenv in _ALLOWED_CLI_MODELS:
+        return dotenv
 
     # 3. デフォルト
     return "opus"
