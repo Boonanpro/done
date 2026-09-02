@@ -2551,7 +2551,13 @@ async def send_dan_message_stream(
 
                         # resultイベント到着時に即座にai_message+doneを送信
                         # （ループ終了を待つとCLIプロセスの後処理分だけ遅延する）
-                        ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
+                        # 追い連絡の割り込みで畳んだ中間ターンが無言だった場合は失敗では
+                        # ないので、代替テンプレ文言を入れない（空本文のまま流す。
+                        # cli_runner 側も同条件でテンプレを入れずに保存している）。
+                        # 割り込み終了の result は is_error=True が付くことがある（実測）ため
+                        # is_error では弾かない。continuation＋本文空＝無言の中間ターン。
+                        empty_continuation = is_continuation and not result_text
+                        ai_response_content = "" if empty_continuation else (final_text or "応答を生成できませんでした。もう一度お試しください。")
                         if cli_saved_ai_message:
                             ai_context = {"turn_id": event.get("turn_id")} if event.get("turn_id") else None
                             # DB保存済み行の実IDをそのまま返す。合成ID(cli-saved-*)だと
@@ -2571,6 +2577,10 @@ async def send_dan_message_stream(
                             if ai_context:
                                 ai_message["ai_context"] = ai_context
                             yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                        elif empty_continuation:
+                            # 空の中間ターンは cli_runner 側で保存自体をスキップ済み。
+                            # ここでフォールバック保存するとテンプレ文言が復活するので何もしない。
+                            pass
                         else:
                             ai_message_data = await service.send_dan_ai_message(
                                 current_user.user_id, ai_response_content, reasoning_steps,
