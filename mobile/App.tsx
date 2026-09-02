@@ -1318,6 +1318,7 @@ function AppMain() {
   const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
   // In-chat keyword search (find past messages across full history).
   const [searchOpen, setSearchOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -3529,6 +3530,13 @@ function AppMain() {
           </View>
           <View style={styles.appBarRight}>
             <Pressable
+              onPress={() => setVoiceOpen(true)}
+              hitSlop={10}
+              style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+            >
+              <Ionicons name="mic-outline" size={22} color="#f4f0e8" />
+            </Pressable>
+            <Pressable
               onPress={() => setSearchOpen(true)}
               hitSlop={10}
               style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
@@ -3828,6 +3836,17 @@ function AppMain() {
           )}
         </View>
       </KeyboardAvoidingView>
+
+      {currentProject?.room_id ? (
+        <VoiceOverlay
+          visible={voiceOpen}
+          onClose={() => setVoiceOpen(false)}
+          roomId={currentProject.room_id}
+          chatTitle={currentProject.title || undefined}
+          apiBase={API_BASE_URL}
+          token={token ?? null}
+        />
+      ) : null}
 
       <Modal
         visible={searchOpen}
