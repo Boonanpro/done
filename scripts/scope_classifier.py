@@ -126,6 +126,8 @@ _APP_API_DIR_TO_OWNER: dict[str, Scope] = {
 _INFRA_PATTERNS: tuple[str, ...] = (
     # backend
     "app/**",
+    # standalone services (phone voice bridge etc.)
+    "services/**",
     # repo-root tooling manifests
     "skills-lock.json",
     # ops / tooling

@@ -145,6 +145,7 @@ test_*.txt
 .owner_token
 .tunnel_*
 data/email_sync_state.json
+data/zeirishi_mail_watch.json
 .claude/mcp_*.json
 .claude/scheduled_tasks.lock
 
@@ -193,6 +194,7 @@ tests/**/screenshot_*.png
 !/frontend/src/app/artifacts/publish/
 !/frontend/src/app/artifacts/\[slug\]/
 /frontend/src/app/api/denki-qa/
+/frontend/src/app/api/denki-ai/
 /frontend/src/app/api/denki-auth/
 /frontend/src/app/api/kittoku/
 /frontend/public/artifacts/
