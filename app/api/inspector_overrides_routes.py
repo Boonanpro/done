@@ -101,34 +101,36 @@ async def publish_overrides(
     user: TokenData = Depends(get_current_user),
     service: InspectorOverridesService = Depends(get_service),
 ):
-    """slug の全 override を JSX に焼き込み、done-artifacts へ自動公開する。
+    """draft（inspector_overrides）を1つの公開リビジョンとして確定し、配信へ届ける。
 
-    Inspector のライブ編集を「公開ボタンを押さずに」本番反映するための自動公開トリガ。
-    フロントが編集保存後にデバウンスして叩く。焼き込み(DB→JSX)後に
-    dedicated deployment job で、この成果物のVercelプロジェクトだけを更新する。
-    公開URL/クライアントに反映される（〜1〜2分）。DB の override は消さない
-    （ライブプレビューの継続適用のため。JSX と内容一致で無害）。
+    公開 = ①不変リビジョン発行（artifact_edit_releases）
+         → ②release.gen.json を成果物ディレクトリへ焼き込み
+         → ③専用 Vercel プロジェクトを再デプロイ（連打はデプロイ側で合流）。
+    配信ページはビルドに焼き込まれたスナップショットを初回 HTML に描画するだけで、
+    実行時に DB を読まない。DOM の後書き換えも無い（＝一瞬古い表示が出ることが
+    構造的に無い）。DB の draft は消さない（ライブプレビューの継続適用のため）。
     """
-    overrides = await service.list_by_slug(slug, user.user_id)
-    applied = 0
-    skipped: list[str] = []
-    for ov in overrides:
-        try:
-            r = apply_override_for_slug(
-                slug=slug,
-                element_key=ov.get("element_key", ""),
-                styles=ov.get("styles") or {},
-                attrs=ov.get("attrs") or {},
-            )
-            if r.get("applied"):
-                applied += 1
-            elif r.get("reason"):
-                skipped.append(f"{ov.get('element_key')}: {r['reason']}")
-        except Exception as e:  # noqa: BLE001 - 1件の失敗で全体を止めない
-            skipped.append(f"{ov.get('element_key')}: {e}")
+    release = await service.publish_draft(slug, user.user_id)
+    overrides = release.get("overrides") or {}
+    # EditableText（@<editId>）以外のキーはサーバーレンダリングで解決できず、
+    # 公開ページに反映されない。黙って捨てず、呼び出し側へ知らせる。
+    unpublishable_keys = [
+        k for k in overrides
+        if not (k.startswith("@") and not k.startswith("@auto:"))
+    ]
 
-    publish_scheduled = False
+    deploy_scheduled = False
+    skipped: list[str] = []
     try:
+        from app.services.artifact_publication_service import (
+            ArtifactPublicationService,
+            schedule_dedicated_deploy,
+        )
+
+        publications = ArtifactPublicationService()
+        # デプロイを待たずにローカルのスナップショットを先に更新する。
+        # 自宅PCの内部プレビュー（next dev/HMR）は書いた瞬間に最新化される。
+        publications.write_release_snapshot(slug)
         artifact_result = (
             service.supabase.table("chat_artifact")
             .select("id")
@@ -139,20 +141,19 @@ async def publish_overrides(
             .execute()
         )
         if artifact_result.data:
-            from app.services.artifact_publication_service import schedule_dedicated_deploy
-
             schedule_dedicated_deploy(str(artifact_result.data[0]["id"]), user.user_id)
-            publish_scheduled = True
+            deploy_scheduled = True
         else:
             skipped.append("artifact was not registered; no dedicated deployment target exists")
-    except Exception as e:  # noqa: BLE001
-        skipped.append(f"publish schedule failed: {e}")
+    except Exception as e:  # noqa: BLE001 - リビジョンは発行済み。デプロイ失敗は情報として返す
+        skipped.append(f"deploy schedule failed: {e}")
 
     return {
         "slug": slug,
-        "overrides": len(overrides),
-        "applied": applied,
-        "publish_scheduled": publish_scheduled,
+        "revision": release.get("revision"),
+        "published": True,
+        "deploy_scheduled": deploy_scheduled,
+        "unpublishable_keys": unpublishable_keys,
         "skipped": skipped,
     }
 
@@ -209,17 +210,28 @@ async def delete_element(
         user_id=user.user_id,
         replace_attrs=False,
     )
-    write_result = apply_override_for_slug(
-        slug=data.artifact_slug,
-        element_key=data.element_key,
-        styles=hide_styles,
-        attrs=None,
-    )
-    if not write_result["applied"] and write_result.get("reason") and "not found" in write_result["reason"]:
-        raise HTTPException(status_code=404, detail=write_result["reason"])
+    # JSX 直書きは EditableText 以前のページ用のベストエフォート。今の配信は
+    # release パイプライン（draft→公開リビジョン→焼き込み→再デプロイ）が担うので、
+    # ソース上に data-edit-id が見つからなくても削除は失敗ではない。
+    # ここで 404 を返すと「DB には保存済みなのに UI はエラー」という嘘になる。
+    try:
+        write_result = apply_override_for_slug(
+            slug=data.artifact_slug,
+            element_key=data.element_key,
+            styles=hide_styles,
+            attrs=None,
+        )
+    except Exception as e:  # noqa: BLE001
+        write_result = {"applied": False, "reason": str(e), "file": None}
+    # `@auto:` は編集セッション内で生成される識別子で、サーバーレンダリングでは
+    # 解決できない＝公開URLに届かない。フロントがユーザーへ正直に伝えるための旗。
+    delivery_supported = (
+        data.element_key.startswith("@") and not data.element_key.startswith("@auto:")
+    ) or bool(write_result.get("applied"))
     return {
         "hidden": True,
         "removed": True,  # 既存クライアント互換: UI 上は「削除」表示
+        "delivery_supported": delivery_supported,
         "file": write_result.get("file"),
         "override_id": saved.get("id"),
         "reason": write_result.get("reason"),
@@ -236,12 +248,12 @@ async def list_overrides(
     return await service.list_by_slug(slug, user.user_id)
 
 
-@router.get("/public", response_model=List[OverrideResponse])
+@router.get("/public")
 async def list_public_overrides(
     slug: str = Query(..., min_length=1),
     service: InspectorOverridesService = Depends(get_service),
 ):
-    return await service.list_public_by_slug(slug)
+    return await service.list_published_by_slug(slug)
 
 
 @router.delete("")

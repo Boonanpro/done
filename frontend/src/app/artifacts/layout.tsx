@@ -66,6 +66,7 @@ function prePaintScript(fallbackSlug: string | null): string {
     var inIframe = false;
     try { inIframe = window.top !== window.self; } catch (e) { inIframe = true; }
     if (!inIframe) return;
+    if (new URLSearchParams(location.search).get('dan_preview') === '1') return;
     var match = location.pathname.match(/\\/(?:artifacts|preview)\\/([^/]+)/);
     var slug = match && match[1];
     // A dedicated Vercel project serves its artifact from the root path. Its project
@@ -129,6 +130,10 @@ html, body {
 export default function ArtifactsLayout({ children }: { children: React.ReactNode }) {
   // This is deliberately server-only. ARTIFACT_ONLY_SLUG is set on every
   // one-artifact Vercel project and must not be copied into a public host map.
+  //
+  // 公開済み編集の反映はここでは行わない。公開時に成果物ディレクトリへ焼き込まれた
+  // release.gen.json を各成果物の server page が読み、EditableText が初回 HTML に
+  // 描画する（lib/editable-release.ts）。配信ページに DOM 後書き換えは存在しない。
   const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
   return (
     <>

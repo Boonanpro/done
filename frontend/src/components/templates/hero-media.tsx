@@ -33,6 +33,8 @@ type CommonProps = {
   className?: string;
   /** メディアエリアの最小高 (例: "min-h-[80vh]") */
   minHeightClass?: string;
+  /** メディア(<img>/<video>)に付ける data-edit-id — inspector で差し替え対象にする */
+  mediaEditId?: string;
 };
 
 type ImageProps = CommonProps & {
@@ -79,7 +81,15 @@ function buildMask(fade?: Fade): string | undefined {
 }
 
 export function HeroMedia(props: HeroMediaProps) {
-  const { darken, blur, fade, children, className, minHeightClass = "min-h-[60vh]" } = props;
+  const {
+    darken,
+    blur,
+    fade,
+    children,
+    className,
+    minHeightClass = "min-h-[60vh]",
+    mediaEditId,
+  } = props;
   const filter = buildFilter(darken, blur);
   const maskImage = buildMask(fade);
   const mediaStyle: React.CSSProperties = {
@@ -95,6 +105,7 @@ export function HeroMedia(props: HeroMediaProps) {
       {props.kind === "image" ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
+          data-edit-id={mediaEditId}
           src={props.src}
           alt={props.alt}
           className="absolute inset-0 h-full w-full object-cover"
@@ -102,6 +113,7 @@ export function HeroMedia(props: HeroMediaProps) {
         />
       ) : (
         <video
+          data-edit-id={mediaEditId}
           src={props.src}
           poster={props.poster}
           autoPlay={props.autoPlay ?? true}

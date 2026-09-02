@@ -152,31 +152,23 @@ function TextContentSection() {
 function TextContentEditor({ elementKey, initialText }: { elementKey: string; initialText: string }) {
   const commitText = usePreviewStore((s) => s.commitText);
   const [value, setValue] = useState(initialText);
-  const save = () => commitText(elementKey, value);
+  useEffect(() => setValue(initialText), [initialText]);
 
   return (
     <section className="flex flex-col gap-2">
       <SectionHeader title="Text" />
       <textarea
         value={value}
-        onChange={(event) => setValue(event.target.value)}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-            event.preventDefault();
-            save();
-          }
+        onChange={(event) => {
+          const text = event.target.value;
+          setValue(text);
+          // The canvas updates immediately; the store coalesces persistence.
+          commitText(elementKey, text);
         }}
         rows={Math.min(10, Math.max(3, value.split('\n').length + 1))}
         className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-sm leading-5 outline-none focus:ring-2 focus:ring-ring"
         aria-label="テキストを編集"
       />
-      <button
-        type="button"
-        onClick={save}
-        className="rounded-md bg-primary px-2.5 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-      >
-        テキストを反映
-      </button>
     </section>
   );
 }

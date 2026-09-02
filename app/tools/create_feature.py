@@ -330,6 +330,7 @@ import {{ useQuery, useMutation, useQueryClient }} from '@tanstack/react-query';
 import {{ Plus, Search, Loader2 }} from 'lucide-react';
 import {{ Button }} from '@/components/ui/button';
 import {{ Input }} from '@/components/ui/input';
+import {{ EditableText }} from '@/components/dan/editable';
 
 const API_BASE = '/api/v1/{kebab}';
 
@@ -359,7 +360,7 @@ export default function {snake.title().replace("_", "")}Page() {{
     <div className="p-6 space-y-6">
       {{/* ヘッダー */}}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-foreground">{feature_name}</h1>
+        <EditableText as="h1" editId="{kebab}-page-title" className="text-2xl font-bold text-foreground">{feature_name}</EditableText>
         <Button>
           <Plus className="h-4 w-4 mr-2" />
           新規作成

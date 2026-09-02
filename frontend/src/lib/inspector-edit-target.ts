@@ -20,11 +20,9 @@
 const TEXTUAL_TAGS = new Set([
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'p', 'span', 'a', 'li', 'label', 'button', 'strong', 'em',
-  'td', 'th', 'figcaption',
+  'td', 'th', 'figcaption', 'dt', 'dd', 'b',
 ]);
 
-// These tags only decorate or break a sentence. A layout or media child is
-// intentionally excluded: replacing its parent text could erase page content.
 const INLINE_TEXT_TAGS = new Set([
   'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'del', 'em',
   'i', 'ins', 'kbd', 'mark', 'q', 's', 'small', 'span', 'strong', 'sub',
@@ -32,21 +30,20 @@ const INLINE_TEXT_TAGS = new Set([
 ]);
 
 function hasOnlyInlineTextContent(el: Element): boolean {
-  for (const child of Array.from(el.children)) {
-    if (!INLINE_TEXT_TAGS.has(child.tagName.toLowerCase())) return false;
-    if (!hasOnlyInlineTextContent(child)) return false;
-  }
-  return true;
+  return Array.from(el.children).every((child) =>
+    INLINE_TEXT_TAGS.has(child.tagName.toLowerCase()) && hasOnlyInlineTextContent(child)
+  );
 }
 
 /**
- * A semantic text element, such as a paragraph containing <strong> or a
- * heading containing <br>, is one editable text unit.  Layout wrappers and
- * media remain excluded, so editing text cannot remove page structure.
+ * A text edit may replace the element's HTML. It is therefore safe only for
+ * one text unit: a leaf element or a generated `data-edit-id` wrapper that
+ * contains inline text only. A paragraph containing an emphasized word is not
+ * one text unit; generated pages must mark its separately editable fragments.
  */
 export function isEditableTextLeaf(el: Element | null | undefined): boolean {
   if (!el) return false;
   const tag = el.tagName.toLowerCase();
-  if (TEXTUAL_TAGS.has(tag)) return hasOnlyInlineTextContent(el);
-  return !!el.getAttribute?.('data-edit-id') && el.children.length === 0;
+  if (el.getAttribute?.('data-edit-id')) return hasOnlyInlineTextContent(el);
+  return TEXTUAL_TAGS.has(tag) && hasOnlyInlineTextContent(el);
 }

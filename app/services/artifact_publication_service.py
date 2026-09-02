@@ -123,6 +123,14 @@ class ArtifactPublicationService:
             )
             if previous.data:
                 return previous.data[0]
+        # A failed attempt must be retried against the SAME provisioned target.
+        # The ledger holds one row per delivery project (unique index on
+        # deployment_provider + deployment_project), so opening a second row for
+        # an artifact whose project already exists can never be provisioned: the
+        # retry dies on a duplicate key instead of redeploying. Status is about
+        # the last attempt; the project is the durable identity of the site.
+        if latest and (latest.get("deployment_project") or "").strip():
+            return latest
         if latest and latest.get("status") in {"draft", "shared", "deploying", "live"}:
             return latest
         return self.create_release(artifact_id)

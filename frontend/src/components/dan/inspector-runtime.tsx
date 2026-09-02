@@ -19,6 +19,7 @@ import { useEffect } from 'react';
 import { emptyModel, type EditModel } from '@/lib/inspector-model';
 import { applyModelToElement } from '@/lib/inspector-render';
 import { normalizeToModel } from '@/lib/inspector-migrate';
+import { durableElementKey, findDurableElement, findLegacyElement } from '@/lib/inspector-element-identity';
 
 /** 旧コードとの互換のために残す型エイリアス。 */
 export type OverrideEntry = {
@@ -43,23 +44,7 @@ export function computeElementKey(el: Element): string {
     cur = cur.parentElement;
   }
   // 2) フォールバック: DOM パス
-  return computeDomPathKey(el);
-}
-
-function computeDomPathKey(el: Element): string {
-  const root = el.ownerDocument?.body;
-  if (!root) return '';
-  const parts: string[] = [];
-  let cur: Element | null = el;
-  while (cur && cur !== root) {
-    const parentEl: Element | null = cur.parentElement;
-    if (!parentEl) break;
-    const siblings = Array.from(parentEl.children);
-    const idx = siblings.indexOf(cur);
-    parts.unshift(`${cur.tagName.toLowerCase()}[${idx}]`);
-    cur = parentEl;
-  }
-  return parts.join('>');
+  return durableElementKey(el);
 }
 
 /**
@@ -82,6 +67,8 @@ export function resolveEditUnit(el: Element): Element {
 export function findElementByKey(doc: Document, key: string): Element | null {
   if (!key) return null;
   if (key.startsWith('@')) {
+    const durable = findDurableElement(doc, key);
+    if (durable) return durable;
     const id = key.slice(1);
     // CSS attribute selector の値はエスケープが必要
     try {
@@ -91,6 +78,8 @@ export function findElementByKey(doc: Document, key: string): Element | null {
     }
   }
   // DOM パス
+  const compatibilityTarget = findLegacyElement(doc, key);
+  if (compatibilityTarget) return compatibilityTarget;
   const parts = key.split('>');
   let cur: Element = doc.body;
   for (const part of parts) {
@@ -212,10 +201,6 @@ export function InspectorRuntime({ slug }: { slug: string }) {
       const editId = entries.filter(([k]) => k.startsWith('@'));
       const legacy = entries.filter(([k]) => !k.startsWith('@'));
 
-      for (const [key, patch] of editId) {
-        const el = findElementByKey(doc, key);
-        if (el) applyEntry(el, patch.styles, patch.attrs);
-      }
       for (const [key, patch] of legacy) {
         const el = findElementByKey(doc, key);
         if (!el) continue;
@@ -223,6 +208,12 @@ export function InspectorRuntime({ slug }: { slug: string }) {
         // 管理対象 → レガシーは適用しない（汚染防止）
         if (hasEditIdAncestor(el)) continue;
         applyEntry(el, patch.styles, patch.attrs);
+      }
+      // New durable identities win when an old record and a new edit refer to
+      // the same element. This makes the one-time compatibility path harmless.
+      for (const [key, patch] of editId) {
+        const el = findElementByKey(doc, key);
+        if (el) applyEntry(el, patch.styles, patch.attrs);
       }
     };
 
@@ -272,9 +263,10 @@ export function InspectorRuntime({ slug }: { slug: string }) {
       }
     };
 
-    // 公開閲覧モード（iframe 外、トップレベル訪問）では DB を見に行かない。
-    // JSX 自体が真実の状態なので fetch して上書きすると一瞬古い→新しいの flash が起きる。
-    // 編集モード（dan UI の iframe 内）では従来通り DB を取りに行って live edit を反映する。
+    // 公開閲覧モード（iframe 外、トップレベル訪問）では DB を見に行かず、DOM にも触れない。
+    // 公開済みの編集は release.gen.json として初回 HTML に焼き込まれており、
+    // それが真実の状態。ここで fetch して上書きすると「一瞬古い→新しい」の flash に戻る。
+    // 編集モード（dan UI の iframe 内）だけ、保存済み draft を取りに行って live edit を再現する。
     const isInIframe = (() => {
       try {
         return window.top !== window.self;
@@ -283,9 +275,7 @@ export function InspectorRuntime({ slug }: { slug: string }) {
         return true;
       }
     })();
-    if (isInIframe) {
-      fetchAndApply();
-    }
+    if (isInIframe) void fetchAndApply();
 
     const api: DanInspectorApi = {
       slug,
@@ -327,20 +317,7 @@ export function InspectorRuntime({ slug }: { slug: string }) {
     };
     (window as unknown as Record<string, DanInspectorApi>)[WINDOW_KEY] = api;
 
-    let scheduled = false;
-    const throttled = () => {
-      if (scheduled) return;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
-        applyAll();
-      });
-    };
-    const observer = new MutationObserver(throttled);
-    observer.observe(doc.body, { childList: true, subtree: true });
-
     return () => {
-      observer.disconnect();
       delete (window as unknown as Record<string, DanInspectorApi | undefined>)[WINDOW_KEY];
     };
   }, [slug]);

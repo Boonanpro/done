@@ -91,9 +91,10 @@ def main() -> int:
             )
 
             # ----- Case 2: wrapper (data-edit-id 無し、子に有り) を選択 -----
-            # wrapper は CSS 上「破線ボーダー」の div。data-edit-id 無いのでクラスで選ぶ。
+            # wrapper は data-edit-id を持たないので data-testid で選ぶ
+            # （見た目クラスで選ぶとデザイン変更のたびにテストが壊れるため）。
             print("[case 2] Click wrapper without data-edit-id")
-            iframe.locator("div.border-dashed").first.click()
+            iframe.locator("div[data-testid='te-case-wrapper-no-id']").first.click()
             page.wait_for_timeout(500)
             btn_text2 = delete_btn.text_content() or ""
             is_disabled2 = delete_btn.is_disabled()
@@ -104,8 +105,8 @@ def main() -> int:
             )
 
             # ----- Case 3: 完全に data-edit-id 無し（祖先も子も）-----
-            print("[case 3] Click amber block (no data-edit-id anywhere)")
-            iframe.locator("div.bg-amber-50").first.click()
+            print("[case 3] Click block with no data-edit-id anywhere")
+            iframe.locator("div[data-testid='te-case-no-id']").first.click()
             page.wait_for_timeout(500)
             btn_text3 = delete_btn.text_content() or ""
             is_disabled3 = delete_btn.is_disabled()
