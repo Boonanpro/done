@@ -9,6 +9,7 @@ salonboard_credentials のビジネスロジック。
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
@@ -24,6 +25,19 @@ COMPED_EMAILS = {"xxx_shun7@icloud.com"}
 COMPED_STYLISTS = {"SHUN"}
 # 月額サブスクの本番決済リンク。ブロック時にここへ誘導する。
 STYLEUP_CHECKOUT_URL = "https://buy.stripe.com/28EdR9e98dJT3ECfav4F200"
+# StyleUp のLINE公式アカウント（ベーシックID @541xhrev）。
+# モニター募集中は、無料枠を使い切った人をここへ誘導して30分の無料面談につなぐ。
+STYLEUP_LINE_URL = "https://line.me/R/ti/p/@541xhrev"
+
+
+def hash_login_id(login_id: str) -> str:
+    """サロンボードのログインIDを名寄せ用のハッシュにする。
+
+    無料投稿枠は端末(device_id)ではなくログインID単位で数える。
+    encrypted_login_id は Fernet の非決定的暗号で毎回暗号文が変わり照合に使えないため、
+    照合専用の SHA-256 を別に持つ。ハッシュなので元のIDには戻せない。
+    """
+    return hashlib.sha256((login_id or "").strip().lower().encode("utf-8")).hexdigest()
 
 
 def _checkout_url_for(email: str) -> str:
@@ -53,6 +67,7 @@ class SalonboardCredentialsService:
         """設定の保存。同じ device_id があれば上書き。"""
         encrypted_id = self.enc.encrypt(login_id)
         encrypted_pw = self.enc.encrypt(password)
+        login_hash = hash_login_id(login_id)
         consent_at = datetime.now(timezone.utc).isoformat()
 
         existing = (
@@ -66,6 +81,7 @@ class SalonboardCredentialsService:
                 "stylist_name": stylist_name,
                 "encrypted_login_id": encrypted_id,
                 "encrypted_password": encrypted_pw,
+                "login_id_hash": login_hash,
                 "consent_at": consent_at,
             }
             if email is not None:
@@ -86,6 +102,7 @@ class SalonboardCredentialsService:
                         "email": email,
                         "encrypted_login_id": encrypted_id,
                         "encrypted_password": encrypted_pw,
+                        "login_id_hash": login_hash,
                         "consent_at": consent_at,
                     }
                 )
@@ -143,10 +160,15 @@ class SalonboardCredentialsService:
         return bool(result.data)
 
     async def get_entitlement(self, device_id: str) -> dict:
-        """投稿してよいか（無料枠・課金・免除）を判定して返す。平文は含まない。"""
+        """投稿してよいか（無料枠・課金・免除）を判定して返す。平文は含まない。
+
+        無料枠は「端末」ではなく「サロンボードのログインID」単位で数える。
+        端末単位だと、別のブラウザやシークレットウィンドウから登録し直すだけで
+        無料枠が何度でも復活してしまうため。
+        """
         result = (
             self.supabase.table(self.table)
-            .select("stylist_name, email, posts_used, is_paid, is_comped")
+            .select("stylist_name, email, posts_used, is_paid, is_comped, login_id_hash")
             .eq("device_id", device_id)
             .execute()
         )
@@ -156,6 +178,7 @@ class SalonboardCredentialsService:
                 "allowed": False,
                 "reason": "not_registered",
                 "checkout_url": STYLEUP_CHECKOUT_URL,
+                "line_url": STYLEUP_LINE_URL,
             }
         row = result.data[0]
         posts_used = int(row.get("posts_used") or 0)
@@ -167,6 +190,22 @@ class SalonboardCredentialsService:
             or stylist in COMPED_STYLISTS
         )
         paid = bool(row.get("is_paid"))
+
+        # 同じサロンボードIDで登録された全端末を名寄せして合算する。
+        login_hash = (row.get("login_id_hash") or "").strip()
+        if login_hash:
+            siblings = (
+                self.supabase.table(self.table)
+                .select("posts_used, is_paid, is_comped")
+                .eq("login_id_hash", login_hash)
+                .execute()
+            )
+            rows = siblings.data or []
+            if rows:
+                posts_used = sum(int(r.get("posts_used") or 0) for r in rows)
+                paid = paid or any(bool(r.get("is_paid")) for r in rows)
+                comped = comped or any(bool(r.get("is_comped")) for r in rows)
+
         allowed = comped or paid or posts_used < FREE_POST_LIMIT
         if allowed:
             reason = "comped" if comped else ("paid" if paid else "free")
@@ -181,6 +220,8 @@ class SalonboardCredentialsService:
             "is_paid": paid,
             "is_comped": comped,
             "checkout_url": None if allowed else _checkout_url_for(email),
+            # 無料枠を使い切った人の主導線。モニター募集中は決済より面談を先に案内する。
+            "line_url": STYLEUP_LINE_URL,
         }
 
     async def increment_posts(self, device_id: str) -> None:

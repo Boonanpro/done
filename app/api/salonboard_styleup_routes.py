@@ -358,7 +358,8 @@ async def post_style(
     if not device_id:
         raise HTTPException(status_code=400, detail="device_id がありません")
 
-    # 課金ゲート: 無料投稿枠（1件）を超えた未課金・未免除の利用者はブロックし、決済へ誘導する。
+    # 課金ゲート: 無料投稿枠（1件）を超えた未課金・未免除の利用者はブロックする。
+    # モニター募集中は決済リンクを出さず、LINEの無料面談だけに誘導する（面談で有料化を案内する）。
     cred_svc = SalonboardCredentialsService()
     entitlement = await cred_svc.get_entitlement(device_id)
     if not entitlement.get("allowed"):
@@ -367,8 +368,8 @@ async def post_style(
             detail={
                 "error": "payment_required",
                 "reason": entitlement.get("reason"),
-                "message": "無料でお試しいただける1回の投稿は完了しています。続けてご利用いただくには、月額プランへのお申し込みをお願いします。",
-                "checkout_url": entitlement.get("checkout_url"),
+                "message": "無料でお試しいただける1回の投稿は完了しています。続けてご利用いただくには、LINEから無料相談にお申し込みください。",
+                "line_url": entitlement.get("line_url"),
             },
         )
 
