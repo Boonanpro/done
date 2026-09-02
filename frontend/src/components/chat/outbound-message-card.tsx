@@ -151,7 +151,7 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
       setTimeout(() => {
         setGone(true);
         queryClient.invalidateQueries({ queryKey: ['collab-outbound'] });
-      }, 380);
+      }, 200);
     },
     onError: (e: Error) => toast.error(`送信に失敗: ${e.message}`),
   });
@@ -164,7 +164,7 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
       setTimeout(() => {
         setGone(true);
         queryClient.invalidateQueries({ queryKey: ['collab-outbound'] });
-      }, 380);
+      }, 200);
     },
     onError: (e: Error) => toast.error(`破棄に失敗: ${e.message}`),
   });
@@ -223,7 +223,7 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
 
   return (
     <div
-      className={`my-1 w-full max-w-[640px] overflow-hidden rounded-xl border bg-card shadow-sm transition-all duration-300 ease-out ${
+      className={`my-1 w-full max-w-[640px] overflow-hidden rounded-xl border bg-card shadow-sm transition-all duration-200 ease-out motion-reduce:transition-none ${
         exiting
           ? 'opacity-0 scale-95 -translate-y-2'
           : sendMutation.isPending

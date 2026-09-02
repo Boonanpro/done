@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Share, MoreVertical, Download } from 'lucide-react';
 import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
+import { ReactionBar } from '@/components/collab/reaction-bar';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
 
@@ -315,6 +316,27 @@ export default function GuestJoinPage() {
     setEditNameValue('');
   };
 
+
+  // 入力欄→吹き出しの連続移動（iMessage式）: 送った文字が入力欄の位置から
+  // 吹き出しの最終位置へ移動して見える。「押した→生えた」を一つの物にする。
+  const flipFromComposer = (tempId: string) => {
+    if (typeof window === 'undefined') return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const from = inputRef.current?.getBoundingClientRect();
+    if (!from) return;
+    requestAnimationFrame(() => {
+      const bubble = document.querySelector<HTMLElement>(`[data-collab-msg-id="${tempId}"] [data-bubble]`);
+      if (!bubble) return;
+      const to = bubble.getBoundingClientRect();
+      const dx = from.left - to.left;
+      const dy = from.top - to.top;
+      bubble.animate(
+        [{ transform: `translate(${dx}px, ${dy}px) scale(0.96)`, opacity: 0.5 }, { transform: 'none', opacity: 1 }],
+        { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)' }
+      );
+    });
+  };
+
   const handleSend = async () => {
     const content = input.trim();
     if (!content) return;
@@ -352,6 +374,7 @@ export default function GuestJoinPage() {
     setInput('');
     setReplyTo(null);
     setMessages((prev) => [...prev, optimistic]);
+    flipFromComposer(tempId);
     inputRef.current?.focus();
     try {
       const sent = await api.collab.sendMessage(roomId, finalContent, guestToken, metadata);
@@ -515,6 +538,13 @@ export default function GuestJoinPage() {
                 )}
                 <GuestMessageBubble
                   message={msg}
+                  myName={guestName}
+                  onReact={(m, emoji) => {
+                    if (!roomId || !guestToken) return;
+                    api.collab.react(roomId, m.id, emoji, guestToken)
+                      .then((r) => handleReaction({ message_id: m.id, reactions: r.reactions }))
+                      .catch(() => toast.error('リアクションに失敗しました'));
+                  }}
                   showRead={msg.id === lastReadOwnId}
                   replyState={replyStates[msg.id]?.state}
                   onReply={setReplyTo}
@@ -773,12 +803,14 @@ function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name
   );
 }
 
-function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply }: {
+function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, onReact }: {
   message: CollabMessageResponse;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
   onGenerateReply?: () => void;
   onReply?: (msg: CollabMessageResponse) => void;
+  myName?: string;
+  onReact?: (msg: CollabMessageResponse, emoji: string) => void;
 }) {
   const isGuest = message.sender_type === 'guest';
   const isDan = message.sender_type.startsWith('dan_');
@@ -799,7 +831,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-2 duration-150 ease-out motion-reduce:animate-none ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
       {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
       {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
       {!isPrivate && !isGuest && (
@@ -825,6 +857,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
           </div>
         )}
         <div
+          data-bubble
           className={`rounded-lg ${isStamp && !isPrivate ? 'px-1 py-0' : 'px-3 py-2'} ${
             isStamp && !isPrivate
               ? ''
@@ -858,21 +891,16 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
           })()}
           <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={message.content} /></p>
 
-          {/* リアクション（🙏既読サイン等） */}
-          {(() => {
-            const reactions = message.metadata?.reactions as Record<string, string[]> | undefined;
-            if (!reactions || Object.keys(reactions).length === 0) return null;
-            return (
-              <div className="mt-1 flex gap-1">
-                {Object.entries(reactions).map(([emoji, names]) => (
-                  <span key={emoji} title={(names || []).join('、')}
-                        className="animate-in zoom-in duration-200 rounded-full border border-border bg-background/80 px-1.5 py-0.5 text-sm leading-none">
-                    {emoji}{(names || []).length > 1 ? ` ${names.length}` : ''}
-                  </span>
-                ))}
-              </div>
-            );
-          })()}
+          {/* リアクション（ダンの🙏既読サイン＋自分の付け外し。スマホ向けに「+」常時表示） */}
+          {onReact && (
+            <ReactionBar
+              reactions={message.metadata?.reactions as Record<string, string[]> | undefined}
+              myName={myName}
+              align={isGuest ? 'right' : 'left'}
+              compact
+              onToggle={(emoji) => onReact(message, emoji)}
+            />
+          )}
 
           {/* Reply generation button for owner messages */}
           {isOwner && !replyState && onGenerateReply && (
@@ -892,9 +920,6 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
           )}
         </div>
       </div>
-      {showRead && (
-        <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>
-      )}
     </div>
   );
 }

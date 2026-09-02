@@ -34,6 +34,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import { animateNextLayout, pressedScale } from './motion';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
@@ -2710,6 +2711,7 @@ function AppMain() {
       content: localContent,
       created_at: new Date().toISOString(),
     };
+    animateNextLayout();
     setMessages((current) => [...current, optimistic]);
 
     // このチャットの run が動いている最中の送信＝追い連絡。サーバーの
@@ -3816,6 +3818,7 @@ function AppMain() {
               style={({ pressed }) => [
                 styles.sendButton,
                 (pressed || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
+                pressed && pressedScale({ pressed }),
               ]}
             >
               {/* No spinner here — the live "working" indicator already shows in

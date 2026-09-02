@@ -615,6 +615,40 @@ async def get_participants(
     }
 
 
+@router.post("/rooms/{room_id}/messages/{message_id}/react")
+async def react_to_message(
+    room_id: str,
+    message_id: str,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """人間（オーナー/ゲスト）のリアクション。同じ絵文字をもう一度で外れる（トグル）。
+    通知・Push・未読は発生しない。開いている画面にはWSで即反映。"""
+    access = await _room_access(request, credentials, service, room_id)
+    if access is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    is_owner, guest_invite_id = access
+    data = await request.json()
+    emoji = (data.get("emoji") or "").strip()
+    if not emoji or len(emoji) > 8:
+        raise HTTPException(status_code=422, detail="emoji required")
+    if is_owner:
+        room = await service.get_room(room_id)
+        by = await _get_display_name(room["owner_id"], "オーナー") if room else "オーナー"
+    else:
+        gd = _decode_guest_token(_get_guest_token_from_request(request, credentials) or "") or {}
+        by = gd.get("guest_name") or "ゲスト"
+    msg = await service.add_reaction(room_id, message_id, emoji, by=by, toggle=True)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    reactions = (msg.get("metadata") or {}).get("reactions") or {}
+    await collab_manager.broadcast(room_id, {
+        "type": "reaction", "message_id": message_id, "reactions": reactions,
+    })
+    return {"reactions": reactions}
+
+
 @router.post("/rooms/{room_id}/read")
 async def mark_room_read(
     room_id: str,

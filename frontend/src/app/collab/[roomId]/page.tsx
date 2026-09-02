@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { OutboundMessageCard } from '@/components/chat/outbound-message-card';
+import { ReactionBar } from '@/components/collab/reaction-bar';
 import { useUnreadStore } from '@/stores/unread-store';
 import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
@@ -227,6 +228,27 @@ export default function CollabRoomPage() {
     }
   }, [messages]);
 
+
+  // 入力欄→吹き出しの連続移動（iMessage式）: 送った文字が入力欄の位置から
+  // 吹き出しの最終位置へ移動して見える。「押した→生えた」を一つの物にする。
+  const flipFromComposer = (tempId: string) => {
+    if (typeof window === 'undefined') return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const from = inputRef.current?.getBoundingClientRect();
+    if (!from) return;
+    requestAnimationFrame(() => {
+      const bubble = document.querySelector<HTMLElement>(`[data-collab-msg-id="${tempId}"] [data-bubble]`);
+      if (!bubble) return;
+      const to = bubble.getBoundingClientRect();
+      const dx = from.left - to.left;
+      const dy = from.top - to.top;
+      bubble.animate(
+        [{ transform: `translate(${dx}px, ${dy}px) scale(0.96)`, opacity: 0.5 }, { transform: 'none', opacity: 1 }],
+        { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)' }
+      );
+    });
+  };
+
   // Send message — メインの入力欄は**相手（クライアント）専用**。
   // ダンへの返事は相談メッセージ内のスレッド入力欄から（sendPrivateReply）。
   const handleSend = async () => {
@@ -255,6 +277,7 @@ export default function CollabRoomPage() {
     setInput('');
     setReplyTo(null);
     setMessages((prev) => [...prev, optimistic]);
+    flipFromComposer(tempId);
     inputRef.current?.focus();
     try {
       const sent = await api.collab.sendMessage(roomId, content, undefined, metadata);
@@ -604,6 +627,12 @@ export default function CollabRoomPage() {
                   message={msg}
                   privateReplies={privateReplyMap.get(msg.id)}
                   onPrivateReply={sendPrivateReply}
+                  myName={participants?.owner.name}
+                  onReact={(m, emoji) => {
+                    api.collab.react(roomId, m.id, emoji)
+                      .then((r) => handleReaction({ message_id: m.id, reactions: r.reactions }))
+                      .catch(() => toast.error('リアクションに失敗しました'));
+                  }}
                   isOwner={msg.sender_type === 'owner'}
                   showRead={msg.id === lastReadOwnId}
                   replyState={rs?.state}
@@ -834,7 +863,7 @@ function CollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name: str
   );
 }
 
-function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply, onReply, privateReplies, onPrivateReply }: {
+function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply, onReply, privateReplies, onPrivateReply, myName, onReact }: {
   message: CollabMessageResponse;
   isOwner: boolean;
   showRead?: boolean;
@@ -843,6 +872,8 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
   onReply?: (msg: CollabMessageResponse) => void;
   privateReplies?: CollabMessageResponse[];
   onPrivateReply?: (parent: CollabMessageResponse, text: string) => void;
+  myName?: string;
+  onReact?: (msg: CollabMessageResponse, emoji: string) => void;
 }) {
   const isDan = message.sender_type.startsWith('dan_');
   const isGuest = message.sender_type === 'guest';
@@ -855,7 +886,7 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 ${isOwner || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isOwner || isDan ? 'ml-auto' : 'mr-auto'}`}>
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-2 duration-150 ease-out motion-reduce:animate-none ${isOwner || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isOwner || isDan ? 'ml-auto' : 'mr-auto'}`}>
       {replyToData && <CollabReplyQuote replyTo={replyToData} />}
       {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
       {!isPrivate && !isOwner && !isDan && (
@@ -882,6 +913,7 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
           </div>
         )}
         <div
+          data-bubble
           className={`rounded-lg ${isStamp && !isPrivate ? 'px-1 py-0' : 'px-3 py-2'} ${
             /* 色の意味: 紫=あなたにしか見えない（相談・ダンへの私的返信）/
                primary=相手に見える自分側（あなた・ダン）/ muted=相手 */
@@ -924,21 +956,15 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
           ) : null}
           <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={message.content} /></p>
 
-          {/* リアクション（🙏既読サイン等） */}
-          {(() => {
-            const reactions = message.metadata?.reactions as Record<string, string[]> | undefined;
-            if (!reactions || Object.keys(reactions).length === 0) return null;
-            return (
-              <div className="mt-1 flex gap-1">
-                {Object.entries(reactions).map(([emoji, names]) => (
-                  <span key={emoji} title={(names || []).join('、')}
-                        className="animate-in zoom-in duration-200 rounded-full border border-border bg-background/80 px-1.5 py-0.5 text-sm leading-none">
-                    {emoji}{(names || []).length > 1 ? ` ${names.length}` : ''}
-                  </span>
-                ))}
-              </div>
-            );
-          })()}
+          {/* リアクション（ダンの🙏既読サイン＋人間の付け外し） */}
+          {onReact && (
+            <ReactionBar
+              reactions={message.metadata?.reactions as Record<string, string[]> | undefined}
+              myName={myName}
+              align={isOwner || isDan ? 'right' : 'left'}
+              onToggle={(emoji) => onReact(message, emoji)}
+            />
+          )}
 
           {/* 相談スレッド: あなたの返事の履歴 + 専用入力欄（メインの入力欄は相手専用） */}
           {isDan && isPrivate && (

@@ -7,6 +7,9 @@ import {
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { animateNextLayout, pressedScale } from './motion';
+
+const REACTION_CHOICES = ['🙏', '👍', '❤️', '😂', '🎉'];
 
 // 既存パレット踏襲（App.tsx の実質規約）
 const C = {
@@ -241,7 +244,14 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
     let alive = true;
     const load = () => {
       request<{ messages: CollabMessage[] }>(`/collab/rooms/${roomId}/messages?limit=50`)
-        .then((d) => { if (alive) setMessages((prev) => reconcileList(prev, d.messages)); })
+        .then((d) => {
+          if (!alive) return;
+          setMessages((prev) => {
+            const next = reconcileList(prev, d.messages);
+            if (next.length > prev.length) animateNextLayout();
+            return next;
+          });
+        })
         .catch(() => {});
       request<{ thinking: boolean }>(`/collab/rooms/${roomId}/dan-status`)
         .then((d) => { if (alive) setDanThinking(!!d.thinking); })
@@ -276,7 +286,10 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
               if (full.status === 'pending') pend.push(full);
             } catch { /* skip */ }
           }
-          setProposals(pend);
+          setProposals((prev) => {
+            if (pend.length !== prev.length) animateNextLayout();
+            return pend;
+          });
         })
         .catch(() => {});
     };
@@ -297,6 +310,7 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
       content: text, metadata: metadata as CollabMessage['metadata'],
       created_at: new Date().toISOString(),
     };
+    animateNextLayout();
     setMessages((prev) => [...prev, optimistic]);
     try {
       const sent = await request<CollabMessage>(`/collab/rooms/${roomId}/messages`, {
@@ -309,6 +323,30 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
       throw new Error('send failed');
     }
   }, [roomId, request, participants, mergeMessage]);
+
+  // リアクション: 押した瞬間に反映し、サーバーの確定値で上書き（トグル）
+  const myName = participants?.owner.name || '';
+  const react = useCallback(async (messageId: string, emoji: string) => {
+    if (messageId.startsWith('temp-')) return;
+    setMessages((prev) => prev.map((m) => {
+      if (m.id !== messageId) return m;
+      const reactions = { ...(m.metadata?.reactions || {}) };
+      const names = [...(reactions[emoji] || [])];
+      const idx = myName ? names.indexOf(myName) : -1;
+      if (idx >= 0) names.splice(idx, 1); else names.push(myName || 'あなた');
+      if (names.length) reactions[emoji] = names; else delete reactions[emoji];
+      return { ...m, metadata: { ...(m.metadata || {}), reactions } };
+    }));
+    try {
+      const r = await request<{ reactions: Record<string, string[]> }>(
+        `/collab/rooms/${roomId}/messages/${messageId}/react`,
+        { method: 'POST', body: JSON.stringify({ emoji }) },
+      );
+      setMessages((prev) => prev.map((m) => (
+        m.id === messageId ? { ...m, metadata: { ...(m.metadata || {}), reactions: r.reactions } } : m
+      )));
+    } catch { /* 次のポーリングで実状態に戻る */ }
+  }, [roomId, request, myName]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -402,6 +440,8 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
             threadReplies={threadMap.get(item.id)}
             showRead={item.id === lastReadOwnId}
             apiBase={apiBase}
+            myName={myName}
+            onReact={react}
             onThreadReply={(parent, text) =>
               send(text, {
                 visibility: 'owner_only',
@@ -440,7 +480,7 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
           multiline
         />
         <Pressable
-          style={[s.sendBtn, (!input.trim() || sending) && { opacity: 0.4 }]}
+          style={({ pressed }) => [s.sendBtn, (!input.trim() || sending) && { opacity: 0.4 }, pressedScale({ pressed })]}
           onPress={handleSend}
           disabled={!input.trim() || sending}
         >
@@ -464,11 +504,13 @@ function reconcileList(prev: CollabMessage[], server: CollabMessage[]): CollabMe
 // ============================================================
 // メッセージ行
 // ============================================================
-function MessageRow({ msg, threadReplies, showRead, apiBase, onThreadReply }: {
+function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, onThreadReply }: {
   msg: CollabMessage;
   threadReplies?: CollabMessage[];
   showRead: boolean;
   apiBase: string;
+  myName: string;
+  onReact: (messageId: string, emoji: string) => void;
   onThreadReply: (parent: CollabMessage, text: string) => void;
 }) {
   const isDan = msg.sender_type.startsWith('dan_');
@@ -478,6 +520,8 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, onThreadReply }: {
   const reactions = msg.metadata?.reactions;
   const file = msg.metadata?.file;
   const [replyText, setReplyText] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const canReact = !isPrivate && !msg.id.startsWith('temp-');
 
   // ダンの相談（非公開）はLINEバブルではなく専用パネル（スレッド付き）
   if (isDan && isPrivate) {
@@ -530,10 +574,13 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, onThreadReply }: {
   // LINE式: 名前は相手側だけバブルの上（自分の名前は出さない。ダンだけ右側でも小さく表示）、
   // 時刻・既読はバブルの外側（横・下揃え）
   const bubbleBody = (
-    <View
-      style={[
+    <Pressable
+      onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
+      delayLongPress={250}
+      style={({ pressed }) => [
         stamp ? s.stampBox : s.bubble,
         !stamp && (isPrivate ? s.bubblePrivate : isOwnSide ? s.bubbleOwn : s.bubbleOther),
+        pressed && canReact ? { opacity: 0.85 } : undefined,
       ]}
     >
       {file ? (
@@ -554,15 +601,42 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, onThreadReply }: {
       )}
       {!!reactions && Object.keys(reactions).length > 0 && (
         <View style={s.reactionRow}>
-          {Object.entries(reactions).map(([emoji, ns]) => (
-            <View key={emoji} style={s.reactionChip}>
-              <Text style={{ fontSize: 13 }}>{emoji}{(ns || []).length > 1 ? ` ${ns.length}` : ''}</Text>
-            </View>
-          ))}
+          {Object.entries(reactions).map(([emoji, ns]) => {
+            const mine = !!myName && (ns || []).includes(myName);
+            return (
+              <Pressable
+                key={emoji}
+                onPress={canReact ? () => onReact(msg.id, emoji) : undefined}
+                style={({ pressed }) => [
+                  s.reactionChip,
+                  mine && s.reactionChipMine,
+                  pressedScale({ pressed }),
+                ]}
+              >
+                <Text style={{ fontSize: 13, color: C.text }}>{emoji}{(ns || []).length > 1 ? ` ${ns.length}` : ''}</Text>
+              </Pressable>
+            );
+          })}
         </View>
       )}
-    </View>
+    </Pressable>
   );
+
+  // 長押しで出るスタンプ選択（LINE式）。選ぶ／もう一度長押しで閉じる
+  const picker = pickerOpen && canReact ? (
+    <View style={[s.reactionPicker, isOwnSide ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
+      {REACTION_CHOICES.map((emoji) => (
+        <Pressable
+          key={emoji}
+          hitSlop={4}
+          onPress={() => { setPickerOpen(false); onReact(msg.id, emoji); }}
+          style={({ pressed }) => [s.reactionPickItem, pressedScale({ pressed })]}
+        >
+          <Text style={{ fontSize: 20 }}>{emoji}</Text>
+        </Pressable>
+      ))}
+    </View>
+  ) : null;
 
   return (
     <View style={[s.msgWrap, isOwnSide ? s.msgRight : s.msgLeft]}>
@@ -575,6 +649,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, onThreadReply }: {
         </View>
         {bubbleBody}
       </View>
+      {picker}
     </View>
   );
 }
@@ -692,6 +767,9 @@ const s = StyleSheet.create({
   fileLink: { color: C.accent, fontSize: 14, textDecorationLine: 'underline' },
   reactionRow: { flexDirection: 'row', gap: 6, marginTop: 5 },
   reactionChip: { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 12, paddingHorizontal: 7, paddingVertical: 2 },
+  reactionChipMine: { borderColor: C.accent, backgroundColor: '#1f3a33' },
+  reactionPicker: { flexDirection: 'row', gap: 4, marginTop: 6, backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 22, paddingHorizontal: 8, paddingVertical: 5 },
+  reactionPickItem: { paddingHorizontal: 5, paddingVertical: 2 },
   readMark: { color: C.muted2, fontSize: 10, textAlign: 'right', marginTop: 2, marginRight: 4 },
 
   thread: { borderTopWidth: 1, borderTopColor: '#4c3d6e55', marginTop: 8, paddingTop: 8, gap: 6 },

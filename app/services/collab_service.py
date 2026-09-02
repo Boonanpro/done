@@ -403,11 +403,12 @@ class CollabService:
 
         return result.data[0]
 
-    async def add_reaction(self, room_id: str, message_id: str, emoji: str, by: str = "ダン") -> Optional[dict]:
+    async def add_reaction(self, room_id: str, message_id: str, emoji: str, by: str = "ダン",
+                           toggle: bool = False) -> Optional[dict]:
         """メッセージにリアクションを付ける（metadata.reactions に追記）。
 
         リアクションはメッセージではない: 通知・Push・未読は一切発生しない。
-        相手がチャットを開いた時に「読まれた」と分かる既読サイン用。
+        toggle=True なら同じ人の同じ絵文字は付け外し（人間の操作用）。
         """
         r = await self._retry("get_msg_for_reaction",
             lambda: self.supabase.table("collab_messages").select("id,metadata")
@@ -417,9 +418,15 @@ class CollabService:
         md = dict(r.data[0].get("metadata") or {})
         reactions = dict(md.get("reactions") or {})
         names = list(reactions.get(emoji) or [])
-        if by not in names:
+        if by in names:
+            if toggle:
+                names.remove(by)
+        else:
             names.append(by)
-        reactions[emoji] = names
+        if names:
+            reactions[emoji] = names
+        else:
+            reactions.pop(emoji, None)
         md["reactions"] = reactions
         upd = await self._retry("add_reaction",
             lambda: self.supabase.table("collab_messages")

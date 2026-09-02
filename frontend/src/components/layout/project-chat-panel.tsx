@@ -1737,7 +1737,7 @@ function ChatInput({
         ) : message.trim() || attachedFiles.length > 0 || pendingComments.length > 0 ? (
           <Button
             size="icon"
-            className="h-7 w-7 shrink-0"
+            className="h-7 w-7 shrink-0 transition-transform active:scale-90"
             onClick={handleSendMessage}
           >
             <Send className="h-3.5 w-3.5" />
@@ -1755,7 +1755,7 @@ function ChatInput({
         ) : (
           <Button
             size="icon"
-            className="h-7 w-7 shrink-0"
+            className="h-7 w-7 shrink-0 transition-transform active:scale-90"
             onClick={handleSendMessage}
             disabled={!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0}
           >
@@ -2927,7 +2927,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 }
 
                 nodes.push(
-                  <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
+                  <div key={item.msg.id} data-message-id={item.msg.id} className="animate-in fade-in slide-in-from-bottom-2 duration-150 ease-out motion-reduce:animate-none"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
                 );
               });
               return nodes;

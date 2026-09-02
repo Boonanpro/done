@@ -1836,6 +1836,16 @@ export const api = {
       }>(`/collab/rooms/${roomId}/participants`, { headers });
     },
 
+    // リアクションの付け外し（人間用。同じ絵文字をもう一度でトグル）
+    react: (roomId: string, messageId: string, emoji: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<{ reactions: Record<string, string[]> }>(
+        `/collab/rooms/${roomId}/messages/${messageId}/react`,
+        { method: 'POST', body: JSON.stringify({ emoji }), headers }
+      );
+    },
+
     // 既読位置の更新（開いている間、定期的に叩く）
     markRead: (roomId: string, token?: string) => {
       const headers: Record<string, string> = {};
