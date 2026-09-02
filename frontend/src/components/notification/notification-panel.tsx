@@ -373,12 +373,26 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
               className="w-full flex items-center justify-between p-3 hover:bg-muted/30 transition-colors"
             >
               <div className="flex items-center gap-2">
-                <Bell className="h-4 w-4 text-muted-foreground" />
+                {/* 未対応がある間はベルを揺らして気づかせる（閉じたままでも見える） */}
+                <motion.span
+                  className="inline-flex"
+                  animate={pendingCount > 0 ? { rotate: [0, -14, 12, -8, 6, 0] } : { rotate: 0 }}
+                  transition={
+                    pendingCount > 0
+                      ? { duration: 0.7, repeat: Infinity, repeatDelay: 2.0, ease: 'easeInOut' }
+                      : { duration: 0.2 }
+                  }
+                >
+                  <Bell className={cn('h-4 w-4', pendingCount > 0 ? 'text-primary' : 'text-muted-foreground')} />
+                </motion.span>
                 <span className="text-sm font-medium">通知</span>
                 {pendingCount > 0 && (
-                  <Badge variant="default" className="h-5 px-1.5 text-xs">
-                    {pendingCount}
-                  </Badge>
+                  <span className="relative inline-flex">
+                    <span className="absolute inset-0 rounded-full bg-primary/60 animate-ping" />
+                    <Badge variant="default" className="relative h-5 px-1.5 text-xs">
+                      {pendingCount}
+                    </Badge>
+                  </span>
                 )}
               </div>
               {isExpanded ? (
