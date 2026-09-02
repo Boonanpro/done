@@ -75,8 +75,14 @@ async function canonicalHostFor(
   slug: string,
   currentHost: string,
   origin: string,
+  skipLookup = false,
 ): Promise<string> {
   if (isCustomDomainHost(currentHost)) return currentHost;
+  // 専用プロジェクト（1プロジェクト=1成果物）では、この問い合わせ先はバックエンド
+  // (自宅PC への tunnel) で、応答に 1.3〜2.5秒かかる。ページ表示の度にこれを待つと
+  // TTFB が数秒になり、広告から来た人が白画面のまま離脱する。専用ホストで独自ドメインが
+  // 未接続なら canonical は現在のホストで確定するので、問い合わせ自体を行わない。
+  if (skipLookup) return currentHost;
   const map = await fetchDynamicDomainMap(origin);
   for (const [domain, mappedSlug] of Object.entries(map)) {
     if (mappedSlug === slug && isCustomDomainHost(domain)) return domain;
@@ -96,7 +102,18 @@ const DEFAULT_PUBLIC_ARTIFACT_SLUGS = [
   'salonboard-styleup',
   'bookings',
   'oku-yukadanbou',
+  'oku-yukadanbou-real',
   'moonbox-jp',
+  // 創業者に DM のリンクから開いてもらう提案ページ。ログイン不要で読めないと
+  // 意味がない（noindex は markNoIndex で付く）。
+  'moonbox-proposal',
+  // 広告からの流入を受ける公開LP。タイル画像（/artifacts/<slug>/*.png）も
+  // ここに入れないと認証リダイレクトされ、画像が1枚も出ない。
+  'styleup-lp',
+  'salonboard-monitor',
+  // Safeguard（ポルノブロッカー）の販売ページ。YouTube・TikTok からの遷移先で、
+  // タイル画像・法務ページ・ダウンロード案内すべてログイン不要で開く必要がある。
+  'safeguard',
 ];
 
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
@@ -170,6 +187,7 @@ export async function middleware(request: NextRequest) {
       customDomainSlug,
       host,
       request.nextUrl.origin,
+      Boolean(dedicatedArtifactSlug),
     );
     const withCanonical = (response: NextResponse): NextResponse => {
       response.headers.append(

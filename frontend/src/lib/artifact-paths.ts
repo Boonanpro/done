@@ -46,6 +46,18 @@ function isPublicCustomDomainHost(hostname: string): boolean {
   return true;
 }
 
+/**
+ * 専用配信プロジェクトのホスト（`dan-site-<slug>-<id>.vercel.app`）か。
+ *
+ * 独自ドメインと同じく 1 ホスト = 1 成果物なので、成果物はドメイン直下で
+ * 配信される。ここを判定しないと、独自ドメインを繋ぐ前の成果物のリンクだけ
+ * `/preview/<slug>/...` のままになり、公開ページの URL に「preview」が
+ * 出続ける（動きはするが、法務ページを載せる商用ページとしては見栄えが悪い）。
+ */
+function isDedicatedDeliveryHost(hostname: string): boolean {
+  return /^dan-site-[a-z0-9-]+\.vercel\.app$/.test(hostname);
+}
+
 function normalizeRest(rest = ''): string {
   if (!rest || rest === '/') return '';
   return rest.startsWith('/') ? rest : `/${rest}`;
@@ -95,6 +107,7 @@ export function artifactVisiblePath({
     hostname &&
     (customDomains.includes(hostname) ||
       hostname === artifactDeliveryDomain(slug) ||
+      isDedicatedDeliveryHost(hostname) ||
       isPublicCustomDomainHost(hostname))
   ) {
     return cleanPath(rest);
