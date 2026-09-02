@@ -71,7 +71,7 @@ const navItems = [
   },
   {
     title: '物語',
-    href: '/api/v1/story/',
+    href: '/api/v1/story',
     icon: BookOpen,
     description: 'ダン開発の物語 (週ごとの日記・新しいタブ)',
   },
@@ -665,7 +665,7 @@ export function Sidebar({
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
               const showBadge = item.href === '/collab' && unreadCount > 0;
-              const openInNewTab = item.href === '/dan-notion' || item.href === '/api/v1/story/';
+              const openInNewTab = item.href === '/dan-notion' || item.href === '/api/v1/story';
               const LinkWrapper = openInNewTab
                 ? ({ children }: { children: React.ReactNode }) => (
                     <a href={item.href} target="_blank" rel="noopener noreferrer">

@@ -25,7 +25,11 @@ async def story_index(_: TokenData = Depends(get_current_user)):
     p = STORY_DIR / "index.html"
     if not p.exists():
         raise HTTPException(status_code=404, detail="story not built yet (python scripts/story_build.py)")
-    return FileResponse(str(p), media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
+    # index.html はローカル直開き(file://)用に相対 "shots/..." で書かれている。
+    # ここ経由で見る時は絶対パスに書き換える (Next が末尾スラッシュを剥がすため相対では解決しない)。
+    from fastapi.responses import HTMLResponse
+    html = p.read_text(encoding="utf-8").replace('src="shots/', 'src="/api/v1/story/shots/').replace('href="shots/', 'href="/api/v1/story/shots/')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/shots/{day}/{name}")
