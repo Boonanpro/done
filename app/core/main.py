@@ -126,6 +126,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("achievement poller failed to start: %s", e)
 
+    # UIスクショウォッチャー: フロントのコード変更を検知して変わった画面だけ自動保存
+    # (ダン開発の物語の素材。ユーザー操作不要)。失敗してもコア起動は妨げない。
+    try:
+        from app.services.ui_snapshot_watcher import start_watcher as start_ui_watcher
+        start_ui_watcher()
+    except Exception as e:
+        logger.warning("ui snapshot watcher failed to start: %s", e)
+
     # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
     # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
     try:
