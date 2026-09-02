@@ -105,6 +105,49 @@ def _get_session_title(room_id: str) -> str:
     return room_id[:8]
 
 
+def _fetch_unseen_voice_digest(room_id: str) -> str:
+    """直近のダンのテキスト発言より後に入った音声会話（🎙）をダイジェスト化する。
+
+    音声モードの会話は DB（chat_messages）に直接保存され、CLI セッションを
+    経由しないため、そのままではテキスト側のダンの記憶に入らない。
+    次のターンの冒頭に合流させることで「部屋=共有記憶」を双方向にする
+    （音声側は read_room_history / 接続時注入で逆方向を担う）。
+    """
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        sb = get_supabase_client().client
+        result = (
+            sb.table("chat_messages")
+            .select("sender_type,content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(60)
+            .execute()
+        )
+        msgs = list(reversed(result.data or []))
+        last_dan_idx = -1
+        for i, m in enumerate(msgs):
+            c = m.get("content") or ""
+            if m.get("sender_type") == "ai" and not c.startswith("🎙"):
+                last_dan_idx = i
+        voice = [m for m in msgs[last_dan_idx + 1 :] if (m.get("content") or "").startswith("🎙")]
+        if not voice:
+            return ""
+        lines = []
+        for m in voice[-30:]:
+            who = "ユーザー" if m.get("sender_type") == "human" else "あなた（音声モードの自分）"
+            lines.append(f"{who}: {(m.get('content') or '')[1:].strip()[:160]}")
+        digest = "\n".join(lines)[:2000]
+        return (
+            "【音声モードでの会話（この部屋であなた自身が音声で話した、まだ目を通していない分）】\n"
+            + digest
+            + "\n【音声の会話ここまで。以下が今回のメッセージ】\n\n"
+        )
+    except Exception:
+        return ""
+
+
 def _fetch_messages_since(room_id: str, last_index: int) -> str:
     """last_index以降のメッセージをDBから取得してテキスト化する"""
     try:
@@ -2329,6 +2372,10 @@ async def send_dan_message_stream(
                 cli_content, video_analyses = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
+                # 音声モードの未読会話を記憶へ合流（部屋=共有記憶の双方向化）
+                voice_digest = _fetch_unseen_voice_digest(room_id)
+                if voice_digest:
+                    cli_content = voice_digest + cli_content
                 # 送信案カード（compose_message）の編集/送信/破棄をダンの記憶へ合流
                 try:
                     from app.services.outbound_message_service import OutboundMessageService

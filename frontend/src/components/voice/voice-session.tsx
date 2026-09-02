@@ -17,6 +17,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 
+import { usePreviewStore } from '@/stores/preview-store';
+
 import { VoiceOrb } from './voice-orb';
 
 const OPENAI_CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
@@ -28,6 +30,20 @@ const TOOL_LABELS: Record<string, string> = {
   delegate_to_dan: 'ダンへ委譲',
   check_dan_status: '進行確認',
   look_at_screen: '画面確認',
+  web_search: 'Web検索',
+  read_room_history: '履歴読込',
+  get_artifact_state: '状態取得',
+  set_text: '文言変更',
+  set_style: 'スタイル変更',
+  list_source_files: 'ファイル一覧',
+  read_source: 'ソース読込',
+  edit_source: 'ソース編集',
+  write_source: 'ソース書換',
+  generate_image: '画像生成',
+  look_at_page: '全体確認',
+  look_at_section: '細部確認',
+  check_contrast: 'コントラスト検査',
+  read_skill: 'スキル参照',
 };
 
 interface VoiceSessionProps {
@@ -96,6 +112,9 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
   const toolOutputItemsRef = useRef<Array<{ id: string; size: number }>>([]);
   const delegatingRef = useRef(false);
   const danActivityRef = useRef<string[]>([]);
+  /** 委譲の途中テキスト即中継用: ダンの最初のまとまった発言が届いた時点で音声へ渡す（ターン終了を待たない） */
+  const earlyTextRef = useRef('');
+  const earlyInjectedRef = useRef(false);
 
   // ---- オーブ駆動用の音量計測 ----
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -222,8 +241,46 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
         ws.send(JSON.stringify({ type: 'delegate', task, room_id: roomId }));
         delegatingRef.current = true;
         danActivityRef.current = [];
+        earlyTextRef.current = '';
+        earlyInjectedRef.current = false;
         pushLog('📋', `委譲: ${task.slice(0, 200)}`);
         return { status: 'delegated', note: '開発エージェントに渡しました。数分かかることがあります。完了したら通知が届きます。' };
+      }
+
+      if (name === 'read_room_history') {
+        const limit = Math.min(50, Math.max(1, Number(args.limit) || 30));
+        try {
+          const res = await fetch(`/api/v1/chat/rooms/${encodeURIComponent(roomId)}/messages?limit=${limit}`, {
+            headers: authHeaders(),
+          });
+          if (!res.ok) return { error: `履歴の取得に失敗 (HTTP ${res.status})` };
+          const data = (await res.json()) as { messages?: Array<{ sender_type?: string; content?: string; created_at?: string }> };
+          const msgs = (data.messages || []).map((m) => ({
+            from: m.sender_type === 'ai' ? 'dan' : 'user',
+            at: String(m.created_at || '').slice(5, 16),
+            text: String(m.content || '').slice(0, 200),
+          }));
+          return { count: msgs.length, messages: msgs };
+        } catch (e) {
+          return { error: `履歴の取得に失敗: ${String(e).slice(0, 120)}` };
+        }
+      }
+
+      if (name === 'web_search') {
+        const query = String(args.query ?? '').trim();
+        if (!query) return { error: 'query が空です' };
+        try {
+          const res = await fetch('/api/v1/voicelog/search', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ query }),
+          });
+          const data = (await res.json()) as Record<string, unknown>;
+          if (!res.ok) return { error: String(data.detail || `検索に失敗 (${res.status})`) };
+          return data;
+        } catch (e) {
+          return { error: `検索に失敗: ${String(e).slice(0, 120)}` };
+        }
       }
 
       if (name === 'check_dan_status') {
@@ -253,9 +310,128 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
         }
       }
 
+      // ---- 成果物編集ツール群（V2）: 対象=成果物タブで開いている成果物。実行は全部サーバー側 ----
+      const previewSlug = () => {
+        const s = usePreviewStore.getState();
+        return s.iframeSlug || s.artifact?.slug || null;
+      };
+      const refreshPreview = () => usePreviewStore.getState().bumpContentVersion();
+      const needSlug = (): string | { error: string } => {
+        const slug = previewSlug();
+        return slug || { error: '成果物タブで対象の成果物を開いてください（プレビューが開いていません）' };
+      };
+      const api = async (path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        const res = await fetch(`/api/v1/voicelog/${path}`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify(payload),
+        });
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!res.ok) return { error: String(data.detail || `失敗 (HTTP ${res.status})`) };
+        return data;
+      };
+      const injectImages = (images: string[]) => {
+        for (const oldId of lastImageItemIdsRef.current) {
+          injectItem({ type: 'conversation.item.delete', item_id: oldId });
+        }
+        const ids: string[] = [];
+        images.forEach((img, i) => {
+          const id = `item_img_${Date.now()}_${i}`;
+          ids.push(id);
+          injectItem({
+            type: 'conversation.item.create',
+            item: { id, type: 'message', role: 'user', content: [{ type: 'input_image', image_url: img }] },
+          });
+        });
+        lastImageItemIdsRef.current = ids;
+      };
+
+      if (name === 'get_artifact_state' || name === 'check_contrast') {
+        const slug = needSlug();
+        if (typeof slug !== 'string') return slug;
+        const data = await api('capture', { slug, mode: name === 'check_contrast' ? 'contrast' : 'state' });
+        return data;
+      }
+
+      if (name === 'look_at_page') {
+        const slug = needSlug();
+        if (typeof slug !== 'string') return slug;
+        const data = await api('capture', { slug, mode: 'tiles' });
+        if (data.error) return data;
+        const tiles = (data.tiles as string[]) || [];
+        if (!tiles.length) return { error: 'タイルが取得できませんでした' };
+        injectImages(tiles);
+        return {
+          ok: true,
+          tiles: tiles.length,
+          note: `成果物の全体を上から順に${tiles.length}枚の高解像度タイルで添付しました。draft反映済みの実際の見た目です。悪いところに自分の目で気付いてください。`,
+        };
+      }
+
+      if (name === 'look_at_section') {
+        const slug = needSlug();
+        if (typeof slug !== 'string') return slug;
+        const data = await api('capture', { slug, mode: 'section', element_id: String(args.id ?? '') });
+        if (data.error) return data;
+        if (!data.image) return { error: '撮影できませんでした' };
+        injectImages([data.image as string]);
+        return { ok: true, note: `要素 ${String(args.id)} の原寸スクリーンショットを添付しました。` };
+      }
+
+      if (name === 'set_text' || name === 'set_style') {
+        const slug = needSlug();
+        if (typeof slug !== 'string') return slug;
+        const payload: Record<string, unknown> = { slug, element_id: String(args.id ?? '') };
+        if (name === 'set_text') payload.text = String(args.text ?? '');
+        else payload.styles = args.styles ?? {};
+        const data = await api('edit', payload);
+        if (!data.error) refreshPreview();
+        return data.error ? data : { ok: true, id: args.id, note: 'draftとして保存しました。プレビューを再読込して反映します。' };
+      }
+
+      if (name === 'list_source_files' || name === 'read_source' || name === 'edit_source' || name === 'write_source') {
+        const slug = needSlug();
+        if (typeof slug !== 'string') return slug;
+        const action =
+          name === 'list_source_files' ? 'list' : name === 'read_source' ? 'read' : name === 'edit_source' ? 'edit' : 'write';
+        const data = await api('source', {
+          action,
+          slug,
+          file: args.file,
+          old_string: args.old_string,
+          new_string: args.new_string,
+          content: args.content,
+        });
+        if (!data.error && (action === 'edit' || action === 'write')) refreshPreview();
+        return data;
+      }
+
+      if (name === 'generate_image') {
+        const prompt = String(args.prompt ?? '').trim();
+        if (!prompt) return { error: 'prompt が空です' };
+        pushLog('🖼', `画像生成開始: ${prompt.slice(0, 80)}`);
+        void (async () => {
+          const data = await api('generate-image', { prompt, size: args.size });
+          if (data.error) {
+            injectSystemAndRespond(`[システム通知] 画像生成に失敗しました（${String(data.error).slice(0, 150)}）。ユーザーに伝えてください。`);
+            return;
+          }
+          pushLog('🖼', `画像生成完了: ${String(data.url)}`);
+          injectSystemAndRespond(
+            `[システム通知] 画像が完成しました: ${String(data.url)}\n` +
+              'set_style の background-image、または edit_source で <img> の src にこのURLを自分で適用してください。',
+          );
+        })();
+        return { status: 'generating', note: '20〜60秒で完成の通知が届きます。届いたら自分で適用してください。' };
+      }
+
+      if (name === 'read_skill') {
+        return api('skill', { name: args.name });
+      }
+
       return { error: `未知のツール: ${name}` };
     },
-    [captureScreenshot, injectItem, pushLog, roomId],
+    [authHeaders, captureScreenshot, injectItem, injectSystemAndRespond, pushLog, roomId],
   );
 
   const disconnect = useCallback(() => {
@@ -436,6 +612,8 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
       switch (data.type) {
         case 'delegate_started':
           delegatingRef.current = true;
+          earlyTextRef.current = '';
+          earlyInjectedRef.current = false;
           setCurrentActivity('ダンが作業中（委譲）');
           pushActivity('📋 ダンに作業を委譲');
           break;
@@ -446,9 +624,22 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
           danActivity(`ツール実行: ${String(data.name || 'tool')}`);
           pushActivity(`⚙ ダン: ${String(data.name || 'tool')}`);
           break;
-        case 'text':
-          danActivity(`発言: ${String(data.text || '').slice(0, 60)}`);
+        case 'text': {
+          const chunk = String(data.text || '');
+          danActivity(`発言: ${chunk.slice(0, 60)}`);
+          // 途中テキスト即中継: ダンの最初のまとまった発言が届いたら、ターン終了を
+          // 待たずに音声へ渡す（実測: 回答9秒に対しターン終端まで待つと約50秒）
+          earlyTextRef.current = `${earlyTextRef.current}${chunk}\n`;
+          if (!earlyInjectedRef.current && earlyTextRef.current.trim().length >= 60) {
+            earlyInjectedRef.current = true;
+            pushLog('⚡', 'ダンの途中報告を音声へ即中継');
+            injectSystemAndRespond(
+              `[途中経過] ダンからの報告（まだ作業は完了していない）:\n${earlyTextRef.current.slice(0, 1500)}\n\n` +
+                '内容がユーザーの質問に答えているなら、要点を短く伝えてよい。完了通知は別に届く。',
+            );
+          }
           break;
+        }
         case 'result': {
           delegatingRef.current = false;
           setCurrentActivity(null);
@@ -531,7 +722,7 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
       const sessRes = await fetch('/api/v1/voicelog/session', {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({ chat_title: chatTitle ?? null }),
+        body: JSON.stringify({ chat_title: chatTitle ?? null, room_id: roomId }),
       });
       if (!live()) return;
       const sess = await sessRes.json();
@@ -647,7 +838,7 @@ export function VoiceSession({ roomId, chatTitle, onClose }: VoiceSessionProps) 
       setError(e instanceof Error ? e.message : '接続に失敗しました');
       setStatus('error');
     }
-  }, [authHeaders, chatTitle, dcSend, disconnect, executeTool, injectItem, injectSystemAndRespond, saveTranscript, scheduleResponse]);
+  }, [authHeaders, chatTitle, dcSend, disconnect, executeTool, injectItem, injectSystemAndRespond, roomId, saveTranscript, scheduleResponse]);
 
   useEffect(() => {
     void connect();
