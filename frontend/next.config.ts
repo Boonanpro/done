@@ -123,6 +123,10 @@ const nextConfig: NextConfig = {
         source: '/api/v1/story',
         destination: `${coreBackendUrl}/api/v1/story`,
       },
+      {
+        source: '/api/v1/story/:path*',
+        destination: `${coreBackendUrl}/api/v1/story/:path*`,
+      },
       // 上記以外の /api/* は業務系サンドボックスへ
       {
         source: '/api/:path*',

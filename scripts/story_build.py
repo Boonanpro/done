@@ -601,8 +601,24 @@ h2.ch{font-size:20px;margin:44px 0 6px;padding-top:18px;border-top:2px solid var
 .body{white-space:pre-wrap}.st{margin:10px 0 0;padding:10px 14px;border-left:3px solid var(--red);background:color-mix(in srgb,var(--red) 8%,transparent);border-radius:6px;font-size:14px}
 .tp{margin:10px 0 0;padding:10px 14px;border-left:3px solid var(--acc);background:color-mix(in srgb,var(--acc) 8%,transparent);border-radius:6px;font-size:14px}
 .ev{margin-top:10px;font-size:12px;color:var(--mut)}.ev span{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin:2px 4px 2px 0}
-.tried{margin-top:10px;font-size:13px}.tried li{margin:2px 0;color:var(--mut)}.tried .r{display:inline-block;width:4.2em;font-size:11px;border-radius:5px;text-align:center;padding:0 4px;margin-right:6px}.r-ok{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}.r-ng{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}.r-wip{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}.r-drop{background:var(--line);color:var(--mut)}.tried .why{opacity:.8}.abil{margin:10px 0 0;padding:10px 14px;border-left:3px solid #7aa2ff;background:color-mix(in srgb,#7aa2ff 8%,transparent);border-radius:6px;font-size:14px}.chmeta{font-size:13px;color:var(--mut);margin:0 0 14px}.chmeta b{color:var(--fg)}.chmeta .faded-x{color:var(--red)}.stats{font-size:11px;color:var(--mut);margin-top:6px}.foot{color:var(--mut);font-size:12px;margin-top:50px}
+.tried{margin-top:10px;font-size:13px}.tried li{margin:2px 0;color:var(--mut)}.tried .r{display:inline-block;width:4.2em;font-size:11px;border-radius:5px;text-align:center;padding:0 4px;margin-right:6px}.r-ok{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}.r-ng{background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}.r-wip{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}.r-drop{background:var(--line);color:var(--mut)}.tried .why{opacity:.8}.abil{margin:10px 0 0;padding:10px 14px;border-left:3px solid #7aa2ff;background:color-mix(in srgb,#7aa2ff 8%,transparent);border-radius:6px;font-size:14px}.chmeta{font-size:13px;color:var(--mut);margin:0 0 14px}.chmeta b{color:var(--fg)}.chmeta .faded-x{color:var(--red)}.shots{margin-top:10px}.shotrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.shotrow img{width:220px;border:1px solid var(--line);border-radius:8px;display:block}.stats{font-size:11px;color:var(--mut);margin-top:6px}.foot{color:var(--mut);font-size:12px;margin-top:50px}
 """
+
+
+def collect_shots(key: str) -> List[str]:
+    """その週に撮ったUIスクショの相対パス (story/index.html から見た "shots/日付/名前.png")。"""
+    shots_dir = STORY_DIR / "shots"
+    if not shots_dir.exists():
+        return []
+    s, e = week_bounds(key)
+    out: List[str] = []
+    d = s
+    while d <= e:
+        day_dir = shots_dir / d.isoformat()
+        if day_dir.exists():
+            out.extend(f"shots/{d.isoformat()}/{f.name}" for f in sorted(day_dir.glob("*.png")))
+        d += timedelta(days=1)
+    return out
 
 
 def render(weeks: List[Dict[str, Any]], chapters: Optional[Dict[str, Any]]) -> Path:
@@ -632,6 +648,10 @@ def render(weeks: List[Dict[str, Any]], chapters: Optional[Dict[str, Any]]) -> P
             parts.append('<details class="tried"><summary style="cursor:pointer;color:var(--mut);font-size:12px">やろうとしたこと ' + str(len(lis)) + ' 件</summary><ul style="margin:6px 0 0;padding-left:18px">' + "".join(lis) + "</ul></details>")
         if w.get("ability_delta"):
             parts.append(f'<div class="abil">この週の変化: {esc(w["ability_delta"])}</div>')
+        shots = collect_shots(w["week"])
+        if shots:
+            imgs = "".join(f'<a href="{esc(u)}" target="_blank"><img src="{esc(u)}" loading="lazy" alt="" title="{esc(u.split(chr(47))[-1])}"></a>' for u in shots)
+            parts.append('<details class="shots"><summary style="cursor:pointer;color:var(--mut);font-size:12px">当時のUIスクショ ' + str(len(shots)) + ' 枚</summary><div class="shotrow">' + imgs + "</div></details>")
         if w.get("evidence"):
             parts.append('<div class="ev">' + "".join(f'<span title="{esc(e.get("ref"))}">{esc(e.get("kind"))}: {esc(e.get("label") or e.get("ref"))}</span>' for e in w["evidence"]) + "</div>")
         parts.append(f'<div class="stats">{stats}</div></article>')
