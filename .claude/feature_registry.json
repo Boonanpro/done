@@ -334,5 +334,33 @@
       "D:\\done\\supabase\\migrations\\078_pornblocker_cancellation.sql",
       "D:\\done\\app\\services\\pornblocker_cancellation_service.py"
     ]
+  },
+  "daily_achievements": {
+    "name": "daily_achievements",
+    "description": "今日やったこと台帳: ダン/CLI/git/見張りの証拠から成果を自動判定",
+    "created_at": "2026-08-26T16:42:52.330203",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\080_daily_achievements.sql",
+      "D:\\done\\app\\models\\daily_achievements_schemas.py",
+      "D:\\done\\app\\services\\daily_achievements_service.py",
+      "D:\\done\\app\\api\\daily_achievements_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\daily-achievements\\page.tsx",
+      "D:\\done\\scripts\\seed_daily_achievements.py"
+    ]
+  },
+  "himawari_seitai": {
+    "name": "himawari_seitai",
+    "description": "仮クライアント ひまわり整体院のテスト用HP成果物（コラボ窓口の本番フロー検証用・非公開）",
+    "created_at": "2026-08-31T16:42:20.362910",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\082_himawari_seitai.sql",
+      "D:\\done\\app\\models\\himawari_seitai_schemas.py",
+      "D:\\done\\app\\services\\himawari_seitai_service.py",
+      "D:\\done\\app\\api\\himawari_seitai_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\himawari-seitai\\page.tsx",
+      "D:\\done\\scripts\\seed_himawari_seitai.py"
+    ]
   }
 }

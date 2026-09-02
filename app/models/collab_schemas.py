@@ -46,6 +46,8 @@ class CollabRoomCreateRequest(BaseModel):
     project_ref: Optional[str] = None
     ai_auto_assist: bool = True
     ai_assist_config: Optional[AIAssistConfig] = None
+    # 紐づけ先の本体チャットルーム。指定するとゲスト発言でその部屋のダンが自動起動する
+    origin_chat_room_id: Optional[str] = None
 
 
 class CollabRoomUpdateRequest(BaseModel):
@@ -106,6 +108,8 @@ class CollabJoinResponse(BaseModel):
     guest_token: str
     guest_name: str
     role: str
+    # 本人専用URL用トークン（/collab/join/<personal_token>）。端末・ブラウザを問わず本人を特定する
+    personal_token: Optional[str] = None
 
 
 # ==================== Messages ====================

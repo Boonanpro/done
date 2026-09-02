@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -9,6 +9,7 @@ import {
   Bot, User, UserCheck, Circle, Sparkles, Loader2, Reply, X,
 } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
+import { OutboundMessageCard } from '@/components/chat/outbound-message-card';
 import { useUnreadStore } from '@/stores/unread-store';
 import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
@@ -82,7 +83,6 @@ export default function CollabRoomPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [danThinking, setDanThinking] = useState(false);
-  const [danMode, setDanMode] = useState(false);
   const [readByOther, setReadByOther] = useState<string | null>(null); // last message_id read by other side
   // Reply generation state - keyed by message ID to survive re-renders
   const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
@@ -102,6 +102,32 @@ export default function CollabRoomPage() {
     enabled: !!roomId,
   });
 
+  // 参加者名簿＋既読位置（入室した人は恒久的に掲載。オンライン判定はしない）
+  const { data: participants } = useQuery({
+    queryKey: ['collab-participants', roomId],
+    queryFn: () => api.collab.getParticipants(roomId),
+    enabled: !!roomId,
+    refetchInterval: 10_000,
+  });
+
+  // 自分の既読位置を定期更新（相手側の「既読」表示の元になる）
+  useEffect(() => {
+    if (!roomId) return;
+    const mark = () => api.collab.markRead(roomId).catch(() => {});
+    mark();
+    const timer = setInterval(mark, 10_000);
+    return () => clearInterval(timer);
+  }, [roomId]);
+
+  // この窓口宛のダンの送信案カード（pending をインライン表示。承認/編集/破棄は本体チャットと同じ経路）
+  const { data: outboundData } = useQuery({
+    queryKey: ['collab-outbound', roomId],
+    queryFn: () => api.proposals.listForCollab(roomId),
+    enabled: !!roomId,
+    refetchInterval: 10_000,
+  });
+  const pendingProposals = (outboundData?.proposals ?? []).filter((p) => p.status === 'pending');
+
   useEffect(() => {
     if (messagesData?.messages) {
       setMessages(messagesData.messages);
@@ -112,12 +138,19 @@ export default function CollabRoomPage() {
   const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
 
   // WebSocket
+  // 受信メッセージの合流点。楽観表示の仮バブル（client_msg_id）と同一なら
+  // 追加ではなく「その場で差し替え」る。WSエコー・REST応答・どちらが先でも
+  // 二重表示にならず、描画キーも client_msg_id なのでDOMも作り直されない。
   const handleNewMessage = useCallback((msg: CollabMessageResponse) => {
     if (msg.sender_type?.startsWith('dan_')) {
       setDanThinking(false);
     }
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
+      const cid = (msg.metadata as { client_msg_id?: string } | undefined)?.client_msg_id;
+      if (cid && prev.some((m) => m.id === cid)) {
+        return prev.map((m) => (m.id === cid ? msg : m));
+      }
       return [...prev, msg];
     });
   }, []);
@@ -132,6 +165,15 @@ export default function CollabRoomPage() {
     }
   }, []);
 
+  // リアクション（🙏既読サイン等）の反映
+  const handleReaction = useCallback((data: { message_id: string; reactions: Record<string, string[]> }) => {
+    setMessages((prev) => prev.map((m) =>
+      m.id === data.message_id
+        ? { ...m, metadata: { ...(m.metadata || {}), reactions: data.reactions } }
+        : m
+    ));
+  }, []);
+
   const { isConnected, onlineUsers, sendMessage: wsSend, sendRead } = useCollabWebSocket({
     roomId,
     token,
@@ -139,6 +181,7 @@ export default function CollabRoomPage() {
     onMessage: handleNewMessage,
     onDanThinking: handleDanThinking,
     onRead: handleRead,
+    onReaction: handleReaction,
   });
 
   // Send read receipt when new messages arrive from guest
@@ -148,6 +191,31 @@ export default function CollabRoomPage() {
       sendRead(lastMsg.id);
     }
   }, [messages, sendRead]);
+
+  // 部屋を開いた瞬間・WS再接続時に「考え中」状態を取得する。
+  // これが無いと、ダンの作業中に部屋を開いた場合にインジケーターが出ない
+  // （WSは開始イベントを聞き逃すと done まで何も来ないため）。
+  useEffect(() => {
+    if (!roomId) return;
+    api.collab.getDanStatus(roomId)
+      .then((s) => setDanThinking(!!s.thinking))
+      .catch(() => {});
+  }, [roomId, isConnected]);
+
+  // WS が張れない環境（Vercel 経由など。rewrites は WS を通せない）では
+  // REST ポーリングで受信＋考え中状態を代替する（4秒間隔＝体感リアルタイム）。
+  useEffect(() => {
+    if (!roomId || isConnected) return;
+    const timer = setInterval(() => {
+      api.collab.getMessages(roomId)
+        .then((d) => setMessages(d.messages))
+        .catch(() => {});
+      api.collab.getDanStatus(roomId)
+        .then((s) => setDanThinking(!!s.thinking))
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [roomId, isConnected]);
 
   // Push notifications
   usePushNotification(roomId, 'owner');
@@ -159,11 +227,11 @@ export default function CollabRoomPage() {
     }
   }, [messages]);
 
-  // Send message
-  const handleSend = () => {
+  // Send message — メインの入力欄は**相手（クライアント）専用**。
+  // ダンへの返事は相談メッセージ内のスレッド入力欄から（sendPrivateReply）。
+  const handleSend = async () => {
     const content = input.trim();
     if (!content) return;
-    const finalContent = danMode ? `@ダン ${content}` : content;
     const metadata: Record<string, unknown> = {};
     if (replyTo) {
       metadata.reply_to = {
@@ -173,11 +241,100 @@ export default function CollabRoomPage() {
         content: replyTo.content.slice(0, 200),
       };
     }
-    wsSend(finalContent, Object.keys(metadata).length > 0 ? metadata : undefined);
+    // 楽観表示: 押した瞬間に自分のバブルを即表示。client_msg_id を焼き込み、
+    // WSエコー/REST応答のどちらが先に来ても handleNewMessage が1回で差し替える。
+    const savedReplyTo = replyTo;
+    const tempId = `temp-${Date.now()}`;
+    metadata.client_msg_id = tempId;
+    const optimistic = {
+      id: tempId, room_id: roomId, sender_type: 'owner',
+      sender_name: [...messages].reverse().find((m) => m.sender_type === 'owner')?.sender_name || 'あなた',
+      content, metadata: metadata as CollabMessageResponse['metadata'],
+      created_at: new Date().toISOString(),
+    } as CollabMessageResponse;
     setInput('');
     setReplyTo(null);
+    setMessages((prev) => [...prev, optimistic]);
     inputRef.current?.focus();
+    try {
+      const sent = await api.collab.sendMessage(roomId, content, undefined, metadata);
+      handleNewMessage(sent);
+    } catch {
+      toast.error('送信に失敗しました。通信環境をご確認ください');
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setInput(content);
+      setReplyTo(savedReplyTo);
+    }
   };
+
+  // 相談スレッド内からのダン宛返信（相手には見えない）
+  const sendPrivateReply = async (parent: CollabMessageResponse, text: string) => {
+    const content = text.trim();
+    if (!content) return;
+    const md: Record<string, unknown> = {
+      visibility: 'owner_only',
+      reply_to: {
+        id: parent.id,
+        sender_name: parent.sender_name,
+        sender_type: parent.sender_type,
+        content: (parent.content || '').slice(0, 200),
+      },
+    };
+    // 楽観表示（相談スレッド内の返信も押した瞬間に出す）
+    const tempId = `temp-${Date.now()}`;
+    md.client_msg_id = tempId;
+    const myName = [...messages].reverse().find((m) => m.sender_type === 'owner')?.sender_name || 'あなた';
+    const optimistic = {
+      id: tempId, room_id: roomId, sender_type: 'owner', sender_name: myName,
+      content, metadata: md as CollabMessageResponse['metadata'],
+      created_at: new Date().toISOString(),
+    } as CollabMessageResponse;
+    setMessages((prev) => [...prev, optimistic]);
+    try {
+      const sent = await api.collab.sendMessage(roomId, content, undefined, md);
+      handleNewMessage(sent);
+    } catch {
+      toast.error('送信に失敗しました。通信環境をご確認ください');
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    }
+  };
+
+  // 既読表示: 相手（ゲスト）の既読位置以前の「自分側の公開メッセージ」の最後の1件に「既読」を付ける
+  const guestMaxRead = Math.max(
+    0,
+    ...((participants?.guests ?? []).map((g) => (g.last_read_at ? new Date(g.last_read_at).getTime() : 0)))
+  );
+  const lastReadOwnId = useMemo(() => {
+    let id: string | null = null;
+    for (const m of messages) {
+      const priv = (m.metadata as { visibility?: string } | undefined)?.visibility;
+      if (
+        (m.sender_type === 'owner' || m.sender_type === 'dan_owner') && !priv &&
+        new Date(m.created_at).getTime() <= guestMaxRead
+      ) {
+        id = m.id;
+      }
+    }
+    return id;
+  }, [messages, guestMaxRead]);
+
+  // 相談スレッドの構造化: 親（相談）への返信（あなた・ダンの続き発言とも）を親の下にぶら下げる
+  const messageIds = useMemo(() => new Set(messages.map((m) => m.id)), [messages]);
+  const privateReplyMap = useMemo(() => {
+    const map = new Map<string, CollabMessageResponse[]>();
+    for (const m of messages) {
+      const md = m.metadata as { visibility?: string; reply_to?: { id?: string } } | undefined;
+      if (
+        (m.sender_type === 'owner' || m.sender_type === 'dan_owner') &&
+        md?.visibility === 'owner_only' && md?.reply_to?.id && messageIds.has(md.reply_to.id)
+      ) {
+        const arr = map.get(md.reply_to.id) || [];
+        arr.push(m);
+        map.set(md.reply_to.id, arr);
+      }
+    }
+    return map;
+  }, [messages, messageIds]);
 
   // File upload
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -199,9 +356,11 @@ export default function CollabRoomPage() {
       const fileData = await res.json();
       // Send message with file attachment
       const fileUrl = fileData.file_path;
-      wsSend(`${file.name}`, {
+      const fileMeta = {
         file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
-      });
+      };
+      const sent = await api.collab.sendMessage(roomId, `${file.name}`, undefined, fileMeta);
+      handleNewMessage(sent);
       toast.success('ファイルを送信しました');
     } catch (err: unknown) {
       const errAny = err as { name?: string; message?: string };
@@ -286,11 +445,38 @@ export default function CollabRoomPage() {
           >
             {room?.title ?? '...'}
           </h2>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Circle className={`h-2 w-2 fill-current ${isConnected ? 'text-green-500' : 'text-gray-400'}`} />
-            <span>{onlineUsers.length}人オンライン</span>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Users className="h-3 w-3 shrink-0" />
+            <span className="truncate">
+              {participants
+                ? `${1 + participants.guests.length}人: ${[participants.owner.name, ...participants.guests.map((g) => g.name)].join('、')}`
+                : '...'}
+            </span>
           </div>
         </div>
+        {/* 自分のプロフィール（クリックで表示名を編集。チャット内では自分の名前を出さない代わり） */}
+        <button
+          className="flex items-center gap-1.5 rounded-full bg-muted/60 hover:bg-muted px-1 py-1 pr-2.5 transition-colors max-w-[130px]"
+          title="表示名を編集"
+          onClick={async () => {
+            const current = participants?.owner.name || '';
+            const v = window.prompt('表示名を変更', current);
+            if (v && v.trim() && v.trim() !== current) {
+              try {
+                await api.auth.updateProfile(v.trim());
+                queryClient.invalidateQueries({ queryKey: ['collab-participants', roomId] });
+                toast.success('表示名を変更しました');
+              } catch {
+                toast.error('変更に失敗しました');
+              }
+            }
+          }}
+        >
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary">
+            <User className="h-3.5 w-3.5 text-primary-foreground" />
+          </span>
+          <span className="truncate text-xs">{participants?.owner.name || '...'}</span>
+        </button>
         <Button
           variant="outline"
           size="sm"
@@ -319,6 +505,36 @@ export default function CollabRoomPage() {
                   checked={room?.ai_auto_assist ?? true}
                   onCheckedChange={(v) => toggleAssist.mutate(v)}
                 />
+              </div>
+
+              <div>
+                <p className="font-medium text-sm mb-2">参加者</p>
+                <div className="space-y-1.5 text-sm">
+                  {participants ? (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <User className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>{participants.owner.name}（あなた）</span>
+                      </div>
+                      {participants.guests.map((g) => (
+                        <div key={g.id} className="flex items-center gap-2">
+                          <UserCheck className="h-3.5 w-3.5 text-muted-foreground" />
+                          <span>{g.name}</span>
+                          {g.joined_at && (
+                            <span className="text-[10px] text-muted-foreground">
+                              {new Date(g.joined_at).toLocaleDateString('ja-JP')}参加
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                      {participants.guests.length === 0 && (
+                        <p className="text-xs text-muted-foreground">まだ相手が参加していません</p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">読み込み中...</p>
+                  )}
+                </div>
               </div>
 
               {inviteUrl && (
@@ -361,12 +577,21 @@ export default function CollabRoomPage() {
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
         <div className="space-y-3 py-4">
           {messages.map((msg, i) => {
+            // 相談スレッドに属する私的メッセージ（あなたの返信・ダンの続き）は
+            // 親のスレッド内に表示するので、単独では出さない
+            const mdv = msg.metadata as { visibility?: string; reply_to?: { id?: string } } | undefined;
+            if (
+              (msg.sender_type === 'owner' || msg.sender_type === 'dan_owner') &&
+              mdv?.visibility === 'owner_only' && mdv?.reply_to?.id && messageIds.has(mdv.reply_to.id)
+            ) {
+              return null;
+            }
             const prevDate = i > 0 ? new Date(messages[i - 1].created_at).toDateString() : '';
             const curDate = new Date(msg.created_at).toDateString();
             const showSeparator = curDate !== prevDate;
             const rs = replyStates[msg.id];
             return (
-              <div key={msg.id}>
+              <div key={(msg.metadata as { client_msg_id?: string } | undefined)?.client_msg_id || msg.id}>
                 {showSeparator && (
                   <div className="flex items-center gap-3 py-2">
                     <div className="flex-1 border-t border-border" />
@@ -377,8 +602,10 @@ export default function CollabRoomPage() {
                 <div data-collab-msg-id={msg.id}>
                 <MessageBubble
                   message={msg}
+                  privateReplies={privateReplyMap.get(msg.id)}
+                  onPrivateReply={sendPrivateReply}
                   isOwner={msg.sender_type === 'owner'}
-                  showRead={msg.sender_type === 'owner' && !msg.metadata?.visibility && readByOther != null && messages.filter(m => m.sender_type === 'owner' && !m.metadata?.visibility).pop()?.id === msg.id}
+                  showRead={msg.id === lastReadOwnId}
                   replyState={rs?.state}
                   onReply={setReplyTo}
                   onGenerateReply={async () => {
@@ -445,8 +672,21 @@ export default function CollabRoomPage() {
             <div className="flex justify-end">
               <div className="bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
                 <Bot className="h-4 w-4 text-violet-400 animate-pulse" />
-                <span className="text-xs text-violet-300">DAN 分析中...</span>
+                <span className="text-xs text-violet-300">考え中...</span>
               </div>
+            </div>
+          )}
+          {/* ダンの送信案カード（承認すると相手のチャットに送られる。オーナーだけに見える）
+              自分側から出るものなので右寄せ */}
+          {pendingProposals.length > 0 && (
+            <div className="flex flex-col items-end space-y-3 pt-2">
+              <div className="flex items-center gap-1.5 text-xs text-violet-300">
+                <Bot className="h-3.5 w-3.5" />
+                ダンが返信案を用意しています（送信するまで相手には見えません）
+              </div>
+              {pendingProposals.map((p) => (
+                <OutboundMessageCard key={p.id} proposalId={p.id} />
+              ))}
             </div>
           )}
         </div>
@@ -459,7 +699,7 @@ export default function CollabRoomPage() {
             <Reply className="h-3.5 w-3.5 shrink-0 text-primary" />
             <div className="min-w-0 flex-1">
               <span className="text-xs font-medium text-primary">
-                {replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name}に返信
+                {replyTo.sender_name}に返信
               </span>
               <p className="truncate text-xs text-muted-foreground">
                 {(replyTo.content || '').slice(0, 100) || '(ファイル)'}
@@ -486,28 +726,14 @@ export default function CollabRoomPage() {
         >
           <Paperclip className="h-4 w-4" />
         </Button>
-        <Button
-          variant={danMode ? "default" : "ghost"}
-          size="icon"
-          onClick={() => setDanMode(!danMode)}
-          className={danMode ? "bg-violet-600 hover:bg-violet-700 text-white" : ""}
-          title={danMode ? "DANモード ON（相手に見えません）" : "DANに話しかける"}
-        >
-          <Bot className="h-4 w-4" />
-        </Button>
         <div className="flex-1 relative">
-          {danMode && (
-            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] text-violet-400 font-medium pointer-events-none">
-              DAN宛
-            </div>
-          )}
           <textarea
             ref={inputRef as any}
-            placeholder={danMode ? "DANへの指示を入力..." : "メッセージを入力..."}
+            placeholder="メッセージを入力...（相手に届きます）"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             rows={1}
-            className={`flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none ${danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}`}
+            className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
             style={{ maxHeight: '120px', overflowY: 'auto' }}
             onInput={(e) => {
               const t = e.target as HTMLTextAreaElement;
@@ -520,7 +746,7 @@ export default function CollabRoomPage() {
           size="icon"
           onClick={handleSend}
           disabled={!input.trim()}
-          className={danMode ? "bg-violet-600 hover:bg-violet-700" : ""}
+          className="transition-transform active:scale-90"
         >
           <Send className="h-4 w-4" />
         </Button>
@@ -608,58 +834,78 @@ function CollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name: str
   );
 }
 
-function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply, onReply }: {
+function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply, onReply, privateReplies, onPrivateReply }: {
   message: CollabMessageResponse;
   isOwner: boolean;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
   onGenerateReply?: () => void;
   onReply?: (msg: CollabMessageResponse) => void;
+  privateReplies?: CollabMessageResponse[];
+  onPrivateReply?: (parent: CollabMessageResponse, text: string) => void;
 }) {
   const isDan = message.sender_type.startsWith('dan_');
   const isGuest = message.sender_type === 'guest';
   const isPrivate = message.metadata?.visibility === 'owner_only';
   const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
+  // 絵文字1〜2個だけの発言はスタンプとして大きく表示
+  const isStamp = !file && /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
   const isImage = file?.type?.startsWith('image/');
   const isOwnerPrivate = isOwner && isPrivate;
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col ${isOwner || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isOwner || isDan ? 'ml-auto' : 'mr-auto'}`}>
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 ${isOwner || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isOwner || isDan ? 'ml-auto' : 'mr-auto'}`}>
       {replyToData && <CollabReplyQuote replyTo={replyToData} />}
-      <div className={`group flex items-start gap-1 ${isOwner || isDan ? 'flex-row' : 'flex-row-reverse'}`}>
-        {onReply && (
+      {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
+      {!isPrivate && !isOwner && !isDan && (
+        <span className="mb-0.5 mx-1 text-[11px] text-muted-foreground">{message.sender_name}</span>
+      )}
+      {!isPrivate && isDan && (
+        <span className="mb-0.5 mx-1 text-[11px] text-muted-foreground">ダン</span>
+      )}
+      <div className={`group flex items-end gap-1.5 ${isOwner || isDan ? 'flex-row' : 'flex-row-reverse'}`}>
+        {onReply && !(isDan && isPrivate) && (
           <button
             onClick={() => onReply(message)}
-            className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            className="self-start mt-1.5 opacity-40 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
             title="返信"
           >
             <Reply className="h-3.5 w-3.5" />
           </button>
         )}
+        {/* LINE式: 時刻・既読はバブルの外側（横・下揃え） */}
+        {!isPrivate && (
+          <div className={`flex flex-col justify-end pb-0.5 text-[10px] leading-tight text-muted-foreground ${isOwner || isDan ? 'items-end' : 'items-start'}`}>
+            {showRead && <span>既読</span>}
+            <span>{formatTime(message.created_at)}</span>
+          </div>
+        )}
         <div
-          className={`rounded-lg px-3 py-2 ${
-            isDan
-              ? 'bg-violet-500/10 border border-violet-500/20'
-              : isOwnerPrivate
-                ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
-                : isOwner
+          className={`rounded-lg ${isStamp && !isPrivate ? 'px-1 py-0' : 'px-3 py-2'} ${
+            /* 色の意味: 紫=あなたにしか見えない（相談・ダンへの私的返信）/
+               primary=相手に見える自分側（あなた・ダン）/ muted=相手 */
+            isStamp && !isPrivate
+              ? ''
+              : isPrivate
+                ? 'bg-violet-500/15 border border-dashed border-violet-500/40'
+                : isOwner || isDan
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted'
           }`}
         >
-          <div className="flex items-center gap-1.5 mb-1">
-            {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
-            <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
-              {isOwnerPrivate ? `${message.sender_name} → DAN` : message.sender_name}
-            </span>
-            {isPrivate && (
+          {isPrivate && (
+            <div className="flex items-center gap-1.5 mb-1">
+              <Bot className="h-4 w-4 text-violet-400" />
+              <span className="text-xs font-medium text-violet-400">
+                {isOwnerPrivate ? `${message.sender_name} → DAN` : 'ダン'}
+              </span>
               <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
-            )}
-            <span className="text-[10px] opacity-50 ml-auto">
-              {formatTime(message.created_at)}
-            </span>
-          </div>
+              <span className="text-[10px] opacity-50 ml-auto">
+                {formatTime(message.created_at)}
+              </span>
+            </div>
+          )}
           {file && isImage ? (
             <a href={file.url} target="_blank" rel="noopener noreferrer">
               <img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" />
@@ -676,7 +922,45 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
               {file.size && <span className="text-xs opacity-50">({(file.size / 1024).toFixed(0)}KB)</span>}
             </a>
           ) : null}
-          <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
+          <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={message.content} /></p>
+
+          {/* リアクション（🙏既読サイン等） */}
+          {(() => {
+            const reactions = message.metadata?.reactions as Record<string, string[]> | undefined;
+            if (!reactions || Object.keys(reactions).length === 0) return null;
+            return (
+              <div className="mt-1 flex gap-1">
+                {Object.entries(reactions).map(([emoji, names]) => (
+                  <span key={emoji} title={(names || []).join('、')}
+                        className="animate-in zoom-in duration-200 rounded-full border border-border bg-background/80 px-1.5 py-0.5 text-sm leading-none">
+                    {emoji}{(names || []).length > 1 ? ` ${names.length}` : ''}
+                  </span>
+                ))}
+              </div>
+            );
+          })()}
+
+          {/* 相談スレッド: あなたの返事の履歴 + 専用入力欄（メインの入力欄は相手専用） */}
+          {isDan && isPrivate && (
+            <div className="mt-2.5 space-y-1.5 border-t border-violet-500/25 pt-2">
+              {(privateReplies || []).map((r) => (
+                <div
+                  key={r.id}
+                  className={`rounded-md px-2.5 py-1.5 ${
+                    r.sender_type === 'dan_owner' ? 'bg-violet-500/20' : 'bg-violet-500/10'
+                  }`}
+                >
+                  <p className="mb-0.5 text-[10px] text-violet-300/80">
+                    {r.sender_type === 'dan_owner' ? 'ダン' : `${r.sender_name} → ダン`}
+                  </p>
+                  <p className="whitespace-pre-wrap break-words text-sm">{r.content}</p>
+                </div>
+              ))}
+              {onPrivateReply && (
+                <ConsultReplyInput onSend={(t) => onPrivateReply(message, t)} />
+              )}
+            </div>
+          )}
 
           {/* Reply generation button - stays inside bubble */}
           {isGuest && !replyState && (
@@ -696,9 +980,41 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
           )}
         </div>
       </div>
-      {showRead && (
-        <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>
-      )}
+    </div>
+  );
+}
+
+/** 相談メッセージ内のダン宛スレッド入力欄。相手には一切見えない。 */
+function ConsultReplyInput({ onSend }: { onSend: (text: string) => void }) {
+  const [text, setText] = useState('');
+  const submit = () => {
+    const t = text.trim();
+    if (!t) return;
+    onSend(t);
+    setText('');
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+        placeholder="ダンに返事…（相手には見えません）"
+        className="flex-1 rounded-md border border-violet-500/40 bg-background/60 px-2.5 py-1.5 text-sm focus:outline-none focus:border-violet-400"
+      />
+      <button
+        onClick={submit}
+        disabled={!text.trim()}
+        className="rounded-md bg-violet-600 p-1.5 text-white transition-colors hover:bg-violet-700 disabled:opacity-40"
+        aria-label="ダンに送信"
+      >
+        <Send className="h-3.5 w-3.5" />
+      </button>
     </div>
   );
 }

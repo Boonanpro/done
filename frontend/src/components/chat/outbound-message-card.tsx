@@ -26,12 +26,13 @@ const CHANNEL_LABEL: Record<string, string> = {
   chatwork: 'Chatwork',
   slack: 'Slack',
   x_dm: 'X DM',
+  collab: 'コラボチャット',
   other: 'メッセージ',
 };
 const channelLabel = (c: string) => CHANNEL_LABEL[c] || c;
 
 // サーバーから直接送れるチャネル。それ以外はダンが browser で送る（カードは承認用）。
-const SERVER_SENDABLE = new Set(['email', 'instagram_dm', 'instagram_comment']);
+const SERVER_SENDABLE = new Set(['email', 'instagram_dm', 'instagram_comment', 'collab']);
 
 type ActionData = {
   channel?: string;
@@ -58,7 +59,7 @@ function fmtTime(iso?: string | null): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
+export function OutboundMessageCard({ proposalId, foldCollab = false }: { proposalId: string; foldCollab?: boolean }) {
   const queryClient = useQueryClient();
   const queryKey = ['outbound-proposal', proposalId];
   const { data: proposal, isLoading, isError } = useQuery({
@@ -81,6 +82,11 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  // collab カードを本体チャット側では薄い1行に折り畳む（対応の主戦場はコラボ窓口画面）
+  const [expanded, setExpanded] = useState(false);
+  // 送信/破棄の退場アニメーション（ボタン→送信→カード消滅の繋がり感）
+  const [exiting, setExiting] = useState(false);
+  const [gone, setGone] = useState(false);
   const lastServer = useRef<{ body: string; subject: string } | null>(null);
 
   useEffect(() => {
@@ -140,6 +146,12 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
     onSuccess: (updated: ProposalResponse) => {
       queryClient.setQueryData(queryKey, updated);
       toast.success('送信しました');
+      // 退場アニメーション → 消えたタイミングで一覧を更新（ラグの正体だった10秒待ちを排除）
+      setExiting(true);
+      setTimeout(() => {
+        setGone(true);
+        queryClient.invalidateQueries({ queryKey: ['collab-outbound'] });
+      }, 380);
     },
     onError: (e: Error) => toast.error(`送信に失敗: ${e.message}`),
   });
@@ -148,6 +160,11 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
     mutationFn: () => api.proposals.discardDraft(proposalId),
     onSuccess: (updated: ProposalResponse) => {
       queryClient.setQueryData(queryKey, updated);
+      setExiting(true);
+      setTimeout(() => {
+        setGone(true);
+        queryClient.invalidateQueries({ queryKey: ['collab-outbound'] });
+      }, 380);
     },
     onError: (e: Error) => toast.error(`破棄に失敗: ${e.message}`),
   });
@@ -176,6 +193,24 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
     );
   }
 
+  if (foldCollab && channel === 'collab' && !expanded) {
+    const statusLabel =
+      proposal?.status === 'pending' ? '未送信・コミュニケーションタブで確認できます'
+      : proposal?.status === 'sent' ? '送信済み'
+      : proposal?.status === 'sending' ? '送信中'
+      : proposal?.status === 'rejected' ? '破棄'
+      : '';
+    return (
+      <div className="my-1 max-w-[640px] rounded-lg border border-dashed border-border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
+        <button type="button" className="text-left w-full" onClick={() => setExpanded(true)}>
+          📨 窓口への返信案{statusLabel ? `（${statusLabel}）` : ''}: {ad.to_name || ad.to || ''}
+          {ad.intent ? ` — ${ad.intent}` : ''}
+          <span className="ml-1 opacity-70">▼ 開く</span>
+        </button>
+      </div>
+    );
+  }
+
   const Icon = channel === 'email' ? Mail : MessageCircle;
   const label = channelLabel(channel);
   const status = proposal.status as string;
@@ -184,9 +219,17 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
   const discarded = status === 'rejected';
   const busy = sendMutation.isPending || discardMutation.isPending;
 
+  if (gone) return null;
+
   return (
     <div
-      className={`my-1 w-full max-w-[640px] overflow-hidden rounded-xl border bg-card shadow-sm ${
+      className={`my-1 w-full max-w-[640px] overflow-hidden rounded-xl border bg-card shadow-sm transition-all duration-300 ease-out ${
+        exiting
+          ? 'opacity-0 scale-95 -translate-y-2'
+          : sendMutation.isPending
+            ? 'border-primary ring-2 ring-primary/40'
+            : ''
+      } ${
         sent ? 'border-emerald-500/40' : sending ? 'border-amber-500/40' : discarded ? 'border-border opacity-60' : 'border-primary/40'
       }`}
     >
@@ -244,6 +287,16 @@ export function OutboundMessageCard({ proposalId }: { proposalId: string }) {
             <span className="text-muted-foreground">
               {saving ? '保存中…' : dirty ? '未保存' : savedAt ? '保存済み' : ad.user_edited ? '編集済み' : '下書き'}
             </span>
+          )}
+          {foldCollab && channel === 'collab' && (
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="ml-2 text-muted-foreground hover:text-foreground"
+              title="1行表示に戻す"
+            >
+              ▲ たたむ
+            </button>
           )}
         </div>
       </div>
@@ -343,4 +396,11 @@ export function OutboundEventLine({ content }: { content: string }) {
 
 export function isOutboundEventContent(content: string | null | undefined): boolean {
   return !!content && (content.startsWith('📤 ') || content.startsWith('🗑 '));
+}
+
+/** 外部窓口（collab）対応の作業ログ行。「窓口ログ:」（旧「窓口:」）で始まるai発言を折り畳み表示にする。 */
+export function isCollabLogContent(content: string | null | undefined): boolean {
+  if (!content) return false;
+  const head = content.trimStart();
+  return head.startsWith('窓口ログ:') || head.startsWith('窓口:');
 }

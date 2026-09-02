@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2, Reply, X, Bell } from 'lucide-react';
@@ -50,6 +50,7 @@ function formatDateSeparator(dateStr: string): string {
 
 export default function GuestJoinPage() {
   const params = useParams();
+  const router = useRouter();
   const inviteToken = params.token as string;
   const [guestName, setGuestName] = useState('');
   const [guestNameLoaded, setGuestNameLoaded] = useState(false);
@@ -109,36 +110,50 @@ export default function GuestJoinPage() {
     enabled: !!inviteToken && !guestToken,
   });
 
-  // Auto-join if we have a saved name but no token (e.g. cache cleared)
-  const autoJoinAttempted = useRef(false);
+  // 身分モデル: 入口URL（共有）では名前を入れて参加 → 本人専用URLへ切り替わる。
+  // 本人専用URLは開いた端末・ブラウザに関係なくその人として入室できる。
   useEffect(() => {
-    if (autoJoinAttempted.current) return;
-    if (!guestNameLoaded || guestToken || !guestName.trim()) return;
-    // Wait for invite info to load first — if rejoin_token exists, that path handles it
-    if (!inviteInfo) return;
-    if ((inviteInfo as any).rejoin_token) return;
-    // Auto-join with saved name
-    autoJoinAttempted.current = true;
-    handleJoin();
-  }, [guestNameLoaded, guestToken, guestName, inviteInfo]);
-
-  // Auto-rejoin if invite was already used (same guest, different browser)
-  useEffect(() => {
-    if (inviteInfo && (inviteInfo as any).rejoin_token && !guestToken) {
-      const info = inviteInfo as any;
-      setGuestToken(info.rejoin_token);
-      setRoomId(info.room_id);
-      setRoomTitle(info.room_title);
-      if (info.guest_name) {
-        setGuestName(info.guest_name);
-        localStorage.setItem(GUEST_NAME_KEY, info.guest_name);
-      }
-      const keys = getStorageKeys(inviteToken);
-      localStorage.setItem(keys.tokenKey, info.rejoin_token);
-      localStorage.setItem(keys.roomKey, info.room_id);
-      localStorage.setItem(keys.titleKey, info.room_title);
+    const info = inviteInfo as { personal?: boolean; rejoin_token?: string; room_id?: string; room_title?: string; guest_name?: string } | undefined;
+    if (!info?.personal || !info.rejoin_token || guestToken) return;
+    setGuestToken(info.rejoin_token);
+    setRoomId(info.room_id || null);
+    setRoomTitle(info.room_title || '');
+    if (info.guest_name) {
+      setGuestName(info.guest_name);
+      localStorage.setItem(GUEST_NAME_KEY, info.guest_name);
     }
+    const keys = getStorageKeys(inviteToken);
+    localStorage.setItem(keys.tokenKey, info.rejoin_token);
+    if (info.room_id) localStorage.setItem(keys.roomKey, info.room_id);
+    if (info.room_title) localStorage.setItem(keys.titleKey, info.room_title);
   }, [inviteInfo, inviteToken, guestToken]);
+
+  // 移行: 入口URLに古いセッション（ブラウザ保存のトークン）で来た人を本人専用URLへ誘導。
+  // 身分が消えていれば保存トークンを捨てて参加フォームに戻す。
+  useEffect(() => {
+    if (!guestToken || !roomId) return;
+    api.collab.me(guestToken)
+      .then((me) => {
+        if (me.personal_token && me.personal_token !== inviteToken) {
+          const keys = getStorageKeys(me.personal_token);
+          localStorage.setItem(keys.tokenKey, guestToken);
+          localStorage.setItem(keys.roomKey, roomId);
+          localStorage.setItem(keys.titleKey, roomTitle || '');
+          router.replace(`/collab/join/${me.personal_token}`);
+        }
+      })
+      .catch((e: unknown) => {
+        const status = (e as { status?: number })?.status;
+        if (status === 404 || status === 403) {
+          const keys = getStorageKeys(inviteToken);
+          localStorage.removeItem(keys.tokenKey);
+          localStorage.removeItem(keys.roomKey);
+          setGuestToken(null);
+          setRoomId(null);
+        }
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guestToken, roomId]);
 
   // Fetch messages when joined
   useEffect(() => {
@@ -149,11 +164,44 @@ export default function GuestJoinPage() {
     }
   }, [roomId, guestToken]);
 
+  // 参加者名簿＋オーナーの既読位置（既読表示用）
+  const { data: participants } = useQuery({
+    queryKey: ['collab-guest-participants', roomId],
+    queryFn: () => api.collab.getParticipants(roomId!, guestToken!),
+    enabled: !!roomId && !!guestToken,
+    refetchInterval: 10_000,
+  });
+
+  // 自分の既読位置を定期更新（オーナー側の「既読」表示の元になる）
+  useEffect(() => {
+    if (!roomId || !guestToken) return;
+    const mark = () => api.collab.markRead(roomId, guestToken).catch(() => {});
+    mark();
+    const timer = setInterval(mark, 10_000);
+    return () => clearInterval(timer);
+  }, [roomId, guestToken]);
+
+  // オーナーの既読位置以前の「自分の発言」の最後の1件に「既読」を付ける
+  const ownerReadTime = participants?.owner.last_read_at
+    ? new Date(participants.owner.last_read_at).getTime() : 0;
+  const lastReadOwnId = (() => {
+    let id: string | null = null;
+    for (const m of messages) {
+      if (m.sender_type === 'guest' && new Date(m.created_at).getTime() <= ownerReadTime) id = m.id;
+    }
+    return id;
+  })();
+
   // WebSocket
+  // 楽観表示の仮バブル（client_msg_id）と同一なら追加ではなく差し替え（二重表示防止）
   const handleNewMessage = useCallback((msg: CollabMessageResponse) => {
     if (msg.sender_type === 'dan_guest') setDanThinking(false);
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
+      const cid = (msg.metadata as { client_msg_id?: string } | undefined)?.client_msg_id;
+      if (cid && prev.some((m) => m.id === cid)) {
+        return prev.map((m) => (m.id === cid ? msg : m));
+      }
       return [...prev, msg];
     });
   }, []);
@@ -168,6 +216,15 @@ export default function GuestJoinPage() {
     }
   }, []);
 
+  // リアクション（🙏既読サイン等）の反映
+  const handleReaction = useCallback((data: { message_id: string; reactions: Record<string, string[]> }) => {
+    setMessages((prev) => prev.map((m) =>
+      m.id === data.message_id
+        ? { ...m, metadata: { ...(m.metadata || {}), reactions: data.reactions } }
+        : m
+    ));
+  }, []);
+
   const { isConnected, onlineUsers, sendMessage: wsSend, sendRead } = useCollabWebSocket({
     roomId: roomId || '',
     token: guestToken || '',
@@ -175,6 +232,7 @@ export default function GuestJoinPage() {
     onMessage: handleNewMessage,
     onRead: handleRead,
     onDanThinking: handleDanThinking,
+    onReaction: handleReaction,
   });
 
   // Send read receipt when new messages arrive from owner
@@ -185,8 +243,20 @@ export default function GuestJoinPage() {
     }
   }, [messages, sendRead]);
 
+  // WebSocket が張れない環境（Vercel 経由など。rewrites は WS を通せない）では
+  // REST ポーリングで受信を代替する。REST が正なのでリストごと置き換える。
+  useEffect(() => {
+    if (!roomId || !guestToken || isConnected) return;
+    const timer = setInterval(() => {
+      api.collab.getMessages(roomId, 50, guestToken)
+        .then((data) => setMessages(data.messages))
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [roomId, guestToken, isConnected]);
+
   // Push notifications
-  usePushNotification(roomId || '', 'guest');
+  const { permission: pushPermission, subscribe: pushSubscribe } = usePushNotification(roomId || '', 'guest');
 
   // Auto-scroll
   useEffect(() => {
@@ -201,14 +271,20 @@ export default function GuestJoinPage() {
     setIsJoining(true);
     try {
       const result = await api.collab.joinRoom(inviteToken, guestName.trim());
-      setGuestToken(result.guest_token);
-      setRoomId(result.room_id);
-      setRoomTitle(result.room_title);
-      const keys = getStorageKeys(inviteToken);
+      localStorage.setItem(GUEST_NAME_KEY, result.guest_name || guestName.trim());
+      // 本人専用URLへ切り替える（身分をURLに持たせる。端末・ブラウザの保存領域に依存しない）
+      const personal = result.personal_token || inviteToken;
+      const keys = getStorageKeys(personal);
       localStorage.setItem(keys.tokenKey, result.guest_token);
       localStorage.setItem(keys.roomKey, result.room_id);
       localStorage.setItem(keys.titleKey, result.room_title);
-      localStorage.setItem(GUEST_NAME_KEY, guestName.trim());
+      if (personal !== inviteToken) {
+        router.replace(`/collab/join/${personal}`);
+        return;
+      }
+      setGuestToken(result.guest_token);
+      setRoomId(result.room_id);
+      setRoomTitle(result.room_title);
       toast.success('参加しました');
     } catch (e: any) {
       toast.error(e?.data?.detail || '参加できませんでした');
@@ -217,7 +293,29 @@ export default function GuestJoinPage() {
     }
   };
 
-  const handleSend = () => {
+  // 表示名の変更（サーバーの身分ごと更新。以後の発言から新しい名前になる）
+  const applyRename = async () => {
+    const v = editNameValue.trim();
+    if (!v || !guestToken) {
+      setEditingName(false); setEditNameValue('');
+      return;
+    }
+    try {
+      const res = await api.collab.rename(v, guestToken);
+      setGuestName(res.guest_name);
+      setGuestToken(res.guest_token);
+      localStorage.setItem(GUEST_NAME_KEY, res.guest_name);
+      const keys = getStorageKeys(inviteToken);
+      localStorage.setItem(keys.tokenKey, res.guest_token);
+      toast.success('表示名を変更しました（今後の発言から反映されます）');
+    } catch {
+      toast.error('変更に失敗しました');
+    }
+    setEditingName(false);
+    setEditNameValue('');
+  };
+
+  const handleSend = async () => {
     const content = input.trim();
     if (!content) return;
     const finalContent = danMode ? `@ダン ${content}` : content;
@@ -230,10 +328,39 @@ export default function GuestJoinPage() {
         content: replyTo.content.slice(0, 200),
       };
     }
-    wsSend(finalContent, Object.keys(metadata).length > 0 ? metadata : undefined);
+    const md = Object.keys(metadata).length > 0 ? metadata : undefined;
+    // @ダン の私的相談だけは WS 専用機能なので接続時は WS、それ以外は常に REST
+    // （確実・即時に自分の画面へ反映。WS は受信専用）。
+    if (danMode && isConnected) {
+      wsSend(finalContent, md);
+      setInput('');
+      setReplyTo(null);
+      inputRef.current?.focus();
+      return;
+    }
+    if (!roomId || !guestToken) return;
+    // 楽観表示: 押した瞬間に自分のバブルを即表示。client_msg_id 焼き込みで
+    // WSエコー/REST応答のどちらが先でも handleNewMessage が1回で差し替える
+    const savedInput = content;
+    const tempId = `temp-${Date.now()}`;
+    metadata.client_msg_id = tempId;
+    const optimistic = {
+      id: tempId, room_id: roomId, sender_type: 'guest', sender_name: guestName || 'あなた',
+      content: finalContent, metadata: metadata as CollabMessageResponse['metadata'],
+      created_at: new Date().toISOString(),
+    } as CollabMessageResponse;
     setInput('');
     setReplyTo(null);
+    setMessages((prev) => [...prev, optimistic]);
     inputRef.current?.focus();
+    try {
+      const sent = await api.collab.sendMessage(roomId, finalContent, guestToken, metadata);
+      handleNewMessage(sent);
+    } catch {
+      toast.error('送信に失敗しました。通信環境をご確認ください');
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setInput(savedInput);
+    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -251,9 +378,11 @@ export default function GuestJoinPage() {
       if (!res.ok) throw new Error('Upload failed');
       const fileData = await res.json();
       const fileUrl = fileData.file_path;
-      wsSend(file.name, {
+      const fileMeta = {
         file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
-      });
+      };
+      const sent = await api.collab.sendMessage(roomId, file.name, guestToken, fileMeta);
+      handleNewMessage(sent);
       toast.success('ファイルを送信しました');
     } catch {
       toast.error('アップロードに失敗しました');
@@ -338,17 +467,34 @@ export default function GuestJoinPage() {
         </button>
       </div>
 
-      {/* Notification install banner - only on mobile, not standalone */}
+      {/* 通知バナー:
+          - アプリ（ホーム画面追加後）で開いていて未許可 → 許可ダイアログを出すボタン
+          - ブラウザで開いている → ホーム画面追加の案内（iOSは追加後でないと許可できない） */}
       {typeof window !== 'undefined' &&
-        !window.matchMedia('(display-mode: standalone)').matches &&
         (/iPad|iPhone|iPod|Android/i.test(navigator.userAgent)) && (
-        <button
-          onClick={() => setShowInstallGuide(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 text-violet-400 text-xs shrink-0 hover:bg-violet-500/15 transition-colors"
-        >
-          <Bell className="h-3.5 w-3.5 shrink-0" />
-          <span>通知がほしい場合</span>
-        </button>
+        window.matchMedia('(display-mode: standalone)').matches ? (
+          pushPermission !== 'granted' && (
+            <button
+              onClick={async () => {
+                const ok = await pushSubscribe();
+                if (ok) toast.success('通知をオンにしました');
+                else toast.error('通知を許可できませんでした。端末の設定アプリから通知を許可してください');
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-violet-500/15 border-b border-violet-500/30 text-violet-300 text-xs font-medium shrink-0 hover:bg-violet-500/20 transition-colors"
+            >
+              <Bell className="h-3.5 w-3.5 shrink-0 animate-pulse" />
+              <span>タップして通知をオンにする（新着に気づけます）</span>
+            </button>
+          )
+        ) : (
+          <button
+            onClick={() => setShowInstallGuide(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 text-violet-400 text-xs shrink-0 hover:bg-violet-500/15 transition-colors"
+          >
+            <Bell className="h-3.5 w-3.5 shrink-0" />
+            <span>通知がほしい場合</span>
+          </button>
+        )
       )}
 
       {/* Messages */}
@@ -359,7 +505,7 @@ export default function GuestJoinPage() {
             const curDate = new Date(msg.created_at).toDateString();
             const showSeparator = curDate !== prevDate;
             return (
-              <div key={msg.id} data-collab-msg-id={msg.id}>
+              <div key={(msg.metadata as { client_msg_id?: string } | undefined)?.client_msg_id || msg.id} data-collab-msg-id={msg.id}>
                 {showSeparator && (
                   <div className="flex items-center gap-3 py-2">
                     <div className="flex-1 border-t border-border" />
@@ -369,7 +515,7 @@ export default function GuestJoinPage() {
                 )}
                 <GuestMessageBubble
                   message={msg}
-                  showRead={msg.sender_type === 'guest' && readByOther != null && messages.filter(m => m.sender_type === 'guest').pop()?.id === msg.id}
+                  showRead={msg.id === lastReadOwnId}
                   replyState={replyStates[msg.id]?.state}
                   onReply={setReplyTo}
                   onGenerateReply={msg.sender_type === 'owner' && !replyStates[msg.id] ? async () => {
@@ -452,20 +598,12 @@ export default function GuestJoinPage() {
               onChange={(e) => setEditNameValue(e.target.value)}
               autoFocus
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const v = (editNameValue).trim();
-                  if (v) { setGuestName(v); localStorage.setItem(GUEST_NAME_KEY, v); toast.success('表示名を変更しました'); }
-                  setEditingName(false); setEditNameValue('');
-                }
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) applyRename();
               }}
             />
             <div className="flex gap-2">
               <Button variant="outline" className="flex-1" onClick={() => { setEditingName(false); setEditNameValue(''); }}>キャンセル</Button>
-              <Button className="flex-1" onClick={() => {
-                const v = (editNameValue).trim();
-                if (v) { setGuestName(v); localStorage.setItem(GUEST_NAME_KEY, v); toast.success('表示名を変更しました'); }
-                setEditingName(false); setEditNameValue('');
-              }}>保存</Button>
+              <Button className="flex-1" onClick={applyRename}>保存</Button>
             </div>
           </div>
         </div>
@@ -480,6 +618,9 @@ export default function GuestJoinPage() {
             </button>
             <h3 className="font-bold text-base">通知を受け取るには</h3>
             <p className="text-xs text-muted-foreground">ホーム画面にアプリを追加すると、LINEのように新着メッセージの通知が届きます。</p>
+            <p className="text-xs text-violet-300">
+              追加したアイコンから開くと、画面上部に<b>「タップして通知をオンにする」</b>が出ます。押して「許可」を選べば設定完了です。
+            </p>
 
             {/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ? (
               <div className="space-y-3">
@@ -595,7 +736,7 @@ export default function GuestJoinPage() {
           size="icon"
           onClick={handleSend}
           disabled={!input.trim()}
-          className={danMode ? "bg-violet-600 hover:bg-violet-700" : ""}
+          className={`transition-transform active:scale-90 ${danMode ? "bg-violet-600 hover:bg-violet-700" : ""}`}
         >
           <Send className="h-4 w-4" />
         </Button>
@@ -642,6 +783,8 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const isGuest = message.sender_type === 'guest';
   const isDan = message.sender_type.startsWith('dan_');
   const isOwner = message.sender_type === 'owner';
+  // 絵文字1〜2個だけの発言はスタンプとして大きく表示
+  const isStamp = /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
 
   function SenderIcon({ type }: { type: string }) {
     switch (type) {
@@ -656,39 +799,52 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col ${isGuest || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || isDan ? 'ml-auto' : 'mr-auto'}`}>
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
       {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
-      <div className={`group flex items-start gap-1 ${isGuest || isDan ? 'flex-row' : 'flex-row-reverse'}`}>
+      {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
+      {!isPrivate && !isGuest && (
+        <span className="mb-0.5 mx-1 text-[11px] text-muted-foreground">
+          {isDan ? 'ダン' : message.sender_name}
+        </span>
+      )}
+      <div className={`group flex items-end gap-1.5 ${isGuest || (isDan && isPrivate) ? 'flex-row' : 'flex-row-reverse'}`}>
         {onReply && (
           <button
             onClick={() => onReply(message)}
-            className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            className="self-start mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
             title="返信"
           >
             <Reply className="h-3.5 w-3.5" />
           </button>
         )}
+        {/* LINE式: 時刻・既読はバブルの外側（横・下揃え） */}
+        {!isPrivate && (
+          <div className={`flex flex-col justify-end pb-0.5 text-[10px] leading-tight text-muted-foreground ${isGuest ? 'items-end' : 'items-start'}`}>
+            {showRead && <span>既読</span>}
+            <span>{formatTime(message.created_at)}</span>
+          </div>
+        )}
         <div
-          className={`rounded-lg px-3 py-2 ${
-            isDan
-              ? 'bg-violet-500/10 border border-violet-500/20'
-              : isGuestPrivate
-                ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
+          className={`rounded-lg ${isStamp && !isPrivate ? 'px-1 py-0' : 'px-3 py-2'} ${
+            isStamp && !isPrivate
+              ? ''
+              : isPrivate
+                ? 'bg-violet-500/10 border border-dashed border-violet-500/30'
                 : isGuest
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted'
           }`}
         >
-          <div className="flex items-center gap-1.5 mb-1">
-            {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
-            <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
-              {isGuestPrivate ? `${message.sender_name} → DAN` : message.sender_name}
-            </span>
-            {isPrivate && (
+          {isPrivate && (
+            <div className="flex items-center gap-1.5 mb-1">
+              <Bot className="h-4 w-4 text-violet-400" />
+              <span className="text-xs font-medium text-violet-400">
+                {isGuestPrivate ? `${message.sender_name} → DAN` : 'DAN'}
+              </span>
               <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
-            )}
-            <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
-          </div>
+              <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
+            </div>
+          )}
           {(() => {
             const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
             const isImage = file?.type?.startsWith('image/');
@@ -700,7 +856,23 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
             }
             return null;
           })()}
-          <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
+          <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={message.content} /></p>
+
+          {/* リアクション（🙏既読サイン等） */}
+          {(() => {
+            const reactions = message.metadata?.reactions as Record<string, string[]> | undefined;
+            if (!reactions || Object.keys(reactions).length === 0) return null;
+            return (
+              <div className="mt-1 flex gap-1">
+                {Object.entries(reactions).map(([emoji, names]) => (
+                  <span key={emoji} title={(names || []).join('、')}
+                        className="animate-in zoom-in duration-200 rounded-full border border-border bg-background/80 px-1.5 py-0.5 text-sm leading-none">
+                    {emoji}{(names || []).length > 1 ? ` ${names.length}` : ''}
+                  </span>
+                ))}
+              </div>
+            );
+          })()}
 
           {/* Reply generation button for owner messages */}
           {isOwner && !replyState && onGenerateReply && (

@@ -49,6 +49,8 @@ import {
   type ExecutionEvent,
   type TurnBlock,
 } from './chatTimeline';
+import { VoiceOverlay } from './voice';
+import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
 
 const DEFAULT_API_BASE_URL = 'https://frontend-liard-rho-29.vercel.app';
 const API_BASE_URL =
@@ -1305,7 +1307,9 @@ function AppMain() {
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
   const [runEvents, setRunEvents] = useState<ExecutionEvent[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
+  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings' | 'collab' | 'collabChat'>('projects');
+  // コラボ（外部クライアント窓口）: 開いている部屋
+  const [collabRoom, setCollabRoom] = useState<{ id: string; title?: string } | null>(null);
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
@@ -1405,7 +1409,7 @@ function AppMain() {
   }, [currentProjectId]);
   // Tracks which screen is showing, so background→foreground logic can tell
   // "user is actually viewing this chat" from "user is on the chat list".
-  const screenRef = useRef<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
+  const screenRef = useRef<'projects' | 'chat' | 'artifact' | 'settings' | 'collab' | 'collabChat'>('projects');
   useEffect(() => {
     screenRef.current = screen;
   }, [screen]);
@@ -1906,6 +1910,13 @@ function AppMain() {
     async (url?: unknown) => {
       if (!token || typeof url !== 'string') return;
       await syncNotificationBadge(0);
+      // コラボ窓口の通知 → コラボチャット画面を直接開く
+      const collabMatch = url.match(/\/collab\/([^/?#]+)/);
+      if (collabMatch?.[1]) {
+        setCollabRoom({ id: collabMatch[1] });
+        setScreen('collabChat');
+        return;
+      }
       const match = url.match(/\/chat\/([^/?#]+)/);
       const projectId = match?.[1];
       if (!projectId) {
@@ -2228,6 +2239,14 @@ function AppMain() {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       if (screen === 'artifact') {
         setScreen(currentProject ? 'chat' : 'projects');
+        return true;
+      }
+      if (screen === 'collabChat') {
+        setScreen('collab');
+        return true;
+      }
+      if (screen === 'collab') {
+        setScreen('projects');
         return true;
       }
       if (screen !== 'chat') return false;
@@ -3183,6 +3202,13 @@ function AppMain() {
             <Text style={styles.appBarTitle}>Done</Text>
           </View>
           <Pressable
+            onPress={() => setScreen('collab')}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="people-outline" size={22} color="#f4f0e8" />
+          </Pressable>
+          <Pressable
             onPress={() => setScreen('settings')}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
@@ -3285,6 +3311,40 @@ function AppMain() {
             setActionSheet(null);
             void handleDeleteProject(project);
           }}
+        />
+      </View>
+    );
+  }
+
+  if (screen === 'collab') {
+    return (
+      <View style={styles.screen}>
+        <StatusBar style="light" />
+        <CollabRoomsScreen
+          request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
+          topInset={insets.top + 8}
+          onBack={() => setScreen('projects')}
+          onOpenRoom={(room: CollabRoomSummary) => {
+            setCollabRoom({ id: room.id, title: room.title });
+            setScreen('collabChat');
+          }}
+        />
+      </View>
+    );
+  }
+
+  if (screen === 'collabChat' && collabRoom) {
+    return (
+      <View style={styles.screen}>
+        <StatusBar style="light" />
+        <CollabChatScreen
+          request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
+          apiBase={API_BASE_URL}
+          roomId={collabRoom.id}
+          roomTitle={collabRoom.title}
+          topInset={insets.top + 8}
+          bottomInset={insets.bottom}
+          onBack={() => setScreen('collab')}
         />
       </View>
     );

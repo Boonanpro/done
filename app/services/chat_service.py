@@ -111,6 +111,14 @@ def record_message_delivery_sync(
     incremented. Best-effort; failures are logged but do not raise.
     """
     now = datetime.now(timezone.utc).isoformat()
+
+    # 外部窓口（collab）対応の作業ログ（「窓口ログ:」で始まるai発言）は「静かな記録」:
+    # 部屋を未読にせず、一覧の並び・プレビューも動かさない。ユーザーは
+    # コミュニケーションタブ側の通知で対応する（本人の要望 2026-08-31）。
+    _head = (content or "").lstrip()
+    if _head.startswith("窓口ログ:") or _head.startswith("窓口:"):
+        return
+
     try:
         room_update: dict = {"last_message_at": now}
         if content is not None:

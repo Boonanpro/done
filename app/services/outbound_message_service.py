@@ -33,13 +33,15 @@ CHANNELS = {
     "sms": "SMS",
     "instagram_comment": "Instagramコメント",
     "web_form": "Webフォーム",
+    "collab": "コラボチャット",
     "other": "その他",
 }
 
 # 表記揺れの正規化
 _CHANNEL_ALIASES = {"instagram": "instagram_dm", "ig": "instagram_dm", "ig_dm": "instagram_dm",
                     "insta": "instagram_dm", "ig_comment": "instagram_comment",
-                    "mail": "email", "gmail": "email", "form": "web_form", "webform": "web_form"}
+                    "mail": "email", "gmail": "email", "form": "web_form", "webform": "web_form",
+                    "collab_chat": "collab", "collab_room": "collab"}
 
 
 def channel_label(channel: Optional[str]) -> str:
@@ -55,7 +57,8 @@ def _reply_subject(subject: Optional[str]) -> Optional[str]:
 
 # サーバー側で実送信できるチャネル。それ以外はダンが browser 等で送って mark_sent する。
 # instagram_* は巡回用プロファイル（ログイン済み）から内部APIで送る（instagram_send）。
-SERVER_SENDABLE = {"email", "instagram_dm", "instagram_comment"}
+# collab は自前DB（collab_messages）＋sandbox の WS/Push 配信なので最も確実。
+SERVER_SENDABLE = {"email", "instagram_dm", "instagram_comment", "collab"}
 
 CARD_PREFIX = "[送信案: "
 
@@ -176,7 +179,10 @@ class OutboundMessageService:
             "action_data": action_data,
         }).execute()
         row = r.data[0]
-        self._post_room_message(room_id, card_marker(row["id"]))
+        # collab（外部窓口）のカードはコミュニケーションタブ側に表示されるため、
+        # 本体チャットにはカード行を出さない（ダンの記憶は digest_for_turn が届ける）。
+        if channel != "collab":
+            self._post_room_message(room_id, card_marker(row["id"]))
         return row
 
     # ------------------------------------------------------------------
@@ -275,7 +281,42 @@ class OutboundMessageService:
         if channel in ("instagram_dm", "instagram_comment"):
             await self._send_instagram(row, ad, user_id=user_id, sent_by=sent_by, proposal_id=proposal_id)
 
+        if channel == "collab":
+            await self._send_collab(row, ad)
+
         return self._finalize_sent(row, ad, sent_by=sent_by)
+
+    async def _send_collab(self, row: dict, ad: dict) -> None:
+        """コラボチャット（外部窓口）へ送る。sandbox の内部エンドポイントが
+        保存＋WSリアルタイム配信＋ゲストへのPush通知まで行う。sandbox 停止中でも
+        取りこぼさないよう DB 直書きにフォールバック（次回読み込みで相手に見える）。"""
+        collab_room_id = (
+            (ad.get("reply_to") or {}).get("collab_room_id")
+            or (ad.get("target") or {}).get("collab_room_id")
+        )
+        if not collab_room_id:
+            raise ValueError("collab_room_id が未指定です（送信先コラボルームのID）")
+        body = row["content"]
+        import os
+        import httpx
+        sandbox_port = os.environ.get("DAN_SANDBOX_PORT", "8000")
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/send",
+                    json={"room_id": collab_room_id, "content": body, "sender_name": "ダン"},
+                )
+                r.raise_for_status()
+                ad["send_result"] = r.json()
+        except Exception:
+            logger.warning("collab internal send failed (sandbox down?); writing to DB directly",
+                           exc_info=True)
+            from app.services.collab_service import CollabService
+            msg = await CollabService().send_message(
+                room_id=collab_room_id, sender_type="dan_owner", sender_name="ダン",
+                content=body, metadata={"via": "outbound_card"},
+            )
+            ad["send_result"] = {"message_id": msg["id"], "delivery": "db_only"}
 
     async def _send_instagram(self, row: dict, ad: dict, *, user_id: str, sent_by: str, proposal_id: str) -> None:
         """Instagram DM / コメントを巡回用プロファイルから内部APIで送る。"""
@@ -372,10 +413,11 @@ class OutboundMessageService:
             "status": "rejected", "responded_at": _now(), "action_data": ad,
         }).eq("id", proposal_id).execute()
         who = "ユーザー" if by == "user" else "ダン"
-        self._post_room_message(
-            row["source_room_id"],
-            f"🗑 送信案を破棄（{who}・{_jst_label()}）: {row.get('title')}",
-        )
+        if (ad.get("channel") or "") != "collab":
+            self._post_room_message(
+                row["source_room_id"],
+                f"🗑 送信案を破棄（{who}・{_jst_label()}）: {row.get('title')}",
+            )
         return r.data[0]
 
     def _finalize_sent(self, row: dict, ad: dict, *, sent_by: str) -> dict:
@@ -386,7 +428,9 @@ class OutboundMessageService:
         r = self.sb.table("dan_proposals").update({
             "status": "sent", "responded_at": now, "action_data": ad,
         }).eq("id", row["id"]).execute()
-        self._post_room_message(row["source_room_id"], self._sent_event_text(row, ad))
+        # collab は送信結果が窓口の会話自体に残るので、本体チャットに📤行を出さない。
+        if (ad.get("channel") or "") != "collab":
+            self._post_room_message(row["source_room_id"], self._sent_event_text(row, ad))
         return r.data[0]
 
     def _sent_event_text(self, row: dict, ad: dict) -> str:

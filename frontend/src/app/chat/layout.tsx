@@ -40,6 +40,7 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
     setHasToken(!!token);
     setChecked(true);
     if (!token) {
+      import('@/lib/api-client').then((m) => m.recordLogoutReason('chat-layout-no-token')).catch(() => {});
       try { usePreviewStore.getState().closePreview(); } catch {}
       router.push('/login');
       return;

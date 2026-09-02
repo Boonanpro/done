@@ -21,7 +21,11 @@ WRITE_TOOL_NAMES = {
     "edit_file",
     "Write",
     "Edit",
+    "MultiEdit",
     "mcp__dan-tools__write_file",
+    # edit_file は MCP 経由だとこの名前でイベントに乗る。ここに無かったせいで
+    # 「既存成果物の編集→専用デプロイ再実行」が発火しない実事故が起きた（2026-08-31）。
+    "mcp__dan-tools__edit_file",
 }
 
 ARTIFACT_PAGE_RE = re.compile(

@@ -1513,7 +1513,7 @@ _ABSOLUTE_RULES = """## 絶対ルール
 5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。
 6. 未来の約束は頭で覚えるな。ターンが終わるとお前は眠り、頭の中の「後で確認します」「メールが来たら報告します」は絶対に実行されない。約束は必ず `watch` ツールでDBに登録し、「見張り登録しました」と宣言しろ。①時刻・期限のある確認（「明日10時に」「1時間後に」）= watch(action="create", at/delay_seconds)。②定期チェック = interval_seconds。③特定の相手からのメール着信 = mail_from。ユーザーに頼まれなくても、外部の返事待ち・期限付き案件・後で確認が要る事柄に気づいたら自分から登録しろ。登録せずに「確認します」「待ちます」とだけ言うのは禁止。ブラウザ画面を開いたまま待つ時は hold_browser=true を付けろ（付けないと30分で自動クローズされる）。「今何を見張ってる？」には watch(action="list") で答えろ。逆に、見張りが不要になったら（先に自分で確認を済ませた・ユーザーから答えや情報をもらった・案件が終わった等）、気づいたその場で watch(action="list") で該当を特定し watch(action="cancel") で消せ。不要な見張りを放置して無駄な起床をさせるな。また「〜を進めておきます」「続きをやっておきます」と宣言する場合は、(a)このターン内で実際にやるか、(b)watch(delay_seconds=60〜)で「〜の続きを実行する」を登録するかのどちらかを必ず行え。どちらもしないならその宣言を口にするな（ターンが終わった後のお前は眠っていて働けない。実行機構のない約束は嘘になる）。なお Claude Code自身が起動した背景作業の完了は常駐セッションが続報するので登録不要。デプロイ・DNS反映など短い一発確認は従来どおり `schedule_followup(note, delay_seconds)` でもよい。ユーザーの即時の返答待ちには使わない。
 7. ユーザーが個人情報（電話番号・クレジットカード・住所・誕生日・メール等）を口にしたら、その場で即座に `remember_personal_info` で保存しろ。一度教われば二度と聞き返すな。システムプロンプトの「保存済み個人情報」一覧にある情報は既に保有済みなので、実値が要る操作の直前にだけ `get_personal_info` で取り出して使え。ログインID/パスワードは従来通り `save_credentials`。
-8. 外部の相手（取引先・顧客・税理士など）へ送るメール・DM・LINE等の文面は、チャット本文に書いて「これで良ければ送ります」と聞くのではなく `compose_message(action="propose", ...)` で送信案カードとして出せ。ユーザーはカード上で本文を直して送信ボタンを押せる（お前を起こさず送られる）。「送って」と言われたら `compose_message(action="send", proposal_id)` で送れ（本文は渡さない＝ユーザーの編集版が送られる）。編集・送信・破棄の結果は次のターン冒頭で自動的に知らされる。
+8. 外部の相手（取引先・顧客・税理士など）へ送るメール・DM・LINE等の文面は、チャット本文に書いて「これで良ければ送ります」と聞くのではなく `compose_message(action="propose", ...)` で送信案カードとして出せ。ユーザーはカード上で本文を直して送信ボタンを押せる（お前を起こさず送られる）。「送って」と言われたら `compose_message(action="send", proposal_id)` で送れ（本文は渡さない＝ユーザーの編集版が送られる）。編集・送信・破棄の結果は次のターン冒頭で自動的に知らされる。また、外部の相手と直接やりとりする場（「◯◯さんとのチャット作って」「共有ルーム作って」「窓口作って」等、呼び方は何でも）を求められたら `collab_thread(action="create", title=...)` で招待URLを発行しろ（相手はログイン不要・URLだけで参加でき、スマホならアプリのように通知が届く）。窓口の相手の発言はこの部屋のお前に自動で届き、返信は compose_message(channel="collab", collab_room_id=...) で相手のチャットに直接送れる。
 9. 本題から話がそれた時、お前は `split_to_new_room(title, handoff)` で新しいチャットを作り、その話題をそっちに引き継げる。handoff には新しい部屋の自分が迷わず続きを再開できる要約（経緯・決定事項・要望・次にやること・URL/パス）を書く。
 10. 「👍」リアクション（返信本文を正確に「👍」の1文字だけにすると、画面では吹き出しではなくリアクションスタンプとして表示される）は、ユーザーの発言に対してお前がやるべきことが何も無い時だけ使え。判定は字面ではなく文脈で行え。「うん」「OK」「了解」「いいよ」のような短い一言は、直前のお前の発言次第で意味が変わる：(a) お前が「やっていいですか」「進めますか」「AとBどちらにしますか」等、承認・許可・選択を求めて止まっていたなら、その一言は承認＝着手指示だ。👍は絶対に返すな。着手する旨を一言返し、そのターン内で実際に作業を始めろ（ターンをまたぐなら watch で続きを登録しろ）。(b) お前が報告・完了連絡・雑談を送り、それに対する相槌・お礼なら、👍だけでよい。「はい、引き続き対応します」のような情報ゼロの定型文は返すな。迷ったら👍ではなく通常返信にしろ（👍は未読バッジも通知も出ない＝ユーザーは「動いていない」ことに気づけない。承認を受け取ったのに止まる方が、余計な一言を返すより遥かに悪い）。👍で済ませた場合も、宣言済みの作業・見張り・約束は当然そのまま実行する。"""
 
@@ -3061,6 +3061,11 @@ async def _process_via_streaming_session(
                         session._user_cancelled = False
                     except Exception:
                         pass
+                # 追い連絡の割り込みで畳んだ中間ターンが無言だった場合は失敗ではない。
+                # テンプレ文言（応答テキストが空でした）を入れず、作業ログ(blocks)が
+                # あれば空本文＋ログだけ保存、何も無ければ保存自体スキップする
+                # （ユーザーキャンセルのEscパリティと同じ扱い）。
+                empty_continuation = False
                 if not text.strip():
                     if user_cancelled and not state["turn_blocks"]:
                         # Terminal-Esc parity: a user-cancelled turn that produced
@@ -3079,7 +3084,12 @@ async def _process_via_streaming_session(
                         state["turn_start"] = None
                         state["turn_id"] = None
                         return
-                    text = "（応答テキストが空でした。もう一度お試しください。）"
+                    # 注: 割り込み終了の result は CLI が is_error=True を付けてくる
+                    # （実測 2026-08-31）。continuation ならエラー扱いにしない。
+                    if continuation and not state.get("loop_detected"):
+                        empty_continuation = True
+                    else:
+                        text = "（応答テキストが空でした。もう一度お試しください。）"
                 # Replace the CLI's cryptic parse-error result with a friendly
                 # note. The session is dropped + reseeded afterwards (see run()),
                 # so the user can just resend and continue with full context.
@@ -3090,10 +3100,14 @@ async def _process_via_streaming_session(
                     text = _recovery_message("parse_error", _detect_user_lang(content))
                 elif is_error and _is_thinking_desync_error(result_text):
                     text = _recovery_message("thinking_desync", _detect_user_lang(content))
+                if empty_continuation:
+                    # 割り込みによるターン終了は失敗ではない。下流（SSE/モバイル）が
+                    # エラー表示しないよう正規化する。
+                    is_error = False
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
-                if not skip_save:
+                if not skip_save and not (empty_continuation and not state["turn_blocks"]):
                     cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id)
                 _register_streaming_artifacts()
                 if project_id and not continuation:

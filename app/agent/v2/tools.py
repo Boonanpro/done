@@ -340,6 +340,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WATCH_TOOL,
         SPLIT_TO_NEW_ROOM_TOOL,
         COMPOSE_MESSAGE_TOOL,
+        COLLAB_THREAD_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         SAVE_TOTP_SECRET_TOOL,
@@ -504,6 +505,7 @@ COMPOSE_MESSAGE_TOOL = {
 【返信の場合】受信したメール/DMへの返信なら reply_to_message_id（メールの Message-ID 等）と reply_to_subject を渡す。件名は不要（Re: を自動付与し、メールは同じスレッドに繋がる）。
 【フォーム送信の場合】channel="web_form"、target_url にフォームのURL、to にはフォームの持ち主（会社名など）を入れる。件名不要。
 【Instagram】DM は channel="instagram_dm"、to=相手のユーザーネーム、from_account=送信元アカウント。受信DMへの返信なら reply_to_thread_id（受信通知にある thread_id）も渡す。コメント返信は channel="instagram_comment"、reply_to_post_url=投稿URL、reply_to_comment_id=返信先コメントID。どちらもカードの送信ボタン／send でサーバーから直接送れる。
+【コラボチャット】外部窓口（collab_thread で作った招待制チャット）への送信は channel="collab"、collab_room_id=窓口のルームID、to=相手の名前。件名不要。カードの送信ボタン／send でサーバーから直接相手のチャットに届く（リアルタイム配信＋Push通知付き）。文体は**チャット**: 宛名・「お世話になっております」等の定型挨拶・署名は書かず、会話の流れに続く自然な話し方で簡潔に（通常2〜6行）。
 
 【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
 
@@ -532,11 +534,38 @@ COMPOSE_MESSAGE_TOOL = {
             "reply_to_thread_id": {"type": "string", "description": "Instagram DM 返信用: 受信通知にある thread_id"},
             "reply_to_post_url": {"type": "string", "description": "コメント返信用: 投稿URL"},
             "reply_to_comment_id": {"type": "string", "description": "コメント返信用: 返信先コメントのID"},
+            "collab_room_id": {"type": "string", "description": "channel=\"collab\" 用: 送信先コラボルームのID（collab_thread の結果や受信通知にある）"},
             "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
             "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
             "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
+        },
+        "required": ["action"],
+    },
+}
+
+COLLAB_THREAD_TOOL = {
+    "name": "collab_thread",
+    "description": """外部の相手（クライアント・取引先など）と継続的にやりとりする専用チャット窓口（コラボチャット）を開き、招待URLを発行する。
+相手はURLを開いて名前を入れるだけで参加できる（ログイン不要）。スマホならホーム画面に追加する案内が自動で出て、以後アプリのように通知が届く。
+窓口はこの部屋（今の本体チャット）に紐付くので、相手の発言はあなたがこの部屋で自動起動されて届く（ユーザーが共有しなくても分かる）。相手への返信は compose_message(action="propose", channel="collab", collab_room_id=..., to=相手の名前, body=...) で送信案カードを出す。送信すると相手のチャットに直接届く。
+「◯◯さん用の窓口/チャット作って」「◯◯さんと話せるチャットがほしい」「クライアントと共有できるルームを作って」「外部の人とやりとりできるようにして」など、**外部の相手と直接やりとりする場（チャット/ルーム/窓口、呼び方は何でも）を求められたら**このツールで create を呼び、返ってきた招待URLをユーザーに伝える。相手にメール等で直接送る場合は compose_message を使う。
+【運用方針】既定では相手への返信は全件ユーザー承認（送信案カード止まり）。ユーザーが「この窓口は受領確認くらい自動で返していい」等と言ったら set_policy(autonomy="auto", guidance="許可範囲の要約") で設定しろ。以後、guidance の範囲内だけ承認なしで送信できる（範囲外は従来どおり承認待ち）。「全部承認制に戻して」なら autonomy="approval"。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "set_policy", "consult", "react", "say"], "description": "create=窓口を作って招待URLを発行 / list=この部屋に紐付く窓口の一覧 / set_policy=自動返信の許可範囲を設定 / consult=窓口の件でユーザーに相談（相手には見えない） / react=相手のメッセージに🙏リアクション（既読サイン。通知なし・承認不要） / say=公開の場に直接発言（ユーザーからの公開の呼びかけへの返答用。相手にも見える・承認不要）"},
+            "title": {"type": "string", "description": "create時必須。窓口の名前（例:「田中様との連絡」「◯◯社 HP修正窓口」）"},
+            "description": {"type": "string", "description": "何のやりとりの窓口か（相手の参加画面にも表示される説明）"},
+            "expires_hours": {"type": "integer", "description": "招待URLから初回参加できる期間（時間。省略時168=7日）。一度参加した相手はその後もアクセスできる"},
+            "collab_room_id": {"type": "string", "description": "set_policy時必須。対象窓口のルームID"},
+            "autonomy": {"type": "string", "enum": ["approval", "auto"], "description": "set_policy用: approval=返信は全件ユーザー承認（既定）/ auto=guidance の範囲だけ承認なしで送信可"},
+            "guidance": {"type": "string", "description": "set_policy用: 承認なしで送ってよい範囲の要約（例:「受領確認・お礼・営業時間などHPに載っている事実の回答のみ。金額や納期の約束は承認必須」）"},
+            "body": {"type": "string", "description": "consult用: ユーザーへの相談文（状況の要約＋あなたの提案＋質問。相手には見えない。窓口画面にダンの発言として表示され、通知が届く）"},
+            "reply_to_message_id": {"type": "string", "description": "consult用: 既存の相談スレッドの続きとして出す場合、そのスレッドの親メッセージID（起動通知に書かれている）。指定しないと新しい相談バブルになる"},
+            "message_id": {"type": "string", "description": "react用: リアクションを付ける相手メッセージのID（着信通知の message_id）"},
+            "emoji": {"type": "string", "description": "react用: 絵文字1個（省略時 🙏）"},
         },
         "required": ["action"],
     },
@@ -1137,6 +1166,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "compose_message":
         return ("_compose_message", "manage")
+
+    if tool_name == "collab_thread":
+        return ("_collab_thread", "manage")
 
     if tool_name == "attach_image":
         return ("_attach_image", "attach")
@@ -2301,6 +2333,10 @@ async def execute_tool(
     # ★★★ 外部宛メッセージの文面カード（送信案）★★★
     if skill_name == "_compose_message":
         return await _execute_compose_message(params, session_id, user_id)
+
+    # ★★★ 外部の相手との専用チャット窓口（コラボチャット）★★★
+    if skill_name == "_collab_thread":
+        return await _execute_collab_thread(params, session_id, user_id)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -3986,6 +4022,165 @@ async def _execute_schedule_followup(
 
 
 
+async def _execute_collab_thread(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """外部の相手との専用チャット窓口（コラボチャット）。room_id = session_id。
+    実体は collab_service.create_external_thread（本体チャット⇄コラボの橋渡し）。"""
+    from app.services.collab_service import CollabService
+    from app.config import settings as _settings
+
+    room_id = session_id or ""
+    if not room_id or not user_id:
+        return {"success": False, "error": "room_id/user_id が不明なため窓口を作れません。"}
+    svc = CollabService()
+    action = (params.get("action") or "").strip()
+    frontend = (_settings.FRONTEND_URL or "http://localhost:3000").rstrip("/")
+
+    try:
+        if action == "create":
+            title = (params.get("title") or "").strip()
+            if not title:
+                return {"success": False, "error": "title は必須です（例:「田中様との連絡」）。"}
+            try:
+                expires_hours = int(params.get("expires_hours") or 168)
+            except (TypeError, ValueError):
+                expires_hours = 168
+            res = await svc.create_external_thread(
+                owner_id=user_id,
+                origin_room_id=room_id,
+                title=title,
+                description=(params.get("description") or "").strip() or None,
+                expires_hours=expires_hours,
+            )
+            collab_room_id = res["room"]["id"]
+            invite_url = f"{frontend}/collab/join/{res['invite']['token']}"
+            return {
+                "success": True,
+                "collab_room_id": collab_room_id,
+                "invite_url": invite_url,
+                "message": (
+                    "外部窓口を作りました。招待URLをユーザーに伝えてください"
+                    "（相手にメール等で直接送るなら compose_message を使う）。"
+                    "相手が参加して発言すると、この部屋であなたが自動起動されて届きます。"
+                    "相手への返信は compose_message(action=\"propose\", channel=\"collab\", "
+                    f"collab_room_id=\"{collab_room_id}\", to=相手の名前, body=...) で送信案カードを出してください。"
+                ),
+            }
+
+        if action == "list":
+            rooms = await svc.list_threads_for_origin(room_id)
+            threads = []
+            for r in rooms:
+                invites = await svc.list_invites(r["id"])
+                token = next((i.get("token") for i in invites if i.get("token")), None)
+                guest = next((i.get("guest_name") for i in invites if i.get("guest_name")), None)
+                cfg = r.get("ai_assist_config") or {}
+                threads.append({
+                    "collab_room_id": r["id"],
+                    "title": r.get("title"),
+                    "guest_name": guest,
+                    "invite_url": f"{frontend}/collab/join/{token}" if token else None,
+                    "autonomy": cfg.get("autonomy") or "approval",
+                    "auto_guidance": cfg.get("auto_guidance"),
+                    "created_at": r.get("created_at"),
+                })
+            return {"success": True, "threads": threads,
+                    "message": "この部屋に紐付く外部窓口の一覧です。" if threads
+                    else "この部屋に紐付く外部窓口はまだありません。"}
+
+        if action == "set_policy":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            if not collab_room_id:
+                return {"success": False, "error": "collab_room_id は必須です（list で確認できます）。"}
+            autonomy = (params.get("autonomy") or "").strip() or None
+            guidance = params.get("guidance")
+            if autonomy is None and guidance is None:
+                return {"success": False, "error": "autonomy か guidance を指定してください。"}
+            room = await svc.set_thread_policy(collab_room_id, autonomy=autonomy, guidance=guidance)
+            cfg = room.get("ai_assist_config") or {}
+            mode = cfg.get("autonomy") or "approval"
+            return {
+                "success": True,
+                "autonomy": mode,
+                "auto_guidance": cfg.get("auto_guidance"),
+                "message": (
+                    f"窓口「{room.get('title')}」の運用方針を更新しました: "
+                    + ("全件ユーザー承認（送信案カード止まり）" if mode == "approval"
+                       else f"許可範囲「{cfg.get('auto_guidance') or '軽い受領確認のみ'}」は承認なしで送信可、範囲外は承認待ち")
+                ),
+            }
+
+        if action == "consult":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            body = (params.get("body") or "").strip()
+            if not collab_room_id or not body:
+                return {"success": False, "error": "collab_room_id と body は必須です。"}
+            import os as _os
+            import httpx as _httpx
+            sandbox_port = _os.environ.get("DAN_SANDBOX_PORT", "8000")
+            payload = {"room_id": collab_room_id, "content": body,
+                       "sender_name": "ダン", "visibility": "owner_only"}
+            reply_to = (params.get("reply_to_message_id") or "").strip()
+            if reply_to:
+                payload["reply_to_message_id"] = reply_to
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/send",
+                    json=payload,
+                )
+                r.raise_for_status()
+            return {
+                "success": True,
+                "message": (
+                    "ユーザーへの相談を窓口画面に出しました（相手には見えません）。"
+                    "ユーザーの返答が来るまで、この件の作業・返信は行わないでください。"
+                ),
+            }
+
+        if action == "say":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            body = (params.get("body") or "").strip()
+            if not collab_room_id or not body:
+                return {"success": False, "error": "collab_room_id と body は必須です。"}
+            import os as _os
+            import httpx as _httpx
+            sandbox_port = _os.environ.get("DAN_SANDBOX_PORT", "8000")
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/send",
+                    json={"room_id": collab_room_id, "content": body, "sender_name": "ダン"},
+                )
+                r.raise_for_status()
+            return {"success": True,
+                    "message": "公開の場に発言しました（ユーザーにも相手にも見えています）。"}
+
+        if action == "react":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            message_id = (params.get("message_id") or "").strip()
+            if not collab_room_id or not message_id:
+                return {"success": False, "error": "collab_room_id と message_id は必須です。"}
+            import os as _os
+            import httpx as _httpx
+            sandbox_port = _os.environ.get("DAN_SANDBOX_PORT", "8000")
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/react",
+                    json={"room_id": collab_room_id, "message_id": message_id,
+                          "emoji": (params.get("emoji") or "🙏").strip() or "🙏"},
+                )
+                r.raise_for_status()
+            return {"success": True,
+                    "message": "リアクションを付けました（相手に通知は飛びません。開いた時に既読サインとして見えます）。"}
+
+        return {"success": False, "error": f"不明な action: {action}（create / list / set_policy / consult / react）"}
+    except Exception as e:
+        logger.error("collab_thread error: %s", e, exc_info=True)
+        return {"success": False, "error": f"コラボ窓口の操作に失敗: {e}"}
+
+
 async def _execute_compose_message(
     params: Dict[str, Any],
     session_id: Optional[str],
@@ -4028,6 +4223,7 @@ async def _execute_compose_message(
                 "thread_id": (params.get("reply_to_thread_id") or "").strip() or None,
                 "post_url": (params.get("reply_to_post_url") or "").strip() or None,
                 "comment_id": (params.get("reply_to_comment_id") or "").strip() or None,
+                "collab_room_id": (params.get("collab_room_id") or "").strip() or None,
             }
             target = {
                 "url": (params.get("target_url") or "").strip() or None,

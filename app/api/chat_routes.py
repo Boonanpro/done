@@ -3182,6 +3182,35 @@ async def discard_outbound_draft(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/proposals/outbound-for-collab/{collab_room_id}")
+async def list_outbound_proposals_for_collab(
+    collab_room_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """コラボルーム宛の送信案カード一覧。
+
+    コミュニケーションタブのオーナー画面が、その窓口宛の pending カードを
+    インライン表示するために使う（承認・編集・破棄は既存の proposals API と同じ）。
+    """
+    import asyncio as _aio
+    from app.services.supabase_client import get_supabase_client
+
+    def _q():
+        return (
+            get_supabase_client().client.table("dan_proposals")
+            .select("id,status,created_at")
+            .eq("type", "outbound")
+            .eq("user_id", current_user.user_id)
+            .eq("action_data->reply_to->>collab_room_id", collab_room_id)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+
+    r = await _aio.to_thread(_q)
+    return {"proposals": r.data or []}
+
+
 @router.post("/proposals/{proposal_id}/instruct")
 async def instruct_proposal(
     proposal_id: str,
@@ -3247,6 +3276,89 @@ class ConnectionManager:
                     await connection.send_json(message)
                 except Exception:
                     pass  # 接続が切れている場合は無視
+
+
+# ==================== プロフィール ====================
+
+@router.post("/profile")
+async def update_profile(
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """自分の表示名を変更する（コラボ窓口などで相手に見える名前）。"""
+    data = await request.json()
+    display_name = (data.get("display_name") or "").strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="display_name required")
+    from app.services.supabase_client import get_supabase_client
+    import asyncio as _aio
+    def _upd():
+        return (get_supabase_client().client.table("users")
+                .update({"display_name": display_name[:60]})
+                .eq("id", current_user.user_id).execute())
+    await _aio.to_thread(_upd)
+    return {"display_name": display_name[:60]}
+
+
+# ==================== コラボチャット着信（sandbox → core） ====================
+
+@router.post("/internal/collab-inbound")
+async def collab_inbound(request: Request):
+    """コラボルームのゲスト発言を、紐付いた本体チャットルームでダンを起こして届ける。
+
+    sandbox(collab_routes) から localhost 経由で呼ばれる。wake を予約できなければ
+    通知タブ（dan_proposals）へフォールバックして取りこぼさない。
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+
+    payload = await request.json()
+    collab_room_id = (payload.get("collab_room_id") or "").strip()
+    message = payload.get("message") or {}
+    if not collab_room_id or not (message.get("content") or "").strip():
+        raise HTTPException(status_code=422, detail="collab_room_id and message.content required")
+
+    sender_type = message.get("sender_type")
+    is_owner_private = (
+        sender_type == "owner"
+        and ((message.get("metadata") or {}).get("visibility") == "owner_only")
+    )
+    is_owner_public = sender_type == "owner" and not is_owner_private
+    if sender_type != "guest" and not is_owner_private and not is_owner_public:
+        return {"status": "ignored", "reason": "not_guest"}
+
+    from app.services.collab_service import CollabService
+    svc = CollabService()
+    room = await svc.get_room(collab_room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Collab room not found")
+    origin_room_id = room.get("origin_chat_room_id")
+    if not origin_room_id:
+        return {"status": "ignored", "reason": "no_origin_link"}
+
+    # ユーザーの私的メッセージ（相談への返答・ダンへの指示）は即時に origin ダンへ
+    if is_owner_private:
+        from app.services.collab_wakeup import schedule_owner_instruction
+        thread_root = (((message.get("metadata") or {}).get("reply_to")) or {}).get("id")
+        ok = schedule_owner_instruction(collab_room_id, message.get("content") or "",
+                                        thread_root=thread_root)
+        return {"status": "owner_instruction_scheduled" if ok else "ignored"}
+
+    # ユーザーの公開発言: ダン宛てかどうかはダンが判断し、宛てられていれば公開の場で直接返答
+    if is_owner_public:
+        from app.services.collab_wakeup import schedule_owner_instruction
+        ok = schedule_owner_instruction(collab_room_id, message.get("content") or "",
+                                        public=True)
+        return {"status": "owner_public_scheduled" if ok else "ignored"}
+
+    # 連投対応: 1メッセージ=1起動ではなく、窓口ごとのアグリゲータに通知する。
+    # 60秒静かになるまで待って未処理分をまとめて1ターンで処理する（collab_wakeup 参照）。
+    from app.services.collab_wakeup import schedule_collab_wakeup
+    if schedule_collab_wakeup(collab_room_id):
+        return {"status": "wake_scheduled", "origin_room_id": origin_room_id}
+    proposal = await svc.notify_origin_chat_of_guest_message(collab_room_id, message)
+    return {"status": "proposal_created" if proposal else "ignored"}
 
 
 # ==================== 整理オブザーバー（スケジューラー用） ====================

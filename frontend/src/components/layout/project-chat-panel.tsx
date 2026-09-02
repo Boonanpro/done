@@ -59,7 +59,8 @@ import {
   type SelectedElement,
 } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
-import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent } from '@/components/chat/outbound-message-card';
+import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
+import { RoomBoard } from '@/components/chat/room-board';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -499,11 +500,16 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
 
   // 送信案カード（compose_message）: `[送信案: <id>]` はカードとして描画する。
   // 送信済み/破棄イベント（📤/🗑）は折り畳みの控えめな行にする。
+  // collab（外部窓口）のカードは本体チャットでは薄い1行に折り畳む（主戦場はコミュニケーションタブ）。
   const outboundCardId = parseOutboundCardMarker(msg.content);
   if (outboundCardId) {
-    return <OutboundMessageCard proposalId={outboundCardId} />;
+    return <OutboundMessageCard proposalId={outboundCardId} foldCollab />;
   }
   if (isOutboundEventContent(msg.content)) {
+    return <OutboundEventLine content={msg.content || ''} />;
+  }
+  // 外部窓口対応の作業ログ（「窓口ログ:」で始まるai発言）も折り畳みの控えめな行にする。
+  if (msg.sender_type === 'ai' && isCollabLogContent(msg.content)) {
     return <OutboundEventLine content={msg.content || ''} />;
   }
 
@@ -2381,10 +2387,26 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     return () => cancelAnimationFrame(frame);
   }, [projectId]);
 
+  // 部屋ボードが有効な部屋は、履歴の代わりにボードを主役にして
+  // チャットは「直前1ターン」（最後のユーザー発言以降）だけを表示する。
+  const boardEnabled = !!(project?.metadata as Record<string, unknown> | null | undefined)?.board_enabled;
+
   const visibleDisplayItems = useMemo(() => {
+    if (boardEnabled) {
+      let start = -1;
+      for (let i = displayItems.length - 1; i >= 0; i--) {
+        const item = displayItems[i];
+        if (item.kind === 'message' && item.msg.sender_type !== 'ai') {
+          start = i;
+          break;
+        }
+      }
+      // ユーザー発言が見つからない場合は末尾2要素（ダンの返答+作業ブロック想定）だけ
+      return start >= 0 ? displayItems.slice(start) : displayItems.slice(-2);
+    }
     const start = Math.max(0, displayItems.length - visibleItemCount);
     return displayItems.slice(start);
-  }, [displayItems, visibleItemCount]);
+  }, [displayItems, visibleItemCount, boardEnabled]);
 
   const hiddenOlderCount = Math.max(0, displayItems.length - visibleDisplayItems.length);
 
@@ -2840,6 +2862,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             {hasNewMessages ? '新しいメッセージ' : '最新へ'}
           </button>
         )}
+        {/* 部屋ボード: 有効な部屋では履歴の代わりに現在地ボードを主役表示。
+            isBooting で外すと送信のたびに再マウント→付箋アニメ再生になるので、
+            ロード状態に関わらずマウントし続ける（ボード自身がスピナーを持つ） */}
+        {boardEnabled ? <RoomBoard projectId={projectId} /> : null}
         {/* 「空の部屋」の文言は、取得が成功して本当に0件だった時だけ出す。
             プロジェクト情報の取得中（=メッセージクエリが未開始）や
             メッセージ初回取得中は「読み込み中」であって「空」ではない。
