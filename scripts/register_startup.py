@@ -24,6 +24,14 @@ PYTHONW_TASKS = [
         "script": "scripts\\observer_scheduler.py",
         "args": "",
     },
+    # DanTunnel: 公開URL(Vercel)から自宅PCへ入る通り道。これが無いと再起動後に
+    # StyleUp 等の公開ツールが「画面は出るが押しても何も起きない」状態のまま
+    # 手動復旧まで止まる（2026-08-07 に発覚）。バックエンドの起動を待ってから張る。
+    {
+        "name": "DanTunnel",
+        "script": "scripts\\start_tunnel_autostart.py",
+        "args": "",
+    },
 ]
 
 # リポジトリ内の .bat を呼ぶだけの薄いラッパー系
