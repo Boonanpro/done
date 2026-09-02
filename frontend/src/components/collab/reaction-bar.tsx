@@ -42,7 +42,7 @@ export function ReactionBar({ reactions, myName, onToggle, align = 'left', compa
             type="button"
             title={(names || []).join('、')}
             onClick={() => onToggle(emoji)}
-            className={`animate-in zoom-in-90 duration-150 motion-reduce:animate-none rounded-full border px-1.5 py-0.5 text-sm leading-none transition-colors ${
+            className={`animate-in zoom-in duration-200 motion-reduce:animate-none rounded-full border px-1.5 py-0.5 text-sm leading-none transition-colors ${
               mine ? 'border-primary/60 bg-primary/15' : 'border-border bg-background/80 hover:bg-muted'
             }`}
           >
@@ -61,7 +61,7 @@ export function ReactionBar({ reactions, myName, onToggle, align = 'left', compa
         <SmilePlus className="h-3.5 w-3.5" />
       </button>
       {open && (
-        <div className={`absolute top-full z-20 mt-1 flex gap-1 rounded-full border border-border bg-card px-2 py-1 shadow-lg animate-in fade-in zoom-in-95 duration-150 motion-reduce:animate-none ${
+        <div className={`absolute top-full z-20 mt-1 flex gap-1 rounded-full border border-border bg-card px-2 py-1 shadow-lg animate-in fade-in zoom-in-95 duration-200 motion-reduce:animate-none ${
           align === 'right' ? 'right-0' : 'left-0'
         }`}>
           {REACTION_CHOICES.map((e) => (

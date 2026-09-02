@@ -317,26 +317,6 @@ export default function GuestJoinPage() {
   };
 
 
-  // 入力欄→吹き出しの連続移動（iMessage式）: 送った文字が入力欄の位置から
-  // 吹き出しの最終位置へ移動して見える。「押した→生えた」を一つの物にする。
-  const flipFromComposer = (tempId: string) => {
-    if (typeof window === 'undefined') return;
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const from = inputRef.current?.getBoundingClientRect();
-    if (!from) return;
-    requestAnimationFrame(() => {
-      const bubble = document.querySelector<HTMLElement>(`[data-collab-msg-id="${tempId}"] [data-bubble]`);
-      if (!bubble) return;
-      const to = bubble.getBoundingClientRect();
-      const dx = from.left - to.left;
-      const dy = from.top - to.top;
-      bubble.animate(
-        [{ transform: `translate(${dx}px, ${dy}px) scale(0.96)`, opacity: 0.5 }, { transform: 'none', opacity: 1 }],
-        { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)' }
-      );
-    });
-  };
-
   const handleSend = async () => {
     const content = input.trim();
     if (!content) return;
@@ -374,7 +354,6 @@ export default function GuestJoinPage() {
     setInput('');
     setReplyTo(null);
     setMessages((prev) => [...prev, optimistic]);
-    flipFromComposer(tempId);
     inputRef.current?.focus();
     try {
       const sent = await api.collab.sendMessage(roomId, finalContent, guestToken, metadata);
@@ -831,7 +810,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-2 duration-150 ease-out motion-reduce:animate-none ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
       {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
       {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
       {!isPrivate && !isGuest && (

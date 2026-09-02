@@ -2927,7 +2927,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 }
 
                 nodes.push(
-                  <div key={item.msg.id} data-message-id={item.msg.id} className="animate-in fade-in slide-in-from-bottom-2 duration-150 ease-out motion-reduce:animate-none"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
+                  <div key={item.msg.id} data-message-id={item.msg.id} className="animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
                 );
               });
               return nodes;
