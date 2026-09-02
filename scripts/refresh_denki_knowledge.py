@@ -26,6 +26,9 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from denki_encoding import resolve_encoding  # noqa: E402
+
 requests.packages.urllib3.disable_warnings()  # type: ignore
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -62,8 +65,8 @@ def strip_html(raw: str) -> str:
 
 def get(url: str):
     r = session.get(url, timeout=TIMEOUT, verify=False)
-    if not r.encoding or r.encoding.lower() in ("iso-8859-1", "windows-1252", "windows-1254"):
-        r.encoding = r.apparent_encoding or r.encoding
+    # charset を返さない古いサイト（Shift_JIS）を欧文と誤判定しないようにする。
+    r.encoding = resolve_encoding(r)
     return r
 
 
@@ -338,11 +341,18 @@ def fetch_newest(src, known):
     return []
 
 
-def _verify_published(generated_at: str, attempts: int = 12, wait: int = 30) -> bool:
-    """公開URLの索引が新しい generated_at に切り替わるまで確認する。"""
-    # <slug>-done.vercel.app の alias は廃止済み（RULES.md）。索引は public 直下に
-    # 置かれるので、成果物本体を配信している done-artifacts のホストで確認する。
-    url = "https://denki-knowledge-done.vercel.app/denki-knowledge-index.json"
+def _verify_published(generated_at: str, base: str, attempts: int = 12, wait: int = 30) -> bool:
+    """公開URLの索引が新しい generated_at に切り替わるまで確認する。
+
+    確認先の URL は決め打ちにしない。<slug>-done.vercel.app の alias は廃止済みで、
+    今の配信先は成果物レコードの独自ドメイン（denkiouen.com）か専用プロジェクトの
+    URL だからである。決め打ちにすると、公開は成功しているのに毎朝
+    「反映を確認できませんでした」と出続ける。
+    """
+    if not base:
+        print("[publish] 公開URLが分からないため反映確認を省略しました")
+        return True
+    url = f"{base.rstrip('/')}/denki-knowledge-index.json"
     for _ in range(attempts):
         try:
             r = session.get(url, headers={"Range": "bytes=0-200"}, timeout=TIMEOUT)
@@ -384,8 +394,12 @@ def publish_index() -> bool:
                     .eq("slug", "denki-knowledge").order("created_at", desc=True).limit(1).execute())
             if not rows.data:
                 return [{"status": "error", "error": "denki-knowledge artifact is not registered"}]
-            asyncio.run(ArtifactPublicationService().deploy_dedicated_release(rows.data[0]))
-            return [{"status": "live", "changed": True}]
+            artifact = rows.data[0]
+            asyncio.run(ArtifactPublicationService().deploy_dedicated_release(artifact))
+            # 反映確認は独自ドメイン優先。無ければ専用プロジェクトのURL。
+            domain = (artifact.get("custom_domain") or "").strip()
+            base = f"https://{domain}" if domain else (artifact.get("share_url") or "").strip()
+            return [{"status": "live", "changed": True, "base": base}]
     except Exception as e:  # noqa: BLE001
         print("[publish] 公開処理を読み込めません:", e)
         return False
@@ -400,7 +414,7 @@ def publish_index() -> bool:
         print("[publish] 索引に差分なし（公開はすでに最新）")
         return True
 
-    return _verify_published(generated_at)
+    return _verify_published(generated_at, result.get("base") or "")
 
 
 def main():
