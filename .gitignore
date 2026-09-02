@@ -37,7 +37,7 @@ env.bak/
 venv.bak/
 
 # Local model weights / vendored third-party repos (SAM 3.1 etc.)
-models/
+/models/
 vendor/
 
 # Environment Variables

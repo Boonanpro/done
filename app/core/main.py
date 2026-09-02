@@ -118,6 +118,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("email poller failed to start: %s", e)
 
+    # Instagram DM ポーラー: ダンがDMを送ったアカウントだけを低頻度(既定60分)で
+    # 巡回し、返信は案件ルームでダンを起動、新規DMは通知タブに出す。
+    # スレッドは開かないので既読は付かない。失敗してもコア起動は妨げない。
+    try:
+        from app.services.instagram_poller import start_poller as start_ig_poller
+        start_ig_poller()
+    except Exception as e:
+        logger.warning("instagram poller failed to start: %s", e)
+
     # 「今日やったこと」ポーラー: ダン/CLI/git/見張りの証拠を定期(既定5分)+ターン完了時に
     # 判定し daily_achievements を更新する。失敗してもコア起動は妨げない。
     try:

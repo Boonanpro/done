@@ -12,6 +12,7 @@ class MessageSource(str, Enum):
     DONE_CHAT = "done_chat"
     GMAIL = "gmail"
     LINE = "line"
+    INSTAGRAM = "instagram"
 
 
 class DetectionStatus(str, Enum):
