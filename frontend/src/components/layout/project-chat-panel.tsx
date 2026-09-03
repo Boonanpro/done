@@ -1,5 +1,6 @@
 'use client';
 
+import { perfLog, roomClickStart } from '@/lib/perf-log';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
@@ -2019,6 +2020,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   }, [addPendingComment]);
 
   const [openState, setOpenState] = useState<'pending' | 'done' | 'failed'>('pending');
+  const mountAtRef = useRef(typeof performance !== 'undefined' ? performance.now() : 0);
+  const bootLoggedRef = useRef(false);
   const queriesReleased = openState !== 'pending';
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -2059,6 +2062,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       })
       .then((data) => {
         if (cancelled) return;
+        perfLog({ surface: 'web', event: 'room-open-net', ms: performance.now() - (roomClickStart(projectId) ?? mountAtRef.current), room_id: initialRoomId, extra: data.timings_ms ? { server: data.timings_ms } : undefined });
         if (data.project) queryClient.setQueryData(['project', projectId], data.project);
         if (data.messages) {
           if (data.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
@@ -2392,6 +2396,22 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // run状態・作業イベントは待たない。メッセージが揃った時点で描き、実行中の
   // 表示は後から到着した時に差し込む（束ね応答なら同時に届く）。
   const isBooting = !project || (!!project.room_id && messagesData === undefined);
+  // 実使用の計測: サイドバーで押した瞬間（無ければこの部屋の mount）→ 内容が描けた時点
+  useEffect(() => {
+    if (isBooting || bootLoggedRef.current) return;
+    bootLoggedRef.current = true;
+    const start = roomClickStart(projectId) ?? mountAtRef.current;
+    // 描画が実際に画面に出た後（次のフレーム）で測る
+    requestAnimationFrame(() => {
+      perfLog({
+        surface: 'web',
+        event: 'room-open-visible',
+        ms: performance.now() - start,
+        room_id: project?.room_id ?? null,
+        extra: { from_click: roomClickStart(projectId) != null, messages: messagesData?.messages?.length ?? 0, open: openState },
+      });
+    });
+  }, [isBooting, projectId, project?.room_id, messagesData?.messages?.length, openState]);
 
   useEffect(() => {
     isNearBottomRef.current = true;

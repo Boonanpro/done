@@ -1,5 +1,6 @@
 'use client';
 
+import { markRoomClick } from '@/lib/perf-log';
 import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -262,6 +263,7 @@ export function Sidebar({
   // 行う（Next は history.pushState をルーターと同期するので、リロード・共有・
   // 戻る/進むは従来通り動く。戻る/進むは通常の遷移として page.tsx が同期する）。
   const handleProjectClick = (project: ProjectResponse) => {
+    markRoomClick(project.id);
     // /chat 以外のページ（/today 等）にいる時は pushState だけでは画面が
     // 切り替わらない（描画するのは chat 配下のみ）ので通常遷移で飛ぶ。
     if (!pathname.startsWith('/chat')) {

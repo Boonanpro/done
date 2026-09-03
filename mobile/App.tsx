@@ -1,3 +1,4 @@
+import * as Updates from 'expo-updates';
 import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
@@ -70,6 +71,7 @@ const PUSH_KEY = 'done_mobile_push_enabled';
 // 部屋を開く一式（/chat/rooms/{id}/open）。欠けた項目は null。
 type RoomOpenResponse = {
   room_id: string;
+  timings_ms?: Record<string, number>;
   project: ProjectResponse | null;
   messages: MessageResponse[] | null;
   artifacts: ChatArtifactResponse[] | null;
@@ -77,6 +79,18 @@ type RoomOpenResponse = {
   current_run: AgentRun | null;
   execution_events: ExecutionEvent[] | null;
 };
+
+// 実使用の体感時間をログ(adb logcat)とバックエンド(/chat/perf)に残す。失敗しても何もしない。
+const perfLog = (event: string, ms: number, extra?: Record<string, unknown>, token?: string | null) => {
+  console.log(`[perf] ${event} ${Math.round(ms)}ms`, extra ?? '');
+  if (!token) return;
+  fetch(`${API_BASE_URL}/api/v1/chat/perf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ surface: 'mobile', event, ms, extra, at: new Date().toISOString(), ua: `updates:${Updates.updateId ?? 'embedded'}` }),
+  }).catch(() => undefined);
+};
+console.log(`[perf] startup update=${Updates.updateId ?? 'embedded'} created=${Updates.createdAt ? Updates.createdAt.toISOString() : '-'} channel=${Updates.channel ?? '-'}`);
 
 const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
 
@@ -1780,6 +1794,7 @@ function AppMain() {
       // （前に見ていた部屋のメッセージを新しい部屋に残像として出さない）。
       setMessages(knownRoom ? messagesCacheRef.current[knownRoom] ?? [] : []);
       SecureStore.setItemAsync(PROJECT_KEY, projectId).catch(() => null);
+      const openStartedAt = Date.now();
       setLoadingMessages(true);
       try {
         let roomId = knownRoom;
@@ -1807,6 +1822,8 @@ function AppMain() {
         const fetched = data.messages ?? [];
         // 初回応答が上限未満なら、それより古い行はサーバーに無い。
         hasMoreOlderRef.current = fetched.length >= CHAT_INITIAL_FETCH_LIMIT;
+        perfLog('room-open-net', Date.now() - openStartedAt, { messages: fetched.length, server: data.timings_ms ?? null }, activeToken);
+        requestAnimationFrame(() => perfLog('room-open-visible', Date.now() - openStartedAt, { messages: fetched.length, cached: !!(knownRoom && messagesCacheRef.current[knownRoom]?.length) }, activeToken));
         // 取得中に別の部屋へ移動していたら適用しない（残像・取り違え防止）
         if (currentProjectIdRef.current === projectId) {
           const fetchedRoomId = roomId;

@@ -2954,6 +2954,43 @@ async def get_active_session_status(
     return await _active_session_status(session_id)
 
 
+class PerfEventIn(BaseModel):
+    surface: str
+    event: str
+    ms: float
+    room_id: Optional[str] = None
+    extra: Optional[dict] = None
+    at: Optional[str] = None
+    ua: Optional[str] = None
+
+
+@router.post("/perf")
+async def record_perf_event(body: PerfEventIn, current_user: TokenData = Depends(get_current_user)):
+    """実使用の体感時間（部屋切替など）を .tmp/perf_events.jsonl に追記する。
+
+    手元の headless 計測と本人の体感がずれたため、本人の端末で「タップ→内容が見える」
+    を測って残す。分析は scripts/perf_report.py。
+    """
+    import json as _json
+    from pathlib import Path as _P
+
+    row = body.model_dump()
+    row["user_id"] = current_user.user_id[:8]
+    row["received_at"] = datetime.now(timezone.utc).isoformat()
+    path = _P(__file__).resolve().parents[2] / ".tmp" / "perf_events.jsonl"
+
+    def _append():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(row, ensure_ascii=False) + "\n")
+
+    try:
+        await asyncio.to_thread(_append)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("perf event append failed: %s", e)
+    return {"ok": True}
+
+
 @router.get("/rooms/{room_id}/open")
 async def open_room(
     room_id: str,

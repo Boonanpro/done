@@ -107,6 +107,7 @@ export interface MessageResponse {
 
 export interface RoomOpenResponse {
   room_id: string;
+  timings_ms?: Record<string, number>;
   project: ProjectResponse | null;
   messages: MessageResponse[] | null;
   artifacts: unknown[] | null;
