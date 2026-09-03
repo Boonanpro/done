@@ -1,9 +1,19 @@
 """
-Video analysis service using Gemini.
+Video analysis service using Gemini (agentic video understanding).
 
 Sends video files to Gemini for multimodal understanding
 (visual content, audio, screen operations, human movements, etc.)
 and returns a text description.
+
+2026-09-03: switched from static 1fps processing (generate_content on
+gemini-3.1-pro-preview) to *agentic* video understanding via the
+Interactions API (`processing: "agentic"`). The model navigates the
+video itself (frames / audio / transcript on demand) instead of
+ingesting every frame — up to 88% fewer tokens on long videos.
+Agentic mode is only offered on Flash-family models, hence the model
+change. Single code path by design (no length-based branching); if the
+agentic call fails we fall back to static processing on the same model.
+Requires google-genai >= 2.3.0 (Interactions API v2 schema).
 
 Supports:
 - Local file paths (upload to Gemini Files API)
@@ -20,13 +30,14 @@ from typing import Optional
 
 import requests
 from google import genai
-from google.genai import types as genai_types
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gemini-3.1-pro-preview"
+MODEL = "gemini-3.8-flash"
+# "agentic" = model-driven navigation of the video (Flash models only).
+VIDEO_PROCESSING = "agentic"
 
 ANALYSIS_PROMPT = (
     "この動画の内容を詳細に分析してください。以下を含めてください:\n"
@@ -96,8 +107,48 @@ def _download_loom_video(video_id: str) -> str:
     return tmp.name
 
 
+def _video_input(uri: str, mime_type: Optional[str], processing: Optional[str]) -> dict:
+    item: dict = {"type": "video", "uri": uri}
+    if mime_type:
+        item["mime_type"] = mime_type
+    if processing:
+        item["processing"] = processing
+    return item
+
+
+def _run_interaction(client: "genai.Client", uri: str, mime_type: Optional[str], prompt: str, label: str) -> Optional[str]:
+    """Call the Interactions API with agentic processing; fall back to static on failure."""
+    import time
+
+    t0 = time.time()
+    try:
+        interaction = client.interactions.create(
+            model=MODEL,
+            input=[_video_input(uri, mime_type, VIDEO_PROCESSING), {"type": "text", "text": prompt}],
+        )
+        usage = getattr(interaction, "usage", None)
+        logger.info(
+            "Video analysis done (%s, %s/%s, %.1fs, tokens=%s)",
+            label, MODEL, VIDEO_PROCESSING, time.time() - t0,
+            getattr(usage, "total_tokens", None),
+        )
+        return interaction.output_text
+    except Exception as e:
+        logger.warning(
+            "Agentic video analysis failed (%s, %.1fs): %s — retrying with static processing",
+            label, time.time() - t0, e,
+        )
+        t1 = time.time()
+        interaction = client.interactions.create(
+            model=MODEL,
+            input=[_video_input(uri, mime_type, None), {"type": "text", "text": prompt}],
+        )
+        logger.info("Video analysis done (%s, %s/static, %.1fs)", label, MODEL, time.time() - t1)
+        return interaction.output_text
+
+
 def _analyze_file_sync(file_path: str, prompt: str) -> Optional[str]:
-    """Upload a local file to Gemini Files API and analyze."""
+    """Upload a local file to Gemini Files API and analyze (agentic)."""
     import time
 
     client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
@@ -105,53 +156,28 @@ def _analyze_file_sync(file_path: str, prompt: str) -> Optional[str]:
     logger.info("Uploading video to Gemini: %s", file_path)
     video_file = client.files.upload(file=file_path)
 
-    for _ in range(60):
+    # Large files (hundreds of MB, 1h+) can take several minutes to become ACTIVE.
+    for _ in range(300):
         video_file = client.files.get(name=video_file.name)
         if video_file.state.name == "ACTIVE":
             break
+        if video_file.state.name == "FAILED":
+            raise RuntimeError(f"Gemini rejected the video file: {video_file.name}")
         logger.info("Waiting for video processing... (state: %s)", video_file.state.name)
         time.sleep(2)
     else:
-        raise RuntimeError(f"Video file did not become ACTIVE after 120s (state: {video_file.state.name})")
+        raise RuntimeError(f"Video file did not become ACTIVE after 600s (state: {video_file.state.name})")
 
-    logger.info("Analyzing video with %s (file: %s)", MODEL, video_file.name)
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai_types.Content(
-                parts=[
-                    genai_types.Part.from_uri(
-                        file_uri=video_file.uri,
-                        mime_type=video_file.mime_type,
-                    ),
-                    genai_types.Part(text=prompt),
-                ]
-            )
-        ],
-    )
-    return response.text
+    logger.info("Analyzing video with %s/%s (file: %s)", MODEL, VIDEO_PROCESSING, video_file.name)
+    return _run_interaction(client, video_file.uri, video_file.mime_type, prompt, os.path.basename(file_path))
 
 
 def _analyze_youtube_sync(video_url: str, prompt: str) -> Optional[str]:
     """Analyze YouTube video by passing URL directly to Gemini (no download)."""
     client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
 
-    logger.info("Analyzing YouTube video: %s", video_url)
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai_types.Content(
-                parts=[
-                    genai_types.Part.from_uri(
-                        file_uri=video_url,
-                        mime_type="video/mp4",
-                    ),
-                    genai_types.Part(text=prompt),
-                ]
-            )
-        ],
-    )
-    return response.text
+    logger.info("Analyzing YouTube video with %s/%s: %s", MODEL, VIDEO_PROCESSING, video_url)
+    return _run_interaction(client, video_url, None, prompt, video_url)
 
 
 def _analyze_loom_sync(video_id: str, prompt: str) -> Optional[str]:
