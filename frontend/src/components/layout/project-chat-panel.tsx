@@ -1875,6 +1875,54 @@ function composeCommentsMessage(
   return `${lines.join('\n')}\n\n${body}${suffix}`;
 }
 
+/**
+ * サーバー取得(fresh)をキャッシュ(old)へ「追いつき」として結合する純関数。
+ * 画面にしか無い新しい行（SSE直挿入・楽観表示）を消さず、変わっていない行は
+ * 同じオブジェクトを使い回して再描画を最小にする。通常のクエリと、部屋を開く
+ * 束ね応答の投入、両方から使う。
+ */
+function mergeFreshMessages(
+  old: { messages: MessageResponse[] } | undefined,
+  fresh: { messages: MessageResponse[] },
+): { messages: MessageResponse[] } {
+  if (!old?.messages?.length) return fresh;
+  // オブジェクト同一性の安定化: 内容が変わっていない行は「前回と同じ
+  // オブジェクト」を使い回す。これが無いとポーリングのたびに全行が新しい
+  // オブジェクトになり、MessageBubble の memo が全滅して毎回500件を再描画・
+  // マークダウン再解析していた（長い部屋で送信直後に自分のメッセージが
+  // 数秒遅れて出る/全体が重い、の主犯）。再描画は変わった行だけになる。
+  const prevById = new Map(old.messages.map((m) => [m.id, m]));
+  const stabilized = fresh.messages.map((m) => {
+    const prev = prevById.get(m.id);
+    return prev
+      && prev.content === m.content
+      && prev.pendingFollowup === m.pendingFollowup
+      && prev.reply_to_id === m.reply_to_id
+      ? prev
+      : m;
+  });
+  const freshIds = new Set(fresh.messages.map((m) => m.id));
+  // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
+  // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
+  // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
+  // 遡り読み込みで足した行は fresh の取得窓（最新N件）より古いので fresh に
+  // 含まれないが、削除された訳ではない。窓の下端より古い行は無条件で残す。
+  const cutoff = Date.now() - 120_000;
+  const oldestFresh = fresh.messages.length
+    ? Math.min(...fresh.messages.map((m) => new Date(m.created_at).getTime()))
+    : Infinity;
+  const localOnly = old.messages.filter((m) => {
+    if (freshIds.has(m.id)) return false;
+    const t = new Date(m.created_at).getTime();
+    return t >= cutoff || t < oldestFresh;
+  });
+  if (localOnly.length === 0) return { messages: stabilized };
+  const merged = [...stabilized, ...localOnly].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+  return { messages: merged };
+}
+
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -2014,10 +2062,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         if (data.project) queryClient.setQueryData(['project', projectId], data.project);
         if (data.messages) {
           if (data.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
-          // 既にキャッシュがある（開き直し）場合は、SSE直挿入行を消さないよう通常経路のマージに任せる
-          if (!queryClient.getQueryData(['project-messages', initialRoomId])) {
-            queryClient.setQueryData(['project-messages', initialRoomId], { messages: data.messages });
-          }
+          const fresh = { messages: data.messages };
+          queryClient.setQueryData(['project-messages', initialRoomId], (old?: { messages: MessageResponse[] }) =>
+            mergeFreshMessages(old, fresh),
+          );
         }
         queryClient.setQueryData(['chat-artifacts', initialRoomId], (data.artifacts ?? []) as ArtifactRecord[]);
         if (data.active) queryClient.setQueryData(['session-active', initialRoomId], data.active);
@@ -2093,45 +2141,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       const fresh = await api.rooms.getMessages(project!.room_id!, { limit: CHAT_INITIAL_FETCH_LIMIT });
       // 初回応答が上限未満なら、それより古い行はサーバーに無い。
       if (fresh.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
-      const old = queryClient.getQueryData<{ messages: MessageResponse[] }>(
-        ['project-messages', project?.room_id],
-      );
-      if (!old?.messages?.length) return fresh;
-      // オブジェクト同一性の安定化: 内容が変わっていない行は「前回と同じ
-      // オブジェクト」を使い回す。これが無いとポーリングのたびに全行が新しい
-      // オブジェクトになり、MessageBubble の memo が全滅して毎回500件を再描画・
-      // マークダウン再解析していた（長い部屋で送信直後に自分のメッセージが
-      // 数秒遅れて出る/全体が重い、の主犯）。再描画は変わった行だけになる。
-      const prevById = new Map(old.messages.map((m) => [m.id, m]));
-      const stabilized = fresh.messages.map((m) => {
-        const prev = prevById.get(m.id);
-        return prev
-          && prev.content === m.content
-          && prev.pendingFollowup === m.pendingFollowup
-          && prev.reply_to_id === m.reply_to_id
-          ? prev
-          : m;
-      });
-      const freshIds = new Set(fresh.messages.map((m) => m.id));
-      // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
-      // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
-      // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
-      // 遡り読み込みで足した行は fresh の取得窓（最新N件）より古いので fresh に
-      // 含まれないが、削除された訳ではない。窓の下端より古い行は無条件で残す。
-      const cutoff = Date.now() - 120_000;
-      const oldestFresh = fresh.messages.length
-        ? Math.min(...fresh.messages.map((m) => new Date(m.created_at).getTime()))
-        : Infinity;
-      const localOnly = old.messages.filter((m) => {
-        if (freshIds.has(m.id)) return false;
-        const t = new Date(m.created_at).getTime();
-        return t >= cutoff || t < oldestFresh;
-      });
-      if (localOnly.length === 0) return { messages: stabilized };
-      const merged = [...stabilized, ...localOnly].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      );
-      return { messages: merged };
+      return mergeFreshMessages(queryClient.getQueryData<{ messages: MessageResponse[] }>(['project-messages', project?.room_id]), fresh);
     },
     enabled: !!project?.room_id && queriesReleased,
     staleTime: 5 * 1000,
@@ -2401,33 +2411,18 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const visibleDisplayItems = useMemo(() => {
     if (boardEnabled) {
-      // 1セット表示: 「直前のやりとり1往復」だけを残す。
-      // 新しいメッセージを送るとそれが最後のセットの起点になり、前のセットは消える。
-      // 追い連絡（ユーザーが連続で送る）は同じセットとして両方残す。
-      let lastAi = -1;
-      for (let i = displayItems.length - 1; i >= 0; i--) {
-        const item = displayItems[i];
-        if (item.kind === 'message' && item.msg.sender_type === 'ai') {
-          lastAi = i;
-          break;
-        }
-      }
+      // 1セット表示: 「最後のユーザー発言」を起点に、そこから末尾まで全部を残す。
+      // ダンは1ターンで複数メッセージ（返信＋送信案カード＋続報など）を返すことが
+      // あるので、遡って最初のAIで打ち切る旧実装だとユーザー発言や途中のカードが
+      // 切り落とされていた。起点をユーザー発言に固定すれば、そのターンのダンの
+      // 出力が何通でも全部同じセットに残る。追い連絡（連続送信）も両方残る。
+      // 新しいメッセージを送れば、それが新しい起点になって前のセットは引っ込む。
       let start = -1;
-      // ダンの最終返信より後にユーザー発言があれば（=返信待ち中）そこがセットの起点
-      for (let i = lastAi + 1; i < displayItems.length; i++) {
+      for (let i = displayItems.length - 1; i >= 0; i--) {
         const item = displayItems[i];
         if (item.kind === 'message' && item.msg.sender_type !== 'ai') {
           start = i;
           break;
-        }
-      }
-      if (start === -1 && lastAi >= 0) {
-        // ダンの返信が最後: その返信に対応するユーザー発言群の先頭まで戻る
-        start = lastAi;
-        for (let i = lastAi - 1; i >= 0; i--) {
-          const item = displayItems[i];
-          if (item.kind === 'message' && item.msg.sender_type === 'ai') break;
-          start = i;
         }
       }
       return start >= 0 ? displayItems.slice(start) : displayItems.slice(-2);
