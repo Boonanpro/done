@@ -9,6 +9,12 @@
 
 どちらかに変更がなければスキップしてよい。
 
+### リモートは GitLab（2026-09-03〜）
+
+- `origin` = **GitLab**（`gitlab.com/painai2/{done,done-artifacts,dan-workspace}`）。GitHub は `github` という名前のリモートに退避してあり、アカウント凍結中なので push しない。
+- 認証は Windows 資格情報マネージャーに保存済み（PAT `done-dev-push`）。「GitHub が使えない」と止まらず、普通に `git push origin <branch>` すればよい。
+- `gh`（GitHub CLI）は使えない。PR フローは「ブランチ push → ローカルで `main` に `--no-ff` マージ → `git push origin main`」で代替する（下記「開発ワークフロー」の PR 手順の読み替え）。
+
 ## アーキテクチャ: 2プロセス分離（ダンコア / アプリサンドボックス）
 
 **ダンコア（不変）と アプリサンドボックス（可変）を別プロセスで動かす。**
@@ -229,8 +235,7 @@ Git Bash（mintty）とPowerShellの間でパイプが正しく閉じられず�
 7. 承認されたら以下を自動実行:
    - ブランチ作成: `git checkout -b dan/<簡潔な変更名>`
    - コミット & プッシュ: `git add → git commit → git push origin dan/<ブランチ名>`
-   - PR作成: `gh pr create --title "..." --body "..."`
-   - マージ: `gh pr merge --merge --delete-branch`
+   - PR作成・マージ: GitLab 運用中は `gh` が使えないので、`git checkout main && git pull && git merge --no-ff dan/<ブランチ名> && git push origin main && git branch -d dan/<ブランチ名>` で代替
    - mainに戻る: `git checkout main && git pull`
 8. 却下されたら `git restore .` で破棄
 
