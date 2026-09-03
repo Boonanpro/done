@@ -702,6 +702,26 @@ def render(weeks: List[Dict[str, Any]], chapters: Optional[Dict[str, Any]]) -> P
 # main
 # ---------------------------------------------------------------------------
 
+def _push_archive() -> None:
+    """D:/dan-archive が git 化されていれば、物語データを commit して GitLab へ push (失敗しても本処理は成功扱い)。"""
+    repo = ARCHIVE
+    if not (repo / ".git").exists():
+        return
+    try:
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, timeout=120, creationflags=NO_WINDOW)
+        r = subprocess.run(["git", "-C", str(repo), "-c", "user.name=Boonanpro", "-c", "user.email=0aw325171@gmail.com",
+                            "commit", "-q", "-m", f"story: {datetime.now(JST):%Y-%m-%d %H:%M} 自動更新 (週次日記/スクショ)"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, creationflags=NO_WINDOW)
+        if r.returncode != 0:  # 変更なし
+            return
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        pr = subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "main"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, env=env, creationflags=NO_WINDOW)
+        log("archive push " + ("ok" if pr.returncode == 0 else f"FAILED: {(pr.stderr or '').strip()[:160]}"))
+    except Exception as e:
+        log(f"archive push error: {e}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weeks", nargs="*", help="作り直す週 (例: 2026-W34)。省略時は未生成の週 + 今週")
@@ -737,6 +757,7 @@ def main() -> int:
             chapters = None
     p = render(weeks, chapters)
     log(f"rendered {p} ({len(weeks)} weeks, made {made})")
+    _push_archive()
     return 0
 
 
