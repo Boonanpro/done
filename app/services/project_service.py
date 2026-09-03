@@ -145,21 +145,24 @@ class ProjectService:
         preview_by_room: dict[str, str] = {}
 
         try:
-            members = (
-                self.supabase.table("chat_room_members")
-                .select("room_id,unread_count")
-                .eq("user_id", user_id)
-                .in_("room_id", room_ids)
-                .execute()
-            )
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_members = ex.submit(
+                    lambda: self.supabase.table("chat_room_members")
+                    .select("room_id,unread_count")
+                    .eq("user_id", user_id)
+                    .in_("room_id", room_ids)
+                    .execute()
+                )
+                f_rooms = ex.submit(
+                    lambda: self.supabase.table("chat_rooms")
+                    .select("id,last_message_at,updated_at,last_message_preview")
+                    .in_("id", room_ids)
+                    .execute()
+                )
+                members = f_members.result()
+                rooms = f_rooms.result()
             member_by_room = {row["room_id"]: row for row in (members.data or [])}
-
-            rooms = (
-                self.supabase.table("chat_rooms")
-                .select("id,last_message_at,updated_at,last_message_preview")
-                .in_("id", room_ids)
-                .execute()
-            )
             latest_by_room = {
                 row["id"]: row.get("last_message_at") or row.get("updated_at")
                 for row in (rooms.data or [])
@@ -312,8 +315,17 @@ class ProjectService:
             query = query.eq("status", status)
 
         result = query.order("updated_at", desc=True).execute()
-        enriched = self._enrich_projects_read_state(result.data or [], user_id)
-        enriched = self._attach_active_run_state(enriched)
+        # 未読/最終メッセージ(2本)と実行中run(1本)は互いに独立なので同時に取る。
+        # 直列だと 1本150ms(DBがシンガポール)×3 が起動直後の一覧表示にそのまま乗る。
+        from concurrent.futures import ThreadPoolExecutor
+        rows = result.data or []
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_read = ex.submit(self._enrich_projects_read_state, rows, user_id)
+            f_run = ex.submit(self._attach_active_run_state, [dict(r) for r in rows])
+            enriched = f_read.result()
+            running = {p["id"] for p in f_run.result() if p.get("has_active_run")}
+        for p in enriched:
+            p["has_active_run"] = p.get("id") in running
         # LINE-style ordering: pinned items first (newer pins on top), then
         # the rest by activity. We do this in Python rather than SQL because
         # _enrich_projects_read_state already loads everything anyway.

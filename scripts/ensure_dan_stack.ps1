@@ -6,7 +6,7 @@
 #      special restart logic lives here).
 #
 # Services watched:
-#   - Frontend       Next.js dev on 0.0.0.0:3000           -> start_frontend.bat
+#   - Frontend       Next.js PROD build on 0.0.0.0:3000    -> start_frontend.bat (+ preview dev 3001)
 #   - Dan Core       FastAPI on 127.0.0.1:9000             -> dan_core_autostart.bat
 #   - Sandbox        FastAPI on 127.0.0.1:8000             -> core POST /api/v1/sandbox/restart
 #                                                            (falls back to dan_core_autostart.bat if core is also down)
@@ -41,8 +41,12 @@ function Test-Responding([string]$Url) {
 
 # 1) Frontend ------------------------------------------------------------
 if (-not (Test-Responding 'http://127.0.0.1:3000')) {
-    Write-WatchdogLog 'frontend (3000) down -> start_frontend.bat'
+    Write-WatchdogLog 'frontend (3000, production build) down -> start_frontend.bat'
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "$Root\scripts\start_frontend.bat" -WindowStyle Hidden
+} elseif (-not (Test-Responding 'http://127.0.0.1:3001')) {
+    # 成果物プレビュー用の開発サーバー(HMR)。ダッシュボード(3000)とは別プロセス。
+    Write-WatchdogLog 'preview dev server (3001) down -> start_preview_dev.bat'
+    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "$Root\scripts\start_preview_dev.bat" -WindowStyle Hidden
 }
 
 # 2) Dan Core / Sandbox --------------------------------------------------

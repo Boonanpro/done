@@ -98,7 +98,10 @@ Playwrightが使えない環境ではSQLファイル作成のみで報告する�
 
 - ダンコア: FastAPI (port 9000) — 不変、再起動しない
 - アプリサンドボックス: FastAPI (port 8000) — 業務系、自由に再起動OK
-- フロントエンド: Next.js (port 3000)
+- フロントエンド: **2サーバー構成（2026-09-03〜）**
+  - port 3000 = ダッシュボードの**本番ビルド**（`next start`）。`frontend/src` の変更は自動反映されない → `python scripts/frontend_prod.py restart`（約40秒、稼働中は止めずにビルド→数秒で入れ替え）
+  - port 3001 = 成果物プレビュー用の**開発サーバー**（`next dev`, HMR）。`/artifacts` `/preview` `/scratch` の編集は従来どおり即時反映。ダッシュボードの iframe は `NEXT_PUBLIC_PREVIEW_PORT=3001` で自動的にこちらを見る
+  - 起動: `scripts/start_frontend.bat`（両方）。watchdog `ensure_dan_stack.ps1` が 3000/3001 を監視
 - データベース: Supabase
 - 自動デプロイ: `python scripts/auto_deploy.py` （常駐スクリプト、変更検知でサンドボックス再起動）
 
