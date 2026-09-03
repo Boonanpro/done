@@ -857,10 +857,10 @@ const s = StyleSheet.create({
 
   senderName: { color: C.muted, fontSize: 11, marginBottom: 2, marginHorizontal: 4 },
   msgLine: { alignItems: 'flex-end', gap: 5 },
-  metaCol: { alignItems: 'flex-end', justifyContent: 'flex-end' },
+  metaCol: { alignItems: 'flex-end', justifyContent: 'flex-end', flexShrink: 0 },
   metaRead: { color: C.muted2, fontSize: 9 },
   metaTime: { color: C.muted2, fontSize: 10 },
-  stampBox: { paddingHorizontal: 2 },
+  stampBox: { paddingHorizontal: 2, flexShrink: 1 },
   emptyText: { color: C.muted, fontSize: 13, textAlign: 'center', marginTop: 48, paddingHorizontal: 32, lineHeight: 20 },
 
   roomRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 12 },
@@ -889,7 +889,8 @@ const s = StyleSheet.create({
   msgWrap: { marginVertical: 4, maxWidth: '85%' },
   msgLeft: { alignSelf: 'flex-start' },
   msgRight: { alignSelf: 'flex-end' },
-  bubble: { borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
+  // 時刻カラムと横並びの row 内で縮まないと長文が画面外へはみ出す（RN の flexShrink 既定は 0）
+  bubble: { borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, flexShrink: 1 },
   bubbleOther: { backgroundColor: C.card },
   bubbleOwn: { backgroundColor: C.accent },
   bubblePrivate: { backgroundColor: C.violetBg, borderWidth: 1, borderColor: '#4c3d6e', borderStyle: 'dashed' },
