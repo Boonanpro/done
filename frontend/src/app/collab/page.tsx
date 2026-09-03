@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
@@ -62,7 +62,13 @@ export default function CollabListPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['collab-rooms'],
     queryFn: () => api.collab.listRooms(),
+    refetchInterval: 15_000,
   });
+  // 一覧の未読はサーバー判定に合わせる（別端末で読んだ分もここで消える）
+  const syncFromServer = useUnreadStore((s) => s.syncFromServer);
+  useEffect(() => {
+    if (data) syncFromServer(data.rooms.filter((r) => r.unread).map((r) => r.id));
+  }, [data, syncFromServer]);
 
   // 紐づけ先の候補（本体チャットのプロジェクト一覧）。紐づけるとダン自動対応が有効になる
   const { data: projectsData } = useQuery({

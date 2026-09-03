@@ -3373,7 +3373,10 @@ async def collab_inbound(request: Request):
     payload = await request.json()
     collab_room_id = (payload.get("collab_room_id") or "").strip()
     message = payload.get("message") or {}
-    if not collab_room_id or not (message.get("content") or "").strip():
+    # 添付だけのメッセージは本文が空。ダンには本文＋添付（画像はローカルパス）を渡す
+    from app.services.collab_wakeup import _text_for_dan
+    text_for_dan = _text_for_dan(message)
+    if not collab_room_id or not text_for_dan.strip():
         raise HTTPException(status_code=422, detail="collab_room_id and message.content required")
 
     sender_type = message.get("sender_type")
@@ -3398,14 +3401,14 @@ async def collab_inbound(request: Request):
     if is_owner_private:
         from app.services.collab_wakeup import schedule_owner_instruction
         thread_root = (((message.get("metadata") or {}).get("reply_to")) or {}).get("id")
-        ok = schedule_owner_instruction(collab_room_id, message.get("content") or "",
+        ok = schedule_owner_instruction(collab_room_id, text_for_dan,
                                         thread_root=thread_root)
         return {"status": "owner_instruction_scheduled" if ok else "ignored"}
 
     # ユーザーの公開発言: ダン宛てかどうかはダンが判断し、宛てられていれば公開の場で直接返答
     if is_owner_public:
         from app.services.collab_wakeup import schedule_owner_instruction
-        ok = schedule_owner_instruction(collab_room_id, message.get("content") or "",
+        ok = schedule_owner_instruction(collab_room_id, text_for_dan,
                                         public=True)
         return {"status": "owner_public_scheduled" if ok else "ignored"}
 

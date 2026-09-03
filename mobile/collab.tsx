@@ -3,11 +3,14 @@
 // 通信は REST ポーリングのみ（Web 版の Vercel フォールバックと同一経路＝確実に動く）。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, KeyboardAvoidingView, Linking, Platform, Pressable,
+  ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Linking, Platform, Pressable,
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
 import { animateNextLayout, pressedScale } from './motion';
+import { MediaGrid, type MediaGridItem } from './media-grid';
 
 const REACTION_CHOICES = ['🙏', '👍', '❤️', '😂', '🎉'];
 
@@ -34,7 +37,11 @@ export interface CollabRoomSummary {
   last_message: string | null;
   last_message_at: string | null;
   updated_at: string;
+  /** 相手の公開メッセージが自分の既読位置より後にある（サーバー判定） */
+  unread?: boolean;
 }
+
+type CollabFile = { id?: string; name: string; url: string; type?: string; size?: number };
 
 interface CollabMessage {
   id: string;
@@ -46,7 +53,8 @@ interface CollabMessage {
     visibility?: string;
     reply_to?: { id?: string; sender_name?: string; content?: string };
     reactions?: Record<string, string[]>;
-    file?: { name: string; url: string; type?: string; size?: number };
+    file?: CollabFile;
+    files?: CollabFile[];
     client_msg_id?: string;
   } | null;
   created_at: string;
@@ -184,9 +192,12 @@ export function CollabRoomsScreen({ request, onOpenRoom, onBack, topInset }: {
                   <Text style={s.roomTitle} numberOfLines={1}>{item.title}</Text>
                   <Text style={s.roomTime}>{fmtListTime(item.last_message_at || item.updated_at)}</Text>
                 </View>
-                <Text style={s.roomPreview} numberOfLines={1}>
-                  {item.last_message || 'まだメッセージはありません'}
-                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={[s.roomPreview, { flex: 1 }, item.unread && { color: C.text, fontWeight: '600' }]} numberOfLines={1}>
+                    {item.last_message || 'まだメッセージはありません'}
+                  </Text>
+                  {item.unread && <View style={s.unreadDot} />}
+                </View>
               </View>
             </Pressable>
           )}
@@ -200,9 +211,10 @@ export function CollabRoomsScreen({ request, onOpenRoom, onBack, topInset }: {
 // ============================================================
 // チャット画面
 // ============================================================
-export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, topInset, bottomInset }: {
+export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, onBack, topInset, bottomInset }: {
   request: RequestFn;
   apiBase: string;
+  token: string | null;
   roomId: string;
   roomTitle?: string;
   onBack: () => void;
@@ -216,6 +228,7 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
   const [danThinking, setDanThinking] = useState(false);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const listRef = useRef<FlatList>(null);
 
   // 受信合流点: client_msg_id の仮バブルは差し替え（Web と同一ロジック）
@@ -362,6 +375,74 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
     }
   }, [input, sending, send]);
 
+  // 添付: 写真・動画（複数）またはファイル → 全部アップロード → 1メッセージ（LINE式グリッド）
+  const uploadOne = useCallback(async (uri: string, name: string, mime: string): Promise<CollabFile> => {
+    const form = new FormData();
+    form.append('file', { uri, name, type: mime } as unknown as Blob);
+    const res = await fetch(`${apiBase}/api/v1/collab/rooms/${roomId}/files`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body: form,
+    });
+    if (!res.ok) throw new Error(`upload ${res.status}`);
+    const d = await res.json();
+    return { id: d.id, name: d.file_name, url: d.file_path, type: d.file_type || mime, size: d.file_size };
+  }, [apiBase, roomId, token]);
+
+  const sendFiles = useCallback(async (picked: { uri: string; name: string; mime: string }[]) => {
+    if (picked.length === 0) return;
+    setUploading(true);
+    const tempId = `temp-${Date.now()}`;
+    try {
+      const files: CollabFile[] = [];
+      for (const p of picked) files.push(await uploadOne(p.uri, p.name, p.mime));
+      const metadata = { files, file: files[0], client_msg_id: tempId };
+      animateNextLayout();
+      setMessages((prev) => [...prev, {
+        id: tempId, room_id: roomId, sender_type: 'owner', sender_name: participants?.owner.name || 'あなた',
+        content: '', metadata, created_at: new Date().toISOString(),
+      }]);
+      const sent = await request<CollabMessage>(`/collab/rooms/${roomId}/messages`, {
+        method: 'POST', body: JSON.stringify({ content: '', metadata }),
+      });
+      mergeMessage(sent);
+    } catch (e) {
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      Alert.alert('送信に失敗しました', String((e as Error).message));
+    } finally {
+      setUploading(false);
+    }
+  }, [uploadOne, roomId, request, participants, mergeMessage]);
+
+  const pickMedia = useCallback(async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) { Alert.alert('権限が必要です', '設定アプリから写真へのアクセスを許可してください。'); return; }
+    const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], allowsMultipleSelection: true, quality: 0.9 });
+    if (r.canceled) return;
+    await sendFiles(r.assets.map((a, i) => {
+      const isVideo = a.type === 'video';
+      return {
+        uri: a.uri,
+        name: a.fileName || `${isVideo ? 'video' : 'image'}-${Date.now()}-${i}.${isVideo ? 'mp4' : 'jpg'}`,
+        mime: a.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg'),
+      };
+    }));
+  }, [sendFiles]);
+
+  const pickDocument = useCallback(async () => {
+    const r = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
+    if (r.canceled) return;
+    await sendFiles(r.assets.map((a, i) => ({ uri: a.uri, name: a.name || `file-${Date.now()}-${i}`, mime: a.mimeType || 'application/octet-stream' })));
+  }, [sendFiles]);
+
+  const openAttach = useCallback(() => {
+    Alert.alert('添付', undefined, [
+      { text: '写真・動画', onPress: () => { pickMedia().catch(() => {}); } },
+      { text: 'ファイル', onPress: () => { pickDocument().catch(() => {}); } },
+      { text: 'キャンセル', style: 'cancel' },
+    ]);
+  }, [pickMedia, pickDocument]);
+
   // 相談スレッド構造（Web と同一: 親=ダンの非公開、子=reply_to 付き非公開）
   const messageIds = useMemo(() => new Set(messages.map((m) => m.id)), [messages]);
   const threadMap = useMemo(() => {
@@ -415,7 +496,7 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
   return (
     <KeyboardAvoidingView
       style={[s.screen, { paddingTop: topInset }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={s.appBar}>
         <Pressable onPress={onBack} hitSlop={12}>
@@ -471,6 +552,14 @@ export function CollabChatScreen({ request, apiBase, roomId, roomTitle, onBack, 
       />
 
       <View style={[s.composer, { paddingBottom: Math.max(bottomInset, 8) }]}>
+        <Pressable
+          style={({ pressed }) => [s.attachBtn, pressedScale({ pressed })]}
+          onPress={openAttach}
+          disabled={uploading}
+          hitSlop={6}
+        >
+          {uploading ? <ActivityIndicator size="small" color={C.muted} /> : <Ionicons name="attach" size={22} color={C.muted} />}
+        </Pressable>
         <TextInput
           style={s.input}
           placeholder="メッセージを入力...（相手に届きます）"
@@ -518,7 +607,14 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   const isPrivate = msg.metadata?.visibility === 'owner_only';
   const stamp = isStamp(msg.content);
   const reactions = msg.metadata?.reactions;
-  const file = msg.metadata?.file;
+  const rawFiles: CollabFile[] = msg.metadata?.files || (msg.metadata?.file ? [msg.metadata.file] : []);
+  const mediaItems: MediaGridItem[] = rawFiles
+    .filter((f) => (f.type || '').startsWith('image/') || (f.type || '').startsWith('video/'))
+    .map((f) => ({ url: f.url.startsWith('http') ? f.url : `${apiBase}${f.url}`, kind: (f.type || '').startsWith('video/') ? 'video' : 'image', name: f.name }));
+  const otherFiles = rawFiles.filter((f) => !((f.type || '').startsWith('image/') || (f.type || '').startsWith('video/')));
+  const hasFiles = rawFiles.length > 0;
+  // 添付だけのメッセージは本文が空かファイル名（旧形式）なので本文行を出さない
+  const bodyText = hasFiles && (!msg.content || rawFiles.some((f) => f.name === msg.content)) ? '' : msg.content;
   const [replyText, setReplyText] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const canReact = !isPrivate && !msg.id.startsWith('temp-');
@@ -583,20 +679,22 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
         pressed && canReact ? { opacity: 0.85 } : undefined,
       ]}
     >
-      {file ? (
-        <Pressable onPress={() => Linking.openURL(file.url.startsWith('http') ? file.url : `${apiBase}${file.url}`)}>
+      {mediaItems.length > 0 && <MediaGrid items={mediaItems} width={236} />}
+      {otherFiles.map((file) => (
+        <Pressable key={file.url} onPress={() => Linking.openURL(file.url.startsWith('http') ? file.url : `${apiBase}${file.url}`)}>
           <Text style={[s.fileLink, isOwnSide && !isPrivate ? { color: '#0c1513' } : undefined]}>
             📎 {file.name}
           </Text>
         </Pressable>
-      ) : (
+      ))}
+      {!!bodyText && (
         <Text
           style={[
             stamp ? s.stampText : s.msgText,
             !stamp && isOwnSide && !isPrivate ? { color: '#0c1513' } : undefined,
           ]}
         >
-          {msg.content}
+          {bodyText}
         </Text>
       )}
       {!!reactions && Object.keys(reactions).length > 0 && (
@@ -746,6 +844,8 @@ const s = StyleSheet.create({
   roomTitle: { color: C.text, fontSize: 15, fontWeight: '600', flexShrink: 1 },
   roomTime: { color: C.muted2, fontSize: 11 },
   roomPreview: { color: C.muted, fontSize: 13, marginTop: 2 },
+  unreadDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: C.accent, marginTop: 2 },
+  attachBtn: { paddingVertical: 8, paddingHorizontal: 2, justifyContent: 'center' },
   sep: { height: StyleSheet.hairlineWidth, backgroundColor: C.border, marginLeft: 72 },
 
   thinkingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-end', backgroundColor: C.violetBg, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, marginTop: 8 },

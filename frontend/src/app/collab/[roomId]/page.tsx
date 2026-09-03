@@ -11,6 +11,7 @@ import {
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { OutboundMessageCard } from '@/components/chat/outbound-message-card';
 import { ReactionBar } from '@/components/collab/reaction-bar';
+import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { useUnreadStore } from '@/stores/unread-store';
 import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
@@ -114,7 +115,9 @@ export default function CollabRoomPage() {
   // 自分の既読位置を定期更新（相手側の「既読」表示の元になる）
   useEffect(() => {
     if (!roomId) return;
-    const mark = () => api.collab.markRead(roomId).catch(() => {});
+    const mark = () => api.collab.markRead(roomId)
+      .then(() => queryClient.invalidateQueries({ queryKey: ['collab-rooms'] }))
+      .catch(() => {});
     mark();
     const timer = setInterval(mark, 10_000);
     return () => clearInterval(timer);
@@ -339,32 +342,35 @@ export default function CollabRoomPage() {
   }, [messages, messageIds]);
 
   // File upload
+  // 複数選択をまとめて1メッセージ（LINE式にグリッド表示される）。
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
     setIsUploading(true);
+    let current: File | null = null;
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-      if (!res.ok) {
-        const bodyText = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ' | ' + bodyText.slice(0, 200) : ''}`);
+      const uploaded: { id: string; name: string; url: string; type: string; size: number }[] = [];
+      for (const file of files) {
+        current = file;
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData,
+        });
+        if (!res.ok) {
+          const bodyText = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ' | ' + bodyText.slice(0, 200) : ''}`);
+        }
+        const fileData = await res.json();
+        uploaded.push({ id: fileData.id, name: fileData.file_name, url: fileData.file_path, type: fileData.file_type || file.type, size: fileData.file_size });
       }
-      const fileData = await res.json();
-      // Send message with file attachment
-      const fileUrl = fileData.file_path;
-      const fileMeta = {
-        file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
-      };
-      const sent = await api.collab.sendMessage(roomId, `${file.name}`, undefined, fileMeta);
+      const fileMeta = { files: uploaded, file: uploaded[0] };
+      const sent = await api.collab.sendMessage(roomId, '', undefined, fileMeta);
       handleNewMessage(sent);
-      toast.success('ファイルを送信しました');
     } catch (err: unknown) {
+      const file = current;
       const errAny = err as { name?: string; message?: string };
       const errSummary = [errAny?.name, errAny?.message].filter(Boolean).join(' | ') || String(err);
       const fileSummary = file ? `${file.name || '(no name)'} [${file.type || 'no-type'}, ${file.size}B]` : '(no file)';
@@ -724,6 +730,7 @@ export default function CollabRoomPage() {
           ref={fileInputRef}
           className="hidden"
           onChange={handleFileUpload}
+          multiple
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip"
         />
         <Button
@@ -857,10 +864,12 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
   const isDan = message.sender_type.startsWith('dan_');
   const isGuest = message.sender_type === 'guest';
   const isPrivate = message.metadata?.visibility === 'owner_only';
-  const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
+  const { media, others } = collabMediaItems(message.metadata as Record<string, unknown> | undefined);
+  const hasFiles = media.length > 0 || others.length > 0;
+  // 添付だけのメッセージは本文がファイル名（旧形式）か空なので本文行を出さない
+  const bodyText = hasFiles && (!message.content || others.some((f) => f.name === message.content) || media.some((m) => m.name === message.content)) ? '' : (message.content || '');
   // 絵文字1〜2個だけの発言はスタンプとして大きく表示
-  const isStamp = !file && /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
-  const isImage = file?.type?.startsWith('image/');
+  const isStamp = !hasFiles && /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
   const isOwnerPrivate = isOwner && isPrivate;
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
@@ -917,23 +926,21 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
               </span>
             </div>
           )}
-          {file && isImage ? (
-            <a href={file.url} target="_blank" rel="noopener noreferrer">
-              <img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" />
-            </a>
-          ) : file ? (
+          {media.length > 0 && <MediaGrid items={media} />}
+          {others.map((f) => (
             <a
-              href={file.url}
+              key={f.url}
+              href={f.url}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 mt-1 text-sm underline opacity-80"
             >
               <Paperclip className="h-3.5 w-3.5" />
-              {file.name}
-              {file.size && <span className="text-xs opacity-50">({(file.size / 1024).toFixed(0)}KB)</span>}
+              {f.name}
+              {f.size ? <span className="text-xs opacity-50">({(f.size / 1024).toFixed(0)}KB)</span> : null}
             </a>
-          ) : null}
-          <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={message.content} /></p>
+          ))}
+          {bodyText && <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={bodyText} /></p>}
 
           {/* リアクション（ダンの🙏既読サイン＋人間の付け外し） */}
           {onReact && (

@@ -61,6 +61,7 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
 import { RoomBoard } from '@/components/chat/room-board';
+import { MediaGrid } from '@/components/chat/media-grid';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -293,8 +294,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
     <>
       {(images.length > 0 || videos.length > 0 || files.length > 0) && (
         <div className="flex flex-col gap-1.5 my-2">
-          {images.map((url, i) => (<img key={i} src={url} alt="添付画像" className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(url)} />))}
-          {videos.map((url, i) => (<video key={`v${i}`} src={url} controls className="rounded-xl max-w-full border border-border" style={{ maxHeight: '300px' }} />))}
+          <MediaGrid items={[...images.map((url) => ({ url, kind: 'image' as const })), ...videos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
@@ -454,24 +454,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
             </span>
           )}
           <div className="flex min-w-0 flex-col items-end gap-1">
-          {images.map((url, i) => (
-            <img
-              key={i}
-              src={url}
-              alt="添付画像"
-              className="rounded-xl max-w-full max-h-64 object-contain border border-primary/20 cursor-zoom-in"
-              onClick={() => onImageClick?.(url)}
-            />
-          ))}
-          {videos.map((url, i) => (
-            <video
-              key={`vid-${i}`}
-              src={url}
-              controls
-              className="rounded-xl max-w-full border border-primary/20"
-              style={{ maxHeight: '300px' }}
-            />
-          ))}
+          <MediaGrid items={[...images.map((url) => ({ url, kind: 'image' as const })), ...videos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
           {files.map((f, i) => (
             <a
               key={`file-${i}`}
@@ -551,24 +534,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
       {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} />}
       {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
-          {aiImages.map((url, i) => (
-            <img
-              key={i}
-              src={url}
-              alt="添付画像"
-              className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in"
-              onClick={() => onImageClick?.(url)}
-            />
-          ))}
-          {aiVideos.map((url, i) => (
-            <video
-              key={`vid-${i}`}
-              src={url}
-              controls
-              className="rounded-xl max-w-full border border-border"
-              style={{ maxHeight: '300px' }}
-            />
-          ))}
+          <MediaGrid items={[...aiImages.map((url) => ({ url, kind: 'image' as const })), ...aiVideos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
           {aiFiles.map((f, i) => (
             <a
               key={`file-${i}`}

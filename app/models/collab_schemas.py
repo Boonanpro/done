@@ -70,6 +70,9 @@ class CollabRoomResponse(BaseModel):
     guest_count: int = 0
     last_message: Optional[str] = None
     last_message_at: Optional[datetime] = None
+    # 未読=相手（ゲスト）の公開メッセージがオーナーの既読位置より後にあるか。
+    # サーバーが唯一の真実（PC/APKどちらで読んでも全端末で消える）。
+    unread: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -115,7 +118,8 @@ class CollabJoinResponse(BaseModel):
 # ==================== Messages ====================
 
 class CollabMessageSendRequest(BaseModel):
-    content: str = Field(..., min_length=1)
+    # 添付だけのメッセージ（metadata.files）は本文空でよい。ルート側で「本文か添付のどちらか必須」を検証
+    content: str = ""
     metadata: Optional[dict] = None
 
 

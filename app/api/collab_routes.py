@@ -130,6 +130,23 @@ async def create_room(
     return CollabRoomResponse(**room, guest_count=0)
 
 
+def _preview_text(msg: dict) -> str:
+    files = (msg.get("metadata") or {}).get("files") or []
+    single = (msg.get("metadata") or {}).get("file")
+    if single and not files:
+        files = [single]
+    if files:
+        kinds = [(f.get("type") or "") for f in files]
+        if all(k.startswith("image/") for k in kinds):
+            label = "📷 画像" if len(files) == 1 else f"📷 画像 {len(files)}枚"
+        elif all(k.startswith("video/") for k in kinds):
+            label = "🎬 動画" if len(files) == 1 else f"🎬 動画 {len(files)}本"
+        else:
+            label = f"📎 {files[0].get('name') or 'ファイル'}" + (f" 他{len(files)-1}件" if len(files) > 1 else "")
+        return label
+    return (msg.get("content") or "")[:100]
+
+
 @router.get("/rooms", response_model=CollabRoomListResponse)
 async def list_rooms(
     user: TokenData = Depends(get_current_user),
@@ -155,8 +172,9 @@ async def list_rooms(
         room_responses.append(CollabRoomResponse(
             **r,
             guest_count=guest_count,
-            last_message=last_msg["content"][:100] if last_msg else None,
+            last_message=_preview_text(last_msg) if last_msg else None,
             last_message_at=last_msg["created_at"] if last_msg else None,
+            unread=await service.has_unread_for_owner(r),
         ))
     # 並びは「メッセージの動きがあった順」。updated_at は既読更新などでも動いてしまい、
     # 開いただけで一覧の順番が入れ替わる誤動作の原因になるため使わない。
@@ -504,6 +522,12 @@ async def send_message(
     if not sender_type:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    has_files = bool((req.metadata or {}).get("files") or (req.metadata or {}).get("file"))
+    if not (req.content or "").strip() and not has_files:
+        raise HTTPException(status_code=422, detail="content or files required")
+    # 通知・一覧・Push 用の短い本文（添付だけなら「📷 画像 3枚」等）
+    preview = _preview_text({"content": req.content, "metadata": req.metadata})
+
     # ユーザー→ダンの私的メッセージ（相談への返答・指示）。相手には一切見せない
     is_owner_private = (
         sender_type == "owner"
@@ -548,12 +572,12 @@ async def send_message(
         room_id,
         {"type": "new_message_notification", "room_id": room_id,
          "room_title": ((await service.get_room(room_id)) or {}).get("title", ""),
-         "sender_name": sender_name, "content": req.content[:100]},
+         "sender_name": sender_name, "content": preview[:100]},
         service
     ))
 
     # 相手側へのPush通知（WS経路と同じ扱い）
-    asyncio.ensure_future(_send_push(room_id, sender_type, sender_name, req.content))
+    asyncio.ensure_future(_send_push(room_id, sender_type, sender_name, preview))
 
     # Trigger DAN (REST API path)
     if sender_type == "guest":

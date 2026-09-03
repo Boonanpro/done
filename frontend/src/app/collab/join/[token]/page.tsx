@@ -15,6 +15,7 @@ import { Share, MoreVertical, Download } from 'lucide-react';
 import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
 import { ReactionBar } from '@/components/collab/reaction-bar';
+import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
 
@@ -365,27 +366,28 @@ export default function GuestJoinPage() {
     }
   };
 
+  // 複数選択をまとめて1メッセージ（LINE式にグリッド表示される）
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !roomId || !guestToken) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0 || !roomId || !guestToken) return;
     setIsUploading(true);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
-        method: 'POST',
-        headers: { 'X-Guest-Token': guestToken },
-        body: formData,
-      });
-      if (!res.ok) throw new Error('Upload failed');
-      const fileData = await res.json();
-      const fileUrl = fileData.file_path;
-      const fileMeta = {
-        file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
-      };
-      const sent = await api.collab.sendMessage(roomId, file.name, guestToken, fileMeta);
+      const uploaded: { id: string; name: string; url: string; type: string; size: number }[] = [];
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
+          method: 'POST',
+          headers: { 'X-Guest-Token': guestToken },
+          body: formData,
+        });
+        if (!res.ok) throw new Error('Upload failed');
+        const fileData = await res.json();
+        uploaded.push({ id: fileData.id, name: fileData.file_name, url: fileData.file_path, type: fileData.file_type || file.type, size: fileData.file_size });
+      }
+      const fileMeta = { files: uploaded, file: uploaded[0] };
+      const sent = await api.collab.sendMessage(roomId, '', guestToken, fileMeta);
       handleNewMessage(sent);
-      toast.success('ファイルを送信しました');
     } catch {
       toast.error('アップロードに失敗しました');
     } finally {
@@ -706,7 +708,7 @@ export default function GuestJoinPage() {
           </div>
         )}
       <div className="flex items-center gap-2">
-        <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload}
+        <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} multiple
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip" />
         <Button variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
           <Paperclip className="h-4 w-4" />
@@ -795,7 +797,11 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const isDan = message.sender_type.startsWith('dan_');
   const isOwner = message.sender_type === 'owner';
   // 絵文字1〜2個だけの発言はスタンプとして大きく表示
-  const isStamp = /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
+  const { media, others } = collabMediaItems(message.metadata as Record<string, unknown> | undefined);
+  const hasFiles = media.length > 0 || others.length > 0;
+  // 添付だけのメッセージは本文がファイル名（旧形式）か空なので本文行を出さない
+  const bodyText = hasFiles && (!message.content || others.some((f) => f.name === message.content) || media.some((m) => m.name === message.content)) ? '' : (message.content || '');
+  const isStamp = !hasFiles && /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
 
   function SenderIcon({ type }: { type: string }) {
     switch (type) {
@@ -857,18 +863,11 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
               <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
             </div>
           )}
-          {(() => {
-            const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
-            const isImage = file?.type?.startsWith('image/');
-            if (file && isImage) {
-              return <a href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" /></a>;
-            }
-            if (file) {
-              return <a href={file.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 text-sm underline opacity-80"><Paperclip className="h-3.5 w-3.5" />{file.name}</a>;
-            }
-            return null;
-          })()}
-          <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={message.content} /></p>
+          {media.length > 0 && <MediaGrid items={media} />}
+          {others.map((f) => (
+            <a key={f.url} href={f.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 text-sm underline opacity-80"><Paperclip className="h-3.5 w-3.5" />{f.name}</a>
+          ))}
+          {bodyText && <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={bodyText} /></p>}
 
           {/* リアクション（ダンの🙏既読サイン＋自分の付け外し。スマホ向けに「+」常時表示） */}
           {onReact && (

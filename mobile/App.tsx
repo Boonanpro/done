@@ -35,6 +35,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { animateNextLayout, pressedScale } from './motion';
+import { MediaGrid } from './media-grid';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
@@ -769,7 +770,10 @@ function RichMessageContent({
 
   return (
     <View style={styles.messageContentWrap}>
-      {parsed.images.map((url, index) => (
+      {/* 複数画像は LINE 式にまとめて表示（1枚は従来どおり）。動画は進捗リング付きの既存表示 */}
+      {parsed.images.length >= 2 ? (
+        <MediaGrid items={parsed.images.map((url) => ({ url, kind: 'image' as const }))} width={240} onOpenImage={onOpenUrl} />
+      ) : parsed.images.map((url, index) => (
         <Pressable key={`${url}-${index}`} onPress={() => onOpenUrl(url)}>
           <Image resizeMode="contain" source={{ uri: url }} style={styles.messageImage} />
         </Pressable>
@@ -3343,6 +3347,7 @@ function AppMain() {
         <CollabChatScreen
           request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
           apiBase={API_BASE_URL}
+          token={token ?? null}
           roomId={collabRoom.id}
           roomTitle={collabRoom.title}
           topInset={insets.top + 8}

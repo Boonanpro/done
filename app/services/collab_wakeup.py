@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -207,7 +208,7 @@ async def _owner_instruction_turn_inner(svc, room: dict, collab_room_id: str,
                "dan_owner": "あなた(ダン)"}.get(st, st)
         if vis == "owner_only":
             who += "・相手に非表示"
-        ctx_lines.append(f"【{who}】{(m.get('content') or '')[:300]}")
+        ctx_lines.append(f"【{who}】{_text_for_dan(m)[:300]}")
     ctx = "\n".join(ctx_lines[-10:])
 
     if public:
@@ -326,6 +327,43 @@ async def _mark_handled(svc, room: dict, batch: List[dict]) -> None:
         logger.warning("[collab-wake] mark_handled failed room=%s", room["id"], exc_info=True)
 
 
+_COLLAB_UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "collab"
+
+
+def _text_for_dan(m: dict) -> str:
+    """本文＋添付。画像はローカルパスで渡す（ダンが Read で実際に見られる）。
+    動画・その他はURLのまま（配信は sandbox の /api/v1/collab/files/...）。"""
+    md = m.get("metadata") or {}
+    files = md.get("files") or ([md["file"]] if md.get("file") else [])
+    body = (m.get("content") or "").strip()
+    if not files:
+        return body
+    # 添付だけのメッセージは本文=ファイル名なので本文を省く
+    names = {f.get("name") for f in files}
+    if body in names or body in ("", "画像", "動画"):
+        body = ""
+    import os
+    sandbox_port = os.environ.get("DAN_SANDBOX_PORT", "8000")
+    lines = [body] if body else []
+    for f in files:
+        url = f.get("url") or ""
+        kind = f.get("type") or ""
+        name = f.get("name") or "file"
+        local = None
+        if url.startswith("/api/v1/collab/files/"):
+            rel = url[len("/api/v1/collab/files/"):]
+            cand = _COLLAB_UPLOAD_DIR / rel
+            if cand.exists():
+                local = cand.as_posix()
+        if kind.startswith("image/") and local:
+            lines.append(f"[添付画像: {local}]")
+        elif kind.startswith("video/"):
+            lines.append(f"[添付動画: {name} (http://127.0.0.1:{sandbox_port}{url})]")
+        else:
+            lines.append(f"[添付ファイル: {name} ({local or url})]")
+    return "\n".join(lines)
+
+
 async def _fallback_proposal(svc, collab_room_id: str, batch: List[dict]) -> None:
     """wake できない時は通知タブへ（複数件は1つの通知にまとめる）。"""
     joined = "\n---\n".join((m.get("content") or "").strip() for m in batch)[:2400]
@@ -363,13 +401,13 @@ async def _build_prompt(svc, room: dict, batch: List[dict]) -> str:
         st = m.get("sender_type")
         who = {"guest": f"相手({m.get('sender_name')})", "owner": "あなた側(ユーザー本人が送信)",
                "dan_owner": "あなた側(ダンが送信)"}.get(st, st)
-        ctx_lines.append(f"【{who}】{(m.get('content') or '')[:300]}")
+        ctx_lines.append(f"【{who}】{_text_for_dan(m)[:300]}")
     ctx = "\n".join(ctx_lines[-10:]) or "(まだ会話はありません)"
 
     new_lines = []
     for i, m in enumerate(batch, 1):
         t = (m.get("created_at") or "")[11:16]
-        new_lines.append(f"{i}. [{t}] (message_id: {m.get('id')}) {(m.get('content') or '').strip()}")
+        new_lines.append(f"{i}. [{t}] (message_id: {m.get('id')}) {_text_for_dan(m)}")
     news = "\n".join(new_lines)
 
     plural = f"新着{len(batch)}件をまとめて読み、全体として" if len(batch) > 1 else "この内容に"
