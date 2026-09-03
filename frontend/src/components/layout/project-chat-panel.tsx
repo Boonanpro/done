@@ -2359,15 +2359,35 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const visibleDisplayItems = useMemo(() => {
     if (boardEnabled) {
-      let start = -1;
+      // 1セット表示: 「直前のやりとり1往復」だけを残す。
+      // 新しいメッセージを送るとそれが最後のセットの起点になり、前のセットは消える。
+      // 追い連絡（ユーザーが連続で送る）は同じセットとして両方残す。
+      let lastAi = -1;
       for (let i = displayItems.length - 1; i >= 0; i--) {
+        const item = displayItems[i];
+        if (item.kind === 'message' && item.msg.sender_type === 'ai') {
+          lastAi = i;
+          break;
+        }
+      }
+      let start = -1;
+      // ダンの最終返信より後にユーザー発言があれば（=返信待ち中）そこがセットの起点
+      for (let i = lastAi + 1; i < displayItems.length; i++) {
         const item = displayItems[i];
         if (item.kind === 'message' && item.msg.sender_type !== 'ai') {
           start = i;
           break;
         }
       }
-      // ユーザー発言が見つからない場合は末尾2要素（ダンの返答+作業ブロック想定）だけ
+      if (start === -1 && lastAi >= 0) {
+        // ダンの返信が最後: その返信に対応するユーザー発言群の先頭まで戻る
+        start = lastAi;
+        for (let i = lastAi - 1; i >= 0; i--) {
+          const item = displayItems[i];
+          if (item.kind === 'message' && item.msg.sender_type === 'ai') break;
+          start = i;
+        }
+      }
       return start >= 0 ? displayItems.slice(start) : displayItems.slice(-2);
     }
     const start = Math.max(0, displayItems.length - visibleItemCount);
@@ -2878,7 +2898,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 }
 
                 const d = item.msg.created_at ? new Date(item.msg.created_at) : null;
-                if (d && !isNaN(d.getTime())) {
+                // ボード部屋は1セット表示なので日付チップは出さない
+                if (d && !isNaN(d.getTime()) && !boardEnabled) {
                   const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
                   if (dateKey !== prevDateKey) {
                     nodes.push(

@@ -2,7 +2,9 @@
 Project API Routes - プロジェクト管理
 """
 import asyncio
-from fastapi import APIRouter, HTTPException, Depends, Query
+import json
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from app.api.chat_routes import get_current_user, TokenData
@@ -351,23 +353,50 @@ async def refresh_room_board(
     return result
 
 
-@router.patch("/{project_id}/board/positions")
-async def update_room_board_positions(
+@router.get("/{project_id}/board/stream")
+async def stream_room_board(
     project_id: str,
-    body: dict,
+    request: Request,
     current_user: TokenData = Depends(get_current_user),
     service: ProjectService = Depends(get_project_service),
 ):
-    """付箋のドラッグ配置を保存 {positions: {note_id: {x, y}}}"""
+    """ボード更新のSSE購読。接続時に現状スナップショット、以降は書き込みの度に即時プッシュ。
+
+    消化・外部イベントによる書き込みは room_board_service._write_board → _publish_board
+    で同一プロセス内の購読キューに流れる。25秒ごとに ping を打って接続を保つ。
+    """
     project = await service.get_project(project_id, current_user.user_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    positions = body.get("positions") or {}
-    if not isinstance(positions, dict):
-        raise HTTPException(status_code=400, detail="positions must be an object")
-    from app.services.room_board_service import update_positions
-    board = await asyncio.to_thread(update_positions, project_id, positions)
-    return {"positions": board.get("positions", {})}
+
+    from app.services.room_board_service import get_board, subscribe_board, unsubscribe_board
+
+    q = await subscribe_board(project_id)
+
+    async def gen():
+        try:
+            snapshot = await asyncio.to_thread(get_board, project_id)
+            yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    board = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f"data: {json.dumps({'enabled': True, 'board': board}, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            unsubscribe_board(project_id, q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==================== Execution Events ====================

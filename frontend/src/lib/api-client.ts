@@ -369,29 +369,28 @@ export type ProjectStatusType =
   | 'paused'
   | 'cancelled';
 
-// 部屋ボード（現在地フリーボード）。projects.metadata.board に永続化され、
-// バックエンドのポーラーが会話を消化して付箋+矢印を更新する。
-export interface RoomBoardNote {
+// 部屋ボード v3（目標カード）。projects.metadata.board に永続化され、
+// バックエンドの消化が会話をイベントとして目標状態に反映し、SSEで即時配信される。
+export interface RoomBoardGoal {
   id: string;
-  title: string;
-  body?: string;
-  owner: 'you' | 'dan' | 'wait';
-  kind: 'action' | 'decision';
-  live?: string;
+  title: string; // なぜ＋何を目指すか
+  waiting_on: string; // 今、誰の何待ちか（◯◯待ちの短い見出し）
+  waiting_note?: string; // waiting_onの補足（小さく表示）
+  ball: 'you' | 'dan' | 'external'; // 誰待ちか（アバター表情に対応）
+  ball_label?: string; // 例: 金先生 / LINE / あなた
+  then: string; // 待ちが解消されたら何ができるか
   due?: string;
+  done_criteria?: string;
+  detail?: string;
+  events?: { at: string; text: string }[];
   stale?: boolean;
-}
-
-export interface RoomBoardArrow {
-  from: string;
-  to: string;
-  label?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface RoomBoardDoc {
-  notes: RoomBoardNote[];
-  arrows: RoomBoardArrow[];
-  positions: Record<string, { x: number; y: number }>;
+  schema: number;
+  goals: RoomBoardGoal[];
   recent_changes: { at: string; text: string }[];
   updated_at: string | null;
   version: number;
@@ -1452,15 +1451,6 @@ export const api = {
       request<{ digested: boolean; reason: string; board: RoomBoardDoc | null }>(
         `/projects/${projectId}/board/refresh${force ? '?force=true' : ''}`,
         { method: 'POST' }
-      ),
-
-    updateBoardPositions: (
-      projectId: string,
-      positions: Record<string, { x: number; y: number }>
-    ) =>
-      request<{ positions: Record<string, { x: number; y: number }> }>(
-        `/projects/${projectId}/board/positions`,
-        { method: 'PATCH', body: JSON.stringify({ positions }) }
       ),
 
     proposals: {

@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
-"""部屋ボード (room board) — 部屋ごとの「現在地」フリーボード。
+"""部屋ボード v3 (room board) — 「合意済み目標カード」で部屋の現在地を見せる。
 
-会話ログとは別に、部屋の現在地を「付箋 (notes) + 因果矢印 (arrows)」として
-projects.metadata.board (JSONB) に永続化する。チャット・音声・電話など、
-どのサーフェスの発言も最終的に chat_messages に落ちるので、そこを監視して
-新着ターンを定額CLI (run_oneshot_cli) で「消化」し、ボードを更新する。
+部屋には全体目標のカードだけが並ぶ。カード表面は4点のみ:
+①何を目指すか(title) ②今どこで止まっているか(now) ③誰のボールか(ball)
+④次に何が起きるか(next)。因果・経緯・サブタスク・イベント履歴は開いた時だけ。
+
+チャット・音声・電話などどのサーフェスの発言も chat_messages に落ちるので、
+そこを監視して新着ターンを定額CLI (run_oneshot_cli) で「消化」し、会話を
+イベントとして目標の状態に反映する。更新は同一プロセス内の pub/sub で
+SSE 購読者へ即時プッシュされる（フロントは /projects/{id}/board/stream を購読）。
 
 設計原則 (ユーザーと合意済み):
-- メインは「今」。完了・中止した付箋はボードから消える (changes に記録)
-- 付箋の色 = 手番 (you=ユーザー / dan=ダン / wait=外部・日時待ち)
-- 矢印 = 因果・依存。「これが決まる/終わると、これが動く」
+- メインは「今」。達成・中止した目標はボードから消える (changes に記録)
+- ダンは妥当な目標を自分で抽出してよい（合意の儀式なし）。ユーザーの指摘には即従う
 - 優先順位は絞らない。全体感を提示するだけで、何をやるかはユーザーが決める
-- 付箋の配置 (positions) はユーザーのドラッグを尊重し、消化で上書きしない
+- 判断基準は room_board_rules.md（外部ファイル、使いながら編集）
 
 有効化: python scripts/enable_room_board.py --title <部屋名>
 """
@@ -24,7 +27,7 @@ import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +40,13 @@ _MAX_MESSAGES_PER_DIGEST = 40
 _MAX_CHARS_PER_MESSAGE = 1200
 _MAX_TOTAL_CHARS = 24000
 
-_CAP_NOTES = 16
-_CAP_ARROWS = 14
+_CAP_GOALS = 8
+_CAP_EVENTS_PER_GOAL = 12
+_CAP_SUBTASKS = 10
+_CAP_BLOCKERS = 5
 _CAP_RECENT_CHANGES = 12
 
-_ALLOWED_OWNER = {"you", "dan", "wait"}
-_ALLOWED_KIND = {"action", "decision"}
+_ALLOWED_BALL = {"you", "dan", "external"}
 
 # 同一部屋の消化の同時実行ガード（ポーラーと手動refreshの競合防止）
 _digesting: set = set()
@@ -60,14 +64,55 @@ def _now_iso() -> str:
 
 def _empty_board() -> Dict[str, Any]:
     return {
-        "notes": [],
-        "arrows": [],
-        "positions": {},
+        "schema": 3,
+        "goals": [],
         "recent_changes": [],
         "last_message_at": None,
         "updated_at": None,
         "version": 0,
     }
+
+
+# ---------------------------------------------------------------- pub/sub (SSE)
+
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+_subscribers: Dict[str, Set["asyncio.Queue"]] = {}
+
+
+async def subscribe_board(project_id: str) -> "asyncio.Queue":
+    """SSEハンドラから呼ぶ。ボード更新が Queue に流れてくる。"""
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue(maxsize=20)
+    _subscribers.setdefault(project_id, set()).add(q)
+    return q
+
+
+def unsubscribe_board(project_id: str, q: "asyncio.Queue") -> None:
+    try:
+        _subscribers.get(project_id, set()).discard(q)
+    except Exception:
+        pass
+
+
+def _publish_board(project_id: str, board: Dict[str, Any]) -> None:
+    """ボード書き込み直後に購読者へプッシュ。ワーカースレッドからも呼べる。"""
+    loop = _event_loop
+    subs = _subscribers.get(project_id)
+    if not loop or not subs:
+        return
+
+    def _fanout() -> None:
+        for q in list(_subscribers.get(project_id, ())):
+            try:
+                q.put_nowait(board)
+            except asyncio.QueueFull:
+                pass
+
+    try:
+        loop.call_soon_threadsafe(_fanout)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- 読み書き
@@ -91,8 +136,8 @@ def get_board(project_id: Optional[str] = None, room_id: Optional[str] = None) -
     row = get_project_with_board(project_id=project_id, room_id=room_id)
     meta = (row or {}).get("metadata") or {}
     board = meta.get("board")
-    # 旧スキーマ (v1: tasks/decisions) のボードは空扱い → 次の消化で作り直される
-    if board and "notes" not in board:
+    # 旧スキーマ (v1 tasks / v2 notes) のボードは空扱い → 次の消化で作り直される
+    if board and "goals" not in board:
         board = None
     return {
         "enabled": bool(meta.get("board_enabled")),
@@ -106,32 +151,12 @@ def _read_meta(project_id: str) -> Dict[str, Any]:
 
 
 def _write_board(project_id: str, board: Dict[str, Any]) -> None:
-    """read-merge-write。metadata の他キーを保持し、positions は直前の値と統合する
-    （消化中にユーザーがドラッグした配置を消化の書き込みで潰さないため）。"""
+    """read-merge-write。metadata の他キー (model 等) を保持して board を差し替え、
+    購読者へ即時プッシュする。"""
     meta = _read_meta(project_id)
-    current = meta.get("board") or {}
-    merged_pos = dict(current.get("positions") or {})
-    merged_pos.update(board.get("positions") or {})
-    note_ids = {n["id"] for n in board.get("notes") or []}
-    board["positions"] = {k: v for k, v in merged_pos.items() if k in note_ids}
     meta["board"] = board
     _sb().table("projects").update({"metadata": meta}).eq("id", project_id).execute()
-
-
-def update_positions(project_id: str, positions: Dict[str, Any]) -> Dict[str, Any]:
-    """ユーザーのドラッグ配置を保存する。{note_id: {x, y}} をマージ。"""
-    meta = _read_meta(project_id)
-    board = meta.get("board") or _empty_board()
-    pos = dict(board.get("positions") or {})
-    for note_id, p in positions.items():
-        try:
-            pos[str(note_id)] = {"x": round(float(p["x"]), 1), "y": round(float(p["y"]), 1)}
-        except Exception:
-            continue
-    board["positions"] = pos
-    meta["board"] = board
-    _sb().table("projects").update({"metadata": meta}).eq("id", project_id).execute()
-    return board
+    _publish_board(project_id, board)
 
 
 def set_board_enabled(project_id: str, enabled: bool) -> None:
@@ -155,20 +180,26 @@ def list_board_projects() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------- 消化
 
 _DIGEST_PROMPT = """あなたはチャット部屋の「部屋ボード」を管理する編集者です。
-部屋ボードはホワイトボードに付箋を貼ったような現在地マップです。見た人が
-「この部屋は今どういう状況か」を一目で掴むためのもので、優先順位は付けません。
+部屋ボードは、その部屋の全体目標ごとに「現在地」だけを常に最新で見せるカードUIです。
 
-以下の【現在のボード】と【新しい会話】を読み、ボードを更新して JSON オブジェクトだけを返してください。
+以下の【現在のボード】と【新しい会話】を読み、目標の状態を更新して JSON オブジェクトだけを返してください。
 
 スキーマ:
 {{
-  "notes": [
-    {{"id": "n1", "title": "付箋の見出し(短く)", "body": "補足1行(任意)",
-      "owner": "you|dan|wait", "kind": "action|decision",
-      "live": "ダンがまさに今している作業の一言(owner=danで実行中のみ)",
-      "due": "期日・見込み(任意, 例: 9/3ごろ)", "stale": false}}
+  "goals": [
+    {{"id": "g1",
+      "title": "なぜやりたいか＋何を目指すかを一文で",
+      "waiting_on": "今の待ちを『◯◯待ち』の形で短く（例: 金先生の集計連絡待ち / LINE審査の結果待ち）。やったことは書かない",
+      "waiting_note": "waiting_onの補足を短く（任意。小さく表示される。例: 9月中旬までに報酬額を伝える約束のため）",
+      "ball": "you|dan|external",
+      "ball_label": "待っている相手を短く（例: 金先生 / LINE / あなた）",
+      "then": "その待ちが解消されたら次に何ができるか（一文・短く）",
+      "due": "期日・見込み(任意)",
+      "done_criteria": "何をもって完了か(任意)",
+      "detail": "背景の説明(数行・任意。表面には出ない)",
+      "new_events": ["今回の会話で実際に起きた出来事だけ(任意・内部用)"],
+      "stale": false}}
   ],
-  "arrows": [{{"from": "n1", "to": "n2", "label": "矢印の意味を短く(任意)"}}],
   "changes": ["今回の更新で変わった点を短く。変化がなければ空配列"]
 }}
 
@@ -176,10 +207,9 @@ _DIGEST_PROMPT = """あなたはチャット部屋の「部屋ボード」を管
 {rules}
 
 形式の決まり:
-- id は既存を必ず維持。新規は n+連番の新しい id。
-- kind: action=やること / decision=確定した方針・前提
-- 付箋は{cap_notes}枚以内。すべて日本語。
-- 変化がなければ notes/arrows は現状のまま返し、changes は空配列。
+- id は既存を必ず維持。新規の目標は g+連番の新しい id。
+- 目標は{cap_goals}枚以内。すべて日本語。
+- 変化がなければ goals は現状のまま返し、changes と new_events は空。
 - 出力は JSON オブジェクトのみ。コードフェンスや説明文は一切付けない。
 
 【部屋タイトル】{title}
@@ -193,10 +223,10 @@ _DIGEST_PROMPT = """あなたはチャット部屋の「部屋ボード」を管
 
 _RULES_PATH = Path(__file__).resolve().parent / "room_board_rules.md"
 _FALLBACK_RULES = (
-    "- ユーザーがボードへの指示（付箋消して等）を出したら最優先で従う\n"
-    "- 完了・中止は付箋ごと削除して changes に記録\n"
-    "- owner: you=ユーザーの番 / dan=ダン / wait=外部・日時待ち\n"
-    "- 矢印は因果・依存のみ。推測で書かない。挨拶・雑談からは何も作らない"
+    "- ユーザーがボードへの指示（カード消して等）を出したら最優先で従う\n"
+    "- 目標は成果の単位。作業はサブタスク。達成・中止はカードごと削除して changes に記録\n"
+    "- ball: you=ユーザーの番 / dan=ダン / external=外部・日時待ち\n"
+    "- 推測で書かない。挨拶・雑談・動作テストからは何も作らない"
 )
 
 
@@ -258,67 +288,85 @@ def _parse_board_json(text: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _goal_for_prompt(g: Dict[str, Any]) -> Dict[str, Any]:
+    """LLMに渡す現在ボード: イベント履歴は直近2件だけに畳んでトークンを節約。"""
+    out = {k: g.get(k) for k in (
+        "id", "title", "waiting_on", "waiting_note", "ball", "ball_label", "then", "due",
+        "done_criteria", "detail", "stale",
+    ) if g.get(k) not in (None, "", [])}
+    events = g.get("events") or []
+    if events:
+        out["recent_events"] = [e.get("text") for e in events[-2:]]
+    return out
+
+
+def _core_fields(g: Dict[str, Any]) -> tuple:
+    return (g.get("title"), g.get("waiting_on"), g.get("waiting_note"), g.get("ball"), g.get("ball_label"), g.get("then"), g.get("due"))
+
+
 def _normalize(new: Dict[str, Any], old: Dict[str, Any]) -> Dict[str, Any]:
     """LLM出力を検証してボード形式に整える。壊れた出力は旧値でフォールバック。"""
     board = dict(old)
+    now = _now_iso()
+    old_goals = {g["id"]: g for g in (old.get("goals") or [])}
 
-    notes: List[Dict[str, Any]] = []
+    goals: List[Dict[str, Any]] = []
     seen_ids: set = set()
-    for n in new.get("notes") or []:
-        if not isinstance(n, dict):
+    for g in new.get("goals") or []:
+        if not isinstance(g, dict):
             continue
-        title = str(n.get("title") or "").strip()
+        title = str(g.get("title") or "").strip()
         if not title:
             continue
-        nid = str(n.get("id") or f"n{len(notes) + 1}")
-        if nid in seen_ids:
-            nid = f"n{len(notes) + 1}x"
-        seen_ids.add(nid)
-        owner = str(n.get("owner") or "wait").strip().lower()
-        kind = str(n.get("kind") or "action").strip().lower()
-        note = {
-            "id": nid,
-            "title": title[:60],
-            "body": str(n.get("body") or "").strip()[:160],
-            "owner": owner if owner in _ALLOWED_OWNER else "wait",
-            "kind": kind if kind in _ALLOWED_KIND else "action",
-            "stale": bool(n.get("stale")),
+        gid = str(g.get("id") or f"g{len(goals) + 1}")
+        if gid in seen_ids:
+            gid = f"g{len(goals) + 1}x"
+        seen_ids.add(gid)
+        prev = old_goals.get(gid)
+        ball = str(g.get("ball") or "dan").strip().lower()
+        goal: Dict[str, Any] = {
+            "id": gid,
+            "title": title[:100],
+            "waiting_on": str(g.get("waiting_on") or "").strip()[:60],
+            "waiting_note": str(g.get("waiting_note") or "").strip()[:120],
+            "ball": ball if ball in _ALLOWED_BALL else "dan",
+            "ball_label": str(g.get("ball_label") or "").strip()[:30],
+            "then": str(g.get("then") or "").strip()[:140],
+            "due": str(g.get("due") or "").strip()[:40],
+            "done_criteria": str(g.get("done_criteria") or "").strip()[:160],
+            "detail": str(g.get("detail") or "").strip()[:600],
+            "stale": bool(g.get("stale")),
+            "created_at": (prev or {}).get("created_at") or now,
         }
-        live = str(n.get("live") or "").strip()
-        if live and note["owner"] == "dan":
-            note["live"] = live[:80]
-        due = str(n.get("due") or "").strip()
-        if due:
-            note["due"] = due[:40]
-        notes.append(note)
-    if isinstance(new.get("notes"), list):
-        board["notes"] = notes[:_CAP_NOTES]
+        # イラストURLは消化で消さず引き継ぐ（別途生成して付与される）
+        if (prev or {}).get("image_url"):
+            goal["image_url"] = prev["image_url"]
+        # イベント履歴は蓄積（LLMは new_events だけ返す）
+        events = list((prev or {}).get("events") or [])
+        for ev in g.get("new_events") or []:
+            text = str(ev).strip()[:160]
+            if text and text not in {e.get("text") for e in events[-3:]}:
+                events.append({"at": now, "text": text})
+        goal["events"] = events[-_CAP_EVENTS_PER_GOAL:]
+        # 中身が変わった時だけ updated_at を進める（stale判定・「動いた感」の元）
+        if prev and _core_fields(prev) == _core_fields(goal):
+            goal["updated_at"] = prev.get("updated_at") or now
+        else:
+            goal["updated_at"] = now
+        goals.append(goal)
 
-    note_ids = {n["id"] for n in board.get("notes") or []}
-    arrows: List[Dict[str, Any]] = []
-    for a in new.get("arrows") or []:
-        if not isinstance(a, dict):
-            continue
-        frm, to = str(a.get("from") or ""), str(a.get("to") or "")
-        if frm not in note_ids or to not in note_ids or frm == to:
-            continue
-        arrow = {"from": frm, "to": to}
-        label = str(a.get("label") or "").strip()
-        if label:
-            arrow["label"] = label[:20]
-        arrows.append(arrow)
-    if isinstance(new.get("arrows"), list):
-        board["arrows"] = arrows[:_CAP_ARROWS]
+    if isinstance(new.get("goals"), list):
+        board["goals"] = goals[:_CAP_GOALS]
 
     changes = [str(x).strip()[:200] for x in (new.get("changes") or []) if str(x).strip()]
     if changes:
         recent = list(old.get("recent_changes") or [])
-        now = _now_iso()
         recent.extend({"at": now, "text": c} for c in changes[:5])
         board["recent_changes"] = recent[-_CAP_RECENT_CHANGES:]
 
+    board["schema"] = 3
     board["version"] = int(old.get("version") or 0) + 1
-    board["updated_at"] = _now_iso()
+    board["updated_at"] = now
     return board
 
 
@@ -327,11 +375,11 @@ def _digest_messages(
 ) -> Optional[Dict[str, Any]]:
     """会話1バッチをボードに消化して新しいボードを返す。失敗時 None。"""
     prompt = _DIGEST_PROMPT.format(
-        cap_notes=_CAP_NOTES,
+        cap_goals=_CAP_GOALS,
         rules=_load_rules(),
         title=title,
         board_json=json.dumps(
-            {"notes": board.get("notes") or [], "arrows": board.get("arrows") or []},
+            {"goals": [_goal_for_prompt(g) for g in board.get("goals") or []]},
             ensure_ascii=False, indent=1,
         ),
         conversation=_format_conversation(messages),
@@ -354,7 +402,7 @@ def digest_project(project: Dict[str, Any], force: bool = False) -> Dict[str, An
     room_id = project["room_id"]
     meta = project.get("metadata") or {}
     board = meta.get("board") or _empty_board()
-    if "notes" not in board:  # 旧スキーマは作り直し
+    if "goals" not in board:  # 旧スキーマは作り直し
         board = _empty_board()
 
     with _digesting_lock:
@@ -417,8 +465,15 @@ def seed_from_history(
         updated = _digest_messages(project.get("title") or "", board, chunk)
         if updated is not None:
             board = updated
-        logger.info("room board seed chunk %s/%s done (notes=%s)", idx + 1, len(chunks), len(board.get("notes") or []))
-    board["last_message_at"] = None
+        logger.info("room board seed chunk %s/%s done (goals=%s)", idx + 1, len(chunks), len(board.get("goals") or []))
+    # 種付け直後の「新規」印ラッシュを避ける: 種付け分は既存扱いにする
+    seed_time = _now_iso()
+    for g in board.get("goals") or []:
+        g["created_at"] = g.get("created_at") or seed_time
+    # カーソルを最新メッセージまで進める。空(None)にすると常駐ポーラーが
+    # 直後に再消化して種付け結果を上書きしてしまう（古いコード稼働時は
+    # 新フィールドが消える事故になる）。
+    board["last_message_at"] = messages[-1].get("created_at")
     _write_board(project_id, board)
     return {"digested": True, "reason": "ok", "board": board, "chunks": len(chunks)}
 
@@ -446,13 +501,14 @@ async def _poller_loop() -> None:
 
 
 def start_board_poller() -> Optional["asyncio.Task"]:
-    global _started
+    global _started, _event_loop
     if _started:
         return None
     if os.environ.get("DAN_ROOM_BOARD_POLLER_ENABLED", "1") != "1":
         logger.info("room board poller disabled by env")
         return None
     _started = True
+    _event_loop = asyncio.get_event_loop()
     task = asyncio.get_event_loop().create_task(_poller_loop())
     logger.info("room board poller started (interval=%ss, model=%s)", POLL_INTERVAL, DIGEST_MODEL)
     return task

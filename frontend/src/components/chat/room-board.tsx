@@ -1,288 +1,205 @@
 'use client';
 
 /**
- * 部屋ボード — 部屋の「今」をポストイット＋因果矢印で示すフリーボード。
+ * 部屋ボード v3 — インスタ的「1目標=1画面」カルーセル。
  *
- * - 付箋の色＝手番（黄=あなた / 青=ダン / 灰=待ち）、色あせ＝停滞
- * - 矢印＝因果・依存（これが決まる/終わると、これが動く）
- * - 完了・中止した付箋は貼られない（消化が削除する）
- * - 付箋はドラッグで並べ替え可。配置はサーバーに保存され、ダンは動かさない
+ * カードは4段だけ:
+ *   ① 目標（なぜ＋何を）
+ *   ② アバター（表情＝誰待ち。you/dan/external の3表情）
+ *   ③ 今、誰の何待ちか
+ *   ④ それが来たら何ができるか
+ * 経緯・やったこと・履歴は表面に出さない（気になればチャットで聞く）。
  *
- * データはバックエンドのポーラーが会話を消化して更新する。ここは5秒ポーリング。
+ * 左右ボタン／スワイプ／スクロールで他の目標へ（scroll-snap）。
+ * 更新はSSE購読で完全リアルタイム。更新された画面は一瞬光る。
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, RefreshCw } from 'lucide-react';
 import {
-  api,
-  RoomBoardArrow,
-  RoomBoardNote,
-} from '@/lib/api-client';
+  ArrowDown,
+  ChevronLeft,
+  ChevronRight,
+  Flag,
+  Hourglass,
+  Loader2,
+  RefreshCw,
+  Unlock,
+} from 'lucide-react';
+import { api, RoomBoardGoal, RoomBoardResponse } from '@/lib/api-client';
 
-const NOTE_W = 264;
-const CANVAS_W = 980;
-const GRID_X = [30, 330, 630];
-const GRID_ROW_H = 185;
-const EST_H = 160; // 衝突判定用の付箋想定高さ
+const ball = {
+  you: {
+    avatar: '/board-avatar/you.png',
+    chip: 'bg-amber-400/20 text-amber-700 dark:text-amber-300',
+    ring: '#f59e0b',
+    waitLabel: (g: RoomBoardGoal) => `${g.ball_label || 'あなた'}の番`,
+  },
+  dan: {
+    avatar: '/board-avatar/dan.png',
+    chip: 'bg-sky-400/20 text-sky-700 dark:text-sky-300',
+    ring: '#0ea5e9',
+    waitLabel: () => 'ダンが進行中',
+  },
+  external: {
+    avatar: '/board-avatar/external.png',
+    chip: 'bg-zinc-400/20 text-zinc-700 dark:text-zinc-300',
+    ring: '#71717a',
+    waitLabel: (g: RoomBoardGoal) => `${g.ball_label || '外部'}待ち`,
+  },
+} as const;
 
-type XY = { x: number; y: number };
-
-const noteColors: Record<RoomBoardNote['owner'], { bg: string; edge: string }> = {
-  you: { bg: '#fde047', edge: '#eab308' },
-  dan: { bg: '#7dd3fc', edge: '#0ea5e9' },
-  wait: { bg: '#d6d3d1', edge: '#a8a29e' },
-};
-
-function overlaps(a: XY, b: XY): boolean {
-  return Math.abs(a.x - b.x) < NOTE_W + 20 && Math.abs(a.y - b.y) < EST_H + 20;
+function formatTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-/** 保存済み配置が無い付箋の自動配置。矢印の親の近くへ、無ければ空きグリッドへ。 */
-function autoLayout(
-  notes: RoomBoardNote[],
-  arrows: RoomBoardArrow[],
-  fixed: Record<string, XY>
-): Record<string, XY> {
-  const placed: Record<string, XY> = { ...fixed };
-  const result: Record<string, XY> = {};
-
-  const slots: XY[] = [];
-  for (let row = 0; row < 24; row++) {
-    for (const x of GRID_X) slots.push({ x, y: 30 + row * GRID_ROW_H });
-  }
-  const isFree = (p: XY) => Object.values(placed).every((q) => !overlaps(p, q));
-  const nearestFree = (desired: XY): XY => {
-    let best: XY | null = null;
-    let bestD = Infinity;
-    for (const s of slots) {
-      if (!isFree(s)) continue;
-      const d = (s.x - desired.x) ** 2 + (s.y - desired.y) ** 2;
-      if (d < bestD) {
-        bestD = d;
-        best = s;
-      }
-    }
-    return best ?? desired;
-  };
-
-  let cursor = 0;
-  for (const n of notes) {
-    if (placed[n.id]) continue;
-    const parent = arrows.find((a) => a.to === n.id && placed[a.from]);
-    const child = arrows.find((a) => a.from === n.id && placed[a.to]);
-    let desired: XY | null = null;
-    if (parent) desired = { x: placed[parent.from].x + 40, y: placed[parent.from].y + GRID_ROW_H };
-    else if (child) desired = { x: placed[child.to].x - 40, y: placed[child.to].y - GRID_ROW_H };
-    if (!desired) {
-      while (cursor < slots.length && !isFree(slots[cursor])) cursor++;
-      desired = slots[Math.min(cursor, slots.length - 1)];
-    }
-    const p = nearestFree(desired);
-    placed[n.id] = p;
-    result[n.id] = p;
-  }
-  return result;
-}
-
-/** 矩形境界上のアンカー: 中心同士を結ぶ直線と矩形の交点（簡易） */
-function anchor(from: { cx: number; cy: number; w: number; h: number }, to: { cx: number; cy: number }): XY {
-  const dx = to.cx - from.cx;
-  const dy = to.cy - from.cy;
-  const hw = from.w / 2 + 6;
-  const hh = from.h / 2 + 6;
-  const scale = 1 / Math.max(Math.abs(dx) / hw, Math.abs(dy) / hh, 1e-6);
-  return { x: from.cx + dx * Math.min(scale, 1) * 0.999, y: from.cy + dy * Math.min(scale, 1) * 0.999 };
-}
-
-function PostItNote({
-  note,
-  pos,
-  isNew,
-  delay,
-  onDragEnd,
-  onMeasure,
-  onDrag,
-}: {
-  note: RoomBoardNote;
-  pos: XY;
-  isNew: boolean;
-  delay: number;
-  onDragEnd: (id: string, p: XY) => void;
-  onDrag: (id: string, p: XY) => void;
-  onMeasure: (id: string, el: HTMLDivElement | null) => void;
-}) {
-  const c = noteColors[note.owner] ?? noteColors.wait;
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; moved: boolean } | null>(null);
-
-  const onPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-      dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y, moved: false };
-    },
-    [pos.x, pos.y]
-  );
-  const onPointerMove = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      const d = dragRef.current;
-      if (!d) return;
-      const dx = e.clientX - d.startX;
-      const dy = e.clientY - d.startY;
-      if (!d.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
-      d.moved = true;
-      onDrag(note.id, {
-        x: Math.max(0, Math.min(CANVAS_W - NOTE_W, d.origX + dx)),
-        y: Math.max(0, d.origY + dy),
-      });
-    },
-    [note.id, onDrag]
-  );
-  const onPointerUp = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      const d = dragRef.current;
-      dragRef.current = null;
-      if (d?.moved) {
-        const dx = e.clientX - d.startX;
-        const dy = e.clientY - d.startY;
-        onDragEnd(note.id, {
-          x: Math.max(0, Math.min(CANVAS_W - NOTE_W, d.origX + dx)),
-          y: Math.max(0, d.origY + dy),
-        });
-      }
-    },
-    [note.id, onDragEnd]
-  );
-
-  const isDecision = note.kind === 'decision';
+function GoalPanel({ goal, flash }: { goal: RoomBoardGoal; flash: boolean }) {
+  const b = ball[goal.ball] ?? ball.dan;
   return (
     <div
-      ref={(el) => onMeasure(note.id, el)}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      className={`absolute cursor-grab touch-none select-none rounded-sm shadow-[4px_6px_14px_rgba(0,0,0,0.45)] active:cursor-grabbing ${
-        note.stale ? 'opacity-45' : ''
-      } ${isNew ? 'board-note-stick' : ''}`}
-      style={{
-        left: pos.x,
-        top: pos.y,
-        width: isDecision ? NOTE_W - 30 : NOTE_W,
-        background: c.bg,
-        borderTop: `6px solid ${c.edge}`,
-        color: '#1c1917',
-        animationDelay: isNew ? `${delay}s` : undefined,
-        padding: isDecision ? '10px 12px 10px' : '14px 14px 12px',
-      }}
+      className={`flex h-full w-full shrink-0 snap-center flex-col justify-center overflow-y-auto rounded-2xl border border-border bg-card p-5 md:p-7 ${
+        goal.stale ? 'opacity-70' : ''
+      } ${flash ? 'board-flash' : ''}`}
+      style={{ scrollSnapStop: 'always' }}
     >
-      <div className={`font-bold leading-snug ${isDecision ? 'text-[14px]' : 'text-[16.5px]'}`}>
-        {isDecision ? <span className="mr-1">📌</span> : null}
-        {note.title}
+      {/* ① 目的（ゴールフラッグ＝目指す場所。PCは左上寄せ） */}
+      <div className="mx-auto flex w-fit max-w-2xl shrink-0 items-center gap-2.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 md:mx-0 md:self-start">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/90">
+          <Flag className="h-[18px] w-[18px] text-white" />
+        </span>
+        <span className="text-[16px] font-bold leading-snug text-emerald-800 dark:text-emerald-200 md:text-[18px]">
+          {goal.title}
+        </span>
       </div>
-      {note.body ? (
-        <div className="mt-1.5 text-[13px] leading-snug text-[#44403c]">{note.body}</div>
-      ) : null}
-      {note.live ? (
-        <div className="mt-2 flex items-center gap-1.5 text-[12.5px] font-semibold text-[#075985]">
-          <span className="board-live-dot h-2 w-2 shrink-0 rounded-full bg-[#0284c7]" />
-          {note.live}
+
+      {/* 本体: PC=横並び / モバイル=縦積み */}
+      <div className="mt-4 flex shrink-0 flex-col md:mt-5 md:flex-row md:items-center md:gap-7">
+        {/* ② アバター＋誰待ち */}
+        <div className="flex shrink-0 flex-col items-center justify-center md:w-[36%] md:max-w-[300px]">
+          <img src={b.avatar} alt="" className="h-36 w-auto object-contain md:h-64 lg:h-72" />
+          <span className={`mt-2.5 rounded-full px-4 py-1.5 text-[15px] font-bold ${b.chip}`}>
+            {b.waitLabel(goal)}
+          </span>
         </div>
-      ) : null}
-      {note.due ? (
-        <div className="mt-2 inline-block rounded-full bg-black/10 px-2.5 py-0.5 text-[11.5px] font-semibold text-[#44403c]">
-          {note.due}
+
+        {/* ③ 主役: いま何待ち（砂時計＋手番色の太枠で強調） ＋ ④ これが来たら */}
+        <div className="mt-4 flex min-w-0 flex-1 flex-col justify-center md:mt-0">
+          <div
+            className="rounded-2xl border-l-[5px] p-4 md:p-5"
+            style={{ borderColor: b.ring, background: `${b.ring}14` }}
+          >
+            <div className="flex items-center gap-1.5 text-[15px] font-bold tracking-wide md:text-[17px]" style={{ color: b.ring }}>
+              <Hourglass className="h-[18px] w-[18px]" />
+              今は…
+            </div>
+            {/* ◯◯待ち を大きく */}
+            <div className="mt-1.5 text-[25px] font-bold leading-tight md:text-[34px]">
+              {goal.waiting_on || '—'}
+            </div>
+            {/* 補足は小さく */}
+            {goal.waiting_note ? (
+              <div className="mt-1.5 text-[13px] leading-snug text-muted-foreground">
+                {goal.waiting_note}
+              </div>
+            ) : null}
+          </div>
+
+          {/* 流れの矢印 */}
+          <div className="my-1.5 flex justify-center">
+            <ArrowDown className="h-4 w-4 text-muted-foreground/50" />
+          </div>
+
+          {/* ④ Next→（解錠＝次に進める） */}
+          <div className="flex items-start gap-2.5 rounded-xl border border-border bg-muted/30 px-4 py-3">
+            <Unlock className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+            <div className="min-w-0">
+              <div className="text-[11px] font-bold tracking-wide text-emerald-600 dark:text-emerald-400">Next →</div>
+              <div className="mt-0.5 text-[15px] leading-snug text-foreground/85 md:text-[16px]">
+                {goal.then || '—'}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 text-[11px] text-muted-foreground/60">
+            {formatTime(goal.updated_at)} 更新{goal.stale ? '・しばらく動きなし' : ''}
+          </div>
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
 
 export function RoomBoard({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
+  const [flashIds, setFlashIds] = useState<Set<string>>(new Set());
+  const [current, setCurrent] = useState(0);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const prevUpdatedRef = useRef<Record<string, string>>({});
+
   const { data, isLoading } = useQuery({
     queryKey: ['room-board', projectId],
     queryFn: () => api.projects.getBoard(projectId),
     enabled: !!projectId,
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
+
+  // SSE購読 = 本線
+  useEffect(() => {
+    if (!projectId) return;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(`/api/v1/projects/${projectId}/board/stream`);
+      es.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data) as RoomBoardResponse;
+          queryClient.setQueryData(['room-board', projectId], payload);
+        } catch {
+          /* 不正フレームは無視 */
+        }
+      };
+    } catch {
+      /* 非対応環境はポーリングのみ */
+    }
+    return () => es?.close();
+  }, [projectId, queryClient]);
+
+  const board = data?.board ?? null;
+  const goals = board?.goals ?? [];
+
+  useEffect(() => {
+    const prev = prevUpdatedRef.current;
+    const changed: string[] = [];
+    for (const g of goals) {
+      if (g.updated_at && prev[g.id] && prev[g.id] !== g.updated_at) changed.push(g.id);
+    }
+    prevUpdatedRef.current = Object.fromEntries(goals.map((g) => [g.id, g.updated_at ?? '']));
+    if (changed.length) {
+      setFlashIds(new Set(changed));
+      const timer = setTimeout(() => setFlashIds(new Set()), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [goals]);
+
+  const go = useCallback((idx: number) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const clamped = Math.max(0, Math.min(idx, el.children.length - 1));
+    (el.children[clamped] as HTMLElement)?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  }, []);
+
+  const onScroll = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    setCurrent(Math.round(el.scrollLeft / el.clientWidth));
+  }, []);
 
   const refreshMutation = useMutation({
     mutationFn: () => api.projects.refreshBoard(projectId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['room-board', projectId] }),
   });
-  const positionsMutation = useMutation({
-    mutationFn: (positions: Record<string, XY>) =>
-      api.projects.updateBoardPositions(projectId, positions),
-  });
-
-  const board = data?.board ?? null;
-  const notes = useMemo(() => board?.notes ?? [], [board?.notes]);
-  const arrows = useMemo(() => board?.arrows ?? [], [board?.arrows]);
-  const serverPos = useMemo(() => board?.positions ?? {}, [board?.positions]);
-
-  // ドラッグ中/直後のローカル配置（サーバー確定まで優先）
-  const [dragPos, setDragPos] = useState<Record<string, XY>>({});
-  // 「貼られる」アニメーションは、開いている間に本当に増えた付箋だけ。
-  // 初回表示・部屋切替・再マウントでは動かさない（毎回流れるとうるさい）。
-  const seenIdsRef = useRef<Set<string> | null>(null);
-  const [newIds, setNewIds] = useState<Record<string, number>>({});
-
-  useEffect(() => {
-    if (!board) return;
-    const ids = notes.map((n) => n.id);
-    if (seenIdsRef.current === null) {
-      seenIdsRef.current = new Set(ids);
-      return;
-    }
-    const seen = seenIdsRef.current;
-    const fresh = ids.filter((id) => !seen.has(id));
-    if (fresh.length) {
-      ids.forEach((id) => seen.add(id));
-      setNewIds((prev) => ({
-        ...prev,
-        ...Object.fromEntries(fresh.map((id, i) => [id, i * 0.12])),
-      }));
-    }
-  }, [board, notes]);
-
-  const autoPos = useMemo(
-    () => autoLayout(notes, arrows, { ...serverPos, ...dragPos }),
-    [notes, arrows, serverPos, dragPos]
-  );
-  const posOf = useCallback(
-    (id: string): XY => dragPos[id] ?? serverPos[id] ?? autoPos[id] ?? { x: 30, y: 30 },
-    [dragPos, serverPos, autoPos]
-  );
-
-  // 実測サイズ（矢印のアンカー計算用）
-  const [sizes, setSizes] = useState<Record<string, { w: number; h: number }>>({});
-  const elsRef = useRef<Record<string, HTMLDivElement | null>>({});
-  const onMeasure = useCallback((id: string, el: HTMLDivElement | null) => {
-    elsRef.current[id] = el;
-  }, []);
-  useLayoutEffect(() => {
-    const next: Record<string, { w: number; h: number }> = {};
-    let changed = false;
-    for (const n of notes) {
-      const el = elsRef.current[n.id];
-      if (!el) continue;
-      next[n.id] = { w: el.offsetWidth, h: el.offsetHeight };
-      const prev = sizes[n.id];
-      if (!prev || prev.w !== next[n.id].w || prev.h !== next[n.id].h) changed = true;
-    }
-    if (changed || Object.keys(next).length !== Object.keys(sizes).length) setSizes(next);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notes, dragPos, serverPos]);
-
-  const onDrag = useCallback((id: string, p: XY) => {
-    setDragPos((prev) => ({ ...prev, [id]: p }));
-  }, []);
-  const onDragEnd = useCallback(
-    (id: string, p: XY) => {
-      setDragPos((prev) => ({ ...prev, [id]: p }));
-      positionsMutation.mutate({ [id]: p });
-    },
-    [positionsMutation]
-  );
 
   if (isLoading) {
     return (
@@ -292,53 +209,34 @@ export function RoomBoard({ projectId }: { projectId: string }) {
     );
   }
 
-  const canvasH = Math.max(
-    420,
-    ...notes.map((n) => posOf(n.id).y + (sizes[n.id]?.h ?? EST_H) + 60)
-  );
+  if (!board || !goals.length) {
+    return (
+      <div className="mx-4 mt-4 rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+        まだ目標がありません。会話するとダンがこの部屋の目標と現在地をここに整理していきます。
+      </div>
+    );
+  }
 
   return (
-    <div className="mx-4 mt-4">
+    <div className="mx-3 mt-3 flex h-[62vh] min-h-[460px] flex-col">
       <style>{`
-        .board-live-dot { animation: board-blink 1.2s ease-in-out infinite; }
-        @keyframes board-blink { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }
-        .board-note-stick { animation: board-stick 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
-        @keyframes board-stick {
-          from { opacity: 0; transform: scale(1.25); }
-          to { opacity: 1; transform: scale(1); }
+        .board-flash { animation: board-flash-anim 1.6s ease; }
+        @keyframes board-flash-anim {
+          0% { box-shadow: 0 0 0 2px rgba(16,185,129,0.7), 0 0 24px rgba(16,185,129,0.35); }
+          100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
         }
-        .board-arrow { animation: board-fadein 0.5s ease both; }
-        @keyframes board-fadein { from { opacity: 0 } to { opacity: 1 } }
+        .board-scroller::-webkit-scrollbar { display: none; }
+        .board-scroller { scrollbar-width: none; }
       `}</style>
 
-      {/* 凡例 + 更新 */}
-      <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-[2px]" style={{ background: noteColors.you.bg }} />
-            あなた
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-[2px]" style={{ background: noteColors.dan.bg }} />
-            ダン
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-[2px]" style={{ background: noteColors.wait.bg }} />
-            待ち
-          </span>
-          <span className="text-muted-foreground/60">矢印＝これが動くとこれが動く</span>
-        </div>
+      <div className="mb-2 flex items-center justify-between px-1">
+        <span className="text-[13px] font-semibold text-muted-foreground">
+          目標 {goals.length} 件{' '}
+          <span className="text-muted-foreground/60">（{current + 1}/{goals.length}）</span>
+        </span>
         <div className="flex items-center gap-1.5">
-          {board?.updated_at ? (
-            <span className="text-[10px] text-muted-foreground/70">
-              {new Date(board.updated_at).toLocaleString('ja-JP', {
-                month: 'numeric',
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-              })}{' '}
-              更新
-            </span>
+          {board.updated_at ? (
+            <span className="text-[11px] text-muted-foreground/70">{formatTime(board.updated_at)} 更新</span>
           ) : null}
           <button
             onClick={() => refreshMutation.mutate()}
@@ -346,93 +244,54 @@ export function RoomBoard({ projectId }: { projectId: string }) {
             title="今すぐ更新"
             className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
           >
-            {refreshMutation.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
+            {refreshMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </button>
         </div>
       </div>
 
-      {/* ボード面 */}
-      {!board || !notes.length ? (
-        <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-          まだ付箋がありません。会話するとダンがここに現在地を貼っていきます。
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollerRef}
+          onScroll={onScroll}
+          className="board-scroller flex h-full snap-x snap-mandatory gap-3 overflow-x-auto overflow-y-hidden scroll-smooth"
+        >
+          {goals.map((g) => (
+            <GoalPanel key={g.id} goal={g} flash={flashIds.has(g.id)} />
+          ))}
         </div>
-      ) : (
-        <div className="overflow-x-auto rounded-xl">
-          <div
-            className="relative"
-            style={{
-              width: CANVAS_W,
-              height: canvasH,
-              background:
-                'radial-gradient(circle, rgba(127,127,127,0.18) 1px, transparent 1px) 0 0 / 26px 26px, hsl(var(--muted) / 0.3)',
-            }}
-          >
-            {/* 矢印レイヤー */}
-            <svg className="pointer-events-none absolute inset-0 h-full w-full">
-              <defs>
-                <marker id="board-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                  <path d="M 0 0 L 8 4 L 0 8 Z" fill="rgba(127,127,127,0.75)" />
-                </marker>
-              </defs>
-              {arrows.map((a) => {
-                const fp = posOf(a.from);
-                const tp = posOf(a.to);
-                const fs = sizes[a.from] ?? { w: NOTE_W, h: EST_H };
-                const ts = sizes[a.to] ?? { w: NOTE_W, h: EST_H };
-                const fc = { cx: fp.x + fs.w / 2, cy: fp.y + fs.h / 2, w: fs.w, h: fs.h };
-                const tc = { cx: tp.x + ts.w / 2, cy: tp.y + ts.h / 2, w: ts.w, h: ts.h };
-                const p1 = anchor(fc, tc);
-                const p2 = anchor(tc, fc);
-                const mx = (p1.x + p2.x) / 2;
-                const my = (p1.y + p2.y) / 2;
-                // 軽くカーブさせる（法線方向に膨らみ）
-                const nx = -(p2.y - p1.y) * 0.15;
-                const ny = (p2.x - p1.x) * 0.15;
-                return (
-                  <g key={`${a.from}-${a.to}`} className="board-arrow">
-                    <path
-                      d={`M ${p1.x} ${p1.y} Q ${mx + nx} ${my + ny} ${p2.x} ${p2.y}`}
-                      fill="none"
-                      stroke="rgba(127,127,127,0.75)"
-                      strokeWidth={1.8}
-                      markerEnd="url(#board-arrowhead)"
-                    />
-                    {a.label ? (
-                      <text
-                        x={mx + nx}
-                        y={my + ny - 6}
-                        textAnchor="middle"
-                        fill="rgba(127,127,127,0.95)"
-                        fontSize={12.5}
-                      >
-                        {a.label}
-                      </text>
-                    ) : null}
-                  </g>
-                );
-              })}
-            </svg>
 
-            {/* 付箋レイヤー */}
-            {notes.map((n) => (
-              <PostItNote
-                key={n.id}
-                note={n}
-                pos={posOf(n.id)}
-                isNew={n.id in newIds}
-                delay={newIds[n.id] ?? 0}
-                onDrag={onDrag}
-                onDragEnd={onDragEnd}
-                onMeasure={onMeasure}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+        {current > 0 && (
+          <button
+            onClick={() => go(current - 1)}
+            className="absolute left-1 top-1/2 hidden -translate-y-1/2 rounded-full border border-border bg-background/80 p-2 shadow backdrop-blur hover:bg-background md:block"
+            aria-label="前の目標"
+          >
+            <ChevronLeft className="h-5 w-5" />
+          </button>
+        )}
+        {current < goals.length - 1 && (
+          <button
+            onClick={() => go(current + 1)}
+            className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-full border border-border bg-background/80 p-2 shadow backdrop-blur hover:bg-background md:block"
+            aria-label="次の目標"
+          >
+            <ChevronRight className="h-5 w-5" />
+          </button>
+        )}
+      </div>
+
+      <div className="mt-2.5 flex items-center justify-center gap-1.5">
+        {goals.map((g, i) => (
+          <button
+            key={g.id}
+            onClick={() => go(i)}
+            className={`h-1.5 rounded-full transition-all ${
+              i === current ? 'w-5 bg-foreground/70' : 'w-1.5 bg-foreground/25'
+            }`}
+            aria-label={`目標 ${i + 1}`}
+          />
+        ))}
+      </div>
     </div>
   );
 }
