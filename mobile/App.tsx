@@ -1265,6 +1265,8 @@ function AppMain() {
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [attachSheetOpen, setAttachSheetOpen] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  // 押し込み同期で写しが最新と分かっている時は「最新の状態を取得中…」を出さない
+  const [quietSync, setQuietSync] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
   // この端末発のストリームが生きているプロジェクトの集合（部屋別）。
   // 以前は sending + streamingProjectId のグローバル単一ストリームで、
@@ -1669,7 +1671,12 @@ function AppMain() {
     }
   }, []);
 
+  // 同時に呼ばれた一覧取得は1本にまとめる（起動時に boot と AppState('active') の両方から
+  // 呼ばれて2回取っていた）。進行中があればその Promise を返す。
+  const projectsInFlightRef = useRef<Promise<ProjectResponse[]> | null>(null);
   const refreshProjects = useCallback(async (activeToken: string) => {
+    if (projectsInFlightRef.current) return projectsInFlightRef.current;
+    const run = (async () => {
     const startedAt = Date.now();
     // 起動直後は端末内の写しを先に描く（通信を待たせない）。一覧が既にあれば触らない。
     if (projectsRef.current.length === 0) {
@@ -1689,6 +1696,13 @@ function AppMain() {
       return list;
     } finally {
       setLoadingProjects(false);
+    }
+    })();
+    projectsInFlightRef.current = run;
+    try {
+      return await run;
+    } finally {
+      projectsInFlightRef.current = null;
     }
   }, []);
 
@@ -1842,6 +1856,7 @@ function AppMain() {
       }
       SecureStore.setItemAsync(PROJECT_KEY, projectId).catch(() => null);
       const openStartedAt = Date.now();
+      setQuietSync(feedRef.current.fresh);
       setLoadingMessages(true);
       try {
         let roomId = knownRoom;
@@ -1921,6 +1936,138 @@ function AppMain() {
     },
     [dismissNotificationsForProject, markProjectReadLocally, refreshArtifacts],
   );
+
+  // ---- 押し込み同期（/chat/feed）----
+  // アプリが前面にある間1本の SSE をつなぎ、全部屋の新着をメモリ/端末内の写しへ差し込む。
+  // 復帰時は rooms-delta で「最後に受け取った時刻以降」を1往復で追いつく。
+  // 追いついた後は写しが最新なので、部屋を開いても「最新の状態を取得中…」を出さない。
+  const feedRef = useRef<{ es: EventSource<'hello' | 'message'> | null; lastAt: string | null; fresh: boolean; syncing: boolean }>(
+    { es: null, lastAt: null, fresh: false, syncing: false },
+  );
+  const applyFeedMessage = useCallback((msg: MessageResponse) => {
+    const roomId = msg.room_id;
+    if (!roomId || !msg.id) return;
+    const cur = messagesCacheRef.current[roomId] ?? [];
+    if (!cur.some((m) => m.id === msg.id)) {
+      const merged = [msg, ...cur]
+        .sort((a, b) => (b.created_at < a.created_at ? -1 : b.created_at > a.created_at ? 1 : 0))
+        .slice(0, 100);
+      messagesCacheRef.current[roomId] = merged;
+      deviceCache.write(`room-${roomId}`, merged);
+    }
+    const currentRoom = projectsRef.current.find((p) => p.id === currentProjectIdRef.current)?.room_id;
+    if (currentRoom === roomId) {
+      setMessages((current) => (current.some((m) => m.id === msg.id) ? current : [msg, ...current]));
+    }
+    setProjects((current) => {
+      let touched = false;
+      const next = current.map((p) => {
+        if (p.room_id !== roomId || (p.last_message_at || '') >= msg.created_at) return p;
+        touched = true;
+        return { ...p, last_message_at: msg.created_at, last_message_preview: (msg.content || '').slice(0, 80) };
+      });
+      return touched ? next : current;
+    });
+    if (msg.created_at > (feedRef.current.lastAt || '')) {
+      feedRef.current.lastAt = msg.created_at;
+      SecureStore.setItemAsync('done_feed_last_at', msg.created_at).catch(() => null);
+    }
+  }, []);
+  const feedCatchUp = useCallback(async (activeToken: string, reason: string) => {
+    const f = feedRef.current;
+    if (f.syncing) return;
+    if (!f.lastAt) {
+      f.lastAt = (await SecureStore.getItemAsync('done_feed_last_at').catch(() => null)) || null;
+    }
+    if (!f.lastAt) return;
+    f.syncing = true;
+    const t0 = Date.now();
+    try {
+      const data = await apiRequest<{ messages: MessageResponse[]; server_time: string; complete: boolean }>(
+        `/chat/rooms-delta?since=${encodeURIComponent(f.lastAt)}&limit=500`,
+        {},
+        activeToken,
+      );
+      for (const m of data.messages ?? []) applyFeedMessage(m);
+      const mark = data.complete ? data.server_time : data.messages?.[data.messages.length - 1]?.created_at;
+      if (mark) {
+        f.lastAt = mark;
+        SecureStore.setItemAsync('done_feed_last_at', mark).catch(() => null);
+      }
+      f.fresh = true;
+      perfLog('feed-catchup', Date.now() - t0, { reason, received: data.messages?.length ?? 0 }, activeToken);
+    } catch {
+      /* 次の機会に */
+    } finally {
+      f.syncing = false;
+    }
+  }, [applyFeedMessage]);
+  useEffect(() => {
+    if (!token) return;
+    let closed = false;
+    let retry = 1000;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const f = feedRef.current;
+    const connect = () => {
+      if (closed || AppState.currentState !== 'active') return;
+      const es = new EventSource<'hello' | 'message'>(`${API_BASE_URL}/api/v1/chat/feed`, {
+        headers: { Authorization: `Bearer ${token}` },
+        pollingInterval: 0,
+      });
+      f.es = es;
+      es.addEventListener('hello', (e) => {
+        retry = 1000;
+        try {
+          const d = JSON.parse((e as { data: string }).data) as { server_time: string };
+          void feedCatchUp(token, 'connect').then(() => {
+            if (!f.lastAt) {
+              f.lastAt = d.server_time;
+              SecureStore.setItemAsync('done_feed_last_at', d.server_time).catch(() => null);
+            }
+            f.fresh = true;
+          });
+        } catch {
+          /* ignore */
+        }
+      });
+      es.addEventListener('message', (e) => {
+        try {
+          const d = JSON.parse((e as { data: string }).data) as { message: MessageResponse };
+          if (d?.message) applyFeedMessage(d.message);
+        } catch {
+          /* ignore */
+        }
+      });
+      es.addEventListener('error', () => {
+        es.close();
+        if (f.es === es) f.es = null;
+        f.fresh = false;
+        if (closed) return;
+        retryTimer = setTimeout(connect, retry);
+        retry = Math.min(retry * 2, 30_000);
+      });
+    };
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        void feedCatchUp(token, 'resume');
+        if (!f.es) connect();
+      } else {
+        // 背面では切る（バッテリー/接続数）。復帰時に delta で追いつく
+        f.es?.close();
+        f.es = null;
+        f.fresh = false;
+      }
+    });
+    connect();
+    return () => {
+      closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      f.es?.close();
+      f.es = null;
+      f.fresh = false;
+      sub.remove();
+    };
+  }, [token, applyFeedMessage, feedCatchUp]);
 
   const runSearch = useCallback(
     async (q: string) => {
@@ -3706,7 +3853,7 @@ function AppMain() {
 
         {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
             これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
-        {loadingMessages && messages.length > 0 ? (
+        {loadingMessages && messages.length > 0 && !quietSync ? (
           <View style={styles.messagesRefreshBar}>
             <ActivityIndicator color="#7fd1c7" size="small" />
             <Text style={styles.messagesRefreshText}>最新の状態を取得中…</Text>
