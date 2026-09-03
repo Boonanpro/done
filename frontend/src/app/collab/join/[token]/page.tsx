@@ -16,6 +16,7 @@ import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
+import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
 
@@ -66,6 +67,8 @@ export default function GuestJoinPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [readByOther, setReadByOther] = useState<string | null>(null);
   const [danMode, setDanMode] = useState(false);
   const [danThinking, setDanThinking] = useState(false);
@@ -320,9 +323,25 @@ export default function GuestJoinPage() {
 
   const handleSend = async () => {
     const content = input.trim();
-    if (!content) return;
-    const finalContent = danMode ? `@ダン ${content}` : content;
+    if ((!content && pendingFiles.length === 0) || isUploading) return;
+    const finalContent = danMode && content ? `@ダン ${content}` : content;
     const metadata: Record<string, unknown> = {};
+    // 添付は送信時にまとめてアップロード → files[] として本文と同じメッセージに載せる
+    const filesToSend = pendingFiles;
+    if (filesToSend.length > 0 && roomId && guestToken) {
+      setIsUploading(true);
+      try {
+        const uploaded = await uploadCollabFiles(roomId, filesToSend, { guestToken });
+        metadata.files = uploaded;
+        metadata.file = uploaded[0];
+      } catch {
+        toast.error('アップロードに失敗しました');
+        setIsUploading(false);
+        return;
+      }
+      setIsUploading(false);
+      setPendingFiles([]);
+    }
     if (replyTo) {
       metadata.reply_to = {
         id: replyTo.id,
@@ -334,7 +353,7 @@ export default function GuestJoinPage() {
     const md = Object.keys(metadata).length > 0 ? metadata : undefined;
     // @ダン の私的相談だけは WS 専用機能なので接続時は WS、それ以外は常に REST
     // （確実・即時に自分の画面へ反映。WS は受信専用）。
-    if (danMode && isConnected) {
+    if (danMode && isConnected && filesToSend.length === 0) {
       wsSend(finalContent, md);
       setInput('');
       setReplyTo(null);
@@ -363,37 +382,15 @@ export default function GuestJoinPage() {
       toast.error('送信に失敗しました。通信環境をご確認ください');
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(savedInput);
+      if (filesToSend.length > 0) setPendingFiles(filesToSend);
     }
   };
 
-  // 複数選択をまとめて1メッセージ（LINE式にグリッド表示される）
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 添付ボタン: 送信前の一覧に積むだけ（送信は handleSend で本文と一緒に）
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    if (files.length === 0 || !roomId || !guestToken) return;
-    setIsUploading(true);
-    try {
-      const uploaded: { id: string; name: string; url: string; type: string; size: number }[] = [];
-      for (const file of files) {
-        const formData = new FormData();
-        formData.append('file', file);
-        const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
-          method: 'POST',
-          headers: { 'X-Guest-Token': guestToken },
-          body: formData,
-        });
-        if (!res.ok) throw new Error('Upload failed');
-        const fileData = await res.json();
-        uploaded.push({ id: fileData.id, name: fileData.file_name, url: fileData.file_path, type: fileData.file_type || file.type, size: fileData.file_size });
-      }
-      const fileMeta = { files: uploaded, file: uploaded[0] };
-      const sent = await api.collab.sendMessage(roomId, '', guestToken, fileMeta);
-      handleNewMessage(sent);
-    } catch {
-      toast.error('アップロードに失敗しました');
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
+    if (files.length > 0) setPendingFiles((prev) => [...prev, ...files]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   // Wait for localStorage to load before showing form
@@ -723,6 +720,7 @@ export default function GuestJoinPage() {
           <Bot className="h-4 w-4" />
         </Button>
         <div className="flex-1 relative">
+          <PendingAttachments files={pendingFiles} onRemove={(i) => setPendingFiles((p) => p.filter((_, j) => j !== i))} />
           {danMode && (
             <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] text-violet-400 font-medium pointer-events-none">
               DAN宛
@@ -746,10 +744,10 @@ export default function GuestJoinPage() {
         <Button
           size="icon"
           onClick={handleSend}
-          disabled={!input.trim()}
+          disabled={(!input.trim() && pendingFiles.length === 0) || isUploading}
           className={`transition-transform active:scale-90 ${danMode ? "bg-violet-600 hover:bg-violet-700" : ""}`}
         >
-          <Send className="h-4 w-4" />
+          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
       </div>

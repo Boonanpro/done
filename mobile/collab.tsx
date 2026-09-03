@@ -3,7 +3,7 @@
 // 通信は REST ポーリングのみ（Web 版の Vercel フォールバックと同一経路＝確実に動く）。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Linking, Platform, Pressable,
+  ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Linking, Platform, Pressable,
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -43,6 +43,7 @@ export interface CollabRoomSummary {
 }
 
 type CollabFile = { id?: string; name: string; url: string; type?: string; size?: number };
+type PendingFile = { uri: string; name: string; mime: string };
 
 interface CollabMessage {
   id: string;
@@ -234,6 +235,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
+  const [pending, setPending] = useState<PendingFile[]>([]);
   const listRef = useRef<FlatList>(null);
 
   // 受信合流点: client_msg_id の仮バブルは差し替え（Web と同一ロジック）
@@ -319,7 +322,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   // 送信（楽観表示＋client_msg_id 差し替え）
   const send = useCallback(async (content: string, extraMeta?: Record<string, unknown>) => {
     const text = content.trim();
-    if (!text) return;
+    if (!text && !(extraMeta && (extraMeta as { files?: unknown[] }).files?.length)) return;
     const tempId = `temp-${Date.now()}`;
     const metadata: Record<string, unknown> = { ...(extraMeta || {}), client_msg_id: tempId };
     const optimistic: CollabMessage = {
@@ -366,20 +369,6 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     } catch { /* 次のポーリングで実状態に戻る */ }
   }, [roomId, request, myName]);
 
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
-    setInput('');
-    setSending(true);
-    try {
-      await send(text);
-    } catch {
-      setInput(text);
-    } finally {
-      setSending(false);
-    }
-  }, [input, sending, send]);
-
   // 添付: 写真・動画（複数）またはファイル → 全部アップロード → 1メッセージ（LINE式グリッド）
   const uploadOne = useCallback(async (uri: string, name: string, mime: string): Promise<CollabFile> => {
     const form = new FormData();
@@ -394,30 +383,43 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     return { id: d.id, name: d.file_name, url: d.file_path, type: d.file_type || mime, size: d.file_size };
   }, [apiBase, roomId, token]);
 
-  const sendFiles = useCallback(async (picked: { uri: string; name: string; mime: string }[]) => {
-    if (picked.length === 0) return;
-    setUploading(true);
-    const tempId = `temp-${Date.now()}`;
-    try {
-      const files: CollabFile[] = [];
-      for (const p of picked) files.push(await uploadOne(p.uri, p.name, p.mime));
-      const metadata = { files, file: files[0], client_msg_id: tempId };
-      animateNextLayout();
-      setMessages((prev) => [...prev, {
-        id: tempId, room_id: roomId, sender_type: 'owner', sender_name: participants?.owner.name || 'あなた',
-        content: '', metadata, created_at: new Date().toISOString(),
-      }]);
-      const sent = await request<CollabMessage>(`/collab/rooms/${roomId}/messages`, {
-        method: 'POST', body: JSON.stringify({ content: '', metadata }),
-      });
-      mergeMessage(sent);
-    } catch (e) {
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      Alert.alert('送信に失敗しました', String((e as Error).message));
-    } finally {
+  const handleSend = useCallback(async () => {
+    const text = input.trim();
+    if ((!text && pending.length === 0) || sending || uploading) return;
+    const filesToSend = pending;
+    let extra: Record<string, unknown> | undefined;
+    if (filesToSend.length > 0) {
+      setUploading(true);
+      try {
+        const files: CollabFile[] = [];
+        for (const p of filesToSend) files.push(await uploadOne(p.uri, p.name, p.mime));
+        extra = { files, file: files[0] };
+        setPending([]);
+      } catch (e) {
+        Alert.alert('アップロードに失敗しました', String((e as Error).message));
+        setUploading(false);
+        return;
+      }
       setUploading(false);
     }
-  }, [uploadOne, roomId, request, participants, mergeMessage]);
+    setInput('');
+    setSending(true);
+    try {
+      await send(text, extra);
+    } catch {
+      setInput(text);
+      if (filesToSend.length > 0) setPending(filesToSend);
+    } finally {
+      setSending(false);
+    }
+  }, [input, pending, sending, uploading, send, uploadOne]);
+
+
+  const sendFiles = useCallback(async (picked: PendingFile[]) => {
+    if (picked.length === 0) return;
+    animateNextLayout();
+    setPending((prev) => [...prev, ...picked]);
+  }, []);
 
   const pickMedia = useCallback(async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -556,6 +558,25 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         }
       />
 
+      {pending.length > 0 && (
+        <View style={s.pendingStrip}>
+          {pending.map((p, i) => (
+            <View key={`${p.uri}-${i}`} style={s.pendingItem}>
+              {p.mime.startsWith('image/') ? (
+                <Image source={{ uri: p.uri }} style={s.pendingThumb} />
+              ) : (
+                <View style={[s.pendingThumb, s.pendingFileBox]}>
+                  <Ionicons name={p.mime.startsWith('video/') ? 'videocam' : 'document-text'} size={20} color={C.muted} />
+                  <Text style={s.pendingName} numberOfLines={1}>{p.name}</Text>
+                </View>
+              )}
+              <Pressable style={s.pendingRemove} hitSlop={6} onPress={() => setPending((prev) => prev.filter((_, j) => j !== i))}>
+                <Ionicons name="close" size={12} color={C.bg} />
+              </Pressable>
+            </View>
+          ))}
+        </View>
+      )}
       <View style={[s.composer, { paddingBottom: Math.max(bottomInset, 8) }]}>
         <Pressable
           style={({ pressed }) => [s.attachBtn, pressedScale({ pressed })]}
@@ -563,7 +584,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
           disabled={uploading}
           hitSlop={6}
         >
-          {uploading ? <ActivityIndicator size="small" color={C.muted} /> : <Ionicons name="attach" size={22} color={C.muted} />}
+          <Ionicons name="attach" size={22} color={C.muted} />
         </Pressable>
         <TextInput
           style={s.input}
@@ -574,11 +595,11 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
           multiline
         />
         <Pressable
-          style={({ pressed }) => [s.sendBtn, (!input.trim() || sending) && { opacity: 0.4 }, pressedScale({ pressed })]}
+          style={({ pressed }) => [s.sendBtn, ((!input.trim() && pending.length === 0) || sending || uploading) && { opacity: 0.4 }, pressedScale({ pressed })]}
           onPress={handleSend}
-          disabled={!input.trim() || sending}
+          disabled={(!input.trim() && pending.length === 0) || sending || uploading}
         >
-          <Ionicons name="send" size={18} color="#0c1513" />
+          {uploading ? <ActivityIndicator size="small" color="#0c1513" /> : <Ionicons name="send" size={18} color="#0c1513" />}
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -854,6 +875,12 @@ const s = StyleSheet.create({
   unreadBadge: { alignItems: 'center', backgroundColor: C.danger, borderRadius: 13, minWidth: 26, height: 26, justifyContent: 'center', paddingHorizontal: 7 },
   unreadBadgeText: { color: '#fffaf5', fontSize: 11, fontWeight: '900' },
   attachBtn: { paddingVertical: 8, paddingHorizontal: 2, justifyContent: 'center' },
+  pendingStrip: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 12, paddingTop: 8, backgroundColor: C.bg, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
+  pendingItem: { position: 'relative' },
+  pendingThumb: { width: 60, height: 60, borderRadius: 10, backgroundColor: C.card },
+  pendingFileBox: { width: 110, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, gap: 2 },
+  pendingName: { color: C.muted, fontSize: 10, maxWidth: 96 },
+  pendingRemove: { position: 'absolute', top: -5, right: -5, backgroundColor: C.text, borderRadius: 9, width: 18, height: 18, alignItems: 'center', justifyContent: 'center' },
   sep: { height: StyleSheet.hairlineWidth, backgroundColor: C.border, marginLeft: 72 },
 
   thinkingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-end', backgroundColor: C.violetBg, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, marginTop: 8 },

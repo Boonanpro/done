@@ -12,6 +12,7 @@ import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { OutboundMessageCard } from '@/components/chat/outbound-message-card';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
+import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
 import { useUnreadStore } from '@/stores/unread-store';
 import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
@@ -84,6 +85,8 @@ export default function CollabRoomPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [danThinking, setDanThinking] = useState(false);
   const [readByOther, setReadByOther] = useState<string | null>(null); // last message_id read by other side
   // Reply generation state - keyed by message ID to survive re-renders
@@ -236,8 +239,24 @@ export default function CollabRoomPage() {
   // ダンへの返事は相談メッセージ内のスレッド入力欄から（sendPrivateReply）。
   const handleSend = async () => {
     const content = input.trim();
-    if (!content) return;
+    if ((!content && pendingFiles.length === 0) || isUploading) return;
     const metadata: Record<string, unknown> = {};
+    // 添付は送信時にまとめてアップロード → files[] として本文と同じメッセージに載せる
+    const filesToSend = pendingFiles;
+    if (filesToSend.length > 0) {
+      setIsUploading(true);
+      try {
+        const uploaded = await uploadCollabFiles(roomId, filesToSend, { token });
+        metadata.files = uploaded;
+        metadata.file = uploaded[0];
+      } catch (err) {
+        toast.error(`アップロードに失敗しました: ${(err as Error).message}`);
+        setIsUploading(false);
+        return;
+      }
+      setIsUploading(false);
+      setPendingFiles([]);
+    }
     if (replyTo) {
       metadata.reply_to = {
         id: replyTo.id,
@@ -269,6 +288,7 @@ export default function CollabRoomPage() {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setInput(content);
       setReplyTo(savedReplyTo);
+      if (filesToSend.length > 0) setPendingFiles(filesToSend);
     }
   };
 
@@ -341,45 +361,11 @@ export default function CollabRoomPage() {
     return map;
   }, [messages, messageIds]);
 
-  // File upload
-  // 複数選択をまとめて1メッセージ（LINE式にグリッド表示される）。
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 添付ボタン: 送信前の一覧に積むだけ（送信は handleSend で本文と一緒に）
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    setIsUploading(true);
-    let current: File | null = null;
-    try {
-      const uploaded: { id: string; name: string; url: string; type: string; size: number }[] = [];
-      for (const file of files) {
-        current = file;
-        const formData = new FormData();
-        formData.append('file', file);
-        const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData,
-        });
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => '');
-          throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ' | ' + bodyText.slice(0, 200) : ''}`);
-        }
-        const fileData = await res.json();
-        uploaded.push({ id: fileData.id, name: fileData.file_name, url: fileData.file_path, type: fileData.file_type || file.type, size: fileData.file_size });
-      }
-      const fileMeta = { files: uploaded, file: uploaded[0] };
-      const sent = await api.collab.sendMessage(roomId, '', undefined, fileMeta);
-      handleNewMessage(sent);
-    } catch (err: unknown) {
-      const file = current;
-      const errAny = err as { name?: string; message?: string };
-      const errSummary = [errAny?.name, errAny?.message].filter(Boolean).join(' | ') || String(err);
-      const fileSummary = file ? `${file.name || '(no name)'} [${file.type || 'no-type'}, ${file.size}B]` : '(no file)';
-      console.error('[collab upload] failed:', err, file);
-      toast.error(`アップロード失敗(collab): ${errSummary}\nfile: ${fileSummary}`, { duration: 20000 });
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
+    if (files.length > 0) setPendingFiles((prev) => [...prev, ...files]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   // Create invite
@@ -742,6 +728,7 @@ export default function CollabRoomPage() {
           <Paperclip className="h-4 w-4" />
         </Button>
         <div className="flex-1 relative">
+          <PendingAttachments files={pendingFiles} onRemove={(i) => setPendingFiles((p) => p.filter((_, j) => j !== i))} />
           <textarea
             ref={inputRef as any}
             placeholder="メッセージを入力..."
@@ -760,10 +747,10 @@ export default function CollabRoomPage() {
         <Button
           size="icon"
           onClick={handleSend}
-          disabled={!input.trim()}
+          disabled={(!input.trim() && pendingFiles.length === 0) || isUploading}
           className="transition-transform active:scale-90"
         >
-          <Send className="h-4 w-4" />
+          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
       </div>
