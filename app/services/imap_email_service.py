@@ -143,13 +143,25 @@ def _extract_and_save_attachments(msg: email.message.Message, message_id: str) -
     return out
 
 
-def _connect(provider_key: str) -> Optional[imaplib.IMAP4_SSL]:
-    cfg = PROVIDERS[provider_key]
+def mailbox_address(provider_key: str) -> str:
+    """設定済みのアドレス（未設定なら空文字）。ツール説明などの表示用。"""
+    cfg = PROVIDERS.get(provider_key)
+    return (getattr(settings, cfg["address_attr"], "") or "") if cfg else ""
+
+
+def connect_mailbox(provider_key: str) -> imaplib.IMAP4_SSL:
+    """PROVIDERS のキーで IMAP にログインして返す。失敗は RuntimeError（原因入り）。
+
+    受信メール同期と見張り(mail_watch)の両方がここを通る＝接続先・認証情報・
+    アプリパスワードの正規化（空白/ハイフン除去）を1か所で持つ。
+    """
+    cfg = PROVIDERS.get(provider_key)
+    if not cfg:
+        raise RuntimeError(f"mailbox '{provider_key}' は未対応です（{' / '.join(PROVIDERS)} のいずれか）")
     addr = getattr(settings, cfg["address_attr"], "") or ""
     pw = getattr(settings, cfg["password_attr"], "") or ""
     if not addr or not pw:
-        logger.info("imap %s: not configured", provider_key)
-        return None
+        raise RuntimeError(f"{cfg['address_attr']} / {cfg['password_attr']} が .env にありません")
     M = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
     pw_clean = pw.replace(" ", "").replace("-", "")  # iCloud 表示は xxxx-xxxx 形式だが認証時は連結
     try:
@@ -159,11 +171,19 @@ def _connect(provider_key: str) -> Optional[imaplib.IMAP4_SSL]:
         except imaplib.IMAP4.error:
             M.login(addr, pw_clean)
     except imaplib.IMAP4.error as e:
-        logger.error("imap %s login failed: %s", provider_key, e)
         try: M.logout()
         except Exception: pass
-        return None
+        raise RuntimeError(f"imap {provider_key} login failed: {e}") from e
     return M
+
+
+def _connect(provider_key: str) -> Optional[imaplib.IMAP4_SSL]:
+    """受信メール同期用: 未設定/ログイン失敗はログに残して None（同期は他の受信箱を続ける）。"""
+    try:
+        return connect_mailbox(provider_key)
+    except RuntimeError as e:
+        logger.warning("imap %s: %s", provider_key, e)
+        return None
 
 
 async def fetch_provider(user_id: str, provider_key: str, max_messages: int = 30) -> dict:

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 from app.workspace import resolve_cli_workspace
+from app.services.mail_watch import MAILBOX_KEYS as _MAILBOX_KEYS, describe_mailboxes as _describe_mailboxes
 CLI_WORKSPACE = resolve_cli_workspace()
 
 # バックグラウンドタスクの参照を保持（GC防止）
@@ -578,7 +579,7 @@ WATCH_TOOL = {
 【3種類】
 - at: 一回きりの時刻予約（「明日10時に確認」）。at か delay_seconds を指定。
 - every: 定期実行。①秒間隔（interval_seconds、300以上）②毎月N日（monthly_day + time_of_day。31は月末に丸まる）③毎週X曜（weekly_day 0=月〜6=日 + time_of_day）。毎月の資料作成・送付、毎月の振込準備などの定期業務はこれで登録する。
-- mail: 特定の差出人からのメール着信で起こす（「税理士からメールが来たら」）。mail_from に差出人アドレスまたはドメイン（例 "taxdr-kim.com"）。現在 iCloud 受信箱のみ対応。登録時点より前の既読メールでは起きない。
+- mail: 特定の差出人からのメール着信で起こす（「税理士からメールが来たら」）。mail_from に差出人アドレスまたはドメイン（例 "taxdr-kim.com"）。mailbox で見る受信箱を選ぶ（{mailboxes}。既定 icloud）。複数の受信箱を見張るなら受信箱ごとに1件ずつ登録する。登録時点より前の既読メールでは起きない。
 
 【使い方】
 - 登録: watch(action="create", note="起こされた時に何を確認・報告するか", ...)。kind は指定パラメータから自動判定される（mail_from があれば mail、interval_seconds のみなら every、それ以外は at）。
@@ -602,12 +603,15 @@ WATCH_TOOL = {
             "time_of_day": {"type": "string", "description": "monthly_day/weekly_day用: 実行時刻 HH:MM（JST、既定09:00）"},
             "mail_from": {"type": "string", "description": "mail用: 差出人アドレスまたはドメイン"},
             "mail_subject_contains": {"type": "string", "description": "mail用: 件名に含まれるべき文字列（任意）"},
+            "mailbox": {"type": "string", "enum": list(_MAILBOX_KEYS), "description": "mail用: 見張る受信箱（既定 icloud）"},
             "hold_browser": {"type": "boolean", "description": "この部屋のブラウザを見張り解決まで自動クローズさせない（画面を開いたまま待つ時のみtrue）"},
             "watch_id": {"type": "string", "description": "cancel用: 対象の見張りID"},
         },
         "required": ["action"],
     },
 }
+# 受信箱の一覧とアドレスは .env（imap_email_service.PROVIDERS）から。直書きしない。
+WATCH_TOOL["description"] = WATCH_TOOL["description"].replace("{mailboxes}", _describe_mailboxes())
 
 # ============================================
 # 認証情報: サービス名正規化
@@ -4471,6 +4475,8 @@ async def _execute_watch(
         spec["from"] = mail_from
         if (params.get("mail_subject_contains") or "").strip():
             spec["subject_contains"] = params["mail_subject_contains"].strip()
+        if (params.get("mailbox") or "").strip():
+            spec["mailbox"] = params["mailbox"].strip().lower()
         if interval:
             spec["interval_seconds"] = interval
     elif monthly_day is not None or weekly_day is not None:

@@ -5,7 +5,7 @@ Generalized from scripts/watch_zeirishi_mail.py (which was a hardcoded
 one-off for taxdr-kim.com). A watch's spec drives everything:
 
   spec = {
-    "mailbox": "icloud",              # only icloud for now (Gmail arrives via email_poller)
+    "mailbox": "icloud",              # imap_email_service.PROVIDERS のキー (icloud / gmail / gmail2)
     "from": "taxdr-kim.com",          # sender address or domain substring
     "subject_contains": "請求",       # optional extra filter
     "last_uid": 64292,                # advanced after each successful check
@@ -19,16 +19,14 @@ so registering a watch never dredges up already-read mail.
 from __future__ import annotations
 
 import email
-import imaplib
 import logging
 import re
 from email.header import decode_header
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-logger = logging.getLogger(__name__)
+from app.services.imap_email_service import PROVIDERS, connect_mailbox, mailbox_address
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+logger = logging.getLogger(__name__)
 
 MAX_PER_CHECK = 3
 BODY_LIMIT = 2500
@@ -71,13 +69,13 @@ def _trim_quote(text: str) -> str:
     return re.split(r"\n\s*From:\s", text, maxsplit=1)[0].strip()
 
 
-def _icloud_credentials() -> Tuple[str, str]:
-    from dotenv import dotenv_values
-    cfg = dotenv_values(str(ROOT / ".env"))
-    addr, pw = cfg.get("ICLOUD_ADDRESS"), cfg.get("ICLOUD_APP_PASSWORD")
-    if not addr or not pw:
-        raise RuntimeError("ICLOUD_ADDRESS / ICLOUD_APP_PASSWORD が .env にありません")
-    return addr, pw
+# 見張れる受信箱 = 受信メール同期と同じ PROVIDERS（icloud / gmail / gmail2）。
+MAILBOX_KEYS: Tuple[str, ...] = tuple(PROVIDERS)
+
+
+def describe_mailboxes() -> str:
+    """ツール説明用: 'icloud=xxx@icloud.com / gmail=yyy@gmail.com ...'（.env から）。"""
+    return " / ".join(f"{k}={mailbox_address(k) or '未設定'}" for k in MAILBOX_KEYS)
 
 
 def check_mail_watch(spec: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
@@ -86,17 +84,13 @@ def check_mail_watch(spec: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[st
     Raises on connection/auth errors — the caller decides retry policy.
     """
     mailbox = (spec.get("mailbox") or "icloud").lower()
-    if mailbox != "icloud":
-        raise RuntimeError(f"mailbox '{mailbox}' は未対応です（現状 icloud のみ）")
 
     sender_match = (spec.get("from") or "").strip()
     subject_contains = (spec.get("subject_contains") or "").strip()
     last_uid = int(spec.get("last_uid") or 0)
 
-    addr, pw = _icloud_credentials()
-    M = imaplib.IMAP4_SSL("imap.mail.me.com", 993)
+    M = connect_mailbox(mailbox)
     try:
-        M.login(addr, pw)
         M.select("INBOX", readonly=True)
         typ, data = M.uid("SEARCH", None, "FROM", sender_match)
         uids = [int(u) for u in (data[0].split() if data and data[0] else [])]
