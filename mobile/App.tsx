@@ -1,3 +1,4 @@
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Updates from 'expo-updates';
 import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
@@ -91,6 +92,30 @@ const perfLog = (event: string, ms: number, extra?: Record<string, unknown>, tok
   }).catch(() => undefined);
 };
 console.log(`[perf] startup update=${Updates.updateId ?? 'embedded'} created=${Updates.createdAt ? Updates.createdAt.toISOString() : '-'} channel=${Updates.channel ?? '-'}`);
+
+// 端末内キャッシュ（LINE方式: 手元の写しを先に描き、通信は裏で差分）。
+// SecureStore は 2KB 上限なので expo-file-system を使う。失敗しても何もしない。
+const CACHE_DIR = `${FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? ''}dan-cache/`;
+const deviceCache = {
+  async read<T>(name: string): Promise<T | null> {
+    try {
+      const raw = await FileSystem.readAsStringAsync(`${CACHE_DIR}${name}.json`);
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  },
+  write(name: string, data: unknown): void {
+    void (async () => {
+      try {
+        await FileSystem.makeDirectoryAsync(CACHE_DIR, { intermediates: true }).catch(() => undefined);
+        await FileSystem.writeAsStringAsync(`${CACHE_DIR}${name}.json`, JSON.stringify(data));
+      } catch {
+        /* ignore */
+      }
+    })();
+  },
+};
 
 const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
 
@@ -1645,11 +1670,23 @@ function AppMain() {
   }, []);
 
   const refreshProjects = useCallback(async (activeToken: string) => {
+    const startedAt = Date.now();
+    // 起動直後は端末内の写しを先に描く（通信を待たせない）。一覧が既にあれば触らない。
+    if (projectsRef.current.length === 0) {
+      const cached = await deviceCache.read<ProjectResponse[]>('projects');
+      if (cached && cached.length && projectsRef.current.length === 0) {
+        setProjects(cached);
+        perfLog('projects-visible-cached', Date.now() - startedAt, { count: cached.length }, activeToken);
+      }
+    }
     setLoadingProjects(true);
     try {
       const data = await apiRequest<ProjectListResponse>('/projects', {}, activeToken);
-      setProjects(data.projects ?? []);
-      return data.projects ?? [];
+      const list = data.projects ?? [];
+      setProjects(list);
+      deviceCache.write('projects', list);
+      perfLog('projects-visible-net', Date.now() - startedAt, { count: list.length }, activeToken);
+      return list;
     } finally {
       setLoadingProjects(false);
     }
@@ -1793,6 +1830,16 @@ function AppMain() {
       // 開いた瞬間に対象の部屋のキャッシュを描く。部屋が未知なら空にする
       // （前に見ていた部屋のメッセージを新しい部屋に残像として出さない）。
       setMessages(knownRoom ? messagesCacheRef.current[knownRoom] ?? [] : []);
+      if (knownRoom && !(messagesCacheRef.current[knownRoom]?.length)) {
+        // メモリに無ければ端末内の写しを描く（アプリ再起動後の初回オープン対策）
+        void deviceCache.read<MessageResponse[]>(`room-${knownRoom}`).then((cached) => {
+          if (!cached?.length || currentProjectIdRef.current !== projectId) return;
+          setMessages((current) => (current.length ? current : cached));
+          messagesCacheRef.current[knownRoom] = messagesCacheRef.current[knownRoom]?.length
+            ? messagesCacheRef.current[knownRoom]
+            : cached;
+        });
+      }
       SecureStore.setItemAsync(PROJECT_KEY, projectId).catch(() => null);
       const openStartedAt = Date.now();
       setLoadingMessages(true);
@@ -1853,6 +1900,7 @@ function AppMain() {
           }
         }
         messagesCacheRef.current[roomId] = fetched;
+        deviceCache.write(`room-${roomId}`, fetched);
         // 既読は応答を待たずに送る
         apiRequest(`/chat/rooms/${roomId}/read`, { method: 'POST' }, activeToken).catch(() => null);
         setCurrentProject((current) =>
