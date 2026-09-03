@@ -1267,6 +1267,12 @@ def _save_ai_message_sync(
                 # indicator. This is the same bookkeeping ChatService.send_*
                 # does via _record_message_delivery; without it, AI replies
                 # stay invisible as "unread" because we bypass the service.
+                # 押し込み同期（ワーカースレッドから呼ぶ。購読者のループへ threadsafe に渡る）
+                try:
+                    from app.services.room_feed import publish_message
+                    publish_message(room_id, {**result.data[0], "sender_name": "ダン"})
+                except Exception:  # noqa: BLE001
+                    pass
                 record_message_delivery_sync(sb, room_id, msg_id, content=content)
                 # 嘘宣言チェッカー: blocks が渡された保存（＝ターン確定の本文）のみ対象。
                 if blocks is not None:

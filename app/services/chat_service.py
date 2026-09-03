@@ -662,6 +662,12 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
+            # 押し込み同期: この部屋のメンバーの新着ストリームへ流す（購読者が無ければ即return）
+            try:
+                from app.services.room_feed import publish_message
+                publish_message(room_id, msg)
+            except Exception:  # noqa: BLE001
+                pass
             await self._record_message_delivery(room_id, msg["id"], sender_id=sender_id, content=content)
             
             # Phase 5A: メッセージ検知フック（AI有効ルームのみ）
@@ -1273,6 +1279,11 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = "ダン"
+            try:
+                from app.services.room_feed import publish_message
+                publish_message(target_room_id, msg)
+            except Exception:  # noqa: BLE001
+                pass
             await self._record_message_delivery(target_room_id, msg["id"], content=content)
             return msg
         raise ValueError("Failed to send AI message")

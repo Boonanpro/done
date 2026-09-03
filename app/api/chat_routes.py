@@ -2991,6 +2991,68 @@ async def record_perf_event(body: PerfEventIn, current_user: TokenData = Depends
     return {"ok": True}
 
 
+@router.get("/feed")
+async def room_feed(request: Request, current_user: TokenData = Depends(get_current_user)):
+    """本人向けの新着ストリーム(SSE)。開いている間つなぎっぱなしにし、全部屋の新着
+    メッセージを押し込む。15秒ごとに ping。切れていた間の分は /rooms/delta で追いつく。"""
+    from starlette.responses import StreamingResponse
+    from app.services.room_feed import subscribe
+    import json as _json
+
+    async def gen():
+        yield "event: hello\ndata: " + _json.dumps({"server_time": datetime.now(timezone.utc).isoformat()}) + "\n\n"
+        async for ev in subscribe(current_user.user_id):
+            if await request.is_disconnected():
+                break
+            if ev.get("type") == "ping":
+                yield ": ping\n\n"
+                continue
+            yield "event: " + str(ev["type"]) + "\ndata: " + _json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive",
+    })
+
+
+@router.get("/rooms-delta")  # /rooms/{room_id} より先にマッチさせないため別パス
+async def rooms_delta(
+    since: str,
+    limit: int = 300,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """since(ISO) 以降に本人の全部屋へ入ったメッセージをまとめて返す（1往復で追いつく）。
+    ストリームが切れていた間・アプリを閉じていた間の差分用。"""
+    from app.services.room_feed import _slim_message
+
+    user_id = current_user.user_id
+    limit = max(1, min(limit, 1000))
+
+    def _fetch():
+        sb = service.supabase
+        rooms = sb.table("chat_room_members").select("room_id").eq("user_id", user_id).execute().data or []
+        ids = [r["room_id"] for r in rooms if r.get("room_id")]
+        if not ids:
+            return [], True
+        rows = (
+            sb.table("chat_messages")
+            .select("*, sender:users!sender_id(display_name)")
+            .in_("room_id", ids).gt("created_at", since)
+            .order("created_at", desc=False).limit(limit + 1).execute().data or []
+        )
+        more = len(rows) > limit
+        rows = rows[:limit]
+        out = []
+        for m in rows:
+            m = dict(m)
+            m["sender_name"] = (m.get("sender") or {}).get("display_name") or ("ダン" if m.get("sender_type") == "ai" else "Unknown")
+            out.append(_slim_message(m))
+        return out, not more
+
+    messages, complete = await asyncio.to_thread(_fetch)
+    return {"since": since, "server_time": datetime.now(timezone.utc).isoformat(), "messages": messages, "complete": complete}
+
+
 @router.get("/rooms/{room_id}/open")
 async def open_room(
     room_id: str,
