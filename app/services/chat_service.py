@@ -2,10 +2,12 @@
 Chat Service - Business Logic for Done Chat
 """
 from typing import Optional, Callable, Any
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import secrets
 import re
 import asyncio
+import time
 import random
 import logging
 
@@ -109,11 +111,23 @@ def record_message_delivery_sync(
     incremented. Best-effort; failures are logged but do not raise.
     """
     now = datetime.now(timezone.utc).isoformat()
+
+    # 外部窓口（collab）対応の作業ログ（「窓口ログ:」で始まるai発言）は「静かな記録」:
+    # 部屋を未読にせず、一覧の並び・プレビューも動かさない。ユーザーは
+    # コミュニケーションタブ側の通知で対応する（本人の要望 2026-08-31）。
+    _head = (content or "").lstrip()
+    if _head.startswith("窓口ログ:") or _head.startswith("窓口:"):
+        return
+
     try:
         room_update: dict = {"last_message_at": now}
         if content is not None:
             room_update["last_message_preview"] = build_message_preview(content)
         sb.table("chat_rooms").update(room_update).eq("id", room_id).execute()
+
+        # ダンの👍リアクション（受領スタンプ）は情報を運ばないので、部屋一覧の
+        # 未読バッジを増やさない。「数字が出たから見に行ったら👍だけだった」を防ぐ。
+        is_reaction = (content or "").strip() == "👍"
 
         members = sb.table("chat_room_members").select(
             "id,user_id,unread_count"
@@ -130,6 +144,8 @@ def record_message_delivery_sync(
                 sb.table("chat_room_members").update(update_data).eq("id", member["id"]).execute()
                 continue
 
+            if is_reaction:
+                continue
             current = member.get("unread_count") or 0
             sb.table("chat_room_members").update({
                 "unread_count": current + 1,
@@ -554,6 +570,9 @@ class ChatService:
                 room_update["last_message_preview"] = build_message_preview(content)
             self.supabase.table("chat_rooms").update(room_update).eq("id", room_id).execute()
 
+            # ダンの👍リアクションは未読バッジを増やさない（record_message_delivery_sync と同じ規約）。
+            is_reaction = (content or "").strip() == "👍"
+
             members = self.supabase.table("chat_room_members").select(
                 "id,user_id,unread_count"
             ).eq("room_id", room_id).execute()
@@ -567,6 +586,8 @@ class ChatService:
                     }).eq("id", member["id"]).execute()
                     continue
 
+                if is_reaction:
+                    continue
                 current = member.get("unread_count") or 0
                 self.supabase.table("chat_room_members").update({
                     "unread_count": current + 1,
@@ -613,14 +634,29 @@ class ChatService:
             import re as _re
             if _re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", message_id):
                 insert_data["id"] = message_id
+        if "id" not in insert_data:
+            # Client-assigned PK so _execute_with_retry cannot double-insert
+            # when the first INSERT landed but the response was lost.
+            import uuid as _uuid
+            insert_data["id"] = str(_uuid.uuid4())
         if reply_to_id:
             insert_data["reply_to"] = reply_to_id
         if created_at:
             insert_data["created_at"] = created_at
 
+        def _insert_idempotent():
+            try:
+                return self.supabase.table("chat_messages").insert(insert_data).execute()
+            except Exception as exc:
+                # 23505 = our own id already exists: a previous attempt landed
+                # but its response was lost. Read the row back instead of failing.
+                if "23505" in str(exc) or "duplicate key" in str(exc).lower():
+                    return self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
+                raise
+
         result = await self._execute_with_retry(
             "send_message.insert_message",
-            lambda: self.supabase.table("chat_messages").insert(insert_data).execute(),
+            _insert_idempotent,
         )
 
         if result.data:
@@ -749,24 +785,86 @@ class ChatService:
             import logging
             logging.getLogger(__name__).warning(f"Message detection failed: {e}")
     
+    # 作業ブロックの詳細（ツール出力）を一覧応答に含める上限文字数。
+    AI_CONTEXT_DETAIL_MAX = 600
+    # 作業ブロックのラベル（ツール名+入力の要約）の上限。実測でラベルが1件3.4KB・
+    # 1メッセージ187ブロックで69KBに達し、20件取得で本文23KBに対し465KBを占めていた。
+    AI_CONTEXT_LABEL_MAX = 200
+    # 一覧に載せる作業ブロック数の上限。超えた分は先頭側を1件のまとめに畳む。
+    AI_CONTEXT_BLOCKS_MAX = 60
+
+    @classmethod
+    def _slim_ai_context(cls, ai_context: dict) -> dict:
+        """一覧応答用に ai_context から表示に使わない/開くまで見えない大物を外す。
+
+        実測（2026-08-26, StyleUp 500件 4.95MB）で応答の92%が ai_context、
+        うち reasoning_steps/reasoning_full が1.7MB（チャット画面はどこでも
+        描画していない）、ツール block の detail が1.2MB（折りたたみを開いた
+        時だけ見える）。開いていない部屋はキャッシュが無く毎回丸ごと運ぶので、
+        スマホ/トンネル経由では30秒打ち切り→「Load failed」になっていた。
+        DB は触らず、送る時に外す・切るだけ。
+        """
+        if not isinstance(ai_context, dict):
+            return ai_context
+        slim = {k: v for k, v in ai_context.items() if k not in ("reasoning_steps", "reasoning_full")}
+        blocks = slim.get("blocks")
+        if isinstance(blocks, list):
+            dropped = 0
+            if len(blocks) > cls.AI_CONTEXT_BLOCKS_MAX:
+                dropped = len(blocks) - cls.AI_CONTEXT_BLOCKS_MAX
+                blocks = blocks[dropped:]
+            out = []
+            if dropped:
+                out.append({"type": "text", "text": f"…（前半の作業 {dropped} 件は省略）"})
+            for b in blocks:
+                if not isinstance(b, dict):
+                    out.append(b)
+                    continue
+                if isinstance(b.get("detail"), str) and len(b["detail"]) > cls.AI_CONTEXT_DETAIL_MAX:
+                    b = {**b, "detail": b["detail"][: cls.AI_CONTEXT_DETAIL_MAX] + "\n…（以下省略）"}
+                if isinstance(b.get("label"), str) and len(b["label"]) > cls.AI_CONTEXT_LABEL_MAX:
+                    b = {**b, "label": b["label"][: cls.AI_CONTEXT_LABEL_MAX] + "…"}
+                out.append(b)
+            slim["blocks"] = out
+        return slim
+
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:
         """Get messages from a room"""
-        # Verify membership
-        member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute()
-        if not member.data:
-            raise ValueError("Not a member of this room")
-        
+        # 部屋を開くたびに通るホットパス。従来は「会員チェック→本文→返信元」を
+        # 同期 .execute() で直列に（しかもイベントループ上で）行い、20件でも
+        # 約1秒かかっていた。全体をスレッドに逃がし、独立な会員チェックと本文
+        # 取得は並列にする（DB往復 3直列 → 2並列+1）。戻り値・権限判定は不変。
+        return await asyncio.to_thread(self._get_messages_sync, room_id, user_id, limit, before)
+
+    def _get_messages_sync(self, room_id: str, user_id: str, limit: int, before: Optional[str]) -> list[dict]:
         query = self.supabase.table("chat_messages").select(
             "*, sender:users!sender_id(id, display_name, avatar_url)"
         ).eq("room_id", room_id).order("created_at", desc=True).limit(limit)
-
         if before:
             query = query.lt("created_at", before)
 
-        result = await self._execute_with_retry(
-            "get_messages.fetch_messages",
-            lambda: query.execute(),
-        )
+        def fetch_with_retry():
+            attempt = 0
+            while True:
+                try:
+                    return query.execute()
+                except Exception as exc:
+                    if attempt >= 2 or not self._is_transient_supabase_error(exc):
+                        raise
+                    time.sleep(0.2 * (2 ** attempt) + random.uniform(0, 0.15))
+                    attempt += 1
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            member_f = ex.submit(
+                lambda: self.supabase.table("chat_room_members").select("*")
+                .eq("room_id", room_id).eq("user_id", user_id).execute()
+            )
+            result_f = ex.submit(fetch_with_retry)
+            member = member_f.result()
+            result = result_f.result()
+        # Verify membership（本文は取得済みでも、非会員には返さない）
+        if not member.data:
+            raise ValueError("Not a member of this room")
 
         # 返信先メッセージを一括取得
         reply_to_ids = [msg["reply_to"] for msg in (result.data or []) if msg.get("reply_to")]
@@ -799,9 +897,9 @@ class ChatService:
                 "content": msg["content"],
                 "created_at": msg["created_at"],
             }
-            # ai_contextがあれば追加（reasoning_steps等）
+            # ai_context は一覧表示に必要な分だけ送る（下記 _slim_ai_context）。
             if msg.get("ai_context"):
-                message_dict["ai_context"] = msg["ai_context"]
+                message_dict["ai_context"] = self._slim_ai_context(msg["ai_context"])
             # reply_to情報
             if msg.get("reply_to"):
                 message_dict["reply_to_id"] = msg["reply_to"]
@@ -1637,6 +1735,21 @@ class ChatService:
             from_name=from_name, reply_to=OWNER_REPLY_TO,
         )
         logging.info("external email reply sent to=%s subject=%s", to_addr, subject)
+
+        # 送信台帳に記録（次にこの相手から返信が来た時、該当ルームへ照合できるように）
+        source_room_id = proposal.get("source_room_id")
+        if source_room_id:
+            try:
+                from app.services.external_message_routing import get_external_message_routing_service
+                await get_external_message_routing_service().record_outbound(
+                    user_id=proposal["user_id"],
+                    channel="gmail",
+                    origin_room_id=source_room_id,
+                    external_recipient_id=to_addr,
+                    metadata={"via": "proposal_reply", "proposal_id": proposal.get("id")},
+                )
+            except Exception as e:
+                logging.warning("record_outbound for reply proposal failed: %s", e)
 
         # inquiry を replied に
         inquiry_id = action_data.get("inquiry_id")

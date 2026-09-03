@@ -3126,17 +3126,21 @@ export function VideoReviewEditor({
 
             <div className="shrink-0 border-t border-neutral-800 bg-background p-3" style={{ height: timelineHeight }}>
               <div className="flex items-center gap-2">
-                <Button variant={tool === 'select' ? 'default' : 'outline'} size="sm" onClick={() => setTool('select')}>
+                <Button variant={tool === 'select' ? 'default' : 'outline'} size="sm" title="選択・移動" onClick={() => setTool('select')}>
                   <MousePointer2 className="h-4 w-4" />
+                  <span className="hidden sm:inline">選択</span>
                 </Button>
-                <Button variant={tool === 'rect' ? 'default' : 'outline'} size="sm" onClick={() => setTool('rect')}>
+                <Button variant={tool === 'rect' ? 'default' : 'outline'} size="sm" title="矩形で範囲指定。描いたあと「生成」を選べます" onClick={() => setTool('rect')}>
                   <Square className="h-4 w-4" />
+                  <span className="hidden sm:inline">矩形指定</span>
                 </Button>
-                <Button variant={tool === 'freehand' ? 'default' : 'outline'} size="sm" onClick={() => setTool('freehand')}>
+                <Button variant={tool === 'freehand' ? 'default' : 'outline'} size="sm" title="ペンで範囲指定。描いたあと「生成」を選べます" onClick={() => setTool('freehand')}>
                   <Pencil className="h-4 w-4" />
+                  <span className="hidden sm:inline">ペン指定</span>
                 </Button>
-                <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" onClick={() => setTool('marker')}>
+                <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" title="コメントを置く" onClick={() => setTool('marker')}>
                   <MessageSquare className="h-4 w-4" />
+                  <span className="hidden sm:inline">コメント</span>
                 </Button>
                 <Button
                   variant={snapEnabled ? 'default' : 'outline'}

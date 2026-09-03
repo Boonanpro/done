@@ -1,6 +1,7 @@
 'use client';
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { perfLog, roomClickStart } from '@/lib/perf-log';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
   Check,
@@ -13,8 +14,10 @@ import {
   FolderKanban,
   Loader2,
   MessageSquare,
+  MessageSquarePlus,
   Mic,
   Paperclip,
+  Plus,
   Reply,
   Search,
   Send,
@@ -40,6 +43,7 @@ import {
   type MessagesListResponse,
   type ProcessStep,
   type ProjectListResponse,
+  type ProjectResponse,
   type ProjectStatusType,
   type ReplyToMessage,
   type TurnBlock,
@@ -49,9 +53,17 @@ import { useProjectRecovery } from '@/hooks/useProjectRecovery';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
-import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
+import {
+  usePreviewStore,
+  type ArtifactRecord,
+  type PendingComment,
+  type SelectedElement,
+} from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
-import { VoiceConsole } from '@/components/voice/voice-console';
+import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
+import { RoomBoard } from '@/components/chat/room-board';
+import { MediaGrid } from '@/components/chat/media-grid';
+import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
 interface ProjectChatPanelProps {
@@ -60,6 +72,11 @@ interface ProjectChatPanelProps {
 
 const INITIAL_CHAT_RENDER_COUNT = 80;
 const CHAT_RENDER_INCREMENT = 80;
+// 部屋を開いた時に取る件数と、上端まで遡った時に追加で取る件数。
+// ダンの記憶（reseed）は UI の取得件数と無関係なので、画面は「一画面ぶん＋少し」で足りる。
+// 従来は毎回 500 件（大きい部屋で数MB）を丸ごと取っていて、部屋切替の主な重さだった。
+const CHAT_INITIAL_FETCH_LIMIT = 20;
+const CHAT_OLDER_FETCH_LIMIT = 100;
 
 type StepInfo = {
   label: string;
@@ -73,9 +90,10 @@ type DisplayItem =
 
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
 // a finished turn (text segments + a collapsible tool group), so there's no
-// separate "process monitor" box anymore. While live, the tool group is open
-// (watch it work) and a spinner trails the steps; once the run finishes this
-// block is dropped and the saved message's blocks take over (tools collapsed).
+// separate "process monitor" box anymore. The tool group starts collapsed even
+// while live（「〇件の作業」をタップで開ける）; a spinner trails the steps as the
+// working indicator. Once the run finishes this block is dropped and the saved
+// message's blocks take over (also collapsed).
 function InlineProcessBlock({
   steps,
   isLive = false,
@@ -89,7 +107,7 @@ function InlineProcessBlock({
 
   return (
     <div className="my-1">
-      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} toolsOpen={isLive} /> : null}
+      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} /> : null}
       {isLive ? (
         <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
@@ -277,8 +295,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
     <>
       {(images.length > 0 || videos.length > 0 || files.length > 0) && (
         <div className="flex flex-col gap-1.5 my-2">
-          {images.map((url, i) => (<img key={i} src={url} alt="添付画像" className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(url)} />))}
-          {videos.map((url, i) => (<video key={`v${i}`} src={url} controls className="rounded-xl max-w-full border border-border" style={{ maxHeight: '300px' }} />))}
+          <MediaGrid items={[...images.map((url) => ({ url, kind: 'image' as const })), ...videos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
@@ -371,17 +388,58 @@ function stepsToBlocks(steps: StepInfo[]): TurnBlock[] {
 // バックエンドの DAN_STREAMING_INPUT と揃えて有効化する（OFF時は従来挙動）。
 const STREAMING_INPUT = process.env.NEXT_PUBLIC_DAN_STREAMING_INPUT === '1';
 
+/** LINE風の送信時刻（例: 9:41 / 14:23）。日付は日付セパレータ側が担当する。 */
+function formatMessageTime(createdAt: string | undefined): string | null {
+  if (!createdAt) return null;
+  const d = new Date(createdAt);
+  if (isNaN(d.getTime())) return null;
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** LINE風の日付区切りラベル。今日/昨日、それ以外は「8月7日(木)」（年が違えば年も）。 */
+function formatDateSeparator(d: Date): string {
+  const now = new Date();
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000);
+  if (diffDays === 0) return '今日';
+  if (diffDays === 1) return '昨日';
+  const weekday = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()];
+  const base = `${d.getMonth() + 1}月${d.getDate()}日(${weekday})`;
+  return d.getFullYear() === now.getFullYear() ? base : `${d.getFullYear()}年${base}`;
+}
+
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
 
   // 追い連絡の仮送信状態（クライアント側フラグ）。半透明＋バッジで表示。
   const pending = !!msg.pendingFollowup;
+  const timeLabel = formatMessageTime(msg.created_at);
+
+  // ダンのリアクション応答: 本文が「👍」だけのAIメッセージは吹き出しにせず、
+  // 直前のユーザー発言に押されたLINE風リアクションとして右寄せの小さな
+  // スタンプで描画する（純粋な了解・受領に定型文を返さないための仕組み。
+  // 履歴上は通常のAI応答なので送受信ペアは壊れない）。
+  if (msg.sender_type === 'ai' && (msg.content || '').trim() === '👍') {
+    return (
+      <div className="-mt-2 flex justify-end pr-1">
+        <span
+          className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 text-sm leading-none shadow-sm"
+          title="ダンが確認しました"
+        >
+          👍
+        </span>
+      </div>
+    );
+  }
 
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
+    // 長文・URL・英数字の連続など折り返せない塊があると、items-end の
+    // flex 列では吹き出しが左へはみ出して左サイドバーの下に潜る。
+    // min-w-0 + break-words(anywhere) で必ず枠内で折り返す。
     return (
-      <div className={`flex flex-col items-end max-w-[85%] ml-auto${pending ? ' opacity-50' : ''}`}>
+      <div className={`flex min-w-0 max-w-[85%] ml-auto flex-col items-end${pending ? ' opacity-50' : ''}`}>
         {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-        <div className="group flex items-start gap-1">
+        <div className="group flex max-w-full min-w-0 items-start gap-1">
           {onReply && !msg.id.startsWith('temp-') && (
             <button
               onClick={() => onReply(msg)}
@@ -391,25 +449,13 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
               <Reply className="h-3.5 w-3.5" />
             </button>
           )}
-          <div className="flex flex-col items-end gap-1">
-          {images.map((url, i) => (
-            <img
-              key={i}
-              src={url}
-              alt="添付画像"
-              className="rounded-xl max-w-full max-h-64 object-contain border border-primary/20 cursor-zoom-in"
-              onClick={() => onImageClick?.(url)}
-            />
-          ))}
-          {videos.map((url, i) => (
-            <video
-              key={`vid-${i}`}
-              src={url}
-              controls
-              className="rounded-xl max-w-full border border-primary/20"
-              style={{ maxHeight: '300px' }}
-            />
-          ))}
+          {timeLabel && (
+            <span className="self-end mb-0.5 shrink-0 text-[10px] leading-none text-muted-foreground">
+              {timeLabel}
+            </span>
+          )}
+          <div className="flex min-w-0 flex-col items-end gap-1">
+          <MediaGrid items={[...images.map((url) => ({ url, kind: 'image' as const })), ...videos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
           {files.map((f, i) => (
             <a
               key={`file-${i}`}
@@ -423,7 +469,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
             </a>
           ))}
           {text && (
-            <div className="rounded-lg bg-primary px-3 py-2 text-base leading-relaxed text-primary-foreground md:text-[17px] whitespace-pre-wrap">
+            <div className="max-w-full min-w-0 rounded-lg bg-primary px-3 py-2 text-base leading-relaxed text-primary-foreground md:text-[17px] whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
               {text}
             </div>
           )}
@@ -434,6 +480,21 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
         )}
       </div>
     );
+  }
+
+  // 送信案カード（compose_message）: `[送信案: <id>]` はカードとして描画する。
+  // 送信済み/破棄イベント（📤/🗑）は折り畳みの控えめな行にする。
+  // collab（外部窓口）のカードは本体チャットでは薄い1行に折り畳む（主戦場はコミュニケーションタブ）。
+  const outboundCardId = parseOutboundCardMarker(msg.content);
+  if (outboundCardId) {
+    return <OutboundMessageCard proposalId={outboundCardId} foldCollab />;
+  }
+  if (isOutboundEventContent(msg.content)) {
+    return <OutboundEventLine content={msg.content || ''} />;
+  }
+  // 外部窓口対応の作業ログ（「窓口ログ:」で始まるai発言）も折り畳みの控えめな行にする。
+  if (msg.sender_type === 'ai' && isCollabLogContent(msg.content)) {
+    return <OutboundEventLine content={msg.content || ''} />;
   }
 
   const rawContent = msg.content || '';
@@ -474,24 +535,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
       {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} />}
       {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
-          {aiImages.map((url, i) => (
-            <img
-              key={i}
-              src={url}
-              alt="添付画像"
-              className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in"
-              onClick={() => onImageClick?.(url)}
-            />
-          ))}
-          {aiVideos.map((url, i) => (
-            <video
-              key={`vid-${i}`}
-              src={url}
-              controls
-              className="rounded-xl max-w-full border border-border"
-              style={{ maxHeight: '300px' }}
-            />
-          ))}
+          <MediaGrid items={[...aiImages.map((url) => ({ url, kind: 'image' as const })), ...aiVideos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
           {aiFiles.map((f, i) => (
             <a
               key={`file-${i}`}
@@ -538,12 +582,17 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
           ))}
         </div>
       )}
+      {timeLabel && (
+        <div className="mt-1 text-[10px] leading-none text-muted-foreground">{timeLabel}</div>
+      )}
     </div>
   );
 });
 
 type DanSkill = { name: string; display_name: string; description: string };
 type TimelineReference = { content_id: string; title: string; updated_at?: string };
+
+const chatDraftKey = (projectId: string) => `dan-chat-draft:${projectId}`;
 
 function ChatInput({
   projectId,
@@ -554,7 +603,8 @@ function ChatInput({
   onSseStateChange,
   replyTo,
   onClearReply,
-  onSubmitComment,
+  onAddComment,
+  onEditPendingComment,
 }: {
   projectId: string;
   roomId: string;
@@ -564,12 +614,26 @@ function ChatInput({
   onSseStateChange?: (connected: boolean) => void;
   replyTo?: MessageResponse | null;
   onClearReply?: () => void;
-  onSubmitComment?: () => void;
+  onAddComment?: () => void;
+  onEditPendingComment?: (id: string) => void;
 }) {
   const inspectorElement = usePreviewStore((s) => s.selectedElement);
+  const inspectorElements = usePreviewStore((s) => s.selectedElements);
   const inspectorDraft = usePreviewStore((s) => s.popoverDraft);
   const previewMode = usePreviewStore((s) => s.inspectorMode);
   const clearInspectorSelection = usePreviewStore((s) => s.clearSelection);
+  const allPendingComments = usePreviewStore((s) => s.pendingComments);
+  // コメントはルーム別に保持される（別ルームに移動しても消えず、戻ると再表示）。
+  // このルームで表示・送信するのは自ルーム分だけ。projectId 無しの古いデータは
+  // どのルームでも見える（取り残して消せなくなるよりまし）。
+  const pendingComments = useMemo(
+    () => allPendingComments.filter((c) => !c.projectId || c.projectId === projectId),
+    [allPendingComments, projectId]
+  );
+  const removePendingComment = usePreviewStore((s) => s.removePendingComment);
+  const clearPendingComments = usePreviewStore((s) => s.clearPendingComments);
+  const editingCommentId = usePreviewStore((s) => s.editingCommentId);
+  const previewArtifactForComments = usePreviewStore((s) => s.artifact);
   // ChatInput のミラーモードは「コメントモードで要素選択中」の時だけ有効
   const isCommentMode = !!inspectorElement && previewMode === 'comment';
   const [message, setMessage] = useState('');
@@ -615,6 +679,29 @@ function ChatInput({
     serverMessageIdRef.current = null;
     optimisticMessageIdRef.current = null;
   }, [roomId]);
+
+  // 入力中の下書きをプロジェクトごとに永続化する。
+  // パネルは key={selectedProjectId} で切替のたびアンマウントされるため、
+  // state だけだと書きかけのメッセージが消える → localStorage に退避・復元。
+  // 注意: 復元effectを保存effectより先に宣言すること（マウント直後の
+  // message='' で保存effectが先にキーを消すと下書きを読む前に失われる）。
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(chatDraftKey(projectId));
+      if (saved) setMessage((cur) => cur || saved);
+    } catch {
+      // localStorage が使えない環境では下書き保存なしで動く
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    try {
+      if (message) localStorage.setItem(chatDraftKey(projectId), message);
+      else localStorage.removeItem(chatDraftKey(projectId));
+    } catch {
+      // ignore
+    }
+  }, [message, projectId]);
 
   // Focus textarea when reply is selected
   useEffect(() => {
@@ -1035,6 +1122,8 @@ function ChatInput({
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
             onSseStateChange?.(false);
+            // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -1054,6 +1143,8 @@ function ChatInput({
       setInterrupted(projectId, false);
       setWarmupMode(projectId, null);
       if (error instanceof Error && error.name !== 'AbortError') {
+        // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
+        queryClient.invalidateQueries({ queryKey: ['projects'] });
         toast.error('メッセージ送信中に問題が発生しました');
       }
     } finally {
@@ -1159,13 +1250,18 @@ function ChatInput({
   }, [queryClient, roomId, user?.id, user?.display_name]);
 
   const handleSendMessage = useCallback(async () => {
-    if (!message.trim() && attachedFiles.length === 0) return;
+    if (!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0) return;
 
     const isImageFile = (name: string) => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name);
     const imageUrls = attachedFiles.filter(f => isImageFile(f.filename)).map(f => f.url);
     const fileUrls = attachedFiles.filter(f => !isImageFile(f.filename)).map(f => ({ name: f.filename, url: f.url }));
 
-    const content = message.trim();
+    // 溜めておいた要素コメントは、ここで初めて1通のメッセージに畳まれる。
+    // （1件ずつ送るとその都度ダンが走り出してしまうのでこの形にしている）
+    const content = pendingComments.length
+      ? composeCommentsMessage(pendingComments, previewArtifactForComments, message.trim())
+      : message.trim();
+    if (pendingComments.length) clearPendingComments(projectId);
     const currentReplyTo = replyTo;
 
     // 追い連絡: ダン作業中（進行中ストリームあり）の途中送信は、ストリームを
@@ -1180,18 +1276,37 @@ function ChatInput({
       return;
     }
 
-    pendingMessageRef.current = { text: message, files: [...attachedFiles], replyTo };
+    // キャンセル後の再送は「畳んだ後」の本文で行う（要素コメントを失わないため）
+    pendingMessageRef.current = { text: content, files: [...attachedFiles], replyTo };
     aiRespondedRef.current = false;
     serverMessageIdRef.current = null;
     setMessage('');
     setAttachedFiles([]);
     onClearReply?.();
-    // Immediately bump this project to top of sidebar
-    queryClient.invalidateQueries({ queryKey: ['projects'] });
+    // サイドバーの「ダンが作業中…」を送信の瞬間に点灯させる楽観更新。
+    // 即時 invalidate だとサーバーの run 作成(送信後 約1.1〜1.4s)より先に
+    // refetch が着いて has_active_run=false を持ち帰り、次の10sポーリング
+    // まで点灯しなかった。キャッシュを直接 true にし、run 作成完了後の
+    // 遅延 invalidate でサーバー真実（run状態＋並び順）に収束させる。
+    queryClient.setQueryData(
+      ['projects'],
+      (old: ProjectListResponse | undefined) =>
+        old
+          ? {
+              ...old,
+              projects: old.projects.map((p) =>
+                p.id === projectId ? { ...p, has_active_run: true } : p
+              ),
+            }
+          : old
+    );
+    setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    }, 2000);
     const refs = timelineRefs;
     setTimelineRefs([]);
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
-  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply, timelineRefs]);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs, pendingComments, clearPendingComments, previewArtifactForComments]);
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
@@ -1251,6 +1366,8 @@ function ChatInput({
     resetRecovery(projectId);
     setWarmupMode(projectId, null);
     invalidateProjectQueries();
+    // 取消完了 → サイドバーの「ダンが作業中…」も次ポーリングを待たず消灯
+    queryClient.invalidateQueries({ queryKey: ['projects'] });
     if (!wasBeforeAI) {
       toast.info('処理を中断しました');
     }
@@ -1408,13 +1525,26 @@ function ChatInput({
       )}
       {isCommentMode && inspectorElement && (
         <div className="mb-2 flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/5 px-2 py-1 text-xs">
-          <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
-            @{inspectorElement.refId}
-          </span>
-          <span className="truncate text-muted-foreground">
-            &lt;{inspectorElement.tagName}&gt;
-            {inspectorElement.text ? ` "${inspectorElement.text}"` : ''}
-          </span>
+          {inspectorElements.length > 1 ? (
+            <>
+              <span className="shrink-0 rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
+                {inspectorElements.length}要素
+              </span>
+              <span className="truncate text-muted-foreground">
+                {inspectorElements.map((el) => `<${el.tagName}>`).join(' ')}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
+                @{inspectorElement.refId}
+              </span>
+              <span className="truncate text-muted-foreground">
+                &lt;{inspectorElement.tagName}&gt;
+                {inspectorElement.text ? ` "${inspectorElement.text}"` : ''}
+              </span>
+            </>
+          )}
           <button
             onClick={clearInspectorSelection}
             className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
@@ -1422,6 +1552,72 @@ function ChatInput({
           >
             <X className="h-3 w-3" />
           </button>
+        </div>
+      )}
+      {pendingComments.length > 0 && (
+        <div className="mb-1.5 space-y-1 rounded-lg border border-primary/30 bg-primary/5 p-2">
+          <div className="flex items-center gap-1.5 px-0.5 text-xs text-muted-foreground">
+            <MessageSquarePlus className="h-3.5 w-3.5 text-primary" />
+            <span>
+              要素コメント {pendingComments.length}件 — 送信ボタンでまとめて1通で送ります
+            </span>
+            <button
+              type="button"
+              onClick={() => clearPendingComments(projectId)}
+              className="ml-auto shrink-0 hover:text-foreground"
+            >
+              すべて削除
+            </button>
+          </div>
+          {pendingComments.map((c, i) => (
+            <div
+              key={c.id}
+              onClick={() => onEditPendingComment?.(c.id)}
+              role="button"
+              title="クリックで要素を再選択して編集"
+              className={`flex cursor-pointer items-start gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors ${
+                editingCommentId === c.id
+                  ? 'bg-primary/15 ring-1 ring-primary/50'
+                  : 'bg-background/60 hover:bg-background'
+              }`}
+            >
+              <span className="mt-px shrink-0 font-mono text-[10px] text-primary">{i + 1}</span>
+              {c.artifact && c.artifact.slug !== previewArtifactForComments?.slug && (
+                <span
+                  className="max-w-[7rem] shrink-0 truncate rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground"
+                  title={`成果物: ${c.artifact.label || c.artifact.slug}`}
+                >
+                  {c.artifact.slug}
+                </span>
+              )}
+              <span className="shrink-0 rounded bg-primary/15 px-1 font-mono text-[10px] text-primary">
+                {c.elements.length > 1
+                  ? `${c.elements.length}要素`
+                  : `<${c.elements[0]?.tagName}>`}
+              </span>
+              {c.elements.length > 1 ? (
+                <span className="max-w-[9rem] shrink-0 truncate text-muted-foreground">
+                  {c.elements.map((el) => `<${el.tagName}>`).join(' ')}
+                </span>
+              ) : c.elements[0]?.text ? (
+                <span className="max-w-[9rem] shrink-0 truncate text-muted-foreground">
+                  &quot;{c.elements[0].text}&quot;
+                </span>
+              ) : null}
+              <span className="min-w-0 flex-1 break-words">{c.text}</span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removePendingComment(c.id);
+                }}
+                className="mt-px shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label="このコメントを外す"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {escStopHint && (
@@ -1478,14 +1674,20 @@ function ChatInput({
             if (isCommentMode) {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
-                if (inspectorDraft.trim()) onSubmitComment?.();
+                if (inspectorDraft.trim()) onAddComment?.();
               }
               return;
             }
             handleKeyDown(event);
           }}
           onPaste={handlePaste}
-          placeholder={isCommentMode ? '右ペインのコメント欄で入力...' : 'メッセージを入力...'}
+          placeholder={
+            isCommentMode
+              ? '右ペインのコメント欄で入力...'
+              : pendingComments.length > 0
+                ? '補足があれば入力（なくてもそのまま送れます）...'
+                : 'メッセージを入力...'
+          }
           rows={1}
           className={`min-h-[32px] max-h-[480px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px] ${isCommentMode ? 'cursor-not-allowed text-foreground/90' : ''}`}
         />
@@ -1493,16 +1695,16 @@ function ChatInput({
           <Button
             size="icon"
             className="h-7 w-7 shrink-0"
-            onClick={() => onSubmitComment?.()}
+            onClick={() => onAddComment?.()}
             disabled={!inspectorDraft.trim()}
-            title="コメント送信"
+            title="コメントを追加（まだ送信されません）"
           >
-            <Send className="h-3.5 w-3.5" />
+            <Plus className="h-3.5 w-3.5" />
           </Button>
-        ) : message.trim() || attachedFiles.length > 0 ? (
+        ) : message.trim() || attachedFiles.length > 0 || pendingComments.length > 0 ? (
           <Button
             size="icon"
-            className="h-7 w-7 shrink-0"
+            className="h-7 w-7 shrink-0 transition-transform active:scale-90"
             onClick={handleSendMessage}
           >
             <Send className="h-3.5 w-3.5" />
@@ -1520,9 +1722,9 @@ function ChatInput({
         ) : (
           <Button
             size="icon"
-            className="h-7 w-7 shrink-0"
+            className="h-7 w-7 shrink-0 transition-transform active:scale-90"
             onClick={handleSendMessage}
-            disabled={!message.trim() && attachedFiles.length === 0}
+            disabled={!message.trim() && attachedFiles.length === 0 && pendingComments.length === 0}
           >
             <Send className="h-3.5 w-3.5" />
           </Button>
@@ -1541,53 +1743,185 @@ function slugToFilePath(slug: string, previewUrl: string): string {
   return `frontend/src/app/${trimmed}/page.tsx`;
 }
 
-function composeCommentMessage(
-  text: string,
-  element: SelectedElement,
-  artifact: ArtifactRecord | null
+/**
+ * 溜めた要素コメントを1通のメッセージに畳む。
+ *
+ * 1件でも複数件でも同じ形（selections の配列）にする。ダン側から見て
+ * 「この指示はこの要素に対応する」が1対1で読めることが要点で、
+ * 番号を振ってあるので複数箇所を1回の実行でまとめて直せる。
+ */
+function composeCommentsMessage(
+  items: PendingComment[],
+  artifact: ArtifactRecord | null,
+  tail: string
 ): string {
   const lines: string[] = ['<dan-context>'];
   lines.push('kind: element-comment');
+  lines.push(`count: ${items.length}`);
   lines.push('note: |');
   lines.push('  ユーザーは成果物上で要素を選択し、その要素について発言している。');
   lines.push('  発言の意図は文面から判断: 修正要望 / 質問 / 議論 / 提案 など自由。');
   lines.push('  修正を依頼された場合のみファイルを編集する。');
-  if (artifact) {
-    lines.push('artifact:');
-    lines.push(`  slug: ${artifact.slug}`);
-    lines.push(`  label: ${artifact.label || artifact.slug}`);
-    lines.push(`  file: ${slugToFilePath(artifact.slug, artifact.preview_url)}`);
-    lines.push(`  preview-url: ${artifact.preview_url}`);
+  if (items.length > 1) {
+    lines.push(`  今回は ${items.length} 件の指示がまとめて送られている。`);
+    lines.push('  それぞれ対応する要素が selections に番号付きで入っているので、');
+    lines.push('  指示されていない箇所には手を出さず、全件を1回の作業でまとめて処理する。');
   }
-  if (element.tagName === 'img' || element.tagName === 'video' || (element.className || '').match(/bg-\[url/)) {
+  if (items.some((it) => it.elements.length > 1)) {
+    lines.push('  複数要素を選択して書かれた指示がある（targets に複数入っている）。');
+    lines.push('  その instruction は targets 内の全要素に対する1つの指示なので、');
+    lines.push('  全対象要素に同じ変更/回答を適用すること（1要素だけ直して終わりにしない）。');
+  }
+  // 成果物情報はコメント追加時のスナップショットを最優先する。プレビューを
+  // 閉じた後や別成果物に切り替えた後の送信でも、コメントした時の成果物に紐づく。
+  const snapArtifacts = items
+    .map((it) => it.artifact)
+    .filter((a): a is NonNullable<PendingComment['artifact']> => !!a);
+  const uniqueSlugs = [...new Set(snapArtifacts.map((a) => a.slug))];
+  const headerArtifact =
+    uniqueSlugs.length === 1
+      ? snapArtifacts[0]
+      : uniqueSlugs.length === 0 && artifact
+        ? { slug: artifact.slug, label: artifact.label, preview_url: artifact.preview_url }
+        : null;
+  if (headerArtifact) {
+    lines.push('artifact:');
+    lines.push(`  slug: ${headerArtifact.slug}`);
+    lines.push(`  label: ${headerArtifact.label || headerArtifact.slug}`);
+    lines.push(`  file: ${slugToFilePath(headerArtifact.slug, headerArtifact.preview_url)}`);
+    lines.push(`  preview-url: ${headerArtifact.preview_url}`);
+  } else if (uniqueSlugs.length > 1) {
+    lines.push('note-artifacts: |');
+    lines.push('  複数の成果物にまたがるコメントが含まれる。');
+    lines.push('  各 selection の artifact-slug / file を見て対象ファイルを取り違えないこと。');
+  }
+  const isMedia = (el: SelectedElement) =>
+    el.tagName === 'img' || el.tagName === 'video' || (el.className || '').match(/bg-\[url/);
+  if (items.some((it) => it.elements.some(isMedia))) {
     lines.push('intent-hint: |');
-    lines.push('  選択要素は視覚メディア (<img> / <video> / 背景画像)。');
+    lines.push('  選択要素に視覚メディア (<img> / <video> / 背景画像) が含まれる。');
     lines.push('  文面が「画像を〜に変えて」なら image-gen スキル (/api/v1/images/edit) 経由で差し替え。');
     lines.push('  文面が「動画にして」「動かして」「アニメーションに」なら video-gen スキル');
     lines.push('  (/api/v1/videos/generate + reference_image_url で image-to-video) を使い、');
     lines.push('  対象ファイルの <img> を <video autoPlay loop muted playsInline> に書き換える。');
     lines.push('  文面が曖昧なら内容を優先して判断（静止画の修正 vs 動きが欲しい）。');
   }
-  lines.push('selection:');
-  lines.push(`  ref: @${element.refId}`);
-  lines.push(`  tag: ${element.tagName}`);
-  if (element.className) lines.push(`  class: ${JSON.stringify(element.className)}`);
-  if (element.bgColor) lines.push(`  computed-background: ${element.bgColor}`);
-  if (element.ancestors?.length) {
-    lines.push(`  ancestors: ${element.ancestors.join(' > ')}`);
-  }
-  lines.push(
-    `  bounding-rect: { x: ${Math.round(element.rect.x)}, y: ${Math.round(element.rect.y)}, w: ${Math.round(element.rect.width)}, h: ${Math.round(element.rect.height)} }`
-  );
-  if (element.text) lines.push(`  text-content: ${JSON.stringify(element.text)}`);
-  if (element.outerHtmlSnippet) {
-    lines.push('  html: |');
-    element.outerHtmlSnippet.split('\n').forEach((ln) => {
-      lines.push(`    ${ln}`);
-    });
-  }
+  // 1要素の詳細を YAML 行に書き出す（indent はネスト位置に合わせる）。
+  const pushElementLines = (element: SelectedElement, indent: string, listItem: boolean) => {
+    const pad = (first: boolean) => (listItem && first ? `${indent}- ` : listItem ? `${indent}  ` : indent);
+    let first = true;
+    const push = (line: string) => {
+      lines.push(`${pad(first)}${line}`);
+      first = false;
+    };
+    push(`ref: @${element.refId}`);
+    push(`tag: ${element.tagName}`);
+    if (element.elementKey?.startsWith('@')) push(`edit-id: ${JSON.stringify(element.elementKey)}`);
+    if (element.className) push(`class: ${JSON.stringify(element.className)}`);
+    if (element.bgColor) push(`computed-background: ${element.bgColor}`);
+    if (element.ancestors?.length) {
+      push(`ancestors: ${element.ancestors.join(' > ')}`);
+    }
+    push(
+      `bounding-rect: { x: ${Math.round(element.rect.x)}, y: ${Math.round(element.rect.y)}, w: ${Math.round(element.rect.width)}, h: ${Math.round(element.rect.height)} }`
+    );
+    if (element.text) push(`text-content: ${JSON.stringify(element.text)}`);
+    if (element.outerHtmlSnippet) {
+      push('html: |');
+      const htmlIndent = listItem ? `${indent}  ` : indent;
+      element.outerHtmlSnippet.split('\n').forEach((ln) => {
+        lines.push(`${htmlIndent}  ${ln}`);
+      });
+    }
+  };
+
+  lines.push('selections:');
+  items.forEach(({ elements, text, artifact: itemArtifact }, i) => {
+    lines.push(`  - no: ${i + 1}`);
+    if (uniqueSlugs.length > 1 && itemArtifact) {
+      lines.push(`    artifact-slug: ${itemArtifact.slug}`);
+      lines.push(`    file: ${slugToFilePath(itemArtifact.slug, itemArtifact.preview_url)}`);
+    }
+    if (elements.length > 1) {
+      // 複数要素への1指示: targets に全要素を列挙する。
+      lines.push(`    target-count: ${elements.length}`);
+      lines.push('    targets:');
+      elements.forEach((element) => pushElementLines(element, '      ', true));
+    } else if (elements[0]) {
+      // 単一要素は従来のフラットな形（後方互換）。
+      pushElementLines(elements[0], '    ', false);
+    }
+    lines.push('    instruction: |');
+    text.split('\n').forEach((ln) => lines.push(`      ${ln}`));
+  });
   lines.push('</dan-context>');
-  return `${lines.join('\n')}\n\n${text}`;
+
+  // 本文側にも人間が読める形で並べる（チャット履歴を見返した時に何を頼んだか分かる）
+  const body = items
+    .map(({ elements, text }, i) => {
+      const labelOf = (element: SelectedElement) =>
+        element.text
+          ? `<${element.tagName}> "${element.text.slice(0, 30)}"`
+          : `<${element.tagName}>`;
+      const label =
+        elements.length > 1
+          ? `${elements.map(labelOf).join(' + ')}（${elements.length}要素まとめて）`
+          : elements[0]
+            ? labelOf(elements[0])
+            : '';
+      return `${items.length > 1 ? `${i + 1}. ` : ''}${label}\n${text}`;
+    })
+    .join('\n\n');
+  const suffix = tail.trim() ? `\n\n${tail.trim()}` : '';
+  return `${lines.join('\n')}\n\n${body}${suffix}`;
+}
+
+/**
+ * サーバー取得(fresh)をキャッシュ(old)へ「追いつき」として結合する純関数。
+ * 画面にしか無い新しい行（SSE直挿入・楽観表示）を消さず、変わっていない行は
+ * 同じオブジェクトを使い回して再描画を最小にする。通常のクエリと、部屋を開く
+ * 束ね応答の投入、両方から使う。
+ */
+function mergeFreshMessages(
+  old: { messages: MessageResponse[] } | undefined,
+  fresh: { messages: MessageResponse[] },
+): { messages: MessageResponse[] } {
+  if (!old?.messages?.length) return fresh;
+  // オブジェクト同一性の安定化: 内容が変わっていない行は「前回と同じ
+  // オブジェクト」を使い回す。これが無いとポーリングのたびに全行が新しい
+  // オブジェクトになり、MessageBubble の memo が全滅して毎回500件を再描画・
+  // マークダウン再解析していた（長い部屋で送信直後に自分のメッセージが
+  // 数秒遅れて出る/全体が重い、の主犯）。再描画は変わった行だけになる。
+  const prevById = new Map(old.messages.map((m) => [m.id, m]));
+  const stabilized = fresh.messages.map((m) => {
+    const prev = prevById.get(m.id);
+    return prev
+      && prev.content === m.content
+      && prev.pendingFollowup === m.pendingFollowup
+      && prev.reply_to_id === m.reply_to_id
+      ? prev
+      : m;
+  });
+  const freshIds = new Set(fresh.messages.map((m) => m.id));
+  // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
+  // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
+  // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
+  // 遡り読み込みで足した行は fresh の取得窓（最新N件）より古いので fresh に
+  // 含まれないが、削除された訳ではない。窓の下端より古い行は無条件で残す。
+  const cutoff = Date.now() - 120_000;
+  const oldestFresh = fresh.messages.length
+    ? Math.min(...fresh.messages.map((m) => new Date(m.created_at).getTime()))
+    : Infinity;
+  const localOnly = old.messages.filter((m) => {
+    if (freshIds.has(m.id)) return false;
+    const t = new Date(m.created_at).getTime();
+    return t >= cutoff || t < oldestFresh;
+  });
+  if (localOnly.length === 0) return { messages: stabilized };
+  const merged = [...stabilized, ...localOnly].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+  return { messages: merged };
 }
 
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
@@ -1602,8 +1936,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
+  // 遡り読み込み（APK と同じ方式）。上端まで来たら before=最古の created_at で
+  // 追加取得し、キャッシュの末尾に足す。取得中の二重発火と、無い時の再要求を防ぐ。
+  const hasMoreOlderRef = useRef(true);
+  const isLoadingOlderRef = useRef(false);
   const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_CHAT_RENDER_COUNT);
   const [hasNewMessages, setHasNewMessages] = useState(false);
+  // 最下部から離れているか（「最新へ」ジャンプボタンの表示用）
+  const [isAwayFromBottom, setIsAwayFromBottom] = useState(false);
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
   const [voiceOpen, setVoiceOpen] = useState(false);
@@ -1622,11 +1963,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // Preview pane state
   const previewProjectId = usePreviewStore((s) => s.projectId);
   const previewArtifact = usePreviewStore((s) => s.artifact);
-  const selectedElement = usePreviewStore((s) => s.selectedElement);
-  const popoverDraft = usePreviewStore((s) => s.popoverDraft);
   const openArtifact = usePreviewStore((s) => s.openArtifact);
   const closePreview = usePreviewStore((s) => s.closePreview);
-  const consumeDraft = usePreviewStore((s) => s.consumeDraft);
+  const addPendingComment = usePreviewStore((s) => s.addPendingComment);
   const isPreviewOpenForProject =
     !!previewArtifact && previewProjectId === projectId;
 
@@ -1674,17 +2013,20 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     [chatWidth]
   );
 
-  const handleSubmitComment = useCallback(async () => {
-    const { text, element } = consumeDraft();
-    if (!element || !text.trim()) return;
-    const composed = composeCommentMessage(text, element, previewArtifact);
-    sendMessageRef.current?.(composed);
-  }, [consumeDraft, previewArtifact]);
+  // コメントは「追加」して溜めるだけ。実際の送信はチャットの送信ボタン
+  // （ChatInput.handleSendMessage）で、溜まった全件を1通にして行う。
+  const handleAddComment = useCallback(() => {
+    addPendingComment();
+  }, [addPendingComment]);
 
+  const [openState, setOpenState] = useState<'pending' | 'done' | 'failed'>('pending');
+  const mountAtRef = useRef(typeof performance !== 'undefined' ? performance.now() : 0);
+  const bootLoggedRef = useRef(false);
+  const queriesReleased = openState !== 'pending';
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => api.projects.get(projectId),
-    enabled: !!projectId,
+    enabled: !!projectId && queriesReleased,
     // サイドバーの一覧キャッシュには room_id を含む同型のプロジェクトが既に
     // あるので、それを種にして即座に立ち上げる。これが無いと「プロジェクト
     // 取得→room_id判明→メッセージ取得」の直列2段になり、1段目の間は
@@ -1700,6 +2042,49 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
 
+  // 部屋を開く一式を1往復で取り、各クエリのキャッシュへ一括投入する。
+  // 従来は project / messages / artifacts / active / current-run / execution-events を
+  // 別々に投げ、実行中の部屋では一番遅い1本（events 500件 ≒1s）が切替時間を決めていた。
+  // 束ね応答が届くまで個別クエリは止めておき（二重取得しない）、届いたら解放する。
+  // 束ねが失敗/遅延した時は個別クエリに戻す（従来経路が保険）。
+  const initialRoomId = project?.room_id;
+  useEffect(() => {
+    if (!projectId || !initialRoomId) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => { if (!cancelled) setOpenState((s) => (s === 'pending' ? 'failed' : s)); }, 6000);
+    // fetchQuery で in-flight を共有する（StrictMode の二重 effect や連打で同じ束ねを二度投げない）
+    queryClient
+      .fetchQuery({
+        queryKey: ['room-open', initialRoomId, projectId],
+        queryFn: () => api.rooms.open(initialRoomId, projectId, CHAT_INITIAL_FETCH_LIMIT),
+        staleTime: 1500,
+        gcTime: 0,
+      })
+      .then((data) => {
+        if (cancelled) return;
+        perfLog({ surface: 'web', event: 'room-open-net', ms: performance.now() - (roomClickStart(projectId) ?? mountAtRef.current), room_id: initialRoomId, extra: data.timings_ms ? { server: data.timings_ms } : undefined });
+        if (data.project) queryClient.setQueryData(['project', projectId], data.project);
+        if (data.messages) {
+          if (data.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
+          const fresh = { messages: data.messages };
+          queryClient.setQueryData(['project-messages', initialRoomId], (old?: { messages: MessageResponse[] }) =>
+            mergeFreshMessages(old, fresh),
+          );
+        }
+        queryClient.setQueryData(['chat-artifacts', initialRoomId], (data.artifacts ?? []) as ArtifactRecord[]);
+        if (data.active) queryClient.setQueryData(['session-active', initialRoomId], data.active);
+        queryClient.setQueryData(['current-run', projectId], data.current_run);
+        // 待機中の部屋は events が同梱されない（null）。空で種を撒いておけば
+        // 実行が始まった時だけ refetchInterval が取りに行く。
+        queryClient.setQueryData(['execution-events', projectId], data.execution_events ?? []);
+        setOpenState('done');
+      })
+      .catch(() => { if (!cancelled) setOpenState('failed'); })
+      .finally(() => window.clearTimeout(timer));
+    return () => { cancelled = true; window.clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, initialRoomId]);
+
   // Artifacts for the header opener button
   const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
     queryKey: ['chat-artifacts', project?.room_id],
@@ -1710,7 +2095,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: !!project?.room_id,
+    enabled: !!project?.room_id && queriesReleased,
     staleTime: 10_000,
   });
 
@@ -1731,6 +2116,23 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   }, [artifacts, projectId, openArtifact]);
 
+  // たまりコメントのクリック = 編集モード。コメント元の成果物が閉じていれば
+  // 開き直してから、要素の再選択＋本文の下書き復元を行う。
+  const handleEditPendingComment = useCallback(
+    (id: string) => {
+      const st = usePreviewStore.getState();
+      const comment = st.pendingComments.find((c) => c.id === id);
+      if (!comment) return;
+      const slug = comment.artifact?.slug;
+      if (slug && (!st.artifact || st.artifact.slug !== slug)) {
+        const record = artifacts.find((a) => a.slug === slug);
+        if (record) openArtifact(projectId, record);
+      }
+      usePreviewStore.getState().beginEditPendingComment(id);
+    },
+    [artifacts, openArtifact, projectId]
+  );
+
   const { data: messagesData } = useQuery({
     queryKey: ['project-messages', project?.room_id],
     // 画面＝実体の一方通行マージ。サーバー取得は「追いつき」専用で、画面に既に
@@ -1740,41 +2142,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     // 「一瞬消える」画面バグの正体だった。fetch結果はキャッシュと id で結合し、
     // ローカルにしか無い行（SSE直挿入・楽観表示）は必ず生き残る。
     queryFn: async () => {
-      const fresh = await api.rooms.getMessages(project!.room_id!, { limit: 500 });
-      const old = queryClient.getQueryData<{ messages: MessageResponse[] }>(
-        ['project-messages', project?.room_id],
-      );
-      if (!old?.messages?.length) return fresh;
-      // オブジェクト同一性の安定化: 内容が変わっていない行は「前回と同じ
-      // オブジェクト」を使い回す。これが無いとポーリングのたびに全行が新しい
-      // オブジェクトになり、MessageBubble の memo が全滅して毎回500件を再描画・
-      // マークダウン再解析していた（長い部屋で送信直後に自分のメッセージが
-      // 数秒遅れて出る/全体が重い、の主犯）。再描画は変わった行だけになる。
-      const prevById = new Map(old.messages.map((m) => [m.id, m]));
-      const stabilized = fresh.messages.map((m) => {
-        const prev = prevById.get(m.id);
-        return prev
-          && prev.content === m.content
-          && prev.pendingFollowup === m.pendingFollowup
-          && prev.reply_to_id === m.reply_to_id
-          ? prev
-          : m;
-      });
-      const freshIds = new Set(fresh.messages.map((m) => m.id));
-      // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
-      // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
-      // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
-      const cutoff = Date.now() - 120_000;
-      const localOnly = old.messages.filter(
-        (m) => !freshIds.has(m.id) && new Date(m.created_at).getTime() >= cutoff,
-      );
-      if (localOnly.length === 0) return { messages: stabilized };
-      const merged = [...stabilized, ...localOnly].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      );
-      return { messages: merged };
+      const fresh = await api.rooms.getMessages(project!.room_id!, { limit: CHAT_INITIAL_FETCH_LIMIT });
+      // 初回応答が上限未満なら、それより古い行はサーバーに無い。
+      if (fresh.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
+      return mergeFreshMessages(queryClient.getQueryData<{ messages: MessageResponse[] }>(['project-messages', project?.room_id]), fresh);
     },
-    enabled: !!project?.room_id,
+    enabled: !!project?.room_id && queriesReleased,
     staleTime: 5 * 1000,
     retry: 1,
     refetchInterval: (query) => (
@@ -1784,19 +2157,35 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const latestMessageId = messagesData?.messages?.[0]?.id;
 
+  // 既読は「未読がある時」だけ送る。従来は最新IDが変わるたび（開いた直後だけで
+  // 3〜4回）送り、成功のたびに一覧（/projects 114KB）を丸ごと取り直していて、
+  // 本命のメッセージ取得と帯域・DBを奪い合っていた。未読数は手元のキャッシュを
+  // 直接ゼロにする（見た目のタイミングは同じ、手段だけ変える）。
+  const markedReadRoomRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!project?.room_id) return;
-    api.rooms.markAsRead(project.room_id)
+    const roomId = project?.room_id;
+    if (!roomId) return;
+    const list = queryClient.getQueryData<ProjectListResponse>(['projects']);
+    const inList = list?.projects?.find((p) => p.id === projectId);
+    const unread = inList?.unread_count ?? project?.unread_count ?? 0;
+    const firstForRoom = markedReadRoomRef.current !== roomId;
+    if (!firstForRoom && unread <= 0) return;
+    markedReadRoomRef.current = roomId;
+    api.rooms.markAsRead(roomId)
       .then(() => {
-        queryClient.invalidateQueries({ queryKey: ['projects'] });
+        const zero = <T extends { unread_count?: number }>(p: T): T => ({ ...p, unread_count: 0 });
+        queryClient.setQueryData<ProjectListResponse>(['projects'], (cur) =>
+          cur ? { ...cur, projects: cur.projects.map((p) => (p.id === projectId ? zero(p) : p)) } : cur,
+        );
+        queryClient.setQueryData<ProjectResponse>(['project', projectId], (cur) => (cur ? zero(cur) : cur));
       })
       .catch(() => null);
-  }, [latestMessageId, project?.room_id, queryClient]);
+  }, [latestMessageId, project?.room_id, project?.unread_count, projectId, queryClient]);
 
   const { data: activeStatus } = useQuery({
     queryKey: ['session-active', project?.room_id],
     queryFn: () => api.sm.getActiveStatus(project!.room_id!),
-    enabled: !!project?.room_id,
+    enabled: !!project?.room_id && queriesReleased,
     retry: 1,
     // SSE未接続時は 3s ポーリング。SSE接続中もイベントでキャッシュ更新するが、
     // 追い連絡/cancel等でSSEがデシンク（接続扱いのまま無音）すると active 状態が
@@ -1810,7 +2199,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const { data: currentRun } = useQuery({
     queryKey: ['current-run', projectId],
     queryFn: () => api.projects.currentRun(projectId),
-    enabled: !!projectId,
+    enabled: !!projectId && queriesReleased,
     retry: false,
     // session-active はコアのin-memory状態のみで、SSE切断後の常駐セッション
     // 継続ターンを見失う。自分のレスポンス(run.state)も実行中の根拠にして、
@@ -1830,7 +2219,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const { data: allExecutionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId, 500),
-    enabled: !!projectId,
+    enabled: !!projectId && queriesReleased,
     retry: 1,
     staleTime: 30 * 1000,
     refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
@@ -1996,19 +2385,71 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const hasAnyContent = displayItems.length > 0;
 
+  // 初回読み込み中（下のJSXでスピナーを出す条件と同一）。メッセージだけ先に
+  // 届いた時点ではまだリストがDOMに無いので、この間に「最下部へ」を発火させると
+  // スピナー相手に空振りして二度と発火しない。リスト描画後に揃えるための旗。
+  // run状態・作業イベントの初回取得を待つのは「実行中の部屋」だけ。待機中の
+  // 部屋は後から挿入される要素が無いので、メッセージが揃った時点で表示する。
+  // 実行中かどうかは一覧（サイドバー）が既に持つ has_active_run で判定し、
+  // 追加取得はしない。従来は待機中の部屋でも4本の完了を待っていて、一番遅い
+  // 1本（詰まった current-run 等）に切替時間が引きずられていた。
+  // run状態・作業イベントは待たない。メッセージが揃った時点で描き、実行中の
+  // 表示は後から到着した時に差し込む（束ね応答なら同時に届く）。
+  const isBooting = !project || (!!project.room_id && messagesData === undefined);
+  // 実使用の計測: サイドバーで押した瞬間（無ければこの部屋の mount）→ 内容が描けた時点
+  useEffect(() => {
+    if (isBooting || bootLoggedRef.current) return;
+    bootLoggedRef.current = true;
+    const start = roomClickStart(projectId) ?? mountAtRef.current;
+    // 描画が実際に画面に出た後（次のフレーム）で測る
+    requestAnimationFrame(() => {
+      perfLog({
+        surface: 'web',
+        event: 'room-open-visible',
+        ms: performance.now() - start,
+        room_id: project?.room_id ?? null,
+        extra: { from_click: roomClickStart(projectId) != null, messages: messagesData?.messages?.length ?? 0, open: openState },
+      });
+    });
+  }, [isBooting, projectId, project?.room_id, messagesData?.messages?.length, openState]);
+
   useEffect(() => {
     isNearBottomRef.current = true;
+    hasMoreOlderRef.current = true;
+    isLoadingOlderRef.current = false;
     const frame = requestAnimationFrame(() => {
       setVisibleItemCount(INITIAL_CHAT_RENDER_COUNT);
       setHasNewMessages(false);
+      setIsAwayFromBottom(false);
     });
     return () => cancelAnimationFrame(frame);
   }, [projectId]);
 
+  // 部屋ボードが有効な部屋は、履歴の代わりにボードを主役にして
+  // チャットは「直前1ターン」（最後のユーザー発言以降）だけを表示する。
+  const boardEnabled = !!(project?.metadata as Record<string, unknown> | null | undefined)?.board_enabled;
+
   const visibleDisplayItems = useMemo(() => {
+    if (boardEnabled) {
+      // 1セット表示: 「最後のユーザー発言」を起点に、そこから末尾まで全部を残す。
+      // ダンは1ターンで複数メッセージ（返信＋送信案カード＋続報など）を返すことが
+      // あるので、遡って最初のAIで打ち切る旧実装だとユーザー発言や途中のカードが
+      // 切り落とされていた。起点をユーザー発言に固定すれば、そのターンのダンの
+      // 出力が何通でも全部同じセットに残る。追い連絡（連続送信）も両方残る。
+      // 新しいメッセージを送れば、それが新しい起点になって前のセットは引っ込む。
+      let start = -1;
+      for (let i = displayItems.length - 1; i >= 0; i--) {
+        const item = displayItems[i];
+        if (item.kind === 'message' && item.msg.sender_type !== 'ai') {
+          start = i;
+          break;
+        }
+      }
+      return start >= 0 ? displayItems.slice(start) : displayItems.slice(-2);
+    }
     const start = Math.max(0, displayItems.length - visibleItemCount);
     return displayItems.slice(start);
-  }, [displayItems, visibleItemCount]);
+  }, [displayItems, visibleItemCount, boardEnabled]);
 
   const hiddenOlderCount = Math.max(0, displayItems.length - visibleDisplayItems.length);
 
@@ -2032,11 +2473,41 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   }, [displayItems.length]);
 
+  // チャットを開いた瞬間に最新（一番下）を表示する。ペイント前に位置を
+  // 決めるので、上の方が一瞬見えてから飛ぶちらつきが無い。
+  // isBooting を依存に含めるのが要: メッセージ取得完了(hasAnyContent=true)は
+  // run/イベント取得完了より先に来ることがあり、その時点ではまだスピナー表示中で
+  // リストがDOMに無い。スピナーが消えた後のコミットでもう一度発火させる。
+  useLayoutEffect(() => {
+    if (isBooting || !hasAnyContent) return;
+    const el = scrollContainerRef.current;
+    if (el && isNearBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [projectId, hasAnyContent, isBooting]);
+
+  // 開いた直後の「最下部へ合わせたのに途中で止まる」の根治。画像・動画・
+  // マークダウンの遅延レイアウトで後から中身の高さが伸びると、一度合わせた
+  // 位置が相対的に上へずれる。ユーザーが自分で上へスクロールするまで
+  // （isNearBottomRef が true の間）は、高さが変わるたび最下部へ貼り直す。
+  useEffect(() => {
+    if (isBooting) return;
+    const content = messagesContentRef.current;
+    const el = scrollContainerRef.current;
+    // スピナー表示中は messagesContentRef が null で observer 登録に失敗する。
+    // isBooting を依存に含め、リスト描画後に必ず登録し直す。
+    if (!content || !el) return;
+    const observer = new ResizeObserver(() => {
+      if (isNearBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [projectId, hasAnyContent, isBooting]);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     isNearBottomRef.current = nearBottom;
+    setIsAwayFromBottom(!nearBottom);
     if (nearBottom) setHasNewMessages(false);
     if (el.scrollTop < 240) {
       pendingPrependScrollRef.current = {
@@ -2048,8 +2519,48 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           ? count
           : Math.min(displayItems.length, count + CHAT_RENDER_INCREMENT)
       );
+      // 手元の行を全部描画し終えていて、まだサーバーに古い行があるなら取りに行く。
+      const roomId = project?.room_id;
+      if (
+        roomId
+        && visibleItemCount >= displayItems.length
+        && hasMoreOlderRef.current
+        && !isLoadingOlderRef.current
+      ) {
+        const queryKey = ['project-messages', roomId];
+        const cached = queryClient.getQueryData<{ messages: MessageResponse[] }>(queryKey);
+        const oldest = cached?.messages?.length
+          ? cached.messages.reduce((a, b) => (a.created_at < b.created_at ? a : b))
+          : null;
+        if (oldest) {
+          isLoadingOlderRef.current = true;
+          api.rooms.getMessages(roomId, { limit: CHAT_OLDER_FETCH_LIMIT, before: oldest.created_at })
+            .then((older) => {
+              if (older.messages.length < CHAT_OLDER_FETCH_LIMIT) hasMoreOlderRef.current = false;
+              if (older.messages.length === 0) return;
+              pendingPrependScrollRef.current = { height: el.scrollHeight, top: el.scrollTop };
+              queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (cur) => {
+                const have = new Set((cur?.messages ?? []).map((m) => m.id));
+                const add = older.messages.filter((m) => !have.has(m.id));
+                return { messages: [...(cur?.messages ?? []), ...add] };
+              });
+              // 足した分もそのまま描画対象にする（描画窓は別途スクロールで広がる）。
+              setVisibleItemCount((count) => count + older.messages.length);
+            })
+            .catch(() => null)
+            .finally(() => { isLoadingOlderRef.current = false; });
+        }
+      }
     }
-  }, [displayItems.length]);
+  }, [displayItems.length, visibleItemCount, project?.room_id, queryClient]);
+
+  // 初回20件が画面に収まってしまうとスクロールが発生せず遡れない。描画後に
+  // 画面が埋まっていなければ一度だけ handleScroll を通し、遡り読み込みを起動する。
+  useEffect(() => {
+    if (isBooting || !hasAnyContent) return;
+    const el = scrollContainerRef.current;
+    if (el && el.scrollHeight <= el.clientHeight + 240) handleScroll();
+  }, [projectId, isBooting, hasAnyContent, handleScroll]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -2137,7 +2648,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     <div className="relative flex h-full w-full overflow-hidden">
     {voiceOpen && project?.room_id && (
       <div className="fixed bottom-4 right-4 z-50 w-[360px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
-        <VoiceConsole
+        <VoiceSession
           roomId={project.room_id}
           chatTitle={project.title || undefined}
           onClose={() => setVoiceOpen(false)}
@@ -2383,22 +2894,33 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       ) : (
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
-        {hasNewMessages && (
+        {/* 新着が無くても、上へスクロール中は常に「最新へ」ジャンプを出す */}
+        {(hasNewMessages || isAwayFromBottom) && (
           <button
             onClick={scrollToBottom}
             className="sticky top-[calc(100%-3rem)] z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90"
             style={{ display: 'block', marginLeft: 'auto', marginRight: 'auto', width: 'fit-content' }}
           >
             <ChevronDown className="h-3.5 w-3.5" />
-            新しいメッセージ
+            {hasNewMessages ? '新しいメッセージ' : '最新へ'}
           </button>
         )}
+        {/* 部屋ボード: 有効な部屋では履歴の代わりに現在地ボードを主役表示。
+            isBooting で外すと送信のたびに再マウント→付箋アニメ再生になるので、
+            ロード状態に関わらずマウントし続ける（ボード自身がスピナーを持つ） */}
+        {/* ボードの取得/SSE はメッセージを描いた後に始める（部屋を開く1往復と DB を取り合わない） */}
+        {boardEnabled && !isBooting ? <RoomBoard projectId={projectId} /> : null}
         {/* 「空の部屋」の文言は、取得が成功して本当に0件だった時だけ出す。
             プロジェクト情報の取得中（=メッセージクエリが未開始）や
             メッセージ初回取得中は「読み込み中」であって「空」ではない。
             従来は未開始状態を空と誤判定し、チャット切替のたびに
             「メッセージを送信して開始してください」が一瞬表示されていた。 */}
-        {!project || (project.room_id && messagesData === undefined) ? (
+        {/* run状態・作業イベントの初回取得も待ってから一発で描画する。
+            メッセージだけ先に出すと、後から「実行中…」→「〇件の作業」が
+            順に挿入されて画面が組み変わって見える（到着順のバラつき）。
+            isLoading は初回取得中のみ true なので、以降のポーリングや
+            キャッシュ済みの開き直しではスピナーに戻らない。 */}
+        {isBooting ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
@@ -2408,16 +2930,21 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
-          <div className="flex flex-col gap-2 p-4">
+          <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(
                 (last, item, index) => (item.kind === 'execution-block' ? index : last),
                 -1
               );
 
-              return visibleDisplayItems.map((item, index) => {
+              // LINE風の日付区切り: 日付が変わった最初のメッセージの前にだけ
+              // 「今日」「昨日」「8月7日(木)」のチップを挟む。作業ブロックは
+              // 日付を持たないので判定を進めない（前後のメッセージに任せる）。
+              let prevDateKey: string | null = null;
+              const nodes: ReactNode[] = [];
+              visibleDisplayItems.forEach((item, index) => {
                 if (item.kind === 'execution-block') {
-                  return (
+                  nodes.push(
                     <InlineProcessBlock
                       key={item.id}
                       steps={item.steps}
@@ -2425,10 +2952,30 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                       defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
                     />
                   );
+                  return;
                 }
 
-                return <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
+                const d = item.msg.created_at ? new Date(item.msg.created_at) : null;
+                // ボード部屋は1セット表示なので日付チップは出さない
+                if (d && !isNaN(d.getTime()) && !boardEnabled) {
+                  const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+                  if (dateKey !== prevDateKey) {
+                    nodes.push(
+                      <div key={`date-${dateKey}`} className="my-2 flex justify-center">
+                        <span className="rounded-full bg-muted px-3 py-1 text-[11px] text-muted-foreground">
+                          {formatDateSeparator(d)}
+                        </span>
+                      </div>
+                    );
+                    prevDateKey = dateKey;
+                  }
+                }
+
+                nodes.push(
+                  <div key={item.msg.id} data-message-id={item.msg.id} className="animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
+                );
               });
+              return nodes;
             })()}
             {hiddenOlderCount > 0 ? (
               <div className="h-1" aria-hidden="true" />
@@ -2451,7 +2998,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           onSseStateChange={(connected) => { sseConnectedRef.current = connected; }}
           replyTo={replyTo}
           onClearReply={() => setReplyTo(null)}
-          onSubmitComment={handleSubmitComment}
+          onAddComment={handleAddComment}
+          onEditPendingComment={handleEditPendingComment}
         />
       ) : null}
 
@@ -2477,7 +3025,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     </div>
     {isPreviewOpenForProject && isMobile && (
       <div className="h-full w-full min-w-0">
-        <PreviewPane onSubmitComment={handleSubmitComment} />
+        <PreviewPane onAddComment={handleAddComment} />
       </div>
     )}
     {isPreviewOpenForProject && !isMobile && (
@@ -2490,7 +3038,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           <div className="absolute inset-y-0 -left-1 w-3 group-hover:bg-primary/30 transition-colors" />
         </div>
         <div className="min-w-0 flex-1">
-          <PreviewPane onSubmitComment={handleSubmitComment} />
+          <PreviewPane onAddComment={handleAddComment} />
         </div>
       </>
     )}

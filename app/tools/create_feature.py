@@ -330,6 +330,7 @@ import {{ useQuery, useMutation, useQueryClient }} from '@tanstack/react-query';
 import {{ Plus, Search, Loader2 }} from 'lucide-react';
 import {{ Button }} from '@/components/ui/button';
 import {{ Input }} from '@/components/ui/input';
+import {{ EditableText }} from '@/components/dan/editable';
 
 const API_BASE = '/api/v1/{kebab}';
 
@@ -359,7 +360,7 @@ export default function {snake.title().replace("_", "")}Page() {{
     <div className="p-6 space-y-6">
       {{/* ヘッダー */}}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-foreground">{feature_name}</h1>
+        <EditableText as="h1" editId="{kebab}-page-title" className="text-2xl font-bold text-foreground">{feature_name}</EditableText>
         <Button>
           <Plus className="h-4 w-4 mr-2" />
           新規作成
@@ -529,8 +530,11 @@ if __name__ == "__main__":
                 )
                 if not exists.data:
                     artifact_type = "dashboard" if "dashboard" in kebab else ("website" if any(t in kebab for t in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")) else "tool")
-                    delivery_url = f"https://{kebab}-done.vercel.app/"
                     share_url = preview_url if demo else f"/preview/{kebab}"
+                    # 公開URLは publish 時に専用 Vercel プロジェクトが決まってから
+                    # 入る。作成時点では相対パスのまま置く（廃止済みの
+                    # <slug>-done.vercel.app を書き込むと 404 の案内になる）。
+                    delivery_url = share_url
                     sb.table("chat_artifact").insert({
                         "room_id": room_id,
                         "project_id": project_id,
@@ -555,7 +559,7 @@ if __name__ == "__main__":
                             "public_profile": {
                                 "artifact_slug": kebab,
                                 "public_url": delivery_url,
-                                "alias_domain": f"{kebab}-done.vercel.app",
+                                "alias_domain": "",
                                 "title": feature_name,
                                 "manifest_path": f"/artifacts/{kebab}/manifest.webmanifest",
                                 "start_url": f"/preview/{kebab}",

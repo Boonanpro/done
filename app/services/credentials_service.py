@@ -26,6 +26,9 @@ ID_KEYS = ["id", "email", "member_id", "username", "login_id", "user_id"]
 PASSWORD_KEYS = ["password", "pass", "pw"]
 # ログインURLとして認識するキー（優先順）
 URL_KEYS = ["login_url", "url"]
+# 認証アプリ(TOTP)のシードと付随パラメータ。使い捨てのコードではなく、
+# コードを生成するための永続的な秘密なのでパスワードと同じ扱いで保管する。
+TOTP_KEYS = ["totp_secret", "totp_digits", "totp_period", "totp_algorithm"]
 
 
 def _host(u: Optional[str]) -> str:
@@ -37,6 +40,11 @@ def _host(u: Optional[str]) -> str:
     if "://" not in u:
         u = "https://" + u
     return urlparse(u).netloc.lower().split(":")[0]
+
+
+def _strip_www(host: str) -> str:
+    """先頭の www. を落とす（instagram.com と www.instagram.com は同じログイン先）。"""
+    return host[4:] if host.startswith("www.") else host
 
 
 def _base_domain(host: str) -> str:
@@ -54,6 +62,18 @@ def _domains_match(h1: str, h2: str) -> bool:
         or h2.endswith("." + h1)
         or _base_domain(h1) == _base_domain(h2)
     )
+
+
+def narrow_url_matches(matches: list) -> list:
+    """
+    URL照合の結果を絞り込む。
+
+    ベースドメインが同じだけの別サービス（account.line.biz と manager.line.biz 等）が
+    混ざることがあるため、ホストまで完全一致した記録があればそちらを優先する。
+    それでも複数残る場合は絞り込まない（呼び出し元が service 名で選ぶ）。
+    """
+    exact = [m for m in matches if m.get("host_exact")]
+    return exact if exact else matches
 
 
 def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
@@ -97,6 +117,11 @@ def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
         if credentials.get(key):
             normalized["login_url"] = credentials[key]
             break
+
+    # 認証アプリのシードがあれば保持（落とすとコード生成ができなくなる）
+    for key in TOTP_KEYS:
+        if credentials.get(key):
+            normalized[key] = credentials[key]
 
     return normalized
 
@@ -185,6 +210,64 @@ class CredentialsService:
                 "message": str(e),
             }
 
+    async def save_totp_secret(
+        self,
+        user_id: str,
+        service: str,
+        secret: str,
+        digits: int = 6,
+        period: int = 30,
+        algorithm: str = "SHA1",
+        login_url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        認証アプリ(TOTP)のシードを保存する。
+
+        save_credential は渡された辞書で暗号化データを丸ごと置き換えるため、
+        シードだけを渡すと保存済みのID/パスワードが消える。ここでは既存レコードを
+        読んでから統合して書き戻すので、パスワードを保持したままシードを追加できる。
+
+        Args:
+            user_id: ユーザーID
+            service: サービス名
+            secret: base32 のシード（正規化済みを渡すこと）
+            digits/period/algorithm: 認証アプリのパラメータ
+            login_url: ログインページのURL/ドメイン（URL照合用）
+
+        Returns:
+            保存結果
+        """
+        try:
+            existing = await self.get_credential(user_id, service)
+
+            merged: Dict[str, Any] = {
+                "totp_secret": secret,
+                "totp_digits": digits,
+                "totp_period": period,
+                "totp_algorithm": algorithm,
+            }
+            credential_type = "login"
+            if existing:
+                # 既存のID/パスワード/URLを引き継ぐ（消さない）
+                if existing.get("id"):
+                    merged["id"] = existing["id"]
+                if existing.get("password"):
+                    merged["password"] = existing["password"]
+                if existing.get("login_url"):
+                    merged["login_url"] = existing["login_url"]
+                credential_type = existing.get("credential_type") or "login"
+
+            return await self.save_credential(
+                user_id=user_id,
+                service=service,
+                credentials=merged,
+                credential_type=credential_type,
+                login_url=login_url,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save TOTP secret: {e}")
+            return {"success": False, "service": service, "message": str(e)}
+
     async def get_credential(
         self,
         user_id: str,
@@ -229,32 +312,38 @@ class CredentialsService:
                 "service": stored["service_name"],
                 "credential_type": credential_type,
                 "login_url": normalized.get("login_url"),
+                "totp_secret": normalized.get("totp_secret"),
+                "totp_digits": normalized.get("totp_digits"),
+                "totp_period": normalized.get("totp_period"),
+                "totp_algorithm": normalized.get("totp_algorithm"),
             }
         except Exception as e:
             logger.error(f"Failed to get credentials: {e}")
             return None
 
-    async def find_credential_by_url(
+    async def find_credentials_by_url(
         self,
         user_id: str,
         url: str,
-    ) -> Optional[dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
-        ログインページのURL/ドメインに一致する認証情報を返す。
+        ログインページのURL/ドメインに一致する認証情報を「全件」返す。
 
-        同じメールアドレスが複数サービスに登録されていても、保存済みの
-        login_url のドメインで照合するため、正しい1件を曖昧さなく引ける。
+        同じドメインに複数アカウントを保存していることがある（例: Instagram の
+        個人用と事業用）。1件目を黙って返すと別アカウントのパスワードを
+        使ってしまうため、照合結果は全件返し、どれを使うかは呼び出し元が決める。
 
         Args:
             user_id: ユーザーID
             url: 現在のログインページURL（例 https://account.line.biz/login）
 
         Returns:
-            一致した認証情報（id, password, service, credential_type, login_url）、無ければNone
+            一致した認証情報のリスト（id, password, service, credential_type, login_url）
         """
         target = _host(url)
         if not target:
-            return None
+            return []
+        matches: list[dict[str, Any]] = []
         try:
             result = self.supabase.table(self.TABLE_NAME).select("*").eq(
                 "user_id", user_id
@@ -271,17 +360,46 @@ class CredentialsService:
                     continue
                 credential_type = decrypted.pop("_credential_type", "login")
                 normalized = _normalize_credentials(decrypted)
-                return {
+                matches.append({
                     "id": normalized.get("id"),
                     "password": normalized.get("password"),
                     "service": row["service_name"],
                     "credential_type": credential_type,
                     "login_url": stored_url,
-                }
-            return None
+                    "totp_secret": normalized.get("totp_secret"),
+                    "totp_digits": normalized.get("totp_digits"),
+                    "totp_period": normalized.get("totp_period"),
+                    "totp_algorithm": normalized.get("totp_algorithm"),
+                    # ホストまで同じか（ベースドメインだけ同じ別サービスと区別する）。
+                    # www の有無は同じログイン先なので無視する。
+                    "host_exact": _strip_www(_host(stored_url)) == _strip_www(target),
+                })
+            return matches
         except Exception as e:
-            logger.error(f"Failed to find credential by url: {e}")
-            return None
+            logger.error(f"Failed to find credentials by url: {e}")
+            return []
+
+    async def find_credential_by_url(
+        self,
+        user_id: str,
+        url: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        URL照合で一意に定まる場合だけ、その1件を返す。
+
+        複数一致した場合は None を返す（どれか1つを勝手に選ぶと別アカウントの
+        パスワードを使ってしまうため）。呼び出し元は service 名で指定し直すこと。
+        """
+        matches = narrow_url_matches(await self.find_credentials_by_url(user_id, url))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                "URL %s に複数の認証情報が一致: %s — service 名の指定が必要",
+                url,
+                [m.get("service") for m in matches],
+            )
+        return None
 
     async def list_credentials(
         self,

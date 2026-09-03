@@ -28,7 +28,6 @@ import { Label } from '@/components/ui/label';
 import type { ArtifactRecord } from '@/stores/preview-store';
 
 // 公開先の Vercel プロジェクト。内部固定値（UI には出さない）。
-const VERCEL_PROJECT = 'frontend';
 
 type Stage = 'domain' | 'payer' | 'confirm' | 'publishing' | 'done' | 'guide';
 
@@ -61,10 +60,12 @@ interface PublishResponse {
   dns_instructions?: { a?: DnsRecord; cname?: DnsRecord } | null;
   conflict_label?: string | null;
   verified?: boolean;
+  status?: 'registering' | 'live' | 'failed' | null;
 }
 interface DomainSetupResponse {
   success: boolean;
   setup_path?: string | null;
+  setup_url?: string | null;
   error?: string | null;
 }
 
@@ -159,7 +160,6 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         body: JSON.stringify({
           artifact_id: artifact.id,
           domain,
-          vercel_project: VERCEL_PROJECT,
           artifact_dir: `frontend/src/app/artifacts/${artifact.slug}`,
           write_seo_files: true,
           years: 1,
@@ -172,10 +172,17 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
     },
     onMutate: () => setStage('publishing'),
     onSuccess: (data) => {
+      if (data.success && data.status === 'registering') {
+        // Publication is durable after this response.  Return to the preview,
+        // where the domain-publication control becomes the status display.
+        onPublished?.();
+        close(false);
+        return;
+      }
       setResult(data);
       setStage('done');
       if (data.success) {
-        toast.success('公開しました');
+        toast.success(data.status === 'registering' ? '公開処理を開始しました。画面を閉じても続きます。' : '公開しました');
         onPublished?.();
       }
     },
@@ -195,7 +202,6 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         body: JSON.stringify({
           artifact_id: artifact.id,
           domain,
-          vercel_project: VERCEL_PROJECT,
           replace,
         }),
       });
@@ -226,7 +232,6 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         body: JSON.stringify({
           artifact_id: artifact.id,
           domain,
-          vercel_project: VERCEL_PROJECT,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -237,8 +242,13 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         toast.error('発行に失敗しました', { description: data.error?.slice(0, 140) });
         return;
       }
-      const origin = typeof window !== 'undefined' ? window.location.origin : '';
-      setClientUrl(`${origin}${data.setup_path}`);
+      // The backend owns the canonical public origin.  Never infer a client
+      // payment URL from localhost, preview, or the currently open artifact.
+      if (!data.setup_url) {
+        toast.error('案内URLを確定できませんでした');
+        return;
+      }
+      setClientUrl(data.setup_url);
       setStage('guide');
       onPublished?.();
     },
@@ -460,8 +470,15 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3">
                 <div className="flex items-center gap-2 font-medium text-emerald-700">
                   <CheckCircle2 className="h-5 w-5" />
-                  {result.verified === false ? 'DNS設定後に公開されます' : '公開しました'}
+                  {result.status === 'registering'
+                    ? '公開処理を開始しました'
+                    : result.verified === false ? 'DNS設定後に公開されます' : '公開しました'}
                 </div>
+                {result.status === 'registering' && (
+                  <p className="mt-1 text-sm text-emerald-800">
+                    この画面を閉じても、ドメイン取得・URL設定・検索エンジンへの登録は続きます。
+                  </p>
+                )}
                 {result.deploy_url && (
                   <a
                     href={result.deploy_url}

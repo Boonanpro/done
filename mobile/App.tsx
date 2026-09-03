@@ -1,3 +1,4 @@
+import * as Updates from 'expo-updates';
 import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
@@ -13,6 +14,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   AppState,
   BackHandler,
   FlatList,
@@ -33,6 +35,8 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import { animateNextLayout, pressedScale } from './motion';
+import { MediaGrid } from './media-grid';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
@@ -48,6 +52,8 @@ import {
   type ExecutionEvent,
   type TurnBlock,
 } from './chatTimeline';
+import { VoiceOverlay } from './voice';
+import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
 
 const DEFAULT_API_BASE_URL = 'https://frontend-liard-rho-29.vercel.app';
 const API_BASE_URL =
@@ -55,25 +61,71 @@ const API_BASE_URL =
   Constants.expoConfig.extra.apiBaseUrl.trim()
     ? Constants.expoConfig.extra.apiBaseUrl.trim().replace(/\/+$/, '')
     : DEFAULT_API_BASE_URL;
-// Clean, name-bearing host for provisional artifact share/full-screen URLs.
-// Must match the web NEXT_PUBLIC_SHARE_ORIGIN so PC and mobile show the SAME
-// URL. Kept separate from API_BASE_URL: this alias is re-pointed to the latest
-// production on every artifact publish, whereas API calls use an auto-following
-// host. Override via expoConfig.extra.shareBaseUrl.
-const SHARE_BASE_URL =
-  typeof Constants.expoConfig?.extra?.shareBaseUrl === 'string' &&
-  Constants.expoConfig.extra.shareBaseUrl.trim()
-    ? Constants.expoConfig.extra.shareBaseUrl.trim().replace(/\/+$/, '')
-    : 'https://done-studio.vercel.app';
 const LEGACY_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
 const LEGACY_VERCEL_HOST_PATTERN = /^https?:\/\/frontend-[^.]*mikis-projects-86652663\.vercel\.app/i;
-const KNOWN_ARTIFACT_URLS: Record<string, string> = {
-  'salonboard-styleup': 'https://salonboard-styleup-done.vercel.app',
-  kittoku: 'https://kittoku.vercel.app',
-};
 const TOKEN_KEY = 'done_mobile_access_token';
+const REFRESH_TOKEN_KEY = 'done_mobile_refresh_token';
 const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
+// チャットごとの入力下書き（Web版 dan-chat-draft:<projectId> と同等）
+// 部屋を開く一式（/chat/rooms/{id}/open）。欠けた項目は null。
+type RoomOpenResponse = {
+  room_id: string;
+  timings_ms?: Record<string, number>;
+  project: ProjectResponse | null;
+  messages: MessageResponse[] | null;
+  artifacts: ChatArtifactResponse[] | null;
+  active: { active: boolean } | null;
+  current_run: AgentRun | null;
+  execution_events: ExecutionEvent[] | null;
+};
+
+// 実使用の体感時間をログ(adb logcat)とバックエンド(/chat/perf)に残す。失敗しても何もしない。
+const perfLog = (event: string, ms: number, extra?: Record<string, unknown>, token?: string | null) => {
+  console.log(`[perf] ${event} ${Math.round(ms)}ms`, extra ?? '');
+  if (!token) return;
+  fetch(`${API_BASE_URL}/api/v1/chat/perf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ surface: 'mobile', event, ms, extra, at: new Date().toISOString(), ua: `updates:${Updates.updateId ?? 'embedded'}` }),
+  }).catch(() => undefined);
+};
+console.log(`[perf] startup update=${Updates.updateId ?? 'embedded'} created=${Updates.createdAt ? Updates.createdAt.toISOString() : '-'} channel=${Updates.channel ?? '-'}`);
+
+const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
+
+// サーバー取得のスナップショットでメッセージ一覧を置き換える時、送信直後で
+// まだサーバーに保存されていない楽観メッセージ（id が local-*）を残す。
+// 送信ボタンを押す直前に発射済みだったポーリング応答が数百ms遅れて着弾すると、
+// 丸ごと置き換えでは送ったばかりの吹き出しが一瞬消える（SSEのエコーが届いて
+// 復活するまで数秒、thinkingだけが見える）。エコー到着時に local-* は実IDの
+// 行へ置き換えられるので、ここで残しても二重表示にはならない。
+// 部屋を開いた時に取る件数と、上端まで遡った時に追加で取る件数。ダンの記憶は
+// UI の取得件数と無関係なので、画面は「一画面ぶん＋少し」で足りる。
+const CHAT_INITIAL_FETCH_LIMIT = 20;
+const CHAT_OLDER_FETCH_LIMIT = 100;
+
+function keepLocalOptimistic(
+  server: MessageResponse[],
+  current: MessageResponse[],
+  roomId: string,
+): MessageResponse[] {
+  const locals = current.filter((m) => m.id.startsWith('local-') && m.room_id === roomId);
+  // 遡り読み込みで足した行はサーバーの取得窓（最新N件）より古いので server に
+  // 含まれないが、削除された訳ではない。窓の下端より古い行はそのまま残す。
+  const serverIds = new Set(server.map((m) => m.id));
+  const oldestServer = server.length
+    ? Math.min(...server.map((m) => new Date(m.created_at).getTime() || 0))
+    : Infinity;
+  const olderKept = current.filter(
+    (m) =>
+      m.room_id === roomId
+      && !m.id.startsWith('local-')
+      && !serverIds.has(m.id)
+      && (new Date(m.created_at).getTime() || 0) < oldestServer,
+  );
+  return locals.length > 0 || olderKept.length > 0 ? [...server, ...olderKept, ...locals] : server;
+}
 const EAS_PROJECT_ID = 'db295575-26c1-4088-99aa-4887eb27e2e2';
 const DanSmsForwarder = NativeModules.DanSmsForwarder as
   | {
@@ -129,6 +181,8 @@ type ProjectResponse = {
   last_message_at?: string | null;
   last_message_preview?: string | null;
   pinned_at?: string | null;
+  // ダンがこのプロジェクトで今まさに作業中か（一覧の「作業中」インジケーター用）
+  has_active_run?: boolean;
   updated_at?: string | null;
   created_at: string;
 };
@@ -146,6 +200,9 @@ type ChatArtifactResponse = {
   slug: string;
   label?: string | null;
   preview_url?: string | null;
+  // The release ledger is the sole authority for where an artifact is served.
+  // It is populated only after the dedicated Vercel deployment is live.
+  delivery_url?: string | null;
   share_url?: string | null;
   draft_url?: string | null;
   production_url?: string | null;
@@ -228,12 +285,29 @@ function uploadAttachment(
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE_URL}/api/v1/files/upload`);
     xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    // タイムアウトは2段構え（どちらも無いと、ストールしたアップロードの上で
+    // 送信フローが永久に待ち続ける＝Send固着の一因になる）:
+    // - xhr.timeout: 総時間の上限30分（500MB動画の正常な長時間送信は殺さない）
+    // - 無進捗タイマー: 進捗イベントが2分止まったら中断（実質の死活判定）
+    xhr.timeout = 30 * 60 * 1000;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => xhr.abort(), 120_000);
+    };
+    const clearStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = null;
+    };
+    armStallTimer();
     xhr.upload.onprogress = (e) => {
+      armStallTimer();
       if (onProgress && e.lengthComputable && e.total > 0) {
         onProgress(e.loaded / e.total);
       }
     };
     xhr.onload = () => {
+      clearStallTimer();
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const data = JSON.parse(xhr.responseText) as { url: string };
@@ -253,8 +327,18 @@ function uploadAttachment(
         reject(new Error(detail || `Upload failed: ${xhr.status}`));
       }
     };
-    xhr.onerror = () => reject(new Error('Network error during upload'));
-    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.onerror = () => {
+      clearStallTimer();
+      reject(new Error('Network error during upload'));
+    };
+    xhr.ontimeout = () => {
+      clearStallTimer();
+      reject(new Error('Upload timed out'));
+    };
+    xhr.onabort = () => {
+      clearStallTimer();
+      reject(new Error('Upload stalled (no progress for 2 minutes)'));
+    };
     const form = new FormData();
     form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
     xhr.send(form);
@@ -267,21 +351,123 @@ function mediaTag(kind: PendingAttachment['kind'], name: string, url: string): s
   return `[添付ファイル: ${name} (${url})]`;
 }
 
+// ---- セッション自動更新 ----
+// アクセストークンは24時間で失効する。失効(401)を検知したらリフレッシュ
+// トークンで新しいペアを取得してリクエストを1回だけ再試行し、使い続ける
+// 限りログイン状態を維持する（リフレッシュトークンは使うたび30日延長）。
+// リフレッシュも失敗した時だけ本当のログアウト: AppMain が登録する
+// onAuthFailure がエラーアラート無しで即ログイン画面へ切り替える。
+let onAuthFailure: (() => void) | null = null;
+let onTokenRefreshed: ((token: string) => void) | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function tryRefreshSession(): Promise<string | null> {
+  // 同時多発の401（ポーリング群）で refresh を連打しない。1本に相乗りする。
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const stored = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+        if (!stored) return null;
+        const response = await fetch(`${API_BASE_URL}/api/v1/chat/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: stored }),
+        });
+        if (!response.ok) return null;
+        const pair = (await response.json()) as {
+          access_token?: string;
+          refresh_token?: string;
+        };
+        if (!pair.access_token) return null;
+        await SecureStore.setItemAsync(TOKEN_KEY, pair.access_token);
+        if (pair.refresh_token) {
+          await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, pair.refresh_token);
+        }
+        onTokenRefreshed?.(pair.access_token);
+        return pair.access_token;
+      } catch {
+        return null;
+      }
+    })();
+    refreshInFlight.finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+function isAuthError(error: unknown): boolean {
+  return (error as { status?: number } | null)?.status === 401;
+}
+
+// ---- 送信前のトークン鮮度保証 ----
+// 受信系(ポーリング/既読)は Vercel の rewrite 経由で Cookie が届き、バック
+// エンドは Cookie を優先して認証するため、state の Bearer トークンが失効して
+// いても 401 を一度も踏まない＝自動リフレッシュが発火しない。一方、送信の
+// SSE だけは Route Handler 経由で Bearer のみが使われるので、失効した
+// トークンを掴んだまま送信だけが失敗し続ける。送信前に exp をローカルで
+// 確認し、失効済み/失効間近なら先にリフレッシュしてから送る。
+function tokenExpiresSoon(token: string, withinMs = 120_000): boolean {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return false;
+    const b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = JSON.parse(atob(b64)) as { exp?: number };
+    if (typeof decoded.exp !== 'number') return false;
+    return decoded.exp * 1000 - Date.now() < withinMs;
+  } catch {
+    // 読めないトークンはここで判定せず、失敗時の401リカバリに任せる。
+    return false;
+  }
+}
+
+async function ensureFreshAccessToken(token: string): Promise<string> {
+  if (!tokenExpiresSoon(token)) return token;
+  const renewed = await tryRefreshSession();
+  return renewed ?? token;
+}
+
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {},
   token?: string,
+  isRetryAfterRefresh = false,
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/api/v1${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
+  // 全API呼び出しに30秒のタイムアウトを敷く。素の fetch は TCP がストール
+  // すると永久に返らず、それを await している送信フローごと固まる
+  // （Send固着の一因）。abort されたら通常のネットワークエラーとして投げる。
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30_000);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1${endpoint}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Request timed out: ${endpoint}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
+    // アクセストークン失効: 自動リフレッシュして1回だけ再試行。
+    // リフレッシュ不能なら onAuthFailure がログイン画面へ切り替える。
+    if (response.status === 401 && token && !isRetryAfterRefresh) {
+      const renewed = await tryRefreshSession();
+      if (renewed && renewed !== token) {
+        return apiRequest<T>(endpoint, options, renewed, true);
+      }
+      onAuthFailure?.();
+    }
     let detail = '';
     try {
       const body = await response.json();
@@ -352,46 +538,22 @@ function normalizeUrl(raw: string) {
   return value;
 }
 
-function artifactRouteParts(raw?: string | null) {
-  if (!raw) return null;
-  try {
-    const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, API_BASE_URL);
-    const match = url.pathname.match(/^\/(?:artifacts|preview)\/([^/?#]+)(.*)$/);
-    if (!match) return null;
-    return {
-      slug: decodeURIComponent(match[1]),
-      rest: `${match[2] || ''}${url.search || ''}${url.hash || ''}`,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function cleanArtifactUrl(artifact: ChatArtifactResponse) {
-  const path = artifact.share_url || artifact.draft_url || artifact.preview_url || `/preview/${artifact.slug}`;
-  const route = artifactRouteParts(path);
-  const routeSlug = route?.slug || artifact.slug;
-  const base =
+function cleanArtifactUrl(artifact: ChatArtifactResponse): string | null {
+  // Never construct a URL from the artifact name.  That was the old APK
+  // behaviour: it silently sent an artifact without a release to the retired
+  // done-studio/preview/<slug> route and presented its 404 as an app failure.
+  // The server supplies delivery_url from the publication ledger once the
+  // dedicated Vercel release has actually been promoted.
+  const authoritative =
     artifact.production_url ||
     (artifact.custom_domain ? `https://${artifact.custom_domain}` : null) ||
-    KNOWN_ARTIFACT_URLS[routeSlug];
+    artifact.delivery_url;
 
-  if (base) {
-    try {
-      return new URL(route?.rest || '/', base).toString();
-    } catch {
-      return base;
-    }
-  }
-
-  // No custom domain: provisional preview lives on the shared name-bearing host
-  // (done-studio), the same host the web dashboard uses, so PC and mobile show
-  // an identical URL for the same full-screen button.
-  const previewPath = (path || `/preview/${artifact.slug}`).replace('/artifacts/', '/preview/');
+  if (!authoritative) return null;
   try {
-    return new URL(previewPath.startsWith('/') ? previewPath : `/${previewPath}`, SHARE_BASE_URL).toString();
+    return new URL(authoritative).toString();
   } catch {
-    return normalizeUrl(path);
+    return null;
   }
 }
 
@@ -633,7 +795,10 @@ function RichMessageContent({
 
   return (
     <View style={styles.messageContentWrap}>
-      {parsed.images.map((url, index) => (
+      {/* 複数画像は LINE 式にまとめて表示（1枚は従来どおり）。動画は進捗リング付きの既存表示 */}
+      {parsed.images.length >= 2 ? (
+        <MediaGrid items={parsed.images.map((url) => ({ url, kind: 'image' as const }))} width={240} onOpenImage={onOpenUrl} />
+      ) : parsed.images.map((url, index) => (
         <Pressable key={`${url}-${index}`} onPress={() => onOpenUrl(url)}>
           <Image resizeMode="contain" source={{ uri: url }} style={styles.messageImage} />
         </Pressable>
@@ -667,13 +832,15 @@ function RichMessageContent({
       ))}
 
       {parsed.parts.length > 0 ? (
+        // 直接なぞり選択。初回長押しで複数メッセージへ選択が飛び散る暴発は
+        // リスト側の removeClippedSubviews を無効化して抑えている（選択状態が
+        // クリップ済み行の TextView に残って再利用されるのが原因）。
         <Text selectable style={[styles.messageText, mine && styles.myMessageText]}>
           {parsed.parts.map((part, index) =>
             part.kind === 'link' ? (
               <Text
                 key={`${part.url}-${index}`}
                 onPress={() => onOpenUrl(part.url)}
-                selectable
                 style={[styles.messageLink, mine && styles.myMessageLink]}
               >
                 {part.label}
@@ -852,30 +1019,54 @@ async function streamDanMessage(
       pollingInterval: 0,
     });
 
-    // Idle-based timeout: re-armed on every event (incl. keepalive) so a long
-    // but actively-streaming turn is never cut off — mirrors the backend's
-    // idle-timeout fix. Only a genuinely silent/dead connection trips it, and
-    // the chat-screen poll is a further backstop that surfaces the reply even
-    // if this ever fires early.
-    let timeout: ReturnType<typeof setTimeout>;
-    const armTimeout = () => {
-      if (timeout) clearTimeout(timeout);
-      timeout = setTimeout(() => {
-        source.close();
-        reject(new Error('DAN response timed out.'));
-      }, 1000 * 60 * 10);
+    // ---- 決着保証（Send永久固着の根治） ----
+    // この Promise が pending のまま残ると呼び出し側の後始末が走らず、送信中
+    // フラグが立ちっぱなしになる（＝全チャットの Send が死に、アプリ再起動で
+    // しか直らない）。react-native-sse は pollingInterval:0 だと「HTTP 200 の
+    // まま途中切断」（Vercel/トンネルのストリーム打ち切り）で message も error
+    // も close も一切発火しない。そこでイベント任せをやめ、ウォッチドッグが
+    // XHR の実状態を直接見て必ず有限時間で決着させる:
+    //   ① readyState=DONE なのに done/cancelled 未着 → 途中切断として reject
+    //   ② 受信バイトが90秒伸びない → 死んだ接続として reject
+    // サーバーは20秒ごとに keepalive コメント行を流す。コメント行はライブラリ
+    // が message として dispatch しないが responseText は伸びるので、②の判定は
+    // 無言の長い作業中でも keepalive だけで生き続ける（誤爆＝4回連続欠落時のみ）。
+    // reject は「送信失敗」の確定ではない: 成否は呼び出し側のサーバー照合
+    // （reconcile）が決める。
+    let settled = false;
+    let watchdog: ReturnType<typeof setInterval> | null = null;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearInterval(watchdog);
+      source.close();
+      finish();
     };
-    armTimeout();
+    let lastActivityAt = Date.now();
+    let lastSeenBytes = 0;
+    watchdog = setInterval(() => {
+      const xhr = (source as unknown as { _xhr?: XMLHttpRequest | null })._xhr;
+      if (!xhr) return; // 初回接続前（ライブラリは500ms後にopenする）
+      const bytes = typeof xhr.responseText === 'string' ? xhr.responseText.length : 0;
+      if (bytes !== lastSeenBytes) {
+        lastSeenBytes = bytes;
+        lastActivityAt = Date.now();
+        return;
+      }
+      if (xhr.readyState === 4 /* DONE */) {
+        settle(() => reject(new Error('Connection to DAN was interrupted.')));
+        return;
+      }
+      if (Date.now() - lastActivityAt > 90_000) {
+        settle(() => reject(new Error('DAN response timed out.')));
+      }
+    }, 5_000);
     // ユーザーの停止操作用ハンドル。閉じたら正常終了として解決する
     // （中断の後始末は呼び出し側のキャンセル処理が行う）。
-    options?.registerCancel?.(() => {
-      clearTimeout(timeout);
-      source.close();
-      resolve();
-    });
+    options?.registerCancel?.(() => settle(resolve));
 
     source.addEventListener('message', (event) => {
-      armTimeout();
+      lastActivityAt = Date.now();
       if (!event.data) return;
       let parsed: StreamEvent;
       try {
@@ -887,22 +1078,28 @@ async function streamDanMessage(
       onEvent(parsed);
 
       if (parsed.type === 'error') {
-        clearTimeout(timeout);
-        source.close();
-        reject(new Error(typeof parsed.message === 'string' ? parsed.message : 'DAN returned an error.'));
+        settle(() =>
+          reject(new Error(typeof parsed.message === 'string' ? parsed.message : 'DAN returned an error.')),
+        );
       } else if (parsed.type === 'done' || parsed.type === 'cancelled') {
         // cancelled = ターンが中断された（この端末または別端末のキャンセル）。
         // エラーではなく正常終了として扱う（Web版と同じ）。
-        clearTimeout(timeout);
-        source.close();
-        resolve();
+        settle(resolve);
       }
     });
 
-    source.addEventListener('error', () => {
-      clearTimeout(timeout);
-      source.close();
-      reject(new Error('Could not connect to DAN.'));
+    source.addEventListener('error', (event) => {
+      // react-native-sse はエラーイベントに HTTP ステータス(xhrStatus)を載せる。
+      // 401 を「接続失敗」と混同すると認証切れから永遠に回復できないため、
+      // ステータスを error.status に引き継いで呼び出し側で判別できるようにする。
+      const status = (event as { xhrStatus?: number } | null)?.xhrStatus;
+      const err = new Error('Could not connect to DAN.') as Error & { status?: number };
+      if (typeof status === 'number' && status > 0) err.status = status;
+      settle(() => reject(err));
+    });
+    // 何らかの経路で接続が閉じられた場合の最終防衛（未決着なら切断扱い）。
+    source.addEventListener('close', () => {
+      settle(() => reject(new Error('Connection to DAN was closed.')));
     });
   });
 }
@@ -995,6 +1192,29 @@ function ProjectActionSheet({
   );
 }
 
+// チャット一覧の「ダンが作業中」インジケーター。緑の点から波紋が広がり続ける
+// （Webサイドバーの animate-ping 相当）。
+function RunningDot({ style }: { style?: StyleProp<ViewStyle> }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(anim, { toValue: 1, duration: 1200, useNativeDriver: true }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [anim]);
+  const ringScale = anim.interpolate({ inputRange: [0, 1], outputRange: [1, 2.4] });
+  const ringOpacity = anim.interpolate({ inputRange: [0, 0.7, 1], outputRange: [0.7, 0.15, 0] });
+  return (
+    <View style={[styles.runningDotWrap, style]} pointerEvents="none">
+      <Animated.View
+        style={[styles.runningDotRing, { opacity: ringOpacity, transform: [{ scale: ringScale }] }]}
+      />
+      <View style={styles.runningDotCore} />
+    </View>
+  );
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -1010,6 +1230,9 @@ function AppMain() {
   const [password, setPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [messages, setMessages] = useState<MessageResponse[]>([]);
+  // 遡り読み込み（上端到達で before=最古 created_at を追加取得）。
+  const hasMoreOlderRef = useRef(true);
+  const isLoadingOlderRef = useRef(false);
   const [projects, setProjects] = useState<ProjectResponse[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<ProjectResponse | null>(null);
@@ -1018,12 +1241,14 @@ function AppMain() {
   const [attachSheetOpen, setAttachSheetOpen] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
-  const [sending, setSending] = useState(false);
-  // Which project the in-flight stream belongs to. Lets the user navigate away
-  // to other chats while Dan is still working, and only renders the live
-  // timeline / activity in the chat that is actually streaming. null when idle.
-  const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
-  const [activity, setActivity] = useState('');
+  // この端末発のストリームが生きているプロジェクトの集合（部屋別）。
+  // 以前は sending + streamingProjectId のグローバル単一ストリームで、
+  // どこかの部屋がストリーミング中は他の全部屋の Send が塞がれていた
+  // （ダンの長いターン中ずっと押せない＝「たまに送れない」の正体）。
+  // 部屋単位にしたので、どの部屋からでも常に送信できる。
+  const [streamingProjects, setStreamingProjects] = useState<string[]>([]);
+  // 作業ラベルもプロジェクト別（部屋を切り替えても他室のラベルが混ざらない）。
+  const [activityMap, setActivityMap] = useState<Record<string, string>>({});
   // 追い連絡（ダンのターン実行中に送ったメッセージ）の仮送信状態。
   // message id → 送信時刻(ms)。ダンが次の区切りで読み込むと、それ以降の作業
   // （新しいターン）がこのメッセージより後に始まるので、それを検知して解除する。
@@ -1034,16 +1259,61 @@ function AppMain() {
   // 実行中ストリームの停止ハンドル一式（Web版のキャンセルボタン相当）。
   // close: SSE接続を閉じる / clientMessageId: 取消対象メッセージID /
   // optimisticId: 画面上の楽観行 / draft: 入力欄へ復元するテキスト
-  const activeStreamRef = useRef<{
-    close: () => void;
-    clientMessageId: string;
-    optimisticId: string;
-    draft: string;
-    roomId: string;
-  } | null>(null);
-  // ユーザーが停止を押した直後フラグ。reconcile が「送信失敗」扱いで
-  // アラートを出さないようにする。
-  const userCancelledRef = useRef(false);
+  // 追い連絡で同時に複数のストリームが生きるため、clientMessageId をキーに
+  // 全部持つ（単一スロットだと追い連絡が最初のストリームのハンドルを潰し、
+  // 停止ボタンで最初のSSEが閉じられなくなる）。挿入順＝送信順。
+  const activeStreamsRef = useRef(
+    new Map<
+      string,
+      {
+        close: () => void;
+        clientMessageId: string;
+        optimisticId: string;
+        draft: string;
+        roomId: string;
+        projectId: string;
+      }
+    >(),
+  );
+  // プロジェクト別の同時送信フロー数。その部屋の最後の1本が終わった時だけ
+  // その部屋のストリーミング状態を解除する（「最初の送信だけが所有」方式は、
+  // 最初のフローが固まると追い連絡が正常終了しても解除されなかった）。
+  const inFlightSendsRef = useRef(new Map<string, number>());
+  // キャンセル世代（プロジェクト別）。その部屋の停止ボタン（や復帰ウォッチ
+  // ドッグの強制解除）が押されるたびに進む。各送信フローは開始時の世代を
+  // 覚えておき、世代がずれていたら「自分より後にこの部屋のキャンセルが
+  // 走った」＝reconcile も送信状態の解除も触らない（キャンセル側がその部屋を
+  // リセット済み。二重解除すると、その間に始まった新しい送信を巻き添えで消す）。
+  // 部屋別なのは、部屋Aの停止が部屋Bのフローの後始末を放棄させないため。
+  const cancelGenRef = useRef(new Map<string, number>());
+  const genOf = (pid: string) => cancelGenRef.current.get(pid) ?? 0;
+  // 部屋の作業ラベルを更新（null で消去）。
+  const setProjectActivity = useCallback((pid: string, label: string | null) => {
+    setActivityMap((current) => {
+      if (label === null) {
+        if (!(pid in current)) return current;
+        const next = { ...current };
+        delete next[pid];
+        return next;
+      }
+      if (current[pid] === label) return current;
+      return { ...current, [pid]: label };
+    });
+  }, []);
+  // 部屋の送信フローを1本確保 / 返却。最後の1本が返った時だけその部屋の
+  // ストリーミング状態と作業ラベルを畳む。
+  const acquireSendSlot = useCallback((pid: string) => {
+    inFlightSendsRef.current.set(pid, (inFlightSendsRef.current.get(pid) ?? 0) + 1);
+    setStreamingProjects((current) => (current.includes(pid) ? current : [...current, pid]));
+  }, []);
+  const dropStreamingProject = useCallback(
+    (pid: string) => {
+      inFlightSendsRef.current.delete(pid);
+      setStreamingProjects((current) => current.filter((id) => id !== pid));
+      setProjectActivity(pid, null);
+    },
+    [setProjectActivity],
+  );
   // 制作エディタのタイムライン参照（Web版の入力欄と同じ）。選択して送ると
   // 「このタイムラインを編集して」の対象として指示に添付される。
   const [timelineRefs, setTimelineRefs] = useState<{ content_id: string; title: string }[]>([]);
@@ -1067,7 +1337,9 @@ function AppMain() {
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
   const [runEvents, setRunEvents] = useState<ExecutionEvent[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
+  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings' | 'collab' | 'collabChat'>('projects');
+  // コラボ（外部クライアント窓口）: 開いている部屋
+  const [collabRoom, setCollabRoom] = useState<{ id: string; title?: string } | null>(null);
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
@@ -1075,6 +1347,7 @@ function AppMain() {
   const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
   // In-chat keyword search (find past messages across full history).
   const [searchOpen, setSearchOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -1087,12 +1360,55 @@ function AppMain() {
     project: ProjectResponse;
     mode: 'menu' | 'confirm-delete';
   } | null>(null);
+  // メッセージ長押し→「テキストを選択」モーダルの本文。反転FlatListの外で
+  // 選択させる（吹き出し内の直接選択はAndroidで初回長押しが暴発するため）。
   const listRef = useRef<FlatList<ChatListItem>>(null);
   // Live-tracking ref for the notification listener (which we don't want to
   // re-subscribe on every project switch).
   const currentProjectIdRef = useRef<string | null>(null);
   useEffect(() => {
     currentProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
+  // ---- チャットごとの入力下書き退避・復元 ----
+  // AppMain は再マウントされず draft は1つだけなので、そのままだと
+  // 「書きかけの文が別のチャットにそのまま持ち越される」。切替時に
+  // プロジェクト単位で退避し、戻ってきた時に復元する。
+  // - 即時性: メモリ上の draftCacheRef（切替のたび同期更新）
+  // - 永続性: SecureStore（アプリ強制終了・再起動後も残す。書込は400ms
+  //   デバウンス。encrypted prefs への毎キー書込を避ける）
+  const draftCacheRef = useRef<Record<string, string>>({});
+  // いま draft state がどのプロジェクトの文章かを示す。切替直後の1コミットは
+  // draft がまだ前のチャットの文章なので、これで照合しないと保存効果が
+  // 新しいチャットのキャッシュを前の文章で汚染する。
+  const draftProjectRef = useRef<string | null>(null);
+  // ⚠️ この保存効果は下の復元効果より先に宣言すること。逆にすると切替コミットで
+  // 復元効果が先に draftProjectRef を新IDへ進め、直後に走る保存効果が
+  // 「前のチャットの draft」を新しいチャットのキーに保存してしまう。
+  useEffect(() => {
+    const pid = draftProjectRef.current;
+    if (!pid || pid !== currentProjectId) return;
+    draftCacheRef.current[pid] = draft;
+    const timer = setTimeout(() => {
+      if (draft) SecureStore.setItemAsync(draftStoreKey(pid), draft).catch(() => null);
+      else SecureStore.deleteItemAsync(draftStoreKey(pid)).catch(() => null);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [draft, currentProjectId]);
+  useEffect(() => {
+    if (!currentProjectId || draftProjectRef.current === currentProjectId) return;
+    draftProjectRef.current = currentProjectId;
+    const cached = draftCacheRef.current[currentProjectId];
+    setDraft(cached ?? '');
+    if (cached === undefined) {
+      // このセッションで初めて開くチャットだけ永続ストアを読む
+      SecureStore.getItemAsync(draftStoreKey(currentProjectId))
+        .then((saved) => {
+          if (!saved || draftProjectRef.current !== currentProjectId) return;
+          draftCacheRef.current[currentProjectId] = saved;
+          setDraft((d) => (d ? d : saved));
+        })
+        .catch(() => null);
+    }
   }, [currentProjectId]);
   // 一覧の最新スナップショット（loadProjectMessages が room_id を即参照する
   // ためのref。stateを直接依存に入れると関数の同一性が毎回変わり、これを
@@ -1105,6 +1421,10 @@ function AppMain() {
   // ここから描き、裏で最新を取得して差し替える。SSEで直接挿入された分も
   // 下のミラー効果で常に取り込まれる。
   const messagesCacheRef = useRef<Record<string, MessageResponse[]>>({});
+  // プロジェクトごとのライブ実行キャッシュ（run + 作業ログ）。作業中の部屋を
+  // 開いた瞬間に前回ポーリングの内容を即描画するため（メッセージキャッシュと
+  // 同じ「画面＝実体の即表示」の発想）。run が終わったら消す。
+  const runCacheRef = useRef<Record<string, { run: AgentRun; events: ExecutionEvent[] }>>({});
   useEffect(() => {
     const roomId = currentProject?.room_id;
     if (roomId && messages.length > 0) {
@@ -1120,7 +1440,7 @@ function AppMain() {
   }, [currentProjectId]);
   // Tracks which screen is showing, so background→foreground logic can tell
   // "user is actually viewing this chat" from "user is on the chat list".
-  const screenRef = useRef<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
+  const screenRef = useRef<'projects' | 'chat' | 'artifact' | 'settings' | 'collab' | 'collabChat'>('projects');
   useEffect(() => {
     screenRef.current = screen;
   }, [screen]);
@@ -1136,6 +1456,25 @@ function AppMain() {
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
+
+  // apiRequest のセッションハンドラ登録。リフレッシュ成功時は新トークンを
+  // 状態へ反映し、失敗時（=本当のセッション切れ）はエラーアラート無しで
+  // 即ログイン画面へ切り替える。従来はエラーメッセージが出るだけで、
+  // アプリを再起動しないとログイン画面が出なかった。
+  useEffect(() => {
+    onTokenRefreshed = (newToken: string) => {
+      setAuth((prev) => (prev.status === 'signed_in' ? { ...prev, token: newToken } : prev));
+    };
+    onAuthFailure = () => {
+      void SecureStore.deleteItemAsync(TOKEN_KEY).catch(() => null);
+      void SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY).catch(() => null);
+      setAuth((prev) => (prev.status === 'signed_in' ? { status: 'signed_out' } : prev));
+    };
+    return () => {
+      onTokenRefreshed = null;
+      onAuthFailure = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (!token || Platform.OS !== 'android' || !DanSmsForwarder) {
@@ -1178,6 +1517,12 @@ function AppMain() {
   // must not render twice.
   const savedTurnIds = useMemo(() => collectSavedTurnIds(messages), [messages]);
 
+  // 現在開いている部屋が、この端末発のストリーミング中か（部屋別）。
+  const streamingHere = !!currentProject && streamingProjects.includes(currentProject.id);
+  // 現在の部屋の作業ラベル。部屋別 Map から引くので、部屋を切り替えても
+  // 他室のストリームのラベルが混ざらない。
+  const activity = (currentProject && activityMap[currentProject.id]) || '';
+
   // Live in-progress turn for the OPEN chat, rebuilt from the server poll. Shows
   // whenever this chat's run is "running" — independent of the SSE stream — so
   // it persists across navigating away and back, and across SSE drops.
@@ -1197,9 +1542,9 @@ function AppMain() {
     liveRunActive ||
     // 送信した瞬間に出す（PC の warmupMode 相当の即時フィードバック）。前回ターンの
     // 完了済み currentRun が残っていても instant 経路をブロックしないよう、currentRun の
-    // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。sending は送信
-    // フローの finally で false になる＝ターン完了でこの経路は自然に閉じる。
-    (sending && !uploadProgress && streamingProjectId === currentProject?.id);
+    // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。streamingHere は
+    // この部屋の送信フローの決着で false になる＝ターン完了でこの経路は自然に閉じる。
+    (streamingHere && !uploadProgress);
 
   // まだダンに読み込まれていない追い連絡。読み込まれるまで半透明＋「仮送信」表示。
   const activePendingIds = useMemo(
@@ -1210,9 +1555,9 @@ function AppMain() {
   // run が終わった（完了・停止・中断）のに残った仮送信フラグは意味を失うので捨てる。
   useEffect(() => {
     if (Object.keys(pendingFollowups).length === 0) return;
-    if (liveRunActive || sending) return;
+    if (liveRunActive || streamingHere) return;
     setPendingFollowups({});
-  }, [liveRunActive, sending, pendingFollowups]);
+  }, [liveRunActive, streamingHere, pendingFollowups]);
 
   // チャットの行リスト。保存済みメッセージとライブのターン吹き出しを「実際に
   // 起きた時刻」で1本のタイムラインに混ぜる。これにより、ダン作業中に送った
@@ -1223,10 +1568,17 @@ function AppMain() {
     [messages, liveTurnGroups, showLiveTurn],
   );
 
-  // 送信ボタンを塞ぐのは「別チャット宛のストリームが生きている間」だけ。
-  // このチャットのターン実行中は追い連絡として送れる。
-  const sendBlocked = sending && streamingProjectId !== currentProject?.id;
-
+  // コラボ窓口の未読（サーバー判定 unread_count の合計）。👥ボタンのバッジと
+  // アプリアイコンのバッジに合算する。開いている窓口は既読扱い。
+  const [collabUnreadByRoom, setCollabUnreadByRoom] = useState<Record<string, number>>({});
+  const collabUnreadTotal = useMemo(
+    () =>
+      Object.entries(collabUnreadByRoom).reduce((total, [id, n]) => {
+        if (screen === 'collabChat' && collabRoom?.id === id) return total;
+        return total + n;
+      }, 0),
+    [collabUnreadByRoom, screen, collabRoom?.id],
+  );
   const unreadTotal = useMemo(
     () =>
       projects.reduce((total, project) => {
@@ -1234,8 +1586,8 @@ function AppMain() {
         // arrives while you're looking at it must not light up the badge.
         if (screen === 'chat' && project.id === currentProject?.id) return total;
         return total + (project.unread_count || 0);
-      }, 0),
-    [projects, screen, currentProject?.id],
+      }, 0) + collabUnreadTotal,
+    [projects, screen, currentProject?.id, collabUnreadTotal],
   );
 
   const headerTitle = currentProject?.title || 'DAN';
@@ -1265,6 +1617,25 @@ function AppMain() {
       // best-effort; ignore
     }
   }, []);
+
+  // コラボ未読の取得: ログイン中、画面が切り替わった時＋30秒毎（窓口を読んで戻った時に即消える）
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    const load = () => {
+      apiRequest<{ rooms: CollabRoomSummary[] }>('/collab/rooms', {}, token)
+        .then((d) => {
+          if (!alive) return;
+          const next: Record<string, number> = {};
+          for (const r of d.rooms ?? []) if ((r.unread_count ?? 0) > 0) next[r.id] = r.unread_count ?? 0;
+          setCollabUnreadByRoom(next);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [token, screen]);
 
   const syncNotificationBadge = useCallback(async (count: number) => {
     await Notifications.setBadgeCountAsync(count).catch(() => null);
@@ -1312,7 +1683,7 @@ function AppMain() {
   // 復活→次のポーリングでまた消える」という、回答が出る瞬間のちらつきになる。
   // 対策: 後から開始したリクエストが結果を適用済みなら、古いリクエストの
   // 結果は捨てる（applied = 適用済みリクエストの開始順）。
-  const pollRunSeqRef = useRef({ issued: 0, applied: 0 });
+  const pollRunSeqRef = useRef({ issued: 0, applied: 0, running: false });
   const pollRun = useCallback(async (activeToken: string, projectId: string) => {
     const guard = pollRunSeqRef.current;
     const seq = ++guard.issued;
@@ -1320,33 +1691,86 @@ function AppMain() {
     // （プロジェクト切替時の setCurrentRun(null) リセットを上書きしないため）。
     const stale = () => seq < guard.applied || currentProjectIdRef.current !== projectId;
     try {
+      // 実行中と分かっている（直前ポーリング or 一覧の has_active_run）なら
+      // current-run と execution-events を並列に取り、作業ログの表示を
+      // 1往復ぶん早める。アイドル中は従来どおり current-run だけ（2.5秒ごとの
+      // ポーリングなので、無駄な2本目を毎回投げない）。
+      const expectRunning =
+        guard.running ||
+        !!projectsRef.current.find((p) => p.id === projectId)?.has_active_run;
+      const eventsPromise = expectRunning
+        ? apiRequest<ExecutionEvent[]>(
+            `/projects/${projectId}/execution-events?limit=200`,
+            {},
+            activeToken,
+          ).catch(() => null)
+        : null;
       const run = await apiRequest<AgentRun>(`/projects/${projectId}/current-run`, {}, activeToken);
       if (stale()) return;
       guard.applied = seq;
+      guard.running = !!run && run.state === 'running';
       setCurrentRun(run);
       if (run && run.state === 'running') {
-        const events = await apiRequest<ExecutionEvent[]>(
-          `/projects/${projectId}/execution-events?limit=200`,
-          {},
-          activeToken,
-        ).catch(() => null);
+        const events = await (eventsPromise ??
+          apiRequest<ExecutionEvent[]>(
+            `/projects/${projectId}/execution-events?limit=200`,
+            {},
+            activeToken,
+          ).catch(() => null));
         if (stale()) return;
         guard.applied = seq;
         // 一時的な取得失敗（null）ではクリアしない。成功時もイベントは増える
         // 方向にだけマージし、limit やレスポンス順による欠けが吹き出しの
         // 消失・位置ジャンプにならないようにする。
-        if (events) setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
+        if (events) {
+          setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
+          // 部屋を出て戻った時に即描画するためのキャッシュ（開き直しの
+          // 「数秒間ダンが止まって見える」対策の一部）。
+          runCacheRef.current[projectId] = { run, events };
+        }
       } else {
         setRunEvents([]);
+        delete runCacheRef.current[projectId];
       }
     } catch {
       if (stale()) return;
       guard.applied = seq;
+      guard.running = false;
       // 404 = no run for this project (the common idle case).
       setCurrentRun(null);
       setRunEvents([]);
+      delete runCacheRef.current[projectId];
     }
   }, []);
+
+  const loadOlderMessages = useCallback(() => {
+    const roomId = currentProject?.room_id;
+    if (!roomId || !token || !hasMoreOlderRef.current || isLoadingOlderRef.current) return;
+    const oldest = messages
+      .filter((m) => !m.id.startsWith('local-') && m.room_id === roomId)
+      .reduce<MessageResponse | null>((a, b) => (!a || b.created_at < a.created_at ? b : a), null);
+    if (!oldest) return;
+    isLoadingOlderRef.current = true;
+    apiRequest<MessagesListResponse>(
+      `/chat/rooms/${roomId}/messages?limit=${CHAT_OLDER_FETCH_LIMIT}&before=${encodeURIComponent(oldest.created_at)}`,
+      {},
+      token,
+    )
+      .then((data) => {
+        const older = data?.messages ?? [];
+        if (older.length < CHAT_OLDER_FETCH_LIMIT) hasMoreOlderRef.current = false;
+        if (older.length === 0 || currentProjectIdRef.current !== currentProject?.id) return;
+        setMessages((current) => {
+          const have = new Set(current.map((m) => m.id));
+          const add = older.filter((m) => !have.has(m.id));
+          return add.length ? [...current, ...add] : current;
+        });
+      })
+      .catch(() => null)
+      .finally(() => {
+        isLoadingOlderRef.current = false;
+      });
+  }, [currentProject?.id, currentProject?.room_id, messages, token]);
 
   const loadProjectMessages = useCallback(
     async (activeToken: string, projectId: string) => {
@@ -1361,29 +1785,26 @@ function AppMain() {
       const knownRoom = known?.room_id || null;
       if (known) {
         setCurrentProject(known);
-        setCurrentProjectId(known.id);
       }
+      // 一覧に無い部屋（通知からのコールド起動など）でも即 ID を確定する。
+      // pollRun のポーリング効果はこの ID で起動するので、詳細取得の1往復を
+      // 待たずにライブ実行状態の取得が始まる。
+      setCurrentProjectId(projectId);
       // 開いた瞬間に対象の部屋のキャッシュを描く。部屋が未知なら空にする
       // （前に見ていた部屋のメッセージを新しい部屋に残像として出さない）。
       setMessages(knownRoom ? messagesCacheRef.current[knownRoom] ?? [] : []);
       SecureStore.setItemAsync(PROJECT_KEY, projectId).catch(() => null);
-      void refreshArtifacts(activeToken, projectId);
+      const openStartedAt = Date.now();
       setLoadingMessages(true);
       try {
-        // プロジェクト詳細は裏で更新（メッセージ取得をブロックしない）
-        const projectPromise = apiRequest<ProjectResponse>(`/projects/${projectId}`, {}, activeToken);
-        projectPromise
-          .then((p) => {
-            if (currentProjectIdRef.current !== projectId) return;
-            setCurrentProject((cur) => (cur?.id === p.id ? { ...p, unread_count: cur.unread_count } : p));
-            setCurrentProjectId(p.id);
-          })
-          .catch(() => null);
-
         let roomId = knownRoom;
         if (!roomId) {
           // 一覧に無い部屋（通知起動・新規作成直後など）だけ詳細を待つ
-          const project = await projectPromise;
+          const project = await apiRequest<ProjectResponse>(`/projects/${projectId}`, {}, activeToken);
+          if (currentProjectIdRef.current === projectId) {
+            setCurrentProject((cur) => (cur?.id === project.id ? { ...project, unread_count: cur.unread_count } : project));
+            setCurrentProjectId(project.id);
+          }
           if (!project.room_id) {
             setMessages([]);
             return project;
@@ -1391,16 +1812,47 @@ function AppMain() {
           roomId = project.room_id;
         }
 
-        const data = await apiRequest<MessagesListResponse>(
-          `/chat/rooms/${roomId}/messages?limit=120`,
+        // 部屋を開く一式（詳細・メッセージ・成果物・実行状態・作業イベント）を
+        // 1往復で取る。従来は 4〜5 本（各 0.5〜1 秒、トンネル経由）を投げていた。
+        const data = await apiRequest<RoomOpenResponse>(
+          `/chat/rooms/${roomId}/open?project_id=${encodeURIComponent(projectId)}&limit=${CHAT_INITIAL_FETCH_LIMIT}`,
           {},
           activeToken,
         );
+        const fetched = data.messages ?? [];
+        // 初回応答が上限未満なら、それより古い行はサーバーに無い。
+        hasMoreOlderRef.current = fetched.length >= CHAT_INITIAL_FETCH_LIMIT;
+        perfLog('room-open-net', Date.now() - openStartedAt, { messages: fetched.length, server: data.timings_ms ?? null }, activeToken);
+        requestAnimationFrame(() => perfLog('room-open-visible', Date.now() - openStartedAt, { messages: fetched.length, cached: !!(knownRoom && messagesCacheRef.current[knownRoom]?.length) }, activeToken));
         // 取得中に別の部屋へ移動していたら適用しない（残像・取り違え防止）
         if (currentProjectIdRef.current === projectId) {
-          setMessages(data.messages ?? []);
+          const fetchedRoomId = roomId;
+          setMessages((current) => keepLocalOptimistic(fetched, current, fetchedRoomId));
+          if (data.project) {
+            const p = data.project;
+            setCurrentProject((cur) => (cur?.id === p.id ? { ...p, unread_count: cur.unread_count } : p));
+          }
+          if (data.artifacts) {
+            setArtifacts(data.artifacts);
+          } else {
+            void refreshArtifacts(activeToken, projectId);
+          }
+          // 実行状態は pollRun と同じ順序ガードで適用する（後続ポーリングと競合しない）
+          const guard = pollRunSeqRef.current;
+          guard.applied = ++guard.issued;
+          const run = data.current_run;
+          guard.running = !!run && run.state === 'running';
+          setCurrentRun(run ?? null);
+          if (run && run.state === 'running' && data.execution_events) {
+            const events = data.execution_events;
+            setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
+            runCacheRef.current[projectId] = { run, events };
+          } else if (!run) {
+            setRunEvents([]);
+            delete runCacheRef.current[projectId];
+          }
         }
-        messagesCacheRef.current[roomId] = data.messages ?? [];
+        messagesCacheRef.current[roomId] = fetched;
         // 既読は応答を待たずに送る
         apiRequest(`/chat/rooms/${roomId}/read`, { method: 'POST' }, activeToken).catch(() => null);
         setCurrentProject((current) =>
@@ -1408,8 +1860,11 @@ function AppMain() {
         );
         markProjectReadLocally(projectId);
         void dismissNotificationsForProject(projectId);
-        return known ?? (await projectPromise.catch(() => null));
+        return data.project ?? known ?? null;
       } catch (error) {
+        // セッション切れ(401)は onAuthFailure がログイン画面へ切替済み。
+        // その上にエラーアラートを重ねない（以下の各catchも同様）。
+        if (isAuthError(error)) return null;
         Alert.alert('Load failed', String((error as Error).message));
         return null;
       } finally {
@@ -1436,6 +1891,7 @@ function AppMain() {
         );
         setSearchResults(data.messages ?? []);
       } catch (error) {
+        if (isAuthError(error)) return;
         Alert.alert('検索失敗', String((error as Error).message));
         setSearchResults([]);
       } finally {
@@ -1537,6 +1993,13 @@ function AppMain() {
     async (url?: unknown) => {
       if (!token || typeof url !== 'string') return;
       await syncNotificationBadge(0);
+      // コラボ窓口の通知 → コラボチャット画面を直接開く
+      const collabMatch = url.match(/\/collab\/([^/?#]+)/);
+      if (collabMatch?.[1]) {
+        setCollabRoom({ id: collabMatch[1] });
+        setScreen('collabChat');
+        return;
+      }
       const match = url.match(/\/chat\/([^/?#]+)/);
       const projectId = match?.[1];
       if (!projectId) {
@@ -1560,7 +2023,38 @@ function AppMain() {
     if (!token) return;
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        refreshProjects(token).catch(() => null);
+        refreshProjects(token)
+          .then((list) => {
+            // 復帰ウォッチドッグ（Send固着の最終防衛）: 送信中フラグが立って
+            // いるのに、サーバーはその部屋で何も実行していない＝ストリームが
+            // バックグラウンド中に死んで固着した状態。ウォッチドッグや
+            // タイムアウトはバックグラウンドではタイマーが進まず発火できない
+            // ことがあるので、フォアグラウンド復帰時にサーバーの実状態
+            // (has_active_run) と照合して強制解除する。送信直後の
+            // 「まだ run が立ち上がっていない」瞬間を誤爆しないよう、
+            // 送信から15秒は様子を見る。
+            if (
+              inFlightSendsRef.current.size > 0 &&
+              Date.now() - lastSendAtRef.current > 15_000
+            ) {
+              // 部屋別に照合し、固着した部屋だけを解除する（他室の生きた
+              // ストリームは無傷で続行させる）。
+              for (const pid of Array.from(inFlightSendsRef.current.keys())) {
+                const target = list.find((p) => p.id === pid);
+                if (target?.has_active_run) continue;
+                // 生き残りフローに後始末を放棄させる（この部屋の世代だけ進める）
+                cancelGenRef.current.set(pid, (cancelGenRef.current.get(pid) ?? 0) + 1);
+                for (const [key, stream] of Array.from(activeStreamsRef.current.entries())) {
+                  if (stream.projectId !== pid) continue;
+                  activeStreamsRef.current.delete(key);
+                  stream.close();
+                }
+                dropStreamingProject(pid);
+                setUploadProgress(null);
+              }
+            }
+          })
+          .catch(() => null);
         // Reload the open chat too: a reply that finished while the app was
         // backgrounded never streams in (the SSE connection is suspended).
         // Only do this when the user is *actually viewing* that chat — doing
@@ -1573,7 +2067,7 @@ function AppMain() {
       }
     });
     return () => subscription.remove();
-  }, [refreshProjects, loadProjectMessages, token]);
+  }, [refreshProjects, loadProjectMessages, dropStreamingProject, token]);
 
   // Keep the unread badge honest even when the room is read on another device
   // (e.g. the PC). Without this poll the local projects cache — and therefore
@@ -1602,14 +2096,14 @@ function AppMain() {
     if (!token || screen !== 'chat') return;
     const roomId = currentProject?.room_id;
     if (!roomId) return;
-    if (sending && streamingProjectId === currentProject?.id) return;
+    if (streamingHere) return;
     const projectId = currentProject?.id;
     const id = setInterval(() => {
       if (AppState.currentState !== 'active') return;
-      apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=120`, {}, token)
+      apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=${CHAT_INITIAL_FETCH_LIMIT}`, {}, token)
         .then((data) => {
           if (!data?.messages) return;
-          setMessages(data.messages);
+          setMessages((current) => keepLocalOptimistic(data.messages, current, roomId));
           // The chat is open ⇒ a reply that just arrived is already read. Mark it
           // read on the server (only when the newest message actually changed) so
           // leaving the chat doesn't leave a phantom unread badge behind.
@@ -1623,7 +2117,7 @@ function AppMain() {
         .catch(() => null);
     }, 4000);
     return () => clearInterval(id);
-  }, [token, screen, sending, streamingProjectId, currentProject?.room_id, currentProject?.id, markProjectReadLocally]);
+  }, [token, screen, streamingHere, currentProject?.room_id, currentProject?.id, markProjectReadLocally]);
 
   // Poll the live run for the OPEN chat so the in-progress timeline shows even
   // when the SSE stream isn't this device's (e.g. we navigated back into a chat
@@ -1632,7 +2126,10 @@ function AppMain() {
   // calls pollRun directly for low latency while actively streaming here.
   useEffect(() => {
     if (!token || screen !== 'chat') return;
-    const projectId = currentProject?.id;
+    // currentProject（詳細）ではなく currentProjectId（開いた瞬間に確定）で
+    // 起動する。通知起動などで一覧に無い部屋を開いた場合、従来は詳細取得の
+    // 1往復が終わるまでポーリングが始まらなかった。
+    const projectId = currentProjectId;
     if (!projectId) return;
     let cancelled = false;
     const tick = () => {
@@ -1646,18 +2143,47 @@ function AppMain() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [token, screen, currentProject?.id, pollRun]);
+  }, [token, screen, currentProjectId, pollRun]);
 
   // 画面＝実体: チャット画面に入るたび（部屋の切替だけでなく、一覧から同じ
-  // 部屋を開き直した時も）ライブ実行表示をリセットする。従来は「プロジェクト
-  // IDの変化」でしか消していなかったため、ダン作業中に部屋を出て開き直すと
-  // その時点の古い「実行中」（thinking・停止ボタン）が数秒表示され、最初の
-  // ポーリングが届いてやっと実態に直っていた。リセット後、本当に実行中なら
-  // 直後のポーリング（画面遷移で即発火）が正しく点灯させる。
+  // 部屋を開き直した時も）ライブ実行表示を「その時点で分かっている実態」に
+  // 合わせる。
+  // - 一覧が「作業中」(has_active_run) を知っている部屋: 前回ポーリングの
+  //   キャッシュ（本物の run + 作業ログ）があればそれを即描画、無ければ
+  //   プレースホルダ run で停止ボタン＋スピナーだけ即点灯する。従来は無条件で
+  //   null にリセット→2往復のポーリングが届くまで数秒間「ダンが止まっている」
+  //   ように見えた（既に手元にある情報を捨てていた）。詳細は直後のポーリング
+  //   （画面遷移で即発火）が差し替える。
+  // - それ以外の部屋: 従来どおり即リセットし、古い「実行中」を残さない
+  //   （da4932b の残像対策はこちら側で維持）。
   useEffect(() => {
     if (screen !== 'chat') return;
-    setCurrentRun(null);
-    setRunEvents([]);
+    const pid = currentProject?.id;
+    // currentProjectIdRef との照合: 通知起動などで「開いた部屋のID」だけ
+    // 先に確定し currentProject がまだ前の部屋を指している間は、前の部屋の
+    // 実行状態を新しい部屋に点灯させない（ref はこの効果より先に宣言された
+    // 効果で同一コミット内に更新済み）。
+    if (pid && pid === currentProjectIdRef.current && currentProject?.has_active_run) {
+      const cached = runCacheRef.current[pid];
+      if (cached && cached.run.state === 'running') {
+        setCurrentRun(cached.run);
+        setRunEvents(cached.events);
+      } else {
+        setCurrentRun({
+          id: `placeholder-${pid}`,
+          project_id: pid,
+          state: 'running',
+          created_at: new Date().toISOString(),
+        });
+        setRunEvents([]);
+      }
+    } else {
+      setCurrentRun(null);
+      setRunEvents([]);
+    }
+    // has_active_run は「開いた瞬間の一覧の知識」を読みたいだけなので依存に
+    // 入れない（部屋を見ている最中の一覧更新でこの効果を再発火させない —
+    // 見ている間の実態は pollRun が所有する）。
   }, [screen, currentProject?.id]);
 
   // 仮送信フラグと同期カーソルは部屋の切替時のみリセット（同じ部屋の
@@ -1762,14 +2288,19 @@ function AppMain() {
         try {
           const restoredUser = await apiRequest<UserResponse>('/chat/me', {}, storedToken);
           if (!alive) return;
-          setAuth({ status: 'signed_in', token: storedToken, user: restoredUser });
+          // apiRequest 内部の自動リフレッシュでトークンが更新されている場合が
+          // あるので、保存済みの最新トークンで状態を作る（期限切れ間近の
+          // storedToken を状態に固定しない）。
+          const activeToken = (await SecureStore.getItemAsync(TOKEN_KEY)) ?? storedToken;
+          setAuth({ status: 'signed_in', token: activeToken, user: restoredUser });
           // navigateHome=false: don't force the projects list on cold start, so a
           // notification-tap launch isn't bounced out of its chat (see loadInitialData).
-          await loadInitialData(storedToken, false);
+          await loadInitialData(activeToken, false);
           return;
         } catch (error) {
           if ((error as { status?: number }).status === 401) {
             await SecureStore.deleteItemAsync(TOKEN_KEY);
+            await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
             await SecureStore.deleteItemAsync(PROJECT_KEY);
             if (alive) setAuth({ status: 'signed_out' });
             return;
@@ -1793,6 +2324,14 @@ function AppMain() {
         setScreen(currentProject ? 'chat' : 'projects');
         return true;
       }
+      if (screen === 'collabChat') {
+        setScreen('collab');
+        return true;
+      }
+      if (screen === 'collab') {
+        setScreen('projects');
+        return true;
+      }
       if (screen !== 'chat') return false;
       setScreen('projects');
       setDrawerOpen(false);
@@ -1810,11 +2349,14 @@ function AppMain() {
 
     setLoginBusy(true);
     try {
-      const result = await apiRequest<{ access_token: string }>('/chat/login', {
+      const result = await apiRequest<{ access_token: string; refresh_token?: string }>('/chat/login', {
         method: 'POST',
         body: JSON.stringify({ email: cleanEmail, password }),
       });
       await SecureStore.setItemAsync(TOKEN_KEY, result.access_token);
+      if (result.refresh_token) {
+        await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, result.refresh_token);
+      }
       const signedInUser = await apiRequest<UserResponse>('/chat/me', {}, result.access_token);
       setAuth({ status: 'signed_in', token: result.access_token, user: signedInUser });
       setPassword('');
@@ -1832,6 +2374,7 @@ function AppMain() {
       await DanSmsForwarder.disable().catch(() => null);
     }
     await SecureStore.deleteItemAsync(TOKEN_KEY);
+    await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
     await SecureStore.deleteItemAsync(PROJECT_KEY);
     setMessages([]);
     setProjects([]);
@@ -1843,8 +2386,8 @@ function AppMain() {
   }
 
   async function handleSelectProject(projectId: string) {
-    // No `sending` guard: a stream in another chat must not block navigation.
-    // The stream is scoped to streamingProjectId, so switching chats is safe.
+    // No streaming guard: streams are per-project (streamingProjects), so
+    // navigating between chats never blocks or disturbs a live stream.
     if (!token) return;
     const project = projects.find((item) => item.id === projectId) ?? null;
     setDrawerOpen(false);
@@ -1876,6 +2419,7 @@ function AppMain() {
       setScreen('chat');
       setDrawerOpen(false);
     } catch (error) {
+      if (isAuthError(error)) return;
       Alert.alert('Could not create project', String((error as Error).message));
     }
   }
@@ -1890,6 +2434,7 @@ function AppMain() {
       );
       await refreshProjects(token).catch(() => null);
     } catch (error) {
+      if (isAuthError(error)) return;
       Alert.alert('Pin failed', String((error as Error).message));
     }
   }
@@ -1908,6 +2453,7 @@ function AppMain() {
       }
       await refreshProjects(token).catch(() => null);
     } catch (error) {
+      if (isAuthError(error)) return;
       Alert.alert('Delete failed', String((error as Error).message));
     }
   }
@@ -2149,13 +2695,32 @@ function AppMain() {
     const tappedAt = Date.now();
     if (tappedAt - lastSendAtRef.current < 700) return;
     lastSendAtRef.current = tappedAt;
-    // 送信中でも「いまストリーミング中のこのチャット」へは追い連絡として送れる。
-    // 別チャット宛のストリームが生きている間は従来どおりブロック。
-    if (sending && streamingProjectId !== currentProject?.id) return;
-    // このチャットの最初のストリームがまだ生きている間の送信（=追い連絡）は、
-    // sending / streamingProjectId を触らない。これらは最初の送信フローが所有
-    // していて、追い連絡側の finally で先に false に戻すと表示が崩れるため。
-    const ownsSendingState = !(sending && streamingProjectId === currentProject?.id);
+    // ストリームは部屋ごとに独立。この部屋のストリーム中の送信＝追い連絡
+    // （仮送信表示用）。他の部屋のストリームはこの送信を一切妨げない。
+    const isFollowup = !!currentProject && streamingProjects.includes(currentProject.id);
+    // このフローが属する部屋と、開始時点のその部屋のキャンセル世代。
+    // 以降で世代がずれていたらこの部屋の停止ボタン（または復帰ウォッチ
+    // ドッグ）がリセット済みなので、このフローは送信状態に触らず静かに退場。
+    // slotPid は created_project_id イベント（サーバー側で部屋が差し替わる
+    // 稀な経路）で移行されるため let。
+    let slotPid: string | null = null;
+    let cancelGenAtSend = 0;
+    // 送信状態の解除は部屋別カウンタ方式: 各フローが開始時にその部屋の枠を
+    // 1本確保し、決着時に1本返す。その部屋の最後の1本が返った時だけその
+    // 部屋のストリーミング状態を畳む。released ガードで二重返却を防ぐ。
+    let sendSlotReleased = false;
+    const releaseSendSlot = () => {
+      if (sendSlotReleased || !slotPid) return;
+      sendSlotReleased = true;
+      const pid = slotPid;
+      if (genOf(pid) !== cancelGenAtSend) return; // この部屋のキャンセル側がリセット済み
+      const left = Math.max(0, (inFlightSendsRef.current.get(pid) ?? 0) - 1);
+      if (left === 0) {
+        dropStreamingProject(pid);
+      } else {
+        inFlightSendsRef.current.set(pid, left);
+      }
+    };
     const content = draft.trim();
     const pending = attachments;
     if (!content && pending.length === 0) return;
@@ -2176,14 +2741,23 @@ function AppMain() {
 
     let project = currentProject;
     if (!project) {
-      project = await apiRequest<ProjectResponse>(
-        '/projects',
-        {
-          method: 'POST',
-          body: JSON.stringify({ title: '新しいプロジェクト' }),
-        },
-        token,
-      );
+      try {
+        project = await apiRequest<ProjectResponse>(
+          '/projects',
+          {
+            method: 'POST',
+            body: JSON.stringify({ title: '新しいプロジェクト' }),
+          },
+          token,
+        );
+      } catch (error) {
+        // ここは送信フラグ確保前なので固着はしないが、失敗を握りつぶすと
+        // 「押しても無反応」になる（unhandled rejection）。
+        if (!isAuthError(error)) {
+          Alert.alert('Send failed', String((error as Error).message));
+        }
+        return;
+      }
       setCurrentProject(project);
       setCurrentProjectId(project.id);
       await SecureStore.setItemAsync(PROJECT_KEY, project.id);
@@ -2200,10 +2774,10 @@ function AppMain() {
     setDraft('');
     setAttachments([]);
     setTimelineRefs([]);
-    if (ownsSendingState) {
-      setSending(true);
-      setStreamingProjectId(project.id);
-    }
+    // この部屋の送信フローを1本確保（追い連絡でも1本として数える）。
+    slotPid = project.id;
+    cancelGenAtSend = genOf(project.id);
+    acquireSendSlot(project.id);
 
     // LINE風: 送信した瞬間に動画/画像入りのメッセージを画面に出し、アップロードは
     // その動画の上の円形リングが満ちていく形で進める。完了したらローカルURIを
@@ -2219,6 +2793,7 @@ function AppMain() {
       content: localContent,
       created_at: new Date().toISOString(),
     };
+    animateNextLayout();
     setMessages((current) => [...current, optimistic]);
 
     // このチャットの run が動いている最中の送信＝追い連絡。サーバーの
@@ -2226,7 +2801,7 @@ function AppMain() {
     // 仮送信表示にする（エコーが届いたら実IDへ引き継ぐ。万一 run がその間に
     // 終わって普通の送信として扱われても、次ターン開始の検知で自然に解除）。
     const expectFollowup =
-      project.id === currentProject?.id && (liveRunActive || !ownsSendingState);
+      project.id === currentProject?.id && (liveRunActive || isFollowup);
     if (expectFollowup) {
       const queuedMs = followupQueuedMsAtSend({
         nowMs: Date.now(),
@@ -2265,11 +2840,7 @@ function AppMain() {
         setUploadProgress(null);
       } catch (error) {
         setUploadProgress(null);
-        if (ownsSendingState) {
-          setSending(false);
-          setStreamingProjectId(null);
-          setActivity('');
-        }
+        releaseSendSlot();
         setMessages((current) => current.filter((m) => m.id !== optimisticId));
         setPendingFollowups((current) => {
           if (!(optimisticId in current)) return current;
@@ -2280,12 +2851,13 @@ function AppMain() {
         setDraft(content);
         setAttachments(pending);
         setTimelineRefs(sentTimelineRefs);
+        if (isAuthError(error)) return;
         Alert.alert('アップロード失敗', String((error as Error).message));
         return;
       }
     }
 
-    setActivity('Thinking...');
+    setProjectActivity(project.id, 'Thinking...');
 
     let selectedProjectId = project.id;
     // Becomes true once the server has acked the message via the stream (echoes
@@ -2301,13 +2873,27 @@ function AppMain() {
     // 送信の瞬間に発行する本物のメッセージID（サーバーはこれを行IDにする）。
     // 停止ボタンはこのIDで「送ったメッセージごと取消」ができる。
     const clientMessageId = uuidv4();
-    userCancelledRef.current = false;
+
+    // 送信のSSEはBearerだけで認証される（受信系と違いCookieに救われない）ので、
+    // 失効済み/失効間近のトークンはここで先に更新してから送る。
+    const sendToken = await ensureFreshAccessToken(token);
 
     try {
-      await streamDanMessage(token, finalContent, project.room_id, (event) => {
+      await streamDanMessage(sendToken, finalContent, project.room_id, (event) => {
         if (event.created_project_id && event.created_project_id !== selectedProjectId) {
+          const oldPid = selectedProjectId;
           selectedProjectId = event.created_project_id;
-          setStreamingProjectId(event.created_project_id);
+          // 送信枠を旧部屋から新部屋へ移す（サーバー側で部屋が差し替わる稀な
+          // 経路）。旧部屋の枠を返し、新部屋の枠を確保して世代も取り直す。
+          if (slotPid === oldPid && !sendSlotReleased) {
+            releaseSendSlot();
+            sendSlotReleased = false;
+            slotPid = event.created_project_id;
+            cancelGenAtSend = genOf(event.created_project_id);
+            acquireSendSlot(event.created_project_id);
+          }
+          const handle = activeStreamsRef.current.get(clientMessageId);
+          if (handle) handle.projectId = event.created_project_id;
           setCurrentProjectId(event.created_project_id);
           SecureStore.setItemAsync(PROJECT_KEY, event.created_project_id).catch(() => null);
         }
@@ -2323,7 +2909,9 @@ function AppMain() {
         if (event.type === 'process') {
           const step = event.step as { label?: string } | undefined;
           const label = (step?.label || '').trim();
-          if (viewing) setActivity(label || 'Thinking...');
+          // 作業ラベルは部屋別 Map なので viewing に関係なく更新してよい
+          // （表示側が現在の部屋の分だけを読む）。
+          setProjectActivity(selectedProjectId, label || 'Thinking...');
           // Refetch the live run immediately for low latency (don't wait for the
           // 2.5s interval). Only when viewing this chat — otherwise the open
           // chat's own poll owns currentRun. The timeline renders from server state.
@@ -2376,27 +2964,28 @@ function AppMain() {
           if (viewing) setMessages((current) => upsertMessage(current, incoming));
         } else if (event.type === 'done') {
           sent = true;
+          setProjectActivity(selectedProjectId, null);
           if (viewing) {
-            setActivity('Done');
             void pollRun(token, selectedProjectId);
           }
         } else if (event.type === 'cancelled') {
           // ターン中断（この端末または別端末からのキャンセル）。
           // エラー扱いにせず、後段の reconcile がサーバーの実状態を反映する。
           sent = true;
-          if (viewing) setActivity('');
+          setProjectActivity(selectedProjectId, null);
         }
       }, {
         clientMessageId,
         timelineRefs: sentTimelineRefs,
         registerCancel: (close) => {
-          activeStreamRef.current = {
+          activeStreamsRef.current.set(clientMessageId, {
             close,
             clientMessageId,
             optimisticId,
             draft: content,
             roomId: project!.room_id!,
-          };
+            projectId: selectedProjectId,
+          });
         },
       });
     } catch (error) {
@@ -2409,16 +2998,26 @@ function AppMain() {
       streamFailure = error as Error;
     }
 
+    // ストリーム決着＝その場で送信状態を解除する（Send固着の根治の核心）。
+    // 以前はこの解除が下の reconcile（ネットワーク往復）の finally にあり、
+    // reconcile のどれかの await が返ってこないと送信中フラグが永久に残った。
+    // 解除はネットワークに依存しない同期処理だけで行い、reconcile は後段の
+    // ベストエフォートに格下げする。
+    activeStreamsRef.current.delete(clientMessageId);
+    setUploadProgress(null);
+    releaseSendSlot();
+
     // Reconcile from the server (the source of truth). Pull the saved messages
     // and check whether OUR message actually landed. Only treat it as a real
     // failure — and only then restore the draft — if the server has no record of
     // it. This is connection-state-independent, so a dropped SSE on an
     // already-saved message never resurrects the text in the input.
     try {
-      // ユーザーが停止ボタンで中断した場合、後始末（楽観行の削除・入力欄への
-      // 復元・サーバーへの取消依頼）は handleCancelTurn が済ませている。
-      // ここで reconcile すると「送信失敗」誤判定でアラートが出るのでスキップ。
-      if (userCancelledRef.current) return;
+      // ユーザーがこの部屋の停止ボタンで中断した場合（＝この部屋のキャンセル
+      // 世代が進んでいる）、後始末（楽観行の削除・入力欄への復元・サーバーへの
+      // 取消依頼）は handleCancelTurn が済ませている。ここで reconcile すると
+      // 「送信失敗」誤判定でアラートが出るのでスキップ。
+      if (!slotPid || genOf(slotPid) !== cancelGenAtSend) return;
       const list = await refreshProjects(token).catch(() => projects);
       const nextProject =
         list.find((item) => item.id === selectedProjectId) ||
@@ -2454,7 +3053,18 @@ function AppMain() {
           // clobber a new message the user may have started typing meanwhile).
           if (viewing) setMessages((current) => current.filter((m) => m.id !== optimistic.id));
           setDraft((d) => (d ? d : content));
-          Alert.alert('Send failed', streamFailure.message);
+          if (isAuthError(streamFailure)) {
+            // 認証切れによる送信失敗。リフレッシュできれば次の送信は通るので
+            // 再送を促し、できなければ本当のセッション切れ＝ログイン画面へ。
+            const renewed = await tryRefreshSession();
+            if (renewed) {
+              Alert.alert('Send failed', 'セッションを更新しました。もう一度送信してください。');
+            } else {
+              onAuthFailure?.();
+            }
+          } else {
+            Alert.alert('Send failed', streamFailure.message);
+          }
         }
       } else if (viewing && nextProject?.id) {
         // Clean finish (or server-acked): pull the saved messages into view.
@@ -2465,17 +3075,8 @@ function AppMain() {
         void maybeGenerateTitle(nextProject.id, nextProject.room_id);
       }
     } catch {
-      // best-effort reconcile
-    } finally {
-      if (activeStreamRef.current?.clientMessageId === clientMessageId) {
-        activeStreamRef.current = null;
-      }
-      setUploadProgress(null);
-      if (ownsSendingState) {
-        setSending(false);
-        setStreamingProjectId(null);
-        setActivity('');
-      }
+      // best-effort reconcile（送信状態は上で解除済み。ここで失敗しても
+      // メッセージ一覧は開いているチャットの定期ポーリングが追いつかせる）
     }
   }
 
@@ -2485,8 +3086,19 @@ function AppMain() {
   // メッセージごと取り消され、作業中なら作業がその場で止まる。
   async function handleCancelTurn() {
     if (!token) return;
-    const active = activeStreamRef.current;
-    userCancelledRef.current = true;
+    // 停止は「いま開いている部屋」のターンだけに効く。他の部屋で生きている
+    // ストリームには一切触れない（部屋Bの停止で部屋Aの作業を巻き添えにしない）。
+    const pid = currentProject?.id;
+    if (!pid) return;
+    // この部屋の生きているストリームを全部止める（追い連絡があると複数本ある）。
+    // 挿入順＝送信順なので、先頭がこのターンの最初の送信。
+    const actives = Array.from(activeStreamsRef.current.values()).filter(
+      (stream) => stream.projectId === pid,
+    );
+    const active = actives[0] ?? null;
+    // この部屋の世代を進める＝この部屋の各送信フローに「キャンセルが後始末を
+    // 引き取った。お前たちは送信状態に触るな」と伝える（reconcile もスキップ）。
+    cancelGenRef.current.set(pid, genOf(pid) + 1);
     const roomId = active?.roomId || currentProject?.room_id;
     // Web版と同じ判定: ダンの応答（返信 or 作業ステップ）がまだ無ければ
     // 「送信の取り消し」＝メッセージごと消して入力欄へ復元。すでに動き出して
@@ -2497,19 +3109,19 @@ function AppMain() {
       ) ||
       (activity !== '' && activity !== 'Thinking...');
     const beforeReply = !!active && !replied;
-    if (active) {
-      activeStreamRef.current = null;
-      active.close();
-      if (beforeReply) {
+    if (actives.length > 0) {
+      for (const stream of actives) {
+        activeStreamsRef.current.delete(stream.clientMessageId);
+        stream.close();
+      }
+      if (beforeReply && active) {
         setMessages((current) =>
           current.filter((m) => m.id !== active.optimisticId && m.id !== active.clientMessageId),
         );
         setDraft((d) => (d ? d : active.draft));
       }
     }
-    setSending(false);
-    setStreamingProjectId(null);
-    setActivity('');
+    dropStreamingProject(pid);
     setCurrentRun(null);
     if (!roomId) return;
     try {
@@ -2557,18 +3169,27 @@ function AppMain() {
   async function handleRefreshProjectList() {
     if (!token) return;
     await refreshProjects(token).catch((error) => {
+      if (isAuthError(error)) return;
       Alert.alert('Refresh failed', String((error as Error).message));
     });
   }
 
-  function artifactUrl(artifact: ChatArtifactResponse) {
+  function artifactUrl(artifact: ChatArtifactResponse): string | null {
     return cleanArtifactUrl(artifact);
   }
 
   function handleOpenArtifact(artifact: ChatArtifactResponse) {
+    const url = artifactUrl(artifact);
+    if (!url) {
+      // A tab may appear a moment before the background deployment has been
+      // promoted. Refresh the factual state, but never open a guessed URL.
+      if (token && currentProjectId) void refreshArtifacts(token, currentProjectId);
+      Alert.alert('公開準備中', 'この成果物は公開先を準備しています。少し待ってからもう一度開いてください。');
+      return;
+    }
     setArtifactView({
       title: artifact.label || artifact.slug || 'Artifact',
-      url: artifactUrl(artifact),
+      url,
     });
     setScreen('artifact');
   }
@@ -2665,6 +3286,18 @@ function AppMain() {
             <Text style={styles.appBarTitle}>Done</Text>
           </View>
           <Pressable
+            onPress={() => setScreen('collab')}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="people-outline" size={22} color="#f4f0e8" />
+            {collabUnreadTotal > 0 ? (
+              <View style={styles.iconBadge}>
+                <Text style={styles.iconBadgeText}>{collabUnreadTotal > 99 ? '99+' : collabUnreadTotal}</Text>
+              </View>
+            ) : null}
+          </Pressable>
+          <Pressable
             onPress={() => setScreen('settings')}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
@@ -2694,7 +3327,11 @@ function AppMain() {
               </View>
             ) : null
           }
-          renderItem={({ item }) => (
+          renderItem={({ item }) => {
+            // サーバーの has_active_run は一覧ポーリング(20s)で更新されるので、
+            // この端末から送った直後は streamingProjects で即時に点灯させる。
+            const running = !!item.has_active_run || streamingProjects.includes(item.id);
+            return (
             <Pressable
               onPress={() => handleSelectProject(item.id)}
               onLongPress={() => handleProjectLongPress(item)}
@@ -2706,6 +3343,7 @@ function AppMain() {
             >
               <View style={styles.chatAvatar}>
                 <Text style={styles.chatAvatarText}>{item.icon || 'D'}</Text>
+                {running ? <RunningDot /> : null}
               </View>
               <View style={styles.chatListBody}>
                 <View style={styles.chatListTopRow}>
@@ -2719,8 +3357,11 @@ function AppMain() {
                   </View>
                   <Text style={styles.chatListTime}>{formatTime(projectTime(item))}</Text>
                 </View>
-                <Text style={styles.chatListPreview} numberOfLines={1}>
-                  {item.last_message_preview || 'メッセージはまだありません'}
+                <Text
+                  style={[styles.chatListPreview, running && styles.chatListPreviewRunning]}
+                  numberOfLines={1}
+                >
+                  {running ? 'ダンが作業中…' : item.last_message_preview || 'メッセージはまだありません'}
                 </Text>
               </View>
               {(item.unread_count || 0) > 0 ? (
@@ -2731,7 +3372,8 @@ function AppMain() {
                 </View>
               ) : null}
             </Pressable>
-          )}
+            );
+          }}
         />
 
         <Pressable
@@ -2758,6 +3400,41 @@ function AppMain() {
             setActionSheet(null);
             void handleDeleteProject(project);
           }}
+        />
+      </View>
+    );
+  }
+
+  if (screen === 'collab') {
+    return (
+      <View style={styles.screen}>
+        <StatusBar style="light" />
+        <CollabRoomsScreen
+          request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
+          topInset={insets.top + 8}
+          onBack={() => setScreen('projects')}
+          onOpenRoom={(room: CollabRoomSummary) => {
+            setCollabRoom({ id: room.id, title: room.title });
+            setScreen('collabChat');
+          }}
+        />
+      </View>
+    );
+  }
+
+  if (screen === 'collabChat' && collabRoom) {
+    return (
+      <View style={styles.screen}>
+        <StatusBar style="light" />
+        <CollabChatScreen
+          request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
+          apiBase={API_BASE_URL}
+          token={token ?? null}
+          roomId={collabRoom.id}
+          roomTitle={collabRoom.title}
+          topInset={insets.top + 8}
+          bottomInset={insets.bottom}
+          onBack={() => setScreen('collab')}
         />
       </View>
     );
@@ -2940,6 +3617,13 @@ function AppMain() {
           </View>
           <View style={styles.appBarRight}>
             <Pressable
+              onPress={() => setVoiceOpen(true)}
+              hitSlop={10}
+              style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+            >
+              <Ionicons name="mic-outline" size={22} color="#f4f0e8" />
+            </Pressable>
+            <Pressable
               onPress={() => setSearchOpen(true)}
               hitSlop={10}
               style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
@@ -2972,6 +3656,15 @@ function AppMain() {
           </View>
         ) : null}
 
+        {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
+            これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
+        {loadingMessages && messages.length > 0 ? (
+          <View style={styles.messagesRefreshBar}>
+            <ActivityIndicator color="#7fd1c7" size="small" />
+            <Text style={styles.messagesRefreshText}>最新の状態を取得中…</Text>
+          </View>
+        ) : null}
+
         {loadingMessages && messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <ActivityIndicator color="#f4f0e8" />
@@ -2991,12 +3684,20 @@ function AppMain() {
             keyExtractor={(item) => item.key}
             maxToRenderPerBatch={8}
             ref={listRef}
-            removeClippedSubviews
+            // 画面外行のクリップ/再利用は Android の文字選択と相性が最悪で、
+            // 初回長押しに複数メッセージへ選択がぐちゃぐちゃに飛び散る
+            // （クリップされた行の TextView に選択状態が残ったまま再利用される）。
+            // 吹き出し内の直接なぞり選択を成立させるため明示的に無効化する。
+            removeClippedSubviews={false}
+            // inverted なので「末尾」= 画面上端（一番古い行）。そこまで来たら遡って取る。
+            onEndReached={loadOlderMessages}
+            onEndReachedThreshold={0.5}
             renderItem={({ item }) => {
-              // Live in-progress turn: render the timeline as it builds (tool
-              // steps expanded) with a spinner, like the web chat's live view.
-              // Anchored chronologically — a follow-up message sent mid-run
-              // stays BELOW the work that happened before it.
+              // Live in-progress turn: render the timeline as it builds with a
+              // spinner, like the web chat's live view. Tool steps start
+              // COLLAPSED even while live（「〇件の作業」タップで開ける — Webと
+              // 同じ挙動）. Anchored chronologically — a follow-up message sent
+              // mid-run stays BELOW the work that happened before it.
               if (item.kind === 'live') {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.wideBubble]}>
@@ -3004,7 +3705,7 @@ function AppMain() {
                       <Text style={styles.messageSender}>DAN</Text>
                     </View>
                     {item.blocks.length > 0 ? (
-                      <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} defaultOpen />
+                      <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                     ) : null}
                     {/* The "running now" spinner sits at the bottom next to the
                         latest log line, so it's obvious which step is live. */}
@@ -3020,6 +3721,25 @@ function AppMain() {
                 );
               }
               const msg = item.msg;
+              // ダンのリアクション応答（👍のみ）: 吹き出しにせず、直前の自分の
+              // メッセージに押されたLINE風リアクションとして右寄せの小さな
+              // スタンプで描画する（Web版 project-chat-panel と同じ規約）。
+              if (msg.sender_type === 'ai' && (msg.content || '').trim() === '👍') {
+                return (
+                  <View style={{ alignItems: 'flex-end', marginTop: -6, marginBottom: 6, paddingRight: 8 }}>
+                    <View
+                      style={{
+                        backgroundColor: 'rgba(127,127,127,0.18)',
+                        borderRadius: 999,
+                        paddingHorizontal: 8,
+                        paddingVertical: 3,
+                      }}
+                    >
+                      <Text style={{ fontSize: 14 }}>👍</Text>
+                    </View>
+                  </View>
+                );
+              }
               const mine = msg.sender_type === 'human';
               // ダンが読み込むまでの追い連絡は半透明＋「仮送信」で、読み込まれた
               // 時点（次のターンが始まった時点）で通常表示に固定される。
@@ -3152,7 +3872,6 @@ function AppMain() {
         <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
           <Pressable
             onPress={() => setAttachSheetOpen(true)}
-            disabled={sending}
             hitSlop={6}
             style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
           >
@@ -3179,8 +3898,7 @@ function AppMain() {
           />
           {/* Web版と同じ切替: 入力が空でダンが動いている間は停止ボタン。
               文字を打ち始めたら Send に戻る（＝追い連絡）。 */}
-          {!draft.trim() && attachments.length === 0 &&
-          ((sending && streamingProjectId === currentProject?.id) || liveRunActive) ? (
+          {!draft.trim() && attachments.length === 0 && (streamingHere || liveRunActive) ? (
             <Pressable
               onPress={handleCancelTurn}
               style={({ pressed }) => [styles.stopButton, pressed && styles.buttonPressed]}
@@ -3190,11 +3908,12 @@ function AppMain() {
             </Pressable>
           ) : (
             <Pressable
-              disabled={sendBlocked || (!draft.trim() && attachments.length === 0)}
+              disabled={!draft.trim() && attachments.length === 0}
               onPress={handleSend}
               style={({ pressed }) => [
                 styles.sendButton,
-                (pressed || sendBlocked || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
+                (pressed || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
+                pressed && pressedScale({ pressed }),
               ]}
             >
               {/* No spinner here — the live "working" indicator already shows in
@@ -3204,6 +3923,17 @@ function AppMain() {
           )}
         </View>
       </KeyboardAvoidingView>
+
+      {currentProject?.room_id ? (
+        <VoiceOverlay
+          visible={voiceOpen}
+          onClose={() => setVoiceOpen(false)}
+          roomId={currentProject.room_id}
+          chatTitle={currentProject.title || undefined}
+          apiBase={API_BASE_URL}
+          token={token ?? null}
+        />
+      ) : null}
 
       <Modal
         visible={searchOpen}
@@ -3519,6 +4249,24 @@ const styles = StyleSheet.create({
     paddingLeft: 2,
     paddingRight: 6,
   },
+  // アプリバーのアイコン右上に載せる未読数（👥のコラボ未読）
+  iconBadge: {
+    position: 'absolute',
+    top: 2,
+    right: -2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#ff5a3d',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  iconBadgeText: {
+    color: '#fffaf5',
+    fontSize: 10,
+    fontWeight: '900',
+  },
   backBadge: {
     alignItems: 'center',
     backgroundColor: '#3f3a33',
@@ -3778,6 +4526,32 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
+  runningDotWrap: {
+    alignItems: 'center',
+    height: 12,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: 12,
+  },
+  runningDotRing: {
+    backgroundColor: '#34d399',
+    borderRadius: 6,
+    height: 12,
+    position: 'absolute',
+    width: 12,
+  },
+  runningDotCore: {
+    backgroundColor: '#10b981',
+    borderRadius: 4.5,
+    height: 9,
+    width: 9,
+  },
+  chatListPreviewRunning: {
+    color: '#34d399',
+    fontWeight: '600',
+  },
   chatListTopRow: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -3941,6 +4715,20 @@ const styles = StyleSheet.create({
     gap: 10,
     justifyContent: 'center',
     paddingHorizontal: 24,
+  },
+  messagesRefreshBar: {
+    alignItems: 'center',
+    backgroundColor: '#211f1b',
+    borderBottomColor: '#282520',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  messagesRefreshText: {
+    color: '#a7a19a',
+    fontSize: 12,
   },
   emptyTitle: {
     color: '#f4f0e8',

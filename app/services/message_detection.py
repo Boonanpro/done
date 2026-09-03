@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # dan-notion は「案件素材の整理棚」であり、メール受信箱ではない。
 # メール系ソースは通知タブ(dan_proposals)の返信フローが置き場所なので、
 # 「とりあえず」inbox には投入しない（添付の有無を問わず）。
-_INBOX_EXCLUDED_SOURCES = {"gmail", "icloud_mail"}
+_INBOX_EXCLUDED_SOURCES = {"gmail", "icloud_mail", "instagram"}
 
 
 class MessageDetectionService:

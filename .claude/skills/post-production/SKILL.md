@@ -1,6 +1,6 @@
 ---
 name: post-production
-description: Video finishing skill for editing, reframing, aspect-ratio conversion, subtitles, audio, color grading, LUT creation/application, compression, exports, and quality checks. Use when the user asks to edit footage, make vertical/horizontal versions, create social variants, color grade, apply/make LUTs, resize/crop/blur-fill/extend videos, or finish generated/captured clips.
+description: Video finishing skill for editing, reframing, aspect-ratio conversion, subtitles, audio, color grading, LUT creation/application, compression, exports, privacy blur/redaction (ぼかし・モザイク・個人情報の秘匿), and quality checks. Use when the user asks to edit footage, make vertical/horizontal versions, create social variants, color grade, apply/make LUTs, resize/crop/blur-fill/extend videos, blur or mosaic sensitive information in a video (名前・顔・個人情報を隠す/ぼかす), or finish generated/captured clips.
 ---
 
 # Post Production
@@ -41,27 +41,56 @@ Avoid broad full-screen blur unless the user asks for it. For app demos, prefer 
 
 ### Choose The Mask Method
 
+**FORBIDDEN: a fixed rectangle over a time range for anything that can move.** On a scrolling page or moving camera, the target slides out from under the rectangle and leaks. The historical failure mode: widen the rectangle "to be safe", which then destroys surrounding content the user wanted visible. Masks must be anchored to the target, not to screen coordinates.
+
 | Target type | Preferred method |
 |---|---|
-| Stable app input fields | UI-state detection + fixed/relative rectangle masks |
-| Scrolling app screens | Detect screen state, then apply state-specific masks over known fields |
-| Moving faces or people | Face/person detection + tracker + manual QA |
-| Moving phone/object | Detector/segmentation + tracker + manual QA |
+| On-screen text/cards with fixed appearance (app UI, screen recordings, names, IDs) | Template matching per frame + relative-offset mask (workflow below). This is the proven high-precision one-shot method. |
+| Moving faces, people, objects in real footage (appearance changes with scale/rotation/light) | SAM 3.1 tracked mask: `scripts/blur_mask_bake.py` (see below) + manual QA |
 | High-risk private data | NLE/manual pass in DaVinci Resolve, Premiere, After Effects, or Fusion |
 
-OpenCV tracking is acceptable as an automation layer, but it is not enough by itself for high-risk privacy redaction. If a mask drifts, disappears, or hits the wrong area, the output is not complete.
+For real-footage targets, run the SAM 3.1 baker in its dedicated env:
 
-### Input-Field Blur Workflow
+```text
+D:/done/venv_sam3/Scripts/python.exe scripts/blur_mask_bake.py IN.mp4 --out mask.mp4 --prompt "person" --start 130 --duration 12
+```
 
-For app recordings where only input fields should be hidden:
+It tracks well (people, icons) but one-shot mask quality is NOT guaranteed final quality — plan a manual finishing pass in the production tab's content editor. A user-drawn box without a text concept needs the tracker-specific single-object mode.
 
-1. Extract representative frames for each UI state.
-2. Detect the phone/app viewport when needed.
-3. Define rectangle masks for only the sensitive fields in that UI state.
-4. Apply masks by frame range or by UI-state detection.
-5. Keep surrounding UI readable unless it contains sensitive data.
-6. Generate a review contact sheet showing blurred frames from the start, middle, and end of each masked segment.
-7. Run OCR or visual inspection on the final export for the sensitive regions and any likely leaks.
+### Template-Matched Blur Workflow (ぼかし・モザイク追従)
+
+For screen recordings where specific on-screen text must be hidden while everything else stays visible (proven one-shot 2026-08-19; reference implementation `D:\dan-workspace\demo_build3\build.py`, templates in `D:\dan-workspace\blur_audit\`):
+
+1. **Agree the target list with the user before touching the video.** Do not guess what counts as sensitive; a wrong guess wastes a full review round.
+2. **Cut template images**: crop the exact target (e.g. a name) from a representative frame, save as grayscale PNG. One template per distinct appearance of the target.
+3. **Match every frame**: decode frames one by one and run `cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)`, accept at score >= ~0.55. If the same text also appears elsewhere in frame (thumbnails, camera roll), restrict the search to a y-band so the wrong instance is never grabbed.
+4. **Mask by relative offset** `(dx, dy, w, h)` from the matched top-left. The mask then follows scrolling automatically and stays tight.
+5. **Fail safe — never leak**: frame not matched → reuse the last known position; target never seen in the segment → blur the entire frame. Over-hiding beats leaking.
+6. **Report the tracking rate** (`tracked=hits/total` per segment). A low rate means failure: re-cut the template or adjust the search band before delivering.
+
+Core pattern:
+
+```python
+res = cv2.matchTemplate(gray[band0:band1, :], tpl, cv2.TM_CCOEFF_NORMED)
+_, mx, _, loc = cv2.minMaxLoc(res)
+if mx >= 0.55:
+    pos = (loc[0], loc[1] + band0); last = pos; hits += 1
+else:
+    pos = last                       # fall back to last known position
+if pos is not None:
+    mask(frame, pos[0] + dx, pos[1] + dy, w, h)
+else:
+    mask(frame, 0, 0, W, H)          # never seen -> blur everything, never leak
+```
+
+Destruction must be two-stage: pixelate first (downscale ~1/14 with INTER_AREA, upscale with INTER_NEAREST), then GaussianBlur on top. A plain Gaussian blur of known-font text can be partially reversed; for maximum irreversibility use an opaque fill.
+
+Known weakness: the last-known-position fallback lags if the page scrolls during a miss streak. This is why the tracking rate and the frame-by-frame review below are mandatory, not optional.
+
+After masking, always:
+
+1. Generate a review contact sheet showing blurred frames from the start, middle, and end of each masked segment.
+2. Run OCR or visual inspection on the final export for the sensitive regions and any likely leaks.
 
 ### Review Status
 

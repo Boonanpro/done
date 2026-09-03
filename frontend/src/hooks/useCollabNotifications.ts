@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { useUnreadStore } from '@/stores/unread-store';
+import { api } from '@/lib/api-client';
 
 /**
  * Connects a per-user WebSocket for real-time cross-room notifications.
@@ -10,8 +11,25 @@ import { useUnreadStore } from '@/stores/unread-store';
  */
 export function useCollabNotifications() {
   const markUnread = useUnreadStore((s) => s.markUnread);
+  const syncFromServer = useUnreadStore((s) => s.syncFromServer);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // 未読のサーバー同期: 起動時＋定期。WS通知は即時の印、真実はサーバーの既読位置
+  // （APKで読んだ部屋はここで消える）。
+  useEffect(() => {
+    let alive = true;
+    const sync = () => {
+      api.collab.listRooms()
+        .then((d) => { if (alive) syncFromServer(d.rooms.filter((r) => r.unread).map((r) => r.id)); })
+        .catch(() => {});
+    };
+    sync();
+    const t = setInterval(sync, 30_000);
+    const onFocus = () => sync();
+    window.addEventListener('focus', onFocus);
+    return () => { alive = false; clearInterval(t); window.removeEventListener('focus', onFocus); };
+  }, [syncFromServer]);
 
   useEffect(() => {
     const token = localStorage.getItem('done-token');

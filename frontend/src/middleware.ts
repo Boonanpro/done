@@ -75,8 +75,14 @@ async function canonicalHostFor(
   slug: string,
   currentHost: string,
   origin: string,
+  skipLookup = false,
 ): Promise<string> {
   if (isCustomDomainHost(currentHost)) return currentHost;
+  // 専用プロジェクト（1プロジェクト=1成果物）では、この問い合わせ先はバックエンド
+  // (自宅PC への tunnel) で、応答に 1.3〜2.5秒かかる。ページ表示の度にこれを待つと
+  // TTFB が数秒になり、広告から来た人が白画面のまま離脱する。専用ホストで独自ドメインが
+  // 未接続なら canonical は現在のホストで確定するので、問い合わせ自体を行わない。
+  if (skipLookup) return currentHost;
   const map = await fetchDynamicDomainMap(origin);
   for (const [domain, mappedSlug] of Object.entries(map)) {
     if (mappedSlug === slug && isCustomDomainHost(domain)) return domain;
@@ -90,7 +96,25 @@ function markNoIndex(response: NextResponse): NextResponse {
   return response;
 }
 
-const DEFAULT_PUBLIC_ARTIFACT_SLUGS = ['kittoku', 'test-edit', 'salonboard-styleup', 'bookings'];
+const DEFAULT_PUBLIC_ARTIFACT_SLUGS = [
+  'kittoku',
+  'test-edit',
+  'salonboard-styleup',
+  'bookings',
+  'oku-yukadanbou',
+  'oku-yukadanbou-real',
+  'moonbox-jp',
+  // 創業者に DM のリンクから開いてもらう提案ページ。ログイン不要で読めないと
+  // 意味がない（noindex は markNoIndex で付く）。
+  'moonbox-proposal',
+  // 広告からの流入を受ける公開LP。タイル画像（/artifacts/<slug>/*.png）も
+  // ここに入れないと認証リダイレクトされ、画像が1枚も出ない。
+  'styleup-lp',
+  'salonboard-monitor',
+  // Safeguard（ポルノブロッカー）の販売ページ。YouTube・TikTok からの遷移先で、
+  // タイル画像・法務ページ・ダウンロード案内すべてログイン不要で開く必要がある。
+  'safeguard',
+];
 
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
   ...DEFAULT_PUBLIC_ARTIFACT_SLUGS,
@@ -104,10 +128,13 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const host = normalizeHost(request.headers.get('host'));
   const deliverySlug = deliverySlugFromHost(host);
+  // A dedicated project serves exactly one artifact. Unlike the legacy shared
+  // host, it needs neither a database lookup nor a generated global rewrite.
+  const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
 
   // ホスト解決: 静的マップ → 納品ホスト → DB 由来の動的マップ の順に確認する。
   // 静的マップ / 納品ホストで決まる場合は外部 fetch を避ける。
-  let customDomainSlug: string | null = STATIC_DOMAIN_TO_ARTIFACT.get(host) ?? deliverySlug ?? null;
+  let customDomainSlug: string | null = dedicatedArtifactSlug ?? STATIC_DOMAIN_TO_ARTIFACT.get(host) ?? deliverySlug ?? null;
   if (!customDomainSlug) {
     const dynamicMap = await fetchDynamicDomainMap(request.nextUrl.origin);
     customDomainSlug = dynamicMap[host] ?? null;
@@ -141,7 +168,11 @@ export async function middleware(request: NextRequest) {
 
     if (first === 'artifacts' && slug === customDomainSlug) {
       const rest = segments.slice(2).join('/');
-      if (rest === 'manifest.webmanifest' || /^icon-\d+\.png$/.test(rest)) {
+      // 成果物の静的アセット（画像・動画・フォント・manifest 等、拡張子を持つもの）は
+      // clean path へ redirect せずそのまま配信する。ページだけを clean path に寄せる。
+      // ここを redirect にすると /artifacts/<slug>/tiles/t1.webp が /tiles/t1.webp へ
+      // 飛ばされて 404 になり、画像ファーストLPのタイルが公開サイトで全滅する。
+      if (/\.[a-z0-9]+$/i.test(rest)) {
         return NextResponse.next();
       }
       const url = request.nextUrl.clone();
@@ -156,6 +187,7 @@ export async function middleware(request: NextRequest) {
       customDomainSlug,
       host,
       request.nextUrl.origin,
+      Boolean(dedicatedArtifactSlug),
     );
     const withCanonical = (response: NextResponse): NextResponse => {
       response.headers.append(
@@ -182,7 +214,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  // ここから先はダン本体ホスト（done-studio.vercel.app / localhost 等）。
+  // ここから先はダン本体ホスト（localhost 等）。
   // /preview/<slug> はチャット横の編集用プレビュー、/artifacts/<slug> はその実体で、
   // どちらも内部用URL。外部公開URLと中身が重複するため必ず検索対象から外す。
   if (pathname.startsWith('/preview/')) {

@@ -65,6 +65,11 @@ class ChatArtifactResponse(BaseModel):
     artifact_type: str = "tool"
     label: Optional[str] = None
     preview_url: str
+    # The concrete, verified address of the latest dedicated release.  This is
+    # derived from artifact_publication and deliberately is not a mutable
+    # chat_artifact field: a card describes the work, while the ledger records
+    # where that work was actually deployed.
+    delivery_url: Optional[str] = None
     share_url: Optional[str] = None
     draft_url: Optional[str] = None
     production_url: Optional[str] = None

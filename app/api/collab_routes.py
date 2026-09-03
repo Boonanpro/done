@@ -125,8 +125,26 @@ async def create_room(
         project_ref=req.project_ref,
         ai_auto_assist=req.ai_auto_assist,
         ai_assist_config=req.ai_assist_config.model_dump() if req.ai_assist_config else None,
+        origin_chat_room_id=req.origin_chat_room_id,
     )
     return CollabRoomResponse(**room, guest_count=0)
+
+
+def _preview_text(msg: dict) -> str:
+    files = (msg.get("metadata") or {}).get("files") or []
+    single = (msg.get("metadata") or {}).get("file")
+    if single and not files:
+        files = [single]
+    if files:
+        kinds = [(f.get("type") or "") for f in files]
+        if all(k.startswith("image/") for k in kinds):
+            label = "📷 画像" if len(files) == 1 else f"📷 画像 {len(files)}枚"
+        elif all(k.startswith("video/") for k in kinds):
+            label = "🎬 動画" if len(files) == 1 else f"🎬 動画 {len(files)}本"
+        else:
+            label = f"📎 {files[0].get('name') or 'ファイル'}" + (f" 他{len(files)-1}件" if len(files) > 1 else "")
+        return label
+    return (msg.get("content") or "")[:100]
 
 
 @router.get("/rooms", response_model=CollabRoomListResponse)
@@ -151,12 +169,21 @@ async def list_rooms(
         # Get last message
         messages = await service.get_messages(r["id"], limit=1)
         last_msg = messages[-1] if messages else None
+        unread_count = await service.unread_count_for_owner(r)
         room_responses.append(CollabRoomResponse(
             **r,
             guest_count=guest_count,
-            last_message=last_msg["content"][:100] if last_msg else None,
+            last_message=_preview_text(last_msg) if last_msg else None,
             last_message_at=last_msg["created_at"] if last_msg else None,
+            unread=unread_count > 0,
+            unread_count=unread_count,
         ))
+    # 並びは「メッセージの動きがあった順」。updated_at は既読更新などでも動いてしまい、
+    # 開いただけで一覧の順番が入れ替わる誤動作の原因になるため使わない。
+    room_responses.sort(
+        key=lambda x: x.last_message_at or x.created_at or "",
+        reverse=True,
+    )
     return CollabRoomListResponse(rooms=room_responses)
 
 
@@ -265,21 +292,21 @@ async def get_invite_info(
         "room_description": room.get("description") if room else None,
         "role": invite["role"],
         "status": "expired" if is_expired else invite["status"],
-        "already_joined": invite["status"] == "joined",
-        "guest_name": invite.get("guest_name"),
+        # personal=True: 本人専用URL（開いた端末に関係なくこの身分で入れる）
+        # personal=False: 入口URL（名前を入れて参加すると専用URLが発行される）
+        "personal": bool(invite.get("guest_name")),
+        "already_joined": bool(invite.get("guest_name")),
     }
-
-    # If already joined, include rejoin info so the guest can re-enter directly
-    if invite["status"] == "joined" and invite.get("guest_name"):
-        rejoin_jwt = _create_guest_token(
+    if invite.get("guest_name"):
+        # 本人専用URLはそのまま入室させてよい（このURLを持っている＝本人）
+        result["rejoin_token"] = _create_guest_token(
             invite_id=invite["id"],
             room_id=invite["room_id"],
             guest_name=invite["guest_name"],
             role=invite["role"],
         )
-        result["rejoin_token"] = rejoin_jwt
         result["room_id"] = invite["room_id"]
-
+        result["guest_name"] = invite["guest_name"]
     return result
 
 
@@ -289,20 +316,112 @@ async def join_room(
     req: CollabJoinRequest,
     service: CollabService = Depends(get_collab_service),
 ):
-    """Guest joins a collab room via invite token. No auth required."""
+    """Guest joins a collab room via invite token. No auth required.
+
+    1つの招待URL＝部屋の入口。最初の参加者は招待行そのものを身分証として使い、
+    2人目以降は参加ごとに新しい身分（collab_invites 行）を発行する。
+    """
     invite = await service.get_invite_by_token(token)
     if not invite:
         raise HTTPException(status_code=404, detail="Invalid invite link")
+    room = invite.get("collab_rooms") or await service.get_room(invite["room_id"])
 
+    # 身分モデル:
+    #   - 入口URL（共有する招待リンク）= guest_name を持たない行。誰が何度開いても消費されない
+    #   - 本人専用URL = 参加時に発行される身分行のトークン。開いた端末・ブラウザに
+    #     関係なくその人を特定する（iOSのホーム画面アプリはSafariと保存領域が別なので、
+    #     ブラウザ保存に頼ると同じ人が別人として二重参加する。URLに身分を持たせて根治）
+    if invite.get("guest_name"):
+        # 本人専用URL: その身分で入る（名前は変更可能なので入力値は無視して身分側を正とする）
+        guest_jwt = _create_guest_token(
+            invite_id=invite["id"],
+            room_id=invite["room_id"],
+            guest_name=invite["guest_name"],
+            role=invite["role"],
+        )
+        await service.update_invite_guest_token(invite["id"], guest_jwt)
+        return CollabJoinResponse(
+            guest_token=guest_jwt,
+            room_id=invite["room_id"],
+            room_title=room["title"] if room else "",
+            guest_name=invite["guest_name"],
+            role=invite["role"],
+            personal_token=invite["token"],
+        )
+
+    # 入口URL: この参加者専用の身分（＋専用URL）を新規発行。入口行自体は身分にしない
+    identity = await service.create_joiner_identity(invite["room_id"], req.guest_name, invite["role"])
     guest_jwt = _create_guest_token(
-        invite_id=invite["id"],
+        invite_id=identity["id"],
         room_id=invite["room_id"],
         guest_name=req.guest_name,
         role=invite["role"],
     )
+    await service.update_invite_guest_token(identity["id"], guest_jwt)
+    return CollabJoinResponse(
+        guest_token=guest_jwt,
+        room_id=invite["room_id"],
+        room_title=room["title"] if room else "",
+        guest_name=req.guest_name,
+        role=invite["role"],
+        personal_token=identity["token"],
+    )
 
-    result = await service.join_room(token, req.guest_name, guest_jwt)
-    return CollabJoinResponse(guest_token=guest_jwt, **result)
+
+@router.get("/me")
+async def guest_me(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """ゲストの自分の身分情報（本人専用URL用トークン）。
+    入口URLに古いセッションで来た人を、本人専用URLへ移行させるために使う。"""
+    guest_token = _get_guest_token_from_request(request, credentials)
+    if not guest_token:
+        raise HTTPException(status_code=401, detail="Guest token required")
+    gd = _decode_guest_token(guest_token)
+    if not gd:
+        raise HTTPException(status_code=403, detail="Invalid guest token")
+    invites = await service.list_invites(gd["room_id"])
+    mine = next((i for i in invites if i["id"] == gd.get("sub")), None)
+    if not mine:
+        raise HTTPException(status_code=404, detail="Identity not found")
+    return {
+        "personal_token": mine["token"],
+        "guest_name": mine.get("guest_name"),
+        "room_id": gd["room_id"],
+    }
+
+
+@router.post("/rename")
+async def rename_guest(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """ゲストの表示名変更。サーバー側の身分を更新し、新しい名前入りのトークンを返す。"""
+    guest_token = _get_guest_token_from_request(request, credentials)
+    if not guest_token:
+        raise HTTPException(status_code=401, detail="Guest token required")
+    guest_data = _decode_guest_token(guest_token)
+    if not guest_data:
+        raise HTTPException(status_code=403, detail="Invalid guest token")
+    data = await request.json()
+    new_name = (data.get("guest_name") or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=422, detail="guest_name required")
+
+    updated = await service.update_invite_name(guest_data["sub"], new_name)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Identity not found")
+    new_jwt = _create_guest_token(
+        invite_id=guest_data["sub"],
+        room_id=guest_data["room_id"],
+        guest_name=new_name,
+        role=guest_data.get("role", "reviewer"),
+    )
+    await service.update_invite_guest_token(guest_data["sub"], new_jwt)
+    return {"guest_token": new_jwt, "guest_name": new_name}
 
 
 # ==================== Messages ====================
@@ -405,6 +524,18 @@ async def send_message(
     if not sender_type:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    has_files = bool((req.metadata or {}).get("files") or (req.metadata or {}).get("file"))
+    if not (req.content or "").strip() and not has_files:
+        raise HTTPException(status_code=422, detail="content or files required")
+    # 通知・一覧・Push 用の短い本文（添付だけなら「📷 画像 3枚」等）
+    preview = _preview_text({"content": req.content, "metadata": req.metadata})
+
+    # ユーザー→ダンの私的メッセージ（相談への返答・指示）。相手には一切見せない
+    is_owner_private = (
+        sender_type == "owner"
+        and ((req.metadata or {}).get("visibility") == "owner_only")
+    )
+
     message = await service.send_message(
         room_id=room_id,
         sender_type=sender_type,
@@ -413,24 +544,151 @@ async def send_message(
         metadata=req.metadata,
     )
 
-    # Real-time notification via WebSocket
+    ws_payload = {
+        "type": "new_message",
+        "message": {
+            "id": message["id"],
+            "room_id": room_id,
+            "sender_type": message["sender_type"],
+            "sender_name": message["sender_name"],
+            "content": message["content"],
+            "metadata": message.get("metadata", {}),
+            "created_at": message["created_at"],
+        },
+    }
+
     import asyncio
+    if is_owner_private:
+        # 自分側の画面にだけ配信し、ダンへ即時ディスパッチ。通知・Pushは出さない
+        await collab_manager.send_to_type(room_id, "owner", ws_payload)
+        asyncio.ensure_future(_dispatch_owner_private(service, room_id, message))
+        return CollabMessageResponse(**message)
+
+    # 部屋のWebSocketにも配信する（WS経由の送信と同じ見え方にする）。
+    # これが無いと、REST経由の着信（スマホのフォールバック送信・外部ボット等）が
+    # 開きっぱなしの画面にリアルタイム表示されない。
+    await collab_manager.broadcast(room_id, ws_payload)
+
+    # Real-time notification via WebSocket
     asyncio.ensure_future(notification_manager.notify_room_users(
         room_id,
         {"type": "new_message_notification", "room_id": room_id,
          "room_title": ((await service.get_room(room_id)) or {}).get("title", ""),
-         "sender_name": sender_name, "content": req.content[:100]},
+         "sender_name": sender_name, "content": preview[:100]},
         service
     ))
 
-    # Trigger DAN assist for guest messages (REST API path)
+    # 相手側へのPush通知（WS経路と同じ扱い）
+    asyncio.ensure_future(_send_push(room_id, sender_type, sender_name, preview))
+
+    # Trigger DAN (REST API path)
     if sender_type == "guest":
-        import asyncio
         asyncio.ensure_future(
-            _trigger_dan_assist(service, room_id, message)
+            _dispatch_guest_message(service, room_id, message)
+        )
+    elif sender_type == "owner":
+        # ユーザーの公開発言もダンに届ける（ダン宛てかどうかはダンが判断し、
+        # 宛てられていれば公開の場で直接返答する）
+        asyncio.ensure_future(
+            _dispatch_owner_public(service, room_id, message)
         )
 
     return CollabMessageResponse(**message)
+
+
+# ==================== Participants / Read ====================
+
+async def _room_access(request: Request, credentials, service: CollabService, room_id: str):
+    """オーナー or ゲストのアクセス判定。(is_owner, guest_invite_id) を返す。どちらでもなければ None。"""
+    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials:
+        owner_token = credentials.credentials
+    if owner_token:
+        td = decode_access_token(owner_token)
+        if td:
+            room = await service.get_room(room_id)
+            if room and room["owner_id"] == td.user_id:
+                return True, None
+    guest_token = request.headers.get("X-Guest-Token") or (
+        credentials.credentials if credentials else None
+    )
+    if guest_token:
+        gd = _decode_guest_token(guest_token)
+        if gd and gd.get("room_id") == room_id:
+            return False, gd.get("sub")
+    return None
+
+
+@router.get("/rooms/{room_id}/participants")
+async def get_participants(
+    room_id: str,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """参加者名簿（オーナー＋参加済みゲスト）と既読位置。双方から見える。"""
+    access = await _room_access(request, credentials, service, room_id)
+    if access is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    room = await service.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    owner_name = await _get_display_name(room["owner_id"], "オーナー")
+    guests = await service.list_participants(room_id)
+    return {
+        "owner": {"name": owner_name, "last_read_at": room.get("owner_last_read_at")},
+        "guests": guests,
+    }
+
+
+@router.post("/rooms/{room_id}/messages/{message_id}/react")
+async def react_to_message(
+    room_id: str,
+    message_id: str,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """人間（オーナー/ゲスト）のリアクション。同じ絵文字をもう一度で外れる（トグル）。
+    通知・Push・未読は発生しない。開いている画面にはWSで即反映。"""
+    access = await _room_access(request, credentials, service, room_id)
+    if access is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    is_owner, guest_invite_id = access
+    data = await request.json()
+    emoji = (data.get("emoji") or "").strip()
+    if not emoji or len(emoji) > 8:
+        raise HTTPException(status_code=422, detail="emoji required")
+    if is_owner:
+        room = await service.get_room(room_id)
+        by = await _get_display_name(room["owner_id"], "オーナー") if room else "オーナー"
+    else:
+        gd = _decode_guest_token(_get_guest_token_from_request(request, credentials) or "") or {}
+        by = gd.get("guest_name") or "ゲスト"
+    msg = await service.add_reaction(room_id, message_id, emoji, by=by, toggle=True)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    reactions = (msg.get("metadata") or {}).get("reactions") or {}
+    await collab_manager.broadcast(room_id, {
+        "type": "reaction", "message_id": message_id, "reactions": reactions,
+    })
+    return {"reactions": reactions}
+
+
+@router.post("/rooms/{room_id}/read")
+async def mark_room_read(
+    room_id: str,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """既読位置の更新（開いている間、フロントが定期的に叩く）。"""
+    access = await _room_access(request, credentials, service, room_id)
+    if access is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    is_owner, guest_invite_id = access
+    await service.mark_read(room_id, guest_invite_id=guest_invite_id, as_owner=is_owner)
+    return {"ok": True}
 
 
 # ==================== Generate Reply ====================
@@ -952,15 +1210,14 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                     })
 
                     if sender_type == "owner":
-                        # Owner: trigger full DAN agent
+                        # Owner → ダンへの指示。origin 紐付きルームなら本体ダンへ
                         import asyncio
                         asyncio.ensure_future(
-                            _trigger_dan_assist(service, room_id, {
+                            _dispatch_owner_private(service, room_id, {
                                 **message,
                                 "content": dan_content,
                                 "sender_type": "owner",
                                 "sender_name": sender_name,
-                                "_owner_instruction": True,
                             })
                         )
                     else:
@@ -974,6 +1231,30 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                                 "sender_name": sender_name,
                             })
                         )
+                elif sender_type == "owner" and (metadata or {}).get("visibility") == "owner_only":
+                    # ユーザー→ダンの私的メッセージ（相談への返信）。相手には見せず、
+                    # 自分側にだけ表示して本体ダンへ即時ディスパッチ
+                    message = await service.send_message(
+                        room_id=room_id,
+                        sender_type=sender_type,
+                        sender_name=sender_name,
+                        content=content,
+                        metadata=metadata,
+                    )
+                    await collab_manager.send_to_type(room_id, "owner", {
+                        "type": "new_message",
+                        "message": {
+                            "id": message["id"],
+                            "room_id": room_id,
+                            "sender_type": message["sender_type"],
+                            "sender_name": message["sender_name"],
+                            "content": message["content"],
+                            "metadata": message.get("metadata", {}),
+                            "created_at": message["created_at"],
+                        }
+                    })
+                    import asyncio
+                    asyncio.ensure_future(_dispatch_owner_private(service, room_id, message))
                 else:
                     # Normal message - visible to all
                     message = await service.send_message(
@@ -1012,11 +1293,16 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                         room_id, sender_type, sender_name, content
                     ))
 
-                    # DAN auto-assist: trigger when guest sends a message
+                    # DAN auto-assist
                     if sender_type == "guest":
                         import asyncio
                         asyncio.ensure_future(
-                            _trigger_dan_assist(service, room_id, message)
+                            _dispatch_guest_message(service, room_id, message)
+                        )
+                    elif sender_type == "owner":
+                        import asyncio
+                        asyncio.ensure_future(
+                            _dispatch_owner_public(service, room_id, message)
                         )
 
             elif msg_type == "typing":
@@ -1051,6 +1337,72 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 "sender_name": sender_name,
                 "online_users": collab_manager.get_online_users(room_id),
             })
+
+
+async def _dispatch_guest_message(service: CollabService, room_id: str, message: dict):
+    """ゲスト発言をダンに届ける振り分け。
+
+    - origin 紐付きルーム（collab_thread ツールで作った外部窓口）: 本体チャットの部屋で
+      ダンを自動起動する（core の /api/v1/chat/internal/collab-inbound 経由）。
+      会話がダンの本体記憶に入り、改善提案・返信案が本体チャットに出る。
+    - それ以外（手動作成の従来ルーム）: 従来どおり隔離 collab DAN でサポート。
+    """
+    try:
+        room = await service.get_room(room_id)
+        if room and room.get("origin_chat_room_id"):
+            await _notify_origin_chat(service, room_id, message)
+        else:
+            await _trigger_dan_assist(service, room_id, message)
+    except Exception:
+        logger.exception("guest message dispatch failed room=%s", room_id)
+
+
+async def _notify_origin_chat(service: CollabService, room_id: str, message: dict):
+    """core にゲスト着信を中継して origin ルームで wake させる。core 不通なら通知タブへ。"""
+    import httpx
+    core_port = os.environ.get("DAN_CORE_PORT", "9000")
+    payload = {
+        "collab_room_id": room_id,
+        "message": {k: message.get(k) for k in
+                    ("id", "sender_type", "sender_name", "content", "created_at", "metadata")},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"http://127.0.0.1:{core_port}/api/v1/chat/internal/collab-inbound",
+                json=payload,
+            )
+            r.raise_for_status()
+    except Exception:
+        logger.warning("collab inbound relay to core failed room=%s; falling back to proposal",
+                       room_id, exc_info=True)
+        await service.notify_origin_chat_of_guest_message(room_id, message)
+
+
+async def _dispatch_owner_public(service: CollabService, room_id: str, message: dict):
+    """ユーザーの公開発言をダンへ。origin 紐付きルームのみ（ダン宛てかはダンが判断）。"""
+    try:
+        room = await service.get_room(room_id)
+        if room and room.get("origin_chat_room_id"):
+            await _notify_origin_chat(service, room_id, message)
+    except Exception:
+        logger.exception("owner public dispatch failed room=%s", room_id)
+
+
+async def _dispatch_owner_private(service: CollabService, room_id: str, message: dict):
+    """ユーザーの私的メッセージ（相談への返答・ダンへの指示）をダンへ届ける。
+
+    origin 紐付きルームでは本体ダン（相談を出した頭）に即時で届ける。
+    紐付き無しの従来ルームは旧来の隔離アシストにフォールバック。
+    """
+    try:
+        room = await service.get_room(room_id)
+        if room and room.get("origin_chat_room_id"):
+            await _notify_origin_chat(service, room_id, message)
+        else:
+            await _trigger_dan_assist(service, room_id, {**message, "_owner_instruction": True})
+    except Exception:
+        logger.exception("owner private dispatch failed room=%s", room_id)
 
 
 async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_message: dict):
@@ -1348,6 +1700,168 @@ async def _send_push(room_id: str, sender_type: str, sender_name: str, content: 
             exclude_type=sender_type,
             title=sender_name,
             body=body,
+            url=f"/collab/{room_id}",
         )
+        # オーナー宛（相手やダンからの新着）は、APKのネイティブ通知トークン
+        # （room_id="user:{owner_id}" で登録される）にも届ける
+        if sender_type != "owner":
+            room = await CollabService().get_room(room_id)
+            if room:
+                await svc.notify_room(
+                    room_id=f"user:{room['owner_id']}",
+                    exclude_type=sender_type,
+                    title=sender_name,
+                    body=body,
+                    url=f"/collab/{room_id}",
+                )
     except Exception as e:
         logger.error("Push notification error: %s", e)
+
+
+# ==================== Internal (localhost only) ====================
+
+# 窓口ごとのダン稼働状態（考え中インジケーター用）。
+# WS が張れない環境（Vercel 経由）はポーリングでこのキャッシュを読む。
+# サンドボックス再起動で消える＝消灯側に倒れる（安全側）。
+_dan_status: dict[str, float] = {}   # room_id -> thinking 開始時刻(epoch)
+_DAN_STATUS_TTL = 30 * 60            # 万一 done が来なくても30分で自動消灯
+
+
+@router.post("/internal/react")
+async def internal_react(
+    request: Request,
+    service: CollabService = Depends(get_collab_service),
+):
+    """ダンのリアクション（既読サイン🙏など）。メッセージではないので通知・Push・未読なし。
+    開いている画面には WS でリアルタイム反映される。"""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+    data = await request.json()
+    room_id = (data.get("room_id") or "").strip()
+    message_id = (data.get("message_id") or "").strip()
+    emoji = (data.get("emoji") or "🙏").strip() or "🙏"
+    if not room_id or not message_id:
+        raise HTTPException(status_code=422, detail="room_id and message_id required")
+    msg = await service.add_reaction(room_id, message_id, emoji, by=(data.get("by") or "ダン"))
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    await collab_manager.broadcast(room_id, {
+        "type": "reaction",
+        "message_id": message_id,
+        "reactions": (msg.get("metadata") or {}).get("reactions") or {},
+    })
+    return {"ok": True}
+
+
+@router.post("/internal/dan-status")
+async def internal_dan_status(request: Request):
+    """ダンの稼働状態をオーナー画面に流す（考え中インジケーター用）。core から呼ばれる。"""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+    data = await request.json()
+    room_id = (data.get("room_id") or "").strip()
+    status = (data.get("status") or "").strip()
+    if not room_id or status not in ("thinking", "done"):
+        raise HTTPException(status_code=422, detail="room_id and status(thinking|done) required")
+    import time as _time
+    if status == "thinking":
+        _dan_status[room_id] = _time.time()
+    else:
+        _dan_status.pop(room_id, None)
+    await collab_manager.send_to_type(room_id, "owner", {
+        "type": "dan_thinking" if status == "thinking" else "dan_done",
+        "room_id": room_id,
+    })
+    return {"ok": True}
+
+
+@router.get("/rooms/{room_id}/dan-status")
+async def get_dan_status(
+    room_id: str,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    """ダンが考え中かどうか（オーナー画面のポーリング用）。"""
+    room = await service.get_room(room_id)
+    if not room or room["owner_id"] != user.user_id:
+        raise HTTPException(status_code=404, detail="Room not found")
+    import time as _time
+    since = _dan_status.get(room_id)
+    thinking = bool(since and (_time.time() - since) < _DAN_STATUS_TTL)
+    return {"thinking": thinking}
+
+
+
+@router.post("/internal/send")
+async def internal_send_message(
+    request: Request,
+    service: CollabService = Depends(get_collab_service),
+):
+    """ダン（compose_message channel="collab"）からの送信。保存＋WS配信＋Push まで行う。
+
+    core / MCP サブプロセスから localhost 経由でのみ呼ばれる。ゲスト側には
+    「DAN」の発言として表示される（visibility 指定なし＝双方に見える）。
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+
+    data = await request.json()
+    room_id = (data.get("room_id") or "").strip()
+    content = (data.get("content") or "").strip()
+    if not room_id or not content:
+        raise HTTPException(status_code=422, detail="room_id and content required")
+    room = await service.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    sender_name = (data.get("sender_name") or "ダン").strip() or "ダン"
+    # visibility="owner_only" はダンからユーザーへの「相談」: 相手には見せない
+    owner_only = (data.get("visibility") or "").strip() == "owner_only"
+    metadata = {"via": "consult" if owner_only else "outbound_card"}
+    if owner_only:
+        metadata["visibility"] = "owner_only"
+        # 既存の相談スレッドの続きなら、そのスレッド（親メッセージ）にぶら下げる
+        reply_to_id = (data.get("reply_to_message_id") or "").strip()
+        if reply_to_id:
+            metadata["reply_to"] = {"id": reply_to_id}
+
+    message = await service.send_message(
+        room_id=room_id,
+        sender_type="dan_owner",
+        sender_name=sender_name,
+        content=content,
+        metadata=metadata,
+    )
+
+    payload = {
+        "type": "new_message",
+        "message": {
+            "id": message["id"],
+            "room_id": room_id,
+            "sender_type": message["sender_type"],
+            "sender_name": message["sender_name"],
+            "content": message["content"],
+            "metadata": message.get("metadata", {}),
+            "created_at": message["created_at"],
+        },
+    }
+    if owner_only:
+        await collab_manager.send_to_type(room_id, "owner", payload)
+    else:
+        await collab_manager.broadcast(room_id, payload)
+
+    import asyncio
+    asyncio.ensure_future(notification_manager.notify_room_users(
+        room_id,
+        {"type": "new_message_notification", "room_id": room_id,
+         "room_title": room.get("title", ""),
+         "sender_name": sender_name, "content": content[:100]},
+        service,
+    ))
+    # 通常送信は相手（guest）側へ、相談はユーザー（owner）側へ Push
+    asyncio.ensure_future(_send_push(room_id, "guest" if owner_only else "owner", sender_name, content))
+
+    return {"message_id": message["id"], "delivery": "owner_only" if owner_only else "broadcast"}

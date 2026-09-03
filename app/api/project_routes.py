@@ -2,7 +2,9 @@
 Project API Routes - プロジェクト管理
 """
 import asyncio
-from fastapi import APIRouter, HTTPException, Depends, Query
+import json
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from app.api.chat_routes import get_current_user, TokenData
@@ -98,13 +100,33 @@ async def suggest_project_title(
     room_id: Optional[str] = Query(default=None),
     current_user: TokenData = Depends(get_current_user),
 ):
-    """チャット内容からプロジェクトタイトルを自動生成"""
+    """チャット内容からプロジェクトタイトルを自動生成（初回のみ）
+
+    タイトルは最初の1回だけAIが付ける。既にタイトルが付いている部屋には
+    現在のタイトルをそのまま返す（LLM生成もしない）。会話が進むたびに
+    名前がころころ変わると目的のチャットを見失う、というユーザー要望による。
+    クライアント側（Web/モバイル）にも同種のガードはあるが、キャッシュ未取得の
+    タイミングですり抜けて改名される事故が実際に起きたため、サーバー側で確実に守る。
+    """
     from app.services.chat_service import ChatService
 
     service = ChatService()
     raw_messages: list[dict] = []
 
     if room_id:
+        try:
+            proj = (
+                service.supabase.table("projects")
+                .select("title")
+                .eq("room_id", room_id)
+                .limit(1)
+                .execute()
+            )
+            current_title = (proj.data[0].get("title") or "").strip() if proj.data else ""
+            if current_title and current_title != "新しいプロジェクト":
+                return {"title": current_title}
+        except Exception:
+            pass
         try:
             raw = await service.get_messages(room_id, current_user.user_id, limit=20)
             # 古い→新しい順に並べ替え、空メッセージは除外
@@ -294,6 +316,87 @@ async def delete_project(
         asyncio.create_task(
             _run_archive_in_background(room_id, messages_for_archive)
         )
+
+
+# ==================== Room Board（部屋ボード） ====================
+
+@router.get("/{project_id}/board")
+async def get_room_board(
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """部屋ボード（現在地ドキュメント）を取得"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from app.services.room_board_service import get_board
+    return await asyncio.to_thread(get_board, project_id)
+
+
+@router.post("/{project_id}/board/refresh")
+async def refresh_room_board(
+    project_id: str,
+    force: bool = Query(default=False),
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """部屋ボードを即時消化（テスト・手動更新用）。force=true でカーソル無視で再消化"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    from app.services.room_board_service import digest_project, get_project_with_board
+    row = await asyncio.to_thread(get_project_with_board, project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    result = await asyncio.to_thread(digest_project, row, force)
+    return result
+
+
+@router.get("/{project_id}/board/stream")
+async def stream_room_board(
+    project_id: str,
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """ボード更新のSSE購読。接続時に現状スナップショット、以降は書き込みの度に即時プッシュ。
+
+    消化・外部イベントによる書き込みは room_board_service._write_board → _publish_board
+    で同一プロセス内の購読キューに流れる。25秒ごとに ping を打って接続を保つ。
+    """
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from app.services.room_board_service import get_board, subscribe_board, unsubscribe_board
+
+    q = await subscribe_board(project_id)
+
+    async def gen():
+        try:
+            snapshot = await asyncio.to_thread(get_board, project_id)
+            yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    board = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f"data: {json.dumps({'enabled': True, 'board': board}, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            unsubscribe_board(project_id, q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==================== Execution Events ====================

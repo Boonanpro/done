@@ -9,6 +9,7 @@ import imaplib
 import email as email_lib
 import hashlib
 import secrets
+from email import utils as email_utils
 from email.header import decode_header
 from typing import Optional, List, Tuple
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,9 @@ from app.models.otp_schemas import (
     OTPResult,
     OTP_PATTERNS,
     OTP_SENDER_DOMAINS,
+    OTP_LINK_URL_PATTERN,
+    OTP_LINK_TRUSTED_HOSTS,
+    OTP_LINK_CONTEXT_KEYWORDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,64 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
             return datetime.fromisoformat(main_part + tz_part)
         except Exception:
             return datetime.now(timezone.utc)
+
+
+def _raw_message_from_fetch(msg_data) -> Optional[bytes]:
+    """IMAP fetch の応答から生メッセージを取り出す。
+
+    応答の形はサーバによって違い、iCloud は本文を持たない要素を混ぜてくる。
+    先頭要素を決め打ちすると取りこぼすので、bytes 本文を持つ最初のタプルを拾う。
+    """
+    for part in msg_data or []:
+        if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], (bytes, bytearray)):
+            return bytes(part[1])
+    return None
+
+
+def _message_datetime(email_message) -> Optional[datetime]:
+    """メールの送信日時を tz-aware で返す。読めなければ None。"""
+    raw = email_message.get("Date")
+    if not raw:
+        return None
+    try:
+        dt = email_utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# CSSやJSは本文扱いしない。色指定の #595959 が6桁コードとして拾われるため。
+_HTML_NOISE_RE = re.compile(r'<(style|script|head)[^>]*>.*?</\1>', re.S | re.I)
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+
+
+def _message_text(email_message) -> str:
+    """メールから本文テキストを取り出す。
+
+    text/plain が無いメール（Epic の認証メールなど HTML のみ）でも
+    コードやリンクを拾えるよう、無ければ HTML から起こす。
+    """
+    plain = ""
+    html = ""
+    parts = email_message.walk() if email_message.is_multipart() else [email_message]
+    for part in parts:
+        content_type = part.get_content_type()
+        if content_type not in ("text/plain", "text/html"):
+            continue
+        payload = part.get_payload(decode=True) or b""
+        text = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+        if content_type == "text/plain":
+            plain += text
+        else:
+            html += text
+
+    if plain.strip():
+        return plain
+    if not html:
+        return ""
+    return _HTML_TAG_RE.sub(" ", _HTML_NOISE_RE.sub(" ", html))
 
 
 # メールプロバイダ別の IMAP ホスト（ドメイン → host）
@@ -166,6 +228,59 @@ class OTPService:
         
         return None
     
+    def _extract_link_from_text(self, text: str) -> Optional[str]:
+        """
+        テキストからワンタイムURL（タップして再設定/認証するリンク）を抽出
+
+        数字コードではなくリンクを送ってくるサービス（Instagramのパスワード
+        再設定など）向け。宣伝リンクを誤って掴まないよう、信頼できる短縮
+        ドメインか、本文に認証文脈のキーワードがある場合だけ採用する。
+
+        Args:
+            text: 解析対象のテキスト
+
+        Returns:
+            抽出されたURL、見つからない場合はNone
+        """
+        if not text:
+            return None
+
+        urls = re.findall(OTP_LINK_URL_PATTERN, text)
+        if not urls:
+            return None
+
+        # "sign-in" と "sign in" を同一視するため区切り文字を空白に寄せる
+        text_lower = re.sub(r'[-_]', ' ', text.lower())
+        has_context = any(k.lower() in text_lower for k in OTP_LINK_CONTEXT_KEYWORDS)
+
+        for url in urls:
+            # SMSでは文末の句読点や括弧がURLに食い込むので落とす
+            url = url.rstrip('.,;:!?)]｝』」）　')
+            if not url:
+                continue
+            host = url.split("//", 1)[-1].split("/", 1)[0].split("?", 1)[0].lower()
+            trusted = any(host == h or host.endswith("." + h) for h in OTP_LINK_TRUSTED_HOSTS)
+            if trusted or has_context:
+                logger.debug(f"OTP link extracted: host={host}")
+                return url
+
+        return None
+
+    def _row_to_result(self, otp_data: dict, source: Optional[OTPSource] = None) -> OTPResult:
+        """otp_extractions の1行を OTPResult に変換（code / link_url 両対応）"""
+        return OTPResult(
+            id=otp_data["id"],
+            code=otp_data.get("otp_code"),
+            link_url=otp_data.get("link_url"),
+            source=source or OTPSource(otp_data["source"]),
+            sender=otp_data.get("sender"),
+            subject=otp_data.get("subject"),
+            service=otp_data.get("service"),
+            extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+            expires_at=_parse_datetime(otp_data.get("expires_at")),
+            is_used=otp_data.get("is_used", False),
+        )
+
     def _match_service_domain(self, sender: str, service: Optional[str]) -> bool:
         """
         送信元がサービスのドメインと一致するか確認
@@ -330,6 +445,7 @@ class OTPService:
         max_age_minutes: Optional[int] = None,
         subject_filter: Optional[str] = None,
         email_address: Optional[str] = None,
+        want_link: bool = False,
     ) -> Optional[OTPResult]:
         """
         IMAPを使用してGmailからOTPを抽出（OAuth2不要）
@@ -342,6 +458,7 @@ class OTPService:
                             ※旧SMS Forwarder([SMSFW])経路はAPK転送に置換済みで廃止
             email_address: 読みたい受信箱のアドレス（指定時はそのアドレスの
                            アプリパスワードを使う。未指定は既定の gmail_imap）
+            want_link: True の場合、数字コードではなくワンタイムURLを探す
 
         Returns:
             抽出されたOTP情報
@@ -397,13 +514,25 @@ class OTPService:
 
             # 最新のメールから確認（最新10件）
             message_ids = list(reversed(message_ids[-10:]))
-            cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
 
             for msg_id in message_ids:
-                _, msg_data = imap.fetch(msg_id, '(RFC822)')
+                # iCloud は (RFC822) に空応答を返して本文が一切取れないため
+                # BODY.PEEK[] を使う。PEEK は既読フラグを立てないので、OTPを
+                # 採用したメールだけ下で明示的に既読にする従来の挙動は保たれる。
+                _, msg_data = imap.fetch(msg_id, '(BODY.PEEK[])')
 
-                email_body = msg_data[0][1]
+                email_body = _raw_message_from_fetch(msg_data)
+                if not email_body:
+                    logger.debug(f"[IMAP] No body in fetch response for {msg_id}")
+                    continue
                 email_message = email_lib.message_from_bytes(email_body)
+
+                # 認証待ちの時間内に届いたメールだけを見る。未読が大量にある
+                # 受信箱では、広告メールの数字をOTPとして掴む事故が起きるため。
+                sent_at = _message_datetime(email_message)
+                if sent_at and sent_at < cutoff_time:
+                    continue
 
                 # 件名をデコード
                 subject_raw = email_message.get('Subject', '')
@@ -421,21 +550,23 @@ class OTPService:
                 from_header = email_message.get('From', '')
 
                 # 本文を取得
-                body = ""
-                if email_message.is_multipart():
-                    for part in email_message.walk():
-                        if part.get_content_type() == "text/plain":
-                            body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                            break
-                else:
-                    body = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+                body = _message_text(email_message)
 
                 # OTP抽出
                 logger.debug(f"[IMAP] Checking email - Subject: {subject[:50] if subject else 'None'}...")
-                otp_code = self._extract_otp_from_text(subject) or self._extract_otp_from_text(body)
+                otp_code = None
+                link_url = None
+                if want_link:
+                    link_url = self._extract_link_from_text(body) or self._extract_link_from_text(subject)
+                else:
+                    otp_code = self._extract_otp_from_text(subject) or self._extract_otp_from_text(body)
 
-                if otp_code:
-                    logger.info(f"[IMAP] OTP extracted from email: {otp_code[:2]}****")
+                if otp_code or link_url:
+                    if otp_code:
+                        logger.info(f"[IMAP] OTP extracted from email: {otp_code[:2]}****")
+                    else:
+                        host = link_url.split("//", 1)[-1].split("/", 1)[0]
+                        logger.info(f"[IMAP] One-time link extracted from email: host={host}")
                     # メールを既読にする
                     imap.store(msg_id, '+FLAGS', '\\Seen')
 
@@ -462,25 +593,14 @@ class OTPService:
                         "sender": from_header,
                         "subject": subject,
                         "otp_code": otp_code,
+                        "link_url": link_url,
                         "expires_at": expires_at.isoformat(),
                     }
 
                     insert_result = self.supabase.table("otp_extractions").insert(insert_data).execute()
 
                     if insert_result.data:
-                        otp_data = insert_result.data[0]
-                        logger.info(f"OTP extracted via IMAP for user {user_id}: {otp_code[:2]}****")
-                        return OTPResult(
-                            id=otp_data["id"],
-                            code=otp_data["otp_code"],
-                            source=OTPSource.EMAIL,
-                            sender=otp_data.get("sender"),
-                            subject=otp_data.get("subject"),
-                            service=otp_data.get("service"),
-                            extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
-                            expires_at=_parse_datetime(otp_data.get("expires_at")),
-                            is_used=otp_data.get("is_used", False),
-                        )
+                        return self._row_to_result(insert_result.data[0], OTPSource.EMAIL)
 
             imap.close()
             imap.logout()
@@ -514,8 +634,8 @@ class OTPService:
             max_age_minutes = self.max_age_minutes
         
         cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
-        
-        # 最新のSMS OTPを検索
+
+        # 最新のSMS OTPを検索（リンクのみの行は除く。コードを求める呼び出し向け）
         query = self.supabase.table("otp_extractions").select("*").eq(
             "user_id", user_id
         ).eq(
@@ -524,28 +644,64 @@ class OTPService:
             "is_used", False
         ).gte(
             "extracted_at", cutoff_time.isoformat()
+        ).not_.is_(
+            "otp_code", "null"
         ).order("extracted_at", desc=True).limit(1)
-        
+
         if service:
             query = query.eq("service", service)
-        
+
         result = query.execute()
-        
+
         if result.data:
-            otp_data = result.data[0]
-            return OTPResult(
-                id=otp_data["id"],
-                code=otp_data["otp_code"],
-                source=OTPSource.SMS,
-                sender=otp_data.get("sender"),
-                service=otp_data.get("service"),
-                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
-                expires_at=_parse_datetime(otp_data.get("expires_at")),
-                is_used=otp_data.get("is_used", False),
-            )
-        
+            return self._row_to_result(result.data[0], OTPSource.SMS)
+
         return None
-    
+
+    async def extract_link_from_sms(
+        self,
+        user_id: str,
+        service: Optional[str] = None,
+        max_age_minutes: Optional[int] = None,
+    ) -> Optional[OTPResult]:
+        """
+        SMSからワンタイムURLを抽出（数字コードではなくリンクが届くサービス用）
+
+        Args:
+            user_id: ユーザーID
+            service: 対象サービス
+            max_age_minutes: 最大経過時間
+
+        Returns:
+            リンクを含むOTP情報
+        """
+        if max_age_minutes is None:
+            max_age_minutes = self.max_age_minutes
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+
+        query = self.supabase.table("otp_extractions").select("*").eq(
+            "user_id", user_id
+        ).eq(
+            "source", OTPSource.SMS.value
+        ).eq(
+            "is_used", False
+        ).gte(
+            "extracted_at", cutoff_time.isoformat()
+        ).not_.is_(
+            "link_url", "null"
+        ).order("extracted_at", desc=True).limit(1)
+
+        if service:
+            query = query.eq("service", service)
+
+        result = query.execute()
+
+        if result.data:
+            return self._row_to_result(result.data[0], OTPSource.SMS)
+
+        return None
+
     async def extract_otp_from_voice(
         self,
         user_id: str,
@@ -697,15 +853,17 @@ class OTPService:
         user_id: str,
         service: Optional[str] = None,
         source: Optional[str] = None,
+        kind: str = "any",
     ) -> Optional[OTPResult]:
         """
         最新の未使用OTPを取得
-        
+
         Args:
             user_id: ユーザーID
             service: 対象サービス（オプション）
             source: ソース（email/sms）
-            
+            kind: code=数字コードのみ / link=ワンタイムURLのみ / any=両方
+
         Returns:
             最新のOTP情報
         """
@@ -716,28 +874,21 @@ class OTPService:
         ).gt(
             "expires_at", datetime.now(timezone.utc).isoformat()
         ).order("extracted_at", desc=True).limit(1)
-        
+
         if service:
             query = query.eq("service", service)
         if source:
             query = query.eq("source", source)
-        
+        if kind == "code":
+            query = query.not_.is_("otp_code", "null")
+        elif kind == "link":
+            query = query.not_.is_("link_url", "null")
+
         result = query.execute()
-        
+
         if result.data:
-            otp_data = result.data[0]
-            return OTPResult(
-                id=otp_data["id"],
-                code=otp_data["otp_code"],
-                source=OTPSource(otp_data["source"]),
-                sender=otp_data.get("sender"),
-                subject=otp_data.get("subject"),
-                service=otp_data.get("service"),
-                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
-                expires_at=_parse_datetime(otp_data.get("expires_at")),
-                is_used=otp_data.get("is_used", False),
-            )
-        
+            return self._row_to_result(result.data[0])
+
         return None
     
     async def mark_otp_used(self, otp_id: str) -> bool:
@@ -786,20 +937,8 @@ class OTPService:
         
         result = query.execute()
         
-        extractions = []
-        for otp_data in result.data:
-            extractions.append(OTPResult(
-                id=otp_data["id"],
-                code=otp_data["otp_code"],
-                source=OTPSource(otp_data["source"]),
-                sender=otp_data.get("sender"),
-                subject=otp_data.get("subject"),
-                service=otp_data.get("service"),
-                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
-                expires_at=_parse_datetime(otp_data.get("expires_at")),
-                is_used=otp_data.get("is_used", False),
-            ))
-        
+        extractions = [self._row_to_result(otp_data) for otp_data in result.data]
+
         return extractions, result.count or len(extractions)
     
     async def wait_for_otp(
@@ -875,7 +1014,71 @@ class OTPService:
 
         logger.warning(f"OTP wait timed out for {service}")
         return None
-    
+
+    async def wait_for_link(
+        self,
+        user_id: str,
+        service: Optional[str] = None,
+        source: str = "sms",
+        timeout_seconds: Optional[int] = None,
+        poll_interval: Optional[int] = None,
+        email_address: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        ワンタイムURLが届くまで待機して取得
+
+        数字コードではなく「タップして再設定」形式のリンクを送ってくる
+        サービス（Instagramのパスワード再設定など）向け。
+
+        Args:
+            user_id: ユーザーID
+            service: 対象サービス
+            source: ソース（sms/email）
+            timeout_seconds: タイムアウト秒数
+            poll_interval: ポーリング間隔秒数
+            email_address: source=email時に読む受信箱
+
+        Returns:
+            URL、タイムアウトの場合はNone
+        """
+        if timeout_seconds is None:
+            timeout_seconds = self.wait_timeout
+        if poll_interval is None:
+            poll_interval = self.poll_interval
+
+        logger.info(f"Waiting for one-time link (service={service}, source={source}, timeout={timeout_seconds}s)")
+
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+
+        while datetime.now(timezone.utc) < deadline:
+            if source == "email":
+                result = await self.extract_otp_from_email_imap(
+                    user_id=user_id,
+                    service=service,
+                    max_age_minutes=2,
+                    subject_filter=None,
+                    email_address=email_address,
+                    want_link=True,
+                )
+            else:
+                result = await self.extract_link_from_sms(
+                    user_id=user_id,
+                    service=service,
+                    max_age_minutes=2,
+                )
+
+            if result and result.link_url and not result.is_used:
+                await self.mark_otp_used(result.id)
+                host = result.link_url.split("//", 1)[-1].split("/", 1)[0]
+                logger.info(f"One-time link obtained for {service}: host={host}")
+                return result.link_url
+
+            await asyncio.sleep(poll_interval)
+
+        logger.warning(f"Link wait timed out for {service}")
+        return None
+
+
     async def save_sms_otp(
         self,
         from_number: str,
@@ -894,13 +1097,15 @@ class OTPService:
         Returns:
             保存されたOTP情報
         """
-        # OTPを抽出
+        # OTPを抽出。数字コードが無くても、タップして認証するワンタイムURLが
+        # 入っていれば取りこぼさずに保存する（Instagramのパスワード再設定など）
         otp_code = self._extract_otp_from_text(body)
-        
-        if not otp_code:
-            logger.debug(f"No OTP found in SMS from {from_number}")
+        link_url = None if otp_code else self._extract_link_from_text(body)
+
+        if not otp_code and not link_url:
+            logger.debug(f"No OTP or link found in SMS from {from_number}")
             return None
-        
+
         # 電話番号からユーザーを特定
         conn_result = None
         if not user_id:
@@ -928,25 +1133,21 @@ class OTPService:
             "service": service,
             "sender": from_number,
             "otp_code": otp_code,
+            "link_url": link_url,
             "expires_at": expires_at.isoformat(),
         }
-        
+
         result = self.supabase.table("otp_extractions").insert(insert_data).execute()
-        
+
         if result.data:
             otp_data = result.data[0]
-            logger.info(f"SMS OTP saved: {otp_code[:2]}****")
-            return OTPResult(
-                id=otp_data["id"],
-                code=otp_data["otp_code"],
-                source=OTPSource.SMS,
-                sender=otp_data.get("sender"),
-                service=otp_data.get("service"),
-                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
-                expires_at=_parse_datetime(otp_data.get("expires_at")),
-                is_used=False,
-            )
-        
+            if otp_code:
+                logger.info(f"SMS OTP saved: {otp_code[:2]}****")
+            else:
+                host = link_url.split("//", 1)[-1].split("/", 1)[0]
+                logger.info(f"SMS one-time link saved: host={host}")
+            return self._row_to_result(otp_data, OTPSource.SMS)
+
         return None
     
     async def register_apk_otp_device(
@@ -1046,20 +1247,9 @@ class OTPService:
     async def _get_otp_by_id(self, otp_id: str) -> Optional[OTPResult]:
         """IDでOTPを取得"""
         result = self.supabase.table("otp_extractions").select("*").eq("id", otp_id).execute()
-        
+
         if result.data:
-            otp_data = result.data[0]
-            return OTPResult(
-                id=otp_data["id"],
-                code=otp_data["otp_code"],
-                source=OTPSource(otp_data["source"]),
-                sender=otp_data.get("sender"),
-                subject=otp_data.get("subject"),
-                service=otp_data.get("service"),
-                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
-                expires_at=_parse_datetime(otp_data.get("expires_at")),
-                is_used=otp_data.get("is_used", False),
-            )
+            return self._row_to_result(result.data[0])
         return None
     
     async def get_sms_status(self, user_id: str) -> dict:

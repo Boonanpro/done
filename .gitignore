@@ -37,7 +37,8 @@ env.bak/
 venv.bak/
 
 # Local model weights / vendored third-party repos (SAM 3.1 etc.)
-models/
+/models/
+frontend/public/models/
 vendor/
 
 # Environment Variables
@@ -145,6 +146,7 @@ test_*.txt
 .owner_token
 .tunnel_*
 data/email_sync_state.json
+data/zeirishi_mail_watch.json
 .claude/mcp_*.json
 .claude/scheduled_tasks.lock
 
@@ -193,6 +195,8 @@ tests/**/screenshot_*.png
 !/frontend/src/app/artifacts/publish/
 !/frontend/src/app/artifacts/\[slug\]/
 /frontend/src/app/api/denki-qa/
+/frontend/src/app/api/denki-ai/
+/frontend/src/app/api/denki-auth/
 /frontend/src/app/api/kittoku/
 /frontend/public/artifacts/
 /frontend/public/kikkawa/
@@ -217,3 +221,21 @@ nul
 # Claude Code local settings (may contain API keys)
 .claude/settings.local.json
 .vercel
+
+# Local recovery copies, agent worktrees, research captures and generated runs.
+# These are deliberately kept on this machine but must never be committed as
+# application source or deployed with DAN.
+/.backup/
+/_codex_backups/
+/_codex_worktrees/
+/_research/
+/.agents/
+/.gojo_chunks/
+/*.out
+/scripts/*.out
+/scripts/*.err.txt
+/scripts/igserve/
+/scripts/*.mp4
+/frontend/public/*.mp4
+# 今日やったことページの挿絵 (生成物・ローカル専用)
+data/today_illust/

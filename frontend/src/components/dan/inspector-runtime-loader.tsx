@@ -22,12 +22,19 @@ function slugFromHost(): string | null {
   return PUBLIC_ARTIFACT_HOSTS[window.location.host] || null;
 }
 
-/** 現在のパスから artifact slug を抽出して InspectorRuntime を起動 */
-export function InspectorRuntimeLoader() {
+/**
+ * 現在のパスから artifact slug を抽出して InspectorRuntime を起動する。
+ *
+ * Dedicated Vercel projects intentionally serve their one artifact at `/`.
+ * In that form the browser cannot infer a slug from either the path or a
+ * hard-coded hostname.  The server layout supplies the project-owned slug so
+ * the editor has the same authority as middleware and sitemap generation.
+ */
+export function InspectorRuntimeLoader({ fallbackSlug }: { fallbackSlug?: string | null }) {
   const pathname = usePathname();
   // /artifacts/{slug} (通常) または /preview/{slug}
   const m = pathname?.match(/^\/(?:artifacts|preview)\/([^/]+)/);
-  const slug = m?.[1] || slugFromHost();
+  const slug = m?.[1] || fallbackSlug || slugFromHost();
 
   // クロスオリジン Inspector: iframe 内に居る場合のみ、親ダッシュボードと
   // postMessage で通信する agent を起動する（公開閲覧では何もしない）。

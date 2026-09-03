@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
-import { api, ApiError, OWNER_USER_ID, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
+import { api, ApiError, OWNER_USER_ID, recordLogoutReason, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
 
 /** Collect all collab guest tokens from localStorage */
 function collectGuestTokens(): string[] {
@@ -48,19 +48,43 @@ export function useAuth() {
               return;
             } catch {
               // Refresh failed, clear auth
+              recordLogoutReason('checkauth-refresh-failed');
               setUser(null);
               setToken(null);
             }
           } else {
-            setUser(null);
-            setToken(null);
+            // 401以外の失敗（サーバー再起動中・ネットワーク断・一時的な5xx）では
+            // ログアウトしない。トークンが無効な時だけ上の401分岐でクリアされる。
+            // ここでセッションを破棄すると、バックエンド再起動のたびに
+            // ログイン画面へ蹴り出される（2026-09-02 実発生）。
+            setLoading(false);
           }
         }
       } else {
+        // 補強: zustand persist の復元前に走った可能性があるので、
+        // localStorage の生トークンも確認してから未ログイン扱いにする。
+        // （復元競合で保存済みセッションを破棄していた疑いへの対策）
+        const raw = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
+        if (raw) {
+          setToken(raw);
+          return; // token が入ったので次のeffectで通常の検証が走る
+        }
+        recordLogoutReason('checkauth-no-token');
         setUser(null);
         setLoading(false);
       }
     };
+
+    // persist の復元（localStorage読み込み）が終わる前に判定しない
+    const persistApi = (useAuthStore as unknown as {
+      persist?: { hasHydrated?: () => boolean; onFinishHydration?: (fn: () => void) => () => void };
+    }).persist;
+    if (persistApi?.hasHydrated && !persistApi.hasHydrated()) {
+      const unsub = persistApi.onFinishHydration?.(() => {
+        if (useAuthStore.getState().isLoading) checkAuth();
+      });
+      return unsub;
+    }
 
     if (isLoading) {
       checkAuth();
@@ -88,7 +112,10 @@ export function useAuth() {
         setImmediateToken(null);
         setStoredToken(null);
         if (error instanceof ApiError) {
-          return { success: false, error: error.data };
+          // status を返して呼び出し側が「認証情報が違う(401)」と「サーバーに
+          // 届かない(502/503等)」を表示し分けられるようにする。従来は全部
+          // まとめて「認証情報が正しくない」と誤表示していた。
+          return { success: false, error: error.data, status: error.status };
         }
         throw error;
       }

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 from app.workspace import resolve_cli_workspace
+from app.services.mail_watch import MAILBOX_KEYS as _MAILBOX_KEYS, describe_mailboxes as _describe_mailboxes
 CLI_WORKSPACE = resolve_cli_workspace()
 
 # バックグラウンドタスクの参照を保持（GC防止）
@@ -337,8 +338,13 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         BROWSER_TOOL,
         READ_URL_TOOL,
         SCHEDULE_FOLLOWUP_TOOL,
+        WATCH_TOOL,
+        SPLIT_TO_NEW_ROOM_TOOL,
+        COMPOSE_MESSAGE_TOOL,
+        COLLAB_THREAD_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
+        SAVE_TOTP_SECRET_TOOL,
         REMEMBER_PERSONAL_INFO_TOOL,
         GET_PERSONAL_INFO_TOOL,
         CHECK_SKILL_TOOL,
@@ -362,13 +368,13 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
 BROWSER_TOOL = {
     "name": "browser",
-    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。fill_totp_code: 認証アプリ(TOTP)の6桁コードをサーバー側で生成して入力欄(ref)に直接入れる。シード保管済みのサービスなら**SMSもメールも待たずに即座に**2段階認証を突破できる最優先の手段（ref と、service または url を指定）。wait_for_otp_from_app: SMS/メールで届く数字コードを自動取得して入力欄(ref)に入れる。wait_for_link_from_app: 数字コードではなく「タップして再設定/認証」形式のワンタイムURLが届くサービス（Instagramのパスワード再設定等）向け。届いたリンクを自動取得してこのブラウザで開く（refは不要）。リンクを本人に読ませない。",
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "fill_totp_code", "wait_for_otp_from_app", "wait_for_link_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "upload_file", "solve_captcha", "human_click", "human_drag", "puzzle_fit"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）。action=fill_credentialではログイン先URLで保存済み認証情報を照合するのに使える"},
@@ -376,17 +382,23 @@ BROWSER_TOOL = {
             "text": {"type": "string", "description": "入力テキスト（action=type）"},
             "field": {"type": "string", "enum": ["password", "username"], "description": "action=fill_credentialで入れる項目。password=保存済みパスワード, username=保存済みログインID（既定: password）"},
             "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type / fill_credential, デフォルト: false）"},
-            "timeout_seconds": {"type": "integer", "description": "OTP待機のタイムアウト秒数（action=wait_for_otp_from_app, デフォルト: 30）"},
+            "timeout_seconds": {"type": "integer", "description": "待機のタイムアウト秒数（action=wait_for_otp_from_app は既定30 / wait_for_link_from_app は既定60）"},
             "service": {"type": "string", "description": "OTPのサービス絞り込み（例: amazon, ex_reservation）"},
-            "source": {"type": "string", "enum": ["sms", "email"], "description": "OTPの受信元（action=wait_for_otp_from_app）。SMS(Androidアプリ転送)=sms（既定）、メールに届くコード=email。emailの場合は email_address を指定"},
-            "email_address": {"type": "string", "description": "メールOTPの受信箱アドレス（action=wait_for_otp_from_app, source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
+            "source": {"type": "string", "enum": ["sms", "email"], "description": "OTP/リンクの受信元（action=wait_for_otp_from_app, wait_for_link_from_app）。SMS(Androidアプリ転送)=sms（既定）、メール=email。emailの場合は email_address を指定"},
+            "email_address": {"type": "string", "description": "メールOTP/リンクの受信箱アドレス（source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
             "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向（action=scroll）"},
-            "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
-            "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
+            "x": {"type": "integer", "description": "X座標（action=click / human_click / human_drag の始点）"},
+            "y": {"type": "integer", "description": "Y座標（action=click / human_click / human_drag の始点）"},
+            "to_x": {"type": "integer", "description": "ドラッグ先のX座標（action=human_drag）"},
+            "to_y": {"type": "integer", "description": "ドラッグ先のY座標（action=human_drag）"},
+            "coords": {"type": "string", "enum": ["image", "css"], "description": "human_click/human_drag の座標系。既定 image=スクリーンショット上で読んだ座標をそのまま渡してよい（縮小率は自動換算される）。css=ブラウザの実座標を直接指定する場合のみ"},
+            "threshold": {"type": "number", "description": "答えてよい形状一致度の下限（action=puzzle_fit, 既定0.85）。これ未満なら答えずに『更新』で別の問題を引く"},
+            "max_refresh": {"type": "integer", "description": "パズルを引き直す上限回数（action=puzzle_fit, 既定3）"},
             "value": {"type": "string", "description": "選択する値（action=select）"},
             "expression": {"type": "string", "description": "実行するJavaScriptコード（action=evaluate）"},
             "key": {"type": "string", "description": "押すキー（action=keyboard_press, 例: Escape, Tab, Enter, ArrowDown）"},
-            "path": {"type": "string", "description": "保存先ファイルパス（action=save_image）"},
+            "path": {"type": "string", "description": "保存先ファイルパス（action=save_image）／アップロードするローカルファイルの絶対パス（action=upload_file）"},
+            "selector": {"type": "string", "description": "CSSセレクタ（action=upload_file でアップロードボタンをrefで指せない場合）"},
             "image_ref": {"type": "string", "description": "画像CAPTCHAの画像要素ref（action=solve_captcha, 任意。未指定なら自動検出）"},
             "input_ref": {"type": "string", "description": "画像CAPTCHAの入力欄ref（action=solve_captcha, 任意。未指定なら自動検出）"},
             "image_selector": {"type": "string", "description": "画像CAPTCHAの画像CSSセレクタ（action=solve_captcha, 任意）"},
@@ -459,11 +471,147 @@ Claude Code自身が起動した背景作業は常駐セッションの完了イ
         "type": "object",
         "properties": {
             "note": {"type": "string", "description": "起こされた時に何を確認して報告すべきか（具体的に書く）"},
-            "delay_seconds": {"type": "integer", "description": "何秒後に起こすか（15〜21600）。デプロイ/ビルドなら90〜180が目安"},
+            "delay_seconds": {"type": "integer", "description": "何秒後に起こすか（15以上）。デプロイ/ビルドなら90〜180が目安"},
         },
         "required": ["note", "delay_seconds"],
     },
 }
+
+SPLIT_TO_NEW_ROOM_TOOL = {
+    "name": "split_to_new_room",
+    "description": """脱線した話題を新しいチャット（部屋）に切り出し、そこで自分（ダン）が続きを話し始める。
+
+【使う場面】ユーザーが「この話は新しいチャットで話そう」「別の部屋でやろう」「これは分けよう」等、
+今の話題を別チャットに移したいと言った時。ユーザーに部屋を作らせない。自分でこのツールを呼ぶ。
+
+【動作】新しいチャットを作成し、handoff の内容を持って数十秒以内にその部屋であなたが一言目を話し始める。
+
+【handoff の書き方】新しい部屋の自分は元の部屋の会話を読めない。だから handoff に、
+その話題の経緯・決まったこと・ユーザーの要望・次にやること・関係するURLやファイルパスを、
+続きが迷わず再開できる粒度で書く（生ログのコピーではなく要約）。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "新しいチャットの名前（話題が一目で分かる短い日本語。例:「経費精算アプリの相談」）"},
+            "handoff": {"type": "string", "description": "新しい部屋へ持ち込む引き継ぎメモ（経緯・決定事項・要望・次にやること・URL/パス）"},
+        },
+        "required": ["title", "handoff"],
+    },
+}
+
+COMPOSE_MESSAGE_TOOL = {
+    "name": "compose_message",
+    "description": """外部の相手（取引先・顧客・税理士など、この部屋の外の人）へ送るメッセージの文面を用意する。手段は問わない（メール / Instagram DM / LINE / SMS / Chatwork / Slack / Webフォーム / X DM など何でも）。外部宛の文面はチャット本文に書かず、必ずこのツールで出すこと。
+
+【返信の場合】受信したメール/DMへの返信なら reply_to_message_id（メールの Message-ID 等）と reply_to_subject を渡す。件名は不要（Re: を自動付与し、メールは同じスレッドに繋がる）。
+【フォーム送信の場合】channel="web_form"、target_url にフォームのURL、to にはフォームの持ち主（会社名など）を入れる。件名不要。
+【Instagram】DM は channel="instagram_dm"、to=相手のユーザーネーム、from_account=送信元アカウント。受信DMへの返信なら reply_to_thread_id（受信通知にある thread_id）も渡す。コメント返信は channel="instagram_comment"、reply_to_post_url=投稿URL、reply_to_comment_id=返信先コメントID。どちらもカードの送信ボタン／send でサーバーから直接送れる。
+【コラボチャット】外部窓口（collab_thread で作った招待制チャット）への送信は channel="collab"、collab_room_id=窓口のルームID、to=相手の名前。件名不要。カードの送信ボタン／send でサーバーから直接相手のチャットに届く（リアルタイム配信＋Push通知付き）。文体は**チャット**: 宛名・「お世話になっております」等の定型挨拶・署名は書かず、会話の流れに続く自然な話し方で簡潔に（通常2〜6行）。
+
+【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
+
+【使い方】
+- propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。件名が要るのは「メールの新規送信」だけ。
+- send: 既に出した送信案を送る（ユーザーが「送って」「それでいい」と言った時）。proposal_id だけ渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
+- mark_sent: あなたが browser 等で自力送信した後、送信済みとして確定する（本文は DB の現在の版）。
+- release: 手動送信に失敗した時、「送信中」ロックを解除して下書きに戻す。
+- discard: 送信案を取り下げる。
+- list: この部屋の送信案（未送信/送信済み）を確認する。
+
+【規律】ユーザーが「送っておいて」と先に言っていた場合も、propose → 同じターン内で send の順で呼ぶ（本文をカードとして残すため）。外部宛の送信は必ずこのツールを通すこと。カードを無視して記憶の本文を browser で送ってはいけない（ユーザーの編集が反映されず、カードも未送信のまま残って二重送信の原因になる）。相手の返事を待つなら送信後に watch を登録する。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["propose", "send", "mark_sent", "release", "discard", "list"], "description": "propose=文面を出す / send=送る（手動チャネルはロック＋本文取得）/ mark_sent=自力送信を確定 / release=ロック解除 / discard=取り下げ / list=一覧"},
+            "channel": {"type": "string", "description": "propose時必須。email / instagram_dm / line / sms / web_form / chatwork / slack / x_dm など（自由記述可。小文字スネークケース）"},
+            "to": {"type": "string", "description": "propose時必須。宛先（メールアドレス / IGユーザーネーム / 電話番号 / フォームなら会社名など）"},
+            "to_name": {"type": "string", "description": "相手の表示名（例: 山田様、株式会社◯◯ 田中様）"},
+            "subject": {"type": "string", "description": "件名。メールの新規送信のみ必須。返信・DM・フォームでは不要"},
+            "reply_to_message_id": {"type": "string", "description": "返信の場合: 元メッセージのID（メールなら Message-ID ヘッダ。受信通知に書かれている）"},
+            "reply_to_subject": {"type": "string", "description": "返信の場合: 元メッセージの件名（Re: を自動付与）"},
+            "target_url": {"type": "string", "description": "web_form 等: 送信先フォームのURL"},
+            "target_note": {"type": "string", "description": "web_form 等: どの欄に何を入れるか等の補足"},
+            "from_account": {"type": "string", "description": "SNS用: 送信元アカウント（例: ajp.gdw）。受信への返信なら受信通知の account"},
+            "reply_to_thread_id": {"type": "string", "description": "Instagram DM 返信用: 受信通知にある thread_id"},
+            "reply_to_post_url": {"type": "string", "description": "コメント返信用: 投稿URL"},
+            "reply_to_comment_id": {"type": "string", "description": "コメント返信用: 返信先コメントのID"},
+            "collab_room_id": {"type": "string", "description": "channel=\"collab\" 用: 送信先コラボルームのID（collab_thread の結果や受信通知にある）"},
+            "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
+            "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
+            "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
+            "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
+            "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
+        },
+        "required": ["action"],
+    },
+}
+
+COLLAB_THREAD_TOOL = {
+    "name": "collab_thread",
+    "description": """外部の相手（クライアント・取引先など）と継続的にやりとりする専用チャット窓口（コラボチャット）を開き、招待URLを発行する。
+相手はURLを開いて名前を入れるだけで参加できる（ログイン不要）。スマホならホーム画面に追加する案内が自動で出て、以後アプリのように通知が届く。
+窓口はこの部屋（今の本体チャット）に紐付くので、相手の発言はあなたがこの部屋で自動起動されて届く（ユーザーが共有しなくても分かる）。相手への返信は compose_message(action="propose", channel="collab", collab_room_id=..., to=相手の名前, body=...) で送信案カードを出す。送信すると相手のチャットに直接届く。
+「◯◯さん用の窓口/チャット作って」「◯◯さんと話せるチャットがほしい」「クライアントと共有できるルームを作って」「外部の人とやりとりできるようにして」など、**外部の相手と直接やりとりする場（チャット/ルーム/窓口、呼び方は何でも）を求められたら**このツールで create を呼び、返ってきた招待URLをユーザーに伝える。相手にメール等で直接送る場合は compose_message を使う。
+【運用方針】既定では相手への返信は全件ユーザー承認（送信案カード止まり）。ユーザーが「この窓口は受領確認くらい自動で返していい」等と言ったら set_policy(autonomy="auto", guidance="許可範囲の要約") で設定しろ。以後、guidance の範囲内だけ承認なしで送信できる（範囲外は従来どおり承認待ち）。「全部承認制に戻して」なら autonomy="approval"。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "set_policy", "consult", "react", "say"], "description": "create=窓口を作って招待URLを発行 / list=この部屋に紐付く窓口の一覧 / set_policy=自動返信の許可範囲を設定 / consult=窓口の件でユーザーに相談（相手には見えない） / react=相手のメッセージに🙏リアクション（既読サイン。通知なし・承認不要） / say=公開の場に直接発言（ユーザーからの公開の呼びかけへの返答用。相手にも見える・承認不要）"},
+            "title": {"type": "string", "description": "create時必須。窓口の名前（例:「田中様との連絡」「◯◯社 HP修正窓口」）"},
+            "description": {"type": "string", "description": "何のやりとりの窓口か（相手の参加画面にも表示される説明）"},
+            "expires_hours": {"type": "integer", "description": "招待URLから初回参加できる期間（時間。省略時168=7日）。一度参加した相手はその後もアクセスできる"},
+            "collab_room_id": {"type": "string", "description": "set_policy時必須。対象窓口のルームID"},
+            "autonomy": {"type": "string", "enum": ["approval", "auto"], "description": "set_policy用: approval=返信は全件ユーザー承認（既定）/ auto=guidance の範囲だけ承認なしで送信可"},
+            "guidance": {"type": "string", "description": "set_policy用: 承認なしで送ってよい範囲の要約（例:「受領確認・お礼・営業時間などHPに載っている事実の回答のみ。金額や納期の約束は承認必須」）"},
+            "body": {"type": "string", "description": "consult用: ユーザーへの相談文（状況の要約＋あなたの提案＋質問。相手には見えない。窓口画面にダンの発言として表示され、通知が届く）"},
+            "reply_to_message_id": {"type": "string", "description": "consult用: 既存の相談スレッドの続きとして出す場合、そのスレッドの親メッセージID（起動通知に書かれている）。指定しないと新しい相談バブルになる"},
+            "message_id": {"type": "string", "description": "react用: リアクションを付ける相手メッセージのID（着信通知の message_id）"},
+            "emoji": {"type": "string", "description": "react用: 絵文字1個（省略時 🙏）"},
+        },
+        "required": ["action"],
+    },
+}
+
+WATCH_TOOL = {
+    "name": "watch",
+    "description": """見張り（未来の約束）の登録・一覧・取消。あなた（ダン）はターンが終わると眠るため、頭の中の「後で確認します」「メールが来たら報告します」は実行されない。未来の約束は必ずこのツールでDBに登録すること。登録した見張りはダンコアが監視し、時刻・条件が来たらこの部屋であなたを起こす。
+
+【3種類】
+- at: 一回きりの時刻予約（「明日10時に確認」）。at か delay_seconds を指定。
+- every: 定期実行。①秒間隔（interval_seconds、300以上）②毎月N日（monthly_day + time_of_day。31は月末に丸まる）③毎週X曜（weekly_day 0=月〜6=日 + time_of_day）。毎月の資料作成・送付、毎月の振込準備などの定期業務はこれで登録する。
+- mail: 特定の差出人からのメール着信で起こす（「税理士からメールが来たら」）。mail_from に差出人アドレスまたはドメイン（例 "taxdr-kim.com"）。mailbox で見る受信箱を選ぶ（{mailboxes}。既定 icloud）。複数の受信箱を見張るなら受信箱ごとに1件ずつ登録する。登録時点より前の既読メールでは起きない。
+
+【使い方】
+- 登録: watch(action="create", note="起こされた時に何を確認・報告するか", ...)。kind は指定パラメータから自動判定される（mail_from があれば mail、interval_seconds のみなら every、それ以外は at）。
+- 一覧: watch(action="list") — この部屋の有効な見張りを返す。「今何を見張ってる？」に答える時に使う。
+- 取消: watch(action="cancel", watch_id="...")。
+- ブラウザ画面（OTP入力・ログイン途中など）を開いたまま待つ必要がある時だけ hold_browser=true。これを付けないと30分放置でブラウザは自動クローズされる。
+
+【承認の扱い】不可逆な操作（送金の実行・外部への送信など）を含む定期業務は、原則「準備まで自動＋実行は承認」。ただしユーザーが「承認なしで実行して報告だけでいい」と明示した場合は、その旨を note に必ず書き込むこと（例:「承認不要・実行して結果を報告のみ」）。起こされたダンは note の記載に従う。
+
+【規律】ユーザーの即時の返答待ちには使わない。定期見張りの起床ターン内で同じ見張りを再登録しない（自動継続する）。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "cancel"], "description": "create=登録 / list=一覧 / cancel=取消"},
+            "note": {"type": "string", "description": "create時必須。起こされた時に何を確認して何を報告するか（具体的に）"},
+            "at": {"type": "string", "description": "at用: 起こす日時 ISO形式（例 2026-08-25T10:00）。タイムゾーン無しはJSTと解釈"},
+            "delay_seconds": {"type": "integer", "description": "at用: 何秒後に起こすか（atの代わり）"},
+            "interval_seconds": {"type": "integer", "description": "every/mail用: 確認間隔秒（最小300。mailの既定600）"},
+            "monthly_day": {"type": "integer", "description": "every用: 毎月の実行日（1〜31。31は月末に丸まる）"},
+            "weekly_day": {"type": "integer", "description": "every用: 毎週の実行曜日（0=月〜6=日）"},
+            "time_of_day": {"type": "string", "description": "monthly_day/weekly_day用: 実行時刻 HH:MM（JST、既定09:00）"},
+            "mail_from": {"type": "string", "description": "mail用: 差出人アドレスまたはドメイン"},
+            "mail_subject_contains": {"type": "string", "description": "mail用: 件名に含まれるべき文字列（任意）"},
+            "mailbox": {"type": "string", "enum": list(_MAILBOX_KEYS), "description": "mail用: 見張る受信箱（既定 icloud）"},
+            "hold_browser": {"type": "boolean", "description": "この部屋のブラウザを見張り解決まで自動クローズさせない（画面を開いたまま待つ時のみtrue）"},
+            "watch_id": {"type": "string", "description": "cancel用: 対象の見張りID"},
+        },
+        "required": ["action"],
+    },
+}
+# 受信箱の一覧とアドレスは .env（imap_email_service.PROVIDERS）から。直書きしない。
+WATCH_TOOL["description"] = WATCH_TOOL["description"].replace("{mailboxes}", _describe_mailboxes())
 
 # ============================================
 # 認証情報: サービス名正規化
@@ -491,6 +639,79 @@ def _normalize_service_name(service: str) -> str:
     # スペースやハイフンをアンダースコアに
     s = s.replace(" ", "_").replace("-", "_")
     return s
+
+
+# 照合語として意味を持たない一般語（これだけで一致させると無関係な記録を拾う）
+_SERVICE_TOKEN_STOPWORDS = {
+    "jp", "com", "co", "net", "org", "www", "login", "app", "web",
+    "my", "account", "official", "biz", "site",
+}
+
+
+def _service_tokens(value: str) -> set:
+    """サービス名から照合用の語を取り出す。"amazon_biz" → {"amazon_biz", "amazon"}"""
+    s = _normalize_service_name(value)
+    tokens = {
+        t for t in re.split(r"[^a-z0-9]+", s)
+        if len(t) >= 3 and t not in _SERVICE_TOKEN_STOPWORDS
+    }
+    if len(s) >= 3:
+        tokens.add(s)
+    return tokens
+
+
+async def _suggest_credential_services(
+    creds_service,
+    user_id: str,
+    service: Optional[str],
+    url: Optional[str],
+) -> List[str]:
+    """
+    完全一致で見つからなかった時に、保存済みのサービス名から近い候補を返す。
+
+    取得は完全一致しか見ないため、名前を少し外すと「保存されていない」と読めてしまい、
+    実際には保存済みの認証情報を「無い」と誤って断定する事故が起きた。
+    ここでは名前だけを返す（パスワードは返さない）。
+    """
+    try:
+        stored = await creds_service.list_credentials(user_id)
+    except Exception as e:
+        logger.warning(f"Failed to list credentials for suggestion: {e}")
+        return []
+
+    names = [row.get("service") for row in stored if row.get("service")]
+    if not names:
+        return []
+
+    queries = set()
+    if service:
+        queries |= _service_tokens(service)
+    if url:
+        try:
+            from app.services.credentials_service import _base_domain, _host
+            host = _host(url)
+            if host:
+                queries |= _service_tokens(_base_domain(host))
+        except Exception:
+            pass
+
+    matched: List[str] = []
+    for name in names:
+        low = name.strip().lower()
+        if any(q in low or low in q for q in queries):
+            matched.append(name)
+
+    # 打ち間違い・語順違いも拾う
+    if service:
+        import difflib
+        for name in difflib.get_close_matches(
+            _normalize_service_name(service), names, n=3, cutoff=0.6
+        ):
+            if name not in matched:
+                matched.append(name)
+
+    return matched[:5]
+
 
 # ============================================
 # 認証情報保存ツール
@@ -560,6 +781,47 @@ GET_CREDENTIALS_TOOL = {
                 "description": "現在のログインページURL（例: https://account.line.biz/login）。ドメイン照合で正しい認証情報を引く"
             }
         },
+    },
+}
+
+SAVE_TOTP_SECRET_TOOL = {
+    "name": "save_totp_secret",
+    "description": """認証アプリ(TOTP)のシードを暗号化保存する。以後そのサービスの2段階認証は
+`browser(action="fill_totp_code")` だけで突破でき、SMSもメールも一切不要になる。
+
+★シードとは: 認証アプリの登録画面に一度だけ表示される英数字の文字列（QRコードの中身）。
+6桁コードは「シード＋現在時刻」から計算されているだけなので、シードを持てばダン自身が
+同じコードを生成できる。6桁コード自体は使い捨てなので保存しない（保存するのはシード）。
+
+★使うタイミング（重要）:
+- サービスの2段階認証を新規に設定する時、SMSではなく必ず「認証アプリ」を選び、
+  表示されたシード（またはQRの otpauth:// URI）をこのツールで保存してから有効化を完了する
+- ユーザーがシード/QRの文字列を渡してきた時
+- 既にSMS認証になっているサービスにログインできた時、設定画面から認証アプリ方式へ
+  切り替えてシードを保存しておく（次回以降スマホが不要になる）
+
+secret には以下のどちらを渡してもよい:
+- otpauth://totp/... の URI 全体（QRを読めた場合はこれが確実。桁数や周期も自動で読む）
+- 素のシード文字列（"abcd efgh ijkl" のような空白区切り・小文字でもよい）
+
+保存済みのID/パスワードは消えない（統合される）。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "service": {
+                "type": "string",
+                "description": "サービス名（例: meta, google, amazon）。既存の認証情報と同じ名前にすると1件に統合される"
+            },
+            "secret": {
+                "type": "string",
+                "description": "otpauth:// URI 全体、または素のbase32シード文字列"
+            },
+            "login_url": {
+                "type": "string",
+                "description": "ログインページのURL/ドメイン（例: facebook.com）。指定するとURL照合でも引ける"
+            },
+        },
+        "required": ["service", "secret"],
     },
 }
 
@@ -874,6 +1136,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "get_credentials":
         return ("_get_credentials", "get")
 
+    if tool_name == "save_totp_secret":
+        return ("_save_totp_secret", "save")
+
     if tool_name == "remember_personal_info":
         return ("_remember_personal_info", "save")
 
@@ -896,6 +1161,18 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "schedule_followup":
         return ("_followup", "schedule")
+
+    if tool_name == "watch":
+        return ("_watch", "manage")
+
+    if tool_name == "split_to_new_room":
+        return ("_split_room", "split")
+
+    if tool_name == "compose_message":
+        return ("_compose_message", "manage")
+
+    if tool_name == "collab_thread":
+        return ("_collab_thread", "manage")
 
     if tool_name == "attach_image":
         return ("_attach_image", "attach")
@@ -1758,9 +2035,26 @@ async def execute_tool(
 
         # 1) URL（ログイン先ドメイン）で照合 — 同一メール複数サービスの取り違えを防ぐ最優先経路
         if url:
-            stored_creds = await creds_service.find_credential_by_url(user_id, url)
-            if stored_creds:
+            from app.services.credentials_service import narrow_url_matches
+            url_matches = narrow_url_matches(
+                await creds_service.find_credentials_by_url(user_id, url)
+            )
+            if len(url_matches) == 1:
+                stored_creds = url_matches[0]
                 matched_service = stored_creds.get("service")
+            elif len(url_matches) > 1 and not service:
+                # 同一ドメインに複数アカウント（例: Instagram の個人用と事業用）。
+                # 1件目を黙って返すと別アカウントのパスワードを渡すことになる。
+                names = [m.get("service") for m in url_matches if m.get("service")]
+                return {
+                    "success": False,
+                    "service": None,
+                    "suggestions": names,
+                    "message": (
+                        f"{url} には複数の認証情報が保存されています: {', '.join(names)}。"
+                        "どれを使うか service で指定して取り直すこと。"
+                    ),
+                }
 
         # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
         if not stored_creds and service:
@@ -1781,10 +2075,23 @@ async def execute_tool(
             }
         else:
             label = service or url
+            suggestions = await _suggest_credential_services(
+                creds_service, user_id, service, url
+            )
+            if suggestions:
+                message = (
+                    f"{label} という名前では見つかりませんでした。"
+                    f"似た名前で保存済み: {', '.join(suggestions)}。"
+                    "この中に目的のものがあれば service をその名前にして取り直すこと。"
+                    "候補を確認せずに「保存されていない」と判断しないこと。"
+                )
+            else:
+                message = f"{label} の認証情報は保存されていません。ユーザーに聞いてください。"
             return {
                 "success": False,
                 "service": matched_service,
-                "message": f"{label} の認証情報は保存されていません。ユーザーに聞いてください。",
+                "suggestions": suggestions,
+                "message": message,
             }
 
     # ★★★ 認証情報保存 ★★★
@@ -1845,6 +2152,59 @@ async def execute_tool(
         )
 
         return {"success": True}
+
+    # ★★★ 認証アプリ(TOTP)シードの保存 ★★★
+    if skill_name == "_save_totp_secret":
+        service = params.get("service")
+        secret = params.get("secret")
+        if not service or not secret:
+            return {"success": False, "error": "service と secret が必要です"}
+
+        service = _normalize_service_name(service)
+
+        from app.services.totp_service import parse_totp_uri, generate_code, TOTPError
+        try:
+            parsed = parse_totp_uri(secret)
+        except TOTPError as exc:
+            # 値そのものは返さない
+            return {"success": False, "error": str(exc)}
+
+        from app.services.credentials_service import get_credentials_service
+        creds_service = get_credentials_service()
+        result = await creds_service.save_totp_secret(
+            user_id=user_id,
+            service=service,
+            secret=parsed["secret"],
+            digits=parsed["digits"],
+            period=parsed["period"],
+            algorithm=parsed["algorithm"],
+            login_url=params.get("login_url"),
+        )
+        if not result.get("success"):
+            return {"success": False, "error": result.get("message", "保存に失敗しました")}
+
+        # 保存直後に一度生成して、実際にコードが作れる状態か確かめる（値は返さない）。
+        # 登録画面で確認コードを求められた時、ここで失敗に気付けないと詰む。
+        try:
+            generate_code(
+                parsed["secret"],
+                digits=parsed["digits"],
+                period=parsed["period"],
+                algorithm=parsed["algorithm"],
+            )
+        except TOTPError as exc:
+            return {"success": False, "error": f"保存しましたがコード生成に失敗します: {exc}"}
+
+        return {
+            "success": True,
+            "service": service,
+            "message": (
+                f"{service} の認証アプリのシードを保存しました。"
+                f"以後は browser(action=\"fill_totp_code\", service=\"{service}\", ref=\"...\") で"
+                "SMSを待たずに2段階認証を突破できます。"
+                "登録画面で確認コードを求められている場合は、そのまま fill_totp_code で入力してください。"
+            ),
+        }
 
     # ★★★ 個人情報の保存（電話・カード・住所等）★★★
     if skill_name == "_remember_personal_info":
@@ -1965,6 +2325,22 @@ async def execute_tool(
     # ★★★ 続報の予約（後で自動で起こして報告させる）★★★
     if skill_name == "_followup":
         return await _execute_schedule_followup(params, session_id, user_id)
+
+    # ★★★ 見張り（未来の約束の登録・一覧・取消）★★★
+    if skill_name == "_watch":
+        return await _execute_watch(params, session_id, user_id)
+
+    # ★★★ 脱線した話題を新しいチャットに切り出す ★★★
+    if skill_name == "_split_room":
+        return await _execute_split_to_new_room(params, session_id, user_id)
+
+    # ★★★ 外部宛メッセージの文面カード（送信案）★★★
+    if skill_name == "_compose_message":
+        return await _execute_compose_message(params, session_id, user_id)
+
+    # ★★★ 外部の相手との専用チャット窓口（コラボチャット）★★★
+    if skill_name == "_collab_thread":
+        return await _execute_collab_thread(params, session_id, user_id)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -2549,6 +2925,74 @@ def _looks_like_login_url(url: str) -> bool:
     ))
 
 
+# 確認コードの入力欄が「1桁ずつ6個」に分かれているサイト向け。
+# ref の欄へ6桁をまとめて入れると maxlength=1 で先頭1桁に切られ、
+# 「コードが未入力」として弾かれる（2captcha の 2FA 画面がこれ）。
+# 値は引数で渡し、戻り値には入れ方だけを返す（コードを外に出さない）。
+_FILL_CODE_JS = """
+(args) => {
+  const code = String(args.code || '').trim();
+  const target = document.querySelector(
+    '[data-dan-ref="' + String(args.ref || '').replace('@', '') + '"]'
+  );
+  if (!target || !code) return {mode: 'none'};
+
+  const setValue = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set;
+    setter.call(el, v);
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  const isDigitBox = (el) => el.tagName === 'INPUT' && el.maxLength === 1;
+
+  if (!isDigitBox(target)) return {mode: 'single'};
+
+  const scope = target.form || target.closest('form, fieldset, div') || document;
+  let boxes = [...scope.querySelectorAll('input')].filter(isDigitBox);
+  if (boxes.length < code.length) {
+    boxes = [...document.querySelectorAll('input')].filter(isDigitBox);
+  }
+  const start = Math.max(0, boxes.indexOf(target));
+  const slice = boxes.slice(start, start + code.length);
+  if (slice.length < code.length) return {mode: 'short'};
+
+  slice.forEach((el, i) => { el.focus(); setValue(el, code[i]); });
+  slice[slice.length - 1].focus();
+
+  // 分割UIの裏で実際に送信される集約欄にも同じ値を入れておく
+  const form = target.form;
+  if (form) {
+    for (const el of form.querySelectorAll('input')) {
+      if (isDigitBox(el)) continue;
+      const name = ((el.name || '') + ' ' + (el.id || '')).toLowerCase();
+      if (/code|otp|token|2fa/.test(name)) setValue(el, code);
+    }
+  }
+  return {mode: 'split', digits: slice.length};
+}
+"""
+
+
+async def _fill_code_into_inputs(page, ref: str, code: str) -> str:
+    """確認コードを入力欄へ入れる。1桁ずつに分かれたUIなら各桁へ配る。
+
+    分割されていない普通の欄なら従来どおり fill_by_ref に任せる。
+    """
+    try:
+        result = await page.evaluate(_FILL_CODE_JS, {"ref": ref, "code": code})
+    except Exception as exc:  # JS 実行に失敗しても通常入力で続行する
+        logger.warning(f"確認コードの分割入力に失敗、通常入力にフォールバック: {exc}")
+        result = None
+
+    if isinstance(result, dict) and result.get("mode") == "split":
+        return "split"
+
+    await page.fill_by_ref(ref, code)
+    return "single"
+
+
 async def _get_browser_state(page) -> Dict[str, Any]:
     """
     操作後のページ状態を取得（スクリーンショット + 要素リスト）
@@ -2598,6 +3042,18 @@ async def _get_browser_state(page) -> Dict[str, Any]:
 
     # テキスト部分: URL + タイトル + ページ状態 + 要素一覧
     text_parts = [f"URL: {url}", f"タイトル: {title}"]
+
+    # 添付する写真は縮小されている。写真から座標を読んで操作する時に換算を
+    # 忘れると、掴む位置が対象の外に落ちて「何も動かない」状態になるため、
+    # 倍率と「換算は自動」であることを毎回明示する。
+    if isinstance(screenshot, dict) and screenshot.get("shot_scale"):
+        s = float(screenshot["shot_scale"])
+        if abs(s - 1.0) > 0.001:
+            text_parts.append(
+                f"写真の縮小率: {s:.3f}（実座標の{s:.3f}倍で表示）。"
+                "human_click / human_drag は写真上の座標をそのまま渡せば自動換算されます"
+                "（手計算不要）。"
+            )
 
     # ページ状態セクション
     if page_context:
@@ -2726,6 +3182,24 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 }
             await page.goto(url)
             await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
+            if action == "open_target" and not _looks_like_login_url(page.url):
+                # Apple等はDOM構築後にJSでログイン画面へ飛ぶ。ここで待たずにURLを見ると
+                # 「ログイン済み」と誤判定し、後続のclickがログインガードでgo_backされる。
+                # networkidleは常時通信のあるサイトでは来ないので、URL自体をポーリングする。
+                # ブラウザ起動直後は遷移が終わるまで about:blank が返り続けることがある。
+                # URLが確定するまでは判定を保留しないと、同じく誤判定になる。
+                settled_polls = 0
+                for _ in range(100):  # 最大20秒
+                    current_url = page.url or ""
+                    if not current_url or current_url.startswith("about:"):
+                        await page.wait_for_timeout(200)
+                        continue
+                    if _looks_like_login_url(current_url):
+                        break
+                    settled_polls += 1
+                    if settled_polls >= 30:  # URL確定後の遅延リダイレクト待ちは6秒
+                        break
+                    await page.wait_for_timeout(200)
             state = await _get_browser_state(page)
             if action == "open_target":
                 _browser_auth_state["target_url"] = url
@@ -2890,7 +3364,23 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             stored_creds = None
             # 1) ログイン先URLで照合（同一メール複数サービスの取り違え防止・最優先）
             if url:
-                stored_creds = await creds_service.find_credential_by_url(user_id, url)
+                from app.services.credentials_service import narrow_url_matches
+                url_matches = narrow_url_matches(
+                    await creds_service.find_credentials_by_url(user_id, url)
+                )
+                if len(url_matches) == 1:
+                    stored_creds = url_matches[0]
+                elif len(url_matches) > 1 and not service:
+                    # 同一ドメインに複数アカウント。取り違えたパスワードを流し込むと
+                    # ログイン失敗が続くだけでなく、アカウントがロックされることもある。
+                    names = [m.get("service") for m in url_matches if m.get("service")]
+                    return {
+                        "success": False,
+                        "error": (
+                            f"{url} には複数の認証情報が保存されています: {', '.join(names)}。"
+                            "どれを入力するか service で指定してください。"
+                        ),
+                    }
             # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
             if not stored_creds and service:
                 service_normalized = _normalize_service_name(service)
@@ -2900,7 +3390,14 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 
             if not stored_creds:
                 label = service or url
-                return {"success": False, "error": f"{label} の認証情報が保存されていません。ユーザーに聞いてください。"}
+                suggestions = await _suggest_credential_services(
+                    creds_service, user_id, service, url
+                )
+                hint = (
+                    f" 似た名前で保存済み: {', '.join(suggestions)}。service を指定し直してください。"
+                    if suggestions else " ユーザーに聞いてください。"
+                )
+                return {"success": False, "error": f"{label} の認証情報が保存されていません。{hint}"}
 
             value = stored_creds.get("password", "") if field == "password" else stored_creds.get("id", "")
             if not value:
@@ -2925,6 +3422,179 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                         f"保存済みの{field_label}を {ref} に入力しました（値は非表示）。"
                         "続けて必要ならサインイン/送信ボタンを click してください。"
                         "状態を見る場合は screenshot を呼ぶ（パスワード欄の値はマスクされます）。"
+                    ),
+                }],
+            }
+
+        elif action in ("human_click", "human_drag"):
+            # 人間らしいポインタ操作。CAPTCHAは「答えが合っているか」だけでなく
+            # 「どう操作したか」も採点する。座標へ瞬間移動して押すだけの操作は
+            # 機械と判定され、正しい位置に置いても「誤った返答」で弾かれる。
+            # 曲線を描いて近づき、緩急と微細なブレを混ぜ、押下前後に間を置く。
+            x, y = params.get("x"), params.get("y")
+            if x is None or y is None:
+                return {"success": False, "error": "x と y が必要です"}
+
+            from app.tools.human_pointer import HumanPointer
+            from app.tools.browser import get_last_shot_scale, image_to_css
+
+            # スクリーンショットは縮小して渡しているので、写真から読んだ座標と
+            # 実際のクリック座標は一致しない。既定を「写真の座標」にして、ここで
+            # 換算する。手計算に頼ると掴む位置が対象の外に落ち、図形が動かない
+            # まま時間だけ溶ける（実際にそれで何度も失敗した）。
+            coords = (params.get("coords") or "image").lower()
+            scale = get_last_shot_scale()
+            conv = image_to_css if coords == "image" else (lambda a, b: (a, b))
+
+            pointer = HumanPointer(page)
+            cx, cy = conv(float(x), float(y))
+
+            if action == "human_drag":
+                to_x, to_y = params.get("to_x"), params.get("to_y")
+                if to_x is None or to_y is None:
+                    return {"success": False, "error": "human_drag には to_x と to_y が必要です"}
+                tx, ty = conv(float(to_x), float(to_y))
+                await pointer.drag(cx, cy, tx, ty)
+                note = (
+                    f"({x},{y}) から ({to_x},{to_y}) へ人間らしい軌道でドラッグしました"
+                    f"（写真座標→実座標に換算: 倍率{scale:.3f} → 実際は ({cx:.0f},{cy:.0f})→({tx:.0f},{ty:.0f})）。"
+                )
+            else:
+                await pointer.click(cx, cy)
+                note = (
+                    f"({x},{y}) を人間らしい動きでクリックしました"
+                    f"（写真座標→実座標に換算: 倍率{scale:.3f} → 実際は ({cx:.0f},{cy:.0f})）。"
+                )
+
+            state = await _get_browser_state(page)
+            state["success"] = True
+            state["content"] = [{"type": "text", "text": note}] + (state.get("content") or [])
+            return state
+
+        elif action == "puzzle_fit":
+            # 「図形をはめる」パズルを、確信が持てる時だけ答える。
+            # 撮影→形状の一致度計算→判定→ドラッグを1回の呼び出しで完結させる。
+            # 目視で座標を割り出していると、調べている間にチャレンジが時間切れに
+            # なって最初からやり直しになるため。
+            # 一致度が閾値に届かない時は答えず、『更新』で別の問題を引き直す。
+            # 誤答はEpic側の警戒を上げるので、精度の低い回答を出す方が損になる。
+            from app.tools.puzzle_fit import solve_shape_puzzle
+
+            result = await solve_shape_puzzle(
+                page,
+                threshold=float(params.get("threshold") or 0.85),
+                max_refresh=int(params.get("max_refresh") or 3),
+            )
+            if result.get("answered"):
+                note = (
+                    f"一致度 {result['score']}（次点 {result['runner_up']}）で確信が持てたので、"
+                    f"({result['from']['x']},{result['from']['y']}) から "
+                    f"({result['to']['x']},{result['to']['y']}) へ人間らしい軌道で運びました。"
+                    f"引き直し {len(result['attempts']) - 1} 回。"
+                )
+            else:
+                tried = " / ".join(
+                    f"{a['attempt']}問目 一致度{a['score']}" for a in result.get("attempts", [])
+                )
+                note = (
+                    f"確信が持てないので答えていません。{result.get('reason')}"
+                    + (f"（{tried}）" if tried else "")
+                )
+            state = await _get_browser_state(page)
+            state["success"] = True
+            state["content"] = [{"type": "text", "text": note}] + (state.get("content") or [])
+            return state
+
+        elif action == "fill_totp_code":
+            # 認証アプリ(TOTP)のコードをサーバー側で生成して入力欄へ直接入れる。
+            # シードと現在時刻から計算するだけなので、SMS/メールの到着を待つ必要がない。
+            # fill_credential と同様、生成した値はモデルに一切返さない。
+            ref = params.get("ref")
+            service = params.get("service")
+            url = params.get("url")
+            if not ref:
+                return {"success": False, "error": "ref が必要です"}
+            if not service and not url:
+                return {"success": False, "error": "service または url が必要です"}
+
+            user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+            from app.services.credentials_service import get_credentials_service
+            creds_service = get_credentials_service()
+
+            stored_creds = None
+            # 1) ログイン先URLで照合（同一ドメイン複数アカウントの取り違え防止）
+            if url:
+                from app.services.credentials_service import narrow_url_matches
+                url_matches = narrow_url_matches(
+                    await creds_service.find_credentials_by_url(user_id, url)
+                )
+                with_totp = [m for m in url_matches if m.get("totp_secret")]
+                if len(with_totp) == 1:
+                    stored_creds = with_totp[0]
+                elif len(with_totp) > 1 and not service:
+                    names = [m.get("service") for m in with_totp if m.get("service")]
+                    return {
+                        "success": False,
+                        "error": (
+                            f"{url} には認証アプリのシードが複数保存されています: {', '.join(names)}。"
+                            "どれを使うか service で指定してください。"
+                        ),
+                    }
+            # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
+            if not stored_creds and service:
+                service_normalized = _normalize_service_name(service)
+                stored_creds = await creds_service.get_credential(user_id, service_normalized)
+                if not stored_creds and service_normalized != service:
+                    stored_creds = await creds_service.get_credential(user_id, service)
+
+            if not stored_creds or not stored_creds.get("totp_secret"):
+                label = service or url
+                return {
+                    "success": False,
+                    "error": (
+                        f"{label} には認証アプリ(TOTP)のシードが保存されていません。"
+                        "このサービスはまだ認証アプリ方式になっていない可能性があります。"
+                        "SMS/メールで認証を進め、ログインできたら設定画面で認証アプリ方式に切り替えて "
+                        "save_totp_secret でシードを保存してください（次回からSMS不要になります）。"
+                    ),
+                }
+
+            from app.services.totp_service import (
+                generate_from_stored,
+                seconds_remaining,
+                TOTPError,
+            )
+            try:
+                generated = generate_from_stored(stored_creds)
+                # 残り僅かだと入力中に切り替わって弾かれる。次の窓まで待ってから入れる。
+                if generated["seconds_remaining"] <= 3:
+                    await page.wait_for_timeout(
+                        (generated["seconds_remaining"] + 1) * 1000
+                    )
+                    generated = generate_from_stored(stored_creds)
+            except TOTPError as exc:
+                return {"success": False, "error": str(exc)}
+
+            await _fill_code_into_inputs(page, ref, generated["code"])
+
+            if params.get("press_enter", False):
+                await page.keyboard.press("Enter")
+                try:
+                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
+                except Exception:
+                    await page.wait_for_timeout(2000)
+
+            # 値は絶対に返さない。入力できたことと、残り有効秒数だけ伝える。
+            return {
+                "success": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"認証アプリのコードを生成して {ref} に入力しました（値は非表示・"
+                        f"残り約{generated['seconds_remaining']}秒有効）。"
+                        "続けて送信ボタンを click してください。"
+                        "コードが拒否された場合は時刻ずれの可能性があるので、もう一度この操作を呼べば"
+                        "新しいコードが入ります。"
                     ),
                 }],
             }
@@ -2996,7 +3666,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 )
                 return state
 
-            await page.fill_by_ref(ref, otp_code)
+            await _fill_code_into_inputs(page, ref, otp_code)
             if params.get("press_enter", False):
                 await page.keyboard.press("Enter")
                 try:
@@ -3008,6 +3678,85 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             state["content"].insert(0, {
                 "type": "text",
                 "text": "OTP was received from the Android app and entered without exposing the code.",
+            })
+            return state
+
+        elif action == "wait_for_link_from_app":
+            # 数字コードではなく「タップして再設定」形式のワンタイムURLが届く
+            # サービス向け。届いたリンクをこのブラウザで開くところまでやる。
+            timeout_seconds = max(1, min(int(params.get("timeout_seconds", 60)), 180))
+            user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+            source = (params.get("source") or "sms").lower()
+            email_address = params.get("email_address")
+
+            from app.services.otp_service import get_otp_service
+            otp_service = get_otp_service()
+
+            if source == "email" and email_address:
+                if not await otp_service.has_imap_access(user_id, email_address):
+                    from app.services.otp_service import app_password_guidance
+                    g = app_password_guidance(email_address)
+                    return {
+                        "success": False,
+                        "needs_app_password": True,
+                        "email_address": email_address,
+                        "error": (
+                            f"{email_address} の受信箱を読む手段（アプリパスワード）が未登録のため、"
+                            f"メールに届くワンタイムURLを自動取得できません。ユーザーにこう案内してください:\n"
+                            f"「{g['note']} で発行したアプリパスワードを、ここに貼ってください」\n"
+                            f"貼られたら save_credentials(service=\"{g['service']}\", login_id=\"{email_address}\", "
+                            f"password=\"<アプリパスワード>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
+                        ),
+                    }
+
+            link_url = await otp_service.wait_for_link(
+                user_id=user_id,
+                service=params.get("service"),
+                source=source,
+                email_address=email_address,
+                timeout_seconds=timeout_seconds,
+                poll_interval=2,
+            )
+
+            if not link_url:
+                state = await _get_browser_state(page)
+                state["success"] = False
+                src_label = "メール" if source == "email" else "Androidアプリ(SMS)"
+                hint = ""
+                if source == "sms":
+                    try:
+                        dev = await otp_service.get_apk_otp_device_status(user_id)
+                        hint = (
+                            f" Forwarder device status: enabled={dev.get('enabled')}, "
+                            f"device={dev.get('device_name')}, last_received_at={dev.get('last_received_at')}."
+                            " If the user says the SMS DID arrive on their phone, the app's local"
+                            " forwarding setting was probably lost (reinstall/logout) — ask them to"
+                            " open the Dan app once (opening it self-repairs the setting) and then"
+                            " resend the link."
+                        )
+                    except Exception:
+                        pass
+                state["error"] = (
+                    f"No one-time link arrived from {src_label} within {timeout_seconds} seconds."
+                    + hint
+                    + " Keep this browser page open. Ask the user to paste the link only as a last resort."
+                )
+                return state
+
+            await page.goto(link_url)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
+            except Exception:
+                await page.wait_for_timeout(1000)
+
+            link_host = link_url.split("//", 1)[-1].split("/", 1)[0]
+            state = await _get_browser_state(page)
+            state["content"].insert(0, {
+                "type": "text",
+                "text": (
+                    f"One-time link received from the Android app ({link_host}) and opened in this browser. "
+                    "The link itself is single-use and is not shown here."
+                ),
             })
             return state
 
@@ -3052,6 +3801,25 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 "success": True,
                 "content": [{"type": "text", "text": f"画像を保存しました: {result}"}],
             }
+
+        elif action == "upload_file":
+            path = params.get("path")
+            if not path:
+                return {"success": False, "error": "path（アップロードするファイルの絶対パス）が必要です"}
+            import os as _os
+            if not _os.path.exists(path):
+                return {"success": False, "error": f"ファイルが見つかりません: {path}"}
+            try:
+                await page.upload_file(
+                    files=[path],
+                    ref=params.get("ref"),
+                    selector=params.get("selector"),
+                )
+            except Exception as e:
+                return {"success": False, "error": f"アップロードに失敗しました: {e}"}
+            state = await _get_browser_state(page)
+            state["content"].insert(0, {"type": "text", "text": f"ファイルを渡しました: {path}"})
+            return state
 
         elif action == "content":
             html = await page.content()
@@ -3255,6 +4023,487 @@ async def _execute_schedule_followup(
         "message": res.get("message", ""),
         "fire_at": res.get("fire_at"),
     }
+
+
+
+async def _execute_collab_thread(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """外部の相手との専用チャット窓口（コラボチャット）。room_id = session_id。
+    実体は collab_service.create_external_thread（本体チャット⇄コラボの橋渡し）。"""
+    from app.services.collab_service import CollabService
+    from app.config import settings as _settings
+
+    room_id = session_id or ""
+    if not room_id or not user_id:
+        return {"success": False, "error": "room_id/user_id が不明なため窓口を作れません。"}
+    svc = CollabService()
+    action = (params.get("action") or "").strip()
+    frontend = (_settings.FRONTEND_URL or "http://localhost:3000").rstrip("/")
+
+    try:
+        if action == "create":
+            title = (params.get("title") or "").strip()
+            if not title:
+                return {"success": False, "error": "title は必須です（例:「田中様との連絡」）。"}
+            try:
+                expires_hours = int(params.get("expires_hours") or 168)
+            except (TypeError, ValueError):
+                expires_hours = 168
+            res = await svc.create_external_thread(
+                owner_id=user_id,
+                origin_room_id=room_id,
+                title=title,
+                description=(params.get("description") or "").strip() or None,
+                expires_hours=expires_hours,
+            )
+            collab_room_id = res["room"]["id"]
+            invite_url = f"{frontend}/collab/join/{res['invite']['token']}"
+            return {
+                "success": True,
+                "collab_room_id": collab_room_id,
+                "invite_url": invite_url,
+                "message": (
+                    "外部窓口を作りました。招待URLをユーザーに伝えてください"
+                    "（相手にメール等で直接送るなら compose_message を使う）。"
+                    "相手が参加して発言すると、この部屋であなたが自動起動されて届きます。"
+                    "相手への返信は compose_message(action=\"propose\", channel=\"collab\", "
+                    f"collab_room_id=\"{collab_room_id}\", to=相手の名前, body=...) で送信案カードを出してください。"
+                ),
+            }
+
+        if action == "list":
+            rooms = await svc.list_threads_for_origin(room_id)
+            threads = []
+            for r in rooms:
+                invites = await svc.list_invites(r["id"])
+                token = next((i.get("token") for i in invites if i.get("token")), None)
+                guest = next((i.get("guest_name") for i in invites if i.get("guest_name")), None)
+                cfg = r.get("ai_assist_config") or {}
+                threads.append({
+                    "collab_room_id": r["id"],
+                    "title": r.get("title"),
+                    "guest_name": guest,
+                    "invite_url": f"{frontend}/collab/join/{token}" if token else None,
+                    "autonomy": cfg.get("autonomy") or "approval",
+                    "auto_guidance": cfg.get("auto_guidance"),
+                    "created_at": r.get("created_at"),
+                })
+            return {"success": True, "threads": threads,
+                    "message": "この部屋に紐付く外部窓口の一覧です。" if threads
+                    else "この部屋に紐付く外部窓口はまだありません。"}
+
+        if action == "set_policy":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            if not collab_room_id:
+                return {"success": False, "error": "collab_room_id は必須です（list で確認できます）。"}
+            autonomy = (params.get("autonomy") or "").strip() or None
+            guidance = params.get("guidance")
+            if autonomy is None and guidance is None:
+                return {"success": False, "error": "autonomy か guidance を指定してください。"}
+            room = await svc.set_thread_policy(collab_room_id, autonomy=autonomy, guidance=guidance)
+            cfg = room.get("ai_assist_config") or {}
+            mode = cfg.get("autonomy") or "approval"
+            return {
+                "success": True,
+                "autonomy": mode,
+                "auto_guidance": cfg.get("auto_guidance"),
+                "message": (
+                    f"窓口「{room.get('title')}」の運用方針を更新しました: "
+                    + ("全件ユーザー承認（送信案カード止まり）" if mode == "approval"
+                       else f"許可範囲「{cfg.get('auto_guidance') or '軽い受領確認のみ'}」は承認なしで送信可、範囲外は承認待ち")
+                ),
+            }
+
+        if action == "consult":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            body = (params.get("body") or "").strip()
+            if not collab_room_id or not body:
+                return {"success": False, "error": "collab_room_id と body は必須です。"}
+            import os as _os
+            import httpx as _httpx
+            sandbox_port = _os.environ.get("DAN_SANDBOX_PORT", "8000")
+            payload = {"room_id": collab_room_id, "content": body,
+                       "sender_name": "ダン", "visibility": "owner_only"}
+            reply_to = (params.get("reply_to_message_id") or "").strip()
+            if reply_to:
+                payload["reply_to_message_id"] = reply_to
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/send",
+                    json=payload,
+                )
+                r.raise_for_status()
+            return {
+                "success": True,
+                "message": (
+                    "ユーザーへの相談を窓口画面に出しました（相手には見えません）。"
+                    "ユーザーの返答が来るまで、この件の作業・返信は行わないでください。"
+                ),
+            }
+
+        if action == "say":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            body = (params.get("body") or "").strip()
+            if not collab_room_id or not body:
+                return {"success": False, "error": "collab_room_id と body は必須です。"}
+            import os as _os
+            import httpx as _httpx
+            sandbox_port = _os.environ.get("DAN_SANDBOX_PORT", "8000")
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/send",
+                    json={"room_id": collab_room_id, "content": body, "sender_name": "ダン"},
+                )
+                r.raise_for_status()
+            return {"success": True,
+                    "message": "公開の場に発言しました（ユーザーにも相手にも見えています）。"}
+
+        if action == "react":
+            collab_room_id = (params.get("collab_room_id") or "").strip()
+            message_id = (params.get("message_id") or "").strip()
+            if not collab_room_id or not message_id:
+                return {"success": False, "error": "collab_room_id と message_id は必須です。"}
+            import os as _os
+            import httpx as _httpx
+            sandbox_port = _os.environ.get("DAN_SANDBOX_PORT", "8000")
+            async with _httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/react",
+                    json={"room_id": collab_room_id, "message_id": message_id,
+                          "emoji": (params.get("emoji") or "🙏").strip() or "🙏"},
+                )
+                r.raise_for_status()
+            return {"success": True,
+                    "message": "リアクションを付けました（相手に通知は飛びません。開いた時に既読サインとして見えます）。"}
+
+        return {"success": False, "error": f"不明な action: {action}（create / list / set_policy / consult / react）"}
+    except Exception as e:
+        logger.error("collab_thread error: %s", e, exc_info=True)
+        return {"success": False, "error": f"コラボ窓口の操作に失敗: {e}"}
+
+
+async def _execute_compose_message(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """外部宛メッセージの送信案カード。room_id = session_id。実体は
+    app.services.outbound_message_service（ユーザーの送信ボタンと同じ経路）。"""
+    import asyncio as _aio
+    from app.services.outbound_message_service import (
+        OutboundMessageService, SERVER_SENDABLE, channel_label,
+    )
+
+    room_id = session_id or ""
+    if not room_id or not user_id:
+        return {"success": False, "error": "room_id/user_id が不明なため送信案を扱えません。"}
+    svc = OutboundMessageService()
+    action = (params.get("action") or "").strip()
+
+    def _brief(row: Dict[str, Any]) -> Dict[str, Any]:
+        ad = row.get("action_data") or {}
+        return {
+            "proposal_id": row.get("id"), "status": row.get("status"),
+            "channel": ad.get("channel"), "to": ad.get("to"), "to_name": ad.get("to_name"),
+            "subject": ad.get("subject"), "reply_to": ad.get("reply_to"), "target": ad.get("target"),
+            "user_edited": bool(ad.get("user_edited")),
+            "sent_by": ad.get("sent_by"), "body": row.get("content"),
+        }
+
+    try:
+        if action == "propose":
+            channel = (params.get("channel") or "").strip()
+            to = (params.get("to") or "").strip()
+            body = (params.get("body") or "").strip()
+            subject = (params.get("subject") or "").strip()
+            if not channel or not to or not body:
+                return {"success": False, "error": "channel, to, body は必須です。"}
+            reply_to = {
+                "message_id": (params.get("reply_to_message_id") or "").strip() or None,
+                "subject": (params.get("reply_to_subject") or "").strip() or None,
+                "thread_id": (params.get("reply_to_thread_id") or "").strip() or None,
+                "post_url": (params.get("reply_to_post_url") or "").strip() or None,
+                "comment_id": (params.get("reply_to_comment_id") or "").strip() or None,
+                "collab_room_id": (params.get("collab_room_id") or "").strip() or None,
+            }
+            target = {
+                "url": (params.get("target_url") or "").strip() or None,
+                "note": (params.get("target_note") or "").strip() or None,
+            }
+            row = await _aio.to_thread(
+                svc.create_draft, user_id=user_id, room_id=room_id, channel=channel, to=to,
+                body=body, subject=subject or None, intent=params.get("intent"),
+                to_name=params.get("to_name"), from_name=params.get("from_name"),
+                reply_to=reply_to, target=target,
+                from_account=params.get("from_account"),
+            )
+            channel = (row.get("action_data") or {}).get("channel") or channel
+            sendable = channel in SERVER_SENDABLE
+            tail = (
+                'ユーザーから「送って」と言われたら compose_message(action="send", proposal_id) で送れます。'
+                if sendable else
+                f'{channel_label(channel)} はサーバー送信不可。ユーザーが承認したらまず compose_message(action="send", proposal_id) を呼ぶこと'
+                '（カードがロックされ、送るべき本文が返る）→ その本文を browser で送る → action="mark_sent" で確定。'
+                '記憶の本文を直接 browser で送ってはいけない。'
+            )
+            return {
+                "success": True, "proposal_id": row["id"],
+                "message": (
+                    "送信案カードをこの部屋に出しました。本文はチャットに繰り返さないこと。"
+                    "ユーザーはカード上で本文を直して送信ボタンを押せます（あなたを起こさずに送られます）。"
+                    + tail
+                ),
+            }
+
+        if action == "send":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            row = await svc.send(pid, user_id, sent_by="dan")
+            if row.get("status") == "sending":
+                # 手動チャネル: 送信の代わりにカードをロックして本文を渡した。
+                # ダンはこの本文（＝ユーザーの編集を反映した版）をそのまま送ること。
+                return {
+                    "success": True, "locked": True, "draft": _brief(row),
+                    "message": (
+                        "このチャネルはサーバーから送れないため、カードを「送信中」にロックしました"
+                        "（ユーザーはもう押せません）。上の draft の本文を一字も変えずに browser で送り、"
+                        '送れたら compose_message(action="mark_sent", proposal_id) で確定、'
+                        '送れなかったら action="release" で下書きに戻すこと。'
+                    ),
+                }
+            return {"success": True, "message": "送信しました（DBの現在本文＝ユーザーの編集を反映した版）。", "sent": _brief(row)}
+
+        if action == "release":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            row = await _aio.to_thread(svc.release, pid, user_id)
+            return {"success": True, "message": "ロックを解除し、下書き（編集・送信可能）に戻しました。", "draft": _brief(row)}
+
+        if action == "mark_sent":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            row = await _aio.to_thread(svc.mark_sent, pid, user_id, sent_by="dan", note=params.get("note"))
+            return {"success": True, "message": "送信済みとして記録しました。", "sent": _brief(row)}
+
+        if action == "discard":
+            pid = (params.get("proposal_id") or "").strip()
+            if not pid:
+                return {"success": False, "error": "proposal_id が必要です。"}
+            await _aio.to_thread(svc.discard, pid, user_id, by="dan")
+            return {"success": True, "message": "送信案を取り下げました。", "proposal_id": pid}
+
+        if action == "list":
+            rows = await _aio.to_thread(svc.list_for_room, room_id)
+            items = [_brief(r) for r in rows]
+            return {"success": True, "count": len(items), "drafts": items}
+
+        return {"success": False, "error": "action は propose/send/mark_sent/release/discard/list のいずれか。"}
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": f"送信案の処理に失敗: {e}"}
+
+
+async def _execute_split_to_new_room(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Split a drifted topic into a brand-new chat (project + room).
+
+    1. Create a project (= sidebar chat) whose room is the new home of the topic.
+       origin_room_id records where it was split from; the CLI model choice of
+       the origin project is inherited.
+    2. Register a `handoff` watch on the new room. The dan-core poller fires it on
+       its next cycle and Dan speaks first there with the handoff memo. (This runs
+       in the MCP subprocess, which dies with the turn — so the turn itself is
+       driven by dan-core via the watch table, not from here.)
+    The screen is NOT switched: the user opens the new chat from the sidebar
+    (sidebar polls /projects every 10s).
+    """
+    import asyncio as _aio
+    from app.services import followups as _fu
+    from app.services.project_service import ProjectService
+    from app.services.supabase_client import get_supabase_client
+
+    origin_room_id = session_id or ""
+    if not origin_room_id or not user_id:
+        return {"success": False, "error": "room_id/user_id が不明なため新しいチャットを作れません。"}
+
+    title = (params.get("title") or "").strip()[:80]
+    handoff = (params.get("handoff") or "").strip()
+    if not title:
+        return {"success": False, "error": "title（新しいチャットの名前）が必要です。"}
+    if not handoff:
+        return {"success": False, "error": "handoff（引き継ぎメモ）が空です。新しい部屋の自分は元の会話を読めないので、経緯と次にやることを書いてください。"}
+
+    def _origin_metadata() -> Optional[dict]:
+        try:
+            r = (
+                get_supabase_client().client.table("projects")
+                .select("metadata").eq("room_id", origin_room_id).limit(1).execute()
+            )
+            md = (r.data or [{}])[0].get("metadata") or {}
+            model = md.get("model")
+            return {"model": model} if model else None
+        except Exception:
+            return None
+
+    try:
+        metadata = await _aio.to_thread(_origin_metadata)
+        project = await ProjectService().create_project(
+            user_id=user_id,
+            title=title,
+            description=handoff[:2000],
+            origin_room_id=origin_room_id,
+            metadata=metadata,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"新しいチャットの作成に失敗しました: {e}"}
+
+    new_room_id = project.get("room_id")
+    if not new_room_id:
+        return {"success": False, "error": "新しいチャットは作れましたが部屋IDが取れませんでした。"}
+
+    try:
+        res = await _aio.to_thread(
+            _fu.create_watch, new_room_id, user_id, "handoff", handoff, spec={"origin_room_id": origin_room_id},
+        )
+    except Exception as e:
+        res = {"scheduled": False, "message": str(e)}
+
+    if not res.get("scheduled"):
+        return {
+            "success": True,
+            "project_id": project.get("id"),
+            "room_id": new_room_id,
+            "title": title,
+            "auto_start": False,
+            "message": (
+                f"新しいチャット「{title}」を作りました（サイドバーに表示されます）が、"
+                f"自動起動の登録に失敗しました: {res.get('message')}。ユーザーがその部屋を開いて話しかければ続きができます。"
+            ),
+        }
+
+    return {
+        "success": True,
+        "project_id": project.get("id"),
+        "room_id": new_room_id,
+        "title": title,
+        "auto_start": True,
+        "message": (
+            f"新しいチャット「{title}」を作りました。"
+            f"数十秒以内にその部屋で自分（ダン）が引き継ぎの一言目を話し始めます。"
+        ),
+    }
+
+
+async def _execute_watch(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Manage watches (standing instructions). room_id = session_id, same as
+    schedule_followup. The dan-core poller fires them by kind (at/every/mail)."""
+    import asyncio as _aio
+    from datetime import datetime, timedelta, timezone
+    from app.services import followups as _fu
+
+    room_id = session_id or ""
+    if not room_id:
+        return {"success": False, "error": "room_id (session) が不明なため見張りを操作できません。"}
+
+    action = (params.get("action") or "").strip()
+
+    if action == "list":
+        rows = await _aio.to_thread(_fu.list_watches, room_id)
+        items = [
+            {
+                "id": r.get("id"),
+                "kind": r.get("kind"),
+                "note": r.get("plain_note"),
+                "next_fire_at": r.get("fire_at"),
+                "spec": {k: v for k, v in (r.get("spec") or {}).items()
+                         if k != "consecutive_errors"},
+            }
+            for r in rows
+        ]
+        return {"success": True, "count": len(items), "watches": items,
+                "message": f"この部屋の有効な見張りは {len(items)} 件です。"}
+
+    if action == "cancel":
+        wid = (params.get("watch_id") or "").strip()
+        if not wid:
+            return {"success": False, "error": "cancel には watch_id が必要です。"}
+        ok = await _aio.to_thread(_fu.cancel_watch, wid, room_id)
+        return {"success": ok,
+                "message": "見張りを取り消しました。" if ok
+                else "対象の見張りが見つかりません（既に完了・取消済みの可能性）。"}
+
+    if action != "create":
+        return {"success": False, "error": "action は create / list / cancel のいずれかです。"}
+
+    note = params.get("note") or ""
+    mail_from = (params.get("mail_from") or "").strip()
+    interval = params.get("interval_seconds")
+    spec: Dict[str, Any] = {}
+    if params.get("hold_browser"):
+        spec["hold_browser"] = True
+
+    fire_at_dt = None
+    at_raw = (params.get("at") or "").strip()
+    if at_raw:
+        try:
+            dt = datetime.fromisoformat(at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return {"success": False,
+                    "error": f"at の日時を解釈できません: {at_raw}（例 2026-08-25T10:00）"}
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=9)))  # タイムゾーン無しはJST
+        fire_at_dt = dt
+
+    monthly_day = params.get("monthly_day")
+    weekly_day = params.get("weekly_day")
+    if mail_from:
+        kind = "mail"
+        spec["from"] = mail_from
+        if (params.get("mail_subject_contains") or "").strip():
+            spec["subject_contains"] = params["mail_subject_contains"].strip()
+        if (params.get("mailbox") or "").strip():
+            spec["mailbox"] = params["mailbox"].strip().lower()
+        if interval:
+            spec["interval_seconds"] = interval
+    elif monthly_day is not None or weekly_day is not None:
+        kind = "every"
+        if monthly_day is not None:
+            spec["monthly_day"] = int(monthly_day)
+        else:
+            spec["weekly_day"] = int(weekly_day)
+        if (params.get("time_of_day") or "").strip():
+            spec["time_of_day"] = params["time_of_day"].strip()
+    elif interval:
+        kind = "every"
+        spec["interval_seconds"] = interval
+    else:
+        kind = "at"
+
+    try:
+        res = await _aio.to_thread(
+            _fu.create_watch, room_id, user_id, kind, note,
+            fire_at=fire_at_dt, delay_seconds=params.get("delay_seconds"), spec=spec,
+        )
+    except Exception as e:
+        return {"success": False, "error": f"見張りの登録に失敗しました: {e}"}
+
+    return {"success": bool(res.get("scheduled")), "id": res.get("id"),
+            "kind": kind, "fire_at": res.get("fire_at"),
+            "message": res.get("message", "")}
 
 
 # ============================================

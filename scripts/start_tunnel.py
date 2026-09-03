@@ -205,10 +205,9 @@ def set_vercel_env(name: str, value: str):
 # 古いビルドを指したままになり、公開ツールのAPIが 404(DNS_HOSTNAME_RESOLVED_PRIVATE)
 # になる（2026-07-04 の障害の直接原因）。
 # salonboard-styleup-done.vercel.app: StyleUp をクライアント(SHUN氏ら)に共有済みの
-# 旧エイリアス。done-studio と同じく毎回張り替えないと古いビルドに固定され、
+# 旧エイリアス。毎回張り替えないと古いビルドに固定され、
 # 「保存に失敗しました」で締め出される（2026-07-05 の SHUN 氏ログイン不可の直接原因）。
 PUBLIC_ALIASES = [
-    "done-studio.vercel.app",
     "salonboard-styleup-done.vercel.app",
 ]
 
@@ -265,6 +264,28 @@ def update_vercel_env(core_url: str, sandbox_url: str):
         print(f"[tunnel] Warning: Redeploy may have failed: {result.stderr[:200]}")
 
 
+def resync_dedicated_artifact_sites() -> None:
+    """Rebuild each delivered artifact site against the new tunnel address.
+
+    The main frontend project is handled by ``update_vercel_env`` above, but a
+    published artifact lives in its own Vercel project and bakes ``/api/*`` in
+    at build time.  Skipping this leaves every delivered tool loading fine and
+    failing on the first action after a reboot.
+    """
+    if REPO_ROOT not in sys.path:
+        sys.path.insert(0, REPO_ROOT)
+    try:
+        from app.services.artifact_publication_service import (
+            resync_dedicated_sites_after_tunnel_change,
+        )
+
+        scheduled = resync_dedicated_sites_after_tunnel_change()
+    except Exception as exc:  # never let this block the tunnel itself
+        print(f"[tunnel] Warning: artifact site resync failed: {exc}")
+        return
+    print(f"[tunnel] Rebuilding {len(scheduled)} dedicated artifact site(s)")
+
+
 def main():
     print("=" * 60)
     print("Cloudflare Tunnel Startup")
@@ -299,6 +320,7 @@ def main():
     if core_url != old_core_url or sandbox_url != old_sandbox_url:
         print("[tunnel] Tunnel URL changed; updating Vercel")
         update_vercel_env(core_url, sandbox_url)
+        resync_dedicated_artifact_sites()
     else:
         print("[tunnel] URLs unchanged, skipping Vercel redeploy")
 

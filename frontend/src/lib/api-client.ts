@@ -15,6 +15,36 @@ const SSE_BASE_URL = '';
 
 export const OWNER_USER_ID = '2582a188-ff24-4a4f-b989-6063034d90b2';
 
+export interface AchievementEvidence {
+  kind: 'commit' | 'room' | 'cli' | 'watch' | 'url' | 'mail';
+  label: string;
+  ref: string;
+}
+
+export interface AchievementItem {
+  id: string;
+  day: string;
+  title: string;
+  detail: string | null;
+  status: 'done' | 'in_progress' | 'dismissed';
+  tags: string[];
+  evidence: AchievementEvidence[];
+  sources: string[];
+  icon: string;
+  illustration_status: 'none' | 'pending' | 'done' | 'failed';
+  first_seen: string;
+  done_at: string | null;
+  updated_at: string;
+}
+
+export interface AchievementsResponse {
+  day: string;
+  today: string;
+  items: AchievementItem[];
+  days: string[];
+  last_run: string | null;
+}
+
 export interface UserResponse {
   id: string;
   email: string;
@@ -73,6 +103,17 @@ export interface MessageResponse {
   // ダン作業中の追い連絡で、まだ「読まれて反映」されていない仮送信状態（半透明表示）。
   // クライアント側のみで付与し、ダンの応答到着でクリアする（DB列ではない）。
   pendingFollowup?: boolean;
+}
+
+export interface RoomOpenResponse {
+  room_id: string;
+  timings_ms?: Record<string, number>;
+  project: ProjectResponse | null;
+  messages: MessageResponse[] | null;
+  artifacts: unknown[] | null;
+  active: ActiveSessionStatus | null;
+  current_run: AgentRunResponse | null;
+  execution_events: ExecutionEvent[] | null;
 }
 
 export interface MessagesListResponse {
@@ -161,8 +202,8 @@ export interface SessionSwitchResponse {
 }
 
 // Proposal types
-export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired';
-export type ProposalType = 'reply' | 'action' | 'schedule' | 'reminder';
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'sent' | 'sending';
+export type ProposalType = 'reply' | 'action' | 'schedule' | 'reminder' | 'observation' | 'notify' | 'outbound';
 
 export interface ProposalResponse {
   id: string;
@@ -339,6 +380,38 @@ export type ProjectStatusType =
   | 'paused'
   | 'cancelled';
 
+// 部屋ボード v3（目標カード）。projects.metadata.board に永続化され、
+// バックエンドの消化が会話をイベントとして目標状態に反映し、SSEで即時配信される。
+export interface RoomBoardGoal {
+  id: string;
+  title: string; // なぜ＋何を目指すか
+  waiting_on: string; // 今、誰の何待ちか（◯◯待ちの短い見出し）
+  waiting_note?: string; // waiting_onの補足（小さく表示）
+  ball: 'you' | 'dan' | 'external'; // 誰待ちか（アバター表情に対応）
+  ball_label?: string; // 例: 金先生 / LINE / あなた
+  then: string; // 待ちが解消されたら何ができるか
+  due?: string;
+  done_criteria?: string;
+  detail?: string;
+  events?: { at: string; text: string }[];
+  stale?: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RoomBoardDoc {
+  schema: number;
+  goals: RoomBoardGoal[];
+  recent_changes: { at: string; text: string }[];
+  updated_at: string | null;
+  version: number;
+}
+
+export interface RoomBoardResponse {
+  enabled: boolean;
+  board: RoomBoardDoc | null;
+}
+
 export interface ProjectResponse {
   id: string;
   user_id: string;
@@ -353,6 +426,8 @@ export interface ProjectResponse {
   unread_count: number;
   last_message_at: string | null;
   pinned_at: string | null;
+  // ダンがこのプロジェクトで今まさに作業中か（一覧の「作業中」インジケーター用）
+  has_active_run?: boolean;
   created_at: string;
   updated_at: string | null;
 }
@@ -620,6 +695,20 @@ export function setStoredToken(token: string | null) {
 
 // ==================== HTTP Client ====================
 
+// ログアウトが起きた時に「どの経路が蹴り出したか」を残す（原因調査用）。
+// ログイン画面に飛ばされたら localStorage の done-logout-reason を見れば分かる。
+export function recordLogoutReason(why: string, detail?: string) {
+  try {
+    localStorage.setItem(
+      'done-logout-reason',
+      JSON.stringify({ at: new Date().toISOString(), why, detail: detail?.slice(0, 200) })
+    );
+    console.warn('[auth] logout triggered:', why, detail);
+  } catch {
+    // storage不可環境では無視
+  }
+}
+
 // Temporary token storage for immediate use after login
 let immediateToken: string | null = null;
 
@@ -653,7 +742,12 @@ async function request<T>(
     if (response.status === 401) {
       // ログインエンドポイント自体の401はリダイレクトしない（パスワード間違い等）
       const isLoginEndpoint = endpoint === '/chat/login' || endpoint === '/chat/register';
-      if (!isLoginEndpoint) {
+      // 外部ゲスト（コラボ招待ページ）はオーナー用ログイン画面に飛ばさない。
+      // トークン切れは招待ページ側が再入室フローで処理する。
+      const isGuestPage =
+        typeof window !== 'undefined' && window.location.pathname.startsWith('/collab/join');
+      if (!isLoginEndpoint && !isGuestPage) {
+        recordLogoutReason('api-401', endpoint);
         // トークンをクリア
         setStoredToken(null);
         immediateToken = null;
@@ -724,6 +818,13 @@ export const api = {
       request<TokenResponse>('/chat/login', {
         method: 'POST',
         body: JSON.stringify(data),
+      }),
+
+    // 自分の表示名を変更（コラボ窓口などで相手に見える名前）
+    updateProfile: (displayName: string) =>
+      request<{ display_name: string }>('/chat/profile', {
+        method: 'POST',
+        body: JSON.stringify({ display_name: displayName }),
       }),
 
     register: (data: RegisterRequest) =>
@@ -895,6 +996,19 @@ export const api = {
   rooms: {
     list: () => request<RoomsListResponse>('/chat/rooms'),
 
+    /**
+     * 部屋を開くのに必要な一式を1往復で取る（部屋切替の高速化）。
+     * project / messages / artifacts / active / current-run / execution-events を
+     * サーバー側で同時に取得してまとめて返す。欠けた項目は null。
+     */
+    open: (roomId: string, projectId?: string | null, limit = 20, includeProject = false) => {
+      const q = new URLSearchParams({ limit: String(limit) });
+      if (projectId) q.set('project_id', projectId);
+      // Web はサイドバーの一覧キャッシュに project を持つので省く（束ねの中で一番遅い）
+      if (!includeProject) q.set('include_project', 'false');
+      return request<RoomOpenResponse>(`/chat/rooms/${roomId}/open?${q.toString()}`);
+    },
+
     get: (roomId: string) => request<RoomResponse>(`/chat/rooms/${roomId}`),
 
     getMessages: (
@@ -993,6 +1107,22 @@ export const api = {
 
     get: (proposalId: string) =>
       request<ProposalResponse>(`/chat/proposals/${proposalId}`),
+
+    // 送信案カード（compose_message）
+    updateDraft: (proposalId: string, patch: { body?: string; subject?: string; to?: string }) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/draft`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    sendDraft: (proposalId: string) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/send`, { method: 'POST' }),
+    // コラボ窓口宛の送信案カード一覧（コミュニケーションタブのオーナー画面用）
+    listForCollab: (collabRoomId: string) =>
+      request<{ proposals: { id: string; status: string; created_at: string }[] }>(
+        `/chat/proposals/outbound-for-collab/${collabRoomId}`
+      ),
+    discardDraft: (proposalId: string) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/discard`, { method: 'POST' }),
 
     respond: (
       proposalId: string,
@@ -1134,6 +1264,7 @@ export const api = {
 
         // 401エラー時はログインページにリダイレクト
         if (response.status === 401) {
+          recordLogoutReason('sse-401', 'chat stream');
           setStoredToken(null);
           try {
             useAuthStore.getState().logout();
@@ -1337,6 +1468,15 @@ export const api = {
     currentRun: (projectId: string) =>
       request<AgentRunResponse>(`/projects/${projectId}/current-run`),
 
+    getBoard: (projectId: string) =>
+      request<RoomBoardResponse>(`/projects/${projectId}/board`),
+
+    refreshBoard: (projectId: string, force = false) =>
+      request<{ digested: boolean; reason: string; board: RoomBoardDoc | null }>(
+        `/projects/${projectId}/board/refresh${force ? '?force=true' : ''}`,
+        { method: 'POST' }
+      ),
+
     proposals: {
       list: (projectId: string) =>
         request<ProjectProposalResponse[]>(`/projects/${projectId}/proposals`),
@@ -1524,6 +1664,18 @@ export const api = {
   },
 
   // Notes endpoints
+  achievements: {
+    list: (day?: string) =>
+      request<AchievementsResponse>(`/achievements${day ? `?day=${day}` : ''}`),
+    refresh: () =>
+      request<{ judged: boolean; changed: number }>('/achievements/refresh', { method: 'POST' }),
+    patch: (id: string, data: { status?: string; title?: string; detail?: string; tags?: string[] }) =>
+      request<AchievementItem>(`/achievements/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    illustrate: (id: string, force = false) =>
+      request<AchievementItem>(`/achievements/${id}/illustration${force ? '?force=true' : ''}`, { method: 'POST' }),
+    illustrationUrl: (id: string, v?: string | null) => `/api/v1/achievements/${id}/illustration${v ? `?v=${encodeURIComponent(v)}` : ''}`,
+  },
+
   notes: {
     // Drafts
     listDrafts: () =>
@@ -1665,7 +1817,7 @@ export const api = {
 
   // Collab endpoints
   collab: {
-    createRoom: (data: { title: string; description?: string; project_ref?: string; ai_auto_assist?: boolean }) =>
+    createRoom: (data: { title: string; description?: string; project_ref?: string; ai_auto_assist?: boolean; origin_chat_room_id?: string }) =>
       request<CollabRoomResponse>('/collab/rooms', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -1702,6 +1854,20 @@ export const api = {
         body: JSON.stringify({ guest_name: guestName }),
       }),
 
+    // ゲストの自分の身分（本人専用URL用トークン）
+    me: (token: string) =>
+      request<{ personal_token: string; guest_name: string | null; room_id: string }>('/collab/me', {
+        headers: { 'X-Guest-Token': token },
+      }),
+
+    // ゲストの表示名変更（サーバーの身分ごと更新し、新しい名前入りトークンが返る）
+    rename: (guestName: string, token: string) =>
+      request<{ guest_token: string; guest_name: string }>('/collab/rename', {
+        method: 'POST',
+        body: JSON.stringify({ guest_name: guestName }),
+        headers: { 'X-Guest-Token': token },
+      }),
+
     getMessages: (roomId: string, limit?: number, token?: string) => {
       const headers: Record<string, string> = {};
       if (token) headers['X-Guest-Token'] = token;
@@ -1711,14 +1877,45 @@ export const api = {
       );
     },
 
-    sendMessage: (roomId: string, content: string, token?: string) => {
+    sendMessage: (roomId: string, content: string, token?: string, metadata?: Record<string, unknown>) => {
       const headers: Record<string, string> = {};
       if (token) headers['X-Guest-Token'] = token;
       return request<CollabMessageResponse>(`/collab/rooms/${roomId}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(metadata ? { content, metadata } : { content }),
         headers,
       });
+    },
+
+    // ダンが考え中かどうか（WSが張れない環境のポーリング用・オーナー専用）
+    getDanStatus: (roomId: string) =>
+      request<{ thinking: boolean }>(`/collab/rooms/${roomId}/dan-status`),
+
+    // 参加者名簿＋既読位置（オーナー・ゲスト双方から見える）
+    getParticipants: (roomId: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<{
+        owner: { name: string; last_read_at: string | null };
+        guests: { id: string; name: string; joined_at: string | null; last_read_at: string | null }[];
+      }>(`/collab/rooms/${roomId}/participants`, { headers });
+    },
+
+    // リアクションの付け外し（人間用。同じ絵文字をもう一度でトグル）
+    react: (roomId: string, messageId: string, emoji: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<{ reactions: Record<string, string[]> }>(
+        `/collab/rooms/${roomId}/messages/${messageId}/react`,
+        { method: 'POST', body: JSON.stringify({ emoji }), headers }
+      );
+    },
+
+    // 既読位置の更新（開いている間、定期的に叩く）
+    markRead: (roomId: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<{ ok: boolean }>(`/collab/rooms/${roomId}/read`, { method: 'POST', headers });
     },
 
     getFiles: (roomId: string, token?: string) => {
@@ -1756,6 +1953,9 @@ export interface CollabRoomResponse {
   guest_count: number;
   last_message: string | null;
   last_message_at: string | null;
+  /** 相手の公開メッセージがオーナーの既読位置より後にある（サーバー判定） */
+  unread?: boolean;
+  unread_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -1797,6 +1997,7 @@ export interface CollabJoinResponse {
   guest_token: string;
   guest_name: string;
   role: string;
+  personal_token?: string | null;
 }
 
 export interface CollabMessageResponse {

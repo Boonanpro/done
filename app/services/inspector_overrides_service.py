@@ -119,6 +119,54 @@ class InspectorOverridesService:
         )
         return result.data or []
 
+    async def publish_draft(self, artifact_slug: str, user_id: str) -> dict:
+        """Atomically expose the caller's current draft as one public revision.
+
+        Editing continues to use ``inspector_overrides`` as a private draft.
+        Delivery hosts read only this immutable release, so a half-finished
+        edit can never leak merely because an editor refreshed its preview.
+        """
+        rows = await self.list_by_slug(artifact_slug, user_id)
+        overrides = {
+            str(row["element_key"]): {
+                "styles": row.get("styles") or {},
+                "attrs": row.get("attrs") or {},
+            }
+            for row in rows
+        }
+        result = self.supabase.rpc("publish_artifact_edit_release", {
+            "p_artifact_slug": artifact_slug,
+            "p_created_by": user_id,
+            "p_overrides": overrides,
+        }).execute()
+        if not result.data:
+            raise RuntimeError("The published edit revision could not be created")
+        # PostgREST returns a JSON object for a function returning one composite
+        # row, unlike table inserts which return a one-item list.
+        if isinstance(result.data, dict):
+            return result.data
+        return result.data[0]
+
+    async def list_published_by_slug(self, artifact_slug: str) -> List[dict]:
+        if not await self.is_public_preview_slug(artifact_slug):
+            return []
+        result = (
+            self.supabase.table("artifact_edit_releases")
+            .select("overrides")
+            .eq("artifact_slug", artifact_slug)
+            .order("revision", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
+            return []
+        overrides = result.data[0].get("overrides") or {}
+        return [
+            {"element_key": key, "styles": value.get("styles") or {}, "attrs": value.get("attrs") or {}}
+            for key, value in overrides.items()
+            if isinstance(value, dict)
+        ]
+
     async def delete_by_slug(self, artifact_slug: str, user_id: str) -> int:
         result = (
             self.supabase.table(self.table)

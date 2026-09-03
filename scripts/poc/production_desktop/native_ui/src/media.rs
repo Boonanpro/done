@@ -1042,8 +1042,9 @@ pub fn mix_timeline_audio(
     use std::io::Write;
     let mut file = std::io::BufWriter::new(std::fs::File::create(out_path)?);
     let any_solo = doc.seq.tracks.iter().any(|t| t.solo);
-    // clip id -> (decoder, next_src_t): continuity avoids a re-seek per chunk
-    let mut streams: HashMap<String, (AudioDecoder, f64)> = HashMap::new();
+    // clip id -> stream state: continuity avoids a re-seek per chunk; per-clip speed
+    // shares the same WSOLA machinery as live playback (export parity).
+    let mut streams: HashMap<String, ClipStream> = HashMap::new();
     let chunk = (rate / 10) as usize; // 100ms windows, same order of magnitude as device fills
     let total = ((end - start).max(0.0) * rate as f64).round() as u64;
     let mut done: u64 = 0;
@@ -1075,29 +1076,103 @@ pub fn mix_timeline_audio(
                 let path = doc.asset_path(aid);
                 match AudioDecoder::open(&path, rate, ch) {
                     Ok(dec) => {
-                        streams.insert(c.id.clone(), (dec, f64::NAN));
+                        streams.insert(
+                            c.id.clone(),
+                            ClipStream {
+                                dec,
+                                next_src_t: f64::NAN,
+                                last_used: 0,
+                                stretch: None,
+                                stretch_speed: 1.0,
+                                stretch_fifo: VecDeque::new(),
+                                stretch_last: Vec::new(),
+                            },
+                        );
                     }
                     Err(_) => continue, // asset without a decodable audio stream
                 }
             }
-            let (dec, next_src_t) = streams.get_mut(&c.id).unwrap();
-            let src_t = c.source_start + (t0 + s0 as f64 / rate as f64) - c.timeline_start;
-            if !next_src_t.is_finite() || (*next_src_t - src_t).abs() > 0.08 {
-                if dec.seek(src_t, rate, ch).is_err() {
+            let st = streams.get_mut(&c.id).unwrap();
+            // クリップ速度: 再生 fill と同じブロック写像+WSOLA（書き出しパリティ）
+            let t_blk0 = t0 + s0 as f64 / rate as f64;
+            let t_blk1 = t0 + s1 as f64 / rate as f64;
+            let src_t = c.src_at(t_blk0);
+            let eff = if t_blk1 > t_blk0 + 1e-9 {
+                ((c.src_at(t_blk1) - src_t) / (t_blk1 - t_blk0)).clamp(0.25, 8.0)
+            } else {
+                c.rate_at(t_blk0).clamp(0.25, 8.0)
+            };
+            let stretching = (eff - 1.0).abs() > 0.01;
+            let buffered_stretch = stretching && !st.stretch_fifo.is_empty();
+            if !st.next_src_t.is_finite()
+                || (!buffered_stretch && (st.next_src_t - src_t).abs() > 0.08)
+            {
+                if st.dec.seek(src_t, rate, ch).is_err() {
                     continue;
                 }
-                *next_src_t = src_t;
+                st.next_src_t = src_t;
+                if let Some(p) = st.stretch.as_mut() {
+                    p.reset();
+                }
+                st.stretch_fifo.clear();
+                st.stretch_last.clear();
             }
             let out_frames = s1 - s0;
-            let n = out_frames * ch;
-            scratch.clear();
-            scratch.resize(n, 0.0);
-            if dec.pull(&mut scratch[..n], rate, ch).is_err() {
-                continue;
-            }
-            *next_src_t = src_t + out_frames as f64 / rate as f64;
-            for (o, sv) in buf[s0 * ch..s1 * ch].iter_mut().zip(scratch.iter()) {
-                *o += *sv * vol;
+            if !stretching {
+                let n = out_frames * ch;
+                scratch.clear();
+                scratch.resize(n, 0.0);
+                if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
+                    continue;
+                }
+                st.next_src_t = src_t + out_frames as f64 / rate as f64;
+                for (o, sv) in buf[s0 * ch..s1 * ch].iter_mut().zip(scratch.iter()) {
+                    *o += *sv * vol;
+                }
+            } else {
+                if st.stretch.is_none() {
+                    st.stretch = Some(Wsola::new(rate, ch, eff));
+                    st.stretch_speed = eff;
+                } else if (st.stretch_speed - eff).abs() > 1e-6 {
+                    if let Some(p) = st.stretch.as_mut() {
+                        p.set_speed(eff);
+                    }
+                    st.stretch_speed = eff;
+                }
+                let need = out_frames * ch;
+                let target_fifo = need + ((rate as usize / 4).max(2048) * ch);
+                let mut guard = 0usize;
+                while st.stretch_fifo.len() < target_fifo && guard < 4 {
+                    guard += 1;
+                    let missing_frames = ((target_fifo - st.stretch_fifo.len()) / ch).max(out_frames);
+                    let src_frames = ((missing_frames as f64 * eff).ceil() as usize + rate as usize / 8)
+                        .clamp(4096, rate as usize);
+                    let n = src_frames * ch;
+                    scratch.clear();
+                    scratch.resize(n, 0.0);
+                    if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
+                        break;
+                    }
+                    st.next_src_t += src_frames as f64 / rate as f64;
+                    let mut stretched = Vec::with_capacity(need + 65_536);
+                    if let Some(p) = st.stretch.as_mut() {
+                        p.process_into(&scratch, &mut stretched);
+                    }
+                    st.stretch_fifo.extend(stretched);
+                }
+                if st.stretch_last.len() != ch {
+                    st.stretch_last.resize(ch, 0.0);
+                }
+                for (idx, o) in buf[s0 * ch..s1 * ch].iter_mut().enumerate() {
+                    let cc = idx % ch;
+                    let sv = if let Some(v) = st.stretch_fifo.pop_front() {
+                        st.stretch_last[cc] = v;
+                        v
+                    } else {
+                        st.stretch_last[cc]
+                    };
+                    *o += sv * vol;
+                }
             }
         }
         for v in buf[..frames * ch].iter_mut() {
@@ -1135,7 +1210,9 @@ impl Wsola {
     fn new(rate: u32, ch: usize, speed: f64) -> Self {
         let r = rate as usize;
         Self {
-            speed: speed.max(1.0),
+            // 1.0未満も許可: read位置がwrite位置より遅く進む=スローになる（同じ
+            // アルゴリズムで低速側も成立する）。クリップ速度のスロー再生に使う。
+            speed: speed.clamp(0.25, 8.0),
             ch,
             seg: r * 20 / 1000,
             ola: r * 6 / 1000,
@@ -1144,6 +1221,11 @@ impl Wsola {
             in_pos: 0.0,
             tail: Vec::new(),
         }
+    }
+
+    /// レシオの滑らかな更新（スピードランプ用）。状態は保つ＝クリック無し。
+    fn set_speed(&mut self, s: f64) {
+        self.speed = s.clamp(0.25, 8.0);
     }
 
     fn reset(&mut self) {
@@ -1382,8 +1464,19 @@ impl AudioOut {
                 }
                 let st = self.streams.get_mut(&c.id).unwrap();
                 st.last_used = fills;
-                let src_t = c.source_start + (t0 + s0 as f64 / rate as f64 * speed) - c.timeline_start;
-                let buffered_stretch = speed > 1.01 && !st.stretch_fifo.is_empty();
+                // クリップ速度対応: ブロック境界のタイムライン時刻をクリップの写像で
+                // ソースへ変換。実効レシオ = グローバル速度 × クリップ局所レート。
+                let t_blk0 = t0 + s0 as f64 / rate as f64 * speed;
+                let t_blk1 = t0 + s1 as f64 / rate as f64 * speed;
+                let src_t = c.src_at(t_blk0);
+                let clip_rate = if t_blk1 > t_blk0 + 1e-9 {
+                    ((c.src_at(t_blk1) - src_t) / (t_blk1 - t_blk0)).clamp(0.05, 16.0)
+                } else {
+                    c.rate_at(t_blk0)
+                };
+                let eff = (speed * clip_rate).clamp(0.25, 8.0);
+                let stretching = (eff - 1.0).abs() > 0.01;
+                let buffered_stretch = stretching && !st.stretch_fifo.is_empty();
                 let discontinuity = !st.next_src_t.is_finite()
                     || (!buffered_stretch && (st.next_src_t - src_t).abs() > 0.08);
                 if discontinuity {
@@ -1398,7 +1491,7 @@ impl AudioOut {
                     st.stretch_last.clear();
                 }
                 let out_frames = s1 - s0;
-                if speed <= 1.01 {
+                if !stretching {
                     let n = out_frames * ch;
                     scratch.clear();
                     scratch.resize(n, 0.0);
@@ -1410,11 +1503,18 @@ impl AudioOut {
                         *o += *sv * vol;
                     }
                 } else {
-                    if st.stretch.is_none() || (st.stretch_speed - speed).abs() > 0.01 {
-                        st.stretch = Some(Wsola::new(rate, ch, speed));
-                        st.stretch_speed = speed;
+                    if st.stretch.is_none() {
+                        st.stretch = Some(Wsola::new(rate, ch, eff));
+                        st.stretch_speed = eff;
                         st.stretch_fifo.clear();
                         st.stretch_last.clear();
+                    } else if (st.stretch_speed - eff).abs() > 1e-6 {
+                        // ランプ中はブロック毎にレシオが変わる: 状態を保ったまま更新
+                        // （作り直すとリセット音が出る）
+                        if let Some(p) = st.stretch.as_mut() {
+                            p.set_speed(eff);
+                        }
+                        st.stretch_speed = eff;
                     }
                     let need = out_frames * ch;
                     let target_fifo = need + ((rate as usize / 4).max(2048) * ch);
@@ -1422,7 +1522,7 @@ impl AudioOut {
                     while st.stretch_fifo.len() < target_fifo && guard < 4 {
                         guard += 1;
                         let missing_frames = ((target_fifo - st.stretch_fifo.len()) / ch).max(out_frames);
-                        let src_frames = ((missing_frames as f64 * speed).ceil() as usize + rate as usize / 8)
+                        let src_frames = ((missing_frames as f64 * eff).ceil() as usize + rate as usize / 8)
                             .clamp(4096, rate as usize);
                         let n = src_frames * ch;
                         scratch.clear();

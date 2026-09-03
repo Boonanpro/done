@@ -96,6 +96,24 @@ def _system_prompt() -> str:
             parts.append(bs)
     except Exception:  # noqa: BLE001
         logger.exception("bootstrap persona load failed — falling back to bare prompt")
+    try:
+        from app.agent.v2.tools import SkillRegistry
+        hidden = {"self-dev"}
+        entries = sorted(
+            f"- {s.name}: {s.description}"
+            for s in SkillRegistry.list_all()
+            if s.name not in hidden
+        )
+        if entries:
+            parts.append(
+                "## 使えるスキル（作業の手順書）\n"
+                "ジャンルに合うスキルが下にある場合、作業を始める前に check_skill ツールで本文を読み、"
+                "その手順・様式（テロップ様式・カット密度・構成の型など）に従うこと。"
+                "例: 解説動画/ドキュメンタリー調の組み立ては explainer-video、"
+                "動画の仕上げ・ぼかしは post-production。\n" + "\n".join(entries)
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("skill catalog load failed — continuing without it")
     parts.append(
         "## 今の状況: 動画タイムラインの編集ジョブ\n"
         "あなたは今チャットではなく、ユーザーが開いている動画エディタのタイムラインを直接編集している。\n"

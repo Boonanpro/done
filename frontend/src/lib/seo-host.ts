@@ -11,7 +11,7 @@
  *
  * 内部ホスト（クロール禁止）:
  *   - localhost / 127.0.0.1
- *   - ダン本体の *.vercel.app（done-studio.vercel.app / frontend-xxxx.vercel.app 等）
+ *   - ダン本体の *.vercel.app（frontend-xxxx.vercel.app 等）
  *     ここにはチャットシェル・管理画面・編集用プレビューが同居するため丸ごと塞ぐ。
  */
 

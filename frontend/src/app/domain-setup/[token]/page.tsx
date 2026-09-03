@@ -21,6 +21,7 @@ interface DomainSetup {
   production_url?: string | null;
   detail?: string | null;
   error?: string | null;
+  registrant_saved?: boolean;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -43,6 +44,7 @@ export default function DomainSetupPage() {
   const [loading, setLoading] = useState(true);
   const [paying, setPaying] = useState(false);
   const [payError, setPayError] = useState('');
+  const [registrant, setRegistrant] = useState({ name: '', organization: '', email: '', phone: '', street: '', city: '', state: '', postal_code: '', country_code: 'JP' });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchState = useCallback(async (): Promise<DomainSetup | null> => {
@@ -108,6 +110,15 @@ export default function DomainSetupPage() {
     setPaying(true);
     setPayError('');
     try {
+      if (!data?.registrant_saved) {
+        const registrantRes = await fetch(`/api/v1/publish/domain-setup/${token}/registrant`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(registrant),
+        });
+        if (!registrantRes.ok) {
+          const error = await registrantRes.json().catch(() => ({}));
+          throw new Error(error.detail || 'Please complete the registrant information.');
+        }
+      }
       const res = await fetch(`/api/v1/publish/domain-setup/${token}/checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -151,6 +162,7 @@ export default function DomainSetupPage() {
 
   const label = data.artifact_label || '成果物';
   const domain = data.domain || '';
+  const updateRegistrant = (key: keyof typeof registrant, value: string) => setRegistrant((current) => ({ ...current, [key]: value }));
 
   // 公開完了
   if (data.status === 'live') {
@@ -238,6 +250,20 @@ export default function DomainSetupPage() {
           {data.price ? `$${data.price}` : '—'}
         </span>
       </div>
+
+      {!data.registrant_saved && (
+        <div className="mt-5 space-y-3 rounded-lg border border-slate-200 p-4">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">このドメインの名義人情報</h2>
+            <p className="mt-1 text-xs text-slate-500">支払う人とは別です。ここに入力した個人・会社の名義で登録されます。</p>
+          </div>
+          {([['name', '氏名（担当者名）'], ['organization', '会社名（任意）'], ['email', 'メールアドレス'], ['phone', '電話番号（+81から）'], ['street', '住所'], ['city', '市区町村'], ['state', '都道府県'], ['postal_code', '郵便番号'], ['country_code', '国コード（日本はJP）']] as const).map(([key, label]) => (
+            <label key={key} className="block text-xs text-slate-600">{label}
+              <input value={registrant[key]} onChange={(e) => updateRegistrant(key, e.target.value)} className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900" required={key !== 'organization'} />
+            </label>
+          ))}
+        </div>
+      )}
 
       {payError && (
         <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">{payError}</p>

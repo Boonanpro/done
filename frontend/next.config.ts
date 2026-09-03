@@ -109,6 +109,24 @@ const nextConfig: NextConfig = {
         source: '/api/v1/realtime/:path*',
         destination: `${coreBackendUrl}/api/v1/realtime/:path*`,
       },
+      // 「今日やったこと」台帳はダンコア (ポーラーと同居)
+      {
+        source: '/api/v1/achievements',
+        destination: `${coreBackendUrl}/api/v1/achievements`,
+      },
+      {
+        source: '/api/v1/achievements/:path*',
+        destination: `${coreBackendUrl}/api/v1/achievements/:path*`,
+      },
+      // ダン開発の物語 (静的HTMLをダンコア経由で配信)
+      {
+        source: '/api/v1/story',
+        destination: `${coreBackendUrl}/api/v1/story`,
+      },
+      {
+        source: '/api/v1/story/:path*',
+        destination: `${coreBackendUrl}/api/v1/story/:path*`,
+      },
       // 上記以外の /api/* は業務系サンドボックスへ
       {
         source: '/api/:path*',
@@ -177,6 +195,26 @@ const nextConfig: NextConfig = {
         source: '/kikkawa-tokuso/:path*',
         destination: '/artifacts/kittoku/:path*',
       },
+      // 専用配信プロジェクト（1 プロジェクト = 1 成果物）の子ページ。
+      //
+      // middleware は `/` だけを成果物直下へ rewrite し、サブパスは
+      // 「filesystem 側に任せる」として素通ししている。ところが専用
+      // プロジェクトには /download や /legal という実ルートが無い（実体は
+      // /artifacts/<slug>/download）ので、ここが無いと**トップだけ開いて
+      // 子ページが全部 404** になる。独自ドメインを繋いだ成果物は
+      // CUSTOM_DOMAIN_REWRITES が同じ役目を果たすが、専用URLのままの
+      // 成果物には対応するものが無かった。
+      //
+      // rewrites() の配列は afterFiles として評価されるため、/_next・/api・
+      // /artifacts・public 配下の実ファイルはここへ来る前に解決される。
+      ...(process.env.ARTIFACT_ONLY_SLUG?.trim()
+        ? [
+            {
+              source: '/:path+',
+              destination: `/artifacts/${process.env.ARTIFACT_ONLY_SLUG.trim()}/:path+`,
+            },
+          ]
+        : []),
       // 接続済み独自ドメインの host条件付き rewrite（DB由来で自動生成）。
       // 配列末尾＝filesystem ルートと先行 rewrite の後に評価されるので、クリーンパス
       // (/business 等)だけを成果物配下に振り向ける（/robots.txt /sitemap.xml /_next

@@ -1,18 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const DEFAULT_PUBLIC_ARTIFACT_SLUGS = 'kittoku,test-edit,salonboard-styleup';
-
 function backendUrl(): string {
   return process.env.BACKEND_URL || 'http://127.0.0.1:8000';
-}
-
-function publicSlugs(): Set<string> {
-  return new Set(
-    (process.env.PUBLIC_ARTIFACT_SLUGS || process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || DEFAULT_PUBLIC_ARTIFACT_SLUGS)
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
 }
 
 function supabaseConfig() {
@@ -48,17 +37,16 @@ export async function GET(request: NextRequest) {
     // have a reachable backend proxy configured.
   }
 
-  if (!publicSlugs().has(slug)) return NextResponse.json([]);
-
   const { url, key } = supabaseConfig();
   if (!url || !key) {
     return NextResponse.json({ detail: 'Supabase is not configured' }, { status: 500 });
   }
 
-  const endpoint = new URL('/rest/v1/inspector_overrides', url);
+  const endpoint = new URL('/rest/v1/artifact_edit_releases', url);
   endpoint.searchParams.set('artifact_slug', `eq.${slug}`);
-  endpoint.searchParams.set('select', '*');
-  endpoint.searchParams.set('order', 'updated_at.asc');
+  endpoint.searchParams.set('select', 'overrides');
+  endpoint.searchParams.set('order', 'revision.desc');
+  endpoint.searchParams.set('limit', '1');
 
   const res = await fetch(endpoint, {
     headers: {
@@ -72,7 +60,13 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ detail: 'Failed to load public overrides' }, { status: res.status });
   }
 
-  const rows = await res.json();
+  const releases = await res.json() as Array<{ overrides?: Record<string, { styles?: Record<string, string>; attrs?: Record<string, unknown> }> }>;
+  const overrides = releases[0]?.overrides || {};
+  const rows = Object.entries(overrides).map(([element_key, value]) => ({
+    element_key,
+    styles: value?.styles || {},
+    attrs: value?.attrs || {},
+  }));
   return NextResponse.json(rows, {
     headers: {
       'Cache-Control': 'no-store',

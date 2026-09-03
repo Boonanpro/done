@@ -74,7 +74,6 @@ def main() -> int:
     cases = [
         ("app/api/chat_routes.py belongs to Dan infra", ROOT / "app/api/chat_routes.py"),
         ("frontend/src/middleware.ts belongs to Dan infra", ROOT / "frontend/src/middleware.ts"),
-        ("scripts/auto_deploy.py", ROOT / "scripts/auto_deploy.py"),
         # Different artifact's file should be rejected when slug doesn't match.
         (
             "salonboard file under kittoku slug",

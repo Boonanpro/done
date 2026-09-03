@@ -16,7 +16,7 @@ use crate::media::D3d;
 pub type CaptionTex = (ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64), f64);
 
 const HLSL: &str = r#"
-cbuffer CB : register(b0) { float4 dst; float4 uvr; float4 aff; float4 opt; };
+cbuffer CB : register(b0) { float4 dst; float4 uvr; float4 aff; float4 opt; float4 ext; };
 struct VOut { float4 pos: SV_Position; float2 uv: TEXCOORD0; };
 VOut vs(uint id: SV_VertexID) {
   float2 corners[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
@@ -32,13 +32,48 @@ Texture2D tex1 : register(t1);
 Texture2D tex2 : register(t2);
 Texture2D tex3 : register(t3);
 SamplerState smp : register(s0);
+// カラーグレード（プレビュー/書き出し共通）。opt.y=モード(0=無効,1=素材のまま,
+// 2=S-Log3,3=V-Log,4=C-Log3)、opt.z=露出EV、opt.w=コントラスト、
+// aff.x=彩度、aff.y=色温度(-1..1 暖<->寒)、aff.z=ティント(-1..1 緑<->マゼンタ)。
+// Log変換は各社公式カーブの主要セグメント→2.2ガンマの"見れる"変換（厳密な
+// カラーマネジメントではなくざっくりノーマライズが目的）。
+float3 apply_grade(float3 c) {
+  int mode = (int)round(opt.y);
+  if (mode == 0) return c;
+  if (mode >= 2) {
+    float3 x = c;
+    float3 lin;
+    if (mode == 2) {        // Sony S-Log3
+      lin = (x >= 0.1712) ? (pow(10.0, (x - 0.4205) / 0.2556) - 0.0526) / 4.7368
+                          : (x - 0.0929) / 5.3676;
+    } else if (mode == 3) { // Panasonic V-Log
+      lin = (x < 0.181) ? (x - 0.125) / 5.6
+                        : pow(10.0, (x - 0.598206) / 0.241514) - 0.00873;
+    } else {                // Canon C-Log3（主要セグメント近似）
+      lin = (x < 0.097) ? (x - 0.0730) / 2.3069
+                        : (pow(10.0, (x - 0.0698) / 0.42889) - 1.0) / 14.98325;
+    }
+    lin = max(lin, 0.0) * exp2(opt.z);
+    // ハイライトに軽い肩を付けて白飛びを緩和してから2.2ガンマへ
+    lin = lin / (1.0 + max(lin - 0.85, 0.0) * 0.65);
+    c = pow(saturate(lin), 1.0 / 2.2);
+  } else {
+    c = saturate(c * exp2(opt.z));
+  }
+  c = (c - 0.4135) * opt.w + 0.4135;
+  float lum = dot(c, float3(0.2126, 0.7152, 0.0722));
+  c = lerp(float3(lum, lum, lum), c, aff.x);
+  float t = aff.y, m = aff.z;
+  c *= float3(1.0 + 0.22 * t + 0.10 * m, 1.0 - 0.12 * m, 1.0 - 0.22 * t + 0.10 * m);
+  return saturate(c);
+}
 float4 ps_plain(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
-  return float4(c.rgb * opt.x, opt.x);
+  return float4(apply_grade(c.rgb) * opt.x, opt.x);
 }
 float4 ps_alpha(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
-  return float4(c.rgb * c.a * opt.x, c.a * opt.x);
+  return float4(apply_grade(c.rgb) * c.a * opt.x, c.a * opt.x);
 }
 float4 ps_popout(VOut i) : SV_Target {
   float3 c = tex0.Sample(smp, i.uv).rgb;
@@ -94,15 +129,34 @@ float4 ps_blur_masked(VOut i) : SV_Target {
 // export's uniform crop-blur exactly.
 float4 ps_blur_rect(VOut i) : SV_Target {
   float2 cuv = i.pos.xy / aff.zw;
-  float2 local = (cuv - uvr.xy) / max(uvr.zw, 1e-6);
   float3 base = tex0.Sample(smp, cuv).rgb;
-  if (any(local < 0.0) || any(local > 1.0)) return float4(base, 1.0);
+  // 回転対応: 矩形中心周りにθ^-1回してから軸平行判定（斜めのぼかし帯用）。
+  // ext.x=cosθ ext.y=sinθ ext.z=アスペクト(w/h)。判定はアスペクト補正空間。
+  float2 ctr = uvr.xy + uvr.zw * 0.5;
+  float2 p = float2((cuv.x - ctr.x) * ext.z, cuv.y - ctr.y);
+  float2 q = float2(ext.x * p.x + ext.y * p.y, -ext.y * p.x + ext.x * p.y);
+  float2 hs = float2(uvr.z * 0.5 * ext.z, uvr.w * 0.5);
+  if (abs(q.x) > hs.x || abs(q.y) > hs.y) return float4(base, 1.0);
   float3 blurc = soft_blur(cuv, aff.xy);
   return float4(blurc, 1.0);
 }
 // A static redaction card. opt = RGB + opacity, with premultiplied-alpha output.
 float4 ps_solid_rect(VOut i) : SV_Target {
   return float4(opt.rgb * opt.a, opt.a);
+}
+// 回転つき単色矩形（斜めの疑似ライン/帯用）。全画面クアッドで描き、ピクセル毎に
+// 回転後の矩形内かを判定する。ext.xy=回転後の矩形中心(canvas uv)、ext.zw=半サイズ
+// (canvas uv)、aff.x=cosθ aff.y=sinθ aff.z=アスペクト(w/h) aff.w=1px(uv,高さ基準)。
+// 判定はアスペクト補正空間（角度が見た目通りになる）、境界は約1pxスムースでAA。
+float4 ps_solid_rot(VOut i) : SV_Target {
+  float2 p = float2((i.uv.x - ext.x) * aff.z, i.uv.y - ext.y);
+  float2 q = float2(aff.x * p.x + aff.y * p.y, -aff.y * p.x + aff.x * p.y);
+  float2 hs = float2(ext.z * aff.z, ext.w);
+  float e = aff.w * 0.75;
+  float ax = 1.0 - smoothstep(hs.x - e, hs.x + e, abs(q.x));
+  float ay = 1.0 - smoothstep(hs.y - e, hs.y + e, abs(q.y));
+  float a = ax * ay * opt.a;
+  return float4(opt.rgb * a, a);
 }
 // Soft-edged box coverage for the attention effects: 1 inside uvr, 0 outside,
 // feathered over aff.xy (canvas-uv units).
@@ -252,11 +306,15 @@ struct Cb {
     uvr: [f32; 4],
     aff: [f32; 4],
     opt: [f32; 4],
+    ext: [f32; 4],
 }
 
 pub struct Compositor {
     pub width: u32,
     pub height: u32,
+    /// 次の draw_* 1回に適用するカラーグレード係数（ワンショット）。
+    /// [mode, ev, contrast, sat, temp, tint]
+    grade: std::cell::Cell<Option<[f32; 6]>>,
     canvas: ID3D11Texture2D,
     rtv: ID3D11RenderTargetView,
     staging: [ID3D11Texture2D; 3],
@@ -271,6 +329,7 @@ pub struct Compositor {
     ps_blur_masked: ID3D11PixelShader,
     ps_blur_rect: ID3D11PixelShader,
     ps_solid_rect: ID3D11PixelShader,
+    ps_solid_rot: ID3D11PixelShader,
     ps_solid_masked: ID3D11PixelShader,
     ps_spotlight: ID3D11PixelShader,
     ps_marker: ID3D11PixelShader,
@@ -369,6 +428,9 @@ impl Compositor {
             let psb8 = compile("ps_solid_masked", "ps_5_0")?;
             let mut ps_solid_masked: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb8), None, Some(&mut ps_solid_masked))?;
+            let psbr = compile("ps_solid_rot", "ps_5_0")?;
+            let mut ps_solid_rot: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psbr), None, Some(&mut ps_solid_rot))?;
             let psb9 = compile("ps_spotlight", "ps_5_0")?;
             let mut ps_spotlight: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb9), None, Some(&mut ps_spotlight))?;
@@ -428,6 +490,7 @@ impl Compositor {
             Ok(Self {
                 width,
                 height,
+                grade: std::cell::Cell::new(None),
                 canvas,
                 rtv: rtv.unwrap(),
                 staging: [staging0.unwrap(), staging1.unwrap(), staging2.unwrap()],
@@ -442,6 +505,7 @@ impl Compositor {
                 ps_blur_masked: ps_blur_masked.unwrap(),
                 ps_blur_rect: ps_blur_rect.unwrap(),
                 ps_solid_rect: ps_solid_rect.unwrap(),
+                ps_solid_rot: ps_solid_rot.unwrap(),
                 ps_solid_masked: ps_solid_masked.unwrap(),
                 ps_spotlight: ps_spotlight.unwrap(),
                 ps_marker: ps_marker.unwrap(),
@@ -481,6 +545,12 @@ impl Compositor {
     /// Draw into a canvas box. `cover` preserves source aspect and crops overflow;
     /// `opacity` is applied in the same premultiplied-alpha pass.
     #[allow(clippy::too_many_arguments)]
+    /// 次の draw_* 1回だけに適用するグレード係数を仕込む（描画時に take で消費）。
+    /// [mode, ev, contrast, sat, temp, tint]
+    pub fn set_grade(&self, g: Option<[f32; 6]>) {
+        self.grade.set(g);
+    }
+
     pub fn draw_opacity(
         &self,
         d3d: &D3d,
@@ -576,11 +646,19 @@ impl Compositor {
                     dst.3 * (1.0 - t - b).max(0.02),
                 );
             }
+            // ワンショットのグレード係数（set_grade → 直後の draw 1回で消費）
+            let g = self.grade.take();
             let cbv = Cb {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],
                 uvr: [u0, v0, uw, vh],
-                aff: [0.0, 0.0, 1.0, 1.0],
-                opt: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                aff: g.map(|g| [g[3], g[4], g[5], 0.0]).unwrap_or([0.0, 0.0, 1.0, 1.0]),
+                opt: [
+                    opacity.clamp(0.0, 1.0),
+                    g.map(|g| g[0]).unwrap_or(0.0),
+                    g.map(|g| g[1]).unwrap_or(0.0),
+                    g.map(|g| g[2]).unwrap_or(1.0),
+                ],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&views));
@@ -617,6 +695,7 @@ impl Compositor {
                 uvr: [0.0, 0.0, 1.0, 1.0],
                 aff,
                 opt: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&views));
@@ -745,6 +824,7 @@ impl Compositor {
                 uvr: [x as f32, y as f32, w as f32, h as f32],
                 aff: [cells_x, cells_y, 0.0, 0.0],
                 opt: [1.0, 0.0, 0.0, 0.0],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
@@ -831,6 +911,7 @@ impl Compositor {
                     self.height as f32,
                 ],
                 opt: [1.0, 0.0, 0.0, 0.0],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));
@@ -842,7 +923,8 @@ impl Compositor {
 
     /// Static-rectangle SOFT blur (the un-baked stand-in / "gaussian" style): same haze
     /// as the tracked path, gated to the drawn region.
-    pub fn apply_blur_rect(&self, d3d: &D3d, region: (f64, f64, f64, f64), radius_px: f64) -> Result<()> {
+    /// rot_deg: 矩形中心周りの時計回り回転（斜めのぼかし帯）。0で従来通り。
+    pub fn apply_blur_rect(&self, d3d: &D3d, region: (f64, f64, f64, f64), radius_px: f64, rot_deg: f64) -> Result<()> {
         unsafe {
             {
                 let mut sc = self.scratch.borrow_mut();
@@ -864,8 +946,17 @@ impl Compositor {
             let mut srv: Option<ID3D11ShaderResourceView> = None;
             d3d.device.CreateShaderResourceView(scratch, None, Some(&mut srv))?;
             let (x, y, w, h) = region;
+            let asp = self.width as f64 / self.height as f64;
+            let (sn, cs) = rot_deg.to_radians().sin_cos();
+            // 回転時は回転後の角がクアッド外に出るので全画面クアッドで描く
+            // （矩形外ピクセルはシェーダが元画像をそのまま返すため無害）
+            let dst = if rot_deg.abs() < 1e-3 {
+                [x as f32, y as f32, w as f32, h as f32]
+            } else {
+                [0.0, 0.0, 1.0, 1.0]
+            };
             let cbv = Cb {
-                dst: [x as f32, y as f32, w as f32, h as f32],
+                dst,
                 uvr: [x as f32, y as f32, w as f32, h as f32],
                 aff: [
                     (radius_px / self.width as f64) as f32,
@@ -874,10 +965,43 @@ impl Compositor {
                     self.height as f32,
                 ],
                 opt: [1.0, 0.0, 0.0, 0.0],
+                ext: [cs as f32, sn as f32, asp as f32, 0.0],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
             d3d.ctx.PSSetShader(&self.ps_blur_rect, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
+    /// 回転つき単色矩形。pivot（canvas uv）周りに時計回り rot_deg 回す。
+    /// 枠の帯4本のように「共通の中心で回したい」呼び出しのため、矩形自身の中心も
+    /// ここで pivot 周りに回してからシェーダへ渡す（回転はアスペクト補正空間）。
+    pub fn apply_solid_rect_rot(
+        &self, d3d: &D3d, region: (f64, f64, f64, f64), color: [f32; 3], opacity: f64,
+        rot_deg: f64, pivot: (f64, f64),
+    ) -> Result<()> {
+        if rot_deg.abs() < 1e-3 {
+            return self.apply_solid_rect(d3d, region, color, opacity);
+        }
+        unsafe {
+            let (x, y, w, h) = region;
+            let asp = self.width as f64 / self.height as f64;
+            let (sn, cs) = rot_deg.to_radians().sin_cos();
+            let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+            let (dx, dy) = ((cx - pivot.0) * asp, cy - pivot.1);
+            let rcx = pivot.0 + (cs * dx - sn * dy) / asp;
+            let rcy = pivot.1 + (sn * dx + cs * dy);
+            let cbv = Cb {
+                dst: [0.0, 0.0, 1.0, 1.0],
+                uvr: [0.0, 0.0, 1.0, 1.0],
+                aff: [cs as f32, sn as f32, asp as f32, 1.0 / self.height as f32],
+                opt: [color[0], color[1], color[2], opacity.clamp(0.0, 1.0) as f32],
+                ext: [rcx as f32, rcy as f32, (w * 0.5) as f32, (h * 0.5) as f32],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShader(&self.ps_solid_rot, None);
             d3d.ctx.Draw(4, 0);
             Ok(())
         }
@@ -890,6 +1014,7 @@ impl Compositor {
             let cbv = Cb {
                 dst: [x as f32, y as f32, w as f32, h as f32], uvr: [0.0; 4], aff: [0.0; 4],
                 opt: [color[0], color[1], color[2], opacity.clamp(0.0, 1.0) as f32],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShader(&self.ps_solid_rect, None);
@@ -934,6 +1059,7 @@ impl Compositor {
                     self.height as f32,
                 ],
                 opt: [1.0, dim as f32, 0.0, wash as f32],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
@@ -980,6 +1106,7 @@ impl Compositor {
                 uvr: [(x + w / 2.0) as f32, (y + h / 2.0) as f32, 0.0, 0.0],
                 aff: [0.0, 0.0, self.width as f32, self.height as f32],
                 opt: [1.0, zoom.clamp(1.0, 4.0) as f32, 0.0, 0.0],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
@@ -1027,6 +1154,7 @@ impl Compositor {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32], uvr: [u0, v0, uw, vh],
                 aff: [0.0, 0.0, self.width as f32, self.height as f32],
                 opt: [color[0], color[1], color[2], opacity.clamp(0.0, 1.0) as f32],
+                ext: [0.0; 4],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));

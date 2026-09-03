@@ -1,7 +1,7 @@
 'use client';
 
 import { RefObject, useEffect, useRef } from 'react';
-import { Send, X } from 'lucide-react';
+import { Plus, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { usePreviewStore } from '@/stores/preview-store';
@@ -14,9 +14,13 @@ export function CommentPopover({
   onSubmit: () => void;
 }) {
   const selectedElement = usePreviewStore((s) => s.selectedElement);
+  const selectedElements = usePreviewStore((s) => s.selectedElements);
+  const editingCommentId = usePreviewStore((s) => s.editingCommentId);
   const popoverDraft = usePreviewStore((s) => s.popoverDraft);
   const setPopoverDraft = usePreviewStore((s) => s.setPopoverDraft);
   const clearSelection = usePreviewStore((s) => s.clearSelection);
+  const removeSelectedElement = usePreviewStore((s) => s.removeSelectedElement);
+  const pendingCount = usePreviewStore((s) => s.pendingComments.length);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -27,8 +31,11 @@ export function CommentPopover({
 
   if (!selectedElement) return null;
 
+  const elements = selectedElements.length ? selectedElements : [selectedElement];
+  const isMulti = elements.length > 1;
+
   const POPOVER_WIDTH = 300;
-  const POPOVER_HEIGHT = 160;
+  const POPOVER_HEIGHT = 200;
   const iframe = iframeRef.current;
   const containerRect = iframe?.parentElement?.getBoundingClientRect();
   const maxX = (containerRect?.width ?? 800) - POPOVER_WIDTH - 12;
@@ -43,14 +50,40 @@ export function CommentPopover({
       className="absolute z-30 flex w-[300px] flex-col gap-2 rounded-lg border border-border bg-popover p-2.5 shadow-xl"
       style={{ left: x, top: y }}
     >
-      <div className="flex items-center gap-1.5 text-xs">
-        <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono font-medium text-primary">
-          @{selectedElement.refId}
-        </span>
-        <span className="truncate text-muted-foreground">
-          &lt;{selectedElement.tagName}&gt;
-          {selectedElement.text ? ` "${selectedElement.text}"` : ''}
-        </span>
+      <div className="flex items-start gap-1.5 text-xs">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+          {editingCommentId && (
+            <span className="w-full text-[11px] font-medium text-amber-500">
+              コメントを編集中（更新で上書き / Esc でキャンセル）
+            </span>
+          )}
+          {isMulti && (
+            <span className="w-full text-[11px] font-medium text-foreground">
+              {elements.length}個の要素を選択中
+            </span>
+          )}
+          {elements.map((el) => (
+            <span
+              key={el.refId}
+              className="inline-flex max-w-full items-center gap-1 rounded bg-primary/15 px-1.5 py-0.5 font-mono text-primary"
+            >
+              @{el.refId}
+              <span className="truncate font-sans text-muted-foreground">
+                &lt;{el.tagName}&gt;
+                {el.text ? ` "${el.text.slice(0, isMulti ? 12 : 40)}"` : ''}
+              </span>
+              {isMulti && (
+                <button
+                  onClick={() => removeSelectedElement(el.refId)}
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  title="この要素を選択から外す"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
         <button
           onClick={clearSelection}
           className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
@@ -72,7 +105,7 @@ export function CommentPopover({
             clearSelection();
           }
         }}
-        placeholder="この要素へのコメント..."
+        placeholder={isMulti ? `選択中の${elements.length}要素へのコメント...` : 'この要素へのコメント...'}
         rows={3}
         className="min-h-[72px] resize-none rounded-md border border-border bg-input/40 p-2 text-sm focus:border-primary/50 focus:outline-none"
       />
@@ -82,9 +115,18 @@ export function CommentPopover({
         onClick={onSubmit}
         disabled={!popoverDraft.trim()}
       >
-        <Send className="mr-1 h-3 w-3" />
-        送信
+        <Plus className="mr-1 h-3 w-3" />
+        {editingCommentId
+          ? 'コメントを更新'
+          : isMulti
+            ? `${elements.length}要素まとめて追加`
+            : '追加'}
       </Button>
+      <p className="text-[11px] leading-snug text-muted-foreground">
+        {pendingCount > 0
+          ? `${pendingCount}件たまっています。続けて他の要素も選べます。送信はチャットの送信ボタンで。`
+          : 'Ctrl+クリックで要素を追加選択できます。追加してもまだ送信されません。まとめてチャットの送信ボタンで送ります。'}
+      </p>
     </div>
   );
 }

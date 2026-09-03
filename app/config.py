@@ -46,6 +46,23 @@ class Settings(BaseSettings):
 
     # Salonboard credentials encryption (Fernet base64, 32 bytes urlsafe)
     SALONBOARD_ENCRYPTION_KEY: str = ""
+
+    # ポルノブロッカー端末が状態を送るときの合言葉。
+    # 空だと受け口が誰でも叩けるので、空のときは受け口ごと閉じる（503 を返す）。
+    PORNBLOCKER_BEACON_TOKEN: str = ""
+
+    # ポルノブロッカーの課金（保護ロックの鍵を預かる対価）。
+    # 未設定なら支払いの入口を作らない。アプリ側は「支払いに進めません」と出す。
+    PORNBLOCKER_STRIPE_SECRET_KEY: str = ""
+    PORNBLOCKER_STRIPE_PRICE_ID: str = ""
+    PORNBLOCKER_STRIPE_WEBHOOK_SECRET: str = ""
+    # 支払い後に戻ってくる先。アプリへ戻すための中継ページ。
+    PORNBLOCKER_CHECKOUT_RETURN_URL: str = ""
+    # 保護ロックの解除コードを作る鍵。**端末に埋め込んだものと同じ値**にする
+    # （porn-blocker/app/build.gradle.kts の UNLOCK_MASTER_KEY）。
+    # 違う値だと、こちらが出したコードを端末が受け付けない。
+    # 未設定なら解除コードを出せないので、その場合は運営に引き継ぐ文面を返す。
+    PORNBLOCKER_UNLOCK_MASTER_KEY: str = ""
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -59,6 +76,10 @@ class Settings(BaseSettings):
     # Gmail App Password (Phase 9: SMS OTP via Gmail / dan-notion IMAP fetch)
     GMAIL_APP_PASSWORD: str = ""
     GMAIL_ADDRESS: str = ""
+
+    # 2つ目の Gmail (0aw325171@gmail.com)。IMAP 巡回対象に含めるためのアプリパスワード。
+    GMAIL2_APP_PASSWORD: str = ""
+    GMAIL2_ADDRESS: str = ""
 
     # iCloud Mail App-specific Password (dan-notion IMAP fetch)
     ICLOUD_ADDRESS: str = ""
@@ -137,6 +158,9 @@ class Settings(BaseSettings):
     # Deploy: external frontend/CORS
     ALLOWED_ORIGINS: str = ""  # comma-separated extra origins
     FRONTEND_URL: str = ""     # e.g. https://xxx.vercel.app
+    # One canonical, externally reachable origin for client-facing flows.
+    # Never derive this from the operator's localhost browser URL.
+    PUBLIC_APP_URL: str = "https://frontend-mikis-projects-86652663.vercel.app"
 
     # Umami analytics (運営者所有・マルチテナント計測基盤)
     # 1 つの運営者 admin で全テナントの公開ドメインを website 登録・集計する。

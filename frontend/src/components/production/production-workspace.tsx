@@ -143,6 +143,9 @@ export function ProductionWorkspace({
   const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
   const [revisionNote, setRevisionNote] = useState('');
   const [higgsfieldModel, setHiggsfieldModel] = useState<'seedance_2_0' | 'kling3_0'>('seedance_2_0');
+  const [aiVideoPrompt, setAiVideoPrompt] = useState('');
+  const [aiVideoDuration, setAiVideoDuration] = useState<5 | 10>(5);
+  const [isCreatingAiVideo, setIsCreatingAiVideo] = useState(false);
   // Cut-adjust (FireCut-style): silence threshold + pads, re-applied via /recut.
   const [silenceThreshold, setSilenceThreshold] = useState(0.45);
   const [leadPad, setLeadPad] = useState(0.06);
@@ -639,6 +642,50 @@ export function ProductionWorkspace({
   // Returns whether the job was accepted (the editor removes the consumed clip only then).
   const executeInstructionClip = async (ann: ReviewAnnotation): Promise<boolean> => {
     return requestDanEdit(ann.note || '', [{ id: ann.id, intent: ann.intent, start: ann.start, end: ann.end ?? undefined, note: ann.note ?? undefined }]);
+  };
+
+  // A source-less creation path: make an empty editable content first, then let the
+  // same Higgsfield production job register the resulting asset and create its first clip.
+  const createAiVideo = async () => {
+    const prompt = aiVideoPrompt.trim();
+    if (!prompt) {
+      toast.error('作りたい動画の指示を入力してください');
+      return;
+    }
+    setIsCreatingAiVideo(true);
+    try {
+      const title = makeUniqueTitle(newContentTitle.trim() || 'AI動画', contents.map((content) => content.title));
+      const format = contentFormat === '4:5' ? '9:16' : contentFormat;
+      const createRes = await fetch('/api/v1/production-assets/contents', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          room_id: roomId, title, format, asset_ids: [],
+          timeline: { brief: prompt, format, source_asset_ids: [], annotations: [], sequence: { format, duration: 0, tracks: [] } },
+        }),
+      });
+      if (!createRes.ok) throw new Error(await createRes.text());
+      const content = await createRes.json() as ProductionContent;
+      const jobRes = await fetch('/api/v1/production-assets/jobs', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room_id: roomId, content_id: content.id, instruction: {
+          mode: 'higgsfield_generate', prompt, model: higgsfieldModel, aspect_ratio: format,
+          duration: aiVideoDuration, timeline_start: 0,
+        }}),
+      });
+      if (!jobRes.ok) throw new Error(await jobRes.text());
+      const job = await jobRes.json() as ProductionJob;
+      setContents((current) => [...current, content]);
+      setSelectedContent(content);
+      setJobs([job]);
+      setUrlContentId(content.id);
+      setAiVideoPrompt('');
+      toast.success('AI動画の生成を開始しました');
+      void loadJobs();
+    } catch (error) {
+      toast.error('AI動画を作成できませんでした', { description: String(error).slice(0, 180) });
+    } finally {
+      setIsCreatingAiVideo(false);
+    }
   };
 
   // 「生成」ペン注釈は Dan の解釈を挟まず、選択モデルへそのまま渡す。
@@ -1268,14 +1315,65 @@ export function ProductionWorkspace({
             <div className="space-y-4">
               <div>
                 <h2 className="text-lg font-semibold">{selectedContent.title}</h2>
-                <p className="text-sm text-muted-foreground">左の素材から動画を追加するとタイムラインを開けます。</p>
+                <p className="text-sm text-muted-foreground">生成完了後に編集タイムラインを開きます。</p>
               </div>
               <div className="rounded-md border border-border p-6 text-sm text-muted-foreground">
-                まだ動画素材がありません。左の素材からこのコンテンツに追加してください。
+                {latestJob?.instruction?.mode === 'higgsfield_generate' && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 font-medium text-foreground"><Loader2 className="h-4 w-4 animate-spin text-primary" />Higgsfieldが動画を生成中…</div>
+                    <p>完了すると、素材登録・最初の映像クリップの配置まで自動で行い、この画面がエディタに切り替わります。</p>
+                    {jobEvents.length > 0 ? <div className="space-y-1 rounded border bg-muted/30 p-2 text-xs">{jobEvents.slice(-6).map((event, index) => <div key={`${event.created_at || index}-${index}`}>{event.text || ''}</div>)}</div> : null}
+                  </div>
+                ) : latestJob?.status === 'failed' ? (
+                  <div className="text-destructive">生成に失敗しました。{latestJob.error || ''}</div>
+                ) : (
+                  'まだ動画素材がありません。左の素材から追加するか、制作ライブラリの「AIで新しい動画を作る」を使ってください。'
+                )}
               </div>
             </div>
           ) : (
             <div className="space-y-5">
+              <section className="rounded-lg border border-violet-500/40 bg-violet-500/5 p-4">
+                <div className="flex items-center gap-2">
+                  <Clapperboard className="h-5 w-5 text-violet-600" />
+                  <div>
+                    <h2 className="font-semibold">AIで新しい動画を作る</h2>
+                    <p className="text-xs text-muted-foreground">素材なしで始められます。生成後はそのまま編集タイムラインを開きます。</p>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-3">
+                  <Textarea
+                    value={aiVideoPrompt}
+                    onChange={(event) => setAiVideoPrompt(event.target.value)}
+                    placeholder="例: 朝の柔らかな光が差すサロン。スタイリストが笑顔で髪を整え、カメラがゆっくり寄る。自然な縦型UGC動画、動きは滑らかに。"
+                    className="min-h-24 bg-background"
+                  />
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <label className="grid gap-1 text-xs">モデル
+                      <select value={higgsfieldModel} onChange={(event) => setHiggsfieldModel(event.target.value as 'seedance_2_0' | 'kling3_0')} className="h-9 rounded-md border border-input bg-background px-2 text-sm">
+                        <option value="seedance_2_0">Seedance 2.0（推奨）</option>
+                        <option value="kling3_0">Kling 3.0</option>
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-xs">長さ
+                      <select value={aiVideoDuration} onChange={(event) => setAiVideoDuration(Number(event.target.value) as 5 | 10)} className="h-9 rounded-md border border-input bg-background px-2 text-sm">
+                        <option value={5}>5秒</option><option value={10}>10秒</option>
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-xs">画面比率
+                      <select value={contentFormat} onChange={(event) => setContentFormat(event.target.value)} className="h-9 rounded-md border border-input bg-background px-2 text-sm">
+                        <option value="9:16">9:16（縦）</option><option value="16:9">16:9（横）</option><option value="1:1">1:1（正方形）</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button onClick={() => void createAiVideo()} disabled={isCreatingAiVideo || !aiVideoPrompt.trim()}>
+                      {isCreatingAiVideo ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Clapperboard className="mr-1 h-4 w-4" />}
+                      AI動画を作る
+                    </Button>
+                  </div>
+                </div>
+              </section>
               {draftAssetIds.length > 0 ? (
                 <section className="rounded-md border border-border p-4">
                   <div className="grid gap-4">

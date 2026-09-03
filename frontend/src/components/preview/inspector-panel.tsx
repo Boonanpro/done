@@ -132,6 +132,47 @@ function TypographySection() {
   );
 }
 
+/**
+ * Text is edited in the parent panel, not by requiring a precise double-click
+ * inside a cross-origin iframe. This also works for headings containing <br>
+ * and other text elements which are not DOM leaves.
+ */
+function TextContentSection() {
+  const selectedElement = usePreviewStore((s) => s.selectedElement);
+  if (!selectedElement?.elementKey) return null;
+  return (
+    <TextContentEditor
+      key={selectedElement.refId}
+      elementKey={selectedElement.elementKey}
+      initialText={selectedElement.text || ''}
+    />
+  );
+}
+
+function TextContentEditor({ elementKey, initialText }: { elementKey: string; initialText: string }) {
+  const commitText = usePreviewStore((s) => s.commitText);
+  const [value, setValue] = useState(initialText);
+  useEffect(() => setValue(initialText), [initialText]);
+
+  return (
+    <section className="flex flex-col gap-2">
+      <SectionHeader title="Text" />
+      <textarea
+        value={value}
+        onChange={(event) => {
+          const text = event.target.value;
+          setValue(text);
+          // The canvas updates immediately; the store coalesces persistence.
+          commitText(elementKey, text);
+        }}
+        rows={Math.min(10, Math.max(3, value.split('\n').length + 1))}
+        className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-sm leading-5 outline-none focus:ring-2 focus:ring-ring"
+        aria-label="テキストを編集"
+      />
+    </section>
+  );
+}
+
 function BoxSection() {
   const cs = useComputed();
   const setLive = usePreviewStore((s) => s.setLiveStyle);
@@ -291,6 +332,7 @@ export function InspectorPanel() {
       </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-3">
         <ElementPreview el={selectedElement} />
+        {isText && <TextContentSection />}
         {isText && <TypographySection />}
         {isImage && <ImageSection />}
         {isVideo && <VideoSection />}

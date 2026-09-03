@@ -30,6 +30,15 @@ PROVIDERS = {
         "password_attr": "GMAIL_APP_PASSWORD",
         "source": MessageSource.GMAIL,
     },
+    # 2つ目の Gmail（個人用 0aw325171）。shub6923 と同様に巡回して、
+    # こちら宛に来た返信も送信台帳と照合できるようにする。
+    "gmail2": {
+        "host": "imap.gmail.com",
+        "port": 993,
+        "address_attr": "GMAIL2_ADDRESS",
+        "password_attr": "GMAIL2_APP_PASSWORD",
+        "source": MessageSource.GMAIL,
+    },
     "icloud": {
         "host": "imap.mail.me.com",
         "port": 993,
@@ -134,13 +143,25 @@ def _extract_and_save_attachments(msg: email.message.Message, message_id: str) -
     return out
 
 
-def _connect(provider_key: str) -> Optional[imaplib.IMAP4_SSL]:
-    cfg = PROVIDERS[provider_key]
+def mailbox_address(provider_key: str) -> str:
+    """設定済みのアドレス（未設定なら空文字）。ツール説明などの表示用。"""
+    cfg = PROVIDERS.get(provider_key)
+    return (getattr(settings, cfg["address_attr"], "") or "") if cfg else ""
+
+
+def connect_mailbox(provider_key: str) -> imaplib.IMAP4_SSL:
+    """PROVIDERS のキーで IMAP にログインして返す。失敗は RuntimeError（原因入り）。
+
+    受信メール同期と見張り(mail_watch)の両方がここを通る＝接続先・認証情報・
+    アプリパスワードの正規化（空白/ハイフン除去）を1か所で持つ。
+    """
+    cfg = PROVIDERS.get(provider_key)
+    if not cfg:
+        raise RuntimeError(f"mailbox '{provider_key}' は未対応です（{' / '.join(PROVIDERS)} のいずれか）")
     addr = getattr(settings, cfg["address_attr"], "") or ""
     pw = getattr(settings, cfg["password_attr"], "") or ""
     if not addr or not pw:
-        logger.info("imap %s: not configured", provider_key)
-        return None
+        raise RuntimeError(f"{cfg['address_attr']} / {cfg['password_attr']} が .env にありません")
     M = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
     pw_clean = pw.replace(" ", "").replace("-", "")  # iCloud 表示は xxxx-xxxx 形式だが認証時は連結
     try:
@@ -150,11 +171,19 @@ def _connect(provider_key: str) -> Optional[imaplib.IMAP4_SSL]:
         except imaplib.IMAP4.error:
             M.login(addr, pw_clean)
     except imaplib.IMAP4.error as e:
-        logger.error("imap %s login failed: %s", provider_key, e)
         try: M.logout()
         except Exception: pass
-        return None
+        raise RuntimeError(f"imap {provider_key} login failed: {e}") from e
     return M
+
+
+def _connect(provider_key: str) -> Optional[imaplib.IMAP4_SSL]:
+    """受信メール同期用: 未設定/ログイン失敗はログに残して None（同期は他の受信箱を続ける）。"""
+    try:
+        return connect_mailbox(provider_key)
+    except RuntimeError as e:
+        logger.warning("imap %s: %s", provider_key, e)
+        return None
 
 
 async def fetch_provider(user_id: str, provider_key: str, max_messages: int = 30) -> dict:
@@ -213,6 +242,13 @@ async def fetch_provider(user_id: str, provider_key: str, max_messages: int = 30
                 body = _extract_body(msg)
                 attachments = _extract_and_save_attachments(msg, msg_id_header.replace("<", "").replace(">", "").replace("/", "_")[:80])
 
+                # 返信照合用ヘッダ。In-Reply-To/References は「どの送信への返事か」の
+                # 決定的な手がかりで、external_message_routing.find_route が
+                # 送信台帳(external_message_routes)の external_message_id と突き合わせる。
+                in_reply_to = (msg.get("In-Reply-To") or "").strip() or None
+                references = (msg.get("References") or "").strip() or None
+                x_dan_ref = (msg.get("X-Dan-Ref") or "").strip() or None
+
                 await detection.detect_message(
                     user_id=user_id,
                     source=cfg["source"],
@@ -220,7 +256,15 @@ async def fetch_provider(user_id: str, provider_key: str, max_messages: int = 30
                     source_id=msg_id_header,
                     subject=subject,
                     sender_info={"from": from_addr, "date": date_str, "provider": provider_key},
-                    metadata={"attachments": attachments, "uid": uid, "provider": provider_key},
+                    metadata={
+                        "attachments": attachments,
+                        "uid": uid,
+                        "provider": provider_key,
+                        "message_id": msg_id_header,
+                        "in_reply_to": in_reply_to,
+                        "references": references,
+                        "routing_key": x_dan_ref,
+                    },
                 )
                 fetched += 1
                 new_last_uid = max(new_last_uid, uid)

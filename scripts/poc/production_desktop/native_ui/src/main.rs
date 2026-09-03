@@ -678,6 +678,7 @@ fn draw_plain_pip(
             }
             tw
         };
+        comp.set_grade(grade_params(c));
         comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
         return Ok(None);
     }
@@ -689,6 +690,7 @@ fn draw_plain_pip(
             .map_err(|e| e.context(format!("plain-pip {} src_t={src_t:.2}", vs.name)))?;
     }
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
+    comp.set_grade(grade_params(c));
     comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
     Ok(Some(p2))
 }
@@ -710,6 +712,21 @@ fn contain_box(
         (src_wh.1 as f64 * scale) / canvas_h() as f64,
     );
     (dst.0 + (dst.2 - dw) / 2.0, dst.1 + (dst.3 - dh) / 2.0, dw, dh)
+}
+
+/// クリップの実効表示箱。contain クリップは素材実寸のアスペクトそのままの箱になる。
+/// 選択枠・ドラッグ・ジオメトリ写像・描画のすべてがこの箱を使うことで、キャンバスが
+/// どの形でも素材の形が保たれる（余白はクリップの一部ではない）。箱アスペクト==素材
+/// アスペクトになるため、下流の cover/contain 計算は恒等になり既存の写像は壊れない。
+fn effective_box(doc: &model::Doc, c: &model::Clip, t: f64) -> model::Pos {
+    let b = c.display_box_at(t);
+    if !c.contains_in_box() {
+        return b;
+    }
+    let Some(aid) = c.asset_id.as_deref() else { return b };
+    let dims = doc.asset_dims.get(aid).copied().unwrap_or((0, 0));
+    let (x, y, w, h) = contain_box((b.x, b.y, b.width, b.height), dims);
+    model::Pos { x, y, width: w, height: h }
 }
 
 /// Throttled diagnostics for the freeze paths (at most one line per 500ms) — cheap
@@ -820,9 +837,9 @@ fn step_enter(doc: &model::Doc, cache: &mut PtsCache, edge: f64, dir: f64) -> Op
     }
     let aid = c.asset_id.clone()?;
     let pts = cached_pts(doc, cache, &aid)?;
-    let src_edge = c.source_start + (edge.clamp(c.timeline_start, c.timeline_end) - c.timeline_start);
+    let src_edge = c.src_at(edge.clamp(c.timeline_start, c.timeline_end));
     let k = edge_frame(&pts, src_edge, dir);
-    let nt = c.timeline_start + (frame_mid(&pts, k)? - c.source_start);
+    let nt = c.t_at_src(frame_mid(&pts, k)?);
     Some(nt.clamp(c.timeline_start, (c.timeline_end - 1e-3).max(c.timeline_start)))
 }
 
@@ -844,12 +861,12 @@ fn step_target(doc: &model::Doc, cache: &mut PtsCache, t: f64, dir: f64) -> Opti
     }
     let aid = c.asset_id.clone()?;
     let pts = cached_pts(doc, cache, &aid)?;
-    let src = c.source_start + (t - c.timeline_start);
+    let src = c.src_at(t);
     let k2 = nearest_idx(&pts, src) as i64 + dir as i64;
     if k2 < 0 {
         return step_enter(doc, cache, c.timeline_start, -1.0);
     }
-    let nt = c.timeline_start + (frame_mid(&pts, k2 as usize)? - c.source_start);
+    let nt = c.t_at_src(frame_mid(&pts, k2 as usize)?);
     if nt >= c.timeline_end - 1e-6 {
         return step_enter(doc, cache, c.timeline_end, 1.0);
     }
@@ -1027,7 +1044,7 @@ fn compose(
                         .active_video(t)
                         .0
                         .filter(|b| b.asset_id.as_deref() == Some(baid))
-                        .map(|b| (b.src_at(t), b.display_box_at(t_fx), b.crop_ltrb_at(t_fx)));
+                        .map(|b| (b.src_at(t), effective_box(doc, b, t_fx), b.crop_ltrb_at(t_fx)));
                     let mask_ok = !key.is_empty()
                         && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
                     if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
@@ -1081,15 +1098,36 @@ fn compose(
                         let _ = comp.apply_spotlight(d3d, rg, 1.0 - 0.55 * opacity);
                     } else if style == "marker" {
                         let _ = comp.apply_marker(d3d, rg, opacity);
+                    } else if style == "frame" {
+                        // 矩形枠: 囲むだけで周囲を暗くしない。マーカー/スポットの
+                        // 重ね掛けで注目以外がどんどん沈む問題への答え（同一シーンで
+                        // 複数箇所を目立たせる用途）。solid の帯4本＝新シェーダ不要
+                        let (x, y, w, h) = rg;
+                        let t = c.effect_strength.unwrap_or(4.0).clamp(1.0, 24.0) / canvas_h() as f64;
+                        let tx = t * canvas_h() as f64 / canvas_w() as f64;
+                        let fcol = effect_rgb(c.effect_color.as_deref().unwrap_or("#ffe14d"));
+                        // 回転は枠全体の中心を共通pivotに（帯4本がバラけないように）
+                        let rot = c.effect_rot.unwrap_or(0.0);
+                        let pivot = (x + w * 0.5, y + h * 0.5);
+                        for s in [
+                            (x - tx, y - t, w + 2.0 * tx, t),
+                            (x - tx, y + h, w + 2.0 * tx, t),
+                            (x - tx, y, tx, h),
+                            (x + w, y, tx, h),
+                        ] {
+                            let _ = comp.apply_solid_rect_rot(d3d, s, fcol, opacity, rot, pivot);
+                        }
                     } else if style == "zoom" {
                         let z = c.effect_strength.unwrap_or(1.6).clamp(1.1, 3.0);
                         let _ = comp.apply_zoom(d3d, rg, z);
                     } else if is_mosaic && c.blur_track.is_none() {
                         let _ = comp.apply_mosaic(d3d, rg, strength);
                     } else if is_solid {
-                        let _ = comp.apply_solid_rect(d3d, rg, solid, opacity);
+                        let rot = c.effect_rot.unwrap_or(0.0);
+                        let pivot = (rg.0 + rg.2 * 0.5, rg.1 + rg.3 * 0.5);
+                        let _ = comp.apply_solid_rect_rot(d3d, rg, solid, opacity, rot, pivot);
                     } else {
-                        let _ = comp.apply_blur_rect(d3d, rg, strength);
+                        let _ = comp.apply_blur_rect(d3d, rg, strength, c.effect_rot.unwrap_or(0.0));
                     }
                 }
             }
@@ -1141,7 +1179,7 @@ fn compose(
             }
             continue;
         }
-        let b = c.display_box_at(t_geo);
+        let b = effective_box(doc, c, t_geo);
         if let Some((key, off)) = c.popout_key() {
             // LIVE matte path: color sampled from the ORIGINAL frame — the same file and
             // the same src_t the AUDIO plays, so lips can't drift. The baked pv (30fps
@@ -1151,7 +1189,7 @@ fn compose(
                 let opath = doc.asset_path_q(aid, original);
                 let src_t = c.src_at(t);
                 let mt_path = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
-                let mt_t = if c.is_freeze() { off } else { off + (t - c.timeline_start) };
+                let mt_t = if c.is_freeze() { off } else { off + (c.src_at(t) - c.source_start) };
                 // ONE pool.get per stream: a second get in the same compose sees the
                 // instance as busy-this-frame and OPENS A SPARE (~50ms + an empty texture)
                 // — that was 110ms/frame of the pop-out scrub cost
@@ -1250,7 +1288,7 @@ fn compose(
                 continue;
             }
             let pv_draw = (|pool: &mut media::VideoPool, comp: &mut compositor::Compositor, used: &mut Vec<String>| -> anyhow::Result<()> {
-                let src_t = if c.is_freeze() { off } else { off + (t - c.timeline_start) };
+                let src_t = if c.is_freeze() { off } else { off + (c.src_at(t) - c.source_start) };
                 const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
                 const MATTE: u32 = 0;
                 let (ctex, cwh) = {
@@ -1323,6 +1361,7 @@ fn compose(
                 // switches to stretch and the source fills the edited box itself.
                 let (bx, by, bw, bh) = (b.x, b.y, b.width, b.height);
                 if c.stretches_to_box() {
+                    comp.set_grade(grade_params(c));
                     let _ = comp.draw_alpha_opacity(
                         d3d,
                         &tex,
@@ -1346,6 +1385,7 @@ fn compose(
                     }
                 }
                 let dst = (bx + (bw - dw) / 2.0, by + (bh - dh) / 2.0, dw, dh);
+                comp.set_grade(grade_params(c));
                 let _ = comp.draw_alpha_opacity(d3d, &tex, (iw, ih), dst, c.visual_opacity());
             }
             used.push(path);
@@ -1386,7 +1426,7 @@ fn compose(
                     }
                     tw
                 };
-                let b = c.display_box_at(t_geo);
+                let b = effective_box(doc, c, t_geo);
                 if near_fz {
                     eprintln!(
                         "FZ_SEAM t={t:.3} clip={} q={} tex={}x{} box={:.4},{:.4},{:.4},{:.4}",
@@ -1397,6 +1437,7 @@ fn compose(
                 }
                 let dst = (b.x, b.y, b.width, b.height);
                 let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+                comp.set_grade(grade_params(c));
                 comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
                 used.push(path);
                 continue;
@@ -1448,6 +1489,7 @@ fn compose(
             }
             let dst = (b.x, b.y, b.width, b.height);
             let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+            comp.set_grade(grade_params(c));
             comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
             used.push(path);
         }
@@ -2298,6 +2340,77 @@ fn iso8601_utc_now() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}+00:00")
+}
+
+/// OS cursor position in egui points for this window, straight from Win32.
+/// winit's Windows file-drop handler discards the OLE drag coordinates
+/// (DragEnter/DragOver/Drop all ignore their POINTL argument) and the OLE mouse
+/// capture means no WM_MOUSEMOVE reaches the window either, so for the whole
+/// OS drag gesture — including the drop frame — egui's interact_pos/hover_pos
+/// are None. GetCursorPos is the only live position source during that window.
+/// レーンid採番用のソルト。プロセス内カウンタだとセッションを跨いで衝突するので
+/// エポックms（1回のドラッグ/ドロップ/ロード毎に1つ）を使う。
+fn lane_salt() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 時間区間の開始順ソート＋重なり・隣接マージ。
+fn merge_time_ranges(mut v: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    v.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut m: Vec<(f64, f64)> = Vec::new();
+    for r in v {
+        if let Some(last) = m.last_mut() {
+            if r.0 <= last.1 + 1e-6 {
+                last.1 = last.1.max(r.1);
+                continue;
+            }
+        }
+        m.push(r);
+    }
+    m
+}
+
+/// クリップのカラーグレード係数（コンポジタの set_grade へ渡す形）。
+/// 全て既定値なら None（グレード無効＝コストゼロ）。
+fn grade_params(c: &model::Clip) -> Option<[f32; 6]> {
+    let g = c.grade.as_ref()?;
+    let f = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let mode = match g.get("log").and_then(|v| v.as_str()).unwrap_or("") {
+        "slog3" => 2.0f32,
+        "vlog" => 3.0,
+        "clog3" => 4.0,
+        _ => 1.0,
+    };
+    let (ev, ct, sat, temp, tint) =
+        (f("ev", 0.0), f("contrast", 1.0), f("sat", 1.0), f("temp", 0.0), f("tint", 0.0));
+    if mode == 1.0 && ev == 0.0 && ct == 1.0 && sat == 1.0 && temp == 0.0 && tint == 0.0 {
+        return None;
+    }
+    Some([mode, ev as f32, ct as f32, sat as f32, temp as f32, tint as f32])
+}
+
+/// Timeline thumbnail for IMAGE assets. The normal thumbnailer decodes via Media
+/// Foundation, which has no still-image path — every image clip therefore fell
+/// back to the flat grey placeholder. Decode with the image crate instead.
+fn image_thumb(path: &str, max_w: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let img = image::open(path).ok()?;
+    let w = img.width().max(1);
+    let scale = (max_w as f32 / w as f32).min(1.0);
+    let tw = ((w as f32 * scale) as u32).max(1);
+    let th = ((img.height().max(1) as f32 * scale) as u32).max(1);
+    let small = img.thumbnail(tw, th).to_rgba8();
+    Some((small.width() as usize, small.height() as usize, small.into_raw()))
+}
+
+fn os_cursor_in_ui(ctx: &egui::Context) -> Option<egui::Pos2> {
+    let (inner, ppp) = ctx.input(|i| (i.viewport().inner_rect, i.pixels_per_point()));
+    let inner = inner?;
+    let mut p = windows::Win32::Foundation::POINT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p).ok()? };
+    Some(egui::pos2(p.x as f32 / ppp - inner.min.x, p.y as f32 / ppp - inner.min.y))
 }
 
 fn is_timeline_media_path(path: &std::path::Path) -> bool {
@@ -3259,7 +3372,11 @@ fn media_thread(shared: Arc<Shared>) {
                 match job {
                     Some(AuxJob::Thumb { asset_id, path, bucket }) => {
                         let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
-                        let got = media::thumbnail(&d3d, &path, tt, 96).ok();
+                        let got = if is_image_path(std::path::Path::new(&path)) {
+                            image_thumb(&path, 96)
+                        } else {
+                            media::thumbnail(&d3d, &path, tt, 96).ok()
+                        };
                         {
                             let mut a = shared.aux.lock().unwrap();
                             if let Some(t) = got {
@@ -3319,7 +3436,11 @@ fn aux_thread(shared: Arc<Shared>) {
             match job {
                 Some(AuxJob::Thumb { asset_id, path, bucket }) => {
                     let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
-                    let got = thumbnailer.thumbnail(&d3d, &path, tt, 96).ok();
+                    let got = if is_image_path(std::path::Path::new(&path)) {
+                        image_thumb(&path, 96)
+                    } else {
+                        thumbnailer.thumbnail(&d3d, &path, tt, 96).ok()
+                    };
                     {
                         let mut a = shared.aux.lock().unwrap();
                         if let Some(t) = got {
@@ -3381,6 +3502,9 @@ struct Library {
     brief: String,
     title: String,
     format: String,
+    /// Library-first text-to-video. Unlike `start_generation`, this needs no source asset.
+    ai_model: String,
+    ai_duration: i32,
     thumb_tried: std::collections::HashSet<String>,
     gen_content: Option<String>,
     gen_job: Option<String>,
@@ -3459,9 +3583,15 @@ struct App {
     selected: Vec<String>,
     /// Asset currently being dragged from the editor's media menu toward the timeline.
     asset_drag: Option<serde_json::Value>,
-    /// Last pointer position while an OS media drag is over the timeline. egui clears
-    /// hover/interact_pos on the release frame, so this survives that one-frame gap.
-    last_os_media_pointer: Option<egui::Pos2>,
+    /// Probed duration per OS-dragged file path, so the timeline ghost shows the real
+    /// clip length while hovering (probe once per path, not per frame).
+    os_drag_durations: std::collections::HashMap<String, f64>,
+    /// Moveドラッグ開始時に確定した付着クリップ（親=メインレーンの移動対象に頭が
+    /// 載っている前面レーンのクリップ+リンク音声）。水平移動のdtだけ一緒に動く。
+    move_attached: Vec<String>,
+    /// 複数選択中のクリップを押した時の「離したら単独選択に絞る」予約。
+    /// 実移動(drag_engaged)が始まったら破棄＝グループ移動は従来どおり。
+    click_collapse: Option<String>,
     drag: Drag,
     /// Moveドラッグ中に凍結したレーンレイアウト。ドラッグ開始で空レーンが
     /// 出現してレイアウトがズレ、ポインタ→レーン対応が壊れてクリップが
@@ -3507,6 +3637,11 @@ struct App {
     playing: bool,
     playback_speed: f64,
     preview_fullscreen: bool,
+    /// 全画面プレビュー(P)の小型トランスポート: 最後にマウスが動いた時刻。
+    /// 再生中に触らなければ自動で消える（DaVinci流）。
+    fs_bar_last_move: Option<Instant>,
+    /// シークバーのドラッグ開始時に再生中だったら、離した時に再生を再開する
+    fs_resume_play: bool,
     show_help: bool,
     step_settle_at: Option<Instant>,
     // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
@@ -3536,6 +3671,19 @@ struct App {
     /// DaVinci-style render range (in/out, timeline seconds). None = whole content.
     /// Session-local: I/O keys set the edges at the playhead; ruler band edges drag.
     export_range: Option<(f64, f64)>,
+    /// 書き出しダイアログ「サブタイムラインの区間だけ繋げて書き出す」チェック状態
+    export_use_sub: bool,
+    /// サブタイムラインの I キーで置いた「イン点待ち」（O で区間として確定）
+    sub_in: Option<f64>,
+    /// 区間ジャンプ直後の音声クロック再アンカー待ち（この間は再ジャンプしない）
+    sub_jump_until: Option<Instant>,
+    /// この再生セッションが「区間だけ飛び飛び」かどうか。再生開始位置で決まる:
+    /// 緑区間の中から開始=飛び飛び／区間の外から開始=普通の全体再生（素材の下見）
+    sub_skip_active: bool,
+    /// 緑帯の端ドラッグ中: (掴んだ時点の区間リスト, 区間index, イン点か)
+    sub_edge_drag: Option<(Vec<(f64, f64)>, usize, bool)>,
+    /// サブタブ削除の二段確認（右クリック2回）: (サブid, 1回目の時刻)
+    sub_del_arm: Option<(String, Instant)>,
     /// render progress 0..1 while the server reports frame=N/M; None = no bar
     /// (queued / finishing phase / idle)
     export_progress: Option<f32>,
@@ -3612,10 +3760,16 @@ impl App {
     fn new(contents: &str, dir: &str) -> anyhow::Result<Self> {
         let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(contents)?)?;
         let disk_fingerprint = serde_json::to_string(&raw).unwrap_or_default();
+        // 前回開いていたタブ（サブ）をメモリ上の sequence スロットへスワップイン
+        edits::seq_swap_in(&mut raw);
         let before_norm = serde_json::to_string(&raw).unwrap_or_default();
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
         edits::quantize_timeline_frames(&mut raw);
+        // 無名レーンは「ジェスチャ中の仮レーン」だけという不変条件をロード時に確立。
+        // 過去に作られたクリップ載りの無名レーンへ id を付与しておかないと、
+        // 最初のドラッグで仮レーン扱い(already_provisionalガード/prune)に巻き込まれる。
+        edits::promote_unnamed_occupied_tracks(&mut raw, lane_salt());
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         set_canvas_from_content(&raw);
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
@@ -3679,7 +3833,7 @@ impl App {
         }
         Ok(Self {
             screen: Screen::Editor,
-            lib: Library { format: "9:16".into(), ..Default::default() },
+            lib: Library { format: "9:16".into(), ai_model: "seedance_2_5".into(), ai_duration: 30, ..Default::default() },
             lib_poll: Instant::now(),
             lib_sink: Default::default(),
             picked_files: Default::default(),
@@ -3722,7 +3876,9 @@ impl App {
             shared,
             selected: Vec::new(),
             asset_drag: None,
-            last_os_media_pointer: None,
+            os_drag_durations: std::collections::HashMap::new(),
+            move_attached: Vec::new(),
+            click_collapse: None,
             drag: Drag::None,
             drag_lane_tops: None,
             drag_press: None,
@@ -3746,6 +3902,8 @@ impl App {
             playing: false,
             playback_speed: 1.0,
             preview_fullscreen: false,
+            fs_bar_last_move: None,
+            fs_resume_play: false,
             show_help: false,
             step_settle_at: None,
             step_probe: None,
@@ -3764,6 +3922,12 @@ impl App {
             export_status: None,
             export_poll: Instant::now(),
             export_range: None,
+            export_use_sub: false,
+            sub_in: None,
+            sub_jump_until: None,
+            sub_skip_active: false,
+            sub_edge_drag: None,
+            sub_del_arm: None,
             range_drag: None,
             export_progress: None,
             export_done_path: None,
@@ -3902,6 +4066,10 @@ impl App {
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
         edits::quantize_timeline_frames(&mut raw);
+        // キャンバス寸法はドキュメント公開の「前」に確定させる。メディアスレッドは
+        // doc差し替えの瞬間に寸法変化を見てコンポジタを作り直すため、後から寸法だけ
+        // 変えると再構築されず、古い形の合成絵が新しい枠へ引き伸ばされる（形式切替の潰れ）。
+        set_canvas_from_content(&raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
                 let df = Self::dirty_from(&self.doc, &nd);
@@ -3958,8 +4126,11 @@ impl App {
             eprintln!("save blocked: contents.json changed outside this editor instance");
             return Ok(false);
         }
-        edits::save(&self.doc.raw, &self.doc.contents_path)?;
-        self.disk_fingerprint = self.doc.raw.to_string();
+        // メモリはアクティブタブが sequence に入っているので、ディスク形
+        // （sequence=メイン・サブは subseqs）へ変換して書く
+        let disk_form = edits::seq_swap_out(&self.doc.raw);
+        edits::save(&disk_form, &self.doc.contents_path)?;
+        self.disk_fingerprint = disk_form.to_string();
         Ok(true)
     }
 
@@ -4020,6 +4191,19 @@ impl App {
 
     /// Register a dropped file as an asset and insert it at the playhead on the first
     /// visual lane. Exact timeline drops use `import_file_at` below.
+    /// 素材ドロップ/カードドロップの「最上段より上」ゾーン: 新規最前面ビジュアル
+    /// レーンを挿入して、その index を返す（レーンは上へ何本でも増やせる）。
+    fn insert_new_top_lane(&mut self) -> usize {
+        let target = (0..self.doc.seq.tracks.len())
+            .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
+            .max()
+            .map(|f| f + 1)
+            .unwrap_or(0);
+        let salt = lane_salt();
+        self.apply_edit(false, move |raw| edits::insert_top_visual_track(raw, salt));
+        target
+    }
+
     fn import_file(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
         let target = self
             .doc
@@ -4306,7 +4490,7 @@ impl App {
                 "format": fmt,
                 "position": {"x": box_.x, "y": box_.y, "width": box_.width, "height": box_.height},
                 "source_start": c.source_start,
-                "source_end": c.source_start + (c.timeline_end - c.timeline_start),
+                "source_end": c.source_end.unwrap_or(c.source_start + (c.timeline_end - c.timeline_start)),
                 "intensity": "mid", "shadow": true,
             })
             .to_string();
@@ -4462,7 +4646,7 @@ impl App {
             .rev()
             .copied()
             .find(|b| {
-                let p = b.display_box_at(mid);
+                let p = effective_box(&self.doc, b, mid);
                 cx >= p.x && cx <= p.x + p.width && cy >= p.y && cy <= p.y + p.height
             })
             .or_else(|| active.last().copied())
@@ -4520,7 +4704,7 @@ impl App {
             c.timeline_start.max(b.timeline_start)
         };
         let dims = self.doc.asset_dims.get(&aid).copied().unwrap_or((0, 0));
-        let bb = b.display_box_at(t_anchor);
+        let bb = effective_box(&self.doc, &b, t_anchor);
         let sbox = compositor::canvas_box_to_source(
             (canvas_w(), canvas_h()),
             dims,
@@ -5197,6 +5381,35 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
         }
         self.playing = !self.playing;
+        if self.playing {
+            // 末尾で止まった状態のSpace/▶: 再生範囲の先頭から再生し直す
+            // （in/out指定があればその頭、サブタブは最初の緑区間の頭、通常は0）。
+            // 自然停止はコーデック都合で末尾の1〜2フレーム手前に着地する（実測: 10.100s の
+            // 動画で 10.067s 停止）ため、余裕は2.5フレーム取る
+            let end_eps = 2.5 / self.timeline_fps().max(1.0);
+            let restart_to: Option<f64> = if !self.on_sub_tab() {
+                if let Some((ra, rb)) = self.export_range {
+                    (self.t >= rb - end_eps || self.t >= self.dur - end_eps).then_some(ra)
+                } else {
+                    (self.t >= self.dur - end_eps).then_some(0.0)
+                }
+            } else {
+                let first = self.sub_ranges().first().map(|&(a, _)| a).unwrap_or(0.0);
+                let last_end = self.sub_ranges().last().map(|&(_, b)| b).unwrap_or(self.dur);
+                (self.t >= last_end - end_eps || self.t >= self.dur - end_eps).then_some(first)
+            };
+            if let Some(a) = restart_to {
+                self.t = a;
+            }
+            // サブタイムライン: 再生開始位置で意図を汲む — 緑区間の中から始めたら
+            // 「区間だけ飛び飛び」、外（暗転部分）から始めたら普通の全体再生。
+            // 判定は再生セッション開始時に一度だけ。
+            self.sub_skip_active = self.on_sub_tab()
+                && self
+                    .sub_ranges()
+                    .iter()
+                    .any(|&(a, b)| self.t >= a - 0.001 && self.t < b);
+        }
         self.resume_pending = None;
         self.push_req(false);
     }
@@ -5513,6 +5726,57 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 self.snap_line = None;
             }
             ui.separator();
+            // ---- シーケンスタブ: メイン | サブ… | ＋ ----
+            // サブ=独立した複製（素材はID共有＝軽い）。編集してもメインは不変。
+            {
+                let active = self.active_seq_id();
+                let tabs = self.seq_tabs();
+                if ui.selectable_label(active == "main", "メイン").clicked() && active != "main" {
+                    self.switch_seq("main");
+                }
+                let mut want_switch: Option<String> = None;
+                let mut want_delete: Option<String> = None;
+                let mut arm: Option<(String, String)> = None;
+                for (id, name) in &tabs {
+                    let sel = *id == active;
+                    let armed = matches!(&self.sub_del_arm, Some((aid, at)) if aid == id && at.elapsed().as_secs() < 2);
+                    let label = if armed { format!("🗑 {name}?") } else { name.clone() };
+                    let resp = ui
+                        .selectable_label(sel, label)
+                        .on_hover_text("クリック=切替 / 右クリック2回=削除。サブは独立した複製で、編集してもメインは変わりません");
+                    if resp.clicked() && !sel {
+                        want_switch = Some(id.clone());
+                    }
+                    if resp.secondary_clicked() {
+                        if armed {
+                            want_delete = Some(id.clone());
+                        } else {
+                            arm = Some((id.clone(), name.clone()));
+                        }
+                    }
+                }
+                if let Some((id, name)) = arm {
+                    self.sub_del_arm = Some((id, Instant::now()));
+                    self.toast(&format!("「{name}」を削除するにはもう一度右クリック"));
+                }
+                if want_delete.is_some() {
+                    self.sub_del_arm = None;
+                }
+                if ui
+                    .small_button("＋")
+                    .on_hover_text("今開いているタイムラインを複製してサブを作る（元は変更されない・素材は共有）")
+                    .clicked()
+                {
+                    self.create_sub();
+                }
+                if let Some(id) = want_switch {
+                    self.switch_seq(&id);
+                }
+                if let Some(id) = want_delete {
+                    self.delete_sub(&id);
+                }
+            }
+            ui.separator();
             ui.label(
                 egui::RichText::new(if self.selected.is_empty() {
                     String::new()
@@ -5652,15 +5916,24 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // the panel is ALWAYS rendered at its fixed width — appearing/disappearing with
         // the selection resized the central area and made the preview jump every time a
         // clip was selected or created ("パネルが出るたびプレビューの位置が変わる")
+        // 幅は開閉どちらの状態でも完全固定。選択のたびに中央のプレビュー位置が
+        // 微妙に動く（ガクつく）のを防ぐ — パネルは常に同じ幅で存在し続ける。
+        const INSPECTOR_W: f32 = 320.0;
+        let placeholder = |ctx: &egui::Context| {
+            egui::SidePanel::right("inspector")
+                .resizable(false)
+                .exact_width(INSPECTOR_W)
+                .show(ctx, |ui| {
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("クリップを選択すると\nここに編集パネルが出ます")
+                            .small()
+                            .weak(),
+                    );
+                });
+        };
         if selected.is_empty() {
-            egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
-                ui.add_space(12.0);
-                ui.label(
-                    egui::RichText::new("クリップを選択すると\nここに編集パネルが出ます")
-                        .small()
-                        .weak(),
-                );
-            });
+            placeholder(ctx);
             return;
         }
         let multi = selected.len() > 1;
@@ -5676,12 +5949,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 && c.style.as_ref().and_then(|v| v.as_str()) != Some("note")
         });
         if multi && !same_media && !same_caption && !same_region_effect {
+            placeholder(ctx);
             return;
         }
         let (clip, kind) = selected[0].clone();
         let id = clip.id.clone();
         let edit_ids: Vec<String> = selected.iter().map(|(c, _)| c.id.clone()).collect();
-        egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
+        egui::SidePanel::right("inspector").resizable(false).exact_width(INSPECTOR_W).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
                 let title = if multi {
@@ -5756,7 +6030,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     ui.label(egui::RichText::new("変更は選択中の全クリップに適用されます。").small().weak());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
                     ui.horizontal(|ui| {
-                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid"), ("マーカー", "marker"), ("スポットライト", "spotlight"), ("ズーム", "zoom")] {
+                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid"), ("マーカー", "marker"), ("スポットライト", "spotlight"), ("枠", "frame"), ("ズーム", "zoom")] {
                             let all_same = selected.iter().all(|(c, _)| c.style.as_ref().and_then(|v| v.as_str()) == Some(val));
                             if ui.selectable_label(all_same, label).clicked() {
                                 let ids = edit_ids.clone();
@@ -5830,6 +6104,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         for (label, val) in [
                             ("マーカー", "marker"),
                             ("スポットライト", "spotlight"),
+                            ("枠", "frame"),
                             ("ズーム", "zoom"),
                         ] {
                             if ui.selectable_label(cur == val, label).clicked() {
@@ -5842,6 +6117,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     let is_solid = cur == "solid";
                     let is_focus = cur == "marker" || cur == "spotlight";
                     let is_zoom = cur == "zoom";
+                    let is_frame = cur == "frame";
                     let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
                     if is_zoom {
                         let mut z = clip.effect_strength.unwrap_or(1.6) as f32;
@@ -5864,6 +6140,48 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             if resp.changed() {
                                 let cid = id.clone();
                                 self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64)));
+                            }
+                        });
+                    } else if is_frame {
+                        let mut colour = hex_color32(
+                            clip.effect_color.as_deref().unwrap_or("#ffe14d"),
+                            egui::Color32::from_rgb(255, 225, 77),
+                        );
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        let mut th = clip.effect_strength.unwrap_or(4.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("色");
+                            if ui.color_edit_button_srgba(&mut colour).changed() {
+                                let cid = id.clone();
+                                let hex = color32_hex(colour);
+                                self.apply_edit(true, move |raw| {
+                                    edits::set_effect_options(raw, &cid, None, Some(hex), None)
+                                });
+                            }
+                            ui.label("太さ");
+                            let r = ui.add(egui::Slider::new(&mut th, 1.0..=24.0).suffix(" px"));
+                            if r.drag_started() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            if r.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| {
+                                    edits::set_effect_options(raw, &cid, Some(th as f64), None, None)
+                                });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("不透明度");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| {
+                                    edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64))
+                                });
                             }
                         });
                     } else if !is_solid {
@@ -5900,17 +6218,36 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         });
                     }
-                    ui.label(egui::RichText::new(if is_focus || is_zoom {
+                    // 角度: 単色/枠/ぼかしの矩形を回す（細い単色＋角度＝斜めの疑似ライン）
+                    if is_solid || is_frame || cur == "gaussian" {
+                        let mut rot = clip.effect_rot.unwrap_or(0.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("角度");
+                            let r = ui.add(egui::Slider::new(&mut rot, -90.0..=90.0).suffix("°").fixed_decimals(1));
+                            if r.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if r.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_rot(raw, &cid, Some(rot as f64)));
+                            }
+                            if ui.small_button("0°").clicked() {
+                                let cid = id.clone();
+                                self.apply_edit(true, move |raw| edits::set_effect_rot(raw, &cid, None));
+                            }
+                        });
+                    }
+                    ui.label(egui::RichText::new(if is_frame {
+                        "枠=範囲を四角い線で囲むだけ（周囲は暗くしない）。同一シーンで複数箇所を目立たせても画面が沈みません。"
+                    } else if is_focus || is_zoom {
                         "マーカー/スポットライト=範囲を目立たせる、ズーム=範囲へパンチイン。移動する対象は下の手動追従（キーフレーム）で追えます。"
                     } else {
-                        "単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。"
+                        "単色は静的範囲にもAI追従にも使えます。細くして角度をつければ斜めの線・帯としても使えます。ぼかし・モザイクは強度を調整できます。"
                     }).small().weak());
                     ui.add_space(6.0);
                     // ---- SAM tracked blur: the rectangle picks the OBJECT; the baked
                     // mask then follows it (pixel silhouette), replacing the static rect
                     // (隠す系スタイル専用 — 注目演出はマスク追従の対象外)
                     let has_track = clip.blur_track.is_some();
-                    if !(is_focus || is_zoom) {
+                    if !(is_focus || is_zoom || is_frame) {
                     ui.label(egui::RichText::new("AI追従（SAM）").strong());
                     ui.horizontal(|ui| {
                         let blabel = if has_track { "再ベイク" } else { "囲んだ物体を追従ぼかし" };
@@ -6133,6 +6470,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     ui.label(egui::RichText::new("本文").strong());
                     let r = ui.add(
                         egui::TextEdit::multiline(&mut self.insp_text)
+                            .id(egui::Id::new("cap_text_edit"))
                             .desired_rows(4)
                             .desired_width(f32::INFINITY),
                     );
@@ -6244,12 +6582,46 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             egui::Color32::WHITE,
                         );
                         if ui.color_edit_button_srgba(&mut tc).changed() {
+                            // 本文欄で文字を選択していればその範囲だけ、無ければ全体。
+                            // （egui の TextEditState はフォーカスが外れても選択範囲を
+                            // 保持するので、ピッカー操作後でも範囲が取れる）
+                            let sel = if multi {
+                                None
+                            } else {
+                                egui::TextEdit::load_state(ui.ctx(), egui::Id::new("cap_text_edit"))
+                                    .and_then(|st| st.cursor.char_range())
+                                    .map(|cr| {
+                                        (
+                                            cr.primary.index.min(cr.secondary.index),
+                                            cr.primary.index.max(cr.secondary.index),
+                                        )
+                                    })
+                                    .filter(|(a, b)| b > a)
+                            };
                             let ids = edit_ids.clone();
                             self.remember_caption_fallbacks(&ids);
-                            // a plain color pick must WIN: a leftover gradient overrides
-                            // `color` in the renderer, so it is cleared explicitly
-                            let patch = serde_json::json!({"color": color32_hex(tc), "gradient": null});
-                            self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                            if let (Some((a, b)), Some(cid)) = (sel, edit_ids.first().cloned()) {
+                                let col = color32_hex(tc);
+                                self.apply_edit(false, move |raw| {
+                                    edits::set_caption_color_span(raw, &cid, a, b, Some(&col))
+                                });
+                                // ピッカー操作でフォーカスが移っても選択が見えたままに
+                                ui.ctx().memory_mut(|m| {
+                                    m.request_focus(egui::Id::new("cap_text_edit"))
+                                });
+                            } else {
+                                // a plain color pick must WIN: a leftover gradient overrides
+                                // `color` in the renderer, so it is cleared explicitly.
+                                // 選択なしの全体変更は範囲色(colorSpans)もリセット＝見たまま
+                                let patch = serde_json::json!({
+                                    "color": color32_hex(tc),
+                                    "gradient": null,
+                                    "colorSpans": null,
+                                });
+                                self.apply_edit(false, move |raw| {
+                                    edits::patch_caption_style(raw, &ids, patch)
+                                });
+                            }
                             self.push_req(false);
                         }
                         if ui
@@ -6386,7 +6758,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // keyed clips: the fields show (and edit around) the DISPLAYED pose
                 let tkf_t_now = self.keyed_grid_t(clip.timeline_start, &clip.transform_key_times());
                 let has_tkeys = !clip.transform_key_times().is_empty();
-                let b = if has_tkeys { clip.display_box_at(tkf_t_now) } else { clip.display_box() };
+                let b = effective_box(&self.doc, &clip, tkf_t_now);
 
                 let mut xy = [b.x * 100.0, b.y * 100.0];
                 let mut xy_changed = false;
@@ -6525,7 +6897,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 .on_disabled_hover_text("再生ヘッドをこのクリップの範囲内に置いてください")
                                 .clicked()
                             {
-                                let kb = clip.display_box_at(tkf_t_now);
+                                let kb = effective_box(&self.doc, &clip, tkf_t_now);
                                 let kc = clip.crop_ltrb_at(tkf_t_now);
                                 let cid = id.clone();
                                 self.apply_edit(true, move |raw| {
@@ -6590,6 +6962,261 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let v = (vol / 100.0) as f64;
                         self.apply_edit(false, move |raw| edits::set_volume(raw, &ids, v));
                     }
+                    ui.add_space(6.0);
+                }
+                // ---- 再生速度 ----
+                if !clip.is_freeze() && clip.asset_id.is_some() && clip.source_end.is_some() {
+                    ui.label(egui::RichText::new("再生速度").strong());
+                    let has_ramp = !clip.speed_keys.is_empty();
+                    let mut spd = clip.speed * 100.0;
+                    ui.horizontal(|ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut spd)
+                                .speed(1.0)
+                                .range(5.0..=1600.0)
+                                .suffix("%"),
+                        );
+                        if r.gained_focus() || r.drag_started() {
+                            self.pending_undo = Some(self.doc.raw.clone());
+                        }
+                        let mut set_to: Option<f64> = None;
+                        if r.changed() {
+                            set_to = Some(spd / 100.0);
+                        }
+                        for (lbl, v) in [("0.5x", 0.5), ("1x", 1.0), ("1.5x", 1.5), ("2x", 2.0)] {
+                            if ui.small_button(lbl).clicked() {
+                                self.pending_undo = None;
+                                set_to = Some(v);
+                            }
+                        }
+                        if let Some(v) = set_to {
+                            let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                            self.apply_edit(true, move |raw| edits::set_clip_speed(raw, &ids, v));
+                            self.push_req(false);
+                        }
+                    });
+                    if has_ramp {
+                        ui.label(
+                            egui::RichText::new("※ランプ設定中（等速の変更でランプは解除）")
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    // ---- スピードランプ ----
+                    if !multi {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("スピードランプ").strong());
+                            if ui.small_button("＋ 再生ヘッドにキー").clicked() {
+                                let mut keys = clip.speed_keys.clone();
+                                let u = if self.t > clip.timeline_start + 0.05
+                                    && self.t < clip.timeline_end - 0.05
+                                {
+                                    clip.src_at(self.t)
+                                } else {
+                                    clip.source_start
+                                };
+                                let v = if keys.is_empty() {
+                                    clip.speed.max(0.05)
+                                } else {
+                                    clip.rate_at(self.t)
+                                };
+                                keys.push(model::SpeedKey { u, v, ease: 0.5 });
+                                keys.sort_by(|a, b| a.u.total_cmp(&b.u));
+                                let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                                self.apply_edit(true, move |raw| edits::set_speed_keys(raw, &ids, &keys));
+                                self.push_req(false);
+                            }
+                        });
+                        if !clip.speed_keys.is_empty() {
+                            let mut keys = clip.speed_keys.clone();
+                            let mut kchanged = false;
+                            let mut remove: Option<usize> = None;
+                            let css = clip.source_start;
+                            for (i, k) in keys.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("{}", i + 1)).weak().small());
+                                    ui.label(egui::RichText::new("位置").weak().small());
+                                    let mut pos = k.u - css;
+                                    let r1 = ui.add(
+                                        egui::DragValue::new(&mut pos).speed(0.05).suffix("s"),
+                                    );
+                                    if r1.changed() {
+                                        k.u = css + pos.max(0.0);
+                                        kchanged = true;
+                                    }
+                                    ui.label(egui::RichText::new("速度").weak().small());
+                                    let mut v = k.v;
+                                    let r2 = ui.add(
+                                        egui::DragValue::new(&mut v)
+                                            .speed(0.02)
+                                            .range(0.1..=8.0)
+                                            .suffix("x"),
+                                    );
+                                    if r2.changed() {
+                                        k.v = v;
+                                        kchanged = true;
+                                    }
+                                    ui.label(egui::RichText::new("カーブ").weak().small());
+                                    let mut e = k.ease;
+                                    let r3 = ui.add(
+                                        egui::DragValue::new(&mut e).speed(0.02).range(0.0..=1.0),
+                                    );
+                                    if r3.changed() {
+                                        k.ease = e;
+                                        kchanged = true;
+                                    }
+                                    if r1.drag_started() || r2.drag_started() || r3.drag_started() {
+                                        self.pending_undo = Some(self.doc.raw.clone());
+                                    }
+                                    if ui.small_button("✖").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                            }
+                            if let Some(i) = remove {
+                                keys.remove(i);
+                                kchanged = true;
+                            }
+                            if kchanged {
+                                keys.sort_by(|a, b| a.u.total_cmp(&b.u));
+                                let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                                self.apply_edit(false, move |raw| edits::set_speed_keys(raw, &ids, &keys));
+                                self.push_req(false);
+                            }
+                            ui.label(
+                                egui::RichText::new("位置=クリップ内ソース秒 / カーブ=つなぎ目の滑らかさ(0=急,1=なだらか)")
+                                    .weak()
+                                    .small(),
+                            );
+                        }
+                    }
+                    ui.add_space(6.0);
+                }
+                // ---- カラー（グレード）----
+                if clip.asset_id.is_some() {
+                    ui.label(egui::RichText::new("カラー").strong());
+                    let g = clip.grade.clone().unwrap_or_else(|| serde_json::json!({}));
+                    let gf = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+                    let cur_log = g.get("log").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("Log変換").weak().small());
+                        for (label, val) in
+                            [("なし", ""), ("S-Log3", "slog3"), ("V-Log", "vlog"), ("C-Log3", "clog3")]
+                        {
+                            if ui.selectable_label(cur_log == val, label).clicked() {
+                                let ids = edit_ids.clone();
+                                let patch = if val.is_empty() {
+                                    serde_json::json!({"log": null})
+                                } else {
+                                    serde_json::json!({"log": val})
+                                };
+                                self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    // プリセット=スライダー5本の値の束。トグル式: もう一度押すと
+                    // オフ＝調整値を全部外してスライダーが初期位置に戻る（Logは維持）。
+                    // 束は5キー全指定（マージ残りで前のプリセットの色が混ざらないように）。
+                    let cur5 = [gf("ev", 0.0), gf("contrast", 1.0), gf("sat", 1.0), gf("temp", 0.0), gf("tint", 0.0)];
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("プリセット").weak().small());
+                        for (label, p) in [
+                            ("シネマ", [0.0, 1.15, 0.95, 0.15, 0.0]),
+                            ("ティール&オレンジ", [0.0, 1.12, 1.1, 0.35, -0.08]),
+                            ("ビビッド", [0.0, 1.1, 1.35, 0.0, 0.0]),
+                            ("フィルム", [0.0, 0.92, 0.85, 0.08, 0.05]),
+                            ("モノクロ", [0.0, 1.05, 0.0, 0.0, 0.0]),
+                        ] {
+                            let active = cur5.iter().zip(p).all(|(a, b)| (a - b).abs() < 1e-4);
+                            if ui.selectable_label(active, label).clicked() {
+                                let ids = edit_ids.clone();
+                                let patch = if active {
+                                    serde_json::json!({"ev": null, "contrast": null, "sat": null, "temp": null, "tint": null})
+                                } else {
+                                    serde_json::json!({"ev": p[0], "contrast": p[1], "sat": p[2], "temp": p[3], "tint": p[4]})
+                                };
+                                self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    let mut ev = gf("ev", 0.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut ev, -2.0..=2.0).text("露出").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"ev": ev as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut ct = gf("contrast", 1.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut ct, 0.5..=1.8).text("コントラスト").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"contrast": ct as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut sat = gf("sat", 1.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut sat, 0.0..=2.0).text("彩度").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"sat": sat as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut temp = gf("temp", 0.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut temp, -1.0..=1.0).text("色温度").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"temp": temp as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    let mut tint = gf("tint", 0.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut tint, -1.0..=1.0).text("ティント").fixed_decimals(2));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edit_ids.clone();
+                        let patch = serde_json::json!({"tint": tint as f64});
+                        self.apply_edit(false, move |raw| edits::set_grade(raw, &ids, &patch));
+                        self.push_req(false);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("調整をリセット").clicked() {
+                            let ids = edit_ids.clone();
+                            let patch = serde_json::json!({"ev": null, "contrast": null, "sat": null, "temp": null, "tint": null});
+                            self.apply_edit(true, move |raw| edits::set_grade(raw, &ids, &patch));
+                            self.push_req(false);
+                        }
+                        if ui.small_button("すべてリセット").clicked() {
+                            let ids = edit_ids.clone();
+                            self.apply_edit(true, move |raw| {
+                                edits::set_grade(raw, &ids, &serde_json::Value::Null)
+                            });
+                            self.push_req(false);
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("複数選択中は選択した全クリップに適用されます")
+                            .weak()
+                            .small(),
+                    );
                     ui.add_space(6.0);
                 }
                 // ---- crop ----
@@ -6706,7 +7333,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .find(|c| c.id == id)
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
-                let src = c.source_start + (t - c.timeline_start);
+                // 速度対応: ヘッド下のソース時刻・フレーム端→タイムラインの換算は
+                // クリップの写像/局所レート経由（1:1だと速度クリップでズレる）
+                let src = c.src_at(t);
                 let p = format!("{}/{aid}_proxy.pts.json", self.doc.asset_dir);
                 let txt = std::fs::read_to_string(p).ok()?;
                 let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
@@ -6739,8 +7368,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // hole near the end could otherwise push the split outside the clip and
                 // leave a gap). When clamped, `back` shrinks so the rewind still lands
                 // exactly on the displayed frame's pts.
-                let tn = (t + (chosen + fd + 0.0002 - src)).min(c.timeline_end - 0.05);
-                let new_src = c.source_start + (tn - c.timeline_start);
+                let rate = c.rate_at(t).max(0.01);
+                let tn = (t + (chosen + fd + 0.0002 - src) / rate).min(c.timeline_end - 0.05);
+                let new_src = c.src_at(tn);
                 Some((tn - t, (new_src - chosen).max(0.0)))
             })
             .unwrap_or((0.0, 0.0));
@@ -6760,7 +7390,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .find(|c| c.id == id)
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
-                let src = (c.source_start + (t - c.timeline_start) - frame_back).max(0.0);
+                let src = (c.src_at(t) - frame_back).max(0.0);
                 let srcp = self.doc.asset_path_q(aid, false);
                 Some((src, srcp))
             });
@@ -7135,6 +7765,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 arr.insert(0, c);
             }
         }
+        edits::seq_swap_in(&mut raw);
         if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             let nd = Arc::new(nd);
             self.disk_fingerprint = disk_fp;
@@ -7347,6 +7978,40 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         self.lib_gen_stash = Some(stash);
     }
 
+    /// Create an editable, source-less content and let the backend Higgsfield job fill
+    /// it with the first generated asset/clip. This is the native app's real entry point
+    /// for "AIで新しい動画を作る".
+    fn start_ai_video(&mut self) {
+        if self.lib.started || self.lib.brief.trim().is_empty() {
+            return;
+        }
+        let room = self.room_id();
+        let title = if self.lib.title.trim().is_empty() {
+            format!("AI動画 {}", self.lib.contents.len() + 1)
+        } else { self.lib.title.clone() };
+        let format = if self.lib.format == "4:5" { "9:16".to_string() } else { self.lib.format.clone() };
+        let prompt = self.lib.brief.clone();
+        // Selection is reference material for the AI (logo/photo/video), not a mode switch.
+        let reference_asset_ids: Vec<String> = self.lib.selected_assets.clone();
+        let timeline = serde_json::json!({
+            "brief": prompt, "format": format, "source_asset_ids": reference_asset_ids, "annotations": [],
+            "sequence": { "format": format, "duration": 0, "tracks": [] },
+        });
+        self.lib.started = true;
+        self.lib.error = None;
+        self.lib.events = vec!["AI動画の編集プロジェクトを作成しています…".into()];
+        self.lib.gen_content = None;
+        self.lib.gen_job = None;
+        self.lib_post("gen_content", "/api/v1/production-assets/contents".into(), serde_json::json!({
+            "room_id": room, "title": title, "format": format, "asset_ids": reference_asset_ids, "timeline": timeline,
+        }));
+        self.lib_gen_stash = Some(serde_json::json!({
+            "mode": "higgsfield_generate", "prompt": prompt, "model": self.lib.ai_model,
+            "duration": self.lib.ai_duration, "aspect_ratio": format, "timeline": timeline, "title": title,
+            "reference_asset_ids": reference_asset_ids,
+        }));
+    }
+
     fn content_id(&self) -> String {
         self.doc
             .raw
@@ -7383,23 +8048,232 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .collect();
         let title = if title.trim().is_empty() { "動画".to_string() } else { title };
         self.export_dest = format!("{dir}\\{title}_{}.mp4", jst_timestamp_compact());
+        // サブタイムライン編集中に書き出しを開いたら、既定でその区間だけを書き出す
+        self.export_use_sub = self.on_sub_tab() && !self.sub_ranges().is_empty();
         self.export_dialog_open = true;
+    }
+
+    /// サブタブを開いているか。タブが役割を決める: メイン=I/Oで青い単一書き出し
+    /// 範囲、サブ=I/Oで緑の飛び飛び区間＋区間だけ再生（モードボタンは廃止）。
+    fn on_sub_tab(&self) -> bool {
+        self.active_seq_id() != "main"
+    }
+
+    /// 今開いているシーケンスタブのid（"main" またはサブid）。
+    fn active_seq_id(&self) -> String {
+        self.doc
+            .raw
+            .get(0)
+            .and_then(|c| c.pointer("/timeline/active_seq"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_string()
+    }
+
+    /// サブタブの一覧 (id, 表示名)。順序は timeline.seq_order。
+    fn seq_tabs(&self) -> Vec<(String, String)> {
+        let tl = self.doc.raw.get(0).and_then(|c| c.get("timeline"));
+        let order: Vec<String> = tl
+            .and_then(|t| t.get("seq_order"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let names = tl.and_then(|t| t.get("seq_names"));
+        order
+            .into_iter()
+            .map(|id| {
+                let name = names
+                    .and_then(|n| n.get(&id))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("サブ")
+                    .to_string();
+                (id, name)
+            })
+            .collect()
+    }
+
+    /// シーケンスタブ切替。sequence スロットの中身を入れ替えるだけなので、
+    /// 既存の編集・描画・保存コードは何も知らなくてよい。undo履歴はタブ間で
+    /// 混ぜない（切替時にクリア）。
+    fn switch_seq(&mut self, target: &str) {
+        if self.is_generating_open() {
+            self.toast("🎬 ダンが制作中です。完成後に切り替えられます");
+            return;
+        }
+        let mut raw = self.doc.raw.clone();
+        {
+            let Some(tl) = raw
+                .get_mut(0)
+                .and_then(|c| c.get_mut("timeline"))
+                .and_then(|t| t.as_object_mut())
+            else {
+                return;
+            };
+            let active = tl.get("active_seq").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+            if active == target {
+                return;
+            }
+            // 対象を先に取り出す（無ければ何もしない）
+            let next = if target == "main" {
+                tl.remove("main_seq")
+            } else {
+                tl.get_mut("subseqs").and_then(|s| s.as_object_mut()).and_then(|s| s.remove(target))
+            };
+            let Some(next) = next else {
+                return;
+            };
+            // 今の sequence を退避してから入れ替え
+            if let Some(cur) = tl.insert("sequence".into(), next) {
+                if active == "main" {
+                    tl.insert("main_seq".into(), cur);
+                } else if let Some(s) = tl
+                    .entry("subseqs")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                {
+                    s.insert(active, cur);
+                }
+            }
+            tl.insert("active_seq".into(), serde_json::Value::from(target));
+        }
+        self.undo.clear();
+        self.redo.clear();
+        self.pending_undo = None;
+        self.selected.clear();
+        self.sub_in = None;
+        self.sub_edge_drag = None;
+        self.playing = false;
+        self.resume_pending = None;
+        self.restore(raw);
+        self.t = self.t.min(self.dur);
+        self.push_req(false);
+    }
+
+    /// 今開いているタイムラインを複製してサブタブを作り、そこへ切り替える。
+    /// 素材はID参照の共有なので複製されるのはJSONのクリップ並びだけ＝軽い。
+    fn create_sub(&mut self) {
+        if self.is_generating_open() {
+            self.toast("🎬 ダンが制作中です。完成後に作成できます");
+            return;
+        }
+        let mut raw = self.doc.raw.clone();
+        let new_id = format!("sub{}", lane_salt());
+        {
+            let Some(tl) = raw
+                .get_mut(0)
+                .and_then(|c| c.get_mut("timeline"))
+                .and_then(|t| t.as_object_mut())
+            else {
+                return;
+            };
+            let seq = tl.get("sequence").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let n = tl.get("seq_order").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0) + 1;
+            if let Some(s) = tl
+                .entry("subseqs")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            {
+                s.insert(new_id.clone(), seq);
+            }
+            if let Some(a) = tl
+                .entry("seq_order")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+            {
+                a.push(serde_json::Value::from(new_id.clone()));
+            }
+            if let Some(s) = tl
+                .entry("seq_names")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            {
+                s.insert(new_id.clone(), serde_json::Value::from(format!("サブ{n}")));
+            }
+        }
+        self.restore(raw);
+        self.switch_seq(&new_id);
+        self.toast("サブを作成: 自由に編集できます（メインは変わりません）。I→Oで緑の区間を組めば区間だけ再生・書き出し");
+    }
+
+    /// サブタブ削除（右クリック2回で確定済み）。アクティブならメインへ戻ってから。
+    fn delete_sub(&mut self, id: &str) {
+        if self.active_seq_id() == id {
+            self.switch_seq("main");
+        }
+        let mut raw = self.doc.raw.clone();
+        {
+            let Some(tl) = raw
+                .get_mut(0)
+                .and_then(|c| c.get_mut("timeline"))
+                .and_then(|t| t.as_object_mut())
+            else {
+                return;
+            };
+            if let Some(s) = tl.get_mut("subseqs").and_then(|s| s.as_object_mut()) {
+                s.remove(id);
+            }
+            if let Some(s) = tl.get_mut("seq_names").and_then(|s| s.as_object_mut()) {
+                s.remove(id);
+            }
+            if let Some(a) = tl.get_mut("seq_order").and_then(|v| v.as_array_mut()) {
+                a.retain(|v| v.as_str() != Some(id));
+            }
+        }
+        self.restore(raw);
+        self.toast("サブを削除しました");
+    }
+
+    /// サブタイムラインの再生区間（開始順ソート・マージ済み）。
+    /// contents.json の sequence.subtimeline.ranges に永続化されている。
+    fn sub_ranges(&self) -> Vec<(f64, f64)> {
+        let v: Vec<(f64, f64)> = self
+            .doc
+            .raw
+            .get(0)
+            .and_then(|c| c.pointer("/timeline/sequence/subtimeline/ranges"))
+            .and_then(|r| r.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| {
+                        let x = r.as_array()?;
+                        let (a, b) = (x.first()?.as_f64()?, x.get(1)?.as_f64()?);
+                        (b > a && a >= 0.0).then_some((a, b))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        merge_time_ranges(v)
+    }
+
+    /// サブタイムラインへ区間を追加して保存（undo対象）。
+    fn sub_add_range(&mut self, a: f64, b: f64) {
+        let mut rs = self.sub_ranges();
+        rs.push((a.min(b), a.max(b)));
+        let rs = merge_time_ranges(rs);
+        self.apply_edit(true, move |raw| edits::set_subtimeline_ranges(raw, &rs));
     }
 
     fn start_export(&mut self) {
         // mode "export" renders the CURRENT timeline server-side (the sequence rides in
-        // the instruction — what you see is exactly what gets rendered)
-        let timeline = self
-            .doc
-            .raw
-            .get(0)
-            .and_then(|r| r.get("timeline"))
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
+        // the instruction — what you see is exactly what gets rendered).
+        // sequence スロットには「開いているタブ」が入っている＝タブごとの書き出しが
+        // 自動で成立。退避中の main_seq/subseqs は送らない（payload節約）
+        let tl = self.doc.raw.get(0).and_then(|r| r.get("timeline"));
+        let mut timeline = serde_json::json!({
+            "sequence": tl.and_then(|t| t.get("sequence")).cloned().unwrap_or_else(|| serde_json::json!({})),
+        });
+        if let Some(fmt) = tl.and_then(|t| t.get("format")).cloned() {
+            timeline["format"] = fmt;
+        }
         let mut instruction = serde_json::json!({"mode": "export", "timeline": timeline});
-        if let Some((ra, rb)) = self.export_range {
-            // in/out render range (DaVinci-style): backend forwards it to the native
-            // exporter as start/end; unset = whole content
+        let sel_ranges = if self.export_use_sub { self.sub_ranges() } else { Vec::new() };
+        if !sel_ranges.is_empty() {
+            // サブタイムラインの区間だけを（飛び飛びでも）繋げて1本に書き出す
+            instruction["export_ranges"] =
+                serde_json::json!(sel_ranges.iter().map(|(a, b)| vec![*a, *b]).collect::<Vec<_>>());
+        } else if let Some((ra, rb)) = (!self.on_sub_tab()).then_some(self.export_range).flatten() {
+            // in/out render range (DaVinci-style, メインタブ専用): backend forwards it
+            // to the native exporter as start/end; unset = whole content
             instruction["export_range"] = serde_json::json!([ra, rb]);
         }
         if self.export_dest.trim().to_ascii_lowercase().ends_with(".mp4") {
@@ -7611,9 +8485,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // half a frame on VFR sources, which on fast keyed motion reads as "the frame
         // is offset from the blur" (30px+ at their hand-keyed speeds).
         let t_disp = self.displayed_grid_t();
-        // (id, rect, baked, blur_track, on_key) — on_key = playhead sits on a position
-        // keyframe of this clip (within half a frame)
-        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool)> = self
+        // (id, rect, baked, blur_track, on_key, rot) — on_key = playhead sits on a position
+        // keyframe of this clip (within half a frame)。rot = effect_rot（描画が回る
+        // スタイルのみ。枠線/ハンドルも同角度で回して見た目を一致させる）
+        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool, f64)> = self
             .doc
             .seq
             .tracks
@@ -7630,12 +8505,22 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 let kts = c.region_key_times();
                 let rel = self.keyed_grid_t(c.timeline_start, &kts) - c.timeline_start;
                 let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
+                // 回転が描画に効くスタイル（単色/枠/ぼかし系）だけ枠線も回す
+                let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                let rot = if style.contains("mosaic")
+                    || matches!(style, "marker" | "spotlight" | "zoom" | "note")
+                {
+                    0.0
+                } else {
+                    c.effect_rot.unwrap_or(0.0)
+                };
                 (
                     c.id.clone(),
                     rg,
                     matches!(self.blur_states.get(&c.id), Some(PopState::Ready)),
                     c.blur_track.clone(),
                     on_key,
+                    rot,
                 )
             }))
             .collect();
@@ -7739,7 +8624,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 .cloned();
             if let (true, Some(b)) = (inside_time, base) {
                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
-                let bb = b.display_box_at(self.t);
+                let bb = effective_box(&self.doc, &b, self.t);
                 let src_now = b.src_at(self.t);
                 // markers (source -> canvas)
                 let p = ui.painter_at(vid);
@@ -7808,8 +8693,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
             return;
         }
-        let mut editable: Vec<(String, egui::Rect)> = Vec::new();
-        for (_cid, rg, tracked, bt, on_key) in outlines {
+        let mut editable: Vec<(String, egui::Rect, [egui::Pos2; 4], f64)> = Vec::new();
+        for (_cid, rg, tracked, bt, on_key, rot) in outlines {
             // while a bake is live, the outline FOLLOWS the tracked object: the mask
             // meta records the object's box per mask frame — look up the box for the
             // frame the preview is showing and map it source -> canvas
@@ -7887,7 +8772,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                             if x1 > x0 && y1 > y0 {
                                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
-                                let bb = b.display_box_at(t_disp);
+                                let bb = effective_box(&self.doc, &b, t_disp);
                                 draw_box = compositor::source_box_to_canvas(
                                     (canvas_w(), canvas_h()),
                                     dims,
@@ -7919,10 +8804,36 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 egui::Color32::from_rgb(255, 170, 60)
             };
             let p = ui.painter_at(vid);
-            p.rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            // 回転スタイルは枠線・ハンドルも同角度で回す（見た目の角度を確認できる
+            // ように）。回転は描画と同じ「矩形中心・時計回り」。プレビュー枠 vid は
+            // キャンバスと同アスペクトなのでスクリーン空間の回転角=描画の回転角。
+            let rot_corner = |p0: egui::Pos2| -> egui::Pos2 {
+                if rot.abs() < 1e-3 {
+                    return p0;
+                }
+                let (sn, cs) = (rot.to_radians().sin() as f32, rot.to_radians().cos() as f32);
+                let ctr = r.center();
+                let d = p0 - ctr;
+                egui::pos2(ctr.x + cs * d.x - sn * d.y, ctr.y + sn * d.x + cs * d.y)
+            };
+            // NW, NE, SW, SE（ヒット判定 mode 1..4 と同順）
+            let hs4 = [
+                rot_corner(r.left_top()),
+                rot_corner(r.right_top()),
+                rot_corner(r.left_bottom()),
+                rot_corner(r.right_bottom()),
+            ];
+            if rot.abs() < 1e-3 {
+                p.rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            } else {
+                p.add(egui::Shape::closed_line(
+                    vec![hs4[0], hs4[1], hs4[3], hs4[2]],
+                    egui::Stroke::new(2.0, col),
+                ));
+            }
             if on_key && !following {
                 // small key diamond on the rect's top edge so the state reads at a glance
-                let cpt = egui::pos2(r.center().x, r.top());
+                let cpt = rot_corner(egui::pos2(r.center().x, r.top()));
                 p.add(egui::Shape::convex_polygon(
                     vec![
                         cpt + egui::vec2(0.0, -5.0),
@@ -7938,16 +8849,20 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             // drag. A green following box is the TRACKED object, not the region — its
             // rect is not draggable (解除 first to hand-adjust).
             if !following {
-                for c4 in [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()] {
-                    p.rect_filled(egui::Rect::from_center_size(c4, egui::vec2(8.0, 8.0)), 1.0, col);
+                for c4 in hs4 {
+                    p.rect_filled(egui::Rect::from_center_size(c4, egui::vec2(10.0, 10.0)), 1.0, col);
                 }
-                editable.push((_cid.clone(), r));
+                editable.push((_cid.clone(), r, hs4, rot));
             }
         }
         // --- region rect editing: corners = resize, inside = move (shape preserved) ---
         if preview_drag_started && self.region_drag.is_none() {
-            if let Some(pt) = pointer_pos {
-                'hit: for (cid, r) in &editable {
+            // ヒット判定は「押した瞬間の位置」で行う。egui の drag_started は数px
+            // 動いてから発火するため、現在位置だと速いドラッグでハンドル(12pt)を
+            // 外れて掴み損ねる（掴んだ後のデルタ基準も press 起点に揃える）
+            let press_pt = ui.input(|i| i.pointer.press_origin()).or(pointer_pos);
+            if let Some(pt) = press_pt {
+                'hit: for (cid, r, hs4, ed_rot) in &editable {
                     // (timeline_start, keys snapshot) of a keyframe-able clip (no AI track)
                     let key_info = self
                         .doc
@@ -7964,13 +8879,31 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     // 厳密に成立する。
                     // corner hit zones shrink with the rect so a small rect keeps a
                     // grabbable BODY (10px corners used to swallow short rects whole)
-                    let cr = 10.0f32.min(r.width() / 3.0).min(r.height() / 3.0).max(4.0);
-                    let corners = [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
-                    let mode = corners
+                    // 角の当たりは12pt固定（細い矩形で判定が消えて掴めない問題の根治。
+                    // 角が優先、本体は角に近くない場合のみ）。ハンドル位置=表示位置
+                    // （回転時は回転後の角）なので、見えている所がそのまま掴める
+                    let cr = 12.0f32;
+                    // 本体判定は無回転ローカル空間で（回転した細線は軸平行バウンディング
+                    // ボックスとズレるため、ポインタを逆回転してから判定する）
+                    let ptl = if ed_rot.abs() > 1e-3 {
+                        let (sn, cs) =
+                            ((-ed_rot).to_radians().sin() as f32, (-ed_rot).to_radians().cos() as f32);
+                        let ctr = r.center();
+                        let d = pt - ctr;
+                        egui::pos2(ctr.x + cs * d.x - sn * d.y, ctr.y + sn * d.x + cs * d.y)
+                    } else {
+                        pt
+                    };
+                    // 極細矩形（疑似ライン）でも本体を掴めるよう、当たりは最低12px幅
+                    let body = r.expand2(egui::vec2(
+                        (12.0 - r.width()).max(0.0) * 0.5,
+                        (12.0 - r.height()).max(0.0) * 0.5,
+                    ));
+                    let mode = hs4
                         .iter()
                         .position(|cp| cp.distance(pt) <= cr)
                         .map(|ci| ci as u8 + 1)
-                        .unwrap_or(if r.contains(pt) { 0 } else { u8::MAX });
+                        .unwrap_or(if body.contains(ptl) { 0 } else { u8::MAX });
                     if mode == u8::MAX {
                         continue;
                     }
@@ -8020,35 +8953,30 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             if let Some(pt) = pointer_pos {
                 let dx = ((pt.x - grab.x) / vid.width()) as f64;
                 let dy = ((pt.y - grab.y) / vid.height()) as f64;
+                let (ox, oy, ow, oh) = orig;
                 let (mut x, mut y, mut w, mut h) = orig;
-                match mode {
-                    0 => {
-                        x += dx;
-                        y += dy;
-                    }
-                    1 => {
-                        x += dx;
-                        y += dy;
-                        w -= dx;
-                        h -= dy;
-                    }
-                    2 => {
-                        y += dy;
-                        w += dx;
-                        h -= dy;
-                    }
-                    3 => {
-                        x += dx;
-                        w -= dx;
-                        h += dy;
-                    }
-                    _ => {
-                        w += dx;
-                        h += dy;
-                    }
+                if mode == 0 {
+                    x += dx;
+                    y += dy;
+                } else {
+                    // 角ドラッグ＝掴んだ角を自由に動かし、対角をアンカーに正規化。
+                    // 反対側へ突き抜けたら矩形が反転して逆方向に伸びる＝細さの下限が
+                    // 操作として存在しない（0通過はregion_atの「矩形なし」判定を
+                    // 避けるため極小値で一瞬止まるだけ）
+                    let (gx, gy, ax, ay) = match mode {
+                        1 => (ox, oy, ox + ow, oy + oh),      // NW を掴む / SE 固定
+                        2 => (ox + ow, oy, ox, oy + oh),      // NE を掴む / SW 固定
+                        3 => (ox, oy + oh, ox + ow, oy),      // SW を掴む / NE 固定
+                        _ => (ox + ow, oy + oh, ox, oy),      // SE を掴む / NW 固定
+                    };
+                    let (mx, my) = (gx + dx, gy + dy);
+                    x = mx.min(ax);
+                    y = my.min(ay);
+                    w = (mx - ax).abs();
+                    h = (my - ay).abs();
                 }
-                w = w.clamp(0.02, 1.0);
-                h = h.clamp(0.02, 1.0);
+                w = w.clamp(0.0002, 1.0);
+                h = h.clamp(0.0002, 1.0);
                 // 画面外へのはみ出しOK（端ギリギリを隠す用）。ただし最低5%は画面内に
                 // 残す＝完全に出て掴めなくなる事故を防ぐ
                 x = x.clamp(0.05 - w, 0.95);
@@ -8199,7 +9127,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             return;
         }
         // the frame follows the keyframed pose at the DISPLAYED frame (region 流儀)
-        let b = c.display_box_at(t_disp);
+        let b = effective_box(&self.doc, c, t_disp);
         let tkts = c.transform_key_times();
         let t_rel = t_disp - c.timeline_start;
         let on_tkey = tkts.iter().any(|kt| (kt - t_rel).abs() <= edits::KEY_REPLACE_EPS);
@@ -8267,7 +9195,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // drag starts from the DISPLAYED pose (keyframed clips: the evaluated box)
                 let starts: Vec<(String, model::Pos)> = sel
                     .iter()
-                    .map(|c| (c.id.clone(), c.display_box_at(t_disp)))
+                    .map(|c| (c.id.clone(), effective_box(&self.doc, c, t_disp)))
                     .collect();
                 if corner.is_some() || edge.is_some() || bx.contains(pt) {
                     // transform-key routing, armed per clip like the region editor:
@@ -8527,7 +9455,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // ---- render range band (DaVinci-style in/out) on the ruler ----
         // I/O keys set the edges at the playhead; the edge flags drag; export uses
         // only this span when set. Session-local state (not written to the timeline).
-        if let Some((ra, rb)) = self.export_range {
+        // メインタブ専用（サブタブの I/O は緑の飛び飛び区間）
+        if let Some((ra, rb)) = (!self.on_sub_tab()).then_some(self.export_range).flatten() {
             let x0 = (body.left() + ra as f32 * self.pps - self.scroll_x).max(body.left());
             let x1 = (body.left() + rb as f32 * self.pps - self.scroll_x).min(body.right());
             if x1 > body.left() && x0 < body.right() {
@@ -8562,22 +9491,67 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
+        // ---- サブタイムライン区間帯（飛び飛び再生区間・サブタブ専用）----
+        // 緑帯=再生・書き出しの対象。区間外のレーン本体は暗転して
+        // 「ここは流れない」を見せる。イン点待ちは緑の縦線。
+        if self.on_sub_tab() {
+            let subs = self.sub_ranges();
+            let x_of = |t: f64| body.left() + t as f32 * self.pps - self.scroll_x;
+            for &(a, b) in &subs {
+                let x0 = x_of(a).max(body.left());
+                let x1 = x_of(b).min(body.right());
+                if x1 <= body.left() || x0 >= body.right() {
+                    continue;
+                }
+                p.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, body.top() + 9.0),
+                        egui::pos2(x1, body.top() + 16.0),
+                    ),
+                    2.0,
+                    egui::Color32::from_rgba_unmultiplied(0, 210, 140, 170),
+                );
+                // モード中は端をドラッグハンドルとして見せる（縦線＋内向き三角）
+                if self.on_sub_tab() {
+                    let ec = egui::Color32::from_rgb(0, 230, 155);
+                    for (t_edge, is_in) in [(a, true), (b, false)] {
+                        let x = x_of(t_edge);
+                        if x < body.left() - 8.0 || x > body.right() + 8.0 {
+                            continue;
+                        }
+                        p.line_segment(
+                            [egui::pos2(x, body.top() + 1.0), egui::pos2(x, body.top() + 17.0)],
+                            egui::Stroke::new(2.0, ec),
+                        );
+                        let dir = if is_in { 5.0 } else { -5.0 };
+                        p.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(x, body.top() + 1.0),
+                                egui::pos2(x + dir, body.top() + 5.0),
+                                egui::pos2(x, body.top() + 9.0),
+                            ],
+                            ec,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                }
+            }
+        }
+
         // Layered-track model (Filmora/Olive): the tracks array IS the stacking order,
         // index 0 = back. Display shows visual tracks top=front (reverse array order);
         // audio tracks sit below the visual stack (universal NLE convention). No
         // kind-based pinning — reorder/move clips and the render follows.
         // ロールフリー表示: レーンの太さは「役割(kind)」では決めない。太いのは
         // 映像メインレーン（配列先頭＝最背面の視覚レーン）1本だけで、それ以外は
-        // 種類にかかわらず一律スリム。空のレーンは畳む（役割ごとの常設レーンは
-        // 廃止済みの名残）が、クリップのMoveドラッグ中だけはドロップ先として
-        // 出現させる（既存の「最上段より上=新規レーン」ゾーンと併用）。
-        // 「押しただけ」ではレイアウトを一切変えない: 実移動（drag_engaged）が
-        // 始まって初めてドロップレーン展開＋凍結レイアウトに切り替える
+        // 種類にかかわらず一律スリム。ビジュアルレーンは空でも常に表示する
+        // （普通のNLEの持続的トラック）。ドラッグ中だけ出没する幽霊レーンも、
+        // 「最上段の唯一のクリップを上へ引いても±0に見える」問題も、これで消える。
+        // 同一ジェスチャ中の仮レーン(無名・空)だけは edits 側の prune が畳む。
         let moving = matches!(self.drag, Drag::Move { .. }) && self.drag_engaged;
         let visual: Vec<usize> = (0..self.doc.seq.tracks.len())
             .rev()
             .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
-            .filter(|&i| moving || !self.doc.seq.tracks[i].clips.is_empty())
             .collect();
         let audio: Vec<usize> = (0..self.doc.seq.tracks.len())
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
@@ -8594,7 +9568,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let squeeze = (avail / total_h.max(1.0)).min(1.0);
         let mut lane_tops: Vec<(usize, f32, f32)> = Vec::new(); // (track idx, y0, height)
         {
-            let mut y = rect.top() + ruler_h + 3.0;
+            // レーン束は余った縦空間の中央に置く。上（ルーラー直下）にギチギチ、
+            // 下に広大な余白という頭でっかちを避け、パネルをどう広げても
+            // シーケンスがバランスの良い中間に来る。
+            let mut y = rect.top() + ruler_h + 3.0 + ((avail - total_h).max(0.0) * 0.5);
             for &i in &order {
                 let lh = lane_h_for(i) * squeeze;
                 lane_tops.push((i, y, lh));
@@ -8674,6 +9651,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 .collect()
         };
         let mut flag_click: Option<(usize, String, bool)> = None;
+        let mut lane_delete: Option<usize> = None;
         for &(ti, y0, lane_h) in &lane_tops {
             // 凍結レイアウト使用中にレーン移動でトラックが消えることがある
             // （空トラックの自動削除）。古いインデックスは1フレームだけ読み飛ばす
@@ -8762,6 +9740,29 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         flag_click = Some((ti, key, !cur));
                     }
                     x += 18.0;
+                }
+                // 空レーンはヘッダ右端の小さな×で削除できる
+                if tr.clips.is_empty() {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + GUTTER - 20.0, y0 + lane_h * 0.5 - 8.0),
+                        egui::vec2(16.0, 16.0),
+                    );
+                    let xresp =
+                        ui.interact(r, egui::Id::new(("lane_del", ti)), egui::Sense::click());
+                    p.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "✖",
+                        egui::FontId::proportional(12.0),
+                        if xresp.hovered() {
+                            egui::Color32::from_rgb(240, 110, 110)
+                        } else {
+                            egui::Color32::from_gray(110)
+                        },
+                    );
+                    if xresp.on_hover_text("この空レーンを削除").clicked() {
+                        lane_delete = Some(ti);
+                    }
                 }
             }
             p.line_segment(
@@ -8878,6 +9879,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 "note" => "📝 指示",
                                 "marker" => "マーカー",
                                 "spotlight" => "スポット",
+                                "frame" => "枠",
                                 "zoom" => "ズーム",
                                 s if s.contains("mosaic") => "モザイク",
                                 _ => "ぼかし",
@@ -9115,6 +10117,48 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             egui::Color32::from_white_alpha(235),
                         );
                     }
+                    // 速度バッジ: 等速≠1x は「1.5x」、ランプは「⚡」
+                    let spd_badge = if !c.speed_keys.is_empty() {
+                        Some("⚡ランプ".to_string())
+                    } else if (c.speed - 1.0).abs() > 1e-9 {
+                        Some(format!("{}x", (c.speed * 100.0).round() / 100.0))
+                    } else {
+                        None
+                    };
+                    if let Some(b) = spd_badge {
+                        if strip.width() > 60.0 {
+                            p.text(
+                                egui::pos2(strip.right() - 4.0, strip.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                b,
+                                egui::FontId::proportional(9.0),
+                                egui::Color32::from_rgb(255, 220, 120),
+                            );
+                        }
+                    }
+                }
+                // スピードランプの速度カーブ帯（対数スケール 0.25x..4x を高さへ）
+                if !c.speed_keys.is_empty() && tr.kind != "audio" && r.width() > 20.0 {
+                    let n = ((r.width() / 3.0) as usize).max(2);
+                    let mut prev: Option<egui::Pos2> = None;
+                    for i in 0..=n {
+                        let frac = i as f64 / n as f64;
+                        let t = c.timeline_start + frac * (c.timeline_end - c.timeline_start);
+                        let v = c.rate_at(t).clamp(0.25, 4.0);
+                        let y01 = ((v.ln() - 0.25f64.ln()) / (4.0f64.ln() - 0.25f64.ln())) as f32;
+                        let y = r.bottom() - 2.0 - y01 * (r.height() - strip_h - 4.0).max(4.0);
+                        let pt = egui::pos2(r.left() + (frac as f32) * r.width(), y);
+                        if let Some(pp) = prev {
+                            p.line_segment(
+                                [pp, pt],
+                                egui::Stroke::new(
+                                    1.5,
+                                    egui::Color32::from_rgba_unmultiplied(255, 220, 120, 200),
+                                ),
+                            );
+                        }
+                        prev = Some(pt);
+                    }
                 }
                 if tr.kind != "audio" && c.link_id.is_some() {
                     // unified A/V: waveform ribbon along the clip's bottom quarter
@@ -9124,8 +10168,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let n = ((r.width() / 2.0) as usize).max(1);
                         for i in 0..n {
                             let x = r.left() + (i as f32) * 2.0;
-                            let tt = c.source_start
-                                + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
+                            let tt = c.src_at(
+                                c.timeline_start
+                                    + (i as f64 / n as f64) * (c.timeline_end - c.timeline_start),
+                            );
                             let idx = (tt / spb) as usize;
                             let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0);
                             p.line_segment(
@@ -9142,8 +10188,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let n = ((r.width() / 2.0) as usize).max(1);
                         for i in 0..n {
                             let x = r.left() + (i as f32) * 2.0;
-                            let tt = c.source_start
-                                + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
+                            let tt = c.src_at(
+                                c.timeline_start
+                                    + (i as f64 / n as f64) * (c.timeline_end - c.timeline_start),
+                            );
                             let idx = (tt / spb) as usize;
                             let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0).max(0.04);
                             p.line_segment(
@@ -9217,6 +10265,47 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
+        // サブタイムラインモード: 区間外のレーンを暗転（クリップより前面に塗る＝
+        // 「ここは再生・書き出しに含まれない」を見せる）＋イン点待ちの緑縦線
+        if self.on_sub_tab() {
+            let subs = self.sub_ranges();
+            let x_of = |t: f64| body.left() + t as f32 * self.pps - self.scroll_x;
+            if !subs.is_empty() {
+                let mut edges: Vec<(f64, f64)> = Vec::new();
+                let mut prev = 0.0f64;
+                for &(a, b) in &subs {
+                    if a > prev {
+                        edges.push((prev, a));
+                    }
+                    prev = prev.max(b);
+                }
+                edges.push((prev, f64::MAX));
+                for (a, b) in edges {
+                    let x0 = x_of(a).max(body.left());
+                    let x1 = if b == f64::MAX { body.right() } else { x_of(b).min(body.right()) };
+                    if x1 <= x0 {
+                        continue;
+                    }
+                    p.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(x0, body.top() + 18.0),
+                            egui::pos2(x1, rect.bottom()),
+                        ),
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 110),
+                    );
+                }
+            }
+            if let Some(a) = self.sub_in {
+                let x = x_of(a);
+                if x >= body.left() && x <= body.right() {
+                    p.line_segment(
+                        [egui::pos2(x, body.top()), egui::pos2(x, rect.bottom())],
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 210, 140)),
+                    );
+                }
+            }
+        }
         let hx = body.left() + (self.t as f32) * self.pps - self.scroll_x;
         if hx >= body.left() && hx <= body.right() {
             p.line_segment(
@@ -9249,8 +10338,33 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.apply_edit(true, move |raw| edits::set_track_flag(raw, ti, &key, val));
             self.push_req(false);
         }
+        if let Some(ti) = lane_delete {
+            self.apply_edit(true, move |raw| edits::delete_track(raw, ti));
+            self.drag_lane_tops = None;
+            self.push_req(false);
+        }
         // ---- interactions: trim edges > move body > scrub empty space ----
         let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - body.left())) / pps).max(0.0) as f64;
+        // サブタイムライン: ルーラーの緑帯を右クリック=その区間を削除
+        if self.on_sub_tab() && resp.secondary_clicked() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                if pos.y <= body.top() + 18.0 {
+                    let t = to_t(self.scroll_x, self.pps, pos.x);
+                    let rs = self.sub_ranges();
+                    if let Some(k) = rs.iter().position(|&(a, b)| t >= a && t <= b) {
+                        let (a, b) = rs[k];
+                        let mut rest = rs.clone();
+                        rest.remove(k);
+                        self.apply_edit(true, move |raw| edits::set_subtimeline_ranges(raw, &rest));
+                        self.toast(&format!(
+                            "区間を削除: {:02}:{:02}〜{:02}:{:02}",
+                            a as i64 / 60, a as i64 % 60, b as i64 / 60, b as i64 % 60
+                        ));
+                        self.push_req(false);
+                    }
+                }
+            }
+        }
         // selection & drag arming happen ON PRESS (standard NLE feel) — the old
         // clicked()/drag_started() pair depended on release timing and a clean previous
         // drag state, which made selection feel unreliable
@@ -9287,7 +10401,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             return None;
                         }
                         let inside = r.contains(pos);
-                        if !inside && hits.iter().any(|(rb, _)| rb.contains(pos)) {
+                        let selected = self.selected.contains(id);
+                        // ポインタが別クリップの本体内なら外側キャプチャは譲る — ただし
+                        // 「選択中クリップのエッジ」だけは例外。密着カットでは左端の白い
+                        // ハンドル(境界中央)の左半分が前のクリップの本体に落ち、掴んだ
+                        // つもりの左端が前クリップの右端トリムに化けていた（右へ=前が
+                        // 重なって頭が消え短縮に見える/左へ=前が縮んで隙間、の報告バグ）
+                        if !inside && !selected && hits.iter().any(|(rb, _)| rb.contains(pos)) {
                             return None; // pointer is in another clip's body
                         }
                         let edge_px = (r.width() * 0.33).clamp(4.0, 10.0);
@@ -9295,10 +10415,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let dr = (pos.x - r.right()).abs();
                         let dist = dl.min(dr);
                         let hit_edge = if inside { dist <= edge_px } else { dist <= 10.0 };
-                        hit_edge.then_some((dist, *r, id.clone(), dl <= dr))
+                        hit_edge.then_some((selected, dist, *r, id.clone(), dl <= dr))
                     })
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-                    .map(|(_, r, id, left)| (r, id, Some(left)));
+                    // 選択中クリップのエッジを最優先、その中で距離最小
+                    .min_by(|a, b| {
+                        (!a.0, a.1).partial_cmp(&(!b.0, b.1)).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(_, _, r, id, left)| (r, id, Some(left)));
                 let body_hit = edge_hit.or_else(|| {
                     hits.iter()
                         .rev()
@@ -9330,6 +10453,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             } else {
                                 self.selected = vec![id.clone()];
                             }
+                            self.click_collapse = None;
+                        } else if self.selected.len() > 1 && !ui.input(|i| i.modifiers.ctrl) {
+                            // 複数選択中のクリップを「動かさずにクリック」したら、離した
+                            // 時点でそのクリップ単独選択に絞る。押下時に絞らないのは
+                            // グループごと掴んでドラッグ移動する操作を殺さないため
+                            self.click_collapse = Some(id.clone());
+                        } else {
+                            self.click_collapse = None;
                         }
                         let ids = edits::expand_links(&self.doc.raw, &self.selected);
                         if self.drag == Drag::None {
@@ -9370,6 +10501,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     .map(|c| if left { c.timeline_start } else { c.timeline_end });
                                 let last_t = if left { edges.fold(f64::MAX, f64::min) } else { edges.fold(f64::MIN, f64::max) };
                                 let last_t = if last_t.is_finite() { last_t } else { to_t(self.scroll_x, self.pps, pos.x) };
+                                eprintln!(
+                                    "TRIMPRESS left={left} edge_t={last_t:.3} ids={:?}",
+                                    ids.first()
+                                );
                                 self.drag = Drag::Trim { ids, left, last_t };
                             } else {
                                 let ts = self
@@ -9381,6 +10516,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                     .find(|c| c.id == *id)
                                     .map(|c| c.timeline_start)
                                     .unwrap_or(0.0);
+                                // 付着クリップ(メインレーンのクリップに頭が載っている
+                                // 前面レーンのクリップ+そのリンク音声)は削除と同様、
+                                // 移動でも親と一緒に時間シフトさせる（Filmoraの規則）。
+                                // メンバーはドラッグ開始時に確定。
+                                self.move_attached = {
+                                    let a = edits::attached_to(&self.doc.raw, &ids);
+                                    if a.is_empty() {
+                                        a
+                                    } else {
+                                        edits::expand_links(&self.doc.raw, &a)
+                                            .into_iter()
+                                            .filter(|i| !ids.contains(i))
+                                            .collect()
+                                    }
+                                };
                                 self.drag = Drag::Move {
                                     ids,
                                     anchor_id: id.clone(),
@@ -9398,17 +10548,40 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // ruler strip keeps the press-scrub feel; empty LANE space arms a
                         // marquee (drag = box-select, a tiny click still seeks on release)
                         if pos.y <= body.top() + 18.0 {
-                            // render-range edge flags win over scrub within ±6px
-                            if let Some((ra, rb)) = self.export_range {
-                                let xa = body.left() + ra as f32 * self.pps - self.scroll_x;
-                                let xb = body.left() + rb as f32 * self.pps - self.scroll_x;
-                                if (pos.x - xa).abs() <= 6.0 {
-                                    self.range_drag = Some(true);
-                                } else if (pos.x - xb).abs() <= 6.0 {
-                                    self.range_drag = Some(false);
+                            // サブタイムラインの緑帯の端（イン点/アウト点）ドラッグが最優先。
+                            // ドラッグ中は掴んだ時点の区間リスト（未マージ）を基準に編集し、
+                            // 隣の区間に触れた瞬間に合体して index がズレるのを防ぐ
+                            if self.on_sub_tab() {
+                                let subs = self.sub_ranges();
+                                let mut best: Option<(usize, bool, f32)> = None;
+                                for (k, &(a, b)) in subs.iter().enumerate() {
+                                    for (t_edge, is_in) in [(a, true), (b, false)] {
+                                        let x = body.left() + t_edge as f32 * self.pps - self.scroll_x;
+                                        let d = (pos.x - x).abs();
+                                        if d <= 6.0 && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+                                            best = Some((k, is_in, d));
+                                        }
+                                    }
+                                }
+                                if let Some((k, is_in, _)) = best {
+                                    self.pending_undo = Some(self.doc.raw.clone());
+                                    self.sub_edge_drag = Some((subs, k, is_in));
                                 }
                             }
-                            if self.range_drag.is_none() {
+                            // render-range edge flags win over scrub within ±6px
+                            // （青帯はメインタブ専用）
+                            if self.sub_edge_drag.is_none() && !self.on_sub_tab() {
+                                if let Some((ra, rb)) = self.export_range {
+                                    let xa = body.left() + ra as f32 * self.pps - self.scroll_x;
+                                    let xb = body.left() + rb as f32 * self.pps - self.scroll_x;
+                                    if (pos.x - xa).abs() <= 6.0 {
+                                        self.range_drag = Some(true);
+                                    } else if (pos.x - xb).abs() <= 6.0 {
+                                        self.range_drag = Some(false);
+                                    }
+                                }
+                            }
+                            if self.sub_edge_drag.is_none() && self.range_drag.is_none() {
                                 self.selected.clear();
                                 self.drag = Drag::Scrub;
                                 let raw_t = to_t(self.scroll_x, self.pps, pos.x);
@@ -9432,6 +10605,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         if resp.dragged() {
             if let Some(pos) = resp.interact_pointer_pos() {
+                if let Some((base, k, is_in)) = self.sub_edge_drag.clone() {
+                    // 緑帯の端ドラッグ: フレーム量子化・1フレーム最小幅。掴んだ時点の
+                    // リスト base を毎フレーム基準にする（保存時に読み側でマージされる）
+                    let f = 1.0 / self.timeline_fps();
+                    let t_new = self.grid_quantize(to_t(self.scroll_x, self.pps, pos.x).max(0.0));
+                    let mut rs = base;
+                    if let Some(r) = rs.get_mut(k) {
+                        if is_in {
+                            r.0 = t_new.min(r.1 - f).max(0.0);
+                        } else {
+                            r.1 = t_new.max(r.0 + f);
+                        }
+                        self.apply_edit(false, move |raw| edits::set_subtimeline_ranges(raw, &rs));
+                    }
+                }
                 if let Some(is_in) = self.range_drag {
                     // drag a render-range edge: frame-quantized, kept ordered with a
                     // one-frame minimum span
@@ -9478,7 +10666,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         }
                         // vertical: the clip FOLLOWS the pointer's lane live (not on release)
                         let prev_hover = self.hover_lane;
-                        self.hover_lane = if new_top_drop.map(|r| r.contains(pos)).unwrap_or(false) {
+                        // 最上段レーンより上なら帯の外でも新規レーン扱い
+                        // （上へは何本でも増やせる）
+                        let above_top = body.contains(pos)
+                            && lane_tops.first().map(|&(_, y0, _)| pos.y < y0).unwrap_or(false);
+                        self.hover_lane = if above_top {
                             Some(NEW_TOP_LANE)
                         } else {
                             lane_tops
@@ -9547,18 +10739,25 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let want = self.snap(raw_t, &ids);
                         self.snap_line = ((want - raw_t).abs() > 1e-9).then_some(want);
                         let dt = want - orig - applied;
+                        // 付着クリップも同じ時間シフトに含める（レーンは変えない —
+                        // レーン変更(LANEMOVE/NEWLANE)は選択本体だけに適用される）
+                        let move_ids: Vec<String> = ids
+                            .iter()
+                            .cloned()
+                            .chain(self.move_attached.iter().cloned())
+                            .collect();
                         let min_start = self
                             .doc
                             .seq
                             .tracks
                             .iter()
                             .flat_map(|tr| tr.clips.iter())
-                            .filter(|c| ids.contains(&c.id))
+                            .filter(|c| move_ids.contains(&c.id))
                             .map(|c| c.timeline_start)
                             .fold(f64::MAX, f64::min);
                         let actual_dt = if min_start.is_finite() { dt.max(-min_start) } else { dt };
                         if actual_dt.abs() > 1e-4 {
-                            self.apply_edit(false, |raw| edits::move_clips(raw, &ids, actual_dt));
+                            self.apply_edit(false, |raw| edits::move_clips(raw, &move_ids, actual_dt));
                             if let Drag::Move { applied, .. } = &mut self.drag {
                                 *applied += actual_dt;
                             }
@@ -9566,11 +10765,57 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     Drag::Trim { ids, left, last_t } => {
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
-                        let nt = self.snap(raw_t, &ids);
+                        let mut nt = self.snap(raw_t, &ids);
+                        // スナップ許容は 8px/pps ＝ズームが荒いと1秒超になり、エッジ密集
+                        // タイムラインでは nt が常にカット点へ量子化されて微調整トリムが
+                        // d=0 に潰される（「左に広げられない」の一因）。トリム中は
+                        // 実時間 0.25s を上限にする
+                        if (nt - raw_t).abs() > 0.25 {
+                            nt = self.grid_quantize(raw_t);
+                        }
+                        let requested = nt - last_t;
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
-                        self.apply_edit(false, |raw| edits::trim_clip_live_from(raw, &ids, left, last_t, nt));
+                        // 静止画クリップにはソース時間の概念が無い＝両方向へ自由に
+                        // 伸ばせる（従来は source_start=0 の制限で左拡大が常にゼロ）
+                        let stills: Vec<String> = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .filter(|c| {
+                                ids.contains(&c.id)
+                                    && c.asset_id
+                                        .as_ref()
+                                        .map(|a| self.doc.asset_images.contains(a))
+                                        .unwrap_or(false)
+                            })
+                            .map(|c| c.id.clone())
+                            .collect();
+                        let applied = std::cell::Cell::new(0.0f64);
+                        {
+                            let ap = &applied;
+                            self.apply_edit(false, |raw| {
+                                ap.set(edits::trim_clip_live_from(raw, &ids, left, last_t, nt, &stills));
+                            });
+                        }
+                        // 実際に消化できた分だけ追跡値を進める。限界で止まった分の
+                        // マウス移動を溜めない＝「見えない幅」と反転時の空白の根治
                         if let Drag::Trim { last_t, .. } = &mut self.drag {
-                            *last_t = nt;
+                            *last_t += applied.get();
+                        }
+                        // 常設ログ: トリムが「効かない」報告の一次証拠（%TEMP%\done_app.log）
+                        if applied.get().abs() > 1e-9 || (nt - last_t).abs() > 1e-9 {
+                            eprintln!(
+                                "TRIM_DBG left={left} last_t={last_t:.3} nt={nt:.3} applied={:.3} ids={:?}",
+                                applied.get(),
+                                ids.first()
+                            );
+                        }
+                        // 伸ばせない限界を超えた領域では、動いているかのような
+                        // 黄色いスナップ線を出さない（誤解の元＝報告バグ）
+                        if (applied.get() - requested).abs() > 1e-4 {
+                            self.snap_line = None;
                         }
                     }
                     Drag::Volume { ids, start_y, start_vol } => {
@@ -9651,6 +10896,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let released_now = ui.input(|i| i.pointer.any_released());
         if released_now {
             self.range_drag = None;
+            if self.sub_edge_drag.take().is_some() {
+                self.push_req(false);
+            }
         }
         if resp.drag_stopped() || (released_now && self.drag != Drag::None) {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
@@ -9683,10 +10931,47 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // Moving must never erase either an unselected destination clip or another
                 // member of a multi-selection. Overlaps remain explicit and editable; trim
                 // retains its established overwrite-on-settle behaviour.
-                Drag::Move { .. } => {}
+                Drag::Move { .. } => {
+                    // ジェスチャ確定: クリップが載ったままの無名(仮)レーンへ id を
+                    // 付与して恒久レーンに昇格させる。以後そのレーンは空になっても
+                    // prune に消されず表示され続ける＝レーンは減らない。
+                    let needs_promote = self
+                        .doc
+                        .raw
+                        .get(0)
+                        .and_then(|r| r.get("timeline"))
+                        .and_then(|t| t.get("sequence"))
+                        .and_then(|s| s.get("tracks"))
+                        .and_then(|t| t.as_array())
+                        .map(|ts| {
+                            ts.iter().any(|tr| {
+                                tr.get("id").and_then(|v| v.as_str()).is_none()
+                                    && tr
+                                        .get("clips")
+                                        .and_then(|c| c.as_array())
+                                        .map(|c| !c.is_empty())
+                                        .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if needs_promote {
+                        let s = lane_salt();
+                        self.apply_edit(false, move |raw| {
+                            edits::promote_unnamed_occupied_tracks(raw, s)
+                        });
+                    }
+                }
                 _ => {}
             }
+            // 複数選択中クリップの単純クリック（実移動なし）→ 単独選択へ絞る
+            if matches!(&prev, Drag::Move { .. }) && !self.drag_engaged {
+                if let Some(cid) = self.click_collapse.take() {
+                    self.selected = vec![cid];
+                }
+            }
+            self.click_collapse = None;
             let _ = &prev; // lane moves happen LIVE during the drag now
+            self.move_attached.clear();
             self.hover_lane = None;
             self.snap_line = None;
             if self.resume_on_release {
@@ -9715,21 +11000,53 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 f.path.as_deref().map(is_audio_path).unwrap_or(false)
             })
         });
-        if hovered_os_media {
-            if let Some(pos) = raw_media_pointer {
-                self.last_os_media_pointer = Some(pos);
-            }
-        }
-        let media_pointer = raw_media_pointer.or(self.last_os_media_pointer);
-        // A file drag must not require the pointer to land in the exact few pixels of
-        // a lane.  Native window backends often report the release point just outside
-        // the row (or on a clip/header), which used to produce the misleading
-        // "drop onto a video lane" toast even while visibly over the timeline.
-        // Once horizontally inside the timeline, snap to the closest unlocked visual
-        // lane.  This is also the target used by the live ghost and by the final drop.
+        let os_dropped_any = ui.input(|i| !i.raw.dropped_files.is_empty());
+        // While an OS file drag is over the window (or dropping this frame) egui has
+        // no pointer at all — see os_cursor_in_ui. Prefer the live Win32 cursor there;
+        // internal library-card drags keep using the normal egui pointer.
+        let os_cursor = if hovered_os_media || hovered_os_audio || os_dropped_any {
+            // Nothing but the initial HoveredFile event arrives during an OS drag, so
+            // keep frames coming ourselves or the ghost/lane highlight freezes.
+            ui.ctx().request_repaint();
+            os_cursor_in_ui(ui.ctx())
+        } else {
+            None
+        };
+        let media_pointer = os_cursor.or(raw_media_pointer);
+        // The ghost must show the REAL clip length from the moment it appears, or the
+        // user cannot judge where it will land / what it will cover. Probe each hovered
+        // file once and cache by path — the drop itself re-probes authoritatively.
+        let os_hover_len = if hovered_os_media {
+            let first: Option<std::path::PathBuf> = ui.input(|i| {
+                i.raw
+                    .hovered_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .find(|p| is_timeline_media_path(p))
+            });
+            first.map(|p| {
+                let key = p.to_string_lossy().replace(char::from(92), "/");
+                *self.os_drag_durations.entry(key.clone()).or_insert_with(|| {
+                    if is_image_path(&p) { 5.0 } else { probe_duration(&key).unwrap_or(5.0) }
+                })
+            })
+        } else {
+            None
+        };
+        // The drag only becomes a CLIP once the pointer actually enters the timeline
+        // body: outside it (preview, panels…) the gesture stays "just a file" and both
+        // ghost and drop resolution are off. Inside, a release must not require the
+        // exact few pixels of a lane — backends report the point just outside the row
+        // (or on a clip/header) — so snap to the closest unlocked visual lane. This is
+        // the target used by the live ghost and by the final drop alike.
         let drop_target = media_pointer.and_then(|pt| {
-            if pt.x < body.left() || pt.x > body.right() {
+            if !body.contains(pt) {
                 return None;
+            }
+            // 「最上段レーンより上」は常に新規レーン行き。クリップ移動と同じ規則で、
+            // 素材ドロップでもレーンを上へ何本でも増やせる。
+            if lane_tops.first().map(|&(_, y0, _)| pt.y < y0).unwrap_or(false) {
+                return Some(NEW_TOP_LANE);
             }
             lane_tops
                 .iter()
@@ -9745,7 +11062,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 })
                 .map(|&(ti, _, _)| ti)
         });
-        let drop_time = media_pointer.map(|pt| {
+        let drop_time = media_pointer.filter(|pt| body.contains(*pt)).map(|pt| {
             self.snap(
                 ((self.scroll_x + pt.x - body.left()) / self.pps).max(0.0) as f64,
                 &[],
@@ -9756,7 +11073,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             && drop_time.is_some()
         {
             let ti = drop_target.unwrap();
-            let (_, y0, lh) = lane_tops.iter().find(|&&(i, _, _)| i == ti).copied().unwrap();
+            let (y0, lh) = if ti == NEW_TOP_LANE {
+                // 新規レーンの着地帯: 現在の最上段のすぐ上に仮のレーン枠を描く
+                let band = 26.0 * squeeze;
+                let top = lane_tops.first().map(|&(_, y, _)| y).unwrap_or(body.top() + 30.0);
+                ((top - band - 3.0).max(body.top()), band)
+            } else {
+                let (_, y0, lh) =
+                    lane_tops.iter().find(|&&(i, _, _)| i == ti).copied().unwrap();
+                (y0, lh)
+            };
             let lane_rect = egui::Rect::from_min_max(
                 egui::pos2(body.left(), y0),
                 egui::pos2(body.right(), y0 + lh),
@@ -9764,13 +11090,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             p.rect_filled(lane_rect, 0.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 35));
             p.rect_stroke(lane_rect, 0.0, egui::Stroke::new(1.5, UI_ACCENT));
             let x = body.left() + drop_time.unwrap() as f32 * self.pps - self.scroll_x;
-            // Materialise the prospective clip before release.  Library assets have
-            // a known duration; OS-file drags use a light 5-second proxy here and
-            // probe the real duration only after the user drops (never while dragging).
+            // Materialise the prospective clip before release, at its TRUE length:
+            // library assets carry a duration, OS-file drags use the probed cache
+            // above. 5s only remains as the image/probe-failure fallback.
             let preview_len = self.asset_drag.as_ref()
                 .and_then(|a| a.get("duration").and_then(|d| d.as_f64()))
+                .or(os_hover_len)
                 .unwrap_or(5.0) as f32;
-            let w = (preview_len * self.pps).max(36.0).min(body.right() - x);
+            let w = (preview_len * self.pps).max(2.0).min(body.right() - x);
             let clip_rect = egui::Rect::from_min_size(egui::pos2(x, y0 + 3.0), egui::vec2(w.max(0.0), (lh - 6.0).max(4.0)));
             p.rect_filled(clip_rect, 3.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 110));
             p.rect_stroke(clip_rect, 3.0, egui::Stroke::new(1.5, UI_ACCENT));
@@ -9809,6 +11136,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         if released_now && self.asset_drag.is_some() {
             let dragged = self.asset_drag.take();
             if let (Some(asset), Some(ti), Some(t)) = (dragged, drop_target, drop_time) {
+                let ti = if ti == NEW_TOP_LANE { self.insert_new_top_lane() } else { ti };
                 self.place_library_asset_at(&asset, t, ti);
             }
         }
@@ -9824,6 +11152,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             })
             .into_iter()
             .partition(|path| is_audio_path(path));
+        if !dropped_audio.is_empty() || !dropped_media.is_empty() {
+            // Permanent evidence line for drop failures: says WHICH condition was
+            // missing (egui pointer vs Win32 cursor vs lane/time resolution).
+            eprintln!(
+                "OSDROP media={} audio={} raw={:?} os_cursor={:?} target={:?} time={:?} body_x={:.0}..{:.0}",
+                dropped_media.len(),
+                dropped_audio.len(),
+                raw_media_pointer,
+                os_cursor,
+                drop_target,
+                drop_time,
+                body.left(),
+                body.right()
+            );
+        }
         if !dropped_audio.is_empty() {
             if let Some(t) = drop_time {
                 for path in dropped_audio {
@@ -9833,7 +11176,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                 }
             } else {
-                self.toast("音声はタイムライン上へドロップしてください");
+                // Released outside the timeline: the file stays "just a file" —
+                // register it as room material, never place a clip.
+                for path in dropped_audio {
+                    self.register_media_path(&path);
+                }
+                self.toast("タイムライン外なので素材ライブラリに追加しました");
             }
         }
         if !dropped_media.is_empty() {
@@ -9849,6 +11197,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         .collect();
                     self.pending_initial_imports.extend(dropped_media);
                 } else {
+                    let ti = if ti == NEW_TOP_LANE { self.insert_new_top_lane() } else { ti };
                     for path in dropped_media {
                         if let Err(e) = self.import_file_at(&path, t, ti) {
                             eprintln!("import: {e:#}");
@@ -9857,9 +11206,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                 }
             } else {
-                self.toast("画像・映像はタイムラインの映像レーンへドロップしてください");
+                // Same "just a file" contract for visual media dropped outside the
+                // timeline (or into a room with no visible lane yet).
+                for path in dropped_media {
+                    self.register_media_path(&path);
+                }
+                self.toast("タイムライン外なので素材ライブラリに追加しました");
             }
-            self.last_os_media_pointer = None;
         }
 
         p.text(
@@ -9937,11 +11290,12 @@ impl App {
                     self.lib.gen_content = Some(cid.clone());
                     self.lib.events.push("ダンの計画ジョブを開始しています…".into());
                     let st = self.lib_gen_stash.clone().unwrap_or(serde_json::json!({}));
+                    let is_ai_video = st.get("mode").and_then(|v| v.as_str()) == Some("higgsfield_generate");
                     let body = serde_json::json!({
                         "room_id": self.room_id(),
                         "content_id": cid,
                         "instruction": {
-                            "mode": "dan_plan",
+                            "mode": if is_ai_video { "higgsfield_generate" } else { "dan_plan" },
                             "content_id": cid,
                             "content_title": st.get("title").cloned().unwrap_or_default(),
                             "asset_ids": st.get("asset_ids").cloned().unwrap_or_default(),
@@ -9949,15 +11303,22 @@ impl App {
                             "brief": st.get("brief").cloned().unwrap_or_default(),
                             "workflow_preset": st.get("workflow_preset").cloned().unwrap_or_default(),
                             "timeline": st.get("timeline").cloned().unwrap_or_default(),
+                            "prompt": st.get("prompt").cloned().unwrap_or_default(),
+                            "model": st.get("model").cloned().unwrap_or_default(),
+                            "duration": st.get("duration").cloned().unwrap_or_default(),
+                            "aspect_ratio": st.get("aspect_ratio").cloned().unwrap_or_default(),
+                            "reference_asset_ids": st.get("reference_asset_ids").cloned().unwrap_or_default(),
                         },
                     });
                     self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
                     // ライブ組み上がり: 開始と同時にエディタへ遷移（最初は空の
                     // タイムライン）。中間保存が届くたびに live reload で育つ。
-                    self.generating_content = Some(cid.clone());
-                    self.gen_contents_mtime = None;
-                    self.clip_spawn.clear();
-                    self.open_content(&cid);
+                    if !is_ai_video {
+                        self.generating_content = Some(cid.clone());
+                        self.gen_contents_mtime = None;
+                        self.clip_spawn.clear();
+                        self.open_content(&cid);
+                    }
                 }
                 ("gen_job", Ok(v)) => {
                     self.lib.gen_job = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -10212,7 +11573,51 @@ impl App {
                         }
                     }
                 });
-                ui.add_space(12.0);
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Create an AI video sequence").strong());
+                    ui.label(egui::RichText::new("Describe the 30s main video here. The result is registered as an editable video clip at the start of a new timeline.").small().weak());
+                    ui.label(egui::RichText::new("Selected images/videos remain reference material for the AI; selecting them never switches AI generation off.").small().weak());
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Model").weak());
+                    if ui.selectable_label(self.lib.ai_model == "seedance_2_5", "Seedance 2.5 (recommended)").clicked() {
+                        self.lib.ai_model = "seedance_2_5".into();
+                    }
+                    if ui.selectable_label(self.lib.ai_model == "seedance_2_0", "Seedance 2.0").clicked() {
+                        self.lib.ai_model = "seedance_2_0".into();
+                        if self.lib.ai_duration > 15 { self.lib.ai_duration = 15; }
+                    }
+                    if ui.selectable_label(self.lib.ai_model == "kling3_0", "Kling 3.0").clicked() {
+                        self.lib.ai_model = "kling3_0".into();
+                        if self.lib.ai_duration > 10 { self.lib.ai_duration = 10; }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Length").weak());
+                    for secs in [5, 10, 15, 30] {
+                        let supported = match self.lib.ai_model.as_str() {
+                            "seedance_2_5" => true,
+                            "seedance_2_0" => secs <= 15,
+                            _ => secs <= 10,
+                        };
+                        if ui.add_enabled(supported, egui::SelectableLabel::new(self.lib.ai_duration == secs, format!("{secs}s"))).clicked() {
+                            self.lib.ai_duration = secs;
+                        }
+                    }
+                });
+                if self.lib.ai_model != "seedance_2_5" {
+                    ui.label(egui::RichText::new("30s is available with Seedance 2.5.").small().color(egui::Color32::from_rgb(240, 190, 80)));
+                }
+                let can_ai = !self.lib.brief.trim().is_empty() && !self.lib.started;
+                if ui.add_enabled(can_ai, egui::Button::new(
+                    egui::RichText::new("AI video: create new").size(14.0).color(egui::Color32::WHITE),
+                ).min_size(egui::vec2(330.0, 40.0)).rounding(8.0).fill(if can_ai { egui::Color32::from_rgb(110, 75, 190) } else { egui::Color32::from_gray(45) })).clicked() {
+                    self.start_ai_video();
+                }
+                ui.add_space(8.0);
+                ui.separator();
                 let n = self.lib.selected_assets.len();
                 let can = n > 0 && !self.lib.started;
                 if ui
@@ -10908,7 +12313,29 @@ impl eframe::App for App {
         // Render range (DaVinci-style): I = in point, O = out point at the playhead.
         // The other edge defaults to the content edge so a single keypress makes a
         // valid span; the export button then renders only this range.
-        if !typing {
+        // サブタイムラインモード中は I/O が「区間の追加」になる（飛び飛び可）。
+        if !typing && self.on_sub_tab() {
+            let f = 1.0 / self.timeline_fps();
+            let t_now = self.grid_quantize(self.t);
+            if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+                self.sub_in = Some(t_now);
+                self.toast(&format!(
+                    "サブタイムライン イン点 {:02}:{:02} — Oキーで区間確定",
+                    t_now as i64 / 60, t_now as i64 % 60
+                ));
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
+                let a = self.sub_in.take().unwrap_or(0.0);
+                let (a, b) = (a.min(t_now), a.max(t_now).max(a.min(t_now) + f));
+                self.sub_add_range(a, b);
+                let n = self.sub_ranges().len();
+                self.toast(&format!(
+                    "区間を追加: {:02}:{:02}〜{:02}:{:02}（計{}区間）",
+                    a as i64 / 60, a as i64 % 60, b as i64 / 60, b as i64 % 60, n
+                ));
+                self.push_req(false);
+            }
+        } else if !typing {
             let f = 1.0 / self.timeline_fps();
             let t_now = self.grid_quantize(self.t);
             if ctx.input(|i| i.key_pressed(egui::Key::I)) {
@@ -10939,8 +12366,40 @@ impl eframe::App for App {
             let c = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
             // the audio clock re-anchors a beat after a seek/play request — until it does,
             // showing it would flash the playhead bar back to the OLD position
-            if (c - self.t).abs() < 0.3 || self.last_push.elapsed().as_secs_f32() > 1.2 {
+            // （サブタイムラインの区間ジャンプ直後も同じ理屈で保持し、ホールド明けは
+            // クロックを強制採用する。0.3ゲート任せだと短い区間で古い t が区間内に
+            // 見え続け、区間末で止まらずタイムライン末尾まで流れてしまう）
+            let mut jump_hold = false;
+            if let Some(u) = self.sub_jump_until {
+                if Instant::now() >= u {
+                    self.sub_jump_until = None;
+                    self.t = c;
+                } else {
+                    jump_hold = true;
+                }
+            }
+            if !jump_hold && ((c - self.t).abs() < 0.3 || self.last_push.elapsed().as_secs_f32() > 1.2) {
                 self.t = c;
+            }
+            // サブタイムライン: 再生ヘッドが区間の外に出たら次の区間頭へジャンプ
+            // ＝飛び飛び再生。最後の区間を出たら最終区間の末尾で停止。
+            // （区間の外から始めた再生セッションでは何もしない＝普通の全体再生）
+            if self.on_sub_tab() && self.sub_skip_active && !jump_hold {
+                let rs = self.sub_ranges();
+                if !rs.is_empty() && !rs.iter().any(|&(a, b)| self.t >= a - 0.001 && self.t < b) {
+                    if let Some(&(a, b)) = rs.iter().find(|&&(a, _)| a > self.t) {
+                        self.t = a;
+                        // ホールドは区間長より短く（短い区間でも区間末チェックが生きる）
+                        let hold = ((b - a) * 800.0).clamp(150.0, 700.0) as u64;
+                        self.sub_jump_until =
+                            Some(Instant::now() + std::time::Duration::from_millis(hold));
+                        self.push_req(false);
+                    } else {
+                        self.playing = false;
+                        self.t = rs.last().map(|&(_, b)| b).unwrap_or(self.t).min(self.dur);
+                        self.push_req(false);
+                    }
+                }
             }
             if self.t >= self.dur - 0.05 {
                 self.playing = false;
@@ -11028,7 +12487,10 @@ impl eframe::App for App {
                         let Some(aid) = c.asset_id.clone() else { continue };
                         if tr.kind != "audio" {
                             let s0 = c.source_start;
-                            let s1 = c.source_start + (c.timeline_end - c.timeline_start);
+                            // 速度対応: サムネの対象ソース範囲は source_end が正
+                            let s1 = c
+                                .source_end
+                                .unwrap_or(c.source_start + (c.timeline_end - c.timeline_start));
                             let (b0, b1) = ((s0 / THUMB_BUCKET_S) as i64, (s1 / THUMB_BUCKET_S) as i64);
                             for b in b0..=b1 {
                                 if !self.thumbs.contains_key(&(aid.clone(), b)) {
@@ -11110,6 +12572,98 @@ impl eframe::App for App {
         }
 
         self.poll_export();
+        // 全画面プレビュー(P): DaVinci風の小型トランスポートバー。
+        // 一時停止中は常に表示、再生中はマウスを動かした時だけ現れて自動で消える。
+        if self.preview_fullscreen {
+            let moved = ctx.input(|i| {
+                i.pointer.delta().length() > 0.5 || i.pointer.any_down() || i.pointer.any_click()
+            });
+            if moved {
+                self.fs_bar_last_move = Some(Instant::now());
+            }
+            let recent = self
+                .fs_bar_last_move
+                .map(|t| t.elapsed().as_secs_f32() < 2.2)
+                .unwrap_or(false);
+            if !self.playing || recent {
+                egui::Area::new(egui::Id::new("fs_transport"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_black_alpha(170))
+                            .rounding(10.0)
+                            .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let glyph = if self.playing { "⏸" } else { "▶" };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(glyph)
+                                                    .size(20.0)
+                                                    .color(egui::Color32::WHITE),
+                                            )
+                                            .frame(false)
+                                            .min_size(egui::vec2(30.0, 26.0)),
+                                        )
+                                        .on_hover_text("再生/停止 (Space)")
+                                        .clicked()
+                                    {
+                                        self.toggle_play();
+                                    }
+                                    let dur = self.dur.max(0.001);
+                                    let mut tv = self.t;
+                                    let w = (ctx.screen_rect().width() * 0.42).clamp(260.0, 760.0);
+                                    ui.spacing_mut().slider_width = w;
+                                    let sl = ui.add(
+                                        egui::Slider::new(&mut tv, 0.0..=dur)
+                                            .show_value(false)
+                                            .trailing_fill(true),
+                                    );
+                                    if sl.drag_started() {
+                                        self.fs_resume_play = self.playing;
+                                        self.playing = false;
+                                    }
+                                    if sl.changed() {
+                                        self.t = tv.clamp(0.0, dur);
+                                        self.push_req(true);
+                                    }
+                                    if sl.drag_stopped() {
+                                        if self.fs_resume_play {
+                                            self.fs_resume_play = false;
+                                            self.playing = true;
+                                        }
+                                        self.push_req(false);
+                                    }
+                                    let fps = self.timeline_fps();
+                                    let tc = |t: f64| {
+                                        let fr = ((t * fps).round() as i64).max(0);
+                                        let f = fps.round() as i64;
+                                        format!(
+                                            "{:02}:{:02}:{:02}",
+                                            fr / (f * 60),
+                                            (fr / f) % 60,
+                                            fr % f
+                                        )
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} / {}",
+                                            tc(self.t),
+                                            tc(self.dur)
+                                        ))
+                                        .color(egui::Color32::from_gray(220))
+                                        .monospace(),
+                                    );
+                                    if ui.ui_contains_pointer() {
+                                        self.fs_bar_last_move = Some(Instant::now());
+                                    }
+                                });
+                            });
+                    });
+            }
+        }
         if !self.preview_fullscreen {
             egui::TopBottomPanel::top("toolbar").exact_height(38.0).show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -11231,6 +12785,35 @@ impl eframe::App for App {
                         }
                     });
                 });
+                // キャンバス形式（プレビュー枠=書き出しの形）。何度でも切替可。
+                // クリップは素材実寸ベースの実効箱で描くため、切替で素材は歪まない。
+                {
+                    let cur = self
+                        .doc
+                        .raw
+                        .get(0)
+                        .and_then(|c| c.get("timeline"))
+                        .and_then(|t| t.get("format"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("9:16")
+                        .to_string();
+                    let mut pick = cur.clone();
+                    egui::ComboBox::from_id_source("canvas_fmt")
+                        .width(70.0)
+                        .selected_text(format!("🖼 {cur}"))
+                        .show_ui(ui, |ui| {
+                            for f in ["9:16", "16:9", "1:1", "4:5"] {
+                                ui.selectable_value(&mut pick, f.to_string(), f);
+                            }
+                        })
+                        .response
+                        .on_hover_text("プレビュー枠と書き出しの形。何度でも切替でき、素材は歪みません");
+                    if pick != cur {
+                        let p2 = pick.clone();
+                        self.apply_edit(true, move |raw| edits::set_canvas_format(raw, &p2));
+                        self.push_req(false);
+                    }
+                }
                 if ui
                     .selectable_label(self.revise_open, "🤖 ダンに指示")
                     .on_hover_text("この動画への修正指示を言葉で送る（例: 冒頭をもっとテンポ良く）")
@@ -11239,6 +12822,23 @@ impl eframe::App for App {
                     self.revise_open = !self.revise_open;
                     if self.revise_open && self.lib.assets.is_empty() {
                         self.lib_refresh();
+                    }
+                }
+                // サブタブでは I/O=緑の飛び飛び区間（モードボタンは廃止。
+                // タブが役割を決める: メイン=青い単一書き出し範囲／サブ=緑区間）
+                if self.on_sub_tab() && !self.sub_ranges().is_empty() {
+                    if ui
+                        .small_button("▶ 区間を通しで再生")
+                        .on_hover_text("最初の区間の頭から、区間だけを繋げて再生します（仕上がり確認）")
+                        .clicked()
+                    {
+                        if let Some(&(a, _)) = self.sub_ranges().first() {
+                            self.t = a;
+                            self.playing = true;
+                            self.sub_skip_active = true;
+                            self.resume_pending = None;
+                            self.push_req(false);
+                        }
                     }
                 }
                 let exporting = self.export_job.is_some();
@@ -11264,13 +12864,72 @@ impl eframe::App for App {
                                 .flat_map(|t| t.clips.iter())
                                 .map(|c| c.timeline_end)
                                 .fold(0.0f64, f64::max);
-                            let (r0, r1) = self.export_range.unwrap_or((0.0, content_end));
-                            let dur = (r1 - r0).max(0.0);
+                            // 青い単一範囲はメインタブ専用（サブタブでは無視）
+                            let (r0, r1) = (!self.on_sub_tab())
+                                .then_some(self.export_range)
+                                .flatten()
+                                .unwrap_or((0.0, content_end));
+                            let sel_ranges = self.sub_ranges();
+                            let sel_total: f64 = sel_ranges.iter().map(|(a, b)| b - a).sum();
+                            let dur = if self.export_use_sub && !sel_ranges.is_empty() {
+                                sel_total
+                            } else {
+                                (r1 - r0).max(0.0)
+                            };
                             ui.label(format!(
                                 "解像度 1080x1920 / 30fps   長さ {:02}:{:02}",
                                 dur as i64 / 60, dur as i64 % 60
                             ));
-                            if self.export_range.is_some() {
+                            // どのタブを書き出すか（sequenceスロット=開いているタブ）
+                            let active_tab = self.active_seq_id();
+                            if active_tab != "main" {
+                                let tname = self
+                                    .seq_tabs()
+                                    .into_iter()
+                                    .find(|(id, _)| *id == active_tab)
+                                    .map(|(_, n)| n)
+                                    .unwrap_or_else(|| "サブ".into());
+                                ui.label(
+                                    egui::RichText::new(format!("書き出し対象: {tname}（開いているタブ）"))
+                                        .color(egui::Color32::from_rgb(0, 210, 140))
+                                        .small(),
+                                );
+                            }
+                            // サブタイムライン書き出し: 組んだ再生区間だけを繋げて1本に
+                            // （緑区間はサブタブ専用）
+                            if self.on_sub_tab() && !sel_ranges.is_empty() {
+                                ui.checkbox(
+                                    &mut self.export_use_sub,
+                                    format!(
+                                        "サブタイムラインの区間だけ繋げて書き出す（{}区間・計{:02}:{:02}）",
+                                        sel_ranges.len(),
+                                        sel_total as i64 / 60,
+                                        sel_total as i64 % 60
+                                    ),
+                                );
+                            } else if self.export_use_sub {
+                                self.export_use_sub = false;
+                            }
+                            if self.export_use_sub && !sel_ranges.is_empty() {
+                                let list = sel_ranges
+                                    .iter()
+                                    .take(6)
+                                    .map(|(a, b)| {
+                                        format!(
+                                            "{:02}:{:02}-{:02}:{:02}",
+                                            *a as i64 / 60, *a as i64 % 60, *b as i64 / 60, *b as i64 % 60
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let more = if sel_ranges.len() > 6 { " …" } else { "" };
+                                ui.label(
+                                    egui::RichText::new(format!("区間: {list}{more}"))
+                                        .color(egui::Color32::from_rgb(110, 190, 255))
+                                        .small(),
+                                );
+                            }
+                            if !self.export_use_sub && !self.on_sub_tab() && self.export_range.is_some() {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "範囲書き出し: {:02}:{:02} 〜 {:02}:{:02}（解除はダイアログを閉じて✕）",
@@ -11278,6 +12937,12 @@ impl eframe::App for App {
                                     ))
                                     .color(egui::Color32::from_rgb(110, 190, 255))
                                     .small(),
+                                );
+                            } else if self.on_sub_tab() {
+                                ui.label(
+                                    egui::RichText::new("範囲: 全体（Iでイン点→Oで区間追加＝緑の区間だけ書き出せます）")
+                                        .weak()
+                                        .small(),
                                 );
                             } else {
                                 ui.label(egui::RichText::new("範囲: 全体（I/Oキーで範囲指定できます）").weak().small());
@@ -11348,7 +13013,7 @@ impl eframe::App for App {
                         self.export_dialog_open = false;
                     }
                 }
-                if let Some((ra, rb)) = self.export_range {
+                if let Some((ra, rb)) = (!self.on_sub_tab()).then_some(self.export_range).flatten() {
                     ui.label(
                         egui::RichText::new(format!(
                             "範囲 {:02}:{:02}–{:02}:{:02}",
@@ -11440,7 +13105,17 @@ impl eframe::App for App {
                 let avail = ui.available_size();
                 let gpu_frame = self.display_tex.clone();
                 if gpu_frame.is_some() || self.tex.is_some() {
-                    let (cw, ch) = (canvas_w() as f32, canvas_h() as f32);
+                    // 枠の形は「今表示しているフレーム自身の寸法」から決める。形式切替の
+                    // 直後は新寸法のフレームが届くまで旧フレームを旧比率のまま見せ、
+                    // 届いた瞬間に枠ごと切り替える（一瞬の潰れ・黒抜けの根絶）。
+                    let (cw, ch) = if let Some(g) = &gpu_frame {
+                        (g.w as f32, g.h as f32)
+                    } else if let Some(t) = &self.tex {
+                        let s = t.size();
+                        (s[0] as f32, s[1] as f32)
+                    } else {
+                        (canvas_w() as f32, canvas_h() as f32)
+                    };
                     let scale = (avail.x / cw).min(avail.y / ch);
                     let size = egui::vec2(cw * scale, ch * scale);
                     ui.centered_and_justified(|ui| {
@@ -11482,6 +13157,51 @@ impl eframe::App for App {
                         if resp.clicked() || resp.drag_started() {
                             if let Some(id) = ui.memory(|mem| mem.focused()) {
                                 ui.memory_mut(|mem| mem.surrender_focus(id));
+                            }
+                        }
+                        // プレビュー上のクリックで素材を選択（タイムラインを触らずに選べる）。
+                        // clicked はドラッグ無しの離しでだけ真なので、範囲指定・移動ドラッグとは干渉しない。
+                        // 上のレーンから順に、クリック点を実効箱に含む一番手前のクリップを選ぶ。
+                        if resp.clicked() && !self.revise_pick && !self.blur_mode {
+                            if let Some(p) = resp.interact_pointer_pos() {
+                                let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                                let fx = ((p.x - vid.left()) / vid.width()).clamp(0.0, 1.0) as f64;
+                                let fy = ((p.y - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
+                                let t_disp = self.displayed_grid_t();
+                                let mut hit: Option<String> = None;
+                                'pick: for tr in self.doc.seq.tracks.iter().rev() {
+                                    if tr.hidden
+                                        || matches!(tr.kind.as_str(), "audio" | "caption" | "effect")
+                                    {
+                                        continue;
+                                    }
+                                    for c in tr.clips.iter().rev() {
+                                        if c.asset_id.is_none()
+                                            || t_disp < c.timeline_start
+                                            || t_disp >= c.timeline_end
+                                            || c.video_enabled == Some(false)
+                                        {
+                                            continue;
+                                        }
+                                        let b = effective_box(&self.doc, c, t_disp);
+                                        if fx >= b.x
+                                            && fx <= b.x + b.width
+                                            && fy >= b.y
+                                            && fy <= b.y + b.height
+                                        {
+                                            hit = Some(c.id.clone());
+                                            break 'pick;
+                                        }
+                                    }
+                                }
+                                match hit {
+                                    Some(id) => {
+                                        if !(self.selected.len() == 1 && self.selected[0] == id) {
+                                            self.selected = vec![id];
+                                        }
+                                    }
+                                    None => self.selected.clear(),
+                                }
                             }
                         }
                         let vid = egui::Rect::from_center_size(resp.rect.center(), size);
@@ -11899,7 +13619,26 @@ impl eframe::App for App {
         // media-cache and PNG-cache paths. This runs after all text widgets have seen
         // this frame's IME events, never in the keystroke handler itself.
         self.commit_caption_drafts(None);
-        ctx.request_repaint();
+        // 再描画ポリシー: かつては無条件 request_repaint() で常時約100fps＝停止中でも
+        // 1コアを食い続けていた（実測83%CPU）。操作・再生・ドラッグ中だけ全速、
+        // アイドルは10fpsに落とす。ポーラー類(保存デバウンス/ベイク回収/HTTP結果)は
+        // 100msティックで十分回り、入力イベントが来れば即座にフレームが走る。
+        let busy = self.playing
+            || !matches!(self.drag, Drag::None)
+            || self.resume_pending.is_some()
+            || self.resume_on_release
+            || self.toast.is_some()
+            || self.eyedrop.is_some()
+            || self.lane_reorder.is_some()
+            || self.range_drag.is_some()
+            || ctx.input(|i| {
+                i.pointer.any_down() || !i.raw.hovered_files.is_empty() || !i.raw.events.is_empty()
+            });
+        if busy {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -12051,7 +13790,7 @@ fn main() -> eframe::Result<()> {
             let tr = &doc.seq.tracks[gov];
             let ct0 = c.timeline_start.max(t0);
             let ct1 = c.timeline_end.min(t1);
-            let src_t = c.source_start + ct0 - c.timeline_start;
+            let src_t = c.src_at(ct0);
             let dur = (ct1 - ct0).min(0.5);
             checked += 1;
             if tr.muted || (any_solo && !tr.solo) || c.volume <= 0.001 {
@@ -12174,13 +13913,65 @@ fn main() -> eframe::Result<()> {
             while mask_build_pass(&doc, &d3d, &mut masks, None) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
-            // Audio first: the SAME timeline through the playback mixer's rules, into a
-            // raw PCM sidecar that ffmpeg only compresses.
             let end = end.max(start);
+            // --export-ranges "a-b,c-d,...": タイムラインの飛び飛びの区間だけを順に
+            // 繋げて1本に書き出す（選択クリップ書き出し）。開始順ソート＋重なりマージ。
+            // 映像・音声とも同じフレーム格子（ceil(t*fps)）に量子化するので、区間毎の
+            // AVズレが累積しない。指定なし＝従来どおり [start, end) の単一区間。
+            let ranges: Vec<(f64, f64)> = if let Some(spec) = args
+                .iter()
+                .position(|a| a == "--export-ranges")
+                .and_then(|k| args.get(k + 1))
+            {
+                let mut v: Vec<(f64, f64)> = spec
+                    .split(',')
+                    .filter_map(|s| {
+                        let (a, b) = s.split_once('-')?;
+                        let (a, b): (f64, f64) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+                        (b > a && a >= 0.0).then_some((a, b))
+                    })
+                    .collect();
+                v.sort_by(|x, y| x.0.total_cmp(&y.0));
+                let mut m: Vec<(f64, f64)> = Vec::new();
+                for r in v {
+                    if let Some(last) = m.last_mut() {
+                        if r.0 <= last.1 + 1e-6 {
+                            last.1 = last.1.max(r.1);
+                            continue;
+                        }
+                    }
+                    m.push(r);
+                }
+                anyhow::ensure!(!m.is_empty(), "--export-ranges: 有効な区間がありません");
+                m
+            } else {
+                vec![(start, end)]
+            };
+            let fr = |t: f64| (t * fps).ceil() as u64;
+            let franges: Vec<(u64, u64)> = ranges
+                .iter()
+                .map(|&(s, e)| (fr(s), fr(e)))
+                .filter(|(a, b)| b > a)
+                .collect();
+            anyhow::ensure!(!franges.is_empty(), "書き出し区間が空です");
+            // Audio first: the SAME timeline through the playback mixer's rules, into a
+            // raw PCM sidecar that ffmpeg only compresses. 区間ごとにミックスして
+            // 連結（f32le 生PCMなので単純結合で継ぎ目なし）。
             let (arate, ach) = (48_000u32, 2usize);
             let pcm = format!("{out}.pcm");
-            media::mix_timeline_audio(&doc, start, end, arate, ach, &pcm).context("mix audio")?;
-            println!("EXPORT_AUDIO pcm={pcm} rate={arate} ch={ach}");
+            {
+                let mut pcm_out = std::fs::File::create(&pcm).context("create pcm")?;
+                for (k, &(fa, fb)) in franges.iter().enumerate() {
+                    let seg = format!("{out}.seg{k}.pcm");
+                    media::mix_timeline_audio(&doc, fa as f64 / fps, fb as f64 / fps, arate, ach, &seg)
+                        .context("mix audio")?;
+                    let mut f = std::fs::File::open(&seg).context("open pcm seg")?;
+                    std::io::copy(&mut f, &mut pcm_out).context("concat pcm seg")?;
+                    drop(f);
+                    let _ = std::fs::remove_file(&seg);
+                }
+            }
+            println!("EXPORT_AUDIO pcm={pcm} rate={arate} ch={ach} ranges={}", franges.len());
             let ffmpeg = std::env::var("FFMPEG").unwrap_or_else(|_| "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe".into());
             // ffmpeg's stderr goes to a sidecar log, NOT null: an encoder that dies
             // mid-stream otherwise fails as an unexplained "パイプは終了しました" with
@@ -12210,8 +14001,7 @@ fn main() -> eframe::Result<()> {
                 .spawn()
                 .context("start ffmpeg")?;
             let stdin = child.stdin.as_mut().context("ffmpeg stdin")?;
-            let first = (start * fps).ceil() as u64;
-            let last = (end * fps).ceil() as u64;
+            let total: u64 = franges.iter().map(|(a, b)| b - a).sum();
             let t_render = Instant::now();
             // PROXY quality, exactly like the interactive preview (original=false).
             // The user aligns blur keys against the PREVIEW picture; VFR sources
@@ -12224,26 +14014,28 @@ fn main() -> eframe::Result<()> {
             let use_original = std::env::var("NATIVE_EXPORT_ORIGINAL")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            for n in first..last {
-                let t = n as f64 / fps;
-                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, use_original, false, Rb::Sync)
-                    .context("compose export frame")?;
-                if let Err(e) = stdin.write_all(&comp.rgba) {
-                    // ffmpeg died mid-stream — surface ITS last words, not just EPIPE
-                    let tail = std::fs::read_to_string(&fflog_path)
-                        .map(|s| s.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>())
-                        .unwrap_or_default();
-                    anyhow::bail!("write export frame at t={t:.2}: {e} | ffmpeg says: {tail}");
-                }
-                let done = n - first + 1;
-                if done % 150 == 0 || n + 1 == last {
-                    let el = t_render.elapsed().as_secs_f64().max(0.001);
-                    println!(
-                        "EXPORT_PROGRESS frame={done}/{} t={t:.2} render_fps={:.1}",
-                        last - first,
-                        done as f64 / el
-                    );
-                    let _ = std::io::stdout().flush(); // backend tails this pipe live
+            let mut done: u64 = 0;
+            for &(fa, fb) in &franges {
+                for n in fa..fb {
+                    let t = n as f64 / fps;
+                    compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, use_original, false, Rb::Sync)
+                        .context("compose export frame")?;
+                    if let Err(e) = stdin.write_all(&comp.rgba) {
+                        // ffmpeg died mid-stream — surface ITS last words, not just EPIPE
+                        let tail = std::fs::read_to_string(&fflog_path)
+                            .map(|s| s.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>())
+                            .unwrap_or_default();
+                        anyhow::bail!("write export frame at t={t:.2}: {e} | ffmpeg says: {tail}");
+                    }
+                    done += 1;
+                    if done % 150 == 0 || done == total {
+                        let el = t_render.elapsed().as_secs_f64().max(0.001);
+                        println!(
+                            "EXPORT_PROGRESS frame={done}/{total} t={t:.2} render_fps={:.1}",
+                            done as f64 / el
+                        );
+                        let _ = std::io::stdout().flush(); // backend tails this pipe live
+                    }
                 }
             }
             drop(child.stdin.take());
@@ -12960,7 +14752,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&right_shrink, "d", "timeline_start") - 4.0).abs() < 0.001;
 
         let mut live_left_drag = base.clone();
-        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0);
+        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0, &[]);
         let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
@@ -12968,7 +14760,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&live_left_drag, "e", "timeline_start") - 7.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0);
+        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0, &[]);
         let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
@@ -12981,7 +14773,7 @@ fn main() -> eframe::Result<()> {
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
-        edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0);
+        edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0, &[]);
         let ok_live_left_grow_keeps_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 4.0).abs() < 0.001
@@ -12995,7 +14787,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 9.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
-        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0);
+        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0, &[]);
         edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
         let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
@@ -13010,7 +14802,7 @@ fn main() -> eframe::Result<()> {
             && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0);
+        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0, &[]);
         edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
         let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
@@ -13025,7 +14817,7 @@ fn main() -> eframe::Result<()> {
 
         let mut main_magnet_off = base.clone();
         main_magnet_off[0]["timeline"]["sequence"]["tracks"][0]["magnet"] = serde_json::Value::Bool(false);
-        edits::trim_clip_live_from(&mut main_magnet_off, &["b".to_string()], true, 4.0, 5.0);
+        edits::trim_clip_live_from(&mut main_magnet_off, &["b".to_string()], true, 4.0, 5.0, &[]);
         let ok_main_off_left_shrink_gap = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&main_magnet_off, "b", "timeline_start") - 5.0).abs() < 0.001
             && (clip(&main_magnet_off, "b", "timeline_end") - 8.0).abs() < 0.001
@@ -13038,7 +14830,7 @@ fn main() -> eframe::Result<()> {
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
-        edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0);
+        edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0, &[]);
         let ok_main_off_left_grow_keeps_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "timeline_end") - 9.0).abs() < 0.001
@@ -13494,12 +15286,12 @@ fn main() -> eframe::Result<()> {
         edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.2, 0.1);
         let before_x = x_at(&clip_of(&raw), 12.0);
         let ids: Vec<String> = vec!["fx1".into()];
-        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0, &[]);
         let c = clip_of(&raw);
         let ok4 = (c.timeline_start - 11.0).abs() < 1e-6 && (x_at(&c, 12.0) - before_x).abs() < 1e-3;
         println!("KF trim-pin   {} (ts={} x@12={:.4} want {:.4})",
                  if ok4 { "PASS" } else { "FAIL" }, c.timeline_start, x_at(&c, 12.0), before_x);
-        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 9.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 9.0, &[]);
         let c = clip_of(&raw);
         let ok5 = (c.timeline_start - 9.0).abs() < 1e-6 && (x_at(&c, 12.0) - before_x).abs() < 1e-3;
         println!("KF extend-pin {} (ts={} x@12={:.4})", if ok5 { "PASS" } else { "FAIL" }, c.timeline_start, x_at(&c, 12.0));
@@ -13680,12 +15472,12 @@ fn main() -> eframe::Result<()> {
         edits::set_transform_key(&mut raw, "vc1", 4.0, 0.5, 0.2, 0.4, 0.3, None);
         let before_x = bx(&clip_of(&raw), 12.0).x;
         let ids: Vec<String> = vec!["vc1".into()];
-        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0, &[]);
         let c = clip_of(&raw);
         let ok5 = (c.timeline_start - 11.0).abs() < 1e-6 && (bx(&c, 12.0).x - before_x).abs() < 1e-3;
         println!("TKF trim-pin  {} (ts={} x@12={:.4} want {:.4})",
                  if ok5 { "PASS" } else { "FAIL" }, c.timeline_start, bx(&c, 12.0).x, before_x);
-        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 10.0);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 10.0, &[]);
         // main magnet lane: ripple trim goes through trim_main_lane_live — keys must
         // stay glued to the same SOURCE frame (the lane also pins itself to t=0)
         let mut rawm = json!([{ "timeline": { "sequence": { "tracks": [
@@ -13698,7 +15490,7 @@ fn main() -> eframe::Result<()> {
         edits::set_transform_key(&mut rawm, "vm1", 0.0, 0.1, 0.2, 0.4, 0.3, None);
         edits::set_transform_key(&mut rawm, "vm1", 4.0, 0.5, 0.2, 0.4, 0.3, None);
         let idsm: Vec<String> = vec!["vm1".into()];
-        edits::trim_clip_live_from(&mut rawm, &idsm, true, 10.0, 11.0);
+        edits::trim_clip_live_from(&mut rawm, &idsm, true, 10.0, 11.0, &[]);
         let cm: model::Clip =
             serde_json::from_value(rawm[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone())
                 .expect("vm1 parse");
@@ -13788,6 +15580,158 @@ fn main() -> eframe::Result<()> {
         let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
         println!("TKF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
+    }
+    if args.iter().any(|a| a == "--selftest-trimseq") {
+        // 右→左トリムのUI相当シーケンス検証（Drag::Trimアームと同じ last_t 簿記）
+        let mk = || -> serde_json::Value {
+            serde_json::json!([{ "timeline": { "sequence": { "duration": 10.0, "frame_rate": 30, "tracks": [
+                { "id": "v0", "type": "video", "clips": [
+                    { "id": "V", "asset_id": "img", "track": "video",
+                      "source_start": 0.0, "source_end": 2.0, "timeline_start": 0.0, "timeline_end": 2.0 },
+                    { "id": "W", "asset_id": "vid", "track": "video",
+                      "source_start": 0.0, "source_end": 2.0, "timeline_start": 2.0, "timeline_end": 4.0 }]},
+                { "id": "a0", "type": "audio", "clips": [] }
+            ]}}}])
+        };
+        let get = |raw: &serde_json::Value, id: &str, key: &str| -> f64 {
+            raw[0]["timeline"]["sequence"]["tracks"]
+                .as_array().unwrap().iter()
+                .flat_map(|t| t["clips"].as_array().unwrap().iter())
+                .find(|c| c["id"] == id)
+                .and_then(|c| c[key].as_f64())
+                .unwrap_or(-1.0)
+        };
+        let ids = vec!["W".to_string()];
+        let mut ok = true;
+        let mut check = |name: &str, got: f64, want: f64| {
+            let pass = (got - want).abs() <= 0.02;
+            println!("TRIMSEQ {name:<32} {} got={got:.3} want={want:.3}", if pass { "PASS" } else { "FAIL" });
+            if !pass { ok = false; }
+        };
+        // A) 単一ドラッグ: 右0.5 → 左0.8 (マウス 2.0→2.5→1.7)
+        let mut raw = mk();
+        let mut last_t = 2.0;
+        let mut mouse = 2.0;
+        for _ in 0..5 { mouse += 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        for _ in 0..8 { mouse -= 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &ids);
+        // 縮小0.5で頭ソース0.5sが余白化 → 反転0.8のうち0.5が消化されて停止
+        check("A: single r->l W.ts", get(&raw, "W", "timeline_start"), 1.5);
+        check("A: single r->l W.src", get(&raw, "W", "source_start"), 0.0);
+        // B) 2ドラッグ: 縮小0.5+settle → 新規ドラッグで左0.8
+        let mut raw = mk();
+        let mut last_t = 2.0;
+        let mut mouse = 2.0;
+        for _ in 0..5 { mouse += 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &ids);
+        println!("TRIMSEQ B mid: W {}-{} src {}", get(&raw,"W","timeline_start"), get(&raw,"W","timeline_end"), get(&raw,"W","source_start"));
+        let mut last_t = 2.0; // 新規ドラッグ: エッジ(2.0)から
+        let mut mouse = 2.0;
+        for _ in 0..8 { mouse -= 0.1; last_t += edits::trim_clip_live_from(&mut raw, &ids, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &ids);
+        // 縮小で頭0.5sを捨てた後の再拡大: 余白0.5sぶん左へ戻れる
+        check("B: 2nd drag W.ts", get(&raw, "W", "timeline_start"), 1.5);
+        check("B: 2nd drag W.src", get(&raw, "W", "source_start"), 0.0);
+        check("B: V tail eaten", get(&raw, "V", "timeline_end"), 1.5);
+        // C) 非メインレーン(オーバーレイ)のクリップ: 縮小0.5 → 新規ドラッグで左0.8
+        let mkc = || -> serde_json::Value {
+            serde_json::json!([{ "timeline": { "sequence": { "duration": 10.0, "frame_rate": 30, "tracks": [
+                { "id": "v0", "type": "video", "clips": [
+                    { "id": "base", "asset_id": "vid", "track": "video",
+                      "source_start": 0.0, "source_end": 8.0, "timeline_start": 0.0, "timeline_end": 8.0 }]},
+                { "id": "ov", "type": "video", "clips": [
+                    { "id": "P", "asset_id": "vid", "track": "video",
+                      "source_start": 0.0, "source_end": 2.0, "timeline_start": 2.0, "timeline_end": 4.0 }]},
+                { "id": "a0", "type": "audio", "clips": [] }
+            ]}}}])
+        };
+        let idsp = vec!["P".to_string()];
+        let mut raw = mkc();
+        let mut last_t = 2.0;
+        let mut mouse = 2.0;
+        for _ in 0..5 { mouse += 0.1; last_t += edits::trim_clip_live_from(&mut raw, &idsp, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &idsp);
+        println!("TRIMSEQ C mid: P {}-{} src {}", get(&raw,"P","timeline_start"), get(&raw,"P","timeline_end"), get(&raw,"P","source_start"));
+        check("C: shrink advanced src", get(&raw, "P", "source_start"), 0.5);
+        let mut last_t = get(&raw, "P", "timeline_start");
+        let mut mouse = last_t;
+        for _ in 0..8 { mouse -= 0.1; last_t += edits::trim_clip_live_from(&mut raw, &idsp, true, last_t, mouse, &[]); }
+        edits::settle_overlaps(&mut raw, &idsp);
+        check("C: 2nd drag P.ts", get(&raw, "P", "timeline_start"), 2.0);
+        check("C: 2nd drag P.src", get(&raw, "P", "source_start"), 0.0);
+        println!("TRIMSEQ ALL {}", if ok { "PASS" } else { "FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    if args.iter().any(|a| a == "--selftest-speed") {
+        // クリップ速度写像の数値検証: 等速・ランプ積分・単調性・カーブ幅
+        let mut ok = true;
+        let mut check = |name: &str, got: f64, want: f64, tol: f64| {
+            let pass = (got - want).abs() <= tol;
+            println!(
+                "SPD {name:<24} {} got={got:.4} want={want:.4}",
+                if pass { "PASS" } else { "FAIL" }
+            );
+            if !pass {
+                ok = false;
+            }
+            pass
+        };
+        let c: model::Clip = serde_json::from_value(serde_json::json!({
+            "id": "s1", "asset_id": "a", "source_start": 10.0, "source_end": 18.0,
+            "timeline_start": 5.0, "timeline_end": 9.0, "speed": 2.0
+        }))
+        .expect("clip");
+        check("const2x t=7 -> src14", c.src_at(7.0), 14.0, 1e-9);
+        check("const2x rate", c.rate_at(6.0), 2.0, 1e-9);
+        check("const2x inverse", c.t_at_src(14.0), 7.0, 1e-9);
+        let mut r: model::Clip = serde_json::from_value(serde_json::json!({
+            "id": "s2", "asset_id": "a", "source_start": 0.0, "source_end": 10.0,
+            "timeline_start": 0.0, "timeline_end": 7.0,
+            "speed_keys": [{"u": 0.0, "v": 1.0}, {"u": 4.0, "v": 2.0, "ease": 0.0}]
+        }))
+        .expect("ramp clip");
+        r.ramp = model::build_ramp(&r.speed_keys, 0.0, 10.0).map(std::sync::Arc::new);
+        let total = r.ramp.as_ref().map(|l| l.total_t).unwrap_or(0.0);
+        check("ramp total 1x4s+2x3s", total, 7.0, 0.03);
+        check("ramp t=2 -> src2", r.src_at(2.0), 2.0, 0.03);
+        check("ramp t=6 -> src8", r.src_at(6.0), 8.0, 0.06);
+        check("ramp rate head 1x", r.rate_at(1.0), 1.0, 0.05);
+        check("ramp rate tail 2x", r.rate_at(6.0), 2.0, 0.1);
+        check("ramp inverse src8->t6", r.t_at_src(8.0), 6.0, 0.05);
+        check("roundtrip t=3.3", r.t_at_src(r.src_at(3.3)), 3.3, 0.02);
+        let mut sm: model::Clip = serde_json::from_value(serde_json::json!({
+            "id": "s3", "asset_id": "a", "source_start": 0.0, "source_end": 10.0,
+            "timeline_start": 0.0, "timeline_end": 7.0,
+            "speed_keys": [{"u": 0.0, "v": 1.0}, {"u": 5.0, "v": 2.0, "ease": 1.0}]
+        }))
+        .expect("smooth clip");
+        sm.ramp = model::build_ramp(&sm.speed_keys, 0.0, 10.0).map(std::sync::Arc::new);
+        let tt = sm.ramp.as_ref().map(|l| l.total_t).unwrap_or(0.0);
+        let in_range = tt > 6.5 && tt < 8.0;
+        println!("SPD ease1 total in range   {} got={tt:.3}", if in_range { "PASS" } else { "FAIL" });
+        ok &= in_range;
+        let mut mono = true;
+        let mut prevv = -1.0;
+        for i in 0..=720 {
+            let s = sm.src_at(i as f64 * 0.01);
+            if s < prevv - 1e-9 {
+                mono = false;
+            }
+            prevv = s;
+        }
+        println!("SPD ramp monotonic         {}", if mono { "PASS" } else { "FAIL" });
+        ok &= mono;
+        // カーブ度合い: ease=1 は ease=0 より遷移が広い（t=3.5 時点の速度で判定）
+        let v_sharp = r.rate_at(3.2);
+        let v_smooth = sm.rate_at(3.2);
+        let spread = v_smooth > v_sharp + 0.05;
+        println!(
+            "SPD ease widens transition {} sharp={v_sharp:.3} smooth={v_smooth:.3}",
+            if spread { "PASS" } else { "FAIL" }
+        );
+        ok &= spread;
+        println!("SPD ALL {}", if ok { "PASS" } else { "FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
     }
     if args.iter().any(|a| a == "--selftest-newlane") {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));

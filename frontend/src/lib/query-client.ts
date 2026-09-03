@@ -3,9 +3,10 @@
  */
 
 import { QueryClient, isServer } from '@tanstack/react-query';
+import { PERSISTED_QUERY_KEYS, PERSIST_MAX_AGE_MS } from '@/lib/query-persister';
 
 function makeQueryClient() {
-  return new QueryClient({
+  const client = new QueryClient({
     defaultOptions: {
       queries: {
         // With SSR, we usually want to set some default staleTime
@@ -16,6 +17,12 @@ function makeQueryClient() {
       },
     },
   });
+  // 永続化するキーは gcTime を保存期間以上にする（既定5分で消えると復元の意味が無い）。
+  // 開いていない部屋のメッセージがメモリに残るが、1部屋20件×数十部屋で数MB程度。
+  for (const key of PERSISTED_QUERY_KEYS) {
+    client.setQueryDefaults([key], { gcTime: PERSIST_MAX_AGE_MS });
+  }
+  return client;
 }
 
 let browserQueryClient: QueryClient | undefined = undefined;

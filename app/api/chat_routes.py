@@ -24,7 +24,7 @@ from app.services.auth_service import (
 from app.services.chat_service import ChatService, parse_datetime
 from app.models.chat_schemas import (
     # Auth
-    RegisterRequest, LoginRequest, TokenResponse,
+    RegisterRequest, LoginRequest, TokenResponse, RefreshTokenRequest,
     UserResponse, UserUpdateRequest,
     # Invite
     InviteCreateRequest, InviteResponse, InviteInfoResponse, InviteAcceptResponse,
@@ -103,6 +103,49 @@ def _get_session_title(room_id: str) -> str:
     except Exception:
         pass
     return room_id[:8]
+
+
+def _fetch_unseen_voice_digest(room_id: str) -> str:
+    """直近のダンのテキスト発言より後に入った音声会話（🎙）をダイジェスト化する。
+
+    音声モードの会話は DB（chat_messages）に直接保存され、CLI セッションを
+    経由しないため、そのままではテキスト側のダンの記憶に入らない。
+    次のターンの冒頭に合流させることで「部屋=共有記憶」を双方向にする
+    （音声側は read_room_history / 接続時注入で逆方向を担う）。
+    """
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        sb = get_supabase_client().client
+        result = (
+            sb.table("chat_messages")
+            .select("sender_type,content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(60)
+            .execute()
+        )
+        msgs = list(reversed(result.data or []))
+        last_dan_idx = -1
+        for i, m in enumerate(msgs):
+            c = m.get("content") or ""
+            if m.get("sender_type") == "ai" and not c.startswith("🎙"):
+                last_dan_idx = i
+        voice = [m for m in msgs[last_dan_idx + 1 :] if (m.get("content") or "").startswith("🎙")]
+        if not voice:
+            return ""
+        lines = []
+        for m in voice[-30:]:
+            who = "ユーザー" if m.get("sender_type") == "human" else "あなた（音声モードの自分）"
+            lines.append(f"{who}: {(m.get('content') or '')[1:].strip()[:160]}")
+        digest = "\n".join(lines)[:2000]
+        return (
+            "【音声モードでの会話（この部屋であなた自身が音声で話した、まだ目を通していない分）】\n"
+            + digest
+            + "\n【音声の会話ここまで。以下が今回のメッセージ】\n\n"
+        )
+    except Exception:
+        return ""
 
 
 def _fetch_messages_since(room_id: str, last_index: int) -> str:
@@ -329,6 +372,9 @@ async def _notify_dan_completion(
 ) -> None:
     """Best-effort browser/PWA push when a Dan run finishes."""
     try:
+        # 👍リアクションだけのターンは通知しない（受領スタンプに通知価値はない）。
+        if (final_text or "").strip() == "👍":
+            return
         from app.services.push_service import get_push_service
 
         body = _compact_text(final_text, 120) if final_text else ""
@@ -696,19 +742,6 @@ def _artifact_slugs_from_written_paths(written_file_paths: list[str]) -> list[st
     from app.services.chat_artifact_registration import artifact_slugs_from_written_paths
 
     return artifact_slugs_from_written_paths(written_file_paths)
-
-
-def _schedule_artifact_alias_deploy(written_file_paths: list[str]) -> None:
-    """Run the stable artifact deployment flow in the background.
-
-    This makes the alias update a harness behavior instead of relying on the LLM
-    to remember a deployment command after editing an artifact.
-    """
-    from app.services.chat_artifact_registration import (
-        schedule_artifact_alias_deploy_from_written_paths,
-    )
-
-    schedule_artifact_alias_deploy_from_written_paths(written_file_paths)
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -1391,28 +1424,44 @@ async def login(
         except Exception:
             pass  # Non-critical
 
-    token_pair = create_token_pair(user_id=user["id"], email=user["email"])
+    # remember_me=True: リフレッシュトークンを30日にする。False だと1日で切れ、
+    # APK が毎日ログアウトする原因だった。使うたびにローテーションで30日延びる
+    # ので、日常的に使っている限りログアウトしない。
+    token_pair = create_token_pair(user_id=user["id"], email=user["email"], remember_me=True)
     set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
-    return TokenResponse(access_token=token_pair.access_token)
+    return TokenResponse(
+        access_token=token_pair.access_token,
+        refresh_token=token_pair.refresh_token,
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token_endpoint(
     request: Request,
     response: Response,
+    payload: Optional[RefreshTokenRequest] = None,
 ):
-    """Refresh access token using refresh token from cookie"""
-    refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
+    """Refresh access token using refresh token from body (mobile) or cookie (web)"""
+    # APK は Cookie を使えないのでボディで明示的に渡す。ボディ優先にするのは、
+    # RN の fetch が過去レスポンスの Set-Cookie を勝手に保持していても
+    # 古い Cookie が明示トークンを上書きしないようにするため。
+    refresh_token_value = (
+        (payload.refresh_token if payload else None)
+        or request.cookies.get(REFRESH_TOKEN_COOKIE)
+    )
     if not refresh_token_value:
         raise HTTPException(status_code=401, detail="Refresh token not found")
-    
+
     token_pair = refresh_tokens(refresh_token_value)
     if not token_pair:
         clear_auth_cookies(response)
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-    
+
     set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
-    return TokenResponse(access_token=token_pair.access_token)
+    return TokenResponse(
+        access_token=token_pair.access_token,
+        refresh_token=token_pair.refresh_token,
+    )
 
 
 @router.get("/me", response_model=UserResponse)
@@ -2198,6 +2247,7 @@ async def send_dan_message_stream(
             if True:
                 from app.agent.cli_runner import process_message_cli
                 from app.api.project_routes import _format_tool_label
+                from app.services.project_service import ProjectService
                 from app.services.run_service import RunService
 
                 project_service = ProjectService()
@@ -2322,6 +2372,18 @@ async def send_dan_message_stream(
                 cli_content, video_analyses = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
+                # 音声モードの未読会話を記憶へ合流（部屋=共有記憶の双方向化）
+                voice_digest = _fetch_unseen_voice_digest(room_id)
+                if voice_digest:
+                    cli_content = voice_digest + cli_content
+                # 送信案カード（compose_message）の編集/送信/破棄をダンの記憶へ合流
+                try:
+                    from app.services.outbound_message_service import OutboundMessageService
+                    outbound_digest = await asyncio.to_thread(OutboundMessageService().digest_for_turn, room_id)
+                    if outbound_digest:
+                        cli_content = outbound_digest + cli_content
+                except Exception:
+                    logger.warning("outbound digest failed room=%s", room_id, exc_info=True)
                 mark_latency("content_enriched")
 
                 # ── メディア永続化: CLI起動前に画像/動画をGeminiで抽出・保存 ──
@@ -2489,11 +2551,20 @@ async def send_dan_message_stream(
 
                         # resultイベント到着時に即座にai_message+doneを送信
                         # （ループ終了を待つとCLIプロセスの後処理分だけ遅延する）
-                        ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
+                        # 追い連絡の割り込みで畳んだ中間ターンが無言だった場合は失敗では
+                        # ないので、代替テンプレ文言を入れない（空本文のまま流す。
+                        # cli_runner 側も同条件でテンプレを入れずに保存している）。
+                        # 割り込み終了の result は is_error=True が付くことがある（実測）ため
+                        # is_error では弾かない。continuation＋本文空＝無言の中間ターン。
+                        empty_continuation = is_continuation and not result_text
+                        ai_response_content = "" if empty_continuation else (final_text or "応答を生成できませんでした。もう一度お試しください。")
                         if cli_saved_ai_message:
                             ai_context = {"turn_id": event.get("turn_id")} if event.get("turn_id") else None
+                            # DB保存済み行の実IDをそのまま返す。合成ID(cli-saved-*)だと
+                            # ポーリングで取得したDB行とキャッシュ上で別メッセージ扱いに
+                            # なり、同じ回答が二重表示される（refreshするまで残る）。
                             ai_message = {
-                                "id": f"cli-saved-{event.get('turn_id') or 'latest'}",
+                                "id": event.get("saved_message_id") or f"cli-saved-{event.get('turn_id') or 'latest'}",
                                 "room_id": room_id,
                                 "sender_id": None,
                                 "sender_name": "ダン",
@@ -2506,6 +2577,10 @@ async def send_dan_message_stream(
                             if ai_context:
                                 ai_message["ai_context"] = ai_context
                             yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                        elif empty_continuation:
+                            # 空の中間ターンは cli_runner 側で保存自体をスキップ済み。
+                            # ここでフォールバック保存するとテンプレ文言が復活するので何もしない。
+                            pass
                         else:
                             ai_message_data = await service.send_dan_ai_message(
                                 current_user.user_id, ai_response_content, reasoning_steps,
@@ -2876,6 +2951,145 @@ async def get_active_session_status(
     フロントエンドがページ読み込み時やタブ復帰時に呼び出し、
     実行中ならポーリングモードに切り替える。
     """
+    return await _active_session_status(session_id)
+
+
+class PerfEventIn(BaseModel):
+    surface: str
+    event: str
+    ms: float
+    room_id: Optional[str] = None
+    extra: Optional[dict] = None
+    at: Optional[str] = None
+    ua: Optional[str] = None
+
+
+@router.post("/perf")
+async def record_perf_event(body: PerfEventIn, current_user: TokenData = Depends(get_current_user)):
+    """実使用の体感時間（部屋切替など）を .tmp/perf_events.jsonl に追記する。
+
+    手元の headless 計測と本人の体感がずれたため、本人の端末で「タップ→内容が見える」
+    を測って残す。分析は scripts/perf_report.py。
+    """
+    import json as _json
+    from pathlib import Path as _P
+
+    row = body.model_dump()
+    row["user_id"] = current_user.user_id[:8]
+    row["received_at"] = datetime.now(timezone.utc).isoformat()
+    path = _P(__file__).resolve().parents[2] / ".tmp" / "perf_events.jsonl"
+
+    def _append():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(row, ensure_ascii=False) + "\n")
+
+    try:
+        await asyncio.to_thread(_append)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("perf event append failed: %s", e)
+    return {"ok": True}
+
+
+@router.get("/rooms/{room_id}/open")
+async def open_room(
+    room_id: str,
+    project_id: Optional[str] = None,
+    limit: int = 20,
+    include_project: bool = True,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """部屋を開くのに必要な一式を1往復で返す（部屋切替の高速化）。
+
+    include_project=false: 呼び出し側が一覧キャッシュに project を持っている場合
+    （Web）。project 取得が束ねの中で一番遅い（実測300ms超）ので省く。
+
+    従来はフロントが project / messages / artifacts / active / current-run /
+    execution-events を別々に 8〜12 本投げていた。ブラウザは並列に投げるが、
+    スマホ（Vercel→トンネル→自宅PC）では1本ごとの中継コストが乗り、
+    実測で部屋切替が数秒になっていた。ここでは全部をサーバー側で同時に取り、
+    1本の応答にまとめる。各取得は独立して失敗してよい（欠けた項目は null）。
+    実行イベントは「実行中の部屋」だけ同梱する（待機中の部屋には要らない）。
+    """
+    from app.services.project_service import ProjectService
+    from app.services.run_service import RunService
+    from app.services.chat_artifact_service import ChatArtifactService
+
+    user_id = current_user.user_id
+
+    async def _project():
+        if not project_id or not include_project:
+            return None
+        return await ProjectService().get_project(project_id, user_id)
+
+    async def _messages():
+        msgs = await service.get_messages(room_id, user_id, limit=limit)
+        return [MessageResponse(**m).model_dump(mode="json") for m in msgs]
+
+    async def _artifacts():
+        svc = ChatArtifactService()
+        # service.list は内部で同期 .execute() を呼ぶのでスレッドへ逃がす
+        return await asyncio.to_thread(lambda: asyncio.run(svc.list(user_id, room_id=room_id)))
+
+    async def _current_run():
+        if not project_id:
+            return None
+        return await RunService().get_current_run(project_id)
+
+    timings: dict[str, int] = {}
+
+    async def _timed(name: str, coro):
+        t0 = time.perf_counter()
+        try:
+            return await coro
+        finally:
+            timings[name] = int((time.perf_counter() - t0) * 1000)
+
+    t_all = time.perf_counter()
+    results = await asyncio.gather(
+        _timed("project", _project()), _timed("messages", _messages()), _timed("artifacts", _artifacts()),
+        _timed("active", _active_session_status(room_id)), _timed("current_run", _current_run()),
+        return_exceptions=True,
+    )
+    names = ("project", "messages", "artifacts", "active", "current_run")
+    for name, r in zip(names, results):
+        if isinstance(r, Exception):
+            logger.warning("open_room: %s failed (room=%s): %s", name, room_id[:8], r)
+    if isinstance(results[1], ValueError):
+        raise HTTPException(status_code=403, detail=str(results[1]))
+    project, messages, artifacts, active, current_run = [
+        None if isinstance(r, Exception) else r for r in results
+    ]
+
+    execution_events = None
+    is_running = (
+        bool((active or {}).get("active"))
+        or (current_run or {}).get("state") == "running"
+        or bool((project or {}).get("has_active_run"))
+    )
+    if project_id and is_running:
+        try:
+            execution_events = await _timed("execution_events", ProjectService().get_execution_events(project_id, limit=500))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("open_room: execution_events failed (project=%s): %s", project_id[:8], e)
+    timings["total"] = int((time.perf_counter() - t_all) * 1000)
+
+    return {
+        "room_id": room_id,
+        "timings_ms": timings,
+        "project": project,
+        "messages": messages,
+        "artifacts": artifacts,
+        "active": active,
+        "current_run": current_run,
+        "execution_events": execution_events,
+    }
+
+
+async def _active_session_status(session_id: str) -> dict:
+    """セッションが実行中かの判定本体（/active と /open の共用）。"""
+
     from app.services.cancellation import CancellationRegistry
     from app.agent.cli_runner import is_cli_active
 
@@ -3100,6 +3314,99 @@ class InstructRequest(BaseModel):
     instruction: str
 
 
+# ── 送信案カード（compose_message）: 編集オートセーブ / 送信 / 破棄 ──
+# ダンの compose_message(action="send") と同じ OutboundMessageService を通るので、
+# 誰が送っても部屋の履歴とダンの記憶に同じ形で残る。
+
+class OutboundDraftUpdateRequest(BaseModel):
+    body: Optional[str] = None
+    subject: Optional[str] = None
+    to: Optional[str] = None
+
+
+@router.patch("/proposals/{proposal_id}/draft", response_model=ProposalResponse)
+async def update_outbound_draft(
+    proposal_id: str,
+    request: OutboundDraftUpdateRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """送信案カードの本文/件名/宛先をオートセーブする（DB が唯一の正）。"""
+    from app.services.outbound_message_service import OutboundMessageService
+    try:
+        await asyncio.to_thread(
+            OutboundMessageService().update_draft, proposal_id, current_user.user_id,
+            body=request.body, subject=request.subject, to=request.to,
+        )
+        proposal = await service.get_proposal(proposal_id, current_user.user_id)
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/proposals/{proposal_id}/send", response_model=ProposalResponse)
+async def send_outbound_draft(
+    proposal_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """送信ボタン: DB の現在本文で実送信し、部屋に送信済みイベントを残す。ダンは起動しない。"""
+    from app.services.outbound_message_service import OutboundMessageService
+    try:
+        await OutboundMessageService().send(proposal_id, current_user.user_id, sent_by="user")
+        proposal = await service.get_proposal(proposal_id, current_user.user_id)
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("outbound send failed %s", proposal_id)
+        raise HTTPException(status_code=500, detail=f"送信に失敗しました: {e}")
+
+
+@router.post("/proposals/{proposal_id}/discard", response_model=ProposalResponse)
+async def discard_outbound_draft(
+    proposal_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    from app.services.outbound_message_service import OutboundMessageService
+    try:
+        await asyncio.to_thread(OutboundMessageService().discard, proposal_id, current_user.user_id, by="user")
+        proposal = await service.get_proposal(proposal_id, current_user.user_id)
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/proposals/outbound-for-collab/{collab_room_id}")
+async def list_outbound_proposals_for_collab(
+    collab_room_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """コラボルーム宛の送信案カード一覧。
+
+    コミュニケーションタブのオーナー画面が、その窓口宛の pending カードを
+    インライン表示するために使う（承認・編集・破棄は既存の proposals API と同じ）。
+    """
+    import asyncio as _aio
+    from app.services.supabase_client import get_supabase_client
+
+    def _q():
+        return (
+            get_supabase_client().client.table("dan_proposals")
+            .select("id,status,created_at")
+            .eq("type", "outbound")
+            .eq("user_id", current_user.user_id)
+            .eq("action_data->reply_to->>collab_room_id", collab_room_id)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+
+    r = await _aio.to_thread(_q)
+    return {"proposals": r.data or []}
+
+
 @router.post("/proposals/{proposal_id}/instruct")
 async def instruct_proposal(
     proposal_id: str,
@@ -3165,6 +3472,92 @@ class ConnectionManager:
                     await connection.send_json(message)
                 except Exception:
                     pass  # 接続が切れている場合は無視
+
+
+# ==================== プロフィール ====================
+
+@router.post("/profile")
+async def update_profile(
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """自分の表示名を変更する（コラボ窓口などで相手に見える名前）。"""
+    data = await request.json()
+    display_name = (data.get("display_name") or "").strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="display_name required")
+    from app.services.supabase_client import get_supabase_client
+    import asyncio as _aio
+    def _upd():
+        return (get_supabase_client().client.table("users")
+                .update({"display_name": display_name[:60]})
+                .eq("id", current_user.user_id).execute())
+    await _aio.to_thread(_upd)
+    return {"display_name": display_name[:60]}
+
+
+# ==================== コラボチャット着信（sandbox → core） ====================
+
+@router.post("/internal/collab-inbound")
+async def collab_inbound(request: Request):
+    """コラボルームのゲスト発言を、紐付いた本体チャットルームでダンを起こして届ける。
+
+    sandbox(collab_routes) から localhost 経由で呼ばれる。wake を予約できなければ
+    通知タブ（dan_proposals）へフォールバックして取りこぼさない。
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+
+    payload = await request.json()
+    collab_room_id = (payload.get("collab_room_id") or "").strip()
+    message = payload.get("message") or {}
+    # 添付だけのメッセージは本文が空。ダンには本文＋添付（画像はローカルパス）を渡す
+    from app.services.collab_wakeup import _text_for_dan
+    text_for_dan = _text_for_dan(message)
+    if not collab_room_id or not text_for_dan.strip():
+        raise HTTPException(status_code=422, detail="collab_room_id and message.content required")
+
+    sender_type = message.get("sender_type")
+    is_owner_private = (
+        sender_type == "owner"
+        and ((message.get("metadata") or {}).get("visibility") == "owner_only")
+    )
+    is_owner_public = sender_type == "owner" and not is_owner_private
+    if sender_type != "guest" and not is_owner_private and not is_owner_public:
+        return {"status": "ignored", "reason": "not_guest"}
+
+    from app.services.collab_service import CollabService
+    svc = CollabService()
+    room = await svc.get_room(collab_room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Collab room not found")
+    origin_room_id = room.get("origin_chat_room_id")
+    if not origin_room_id:
+        return {"status": "ignored", "reason": "no_origin_link"}
+
+    # ユーザーの私的メッセージ（相談への返答・ダンへの指示）は即時に origin ダンへ
+    if is_owner_private:
+        from app.services.collab_wakeup import schedule_owner_instruction
+        thread_root = (((message.get("metadata") or {}).get("reply_to")) or {}).get("id")
+        ok = schedule_owner_instruction(collab_room_id, text_for_dan,
+                                        thread_root=thread_root)
+        return {"status": "owner_instruction_scheduled" if ok else "ignored"}
+
+    # ユーザーの公開発言: ダン宛てかどうかはダンが判断し、宛てられていれば公開の場で直接返答
+    if is_owner_public:
+        from app.services.collab_wakeup import schedule_owner_instruction
+        ok = schedule_owner_instruction(collab_room_id, text_for_dan,
+                                        public=True)
+        return {"status": "owner_public_scheduled" if ok else "ignored"}
+
+    # 連投対応: 1メッセージ=1起動ではなく、窓口ごとのアグリゲータに通知する。
+    # 60秒静かになるまで待って未処理分をまとめて1ターンで処理する（collab_wakeup 参照）。
+    from app.services.collab_wakeup import schedule_collab_wakeup
+    if schedule_collab_wakeup(collab_room_id):
+        return {"status": "wake_scheduled", "origin_room_id": origin_room_id}
+    proposal = await svc.notify_origin_chat_of_guest_message(collab_room_id, message)
+    return {"status": "proposal_created" if proposal else "ignored"}
 
 
 # ==================== 整理オブザーバー（スケジューラー用） ====================

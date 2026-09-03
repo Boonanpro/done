@@ -13,11 +13,17 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import requests
 from playwright.sync_api import sync_playwright
 
+from app.config import settings
+
 PROJECT_REF = "omcnusihkpfyvzglttop"
 USER_DATA_DIR = PROJECT_ROOT / ".playwright-supabase"
 
 
 def get_access_token() -> str:
+    # A management PAT is the durable, non-interactive credential for schema
+    # changes.  Browser cookies are only a fallback for older workspaces.
+    if settings.SUPABASE_ACCESS_TOKEN:
+        return settings.SUPABASE_ACCESS_TOKEN
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
             user_data_dir=str(USER_DATA_DIR),

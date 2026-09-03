@@ -11,7 +11,10 @@ export const ARTIFACT_PAGES: Record<string, string[]> = {
     "/"
   ],
   "denki-knowledge": [
-    "/"
+    "/",
+    "/guides/dokuritsu",
+    "/guides/haikyu-jiko",
+    "/guides/nenji-tenken"
   ],
   "inspection-report": [
     "/"

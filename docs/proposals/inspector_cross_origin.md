@@ -116,7 +116,7 @@ sync_inspector_runtime.py` 等）。親側(`preview/*`)はダッシュボード�
 | 2 | postMessageプロトコルの型定義＋origin許可リスト（親/iframe共通の型ファイル） | typecheck |
 | 3 | iframe内ランタイムに「選択・ホバー・ハイライト・プロパティ読取・インライン編集」を移植（iframe-inspector.ts のロジックを移す） | **使い捨てデプロイ**で単体動作 |
 | 4 | 親(preview-pane/iframe-inspector/inspector-panel/stores)を postMessage 駆動に書換（liveTarget/Range 廃止） | ローカル(同一オリジン)で従来同等に動くこと |
-| 5 | iframe src をクロスオリジン(done-studio)へ。保存をDB upsert＋楽観反映＋overrides投入に | **使い捨てデプロイのダッシュボード**でクロスオリジン編集が動くこと |
+| 5 | iframe src をクロスオリジンへ。保存をDB upsert＋楽観反映＋overrides投入に | **使い捨てデプロイのダッシュボード**でクロスオリジン編集が動くこと |
 | 6 | done-artifacts へランタイム同期、本番ダッシュボードで検証（ライブ納品物に影響しないこと） | 本番デプロイ版で編集動作＋既存サイト無影響 |
 | 7 | コメントモード/Undo-Redo/画像/動画セクションの postMessage 対応確認 | 全機能 |
 | 8 | 旧同一オリジンコード削除、ドキュメント更新 | - |

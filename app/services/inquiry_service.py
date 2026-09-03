@@ -21,6 +21,13 @@ SCOPE_LABEL = {
     "paina-contact": "お問い合わせ",
     "paina-waitlist": "ウェイティングリスト登録",
 }
+# scope → 問い合わせ内容をそのまま転送するクライアント側の宛先
+SCOPE_FORWARD_TO = {
+    "himawari-seitai": ["0aw325171@gmail.com"],  # ひまわり整体院 向井院長
+}
+SCOPE_CLIENT_NAME = {
+    "himawari-seitai": "ひまわり整体院",
+}
 
 
 class InquiryService:
@@ -62,11 +69,57 @@ class InquiryService:
         # ダンの返信草案生成＋提案作成はバックグラウンドで（フォーム応答をブロックしない）
         try:
             asyncio.create_task(self._draft_and_propose(created))
+            asyncio.create_task(self._forward_to_client(created))
         except RuntimeError:
             # 実行中ループが無い稀なケースは同期フォールバック
             await self._draft_and_propose(created)
+            await self._forward_to_client(created)
 
         return created
+
+    async def _forward_to_client(self, inquiry: dict) -> None:
+        """問い合わせ内容をクライアント本人のメールへ転送する（ベストエフォート）。
+
+        通知タブへの提案とは独立。クライアントが自分の受信箱でも見落とさないための控え。
+        """
+        scope = inquiry.get("scope") or ""
+        recipients = SCOPE_FORWARD_TO.get(scope) or []
+        if not recipients:
+            return
+        try:
+            from app.services.email_send import send_plain_email
+
+            client = SCOPE_CLIENT_NAME.get(scope, scope)
+            name = inquiry.get("name") or "お名前未記入"
+            sender_email = inquiry.get("email")
+            reply_note = (
+                f"そのまま返信するとお客様（{sender_email}）に直接届きます。"
+                if sender_email
+                else "お客様のメールアドレスが未記入のため、返信しても届きません。"
+            )
+            subject = f"【{client}】ホームページからお問い合わせが届きました（{name} 様）"
+            body = (
+                f"{client}のホームページの問い合わせフォームに、新しいお問い合わせが届きました。\n\n"
+                f"お名前: {name}\n"
+                f"メール: {sender_email or '-'}\n"
+                f"電話: {inquiry.get('phone') or '-'}\n"
+                f"受付日時: {inquiry.get('created_at') or '-'}\n\n"
+                f"--- お問い合わせ内容 ---\n"
+                f"{inquiry.get('message') or '(本文なし)'}\n\n"
+                f"※このメールは自動転送です。{reply_note}\n"
+            )
+            for to in recipients:
+                await asyncio.to_thread(
+                    send_plain_email,
+                    to,
+                    subject,
+                    body,
+                    from_name=f"{client} お問い合わせ通知",
+                    reply_to=sender_email or None,
+                )
+            logger.info("inquiry forwarded scope=%s to=%s", scope, recipients)
+        except Exception:
+            logger.exception("inquiry forward failed scope=%s", scope)
 
     async def _draft_and_propose(self, inquiry: dict) -> None:
         """問い合わせ内容からダンが返信草案を作り、通知タブに reply 提案を出す（ベストエフォート）。"""

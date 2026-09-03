@@ -1,9 +1,10 @@
 ---
 name: build
 description: >
-  Next.js + shadcn/ui + Tailwind で UI とバックエンドを実装するスキル。
-  ダッシュボード・HP・管理画面・LP・問い合わせフォーム付き機能ページなど、
-  見せて使える成果物が必要な時に使う。
+  UIとバックエンドを実装するスキル。ダッシュボード・HP・管理画面・LP・
+  問い合わせフォーム付き機能ページなど、見せて使える成果物が必要な時に使う。
+  LP・広告LP・ドライテストLPは T0 画像ファースト方式（GPT Image 2でタイル生成→
+  操作箇所だけ実HTML化）が既定。作り始める前に必ずこのスキルを読むこと。
 display_name: ビルド
 updated: 2026-04-24
 ---
@@ -124,31 +125,85 @@ import { HeroMedia } from "@/components/templates";
 
 **通常の画像表示** (記事中の挿絵、商品サムネ等) は `<img>` / `<Image>` を直接書いて OK。overlay 不要なら `<HeroMedia>` も不要。
 
-### 5. 編集対象要素には **`data-edit-id` を必ず付ける**
+### 4.5. 成果物で新しいクラスが効かない時は Tailwind のスキャン漏れを疑う
 
-ライブペイント（インスペクタ）でユーザーが編集する可能性のあるテキスト要素・CTA・主要画像には、必ず一意の `data-edit-id` 属性を付ける。
+`frontend/src/app/artifacts/<slug>/` は `.gitignore` で除外されている。Tailwind v4 の自動ソース
+検出は `.gitignore` を尊重するため、**成果物の中でしか使っていないクラス（arbitrary値
+`max-w-[34rem]` や `xl:` などの珍しい variant）は一切コンパイルされず、指定したレイアウトが
+無言で無視される**。エラーも警告も出ない。
+
+対策は導入済み: `scripts/wire_artifact_tailwind_sources.py` が slug ごとの `@source` を
+`frontend/src/app/artifact-sources.css` に書き出し、`globals.css` がそれを import する。
+`hook_register_artifact.py` が成果物作成時に自動で走らせる。
+
+**新しい slug を手で作った直後にレイアウトが効かない場合**は、まず
+`python scripts/wire_artifact_tailwind_sources.py` を実行すること。
+`artifacts/**` を起点にした glob では直らない（walker が ignore 対象の `<slug>/` で
+枝刈りされるため）。glob の起点は必ず `<slug>/` の内側に置く。
+
+（経緯: 2026-08-01、置く床暖房LPで非対称スプリットや `max-w-[34rem]` を指定したのに
+すべて無視され、縦積みのままの「ダサい」ページになっていた）
+
+---
+
+### 5. 編集対象テキストは **`EditableText`（data-edit-id）で書く**
+
+ライブペイント（インスペクタ）でユーザーが編集する可能性のあるテキスト要素・CTA・主要画像は、
+`@/components/dan/editable` の **`EditableText`** で書く（＝一意の `data-edit-id` が付く）。
 
 **なぜ必須か**：
 
-`data-edit-id` がないと、エディタは要素を **DOM ツリー上の位置（パス）** で識別する。これには 2 つの致命的問題がある：
+durable な ID がないと、エディタは要素を **DOM ツリー上の位置（パス）** で識別する。これには 3 つの致命的問題がある：
 
 1. **構造変化に弱い**: ユーザーが部分テキスト装飾を入れた瞬間 `<span>` が DOM に挟まり、識別子がズレる → 編集データが孤立する／別要素扱いになる
 2. **ページ間で干渉する**: 同じテンプレで作った複数ページ（top / services / company / careers 等）は同じ DOM 構造になりやすく、構造ベース ID が衝突 → **1 つのヒーローを編集すると全ページに反映**される
-
-`data-edit-id` を付ければ両方解決する。
+3. **公開URLに反映されない**: 公開済み編集はサーバーレンダリング時に `EditableText` が初回 HTML へ描画する（後述）。`@<editId>` 以外のキー（DOM パス・`@auto:`）は DOM が無いと解決できず、公開ページに出ない
 
 **命名規則**: `{slug}-{page}-{role}` 形式で全ページ通してユニークに。
 
 ```jsx
-// ✅ OK
-<h1 data-edit-id="kittoku-top-hero-h1">働く車を、止めない。</h1>
-<p data-edit-id="kittoku-top-hero-tagline">鳥取・米子の特装車専門整備工場。</p>
-<a href="/contact" data-edit-id="kittoku-top-hero-cta">修理・整備の依頼</a>
+import { EditableText } from "@/components/dan/editable";
+
+// ✅ OK — タグは as で指定。className / onClick 等はそのまま渡る
+<EditableText as="h1" editId="kittoku-top-hero-h1">働く車を、止めない。</EditableText>
+<EditableText as="p" editId="kittoku-top-hero-tagline">鳥取・米子の特装車専門整備工場。</EditableText>
+<EditableText as="button" type="button" className="cta" onClick={submit} editId="kittoku-top-hero-cta">
+  修理・整備の依頼
+</EditableText>
 
 // 子ページ（必ず page セグメントを変える）
-<h1 data-edit-id="kittoku-services-hero-h1">整備・修理・点検・架装。</h1>
-<h1 data-edit-id="kittoku-company-hero-h1">米子の地で、働く車を、30年。</h1>
+<EditableText as="h1" editId="kittoku-services-hero-h1">整備・修理・点検・架装。</EditableText>
 ```
+
+**公開の仕組み（`/artifacts` の専用配信サイト）**:
+編集の保存は draft（`inspector_overrides`）、「公開」で不変リビジョン（`artifact_edit_releases`）が発行され、
+バックエンドが `frontend/src/app/artifacts/<slug>/release.gen.json` に焼き込んで専用 Vercel プロジェクトを再デプロイする。
+成果物の `page.tsx` は server component にして次の形にする（moonbox-jp が実例）：
+
+```tsx
+// page.tsx（server）— release.gen.json を build 時に取り込み初回 HTML に反映
+import { EditableProvider } from "@/components/dan/editable";
+import { toEditableOverrides, type ReleaseOverrides } from "@/lib/editable-release";
+import releaseJson from "./release.gen.json";   // 初期値は {} で作成しておく（必須）
+import { PageBody } from "./page-body";          // "use client" の本体
+
+export default function Page() {
+  return (
+    <EditableProvider overrides={toEditableOverrides(releaseJson as ReleaseOverrides)}>
+      <PageBody />
+    </EditableProvider>
+  );
+}
+```
+
+これにより公開URLは**最初のHTMLから最新の公開内容**になり、「一瞬古い表示が出て差し替わる」ことは構造的に起きない。配信ページは実行時に DB もネットワークも読まない。
+
+**⚠️ チャット指示で成果物のテキストを直す前に、必ず release.gen.json を確認する**：
+公開オーバーライドが存在する要素は、**JSX を書き換えても公開ページには出ない**（オーバーライドが勝つ）。
+その editId が `release.gen.json` に載っている場合は、①ユーザーの公開済みテキストを土台に JSX を書き換え、
+②該当 draft 行（`inspector_overrides`）を更新 or 削除し、③再公開してリビジョンからそのキーを外す（or 更新する）。
+デプロイ自体は artifact 単位で直列化・合流されるので、編集の「公開」とチャット改修の公開が同時でも
+最後のビルドに両方の最新状態が入る（バッティングでどちらかが消えることはない）。
 
 **付与する要素**:
 - ✅ すべての h1, h2, h3, h4
@@ -316,6 +371,36 @@ shadcn/uiのchartコンポーネント（Recharts統合）を使う。`npx shadc
 
 ### B. HP / LP / ツール（Next.js）
 
+#### ⚠️ LP・広告LP・ドライテストLPは T0 画像ファースト方式が既定 ⚠️
+
+**縦スクロール1枚もの（広告LP・ドライテスト・キャンペーン）は、コードでデザインを
+組まず、GPT Image 2 で画像として生成して操作箇所だけ実HTML化する。**
+手順は `recipes/image-first-lp.md`（2026-08-03 置く床暖房LPで通し検証済み）。
+
+- 流れ: **カンプを「1枚に2〜3セクション」ずつチェーン生成（全景1枚に押し込むと
+  4画面の読めないLPになる） → 繋げた全景をチャットに添付してユーザー承認 →
+  区間を参照にタイルごとに清書**（承認前に清書へ進まない）
+- 清書はレシピの**定型文に固定**（レイアウト・配置・余白等の指示を足すのは禁止）。
+  スライスは要素の切れ目、生成後のcrop禁止
+- 標準要望2つを必ずプロンプトへ: 「文章は最小限・ビジュアル中心」（W1文言）と
+  「実在しない数字・統計・出典を描かない」
+- プロンプトは**ユーザーの要望と実素材をそのまま渡すだけ**。デザインの方向性
+  （配色・書体・トーン・「モダンに」等）をダンが足すのは禁止 — デザイン判断と
+  方向転換はユーザーがする
+- この方式ではリファレンス収集(HM5)・自己採点ループは**適用しない**。代わりに文字QA必須
+- 生成は `scripts/gpt_image.py`（OpenAI API直・GPT Image 2。2026-08-11一本化）。
+  プロンプトは必ず標準入力で渡す。Higgsfield は動画・Soul・キャラ参照専用
+- 修正は `scripts/lp_image_patch.py`（タイル再生成→領域合成）
+- **新規LPの納品は実テキスト化（`scripts/lp_textify.py`）まで込みが既定** —
+  文字を画像から消してwebフォントのEditableTextを重ね、チャット/手動編集モードで
+  文言を直せる状態で納める。検証ゲート（FAIL=劣化で不合格/WARN=比較画像を目視）
+  つき。手順はレシピ「5b. 実テキスト化」
+- コード方式(T1〜T4)を使うのは: 多ページ企業HP / SEO主目的 / 機能ページ / ダッシュボード
+
+以下のコード方式のルールは、コード方式を選んだ場合にのみ適用する。
+
+---
+
 ダッシュボードと同じNext.js + shadcn/uiで作る。Astroは使わない。
 同じコンポーネント（Card, Button, Badge等）を使い、**CSS変数でクライアントごとの配色・雰囲気を変える**。
 
@@ -325,7 +410,8 @@ HP/LP は「どんな見た目か」の前に **どの作り方（技法）で�
 
 | 技法 | 使うもの | 向く案件 | 重さ | レシピ |
 |---|---|---|---|---|
-| **T1 コンバージョン・フラット**（既定） | shadcn/Tailwind + framer-motion | 集客HP・地域ビジネス・情報サイト（速度/SEO/モバイル最優先） | 軽 | `recipes/conversion-flat.md` |
+| **T0 画像ファーストLP**（LP系の既定） | GPT Image 2 + 具現化オーバーレイ | 広告LP・ドライテスト・キャンペーン（縦1枚もの） | 軽 | `recipes/image-first-lp.md` |
+| **T1 コンバージョン・フラット**（HP系の既定） | shadcn/Tailwind + framer-motion | 集客HP・地域ビジネス・情報サイト（速度/SEO/モバイル最優先） | 軽 | `recipes/conversion-flat.md` |
 | **T2 スクロールナラティブ** | GSAP(ScrollTrigger) + Lenis + framer-motion | ブランドストーリー・製品ローンチ | 中 | `recipes/scroll-narrative.md` |
 | **T3 スクロール動画ヒーロー** | T2 + スクロールスクラブ動画（media-gen） | プレミアム製品ショーケース | 重 | `recipes/scroll-video.md` |
 | **T4 3Dイマーシブ** | R3F + drei + three | 製品コンフィギュレータ・体験型 | 重 | `recipes/3d-immersive.md` |

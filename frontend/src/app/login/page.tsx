@@ -42,13 +42,21 @@ export default function LoginPage() {
       const result = await login(data);
 
       if (!result.success) {
-        setError('メールアドレスまたはパスワードが正しくありません');
+        // 「認証情報が違う」と言えるのはサーバーが 401 を返した時だけ。
+        // 502(トンネル切れ)/503(再起動中)等まで同じ文言にすると、正しい
+        // パスワードなのに「間違っている」と誤案内してしまう。
+        const status = 'status' in result ? result.status : undefined;
+        setError(
+          status === 401
+            ? 'メールアドレスまたはパスワードが正しくありません'
+            : 'サーバーに接続できません。少し待ってから再試行してください。'
+        );
         setIsSubmitting(false);
       }
       // If success, window.location.href is used in login()
       // Page will navigate, so no need to reset isSubmitting
     } catch {
-      setError('ログインに失敗しました');
+      setError('サーバーに接続できません。少し待ってから再試行してください。');
       setIsSubmitting(false);
     }
   };

@@ -61,6 +61,8 @@ let parentOrigin = '*';
 let allowedOrigins: string[] = [];
 let mode: InspectorMode = 'off';
 let activeTarget: Element | null = null;
+/** コメントモードの複数選択集合（activeTarget は常に最後の1個と一致させる）。 */
+let multiTargets: Element[] = [];
 let gotParentMessage = false;
 
 // ---------------------------------------------------------------------------
@@ -112,6 +114,44 @@ function hide(overlay: HTMLDivElement | null): void {
   if (overlay) overlay.style.display = 'none';
 }
 
+// --- 複数選択オーバーレイ（選択数に合わせてプールを増減） ---
+
+const multiOverlays: HTMLDivElement[] = [];
+
+function syncMultiOverlays(): void {
+  // DOM から消えた要素は選択集合から落とす。
+  multiTargets = multiTargets.filter((el) => document.contains(el));
+  while (multiOverlays.length < multiTargets.length) {
+    const el = document.createElement('div');
+    el.setAttribute('data-dan-preview-ui', '1');
+    el.style.cssText = [
+      'position:absolute', 'pointer-events:none', 'border:2px solid rgb(34,197,94)',
+      'background:rgba(34,197,94,0.1)', 'z-index:2147483647', 'display:none',
+      'box-sizing:border-box', 'transition:none', 'border-radius:2px',
+      'box-shadow:0 0 0 4px rgba(34,197,94,0.2)',
+    ].join(';');
+    document.body.appendChild(el);
+    multiOverlays.push(el);
+  }
+  while (multiOverlays.length > multiTargets.length) {
+    multiOverlays.pop()?.remove();
+  }
+  multiTargets.forEach((target, i) => positionTo(multiOverlays[i], target));
+}
+
+function clearMultiOverlays(): void {
+  multiTargets = [];
+  while (multiOverlays.length) multiOverlays.pop()?.remove();
+}
+
+/** 現在の複数選択の全量を親へ通知する（空配列 = 解除）。 */
+function postMultiSelection(): void {
+  post({
+    type: 'inspector:multi-selected',
+    payload: { snapshots: multiTargets.map((el) => buildSnapshot(el)) },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 判定ヘルパ
 // ---------------------------------------------------------------------------
@@ -129,6 +169,46 @@ function isPreviewUi(el: Element | null): boolean {
 function toRect(el: Element): SerializableRect {
   const r = el.getBoundingClientRect();
   return { x: r.left, y: r.top, width: r.width, height: r.height };
+}
+
+const PRESERVED_INLINE_STYLE_KEYS = [
+  ['color', 'color'],
+  ['fontSize', 'font-size'],
+  ['fontWeight', 'font-weight'],
+  ['fontStyle', 'font-style'],
+  ['letterSpacing', 'letter-spacing'],
+  ['textDecorationLine', 'text-decoration-line'],
+] as const;
+
+function captureInlineSpans(target: Element, text: string): Array<{ start: number; end: number; style: Record<string, string> }> {
+  const win = target.ownerDocument.defaultView;
+  if (!win || !text) return [];
+  const root = win.getComputedStyle(target);
+  const raw = target.textContent || '';
+  const leading = raw.length - raw.trimStart().length;
+  const trailing = raw.length - raw.trimEnd().length;
+  const rawEnd = raw.length - trailing;
+  const spans: Array<{ start: number; end: number; style: Record<string, string> }> = [];
+  const walker = target.ownerDocument.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const value = node.textContent || '';
+    const start = offset;
+    offset += value.length;
+    const end = offset;
+    const owner = node.parentElement;
+    if (!owner || end <= leading || start >= rawEnd) continue;
+    const computed = win.getComputedStyle(owner);
+    const style: Record<string, string> = {};
+    for (const [computedKey, cssKey] of PRESERVED_INLINE_STYLE_KEYS) {
+      if (computed[computedKey] !== root[computedKey]) style[cssKey] = computed[computedKey];
+    }
+    if (Object.keys(style).length) {
+      spans.push({ start: Math.max(0, start - leading), end: Math.min(text.length, end - leading), style });
+    }
+  }
+  return spans.filter((span) => span.end > span.start);
 }
 
 function buildSnapshot(target: Element): SelectionSnapshot {
@@ -165,11 +245,15 @@ function buildSnapshot(target: Element): SelectionSnapshot {
     elementKey: computeElementKey(target),
     tagName,
     rect: toRect(target),
-    text: (target.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+    // Keep the full text for the parent-side editor.  Presentation components
+    // truncate it themselves, but truncating the protocol payload here would
+    // silently destroy the latter half of a long paragraph on save.
+    text: (target.textContent || '').trim(),
     className: target.getAttribute('class') || '',
     outerHtmlSnippet: (target.outerHTML || '').slice(0, 2000),
     ancestors,
     computedStyles,
+    inlineSpans: captureInlineSpans(target, (target.textContent || '').trim()),
     bgColor: computedStyles.backgroundColor || null,
     isTextLeaf: isEditableTextLeaf(target),
     media,
@@ -221,6 +305,26 @@ function onClick(ev: Event): void {
   e.stopPropagation();
   const stackTarget = pickFromStack(e) || initial;
   const target = e.altKey ? stackTarget : resolveEditUnit(stackTarget);
+
+  // コメントモード + Ctrl/Cmd/Shift クリック = 複数選択のトグル。
+  // （編集モードはスタイル/テキスト編集が単一要素前提なので対象外）
+  const additive = mode === 'comment' && (e.ctrlKey || e.metaKey || e.shiftKey) && !e.altKey;
+  if (additive) {
+    // 単一選択中に追加クリックしたら、その単一選択を集合の起点にする。
+    if (multiTargets.length === 0 && activeTarget && document.contains(activeTarget) && activeTarget !== target) {
+      multiTargets = [activeTarget];
+    }
+    const idx = multiTargets.indexOf(target);
+    if (idx >= 0) multiTargets.splice(idx, 1);
+    else multiTargets.push(target);
+    activeTarget = multiTargets[multiTargets.length - 1] ?? null;
+    hide(getOverlay(ACTIVE_OVERLAY_ID));
+    syncMultiOverlays();
+    postMultiSelection();
+    return;
+  }
+
+  clearMultiOverlays();
   activeTarget = target;
   positionTo(getOverlay(ACTIVE_OVERLAY_ID), target);
   post({ type: 'inspector:selected', payload: buildSnapshot(target) });
@@ -244,7 +348,11 @@ function onDblClick(ev: Event): void {
   if (!localLeaf) editTarget = resolveEditUnit(editTarget) as HTMLElement;
 
   const tagName = editTarget.tagName.toLowerCase();
-  if (INLINE_EDIT_BLOCKED_TAGS.has(tagName) || !INLINE_TEXT_TAGS.has(tagName)) return;
+  if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
+  // data-edit-id は「生成側が編集単位として宣言した」印。宣言があればタグ名の
+  // 許可リストに関係なく編集できる（dt/dd/b 等が編集不能になる穴の根本対策）。
+  // タグ許可リストは、宣言の無いレガシー要素にだけ適用する。
+  if (!editTarget.getAttribute('data-edit-id') && !INLINE_TEXT_TAGS.has(tagName)) return;
   if (!isEditableTextLeaf(editTarget)) return;
 
   e.preventDefault();
@@ -260,12 +368,19 @@ function onKeyDown(ev: Event): void {
   if (e.key === 'Escape') {
     hide(getOverlay(ACTIVE_OVERLAY_ID));
     activeTarget = null;
+    if (multiTargets.length) {
+      clearMultiOverlays();
+      postMultiSelection();
+    }
     post({ type: 'inspector:selection-range', payload: { elementKey: null } });
   }
 }
 
 function repositionActive(): void {
-  if (activeTarget && document.contains(activeTarget)) positionTo(getOverlay(ACTIVE_OVERLAY_ID), activeTarget);
+  if (activeTarget && multiTargets.length === 0 && document.contains(activeTarget)) {
+    positionTo(getOverlay(ACTIVE_OVERLAY_ID), activeTarget);
+  }
+  if (multiTargets.length) syncMultiOverlays();
 }
 function onScroll(): void { hide(getOverlay(HOVER_OVERLAY_ID)); repositionActive(); }
 function onResize(): void { repositionActive(); }
@@ -330,6 +445,7 @@ function enableInlineEdit(el: HTMLElement): void {
     el.style.removeProperty('white-space');
     el.removeEventListener('blur', onBlur, true);
     el.removeEventListener('keydown', onKey, true);
+    el.removeEventListener('input', onInput, true);
     if (savedHref !== null) el.setAttribute('href', savedHref);
     if (savedTarget !== null) el.setAttribute('target', savedTarget);
     if (savedType !== null) el.setAttribute('type', savedType);
@@ -344,12 +460,18 @@ function enableInlineEdit(el: HTMLElement): void {
     }
   };
   const onBlur = () => { commit(); cleanup(); };
+  const onInput = () => {
+    // The iframe already contains the typed text. Tell the parent panel to
+    // mirror it without echoing a DOM update back into this editing element.
+    post({ type: 'inspector:text-drafted', payload: { elementKey: key, text: el.innerText ?? el.textContent ?? '' } });
+  };
   const onKey = (ev2: Event) => {
     const e2 = ev2 as KeyboardEvent;
     if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); cancelled = true; el.textContent = original; el.blur(); }
   };
   el.addEventListener('blur', onBlur, true);
   el.addEventListener('keydown', onKey, true);
+  el.addEventListener('input', onInput, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +501,7 @@ function detach(): void {
   window.removeEventListener('resize', onResize);
   getOverlay(HOVER_OVERLAY_ID)?.remove();
   getOverlay(ACTIVE_OVERLAY_ID)?.remove();
+  clearMultiOverlays();
   document.body.style.cursor = '';
   activeTarget = null;
 }
@@ -431,7 +554,31 @@ function handleParentMessage(msg: ParentToIframeMessage): void {
     case 'inspector:clear-selection':
       hide(getOverlay(ACTIVE_OVERLAY_ID));
       activeTarget = null;
+      clearMultiOverlays();
       break;
+    case 'inspector:set-selection': {
+      // 親側UI（チップの×・たまりコメントのクリック等）から選択集合を同期する。
+      // 通知は返さない（ループ防止）。
+      const els = (msg.payload.elementKeys || [])
+        .map((k) => findElementByKey(document, k))
+        .filter((el): el is Element => !!el);
+      hide(getOverlay(ACTIVE_OVERLAY_ID));
+      if (els.length <= 1) {
+        clearMultiOverlays();
+        activeTarget = els[0] ?? null;
+        if (activeTarget) positionTo(getOverlay(ACTIVE_OVERLAY_ID), activeTarget);
+      } else {
+        multiTargets = els;
+        activeTarget = els[els.length - 1];
+        syncMultiOverlays();
+      }
+      // 画面外の要素を選択し直した時に見えるよう、先頭要素へスクロールする。
+      // （オーバーレイはページ絶対座標なのでスクロールしてもズレない）
+      if (els[0]) {
+        try { els[0].scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* ignore */ }
+      }
+      break;
+    }
     case 'inspector:request-snapshot': {
       const el = findElementByKey(document, msg.payload.elementKey);
       if (el) post({ type: 'inspector:selected', payload: buildSnapshot(el) });

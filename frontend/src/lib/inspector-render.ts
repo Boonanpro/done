@@ -35,8 +35,11 @@ function escapeHtmlWithBr(s: string): string {
 
 function styleToString(style: CSSStyle): string {
   return Object.entries(style)
-    .map(([k, v]) => `${k}: ${escapeAttr(v)}`)
-    .join('; ');
+    // Browsers serialize inline declarations with a trailing semicolon. Use
+    // that same canonical form so an already-applied rich-text model compares
+    // equal on the next pass instead of rewriting the DOM forever.
+    .map(([k, v]) => `${k}: ${escapeAttr(v)};`)
+    .join(' ');
 }
 
 function escapeAttr(v: string): string {

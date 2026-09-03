@@ -68,6 +68,8 @@ class ProjectResponse(BaseModel):
     last_message_at: Optional[datetime] = None
     last_message_preview: Optional[str] = None
     pinned_at: Optional[datetime] = None
+    # ダンがこのプロジェクトで今まさに作業中か（一覧の「作業中」インジケーター用）
+    has_active_run: bool = False
     created_at: datetime
     updated_at: Optional[datetime] = None
 

@@ -19,23 +19,6 @@ MIGRATION_FILE = PROJECT_ROOT / "supabase" / "migrations" / "036_dan_notion.sql"
 USER_DATA_DIR = PROJECT_ROOT / ".playwright-supabase"
 
 
-def _get_github_credentials() -> tuple[str, str] | None:
-    try:
-        import json as _json
-        from app.services.supabase_client import get_supabase_client
-        from app.services.encryption import get_encryption_service
-        sb = get_supabase_client().client
-        enc = get_encryption_service()
-        res = sb.table("credentials").select("*").eq("service_name", "github").limit(1).execute()
-        if not res.data:
-            return None
-        d = _json.loads(enc.decrypt(res.data[0]["encrypted_data"]))
-        return d["id"], d["password"]
-    except Exception as e:
-        print(f"[WARN] credentials取得失敗: {e}")
-        return None
-
-
 def get_access_token() -> str:
     """Persistent context で Supabase に行き、localStorage から access_token を取り出す"""
     with sync_playwright() as p:
@@ -59,19 +42,10 @@ def get_access_token() -> str:
                     print(f"[WARN] GitHub ボタン押下失敗: {e}")
             page.wait_for_timeout(4000)
 
-            # GitHub ログインページならクレデンシャル投入
-            if "github.com/login" in page.url or "github.com/session" in page.url:
-                creds = _get_github_credentials()
-                if creds:
-                    user, pw = creds
-                    print(f"[INFO] GitHub に自動ログイン: {user}")
-                    try:
-                        page.fill("input[name='login']", user)
-                        page.fill("input[name='password']", pw)
-                        page.click("input[name='commit']")
-                        page.wait_for_timeout(5000)
-                    except Exception as e:
-                        print(f"[WARN] GitHub 自動入力失敗: {e}")
+            # github.com へのログインは必ず人間が手で行う。
+            # 自動入力は GitHub の利用規約違反（2026-07-28 のアカウント凍結の一因）。
+            if "github.com" in page.url:
+                print("[ACTION] GitHub のログインは手動で行ってください（自動入力は禁止）")
 
             # OAuth 認可画面 / 2FA は手動対応
             print("[ACTION] 必要なら 2FA を入力。最大 5 分待機します。")

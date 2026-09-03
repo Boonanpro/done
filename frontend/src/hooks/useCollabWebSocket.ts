@@ -13,6 +13,7 @@ interface UseCollabWebSocketOptions {
   onTyping?: (data: { sender_type: string; sender_name: string }) => void;
   onDanThinking?: (thinking: boolean) => void;
   onRead?: (data: { sender_type: string; sender_name: string; message_id: string }) => void;
+  onReaction?: (data: { message_id: string; reactions: Record<string, string[]> }) => void;
 }
 
 export interface OnlineUser {
@@ -30,6 +31,7 @@ export function useCollabWebSocket({
   onTyping,
   onDanThinking,
   onRead,
+  onReaction,
 }: UseCollabWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -85,6 +87,9 @@ export function useCollabWebSocket({
           case 'read':
             onRead?.(data);
             break;
+          case 'reaction':
+            onReaction?.(data);
+            break;
           case 'error':
             console.error('Collab WS error:', data.message);
             break;
@@ -107,7 +112,7 @@ export function useCollabWebSocket({
     };
 
     wsRef.current = ws;
-  }, [roomId, token, isGuest, onMessage, onUserJoined, onUserLeft, onTyping, onDanThinking, onRead]);
+  }, [roomId, token, isGuest, onMessage, onUserJoined, onUserLeft, onTyping, onDanThinking, onRead, onReaction]);
 
   useEffect(() => {
     if (roomId && token) {

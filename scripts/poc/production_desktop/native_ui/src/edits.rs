@@ -163,24 +163,44 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
     settle_overlaps(root, ids);
 }
 
-pub fn trim_clip_live_from(root: &mut Value, ids: &[String], left: bool, from_t: f64, new_t: f64) {
-    trim_clip_live_impl(root, ids, left, Some(from_t), new_t);
+/// 戻り値 = 実際に消化したタイムラインデルタ（from_t 起点）。限界（ソース頭切れ・
+/// 最小尺）で止まった分は含まれない。呼び出し側はこの分だけ追跡値を進めること —
+/// マウス位置で進めると「拡大できなかった移動量」が蓄積し、反転時にその幅の
+/// 空白を保ったまま縮む（報告バグ）。`still_ids` は静止画クリップ（ソース時間の
+/// 概念が無い＝両方向に自由に伸ばせる）。
+pub fn trim_clip_live_from(
+    root: &mut Value,
+    ids: &[String],
+    left: bool,
+    from_t: f64,
+    new_t: f64,
+    still_ids: &[String],
+) -> f64 {
+    trim_clip_live_impl(root, ids, left, Some(from_t), new_t, still_ids)
 }
 
 /// Live trim during a mouse drag. Only the selected clip changes shape; overlap
 /// erasure is settled on mouse release so covered clips do not disappear mid-drag.
 pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
-    trim_clip_live_impl(root, ids, left, None, new_t);
+    trim_clip_live_impl(root, ids, left, None, new_t, &[]);
 }
 
-fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) {
-    if trim_main_lane_live(root, ids, left, from_t, new_t) {
+fn trim_clip_live_impl(
+    root: &mut Value,
+    ids: &[String],
+    left: bool,
+    from_t: Option<f64>,
+    new_t: f64,
+    still_ids: &[String],
+) -> f64 {
+    if let Some(applied) = trim_main_lane_live(root, ids, left, from_t, new_t, still_ids) {
         normalize_linked_audio(root);
         remove_orphan_linked_audio(root);
-        return;
+        return applied;
     }
+    let mut applied_ret: Option<f64> = None;
     {
-        let Some(tracks) = tracks_mut(root) else { return };
+        let Some(tracks) = tracks_mut(root) else { return 0.0 };
         for tr in tracks.iter_mut() {
             let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
                 continue;
@@ -190,13 +210,17 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 if !clips.iter().any(|c| ids.contains(&sid(c))) {
                     continue;
                 }
-                // source-less clips (region effects) have no in-point: no left-extension limit
+                // source-less clips (region effects) and stills have no in-point:
+                // no left-extension limit
                 let min_source_room = clips
                     .iter()
                     .filter(|c| ids.contains(&sid(c)))
                     .map(|c| {
-                        if c.get("source_start").map(|v| v.is_number()).unwrap_or(false) {
-                            f(c, "source_start")
+                        if still_ids.contains(&sid(c)) {
+                            f64::INFINITY
+                        } else if c.get("source_start").map(|v| v.is_number()).unwrap_or(false) {
+                            // 速度対応: ソース頭の余白をタイムライン秒へ換算
+                            f(c, "source_start") / clip_avg_rate(c)
                         } else {
                             f64::INFINITY
                         }
@@ -215,8 +239,12 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                         if !ids.contains(&sid(c)) {
                             continue;
                         }
-                        trim_one_clip(c, left, f(c, "timeline_start") + d);
+                        let still = still_ids.contains(&sid(c));
+                        trim_one_clip(c, left, f(c, "timeline_start") + d, still);
                     }
+                }
+                if applied_ret.is_none() {
+                    applied_ret = Some(d);
                 }
                 continue;
             }
@@ -230,12 +258,17 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 if !ids.contains(&sid(c)) {
                     continue;
                 }
-                trim_one_clip(c, left, new_t);
+                let still = still_ids.contains(&sid(c));
+                trim_one_clip(c, left, new_t, still);
+            }
+            if applied_ret.is_none() {
+                applied_ret = Some(new_t - from_t.unwrap_or(new_t));
             }
         }
     }
     normalize_linked_audio(root);
     remove_orphan_linked_audio(root);
+    applied_ret.unwrap_or(0.0)
 }
 
 fn main_video_track(root: &Value) -> Option<usize> {
@@ -253,145 +286,216 @@ fn track_magnet(root: &Value, ti: usize) -> bool {
     tr.get("type").and_then(|v| v.as_str()) == Some("video") && main_video_track(root) == Some(ti)
 }
 
-fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) -> bool {
-    let Some(main_ti) = main_video_track(root) else { return false };
-    let magnet = track_magnet(root, main_ti);
-    let Some(tracks) = tracks_mut(root) else { return false };
-    let Some(clips) = tracks
-        .get_mut(main_ti)
-        .and_then(|tr| tr.get_mut("clips"))
-        .and_then(|c| c.as_array_mut())
-    else {
-        return false;
-    };
-    let selected: Vec<usize> = clips
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| ids.contains(&sid(c)) && c.get("asset_id").is_some() && !is_freeze_v(c))
-        .map(|(i, _)| i)
-        .collect();
-    if selected.len() != 1 {
-        return false;
+/// メインレーンのブロックシフトを実行しつつ ops に記録する（前面レーンへの
+/// ミラー適用 shift_front_lanes の入力になる）。
+fn shift_block_rec(
+    clips: &mut Vec<Value>,
+    ops: &mut Vec<(Option<bool>, f64, f64)>,
+    side_left: bool,
+    pivot: f64,
+    delta: f64,
+    skip: usize,
+) {
+    if delta.abs() < 1e-6 {
+        return;
     }
-    let idx = selected[0];
-    let ts = f(&clips[idx], "timeline_start");
-    let te = f(&clips[idx], "timeline_end");
-    let ss = f(&clips[idx], "source_start");
-    let has_se = clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
-    let se = f(&clips[idx], "source_end");
-    let old_edge = if left { from_t.unwrap_or(ts) } else { from_t.unwrap_or(te) };
-    let mut d = new_t - old_edge;
-    if d.abs() < 1e-6 {
-        return true;
-    }
-
-    let shift_block = |clips: &mut Vec<Value>, side_left: bool, pivot: f64, delta: f64, skip: usize| {
-        if delta.abs() < 1e-6 {
-            return;
+    for (i, c) in clips.iter_mut().enumerate() {
+        if i == skip {
+            continue;
         }
-        for (i, c) in clips.iter_mut().enumerate() {
-            if i == skip {
-                continue;
-            }
+        let cs = f(c, "timeline_start");
+        let ce = f(c, "timeline_end");
+        let belongs = if side_left {
+            ce <= pivot + 0.002
+        } else {
+            cs >= pivot - 0.002
+        };
+        if belongs {
+            setf(c, "timeline_start", cs + delta);
+            setf(c, "timeline_end", ce + delta);
+        }
+    }
+    ops.push((Some(side_left), pivot, delta));
+}
+
+fn pin_start_to_zero_rec(clips: &mut Vec<Value>, ops: &mut Vec<(Option<bool>, f64, f64)>) {
+    let min_start = clips
+        .iter()
+        .map(|c| f(c, "timeline_start"))
+        .fold(f64::MAX, f64::min);
+    if min_start.is_finite() && min_start > 1e-6 {
+        for c in clips.iter_mut() {
             let cs = f(c, "timeline_start");
             let ce = f(c, "timeline_end");
-            let belongs = if side_left {
-                ce <= pivot + 0.002
-            } else {
-                cs >= pivot - 0.002
-            };
-            if belongs {
-                setf(c, "timeline_start", cs + delta);
-                setf(c, "timeline_end", ce + delta);
-            }
+            setf(c, "timeline_start", cs - min_start);
+            setf(c, "timeline_end", ce - min_start);
         }
-    };
-    let pin_start_to_zero = |clips: &mut Vec<Value>| {
-        let min_start = clips
-            .iter()
-            .map(|c| f(c, "timeline_start"))
-            .fold(f64::MAX, f64::min);
-        if min_start.is_finite() && min_start > 1e-6 {
-            for c in clips.iter_mut() {
+        ops.push((None, 0.0, -min_start));
+    }
+}
+
+/// メインレーンのリップルを前面レーン（テロップ/オーバーレイ=付着クリップの
+/// 居場所）へ同じ量だけミラーする。削除は付着ごと消えるのに移動/トリムでは
+/// テロップが置き去りになりズレる、という非対称の解消。頭(timeline_start)基準、
+/// 音声レーンとロック済みレーンは対象外（BGMは独立）。
+fn shift_front_lanes(root: &mut Value, main_ti: usize, ops: &[(Option<bool>, f64, f64)]) {
+    if ops.is_empty() {
+        return;
+    }
+    let Some(tracks) = tracks_mut(root) else { return };
+    for (ti, tr) in tracks.iter_mut().enumerate() {
+        if ti <= main_ti {
+            continue;
+        }
+        let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "audio" || tr.get("locked").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else { continue };
+        for c in clips.iter_mut() {
+            for &(side, pivot, delta) in ops {
                 let cs = f(c, "timeline_start");
-                let ce = f(c, "timeline_end");
-                setf(c, "timeline_start", cs - min_start);
-                setf(c, "timeline_end", ce - min_start);
+                let belongs = match side {
+                    Some(true) => cs <= pivot + 0.002,
+                    Some(false) => cs >= pivot - 0.002,
+                    None => true,
+                };
+                if belongs {
+                    let ce = f(c, "timeline_end");
+                    // 0秒より前へは出さない（メインレーンのpinと同じ最低保証）
+                    let fix = (-(cs + delta)).max(0.0);
+                    setf(c, "timeline_start", cs + delta + fix);
+                    setf(c, "timeline_end", ce + delta + fix);
+                }
             }
         }
-    };
-
-    if !left {
-        d = d.max(-(te - ts - 0.05));
-        if has_se {
-            d = d.max(ss + 0.05 - se);
-        }
-        if d.abs() < 1e-6 {
-            return true;
-        }
-        setf(&mut clips[idx], "timeline_end", te + d);
-        if has_se {
-            setf(&mut clips[idx], "source_end", se + d);
-        }
-        if d > 0.0 || magnet {
-            shift_block(clips, false, te, d, idx);
-        }
-        return true;
     }
+}
 
-    if d > 0.0 {
-        d = d.min(te - ts - 0.05);
-        if has_se {
-            d = d.min(se - ss - 0.05);
-        }
-        if d.abs() < 1e-6 {
-            return true;
-        }
-        if magnet {
-            shift_block(clips, true, ts, d, idx);
-        }
-        setf(&mut clips[idx], "timeline_start", ts + d);
-        setf(&mut clips[idx], "source_start", ss + d);
-        // keyframes are clip-relative and glued to SOURCE frames: the in-point moved
-        // by d, so every key slides back by d (same rule as trim_one_clip)
-        shift_region_keys(&mut clips[idx], -d);
-        if magnet {
-            pin_start_to_zero(clips);
-        }
-        return true;
-    }
-
-    let mut grow = (-d).min(ss);
-    if grow <= 1e-6 {
-        return true;
-    }
-    if magnet {
-        let left_min_start = clips
+/// 戻り値: Some(消化したタイムラインデルタ) = メインレーンとして処理した /
+/// None = 汎用トリムへフォールバック。still_ids の静止画はソース時間の概念が
+/// 無いので両方向とも制限なし（ソースフィールドは触らない）。
+fn trim_main_lane_live(
+    root: &mut Value,
+    ids: &[String],
+    left: bool,
+    from_t: Option<f64>,
+    new_t: f64,
+    still_ids: &[String],
+) -> Option<f64> {
+    let main_ti = main_video_track(root)?;
+    let magnet = track_magnet(root, main_ti);
+    // メインレーンに適用したリップルの記録。トリム完了後に前面レーンへミラーして
+    // テロップ等の付着クリップを親と同期させる。
+    let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
+    let applied: Option<f64> = 'edit: {
+        let Some(tracks) = tracks_mut(root) else { break 'edit None };
+        let Some(clips) = tracks
+            .get_mut(main_ti)
+            .and_then(|tr| tr.get_mut("clips"))
+            .and_then(|c| c.as_array_mut())
+        else {
+            break 'edit None;
+        };
+        let selected: Vec<usize> = clips
             .iter()
             .enumerate()
-            .filter(|(i, c)| *i != idx && f(c, "timeline_end") <= ts + 0.002)
-            .map(|(_, c)| f(c, "timeline_start"))
-            .fold(f64::MAX, f64::min);
-        let restore = if left_min_start.is_finite() { grow.min(left_min_start) } else { 0.0 };
-        if restore > 1e-6 {
-            shift_block(clips, true, ts, -restore, idx);
-            setf(&mut clips[idx], "timeline_start", ts - restore);
-            setf(&mut clips[idx], "source_start", ss - restore);
-            shift_region_keys(&mut clips[idx], restore);
-            grow -= restore;
+            .filter(|(_, c)| ids.contains(&sid(c)) && c.get("asset_id").is_some() && !is_freeze_v(c))
+            .map(|(i, _)| i)
+            .collect();
+        if selected.len() != 1 {
+            break 'edit None;
         }
+        let idx = selected[0];
+        let still = still_ids.contains(&sid(&clips[idx]));
+        let ts = f(&clips[idx], "timeline_start");
+        let te = f(&clips[idx], "timeline_end");
+        let ss = f(&clips[idx], "source_start");
+        let has_se =
+            !still && clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
+        let se = f(&clips[idx], "source_end");
+        let old_edge = if left { from_t.unwrap_or(ts) } else { from_t.unwrap_or(te) };
+        let mut d = new_t - old_edge;
+        if d.abs() < 1e-6 {
+            break 'edit Some(0.0);
+        }
+        // 速度対応: タイムライン方向の d をソース方向へ換算する係数（等速=speed、
+        // ランプは平均。端の値は raw_src_at で正確に求める）
+        let rate_avg = clip_avg_rate(&clips[idx]);
+        let head_rate = {
+            let k = clip_keys_of(&clips[idx]);
+            if k.is_empty() { clip_speed_of(&clips[idx]) } else { crate::model::ramp_v_at(&k, ss) }
+        };
+
+        if !left {
+            d = d.max(-(te - ts - 0.05));
+            if has_se {
+                d = d.max((ss + 0.05 - se) / rate_avg);
+            }
+            if d.abs() < 1e-6 {
+                break 'edit Some(0.0);
+            }
+            let new_se = raw_src_at(&clips[idx], te + d).max(ss + 0.05);
+            setf(&mut clips[idx], "timeline_end", te + d);
+            if has_se {
+                setf(&mut clips[idx], "source_end", new_se);
+            }
+            if d > 0.0 || magnet {
+                shift_block_rec(clips, &mut ops, false, te, d, idx);
+            }
+            break 'edit Some(d);
+        }
+
+        if d > 0.0 {
+            d = d.min(te - ts - 0.05);
+            if has_se {
+                d = d.min((se - ss - 0.05) / rate_avg);
+            }
+            if d.abs() < 1e-6 {
+                break 'edit Some(0.0);
+            }
+            let new_ss = raw_src_at(&clips[idx], ts + d).max(0.0);
+            if magnet {
+                shift_block_rec(clips, &mut ops, true, ts, d, idx);
+            }
+            setf(&mut clips[idx], "timeline_start", ts + d);
+            if !still {
+                setf(&mut clips[idx], "source_start", new_ss);
+            }
+            // keyframes are clip-relative TIMELINE times: the left edge moved by d
+            shift_region_keys(&mut clips[idx], -d);
+            if magnet {
+                pin_start_to_zero_rec(clips, &mut ops);
+            }
+            break 'edit Some(d);
+        }
+
+        // 左方向への拡大: 左端がマウスに追従して左へ動く。前のクリップとは一旦
+        // 重なり、リリース時の settle で前の尻が削れる（上書きトリム）。
+        // 以前の「端は固定のまま尻が右へ伸びる」リップル方式は、ユーザーには
+        // “全く広がらない”ようにしか見えなかった（報告バグ）。
+        // 静止画はソース制限なし、映像はソース頭の余白まで。タイムライン0で停止。
+        let grow = if still { -d } else { (-d).min(ss / head_rate) };
+        if grow <= 1e-6 {
+            break 'edit Some(0.0);
+        }
+        let new_ts = (ts - grow).max(0.0);
+        let actual = ts - new_ts;
+        if actual <= 1e-6 {
+            break 'edit Some(0.0);
+        }
+        setf(&mut clips[idx], "timeline_start", new_ts);
+        if !still {
+            setf(&mut clips[idx], "source_start", (ss - actual * head_rate).max(0.0));
+        }
+        // keyframes are clip-relative TIMELINE times: the left edge moved by -actual
+        shift_region_keys(&mut clips[idx], actual);
+        Some(-actual)
+    };
+    if applied.is_some() {
+        shift_front_lanes(root, main_ti, &ops);
     }
-    if grow > 1e-6 {
-        let cur_end = f(&clips[idx], "timeline_end");
-        let cur_ss = f(&clips[idx], "source_start");
-        setf(&mut clips[idx], "source_start", (cur_ss - grow).max(0.0));
-        setf(&mut clips[idx], "timeline_end", cur_end + grow);
-        // in-point moved earlier by grow while timeline_start stayed: the same source
-        // frame now sits grow seconds LATER in clip-relative time
-        shift_region_keys(&mut clips[idx], grow);
-        shift_block(clips, false, cur_end, grow, idx);
-    }
-    true
+    applied
 }
 
 pub fn settle_overlaps(root: &mut Value, ids: &[String]) {
@@ -414,7 +518,7 @@ pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
 
 pub fn normalize_linked_audio(root: &mut Value) {
     use std::collections::HashMap;
-    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>, String)> = HashMap::new();
+    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>, String, Value)> = HashMap::new();
     let mut audio_links: Vec<String> = Vec::new();
     let mut audio_assets: Vec<String> = Vec::new();
     let mut used_ids: Vec<String> = Vec::new();
@@ -458,6 +562,12 @@ pub fn normalize_linked_audio(root: &mut Value) {
                                 f(c, "source_start"),
                                 c.get("source_end").and_then(|v| v.as_f64()),
                                 aid.to_string(),
+                                // 速度はリンク音声にも複製する（音声側のマッピングも
+                                // 同じ写像で動く必要がある）
+                                serde_json::json!({
+                                    "speed": c.get("speed").cloned().unwrap_or(Value::Null),
+                                    "speed_keys": c.get("speed_keys").cloned().unwrap_or(Value::Null),
+                                }),
                             ),
                         );
                     }
@@ -467,7 +577,7 @@ pub fn normalize_linked_audio(root: &mut Value) {
     }
     let Some(tracks) = tracks_mut(root) else { return };
     let mut missing = Vec::new();
-    for (l, (ts, te, ss, se, aid)) in &visual {
+    for (l, (ts, te, ss, se, aid, _spd)) in &visual {
         if audio_links.contains(l) || !audio_assets.contains(aid) {
             continue;
         }
@@ -510,22 +620,32 @@ pub fn normalize_linked_audio(root: &mut Value) {
         };
         for c in clips {
             let Some(l) = link(c) else { continue };
-            let Some((ts, te, ss, se, _)) = visual.get(&l) else { continue };
+            let Some((ts, te, ss, se, _, spd)) = visual.get(&l) else { continue };
             setf(c, "timeline_start", *ts);
             setf(c, "timeline_end", *te);
             setf(c, "source_start", *ss);
             if let Some(se) = *se {
                 setf(c, "source_end", se);
             }
+            if let Some(o) = c.as_object_mut() {
+                match spd.get("speed") {
+                    Some(Value::Null) | None => { o.remove("speed"); }
+                    Some(v) => { o.insert("speed".into(), v.clone()); }
+                }
+                match spd.get("speed_keys") {
+                    Some(Value::Null) | None => { o.remove("speed_keys"); }
+                    Some(v) => { o.insert("speed_keys".into(), v.clone()); }
+                }
+            }
         }
     }
 }
 
-fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
+fn trim_one_clip(c: &mut Value, left: bool, new_t: f64, still: bool) {
     let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
     let ss = f(c, "source_start");
-    let has_ss = c.get("source_start").map(|v| v.is_number()).unwrap_or(false);
-    let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
+    let has_ss = !still && c.get("source_start").map(|v| v.is_number()).unwrap_or(false);
+    let has_se = !still && c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
     if is_freeze_v(c) {
         // a freeze's length is TIMELINE-only: never touch its source fields.
         // (the old video math turned an extended freeze back into moving video)
@@ -538,36 +658,43 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
         }
         return;
     }
+    // 速度対応: タイムライン方向の d をソース方向へ換算（等速=speed、ランプ=平均）
+    let rate = clip_avg_rate(c);
     if left {
         let nt = new_t.clamp(0.0, te - 0.05);
         let mut d = nt - ts;
         if has_ss {
             // real media: can't extend before the source's first frame. Source-less
             // clips (region effects) have no such limit — they extend freely.
-            d = d.max(-ss);
+            d = d.max(-ss / rate);
         }
         if has_se {
             // never push the in-point past the out-point (that flipped the clip
             // into an accidental freeze by the implicit se<=ss convention)
             let se = f(c, "source_end");
-            d = d.min(se - ss - 0.05);
+            d = d.min((se - ss - 0.05) / rate);
         }
         let nts = (ts + d).max(0.0);
-        setf(c, "timeline_start", nts);
+        // ソース位置は timeline_start を書き換える「前」に計算する。後だと
+        // raw_src_at の相対位置が常に0になり、縮小しても source_start が進まず
+        // 「縮めたのに左へ広げ直せない」回帰の原因になった
         if has_ss {
-            setf(c, "source_start", (ss + d).max(0.0));
+            let new_ss = if d >= 0.0 { raw_src_at(c, nts) } else { ss + d * rate };
+            setf(c, "source_start", new_ss.max(0.0));
         }
+        setf(c, "timeline_start", nts);
         // position keyframes are clip-relative: keep each pinned to the same
         // TIMELINE moment when the clip's left edge moves
         shift_region_keys(c, ts - nts);
     } else {
         let nt = new_t.max(ts + 0.05);
-        setf(c, "timeline_end", nt);
         if has_se {
             let se = f(c, "source_end");
+            let new_se = if nt <= te { raw_src_at(c, nt) } else { se + (nt - te) * rate };
             // clamp: the out-point stays after the in-point
-            setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
+            setf(c, "source_end", new_se.max(ss + 0.05));
         }
+        setf(c, "timeline_end", nt);
     }
 }
 
@@ -741,19 +868,19 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
                     let d = t - ts;
                     let fz = is_freeze_v(&c);
                     let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
+                    // 速度対応: カット点のソース位置は写像で求める（等速/ランプ共通）
+                    let cut_src = raw_src_at(&c, t);
                     let mut leftv = c.clone();
                     setf(&mut leftv, "timeline_end", t);
                     if has_se && !fz {
-                        let ss = f(&c, "source_start");
-                        setf(&mut leftv, "source_end", ss + d);
+                        setf(&mut leftv, "source_end", cut_src);
                     }
                     let mut rightv = c.clone();
                     n += 1;
                     rightv["id"] = Value::from(format!("{}__ns_{}_{}", sid(&c), salt, n));
                     setf(&mut rightv, "timeline_start", t);
                     if has_se && !fz {
-                        let ss = f(&c, "source_start");
-                        setf(&mut rightv, "source_start", ss + d);
+                        setf(&mut rightv, "source_start", cut_src);
                     }
                     if let Some(l) = link(&c) {
                         let nl = right_links
@@ -1407,7 +1534,9 @@ pub fn freeze_frame_with_still(
         for (ti, tr) in tracks.iter().enumerate() {
             for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
                 if sid(c) == id {
-                    let src = f(c, "source_start") + (t - f(c, "timeline_start"));
+                    // 速度対応: 再生ヘッド下のソース時刻は写像で求める（1:1固定だと
+                    // 速度変更クリップで静止画が別の場所になる）
+                    let src = raw_src_at(c, t);
                     if let Some(aid) = c.get("asset_id").and_then(|v| v.as_str()) {
                         info = Some((aid.to_string(), src));
                         track_idx = Some(ti);
@@ -1534,6 +1663,9 @@ pub fn freeze_frame_with_still(
     setf(&mut clip, "source_end", fsrc);
     if let Some(o) = clip.as_object_mut() {
         o.remove("link_id"); // no linked audio: a freeze is silent
+        // 静止画に速度は無意味（テンプレのクローンから引き継がない）
+        o.remove("speed");
+        o.remove("speed_keys");
         o.insert("freeze".into(), Value::from(true));
         if let Some(p) = still_rel {
             o.insert("freeze_still".into(), Value::from(p));
@@ -1559,6 +1691,7 @@ pub fn insert_asset(raw: &mut Value, t: f64, dur: f64, asset_id: &str, has_audio
         "source_start": 0.0,
         "source_end": (dur * 1000.0).round() / 1000.0,
         "link_id": link,
+        "fit": "contain", // 挿入もD&Dと同じく素材の完全なフレームを保持する
     });
     let Some(tracks) = tracks_mut(raw) else { return };
     let vt = tracks
@@ -1755,6 +1888,128 @@ fn tracks_ref(root: &Value) -> Option<&Vec<Value>> {
         .get("sequence")?
         .get("tracks")?
         .as_array()
+}
+
+fn canvas_px_for_format(fmt: &str) -> (f64, f64) {
+    match fmt {
+        "16:9" => (1920.0, 1080.0),
+        "1:1" => (1080.0, 1080.0),
+        "4:5" => (1080.0, 1350.0),
+        _ => (1080.0, 1920.0),
+    }
+}
+
+/// キャンバス割合の箱を、形式変更後も**物理形状が保存される**よう補正する。
+/// 中心割合と高さ割合を保ち、幅割合だけ (旧アスペクト/新アスペクト) 倍する。
+/// 逆方向の切替で厳密に元へ戻る（完全可逆・累積誤差なし）。
+fn convert_frac_box(x: f64, w: f64, old: (f64, f64), new: (f64, f64)) -> (f64, f64) {
+    let k = (old.0 / old.1) * (new.1 / new.0);
+    let cx = x + w / 2.0;
+    let w2 = w * k;
+    (cx - w2 / 2.0, w2)
+}
+
+/// sequence 内の全クリップの明示ジオメトリ（position / transform / transform_keys）を
+/// 形式変更に合わせて物理形状保存で変換する。座標はキャンバス割合で保存されている
+/// ため、これをしないと枠の形を変えた瞬間に素材が歪む。
+fn convert_seq_geometry(seq: &mut Value, old: (f64, f64), new: (f64, f64)) {
+    let k = (old.0 / old.1) * (new.1 / new.0);
+    let Some(tracks) = seq.get_mut("tracks").and_then(|v| v.as_array_mut()) else { return };
+    for tr in tracks {
+        let Some(clips) = tr.get_mut("clips").and_then(|v| v.as_array_mut()) else { continue };
+        for cl in clips {
+            let Some(o) = cl.as_object_mut() else { continue };
+            // 旧 transform (uniform scale/pan) は正方スケールが非可逆になるため position に実体化
+            if let Some(t) = o.get("transform").cloned() {
+                let g = |n: &str, d: f64| t.get(n).and_then(|v| v.as_f64()).unwrap_or(d);
+                let (s, tx, ty) = (g("scale", 1.0), g("x", 0.0), g("y", 0.0));
+                if (s - 1.0).abs() > 1e-4 || tx.abs() > 1e-4 || ty.abs() > 1e-4 {
+                    o.insert(
+                        "position".into(),
+                        serde_json::json!({"x": (1.0 - s) / 2.0 + tx, "y": (1.0 - s) / 2.0 + ty, "width": s, "height": s}),
+                    );
+                }
+                o.remove("transform");
+            }
+            let base_w = o
+                .get("position")
+                .and_then(|p| p.get("width"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            if let Some(p) = o.get_mut("position").and_then(|v| v.as_object_mut()) {
+                let g = |p: &serde_json::Map<String, Value>, n: &str, d: f64| {
+                    p.get(n).and_then(|v| v.as_f64()).unwrap_or(d)
+                };
+                let (x, w) = (g(p, "x", 0.0), g(p, "width", 1.0));
+                let (x2, w2) = convert_frac_box(x, w, old, new);
+                p.insert("x".into(), serde_json::json!(x2));
+                p.insert("width".into(), serde_json::json!(w2));
+            }
+            if let Some(keys) = o.get_mut("transform_keys").and_then(|v| v.as_array_mut()) {
+                for key in keys {
+                    let Some(ko) = key.as_object_mut() else { continue };
+                    let Some(x) = ko.get("x").and_then(|v| v.as_f64()) else { continue };
+                    let wv = ko.get("w").and_then(|v| v.as_f64());
+                    let wu = wv.unwrap_or(base_w);
+                    let cx = x + wu / 2.0;
+                    ko.insert("x".into(), serde_json::json!(cx - wu * k / 2.0));
+                    if let Some(w) = wv {
+                        ko.insert("w".into(), serde_json::json!(w * k));
+                    }
+                }
+            }
+            // テロップ: 文字の物理pxは outH * 0.052 * fontSize で決まる（caption-design.ts）。
+            // 高さが変わる形式切替では fontSize を (旧H/新H) 倍して物理サイズを保存（可逆）。
+            if o.contains_key("text") {
+                let kh = old.1 / new.1;
+                if (kh - 1.0).abs() > 1e-9 {
+                    let style = o
+                        .entry("style")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(so) = style.as_object_mut() {
+                        let fs = so.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                        so.insert("fontSize".into(), serde_json::json!(fs * kh));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// プレビュー/書き出しキャンバスの形式を変更する（何度でも可）。timeline.format を
+/// 正とし、sequence 側の width/height 上書きは形式追従を妨げるので取り除く。
+/// 書き出しサーバーは sequence.format → timeline.format の順で読むため両方に書く。
+/// 全クリップの明示座標は物理形状保存で変換され、素材の形は変わらない。
+pub fn set_canvas_format(root: &mut Value, fmt: &str) {
+    let Some(c) = root.get_mut(0) else { return };
+    let Some(tl) = c.get_mut("timeline").and_then(|t| t.as_object_mut()) else { return };
+    let old_fmt = tl
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("9:16")
+        .to_string();
+    if old_fmt == fmt {
+        return;
+    }
+    let old = canvas_px_for_format(&old_fmt);
+    let new = canvas_px_for_format(fmt);
+    tl.insert("format".into(), Value::String(fmt.to_string()));
+    let mut fix_seq = |s: &mut Value| {
+        if let Some(o) = s.as_object_mut() {
+            o.insert("format".into(), Value::String(fmt.to_string()));
+            o.remove("width");
+            o.remove("height");
+        }
+        convert_seq_geometry(s, old, new);
+    };
+    if let Some(seq) = tl.get_mut("sequence") {
+        fix_seq(seq);
+    }
+    if let Some(subs) = tl.get_mut("subseqs").and_then(|v| v.as_object_mut()) {
+        for (_, s) in subs.iter_mut() {
+            fix_seq(s);
+        }
+    }
 }
 
 fn tracks_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
@@ -2801,6 +3056,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canvas_format_convert_preserves_shape_and_roundtrips() {
+        let mut raw = serde_json::json!([{"timeline": {"format": "9:16", "sequence": {"tracks": [
+            {"id": "v", "type": "video", "clips": [
+                {"id": "c1", "asset_id": "a", "timeline_start": 0.0, "timeline_end": 5.0,
+                 "position": {"x": 0.1, "y": 0.2, "width": 0.5, "height": 0.25},
+                 "transform_keys": [{"t": 1.0, "x": 0.3, "y": 0.1, "w": 0.4, "h": 0.2}]},
+            ]}]}}}]);
+        set_canvas_format(&mut raw, "16:9");
+        let p = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0]["position"].clone();
+        let (w2, h2) = (p["width"].as_f64().unwrap(), p["height"].as_f64().unwrap());
+        // 物理アスペクト保存: (w*W)/(h*H) が前後で一致する
+        let before = (0.5 * 1080.0) / (0.25 * 1920.0);
+        let after = (w2 * 1920.0) / (h2 * 1080.0);
+        assert!((before - after).abs() < 1e-9, "physical aspect changed: {before} -> {after}");
+        // 高さと中心は不変
+        assert!((p["y"].as_f64().unwrap() - 0.2).abs() < 1e-9);
+        assert!(((p["x"].as_f64().unwrap() + w2 / 2.0) - 0.35).abs() < 1e-9);
+        // 逆方向で厳密に元へ戻る（キーフレーム含む）
+        set_canvas_format(&mut raw, "9:16");
+        let c = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone();
+        assert!((c["position"]["x"].as_f64().unwrap() - 0.1).abs() < 1e-9);
+        assert!((c["position"]["width"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert!((c["transform_keys"][0]["x"].as_f64().unwrap() - 0.3).abs() < 1e-9);
+        assert!((c["transform_keys"][0]["w"].as_f64().unwrap() - 0.4).abs() < 1e-9);
+        // 同一形式への再設定は何もしない
+        let snap = raw.to_string();
+        set_canvas_format(&mut raw, "9:16");
+        assert_eq!(snap, raw.to_string());
+    }
+
+    #[test]
     fn timeline_visual_boundaries_are_frame_quantized_and_idempotent() {
         let mut raw = serde_json::json!([{
             "timeline": {"sequence": {
@@ -3023,4 +3309,405 @@ mod tests {
         let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
         assert!(clip.get("opacity").is_none());
     }
+}
+
+/// 素材ドロップの「最上段より上」ゾーン: 最前面に空のビジュアルトラックを挿入する。
+/// クリップMoveの move_group_to_new_top_track と同じ位置規則（front+1）。
+/// ドロップは即確定なので id を最初から与える＝prune(空の無名レーン掃除)の対象外の
+/// 恒久レーンとして生まれる。
+pub fn insert_top_visual_track(raw: &mut Value, salt: u64) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    let at = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
+        .map(|(i, _)| i)
+        .max()
+        .map(|f| f + 1)
+        .unwrap_or(0);
+    tracks.insert(
+        at,
+        serde_json::json!({"id": format!("lane_drop{salt}"), "type": "overlay", "clips": []}),
+    );
+}
+
+/// クリップが載ったまま確定した無名レーンへ id を付与して恒久化する。
+/// これで「無名」は同一ジェスチャ中の仮レーンだけを意味し、空の無名レーンを
+/// 畳む prune が確定済みレーンを巻き込まない（レーンが勝手に減らない）。
+pub fn promote_unnamed_occupied_tracks(raw: &mut serde_json::Value, salt: u64) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    for (i, tr) in tracks.iter_mut().enumerate() {
+        let unnamed = tr.get("id").and_then(|v| v.as_str()).is_none();
+        let occupied = tr
+            .get("clips")
+            .and_then(|c| c.as_array())
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        if unnamed && occupied {
+            if let Some(o) = tr.as_object_mut() {
+                o.insert("id".into(), serde_json::json!(format!("lane{salt}_{i}")));
+            }
+        }
+    }
+}
+
+// ---- クリップ再生速度 ----------------------------------------------------------
+
+/// raw JSON クリップの等速値（speed_keys があっても等速フィールドのみ返す）
+fn clip_speed_of(c: &Value) -> f64 {
+    c.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.05, 16.0)
+}
+
+fn clip_keys_of(c: &Value) -> Vec<crate::model::SpeedKey> {
+    c.get("speed_keys")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// タイムライン t → ソース秒（raw JSON 版。model::Clip::src_at と同じ写像）
+pub fn raw_src_at(c: &Value, t: f64) -> f64 {
+    let ss = f(c, "source_start");
+    let rel = (t - f(c, "timeline_start")).max(0.0);
+    let keys = clip_keys_of(c);
+    if !keys.is_empty() {
+        if let Some(se) = c.get("source_end").and_then(|v| v.as_f64()) {
+            if let Some(l) = crate::model::build_ramp(&keys, ss, se) {
+                return ss + l.src_off(rel);
+            }
+        }
+    }
+    ss + rel * clip_speed_of(c)
+}
+
+/// クリップの平均レート（ソース秒/タイムライン秒）。トリムのクランプ換算に使う。
+fn clip_avg_rate(c: &Value) -> f64 {
+    let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
+    let ss = f(c, "source_start");
+    if let Some(se) = c.get("source_end").and_then(|v| v.as_f64()) {
+        if te - ts > 1e-6 && se - ss > 1e-6 {
+            return ((se - ss) / (te - ts)).clamp(0.05, 16.0);
+        }
+    }
+    clip_speed_of(c)
+}
+
+/// 等速の再生速度を設定する。素材内容(ソース範囲)は保ったままタイムライン尺を
+/// 伸縮し、メインレーン+磁石なら後続をリップル（前面レーンへもミラー=付着追従）。
+/// link_id を共有する音声にも同じ速度が複製される(normalize_linked_audio)。
+pub fn set_clip_speed(raw: &mut Value, ids: &[String], new_speed: f64) {
+    let new_speed = new_speed.clamp(0.05, 16.0);
+    let Some(main_ti) = main_video_track(raw) else { return };
+    let magnet = track_magnet(raw, main_ti);
+    let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
+    {
+        let Some(tracks) = tracks_mut(raw) else { return };
+        for ti in 0..tracks.len() {
+            let is_main = ti == main_ti;
+            let Some(clips) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for i in 0..clips.len() {
+                if !ids.contains(&sid(&clips[i])) || is_freeze_v(&clips[i]) {
+                    continue;
+                }
+                let (ts, te) = (f(&clips[i], "timeline_start"), f(&clips[i], "timeline_end"));
+                let ss = f(&clips[i], "source_start");
+                let src_span = clips[i]
+                    .get("source_end")
+                    .and_then(|v| v.as_f64())
+                    .map(|se| se - ss)
+                    .unwrap_or((te - ts) * clip_speed_of(&clips[i]));
+                if src_span <= 1e-6 {
+                    continue;
+                }
+                let new_len = (src_span / new_speed).max(0.05);
+                let d = new_len - (te - ts);
+                if let Some(o) = clips[i].as_object_mut() {
+                    if (new_speed - 1.0).abs() < 1e-9 {
+                        o.remove("speed");
+                    } else {
+                        o.insert("speed".into(), serde_json::json!(new_speed));
+                    }
+                    o.remove("speed_keys");
+                }
+                setf(&mut clips[i], "timeline_end", te + d);
+                if is_main && (d > 0.0 || magnet) && d.abs() > 1e-6 {
+                    // 尺変化ぶん後続をリップル（右トリムと同じ規則）
+                    shift_block_rec(clips, &mut ops, false, te, d, i);
+                }
+            }
+        }
+    }
+    shift_front_lanes(raw, main_ti, &ops);
+    normalize_linked_audio(raw);
+}
+
+/// スピードランプのキー列を設定し、タイムライン尺を積分で再計算する。
+/// キー u はソース絶対秒。空配列でランプ解除（等速 speed に戻る）。
+pub fn set_speed_keys(raw: &mut Value, ids: &[String], keys: &[crate::model::SpeedKey]) {
+    let Some(main_ti) = main_video_track(raw) else { return };
+    let magnet = track_magnet(raw, main_ti);
+    let mut ops: Vec<(Option<bool>, f64, f64)> = Vec::new();
+    {
+        let Some(tracks) = tracks_mut(raw) else { return };
+        for ti in 0..tracks.len() {
+            let is_main = ti == main_ti;
+            let Some(clips) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for i in 0..clips.len() {
+                if !ids.contains(&sid(&clips[i])) || is_freeze_v(&clips[i]) {
+                    continue;
+                }
+                let (ts, te) = (f(&clips[i], "timeline_start"), f(&clips[i], "timeline_end"));
+                let ss = f(&clips[i], "source_start");
+                let Some(se) = clips[i].get("source_end").and_then(|v| v.as_f64()) else {
+                    continue; // ランプはソース範囲必須
+                };
+                let new_len = if keys.is_empty() {
+                    (se - ss) / clip_speed_of(&clips[i])
+                } else {
+                    crate::model::build_ramp(keys, ss, se)
+                        .map(|l| l.total_t)
+                        .unwrap_or(te - ts)
+                }
+                .max(0.05);
+                let d = new_len - (te - ts);
+                if let Some(o) = clips[i].as_object_mut() {
+                    if keys.is_empty() {
+                        o.remove("speed_keys");
+                    } else {
+                        let arr: Vec<Value> = keys
+                            .iter()
+                            .map(|k| {
+                                serde_json::json!({
+                                    "u": (k.u * 1000.0).round() / 1000.0,
+                                    "v": (k.v * 1000.0).round() / 1000.0,
+                                    "ease": (k.ease * 100.0).round() / 100.0,
+                                })
+                            })
+                            .collect();
+                        o.insert("speed_keys".into(), Value::Array(arr));
+                    }
+                }
+                setf(&mut clips[i], "timeline_end", te + d);
+                if is_main && (d > 0.0 || magnet) && d.abs() > 1e-6 {
+                    shift_block_rec(clips, &mut ops, false, te, d, i);
+                }
+            }
+        }
+    }
+    shift_front_lanes(raw, main_ti, &ops);
+    normalize_linked_audio(raw);
+}
+
+/// 空レーンの明示削除（レーンヘッダの×ボタン）。クリップが残るレーンは対象外。
+pub fn delete_track(raw: &mut Value, ti: usize) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    if ti >= tracks.len() {
+        return;
+    }
+    let empty = tracks[ti]
+        .get("clips")
+        .and_then(|c| c.as_array())
+        .map(|c| c.is_empty())
+        .unwrap_or(true);
+    if empty {
+        tracks.remove(ti);
+    }
+}
+
+/// テロップの選択範囲 [s, e)（charインデックス、BMP文字ではJSのUTF-16単位と一致）
+/// に文字色を設定する。既存スパンと重なる部分は分割して上書き。color=None で解除。
+/// スキーマ: style.colorSpans = [{s, e, color}]（Web CaptionLayer が描画）。
+pub fn set_caption_color_span(raw: &mut Value, id: &str, s: usize, e: usize, color: Option<&str>) {
+    if e <= s {
+        return;
+    }
+    for c in clips_iter_mut(raw) {
+        if sid(c) != id {
+            continue;
+        }
+        let Some(obj) = c.as_object_mut() else { continue };
+        let style = obj.entry("style").or_insert_with(|| serde_json::json!({}));
+        let Some(so) = style.as_object_mut() else { continue };
+        let spans: Vec<(usize, usize, String)> = so
+            .get("colorSpans")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        Some((
+                            x.get("s")?.as_u64()? as usize,
+                            x.get("e")?.as_u64()? as usize,
+                            x.get("color")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 既存スパンから [s,e) を減算（必要なら分割）してから新しい色を載せる
+        let mut next: Vec<(usize, usize, String)> = Vec::new();
+        for (a, b, col) in spans {
+            if b <= s || a >= e {
+                next.push((a, b, col));
+                continue;
+            }
+            if a < s {
+                next.push((a, s, col.clone()));
+            }
+            if b > e {
+                next.push((e, b, col));
+            }
+        }
+        if let Some(col) = color {
+            next.push((s, e, col.to_string()));
+        }
+        next.sort_by_key(|x| x.0);
+        if next.is_empty() {
+            so.remove("colorSpans");
+        } else {
+            so.insert(
+                "colorSpans".into(),
+                Value::Array(
+                    next.into_iter()
+                        .map(|(a, b, col)| serde_json::json!({"s": a, "e": b, "color": col}))
+                        .collect(),
+                ),
+            );
+        }
+    }
+}
+
+/// カラーグレードのパッチ適用。patch のキーをマージ、値 null でキー削除、
+/// patch 自体が null なら grade ごと削除（リセット）。
+pub fn set_grade(raw: &mut Value, ids: &[String], patch: &Value) {
+    for c in clips_iter_mut(raw) {
+        if !ids.contains(&sid(c)) {
+            continue;
+        }
+        let Some(obj) = c.as_object_mut() else { continue };
+        if patch.is_null() {
+            obj.remove("grade");
+            continue;
+        }
+        let g = obj.entry("grade").or_insert_with(|| serde_json::json!({}));
+        let Some(go) = g.as_object_mut() else { continue };
+        if let Some(po) = patch.as_object() {
+            for (k, v) in po {
+                if v.is_null() {
+                    go.remove(k);
+                } else {
+                    go.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        if go.is_empty() {
+            obj.remove("grade");
+        }
+    }
+}
+
+/// 範囲エフェクト矩形の回転角（度）。None または ~0 でフィールド削除（=無回転）。
+pub fn set_effect_rot(raw: &mut Value, id: &str, rot: Option<f64>) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        if let Some(map) = c.as_object_mut() {
+            match rot {
+                Some(r) if r.abs() > 1e-3 => {
+                    map.insert("effect_rot".into(), Value::from(r));
+                }
+                _ => {
+                    map.remove("effect_rot");
+                }
+            }
+        }
+    });
+}
+
+/// サブタイムライン（飛び飛び再生区間セット）: sequence.subtimeline.ranges を
+/// 丸ごと差し替える。空なら subtimeline ごと削除。
+pub fn set_subtimeline_ranges(raw: &mut Value, ranges: &[(f64, f64)]) {
+    let Some(seq) = raw.get_mut(0).and_then(|c| c.pointer_mut("/timeline/sequence")) else {
+        return;
+    };
+    let Some(obj) = seq.as_object_mut() else { return };
+    if ranges.is_empty() {
+        obj.remove("subtimeline");
+    } else {
+        obj.insert(
+            "subtimeline".into(),
+            serde_json::json!({
+                "ranges": ranges.iter().map(|(a, b)| vec![*a, *b]).collect::<Vec<_>>()
+            }),
+        );
+    }
+}
+
+/// シーケンスタブ（サブタイムライン複製）。ディスク形式は常に
+/// timeline.sequence=メイン、サブは timeline.subseqs={id:sequence}・
+/// timeline.active_seq=開いていたタブ・seq_order/seq_names がタブ一覧。
+/// エディタのメモリ上では sequence=アクティブタブの中身（既存の編集・描画・
+/// undoコードは sequence だけを見るため無変更で全機能が効く）で、アクティブが
+/// サブの間はメインを timeline.main_seq に退避する。
+/// ロード直後に swap_in、保存直前に swap_out。
+pub fn seq_swap_in(raw: &mut Value) {
+    let Some(tl) = raw
+        .get_mut(0)
+        .and_then(|c| c.get_mut("timeline"))
+        .and_then(|t| t.as_object_mut())
+    else {
+        return;
+    };
+    let active = tl.get("active_seq").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+    if active == "main" {
+        return;
+    }
+    let sub = tl
+        .get_mut("subseqs")
+        .and_then(|s| s.as_object_mut())
+        .and_then(|s| s.remove(&active));
+    match sub {
+        Some(sub) => {
+            if let Some(main) = tl.insert("sequence".into(), sub) {
+                tl.insert("main_seq".into(), main);
+            }
+        }
+        None => {
+            // 参照先が無い（壊れている）→ メインへフォールバック
+            tl.insert("active_seq".into(), Value::from("main"));
+        }
+    }
+}
+
+/// 保存用スナップショット: メモリ形（sequence=アクティブ）→ディスク形（sequence=メイン）。
+/// メイン以外を開いていても、他の読者（Web制作タブ・ダン）には常にメインが見える。
+pub fn seq_swap_out(raw: &Value) -> Value {
+    let mut out = raw.clone();
+    let Some(tl) = out
+        .get_mut(0)
+        .and_then(|c| c.get_mut("timeline"))
+        .and_then(|t| t.as_object_mut())
+    else {
+        return out;
+    };
+    let active = tl.get("active_seq").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+    if active == "main" {
+        return out;
+    }
+    let (Some(cur), Some(main)) = (tl.remove("sequence"), tl.remove("main_seq")) else {
+        return out;
+    };
+    tl.insert("sequence".into(), main);
+    if let Some(s) = tl
+        .entry("subseqs")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    {
+        s.insert(active, cur);
+    }
+    out
 }

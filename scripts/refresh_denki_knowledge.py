@@ -9,20 +9,25 @@
 使い方:
     python scripts/refresh_denki_knowledge.py            # 索引の更新のみ
     python scripts/refresh_denki_knowledge.py --deploy   # 更新があれば本番反映まで
+    python scripts/refresh_denki_knowledge.py --publish-only  # 索引取得はせず反映だけ
 
 朝1回、Windowsタスクスケジューラから --deploy 付きで実行する想定。
 """
+import asyncio
 import json
 import os
 import re
 import sys
 import io
-import subprocess
+import time
 from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from denki_encoding import resolve_encoding  # noqa: E402
 
 requests.packages.urllib3.disable_warnings()  # type: ignore
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -31,6 +36,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 # スクリプトの位置を基準にした絶対パス（タスクスケジューラ等、作業フォルダがD:\done以外でも動くように）
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_PATH = os.path.join(ROOT, "frontend", "public", "denki-knowledge-index.json")
+# 公開サイトを配信しているのは done-artifacts リポジトリ / Vercel プロジェクト。
+# ただしこのスクリプトから done-artifacts を直接触ってはいけない（publish_index の
+# docstring 参照）。反映は app.services.artifact_git_publish に任せる。
 UA = "Mozilla/5.0 (compatible; DenkiKnowledgeBot/1.0; +blog cross-search)"
 HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.8"}
 TEXT_CAP = 1500
@@ -57,8 +65,8 @@ def strip_html(raw: str) -> str:
 
 def get(url: str):
     r = session.get(url, timeout=TIMEOUT, verify=False)
-    if not r.encoding or r.encoding.lower() in ("iso-8859-1", "windows-1252", "windows-1254"):
-        r.encoding = r.apparent_encoding or r.encoding
+    # charset を返さない古いサイト（Shift_JIS）を欧文と誤判定しないようにする。
+    r.encoding = resolve_encoding(r)
     return r
 
 
@@ -333,8 +341,86 @@ def fetch_newest(src, known):
     return []
 
 
+def _verify_published(generated_at: str, base: str, attempts: int = 12, wait: int = 30) -> bool:
+    """公開URLの索引が新しい generated_at に切り替わるまで確認する。
+
+    確認先の URL は決め打ちにしない。<slug>-done.vercel.app の alias は廃止済みで、
+    今の配信先は成果物レコードの独自ドメイン（denkiouen.com）か専用プロジェクトの
+    URL だからである。決め打ちにすると、公開は成功しているのに毎朝
+    「反映を確認できませんでした」と出続ける。
+    """
+    if not base:
+        print("[publish] 公開URLが分からないため反映確認を省略しました")
+        return True
+    url = f"{base.rstrip('/')}/denki-knowledge-index.json"
+    for _ in range(attempts):
+        try:
+            r = session.get(url, headers={"Range": "bytes=0-200"}, timeout=TIMEOUT)
+            if generated_at in r.text:
+                print(f"[publish] 公開反映を確認: {generated_at}")
+                return True
+        except Exception:
+            pass
+        time.sleep(wait)
+    print("[publish] 公開反映を確認できませんでした（後で再実行してください）")
+    return False
+
+
+def publish_index() -> bool:
+    """索引を正規の公開経路（artifact_git_publish）で公開する。
+
+    ここで done-artifacts の作業ツリー main へ直接 commit し、push が失敗したら
+    その作業ツリーをそのまま `vercel --prod` で上げる、という実装をしてはいけない。
+    ローカル main が origin/main から分岐していると、本番が「分岐した古い main」で
+    丸ごと置き換わり、他の成果物（吉川特装など）が巻き戻る。
+    2026-07-30 に吉川特装のトップが6月18日の v1 に戻った事故の原因はこれだった。
+
+    artifact_git_publish は origin/main（push できない間は publish-pending）を
+    土台に隔離 worktree を作り、denki-knowledge のファイルだけを載せて公開するので、
+    他の成果物を巻き戻さない。索引 frontend/public/denki-knowledge-index.json は
+    denki-knowledge 所有ファイルとして公開対象に含まれている。
+    """
+    with open(INDEX_PATH, encoding="utf-8") as f:
+        generated_at = json.load(f)["generated_at"]
+
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    try:
+        from app.services.artifact_publication_service import ArtifactPublicationService
+        from app.services.chat_artifact_service import ChatArtifactService
+
+        def deploy_dedicated_index():
+            rows = (ChatArtifactService().supabase.table("chat_artifact").select("*")
+                    .eq("slug", "denki-knowledge").order("created_at", desc=True).limit(1).execute())
+            if not rows.data:
+                return [{"status": "error", "error": "denki-knowledge artifact is not registered"}]
+            artifact = rows.data[0]
+            asyncio.run(ArtifactPublicationService().deploy_dedicated_release(artifact))
+            # 反映確認は独自ドメイン優先。無ければ専用プロジェクトのURL。
+            domain = (artifact.get("custom_domain") or "").strip()
+            base = f"https://{domain}" if domain else (artifact.get("share_url") or "").strip()
+            return [{"status": "live", "changed": True, "base": base}]
+    except Exception as e:  # noqa: BLE001
+        print("[publish] 公開処理を読み込めません:", e)
+        return False
+
+    results = deploy_dedicated_index()
+    result = results[0] if results else {}
+    status = result.get("status")
+    if status not in ("live", "pushed", "skipped"):
+        print("[publish] 公開に失敗:", str(result.get("error", ""))[:1000])
+        return False
+    if not result.get("changed"):
+        print("[publish] 索引に差分なし（公開はすでに最新）")
+        return True
+
+    return _verify_published(generated_at, result.get("base") or "")
+
+
 def main():
     do_deploy = "--deploy" in sys.argv
+    if "--publish-only" in sys.argv:
+        sys.exit(0 if publish_index() else 1)
     with open(INDEX_PATH, encoding="utf-8") as f:
         doc = json.load(f)
 
@@ -383,11 +469,7 @@ def main():
 
     if do_deploy and added_total > 0:
         print("新着があったため本番反映します…")
-        subprocess.run(
-            [sys.executable, os.path.join(ROOT, "scripts", "deploy_frontend_artifacts.py"), "denki-knowledge"],
-            check=False,
-            cwd=ROOT,
-        )
+        publish_index()
     elif do_deploy:
         print("新着なし。本番反映はスキップ。")
 

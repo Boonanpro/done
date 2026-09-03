@@ -17,8 +17,33 @@
  *   <strong data-edit-id="..."> や <span data-edit-id="..."> のように
  *   装飾部分を独立した編集単位に分割する責任を artifact が持つ。
  */
+const TEXTUAL_TAGS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'p', 'span', 'a', 'li', 'label', 'button', 'strong', 'em',
+  'td', 'th', 'figcaption', 'dt', 'dd', 'b',
+]);
+
+const INLINE_TEXT_TAGS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'del', 'em',
+  'i', 'ins', 'kbd', 'mark', 'q', 's', 'small', 'span', 'strong', 'sub',
+  'sup', 'time', 'u', 'var', 'wbr',
+]);
+
+function hasOnlyInlineTextContent(el: Element): boolean {
+  return Array.from(el.children).every((child) =>
+    INLINE_TEXT_TAGS.has(child.tagName.toLowerCase()) && hasOnlyInlineTextContent(child)
+  );
+}
+
+/**
+ * A text edit may replace the element's HTML. It is therefore safe only for
+ * one text unit: a leaf element or a generated `data-edit-id` wrapper that
+ * contains inline text only. A paragraph containing an emphasized word is not
+ * one text unit; generated pages must mark its separately editable fragments.
+ */
 export function isEditableTextLeaf(el: Element | null | undefined): boolean {
   if (!el) return false;
-  if (!el.getAttribute || !el.getAttribute('data-edit-id')) return false;
-  return el.children.length === 0;
+  const tag = el.tagName.toLowerCase();
+  if (el.getAttribute?.('data-edit-id')) return hasOnlyInlineTextContent(el);
+  return TEXTUAL_TAGS.has(tag) && hasOnlyInlineTextContent(el);
 }

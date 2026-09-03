@@ -75,6 +75,8 @@ export interface SelectionSnapshot {
   ancestors: AncestorInfo[];
   /** UI が必要とする computedStyle の抜粋（font-size, color, ... 必要分のみ）。 */
   computedStyles: Record<string, string>;
+  /** Styling that belongs to only part of this sentence. */
+  inlineSpans?: Array<{ start: number; end: number; style: Record<string, string> }>;
   /** 背景色（パネルのプレビュー用）。 */
   bgColor: string | null;
   /** インラインテキスト編集が可能な葉要素か。 */
@@ -110,7 +112,11 @@ export type InspectorMode = 'off' | 'edit' | 'comment';
 export type IframeToParentMessage =
   | { type: 'inspector:ready'; payload: { slug: string } }
   | { type: 'inspector:selected'; payload: SelectionSnapshot }
+  /** 複数選択（コメントモードで Ctrl/Cmd/Shift+クリック）。選択集合の全量を毎回送る。
+   *  空配列 = 全解除。旧親はこの type を知らないので単に無視する（後方互換）。 */
+  | { type: 'inspector:multi-selected'; payload: { snapshots: SelectionSnapshot[] } }
   | { type: 'inspector:hover'; payload: { elementKey: string | null; rect: SerializableRect | null } }
+  | { type: 'inspector:text-drafted'; payload: { elementKey: string; text: string } }
   | { type: 'inspector:text-committed'; payload: { elementKey: string; text: string } }
   | { type: 'inspector:selection-range'; payload: { elementKey: string; start: number; end: number } | { elementKey: null } }
   | { type: 'inspector:reloaded'; payload: Record<string, never> };
@@ -124,6 +130,9 @@ export type ParentToIframeMessage =
   | { type: 'inspector:apply'; payload: OverridePayload }
   | { type: 'inspector:apply-overrides'; payload: { overrides: OverrideRow[] } }
   | { type: 'inspector:clear-selection'; payload: Record<string, never> }
+  /** 親側UI（チップの×等）で選択集合が変わった時に iframe のハイライトを同期する。
+   *  旧 iframe ランタイムはこの type を知らないので単に無視する（後方互換）。 */
+  | { type: 'inspector:set-selection'; payload: { elementKeys: string[] } }
   | { type: 'inspector:request-snapshot'; payload: { elementKey: string } };
 
 export type AnyInspectorMessage = IframeToParentMessage | ParentToIframeMessage;

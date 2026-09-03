@@ -46,6 +46,8 @@ class CollabRoomCreateRequest(BaseModel):
     project_ref: Optional[str] = None
     ai_auto_assist: bool = True
     ai_assist_config: Optional[AIAssistConfig] = None
+    # 紐づけ先の本体チャットルーム。指定するとゲスト発言でその部屋のダンが自動起動する
+    origin_chat_room_id: Optional[str] = None
 
 
 class CollabRoomUpdateRequest(BaseModel):
@@ -68,6 +70,10 @@ class CollabRoomResponse(BaseModel):
     guest_count: int = 0
     last_message: Optional[str] = None
     last_message_at: Optional[datetime] = None
+    # 未読=相手（ゲスト）の公開メッセージがオーナーの既読位置より後にあるか。
+    # サーバーが唯一の真実（PC/APKどちらで読んでも全端末で消える）。
+    unread: bool = False
+    unread_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -106,12 +112,15 @@ class CollabJoinResponse(BaseModel):
     guest_token: str
     guest_name: str
     role: str
+    # 本人専用URL用トークン（/collab/join/<personal_token>）。端末・ブラウザを問わず本人を特定する
+    personal_token: Optional[str] = None
 
 
 # ==================== Messages ====================
 
 class CollabMessageSendRequest(BaseModel):
-    content: str = Field(..., min_length=1)
+    # 添付だけのメッセージ（metadata.files）は本文空でよい。ルート側で「本文か添付のどちらか必須」を検証
+    content: str = ""
     metadata: Optional[dict] = None
 
 

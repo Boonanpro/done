@@ -43,6 +43,7 @@ from app.api.image_generation_routes import router as image_generation_router
 from app.api.video_generation_routes import router as video_generation_router
 from app.api.inspector_routes import router as inspector_router
 from app.api.inspector_overrides_routes import router as inspector_overrides_router
+from app.api.voicelog_routes import router as voicelog_router
 from app.api.inquiry_routes import router as inquiry_router
 from app.api.aix_dashboard_routes import router as aix_dashboard_router
 from app.api.publish_routes import router as publish_router
@@ -52,6 +53,7 @@ from app.api.client_messaging_routes import router as client_messaging_router
 from app.api.bookings_routes import router as bookings_router
 from app.api.video_review_routes import router as video_review_router
 from app.api.production_asset_routes import router as production_asset_router
+from app.api.pornblocker_guard_beacon_routes import router as pornblocker_router
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,18 @@ def _boot_selfcheck() -> None:
 async def lifespan(app: FastAPI):
     logger.info("sandbox started")
     _boot_selfcheck()
+    try:
+        from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
+        resumed = await recover_paid_domain_registrations()
+        if resumed:
+            logger.info("resumed %s paid domain registration(s)", resumed)
+    except Exception:
+        logger.exception("paid domain registration recovery failed")
+    try:
+        from app.services.room_board_service import start_board_poller
+        start_board_poller()
+    except Exception:
+        logger.exception("room board poller start failed")
     yield
 
 
@@ -152,6 +166,7 @@ app.include_router(image_generation_router, prefix="/api/v1")
 app.include_router(video_generation_router, prefix="/api/v1")
 app.include_router(inspector_router, prefix="/api/v1")
 app.include_router(inspector_overrides_router, prefix="/api/v1")
+app.include_router(voicelog_router, prefix="/api/v1")
 app.include_router(inquiry_router, prefix="/api/v1")
 app.include_router(aix_dashboard_router, prefix="/api/v1")
 app.include_router(publish_router, prefix="/api/v1")
@@ -160,6 +175,7 @@ app.include_router(salonboard_credentials_router, prefix="/api/v1")
 app.include_router(bookings_router, prefix="/api/v1")
 app.include_router(video_review_router, prefix="/api/v1")
 app.include_router(production_asset_router, prefix="/api/v1")
+app.include_router(pornblocker_router, prefix="/api/v1")
 app.include_router(client_messaging_router)  # router defines its own /api/v1 prefix
 
 

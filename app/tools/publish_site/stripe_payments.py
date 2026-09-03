@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 from typing import Any, Optional
 
 from app.services.credentials_service import get_credentials_service
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 OPERATOR_USER_ID = "2582a188-ff24-4a4f-b989-6063034d90b2"  # 0aw325171@gmail.com
 CREDENTIAL_SERVICE = "stripe"
+WEBHOOK_CREDENTIAL_SERVICE = "stripe_domain_webhook"
 
 # Stripe 手数料(日本 3.6%) + USD決済の両替コスト + 端数 を確実にカバーする割増率。
 # 利益ではなく「手数料で赤字にならないため」の安全値。実取引の明細を見て調整可。
@@ -74,6 +76,19 @@ async def is_test_mode() -> bool:
     """登録キーがテスト用 (sk_test_) か。テスト時は実ドメイン取得を空実行にする。"""
     key = await get_secret_key()
     return bool(key and key.startswith("sk_test_"))
+
+
+async def get_webhook_secret() -> Optional[str]:
+    """Return the signing secret for the domain-purchase Stripe webhook."""
+    secret = os.environ.get("STRIPE_DOMAIN_WEBHOOK_SECRET", "").strip()
+    if secret:
+        return secret
+    cred = await get_credentials_service().get_credential(
+        OPERATOR_USER_ID, WEBHOOK_CREDENTIAL_SERVICE
+    )
+    if not cred or not cred.get("password"):
+        return None
+    return str(cred["password"]).strip() or None
 
 
 def _stripe(secret_key: str):
@@ -149,5 +164,19 @@ async def retrieve_session(session_id: str) -> dict[str, Any]:
             "amount_total": data.get("amount_total"),
             "currency": data.get("currency"),
         }
+
+    return await asyncio.to_thread(_work)
+
+
+async def verify_webhook(payload: bytes, signature: str) -> dict[str, Any]:
+    """Verify a Stripe webhook and return its event as a plain dictionary."""
+    secret = await get_webhook_secret()
+    if not secret:
+        raise StripeError("Stripe domain webhook signing secret is not configured")
+
+    def _work() -> dict[str, Any]:
+        stripe = _stripe(secret)
+        event = stripe.Webhook.construct_event(payload, signature, secret)
+        return json.loads(str(event))
 
     return await asyncio.to_thread(_work)

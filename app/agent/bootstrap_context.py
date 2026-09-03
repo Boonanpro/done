@@ -168,7 +168,7 @@ def load_artifact_publish_state(room_id: str = "") -> str:
         rows = (
             sb.table("chat_artifact")
             .select(
-                "slug, share_url, delivery_status, custom_domain, last_publish_error, created_at"
+                "id, slug, share_url, delivery_status, custom_domain, last_publish_error, created_at"
             )
             .eq("room_id", room_id)
             .order("created_at", desc=False)
@@ -180,12 +180,36 @@ def load_artifact_publish_state(room_id: str = "") -> str:
     if not rows:
         return ""
 
+    # The publication ledger is the source for each site's dedicated public
+    # Vercel URL.  ``chat_artifact.share_url`` may still hold a retired
+    # /preview path from before the per-site migration.
+    releases: dict[str, dict] = {}
+    try:
+        ids = [str(r.get("id")) for r in rows if r.get("id")]
+        if ids:
+            publication_rows = (
+                sb.table("artifact_publication")
+                .select("artifact_id,release_number,shared_url,production_url,custom_domain,domain_status,job_status,last_error,published_at")
+                .in_("artifact_id", ids)
+                .order("release_number", desc=True)
+                .execute().data
+            ) or []
+            for publication in publication_rows:
+                artifact_id = str(publication.get("artifact_id") or "")
+                if artifact_id and artifact_id not in releases:
+                    releases[artifact_id] = publication
+    except Exception:
+        pass
+
     lines = []
     for r in rows:
         slug = r.get("slug") or "?"
-        share = r.get("share_url") or f"/preview/{slug}"
+        share = releases.get(str(r.get("id") or "")) or r.get("share_url") or "公開URLを準備中"
+        release = releases.get(str(r.get("id") or ""), {})
+        share = release.get("shared_url") or r.get("share_url") or "URL is being prepared"
         status = r.get("delivery_status") or "preview"
         custom = r.get("custom_domain")
+        custom = custom or release.get("custom_domain")
         if custom:
             state = f"独自ドメインで公開中: https://{custom}"
         elif status == "ready":
@@ -195,14 +219,21 @@ def load_artifact_publish_state(room_id: str = "") -> str:
             state = f"公開に失敗: {share}（{err[0] if err else 'エラー'}）"
         else:
             state = f"公開処理中（数分で {share} に反映）"
+        observed = (release.get("job_status") or {}).get("observed") or {}
+        search = observed.get("search_console") or {}
+        if search.get("verified") and search.get("sitemap_downloaded"):
+            state += f" / Search Console: {search.get('property')} (sitemap fetched)"
+        elif custom:
+            state += " / Search Console observation has not been recorded yet"
         lines.append(f"- `{slug}` — {state}")
 
     return (
         "## この部屋の成果物の公開状態（DBの真実）\n\n"
-        "成果物は登録された時点で自動的に `<host>/preview/<slug>` で仮公開されます。"
+        "成果物は登録後、専用Vercelプロジェクトへ公開され、その専用URLはすでに誰でも閲覧できます。"
         "現在の状態は以下です。公開状態やURLを聞かれたら、まずこれを根拠に直接答えてください"
         "（既に公開済みのものに「公開しましょうか？」と聞き返さない）。"
         "独自ドメインでの本公開はユーザーが別途「独自ドメインを取得」から行います。\n\n"
+        "\nIMPORTANT: Treat the publication ledger above as the source of truth. Do not infer that Search Console registration is missing from a legacy Vercel URL; say it needs re-registration only when the recorded observation explicitly says so.\n"
         + "\n".join(lines)
     )
 

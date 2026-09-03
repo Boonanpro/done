@@ -67,6 +67,40 @@ async def lifespan(app: FastAPI):
         except RuntimeError as e:
             logger.warning("sandbox auto-start failed: %s", e)
 
+    # 放置ブラウザの掃除: ブラウザは detached 起動でターンをまたいで生き残るので
+    # （ログイン途中やOTP入力画面を失わないための設計）、誰かが片付けないと部屋の
+    # 数だけ Chrome が残り続ける。最終使用から一定時間経ったものだけを正常終了で
+    # 閉じる。判定を時刻だけにするのは、「まだ使う」を推測して外すと今回直した
+    # 「肝心な場面で消える」が再発するため。
+    browser_reaper_task = None
+    try:
+        idle_seconds = int(os.environ.get("DAN_BROWSER_IDLE_CLOSE_SECONDS", "1800"))
+        interval = max(60, min(idle_seconds // 3, 600))
+
+        async def _browser_reaper():
+            from app.tools.browser import close_idle_browsers
+            while True:
+                try:
+                    await asyncio.sleep(interval)
+                    closed = await close_idle_browsers(idle_seconds)
+                    for c in closed:
+                        logger.info(
+                            "idle browser closed: %s (idle %.1f min, graceful=%s)",
+                            c["profile"], c["idle_minutes"], c["graceful"],
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("browser reaper error (non-fatal): %s", exc)
+
+        if idle_seconds > 0:
+            browser_reaper_task = asyncio.create_task(_browser_reaper())
+            logger.info(
+                "browser reaper started (idle=%ss, interval=%ss)", idle_seconds, interval
+            )
+    except Exception as e:
+        logger.warning("browser reaper failed to start: %s", e)
+
     # 続報ポーラー: 予約された follow-up を期限到来時に発火し、ダンを再起動して
     # チャットに報告させる（ターン制エージェントが「完了したら報告します」を守れる
     # ようにする土台）。失敗してもコア起動は妨げない。
@@ -84,6 +118,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("email poller failed to start: %s", e)
 
+    # Instagram DM ポーラー: ダンがDMを送ったアカウントだけを低頻度(既定60分)で
+    # 巡回し、返信は案件ルームでダンを起動、新規DMは通知タブに出す。
+    # スレッドは開かないので既読は付かない。失敗してもコア起動は妨げない。
+    try:
+        from app.services.instagram_poller import start_poller as start_ig_poller
+        start_ig_poller()
+    except Exception as e:
+        logger.warning("instagram poller failed to start: %s", e)
+
+    # 「今日やったこと」ポーラー: ダン/CLI/git/見張りの証拠を定期(既定5分)+ターン完了時に
+    # 判定し daily_achievements を更新する。失敗してもコア起動は妨げない。
+    try:
+        from app.services.achievement_poller import start_poller as start_achievement_poller
+        start_achievement_poller()
+    except Exception as e:
+        logger.warning("achievement poller failed to start: %s", e)
+
+    # UIスクショウォッチャー: フロントのコード変更を検知して変わった画面だけ自動保存
+    # (ダン開発の物語の素材。ユーザー操作不要)。失敗してもコア起動は妨げない。
+    try:
+        from app.services.ui_snapshot_watcher import start_watcher as start_ui_watcher
+        start_ui_watcher()
+    except Exception as e:
+        logger.warning("ui snapshot watcher failed to start: %s", e)
+
     # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
     # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
     try:
@@ -92,7 +151,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("run recovery failed to schedule: %s", e)
 
+    # Paid domain work is persisted before it starts.  Resume it here after a
+    # process restart; this is independent of the payer's browser return.
+    try:
+        from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
+        asyncio.create_task(recover_paid_domain_registrations())
+    except Exception as e:
+        logger.warning("domain publication recovery failed to schedule: %s", e)
+
     yield
+
+    if browser_reaper_task:
+        browser_reaper_task.cancel()
 
     # シャットダウン時にサンドボックスも止める
     try:
@@ -140,6 +210,10 @@ app.include_router(gemini_voice_router)
 app.include_router(realtime_router)  # /api/v1/realtime prefix は router 側に定義
 app.include_router(realtime_ws_router)  # /ws/realtime-delegate
 app.include_router(public_chat_router, prefix="/api/v1")
+from app.api.daily_achievements_routes import router as achievements_router  # noqa: E402
+app.include_router(achievements_router, prefix="/api/v1")
+from app.api.story_routes import router as story_router  # noqa: E402
+app.include_router(story_router, prefix="/api/v1")
 
 
 @app.get("/")

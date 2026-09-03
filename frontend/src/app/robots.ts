@@ -13,7 +13,7 @@ export const dynamic = 'force-dynamic';
  * ホスト単位でクロールの可否を決める。
  *
  *   外部公開ホスト（<slug>-done.vercel.app / 独自ドメイン）→ 許可
- *   ダン本体ホスト（done-studio.vercel.app / localhost 等）→ 全面拒否
+ *   ダン本体ホスト（localhost 等）→ 全面拒否
  *
  * 判定は @/lib/seo-host に集約してあり、成果物ごとの設定は要らない。
  */

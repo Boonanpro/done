@@ -53,7 +53,11 @@ export const metadata: Metadata = {
   },
 };
 
-const prePaintScript = `
+function prePaintScript(fallbackSlug: string | null): string {
+  // JSON serialization is intentional: this value becomes a JavaScript
+  // literal inside the blocking script below, not executable source.
+  const serializedFallbackSlug = JSON.stringify(fallbackSlug || '');
+  return `
 (function(){
   try {
     // 公開閲覧モード (iframe 外、トップレベル訪問) では何もしない。
@@ -62,8 +66,12 @@ const prePaintScript = `
     var inIframe = false;
     try { inIframe = window.top !== window.self; } catch (e) { inIframe = true; }
     if (!inIframe) return;
+    if (new URLSearchParams(location.search).get('dan_preview') === '1') return;
     var match = location.pathname.match(/\\/(?:artifacts|preview)\\/([^/]+)/);
     var slug = match && match[1];
+    // A dedicated Vercel project serves its artifact from the root path. Its project
+    // configuration is the authoritative identity in that case.
+    if (!slug) slug = ${serializedFallbackSlug};
     if (!slug) {
       var hosts = ${publicArtifactHostMap};
       slug = hosts[location.host];
@@ -110,6 +118,7 @@ const prePaintScript = `
   } catch (err) { /* ignore */ }
 })();
 `.trim();
+}
 
 const scrollResetStyle = `
 html, body {
@@ -119,14 +128,21 @@ html, body {
 `.trim();
 
 export default function ArtifactsLayout({ children }: { children: React.ReactNode }) {
+  // This is deliberately server-only. ARTIFACT_ONLY_SLUG is set on every
+  // one-artifact Vercel project and must not be copied into a public host map.
+  //
+  // 公開済み編集の反映はここでは行わない。公開時に成果物ディレクトリへ焼き込まれた
+  // release.gen.json を各成果物の server page が読み、EditableText が初回 HTML に
+  // 描画する（lib/editable-release.ts）。配信ページに DOM 後書き換えは存在しない。
+  const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: scrollResetStyle }} />
-      <script dangerouslySetInnerHTML={{ __html: prePaintScript }} />
+      <script dangerouslySetInnerHTML={{ __html: prePaintScript(dedicatedArtifactSlug) }} />
       <ArtifactStructuredData />
       <ArtifactAnalytics />
       {children}
-      <InspectorRuntimeLoader />
+      <InspectorRuntimeLoader fallbackSlug={dedicatedArtifactSlug} />
     </>
   );
 }

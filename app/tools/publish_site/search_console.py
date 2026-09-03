@@ -319,6 +319,82 @@ async def fetch_search_performance(
     return await asyncio.to_thread(_work)
 
 
+async def inspect_domain_registration(domain: str) -> dict[str, Any]:
+    """Return the concrete Search Console state for one domain property.
+
+    This is deliberately about registration, not search traffic.  A newly
+    published site normally has zero impressions, but can still be verified
+    and have its sitemap fetched successfully.
+    """
+    sa_info = await _load_service_account()
+    property_url = f"sc-domain:{domain}"
+    sitemap_url = f"https://{domain}/sitemap.xml"
+    if sa_info is None:
+        return {
+            "configured": False,
+            "property": property_url,
+            "verified": False,
+            "sitemap_url": sitemap_url,
+            "sitemap_submitted": False,
+            "sitemap_downloaded": False,
+            "detail": "Search Console service account is not configured",
+        }
+
+    def _work() -> dict[str, Any]:
+        _, sc = _build_clients(sa_info)
+        sites = sc.sites().list().execute().get("siteEntry", [])
+        entry = next((row for row in sites if row.get("siteUrl") == property_url), None)
+        if not entry:
+            return {
+                "configured": True,
+                "property": property_url,
+                "verified": False,
+                "sitemap_url": sitemap_url,
+                "sitemap_submitted": False,
+                "sitemap_downloaded": False,
+                "detail": "Domain property is not registered in the DAN Search Console account",
+            }
+        try:
+            sitemaps = sc.sitemaps().list(siteUrl=property_url).execute().get("sitemap", [])
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "configured": True,
+                "property": property_url,
+                "verified": True,
+                "permission": entry.get("permissionLevel"),
+                "sitemap_url": sitemap_url,
+                "sitemap_submitted": False,
+                "sitemap_downloaded": False,
+                "detail": f"Could not read sitemaps: {str(exc)[:180]}",
+            }
+        sitemap = next((row for row in sitemaps if row.get("path") == sitemap_url), None)
+        return {
+            "configured": True,
+            "property": property_url,
+            "verified": True,
+            "permission": entry.get("permissionLevel"),
+            "sitemap_url": sitemap_url,
+            "sitemap_submitted": bool(sitemap and sitemap.get("lastSubmitted")),
+            "sitemap_downloaded": bool(sitemap and sitemap.get("lastDownloaded")),
+            "last_submitted_at": (sitemap or {}).get("lastSubmitted"),
+            "last_downloaded_at": (sitemap or {}).get("lastDownloaded"),
+            "detail": "ok",
+        }
+
+    try:
+        return await asyncio.to_thread(_work)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "configured": True,
+            "property": property_url,
+            "verified": False,
+            "sitemap_url": sitemap_url,
+            "sitemap_submitted": False,
+            "sitemap_downloaded": False,
+            "detail": f"Could not inspect Search Console: {str(exc)[:180]}",
+        }
+
+
 async def auto_submit(
     domain: str,
     sitemap_url: str,

@@ -1,10 +1,11 @@
 'use client';
 
+import { markRoomClick } from '@/lib/perf-log';
 import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
+import { MessageSquare, Users, Settings, CalendarCheck, BookOpen, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -64,6 +65,18 @@ const navItems = [
     description: '情報管理 + 自律エージェント',
   },
   {
+    title: '今日',
+    href: '/today',
+    icon: CalendarCheck,
+    description: '今日やったこと (自動更新)',
+  },
+  {
+    title: '物語',
+    href: '/api/v1/story',
+    icon: BookOpen,
+    description: 'ダン開発の物語 (週ごとの日記・新しいタブ)',
+  },
+  {
     title: '設定',
     href: '/settings',
     icon: Settings,
@@ -89,8 +102,6 @@ export function Sidebar({
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [showAllProjects, setShowAllProjects] = useState(false);
-  // 新チャットで使う Claude モデル（既定: opus）。Fable トライアル用トグル。
-  const [selectedModel, setSelectedModel] = useState<'opus' | 'fable'>('opus');
   const PROJECT_DISPLAY_LIMIT = 5;
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -210,16 +221,61 @@ export function Sidebar({
     refetchInterval: 10 * 1000,
   });
 
+  // 「作業中」のチャットは開かれる前に中身を先読みしておく。開いた瞬間に
+  // キャッシュから完成形（メッセージ＋run状態＋作業イベント）を一発描画
+  // するため。prefetchQuery は staleTime 内なら何もしないので、10秒ごとの
+  // 一覧ポーリングで無駄な再取得は走らない。メッセージだけはキャッシュが
+  // 既にある場合スキップ必須: チャットパネルはSSE直挿入行をキャッシュ上で
+  // 一方通行マージしており、素のスナップショットで上書きすると最新回答が
+  // 数秒消える既知バグが再発する。
+  useEffect(() => {
+    const activeProjects = (projectsData?.projects ?? []).filter((p) => p.has_active_run).slice(0, 5);
+    for (const p of activeProjects) {
+      queryClient.prefetchQuery({
+        queryKey: ['current-run', p.id],
+        queryFn: () => api.projects.currentRun(p.id),
+        staleTime: 5 * 1000,
+      });
+      queryClient.prefetchQuery({
+        queryKey: ['execution-events', p.id],
+        queryFn: () => api.projects.executionEvents.list(p.id, 500),
+        staleTime: 15 * 1000,
+      });
+      const roomId = p.room_id;
+      if (roomId && !queryClient.getQueryData(['project-messages', roomId])) {
+        queryClient.prefetchQuery({
+          queryKey: ['project-messages', roomId],
+          queryFn: () => api.rooms.getMessages(roomId, { limit: 20 }),
+          staleTime: 15 * 1000,
+        });
+      }
+    }
+  }, [projectsData, queryClient]);
+
   const filteredProjects = projectsData?.projects?.filter((p) =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
+  // 部屋の切替はストアの selectedProjectId で描画が決まる（MainLayout）。
+  // router.push だと Next が /chat/[projectId] の RSC を取りに行き、その往復
+  // （dev サーバーで約0.5秒）が切替の最大の固定費だった。URL の書き換えだけ
+  // 行う（Next は history.pushState をルーターと同期するので、リロード・共有・
+  // 戻る/進むは従来通り動く。戻る/進むは通常の遷移として page.tsx が同期する）。
   const handleProjectClick = (project: ProjectResponse) => {
-    if (project.id === selectedProjectId) {
-      selectProject(null);
-      router.push('/chat');
-    } else {
+    markRoomClick(project.id);
+    // /chat 以外のページ（/today 等）にいる時は pushState だけでは画面が
+    // 切り替わらない（描画するのは chat 配下のみ）ので通常遷移で飛ぶ。
+    if (!pathname.startsWith('/chat')) {
       selectProject(project.id);
       router.push(`/chat/${project.id}`);
+      if (isMobile) onToggleCollapse();
+      return;
+    }
+    if (project.id === selectedProjectId) {
+      selectProject(null);
+      window.history.pushState(null, '', '/chat');
+    } else {
+      selectProject(project.id);
+      window.history.pushState(null, '', `/chat/${project.id}`);
       if (isMobile) {
         onToggleCollapse();
       }
@@ -228,7 +284,7 @@ export function Sidebar({
 
   const handleInstantCreate = () => {
     if (!createProjectMutation.isPending) {
-      createProjectMutation.mutate({ title: '新しいプロジェクト', model: selectedModel });
+      createProjectMutation.mutate({ title: '新しいプロジェクト' });
     }
   };
 
@@ -269,7 +325,7 @@ export function Sidebar({
       >
         {/* Header */}
         <div className="flex items-center h-14 px-3 border-b border-sidebar-border">
-          <AnimatePresence mode="wait">
+          <AnimatePresence mode="wait" initial={false}>
             {!isCollapsed && (
               <motion.div
                 initial={{ opacity: 0 }}
@@ -302,7 +358,7 @@ export function Sidebar({
         </div>
 
         {/* Search */}
-        <AnimatePresence>
+        <AnimatePresence initial={false}>
           {!isCollapsed && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
@@ -350,26 +406,6 @@ export function Sidebar({
                 </Button>
               </div>
               {/* 新チャットのモデル選択（Fable トライアル用）。+ を押すと選択中のモデルで作成される */}
-              <div className="flex items-center gap-1 px-2 pb-1.5">
-                <span className="text-[10px] text-muted-foreground mr-1">新規:</span>
-                <div className="inline-flex rounded-md border border-sidebar-border overflow-hidden">
-                  {(['opus', 'fable'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setSelectedModel(m)}
-                      className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                        selectedModel === m
-                          ? 'bg-sidebar-accent text-sidebar-foreground'
-                          : 'text-muted-foreground hover:text-sidebar-foreground'
-                      }`}
-                      title={m === 'opus' ? 'Opus（標準・速い）' : 'Fable（高性能・やや遅い／トライアル中）'}
-                    >
-                      {m === 'opus' ? 'Opus' : 'Fable'}
-                    </button>
-                  ))}
-                </div>
-              </div>
             </>
           )}
 
@@ -415,6 +451,15 @@ export function Sidebar({
                           >
                             {project.icon || '📁'}
                           </button>
+                          {project.has_active_run && (
+                            <span
+                              className="absolute -top-0.5 -right-1 flex h-2.5 w-2.5 pointer-events-none"
+                              title="ダンが作業中"
+                            >
+                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                            </span>
+                          )}
                           {emojiPickerProjectId === project.id && (
                             <div
                               ref={emojiPickerRef}
@@ -461,7 +506,11 @@ export function Sidebar({
                                     <p className="truncate">{project.title}</p>
                                   </div>
                                   <p className="text-xs text-muted-foreground truncate">
-                                    {formatRelativeTime(project.last_message_at || project.updated_at || project.created_at)}
+                                    {project.has_active_run ? (
+                                      <span className="animate-pulse font-medium text-emerald-500">ダンが作業中…</span>
+                                    ) : (
+                                      formatRelativeTime(project.last_message_at || project.updated_at || project.created_at)
+                                    )}
                                   </p>
                                 </div>
                                 {(project.unread_count || 0) > 0 && (
@@ -596,7 +645,7 @@ export function Sidebar({
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
               const showBadge = item.href === '/collab' && unreadCount > 0;
-              const openInNewTab = item.href === '/dan-notion';
+              const openInNewTab = item.href === '/dan-notion' || item.href === '/api/v1/story';
               const LinkWrapper = openInNewTab
                 ? ({ children }: { children: React.ReactNode }) => (
                     <a href={item.href} target="_blank" rel="noopener noreferrer">

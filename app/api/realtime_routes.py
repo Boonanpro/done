@@ -136,6 +136,10 @@ async def realtime_delegate_websocket(websocket: WebSocket):
                     room_id=room_id,
                     user_id=user_id,
                     content=task,
+                    # サイレント委譲（2026-08-23 ユーザー選択）: ダンの回答を部屋へ投稿しない。
+                    # 部屋に残るのは音声の文字起こし（🎙）だけ。ダンのCLIセッション自体は
+                    # 同じ room キーで継続するため、委譲内容の記憶はダン側に残る。
+                    skip_save=True,
                 ):
                     et = event.get("type", "")
                     if et == "reasoning":

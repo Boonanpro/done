@@ -190,13 +190,25 @@ class VideoGenerationService:
     async def _generate_higgsfield(self, *, prompt: str, user_id: str, project_id: Optional[str],
                                    message_id: Optional[str], aspect_ratio: str, duration: str,
                                    model: str) -> dict:
-        if model not in {"seedance_2_0", "kling3_0"}:
+        if model not in {"seedance_2_5", "seedance_2_0", "kling3_0"}:
             raise RuntimeError("Unsupported Higgsfield video model")
-        cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
-               "--aspect_ratio", aspect_ratio, "--duration", str(duration), "--wait", "--json"]
+        allowed_durations = {"seedance_2_5": ("5", "10", "15", "30"), "seedance_2_0": ("5", "10", "15"), "kling3_0": ("5", "10")}
+        duration = min(allowed_durations[model], key=lambda value: abs(int(value) - int(duration)))
+        from app.services.higgsfield_cli import cli_arg_safe, higgsfield_cli
+        prompt = cli_arg_safe(prompt)
+        cmd = [higgsfield_cli(), "generate", "create", model, "--prompt", prompt,
+               "--duration", duration, "--wait", "--json"]
+        if model == "seedance_2_5":
+            dimensions = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}
+            width, height = dimensions.get(aspect_ratio, dimensions["16:9"])
+            # width/heightだけだとサーバー側でaspect_ratio既定値(16:9)が勝つ — 両方渡す
+            cmd += ["--width", str(width), "--height", str(height), "--aspect_ratio", aspect_ratio, "--resolution", "720p", "--generate_audio", "true"]
+        else:
+            cmd += ["--aspect_ratio", aspect_ratio]
         if model == "seedance_2_0":
             cmd += ["--resolution", "720p"]
-        result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=1260)
+        result = await asyncio.to_thread(
+            lambda: subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1260))
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout or "Higgsfield generation failed")[-500:])
         try:

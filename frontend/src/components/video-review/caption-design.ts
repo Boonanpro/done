@@ -77,6 +77,9 @@ export type CaptionDesign = {
   animationSpeed?: number;    // multiplier for the intro duration (default 1; bigger = faster)
   highlightColor?: string;    // karaoke: fill of the word being spoken (default = a warm yellow)
   highlightScale?: number;    // karaoke: scale bump on the active word (default 1.12)
+  // 選択範囲ごとの文字色。s/e は text の UTF-16 コード単位のインデックス [s, e)。
+  // ネイティブエディタの「選択範囲の色」から書かれる。後のスパンが優先。
+  colorSpans?: { s: number; e: number; color: string }[];
 };
 
 // Caption motion presets. 'pop'/'fade'/'slide' are pure intro animations; 'typewriter' reveals

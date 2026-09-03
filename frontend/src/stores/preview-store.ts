@@ -10,6 +10,7 @@ import {
   applyText,
   readModelFromAttrs,
   type EditModel,
+  type InlineSpan,
 } from '@/lib/inspector-model';
 import { useEditHistoryStore, makeEditSummary } from '@/stores/edit-history-store';
 import { sendToIframe } from '@/components/preview/inspector-bridge';
@@ -39,6 +40,7 @@ export interface SelectedElement {
   elementKey?: string;
   /** iframe が計算した computedStyle の抜粋（パネルはこれを読む。live DOM は読まない）。 */
   computedStyles?: Record<string, string>;
+  inlineSpans?: InlineSpan[];
   /** インラインテキスト編集できる葉要素か。 */
   isTextLeaf?: boolean;
   /** img/video の場合の情報。 */
@@ -55,6 +57,8 @@ export interface ArtifactRecord {
   artifact_type: 'website' | 'dashboard' | 'tool' | string;
   label: string | null;
   preview_url: string;
+  /** Latest verified dedicated release URL, supplied by the publication ledger. */
+  delivery_url?: string | null;
   share_url?: string | null;
   draft_url?: string | null;
   production_url?: string | null;
@@ -82,13 +86,38 @@ export interface SelectionRange {
   end: number;
 }
 
+/** 「追加」済みで、まだチャットに送信していないコメント1件。
+ *  1コメントは1要素以上（Ctrl+クリックの複数選択）に対応する。
+ *  送信 or 明示削除まで消えない（localStorage 永続・ルーム別）。 */
+export interface PendingComment {
+  id: string;
+  /** コメント対象の要素（1個以上）。 */
+  elements: SelectedElement[];
+  text: string;
+  /** どのプロジェクト（ルーム）のチャットで送るべきコメントか。
+   *  ルームを移動しても消えず、元のルームに戻ると再表示される。 */
+  projectId: string | null;
+  /** 追加した瞬間の成果物情報のスナップショット。プレビューを閉じた後でも
+   *  送信メッセージに slug / file を正しく載せるために保持する。 */
+  artifact: { slug: string; label: string | null; preview_url: string } | null;
+}
+
 interface PreviewState {
   isOpen: boolean;
   projectId: string | null;
   artifact: ArtifactRecord | null;
   isEditMode: boolean;
   selectedElement: SelectedElement | null;
+  /** 選択集合の全量（単一選択なら1個、Ctrl+クリック複数選択ならN個、なしなら空）。
+   *  selectedElement は常にこの配列の末尾（最後にクリックした要素）と一致する。 */
+  selectedElements: SelectedElement[];
   popoverDraft: string;
+  /** 要素コメントは「追加」でここに溜まり、チャットの送信ボタンでまとめて1通になる。
+   *  1コメント=1メッセージだと1件ごとにダンが走り出してしまうため。 */
+  pendingComments: PendingComment[];
+  /** たまりリストのコメントをクリックして編集中の場合、その id。
+   *  この状態で「追加(更新)」すると新規追加ではなくそのコメントを上書きする。 */
+  editingCommentId: string | null;
   refCounter: number;
 
   inspectorMode: InspectorMode;
@@ -107,13 +136,26 @@ interface PreviewState {
 
 interface PreviewActions {
   openArtifact: (projectId: string, artifact: ArtifactRecord) => void;
+  updateArtifact: (artifact: ArtifactRecord) => void;
   closePreview: () => void;
   toggleEditMode: () => void;
   /** iframe からの選択 snapshot を受けて選択状態を更新する。 */
   selectFromSnapshot: (snap: SelectionSnapshot) => void;
+  /** iframe からの複数選択（全量）を受けて選択状態を更新する。空配列=解除。 */
+  selectFromSnapshots: (snaps: SelectionSnapshot[]) => void;
+  /** 選択集合から1要素だけ外す（ポップオーバーのチップの×）。iframe のハイライトも同期。 */
+  removeSelectedElement: (refId: string) => void;
   clearSelection: () => void;
   setPopoverDraft: (v: string) => void;
   consumeDraft: () => { text: string; element: SelectedElement | null };
+  /** 選択中の要素＋下書きを「追加」して溜める。追加できたら true。 */
+  addPendingComment: () => boolean;
+  removePendingComment: (id: string) => void;
+  /** projectId を渡すとそのプロジェクト分だけ、省略時は全件削除。 */
+  clearPendingComments: (projectId?: string) => void;
+  /** たまりリストのコメントを編集モードにする: 要素を再選択し、下書きに本文を戻す。
+   *  プレビューが開いていれば iframe のハイライトも復元される。 */
+  beginEditPendingComment: (id: string) => void;
 
   setInspectorMode: (mode: InspectorMode) => void;
   /** agent が ready で報告した「iframe実表示slug」を記録する。 */
@@ -123,7 +165,7 @@ interface PreviewActions {
   /** スタイルを適用（選択範囲ありなら部分span、なければblock）。iframeへ送信＋永続化。 */
   setLiveStyle: (property: string, value: string, important?: boolean) => void;
   /** インラインテキスト確定（iframe agent からの commit を受ける）。 */
-  commitText: (elementKey: string, text: string) => void;
+  commitText: (elementKey: string, text: string, options?: { applyToIframe?: boolean }) => void;
   /** 任意要素にスタイルだけ当てる（img/video 用）。elementKey 指定。 */
   applyStyleTo: (elementKey: string | undefined, property: string, value: string, important?: boolean) => void;
   /** 属性(src/alt/href等)を当てる（img/video 用）。 */
@@ -143,7 +185,10 @@ const INITIAL: PreviewState = {
   artifact: null,
   isEditMode: false,
   selectedElement: null,
+  selectedElements: [],
   popoverDraft: '',
+  pendingComments: [],
+  editingCommentId: null,
   refCounter: 0,
   inspectorMode: 'comment',
   iframeSlug: null,
@@ -153,12 +198,37 @@ const INITIAL: PreviewState = {
   contentVersion: 0,
 };
 
+/** iframe からの snapshot を store の SelectedElement に写す。 */
+function snapshotToElement(snap: SelectionSnapshot, refId: string): SelectedElement {
+  return {
+    refId,
+    tagName: snap.tagName,
+    text: snap.text,
+    outerHtmlSnippet: snap.outerHtmlSnippet,
+    rect: snap.rect,
+    className: snap.className,
+    ancestors: snap.ancestors,
+    bgColor: snap.bgColor,
+    elementKey: snap.elementKey,
+    computedStyles: snap.computedStyles,
+    inlineSpans: snap.inlineSpans,
+    isTextLeaf: snap.isTextLeaf,
+    media: snap.media,
+  };
+}
+
 /** キャッシュ or 空モデル（text を seed）から現在モデルを得る。DOM には触れない。 */
-function getOrInitModel(key: string, text: string, models: Record<string, EditModel>): EditModel {
+function getOrInitModel(
+  key: string,
+  text: string,
+  models: Record<string, EditModel>,
+  inlineSpans: InlineSpan[] = [],
+): EditModel {
   const existing = models[key];
   if (existing) return existing;
   const m = emptyModel();
   m.text = text;
+  m.spans = inlineSpans;
   return m;
 }
 
@@ -169,31 +239,41 @@ export const usePreviewStore = create<PreviewStore>()(
 
       openArtifact: (projectId, artifact) => {
         useEditHistoryStore.getState().clear();
+        // pendingComments は意図的にリセットしない: 成果物の開き直し/切替で
+        // 溜めたコメントを失わない（送信 or 明示削除まで保持する）。
         set({
           isOpen: true,
           projectId,
           artifact,
           isEditMode: false,
           selectedElement: null,
+          selectedElements: [],
           popoverDraft: '',
-          refCounter: 0,
+          editingCommentId: null,
           models: {},
           selectedRange: null,
           iframeSlug: null,
           inspectorMode: 'comment',
         });
       },
+      updateArtifact: (artifact) => set((state) => (
+        state.artifact?.id === artifact.id ? { artifact: { ...state.artifact, ...artifact } } : {}
+      )),
 
       closePreview: () => {
         useEditHistoryStore.getState().clear();
-        set({ ...INITIAL });
+        // 溜めたコメントとカウンタはプレビューを閉じても保持する
+        // （間違えて閉じた/ルーム移動で消える事故の根治）。
+        set({ ...INITIAL, pendingComments: get().pendingComments, refCounter: get().refCounter });
       },
 
       toggleEditMode: () =>
         set((s) => ({
           isEditMode: !s.isEditMode,
           selectedElement: null,
+          selectedElements: [],
           popoverDraft: '',
+          editingCommentId: null,
           selectedRange: null,
         })),
 
@@ -201,21 +281,10 @@ export const usePreviewStore = create<PreviewStore>()(
         const counter = get().refCounter + 1;
         const prevKey = get().selectedElement?.elementKey;
         const rangeReset = prevKey !== snap.elementKey ? { selectedRange: null } : {};
+        const element = snapshotToElement(snap, `e${counter}`);
         set({
-          selectedElement: {
-            refId: `e${counter}`,
-            tagName: snap.tagName,
-            text: snap.text,
-            outerHtmlSnippet: snap.outerHtmlSnippet,
-            rect: snap.rect,
-            className: snap.className,
-            ancestors: snap.ancestors,
-            bgColor: snap.bgColor,
-            elementKey: snap.elementKey,
-            computedStyles: snap.computedStyles,
-            isTextLeaf: snap.isTextLeaf,
-            media: snap.media,
-          },
+          selectedElement: element,
+          selectedElements: [element],
           refCounter: counter,
           popoverDraft: '',
           // 選択の瞬間に iframe 実表示slugを確定（保存/取得をこれに固定）。
@@ -224,8 +293,47 @@ export const usePreviewStore = create<PreviewStore>()(
         });
       },
 
+      selectFromSnapshots: (snaps) => {
+        if (!snaps.length) {
+          // iframe 側で全解除（Escape / 最後の1個をCtrl+クリックで外した）。
+          set({ selectedElement: null, selectedElements: [], popoverDraft: '', selectedRange: null });
+          return;
+        }
+        // 既に選択済みの要素は refId を維持し、新規要素にだけ新しい番号を振る。
+        const { selectedElements, refCounter } = get();
+        const byKey = new Map(selectedElements.map((el) => [el.elementKey, el]));
+        let counter = refCounter;
+        const elements = snaps.map((snap) => {
+          const prev = byKey.get(snap.elementKey);
+          if (prev) return { ...snapshotToElement(snap, prev.refId) };
+          counter += 1;
+          return snapshotToElement(snap, `e${counter}`);
+        });
+        // 複数選択の途中で下書きを消さない（要素を追加しながら書けるように）。
+        set({
+          selectedElement: elements[elements.length - 1],
+          selectedElements: elements,
+          refCounter: counter,
+          selectedRange: null,
+          iframeSlug: snaps[0].slug || get().iframeSlug,
+        });
+      },
+
+      removeSelectedElement: (refId) => {
+        const remaining = get().selectedElements.filter((el) => el.refId !== refId);
+        if (!remaining.length) {
+          get().clearSelection();
+          return;
+        }
+        set({ selectedElement: remaining[remaining.length - 1], selectedElements: remaining });
+        sendToIframe({
+          type: 'inspector:set-selection',
+          payload: { elementKeys: remaining.map((el) => el.elementKey).filter((k): k is string => !!k) },
+        });
+      },
+
       clearSelection: () => {
-        set({ selectedElement: null, popoverDraft: '', selectedRange: null });
+        set({ selectedElement: null, selectedElements: [], popoverDraft: '', editingCommentId: null, selectedRange: null });
         sendToIframe({ type: 'inspector:clear-selection', payload: {} });
       },
 
@@ -233,9 +341,110 @@ export const usePreviewStore = create<PreviewStore>()(
 
       consumeDraft: () => {
         const { popoverDraft, selectedElement } = get();
-        set({ selectedElement: null, popoverDraft: '', selectedRange: null });
+        set({ selectedElement: null, selectedElements: [], popoverDraft: '', editingCommentId: null, selectedRange: null });
         return { text: popoverDraft, element: selectedElement };
       },
+
+      addPendingComment: () => {
+        const { popoverDraft, selectedElement, selectedElements, pendingComments, editingCommentId } = get();
+        const text = popoverDraft.trim();
+        const elements = selectedElements.length
+          ? selectedElements
+          : selectedElement
+            ? [selectedElement]
+            : [];
+        if (!elements.length || !text) return false;
+
+        // 編集中なら新規追加ではなく、そのコメントを現在の選択＋本文で上書きする。
+        const editing = editingCommentId
+          ? pendingComments.find((c) => c.id === editingCommentId)
+          : undefined;
+        if (editing) {
+          set({
+            pendingComments: pendingComments.map((c) =>
+              c.id === editing.id ? { ...c, elements, text } : c
+            ),
+            selectedElement: null,
+            selectedElements: [],
+            popoverDraft: '',
+            editingCommentId: null,
+            selectedRange: null,
+          });
+          sendToIframe({ type: 'inspector:clear-selection', payload: {} });
+          return true;
+        }
+
+        const id =
+          typeof crypto !== 'undefined' && 'randomUUID' in crypto
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const artifact = get().artifact;
+        set({
+          pendingComments: [
+            ...pendingComments,
+            {
+              id,
+              elements,
+              text,
+              projectId: get().projectId,
+              // プレビューを閉じた後の送信でも slug/file を正しく組めるよう、
+              // 追加時点の成果物情報をスナップショットして持たせる。
+              artifact: artifact
+                ? { slug: artifact.slug, label: artifact.label, preview_url: artifact.preview_url }
+                : null,
+            },
+          ],
+          selectedElement: null,
+          selectedElements: [],
+          popoverDraft: '',
+          selectedRange: null,
+        });
+        // 次の要素をすぐ選べるように iframe 側のハイライトも解除する
+        sendToIframe({ type: 'inspector:clear-selection', payload: {} });
+        return true;
+      },
+
+      removePendingComment: (id) =>
+        set((s) => ({
+          pendingComments: s.pendingComments.filter((c) => c.id !== id),
+          // 編集中のコメントを消したら編集状態も解除する
+          ...(s.editingCommentId === id ? { editingCommentId: null, popoverDraft: '' } : {}),
+        })),
+
+      beginEditPendingComment: (id) => {
+        const { pendingComments } = get();
+        const comment = pendingComments.find((c) => c.id === id);
+        if (!comment || !comment.elements.length) return;
+        set({
+          editingCommentId: id,
+          popoverDraft: comment.text,
+          selectedElements: comment.elements,
+          selectedElement: comment.elements[comment.elements.length - 1],
+          selectedRange: null,
+          // 編集ポップオーバーを出すため、コメントモードの編集ONへ強制する
+          isEditMode: true,
+          inspectorMode: 'comment',
+        });
+        // プレビューiframe が開いていれば要素ハイライトを復元する
+        // （閉じている/別成果物の場合、iframe 側で該当キーが見つからず単に何も出ない）。
+        sendToIframe({
+          type: 'inspector:set-selection',
+          payload: {
+            elementKeys: comment.elements
+              .map((el) => el.elementKey)
+              .filter((k): k is string => !!k),
+          },
+        });
+      },
+
+      clearPendingComments: (projectId) =>
+        set((s) => ({
+          // projectId 指定時: そのプロジェクト分＋projectId 無しの古いデータを消す
+          // （無印はどのルームにも表示されるので、送信/全削除で一緒に消えないと残留する）。
+          pendingComments: projectId
+            ? s.pendingComments.filter((c) => c.projectId && c.projectId !== projectId)
+            : [],
+        })),
 
       setInspectorMode: (mode) => set({ inspectorMode: mode }),
 
@@ -283,16 +492,29 @@ export const usePreviewStore = create<PreviewStore>()(
         });
       },
 
-      commitText: (elementKey, text) => {
+      commitText: (elementKey, text, options) => {
         const { models, styleVersion, artifact, selectedElement } = get();
         const slug = get().iframeSlug || artifact?.slug || '';
-        const current = getOrInitModel(elementKey, text, models);
+        const current = getOrInitModel(
+          elementKey,
+          selectedElement?.text || text,
+          models,
+          selectedElement?.elementKey === elementKey ? selectedElement.inlineSpans : [],
+        );
         const next = applyText(current, text);
         // 初回編集なら「編集前テキスト」を捕捉（Resetで戻すため）。selectedElement.text は
         // 選択時スナップショット=このタイプ前の状態。一度捕捉したら上書きしない。
         if (!next.orig) next.orig = { text: selectedElement?.text ?? null, blockStyle: {} };
-        set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
-        sendToIframe({ type: 'inspector:apply', payload: { elementKey, model: next } });
+        set({
+          models: { ...models, [elementKey]: next },
+          styleVersion: styleVersion + 1,
+          selectedElement: selectedElement?.elementKey === elementKey
+            ? { ...selectedElement, text }
+            : selectedElement,
+        });
+        if (options?.applyToIframe !== false) {
+          sendToIframe({ type: 'inspector:apply', payload: { elementKey, model: next } });
+        }
         queueInspectorEdit({
           slug,
           elementKey,
@@ -351,7 +573,7 @@ export const usePreviewStore = create<PreviewStore>()(
         sendToIframe({ type: 'inspector:apply', payload: { elementKey: key, styles: { display: 'none' } } });
         const nextModels = { ...models };
         delete nextModels[key];
-        set({ models: nextModels, styleVersion: styleVersion + 1, selectedElement: null });
+        set({ models: nextModels, styleVersion: styleVersion + 1, selectedElement: null, selectedElements: [] });
         removeLocalStorageOverride(slug, key);
 
         const tagHint = opts?.tagName || selectedElement?.tagName;
@@ -367,10 +589,13 @@ export const usePreviewStore = create<PreviewStore>()(
             toast.error('要素の削除に失敗しました', { description: txt.slice(0, 200) });
             return false;
           }
+          let deliverySupported = true;
           try {
             const body = (await res.json()) as {
-              removed?: boolean; file?: string | null; before_content?: string | null; after_content?: string | null;
+              removed?: boolean; delivery_supported?: boolean; file?: string | null;
+              before_content?: string | null; after_content?: string | null;
             };
+            deliverySupported = body.delivery_supported !== false;
             if (body.removed && body.file && typeof body.before_content === 'string' && typeof body.after_content === 'string') {
               useEditHistoryStore.getState().push({
                 slug, filePath: body.file, before: body.before_content, after: body.after_content,
@@ -380,7 +605,15 @@ export const usePreviewStore = create<PreviewStore>()(
           } catch (e) {
             console.warn('[deleteSelectedElement] history record failed', e);
           }
-          toast.success('要素を削除しました（Cmd+Z で復元）');
+          if (deliverySupported) {
+            toast.success('要素を削除しました（Cmd+Z で復元）');
+          } else {
+            // `@auto:` 識別子＝この要素には data-edit-id が無い。編集画面では消えるが
+            // 公開ページのサーバーレンダリングはこの識別子を解決できない。
+            toast.warning('編集画面では削除しましたが、公開ページには反映されません', {
+              description: 'この要素にはまだ編集IDがありません。ダンに「この要素を消して」と指示すると本体から削除できます。',
+            });
+          }
           return true;
         } catch (err) {
           toast.error('要素削除のリクエストに失敗', { description: String(err).slice(0, 200) });
@@ -449,12 +682,33 @@ export const usePreviewStore = create<PreviewStore>()(
     }),
     {
       name: 'dan-preview-state',
-      version: 2,
+      version: 3,
       storage: createJSONStorage(() => (typeof window !== 'undefined' ? localStorage : undefined as unknown as Storage)),
-      partialize: (s) => ({ isEditMode: s.isEditMode, inspectorMode: s.inspectorMode }),
-      migrate: (_persisted, version) => {
-        if (version < 2) return { isEditMode: false, inspectorMode: 'comment' as const };
-        return _persisted as { isEditMode: boolean; inspectorMode: 'comment' | 'edit' };
+      // pendingComments はリロードしても消えない（チャット下書きと同じ思想）。
+      // refCounter も一緒に永続化し、リロード後の新規選択と @ref 番号が衝突しないようにする。
+      partialize: (s) => ({
+        isEditMode: s.isEditMode,
+        inspectorMode: s.inspectorMode,
+        pendingComments: s.pendingComments,
+        refCounter: s.refCounter,
+      }),
+      migrate: (persisted, version) => {
+        const p = (persisted ?? {}) as {
+          isEditMode?: boolean;
+          inspectorMode?: 'comment' | 'edit';
+          pendingComments?: PendingComment[];
+          refCounter?: number;
+        };
+        if (version < 2) return { isEditMode: false, inspectorMode: 'comment' as const, pendingComments: [], refCounter: 0 };
+        if (version < 3) {
+          return {
+            isEditMode: p.isEditMode ?? false,
+            inspectorMode: p.inspectorMode ?? ('comment' as const),
+            pendingComments: [],
+            refCounter: 0,
+          };
+        }
+        return p;
       },
     }
   )
@@ -539,7 +793,7 @@ export function queueInspectorEdit(ctx: QueueContext) {
   flushTimer = setTimeout(flushPendingOverrides, FLUSH_DEBOUNCE_MS);
 }
 
-export function flushInspectorEdits(): Promise<void> {
+export function flushInspectorEdits(): Promise<boolean> {
   if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   return flushPendingOverrides();
 }
@@ -592,9 +846,9 @@ export function syncLocalStorageFromServer(
   } catch { /* ignore */ }
 }
 
-async function flushPendingOverrides(): Promise<void> {
+async function flushPendingOverrides(): Promise<boolean> {
   const entries = Object.entries(pendingOverrides);
-  if (!entries.length) return;
+  if (!entries.length) return true;
   for (const key of entries.map(([k]) => k)) delete pendingOverrides[key];
 
   const state = usePreviewStore.getState();
@@ -640,13 +894,16 @@ async function flushPendingOverrides(): Promise<void> {
       ? '編集の保存に失敗しました（ログインが切れています）'
       : `編集の保存に失敗しました（${failures}件）`;
     try { toast.error(msg, { description: lastError?.text?.slice(0, 200) }); } catch { /* ignore */ }
+    return false;
   }
 
   // 1件でも保存できたら自動公開をスケジュール（ボタン不要で本番反映）。
   if (entries.length - failures > 0) {
     const slug = entries.map(([, e]) => e.slug).find(Boolean);
-    if (slug) scheduleAutoPublish(slug);
+    // Draft persistence never publishes automatically. The explicit 保存
+    // action promotes the complete draft as one public revision.
   }
+  return true;
 }
 
 /** 互換 API（旧コード用）。 */

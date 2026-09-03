@@ -126,6 +126,8 @@ _APP_API_DIR_TO_OWNER: dict[str, Scope] = {
 _INFRA_PATTERNS: tuple[str, ...] = (
     # backend
     "app/**",
+    # standalone services (phone voice bridge etc.)
+    "services/**",
     # repo-root tooling manifests
     "skills-lock.json",
     # ops / tooling
@@ -173,6 +175,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/src/app/settings/**",
     "frontend/src/app/studio/**",
     "frontend/src/app/test-inspector/**",
+    "frontend/src/app/today/**",
     "frontend/src/app/voice/**",
     # generic public assets (PWA, icons, service worker, manifest)
     "frontend/public/favicon.ico",

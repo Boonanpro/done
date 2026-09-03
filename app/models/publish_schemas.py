@@ -33,7 +33,9 @@ class DomainCheckResponse(BaseModel):
 class PublishRequest(BaseModel):
     artifact_id: str
     domain: str = Field(..., min_length=3)
-    vercel_project: str = Field(..., description="Vercel project id または name")
+    # Deprecated browser input. The server resolves the delivery project from
+    # the publication ledger; this remains optional for older callers.
+    vercel_project: Optional[str] = None
     artifact_dir: Optional[str] = Field(
         None, description="リポジトリ相対 (例: 'frontend/src/app/artifacts/kittoku')"
     )
@@ -51,14 +53,14 @@ class ConnectDomainRequest(BaseModel):
 
     artifact_id: str
     domain: str = Field(..., min_length=3)
-    vercel_project: str = "frontend"
+    vercel_project: Optional[str] = None
     replace: bool = False  # 別成果物が使用中でも差し替えるか
 
 
 class DeliveryUrlRequest(BaseModel):
     artifact_id: str
     slug: str = Field(..., min_length=1)
-    vercel_project: str = "frontend"
+    vercel_project: Optional[str] = None
 
 
 class PublishStepDTO(BaseModel):
@@ -80,6 +82,8 @@ class PublishResponse(BaseModel):
     conflict_label: Optional[str] = None  # 同じドメインを使用中の別成果物名
     verified: bool = True  # 外部DNSが反映済みか（false=本番URL未確定）
 
+    status: Optional[Literal["registering", "live", "failed"]] = None
+
 
 class DeliveryUrlResponse(BaseModel):
     success: bool
@@ -99,7 +103,7 @@ class DomainSetupCreateRequest(BaseModel):
 
     artifact_id: str
     domain: str = Field(..., min_length=3, description="クライアントに取得を案内するドメイン")
-    vercel_project: str = "frontend"
+    vercel_project: Optional[str] = None
 
 
 class DomainSetupResponse(BaseModel):
@@ -108,6 +112,7 @@ class DomainSetupResponse(BaseModel):
     success: bool
     token: Optional[str] = None
     setup_path: Optional[str] = None  # /domain-setup/<token>
+    setup_url: Optional[str] = None   # canonical client-facing URL
     artifact_id: Optional[str] = None
     artifact_label: Optional[str] = None
     domain: Optional[str] = None
@@ -128,6 +133,19 @@ class DomainCheckoutResponse(BaseModel):
     success: bool
     checkout_url: Optional[str] = None
     error: Optional[str] = None
+    registrant_saved: bool = False
+
+
+class DomainRegistrantRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=200)
+    organization: str = Field("", max_length=200)
+    email: str = Field(..., min_length=5, max_length=254)
+    phone: str = Field(..., min_length=6, max_length=40)
+    street: str = Field(..., min_length=3, max_length=300)
+    city: str = Field(..., min_length=1, max_length=120)
+    state: str = Field(..., min_length=1, max_length=120)
+    postal_code: str = Field(..., min_length=3, max_length=30)
+    country_code: str = Field(..., min_length=2, max_length=2)
 
 
 class PaymentConfirmRequest(BaseModel):

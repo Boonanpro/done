@@ -221,6 +221,26 @@ def _is_thinking_desync_error(text: Optional[str]) -> bool:
     )
 
 
+def _has_tool_call_leak(text: Optional[str]) -> bool:
+    """成功扱いで終わったターンの本文にツール呼び出しがテキストとして漏れて
+    いるか（「court」化けの本体）。合図が化けてツール実行がされないまま
+    ターンが正常終了するため is_error にならず、既存の復旧網（parse-error /
+    thinking-desync / ループガード）のどれにも掛からない。漏れた本文は
+    transcript と DB に残り、次ターンのモデルがその書式を真似して再発する。
+    検知したら呼び出し側でセッションを手放し、次ターンを新規+DB reseed
+    （汚染行は _RESEED_SKIP_MARKERS で除外）にする。
+
+    判定は「行頭が <invoke name=" で始まる行がある」こと。通常の回答が
+    ツール呼び出しXMLを行頭から生で書くことはまず無い（説明で引用する場合は
+    コードフェンス内でも行頭一致し得るが、誤検知コストはセッション1回の
+    作り直しだけで会話は失われない）。"""
+    if not text:
+        return False
+    return any(
+        line.lstrip().startswith('<invoke name="') for line in text.splitlines()
+    )
+
+
 # Lines from history that would re-poison a fresh session if fed back verbatim.
 _RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
 
@@ -928,6 +948,23 @@ def _fresh_supabase_client():
     return sbmod.get_supabase_client().client
 
 
+def _is_duplicate_key_error(err: Exception) -> bool:
+    """PostgREST/Postgres unique-violation (23505) — the row already exists.
+
+    Used by the disconnect-retry paths: when the first INSERT reached the
+    server but the response was lost ("Server disconnected"), the retry hits
+    the client-assigned primary key and must be treated as *already saved*,
+    not as a failure and never as a second row (2026-08-26 二重表示の真因).
+    """
+    msg = str(err)
+    code = getattr(err, "code", None)
+    if code is None and getattr(err, "args", None):
+        a = err.args[0]
+        if isinstance(a, dict):
+            code = a.get("code")
+    return code == "23505" or "23505" in msg or "duplicate key" in msg.lower()
+
+
 def _save_execution_event_sync(
     room_id: str,
     event_type: str,
@@ -952,6 +989,9 @@ def _save_execution_event_sync(
     if turn_id:
         metadata["turn_id"] = turn_id
     row = {
+        # Client-side id makes the disconnect retry idempotent (PK conflict
+        # instead of a second row).
+        "id": str(uuid.uuid4()),
         "room_id": room_id,
         "run_id": run_id,
         "turn_id": turn_id,
@@ -973,6 +1013,9 @@ def _save_execution_event_sync(
             if attempt == 1 and _is_disconnect_error(e):
                 _cli_debug(f"_save_execution_event_sync disconnect, retrying: {e}")
                 continue
+            if attempt == 2 and _is_duplicate_key_error(e):
+                _cli_debug("_save_execution_event_sync: first attempt had landed (dup key on retry) — ok")
+                return
             _cli_debug(f"_save_execution_event_sync failed: {e}")
             return
 
@@ -1076,6 +1119,84 @@ def _tool_detail(inp, limit: int = 4000) -> str:
     return s[:limit]
 
 
+_DECL_CHECK_MARK = "[宣言未登録の自動確認]"
+_DECL_WATCH_TOOLS = {"watch", "schedule_followup"}
+
+
+def _check_unregistered_declaration(sb, room_id: str, content: str, blocks: list) -> None:
+    """嘘宣言の決定論的チェッカー: 返答本文に「見張りを入れておきます」等の
+    宣言パターンがあるのに、そのターンで watch / schedule_followup が一度も
+    呼ばれていない場合、60秒後の矯正起床を機械が登録する（登録し忘れたまま
+    眠ることを構造的に不可能にする）。
+
+    判断はダンに残す設計: 機械は「宣言文字列あり×登録ツール呼び出しなし」という
+    事実の照合しかしない。起こされたダンが登録するか、不要なら WATCH_NO_CHANGE
+    で黙って終わる（無言化が誤検知の安全弁になる）。
+    実例: 2026-08-26夜「明日の朝10時に聞く見張りを入れておきます」と宣言したのに
+    未登録で、翌朝何も起きなかった（財布紛失ルーム）。
+    """
+    import re as _re
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    try:
+        text = content or ""
+        matched = None
+        # P1: 「見張り/リマインド/続報/予約 を入れ・登録し ます/ました」系（完了主張の嘘も拾う）
+        m = _re.search(
+            r"(見張り|リマインド|続報|フォローアップ)[^\n。]{0,12}(入れ|登録|立て|設定|予約)(て|して)?(おき|し)?ま(す|した)",
+            text,
+        )
+        if m:
+            matched = m.group(0)
+        else:
+            # P2: 文単位判定 — 同一文内に「未来時刻マーカー」と「約束動詞（非過去）」が
+            # 両方あれば宣言とみなす。時刻と動詞の間に長い目的語が挟まっても拾える
+            # （固定距離窓は「10時にEpic Gamesの二段階認証が有効のままかを確認します」
+            # を取りこぼした実測があるため撤廃）。
+            future_re = _re.compile(
+                r"明日|今夜|今晩|後で|あとで|のちほど|後ほど|[0-9０-９]{1,3}\s*(分後|時間後)|[0-9０-９]{1,2}\s*時(半|[0-9０-９]{1,2}分)?\s*(に|頃|過ぎ)"
+            )
+            verb_re = _re.compile(
+                r"(確認|チェック|聞き|見に行き|様子を見|報告|連絡)(し|しに行き|に行き)?ます"
+            )
+            for sent in _re.split(r"[。\n]", text):
+                if future_re.search(sent) and verb_re.search(sent):
+                    matched = sent.strip()[:60]
+                    break
+        if not matched:
+            return
+        tool_names = {b.get("name", "") for b in (blocks or []) if b.get("type") == "tool"}
+        if tool_names & _DECL_WATCH_TOOLS:
+            return  # 宣言と同一ターンで登録済み＝正常
+        from app.services.followups import TABLE as _FU_TABLE, create_watch as _create_watch
+        # ループ天井: 同じ部屋への矯正起床は24時間に3回まで
+        day_ago = (_dt.now(_tz.utc) - _td(hours=24)).isoformat()
+        recent = (
+            sb.table(_FU_TABLE).select("note")
+            .eq("room_id", room_id).gte("created_at", day_ago).execute().data or []
+        )
+        if sum(1 for r in recent if _DECL_CHECK_MARK in (r.get("note") or "")) >= 3:
+            _cli_debug("decl-check: 24h corrective cap reached, skipping")
+            return
+        member = (
+            sb.table("chat_room_members").select("user_id")
+            .eq("room_id", room_id).limit(1).execute().data
+        )
+        uid = member[0]["user_id"] if member else None
+        note = (
+            f"{_DECL_CHECK_MARK} あなたは直前の返答で「{matched}」と宣言したが、"
+            "そのターンで watch / schedule_followup による登録が確認できなかった。"
+            "宣言を守るため、今すぐ watch(action=\"create\") で宣言どおりの時刻・内容の"
+            "見張り・予約を登録すること。既に別の形で登録済み、または実は登録不要だと"
+            "判断できる場合は、本文を正確に「WATCH_NO_CHANGE」とだけ書いて終わること。"
+            "登録した場合も改めてユーザーへ報告し直す必要はない（登録の宣言は済んでいる）。"
+            "本文は「WATCH_NO_CHANGE」のみとし、見張り登録のツール呼び出しだけを行うこと。"
+        )
+        res = _create_watch(room_id, uid, "at", note, delay_seconds=60)
+        _cli_debug(f"decl-check: promise without registration -> corrective watch {res.get('id')} ({matched[:30]!r})")
+    except Exception as e:  # noqa: BLE001
+        _cli_debug(f"decl-check failed (non-fatal): {e}")
+
+
 def _save_ai_message_sync(
     room_id: str,
     content: str,
@@ -1084,8 +1205,12 @@ def _save_ai_message_sync(
     blocks: Optional[list] = None,
     created_at: Optional[str] = None,
     turn_id: Optional[str] = None,
-) -> bool:
-    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。
+) -> Any:
+    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。disconnect時は1度だけリトライ。
+
+    成功時は保存された行のメッセージID(str)を返す（idが取れない場合はTrue）。失敗=False。
+    IDはSSEの ai_message イベントでフロントに渡し、ポーリング取得行とキャッシュ上で
+    同一視させるために使う（合成IDだと同じ回答が二重表示される）。
 
     created_at: 明示指定時はその時刻で保存（既定はDBの now()）。ストリーミング経路が
     「ターン開始時刻」を渡すために使う。保存=ターン終了時刻だと、追い連絡で割り込まれた
@@ -1116,7 +1241,12 @@ def _save_ai_message_sync(
     if turn_id:
         ai_context = ai_context or {}
         ai_context["turn_id"] = turn_id
+    # Client-assigned primary key. The disconnect retry below re-sends the
+    # same payload; if attempt 1 actually landed (response lost), attempt 2
+    # now fails with 23505 instead of inserting an identical second row.
+    msg_id_local = str(uuid.uuid4())
     insert_data = {
+        "id": msg_id_local,
         "room_id": room_id,
         "sender_id": None,
         "sender_type": "ai",
@@ -1138,10 +1268,13 @@ def _save_ai_message_sync(
                 # does via _record_message_delivery; without it, AI replies
                 # stay invisible as "unread" because we bypass the service.
                 record_message_delivery_sync(sb, room_id, msg_id, content=content)
+                # 嘘宣言チェッカー: blocks が渡された保存（＝ターン確定の本文）のみ対象。
+                if blocks is not None:
+                    _check_unregistered_declaration(sb, room_id, content, blocks)
                 _cli_debug(
                     f"_save_ai_message_sync OK (attempt {attempt}): msg_id={msg_id or '?'}"
                 )
-                return True
+                return msg_id or True
             _cli_debug(f"_save_ai_message_sync: insert returned no data (attempt {attempt})")
             if attempt == 2:
                 return False
@@ -1149,6 +1282,14 @@ def _save_ai_message_sync(
             if attempt == 1 and _is_disconnect_error(e):
                 _cli_debug(f"_save_ai_message_sync disconnect, retrying: {e}")
                 continue
+            if attempt == 2 and _is_duplicate_key_error(e):
+                # Attempt 1 reached the server; the row exists under our id.
+                _cli_debug(f"_save_ai_message_sync: first attempt had landed (dup key on retry): msg_id={msg_id_local}")
+                try:
+                    record_message_delivery_sync(sb, room_id, msg_id_local, content=content)
+                except Exception:
+                    pass
+                return msg_id_local
             _cli_debug(f"_save_ai_message_sync failed (attempt {attempt}): {e}")
             return False
     return False
@@ -1303,6 +1444,10 @@ def _build_system_prompt(
     # Absolute rules — placed LAST for maximum attention.
     parts.append(
         "## Deliverable Placement Rules\n\n"
+        "- These rules define only WHERE deliverables live and how they are delivered. "
+        "HOW to build a deliverable (method, design approach, tooling) is defined by the "
+        "`build` skill (`D:/done/.claude/skills/build/SKILL.md`) — read it before "
+        "starting any deliverable.\n"
         "- Treat DAN itself and user deliverables as separate codebases, even when "
         "both live under this repository.\n"
         "- `frontend/src/app/artifacts/<slug>/` and `~/.dan/workspace/artifacts/<room>/` "
@@ -1329,19 +1474,21 @@ def _build_system_prompt(
         "`@/components/artifacts/artifact-link` and alias it as `Link`, or use helpers "
         "from `@/lib/artifact-paths` when storing URLs. This preserves `/preview/<slug>` "
         "and custom-domain clean paths while the source stays under `/artifacts/<slug>`.\n"
-        "- An artifact's public delivery URL is `<host>/preview/<slug>` (the DB "
-        "`share_url`). Use that when telling the user where their site is. Vercel "
-        "deployment URLs (`frontend-xxxxx.vercel.app`) and any `<slug>-done.vercel.app` "
-        "alias are internal or retired — never give them as the delivery URL.\n"
-        "- Publishing is automatic: registering an artifact commits it to the production "
-        "branch so it goes live at `<host>/preview/<slug>` within a couple of minutes. "
-        "You do NOT need to run any deploy script (`deploy_frontend_artifacts.py` is "
-        "retired). Editing an existing artifact re-runs the same auto-publish; do not "
-        "solve delivery by handing out a new URL.\n"
+        "- Each registered artifact is delivered by its own dedicated Vercel project. "
+        "The dedicated `dan-site-<slug>-<id>.vercel.app` URL is already publicly reachable.\n"
+        "- A custom domain is optional and is requested later through the artifact's "
+        "‘独自ドメイン公開’ action; it is not required to make the site viewable. "
+        "When reporting completion, state that the dedicated public URL is ready and "
+        "offer the optional custom-domain flow. Never mention a GitHub production branch.\n"
         "- Public artifacts must not inherit DAN's app identity. Add or preserve "
         "artifact-specific metadata and PWA manifest settings; the public manifest must "
         "not be `/manifest.json`, must not use `Done - AI Secretary`, and must not set "
-        "`start_url` to `/chat`."
+        "`start_url` to `/chat`.\n"
+        "- For user-visible text, links, and media in a new artifact, use the native-tag "
+        "helpers from `@/components/dan/editable` (`EditableText`, `EditableLink`, "
+        "`editableMediaProps`) with a unique editId. They do not add layout wrappers; "
+        "they make the element reliably editable after publication. Text baked into an "
+        "image is the only exception."
     )
     parts.append(_ABSOLUTE_RULES)
     parts.append(_BROWSER_AUTH_RULES)
@@ -1362,10 +1509,13 @@ _ABSOLUTE_RULES = """## 絶対ルール
 1. 質問にはまず回答。作業はその後。報告を求められたら報告だけして次の指示を待て。
 2. 承認済み計画がある場合、逸脱しない。逸脱が必要なら理由を説明し承認を得る。
 3. 同じアプローチで2回失敗したら、回避策を試すのではなく根本原因を特定しろ。自分のソースコード（D:/done配下）をRead/Edit/Bashで調査・修正できる。
-4. browserツールで実現できない非対話操作（ダウンロード等）だけはBashでPythonスクリプトを書いて直接Playwrightを使え。対話操作・ログイン・認証には必ずbrowserツールを使え。直接Playwrightからbrowserツール用の共有プロファイル `~/.ai_secretary/browser_data` を開いてはいけない。補助スクリプトには別の一時プロファイルを使い、処理後に必ずブラウザを閉じろ。
+4. browserツールで実現できない非対話操作（ダウンロード等）だけはBashでPythonスクリプトを書いて直接Playwrightを使え。対話操作・ログイン・認証には必ずbrowserツールを使え。直接Playwrightからbrowserツール用の専用プロファイル（`~/.ai_secretary/browser_data` およびこの部屋用の `browser_data--<room>`）を開いてはいけない。補助スクリプトには別の一時プロファイルを使い、処理後に必ずブラウザを閉じろ。なおbrowserツールのブラウザは部屋ごとに独立しており、他の部屋と取り合いにはならない。
 5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。
-6. Claude Code自身が起動した背景作業の完了は、常駐セッションが完了イベントを受けて続報する。`schedule_followup(note, delay_seconds)` は、デプロイ・DNS反映など**外部サービスの状態を後で再確認する必要があり、確認対象を具体的に示せる時だけ**使え。単に「報告します」「お待ちください」と書いただけで予約してはならない。ユーザーの返答待ちでは絶対に使わない。
-7. ユーザーが個人情報（電話番号・クレジットカード・住所・誕生日・メール等）を口にしたら、その場で即座に `remember_personal_info` で保存しろ。一度教われば二度と聞き返すな。システムプロンプトの「保存済み個人情報」一覧にある情報は既に保有済みなので、実値が要る操作の直前にだけ `get_personal_info` で取り出して使え。ログインID/パスワードは従来通り `save_credentials`。"""
+6. 未来の約束は頭で覚えるな。ターンが終わるとお前は眠り、頭の中の「後で確認します」「メールが来たら報告します」は絶対に実行されない。約束は必ず `watch` ツールでDBに登録し、「見張り登録しました」と宣言しろ。①時刻・期限のある確認（「明日10時に」「1時間後に」）= watch(action="create", at/delay_seconds)。②定期チェック = interval_seconds。③特定の相手からのメール着信 = mail_from。ユーザーに頼まれなくても、外部の返事待ち・期限付き案件・後で確認が要る事柄に気づいたら自分から登録しろ。登録せずに「確認します」「待ちます」とだけ言うのは禁止。ブラウザ画面を開いたまま待つ時は hold_browser=true を付けろ（付けないと30分で自動クローズされる）。「今何を見張ってる？」には watch(action="list") で答えろ。逆に、見張りが不要になったら（先に自分で確認を済ませた・ユーザーから答えや情報をもらった・案件が終わった等）、気づいたその場で watch(action="list") で該当を特定し watch(action="cancel") で消せ。不要な見張りを放置して無駄な起床をさせるな。また「〜を進めておきます」「続きをやっておきます」と宣言する場合は、(a)このターン内で実際にやるか、(b)watch(delay_seconds=60〜)で「〜の続きを実行する」を登録するかのどちらかを必ず行え。どちらもしないならその宣言を口にするな（ターンが終わった後のお前は眠っていて働けない。実行機構のない約束は嘘になる）。なお Claude Code自身が起動した背景作業の完了は常駐セッションが続報するので登録不要。デプロイ・DNS反映など短い一発確認は従来どおり `schedule_followup(note, delay_seconds)` でもよい。ユーザーの即時の返答待ちには使わない。
+7. ユーザーが個人情報（電話番号・クレジットカード・住所・誕生日・メール等）を口にしたら、その場で即座に `remember_personal_info` で保存しろ。一度教われば二度と聞き返すな。システムプロンプトの「保存済み個人情報」一覧にある情報は既に保有済みなので、実値が要る操作の直前にだけ `get_personal_info` で取り出して使え。ログインID/パスワードは従来通り `save_credentials`。
+8. 外部の相手（取引先・顧客・税理士など）へ送るメール・DM・LINE等の文面は、チャット本文に書いて「これで良ければ送ります」と聞くのではなく `compose_message(action="propose", ...)` で送信案カードとして出せ。ユーザーはカード上で本文を直して送信ボタンを押せる（お前を起こさず送られる）。「送って」と言われたら `compose_message(action="send", proposal_id)` で送れ（本文は渡さない＝ユーザーの編集版が送られる）。編集・送信・破棄の結果は次のターン冒頭で自動的に知らされる。また、外部の相手と直接やりとりする場（「◯◯さんとのチャット作って」「共有ルーム作って」「窓口作って」等、呼び方は何でも）を求められたら `collab_thread(action="create", title=...)` で招待URLを発行しろ（相手はログイン不要・URLだけで参加でき、スマホならアプリのように通知が届く）。窓口の相手の発言はこの部屋のお前に自動で届き、返信は compose_message(channel="collab", collab_room_id=...) で相手のチャットに直接送れる。
+9. 本題から話がそれた時、お前は `split_to_new_room(title, handoff)` で新しいチャットを作り、その話題をそっちに引き継げる。handoff には新しい部屋の自分が迷わず続きを再開できる要約（経緯・決定事項・要望・次にやること・URL/パス）を書く。
+10. 「👍」リアクション（返信本文を正確に「👍」の1文字だけにすると、画面では吹き出しではなくリアクションスタンプとして表示される）は、ユーザーの発言に対してお前がやるべきことが何も無い時だけ使え。判定は字面ではなく文脈で行え。「うん」「OK」「了解」「いいよ」のような短い一言は、直前のお前の発言次第で意味が変わる：(a) お前が「やっていいですか」「進めますか」「AとBどちらにしますか」等、承認・許可・選択を求めて止まっていたなら、その一言は承認＝着手指示だ。👍は絶対に返すな。着手する旨を一言返し、そのターン内で実際に作業を始めろ（ターンをまたぐなら watch で続きを登録しろ）。(b) お前が報告・完了連絡・雑談を送り、それに対する相槌・お礼なら、👍だけでよい。「はい、引き続き対応します」のような情報ゼロの定型文は返すな。迷ったら👍ではなく通常返信にしろ（👍は未読バッジも通知も出ない＝ユーザーは「動いていない」ことに気づけない。承認を受け取ったのに止まる方が、余計な一言を返すより遥かに悪い）。👍で済ませた場合も、宣言済みの作業・見張り・約束は当然そのまま実行する。"""
 
 
 _BROWSER_AUTH_RULES = """## Browser authentication handoff rules
@@ -1373,8 +1523,16 @@ _BROWSER_AUTH_RULES = """## Browser authentication handoff rules
 - For interactive browser work that may require user input later, use the `browser` MCP tool. Do not launch a one-shot Playwright script from Bash.
 - Start authenticated browser tasks with `browser(action="open_target", url="<actual destination>")`. Never open a login page first. Reuse the existing authenticated session when the destination opens successfully; log in only after the destination redirects to an unauthenticated page.
 - When an OTP / verification code is required, preserve the current browser page. Do not close the browser, navigate away, or resend a code unless the current page has been checked and the code is expired or the user explicitly asks for a resend.
-- **SMS code** → `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` (default source=sms; the Android app forwards and enters it without exposing it). Forwarding only works for codes sent to the phone that runs the Dan app with SMS forwarding ON — a code sent to anyone else's phone number can never be auto-forwarded, so confirm the destination number is the registered device's before relying on it.
+- **Choosing a 2FA method — always prefer the one you can complete alone.** Read what the current screen actually offers (including any "Try another way" / "別の方法" / "使用できない場合" link, which often hides better options) and pick in this order:
+  1. **Authenticator app (TOTP)** — you generate the code yourself from a stored seed. No phone, no network, never delayed or blocked. ALWAYS first choice.
+  2. **Email code or link** — you can read inboxes directly over IMAP.
+  3. **SMS** — LAST RESORT. It depends on a physical handset, carrier delivery, and app forwarding, any of which can silently drop the code. Never choose SMS when the screen also offers an authenticator or email option.
+  Push-approval ("tap Yes in the app") and passkeys/biometrics cannot be automated — treat them as unavailable and switch to another offered method.
+- **Authenticator app code (TOTP)** → `browser(action="fill_totp_code", ref="...", service="<name>")` (or `url=`). It generates the 6-digit code server-side from the stored seed and fills it without exposing the value — instant, nothing to wait for. If it reports that no seed is stored, that service is not on authenticator yet: fall back to email/SMS for this login, then upgrade it (next bullet).
+- **Upgrade services off SMS whenever you get the chance.** When you set up 2FA on a new account, choose "authenticator app", and save the displayed seed / `otpauth://` URI with `save_totp_secret(service=..., secret=...)` before finishing — never choose SMS during setup. When you successfully log in to an existing account that is still on SMS, go to its security settings, switch it to an authenticator app, and save the seed the same way. Do this without asking; it permanently removes that service's dependence on the phone. If the settings flow turns out to be impossible, just continue with the existing method — do not get stuck on the upgrade.
+- **SMS code** → `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` (default source=sms; the Android app forwards and enters it without exposing it). Forwarding only works for codes sent to the phone that runs the Dan app with SMS forwarding ON — a code sent to anyone else's phone number can never be auto-forwarded, so confirm the destination number is the registered device's before relying on it. If nothing arrives, the SMS may never have reached the handset at all (carrier/sender block), which no amount of retrying fixes — say so plainly instead of resending repeatedly, and look for an authenticator or email option on the page.
 - **Email code** (a code mailed to an inbox, e.g. a Gmail address) → you CAN read email inboxes directly via IMAP. Call `browser(action="wait_for_otp_from_app", source="email", email_address="<the inbox the code was sent to>", ref="...")` FIRST, before deciding the auth method — if the inbox is enabled it auto-reads the code; if not, the tool itself returns one-time setup guidance (`needs_app_password`) to relay to the user, then retry. NEVER claim you cannot read email codes, and NEVER switch to phone/SMS auth just to avoid email verification. Asking the user to read a code manually is a last resort (tool unusable, or no code within the timeout).
+- **One-time LINK instead of a code** (e.g. "Tap to reset your Instagram password: https://ig.me/...", magic sign-in links) → `browser(action="wait_for_link_from_app")` (default source=sms; add `source="email", email_address="..."` for a mailed link). It waits for the forwarded message, extracts the URL, and opens it in the SAME browser page — no `ref` needed. These links are single-use and expire fast, so call it BEFORE triggering the send if possible, and never ask the user to tap the link on their phone (tapping it there burns it).
 - When the user sends an OTP manually, inspect the still-open page first and enter it into the existing challenge. If the page is no longer usable, explain that before requesting a new code.
 - **CAPTCHA** (reCAPTCHA v2/v3/Enterprise, hCaptcha, Cloudflare Turnstile, or a distorted-text image captcha on a form / login page) → you CAN solve these yourself. Call `browser(action="solve_captcha")` BEFORE clicking submit/login — it detects every widget on the page, solves it via 2captcha, and injects the token (then click submit/login). The 2captcha API key is already configured server-side: NEVER ask the user for a 2captcha API key, and NEVER claim captcha solving is unavailable or unconfigured. Asking the user to click or solve a captcha for you is a last resort, allowed only after `solve_captcha` has actually been called and returned an error.
 - Never print, log, or persist OTP values beyond the immediate authentication step."""
@@ -1543,6 +1701,15 @@ def _resolve_claude_cli() -> tuple[Optional[str], Optional[str]]:
     return claude_path, None
 
 
+def _notify_achievement_poller() -> None:
+    """ターン完了を「今日やったこと」ポーラーに知らせて判定を前倒しする (失敗は無視)。"""
+    try:
+        from app.services.achievement_poller import notify_activity
+        notify_activity()
+    except Exception:
+        pass
+
+
 def run_oneshot_cli(
     prompt: str,
     model: str = "haiku",
@@ -1566,8 +1733,11 @@ def run_oneshot_cli(
         return None
 
     cmd = [claude_cmd, cli_js] if cli_js else [claude_cmd]
+    # Windows のコマンドライン上限 (約32K) を超える長いプロンプトは stdin で渡す
+    # (`claude -p` は引数が無ければ stdin をプロンプトとして読む)。
+    use_stdin = len(prompt) > 16000
+    cmd.extend(["-p"] if use_stdin else ["-p", prompt])
     cmd.extend([
-        "-p", prompt,
         "--output-format", "text",
         "--model", model,
         "--dangerously-skip-permissions",
@@ -1584,7 +1754,7 @@ def run_oneshot_cli(
     try:
         proc = subprocess.run(
             cmd,
-            input="",
+            input=prompt if use_stdin else "",
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1615,17 +1785,56 @@ _ALLOWED_CLI_MODELS = {"opus", "sonnet", "haiku", "fable"}
 _room_model_cache: Dict[str, str] = {}
 
 
+def _dotenv_cli_model() -> str:
+    """プロジェクト .env の DAN_CLI_MODEL を読む（プロセス環境に無い時の既定）。
+
+    watchdog 経由の自動再起動はユーザー環境変数を引き継がないため、
+    .env を正とする (DAN_STREAMING_INPUT と同じ理由)。毎ターン1回の小さな
+    ファイル読みなのでキャッシュしない (= 再起動なしで切替が効く)。
+    """
+    try:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("DAN_CLI_MODEL="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _apply_fable_quota_guard(model: str) -> str:
+    """Fable 専用週次枠が閾値超なら opus に退避する (usage_guard 参照)。"""
+    if model != "fable":
+        return model
+    try:
+        from app.agent.usage_guard import fable_quota_exhausted
+        if fable_quota_exhausted():
+            return "opus"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("fable quota guard failed (keeping fable): %s", e)
+    return model
+
+
 def _resolve_cli_model(room_id: Optional[str] = None) -> str:
     """CLI を起動するモデル名を解決する。
 
     解決順（上が優先）:
       1. ルーム単位の選択（projects.metadata.model を room_id で引く）
-      2. `DAN_CLI_MODEL` 環境変数（全ルーム一括切替用）
+      2. `DAN_CLI_MODEL` 環境変数 → 無ければプロジェクト .env の同名キー
+         （全ルーム一括切替用）
       3. "opus"（デフォルト）
+
+    どの経路でも結果が "fable" の場合は Fable 専用週次枠のガードを通し、
+    枠が閾値 (DAN_FABLE_FALLBACK_PCT, 既定90%) 以上なら "opus" に退避する。
 
     許可リスト外の値は無視して次の手段にフォールバックする（--model への
     不正な引数混入を防ぐ安全弁）。
     """
+    return _apply_fable_quota_guard(_resolve_cli_model_raw(room_id))
+
+
+def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
     # 1. ルーム単位の選択（新チャット作成時に保存された値）
     if room_id:
         cached = _room_model_cache.get(room_id)
@@ -1648,10 +1857,13 @@ def _resolve_cli_model(room_id: Optional[str] = None) -> str:
         except Exception as e:
             logger.debug("resolve model failed for room %s: %s", room_id, e)
 
-    # 2. 環境変数による全ルーム一括切替
+    # 2. 環境変数 → .env による全ルーム一括切替
     env = (os.environ.get("DAN_CLI_MODEL") or "").strip().lower()
     if env in _ALLOWED_CLI_MODELS:
         return env
+    dotenv = _dotenv_cli_model()
+    if dotenv in _ALLOWED_CLI_MODELS:
+        return dotenv
 
     # 3. デフォルト
     return "opus"
@@ -2320,6 +2532,12 @@ def _run_cli_in_thread(
             elif is_error and _is_thinking_desync_error(result_text):
                 text = _recovery_message("thinking_desync", _detect_user_lang(content))
                 _clear_cli_session(room_id)
+            elif not is_error and _has_tool_call_leak(text):
+                # 成功扱いに化けた汚染ターン（「court」リーク）。回答の保存は
+                # そのまま行い、セッションだけ手放して次ターンを新規+reseedに
+                # する（放置すると次ターンが漏れた書式を真似して再発する）。
+                _clear_cli_session(room_id)
+                _cli_debug(f"tool-call text leak on successful turn; session cleared (room {room_id[:8]})")
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
@@ -2373,7 +2591,8 @@ def _run_cli_in_thread(
                 "turns": result_data.get("num_turns", 0),
                 "duration_ms": result_data.get("duration_ms", 0),
                 "is_error": is_error,
-                "cli_saved": cli_saved,
+                "cli_saved": bool(cli_saved),
+                "saved_message_id": cli_saved if isinstance(cli_saved, str) else None,
                 "turn_id": turn_id,
             })
             if project_id:
@@ -2623,6 +2842,40 @@ async def _process_via_streaming_session(
 
     from app.agent.streaming_session import get_session
     existing = get_session(room_id)
+    # 履歴肥大ガード（one-shot 経路 2213行付近と同じ掃除をこの常駐経路にも適用）。
+    # 常駐化(2026-07)以降ここが素通りだったため transcript が無制限に育ち
+    # （電管ルームで実測 24MB / 画像56枚 ≒ 閾値1.5MBの16倍）、巨大 prefill で
+    # モデルが崩れてツール呼び出しがテキスト化する（「court」リーク）主因だった。
+    if existing is not None and existing.is_alive():
+        # 稼働中プロセスの transcript jsonl は書き換えできない（CLIが追記中）。
+        # ターン開始前の境界で閾値超過を検知したらプロセスごと畳み、
+        # 新規セッション + DB reseed に切り替える。会話は chat_messages に
+        # あるので文脈は失われない。ターン実行中はスキップ（次の境界で拾う）。
+        if (
+            not existing.is_turn_active()
+            and resume_session_id
+            and _transcript_exceeds_limit(resume_session_id)
+        ):
+            _cli_debug(
+                f"[STREAMING] transcript over limit; recycling live session (room {room_id[:8]})"
+            )
+            try:
+                existing.stop()
+            except Exception:
+                pass
+            _clear_cli_session(room_id)
+            resume_session_id = None
+    elif resume_session_id:
+        # これから --resume する transcript は、先に古いスクリーンショットを
+        # 間引く（画像が肥大の主因）。それでも巨大なら resume を諦めて
+        # DB reseed の新規セッションで開始する。
+        _compact_transcript_images(resume_session_id)
+        if _transcript_exceeds_limit(resume_session_id):
+            _cli_debug(
+                f"[STREAMING] transcript over limit; dropping resume and reseeding (room {room_id[:8]})"
+            )
+            _clear_cli_session(room_id)
+            resume_session_id = None
     session_is_fresh = existing is None or not existing.is_alive()
     session = get_or_create_session(room_id, build_cmd, env, run_cwd)
     # (Re)install the autonomous-turn receiver with this call's freshest
@@ -2850,6 +3103,11 @@ async def _process_via_streaming_session(
                         session._user_cancelled = False
                     except Exception:
                         pass
+                # 追い連絡の割り込みで畳んだ中間ターンが無言だった場合は失敗ではない。
+                # テンプレ文言（応答テキストが空でした）を入れず、作業ログ(blocks)が
+                # あれば空本文＋ログだけ保存、何も無ければ保存自体スキップする
+                # （ユーザーキャンセルのEscパリティと同じ扱い）。
+                empty_continuation = False
                 if not text.strip():
                     if user_cancelled and not state["turn_blocks"]:
                         # Terminal-Esc parity: a user-cancelled turn that produced
@@ -2868,7 +3126,12 @@ async def _process_via_streaming_session(
                         state["turn_start"] = None
                         state["turn_id"] = None
                         return
-                    text = "（応答テキストが空でした。もう一度お試しください。）"
+                    # 注: 割り込み終了の result は CLI が is_error=True を付けてくる
+                    # （実測 2026-08-31）。continuation ならエラー扱いにしない。
+                    if continuation and not state.get("loop_detected"):
+                        empty_continuation = True
+                    else:
+                        text = "（応答テキストが空でした。もう一度お試しください。）"
                 # Replace the CLI's cryptic parse-error result with a friendly
                 # note. The session is dropped + reseeded afterwards (see run()),
                 # so the user can just resend and continue with full context.
@@ -2879,16 +3142,21 @@ async def _process_via_streaming_session(
                     text = _recovery_message("parse_error", _detect_user_lang(content))
                 elif is_error and _is_thinking_desync_error(result_text):
                     text = _recovery_message("thinking_desync", _detect_user_lang(content))
+                if empty_continuation:
+                    # 割り込みによるターン終了は失敗ではない。下流（SSE/モバイル）が
+                    # エラー表示しないよう正規化する。
+                    is_error = False
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
-                if not skip_save:
+                if not skip_save and not (empty_continuation and not state["turn_blocks"]):
                     cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id)
                 _register_streaming_artifacts()
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
-                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
+                _notify_achievement_poller()
+                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": bool(cli_saved), "saved_message_id": cli_saved if isinstance(cli_saved, str) else None, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
                 state["final_text_parts"] = []
@@ -2925,8 +3193,9 @@ async def _process_via_streaming_session(
                 text = (partial + "\n\n" + note) if partial else note
                 t_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 t_id = state["turn_id"] or str(uuid.uuid4())
+                hang_saved = False
                 if not skip_save:
-                    _save_ai_message_sync(
+                    hang_saved = _save_ai_message_sync(
                         room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"],
                         blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id,
                     )
@@ -2939,7 +3208,9 @@ async def _process_via_streaming_session(
                     _update_run_sync(run_id, state="failed")
                 _emit({
                     "type": "result", "text": text, "session_id": state["session_id"],
-                    "is_error": True, "cli_saved": not skip_save, "created_at": t_start,
+                    "is_error": True, "cli_saved": bool(hang_saved),
+                    "saved_message_id": hang_saved if isinstance(hang_saved, str) else None,
+                    "created_at": t_start,
                     "continuation": False, "turn_id": t_id,
                 })
                 state["written_file_paths"] = []
@@ -2968,6 +3239,19 @@ async def _process_via_streaming_session(
                 except Exception:
                     pass
                 _cli_debug(f"[STREAMING] parse-error poisoned session cleared for room {room_id[:8]}")
+            elif res and not res.get("is_error") and _has_tool_call_leak(res.get("result") or ""):
+                # 成功扱いに化けた汚染ターン: ツール呼び出しの合図が化けて
+                # （「court」等）、呼び出し本体がテキストのまま本文に残った。
+                # エラーにならないので上の復旧網に掛からず、放置すると次ターン
+                # 以降が漏れた書式を真似して再発し続ける。回答は sink が保存済み
+                # なので、ここではセッションだけ手放す（次ターンは新規+DB reseed。
+                # reseed は汚染行を除外するので持ち越さない）。
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                _cli_debug(f"[STREAMING] tool-call text leak on successful turn; session cleared for room {room_id[:8]}")
             elif res and res.get("subtype") == "cancelled_before_start":
                 # ユーザーが送信直後にキャンセルし、ターンが始まる前に握りつぶした。
                 # 正常なキャンセルであって「セッション即死」ではないので、下の
@@ -3021,11 +3305,14 @@ async def _process_via_streaming_session(
                     "前回の会話の復元に失敗したため、セッションを作り直しました。"
                     "お手数ですが、もう一度同じ内容を送ってください。"
                 )
+                recreate_saved = False
                 if not skip_save:
-                    _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()))
+                    recreate_saved = _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()))
                 _emit({
                     "type": "result", "text": text, "session_id": None,
-                    "is_error": True, "cli_saved": not skip_save, "continuation": False,
+                    "is_error": True, "cli_saved": bool(recreate_saved),
+                    "saved_message_id": recreate_saved if isinstance(recreate_saved, str) else None,
+                    "continuation": False,
                 })
         except Exception as e:  # noqa: BLE001
             _emit({"type": "error", "message": str(e)})

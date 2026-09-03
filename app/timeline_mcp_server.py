@@ -129,7 +129,11 @@ async def list_tools() -> list[types.Tool]:
               {"clip_id": _STR, "text": _STR, "style": {"type": "object"}}, ["clip_id"]),
         _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す（CTAアート・ロゴ風カード等）。日本語文字を入れる場合はpromptに正確な文字列を指定。aspect_ratioは 9:16 等。",
               {"prompt": _STR, "aspect_ratio": _STR}, ["prompt"]),
-        _tool("generate_video", "Generate a short Higgsfield video and register it as an editable video asset. Use the returned asset_id with append_clip, insert_clip, or add_overlay.",
+        _tool("generate_video", "Higgsfieldで短尺動画を生成し編集可能なアセットとして登録、asset_idを返す。"
+              "配置は append_clip / insert_clip / add_overlay で。model: gemini_omni(最安24cr/8s・2〜10秒・音有無不定・参照不可) / "
+              "seedance_2_5(最高品質65cr/10s・5/10/15/30秒・音声付き・--image/--video参照可) / "
+              "seedance_2_0(45cr/10s・〜15秒・参照可) / kling3_0(20cr/10s・5/10秒・start-image可)。"
+              "既存クリップの作り直しでは、そのクリップが何を描いているか（元プロンプトや視聴内容）を必ずプロンプトに引き継ぐこと。",
               {"prompt": _STR, "aspect_ratio": _STR, "duration": _NUM, "model": _STR,
                "reference_path": _STR, "resolution": _STR}, ["prompt"]),
         _tool("import_image", "実在の画像を部屋の素材として取り込み asset_id を返す。url にはWeb上の画像URL"
@@ -179,8 +183,12 @@ async def _dispatch(name: str, a: dict) -> list:
         for aid, a in assets.items():
             meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
             dur = meta.get("duration")
+            # 生成素材は元プロンプトを見せる — 作り直し指示の時に「そのクリップが
+            # 何を描いているか」を引き継げる（欠落すると文脈が失われる: 2026-08-22実発生）
+            gp = str(meta.get("prompt") or "").replace("\n", " ")
             rows.append(f"{aid}: {a.get('filename')} kind={a.get('kind')}"
-                        + (f" duration={dur}s" if dur else ""))
+                        + (f" duration={dur}s" if dur else "")
+                        + (f" 生成元プロンプト=「{gp[:120]}」" if gp else ""))
         return [types.TextContent(type="text", text="\n".join(rows) or "(no assets)")]
 
     if name == "timeline_transcript":
@@ -397,15 +405,31 @@ def _load_analyses(assets: dict) -> dict:
     return out
 
 
+def _higgsfield_cli() -> str:
+    """PATHにnpm binが無い環境(タスクスケジューラ起動の子プロセス)でも実体を解決する。"""
+    found = shutil.which("higgsfield")
+    if found:
+        return found
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        for name in ("higgsfield.cmd", "higgsfield"):
+            cand = Path(appdata) / "npm" / name
+            if cand.exists():
+                return str(cand)
+    return "higgsfield"
+
+
 def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
-    if not prompt.strip():
+    prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
+    if not prompt:
         return {"ok": False, "error": "empty prompt"}
     try:
         r = subprocess.run(
-            ["higgsfield", "generate", "create", "gpt_image_2",
+            [_higgsfield_cli(), "generate", "create", "gpt_image_2",
              "--prompt", prompt, "--aspect_ratio", aspect,
              "--wait", "--wait-timeout", "10m", "--json"],
-            capture_output=True, text=True, timeout=660, shell=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=660, shell=True,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "image generation timeout (11m)"}
@@ -448,9 +472,10 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     It intentionally returns only an asset. Placement, trimming, cropping, and
     approval remain normal timeline operations instead of provider side-effects.
     """
-    if not prompt.strip():
+    prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
+    if not prompt:
         return {"ok": False, "error": "empty prompt"}
-    supported_models = {"seedance_2_0", "kling3_0"}
+    supported_models = {"seedance_2_5", "seedance_2_0", "kling3_0", "gemini_omni"}
     if model not in supported_models:
         return {"ok": False, "error": f"unsupported Higgsfield video model: {model}"}
     if aspect not in {"16:9", "9:16", "4:3", "3:4", "1:1", "21:9", "auto"}:
@@ -458,19 +483,42 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     if resolution not in {"480p", "720p", "1080p", "4k"}:
         return {"ok": False, "error": f"unsupported resolution: {resolution}"}
 
-    clip_duration = max(1, min(15, int(round(duration))))
-    cmd = ["higgsfield", "generate", "create", model, "--prompt", prompt,
-           "--aspect_ratio", aspect, "--duration", str(clip_duration),
-           "--wait", "--wait-timeout", "20m", "--json"]
+    # モデルごとの尺制約（実測: omniは11秒で `duration <= 10` の事前拒否）
+    want = max(1, int(round(duration)))
+    if model == "seedance_2_5":
+        clip_duration = next((d for d in (5, 10, 15, 30) if d >= want), 30)
+    elif model == "kling3_0":
+        clip_duration = 5 if want <= 5 else 10
+    elif model == "gemini_omni":
+        clip_duration = max(2, min(10, want))
+    else:
+        clip_duration = min(15, want)
+    cmd = [_higgsfield_cli(), "generate", "create", model, "--prompt", prompt,
+           "--duration", str(clip_duration), "--wait", "--wait-timeout", "20m", "--json"]
+    if model == "seedance_2_5":
+        # width/heightだけだと既定aspect(16:9)がサーバー側で勝つ — 両方渡す(実測)
+        if aspect not in {"16:9", "9:16", "1:1"}:
+            return {"ok": False, "error": "seedance_2_5 supports 16:9, 9:16, or 1:1 here"}
+        dims = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}[aspect]
+        cmd += ["--width", str(dims[0]), "--height", str(dims[1]), "--aspect_ratio", aspect,
+                "--resolution", "720p", "--generate_audio", "true"]
+    elif model == "gemini_omni":
+        if aspect not in {"16:9", "9:16"}:
+            return {"ok": False, "error": "gemini_omni supports only 16:9 or 9:16"}
+        cmd += ["--aspect_ratio", aspect]
+    else:
+        cmd += ["--aspect_ratio", aspect]
     if model == "seedance_2_0":
         cmd += ["--resolution", resolution]
-    elif aspect not in {"16:9", "9:16", "1:1"}:
+    elif model == "kling3_0" and aspect not in {"16:9", "9:16", "1:1"}:
         return {"ok": False, "error": "kling3_0 supports only 16:9, 9:16, or 1:1"}
     if reference_path:
         ref = Path(reference_path).expanduser()
         if not ref.is_file():
             return {"ok": False, "error": f"reference file not found: {reference_path}"}
         is_video = ref.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+        if model == "gemini_omni":
+            return {"ok": False, "error": "gemini_omni reference is not supported here; use seedance_2_5/2_0"}
         if model == "kling3_0":
             if is_video:
                 return {"ok": False, "error": "kling3_0 reference video is not supported here; use seedance_2_0"}
@@ -479,7 +527,7 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
             cmd += ["--video" if is_video else "--image", str(ref)]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=1260,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1260,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
@@ -713,6 +761,23 @@ def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -
                 pass
 
 
+def _media_dims(path: Path) -> dict:
+    """実寸(width/height)を返す。不変条件: 登録される素材は必ず実寸を持つ
+    （クリップの形状保持計算の基準。欠落するとキャンバス切替で歪む）。"""
+    try:
+        r = subprocess.run(
+            [_ffprobe(), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        s = (json.loads(r.stdout or "{}").get("streams") or [{}])[0]
+        w, h = int(s.get("width") or 0), int(s.get("height") or 0)
+        return {"width": w, "height": h} if w and h else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
                           filename_hint: str = "") -> None:
     with td.ContentsLock(ROOM_ID):
@@ -728,7 +793,7 @@ def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
             "local_path": str(dest.resolve()), "filename": filename_hint or dest.name,
             "proxy_path": None, "proxy_url": None,
             "thumbnail_path": None, "thumbnail_url": None,
-            "status": "proxy_ready", "metadata": {},
+            "status": "proxy_ready", "metadata": _media_dims(dest),
             "created_at": now, "updated_at": now,
             "generated_by": f"agent:{JOB_ID}",
         })
@@ -748,7 +813,8 @@ def _register_media_asset(draft: dict, aid: str, dest: Path, kind: str,
             "original_uri": str(dest.resolve()), "local_path": str(dest.resolve()),
             "filename": filename_hint or dest.name, "proxy_path": None, "proxy_url": None,
             "thumbnail_path": None, "thumbnail_url": None, "status": "ready",
-            "metadata": metadata or {}, "created_at": now, "updated_at": now,
+            "metadata": {**(_media_dims(dest) if kind == "video" else {}), **(metadata or {})},
+            "created_at": now, "updated_at": now,
             "generated_by": f"agent:{JOB_ID}",
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

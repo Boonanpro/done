@@ -59,6 +59,9 @@ class TokenResponse(BaseModel):
     """JWT token response (Bearer token - for backwards compatibility)"""
     access_token: str
     token_type: str = "bearer"
+    # Cookieを使えないクライアント（APK）が長期セッションを維持するための
+    # リフレッシュトークン。Webはこのフィールドを無視してCookieの方を使う。
+    refresh_token: Optional[str] = None
 
 
 class TokenPairResponse(BaseModel):
@@ -71,7 +74,8 @@ class TokenPairResponse(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     """Refresh token request (when not using cookies)"""
-    refresh_token: str
+    # 省略時はCookieのリフレッシュトークンにフォールバックする（422にしない）
+    refresh_token: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -335,6 +339,8 @@ class ProposalStatus(str, Enum):
     APPROVED = "approved"    # 承認済み
     REJECTED = "rejected"    # 却下済み
     EXPIRED = "expired"      # 期限切れ
+    SENT = "sent"            # 送信済み（outbound）
+    SENDING = "sending"      # 送信中ロック（outbound: ダンが手動送信作業中・操作不可）
 
 
 class ProposalType(str, Enum):
@@ -345,6 +351,7 @@ class ProposalType(str, Enum):
     REMINDER = "reminder"        # リマインダー
     OBSERVATION = "observation"  # 観察者の事後報告
     NOTIFY = "notify"            # 返信不要だが知らせるべき重要情報(FYI通知)
+    OUTBOUND = "outbound"        # 外部宛メッセージの文面カード（compose_message）
 
 
 class ProposalCreateRequest(BaseModel):

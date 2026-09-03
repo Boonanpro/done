@@ -27,12 +27,12 @@ _executor_shutdown = threading.Event()
 _executor_page_proxy = None
 _executor_browser_alive = threading.Event()  # ブラウザ生存フラグ
 _executor_start_error: Optional[str] = None
+_executor_cdp_port: Optional[int] = None
 
-_EXECUTOR_CDP_ENDPOINT = "http://127.0.0.1:9223"
-_EXECUTOR_CDP_ARGS = [
-    "--remote-debugging-address=127.0.0.1",
-    "--remote-debugging-port=9223",
-]
+# 部屋（DAN_SESSION_ID）が無いレガシー実行（scripts/tests）だけが使う固定ポート。
+# 部屋付きプロセスは部屋ごとに動的ポートを割り当てるので、ここには来ない。
+_LEGACY_CDP_PORT = 9223
+_PORT_FILE_NAME = "dan_cdp_port.txt"
 _EXECUTOR_LOCK_NAMES = (
     "lockfile",
     "SingletonLock",
@@ -42,8 +42,176 @@ _EXECUTOR_LOCK_NAMES = (
 )
 
 
-def _executor_profile_dir() -> Path:
+def _browser_room_id() -> str:
+    """このプロセスが担当する部屋。MCPサーバは部屋ごとに別プロセスで
+    DAN_SESSION_ID を env に持って起動される（cli_runner._build_mcp_config）。"""
+    return (os.getenv("DAN_BROWSER_ROOM") or os.getenv("DAN_SESSION_ID") or "").strip()
+
+
+def _safe_room_slug(room_id: str) -> str:
+    import hashlib
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "", room_id)[:40]
+    digest = hashlib.sha1(room_id.encode("utf-8")).hexdigest()[:8]
+    return f"{slug}-{digest}" if slug else digest
+
+
+def _master_profile_dir() -> Path:
     return Path.home() / ".ai_secretary" / "browser_data"
+
+
+def _executor_profile_dir() -> Path:
+    # 部屋ごとに独立プロファイル。`browser_data--<room>` の兄弟ディレクトリにする
+    # （browser_data の下に掘ると、レガシー復旧のパス一致が全部屋を巻き込むため）。
+    room = _browser_room_id()
+    if room:
+        return Path.home() / ".ai_secretary" / f"browser_data--{_safe_room_slug(room)}"
+    return _master_profile_dir()
+
+
+def _executor_port_file() -> Path:
+    return _executor_profile_dir() / _PORT_FILE_NAME
+
+
+def _port_listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _save_executor_cdp_port(port: int) -> None:
+    try:
+        port_file = _executor_port_file()
+        port_file.parent.mkdir(parents=True, exist_ok=True)
+        port_file.write_text(str(port), encoding="utf-8")
+    except OSError as exc:
+        _write_browser_recovery_log("port_file_write_failed", port=port, error=str(exc))
+
+
+def _resolve_executor_cdp_port() -> int:
+    """この部屋のCDPポートを決める。プロセス再起動後も同じ部屋のブラウザに
+    再接続できるよう、選んだポートはプロファイル内のファイルに永続化する。"""
+    global _executor_cdp_port
+    if _executor_cdp_port is not None:
+        return _executor_cdp_port
+    if not _browser_room_id():
+        _executor_cdp_port = _LEGACY_CDP_PORT
+        return _executor_cdp_port
+    try:
+        saved = int(_executor_port_file().read_text(encoding="utf-8").strip())
+        if 1024 <= saved <= 65535:
+            _executor_cdp_port = saved
+            return _executor_cdp_port
+    except (OSError, ValueError):
+        pass
+    _executor_cdp_port = _pick_free_port()
+    _save_executor_cdp_port(_executor_cdp_port)
+    return _executor_cdp_port
+
+
+def _reassign_executor_cdp_port() -> int:
+    """保存済みポートが無関係のプロセスに取られていた場合に新しい空きポートへ移す。"""
+    global _executor_cdp_port
+    _executor_cdp_port = _pick_free_port()
+    _save_executor_cdp_port(_executor_cdp_port)
+    return _executor_cdp_port
+
+
+def _executor_window_position() -> tuple[int, int]:
+    """部屋ごとにウィンドウ位置をずらし、複数部屋のヘッドフルChromeが
+    完全に重なって見分けられなくなるのを避ける。"""
+    import hashlib
+
+    room = _browser_room_id()
+    if not room:
+        return (40, 40)
+    h = int(hashlib.sha1(room.encode("utf-8")).hexdigest()[:8], 16)
+    return (40 + (h % 5) * 90, 40 + ((h // 5) % 4) * 70)
+
+
+# シードでCookieファイルをコピーできなかった時に立つ。起動後にマスターの
+# CDP経由でCookieを注入する（マスター稼働中はファイルが排他ロックされるため）。
+_pending_cookie_import = False
+
+
+def _seed_profile_from_master(profile_dir: Path) -> None:
+    """部屋プロファイル初回作成時にマスタープロファイルからログイン状態を引き継ぐ。
+
+    全コピーはキャッシュ込みで数百MB級×部屋数に膨らむため、ログインに効く
+    ものだけ選択コピーする。Cookie の復号には "Local State" 内のキーが必須。
+    ベストエフォート：マスターのブラウザが起動中でロックされたファイルは
+    スキップし、失敗しても（再ログインが必要になるだけなので）起動は続行する。
+    """
+    import shutil
+
+    if profile_dir.exists():
+        return
+    master = _master_profile_dir()
+    if not master.exists() or profile_dir == master:
+        return
+
+    seed_files = [
+        "Local State",                # Cookie暗号鍵（無いとCookieが復号できない）
+        "Default/Preferences",
+        "Default/Secure Preferences",
+        "Default/Network/Cookies",
+        "Default/Network/Cookies-journal",
+        "Default/Login Data",
+        "Default/Login Data-journal",
+        "Default/Web Data",
+        "Default/Web Data-journal",
+    ]
+    seed_dirs = [
+        "Default/Local Storage",      # localStorageにセッションを持つサイト用
+        "Default/Session Storage",
+    ]
+
+    global _pending_cookie_import
+    copied: list[str] = []
+    try:
+        for rel in seed_files:
+            src = master / rel
+            if not src.is_file():
+                continue
+            dst = profile_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+                copied.append(rel)
+            except OSError:
+                # 稼働中のマスターに排他ロックされている。Cookieは起動後に
+                # マスターのCDPから注入してリカバーする。
+                if rel == "Default/Network/Cookies":
+                    _pending_cookie_import = True
+        for rel in seed_dirs:
+            src = master / rel
+            if not src.is_dir():
+                continue
+
+            def _copy(s: str, d: str) -> None:
+                try:
+                    shutil.copy2(s, d)
+                except OSError:
+                    pass
+
+            shutil.copytree(src, profile_dir / rel, copy_function=_copy, dirs_exist_ok=True)
+            copied.append(rel)
+        _write_browser_recovery_log(
+            "profile_seeded_from_master", profile=str(profile_dir), copied=copied
+        )
+    except Exception as exc:
+        _write_browser_recovery_log(
+            "profile_seed_failed", profile=str(profile_dir), copied=copied, error=str(exc)
+        )
 
 
 def _encode_browser_screenshot(png_bytes: bytes) -> tuple[str, str]:
@@ -103,6 +271,42 @@ def _encode_browser_screenshot(png_bytes: bytes) -> tuple[str, str]:
         return base64.b64encode(png_bytes).decode("utf-8"), "image/png"
 
 
+# Ratio between the screenshot handed to the model and real CSS pixels, kept so
+# coordinate-based actions can convert without the caller doing arithmetic.
+# 1.0 until the first screenshot is taken.
+_last_shot_scale: float = 1.0
+
+
+def _measure_shot_scale(base64_str: str, viewport: Optional[dict]) -> float:
+    """image_width / css_width for the screenshot just produced."""
+    global _last_shot_scale
+    try:
+        import base64 as _b64
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(_b64.b64decode(base64_str))) as img:
+            width = img.width
+        css_w = float((viewport or {}).get("w") or 0)
+        if width and css_w:
+            _last_shot_scale = width / css_w
+    except Exception:
+        pass
+    return _last_shot_scale
+
+
+def get_last_shot_scale() -> float:
+    """Scale of the most recent screenshot (image px per CSS px)."""
+    return _last_shot_scale
+
+
+def image_to_css(x: float, y: float) -> tuple[float, float]:
+    """Convert a coordinate read off the screenshot into a clickable CSS point."""
+    s = _last_shot_scale or 1.0
+    return x / s, y / s
+
+
 def _write_browser_recovery_log(event: str, **details: Any) -> None:
     """Persist browser recovery diagnostics without relying on MCP stdout."""
     try:
@@ -119,26 +323,27 @@ def _write_browser_recovery_log(event: str, **details: Any) -> None:
         logger.exception("[EXECUTOR_BROWSER] Failed to write recovery log")
 
 
-def _is_executor_cdp_available() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 9223), timeout=0.5):
-            return True
-    except OSError:
-        return False
+def _is_executor_cdp_available(port: Optional[int] = None) -> bool:
+    return _port_listening(port if port is not None else _resolve_executor_cdp_port())
 
 
-def _list_dedicated_browser_processes() -> tuple[list[dict[str, Any]], bool]:
+def _list_dedicated_browser_processes(
+    profile_dir: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], bool]:
     """
     List only browser processes that explicitly use DAN's dedicated profile.
 
     Child processes are terminated through taskkill /T after the verified root
     process is selected. Regular Chrome uses a different profile and is never
     returned here.
+
+    ``profile_dir`` defaults to this process's room. The idle reaper runs inside
+    dan-core, which belongs to no room, so it passes the profile explicitly.
     """
     if os.name != "nt":
         return [], False
 
-    profile_marker = str(_executor_profile_dir()).lower().replace("/", "\\")
+    profile_marker = str(profile_dir or _executor_profile_dir()).lower().replace("/", "\\")
     command = (
         "Get-CimInstance Win32_Process | "
         "Where-Object { $_.Name -match '^(chrome|chromium|msedge|headless_shell)\\.exe$' } | "
@@ -163,7 +368,17 @@ def _list_dedicated_browser_processes() -> tuple[list[dict[str, Any]], bool]:
         matches = []
         for row in rows:
             command_line = str(row.get("CommandLine") or "").lower().replace("/", "\\")
-            if profile_marker in command_line:
+            # 前方一致の巻き込み防止: `browser_data` は `browser_data--<room>` の
+            # 接頭辞なので、マーカーの直後がパス継続文字でないことまで確認する。
+            idx = command_line.find(profile_marker)
+            is_exact = False
+            while idx != -1:
+                end = idx + len(profile_marker)
+                if end == len(command_line) or command_line[end] in ('"', "'", " "):
+                    is_exact = True
+                    break
+                idx = command_line.find(profile_marker, idx + 1)
+            if is_exact:
                 matches.append({
                     "pid": int(row["ProcessId"]),
                     "parent_pid": int(row.get("ParentProcessId") or 0),
@@ -265,6 +480,152 @@ def _recover_stale_executor_profile() -> bool:
     return bool(terminated or removed_locks)
 
 
+def _chrome_executable_path(playwright) -> str:
+    """起動する実行ファイルを決める。実Chrome優先（H.264/AAC同梱）、無ければ同梱Chromium。"""
+    channel = os.environ.get("DAN_BROWSER_CHANNEL", "chrome")
+    if channel == "chrome":
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+    return playwright.chromium.executable_path
+
+
+def _spawn_detached_browser(
+    executable: str,
+    user_data_dir: str,
+    cdp_port: int,
+    window_x: int,
+    window_y: int,
+) -> None:
+    """
+    ブラウザを「このプロセスの子」にせず独立プロセスとして起動する。
+
+    Playwright に起動させると、親プロセス（部屋ごとのMCPサーバ）が終了した
+    瞬間にブラウザも道連れで殺される。ダンの常駐セッションは transcript 肥大
+    ・パースエラー・ハングのたびに畳まれるため、そのたびにログイン途中の
+    ページやOTP入力欄ごとブラウザが消え、ユーザーが渡したコードが無駄になって
+    いた。detached で起動して CDP で外から繋ぐ形にすると、ターンをまたいでも
+    同じブラウザ・同じタブが生き残る。
+    """
+    args = [
+        executable,
+        f"--remote-debugging-port={cdp_port}",
+        "--remote-debugging-address=127.0.0.1",
+        f"--user-data-dir={user_data_dir}",
+        "--disable-blink-features=AutomationControlled",
+        f"--window-position={window_x},{window_y}",
+        "--window-size=1440,900",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "about:blank",
+    ]
+    creationflags = 0
+    if os.name == "nt":
+        # DETACHED_PROCESS: 親が死んでも道連れにしない
+        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(
+        args,
+        creationflags=creationflags,
+        close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+async def _connect_detached_browser(playwright, cdp_port: int, timeout: float = 30.0):
+    """detached 起動したブラウザの CDP が開くまで待って接続する。"""
+    deadline = time.time() + timeout
+    last_exc: Optional[Exception] = None
+    while time.time() < deadline:
+        if _port_listening(cdp_port):
+            try:
+                return await playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{cdp_port}", timeout=5000
+                )
+            except Exception as exc:  # 起動直後は CDP がまだ応答しないことがある
+                last_exc = exc
+        await asyncio.sleep(0.25)
+    raise RuntimeError(
+        f"detached browser did not expose CDP on port {cdp_port} within {timeout}s"
+        + (f": {last_exc}" if last_exc else "")
+    )
+
+
+async def _fetch_master_cookies_raw() -> list[dict]:
+    """稼働中マスターブラウザから生CDPでCookie一覧を取得する。
+
+    Playwrightのconnect_over_cdpはブラウザ内の全ページへのアタッチを伴い、
+    ビジー状態のマスターではハングするため使わない（実測でtimeout）。
+    Storage.getCookiesはブラウザレベルの読み取りのみでタブに一切触れない。
+    """
+    import urllib.request
+
+    import websockets
+
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{_LEGACY_CDP_PORT}/json/version", timeout=3
+    ) as resp:
+        ws_url = json.loads(resp.read())["webSocketDebuggerUrl"]
+    async with websockets.connect(
+        ws_url, max_size=64 * 1024 * 1024, open_timeout=5, close_timeout=2
+    ) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+        while True:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if msg.get("id") == 1:
+                return msg.get("result", {}).get("cookies", [])
+
+
+def _cdp_cookie_to_playwright(cookie: dict) -> dict:
+    out = {
+        "name": cookie["name"],
+        "value": cookie["value"],
+        "domain": cookie["domain"],
+        "path": cookie.get("path", "/"),
+        "httpOnly": bool(cookie.get("httpOnly")),
+        "secure": bool(cookie.get("secure")),
+    }
+    expires = cookie.get("expires")
+    if isinstance(expires, (int, float)) and expires > 0:
+        out["expires"] = expires
+    if cookie.get("sameSite") in ("Strict", "Lax", "None"):
+        out["sameSite"] = cookie["sameSite"]
+    return out
+
+
+async def _import_master_cookies(context) -> None:
+    """稼働中マスターブラウザからCookieを取得して部屋コンテキストへ注入する。
+    失敗しても（再ログインが必要になるだけなので）起動は続行。"""
+    global _pending_cookie_import
+    if not _port_listening(_LEGACY_CDP_PORT):
+        _write_browser_recovery_log("cookie_import_skipped_master_offline")
+        _pending_cookie_import = False
+        return
+    try:
+        cookies = await _fetch_master_cookies_raw()
+        added = 0
+        for cookie in cookies:
+            try:
+                await context.add_cookies([_cdp_cookie_to_playwright(cookie)])
+                added += 1
+            except Exception:
+                continue  # 変換できない特殊Cookieはスキップ
+        _write_browser_recovery_log(
+            "cookie_import_from_master", total=len(cookies), added=added
+        )
+        _pending_cookie_import = False
+    except Exception as exc:
+        _write_browser_recovery_log("cookie_import_failed", error=str(exc))
+
+
 def _executor_thread_main():
     """Executor用Playwright専用スレッド"""
     # Windows用のProactorEventLoopを設定
@@ -307,33 +668,53 @@ async def _executor_worker():
         print("[EXECUTOR_BROWSER] Starting Playwright...")
         playwright = await async_playwright().start()
 
-        user_data_dir = str(_executor_profile_dir())
+        profile_dir = _executor_profile_dir()
+        _seed_profile_from_master(profile_dir)
+        user_data_dir = str(profile_dir)
         os.makedirs(user_data_dir, exist_ok=True)
 
-        try:
-            browser = await playwright.chromium.connect_over_cdp(
-                _EXECUTOR_CDP_ENDPOINT,
-                timeout=1000,
-            )
-            context = browser.contexts[0]
-            attached_to_existing_browser = True
-            print("[EXECUTOR_BROWSER] Reconnected to existing browser")
-        except Exception as connect_exc:
-            async def launch_persistent_context():
-                return await playwright.chromium.launch_persistent_context(
-                    user_data_dir=user_data_dir,
-                    headless=False,
-                    slow_mo=100,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        *_EXECUTOR_CDP_ARGS,
-                    ],
-                    viewport={"width": 1440, "height": 900},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        cdp_port = _resolve_executor_cdp_port()
+
+        # 再接続は「この部屋のポート」が実際に開いている時だけ試す。
+        # 以前は 9223 固定で、別部屋が立てたブラウザに相乗りしてタブを
+        # 奪い合っていた。ポートが部屋ごとに違う今、ここで繋がるのは
+        # 自室のブラウザだけ。
+        connect_exc: Optional[Exception] = None
+        if _port_listening(cdp_port):
+            try:
+                browser = await playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{cdp_port}",
+                    timeout=1000,
                 )
+                context = browser.contexts[0]
+                attached_to_existing_browser = True
+                print(f"[EXECUTOR_BROWSER] Reconnected to existing browser (port {cdp_port})")
+            except Exception as exc:
+                connect_exc = exc
+
+        if not attached_to_existing_browser:
+            if connect_exc is not None and _browser_room_id():
+                # ポートは開いているのにCDP接続できない＝無関係のプロセスが
+                # 使っている。この部屋のポートを取り直す。
+                cdp_port = _reassign_executor_cdp_port()
+                _write_browser_recovery_log("cdp_port_reassigned", port=cdp_port, error=str(connect_exc))
+
+            window_x, window_y = _executor_window_position()
+
+            # ブラウザは detached で起動して CDP で「外から」繋ぐ。Playwright に
+            # 起動させるとこのプロセス（部屋ごとのMCPサーバ）の子になり、常駐
+            # セッションが畳まれるたびにブラウザごと道連れで死ぬ。ログイン途中の
+            # ページやOTP入力欄が消える主因だった。詳細は _spawn_detached_browser。
+            executable = _chrome_executable_path(playwright)
+
+            async def launch_detached_and_connect():
+                _spawn_detached_browser(
+                    executable, user_data_dir, cdp_port, window_x, window_y
+                )
+                return await _connect_detached_browser(playwright, cdp_port)
 
             try:
-                context = await launch_persistent_context()
+                browser = await launch_detached_and_connect()
             except Exception as launch_exc:
                 _write_browser_recovery_log(
                     "launch_failed",
@@ -345,9 +726,16 @@ async def _executor_worker():
                 if not _recover_stale_executor_profile():
                     raise
                 _write_browser_recovery_log("launch_retry_started", profile=user_data_dir)
-                context = await launch_persistent_context()
+                browser = await launch_detached_and_connect()
                 _write_browser_recovery_log("launch_retry_succeeded", profile=user_data_dir)
-            browser = context  # persistent contextではcontextがbrowser相当
+
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            # 自前起動＝このプロセスの所有物ではない。終了時に閉じてはいけない
+            # （閉じると元の「毎ターン消える」問題に戻る）。
+            attached_to_existing_browser = True
+
+            if _pending_cookie_import:
+                await _import_master_cookies(context)
 
         # 新しいタブを検知するリスナーを登録
         context.on("page", on_new_page)
@@ -417,6 +805,66 @@ async def _executor_worker():
         print("[EXECUTOR_BROWSER] Browser closed")
 
 
+_EVAL_BLOCKED_MARKERS = (
+    "eval is disabled",
+    "unsafe-eval",
+    "Content Security Policy",
+    "call to eval() blocked",
+    "EvalError",
+)
+
+
+async def _cdp_evaluate(page, expression: str, arg=None):
+    """CSPやサイト側のパッチで window.eval が殺されたページ用の迂回路。
+
+    Playwright の page.evaluate は注入したユーティリティを eval で実行する。
+    American Express のように window.eval を自前で潰すサイトでは、要素一覧も
+    スクリーンショットの縮小率計算も全部落ちて、ページが一切操作できなくなる。
+    CDP の Runtime.evaluate は V8 インスペクタ側で走るのでその影響を受けない。
+    """
+    arg_js = json.dumps(arg) if arg is not None else "undefined"
+    wrapped = (
+        "(() => { const __danFn = ("
+        + expression
+        + "); return (typeof __danFn === 'function') ? __danFn("
+        + arg_js
+        + ") : __danFn; })()"
+    )
+    session = await page.context.new_cdp_session(page)
+    try:
+        res = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": wrapped,
+                "returnByValue": True,
+                "awaitPromise": True,
+                "userGesture": True,
+            },
+        )
+    finally:
+        try:
+            await session.detach()
+        except Exception:
+            pass
+    if res.get("exceptionDetails"):
+        detail = res["exceptionDetails"]
+        raise RuntimeError(detail.get("text") or str(detail))
+    return res.get("result", {}).get("value")
+
+
+async def _page_evaluate(page, expression: str, arg=None):
+    """通常は page.evaluate。eval が禁止されたページだけ CDP に落とす。"""
+    try:
+        if arg is not None:
+            return await page.evaluate(expression, arg)
+        return await page.evaluate(expression)
+    except Exception as exc:
+        message = str(exc)
+        if not any(marker in message for marker in _EVAL_BLOCKED_MARKERS):
+            raise
+        return await _cdp_evaluate(page, expression, arg)
+
+
 async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
     page = pages_state["current"]
@@ -477,6 +925,35 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             f.write(body)
         return {"saved": save_path, "size": len(body)}
 
+    elif cmd == "upload_file":
+        # ローカルファイルをページのアップロード欄に渡す。
+        # 1) 既に input[type=file] があればそこへ直接セット
+        # 2) 無ければ「アップロード」ボタンをクリックしてファイル選択ダイアログを捕まえる
+        files = args["files"]
+        if isinstance(files, str):
+            files = [files]
+        ref = args.get("ref")
+        selector = args.get("selector")
+        timeout = args.get("timeout", 20000)
+
+        file_inputs = page.locator("input[type=file]")
+        if not ref and not selector:
+            if await file_inputs.count() == 0:
+                raise RuntimeError("input[type=file] が見つかりません。ref か selector でアップロードボタンを指定してください")
+            await file_inputs.last.set_input_files(files)
+            return {"uploaded": files, "via": "input"}
+
+        if selector:
+            target = page.locator(selector)
+        else:
+            target = page.locator(f'[data-dan-ref="{str(ref).replace("@", "")}"]').last
+
+        async with page.expect_file_chooser(timeout=timeout) as fc_info:
+            await target.click()
+        chooser = await fc_info.value
+        await chooser.set_files(files)
+        return {"uploaded": files, "via": "file_chooser"}
+
     elif cmd == "locator_count":
         count = await page.locator(args["selector"]).count()
         return {"count": count}
@@ -521,14 +998,34 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
     elif cmd == "screenshot_base64":
         screenshot_bytes = await page.screenshot(full_page=args.get("full_page", False))
         base64_str, media_type = _encode_browser_screenshot(screenshot_bytes)
-        return {"base64": base64_str, "media_type": media_type}
+        # The image handed to the model is downscaled, but clicks are taken in CSS
+        # pixels. Reading a coordinate off the picture and clicking it therefore
+        # lands short of the target — the piece is never grabbed and the puzzle
+        # "does not move". Ship the ratio with the image so nobody has to
+        # remember or re-derive it.
+        scale = _measure_shot_scale(base64_str, await _page_evaluate(
+            page, "() => ({w: window.innerWidth, h: window.innerHeight})"
+        ))
+        return {
+            "base64": base64_str,
+            "media_type": media_type,
+            "shot_scale": scale,
+        }
 
     elif cmd == "mouse_click":
         await page.mouse.click(args["x"], args["y"])
         return {}
 
     elif cmd == "mouse_move":
-        await page.mouse.move(args["x"], args["y"])
+        await page.mouse.move(args["x"], args["y"], steps=args.get("steps", 1))
+        return {}
+
+    elif cmd == "mouse_down":
+        await page.mouse.down()
+        return {}
+
+    elif cmd == "mouse_up":
+        await page.mouse.up()
         return {}
 
     elif cmd == "go_back":
@@ -551,9 +1048,40 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         # arg を渡せるようにする（captcha_solver のトークン注入等で使用）。
         # arg=None の従来呼び出しは引数なし evaluate にフォールバックして後方互換。
         if args.get("arg") is not None:
-            result = await page.evaluate(args["expression"], args["arg"])
+            result = await _page_evaluate(page, args["expression"], args["arg"])
         else:
-            result = await page.evaluate(args["expression"])
+            result = await _page_evaluate(page, args["expression"])
+        return {"result": result}
+
+    elif cmd == "list_frames":
+        # captcha等がiframe内にある場合に、中のドキュメントへ届くようにする。
+        out = []
+        for i, f in enumerate(page.frames):
+            try:
+                out.append({"index": i, "url": f.url or "", "name": f.name or ""})
+            except Exception:
+                continue
+        return {"frames": out}
+
+    elif cmd == "frame_evaluate":
+        frames = page.frames
+        target = None
+        frame_url = args.get("frame_url")
+        idx = args.get("frame_index")
+        if isinstance(idx, int) and 0 <= idx < len(frames):
+            target = frames[idx]
+        # インデックスがずれている場合はURLで引き直す
+        if frame_url and (target is None or (target.url or "") != frame_url):
+            for f in frames:
+                if (f.url or "") == frame_url:
+                    target = f
+                    break
+        if target is None:
+            return {"result": None, "error": "frame not found"}
+        if args.get("arg") is not None:
+            result = await target.evaluate(args["expression"], args["arg"])
+        else:
+            result = await target.evaluate(args["expression"])
         return {"result": result}
 
     elif cmd == "wait_for_selector":
@@ -685,7 +1213,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             return elements;
         }
         """
-        elements = await page.evaluate(script)
+        elements = await _page_evaluate(page, script)
         return {"elements": elements, "count": len(elements)}
 
     elif cmd == "click_by_ref":
@@ -717,7 +1245,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             return document.body.innerText.slice(0, 1000);
         }
         """
-        main_text = await page.evaluate(main_text_script)
+        main_text = await _page_evaluate(page, main_text_script)
 
         return {
             "title": title,
@@ -796,7 +1324,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             return ctx;
         }
         """
-        result = await page.evaluate(script)
+        result = await _page_evaluate(page, script)
         return {"context": result}
 
     else:
@@ -848,9 +1376,31 @@ def _ensure_executor_thread():
             raise RuntimeError(f"Executor browser failed to start: {_executor_start_error}")
 
 
+_LAST_USE_FILE_NAME = "dan_last_use.txt"
+
+
+def _touch_browser_activity() -> None:
+    """この部屋のブラウザを「今使った」と記録する。
+
+    ブラウザは detached で動くのでプロセスが終わっても生き残る（それが狙い）。
+    その代わり誰も片付けないと部屋の数だけ Chrome が積み上がるため、常駐する
+    ダンコアが最終使用時刻を見て放置分を閉じる。時刻はプロセスをまたぐので
+    メモリではなくプロファイル内のファイルに置く。
+    """
+    try:
+        path = _executor_profile_dir() / _LAST_USE_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        # 掃除のための補助情報。書けなくてもブラウザ操作は止めない。
+        pass
+
+
 def _send_executor_command(cmd: str, **args) -> dict:
     """Executorスレッドにコマンドを送信（ブラウザクローズ時は自動再起動、キャンセル対応）"""
     from app.services.cancellation import CancellationRegistry, CancelledError
+
+    _touch_browser_activity()
 
     max_retries = 2  # ブラウザクローズ時のリトライ回数
 
@@ -972,11 +1522,36 @@ class ExecutorPageProxy:
         )
         return result.get("result")
 
+    async def get_frames(self) -> list:
+        """ページ内の全フレーム（iframe含む）をプロキシとして返す。
+
+        captcha_solver がiframe内のcaptchaを検出・突破するために使う。
+        メインフレームも含まれ、先頭がメインフレーム。
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("list_frames")
+        )
+        return [
+            ExecutorFrameProxy(f.get("index", i), f.get("url", ""))
+            for i, f in enumerate(result.get("frames", []))
+        ]
+
     async def save_image(self, url: str, path: str):
         """URLから画像をダウンロードしてファイルに保存"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None, lambda: _send_executor_command("save_image", url=url, path=path)
+        )
+
+    async def upload_file(self, files, ref: str = None, selector: str = None, timeout: int = 20000):
+        """ローカルファイルをページのアップロード欄に渡す"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: _send_executor_command(
+                "upload_file", files=files, ref=ref, selector=selector, timeout=timeout
+            ),
         )
 
     async def wait_for_selector(self, selector: str, timeout: int = 30000, state: str = "visible"):
@@ -1190,6 +1765,34 @@ class ExecutorPageProxy:
         }
 
 
+class ExecutorFrameProxy:
+    """1つのフレーム（メインドキュメント or iframe）へのProxy。
+
+    Playwright の Frame と同じく `.url` と `evaluate()` を持つので、
+    captcha_solver からは実フレームと同じように扱える。
+    """
+
+    def __init__(self, index: int, url: str = ""):
+        self.index = index
+        self.url = url
+
+    async def evaluate(self, expression: str, arg=None):
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: _send_executor_command(
+                "frame_evaluate",
+                frame_index=self.index,
+                frame_url=self.url,
+                expression=expression,
+                arg=arg,
+            ),
+        )
+        if result.get("error"):
+            raise RuntimeError(f"frame_evaluate failed: {result['error']}")
+        return result.get("result")
+
+
 class ExecutorLocatorProxy:
     """Locator Proxy"""
 
@@ -1302,11 +1905,25 @@ class ExecutorMouseProxy:
             None, lambda: _send_executor_command("mouse_click", x=x, y=y)
         )
 
-    async def move(self, x: float, y: float):
-        """マウスを指定座標に移動（ホバー用）"""
+    async def move(self, x: float, y: float, steps: int = 1):
+        """マウスを指定座標に移動（ホバー用 / ドラッグの経路用）"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, lambda: _send_executor_command("mouse_move", x=x, y=y)
+            None, lambda: _send_executor_command("mouse_move", x=x, y=y, steps=steps)
+        )
+
+    async def down(self):
+        """ボタンを押し下げたままにする（ドラッグ開始）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("mouse_down")
+        )
+
+    async def up(self):
+        """ボタンを離す（ドラッグ終了）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("mouse_up")
         )
 
 
@@ -1316,12 +1933,142 @@ async def get_executor_page():
 
 
 async def close_executor_browser():
-    """Executor用ブラウザを閉じる"""
+    """Executor用ブラウザを閉じる。
+
+    ブラウザは detached 起動なのでワーカーを畳んでも生き残る（それが狙い）。
+    このAPIは「本当に閉じる」契約なので、この部屋のプロファイルを使っている
+    ブラウザプロセスを明示的に終了させる。
+    """
     global _executor_thread
     _executor_shutdown.set()
     if _executor_thread and _executor_thread.is_alive():
         _executor_thread.join(timeout=10)
     _executor_thread = None
+
+    processes, scan_ok = _list_dedicated_browser_processes()
+    if scan_ok and processes:
+        terminated = _terminate_dedicated_browser_processes(processes)
+        _write_browser_recovery_log("executor_browser_closed", terminated=terminated)
+
+
+async def close_idle_browsers(idle_seconds: int = 1800) -> list[dict]:
+    """放置されている部屋のブラウザを閉じる（ダンコアから定期的に呼ぶ）。
+
+    ブラウザはターンをまたいで生き残る設計なので、閉じる者がいないと部屋の数だけ
+    Chrome が残り続ける。一方で「OTP待ちの最中に閉じる」のは今回直したばかりの
+    事故そのものなので、判定は最終使用時刻だけで行い、賢く推測しようとしない。
+    待ち時間は数分〜十数分なので 30 分あれば十分に余裕がある。
+
+    閉じ方は CDP 経由の正常終了。強制終了は書き込み途中の Cookie を失い、次回起動
+    時に「前回異常終了」の復元バーを出すため、応答しない時だけの最終手段にする。
+    """
+    from playwright.async_api import async_playwright
+
+    closed: list[dict] = []
+    base = Path.home() / ".ai_secretary"
+    if not base.exists():
+        return closed
+
+    # 例外: 有効な見張り（一回きりの 'at' 予約、または hold_browser 指定）を持つ
+    # 部屋は「待機中」であって「放置」ではないので閉じない。時刻だけで判定する
+    # 原則は維持しつつ、待つという宣言がDBに登録されている場合のみ尊重する。
+    held_profiles: set[str] = set()
+    try:
+        import asyncio as _aio
+        from app.services.followups import held_room_ids
+        rooms = await _aio.to_thread(held_room_ids)
+        held_profiles = {f"browser_data--{_safe_room_slug(r)}" for r in rooms}
+    except Exception:
+        pass  # 判定に失敗しても掃除自体は続行（従来動作）
+
+    now = time.time()
+    for profile in sorted(base.glob("browser_data--*")):
+        if profile.name in held_profiles:
+            continue
+        port_file = profile / _PORT_FILE_NAME
+        if not port_file.exists():
+            continue
+        try:
+            port = int(port_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            continue
+        if not _port_listening(port):
+            continue  # 既に終了している
+
+        last_use_file = profile / _LAST_USE_FILE_NAME
+        try:
+            last_use = float(last_use_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            # 記録が無い＝この仕組みより前から動いているブラウザ。いきなり閉じると
+            # 進行中の作業を巻き込むので、まず時刻を刻んで次の周回から判定する。
+            _safe_write_last_use(last_use_file, now)
+            continue
+
+        idle = now - last_use
+        if idle < idle_seconds:
+            continue
+
+        ok = await _graceful_close_cdp(async_playwright, port)
+        if not ok:
+            processes, scan_ok = _list_dedicated_browser_processes(profile)
+            if scan_ok and processes:
+                _terminate_dedicated_browser_processes(processes)
+        closed.append({
+            "profile": profile.name,
+            "port": port,
+            "idle_minutes": round(idle / 60, 1),
+            "graceful": ok,
+        })
+        _write_browser_recovery_log(
+            "idle_browser_closed", profile=profile.name, port=port,
+            idle_minutes=round(idle / 60, 1), graceful=ok,
+        )
+    return closed
+
+
+def _safe_write_last_use(path: Path, value: float) -> None:
+    try:
+        path.write_text(str(value), encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def _graceful_close_cdp(async_playwright, port: int, wait_seconds: float = 10.0) -> bool:
+    """CDP に繋いで正常終了させる。Cookie を書き切らせるのが目的。
+
+    注意: connect_over_cdp した browser への close() は「接続を切る」だけで、
+    自分で起動していないブラウザは終了しない（Playwright の仕様）。実際に終了
+    させるには全ページを閉じる必要がある。最後のウィンドウが閉じると Chrome は
+    通常終了し、その過程で Cookie をディスクへ書き切る。
+
+    戻り値は「本当に終了したか」。ポートが閉じるまで確認し、閉じなければ False を
+    返して呼び出し側の強制終了にフォールバックさせる。
+    """
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{port}", timeout=5000
+            )
+            for context in browser.contexts:
+                for pg in list(context.pages):
+                    try:
+                        await pg.close()
+                    except Exception:
+                        pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("[EXECUTOR_BROWSER] graceful close failed on port %s: %s", port, exc)
+        return False
+
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if not _port_listening(port):
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 def abort_executor_session():

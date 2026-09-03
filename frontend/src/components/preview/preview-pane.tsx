@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ClipboardList, Copy, Edit3, ExternalLink, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
+import { ChevronDown, ClipboardList, Copy, Edit3, ExternalLink, Loader2, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -17,6 +17,17 @@ import { PublishModal } from './publish-modal';
 import { DeliveryModal } from './delivery-modal';
 
 const LEGACY_SHARE_ORIGIN = 'https://frontend-mikis-projects-86652663.vercel.app';
+
+const DOMAIN_PUBLICATION_LABEL: Record<string, string> = {
+  domain_pending: '公開を開始中…',
+  domain_preparing: 'サイトを準備中…',
+  domain_registering: 'ドメインを取得・設定中…',
+  domain_failed: '公開を確認中',
+};
+
+function isDomainPublicationRunning(status?: string | null) {
+  return status === 'domain_pending' || status === 'domain_preparing' || status === 'domain_registering';
+}
 
 /** Undo / Redo ボタン。編集中のみ表示。 */
 function UndoRedoButtons() {
@@ -77,20 +88,15 @@ function absolutePublicUrl(pathOrUrl: string): string {
 }
 
 function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
-  // Provisional delivery URL: <origin>/preview/<slug>. This is the clean single
-  // public URL (RULES.md). It is served by the production deployment once the
-  // artifact is committed to main, and locally from disk meanwhile — so it never
-  // 404s. We do NOT fabricate a per-slug <slug>-done.vercel.app alias (retired:
-  // that second URL pinned to stale deployments and 404'd as DEPLOYMENT_NOT_FOUND).
-  const previewUrl = absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug));
+  const releaseUrl = absolutePublicUrl(pathOrUrl || artifactSharePath(artifact.slug));
 
-  // Only a custom-domain publish overrides the /preview URL. production_url is
-  // set only for custom domains; KNOWN_CUSTOM_DOMAINS are known-live.
+  // A custom domain is the public address once it has been attached.  Until
+  // then, use the concrete URL recorded for this artifact's dedicated release.
   const hasCustomDomain =
     !!artifact.production_url ||
     !!artifact.custom_domain ||
     (KNOWN_CUSTOM_DOMAINS[artifact.slug]?.length ?? 0) > 0;
-  if (!hasCustomDomain) return previewUrl;
+  if (!hasCustomDomain) return releaseUrl;
 
   return (
     artifactProductionUrl({
@@ -98,7 +104,7 @@ function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
       pathOrUrl,
       productionUrl: artifact.production_url,
       customDomain: artifact.custom_domain,
-    }) || previewUrl
+    }) || releaseUrl
   );
 }
 
@@ -130,7 +136,7 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }) {
+export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
   const queryClient = useQueryClient();
   const artifact = usePreviewStore((s) => s.artifact);
   const projectId = usePreviewStore((s) => s.projectId);
@@ -141,6 +147,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const closePreview = usePreviewStore((s) => s.closePreview);
   const toggleEditMode = usePreviewStore((s) => s.toggleEditMode);
   const openArtifact = usePreviewStore((s) => s.openArtifact);
+  const updateArtifact = usePreviewStore((s) => s.updateArtifact);
   const contentVersion = usePreviewStore((s) => s.contentVersion);
   const bumpContentVersion = usePreviewStore((s) => s.bumpContentVersion);
 
@@ -216,17 +223,58 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     },
     enabled: !!artifactRoomId || !!projectId,
     staleTime: 10_000,
+    // The button itself is the status display.  While it is working, refresh
+    // this artifact automatically; no separate "check status" action exists.
+    refetchInterval: isDomainPublicationRunning(artifact?.publish_status) ? 2_500 : false,
   });
+
+  const saveEditsMutation = useMutation({
+    mutationFn: async () => {
+      if (!artifact) throw new Error('No artifact selected');
+      if (!await flushInspectorEdits()) throw new Error('下書きの保存に失敗しました。公開は行っていません。');
+      const res = await fetch(`/api/v1/inspector-overrides/publish?slug=${encodeURIComponent(artifact.slug)}`, {
+        method: 'POST', credentials: 'include',
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ revision: number }>;
+    },
+    onSuccess: (release) => {
+      toast.success('保存しました', { description: `公開版 ${release.revision} を反映しました` });
+    },
+    onError: (err) => toast.error('保存できませんでした', { description: String(err).slice(0, 160) }),
+  });
+
+  // A paid domain setup updates the artifact from the server in the background.
+  // Keep an already-open full-screen preview in sync and reload it at its new
+  // production URL as soon as that update arrives.
+  useEffect(() => {
+    if (!artifact) return;
+    const latest = artifacts.find((candidate) => candidate.id === artifact.id);
+    if (!latest) return;
+    if (
+      latest.production_url !== artifact.production_url ||
+      latest.custom_domain !== artifact.custom_domain ||
+      latest.delivery_url !== artifact.delivery_url ||
+      latest.publish_status !== artifact.publish_status ||
+      latest.last_publish_error !== artifact.last_publish_error
+    ) {
+      updateArtifact(latest);
+    }
+  }, [artifacts, artifact, updateArtifact]);
 
   const loaded = artifact ? loadedArtifactId === artifact.id : false;
 
   const publicPreviewUrl = artifact ? artifactSharePath(artifact.preview_url || artifact.slug) : '';
   const draftUrl = artifact ? artifact.draft_url || publicPreviewUrl : '';
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
-  const publicShareUrl = artifact && shareUrl ? cleanArtifactUrl(artifact, shareUrl) : '';
-  // クロスオリジン化: プレビューiframe は成果物配信オリジン(done-studio/done-artifacts)を
+  // delivery_url comes from the release ledger.  It is the same actual Vercel
+  // release used by the full-screen view, and takes precedence over retired
+  // shared /preview paths left on older artifact cards.
+  const releaseUrl = artifact?.delivery_url || draftUrl || shareUrl || publicPreviewUrl;
+  const publicShareUrl = artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '';
+  // クロスオリジン化: プレビューiframe は成果物配信オリジンを
   // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
-  const baseIframeSrc = absolutePublicUrl(draftUrl || publicPreviewUrl || shareUrl);
+  const baseIframeSrc = absolutePublicUrl(releaseUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
   // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
   // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。
@@ -250,7 +298,18 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     const iframe = iframeRef.current;
     if (!iframe || !loaded) return;
     const shareOrigin = publicShareOrigin();
-    const allowed = [shareOrigin].filter(Boolean) as string[];
+    // The inspector message originates from the iframe, not from the
+    // dashboard's public-share origin.  Dedicated artifact projects each
+    // have their own Vercel origin, so accept the origin of the iframe we
+    // actually mounted as well.  `attachInspectorBridge` additionally checks
+    // event.source against this exact iframe; this is not a broad allow-list.
+    let iframeOrigin = '';
+    try {
+      iframeOrigin = new URL(iframe.src, window.location.origin).origin;
+    } catch {
+      // An invalid iframe URL cannot produce a valid inspector message.
+    }
+    const allowed = [shareOrigin, iframeOrigin].filter(Boolean) as string[];
 
     const fetchOverrides = async (slug: string): Promise<OverrideRow[]> => {
       try {
@@ -276,6 +335,16 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
       }
       const s2 = usePreviewStore.getState();
       sendToIframe({ type: 'inspector:set-mode', payload: { mode: s2.isEditMode ? s2.inspectorMode : 'off' } });
+      // 選択集合が残っていれば（コメント編集中の開き直し/リロード後など）、
+      // iframe 側のハイライトを復元する。
+      if (s2.isEditMode && s2.selectedElements.length) {
+        const elementKeys = s2.selectedElements
+          .map((el) => el.elementKey)
+          .filter((k): k is string => !!k);
+        if (elementKeys.length) {
+          sendToIframe({ type: 'inspector:set-selection', payload: { elementKeys } });
+        }
+      }
     };
 
     const detach = attachInspectorBridge(
@@ -287,7 +356,11 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         },
         onReloaded: () => { void pushModeAndOverrides(); },
         onSelected: (snap) => usePreviewStore.getState().selectFromSnapshot(snap),
-        onTextCommitted: (elementKey, text) => usePreviewStore.getState().commitText(elementKey, text),
+        onMultiSelected: (snaps) => usePreviewStore.getState().selectFromSnapshots(snaps),
+        onTextDrafted: (elementKey, text) =>
+          usePreviewStore.getState().commitText(elementKey, text, { applyToIframe: false }),
+        onTextCommitted: (elementKey, text) =>
+          usePreviewStore.getState().commitText(elementKey, text, { applyToIframe: false }),
         onSelectionRange: (payload) =>
           usePreviewStore.getState().setSelectionRange('elementKey' in payload && payload.elementKey ? payload : null),
       },
@@ -408,11 +481,33 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         {isWebsite && (
           <button
             onClick={() => setShowPublishModal(true)}
-            className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-            title="独自ドメイン公開"
+            className={`shrink-0 rounded px-2 py-1 text-xs font-medium text-primary-foreground ${
+              isDomainPublicationRunning(artifact.publish_status)
+                ? 'cursor-default bg-amber-600'
+                : artifact.publish_status === 'domain_failed'
+                  ? 'bg-amber-600 hover:bg-amber-600/90'
+                  : 'bg-primary hover:bg-primary/90'
+            }`}
+            disabled={isDomainPublicationRunning(artifact.publish_status)}
+            title={DOMAIN_PUBLICATION_LABEL[artifact.publish_status || ''] || '独自ドメイン公開'}
           >
-            <Rocket className="mr-1 inline h-3 w-3" />
-            独自ドメイン公開
+            {isDomainPublicationRunning(artifact.publish_status) ? (
+              <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+            ) : (
+              <Rocket className="mr-1 inline h-3 w-3" />
+            )}
+            {artifact.custom_domain
+              ? `${artifact.custom_domain} を公開中`
+              : DOMAIN_PUBLICATION_LABEL[artifact.publish_status || ''] || '独自ドメイン公開'}
+          </button>
+        )}
+        {isEditMode && (
+          <button
+            onClick={() => saveEditsMutation.mutate()}
+            disabled={saveEditsMutation.isPending}
+            className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+          >
+            {saveEditsMutation.isPending ? '保存中…' : '保存'}
           </button>
         )}
         {isEditMode && (
@@ -470,13 +565,13 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             title={artifact.label || artifact.slug}
           />
           {isEditMode && inspectorMode === 'comment' && (
-            <CommentPopover iframeRef={iframeRef} onSubmit={onSubmitComment} />
+            <CommentPopover iframeRef={iframeRef} onSubmit={onAddComment} />
           )}
           {isEditMode && (
             <div className="pointer-events-none absolute left-0 right-0 top-0 flex justify-center gap-2 p-2">
               <div className="pointer-events-auto rounded-full bg-primary/90 px-3 py-1 text-xs font-medium text-primary-foreground shadow">
                 {inspectorMode === 'comment'
-                  ? '編集モード — 要素をクリックしてコメント'
+                  ? '編集モード — クリックでコメント / Ctrl+クリックで複数選択'
                   : '編集モード — 要素をクリックして手動編集'}
               </div>
             </div>

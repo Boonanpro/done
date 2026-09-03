@@ -32,9 +32,14 @@ class OTPExtractionRequest(BaseModel):
 
 
 class OTPResult(BaseModel):
-    """OTP抽出結果"""
+    """OTP抽出結果
+
+    数字コードの代わりにワンタイムURLが届くサービス（Instagramのパスワード
+    再設定など）があるため、code と link_url はどちらか一方だけのことがある。
+    """
     id: str
-    code: str
+    code: Optional[str] = None
+    link_url: Optional[str] = None
     source: OTPSource
     sender: Optional[str] = None
     subject: Optional[str] = None
@@ -137,6 +142,34 @@ OTP_PATTERNS = [
     r'(?:is|：|:)\s*(\d{6})\b',
     # 独立した6桁の数字（最も一般的）
     r'(?<!\d)(\d{6})(?!\d)',
+]
+
+# ワンタイムURL抽出パターン
+# 数字コードではなく「タップして再設定」形式のリンクを送ってくるサービス向け。
+# 本文中のURLを拾うが、無関係な宣伝リンクを掴まないよう、本文に認証文脈の
+# キーワードがある場合のみ採用する（下の OTP_LINK_CONTEXT_KEYWORDS）。
+OTP_LINK_URL_PATTERN = r'https?://[^\s<>"\'`）」】\]]+'
+
+# ワンタイムURLの短縮ドメイン（この宛先なら文脈キーワードが無くても採用する）
+OTP_LINK_TRUSTED_HOSTS = [
+    "ig.me",              # Instagram
+    "fb.me",              # Facebook
+    "m.me",               # Messenger
+    "wa.me",              # WhatsApp
+    "l.instagram.com",
+    "l.facebook.com",
+    "accounts.google.com",
+    "appleid.apple.com",
+    "id.line.me",
+]
+
+# 認証文脈のキーワード（本文にこれがあればURLをワンタイムリンクとみなす）
+OTP_LINK_CONTEXT_KEYWORDS = [
+    "reset", "verify", "verification", "confirm", "authenticate",
+    "sign in", "log in", "login", "one time", "magic", "tap to",
+    "click the link", "secure link", "password",
+    "パスワード", "再設定", "リセット", "認証", "確認", "ログイン",
+    "本人確認", "ワンタイム", "タップ",
 ]
 
 # OTP入力フィールドの検知セレクタ（Playwright用）
