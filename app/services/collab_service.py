@@ -31,7 +31,9 @@ class CollabService:
         attempt = 0
         while True:
             try:
-                return fn()
+                # 同期 .execute() をイベントループ上で回すとサンドボックスの全リクエストが
+                # 直列化する（部屋切替が遅い真因の一つ）。必ずスレッドへ逃がす。
+                return await asyncio.to_thread(fn)
             except Exception as exc:
                 if attempt >= retries or not self._is_transient_error(exc):
                     raise

@@ -152,32 +152,42 @@ async def list_rooms(
     user: TokenData = Depends(get_current_user),
     service: CollabService = Depends(get_collab_service),
 ):
-    # Owner's rooms
-    rooms = await service.list_rooms(user.user_id)
-    # Also include rooms where user is a guest
-    guest_rooms = await service.list_guest_rooms(user.user_id)
+    import asyncio
 
-    room_responses = []
+    # Owner's rooms + rooms where user is a guest（同時に取る）
+    rooms, guest_rooms = await asyncio.gather(
+        service.list_rooms(user.user_id), service.list_guest_rooms(user.user_id)
+    )
+
+    unique: list[dict] = []
     seen_ids = set()
     for r in rooms + guest_rooms:
         if r["id"] in seen_ids:
             continue
         seen_ids.add(r["id"])
-        # Get guest count
-        invites = await service.list_invites(r["id"])
+        unique.append(r)
+
+    # 部屋ごとの付加情報（参加者数・最終メッセージ・未読）は互いに独立なので全部同時に取る。
+    # 以前は部屋ごとに3本を直列に待っていて、5部屋で約17往復(=DBがシンガポールで1往復150ms)
+    # → 2〜4秒かかっていた。これがコミュニケーション一覧が開かない主因。
+    async def _enrich(r: dict) -> CollabRoomResponse:
+        invites, messages, unread_count = await asyncio.gather(
+            service.list_invites(r["id"]),
+            service.get_messages(r["id"], limit=1),
+            service.unread_count_for_owner(r),
+        )
         guest_count = sum(1 for i in invites if i["status"] == "joined")
-        # Get last message
-        messages = await service.get_messages(r["id"], limit=1)
         last_msg = messages[-1] if messages else None
-        unread_count = await service.unread_count_for_owner(r)
-        room_responses.append(CollabRoomResponse(
+        return CollabRoomResponse(
             **r,
             guest_count=guest_count,
             last_message=_preview_text(last_msg) if last_msg else None,
             last_message_at=last_msg["created_at"] if last_msg else None,
             unread=unread_count > 0,
             unread_count=unread_count,
-        ))
+        )
+
+    room_responses = list(await asyncio.gather(*[_enrich(r) for r in unique]))
     # 並びは「メッセージの動きがあった順」。updated_at は既読更新などでも動いてしまい、
     # 開いただけで一覧の順番が入れ替わる誤動作の原因になるため使わない。
     room_responses.sort(
@@ -198,11 +208,14 @@ async def get_room(
         raise HTTPException(status_code=404, detail="Room not found")
     # Allow owner or linked guest user
     is_owner = room["owner_id"] == user.user_id
-    guest_rooms = await service.list_guest_rooms(user.user_id) if not is_owner else []
+    import asyncio
+    guest_rooms, invites = await asyncio.gather(
+        service.list_guest_rooms(user.user_id) if not is_owner else asyncio.sleep(0, result=[]),
+        service.list_invites(room_id),
+    )
     is_guest = any(gr["id"] == room_id for gr in guest_rooms)
     if not is_owner and not is_guest:
         raise HTTPException(status_code=404, detail="Room not found")
-    invites = await service.list_invites(room_id)
     guest_count = sum(1 for i in invites if i["status"] == "joined")
     return CollabRoomResponse(**room, guest_count=guest_count)
 
