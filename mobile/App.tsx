@@ -67,6 +67,17 @@ const REFRESH_TOKEN_KEY = 'done_mobile_refresh_token';
 const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
 // チャットごとの入力下書き（Web版 dan-chat-draft:<projectId> と同等）
+// 部屋を開く一式（/chat/rooms/{id}/open）。欠けた項目は null。
+type RoomOpenResponse = {
+  room_id: string;
+  project: ProjectResponse | null;
+  messages: MessageResponse[] | null;
+  artifacts: ChatArtifactResponse[] | null;
+  active: { active: boolean } | null;
+  current_run: AgentRun | null;
+  execution_events: ExecutionEvent[] | null;
+};
+
 const draftStoreKey = (projectId: string) => `done_mobile_draft.${projectId}`;
 
 // サーバー取得のスナップショットでメッセージ一覧を置き換える時、送信直後で
@@ -1769,23 +1780,16 @@ function AppMain() {
       // （前に見ていた部屋のメッセージを新しい部屋に残像として出さない）。
       setMessages(knownRoom ? messagesCacheRef.current[knownRoom] ?? [] : []);
       SecureStore.setItemAsync(PROJECT_KEY, projectId).catch(() => null);
-      void refreshArtifacts(activeToken, projectId);
       setLoadingMessages(true);
       try {
-        // プロジェクト詳細は裏で更新（メッセージ取得をブロックしない）
-        const projectPromise = apiRequest<ProjectResponse>(`/projects/${projectId}`, {}, activeToken);
-        projectPromise
-          .then((p) => {
-            if (currentProjectIdRef.current !== projectId) return;
-            setCurrentProject((cur) => (cur?.id === p.id ? { ...p, unread_count: cur.unread_count } : p));
-            setCurrentProjectId(p.id);
-          })
-          .catch(() => null);
-
         let roomId = knownRoom;
         if (!roomId) {
           // 一覧に無い部屋（通知起動・新規作成直後など）だけ詳細を待つ
-          const project = await projectPromise;
+          const project = await apiRequest<ProjectResponse>(`/projects/${projectId}`, {}, activeToken);
+          if (currentProjectIdRef.current === projectId) {
+            setCurrentProject((cur) => (cur?.id === project.id ? { ...project, unread_count: cur.unread_count } : project));
+            setCurrentProjectId(project.id);
+          }
           if (!project.room_id) {
             setMessages([]);
             return project;
@@ -1793,19 +1797,45 @@ function AppMain() {
           roomId = project.room_id;
         }
 
-        const data = await apiRequest<MessagesListResponse>(
-          `/chat/rooms/${roomId}/messages?limit=${CHAT_INITIAL_FETCH_LIMIT}`,
+        // 部屋を開く一式（詳細・メッセージ・成果物・実行状態・作業イベント）を
+        // 1往復で取る。従来は 4〜5 本（各 0.5〜1 秒、トンネル経由）を投げていた。
+        const data = await apiRequest<RoomOpenResponse>(
+          `/chat/rooms/${roomId}/open?project_id=${encodeURIComponent(projectId)}&limit=${CHAT_INITIAL_FETCH_LIMIT}`,
           {},
           activeToken,
         );
+        const fetched = data.messages ?? [];
         // 初回応答が上限未満なら、それより古い行はサーバーに無い。
-        hasMoreOlderRef.current = (data.messages ?? []).length >= CHAT_INITIAL_FETCH_LIMIT;
+        hasMoreOlderRef.current = fetched.length >= CHAT_INITIAL_FETCH_LIMIT;
         // 取得中に別の部屋へ移動していたら適用しない（残像・取り違え防止）
         if (currentProjectIdRef.current === projectId) {
           const fetchedRoomId = roomId;
-          setMessages((current) => keepLocalOptimistic(data.messages ?? [], current, fetchedRoomId));
+          setMessages((current) => keepLocalOptimistic(fetched, current, fetchedRoomId));
+          if (data.project) {
+            const p = data.project;
+            setCurrentProject((cur) => (cur?.id === p.id ? { ...p, unread_count: cur.unread_count } : p));
+          }
+          if (data.artifacts) {
+            setArtifacts(data.artifacts);
+          } else {
+            void refreshArtifacts(activeToken, projectId);
+          }
+          // 実行状態は pollRun と同じ順序ガードで適用する（後続ポーリングと競合しない）
+          const guard = pollRunSeqRef.current;
+          guard.applied = ++guard.issued;
+          const run = data.current_run;
+          guard.running = !!run && run.state === 'running';
+          setCurrentRun(run ?? null);
+          if (run && run.state === 'running' && data.execution_events) {
+            const events = data.execution_events;
+            setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
+            runCacheRef.current[projectId] = { run, events };
+          } else if (!run) {
+            setRunEvents([]);
+            delete runCacheRef.current[projectId];
+          }
         }
-        messagesCacheRef.current[roomId] = data.messages ?? [];
+        messagesCacheRef.current[roomId] = fetched;
         // 既読は応答を待たずに送る
         apiRequest(`/chat/rooms/${roomId}/read`, { method: 'POST' }, activeToken).catch(() => null);
         setCurrentProject((current) =>
@@ -1813,7 +1843,7 @@ function AppMain() {
         );
         markProjectReadLocally(projectId);
         void dismissNotificationsForProject(projectId);
-        return known ?? (await projectPromise.catch(() => null));
+        return data.project ?? known ?? null;
       } catch (error) {
         // セッション切れ(401)は onAuthFailure がログイン画面へ切替済み。
         // その上にエラーアラートを重ねない（以下の各catchも同様）。
