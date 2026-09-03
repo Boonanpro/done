@@ -102,8 +102,6 @@ export function Sidebar({
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [showAllProjects, setShowAllProjects] = useState(false);
-  // 新チャットで使う Claude モデル（既定: fable）。Fable トライアル用トグル。
-  const [selectedModel, setSelectedModel] = useState<'opus' | 'fable'>('fable');
   const PROJECT_DISPLAY_LIMIT = 5;
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -286,7 +284,7 @@ export function Sidebar({
 
   const handleInstantCreate = () => {
     if (!createProjectMutation.isPending) {
-      createProjectMutation.mutate({ title: '新しいプロジェクト', model: selectedModel });
+      createProjectMutation.mutate({ title: '新しいプロジェクト' });
     }
   };
 
@@ -408,26 +406,6 @@ export function Sidebar({
                 </Button>
               </div>
               {/* 新チャットのモデル選択（Fable トライアル用）。+ を押すと選択中のモデルで作成される */}
-              <div className="flex items-center gap-1 px-2 pb-1.5">
-                <span className="text-[10px] text-muted-foreground mr-1">新規:</span>
-                <div className="inline-flex rounded-md border border-sidebar-border overflow-hidden">
-                  {(['opus', 'fable'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setSelectedModel(m)}
-                      className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                        selectedModel === m
-                          ? 'bg-sidebar-accent text-sidebar-foreground'
-                          : 'text-muted-foreground hover:text-sidebar-foreground'
-                      }`}
-                      title={m === 'opus' ? 'Opus（標準・速い）' : 'Fable（高性能・やや遅い／トライアル中）'}
-                    >
-                      {m === 'opus' ? 'Opus' : 'Fable'}
-                    </button>
-                  ))}
-                </div>
-              </div>
             </>
           )}
 
