@@ -12,10 +12,15 @@ import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persi
 import type { Query } from '@tanstack/react-query';
 import { del, get, set } from 'idb-keyval';
 
-export const PERSISTED_QUERY_KEYS = new Set(['projects', 'project', 'project-messages', 'chat-artifacts']);
+export const PERSISTED_QUERY_KEYS = new Set([
+  'projects', 'project', 'project-messages', 'chat-artifacts',
+  // コミュニケーション（一覧・部屋・メッセージ・参加者）も同じ扱い。一覧は以前
+  // 2〜4秒のAPIを毎回待って骨組み表示していたので、手元の写しを先に描く
+  'collab-rooms', 'collab-room', 'collab-messages', 'collab-participants',
+]);
 export const PERSIST_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 保存形式を変えた時にここを上げると古い写しを捨てる
-export const PERSIST_BUSTER = 'v1';
+export const PERSIST_BUSTER = 'v2';
 
 const KEY = 'done-rq-cache';
 
