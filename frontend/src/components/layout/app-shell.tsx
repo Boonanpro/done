@@ -7,6 +7,7 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { OWNER_USER_ID } from '@/lib/api-client';
 import { usePreviewStore } from '@/stores/preview-store';
 import { useProjectStore } from '@/stores/project-store';
+import { useRoomFeed } from '@/hooks/useRoomFeed';
 
 /**
  * ダッシュボード全体（/chat, /collab, /friends, /notes, /settings, /today）の外枠。
@@ -40,6 +41,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const selectProject = useProjectStore((s) => s.selectProject);
   const { inShell, isChat, isCollabRoom } = shellFor(pathname);
+  // 押し込み同期: 外枠が生きている間、全部屋の新着を手元の写しへ流し込む
+  useRoomFeed(inShell);
 
   // URL → ストアの同期（/chat/<projectId>）。サイドバーの部屋切替は RSC 往復を避けて
   // history.pushState で URL だけ書き換えるため、usePathname で戻る/進むも含めて拾う。
