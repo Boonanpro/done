@@ -74,6 +74,15 @@ function publicShareOrigin(): string {
     return configured.replace(/\/+$/, '');
   }
   if (typeof window === 'undefined') return '';
+  // 2サーバー構成: ダッシュボードは本番ビルド(例: 3000)、成果物プレビューは
+  // HMR が要るので開発サーバー(例: 3001)。同じホスト名でポートだけ変える
+  // （Cookie はホスト単位なので認証は共有される）。ポート無しのホスト
+  // （トンネル/Vercel 経由）では同一オリジンのまま。
+  const previewPort = process.env.NEXT_PUBLIC_PREVIEW_PORT?.trim();
+  const { protocol, hostname, port } = window.location;
+  if (previewPort && port && port !== previewPort) {
+    return `${protocol}//${hostname}:${previewPort}`;
+  }
   return window.location.origin;
 }
 

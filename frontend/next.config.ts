@@ -12,6 +12,9 @@ const ASSET_VERSION =
     `dev`) + `-${Date.now()}`;
 
 const nextConfig: NextConfig = {
+  // 本番ビルド(ダッシュボード, 3000)と開発サーバー(成果物プレビュー, 3001)を同じ
+  // リポジトリで同時に動かすため、出力先を分ける。既定 .next は dev 用。
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   reactStrictMode: true,
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,

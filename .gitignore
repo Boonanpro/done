@@ -214,6 +214,8 @@ tests/**/screenshot_*.png
 
 # Next.js build output (all subdirectories)
 **/.next/
+/frontend/.next-prod*/
+/frontend/.next-preview/
 
 # Windows invalid file
 nul
