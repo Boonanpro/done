@@ -116,6 +116,31 @@ def _video_input(uri: str, mime_type: Optional[str], processing: Optional[str]) 
     return item
 
 
+def _extract_text(interaction) -> Optional[str]:
+    """Final answer text only: model_output steps, never thought steps.
+
+    `interaction.output_text` occasionally carried a leaked "thought" preamble
+    (observed 2026-09-04 on gemini-3.8-flash), so we build the text ourselves
+    and strip such a preamble defensively.
+    """
+    parts: list[str] = []
+    for step in getattr(interaction, "steps", None) or []:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for content in getattr(step, "content", None) or []:
+            if getattr(content, "type", None) == "text" and getattr(content, "text", None):
+                parts.append(content.text)
+    text = "".join(parts) if parts else (getattr(interaction, "output_text", None) or "")
+    NL = chr(10)
+    if text.lstrip().lower().startswith("thought"):
+        for marker in (NL + "# ", NL + "---", NL + NL):
+            i = text.find(marker)
+            if i > 0:
+                text = text[i:].lstrip()
+                break
+    return text or None
+
+
 def _run_interaction(client: "genai.Client", uri: str, mime_type: Optional[str], prompt: str, label: str) -> Optional[str]:
     """Call the Interactions API with agentic processing; fall back to static on failure."""
     import time
@@ -132,7 +157,7 @@ def _run_interaction(client: "genai.Client", uri: str, mime_type: Optional[str],
             label, MODEL, VIDEO_PROCESSING, time.time() - t0,
             getattr(usage, "total_tokens", None),
         )
-        return interaction.output_text
+        return _extract_text(interaction)
     except Exception as e:
         logger.warning(
             "Agentic video analysis failed (%s, %.1fs): %s — retrying with static processing",
@@ -144,7 +169,7 @@ def _run_interaction(client: "genai.Client", uri: str, mime_type: Optional[str],
             input=[_video_input(uri, mime_type, None), {"type": "text", "text": prompt}],
         )
         logger.info("Video analysis done (%s, %s/static, %.1fs)", label, MODEL, time.time() - t1)
-        return interaction.output_text
+        return _extract_text(interaction)
 
 
 def _analyze_file_sync(file_path: str, prompt: str) -> Optional[str]:
