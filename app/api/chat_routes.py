@@ -2951,6 +2951,108 @@ async def get_active_session_status(
     フロントエンドがページ読み込み時やタブ復帰時に呼び出し、
     実行中ならポーリングモードに切り替える。
     """
+    return await _active_session_status(session_id)
+
+
+@router.get("/rooms/{room_id}/open")
+async def open_room(
+    room_id: str,
+    project_id: Optional[str] = None,
+    limit: int = 20,
+    include_project: bool = True,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """部屋を開くのに必要な一式を1往復で返す（部屋切替の高速化）。
+
+    include_project=false: 呼び出し側が一覧キャッシュに project を持っている場合
+    （Web）。project 取得が束ねの中で一番遅い（実測300ms超）ので省く。
+
+    従来はフロントが project / messages / artifacts / active / current-run /
+    execution-events を別々に 8〜12 本投げていた。ブラウザは並列に投げるが、
+    スマホ（Vercel→トンネル→自宅PC）では1本ごとの中継コストが乗り、
+    実測で部屋切替が数秒になっていた。ここでは全部をサーバー側で同時に取り、
+    1本の応答にまとめる。各取得は独立して失敗してよい（欠けた項目は null）。
+    実行イベントは「実行中の部屋」だけ同梱する（待機中の部屋には要らない）。
+    """
+    from app.services.project_service import ProjectService
+    from app.services.run_service import RunService
+    from app.services.chat_artifact_service import ChatArtifactService
+
+    user_id = current_user.user_id
+
+    async def _project():
+        if not project_id or not include_project:
+            return None
+        return await ProjectService().get_project(project_id, user_id)
+
+    async def _messages():
+        msgs = await service.get_messages(room_id, user_id, limit=limit)
+        return [MessageResponse(**m).model_dump(mode="json") for m in msgs]
+
+    async def _artifacts():
+        svc = ChatArtifactService()
+        # service.list は内部で同期 .execute() を呼ぶのでスレッドへ逃がす
+        return await asyncio.to_thread(lambda: asyncio.run(svc.list(user_id, room_id=room_id)))
+
+    async def _current_run():
+        if not project_id:
+            return None
+        return await RunService().get_current_run(project_id)
+
+    timings: dict[str, int] = {}
+
+    async def _timed(name: str, coro):
+        t0 = time.perf_counter()
+        try:
+            return await coro
+        finally:
+            timings[name] = int((time.perf_counter() - t0) * 1000)
+
+    t_all = time.perf_counter()
+    results = await asyncio.gather(
+        _timed("project", _project()), _timed("messages", _messages()), _timed("artifacts", _artifacts()),
+        _timed("active", _active_session_status(room_id)), _timed("current_run", _current_run()),
+        return_exceptions=True,
+    )
+    names = ("project", "messages", "artifacts", "active", "current_run")
+    for name, r in zip(names, results):
+        if isinstance(r, Exception):
+            logger.warning("open_room: %s failed (room=%s): %s", name, room_id[:8], r)
+    if isinstance(results[1], ValueError):
+        raise HTTPException(status_code=403, detail=str(results[1]))
+    project, messages, artifacts, active, current_run = [
+        None if isinstance(r, Exception) else r for r in results
+    ]
+
+    execution_events = None
+    is_running = (
+        bool((active or {}).get("active"))
+        or (current_run or {}).get("state") == "running"
+        or bool((project or {}).get("has_active_run"))
+    )
+    if project_id and is_running:
+        try:
+            execution_events = await _timed("execution_events", ProjectService().get_execution_events(project_id, limit=500))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("open_room: execution_events failed (project=%s): %s", project_id[:8], e)
+    timings["total"] = int((time.perf_counter() - t_all) * 1000)
+
+    return {
+        "room_id": room_id,
+        "timings_ms": timings,
+        "project": project,
+        "messages": messages,
+        "artifacts": artifacts,
+        "active": active,
+        "current_run": current_run,
+        "execution_events": execution_events,
+    }
+
+
+async def _active_session_status(session_id: str) -> dict:
+    """セッションが実行中かの判定本体（/active と /open の共用）。"""
+
     from app.services.cancellation import CancellationRegistry
     from app.agent.cli_runner import is_cli_active
 

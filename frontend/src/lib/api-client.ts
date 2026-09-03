@@ -105,6 +105,16 @@ export interface MessageResponse {
   pendingFollowup?: boolean;
 }
 
+export interface RoomOpenResponse {
+  room_id: string;
+  project: ProjectResponse | null;
+  messages: MessageResponse[] | null;
+  artifacts: unknown[] | null;
+  active: ActiveSessionStatus | null;
+  current_run: AgentRunResponse | null;
+  execution_events: ExecutionEvent[] | null;
+}
+
 export interface MessagesListResponse {
   messages: MessageResponse[];
 }
@@ -984,6 +994,19 @@ export const api = {
   // Rooms endpoints
   rooms: {
     list: () => request<RoomsListResponse>('/chat/rooms'),
+
+    /**
+     * 部屋を開くのに必要な一式を1往復で取る（部屋切替の高速化）。
+     * project / messages / artifacts / active / current-run / execution-events を
+     * サーバー側で同時に取得してまとめて返す。欠けた項目は null。
+     */
+    open: (roomId: string, projectId?: string | null, limit = 20, includeProject = false) => {
+      const q = new URLSearchParams({ limit: String(limit) });
+      if (projectId) q.set('project_id', projectId);
+      // Web はサイドバーの一覧キャッシュに project を持つので省く（束ねの中で一番遅い）
+      if (!includeProject) q.set('include_project', 'false');
+      return request<RoomOpenResponse>(`/chat/rooms/${roomId}/open?${q.toString()}`);
+    },
 
     get: (roomId: string) => request<RoomResponse>(`/chat/rooms/${roomId}`),
 

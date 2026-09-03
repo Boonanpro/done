@@ -484,7 +484,9 @@ class ProjectService:
             query = query.gt("seq", since_seq)
         elif after:
             query = query.gt("created_at", after)
-        result = query.order("created_at", desc=True).limit(limit).execute()
+        # ホットパス（部屋を開くたび・実行中は2秒毎）。ループ上で .execute() を
+        # 待つと全リクエストが直列化するので必ずスレッドへ逃がす。
+        result = await asyncio.to_thread(query.order("created_at", desc=True).limit(limit).execute)
         return list(reversed(result.data or []))
 
     async def get_execution_events_by_room(

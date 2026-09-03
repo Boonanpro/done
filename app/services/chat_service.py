@@ -787,6 +787,11 @@ class ChatService:
     
     # 作業ブロックの詳細（ツール出力）を一覧応答に含める上限文字数。
     AI_CONTEXT_DETAIL_MAX = 600
+    # 作業ブロックのラベル（ツール名+入力の要約）の上限。実測でラベルが1件3.4KB・
+    # 1メッセージ187ブロックで69KBに達し、20件取得で本文23KBに対し465KBを占めていた。
+    AI_CONTEXT_LABEL_MAX = 200
+    # 一覧に載せる作業ブロック数の上限。超えた分は先頭側を1件のまとめに畳む。
+    AI_CONTEXT_BLOCKS_MAX = 60
 
     @classmethod
     def _slim_ai_context(cls, ai_context: dict) -> dict:
@@ -804,10 +809,21 @@ class ChatService:
         slim = {k: v for k, v in ai_context.items() if k not in ("reasoning_steps", "reasoning_full")}
         blocks = slim.get("blocks")
         if isinstance(blocks, list):
+            dropped = 0
+            if len(blocks) > cls.AI_CONTEXT_BLOCKS_MAX:
+                dropped = len(blocks) - cls.AI_CONTEXT_BLOCKS_MAX
+                blocks = blocks[dropped:]
             out = []
+            if dropped:
+                out.append({"type": "text", "text": f"…（前半の作業 {dropped} 件は省略）"})
             for b in blocks:
-                if isinstance(b, dict) and isinstance(b.get("detail"), str) and len(b["detail"]) > cls.AI_CONTEXT_DETAIL_MAX:
+                if not isinstance(b, dict):
+                    out.append(b)
+                    continue
+                if isinstance(b.get("detail"), str) and len(b["detail"]) > cls.AI_CONTEXT_DETAIL_MAX:
                     b = {**b, "detail": b["detail"][: cls.AI_CONTEXT_DETAIL_MAX] + "\n…（以下省略）"}
+                if isinstance(b.get("label"), str) and len(b["label"]) > cls.AI_CONTEXT_LABEL_MAX:
+                    b = {**b, "label": b["label"][: cls.AI_CONTEXT_LABEL_MAX] + "…"}
                 out.append(b)
             slim["blocks"] = out
         return slim

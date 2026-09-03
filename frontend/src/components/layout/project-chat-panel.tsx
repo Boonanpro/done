@@ -1970,10 +1970,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     addPendingComment();
   }, [addPendingComment]);
 
+  const [openState, setOpenState] = useState<'pending' | 'done' | 'failed'>('pending');
+  const queriesReleased = openState !== 'pending';
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => api.projects.get(projectId),
-    enabled: !!projectId,
+    enabled: !!projectId && queriesReleased,
     // サイドバーの一覧キャッシュには room_id を含む同型のプロジェクトが既に
     // あるので、それを種にして即座に立ち上げる。これが無いと「プロジェクト
     // 取得→room_id判明→メッセージ取得」の直列2段になり、1段目の間は
@@ -1989,6 +1991,48 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
 
+  // 部屋を開く一式を1往復で取り、各クエリのキャッシュへ一括投入する。
+  // 従来は project / messages / artifacts / active / current-run / execution-events を
+  // 別々に投げ、実行中の部屋では一番遅い1本（events 500件 ≒1s）が切替時間を決めていた。
+  // 束ね応答が届くまで個別クエリは止めておき（二重取得しない）、届いたら解放する。
+  // 束ねが失敗/遅延した時は個別クエリに戻す（従来経路が保険）。
+  const initialRoomId = project?.room_id;
+  useEffect(() => {
+    if (!projectId || !initialRoomId) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => { if (!cancelled) setOpenState((s) => (s === 'pending' ? 'failed' : s)); }, 6000);
+    // fetchQuery で in-flight を共有する（StrictMode の二重 effect や連打で同じ束ねを二度投げない）
+    queryClient
+      .fetchQuery({
+        queryKey: ['room-open', initialRoomId, projectId],
+        queryFn: () => api.rooms.open(initialRoomId, projectId, CHAT_INITIAL_FETCH_LIMIT),
+        staleTime: 1500,
+        gcTime: 0,
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data.project) queryClient.setQueryData(['project', projectId], data.project);
+        if (data.messages) {
+          if (data.messages.length < CHAT_INITIAL_FETCH_LIMIT) hasMoreOlderRef.current = false;
+          // 既にキャッシュがある（開き直し）場合は、SSE直挿入行を消さないよう通常経路のマージに任せる
+          if (!queryClient.getQueryData(['project-messages', initialRoomId])) {
+            queryClient.setQueryData(['project-messages', initialRoomId], { messages: data.messages });
+          }
+        }
+        queryClient.setQueryData(['chat-artifacts', initialRoomId], (data.artifacts ?? []) as ArtifactRecord[]);
+        if (data.active) queryClient.setQueryData(['session-active', initialRoomId], data.active);
+        queryClient.setQueryData(['current-run', projectId], data.current_run);
+        // 待機中の部屋は events が同梱されない（null）。空で種を撒いておけば
+        // 実行が始まった時だけ refetchInterval が取りに行く。
+        queryClient.setQueryData(['execution-events', projectId], data.execution_events ?? []);
+        setOpenState('done');
+      })
+      .catch(() => { if (!cancelled) setOpenState('failed'); })
+      .finally(() => window.clearTimeout(timer));
+    return () => { cancelled = true; window.clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, initialRoomId]);
+
   // Artifacts for the header opener button
   const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
     queryKey: ['chat-artifacts', project?.room_id],
@@ -1999,7 +2043,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: !!project?.room_id,
+    enabled: !!project?.room_id && queriesReleased,
     staleTime: 10_000,
   });
 
@@ -2089,7 +2133,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       );
       return { messages: merged };
     },
-    enabled: !!project?.room_id,
+    enabled: !!project?.room_id && queriesReleased,
     staleTime: 5 * 1000,
     retry: 1,
     refetchInterval: (query) => (
@@ -2127,7 +2171,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const { data: activeStatus } = useQuery({
     queryKey: ['session-active', project?.room_id],
     queryFn: () => api.sm.getActiveStatus(project!.room_id!),
-    enabled: !!project?.room_id,
+    enabled: !!project?.room_id && queriesReleased,
     retry: 1,
     // SSE未接続時は 3s ポーリング。SSE接続中もイベントでキャッシュ更新するが、
     // 追い連絡/cancel等でSSEがデシンク（接続扱いのまま無音）すると active 状態が
@@ -2138,10 +2182,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const isBackendSessionActive = !!activeStatus?.active;
 
-  const { data: currentRun, isLoading: isLoadingCurrentRun } = useQuery({
+  const { data: currentRun } = useQuery({
     queryKey: ['current-run', projectId],
     queryFn: () => api.projects.currentRun(projectId),
-    enabled: !!projectId,
+    enabled: !!projectId && queriesReleased,
     retry: false,
     // session-active はコアのin-memory状態のみで、SSE切断後の常駐セッション
     // 継続ターンを見失う。自分のレスポンス(run.state)も実行中の根拠にして、
@@ -2158,10 +2202,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // 処理がsinkで続いている限り running なので、開き直し後も表示が消えない。
   const isActiveExecution = isBackendSessionActive || currentRun?.state === 'running';
 
-  const { data: allExecutionEvents = [], isLoading: isLoadingExecutionEvents } = useQuery({
+  const { data: allExecutionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId, 500),
-    enabled: !!projectId,
+    enabled: !!projectId && queriesReleased,
     retry: 1,
     staleTime: 30 * 1000,
     refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
@@ -2335,11 +2379,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // 実行中かどうかは一覧（サイドバー）が既に持つ has_active_run で判定し、
   // 追加取得はしない。従来は待機中の部屋でも4本の完了を待っていて、一番遅い
   // 1本（詰まった current-run 等）に切替時間が引きずられていた。
-  const waitForRunState = !!project?.has_active_run || isActiveExecution;
-  const isBooting =
-    !project ||
-    (!!project.room_id && messagesData === undefined) ||
-    (waitForRunState && (isLoadingCurrentRun || isLoadingExecutionEvents));
+  // run状態・作業イベントは待たない。メッセージが揃った時点で描き、実行中の
+  // 表示は後から到着した時に差し込む（束ね応答なら同時に届く）。
+  const isBooting = !project || (!!project.room_id && messagesData === undefined);
 
   useEffect(() => {
     isNearBottomRef.current = true;
@@ -2851,7 +2893,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         {/* 部屋ボード: 有効な部屋では履歴の代わりに現在地ボードを主役表示。
             isBooting で外すと送信のたびに再マウント→付箋アニメ再生になるので、
             ロード状態に関わらずマウントし続ける（ボード自身がスピナーを持つ） */}
-        {boardEnabled ? <RoomBoard projectId={projectId} /> : null}
+        {/* ボードの取得/SSE はメッセージを描いた後に始める（部屋を開く1往復と DB を取り合わない） */}
+        {boardEnabled && !isBooting ? <RoomBoard projectId={projectId} /> : null}
         {/* 「空の部屋」の文言は、取得が成功して本当に0件だった時だけ出す。
             プロジェクト情報の取得中（=メッセージクエリが未開始）や
             メッセージ初回取得中は「読み込み中」であって「空」ではない。
