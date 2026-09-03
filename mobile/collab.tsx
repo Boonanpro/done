@@ -39,6 +39,7 @@ export interface CollabRoomSummary {
   updated_at: string;
   /** 相手の公開メッセージが自分の既読位置より後にある（サーバー判定） */
   unread?: boolean;
+  unread_count?: number;
 }
 
 type CollabFile = { id?: string; name: string; url: string; type?: string; size?: number };
@@ -196,7 +197,11 @@ export function CollabRoomsScreen({ request, onOpenRoom, onBack, topInset }: {
                   <Text style={[s.roomPreview, { flex: 1 }, item.unread && { color: C.text, fontWeight: '600' }]} numberOfLines={1}>
                     {item.last_message || 'まだメッセージはありません'}
                   </Text>
-                  {item.unread && <View style={s.unreadDot} />}
+                  {(item.unread_count ?? 0) > 0 ? (
+                    <View style={s.unreadBadge}>
+                      <Text style={s.unreadBadgeText}>{(item.unread_count ?? 0) > 99 ? '99+' : item.unread_count}</Text>
+                    </View>
+                  ) : item.unread ? <View style={s.unreadDot} /> : null}
                 </View>
               </View>
             </Pressable>
@@ -562,7 +567,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         </Pressable>
         <TextInput
           style={s.input}
-          placeholder="メッセージを入力...（相手に届きます）"
+          placeholder="メッセージを入力..."
           placeholderTextColor={C.muted2}
           value={input}
           onChangeText={setInput}
@@ -845,6 +850,9 @@ const s = StyleSheet.create({
   roomTime: { color: C.muted2, fontSize: 11 },
   roomPreview: { color: C.muted, fontSize: 13, marginTop: 2 },
   unreadDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: C.accent, marginTop: 2 },
+  // プロジェクト一覧（App.tsx unreadBadge）と同じ見た目
+  unreadBadge: { alignItems: 'center', backgroundColor: C.danger, borderRadius: 13, minWidth: 26, height: 26, justifyContent: 'center', paddingHorizontal: 7 },
+  unreadBadgeText: { color: '#fffaf5', fontSize: 11, fontWeight: '900' },
   attachBtn: { paddingVertical: 8, paddingHorizontal: 2, justifyContent: 'center' },
   sep: { height: StyleSheet.hairlineWidth, backgroundColor: C.border, marginLeft: 72 },
 

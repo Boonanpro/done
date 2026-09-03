@@ -1941,6 +1941,7 @@ export interface CollabRoomResponse {
   last_message_at: string | null;
   /** 相手の公開メッセージがオーナーの既読位置より後にある（サーバー判定） */
   unread?: boolean;
+  unread_count?: number;
   created_at: string;
   updated_at: string;
 }

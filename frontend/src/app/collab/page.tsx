@@ -240,8 +240,10 @@ function RoomRow({ room, onClick, onDelete }: { room: CollabRoomResponse; onClic
         <div className={`h-12 w-12 rounded-full bg-gradient-to-br ${avatarGradient(room.id)} flex items-center justify-center shadow-sm`}>
           <User className="h-6 w-6 text-white/90" />
         </div>
-        {isUnread && (
-          <span className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-primary ring-2 ring-card" />
+        {(isUnread || (room.unread_count ?? 0) > 0) && (
+          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-bold leading-[18px] text-center ring-2 ring-card tabular-nums">
+            {(room.unread_count ?? 0) > 99 ? '99+' : (room.unread_count ?? 0) > 0 ? room.unread_count : ''}
+          </span>
         )}
       </div>
 

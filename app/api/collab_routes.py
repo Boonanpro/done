@@ -169,12 +169,14 @@ async def list_rooms(
         # Get last message
         messages = await service.get_messages(r["id"], limit=1)
         last_msg = messages[-1] if messages else None
+        unread_count = await service.unread_count_for_owner(r)
         room_responses.append(CollabRoomResponse(
             **r,
             guest_count=guest_count,
             last_message=_preview_text(last_msg) if last_msg else None,
             last_message_at=last_msg["created_at"] if last_msg else None,
-            unread=await service.has_unread_for_owner(r),
+            unread=unread_count > 0,
+            unread_count=unread_count,
         ))
     # 並びは「メッセージの動きがあった順」。updated_at は既読更新などでも動いてしまい、
     # 開いただけで一覧の順番が入れ替わる誤動作の原因になるため使わない。

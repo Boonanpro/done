@@ -744,7 +744,7 @@ export default function CollabRoomPage() {
         <div className="flex-1 relative">
           <textarea
             ref={inputRef as any}
-            placeholder="メッセージを入力...（相手に届きます）"
+            placeholder="メッセージを入力..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
             rows={1}

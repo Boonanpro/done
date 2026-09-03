@@ -433,18 +433,21 @@ class CollabService:
                 .update({"metadata": md}).eq("id", message_id).execute())
         return upd.data[0] if upd.data else None
 
-    async def has_unread_for_owner(self, room: dict) -> bool:
-        """オーナー未読: ゲストの公開メッセージが owner_last_read_at より後にあるか。"""
-        q = (self.supabase.table("collab_messages").select("id")
+    async def unread_count_for_owner(self, room: dict) -> int:
+        """オーナー未読数: ゲストの公開メッセージのうち owner_last_read_at より後のもの。"""
+        q = (self.supabase.table("collab_messages").select("id", count="exact")
              .eq("room_id", room["id"]).eq("sender_type", "guest"))
         read_at = room.get("owner_last_read_at")
         if read_at:
             q = q.gt("created_at", read_at)
         try:
-            result = await self._retry("has_unread", lambda: q.limit(1).execute())
+            result = await self._retry("unread_count", lambda: q.limit(1).execute())
         except Exception:
-            return False
-        return bool(result.data)
+            return 0
+        return int(result.count or 0)
+
+    async def has_unread_for_owner(self, room: dict) -> bool:
+        return (await self.unread_count_for_owner(room)) > 0
 
     async def get_messages(self, room_id: str, limit: int = 50, before: str = None) -> List[dict]:
         query = self.supabase.table("collab_messages").select("*").eq("room_id", room_id)

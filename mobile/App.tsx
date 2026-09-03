@@ -1543,6 +1543,17 @@ function AppMain() {
     [messages, liveTurnGroups, showLiveTurn],
   );
 
+  // コラボ窓口の未読（サーバー判定 unread_count の合計）。👥ボタンのバッジと
+  // アプリアイコンのバッジに合算する。開いている窓口は既読扱い。
+  const [collabUnreadByRoom, setCollabUnreadByRoom] = useState<Record<string, number>>({});
+  const collabUnreadTotal = useMemo(
+    () =>
+      Object.entries(collabUnreadByRoom).reduce((total, [id, n]) => {
+        if (screen === 'collabChat' && collabRoom?.id === id) return total;
+        return total + n;
+      }, 0),
+    [collabUnreadByRoom, screen, collabRoom?.id],
+  );
   const unreadTotal = useMemo(
     () =>
       projects.reduce((total, project) => {
@@ -1550,8 +1561,8 @@ function AppMain() {
         // arrives while you're looking at it must not light up the badge.
         if (screen === 'chat' && project.id === currentProject?.id) return total;
         return total + (project.unread_count || 0);
-      }, 0),
-    [projects, screen, currentProject?.id],
+      }, 0) + collabUnreadTotal,
+    [projects, screen, currentProject?.id, collabUnreadTotal],
   );
 
   const headerTitle = currentProject?.title || 'DAN';
@@ -1581,6 +1592,25 @@ function AppMain() {
       // best-effort; ignore
     }
   }, []);
+
+  // コラボ未読の取得: ログイン中、画面が切り替わった時＋30秒毎（窓口を読んで戻った時に即消える）
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    const load = () => {
+      apiRequest<{ rooms: CollabRoomSummary[] }>('/collab/rooms', {}, token)
+        .then((d) => {
+          if (!alive) return;
+          const next: Record<string, number> = {};
+          for (const r of d.rooms ?? []) if ((r.unread_count ?? 0) > 0) next[r.id] = r.unread_count ?? 0;
+          setCollabUnreadByRoom(next);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [token, screen]);
 
   const syncNotificationBadge = useCallback(async (count: number) => {
     await Notifications.setBadgeCountAsync(count).catch(() => null);
@@ -3214,6 +3244,11 @@ function AppMain() {
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
             <Ionicons name="people-outline" size={22} color="#f4f0e8" />
+            {collabUnreadTotal > 0 ? (
+              <View style={styles.iconBadge}>
+                <Text style={styles.iconBadgeText}>{collabUnreadTotal > 99 ? '99+' : collabUnreadTotal}</Text>
+              </View>
+            ) : null}
           </Pressable>
           <Pressable
             onPress={() => setScreen('settings')}
@@ -4166,6 +4201,24 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingLeft: 2,
     paddingRight: 6,
+  },
+  // アプリバーのアイコン右上に載せる未読数（👥のコラボ未読）
+  iconBadge: {
+    position: 'absolute',
+    top: 2,
+    right: -2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#ff5a3d',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  iconBadgeText: {
+    color: '#fffaf5',
+    fontSize: 10,
+    fontWeight: '900',
   },
   backBadge: {
     alignItems: 'center',
