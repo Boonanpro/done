@@ -9,7 +9,6 @@ import { User, Lock, CreditCard, Globe, Loader2, Camera, Check, Link2, Calendar,
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
-import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -149,7 +148,7 @@ export default function SettingsPage() {
   ];
 
   return (
-    <MainLayout showNotifications={false}>
+    <>
       <div className="flex flex-col h-full overflow-auto">
         <div className="shrink-0 px-6 py-4 border-b border-border">
           <h1 className="text-xl font-semibold">設定</h1>
@@ -524,7 +523,7 @@ export default function SettingsPage() {
           </form>
         </DialogContent>
       </Dialog>
-    </MainLayout>
+    </>
   );
 }
 

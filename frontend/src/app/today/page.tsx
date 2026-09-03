@@ -11,7 +11,6 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { api, type AchievementItem } from '@/lib/api-client';
@@ -248,7 +247,7 @@ export default function TodayPage() {
   }, [items]);
 
   return (
-    <MainLayout showNotifications={false}>
+    <>
       <div className="flex flex-col h-full overflow-hidden">
         <div className="flex items-center gap-3 px-6 py-4 border-b shrink-0">
           <div className="flex-1 min-w-0">
@@ -324,6 +323,6 @@ export default function TodayPage() {
           )}
         </div>
       </div>
-    </MainLayout>
+    </>
   );
 }

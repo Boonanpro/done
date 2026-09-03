@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { FileText, Sparkles, Send, Trash2, Loader2, Plus, ExternalLink, ArrowLeft, PenLine, Tag, X, Clock, Calendar, Ban, CheckCircle, AlertCircle } from 'lucide-react';
 
-import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -575,7 +574,7 @@ export default function NotesPage() {
   // Draft detail view
   if (viewDraft) {
     return (
-      <MainLayout showNotifications={false}>
+      <>
         <div className="flex flex-col h-full overflow-hidden">
           <div className="flex items-center gap-3 px-6 py-4 border-b shrink-0">
             <Button variant="ghost" size="icon" onClick={() => setViewDraft(null)}>
@@ -602,14 +601,14 @@ export default function NotesPage() {
             />
           </div>
         </div>
-      </MainLayout>
+      </>
     );
   }
 
   // Editor view
   if (showEditor) {
     return (
-      <MainLayout showNotifications={false}>
+      <>
         <div className="flex flex-col h-full overflow-hidden">
           <div className="flex items-center gap-3 px-6 py-4 border-b shrink-0">
             <Button variant="ghost" size="icon" onClick={() => { setShowEditor(false); setSelectedDraft(null); }}>
@@ -626,13 +625,13 @@ export default function NotesPage() {
             />
           </div>
         </div>
-      </MainLayout>
+      </>
     );
   }
 
   // Main list view
   return (
-    <MainLayout showNotifications={false}>
+    <>
       <div className="flex flex-col h-full overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
@@ -871,6 +870,6 @@ export default function NotesPage() {
           </Tabs>
         </div>
       </div>
-    </MainLayout>
+    </>
   );
 }

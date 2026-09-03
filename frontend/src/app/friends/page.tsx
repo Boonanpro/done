@@ -6,7 +6,6 @@ import { Users, Plus, Search, Copy, Check, ToggleLeft, ToggleRight, MessageCircl
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
-import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -172,7 +171,7 @@ export default function FriendsPage() {
 
   return (
     <TooltipProvider>
-      <MainLayout showNotifications={false}>
+      <>
         <div className="flex h-full">
           {/* Friends List */}
           <div className="w-80 border-r border-border flex flex-col">
@@ -482,7 +481,7 @@ export default function FriendsPage() {
             )}
           </div>
         </div>
-      </MainLayout>
+      </>
     </TooltipProvider>
   );
 }

@@ -14,7 +14,6 @@ import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
 import { useUnreadStore } from '@/stores/unread-store';
-import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
 import { usePushNotification } from '@/hooks/usePushNotification';
 import { Button } from '@/components/ui/button';
@@ -418,7 +417,7 @@ export default function CollabRoomPage() {
   });
 
   return (
-    <MainLayout showNotifications={false} hideHamburger>
+    <>
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b bg-background shrink-0">
@@ -805,7 +804,7 @@ export default function CollabRoomPage() {
       </div>
     )}
 
-    </MainLayout>
+    </>
   );
 }
 

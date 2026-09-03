@@ -7,7 +7,6 @@ import { toast } from 'sonner';
 import { Plus, Users, User, Archive, Trash2, MessagesSquare } from 'lucide-react';
 import { api, type CollabRoomResponse } from '@/lib/api-client';
 import { useUnreadStore } from '@/stores/unread-store';
-import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -96,7 +95,7 @@ export default function CollabListPage() {
   const rooms = data?.rooms ?? [];
 
   return (
-    <MainLayout showNotifications={false}>
+    <>
       <div className="flex-1 px-4 py-6 sm:p-6 max-w-3xl mx-auto w-full">
         <div className="flex items-center justify-between mb-5">
           <div>
@@ -212,7 +211,7 @@ export default function CollabListPage() {
           </div>
         )}
       </div>
-    </MainLayout>
+    </>
   );
 }
 

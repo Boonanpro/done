@@ -325,7 +325,7 @@ export function Sidebar({
       >
         {/* Header */}
         <div className="flex items-center h-14 px-3 border-b border-sidebar-border">
-          <AnimatePresence mode="wait">
+          <AnimatePresence mode="wait" initial={false}>
             {!isCollapsed && (
               <motion.div
                 initial={{ opacity: 0 }}
@@ -358,7 +358,7 @@ export function Sidebar({
         </div>
 
         {/* Search */}
-        <AnimatePresence>
+        <AnimatePresence initial={false}>
           {!isCollapsed && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
