@@ -856,6 +856,8 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
   const bodyText = hasFiles && (!message.content || others.some((f) => f.name === message.content) || media.some((m) => m.name === message.content)) ? '' : (message.content || '');
   // 絵文字1〜2個だけの発言はスタンプとして大きく表示
   const isStamp = !hasFiles && /^(\p{Extended_Pictographic}(️)?){1,2}$/u.test((message.content || '').trim());
+  // 画像・動画だけの発言は吹き出しの枠を付けず、そのまま置く（LINE式）
+  const bare = (isStamp || (media.length > 0 && !bodyText && others.length === 0)) && !isPrivate;
   const isOwnerPrivate = isOwner && isPrivate;
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
@@ -888,10 +890,10 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
         )}
         <div
           data-bubble
-          className={`rounded-lg ${isStamp && !isPrivate ? 'px-1 py-0' : 'px-3 py-2'} ${
+          className={`rounded-lg ${bare ? 'px-1 py-0' : 'px-3 py-2'} ${
             /* 色の意味: 紫=あなたにしか見えない（相談・ダンへの私的返信）/
                primary=相手に見える自分側（あなた・ダン）/ muted=相手 */
-            isStamp && !isPrivate
+            bare
               ? ''
               : isPrivate
                 ? 'bg-violet-500/15 border border-dashed border-violet-500/40'

@@ -702,6 +702,8 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   const hasFiles = rawFiles.length > 0;
   // 添付だけのメッセージは本文が空かファイル名（旧形式）なので本文行を出さない
   const bodyText = hasFiles && (!msg.content || rawFiles.some((f) => f.name === msg.content)) ? '' : msg.content;
+  // 画像・動画だけの発言は吹き出しの枠を付けず、そのまま置く（LINE式）
+  const bare = mediaItems.length > 0 && !bodyText && otherFiles.length === 0 && !isPrivate && !msg.metadata?.reply_to?.id;
   const [replyText, setReplyText] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const canReact = !isPrivate && !msg.id.startsWith('temp-');
@@ -770,14 +772,21 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
       onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
       delayLongPress={250}
       style={({ pressed }) => [
-        stamp ? s.stampBox : s.bubble,
-        !stamp && (isPrivate ? s.bubblePrivate : isOwnSide ? s.bubbleOwn : s.bubbleOther),
+        stamp || bare ? s.stampBox : s.bubble,
+        !stamp && !bare && (isPrivate ? s.bubblePrivate : isOwnSide ? s.bubbleOwn : s.bubbleOther),
         pressed && canReact ? { opacity: 0.85 } : undefined,
         highlighted ? s.bubbleHighlight : undefined,
       ]}
     >
       {quote}
-      {mediaItems.length > 0 && <MediaGrid items={mediaItems} width={236} />}
+      {mediaItems.length > 0 && (
+        <MediaGrid
+          items={mediaItems}
+          width={236}
+          // 画像/動画の長押しは「開く/再生」ではなく返信・スタンプのメニュー（タップで開く）
+          onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
+        />
+      )}
       {otherFiles.map((file) => (
         <Pressable key={file.url} onPress={() => Linking.openURL(file.url.startsWith('http') ? file.url : `${apiBase}${file.url}`)}>
           <Text style={[s.fileLink, isOwnSide && !isPrivate ? { color: '#0c1513' } : undefined]}>

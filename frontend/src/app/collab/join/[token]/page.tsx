@@ -810,6 +810,8 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   }
 
   const isPrivate = message.metadata?.visibility === 'guest_only';
+  // 画像・動画だけの発言は吹き出しの枠を付けず、そのまま置く（LINE式）
+  const bare = (isStamp || (media.length > 0 && !bodyText && others.length === 0)) && !isPrivate;
   const isGuestPrivate = isGuest && isPrivate;
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
@@ -841,8 +843,8 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
         )}
         <div
           data-bubble
-          className={`rounded-lg ${isStamp && !isPrivate ? 'px-1 py-0' : 'px-3 py-2'} ${
-            isStamp && !isPrivate
+          className={`rounded-lg ${bare ? 'px-1 py-0' : 'px-3 py-2'} ${
+            bare
               ? ''
               : isPrivate
                 ? 'bg-violet-500/10 border border-dashed border-violet-500/30'

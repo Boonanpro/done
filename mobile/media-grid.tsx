@@ -17,12 +17,15 @@ export function MediaGrid({
   items,
   width = 240,
   onOpenImage,
+  onLongPress,
 }: {
   items: MediaGridItem[];
   /** グリッド全体の幅（吹き出しの内側に収める） */
   width?: number;
   /** 画像タップ。未指定なら内蔵ビューアで開く */
   onOpenImage?: (url: string) => void;
+  /** 長押し（チャットの返信/スタンプメニュー）。指定すると長押しでは開かない */
+  onLongPress?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [viewing, setViewing] = useState<MediaGridItem | null>(null);
@@ -40,11 +43,11 @@ export function MediaGrid({
     return (
       <View style={{ width }}>
         {it.kind === 'video' ? (
-          <Pressable onPress={() => open(it)} style={[st.tile, { width, height: Math.round(width * 0.6) }]}>
+          <Pressable onPress={() => open(it)} onLongPress={onLongPress} delayLongPress={250} style={[st.tile, { width, height: Math.round(width * 0.6) }]}>
             <VideoTile url={it.url} />
           </Pressable>
         ) : (
-          <SingleImage url={it.url} width={width} onPress={() => open(it)} />
+          <SingleImage url={it.url} width={width} onPress={() => open(it)} onLongPress={onLongPress} />
         )}
         {viewer}
       </View>
@@ -60,6 +63,8 @@ export function MediaGrid({
       <Pressable
         key={`${it.url}-${i}`}
         onPress={() => (isLast ? setExpanded(true) : open(it))}
+        onLongPress={onLongPress}
+        delayLongPress={250}
         style={[st.tile, size]}
       >
         {it.kind === 'video' ? <VideoTile url={it.url} hidePlay={isLast} /> : (
@@ -105,7 +110,7 @@ export function MediaGrid({
 }
 
 // 1枚の画像: 実寸の縦横比で表示（取得前は 4:3）
-function SingleImage({ url, width, onPress }: { url: string; width: number; onPress: () => void }) {
+function SingleImage({ url, width, onPress, onLongPress }: { url: string; width: number; onPress: () => void; onLongPress?: () => void }) {
   const [ratio, setRatio] = useState(4 / 3);
   useEffect(() => {
     let alive = true;
@@ -114,7 +119,7 @@ function SingleImage({ url, width, onPress }: { url: string; width: number; onPr
   }, [url]);
   const height = Math.min(320, Math.round(width / ratio));
   return (
-    <Pressable onPress={onPress} style={[st.tile, { width, height }]}>
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={250} style={[st.tile, { width, height }]}>
       <Image source={{ uri: url }} style={StyleSheet.absoluteFill} resizeMode="cover" />
     </Pressable>
   );
