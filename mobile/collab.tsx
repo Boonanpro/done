@@ -53,7 +53,7 @@ interface CollabMessage {
   content: string;
   metadata?: {
     visibility?: string;
-    reply_to?: { id?: string; sender_name?: string; content?: string };
+    reply_to?: { id?: string; sender_name?: string; sender_type?: string; content?: string };
     reactions?: Record<string, string[]>;
     file?: CollabFile;
     files?: CollabFile[];
@@ -237,6 +237,9 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   const [uploading, setUploading] = useState(false);
   // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
   const [pending, setPending] = useState<PendingFile[]>([]);
+  // 特定のメッセージへの返信（LINE式: 引用付き）
+  const [replyTo, setReplyTo] = useState<CollabMessage | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
   const listRef = useRef<FlatList>(null);
 
   // 受信合流点: client_msg_id の仮バブルは差し替え（Web と同一ロジック）
@@ -388,12 +391,24 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     if ((!text && pending.length === 0) || sending || uploading) return;
     const filesToSend = pending;
     let extra: Record<string, unknown> | undefined;
+    const savedReplyTo = replyTo;
+    if (savedReplyTo) {
+      extra = {
+        reply_to: {
+          id: savedReplyTo.id,
+          sender_name: savedReplyTo.sender_name,
+          sender_type: savedReplyTo.sender_type,
+          content: (savedReplyTo.content || '').slice(0, 200),
+        },
+      };
+      setReplyTo(null);
+    }
     if (filesToSend.length > 0) {
       setUploading(true);
       try {
         const files: CollabFile[] = [];
         for (const p of filesToSend) files.push(await uploadOne(p.uri, p.name, p.mime));
-        extra = { files, file: files[0] };
+        extra = { ...(extra || {}), files, file: files[0] };
         setPending([]);
       } catch (e) {
         Alert.alert('アップロードに失敗しました', String((e as Error).message));
@@ -409,10 +424,12 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     } catch {
       setInput(text);
       if (filesToSend.length > 0) setPending(filesToSend);
+      if (savedReplyTo) setReplyTo(savedReplyTo);
     } finally {
       setSending(false);
     }
-  }, [input, pending, sending, uploading, send, uploadOne]);
+  }, [input, pending, sending, uploading, send, uploadOne, replyTo]);
+
 
 
   const sendFiles = useCallback(async (picked: PendingFile[]) => {
@@ -496,6 +513,15 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     return [...rows].reverse();
   }, [messages, messageIds]);
 
+  // 引用をタップ → 元メッセージへスクロールして一瞬ハイライト
+  const jumpTo = useCallback((id: string) => {
+    const idx = listData.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    listRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
+    setHighlightId(id);
+    setTimeout(() => setHighlightId((cur) => (cur === id ? null : cur)), 1500);
+  }, [listData]);
+
   const names = participants
     ? `${1 + participants.guests.length}人: ${[participants.owner.name, ...participants.guests.map((g) => g.name)].join('、')}`
     : '';
@@ -521,6 +547,9 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         inverted
         data={listData}
         keyExtractor={(m) => m.metadata?.client_msg_id || m.id}
+        onScrollToIndexFailed={(info) => {
+          setTimeout(() => listRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 }), 300);
+        }}
         contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 10 }}
         renderItem={({ item }) => (
           <MessageRow
@@ -530,6 +559,9 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
             apiBase={apiBase}
             myName={myName}
             onReact={react}
+            onReply={(m) => setReplyTo(m)}
+            onJump={jumpTo}
+            highlighted={highlightId === item.id}
             onThreadReply={(parent, text) =>
               send(text, {
                 visibility: 'owner_only',
@@ -558,6 +590,20 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         }
       />
 
+      {replyTo && (
+        <View style={s.replyBar}>
+          <Ionicons name="arrow-undo" size={14} color={C.accent} />
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={s.replyBarName} numberOfLines={1}>
+              {replyTo.sender_type.startsWith('dan_') ? 'ダン' : replyTo.sender_name}に返信
+            </Text>
+            <Text style={s.replyBarText} numberOfLines={1}>{previewOf(replyTo)}</Text>
+          </View>
+          <Pressable hitSlop={8} onPress={() => setReplyTo(null)}>
+            <Ionicons name="close" size={18} color={C.muted} />
+          </Pressable>
+        </View>
+      )}
       {pending.length > 0 && (
         <View style={s.pendingStrip}>
           {pending.map((p, i) => (
@@ -619,13 +665,28 @@ function reconcileList(prev: CollabMessage[], server: CollabMessage[]): CollabMe
 // ============================================================
 // メッセージ行
 // ============================================================
-function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, onThreadReply }: {
+// 引用や返信バーに出す短い本文（添付だけなら「📷 画像」等）
+function previewOf(m: CollabMessage): string {
+  const files = m.metadata?.files || (m.metadata?.file ? [m.metadata.file] : []);
+  const body = (m.content || '').trim();
+  if (body && !files.some((f) => f.name === body)) return body.slice(0, 100);
+  if (files.length === 0) return '';
+  const kinds = files.map((f) => f.type || '');
+  if (kinds.every((k) => k.startsWith('image/'))) return files.length > 1 ? `📷 画像 ${files.length}枚` : '📷 画像';
+  if (kinds.every((k) => k.startsWith('video/'))) return files.length > 1 ? `🎬 動画 ${files.length}本` : '🎬 動画';
+  return `📎 ${files[0].name}`;
+}
+
+function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, onReply, onJump, highlighted, onThreadReply }: {
   msg: CollabMessage;
   threadReplies?: CollabMessage[];
   showRead: boolean;
   apiBase: string;
   myName: string;
   onReact: (messageId: string, emoji: string) => void;
+  onReply: (msg: CollabMessage) => void;
+  onJump: (id: string) => void;
+  highlighted: boolean;
   onThreadReply: (parent: CollabMessage, text: string) => void;
 }) {
   const isDan = msg.sender_type.startsWith('dan_');
@@ -695,6 +756,15 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
 
   // LINE式: 名前は相手側だけバブルの上（自分の名前は出さない。ダンだけ右側でも小さく表示）、
   // 時刻・既読はバブルの外側（横・下揃え）
+  // 引用（この発言が返信なら、元の発言を上に小さく出す。タップで元へ飛ぶ）
+  const rt = msg.metadata?.reply_to;
+  const quote = rt?.id && !isPrivate ? (
+    <Pressable onPress={() => onJump(rt.id!)} style={[s.quote, isOwnSide ? s.quoteOwn : s.quoteOther]}>
+      <Text style={[s.quoteName, { color: isOwnSide ? '#0c1513aa' : C.accent }]} numberOfLines={1}>{(rt.sender_type || '').startsWith('dan_') ? 'ダン' : rt.sender_name}</Text>
+      <Text style={[s.quoteText, { color: isOwnSide ? '#0c1513aa' : C.muted }]} numberOfLines={2}>{(rt.content || '').replace(/\[添付[^\]]*\]/g, '').trim() || '(添付)'}</Text>
+    </Pressable>
+  ) : null;
+
   const bubbleBody = (
     <Pressable
       onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
@@ -703,8 +773,10 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
         stamp ? s.stampBox : s.bubble,
         !stamp && (isPrivate ? s.bubblePrivate : isOwnSide ? s.bubbleOwn : s.bubbleOther),
         pressed && canReact ? { opacity: 0.85 } : undefined,
+        highlighted ? s.bubbleHighlight : undefined,
       ]}
     >
+      {quote}
       {mediaItems.length > 0 && <MediaGrid items={mediaItems} width={236} />}
       {otherFiles.map((file) => (
         <Pressable key={file.url} onPress={() => Linking.openURL(file.url.startsWith('http') ? file.url : `${apiBase}${file.url}`)}>
@@ -759,8 +831,18 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
           <Text style={{ fontSize: 20 }}>{emoji}</Text>
         </Pressable>
       ))}
+      <View style={s.pickerSep} />
+      <Pressable
+        hitSlop={4}
+        onPress={() => { setPickerOpen(false); onReply(msg); }}
+        style={({ pressed }) => [s.reactionPickItem, { flexDirection: 'row', alignItems: 'center', gap: 4 }, pressedScale({ pressed })]}
+      >
+        <Ionicons name="arrow-undo" size={16} color={C.text} />
+        <Text style={{ color: C.text, fontSize: 13 }}>返信</Text>
+      </Pressable>
     </View>
   ) : null;
+
 
   return (
     <View style={[s.msgWrap, isOwnSide ? s.msgRight : s.msgLeft]}>
@@ -871,6 +953,16 @@ const s = StyleSheet.create({
   roomTime: { color: C.muted2, fontSize: 11 },
   roomPreview: { color: C.muted, fontSize: 13, marginTop: 2 },
   unreadDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: C.accent, marginTop: 2 },
+  replyBar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: C.bg, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
+  replyBarName: { color: C.accent, fontSize: 12, fontWeight: '600' },
+  replyBarText: { color: C.muted, fontSize: 12 },
+  quote: { borderLeftWidth: 2, paddingLeft: 8, paddingVertical: 2, marginBottom: 6, maxWidth: '100%' },
+  quoteOwn: { borderLeftColor: '#0c151366' },
+  quoteOther: { borderLeftColor: C.accent },
+  quoteName: { fontSize: 11, fontWeight: '600' },
+  quoteText: { fontSize: 12 },
+  bubbleHighlight: { borderWidth: 2, borderColor: C.accent },
+  pickerSep: { width: StyleSheet.hairlineWidth, backgroundColor: C.border, marginHorizontal: 4, alignSelf: 'stretch' },
   // プロジェクト一覧（App.tsx unreadBadge）と同じ見た目
   unreadBadge: { alignItems: 'center', backgroundColor: C.danger, borderRadius: 13, minWidth: 26, height: 26, justifyContent: 'center', paddingHorizontal: 7 },
   unreadBadgeText: { color: '#fffaf5', fontSize: 11, fontWeight: '900' },
