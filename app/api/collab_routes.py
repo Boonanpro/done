@@ -905,13 +905,22 @@ async def upload_file(
     with open(file_path, "wb") as f:
         f.write(content)
 
+    # スマホ録画の MP4 は索引(moov)が末尾にあり iOS Safari で再生できないことがある → 先頭へ組み替え（無劣化）
+    if ext.lower() in (".mp4", ".m4v", ".mov"):
+        import asyncio
+        from app.services.video_faststart import faststart_inplace
+        await asyncio.to_thread(faststart_inplace, file_path)
+        content_len = file_path.stat().st_size
+    else:
+        content_len = len(content)
+
     record = await service.save_file_record(
         room_id=room_id,
         uploaded_by=uploaded_by,
         file_name=file.filename or saved_name,
         file_path=f"/api/v1/collab/files/{room_id}/{saved_name}",
         file_type=file.content_type,
-        file_size=len(content),
+        file_size=content_len,
     )
     return CollabFileResponse(**record)
 
