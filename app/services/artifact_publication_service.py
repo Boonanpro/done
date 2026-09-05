@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from typing import Any, Optional
 
 from app.config import settings
 from app.services.supabase_client import get_supabase_client
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_ROOT = PROJECT_ROOT / "frontend"
@@ -134,23 +137,6 @@ class ArtifactPublicationService:
         if latest and latest.get("status") in {"draft", "shared", "deploying", "live"}:
             return latest
         return self.create_release(artifact_id)
-
-    def mark_interrupted(self, artifact_id: str, *, reason: str) -> None:
-        """Return an interrupted hand-off to its last known serving state.
-
-        A caller process may be stopped after `mark_deploying` but before it
-        starts a Vercel build.  Leaving that record as "deploying" makes the
-        delivery ledger lie forever.  The existing immutable deployment stays
-        live, so this is a truthful state repair rather than a retry.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        self.supabase.table(self.table).update(
-            {
-                "status": "shared",
-                "job_status": {"phase": "interrupted", "recovered_at": now, "reason": reason},
-                "last_error": reason,
-            }
-        ).eq("artifact_id", artifact_id).eq("status", "deploying").execute()
 
     def delivery_project_for(self, artifact_id: str, *, legacy_project: str) -> str:
         """Resolve the target on the server, never from browser input.
@@ -487,15 +473,15 @@ class ArtifactPublicationService:
 _DEPLOY_COALESCE_LOCK = threading.Lock()
 _DEPLOY_COALESCE: dict[str, dict[str, bool]] = {}
 
-# deploy_dedicated_release 本体の直列化ロック（artifact_id ごと）。
-# 合流表はスケジューラ経由の依頼だけを畳む。直接呼び出し（チャットの「公開して」等）
-# との並走はこちらで防ぐ。
-_DEPLOY_SERIAL_LOCKS: dict[str, threading.Lock] = {}
+# deploy_dedicated_release 本体の直列化ロック（プロセス内で 1 本）。
+# 全専用サイトは同じ frontend ディレクトリから `vercel deploy` されるため、別 artifact
+# でも並走すると衝突して exit 1 になる。同じ artifact の並走（古いビルドが新しい
+# ビルドの後に promote される競合）も、この 1 本で同時に防ぐ。
+_DEPLOY_SERIAL_LOCK = threading.Lock()
 
 
 def _deploy_serial_lock(artifact_id: str) -> threading.Lock:
-    with _DEPLOY_COALESCE_LOCK:
-        return _DEPLOY_SERIAL_LOCKS.setdefault(artifact_id, threading.Lock())
+    return _DEPLOY_SERIAL_LOCK
 
 
 def schedule_dedicated_deploy(artifact_id: str, user_id: str) -> None:
@@ -516,10 +502,16 @@ def schedule_dedicated_deploy(artifact_id: str, user_id: str) -> None:
         from app.services.chat_artifact_service import ChatArtifactService
 
         artifacts = ChatArtifactService()
-        artifact = await artifacts.get(artifact_id, user_id)
-        if not artifact:
-            return
         try:
+            try:
+                artifact = await artifacts.get(artifact_id, user_id)
+            except Exception:  # noqa: BLE001 - a stale keep-alive connection fails once, then works
+                await asyncio.sleep(3)
+                artifact = await artifacts.get(artifact_id, user_id)
+            if not artifact:
+                logger.warning("[artifact-deploy] %s: not found for owner, skipped", artifact_id[:8])
+                return
+            logger.info("[artifact-deploy] %s (%s): deploy start", artifact_id[:8], artifact.get("slug"))
             release = await ArtifactPublicationService().deploy_dedicated_release(
                 artifact, user_id=user_id
             )
@@ -534,28 +526,38 @@ def schedule_dedicated_deploy(artifact_id: str, user_id: str) -> None:
                 },
                 user_id,
             )
+            logger.info("[artifact-deploy] %s: live at %s", artifact_id[:8], release.get("shared_url"))
         except Exception as exc:  # The ledger records the exact deployment failure.
-            await artifacts.update(
-                artifact_id,
-                {
-                    "publish_status": "failed",
-                    "delivery_status": "failed",
-                    "last_publish_error": str(exc)[-1500:],
-                },
-                user_id,
-            )
+            logger.warning("[artifact-deploy] %s: failed: %s", artifact_id[:8], exc)
+            try:
+                await artifacts.update(
+                    artifact_id,
+                    {
+                        "publish_status": "failed",
+                        "delivery_status": "failed",
+                        "last_publish_error": str(exc)[-1500:],
+                    },
+                    user_id,
+                )
+            except Exception as update_exc:  # noqa: BLE001 - the startup sweep retries unrecorded failures
+                logger.warning("[artifact-deploy] %s: could not record failure: %s", artifact_id[:8], update_exc)
 
     def worker() -> None:
-        while True:
-            asyncio.run(run())
+        try:
+            while True:
+                asyncio.run(run())
+                with _DEPLOY_COALESCE_LOCK:
+                    state = _DEPLOY_COALESCE.get(artifact_id) or {}
+                    if state.get("again"):
+                        # 走行中に来た公開依頼をここで1回に畳んで実行し直す。
+                        state["again"] = False
+                        continue
+                    break
+        finally:
+            # どんな終わり方でも「実行中」を必ず下ろす。ここが残ると以後の公開依頼が
+            # すべて畳まれて二度と走らない。
             with _DEPLOY_COALESCE_LOCK:
-                state = _DEPLOY_COALESCE.get(artifact_id) or {}
-                if state.get("again"):
-                    # 走行中に来た公開依頼をここで1回に畳んで実行し直す。
-                    state["again"] = False
-                    continue
-                state["running"] = False
-                break
+                _DEPLOY_COALESCE.pop(artifact_id, None)
 
     # Registration is called from both async HTTP handlers and CLI/SSE code.
     # A thread gives both callers the same detached, dedicated delivery job.
@@ -564,6 +566,56 @@ def schedule_dedicated_deploy(artifact_id: str, user_id: str) -> None:
         name=f"artifact-deploy-{artifact_id[:8]}",
         daemon=True,
     ).start()
+
+
+def publish_pending_artifacts() -> list[str]:
+    """Publish every registered site that has never reached a live release.
+
+    Registration means "this site must be published".  The only way that
+    promise can be left unkept is the core stopping in the middle of a
+    deploy, so the same scheduler is run once at startup for every artifact
+    whose latest release has no shared URL (or is still marked deploying).
+    Sites whose page no longer exists locally are left alone.
+
+    Returns the artifact ids whose publication was scheduled.
+    """
+    from app.services.chat_artifact_registration import PROJECT_ROOT as REPO_ROOT
+
+    service = ArtifactPublicationService()
+    releases = (
+        service.supabase.table(service.table).select("artifact_id,status,shared_url").execute()
+    )
+    # 「公開済み」は、どれか 1 つのリリースが公開URLに到達していること。公開済み
+    # サイトの上に残った古い下書き行（ドメイン申請途中など）は未公開ではない。
+    delivered = {
+        str(r["artifact_id"]) for r in releases.data or [] if (r.get("shared_url") or "").strip()
+    }
+    interrupted = {str(r["artifact_id"]) for r in releases.data or [] if r.get("status") == "deploying"}
+    artifacts = (
+        service.supabase.table("chat_artifact")
+        .select("id,created_by,preview_url,slug,kind")
+        .eq("kind", "production")
+        .execute()
+    )
+    scheduled: list[str] = []
+    for row in artifacts.data or []:
+        artifact_id = str(row["id"])
+        if not row.get("created_by"):
+            continue
+        if artifact_id in delivered and artifact_id not in interrupted:
+            continue
+        # 古いカードは /preview/<slug> を持つ。ソースは常に artifacts/ 配下。
+        route = str(row.get("preview_url") or f"/artifacts/{row.get('slug')}").strip("/")
+        if route.startswith("preview/"):
+            route = "artifacts/" + route[len("preview/"):]
+        page = REPO_ROOT / "frontend" / "src" / "app" / Path(*route.split("/")) / "page.tsx"
+        if not page.exists():
+            continue
+        schedule_dedicated_deploy(artifact_id, str(row["created_by"]))
+        scheduled.append(artifact_id)
+    if scheduled:
+        logger.info("[artifact-deploy] startup: %d pending site(s) scheduled", len(scheduled))
+    return scheduled
 
 
 def resync_dedicated_sites_after_tunnel_change() -> list[str]:

@@ -16,6 +16,14 @@ from app.services.chat_artifact_service import ChatArtifactService
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Shell tools can create page.tsx just as well as the write tools (heredoc,
+# cp, generator scripts).  Their command text is scanned for artifact pages so
+# the registration path does not depend on which tool wrote the file.
+SHELL_TOOL_NAMES = {"Bash", "bash", "run_command", "mcp__dan-tools__run_command"}
+ARTIFACT_PAGE_IN_TEXT_RE = re.compile(
+    r"frontend[/\\]src[/\\]app[/\\](?:artifacts|demo)[/\\][\w-]+(?:[/\\][\w./-]*?)?[/\\]page\.tsx"
+)
 WRITE_TOOL_NAMES = {
     "write_file",
     "edit_file",
@@ -34,18 +42,83 @@ ARTIFACT_PAGE_RE = re.compile(
 ARTIFACT_SLUG_RE = re.compile(r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)[/\\]")
 
 
+def written_paths_from_tool(tool_name: str, tool_input: object) -> list[str]:
+    """Return artifact-relevant paths written by one tool event.
+
+    Write/Edit tools report the path directly.  Shell tools are scanned for
+    artifact page paths mentioned in the command so a heredoc-written page is
+    registered exactly like a Write-tool page.
+    """
+    if not isinstance(tool_input, dict):
+        return []
+    if tool_name in WRITE_TOOL_NAMES:
+        value = tool_input.get("path") or tool_input.get("file_path")
+        return [value] if isinstance(value, str) and value.strip() else []
+    if tool_name in SHELL_TOOL_NAMES:
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return []
+        # The command may cd into the artifact directory first; resolve the
+        # page against it so a bare ``cat > page.tsx`` is attributed correctly.
+        found = ARTIFACT_PAGE_IN_TEXT_RE.findall(command)
+        if not found and re.search(r"(^|[\s;&|])cat\s*>\s*page\.tsx", command):
+            cd = re.search(r"cd\s+(\S*frontend[/\\]src[/\\]app[/\\](?:artifacts|demo)[/\\][\w-]+(?:[/\\][\w-]+)*)", command)
+            if cd:
+                found = [cd.group(1).rstrip("/\\") + "/page.tsx"]
+        return list(dict.fromkeys(found))
+    return []
+
+
 def written_path_from_tool(tool_name: str, tool_input: object) -> Optional[str]:
-    """Return the written path from a write/edit tool event, if any."""
-    if tool_name not in WRITE_TOOL_NAMES or not isinstance(tool_input, dict):
-        return None
-    value = tool_input.get("path") or tool_input.get("file_path")
-    return value if isinstance(value, str) and value.strip() else None
+    """Compatibility wrapper: first path from ``written_paths_from_tool``."""
+    paths = written_paths_from_tool(tool_name, tool_input)
+    return paths[0] if paths else None
 
 
 def add_written_path(paths: list[str], path: Optional[str]) -> None:
     """Append a path once, preserving first-seen order."""
     if path and path not in paths:
         paths.append(path)
+
+
+def request_registration_via_core(
+    written_file_paths: Iterable[str],
+    room_id: Optional[str],
+    project_id: Optional[str],
+    *,
+    timeout: float = 15.0,
+) -> Optional[dict]:
+    """Ask dan-core to register (and publish) artifacts for these paths.
+
+    Short-lived processes (Claude Code hooks, CLI helper scripts) must not run
+    the publication themselves: a daemon thread dies with its process.  Every
+    such caller hands the paths to the core, where the one registration
+    function runs inside the process that never restarts.
+    Returns the core's JSON reply, or None when the core is unreachable.
+    """
+    import json
+    import os
+    import urllib.request
+
+    paths = [p for p in written_file_paths if p]
+    if not (paths and room_id and project_id):
+        return None
+    port = os.environ.get("DAN_CORE_PORT", "9000")
+    body = json.dumps(
+        {"room_id": room_id, "project_id": project_id, "written_paths": paths}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/v1/chat/internal/artifacts/register",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception as exc:  # noqa: BLE001 - the caller reports, never crashes
+        logger.warning("artifact registration via core failed: %s", exc)
+        return None
 
 
 def artifact_candidates_from_written_paths(

@@ -151,6 +151,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("run recovery failed to schedule: %s", e)
 
+    # 成果物の公開保証: 登録済みなのに一度も公開に到達していない専用サイトを、
+    # 登録時と同じスケジューラで公開する。公開はコア内のスレッドで走るため、
+    # 取りこぼしが生まれる経路は「コアの停止」だけ。それをここで拾う。
+    try:
+        from app.services.artifact_publication_service import publish_pending_artifacts
+        asyncio.create_task(asyncio.to_thread(publish_pending_artifacts))
+    except Exception as e:
+        logger.warning("pending artifact publication failed to schedule: %s", e)
+
     # Paid domain work is persisted before it starts.  Resume it here after a
     # process restart; this is independent of the payer's browser return.
     try:

@@ -2206,12 +2206,10 @@ def _run_cli_process(
                     try:
                         from app.services.chat_artifact_registration import (
                             add_written_path,
-                            written_path_from_tool,
+                            written_paths_from_tool,
                         )
-                        add_written_path(
-                            written_file_paths,
-                            written_path_from_tool(ev.get("name", ""), ev.get("input", {})),
-                        )
+                        for written in written_paths_from_tool(ev.get("name", ""), ev.get("input", {})):
+                            add_written_path(written_file_paths, written)
                     except Exception as e:
                         _cli_debug(f"artifact path tracking failed: {e}")
                     # Task 系ツールが呼ばれている間は watchdog 閾値を延長
@@ -3034,12 +3032,10 @@ async def _process_via_streaming_session(
                         try:
                             from app.services.chat_artifact_registration import (
                                 add_written_path,
-                                written_path_from_tool,
+                                written_paths_from_tool,
                             )
-                            add_written_path(
-                                state["written_file_paths"],
-                                written_path_from_tool(ev.get("name", ""), ev.get("input", {})),
-                            )
+                            for written in written_paths_from_tool(ev.get("name", ""), ev.get("input", {})):
+                                add_written_path(state["written_file_paths"], written)
                         except Exception as e:
                             _cli_debug(f"[STREAMING] artifact path tracking failed: {e}")
                         _emit(ev)
