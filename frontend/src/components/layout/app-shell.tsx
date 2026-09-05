@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { OWNER_USER_ID } from '@/lib/api-client';
-import { guestHomeUrl } from '@/lib/guest-home';
+import { findGuestHome } from '@/lib/guest-home';
 import { usePreviewStore } from '@/stores/preview-store';
 import { useProjectStore } from '@/stores/project-store';
 import { useRoomFeed } from '@/hooks/useRoomFeed';
@@ -66,15 +66,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const token = localStorage.getItem('done-token');
     if (!token) {
       // ゲスト（外部窓口の相手）がオーナー用URLに来た場合は、ログインではなく自分の窓口へ
+      // （端末保存のトークンが今も有効かサーバーに確認してから飛ぶ）
       const roomMatch = pathname.match(/^\/collab\/([^/]+)/);
-      const guestHome = guestHomeUrl(roomMatch ? roomMatch[1] : null);
-      if (guestHome) {
-        router.replace(guestHome);
-        return;
-      }
-      import('@/lib/api-client').then((m) => m.recordLogoutReason('app-shell-no-token')).catch(() => {});
-      try { usePreviewStore.getState().closePreview(); } catch {}
-      router.push('/login');
+      findGuestHome({ preferRoomId: roomMatch ? roomMatch[1] : null }).then((guestHome) => {
+        if (guestHome) {
+          router.replace(guestHome);
+          return;
+        }
+        import('@/lib/api-client').then((m) => m.recordLogoutReason('app-shell-no-token')).catch(() => {});
+        try { usePreviewStore.getState().closePreview(); } catch {}
+        router.push('/login');
+      });
       return;
     }
     if (!isChat) return;

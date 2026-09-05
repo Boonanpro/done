@@ -17,6 +17,7 @@ import { LinkifyText } from '@/components/linkify-text';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
+import { findGuestHome, forgetGuestHome } from '@/lib/guest-home';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
 
@@ -109,11 +110,27 @@ export default function GuestJoinPage() {
   }, [inviteToken]);
 
   // Fetch invite info
-  const { data: inviteInfo } = useQuery({
+  const { data: inviteInfo, error: inviteError } = useQuery({
     queryKey: ['collab-invite', inviteToken],
     queryFn: () => api.collab.getInviteInfo(inviteToken),
     enabled: !!inviteToken && !guestToken,
+    retry: false,
   });
+  const inviteInvalid = (inviteError as { status?: number } | null)?.status === 404;
+
+  // このURLのトークンが無効（削除された身分など）: 端末に別の有効な窓口が残っていればそこへ。
+  // 無ければ参加フォームは出さず、招待し直しを案内する（同じ無効トークンで「参加する」を押しても
+  // Invalid invite link になるだけ）。
+  const [invalidRedirecting, setInvalidRedirecting] = useState(false);
+  useEffect(() => {
+    if (!inviteInvalid) return;
+    forgetGuestHome(inviteToken);
+    setInvalidRedirecting(true);
+    findGuestHome({ exclude: inviteToken }).then((home) => {
+      if (home) router.replace(home);
+      else setInvalidRedirecting(false);
+    });
+  }, [inviteInvalid, inviteToken, router]);
 
   // 身分モデル: 入口URL（共有）では名前を入れて参加 → 本人専用URLへ切り替わる。
   // 本人専用URLは開いた端末・ブラウザに関係なくその人として入室できる。
@@ -398,6 +415,22 @@ export default function GuestJoinPage() {
 
   // Not joined yet - show join form
   if (!guestToken || !roomId) {
+    if (inviteInvalid) {
+      return (
+        <div className="min-h-screen flex items-start justify-center bg-background p-4 pt-[15vh]">
+          <Card className="w-full max-w-md">
+            <CardHeader className="text-center"><CardTitle className="text-xl">このリンクは使えません</CardTitle></CardHeader>
+            <CardContent className="text-center text-sm text-muted-foreground space-y-2">
+              {invalidRedirecting ? (
+                <p>あなたの窓口を探しています…</p>
+              ) : (
+                <p>招待リンクが無効になっています。招待した人に、新しいリンク（あなた専用のURL）をもらってください。</p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
     const isExpired = inviteInfo?.status === 'expired';
     const alreadyJoined = inviteInfo?.already_joined;
 

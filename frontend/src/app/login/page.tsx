@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { guestHomeUrl, hasOwnerToken } from '@/lib/guest-home';
+import { findGuestHome, hasOwnerToken } from '@/lib/guest-home';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -29,8 +29,7 @@ export default function LoginPage() {
   // ゲスト（外部窓口の相手）がここに迷い込んだら、ログインさせずに自分の窓口へ戻す
   useEffect(() => {
     if (hasOwnerToken()) return;
-    const home = guestHomeUrl();
-    if (home) router.replace(home);
+    findGuestHome().then((home) => { if (home) router.replace(home); });
   }, [router]);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
