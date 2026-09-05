@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { OWNER_USER_ID } from '@/lib/api-client';
+import { guestHomeUrl } from '@/lib/guest-home';
 import { usePreviewStore } from '@/stores/preview-store';
 import { useProjectStore } from '@/stores/project-store';
 import { useRoomFeed } from '@/hooks/useRoomFeed';
@@ -25,6 +26,11 @@ import { useRoomFeed } from '@/hooks/useRoomFeed';
 const SHELL_PREFIXES = ['/chat', '/collab', '/friends', '/notes', '/settings', '/today'];
 
 function shellFor(pathname: string) {
+  // /collab/join/<token> は外部の相手（ゲスト）の窓口。オーナーの外枠にも認証ゲートにも
+  // 入れてはいけない（入れるとゲストが毎回ログイン画面に飛ばされる。2026-09-05 実発生）
+  if (pathname.startsWith('/collab/join/')) {
+    return { inShell: false, isChat: false, isCollabRoom: false };
+  }
   const inShell = SHELL_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
   const isChat = pathname === '/chat' || pathname.startsWith('/chat/');
   const isCollabRoom = /^\/collab\/[^/]+/.test(pathname);
@@ -59,6 +65,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (!inShell) return;
     const token = localStorage.getItem('done-token');
     if (!token) {
+      // ゲスト（外部窓口の相手）がオーナー用URLに来た場合は、ログインではなく自分の窓口へ
+      const roomMatch = pathname.match(/^\/collab\/([^/]+)/);
+      const guestHome = guestHomeUrl(roomMatch ? roomMatch[1] : null);
+      if (guestHome) {
+        router.replace(guestHome);
+        return;
+      }
       import('@/lib/api-client').then((m) => m.recordLogoutReason('app-shell-no-token')).catch(() => {});
       try { usePreviewStore.getState().closePreview(); } catch {}
       router.push('/login');
