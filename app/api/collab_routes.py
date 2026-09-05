@@ -947,7 +947,7 @@ async def list_files(
 
 from fastapi.responses import FileResponse
 
-@router.get("/files/{room_id}/{filename}")
+@router.api_route("/files/{room_id}/{filename}", methods=["GET", "HEAD"])
 async def serve_file(room_id: str, filename: str):
     """Serve uploaded collab files."""
     file_path = UPLOAD_DIR / room_id / filename
