@@ -511,66 +511,18 @@ if __name__ == "__main__":
     # create backend/internal helper features; only page.tsx write hooks should
     # create user-openable artifact cards.
     if os.environ.get("DAN_CREATE_FEATURE_REGISTER_ARTIFACT") == "1" and room_id and project_id:
+        # 登録も公開も dan-core の 1 つの関数に任せる（登録＝公開保証）。この
+        # スクリプトは使い捨てプロセスなので、ここで DB に直接書いても公開は走らない。
         try:
-            from app.services.supabase_client import get_supabase_client
-            sb = get_supabase_client().client
-            proj_res = sb.table("projects").select("user_id").eq("id", project_id).execute()
-            owner_id = proj_res.data[0]["user_id"] if proj_res.data else None
-            if owner_id:
-                # demo=True なら /demo/、それ以外は /artifacts/
-                folder = "demo" if demo else "artifacts"
-                preview_url = f"/{folder}/{kebab}"
-                # 同じプロジェクト内に同じ slug があれば重複登録しない
-                exists = (
-                    sb.table("chat_artifact")
-                    .select("id")
-                    .eq("room_id", room_id)
-                    .eq("preview_url", preview_url)
-                    .execute()
-                )
-                if not exists.data:
-                    artifact_type = "dashboard" if "dashboard" in kebab else ("website" if any(t in kebab for t in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")) else "tool")
-                    share_url = preview_url if demo else f"/preview/{kebab}"
-                    # 公開URLは publish 時に専用 Vercel プロジェクトが決まってから
-                    # 入る。作成時点では相対パスのまま置く（廃止済みの
-                    # <slug>-done.vercel.app を書き込むと 404 の案内になる）。
-                    delivery_url = share_url
-                    sb.table("chat_artifact").insert({
-                        "room_id": room_id,
-                        "project_id": project_id,
-                        "slug": kebab,
-                        "kind": "demo" if demo else "production",
-                        "artifact_type": artifact_type,
-                        "label": feature_name,
-                        "preview_url": preview_url,
-                        "share_url": share_url,
-                        "draft_url": share_url,
-                        "publish_status": "preview_live",
-                        "created_by": owner_id,
-                        "delivery_status": "preview",
-                        "delivery_mode": "preview",
-                        "target_audience": "internal",
-                        "requires_auth": False,
-                        "payment_responsibility": "owner_pays",
-                        "delivery_checklist": {
-                            "delivery_url": delivery_url,
-                            "share_path": share_url,
-                            "preview_url": preview_url,
-                            "public_profile": {
-                                "artifact_slug": kebab,
-                                "public_url": delivery_url,
-                                "alias_domain": "",
-                                "title": feature_name,
-                                "manifest_path": f"/artifacts/{kebab}/manifest.webmanifest",
-                                "start_url": f"/preview/{kebab}",
-                                "scope": f"/preview/{kebab}",
-                                "auth_policy": "public",
-                                "artifact_type": artifact_type,
-                            },
-                        },
-                    }).execute()
-                    print(f"[chat_artifact] registered: {kebab} -> {preview_url} (project {project_id[:8]}...)")
-                    created_files.append(f"REGISTERED: chat_artifact/{kebab}")
+            from app.services.chat_artifact_registration import request_registration_via_core
+
+            page_path = str((FRONTEND_DEMO if demo else FRONTEND_ARTIFACTS) / kebab / "page.tsx")
+            reply = request_registration_via_core([page_path], room_id, project_id)
+            if reply is None:
+                print("[chat_artifact] dan-core unreachable; the turn-end pass will register")
+            else:
+                print(f"[chat_artifact] registered via core: {reply.get('created')}")
+                created_files.append(f"REGISTERED: chat_artifact/{kebab}")
         except Exception as e:
             print(f"[chat_artifact] failed to register: {e}")
 

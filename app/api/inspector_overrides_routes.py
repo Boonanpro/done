@@ -122,10 +122,7 @@ async def publish_overrides(
     deploy_scheduled = False
     skipped: list[str] = []
     try:
-        from app.services.artifact_publication_service import (
-            ArtifactPublicationService,
-            schedule_dedicated_deploy,
-        )
+        from app.services.artifact_publication_service import ArtifactPublicationService
 
         publications = ArtifactPublicationService()
         # デプロイを待たずにローカルのスナップショットを先に更新する。
@@ -141,7 +138,17 @@ async def publish_overrides(
             .execute()
         )
         if artifact_result.data:
-            schedule_dedicated_deploy(str(artifact_result.data[0]["id"]), user.user_id)
+            # 公開はサンドボックスではなく dan-core の中で走らせる。サンドボックスは
+            # コード変更で再起動するので、ここで起こした裏方スレッドは途中で消える。
+            import httpx
+
+            core_port = os.environ.get("DAN_CORE_PORT", "9000")
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{core_port}/api/v1/chat/internal/artifacts/"
+                    f"{artifact_result.data[0]['id']}/publish"
+                )
+                r.raise_for_status()
             deploy_scheduled = True
         else:
             skipped.append("artifact was not registered; no dedicated deployment target exists")

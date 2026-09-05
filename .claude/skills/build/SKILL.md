@@ -609,9 +609,17 @@ frontend/src/app/artifacts/yoshikawa-tokuso/
 }
 ```
 
-#### デプロイ
+#### デプロイ（登録＝公開保証）
 
-done 本体の Vercel デプロイに自動追従する。チャットの全画面プレビューや共有URLは `/preview/{slug}` を使い、内部的に `/artifacts/{slug}` へ rewrite される。
+成果物は **登録された時点で専用 Vercel プロジェクトへの公開が保証される**。仕組みは 1 本だけ:
+
+- `frontend/src/app/artifacts/<slug>/page.tsx` を書く（Write/Edit でも Bash のヒアドキュメントでも同じ）と PostToolUse hook (`hook_register_artifact.py`) がそのパスを **dan-core の登録API** (`POST /api/v1/chat/internal/artifacts/register`) に渡す。登録も公開もコアの中の 1 つの関数が行う。ターン終端でも同じ関数が走るので、hook が落ちても取りこぼさない。
+- 公開はコア内で直列に走り、完了すると成果物カードの `share_url` に `https://dan-site-<slug>-<id>.vercel.app` が入る。画面は公開URLが入るまで「公開処理中」を表示し、URLを組み立てない。
+- コアが公開の途中で止まった場合は、コア起動時に「一度も公開URLに到達していない成果物」を同じ関数で拾い直す。
+- **hook 以外の場所で公開を起こさない**（サンドボックスやスクリプトで裏方スレッドを作ると、そのプロセス終了と一緒に消える）。再公開したい時はコアの `POST /api/v1/chat/internal/artifacts/<artifact_id>/publish` を叩く。
+- 手動で登録したい時: `echo '{"tool_name":"Write","tool_input":{"file_path":"<page.tsxの絶対パス>"}}' | DAN_ROOM_ID=<room> DAN_PROJECT_ID=<project> python scripts/hook_register_artifact.py`
+
+チャットの全画面プレビューや共有URLは `/preview/{slug}` を使い、内部的に `/artifacts/{slug}` へ rewrite される。
 artifact 内のナビゲーションで `/artifacts/{slug}` にリンクする場合は、`next/link` ではなく `@/components/artifacts/artifact-link` の `ArtifactLink` を `Link` として使う。これにより `/preview/{slug}`、内部 `/artifacts/{slug}`、独自ドメインの clean path が混ざらない。
 クライアント独自ドメインを使う場合は、middleware の `ARTIFACT_CUSTOM_DOMAINS` / `NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS` に `slug=domain.example` 形式で追加する。
 

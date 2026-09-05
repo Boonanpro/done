@@ -29,6 +29,16 @@ function isDomainPublicationRunning(status?: string | null) {
   return status === 'domain_pending' || status === 'domain_preparing' || status === 'domain_registering';
 }
 
+/**
+ * 専用サイトの公開が台帳（delivery_url）か絶対URLで確認できるか。
+ * 確認できるまでは URL を組み立てて開かない。登録直後に旧共有サーバーの
+ * URL を作って DEPLOYMENT_NOT_FOUND を出していた（2026-09-05）ため。
+ */
+function isPublished(a?: ArtifactRecord | null) {
+  if (!a) return false;
+  return !!(a.delivery_url || a.production_url || a.custom_domain || /^https?:\/\//.test(a.share_url || ''));
+}
+
 /** Undo / Redo ボタン。編集中のみ表示。 */
 function UndoRedoButtons() {
   const undoStack = useEditHistoryStore((s) => s.undoStack);
@@ -234,7 +244,11 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
     staleTime: 10_000,
     // The button itself is the status display.  While it is working, refresh
     // this artifact automatically; no separate "check status" action exists.
-    refetchInterval: isDomainPublicationRunning(artifact?.publish_status) ? 2_500 : false,
+    refetchInterval: isDomainPublicationRunning(artifact?.publish_status)
+      ? 2_500
+      : artifact && !isPublished(artifact) && artifact.publish_status !== 'failed'
+        ? 5_000
+        : false,
   });
 
   const saveEditsMutation = useMutation({
@@ -469,11 +483,12 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
           <Copy className="h-3.5 w-3.5" />
         </button>
         <a
-          href={publicShareUrl}
+          href={isPublished(artifact) ? publicShareUrl : undefined}
+          aria-disabled={!isPublished(artifact)}
           target="_blank"
           rel="noopener noreferrer"
-          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="全画面で開く"
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground aria-disabled:pointer-events-none aria-disabled:opacity-40"
+          title={isPublished(artifact) ? '全画面で開く' : '公開が完了すると開けます'}
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
@@ -562,17 +577,25 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
       </div>
       <div className="flex flex-1 overflow-hidden bg-background">
         <div className="relative flex-1 overflow-hidden">
-          <iframe
-            key={`${artifact.id}:${iframeSrc}`}
-            ref={iframeRef}
-            src={iframeSrc}
-            onLoad={() => {
-              setLoadedArtifactId(artifact.id);
-              setIframeLoadSeq((s) => s + 1);
-            }}
-            className="h-full w-full border-0"
-            title={artifact.label || artifact.slug}
-          />
+          {isPublished(artifact) ? (
+            <iframe
+              key={`${artifact.id}:${iframeSrc}`}
+              ref={iframeRef}
+              src={iframeSrc}
+              onLoad={() => {
+                setLoadedArtifactId(artifact.id);
+                setIframeLoadSeq((s) => s + 1);
+              }}
+              className="h-full w-full border-0"
+              title={artifact.label || artifact.slug}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+              {artifact.publish_status === 'failed'
+                ? `公開に失敗しました。${artifact.last_publish_error || ''}`
+                : '公開処理中です。完了すると自動でここに表示されます。'}
+            </div>
+          )}
           {isEditMode && inspectorMode === 'comment' && (
             <CommentPopover iframeRef={iframeRef} onSubmit={onAddComment} />
           )}

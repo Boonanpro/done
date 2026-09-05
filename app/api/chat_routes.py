@@ -3827,3 +3827,70 @@ async def websocket_chat(websocket: WebSocket):
         # エラー時の処理
         if current_room_id and user_id:
             manager.disconnect(current_room_id, user_id)
+
+
+# ==================== 成果物の登録・公開の唯一の入口（core 内部） ====================
+#
+# 成果物は「登録した＝公開を保証する」。その保証を果たす処理は、再起動しない
+# dan-core の中でだけ動く。フック（Claude Code PostToolUse）や CLI 補助スクリプト、
+# サンドボックス側のルーターなど、寿命の短い／再起動するプロセスは自分で公開を
+# 走らせず、ここへパスか artifact_id を渡すだけにする（collab-inbound と同じ規律）。
+
+def _require_loopback(request: Request) -> None:
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+
+
+@router.post("/internal/artifacts/register")
+async def internal_register_artifacts(request: Request) -> dict:
+    """書かれた page.tsx のパスから成果物カードを登録し、専用サイトの公開を予約する。"""
+    _require_loopback(request)
+    payload = await request.json()
+    room_id = str(payload.get("room_id") or "").strip()
+    project_id = str(payload.get("project_id") or "").strip()
+    written_paths = [str(p) for p in (payload.get("written_paths") or []) if p]
+    if not (room_id and project_id and written_paths):
+        raise HTTPException(status_code=400, detail="room_id, project_id, written_paths are required")
+
+    from app.services.supabase_client import get_supabase_client
+
+    owner = (
+        get_supabase_client().client.table("projects")
+        .select("user_id")
+        .eq("id", project_id)
+        .limit(1)
+        .execute()
+    )
+    if not owner.data:
+        raise HTTPException(status_code=404, detail="project not found")
+    user_id = str(owner.data[0]["user_id"])
+
+    from app.services.chat_artifact_registration import register_written_chat_artifacts
+
+    created = await register_written_chat_artifacts(written_paths, room_id, project_id, user_id)
+    slugs = [row.get("slug") for row in created]
+    logger.info("[artifact-register] room=%s created=%s paths=%d", room_id[:8], slugs, len(written_paths))
+    return {"ok": True, "created": slugs}
+
+
+@router.post("/internal/artifacts/{artifact_id}/publish")
+async def internal_publish_artifact(artifact_id: str, request: Request) -> dict:
+    """登録済み成果物の専用サイトを（再）公開する。連打はスケジューラ側で畳まれる。"""
+    _require_loopback(request)
+    from app.services.supabase_client import get_supabase_client
+
+    row = (
+        get_supabase_client().client.table("chat_artifact")
+        .select("id,created_by")
+        .eq("id", artifact_id)
+        .limit(1)
+        .execute()
+    )
+    if not row.data or not row.data[0].get("created_by"):
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    from app.services.artifact_publication_service import schedule_dedicated_deploy
+
+    schedule_dedicated_deploy(artifact_id, str(row.data[0]["created_by"]))
+    return {"ok": True, "scheduled": artifact_id}

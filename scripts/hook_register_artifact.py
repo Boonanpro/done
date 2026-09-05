@@ -1,32 +1,28 @@
 """
-Artifact 自動登録 hook (PostToolUse)
+Artifact 自動登録 hook (PostToolUse: Write / Edit / Bash)
 
 ダンが `frontend/src/app/artifacts/{slug}/page.tsx` または
-`frontend/src/app/demo/{slug}/page.tsx` を Write/Edit した時、
-chat_artifact テーブルに登録されてなければ自動で 1 行 insert する。
+`frontend/src/app/demo/{slug}/page.tsx` を書いた時、そのパスを dan-core の
+登録 API に渡す。登録も公開も core の中の 1 つの関数が行う（登録＝公開保証）。
 
-これにより create_feature を呼び忘れても成果物タブが自動で出現する
-(base44 / Manus のファイルシステム駆動と同等の挙動)。
+この hook 自身は DB を触らず、公開も走らせない。hook はツール呼び出しごとに
+終了する使い捨てプロセスなので、ここで裏方スレッドを起こしても終了と同時に消える
+（2026-09-05 pornblocker-roadmap: 登録だけ残り公開されず 404 になった実例）。
 
-DAN_PROJECT_ID 環境変数があれば project_id を紐づける。無ければ何もしない。
+Write/Edit は tool_input.file_path、Bash は command 文中のパスを拾うので、
+ヒアドキュメントや cp で作った page.tsx も同じ経路で登録される。
+DAN_ROOM_ID / DAN_PROJECT_ID 環境変数が無ければ何もしない。
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import sys
-import asyncio
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(r"D:/done")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-
-# artifacts/{slug}/page.tsx と demo/{slug}/page.tsx の両方を拾う
-PATH_PATTERN = re.compile(
-    r"frontend[/\\]src[/\\]app[/\\](artifacts|demo)[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
-)
 
 
 def main() -> int:
@@ -35,104 +31,49 @@ def main() -> int:
     except Exception:
         return 0
 
-    file_path = data.get("tool_input", {}).get("file_path", "")
-    if not file_path:
+    try:
+        from app.services.chat_artifact_registration import (
+            ARTIFACT_PAGE_RE,
+            request_registration_via_core,
+            written_paths_from_tool,
+        )
+    except Exception as e:  # noqa: BLE001 - a hook must never break the tool call
+        sys.stderr.write(f"[artifact auto-register] unavailable: {e}\n")
         return 0
 
-    norm = file_path.replace("\\", "/")
-    m = PATH_PATTERN.search(norm)
-    if not m:
+    paths = written_paths_from_tool(data.get("tool_name", ""), data.get("tool_input", {}))
+    if not paths:
         return 0
 
-    folder = m.group(1)  # 'artifacts' or 'demo'
-    root_slug = m.group(2)
-    rest = (m.group(3) or "").strip("/\\").replace("\\", "/")
-    slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
-    preview_path = f"/{folder}/{root_slug}" + (f"/{rest}" if rest else "")
-
-    # 成果物 (artifacts のみ。demo は除外) は favicon を自前アイコンに配線する。
+    # 成果物 (artifacts のみ。demo は除外) は favicon と Tailwind の @source を配線する。
     # ルート slug 単位 (例 kittoku-careers でも kittoku の layout/icon を整える)。
-    if folder == "artifacts":
+    root_slugs = {m.group(1) for m in (ARTIFACT_PAGE_RE.search(p.replace("\\", "/")) for p in paths) if m}
+    if root_slugs:
+        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
         try:
-            sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
             from wire_artifact_icons import wire_slug
 
-            status = wire_slug(root_slug)
-            sys.stderr.write(f"[artifact icon] {root_slug} -> {status}\n")
+            for root_slug in sorted(root_slugs):
+                sys.stderr.write(f"[artifact icon] {root_slug} -> {wire_slug(root_slug)}\n")
         except Exception as e:
             sys.stderr.write(f"[artifact icon] failed: {e}\n")
-
-        # 成果物ディレクトリは .gitignore 済みで Tailwind の自動ソース検出から漏れる。
-        # slug 単位の @source を書き出しておかないと、成果物でしか使っていないクラスが
-        # コンパイルされず、指定したレイアウトが無言で無視される。
         try:
-            sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
             from wire_artifact_tailwind_sources import wire as wire_tw_sources
 
-            tw_status = wire_tw_sources()
-            sys.stderr.write(f"[artifact tailwind sources] {tw_status}\n")
+            sys.stderr.write(f"[artifact tailwind sources] {wire_tw_sources()}\n")
         except Exception as e:
             sys.stderr.write(f"[artifact tailwind sources] failed: {e}\n")
 
     room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
     if not room_id or not project_id:
-        # project 紐づけなしで登録する意味は薄い。何もしない
         return 0
 
-    try:
-        from app.services.chat_artifact_service import ChatArtifactService
-    except Exception:
-        return 0
-
-    try:
-        service = ChatArtifactService()
-        # 既存チェック
-        exists = (
-            service.supabase.table("chat_artifact")
-            .select("id")
-            .eq("room_id", room_id)
-            .eq("preview_url", preview_path)
-            .execute()
-        )
-        if exists.data:
-            return 0
-
-        # project の owner を取得
-        proj = service.supabase.table("projects").select("user_id").eq("id", project_id).execute()
-        if not proj.data:
-            return 0
-        owner_id = proj.data[0]["user_id"]
-
-        # 登録
-        kind = "demo" if folder == "demo" else "production"
-        preview_url = preview_path
-        lower = slug.lower()
-        if any(token in lower for token in ("dashboard", "dash", "analytics", "kpi")):
-            artifact_type = "dashboard"
-        elif any(token in lower for token in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")):
-            artifact_type = "website"
-        else:
-            artifact_type = "tool"
-        share_url = preview_url if folder == "demo" else preview_url.replace(f"/{folder}/", "/preview/", 1)
-        asyncio.run(service.create({
-            "project_id": project_id,
-            "room_id": room_id,
-            "slug": slug,
-            "kind": kind,
-            "artifact_type": artifact_type,
-            "label": slug.replace("-", " ").replace("_", " "),
-            "preview_url": preview_url,
-            "share_url": share_url,
-            "draft_url": share_url,
-            "publish_status": "preview_live",
-        }, owner_id))
-        sys.stderr.write(
-            f"[artifact auto-register] {slug} -> {preview_url} (kind:{kind})\n"
-        )
-    except Exception as e:
-        sys.stderr.write(f"[artifact auto-register] failed: {e}\n")
-
+    reply = request_registration_via_core(paths, room_id, project_id)
+    if reply is None:
+        sys.stderr.write("[artifact auto-register] dan-core unreachable; the turn-end pass will register\n")
+    else:
+        sys.stderr.write(f"[artifact auto-register] created={reply.get('created')} paths={paths}\n")
     return 0
 
 
