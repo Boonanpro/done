@@ -17,8 +17,9 @@ class PushService:
     def __init__(self):
         self.supabase = get_supabase_client().client
 
-    async def save_subscription(self, room_id: str, sender_type: str, subscription: dict):
-        """Save a push subscription."""
+    async def save_subscription(self, room_id: str, sender_type: str, subscription: dict,
+                                landing_url: Optional[str] = None):
+        """Save a push subscription. landing_url=通知タップで開くURL（ゲストは本人専用URL）"""
         endpoint = subscription["endpoint"]
         keys = subscription.get("keys", {})
         data = {
@@ -28,6 +29,8 @@ class PushService:
             "p256dh": keys.get("p256dh", ""),
             "auth": keys.get("auth", ""),
         }
+        if landing_url:
+            data["landing_url"] = landing_url
         # Upsert
         self.supabase.table("push_subscriptions").upsert(
             data, on_conflict="room_id,sender_type,endpoint"
@@ -76,10 +79,12 @@ class PushService:
                         "auth": sub["auth"],
                     }
                 }
+                # 購読側が着地URLを持っていればそれを優先（ゲスト=本人専用URL。
+                # 部屋URL /collab/<room> はオーナー専用でゲストが開くとログイン画面になる）
                 payload = json.dumps({
                     "title": title,
                     "body": body,
-                    "url": url or f"/collab/join/{room_id}",
+                    "url": sub.get("landing_url") or url or "/collab",
                     "icon": "/icon-192x192.png",
                 })
                 webpush(

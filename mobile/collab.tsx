@@ -240,6 +240,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   // 特定のメッセージへの返信（LINE式: 引用付き）
   const [replyTo, setReplyTo] = useState<CollabMessage | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  // 長押しメニュー（スタンプ/返信）を開いているメッセージ。画面のどこを触っても閉じる
+  const [pickerFor, setPickerFor] = useState<string | null>(null);
   const listRef = useRef<FlatList>(null);
 
   // 受信合流点: client_msg_id の仮バブルは差し替え（Web と同一ロジック）
@@ -530,6 +532,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     <KeyboardAvoidingView
       style={[s.screen, { paddingTop: topInset }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      // メニューが開いている時は、画面のどこを触っても閉じる（メニュー自身は stopPropagation で除外）
+      onTouchStart={() => { if (pickerFor) setPickerFor(null); }}
     >
       <View style={s.appBar}>
         <Pressable onPress={onBack} hitSlop={12}>
@@ -562,6 +566,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
             onReply={(m) => setReplyTo(m)}
             onJump={jumpTo}
             highlighted={highlightId === item.id}
+            pickerOpen={pickerFor === item.id}
+            onTogglePicker={() => setPickerFor((cur) => (cur === item.id ? null : item.id))}
             onThreadReply={(parent, text) =>
               send(text, {
                 visibility: 'owner_only',
@@ -677,7 +683,7 @@ function previewOf(m: CollabMessage): string {
   return `📎 ${files[0].name}`;
 }
 
-function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, onReply, onJump, highlighted, onThreadReply }: {
+function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, onReply, onJump, highlighted, pickerOpen, onTogglePicker, onThreadReply }: {
   msg: CollabMessage;
   threadReplies?: CollabMessage[];
   showRead: boolean;
@@ -687,6 +693,8 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   onReply: (msg: CollabMessage) => void;
   onJump: (id: string) => void;
   highlighted: boolean;
+  pickerOpen: boolean;
+  onTogglePicker: () => void;
   onThreadReply: (parent: CollabMessage, text: string) => void;
 }) {
   const isDan = msg.sender_type.startsWith('dan_');
@@ -705,7 +713,6 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   // 画像・動画だけの発言は吹き出しの枠を付けず、そのまま置く（LINE式）
   const bare = mediaItems.length > 0 && !bodyText && otherFiles.length === 0 && !isPrivate && !msg.metadata?.reply_to?.id;
   const [replyText, setReplyText] = useState('');
-  const [pickerOpen, setPickerOpen] = useState(false);
   const canReact = !isPrivate && !msg.id.startsWith('temp-');
 
   // ダンの相談（非公開）はLINEバブルではなく専用パネル（スレッド付き）
@@ -769,7 +776,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
 
   const bubbleBody = (
     <Pressable
-      onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
+      onLongPress={canReact ? onTogglePicker : undefined}
       delayLongPress={250}
       style={({ pressed }) => [
         stamp || bare ? s.stampBox : s.bubble,
@@ -784,7 +791,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
           items={mediaItems}
           width={236}
           // 画像/動画の長押しは「開く/再生」ではなく返信・スタンプのメニュー（タップで開く）
-          onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
+          onLongPress={canReact ? onTogglePicker : undefined}
         />
       )}
       {otherFiles.map((file) => (
@@ -829,12 +836,15 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
 
   // 長押しで出るスタンプ選択（LINE式）。選ぶ／もう一度長押しで閉じる
   const picker = pickerOpen && canReact ? (
-    <View style={[s.reactionPicker, isOwnSide ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}>
+    <View
+      style={[s.reactionPicker, isOwnSide ? { alignSelf: 'flex-end' } : { alignSelf: 'flex-start' }]}
+      onTouchStart={(e) => e.stopPropagation()}
+    >
       {REACTION_CHOICES.map((emoji) => (
         <Pressable
           key={emoji}
           hitSlop={4}
-          onPress={() => { setPickerOpen(false); onReact(msg.id, emoji); }}
+          onPress={() => { onTogglePicker(); onReact(msg.id, emoji); }}
           style={({ pressed }) => [s.reactionPickItem, pressedScale({ pressed })]}
         >
           <Text style={{ fontSize: 20 }}>{emoji}</Text>
@@ -843,7 +853,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
       <View style={s.pickerSep} />
       <Pressable
         hitSlop={4}
-        onPress={() => { setPickerOpen(false); onReply(msg); }}
+        onPress={() => { onTogglePicker(); onReply(msg); }}
         style={({ pressed }) => [s.reactionPickItem, { flexDirection: 'row', alignItems: 'center', gap: 4 }, pressedScale({ pressed })]}
       >
         <Ionicons name="arrow-undo" size={16} color={C.text} />

@@ -57,6 +57,9 @@ export function usePushNotification(roomId: string, senderType: string) {
           room_id: roomId,
           sender_type: senderType,
           subscription: subscription.toJSON(),
+          // 通知タップで開く先。ゲストは今開いている本人専用URL（/collab/join/<token>）。
+          // オーナーは部屋URL。これが無いとゲストがオーナー用URLに飛ばされてログイン画面になる
+          landing_url: senderType === 'guest' ? window.location.pathname : `/collab/${roomId}`,
         }),
       });
 

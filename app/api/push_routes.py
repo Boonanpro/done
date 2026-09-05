@@ -16,6 +16,9 @@ class SubscribeRequest(BaseModel):
     room_id: str
     sender_type: str  # 'owner' or 'guest'
     subscription: dict  # PushSubscription JSON
+    # 通知タップで開く先。ゲストは本人専用URL（/collab/join/<token>）。
+    # 未指定だとオーナー用の /collab/<room> に飛んでログイン画面になる事故が起きる
+    landing_url: Optional[str] = None
 
 
 class NativeSubscribeRequest(BaseModel):
@@ -32,7 +35,8 @@ async def get_vapid_key():
 async def subscribe(req: SubscribeRequest):
     """Save a push subscription."""
     svc = get_push_service()
-    await svc.save_subscription(req.room_id, req.sender_type, req.subscription)
+    landing = req.landing_url if (req.landing_url or "").startswith("/") else None
+    await svc.save_subscription(req.room_id, req.sender_type, req.subscription, landing_url=landing)
     return {"success": True}
 
 
