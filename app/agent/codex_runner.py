@@ -383,13 +383,16 @@ def run_codex_process(
     except Exception as e:  # noqa: BLE001
         cr._cli_debug(f"[CODEX] stdin write error: {e}")
 
+    stderr_lines: list[str] = []
+
     def _drain_stderr():
         try:
             for line in process.stderr:
                 line = line.strip()
                 if line and "Reading additional input from stdin" not in line:
-                    cr._cli_debug(f"[CODEX] stderr: {line[:200]}")
-                    errors.append(line[:500]) if line.lower().startswith("error") else None
+                    cr._cli_debug(f"[CODEX] stderr: {line[:800]}")
+                    if len(stderr_lines) < 40:
+                        stderr_lines.append(line[:800])
         except Exception:  # noqa: BLE001
             pass
 
@@ -548,8 +551,15 @@ def run_codex_process(
         return_code = -1
     cr._cli_debug(f"[CODEX] process exited with code {return_code}")
 
-    if thread_id is None and return_code != 0 and not errors:
-        event_queue.put({"type": "error", "message": f"Codex CLI exited with code {return_code}"})
+    if return_code != 0 and not final_text_parts and not errors:
+        # Silent failure (no JSONL error, no answer): surface the CLI's stderr so
+        # the bubble says why instead of the generic "no text" fallback.
+        tail = [l for l in stderr_lines if "ERROR" in l or "error" in l.lower()] or stderr_lines
+        errors.append(
+            f"codex exited with code {return_code}" + (": " + " | ".join(tail[-3:]) if tail else "")
+        )
+    if thread_id is None and return_code != 0:
+        event_queue.put({"type": "error", "message": errors[-1] if errors else f"Codex CLI exited with code {return_code}"})
         return None
 
     is_error = turn_failed or (return_code != 0 and not final_text_parts)
@@ -657,6 +667,24 @@ def run_codex_turn_in_thread(
             cmd, content, env, room_id, event_queue,
             user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd,
         )
+
+        # Silent early death (exit != 0 within seconds, nothing produced): a
+        # transient API/stream failure. Retry the same thread once before
+        # surfacing an error bubble (the frontend would retry anyway, but this
+        # avoids the junk "no text" message in the room).
+        if (
+            result_data is not None
+            and result_data.get("is_error")
+            and not result_data.get("final_text_parts")
+            and result_data.get("duration_ms", 0) < 30_000
+            and not _is_resume_failure(" ".join(str(e) for e in result_data.get("errors", [])))
+        ):
+            cr._cli_debug(f"[CODEX] silent early exit ({result_data.get('errors')}); retrying once")
+            time.sleep(2)
+            result_data = run_codex_process(
+                cmd, content, env, room_id, event_queue,
+                user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd,
+            )
 
         # Resume failure → clear the saved thread and retry fresh (DB reseed).
         if resume_thread_id and result_data is not None and result_data.get("is_error"):
