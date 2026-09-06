@@ -198,6 +198,10 @@ import os
 
 logger = logging.getLogger(__name__)
 
+#: 知らせを出すかどうか。既定は「出さない」。
+#: 2026-09-06 みきさん判断: 今はモニター前で通知は要らない。他社へ提供する段階で、この事業用の
+#: ダッシュボードを作った時に出せばよい。有効にするなら PORNBLOCKER_ALERTS_ENABLED=1。
+ALERTS_ENABLED = os.getenv("PORNBLOCKER_ALERTS_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 #: 知らせの持ち主（みきさん）。
 ALERT_USER_ID = os.getenv("PORNBLOCKER_ALERT_USER_ID", "2582a188-ff24-4a4f-b989-6063034d90b2")
 #: 知らせを入れる部屋。
@@ -361,6 +365,9 @@ class PornblockerAlertWatcher:
         return sent
 
     async def _notify(self, text: str) -> None:
+        if not ALERTS_ENABLED:
+            logger.info("pornblocker alert suppressed (disabled): %s", text.replace(chr(10), " / ")[:200])
+            return
         from app.services.chat_service import ChatService
 
         room_id = await resolve_alert_room()
@@ -399,6 +406,9 @@ def start_alert_watcher() -> Optional["asyncio.Task"]:
     """sandbox の起動時に 1 回だけ呼ぶ。"""
     global _watcher_started
     if _watcher_started:
+        return None
+    if not ALERTS_ENABLED:
+        logger.info("pornblocker alert watcher disabled (PORNBLOCKER_ALERTS_ENABLED is off)")
         return None
     _watcher_started = True
     task = asyncio.get_event_loop().create_task(_alert_loop())
