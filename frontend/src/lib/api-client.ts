@@ -716,6 +716,21 @@ export function setImmediateToken(token: string | null) {
   immediateToken = token;
 }
 
+export interface SessionModelOption {
+  id: string;
+  label: string;
+  backend: 'claude' | 'codex';
+}
+
+export interface SessionModelResponse {
+  session_id: string;
+  selected_model: string | null;
+  effective_model: string;
+  backend: 'claude' | 'codex';
+  can_switch: boolean;
+  options: SessionModelOption[];
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -980,6 +995,16 @@ export const api = {
           method: 'DELETE',
         }
       ),
+
+    // Room model / backend (Claude CLI or Codex CLI) — switchable mid-conversation
+    getSessionModel: (sessionId: string) =>
+      request<SessionModelResponse>(`/chat/dan/sessions/${sessionId}/model`),
+
+    setSessionModel: (sessionId: string, model: string) =>
+      request<SessionModelResponse>(`/chat/dan/sessions/${sessionId}/model`, {
+        method: 'PATCH',
+        body: JSON.stringify({ model }),
+      }),
   },
 
   // Friends endpoints
