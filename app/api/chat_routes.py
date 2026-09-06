@@ -2862,6 +2862,105 @@ async def update_dan_session(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SessionModelRequest(BaseModel):
+    model: str
+
+
+async def _session_model_payload(session_id: str, project: Optional[dict]) -> dict:
+    from app.agent import cli_runner as _cr
+    meta = (project or {}).get("metadata") or {}
+    selected = (meta.get("model") or "").strip().lower() if isinstance(meta, dict) else ""
+    effective, backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
+    return {
+        "session_id": session_id,
+        "selected_model": selected or None,
+        "effective_model": effective,
+        "backend": backend,
+        "can_switch": bool(project),
+        "options": _cr.CLI_MODEL_OPTIONS,
+    }
+
+
+async def _project_for_session(session_id: str, user_id: str) -> Optional[dict]:
+    from app.services.project_service import ProjectService
+    project = await ProjectService().get_project_by_room_id(session_id)
+    if project and project.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return project
+
+
+@router.get("/dan/sessions/{session_id}/model")
+async def get_dan_session_model(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """この部屋の次ターンが動くモデル/バックエンド（Claude CLI / Codex CLI）を返す。"""
+    project = await _project_for_session(session_id, current_user.user_id)
+    return await _session_model_payload(session_id, project)
+
+
+@router.patch("/dan/sessions/{session_id}/model")
+async def set_dan_session_model(
+    session_id: str,
+    request: SessionModelRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """部屋のモデルを切り替える（会話途中でも可）。
+
+    バックエンドが変わる場合、保存済みの CLI セッションは次ターンの冒頭で捨てられ、
+    DB（chat_messages / execution_events / 部屋の状態）から reseed される。人格・
+    記憶・道具は CLI の外にあるので引き継がれる。ターン実行中は 409 で拒否する。
+    """
+    from app.agent import cli_runner as _cr
+    from app.agent.codex_runner import backend_for_model
+
+    model = (request.model or "").strip().lower()
+    if model not in _cr._ALLOWED_CLI_MODELS:
+        raise HTTPException(status_code=400, detail=f"未対応のモデルです: {model}")
+    project = await _project_for_session(session_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="この部屋にはプロジェクト情報が無いためモデルを保存できません")
+
+    # 実行中ターンがある間は切り替えない（途中で backend が変わると転写が食い違う）
+    turn_active = _cr.is_cli_active(session_id)
+    try:
+        from app.agent.streaming_session import get_session as _get_ss
+        _ss = _get_ss(session_id)
+        if _ss is not None and _ss.is_alive() and _ss.is_turn_active():
+            turn_active = True
+    except Exception:
+        pass
+    if turn_active:
+        raise HTTPException(status_code=409, detail="ダンが作業中です。完了してから切り替えてください")
+
+    _, current_backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
+    new_backend = backend_for_model(model)
+
+    meta = project.get("metadata") if isinstance(project.get("metadata"), dict) else {}
+    merged = {**meta, "model": model}
+    from app.services.project_service import ProjectService
+    ps = ProjectService()
+    await asyncio.to_thread(
+        lambda: ps.supabase.table("projects").update({"metadata": merged}).eq("id", project["id"]).execute()
+    )
+    _cr.invalidate_room_model_cache(session_id)
+
+    if new_backend != current_backend and current_backend == "claude":
+        # 常駐 Claude セッションが遊んでいれば畳む（次ターンは Codex が DB reseed で始める）
+        try:
+            from app.agent.streaming_session import get_session as _get_ss
+            _ss = _get_ss(session_id)
+            if _ss is not None and _ss.is_alive():
+                _ss.stop()
+        except Exception:
+            pass
+    logger.info(
+        "[MODEL] room=%s model=%s backend %s → %s", session_id[:8], model, current_backend, new_backend
+    )
+    project["metadata"] = merged
+    return await _session_model_payload(session_id, project)
+
+
 @router.delete("/dan/sessions/{session_id}")
 async def delete_dan_session(
     session_id: str,

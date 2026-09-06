@@ -1786,9 +1786,39 @@ def run_oneshot_cli(
     return (proc.stdout or "").strip() or None
 
 
-_ALLOWED_CLI_MODELS = {"opus", "sonnet", "haiku", "fable"}
+from app.agent import codex_runner as _codex
+
+# Claude CLI models + Codex CLI (ChatGPT sign-in) models. The model decides the
+# backend: ``gpt-*`` → codex_runner, everything else → this file's Claude path.
+_ALLOWED_CLI_MODELS = {"opus", "sonnet", "haiku", "fable"} | set(_codex.CODEX_MODELS)
+
+# Selectable models for the room model switcher (UI order).
+CLI_MODEL_OPTIONS = [
+    {"id": "fable", "label": "Claude Fable 5.1", "backend": "claude"},
+    {"id": "opus", "label": "Claude Opus", "backend": "claude"},
+    {"id": "sonnet", "label": "Claude Sonnet", "backend": "claude"},
+    {"id": "gpt-6-astra", "label": "GPT-6 Astra", "backend": "codex"},
+    {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "backend": "codex"},
+    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "backend": "codex"},
+    {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna", "backend": "codex"},
+]
 # room_id → 解決済みモデル。作成時に固定され以後不変なので恒久キャッシュでよい。
 _room_model_cache: Dict[str, str] = {}
+
+
+def invalidate_room_model_cache(room_id: Optional[str] = None) -> None:
+    """Forget the cached per-room model (called by the model-switch API so the
+    NEXT turn picks up the new backend without a core restart)."""
+    if room_id is None:
+        _room_model_cache.clear()
+    else:
+        _room_model_cache.pop(room_id, None)
+
+
+def resolve_room_backend(room_id: Optional[str] = None) -> tuple[str, str]:
+    """(model, backend) the next turn of this room will run on."""
+    model = _resolve_cli_model(room_id)
+    return model, _codex.backend_for_model(model)
 
 
 def _dotenv_cli_model() -> str:
@@ -3426,6 +3456,34 @@ async def process_message_cli(
                 timeline_draft = None
     resume_session_id = None if skip_resume else _load_session(room_id)
 
+    # --- Backend selection (Claude CLI / Codex CLI) ---------------------------
+    # The room's model decides the backend. A saved session that belongs to the
+    # OTHER backend is dropped so this turn starts fresh and is reseeded from
+    # the DB (chat_messages / execution_events / room state) — the same recovery
+    # that already runs on transcript bloat or poison. Persona, tools and memory
+    # all live outside the CLI transcript, so a mid-room switch loses nothing
+    # beyond the transcript's raw detail.
+    cli_model, backend = resolve_room_backend(room_id)
+    if resume_session_id and _codex.backend_for_session(resume_session_id) != backend:
+        _cli_debug(
+            f"backend switch → {backend} (model={cli_model}); dropping saved "
+            f"{_codex.backend_for_session(resume_session_id)} session for room {room_id[:8]} and reseeding"
+        )
+        _clear_cli_session(room_id)
+        resume_session_id = None
+    if backend == "codex":
+        # A live Claude streaming process for this room must not keep running
+        # (its background sink would answer into the same room). It is only
+        # stopped between turns; mid-turn the switch API refuses the change.
+        try:
+            from app.agent.streaming_session import get_session as _get_ss
+            _ss = _get_ss(room_id)
+            if _ss is not None and _ss.is_alive() and not _ss.is_turn_active():
+                _ss.stop()
+                _cli_debug(f"[CODEX] stopped idle Claude streaming session for room {room_id[:8]}")
+        except Exception as e:
+            _cli_debug(f"[CODEX] streaming session stop failed: {e}")
+
     # Dead-transcript guard: if the saved session's transcript .jsonl is gone
     # (manually cleaned, disk loss, a renamed/corrupt file …), `--resume <id>`
     # does NOT error — the CLI silently starts a FRESH, context-less
@@ -3433,7 +3491,7 @@ async def process_message_cli(
     # memory only. Detect the missing transcript here and drop the dead id so
     # the reseed-from-DB path (session_is_fresh and not resume_session_id) fires
     # instead. _clear_cli_session also evicts the stale in-memory cache entry.
-    if resume_session_id and _session_transcript_path(resume_session_id) is None:
+    if backend == "claude" and resume_session_id and _session_transcript_path(resume_session_id) is None:
         _cli_debug(
             f"resume transcript missing for {resume_session_id[:8]}; "
             f"dropping session and reseeding from DB for room {room_id[:8]}"
@@ -3493,7 +3551,7 @@ async def process_message_cli(
         _use_streaming = streaming_enabled()
     except Exception:
         _use_streaming = False
-    if _use_streaming:
+    if _use_streaming and backend == "claude":
         _cli_debug(f"[STREAMING] routing room={room_id} via persistent session")
         from app.services.artifact_url_guard import sanitize_artifact_public_urls
         async for ev in _process_via_streaming_session(
@@ -3514,9 +3572,11 @@ async def process_message_cli(
         return
 
     latency_message = (
-        "[DAN_LATENCY] room=%s cli_setup=%.3fs system_prompt_chars=%s content_chars=%s resume=%s"
+        "[DAN_LATENCY] room=%s backend=%s model=%s cli_setup=%.3fs system_prompt_chars=%s content_chars=%s resume=%s"
         % (
             room_id,
+            backend,
+            cli_model,
             time.perf_counter() - setup_start,
             len(system_prompt),
             len(content_for_cli),
@@ -3530,26 +3590,29 @@ async def process_message_cli(
     from app.services.cancellation import CancellationRegistry
     cancel_event = CancellationRegistry.get_event(room_id)
 
-    # CLI を別スレッドで実行
+    # CLI を別スレッドで実行（backend に応じて Claude / Codex のランナーを選ぶ。
+    # どちらも同じイベント契約: text / tool_use / reasoning / result / error + 番兵）
     event_q = thread_queue.Queue()
-    cli_thread = threading.Thread(
-        target=_run_cli_in_thread,
-        args=(
-            content_for_cli,
-            system_prompt,
-            mcp_config_path,
-            room_id,
-            event_q,
-            user_id,
-            resume_session_id,
-            project_id,
-            run_id,
-            cancel_event,
-            skip_save,
-            cwd,
-        ),
-        daemon=True,
+    thread_kwargs = dict(
+        content=content_for_cli,
+        system_prompt=system_prompt,
+        mcp_config_path=mcp_config_path,
+        room_id=room_id,
+        event_queue=event_q,
+        user_id=user_id,
+        resume_session_id=resume_session_id,
+        project_id=project_id,
+        run_id=run_id,
+        cancel_event=cancel_event,
+        skip_save=skip_save,
+        cwd=cwd,
     )
+    if backend == "codex":
+        thread_target = _codex.run_codex_turn_in_thread
+        thread_kwargs["model"] = cli_model
+    else:
+        thread_target = _run_cli_in_thread
+    cli_thread = threading.Thread(target=thread_target, kwargs=thread_kwargs, daemon=True)
     cli_thread.start()
 
     # キューからイベントを非同期に読み出してyield
@@ -3572,11 +3635,22 @@ async def process_message_cli(
             event = await loop.run_in_executor(
                 None, lambda: event_q.get(timeout=2)
             )
-        except Exception:
+        except Exception as _qe:
             # queue.Empty (timeout)
             idle_seconds += 2
+            if not isinstance(_qe, thread_queue.Empty):
+                _cli_debug(f"event queue get raised {type(_qe).__name__}: {_qe}")
             if not cli_thread.is_alive():
-                _cli_debug(f"CLI thread died unexpectedly after {idle_seconds}s idle")
+                # The runner thread always puts its final events (result +
+                # sentinel) before exiting; if they are still queued, keep
+                # draining instead of declaring the turn dead.
+                if event_q.qsize() > 0:
+                    idle_seconds = 0
+                    continue
+                _cli_debug(
+                    f"CLI thread died unexpectedly after {idle_seconds}s idle "
+                    f"(backend={backend}, qsize={event_q.qsize()}, exc={type(_qe).__name__})"
+                )
                 yield {"type": "error", "message": "CLI process terminated unexpectedly"}
                 break
             if idle_seconds >= 3600:  # 60 minute safety net

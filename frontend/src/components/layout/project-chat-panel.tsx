@@ -60,6 +60,7 @@ import {
   type SelectedElement,
 } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
+import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
 import { RoomBoard } from '@/components/chat/room-board';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -2786,6 +2787,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             <span>音声</span>
           </button>
         )}
+        {project?.room_id && <ModelSwitcher roomId={project.room_id} />}
         <div className="min-w-0 flex-1">
           {isLoading ? (
             <div className="flex items-center gap-2">
