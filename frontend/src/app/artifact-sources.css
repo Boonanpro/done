@@ -23,6 +23,7 @@
 @source "./artifacts/oku-yukadanbou-real/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/paina/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/pornblocker-guard-beacon/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/pornblocker-roadmap/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/publish/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/safeguard/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/safeguard-layers/**/*.{ts,tsx,js,jsx,mdx}";

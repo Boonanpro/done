@@ -29,6 +29,9 @@ class GuardFlags(BaseModel):
     # 保護ロック（本人には解除できない状態）
     locked: bool = False
     safe_mode: bool = Field(default=False, alias="safeMode")
+    # 端末の中の「もう一つの領域」（Galaxy のセキュアフォルダ）が使われているか。
+    # あちら側にはこの守りが効かない。古い版のアプリは送ってこないので既定は False。
+    secure_space: bool = Field(default=False, alias="secureSpace")
 
     model_config = {"populate_by_name": True}
 

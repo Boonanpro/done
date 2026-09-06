@@ -32,6 +32,7 @@ from app.api.bank_account_routes import router as bank_account_router
 from app.api.otp_routes import router as otp_router
 from app.api.project_routes import router as project_router
 from app.api.note_routes import router as note_router
+from app.api.artifact_documents_routes import router as artifact_documents_router
 from app.api.file_routes import router as file_router
 from app.api.studio_routes import router as studio_router
 from app.api.collab_routes import router as collab_router
@@ -114,6 +115,16 @@ async def lifespan(app: FastAPI):
         start_board_poller()
     except Exception:
         logger.exception("room board poller start failed")
+    try:
+        from app.services.artifact_documents_service import start_document_notifier
+        start_document_notifier()
+    except Exception:
+        logger.exception("artifact document notifier start failed")
+    try:
+        from app.services.pornblocker_guard_beacon_service import start_alert_watcher
+        start_alert_watcher()
+    except Exception:
+        logger.exception("pornblocker alert watcher start failed")
     yield
 
 
@@ -176,6 +187,7 @@ app.include_router(bookings_router, prefix="/api/v1")
 app.include_router(video_review_router, prefix="/api/v1")
 app.include_router(production_asset_router, prefix="/api/v1")
 app.include_router(pornblocker_router, prefix="/api/v1")
+app.include_router(artifact_documents_router, prefix="/api/v1")
 app.include_router(client_messaging_router)  # router defines its own /api/v1 prefix
 
 

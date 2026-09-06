@@ -9,6 +9,7 @@
    artifact-sources.css は scripts/wire_artifact_tailwind_sources.py が自動生成し、
    成果物を作るたびに hook_register_artifact.py が更新する。 */
 @import "./artifact-sources.css";
+@source "../../node_modules/@blocknote/shadcn/dist/*.js"; /* BlockNote(shadcn) のメニュー/ツールバーが使う utility class を拾う（成果物 pornblocker-roadmap 等の Notion 風エディタ用） */
 
 @custom-variant dark (&:is(.dark *));
 

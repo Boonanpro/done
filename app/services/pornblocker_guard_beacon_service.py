@@ -29,6 +29,7 @@ FLAG_FIELDS = (
     "notifications",
     "locked",
     "safe_mode",
+    "secure_space",
 )
 
 #: これだけ音沙汰が無ければ「消息不明」とみなす。
@@ -134,6 +135,8 @@ class PornblockerGuardBeaconService:
                 not r.get("protected")
                 or r["silent"]
                 or (r.get("locked") and not r.get("admin"))
+                # もう一つの領域（セキュアフォルダ）が使われている。守りが効かない場所がある
+                or bool(r.get("secure_space"))
             )
 
         rows.sort(
@@ -173,6 +176,236 @@ class PornblockerGuardBeaconService:
         return result.data[0] if result.data else None
 
 
+# ================================================================== 運営への知らせ（見回り）
+#
+# 【なぜ要るのか】
+# 端末は 30 分ごとに「守りが立っている」と送ってくる。2 時間途切れると一覧では
+# 「消息不明」と出るが、**一覧を開いた人にしか見えない**。アプリを消された・機種変した・
+# 初期化された・セーフモードで起動された、のどれも、誰かが見に行くまで分からなかった。
+#
+# ここは、その一覧を代わりに見に行って、変わった瞬間だけ運営（みきさん）の部屋へ知らせる。
+# 知らせるのは「変わったとき」だけ。同じ状態が続いている間は黙る。戻ったら 1 回だけ「戻りました」。
+#
+# 【なぜダン側なのか】
+# 端末が話しかける先（Cloud Run）は、呼ばれたときだけ動く作りで、自分から時計を見ない。
+# 「来なくなった」ことは、誰かが時計を見て初めて分かる。常に動いているのはダン側なので、ここで見る。
+# 知らせたかどうかは pornblocker_devices.alert_state に残す。残さないと、ダンが再起動するたびに
+# 同じ知らせをもう一度送ってしまう。
+
+import asyncio
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+#: 知らせの持ち主（みきさん）。
+ALERT_USER_ID = os.getenv("PORNBLOCKER_ALERT_USER_ID", "2582a188-ff24-4a4f-b989-6063034d90b2")
+#: 知らせを入れる部屋。
+#: 最初は事業の相談部屋（a588ca6f…）へ入れていたが、「相談の流れに見回りの履歴が混ざってうざい」
+#: とのことで（2026-09-06）、サイドバーに専用チャット「ポルノブロッカー見回り」を 1 つ作ってそこへ入れる。
+#: 環境変数で部屋を固定したいときだけ PORNBLOCKER_ALERT_ROOM_ID を指定する。
+ALERT_ROOM_ID = os.getenv("PORNBLOCKER_ALERT_ROOM_ID", "")
+ALERT_ROOM_TITLE = os.getenv("PORNBLOCKER_ALERT_ROOM_TITLE", "ポルノブロッカー見回り")
+ALERT_ROOM_DESCRIPTION = (
+    "ポルノブロッカーの端末を 5 分ごとに見回り、変わったときだけここへ知らせる専用の部屋です。"
+    "（合図が 2 時間・24 時間途切れた／戻った／守りが外れた／鍵があるのに消せる／セキュアフォルダがある）"
+    "同じ状態が続く間は黙ります。事業の相談は元の部屋で行い、この部屋は記録用です。"
+)
+_alert_room_cache: Optional[str] = None
+
+
+async def resolve_alert_room() -> str:
+    """知らせを入れる部屋の ID を返す。専用チャットが無ければ 1 回だけ作る。"""
+    global _alert_room_cache
+    if ALERT_ROOM_ID:
+        return ALERT_ROOM_ID
+    if _alert_room_cache:
+        return _alert_room_cache
+
+    def _find() -> Optional[str]:
+        r = (
+            get_supabase_client().client.table("projects")
+            .select("room_id, created_at")
+            .eq("user_id", ALERT_USER_ID)
+            .eq("title", ALERT_ROOM_TITLE)
+            .order("created_at")
+            .limit(1)
+            .execute()
+        )
+        rows = r.data or []
+        return str(rows[0]["room_id"]) if rows and rows[0].get("room_id") else None
+
+    room_id = await asyncio.to_thread(_find)
+    if not room_id:
+        from app.services.project_service import ProjectService
+
+        project = await ProjectService().create_project(
+            user_id=ALERT_USER_ID, title=ALERT_ROOM_TITLE, description=ALERT_ROOM_DESCRIPTION,
+        )
+        room_id = project.get("room_id")
+        if not room_id:
+            raise RuntimeError("見回り用の部屋を作れませんでした（room_id が空）")
+        from app.services.chat_service import ChatService
+
+        await ChatService().send_dan_ai_message(ALERT_USER_ID, ALERT_ROOM_DESCRIPTION, room_id=room_id)
+        logger.info("pornblocker alert room created: %s", room_id)
+    _alert_room_cache = room_id
+    return room_id
+#: 見回りの間隔（秒）。端末は 30 分ごとなので、5 分で見れば十分に早い。
+ALERT_POLL_SECONDS = int(os.getenv("PORNBLOCKER_ALERT_POLL_SECONDS", "300"))
+#: 2 時間の知らせのあと、これだけ経っても戻らなければもう 1 回だけ知らせる。
+LONG_SILENT_MINUTES = 24 * 60
+#: これより前から音沙汰が無い端末は「もう使われていない」とみなして知らせない。
+#: 試験に使った端末や、消したまま放置された端末で、初回の見回りが鳴りっぱなしになるのを防ぐ。
+STALE_AFTER_MINUTES = 3 * 24 * 60
+
+
+def _device_name(r: Dict[str, Any]) -> str:
+    label = (r.get("label") or "").strip()
+    short = str(r.get("device_id") or "")[:8]
+    model = (r.get("model") or "").replace("samsung", "Galaxy").strip()
+    head = label or f"端末 {short}"
+    ver = f"v{r.get('app_version')}" if r.get("app_version") else ""
+    tail = " / ".join(x for x in (model, ver) if x)
+    return f"{head}（{tail}）" if tail else head
+
+
+def plan_alerts(rows: List[Dict[str, Any]], now: datetime) -> List[Dict[str, Any]]:
+    """
+    一覧を見て「いま送るべき知らせ」と「更新する alert_state」を決める。
+
+    端末の部品を一切使わない（送りもしない）。だから実際に送らずに確かめられる。
+    返すのは 1 台につき {"device_id", "state", "messages": [文]} で、messages が空なら送るものは無い。
+    """
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        state = dict(r.get("alert_state") or {})
+        before = dict(state)
+        msgs: List[str] = []
+        name = _device_name(r)
+        minutes = _minutes_since(r.get("last_seen_at"), now)
+        silent = minutes is None or minutes >= SILENT_AFTER_MINUTES
+        stamp = now.isoformat()
+
+        # ---- 合図が途切れた / 戻った
+        if silent:
+            if (minutes is None or minutes >= STALE_AFTER_MINUTES) and not state.get("silent"):
+                # 昔から途絶えている端末。知らせずに「見た」印だけ付ける。
+                state["silent"] = "stale"
+            elif not state.get("silent"):
+                state["silent"] = stamp
+                hours = f"{minutes // 60}" if minutes is not None else "?"
+                msgs.append(
+                    f"{name} から守りの合図が {hours} 時間届いていません。"
+                    "アプリを消した・機種変した・電源を切ったまま、のどれかの可能性があります。"
+                )
+            elif (
+                state.get("silent") != "stale"
+                and not state.get("silent_long")
+                and minutes is not None
+                and minutes >= LONG_SILENT_MINUTES
+            ):
+                state["silent_long"] = stamp
+                msgs.append(f"{name} の合図が途切れて 24 時間たちました。本人に連絡したほうがよさそうです。")
+        else:
+            if state.get("silent") and state.get("silent") != "stale":
+                msgs.append(f"{name} の合図が戻りました。")
+            state.pop("silent", None)
+            state.pop("silent_long", None)
+
+        # 合図が来ている端末についてだけ、中身の状態を見る（来ていないものは中身も古い）
+        if not silent:
+            checks = (
+                ("unprotected", not r.get("protected"),
+                 f"{name} の守りが外れています（見張り・遮断のどれかが止まっています）。",
+                 f"{name} の守りが立ち直りました。"),
+                ("lock_incomplete", bool(r.get("locked")) and not r.get("admin"),
+                 f"{name} は鍵がかかっているのに、アプリを消せる状態です。",
+                 f"{name} は鍵と消せない設定がそろいました。"),
+                ("secure_space", bool(r.get("secure_space")),
+                 f"{name} でセキュアフォルダ（もう一つの領域）が使われています。そこにはこの守りが効きません。",
+                 f"{name} のセキュアフォルダは使われなくなりました。"),
+            )
+            for key, active, on_text, off_text in checks:
+                if active and not state.get(key):
+                    state[key] = stamp
+                    msgs.append(on_text)
+                elif not active and state.get(key):
+                    state.pop(key, None)
+                    msgs.append(off_text)
+
+        if msgs or state != before:
+            out.append({"device_id": r["device_id"], "state": state, "messages": msgs})
+    return out
+
+
+class PornblockerAlertWatcher:
+    """見回り本体。一覧を読み、変わった端末だけ部屋へ知らせ、alert_state を書き戻す。"""
+
+    def __init__(self) -> None:
+        self.beacons = PornblockerGuardBeaconService()
+
+    async def run_once(self, dry_run: bool = False) -> List[str]:
+        rows = await self.beacons.list_devices()
+        plans = plan_alerts(rows, datetime.now(timezone.utc))
+        sent: List[str] = []
+        for plan in plans:
+            if plan["messages"] and not dry_run:
+                text = "ポルノブロッカーの見回り\n" + "\n".join(f"- {m}" for m in plan["messages"])
+                await self._notify(text)
+            sent.extend(plan["messages"])
+            if not dry_run:
+                self.beacons.supabase.table(self.beacons.devices).update(
+                    {"alert_state": plan["state"]}
+                ).eq("device_id", plan["device_id"]).execute()
+        return sent
+
+    async def _notify(self, text: str) -> None:
+        from app.services.chat_service import ChatService
+
+        room_id = await resolve_alert_room()
+        await ChatService().send_dan_ai_message(ALERT_USER_ID, text, room_id=room_id)
+        try:
+            from app.services.push_service import get_push_service
+
+            svc = get_push_service()
+            body = text.split("\n", 1)[1][:120] if "\n" in text else text[:120]
+            await svc.notify_room(
+                room_id=f"user:{ALERT_USER_ID}", exclude_type="ai",
+                title="ポルノブロッカー", body=body, url=f"/chat/{room_id}",
+            )
+        except Exception as e:
+            logger.debug("pornblocker alert push skipped: %s", e)
+
+
+_watcher_started = False
+
+
+async def _alert_loop() -> None:
+    await asyncio.sleep(20)
+    while True:
+        try:
+            sent = await PornblockerAlertWatcher().run_once()
+            if sent:
+                logger.info("pornblocker alerts sent: %d", len(sent))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("pornblocker alert cycle failed: %s", e)
+        await asyncio.sleep(ALERT_POLL_SECONDS)
+
+
+def start_alert_watcher() -> Optional["asyncio.Task"]:
+    """sandbox の起動時に 1 回だけ呼ぶ。"""
+    global _watcher_started
+    if _watcher_started:
+        return None
+    _watcher_started = True
+    task = asyncio.get_event_loop().create_task(_alert_loop())
+    logger.info("pornblocker alert watcher started (interval=%ss)", ALERT_POLL_SECONDS)
+    return task
+
+
 def _from_millis(ms: Optional[int]) -> Optional[str]:
     if not ms:
         return None
@@ -183,11 +416,26 @@ def _from_millis(ms: Optional[int]) -> Optional[str]:
         return None
 
 
+def _normalize_iso(iso: str) -> str:
+    """
+    保存先が返す時刻の小数部は 5 桁のことがあり（例 04:55:53.85578+00:00）、
+    Python 3.10 の fromisoformat は 3 桁か 6 桁しか読めない。6 桁にそろえてから読む。
+    読めないと「いつ見たか分からない」扱いになり、生きている端末が消息不明に化ける。
+    """
+    import re
+
+    s = iso.replace("Z", "+00:00")
+    m = re.match(r"^(.*?\.)(\d{1,6})([+-]\d{2}:\d{2}|)$", s)
+    if m:
+        s = m.group(1) + m.group(2).ljust(6, "0") + m.group(3)
+    return s
+
+
 def _minutes_since(iso: Optional[str], now: datetime) -> Optional[int]:
     if not iso:
         return None
     try:
-        seen = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        seen = datetime.fromisoformat(_normalize_iso(iso))
     except ValueError:
         return None
     if seen.tzinfo is None:

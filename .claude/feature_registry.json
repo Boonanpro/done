@@ -362,5 +362,19 @@
       "D:\\done\\frontend\\src\\app\\artifacts\\himawari-seitai\\page.tsx",
       "D:\\done\\scripts\\seed_himawari_seitai.py"
     ]
+  },
+  "artifact_documents": {
+    "name": "artifact_documents",
+    "description": "成果物ページ（ロードマップ等）の本文と作業チェックをDBに保存し、編集をチャットに通知する内部基盤",
+    "created_at": "2026-09-05T14:12:15.056461",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\082_artifact_documents.sql",
+      "D:\\done\\app\\models\\artifact_documents_schemas.py",
+      "D:\\done\\app\\services\\artifact_documents_service.py",
+      "D:\\done\\app\\api\\artifact_documents_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\artifact-documents\\page.tsx",
+      "D:\\done\\scripts\\seed_artifact_documents.py"
+    ]
   }
 }

@@ -39,6 +39,7 @@
     "@types/three": "^0.184.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cn": "^0.2.5",
     "docxtemplater": "^3.68.6",
     "file-saver": "^2.0.5",
     "framer-motion": "^12.23.26",
