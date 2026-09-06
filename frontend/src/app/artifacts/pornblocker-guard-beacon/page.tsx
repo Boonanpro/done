@@ -46,6 +46,7 @@ type Device = {
   notifications: boolean;
   locked: boolean;
   safe_mode: boolean;
+  secure_space?: boolean;
   app_version: string | null;
   model: string | null;
   android: string | null;
@@ -97,6 +98,7 @@ function problems(d: Device): string[] {
   if (!d.overlay) out.push('画面に重ねる許可がありません');
   if (!d.vpn) out.push('サイトの遮断が止まっています');
   if (d.locked && !d.admin) out.push('アプリを消せる状態です');
+  if (d.secure_space) out.push('セキュアフォルダ（守りの効かない領域）が使われています');
   if (!d.notifications) out.push('通知が切られています');
   return out;
 }
