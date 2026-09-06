@@ -49,6 +49,11 @@ CODEX_MODELS = {
 
 SESSION_PREFIX = "codex:"
 
+# Codex rollouts hold every tool output verbatim (one heavy turn was 13.5MB on
+# 2026-09-06), and Codex compacts its own context on resume, so the Claude
+# transcript threshold (1.5MB) must NOT be reused here. 0 disables the guard.
+_ROLLOUT_RESET_BYTES = int(os.environ.get("DAN_CODEX_ROLLOUT_RESET_BYTES", str(400 * 1024 * 1024)))
+
 _CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
@@ -99,6 +104,8 @@ def rollout_path(thread_id: str) -> Optional[Path]:
 
 
 def rollout_exceeds_limit(thread_id: str, limit_bytes: int) -> bool:
+    if limit_bytes <= 0:
+        return False
     p = rollout_path(thread_id)
     if p is None:
         return False
@@ -634,7 +641,7 @@ def run_codex_turn_in_thread(
         # Rollout bloat guard (same threshold as the Claude transcript guard):
         # drop the thread and reseed from the DB instead of re-prefilling a
         # huge history every turn.
-        if resume_thread_id and rollout_exceeds_limit(resume_thread_id, cr._TRANSCRIPT_RESET_BYTES):
+        if resume_thread_id and rollout_exceeds_limit(resume_thread_id, _ROLLOUT_RESET_BYTES):
             cr._cli_debug(f"[CODEX] rollout for {resume_thread_id[:8]} over limit; dropping and reseeding")
             cr._clear_cli_session(room_id)
             resume_thread_id = None
