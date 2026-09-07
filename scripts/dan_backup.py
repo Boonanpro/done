@@ -3,7 +3,7 @@
 
 何を守るか (このPCにしか存在しないもの):
   - D:/done, D:/done-artifacts, ~/.dan/workspace の git 全履歴 (未pushのcommit含む) → git bundle
-  - ~/.claude/projects/**/*.jsonl + ~/.claude/history.jsonl (ターミナルCLIのセッションログ) → zip
+  - ~/.claude/projects/**/*.jsonl + ~/.claude/history.jsonl + ~/.codex/sessions/** (ターミナルCLI/GPT-6のセッションログ) → zip
   - ~/.claude/projects/D--done/memory (開発CLIのメモリ) → zip に含む
 
 出力:
@@ -32,7 +32,7 @@ REPOS = {
     "done-artifacts": Path("D:/done-artifacts"),
     "dan-workspace": HOME / ".dan" / "workspace",
 }
-CLI_DIRS = [HOME / ".claude" / "projects"]
+CLI_DIRS = [HOME / ".claude" / "projects", HOME / ".codex" / "sessions"]
 CLI_FILES = [HOME / ".claude" / "history.jsonl"]
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
