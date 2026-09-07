@@ -121,6 +121,15 @@ def main() -> int:
         if bundle_repo(name, repo, out_dir) is None and name == "done":
             ok = False
     zip_cli_logs(out_dir)
+    # 物語データ (週次日記/章/UIスクショ)。GitLab にも push しているが OneDrive 側の保険にも含める
+    story = ARCHIVE_ROOT.parent / "story"
+    if story.exists():
+        outz = out_dir / "story.zip"
+        with zipfile.ZipFile(outz, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in story.rglob("*"):
+                if f.is_file():
+                    z.write(f, str(f.relative_to(story.parent)))
+        log(f"zipped story: {outz.stat().st_size/1e6:.1f} MB")
     # .env（合鍵の束）は git 管理外なので、gpg で暗号化したコピーを同梱する。
     # 暗証番号は ~/.dan/env_backup_passphrase（本人のスマホにも控えあり）。
     try:
