@@ -340,6 +340,85 @@ def collect_cli(offsets: Dict[str, int], since_utc: datetime, until_utc: datetim
     return out, new_offsets, truncated
 
 
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
+MAX_CODEX_LINES = 60
+
+
+def collect_codex(offsets: Dict[str, int], since_utc: datetime, until_utc: datetime) -> Tuple[List[Dict[str, Any]], Dict[str, int], bool]:
+    """ターミナル Codex CLI (GPT-6) の rollout jsonl。source=cli (本人対話) のみ。
+    codex_exec (ダン内部) は chat_messages 側で拾うので除外 (offset=サイズにして再読しない)。"""
+    new_offsets = dict(offsets)
+    out: List[Dict[str, Any]] = []
+    truncated = False
+    if not CODEX_SESSIONS.exists():
+        return out, new_offsets, truncated
+    for path in sorted(CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl"), key=lambda p: p.stat().st_mtime):
+        if truncated:
+            break
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        key = str(path)
+        if datetime.fromtimestamp(st.st_mtime, tz=timezone.utc) < since_utc:
+            new_offsets.setdefault(key, st.st_size)
+            continue
+        start = offsets.get(key, 0)
+        if start > st.st_size:
+            start = 0
+        try:
+            with open(path, "rb") as f:
+                if start == 0:
+                    first = f.readline()
+                    try:
+                        if (json.loads(first).get("payload") or {}).get("source") != "cli":
+                            new_offsets[key] = st.st_size  # ダン内部実行: 以後読まない
+                            continue
+                    except Exception:
+                        pass
+                    start = f.tell()
+                f.seek(start)
+                blob = f.read()
+        except OSError:
+            continue
+        pos = start
+        consumed = start
+        end = start + len(blob)
+        for raw in blob.split(b"\n"):
+            line_len = len(raw) + 1
+            if pos + line_len > end:
+                break
+            if len(out) >= MAX_CODEX_LINES:
+                truncated = True
+                break
+            pos += line_len
+            consumed = pos
+            try:
+                r = json.loads(raw)
+            except Exception:
+                continue
+            if r.get("type") != "response_item":
+                continue
+            pl = r.get("payload") or {}
+            if pl.get("type") != "message" or pl.get("role") not in ("user", "assistant"):
+                continue
+            texts = [b.get("text", "") for b in pl.get("content") or []
+                     if isinstance(b, dict) and b.get("type") in ("input_text", "output_text", "text")]
+            text = " ".join(x for x in texts if x).strip()
+            if not text or (pl["role"] == "user" and text.startswith("<")):
+                continue
+            try:
+                t = datetime.fromisoformat(str(r.get("timestamp")).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if t < since_utc or t > until_utc:
+                continue
+            out.append({"at": t.astimezone(JST).strftime("%H:%M"), "session": f"gpt6/{path.stem[-12:]}",
+                        "who": "user" if pl["role"] == "user" else "gpt6", "text": _trunc(text, MAX_CLI_CHARS)})
+        new_offsets[key] = consumed if truncated else st.st_size
+    return out, new_offsets, truncated
+
+
 def _git(repo: Path, *args: str, timeout: int = 20) -> str:
     try:
         r = subprocess.run(
@@ -595,6 +674,9 @@ def run_cycle(force: bool = False, model: str = "sonnet") -> Dict[str, Any]:
         dan, dan_last, dan_trunc = collect_dan(since_iso, until_iso)
         watch = collect_watch(since_iso, until_iso)
         cli, cli_offsets, cli_trunc = collect_cli(cursor.get("cli_offsets", {}), since_utc, now_utc)
+        codex, codex_offsets, codex_trunc = collect_codex(cursor.get("codex_offsets", {}), max(since_utc, day_start), now_utc)
+        cli = cli + codex
+        cli_trunc = cli_trunc or codex_trunc
         git, git_seen = collect_git(cursor.get("git_seen", []), day_start)
         commits = git[0]["commits"]
 
@@ -602,7 +684,7 @@ def run_cycle(force: bool = False, model: str = "sonnet") -> Dict[str, Any]:
         has_new = bool(dan or watch or cli or commits)
         if not has_new:
             # 判定する材料は無いが、読み終えた位置は保存する (同じ行を毎回読み直さない)
-            cursor.update({"day": day.isoformat(), "since": until_iso, "cli_offsets": cli_offsets, "git_seen": git_seen})
+            cursor.update({"day": day.isoformat(), "since": until_iso, "cli_offsets": cli_offsets, "codex_offsets": codex_offsets, "git_seen": git_seen})
             save_cursor(cursor)
             break
 
@@ -617,7 +699,7 @@ def run_cycle(force: bool = False, model: str = "sonnet") -> Dict[str, Any]:
 
         # 読み位置は「実際に読めたところ」まで。dan が切れたら最後の発言時刻で止める。
         next_since = dan_last if (dan_trunc and dan_last) else until_iso
-        cursor.update({"day": day.isoformat(), "since": next_since, "cli_offsets": cli_offsets,
+        cursor.update({"day": day.isoformat(), "since": next_since, "cli_offsets": cli_offsets, "codex_offsets": codex_offsets,
                        "git_seen": git_seen, "last_run": until_iso})
         save_cursor(cursor)
         stats["carry_over"] = bool(dan_trunc or cli_trunc)
