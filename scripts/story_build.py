@@ -393,6 +393,68 @@ def collect_cli(key: str) -> List[Dict[str, Any]]:
     return rows
 
 
+CODEX_SESSIONS = HOME / ".codex" / "sessions"
+MAX_CODEX = 120
+
+
+def collect_codex(key: str) -> List[Dict[str, Any]]:
+    """ターミナルの Codex CLI (GPT-6) セッション。source=cli (本人が対話) のみ。
+    codex_exec (ダン内部実行) は chat_messages 側で拾えるので除外して二重計上を防ぐ。"""
+    if not CODEX_SESSIONS.exists():
+        return []
+    s, e = week_bounds(key)
+    rows: List[Dict[str, Any]] = []
+    files = 0
+    d = s
+    while d <= e:
+        day_dir = CODEX_SESSIONS / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}"
+        for f in sorted(day_dir.glob("rollout-*.jsonl")) if day_dir.exists() else []:
+            try:
+                fh = open(f, encoding="utf-8", errors="ignore")
+                meta = json.loads(fh.readline())
+                if (meta.get("payload") or {}).get("source") != "cli":
+                    continue
+                files += 1
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("type") != "response_item":
+                        continue
+                    pl = r.get("payload") or {}
+                    if pl.get("type") != "message" or pl.get("role") not in ("user", "assistant"):
+                        continue
+                    texts = [b.get("text", "") for b in pl.get("content") or []
+                             if isinstance(b, dict) and b.get("type") in ("input_text", "output_text", "text")]
+                    text = " ".join(x for x in texts if x).strip()
+                    if not text or (pl["role"] == "user" and text.startswith("<")):
+                        continue  # 環境注入 (<recommended_plugins> 等) は捨てる
+                    at = str(r.get("timestamp", ""))[:19]
+                    try:
+                        at = _jst(_parse_iso(r["timestamp"]))
+                    except Exception:
+                        pass
+                    rows.append({"at": at, "who": pl["role"], "text": _trunc(text, CHAT_USER_CHARS if pl["role"] == "user" else CHAT_AI_CHARS)})
+            except Exception:
+                continue
+        d += timedelta(days=1)
+    if not rows:
+        return []
+    users = [r for r in rows if r["who"] == "user"]
+    ais = [r for r in rows if r["who"] == "assistant"]
+
+    def sample(lst, n):
+        if len(lst) <= n:
+            return lst
+        step = len(lst) / n
+        return [lst[int(i * step)] for i in range(n)]
+
+    picked = sample(users, int(MAX_CODEX * 0.65)) + sample(ais, MAX_CODEX - int(MAX_CODEX * 0.65))
+    picked.sort(key=lambda r: r["at"])
+    return [{"total_messages": len(rows), "user_messages": len(users), "sessions": files, "sample": picked}]
+
+
 def collect_all(key: str) -> Dict[str, Any]:
     ev = {
         "git": collect_git(key),
@@ -402,6 +464,7 @@ def collect_all(key: str) -> Dict[str, Any]:
         "memory": collect_memory(key),
         "today": collect_today(key),
         "cli": collect_cli(key),
+        "codex": collect_codex(key),
     }
     ev["stats"] = {
         "commits": len(ev["git"]),
@@ -409,6 +472,7 @@ def collect_all(key: str) -> Dict[str, Any]:
         "cursor_messages": ev["cursor"][0]["total_messages"] if ev["cursor"] else 0,
         "cursor_edit_days": len(ev["cursor_edits"]),
         "cli_prompts": len(ev["cli"]),
+        "codex_messages": ev["codex"][0]["total_messages"] if ev["codex"] else 0,
         "memory_days": len(ev["memory"]),
     }
     return ev
@@ -416,7 +480,7 @@ def collect_all(key: str) -> Dict[str, Any]:
 
 def has_evidence(ev: Dict[str, Any]) -> bool:
     st = ev["stats"]
-    return any(st[k] for k in ("commits", "chat_messages", "cursor_messages", "cursor_edit_days", "cli_prompts", "memory_days"))
+    return any(st[k] for k in ("commits", "chat_messages", "cursor_messages", "cursor_edit_days", "cli_prompts", "codex_messages", "memory_days"))
 
 
 # ---------------------------------------------------------------------------
