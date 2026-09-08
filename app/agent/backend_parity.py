@@ -76,21 +76,12 @@ def load_parity_docs() -> list[tuple[Path, str]]:
     return docs
 
 
-def parity_context(backend: str) -> str:
-    """Extra system-prompt context for a non-Claude backend. Empty for Claude
-    (it already loads these itself; injecting again would duplicate)."""
+def parity_static(backend: str) -> str:
+    """Rarely-changing context (CLAUDE.md files). Goes into the backend's
+    per-thread instructions; a change rotates the thread (see codex_runner)."""
     if backend == "claude":
         return ""
     parts: list[str] = []
-    mem = load_memory_index()
-    if mem:
-        parts.append(
-            "## 長期記憶（索引）\n\n"
-            f"以下は `{MEMORY_INDEX.as_posix()}` の索引。各行の詳細は同じフォルダの"
-            "リンク先ファイルを read_file で読め。新しい学び（ユーザーの好み・訂正・"
-            "プロジェクトの事実）はこのフォルダに1件1ファイルで保存し、索引に1行追加しろ。\n\n"
-            f"{mem}"
-        )
     for path, text in load_parity_docs():
         parts.append(
             f"## コードベース規律（{path.as_posix()}）\n\n"
@@ -99,6 +90,41 @@ def parity_context(backend: str) -> str:
             f"{text}"
         )
     return "\n\n---\n\n".join(parts)
+
+
+def parity_dynamic(backend: str) -> str:
+    """Per-turn context (memory index). Delivered with every user message so a
+    long-lived thread always sees the current memory."""
+    if backend == "claude":
+        return ""
+    mem = load_memory_index()
+    if not mem:
+        return ""
+    return (
+        "## 長期記憶（索引）\n\n"
+        f"以下は `{MEMORY_INDEX.as_posix()}` の索引。各行の詳細は同じフォルダの"
+        "リンク先ファイルを read_file で読め。新しい学び（ユーザーの好み・訂正・"
+        "プロジェクトの事実）はこのフォルダに1件1ファイルで保存し、索引に1行追加しろ。\n\n"
+        f"{mem}"
+    )
+
+
+def parity_context(backend: str) -> str:
+    """Extra context for a non-Claude backend (static + dynamic). Empty for
+    Claude (it already loads these itself; injecting again would duplicate)."""
+    parts = [p for p in (parity_dynamic(backend), parity_static(backend)) if p]
+    return "\n\n---\n\n".join(parts)
+
+
+def static_fingerprint(*texts: str) -> str:
+    """Short hash of the instruction pieces that are frozen per thread."""
+    import hashlib
+
+    h = hashlib.sha1()
+    for t in texts:
+        h.update((t or "").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:10]
 
 
 def iter_claude_hook_scripts(settings_path: Path) -> Iterable[tuple[str, str, str]]:

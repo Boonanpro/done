@@ -75,16 +75,80 @@ def backend_for_session(session_id: Optional[str]) -> str:
 
 
 def thread_id_from_session(session_id: Optional[str]) -> Optional[str]:
+    """``codex:<thread_id>[#<static_hash>]`` → thread id."""
     if not is_codex_session_id(session_id):
         return None
-    tid = str(session_id)[len(SESSION_PREFIX):].strip()
+    tid = str(session_id)[len(SESSION_PREFIX):].split("#", 1)[0].strip()
     return tid or None
+
+
+def static_hash_from_session(session_id: Optional[str]) -> str:
+    """Hash of the per-thread (frozen) instructions the thread was created with.
+    Codex keeps a thread's developer_instructions for its whole life, so when
+    the static part changes the thread must be rotated (DB reseed)."""
+    if not is_codex_session_id(session_id) or "#" not in str(session_id):
+        return ""
+    return str(session_id).split("#", 1)[1].strip()
+
+
+def make_session_id(thread_id: str, static_hash: str = "") -> str:
+    return SESSION_PREFIX + thread_id + (f"#{static_hash}" if static_hash else "")
+
+
+def compute_static_hash(system_prompt: str) -> str:
+    """Fingerprint of the rarely-changing instruction pieces (persona/rules/
+    runtime contract/CLAUDE.md). Room state, artifact state, personal-info list
+    and the memory index are dynamic and travel with each user message instead."""
+    try:
+        from app.agent import cli_runner as cr
+        from app.agent.backend_parity import parity_static, static_fingerprint
+        from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
+        return static_fingerprint(
+            get_core_prompt(), load_all_bootstrap_files(),
+            cr._build_runtime_contract_section(), parity_static("codex"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("codex static hash failed: %s", e)
+        return ""
+
+
+def wrap_turn_content(system_prompt: str, content: str) -> str:
+    """Codex freezes developer_instructions per thread, so the CURRENT system
+    prompt (room/artifact/personal-info state) and the memory index are sent at
+    the top of every user message — the same thing the Claude path does when
+    the prompt is too long for argv."""
+    if "<runtime_system_context>" in content:
+        return content
+    try:
+        from app.agent.backend_parity import parity_dynamic
+        dyn = parity_dynamic("codex")
+    except Exception:  # noqa: BLE001
+        dyn = ""
+    ctx = (system_prompt or "") + ("\n\n---\n\n" + dyn if dyn else "")
+    return (
+        "<runtime_system_context>\n"
+        "これが現在のシステム指示・部屋の状態・長期記憶の索引。スレッド開始時の古い指示と"
+        "矛盾する場合はこちらを優先すること。\n\n"
+        f"{ctx}\n"
+        "</runtime_system_context>\n\n"
+        "<user_request>\n"
+        f"{content}\n"
+        "</user_request>"
+    )
 
 
 def resolve_codex_cli() -> Optional[str]:
     """Locate the ``codex`` executable (npm ``.cmd`` shim is fine: every
     argument we pass is plain ASCII, the prompt goes through stdin)."""
-    return shutil.which("codex")
+    command = shutil.which("codex")
+    if command and os.name == 'nt' and Path(command).suffix.lower() == '.cmd':
+        # Avoid cmd.exe's 8191-character limit and interpretation of config
+        # strings. The npm package ships the actual executable next to its shim.
+        package = Path(command).parent / 'node_modules' / '@openai' / 'codex'
+        binaries = list(package.glob('node_modules/@openai/codex-win32-*/vendor/*/bin/codex.exe'))
+        if len(binaries) == 1:
+            return str(binaries[0])
+    return command
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +240,22 @@ def build_codex_profile(
     startup_timeout = int(os.environ.get("DAN_CODEX_MCP_STARTUP_SEC", "120"))
     tool_timeout = int(os.environ.get("DAN_CODEX_MCP_TOOL_SEC", "3600"))
 
-    # Parity with Claude Code: memory index + CLAUDE.md files Claude auto-loads.
+    # Parity with Claude Code: the static part (CLAUDE.md files Claude auto-loads)
+    # is frozen into the thread; the memory index rides on each user message.
     try:
-        from app.agent.backend_parity import parity_context
-        extra = parity_context("codex")
+        from app.agent.backend_parity import parity_static
+        extra = parity_static("codex")
     except Exception as e:  # noqa: BLE001
         logger.warning("codex profile: parity context failed: %s", e)
         extra = ""
-    instructions = (system_prompt or "") + ("\n\n---\n\n" + extra if extra else "")
+    instructions = (
+        (system_prompt or "")
+        + ("\n\n---\n\n" + extra if extra else "")
+        + "\n\n---\n\n## 実行時コンテキストの扱い\n\n"
+        "各ユーザーメッセージ冒頭の <runtime_system_context> が、その時点のシステム指示・"
+        "部屋の状態・長期記憶の索引である。ここ（スレッド開始時の指示）と矛盾したら"
+        "<runtime_system_context> を優先し、<user_request> の内容に応答すること。"
+    )
 
     lines = [
         "# Auto-generated per-room Codex profile (Dan). Safe to delete.",
@@ -370,6 +442,7 @@ def run_codex_process(
     run_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     cwd: Optional[str] = None,
+    static_hash: str = "",
 ) -> Optional[dict]:
     from app.agent import cli_runner as cr
 
@@ -529,7 +602,7 @@ def run_codex_process(
         if etype == "thread.started":
             thread_id = data.get("thread_id") or thread_id
             if thread_id:
-                sid = SESSION_PREFIX + thread_id
+                sid = make_session_id(thread_id, static_hash)
                 cr._save_session(room_id, sid)
                 cr._update_run_sync(run_id, claude_session_id=sid)
             cr._cli_debug(f"[CODEX] thread_id={thread_id}")
@@ -559,8 +632,11 @@ def run_codex_process(
                     event_queue.put(ev)
                     reasoning_full_acc.append(ev["text"])
                 elif ev["type"] == "error":
-                    errors.append(ev["message"])
-                    event_queue.put(ev)
+                    if _is_informational(ev["message"]):
+                        cr._cli_debug(f"[CODEX] notice: {ev['message'][:160]}")
+                    else:
+                        errors.append(ev["message"])
+                        event_queue.put(ev)
         elif etype == "turn.completed":
             usage = data.get("usage") or {}
         elif etype == "turn.failed":
@@ -602,7 +678,7 @@ def run_codex_process(
 
     is_error = turn_failed or (return_code != 0 and not final_text_parts)
     result_data = {
-        "session_id": (SESSION_PREFIX + thread_id) if thread_id else None,
+        "session_id": make_session_id(thread_id, static_hash) if thread_id else None,
         "is_error": is_error,
         "num_turns": 1,
         "errors": errors,
@@ -686,6 +762,23 @@ def run_codex_turn_in_thread(
     try:
         resume_thread_id = thread_id_from_session(resume_session_id)
 
+        # Thread rotation: Codex freezes developer_instructions per thread, so
+        # when the static instruction set (persona/rules/runtime contract/
+        # CLAUDE.md) changed since the thread was created, start a new thread
+        # and reseed from the DB. Dynamic state travels with every message.
+        static_hash = compute_static_hash(system_prompt)
+        if resume_thread_id and static_hash and static_hash_from_session(resume_session_id) != static_hash:
+            cr._cli_debug(
+                f"[CODEX] static instructions changed ({static_hash_from_session(resume_session_id) or 'none'} → "
+                f"{static_hash}); rotating thread for room {room_id[:8]} and reseeding"
+            )
+            cr._clear_cli_session(room_id)
+            resume_thread_id = None
+            if "<conversation_so_far>" not in content:
+                reseed = cr._build_reseed_context(room_id, project_id=project_id)
+                if reseed:
+                    content = cr._wrap_latest_user_message(reseed, content)
+
         # Rollout bloat guard (same threshold as the Claude transcript guard):
         # drop the thread and reseed from the DB instead of re-prefilling a
         # huge history every turn.
@@ -700,10 +793,12 @@ def run_codex_turn_in_thread(
 
         profile = build_codex_profile(room_id, mcp_config_path, system_prompt)
         cmd = build_codex_cmd(codex_cmd, profile, model, resume_thread_id)
+        # Current system prompt + memory index ride on the message every turn.
+        content = wrap_turn_content(system_prompt, content)
         cr._cli_debug(f"[CODEX] attempt 1 (resume={resume_thread_id is not None}, prompt len={len(content)})")
         result_data = run_codex_process(
             cmd, content, env, room_id, event_queue,
-            user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd,
+            user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
         )
 
         # Silent early death (exit != 0 within seconds, nothing produced): a
@@ -721,7 +816,7 @@ def run_codex_turn_in_thread(
             time.sleep(2)
             result_data = run_codex_process(
                 cmd, content, env, room_id, event_queue,
-                user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd,
+                user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
             )
 
         # Resume failure → clear the saved thread and retry fresh (DB reseed).
@@ -738,7 +833,7 @@ def run_codex_turn_in_thread(
                 cmd = build_codex_cmd(codex_cmd, profile, model, None)
                 result_data = run_codex_process(
                     cmd, retry_content, env, room_id, event_queue,
-                    user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd,
+                    user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
                 )
 
         if result_data:
