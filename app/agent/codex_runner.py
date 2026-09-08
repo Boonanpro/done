@@ -332,6 +332,17 @@ def _error_text(data: Dict[str, Any]) -> str:
     return str(data.get("message") or "")
 
 
+_INFORMATIONAL_PATTERNS = (
+    "bypass-hook-trust",
+    "may run without review",
+)
+
+
+def _is_informational(text: str) -> bool:
+    low = (text or "").lower()
+    return any(p in low for p in _INFORMATIONAL_PATTERNS)
+
+
 def _is_resume_failure(text: str) -> bool:
     low = (text or "").lower()
     if not low:
@@ -560,7 +571,11 @@ def run_codex_process(
                 event_queue.put({"type": "error", "message": msg})
         elif etype == "error":
             msg = _error_text(data)
-            if msg:
+            # Codex emits informational warnings on the same channel (e.g. the
+            # hook-trust bypass notice); keep those out of the user's error toast.
+            if msg and _is_informational(msg):
+                cr._cli_debug(f"[CODEX] notice: {msg[:160]}")
+            elif msg:
                 errors.append(msg)
                 event_queue.put({"type": "error", "message": msg})
 
