@@ -55,6 +55,7 @@ SESSION_PREFIX = "codex:"
 _ROLLOUT_RESET_BYTES = int(os.environ.get("DAN_CODEX_ROLLOUT_RESET_BYTES", str(400 * 1024 * 1024)))
 
 _CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # D:/done
 
 
 def is_codex_model(model: Optional[str]) -> bool:
@@ -175,14 +176,34 @@ def build_codex_profile(
     startup_timeout = int(os.environ.get("DAN_CODEX_MCP_STARTUP_SEC", "120"))
     tool_timeout = int(os.environ.get("DAN_CODEX_MCP_TOOL_SEC", "3600"))
 
+    # Parity with Claude Code: memory index + CLAUDE.md files Claude auto-loads.
+    try:
+        from app.agent.backend_parity import parity_context
+        extra = parity_context("codex")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("codex profile: parity context failed: %s", e)
+        extra = ""
+    instructions = (system_prompt or "") + ("\n\n---\n\n" + extra if extra else "")
+
     lines = [
         "# Auto-generated per-room Codex profile (Dan). Safe to delete.",
         f"model_reasoning_effort = {_toml_inline_string(effort)}",
         # Dan's workspace rules live in CLAUDE.md; let Codex read the same file.
         'project_doc_fallback_filenames = ["CLAUDE.md"]',
-        f"developer_instructions = {_toml_basic_string(system_prompt or '')}",
+        f"developer_instructions = {_toml_basic_string(instructions)}",
         "",
     ]
+    # Same hooks as Claude Code (D:/dan-workspace/.claude/settings.json), run
+    # through the bridge that reshapes apply_patch into Write/Edit payloads.
+    if (os.environ.get("DAN_CODEX_HOOKS") or "1").strip().lower() not in ("0", "false", "off"):
+        bridge = _toml_inline_string(f"python {(_PROJECT_ROOT / 'scripts' / 'codex_hook_bridge.py').as_posix()}")
+        for event in ("PreToolUse", "PostToolUse"):
+            lines += [
+                f"[[hooks.{event}]]",
+                'matcher = "Bash|apply_patch"',
+                f"hooks = [{{ type = \"command\", command = {bridge}, timeout = 180 }}]",
+                "",
+            ]
     for name, cfg in (mcp_json.get("mcpServers") or {}).items():
         if not isinstance(cfg, dict):
             continue
@@ -227,6 +248,8 @@ def build_codex_cmd(
         "--json",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
+        # Without this, hooks declared in the profile are silently skipped.
+        "--dangerously-bypass-hook-trust",
         "-p", profile,
         "-m", model,
     ]

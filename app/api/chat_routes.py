@@ -1231,7 +1231,9 @@ async def _update_long_term_memory_standalone(client, model: str, conversation_s
     MEMORY.mdを自動更新する（スタンドアロン版）。
     runner.py の _update_long_term_memory と同じロジック。
     """
-    memory_file = WORKSPACE_DIR / "MEMORY.md"
+    # 長期記憶は memory/MEMORY.md（索引）に統合済み（2026-09-08）。Claude 自動メモリと
+    # Codex 経路の両方がこの索引を読むので、索引形式と 200 行/25KB の上限を守らせる。
+    memory_file = WORKSPACE_DIR / "memory" / "MEMORY.md"
     current_memory = ""
     if memory_file.exists():
         current_memory = memory_file.read_text(encoding="utf-8")
@@ -1253,6 +1255,8 @@ async def _update_long_term_memory_standalone(client, model: str, conversation_s
 - 古い情報が更新された場合は最新に書き換える
 - 一時的な話題（天気、一回きりの質問等）は含めない
 - Markdown形式で、セクション分けして整理する
+- これは「索引」ファイル。1件1行（`- [題名](ファイル名.md) — 要点` または短い1行）を守り、長文の詳細は書かない
+- 全体を200行・25KB以内に保つ（超えた分は次回読み込まれない）。既存のリンク行は消さない
 - テキスト出力のみ。ツールは使わない。
 """
 

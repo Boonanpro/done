@@ -352,7 +352,7 @@ class MemoryService:
         results = {}
 
         # Index bootstrap files
-        for filename in ['MEMORY.md', 'USER.md', 'RULES.md']:
+        for filename in ['memory/MEMORY.md', 'USER.md', 'RULES.md']:
             file_path = WORKSPACE_DIR / filename
             if file_path.exists():
                 results[filename] = self.index_file(file_path)
