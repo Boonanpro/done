@@ -3,189 +3,45 @@ name: build
 description: >
   UIとバックエンドを実装するスキル。ダッシュボード・HP・管理画面・LP・
   問い合わせフォーム付き機能ページなど、見せて使える成果物が必要な時に使う。
-  LP・広告LP・ドライテストLPは T0 画像ファースト方式（GPT Image 2でタイル生成→
-  操作箇所だけ実HTML化）が既定。作り始める前に必ずこのスキルを読むこと。
+  LPを含め、見た目の品質と編集可能性を両立する。画像生成・コード・併用から
+  案件に合う方式を選ぶ。作り始める前に必ずこのスキルを読むこと。
 display_name: ビルド
-updated: 2026-04-24
+updated: 2026-09-08
 ---
 
 # build スキル
 
-ダッシュボード・HP など、**Next.js で見せて使える成果物全般**を実装するスキル。
-UI のデザインだけでなく、DB / API / フロントを通したエンドツーエンドの実装と
-自己評価ループによる品質保証までを含む。
+Next.js で「見せて使える成果物」（ダッシュボード・HP・LP・機能ページ）を作るスキル。
 
-> 提案書 HTML を作る場合は `actions/proposal_html.md` を参照 (ユーザーが「提案書作って」と明示要求した時のみ)。
+このファイルは 3 層に分かれている。**縛るのは第 1 層だけ**。
 
-## 🧩 まず templates を使う
-
-成果物を書き始める前に `frontend/src/components/templates/` を確認。
-ここには構造パターンが既にコンポーネント化されている（色やコピーは各案件で決める）:
-
-| コンポーネント | 用途 |
-|---|---|
-| `<PageShell>` | ダッシュボード/管理画面の外枠（max-width + padding + ヘッダー） |
-| `<LpShell>` | LP全体の外枠（sticky nav + footer） |
-| `<Section>` | セクションの縦リズム・見出し・max-width統一 |
-| `<HeroSection>` | ヒーロー（split/centered/stacked の3レイアウト） |
-| `<FeatureGrid>` | 特徴カードの3〜4カラムグリッド |
-| `<KpiCard>` | KPI表示（label / value / icon / trend） |
-| `<AIChatPanel>` | Mode B の公開チャットUI (`scope` でAPI側のコンテキスト分岐) |
-| `<InquiryForm>` | 問い合わせフォーム（送信先: `/api/v1/inquiries`） |
-| `<LocationMap>` | Google Maps iframe 埋め込み（アクセスセクション用、APIキー不要） |
-
-import 例: `import { HeroSection, Section, FeatureGrid } from "@/components/templates";`
-
-**templateで表現できない構造を毎回スクラッチで書かないこと。** 足りない場合は templates/ に足してから使う。
-
----
-
-## 🧩 機能ブロック（再利用）も使う
-
-ログイン・予約など「丸ごと差し込める機能」は毎回スクラッチで作らず、既存の機能ブロック
-を使う。`config`/props で業種・店舗に合わせて調整する。
-
-| 機能 | 使うもの | 場所 |
+| 層 | 性質 | 内容 |
 |---|---|---|
-| ログイン/初期設定ゲート | `useSetupGate`（フック） | `@/hooks/use-setup-gate` |
-| 予約・カレンダー | `<BookingCalendar>` + `useBooking` | `@/components/booking/booking-calendar`, `@/hooks/use-booking` |
-| スクロール出現アニメ | `<FadeIn>` / `<Stagger>` / `<StaggerItem>` | `@/components/motion` |
+| 1. 不変条件 | 守らないと編集・公開・プレビューが壊れる配線 | 置き場所、EditableText の ID、公開の仕組み、Tailwind のスキャン、プレビュー用ゲート |
+| 2. 判断材料 | 案件に合わせて自分で選ぶ。従わなくてよい | 部品一覧、方式・技法、設計の考え方、落とし穴 |
+| 3. 確認と納品 | 完了と言う前に実物で確かめること | 実ブラウザ確認、機能確認、公開URL確認 |
 
-例: 予約フォームを置きたい → `<BookingCalendar config={{ slug, openTime, closeTime, slotMinutes, services, staff, closedWeekdays }} />` を埋め込むだけ（バックエンドの予約API/DBは実装済み）。実例: `frontend/src/app/artifacts/bookings/page.tsx`。
-
-（決済・LINE連携・会員ログインは順次このメニューに追加予定。）
-
----
-
-## 共通ルール（全用途で厳守）
-
-### 1. デザイントークンを使う（ハードコード禁止）
-
-`globals.css` に定義済みのCSS変数をTailwind経由で使う。色の値はダーク固定ではなく、案件や用途に応じて適切に選ぶ。
-
-| 使う | 使わない |
-|------|---------|
-| `bg-background` | `bg-[#0a0a0a]` `bg-neutral-950` |
-| `bg-card` | `bg-neutral-900/50` `bg-neutral-900` |
-| `text-foreground` | `text-white` `text-neutral-100` |
-| `text-muted-foreground` | `text-neutral-400` `text-neutral-500` |
-| `border-border` | `border-neutral-800` `border-neutral-700` |
-| `bg-primary` | `bg-white`（アクセント用途時） |
-| `text-primary-foreground` | `text-neutral-900`（アクセント上テキスト） |
-| `bg-secondary` | `bg-neutral-800` |
-| `bg-accent` | `bg-neutral-700` |
-| `bg-destructive` | `bg-red-500` |
-
-**例外**: チャートの色分け等、セマンティックトークンでカバーできない場合のみ `emerald-400` 等を許可。CSS変数 `--chart-1` 〜 `--chart-5` を優先。
-
-### 2. アイコンは Lucide React (Next.js)
-
-| 使う | 使わない |
-|------|---------|
-| `<Building2 className="h-4 w-4 text-muted-foreground" />` | `<span>🏢</span>` |
-
-### 3. レスポンシブはmobile-first
-
-`grid-cols-1` → `sm:grid-cols-2` → `lg:grid-cols-4` の順で拡張。
-
-### 4. ヒーロー画像 / 動画は **`<HeroMedia>` を使う** (overlay div を書かせない仕組み)
-
-ヒーローや大きな写真・動画は **必ず `<HeroMedia>` テンプレート** を使う。手書きで `<section>` の中に `<img>`/`<video>` + 重ね overlay `<div>` を書かない。
-
-```tsx
-import { HeroMedia } from "@/components/templates";
-
-// ✅ OK
-<HeroMedia kind="video" src="/hero.mp4" darken={50} blur={1} fade="left">
-  <div className="mx-auto max-w-7xl px-6 py-32">
-    <h1>働く車を、もっと賢く</h1>
-    <p>新明和認定 米子市 ...</p>
-  </div>
-</HeroMedia>
-
-// 画像版 (kind="image")
-<HeroMedia kind="image" src="/hero.png" alt="工場で作業する職人" darken={40}>
-  <div className="...">{/* テキスト */}</div>
-</HeroMedia>
-```
-
-**`<HeroMedia>` の props**:
-- `darken` (0-100): 暗くする度合い → 内部で CSS `filter: brightness(...)` に変換
-- `blur` (0-20px): ぼかし → 内部で CSS `filter: blur(...)` に変換
-- `fade` (`"none" | "left" | "right" | "top" | "bottom"`): 方向性のフェード → 内部で `mask-image` で実装
-- `minHeightClass`: ヒーロー高さ (デフォルト `min-h-[60vh]`)
-
-**なぜこれを使うのか**:
-- **overlay div を書く隙が無い構造**になっているので、ルール違反が起きない
-- 暗転 / ぼかし / フェードは **媒体自体の CSS filter / mask** に変換される → inspector で `<img>`/`<video>` を直接クリック選択できる
-- inspector の Overlay (darken/blur) スライダーで UI から調整可能
-- `alt` 必須、`autoplay loop muted playsInline` 自動付与、Lighthouse スコア確保
-
-**`<HeroMedia>` で表現できない複雑なヒーロー** (例: 動画が画面分割で 2 つ並ぶ、3D Parallax) が必要になったら、 **新しい template コンポーネントを `frontend/src/components/templates/` に追加** してから使う。手書きの section + overlay 構造を残さない。
-
-**通常の画像表示** (記事中の挿絵、商品サムネ等) は `<img>` / `<Image>` を直接書いて OK。overlay 不要なら `<HeroMedia>` も不要。
-
-### 4.5. 成果物で新しいクラスが効かない時は Tailwind のスキャン漏れを疑う
-
-`frontend/src/app/artifacts/<slug>/` は `.gitignore` で除外されている。Tailwind v4 の自動ソース
-検出は `.gitignore` を尊重するため、**成果物の中でしか使っていないクラス（arbitrary値
-`max-w-[34rem]` や `xl:` などの珍しい variant）は一切コンパイルされず、指定したレイアウトが
-無言で無視される**。エラーも警告も出ない。
-
-対策は導入済み: `scripts/wire_artifact_tailwind_sources.py` が slug ごとの `@source` を
-`frontend/src/app/artifact-sources.css` に書き出し、`globals.css` がそれを import する。
-`hook_register_artifact.py` が成果物作成時に自動で走らせる。
-
-**新しい slug を手で作った直後にレイアウトが効かない場合**は、まず
-`python scripts/wire_artifact_tailwind_sources.py` を実行すること。
-`artifacts/**` を起点にした glob では直らない（walker が ignore 対象の `<slug>/` で
-枝刈りされるため）。glob の起点は必ず `<slug>/` の内側に置く。
-
-（経緯: 2026-08-01、置く床暖房LPで非対称スプリットや `max-w-[34rem]` を指定したのに
-すべて無視され、縦積みのままの「ダサい」ページになっていた）
+デザインの判断（配色・書体・レイアウト・モーション・トーン）は、ユーザーの要望と
+実素材を出発点に **自分で決めてよい**。スキルはデザインの方向を指定しない。
+ユーザーが方向を指定したらそれに従う。過去の成果物を「先例」として真似る義務はない。
 
 ---
 
-### 5. 編集対象テキストは **`EditableText`（data-edit-id）で書く**
+## 1. 不変条件（配線。ここだけは必ず守る）
 
-ライブペイント（インスペクタ）でユーザーが編集する可能性のあるテキスト要素・CTA・主要画像は、
-`@/components/dan/editable` の **`EditableText`** で書く（＝一意の `data-edit-id` が付く）。
+### 1-1. 置き場所と page 構造
 
-**なぜ必須か**：
-
-durable な ID がないと、エディタは要素を **DOM ツリー上の位置（パス）** で識別する。これには 3 つの致命的問題がある：
-
-1. **構造変化に弱い**: ユーザーが部分テキスト装飾を入れた瞬間 `<span>` が DOM に挟まり、識別子がズレる → 編集データが孤立する／別要素扱いになる
-2. **ページ間で干渉する**: 同じテンプレで作った複数ページ（top / services / company / careers 等）は同じ DOM 構造になりやすく、構造ベース ID が衝突 → **1 つのヒーローを編集すると全ページに反映**される
-3. **公開URLに反映されない**: 公開済み編集はサーバーレンダリング時に `EditableText` が初回 HTML へ描画する（後述）。`@<editId>` 以外のキー（DOM パス・`@auto:`）は DOM が無いと解決できず、公開ページに出ない
-
-**命名規則**: `{slug}-{page}-{role}` 形式で全ページ通してユニークに。
-
-```jsx
-import { EditableText } from "@/components/dan/editable";
-
-// ✅ OK — タグは as で指定。className / onClick 等はそのまま渡る
-<EditableText as="h1" editId="kittoku-top-hero-h1">働く車を、止めない。</EditableText>
-<EditableText as="p" editId="kittoku-top-hero-tagline">鳥取・米子の特装車専門整備工場。</EditableText>
-<EditableText as="button" type="button" className="cta" onClick={submit} editId="kittoku-top-hero-cta">
-  修理・整備の依頼
-</EditableText>
-
-// 子ページ（必ず page セグメントを変える）
-<EditableText as="h1" editId="kittoku-services-hero-h1">整備・修理・点検・架装。</EditableText>
-```
-
-**公開の仕組み（`/artifacts` の専用配信サイト）**:
-編集の保存は draft（`inspector_overrides`）、「公開」で不変リビジョン（`artifact_edit_releases`）が発行され、
-バックエンドが `frontend/src/app/artifacts/<slug>/release.gen.json` に焼き込んで専用 Vercel プロジェクトを再デプロイする。
-成果物の `page.tsx` は server component にして次の形にする（moonbox-jp が実例）：
+- 成果物は **`frontend/src/app/artifacts/<slug>/`** に作る（クライアント案件も社内LPも同じ）。
+  独立した Next.js プロジェクトは切らない。`demo/` `scratch/` は試行錯誤用。
+- `page.tsx` は **server component** にして `release.gen.json`（初期値 `{}` で作る）を
+  `EditableProvider` に渡し、本体は `"use client"` の `page-body.tsx` に書く:
 
 ```tsx
-// page.tsx（server）— release.gen.json を build 時に取り込み初回 HTML に反映
+// page.tsx（server）
 import { EditableProvider } from "@/components/dan/editable";
 import { toEditableOverrides, type ReleaseOverrides } from "@/lib/editable-release";
-import releaseJson from "./release.gen.json";   // 初期値は {} で作成しておく（必須）
-import { PageBody } from "./page-body";          // "use client" の本体
+import releaseJson from "./release.gen.json";
+import { PageBody } from "./page-body";
 
 export default function Page() {
   return (
@@ -196,459 +52,222 @@ export default function Page() {
 }
 ```
 
-これにより公開URLは**最初のHTMLから最新の公開内容**になり、「一瞬古い表示が出て差し替わる」ことは構造的に起きない。配信ページは実行時に DB もネットワークも読まない。
+  新規 slug はこの雛形を `python scripts/editable_artifact.py init --slug <slug> --title "…"` で
+  作れる（既存 slug には実行しない。保存済み編集が消える）。
+- `layout.tsx` は server component にする（favicon の `metadata.icons` が書けるように）。
+  client の中身は `theme-shell.tsx` 等に分離する。実例: `artifacts/kittoku`。
 
-**⚠️ チャット指示で成果物のテキストを直す前に、必ず release.gen.json を確認する**：
-公開オーバーライドが存在する要素は、**JSX を書き換えても公開ページには出ない**（オーバーライドが勝つ）。
-その editId が `release.gen.json` に載っている場合は、①ユーザーの公開済みテキストを土台に JSX を書き換え、
-②該当 draft 行（`inspector_overrides`）を更新 or 削除し、③再公開してリビジョンからそのキーを外す（or 更新する）。
-デプロイ自体は artifact 単位で直列化・合流されるので、編集の「公開」とチャット改修の公開が同時でも
-最後のビルドに両方の最新状態が入る（バッティングでどちらかが消えることはない）。
+### 1-2. 編集対象は `EditableText` / `EditableElement`（`data-edit-id`）
 
-**付与する要素**:
-- ✅ すべての h1, h2, h3, h4
-- ✅ 段落 `<p>`（説明文・本文）
-- ✅ ヒーローや CTA 内のリンク `<a>` / ボタン `<button>` でテキスト編集対象になりうるもの
-- ✅ 主要な `<img>` / `<video>`（差し替え対象）
+ユーザーが手動編集・チャット編集で触りうる要素には、`@/components/dan/editable` の
+`EditableText`（文字）・`EditableElement`（画像・セクション・複合要素）を使い、
+**durable な ID** を付ける。ID が無いと DOM パスで識別され、構造が変わると編集が孤立し、
+同構造の別ページと衝突し、公開ページに反映されない。
 
-**付与しない要素**:
-- ❌ ラッパー `<div>`, `<section>`, `<main>`
-- ❌ ナビゲーションリンク（共通レイアウトとして共有してよい）
-- ❌ アイコン専用 `<span>`
-- ❌ `map()` で生成される動的リスト要素（同じ ID が複数できる）。固定数（例: 3つの強み）なら index 付きで個別 ID を付ける
+- ID は `{slug}-{page}-{role}` 形式で全ページ通してユニーク。チャット修正でも維持する。
+- 付ける: h1〜h4、本文 `<p>`、CTA の `<a>`/`<button>`、主要な `<img>`/`<video>`、
+  余白や背景を編集させたい `<section>`。
+- 付けない: 単なるラッパー div、アイコン専用 span。`map()` で生成する項目は並び順でなく
+  項目の安定キーで ID を作る。
+- 共通フッター・共通ナビを複数ページで同じ ID にして「1回の編集で全ページ反映」させるのは仕様。
+- 公開済み編集（`release.gen.json` に載っている editId）は **JSX を書き換えても公開ページに
+  出ない**（オーバーライドが勝つ）。チャットで文言を直す前に必ず `release.gen.json` を見て、
+  載っていれば公開済みテキストを土台に JSX を直し、`inspector_overrides` の draft 行を更新
+  または削除して再公開する。
+- 文字は画像に焼き込まず、ネイティブなテキスト要素にする。alt や透明テキストは編集可能性の
+  代わりにならない。
 
-**例外（共有が正しい場合）**:
-共通フッター・共通ナビなど、複数ページで同じ ID を意図的に持たせて「1回の編集で全ページに反映」させたい場合は同一 ID を使ってよい。これは仕様、衝突ではない。
+### 1-3. ヒーロー画像・動画の暗転/ぼかしは媒体自体の CSS で行う
 
----
+`<img>`/`<video>` の上に半透明の overlay `<div>` を重ねると、インスペクタで媒体をクリック
+選択できず、Overlay スライダーも効かない。暗転は `filter: brightness()`、ぼかしは
+`filter: blur()`、方向フェードは `mask-image` を **媒体自体に** 当てる。
+`<HeroMedia kind="video|image" src darken blur fade>` がこれを済ませてある。
+自前で書く場合も同じ原則で書く（`alt`、`autoplay loop muted playsInline` を忘れない）。
 
-### 6. ログイン / 初期設定ゲートは **`useSetupGate` を使う**
+### 1-4. ログイン / 初期設定ゲートは `useSetupGate`
 
-ログインや初回登録（認証情報・名前の登録など）が **必須なページ** を作るときは、
-ゲート判定を自前で書かず **必ず `@/hooks/use-setup-gate` の `useSetupGate` を使う**。
+ログインや初回登録が必須なページでは `@/hooks/use-setup-gate` の `useSetupGate` を使う。
+チャット右ペインのプレビューは iframe なので、自前ゲートだとプレビューでもログインを求められ
+編集できなくなる。`useSetupGate` はプレビュー（`isDanPreview()`）を検出して自動でバイパスする。
+実例: `artifacts/salonboard-styleup/page.tsx`。
 
-**なぜ必須か**：
+### 1-5. Tailwind のスキャン漏れ
 
-チャット右ペインのライブプレビューは成果物を iframe で読み込むため、ゲートを自前で
-書くと **プレビューでもログイン/初期設定を求められ、他の画面を閲覧・編集できなくなる**。
-`useSetupGate` はプレビュー（`isDanPreview()`）を検出して **自動でゲートをバイパス**し、
-管理者として全画面を見られるようにする。各ページでプレビュー判定を再実装しないこと。
+`artifacts/<slug>/` は `.gitignore` 対象で、Tailwind v4 の自動ソース検出は `.gitignore` を
+尊重する。成果物の中でしか使わないクラス（`max-w-[34rem]`、`xl:` など）が **無言で無視**
+される。`hook_register_artifact.py` が `scripts/wire_artifact_tailwind_sources.py` を自動で
+走らせるが、手で slug を作った直後にレイアウトが効かない時はこれを実行する。
 
-```tsx
-import { useSetupGate } from '@/hooks/use-setup-gate';
+### 1-6. 登録＝公開、リンク、ドメイン
 
-const gate = useSetupGate(async () => {
-  // 設定が完了済みか（true=ready / false=要設定）を返す。プレビューでは呼ばれない。
-  const r = await fetch('/api/.../status?...');
-  return r.ok && (await r.json()).has_credentials;
-});
+- `artifacts/<slug>/page.tsx` を書くと PostToolUse hook (`hook_register_artifact.py`) が
+  dan-core の登録API (`POST /api/v1/chat/internal/artifacts/register`) に渡し、専用 Vercel
+  プロジェクトへの公開まで保証される。公開URLは成果物カードの `share_url` に入る。
+  hook 以外の場所（サンドボックスやスクリプトの裏方スレッド）で公開を起こさない。
+  再公開は `POST /api/v1/chat/internal/artifacts/<artifact_id>/publish`。
+  手動登録: `echo '{"tool_name":"Write","tool_input":{"file_path":"<絶対パス>"}}' | DAN_ROOM_ID=<room> DAN_PROJECT_ID=<project> python scripts/hook_register_artifact.py`
+- 成果物内のページ間リンクは `next/link` ではなく `@/components/artifacts/artifact-link` の
+  `ArtifactLink`（`/preview/<slug>`・`/artifacts/<slug>`・独自ドメインを混ぜないため）。
+- 独自ドメインは middleware の `ARTIFACT_CUSTOM_DOMAINS` / `NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS`
+  に `slug=domain.example` で追加。
+- favicon は hook が自動生成して `layout.tsx` の `metadata.icons` に焼き込む。差し替えは
+  `python scripts/set_artifact_icon.py --slug <slug> --image <path>`（画像生成は自分でやる）。
 
-if (gate.status === 'loading')     return <Spinner />;
-if (gate.status === 'needs-setup') return <SetupScreen onDone={gate.markReady} />;
-return <MainApp />;          // gate.isPreview が true のときは常にここに来る
-```
+### 1-7. ダン管理画面（ダッシュボード）はダンの UI 体系に合わせる
 
-- 設定完了で先へ進めたいタイミングでは `gate.markReady()` を呼ぶ。
-- 認証境界ではない（プレビューで飛ばしても保存済み認証情報が無ければ実処理は動かない）。
-- 実例: `frontend/src/app/artifacts/salonboard-styleup/page.tsx`
+ダンのダッシュボード内に置くページは既存画面と同じ操作感にするため、`globals.css` の
+セマンティックトークン（`bg-background` `text-foreground` `text-muted-foreground`
+`border-border` `bg-primary` …）と `frontend/src/components/ui/` の shadcn/ui、Lucide アイコン
+を使う。チャートは shadcn の chart（Recharts）。サイドバーに導線を足す。
 
----
+**これはダッシュボード限定**。クライアント HP・LP・ブランドページは成果物内で固有の配色・
+書体・部品を自由に定義してよく、shadcn を使う義務はない。
 
-### 7. 自己評価ループ（全用途共通）
+### 1-8. 変更の分離
 
-成果物を出力する前に必ず `actions/create.md` の手順に従う。
-用途ごとの評価基準は `criteria.md` を参照。
-
----
-
-### 8. favicon（ブラウザタブ・検索結果のアイコン）
-
-成果物の favicon は **自動で配線される**（何もしなくてよい）。
-`page.tsx` を書くと PostToolUse hook (`hook_register_artifact.py`) が
-`scripts/wire_artifact_icons.py` を呼び、そのページ用のアイコンを生成して
-`layout.tsx` の `metadata.icons` に焼き込む。これをやらないとタブも検索結果も
-ルートのデフォルト favicon（バーセル）に落ちる。
-
-- **デフォルト**: テーマ色 + 屋号の頭文字（ロゴ画像 `public/artifacts/<slug>/logo.png`
-  があればそれを優先）。
-- **アイコンを変えたいと言われたら**: 画像を用意して
-  `python scripts/set_artifact_icon.py --slug <slug> --image <path>` を実行する。
-  （AI生成が必要なら先に `media-gen` で作ってからこのコマンドに渡す。画像生成は
-  自分でやる ─ ユーザーに丸投げしない）。
-- **client component の `layout.tsx` には `metadata` を書けない**。その場合は
-  layout を server component にし、`"use client"` の中身を `theme-shell.tsx` 等に
-  分離してから配線する（実例: `artifacts/kittoku`, `artifacts/yonago-gojo`）。
-- アイコンのパス (`/artifacts/<slug>/icon-*.png`) は静的アセットなので
-  `metadata.icons` に絶対パスで直書きしてよい（link guard の対象外）。
+成果物と ダン infra は同じ commit に混ぜない（`CLAUDE.md` の Scope 規律）。
+`DAN_DONE_ARTIFACTS_NATIVE_SLUGS`（kittoku 等）は `done-artifacts` リポジトリ直編集。
 
 ---
 
-## 用途別ルール
+## 2. 判断材料（参考。案件に合わせて選ぶ・書き足す・使わない、すべて可）
 
----
+### 2-1. 既存部品（`frontend/src/components/templates/`）
 
-### A/B 共通: 実装順序 (バックエンドファースト)
+合えば使う。合わなければ書く。採用デザインを崩してまで押し込まない。
+繰り返し使いそうな構造は templates に足す。
 
-機能を伴う成果物 (A/B) は以下の順序で実装する:
-
-1. **DB 設計** (テーブル・リレーション)
-2. **API 実装** (エンドポイント・ビジネスロジック)
-3. **UI 実装** (画面・コンポーネント)
-4. **統合テスト** (API ↔ UI 接続確認)
-
-UI を先に作らない。
-
-> ※ `create_feature` + guard hook で強制済み。雛形がこの順序で生成され、未実行でのファイル作成はブロックされる。
-
----
-
-### A. ダッシュボード / 管理画面（Next.js）
-
-#### shadcn/uiコンポーネントを必ず使う
-
-> ※ `create_feature` が生成する雛形にはshadcn/uiのimportが含まれる。ただしコンポーネント選択自体はコードで強制していないため、以下のルールに従うこと。
-
-`frontend/src/components/ui/` にあるコンポーネントを最優先で使用する。
-
-| やること | やらないこと |
-|---------|------------|
-| `<Card>` `<CardHeader>` `<CardContent>` | `<div className="rounded-xl border border-neutral-800 ...">` |
-| `<Button variant="outline">` | `<button className="px-4 py-2 rounded-lg bg-neutral-800">` |
-| `<Badge>` | `<span className="text-xs px-2 py-0.5 rounded-full">` |
-| `<Tabs>` `<TabsList>` `<TabsTrigger>` | 自作タブ切り替え |
-| `<Skeleton>` | 自作ローディングスピナー |
-| `<Input>` `<Label>` | `<input className="...">` |
-| `<Dialog>` | 自作モーダル |
-| `<DropdownMenu>` | 自作ドロップダウン |
-| `<Separator>` | `<div className="border-b">` |
-| `<Tooltip>` | title属性やカスタムツールチップ |
-| `<Table>` | 自作テーブル |
-
-#### 足りないコンポーネントは PostToolUse hook が自動 install
-
-`hook_autoinstall_shadcn.py` が `@/components/ui/<name>` の import を検出して
-未導入なら `npx shadcn@latest add <name>` を自動実行する。手動で気にする必要なし。
-
-#### ページ構造の典型
-
-`<PageShell>` (templates) を外枠にして、以下のようなブロックを縦に積む。
-具体的なコードは `frontend/src/app/artifacts/` 配下の既存ダッシュボードを参考にする
-(コードサンプルをここに固定で書くと「同じ構造に収束しやすい」ため意図的に省略)。
-
-- ヘッダー: タイトル + 説明 + 主要アクション
-- KPI 行: `<KpiCard>` 3〜4 個並べる
-- メインエリア: 2 カラム or 3 カラム、目的に応じて
-- リスト/テーブル: `<Table>` (詳細閲覧) または `<Card>` グリッド (概要)
-
-#### チャート
-
-shadcn/uiのchartコンポーネント（Recharts統合）を使う。`npx shadcn@latest add chart` で追加。手書きSVGやカスタムチャートは禁止。
-
-#### 状態表示パターン
-
-```tsx
-// ステータスバッジ
-<Badge variant="outline" className="text-emerald-400 border-emerald-400/30">稼働中</Badge>
-
-// 空状態
-<Card>
-  <CardContent className="flex flex-col items-center justify-center py-12">
-    <FolderOpen className="h-10 w-10 text-muted-foreground mb-3" />
-    <p className="text-muted-foreground">データがありません</p>
-  </CardContent>
-</Card>
-
-// ローディング
-<Card>
-  <CardContent className="pt-6 space-y-3">
-    <Skeleton className="h-4 w-24" />
-    <Skeleton className="h-8 w-16" />
-  </CardContent>
-</Card>
-```
-
----
-
-### B. HP / LP / ツール（Next.js）
-
-#### ⚠️ LP・広告LP・ドライテストLPは T0 画像ファースト方式が既定 ⚠️
-
-**縦スクロール1枚もの（広告LP・ドライテスト・キャンペーン）は、コードでデザインを
-組まず、GPT Image 2 で画像として生成して操作箇所だけ実HTML化する。**
-手順は `recipes/image-first-lp.md`（2026-08-03 置く床暖房LPで通し検証済み）。
-
-- 流れ: **カンプを「1枚に2〜3セクション」ずつチェーン生成（全景1枚に押し込むと
-  4画面の読めないLPになる） → 繋げた全景をチャットに添付してユーザー承認 →
-  区間を参照にタイルごとに清書**（承認前に清書へ進まない）
-- 清書はレシピの**定型文に固定**（レイアウト・配置・余白等の指示を足すのは禁止）。
-  スライスは要素の切れ目、生成後のcrop禁止
-- 標準要望2つを必ずプロンプトへ: 「文章は最小限・ビジュアル中心」（W1文言）と
-  「実在しない数字・統計・出典を描かない」
-- プロンプトは**ユーザーの要望と実素材をそのまま渡すだけ**。デザインの方向性
-  （配色・書体・トーン・「モダンに」等）をダンが足すのは禁止 — デザイン判断と
-  方向転換はユーザーがする
-- この方式ではリファレンス収集(HM5)・自己採点ループは**適用しない**。代わりに文字QA必須
-- 生成は `scripts/gpt_image.py`（OpenAI API直・GPT Image 2。2026-08-11一本化）。
-  プロンプトは必ず標準入力で渡す。Higgsfield は動画・Soul・キャラ参照専用
-- 修正は `scripts/lp_image_patch.py`（タイル再生成→領域合成）
-- **新規LPの納品は実テキスト化（`scripts/lp_textify.py`）まで込みが既定** —
-  文字を画像から消してwebフォントのEditableTextを重ね、チャット/手動編集モードで
-  文言を直せる状態で納める。検証ゲート（FAIL=劣化で不合格/WARN=比較画像を目視）
-  つき。手順はレシピ「5b. 実テキスト化」
-- コード方式(T1〜T4)を使うのは: 多ページ企業HP / SEO主目的 / 機能ページ / ダッシュボード
-
-以下のコード方式のルールは、コード方式を選んだ場合にのみ適用する。
-
----
-
-ダッシュボードと同じNext.js + shadcn/uiで作る。Astroは使わない。
-同じコンポーネント（Card, Button, Badge等）を使い、**CSS変数でクライアントごとの配色・雰囲気を変える**。
-
-#### 技法選択（最初に決める）
-
-HP/LP は「どんな見た目か」の前に **どの作り方（技法）で作るか** を決める。技法はビジネスゴールから選ぶ。詳細レシピは `recipes/` を参照。
-
-| 技法 | 使うもの | 向く案件 | 重さ | レシピ |
-|---|---|---|---|---|
-| **T0 画像ファーストLP**（LP系の既定） | GPT Image 2 + 具現化オーバーレイ | 広告LP・ドライテスト・キャンペーン（縦1枚もの） | 軽 | `recipes/image-first-lp.md` |
-| **T1 コンバージョン・フラット**（HP系の既定） | shadcn/Tailwind + framer-motion | 集客HP・地域ビジネス・情報サイト（速度/SEO/モバイル最優先） | 軽 | `recipes/conversion-flat.md` |
-| **T2 スクロールナラティブ** | GSAP(ScrollTrigger) + Lenis + framer-motion | ブランドストーリー・製品ローンチ | 中 | `recipes/scroll-narrative.md` |
-| **T3 スクロール動画ヒーロー** | T2 + スクロールスクラブ動画（media-gen） | プレミアム製品ショーケース | 重 | `recipes/scroll-video.md` |
-| **T4 3Dイマーシブ** | R3F + drei + three | 製品コンフィギュレータ・体験型 | 重 | `recipes/3d-immersive.md` |
-
-**選び方**:
-1. 既定は **T1**。多くの集客HPはこれが正解（重い演出はCVと表示速度を下げる）
-2. T2〜T4 を選ぶのは次のいずれか:
-   - ユーザーが明示（「3Dで」「スクロール動画で」）
-   - 製品/ブランドが"見せ場"で、かつ表示速度・SEOが最優先制約ではない
-3. 技法で結果が大きく変わる時（＝重大な分岐）は、**平易な2〜3択を推奨つきで提示**してから着手する。例:「①速くて堅実なフラット ②映像的なスクロール ③製品を3Dで回せる(重め)」
-
-**共通の鉄則**: どの技法でも build のコア規律（デザイントークン / `data-edit-id` / `useSetupGate` / templates / 自己評価ループ）を厳守。重い技法（T3/T4）は性能予算（モバイルLCP）とフォールバックを必ず用意する。
-
-#### リファレンス駆動デザインプロセス
-
-HP制作では**ゼロからデザインを生成しない**。必ず既存の優れたデザインを参照素材（リファレンス）にする。
-
-##### なぜリファレンスが必要か
-
-AIにリファレンスなしで「モダンなサイト作って」と指示すると、学習データの平均的な出力になる。結果として均等グリッド・ありきたりなグラデーション・どこかで見たフローティングカードの「AIテンプレ感」が出る。リファレンスを与えることでAIの出力方向を具体的に制御し、品質のベースラインを引き上げる。
-
-##### ビジネスゴールからデザインへの因果連鎖
-
-HP制作のデザイン判断は全て**ビジネスゴール**から逆算する。「信頼感のあるサイト」のような抽象的な感情ラベルではなく、以下の因果連鎖で具体化する:
-
-```
-① ビジネスゴール: このHPで何を達成したいか
-  ↓
-② 訪問者の行動: 訪問者に何をさせたいか（問い合わせ、予約、購入…）
-  ↓
-③ 訪問者の確信: その行動をとるために訪問者が確信すべきことは何か
-  ↓
-④ 必要なコンテンツ: その確信を生むために見せるべき具体物
-  ↓
-⑤ デザイン方針: そのコンテンツを最も効果的に見せるデザイン
-```
-
-**例: 建築事務所のHP**
-
-| ステップ | 内容 |
+| 部品 | 用途 |
 |---|---|
-| ① ゴール | 見込客から問い合わせを取る |
-| ② 行動 | 問い合わせフォーム送信 or 電話 |
-| ③ 確信 | 「実績がある」「自分の案件も対応できる」「ちゃんとした会社」「連絡しやすい」 |
-| ④ コンテンツ | 完成物件の写真（大きく）、類似規模の事例、代表者の顔・創業年数・受賞歴、全セクションにCTA |
-| ⑤ デザイン | 写真が主役→余白多めで呼吸させる。テキスト最小限。CTAは問い合わせフォーム+電話番号常時表示 |
+| `PageShell` / `LpShell` | 管理画面 / LP の外枠（LpShell = sticky nav + footer） |
+| `Section` | セクションの縦リズム・見出し・max-width |
+| `HeroSection` | ヒーロー（split / centered / stacked） |
+| `HeroMedia` | 画像/動画ヒーロー。darken / blur / fade を媒体側 CSS で（1-3） |
+| `FullBleedVideoHero` | 全幅動画ヒーロー。mobileSrc / poster / align / contentWidth |
+| `ScrollVideo` | スクロール進捗で動画をスクラブ。chapters / progressBar / fallback |
+| `FeatureGrid` | 特徴カードのグリッド |
+| `ServiceShowcase` | サービス一覧。featuredIndex で 1 件を大きく |
+| `CaseStudyGrid` | 事例グリッド（category / result） |
+| `ProcessTimeline` | 手順・流れ |
+| `ProofBar` | 数字・実績の帯（light / dark） |
+| `ConversionCta` | 締めの CTA（primary / secondary / image） |
+| `FaqSection` | FAQ |
+| `InquiryForm` | 問い合わせフォーム（送信先 `/api/v1/inquiries`） |
+| `LocationMap` | Google Maps iframe（APIキー不要） |
+| `KpiCard` | KPI 表示 |
+| `AIChatPanel` | 公開チャットUI（`scope` で API 側コンテキスト分岐） |
+| `ImageSlicePage` | 画像タイル + 操作箇所オーバーレイ（画像ファースト方式の器） |
+| typography: `HeroCopy` `VerticalHeroCopy` `SectionKicker` `SectionTitle` `LeadCopy` `BodyCopy` `MetaLabel` `EditorialButton` | 日本語組版（palt）済みの文字部品。縦書きヒーローあり |
+| editorial-accents: `RoundelBadge` `SealMark` `RuleDivider` `BrushStroke` `InkCircle` `HandRule` `PhotoCaption` `InfoStrip` `EditorialFrame` | 装飾部品（印章・筆線・囲み・写真キャプション・情報帯） |
 
-**例: 飲食店のHP**
+import: `import { HeroMedia, Section, ... } from "@/components/templates";`
 
-| ステップ | 内容 |
+機能ブロック:
+
+| 機能 | 使うもの |
 |---|---|
-| ① ゴール | 来店・予約を増やす |
-| ② 行動 | 予約ボタン押下 or 来店（地図確認） |
-| ③ 確信 | 「料理が美味しそう」「雰囲気が良い」「場所がわかる」「値段が妥当」 |
-| ④ コンテンツ | 料理写真（大きく鮮明に）、店内写真、メニューと価格、Google Maps、営業時間 |
-| ⑤ デザイン | 料理写真が主役→暖色系、大きな写真。メニューと予約はモバイルで即アクセス可能に |
+| ログイン/初期設定ゲート | `useSetupGate`（`@/hooks/use-setup-gate`。1-4） |
+| 予約・カレンダー | `<BookingCalendar config={{ slug, openTime, closeTime, slotMinutes, services, staff, closedWeekdays }} />` + `useBooking`（API/DB 実装済み。実例 `artifacts/bookings`） |
+| スクロール出現 | `FadeIn` / `Stagger` / `StaggerItem`（`@/components/motion`） |
+| shadcn/ui の追加 | `@/components/ui/<name>` を import すれば hook が `npx shadcn add` を自動実行 |
 
-この因果連鎖をプロジェクトの `DESIGN.md` に記録してからリファレンスを探す。
+導入済みライブラリ: Next 16 / React 19 / Tailwind v4 / shadcn/ui / lucide-react /
+framer-motion / gsap / three + @react-three/fiber + drei / recharts。
+足りないものは案件に必要なら入れてよい（重さと理由を報告する）。
 
-##### Phase 1: リファレンス収集
+### 2-2. 方式と技法（最初に決めるが、迷ったら作って見せて決める）
 
-1. ブラウザでDribbble / Pinterest / 優れた実在サイトを検索する
-   - 検索例: 「{業種} website design」「{業種} landing page」
-2. **サイト全体を1つ選ぶのではなく、パーツを別々の参照元から集める**:
-   - A案のヒーローレイアウト
-   - B案のタイポグラフィ（フォント選び・サイズ感・太さ）
-   - C案の配色と余白の取り方
-   - D案のインタラクション（ホバー、スクロール連動）
-3. 各パーツのスクリーンショットをプロジェクトフォルダに保存する
-4. **最低3つ以上**のリファレンスを用意する
-
-##### Phase 2: デザイン生成（方法の選択）
-
-リファレンスを基にデザインを形にする。状況に応じて方法を選ぶ:
-
-**方法 1: リファレンス画像を直接渡す** (基本手法)
-- 保存したスクショをコンテキストに含め、パーツの組み合わせを指示する
-- Next.js + shadcn/ui + Tailwind で直接コード生成
-- 最初の出力にテンプレ感があれば、追加のリファレンスを渡して再指示
-
-**方法 2: AI 生成画像/動画ヒーロー付き** (方法 1 と併用)
-- `media-gen` スキルでコンセプト画像を生成 (日本語テキスト焼き込み可)
-- `media-gen` スキルでループ動画を生成、または image-to-video で画像から動かす
-- 開始/終了フレームを同じ画像にしてシームレスループを実現
-- ヒーロー背景として全画面配置 (autoplay, muted, loop)
-- テキスト/CTA は動画上にオーバーレイ
-
-**方法 3: AI 全画面モックアップで方向をロック** (任意 / 視覚差別化が価値になる案件で)
-- `media-gen` で**ページ全体のハイファイモックアップ画像**を生成し、最上位リファレンスにする（Dribbble参照の強化版）
-- ⚠️ **ピクセル完コピ禁止**。モックアップは「設計図」ではなく「参照」。実装は必ずデザインシステム（トークン / templates / `data-edit-id` / レスポンシブ）で作る
-- 偽テキスト・1ビューポートのみ・非レスポンシブという限界がある。方向性とムード決めに使い、実装で正す
-- 単純な集客HPは実サイト参照で十分なのでスキップしてよい
-
-##### Phase 3: 実装とPolish（磨き上げ）
-
-コード生成後、以下の磨き上げを行う:
-
-**タイポグラフィ**（サイトの印象を最も左右する要素）:
-
-3つの役割で分けて選ぶ:
-- **Headline**: 見出し。サイトの個性を決める最重要要素。大胆で特徴的なフォント
-- **Body**: 本文。読みやすさ優先。汎用sans-serif可
-- **Label**: ラベル・キャプション・数値。機械的・データ的な書体が合う
-
-Inter / Roboto / Arial は見出しに使わない（本文・ラベルは可）。
-
-フォント選定基準（クライアントの業種・雰囲気から選ぶ）:
-
-| 出したい印象 | Headline候補 | 理由 |
+| 方式 | 内容 | レシピ |
 |---|---|---|
-| 格式・伝統・信頼 | Cormorant, Playfair Display, Zen Old Mincho, Noto Serif JP | セリフ体は権威性・歴史を暗示 |
-| テック・先進性 | Space Grotesk, DM Sans, IBM Plex Sans | ジオメトリックな形状が精密さを表現 |
-| 力強さ・職人感 | Oswald, Barlow Condensed, Zen Kaku Gothic New (700+) | 太く凝縮された書体が力を表現 |
-| ラグジュアリー・洗練 | Cormorant (細身), Zen Old Mincho (300) + レタースペーシング広め | 細いセリフ+余白=高級感 |
-| 親しみ・カジュアル | M PLUS 1p, Rounded Mplus 1c, Quicksand | 丸みのある書体が親近感を生む |
+| コードで作る（基本） | ネイティブ文字・レイアウト。写真・イラスト・テクスチャは画像素材 | `recipes/editable-lp.md`（LP）、`recipes/conversion-flat.md`（集客HP） |
+| 画像素材の併用 | GPT Image 2 で写真・装飾・完成見本を作り、コードで再構成 | `recipes/editable-lp.md` |
+| 画像ファースト（保守用） | 画像タイル + 操作箇所だけ HTML。既存画像LPの部分修正・品質比較のために残す | `recipes/image-first-lp.md` |
+| スクロールナラティブ | GSAP ScrollTrigger + Lenis | `recipes/scroll-narrative.md` |
+| スクロール動画ヒーロー | `ScrollVideo` + 生成動画 | `recipes/scroll-video.md` |
+| 3D | R3F + drei | `recipes/3d-immersive.md` |
 
-**レイアウト**:
-- セクションごとに構造を変える（全幅→非対称2カラム→ジグザグ→カード群→全幅）
-- 均等グリッドの連続禁止
-- 余白を大胆に使う（py-16〜py-32でメリハリ）
+- 集客・問い合わせ目的で速度・SEO・モバイルが最優先なら軽い方式が無難。
+  重い演出はユーザーが求めた時か、製品/ブランドが見せ場の時。
+- 方式で結果が大きく変わる分岐だけ、平易な 2〜3 択を推奨つきで示してから着手する。
+  それ以外の判断は自分で決め、完成後にフィードバックを受ける。
+- 画像生成は `scripts/gpt_image.py`（OpenAI API 直。プロンプトは標準入力）。
+  プロンプトに渡すのはユーザーの要望と実素材。デザインの方向性を足さない
+  （ユーザーの feedback: 方向付けはユーザーがする）。実在しない数字・出典を描かせない。
 
-**微細アニメーション**（派手なアニメーションは禁止 / 標準ツール = framer-motion、全技法共通）:
-- ホバーエフェクト: ボタンの応答感、カードの微妙な浮き上がり（translateY + shadow変化）
-- スクロール連動: framer-motion の `whileInView` でセクションのフェードイン（手書き IntersectionObserver は使わない）
-- ナビバー遷移: 透明 → スクロールで背景色+影が付く
-- 画像ホバー: 微妙な拡大 + オーバーレイ表示
-- `prefers-reduced-motion` を尊重する（OS設定でアニメ抑制を指定したユーザーには動かさない）
+### 2-3. 設計の考え方（思考の道具。成果物として提出する義務はない）
 
-**配色**（4層モデル）:
-- **Neutral（80-90%）**: 背景・余白。画面の大半を占める。CSS変数 `bg-background`, `bg-card`
-- **Primary**: テキスト・主要要素。CSS変数 `text-foreground`
-- **Secondary**: サポート要素・境界線。CSS変数 `text-muted-foreground`, `border-border`
-- **Accent（最小面積）**: CTAボタン・ハイライトのみ。CSS変数 `bg-primary`
-- 色数を絞る。均等配分禁止。Accentは面積が小さいほど効く
+「信頼感のあるサイト」のような感情ラベルから始めず、次の連鎖で具体化すると迷いが減る:
 
-##### 「AI感」脱却チェック
+ビジネスゴール → 訪問者にさせたい行動 → そのために訪問者が確信すべきこと →
+確信を生む具体物（写真・数字・事例・地図） → それを最も効果的に見せる設計。
 
-HP生成後、以下を全て確認する:
+例: 飲食店なら「来店・予約」→「美味しそう・雰囲気が良い・場所がわかる・値段が妥当」→
+料理写真を大きく、店内写真、メニューと価格、地図、営業時間 → 写真が主役でモバイルから
+予約に即到達。
 
-- [ ] 均等グリッドの羅列ではなく、非対称・重なり合うレイアウトを含むか
-- [ ] decorative dots、ダイヤ区切り線、SVG幾何学模様等のAIあるある装飾がないか
-- [ ] 見出しフォントが大胆で特徴的か（Inter/Roboto/Arialではない）
-- [ ] セクション構造が毎回変化しているか
-- [ ] カラーが60-30-10ルールになっているか
-- [ ] 微細なアニメーションが適切に配置されているか
-- [ ] ボタンが応答感を持っているか（hover/active状態の変化）
+書き出したければ `artifacts/<slug>/DESIGN.md` に置く（任意）。
 
-##### 人間の介入タイミング
+### 2-4. リファレンス（任意）
 
-- **初回**: 要件指示（業種、雰囲気、必要な機能等）
-- **完成後**: 承認 or 修正指示
-- **途中確認は原則しない**。ダンがリファレンス選定・デザイン方向性・実装判断を自律的に行い、完成物を提出する。どうしても判断できない重大な分岐（例: 完全に異なる2方向のブランド解釈）がある場合のみ確認を取る
+- ユーザーが参考サイト・画像・ロゴ・写真を出したら **最優先で使う**。WebFetch や browser で
+  開いて把握する。提供素材は AI 生成で代替せず実際に組み込む。
+- ユーザー提供が無く方向が定まらない時だけ、実在サイトやギャラリーを見て候補を絞る。
+  収集を必須工程にしない。
 
-#### プロジェクト構成 (新アーキテクチャ)
+### 2-5. 落とし穴（AI らしさを避ける規則ではなく、実害が出たもの）
 
-HP は **`frontend/src/app/artifacts/{slug}/` 配下** に作る (クライアント案件も社内 LP も全て同じ場所)。
-※ `frontend/src/app/demo/{slug}/` は提案動画用プロトタイプ専用。通常の HP / ダッシュボード制作には使わない。
-独立した Next.js プロジェクトを切らない (旧 `D:/dan-workspace/hp-projects/` フローは廃止)。
-理由: チャット右ペインのライブプレビューでそのまま見せて会話で詰められる、
-`create_feature` の guard hook が機能する、Vercel デプロイは done 本体と同居できる。
+- 縦スクロール LP を PC 向けの横組みで作る。媒体（スマホ縦）を先に決める。
+- CTA がモバイルで届かない。全セクションから問い合わせ・電話に到達できるか。
+- 文字を画像に焼き込む（1-2）。編集不能になり、公開反映もできない。
+- 座標固定で見本をなぞる。改行や文量変更で隣が覆われる。通常フロー・grid・flex で内容追従。
+- ヒーローの上に overlay div（1-3）。
+- 手書き `IntersectionObserver` で出現アニメ。`framer-motion` の `whileInView` か `FadeIn` で足りる。
+- `prefers-reduced-motion` を無視する。スクロールジャックで戻れなくする。
+- 重い技法で LCP を落とす。モバイルは静止画フォールバック、3D は遅延ロード。
+- 均一なカード行列だけで全セクションを作って単調になる（写真・余白・文字の大小・構成の
+  リズムで意図を出す）。ただし均一が案件の意図なら構わない。
+- 絵文字をアイコン代わりにする（Lucide か SVG）。
 
-```
-frontend/src/app/artifacts/yoshikawa-tokuso/
-  ├─ page.tsx            ← ホーム (LpShell + 各 Section)
-  ├─ services/page.tsx   ← 子ページ
-  ├─ contact/page.tsx
-  └─ components/         ← その HP 専用コンポーネント (templates 外)
-```
+### 2-6. ダッシュボード / 管理画面
 
-#### クライアントごとのカスタマイズ
+- 1-7 の UI 体系。ページ外枠は `PageShell`、KPI 行 `KpiCard`、`Table` / `Card` グリッド、
+  `Skeleton` / 空状態 / エラーの 3 状態。既存ダッシュボード（`artifacts/aix-dashboard` 等）が参考。
+- 機能を伴う場合は DB → API → UI → 統合確認の順が整理しやすい（`create_feature` ツールが
+  雛形を出す）。LP のようにバックエンドの無い成果物には無関係。
 
-同じ shadcn/ui コンポーネントを使いつつ、CSS 変数 (例: `frontend/src/app/artifacts/{slug}/page.tsx` 内の局所 `<style>` か、ルート `globals.css` のクライアント別セレクタ `.theme-yoshikawa` 等) でデザインを変える:
+### 2-7. 提案書 HTML
 
-```css
-/* 例: 野性的・アウトドア系 */
-:root {
-  --background: oklch(0.15 0.02 80);    /* 暗い土色 */
-  --foreground: oklch(0.92 0.01 90);    /* 温かい白 */
-  --primary: oklch(0.6 0.15 140);       /* 深い緑 */
-  --card: oklch(0.2 0.02 80);           /* 土色カード */
-  --muted-foreground: oklch(0.6 0.02 80);
-  --border: oklch(0.3 0.02 80);
-  --radius: 1rem;                        /* 大きめ角丸 */
-}
-
-/* 例: 機械的・テック系 */
-:root {
-  --background: oklch(0.05 0 0);         /* 真っ黒 */
-  --foreground: oklch(0.95 0 0);         /* 白 */
-  --primary: oklch(0.7 0.15 230);        /* 青白い光 */
-  --card: oklch(0.1 0 0);               /* ダークカード */
-  --muted-foreground: oklch(0.5 0 0);
-  --border: oklch(0.2 0 0);
-  --radius: 0;                           /* シャープ角丸なし */
-}
-```
-
-#### デプロイ（登録＝公開保証）
-
-成果物は **登録された時点で専用 Vercel プロジェクトへの公開が保証される**。仕組みは 1 本だけ:
-
-- `frontend/src/app/artifacts/<slug>/page.tsx` を書く（Write/Edit でも Bash のヒアドキュメントでも同じ）と PostToolUse hook (`hook_register_artifact.py`) がそのパスを **dan-core の登録API** (`POST /api/v1/chat/internal/artifacts/register`) に渡す。登録も公開もコアの中の 1 つの関数が行う。ターン終端でも同じ関数が走るので、hook が落ちても取りこぼさない。
-- 公開はコア内で直列に走り、完了すると成果物カードの `share_url` に `https://dan-site-<slug>-<id>.vercel.app` が入る。画面は公開URLが入るまで「公開処理中」を表示し、URLを組み立てない。
-- コアが公開の途中で止まった場合は、コア起動時に「一度も公開URLに到達していない成果物」を同じ関数で拾い直す。
-- **hook 以外の場所で公開を起こさない**（サンドボックスやスクリプトで裏方スレッドを作ると、そのプロセス終了と一緒に消える）。再公開したい時はコアの `POST /api/v1/chat/internal/artifacts/<artifact_id>/publish` を叩く。
-- 手動で登録したい時: `echo '{"tool_name":"Write","tool_input":{"file_path":"<page.tsxの絶対パス>"}}' | DAN_ROOM_ID=<room> DAN_PROJECT_ID=<project> python scripts/hook_register_artifact.py`
-
-チャットの全画面プレビューや共有URLは `/preview/{slug}` を使い、内部的に `/artifacts/{slug}` へ rewrite される。
-artifact 内のナビゲーションで `/artifacts/{slug}` にリンクする場合は、`next/link` ではなく `@/components/artifacts/artifact-link` の `ArtifactLink` を `Link` として使う。これにより `/preview/{slug}`、内部 `/artifacts/{slug}`、独自ドメインの clean path が混ざらない。
-クライアント独自ドメインを使う場合は、middleware の `ARTIFACT_CUSTOM_DOMAINS` / `NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS` に `slug=domain.example` 形式で追加する。
+ユーザーが「提案書 HTML 作って」と明示した時だけ `actions/proposal_html.md`。
 
 ---
 
-### C. 提案書 HTML (明示要求時のみ)
+## 3. 確認と納品（完了と言う前に）
 
-ユーザーが「提案書 HTML 作って」「proposal HTML を作って」等と明示的に依頼した時のみ `actions/proposal_html.md` を参照する。
-通常のダッシュボード/HP 制作 (用途 A/B) には絡めない。
+手順は `actions/create.md`、確認項目は `criteria.md`。要点:
+
+1. **実ブラウザで見る**: 390 / 768 / 1280px 程度でスクリーンショット。文字の読みやすさ、
+   写真の切れ方、横溢れ、情報の順序と密度。比較元があれば同じ幅で並べる。
+   `python scripts/editable_artifact.py audit --slug <slug> --origin http://localhost:3001`
+   が 3 幅スクショ + 必須コピー欠落 / ID 重複 / 画像読込失敗 / 横溢れ / 公開データ接続を検査する。
+2. **編集が効く**: 手動編集ONで見出しを長文に変えて崩れないか、画像差し替え、余白変更、
+   再読み込み後に保存が残るか。
+3. **機能が動く**: API に curl、ブラウザで作成→表示→編集→削除、3 状態。
+4. **公開URL**: `share_url` を curl かブラウザで確認。「ローカルで動いた」は完了ではない。
+5. **報告**: 品質・編集・保存・公開の検証を分けて書く。スクショを添付する。
+   モックした保存テストを本番の証拠として書かない。
+
+品質は自分の目で見て判断し、直せる欠陥は聞かずに直す。点数表は使わない。
+判断が分かれる方向転換だけユーザーに委ねる。
 
 ---
 
-## 自己評価ループ（品質保証）
-
-全用途で共通の仕組み。詳細手順は `actions/create.md` を参照。
-
-### 関連ファイル
+## 4. 参照
 
 | ファイル | 役割 |
-|---------|------|
-| `criteria.md` | 用途別の品質基準 (必須チェック + 品質スコア) |
-| `actions/create.md` | 自己評価ループ込みの作成手順 |
-
-### ループの流れ
-
-```
-初版生成 → 視覚評価(screenshot) → criteria.md で採点
-→ 不合格なら改善(最大3回) → 合格したら出力
-```
-
-> ※ 自動学習 (learned.md への自動追記) は廃止。改善パターンを記録する場合は
-> このファイル (SKILL.md) に明示的に追記する。隠れ状態を作らない方針。
+|---|---|
+| `actions/create.md` | 制作の流れ（要件整理 → 実装 → 確認 → 納品） |
+| `criteria.md` | 確認項目（用途別） |
+| `recipes/*.md` | 方式・技法ごとの手順と落とし穴 |
+| `actions/proposal_html.md` | 提案書 HTML（明示要求時のみ） |
+| `frontend/src/components/templates/index.ts` | 部品の正（この表より新しければそちらが正） |
