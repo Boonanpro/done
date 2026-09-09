@@ -2,6 +2,7 @@ import type { MetadataRoute } from 'next';
 import { headers } from 'next/headers';
 
 import { ARTIFACT_PAGES } from '@/lib/artifact-pages.generated';
+import { ARTIFACT_SITEMAPS } from '@/lib/artifact-sitemaps.generated';
 import { CUSTOM_DOMAIN_SLUG_MAP } from '@/lib/custom-domain-rewrites.generated';
 import {
   deliverySlugFromHost,
@@ -54,6 +55,19 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     STATIC_HOST_TO_SLUG[host] ||
     (await slugFromCustomDomain(host, `${proto}://${host}`));
   if (!slug) return [];
+
+  // 成果物が自前の sitemap.ts を持つなら、そちらを正とする。
+  // ARTIFACT_PAGES は page.tsx の静的走査なので、質問ページ (/qa/<id>) のように
+  // 投稿のたびに増える動的ページが載らず、Google からは「増えないサイト」に見える。
+  const loader = ARTIFACT_SITEMAPS[slug];
+  if (loader) {
+    try {
+      const entries = await (await loader()).default();
+      if (entries.length > 0) return entries;
+    } catch {
+      // 成果物側の取得失敗時は静的一覧へフォールバック（クロール側は再訪する）。
+    }
+  }
 
   const pages = ARTIFACT_PAGES[slug] ?? ['/'];
   const now = new Date();

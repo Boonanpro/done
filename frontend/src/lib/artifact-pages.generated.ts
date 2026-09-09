@@ -14,9 +14,28 @@ export const ARTIFACT_PAGES: Record<string, string[]> = {
     "/",
     "/guides/dokuritsu",
     "/guides/haikyu-jiko",
-    "/guides/nenji-tenken"
+    "/guides/nenji-tenken",
+    "/qa"
+  ],
+  "editable-lp-lab": [
+    "/"
+  ],
+  "floor-lp-compare": [
+    "/"
+  ],
+  "floor-lp-native": [
+    "/"
+  ],
+  "himawari-seitai": [
+    "/"
   ],
   "inspection-report": [
+    "/"
+  ],
+  "itsuki-lab": [
+    "/"
+  ],
+  "itsuki-line": [
     "/"
   ],
   "kittoku": [
@@ -27,24 +46,70 @@ export const ARTIFACT_PAGES: Record<string, string[]> = {
     "/services",
     "/v2"
   ],
+  "moonbox-jp": [
+    "/"
+  ],
+  "moonbox-proposal": [
+    "/"
+  ],
   "new-attack": [
     "/"
+  ],
+  "oku-yukadanbou": [
+    "/"
+  ],
+  "oku-yukadanbou-real": [
+    "/",
+    "/email",
+    "/survey"
   ],
   "paina": [
     "/",
     "/business",
     "/contact"
   ],
+  "pornblocker-guard-beacon": [
+    "/",
+    "/thanks"
+  ],
+  "pornblocker-roadmap": [
+    "/"
+  ],
   "publish": [
     "/"
+  ],
+  "safeguard": [
+    "/",
+    "/download",
+    "/legal",
+    "/privacy",
+    "/terms"
+  ],
+  "safeguard-layers": [
+    "/",
+    "/download",
+    "/legal",
+    "/privacy",
+    "/terms"
   ],
   "salonboard-monitor": [
     "/"
   ],
   "salonboard-styleup": [
+    "/",
+    "/privacy",
+    "/terms"
+  ],
+  "styleup-lp": [
     "/"
   ],
   "test-edit": [
+    "/"
+  ],
+  "voice-note": [
+    "/"
+  ],
+  "voice-playground": [
     "/"
   ],
   "yonago-gojo": [
