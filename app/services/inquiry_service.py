@@ -16,10 +16,33 @@ logger = logging.getLogger(__name__)
 SCOPE_SENDER = {
     "paina-contact": "株式会社パイナ",
     "paina-waitlist": "株式会社パイナ",
+    "oku-yukadanbou-waitlist": "コンセントで使える床暖房",
+    "oku-yukadanbou-survey": "コンセントで使える床暖房",
 }
 SCOPE_LABEL = {
     "paina-contact": "お問い合わせ",
     "paina-waitlist": "ウェイティングリスト登録",
+    "oku-yukadanbou-waitlist": "先行登録",
+    "oku-yukadanbou-survey": "アンケート回答",
+}
+# scope → 登録直後に自動で送る返信（人の承認を待たない）。ドライテストの先行登録など、
+# 「受け付けました＋次の導線」を即返したいフォーム用。件名/本文/差出人名/送信アカウント。
+SCOPE_AUTO_REPLY = {
+    "oku-yukadanbou-waitlist": {
+        "from_name": "コンセントで使える床暖房",
+        "from_account": "gmail",
+        "subject": "先行登録ありがとうございます｜コンセントで使える床暖房",
+        "body": (
+            "ご登録ありがとうございます。\n\n"
+            "「コンセントで使える床暖房」は現在開発中です。発売時期と価格が決まりしだい、"
+            "このメールアドレスへいちばん先にお知らせします。\n\n"
+            "続報はLINEでもお届けします。まだの方は、こちらから友だち追加をしてお待ちください。\n"
+            "https://lin.ee/QY0SmIp\n\n"
+            "ご質問は、このメールにそのまま返信してください。\n\n"
+            "コンセントで使える床暖房\n"
+            "株式会社パイナ"
+        ),
+    },
 }
 # scope → 問い合わせ内容をそのまま転送するクライアント側の宛先
 SCOPE_FORWARD_TO = {
@@ -68,14 +91,41 @@ class InquiryService:
 
         # ダンの返信草案生成＋提案作成はバックグラウンドで（フォーム応答をブロックしない）
         try:
+            asyncio.create_task(self._auto_reply(created))
             asyncio.create_task(self._draft_and_propose(created))
             asyncio.create_task(self._forward_to_client(created))
         except RuntimeError:
             # 実行中ループが無い稀なケースは同期フォールバック
+            await self._auto_reply(created)
             await self._draft_and_propose(created)
             await self._forward_to_client(created)
 
         return created
+
+    async def _auto_reply(self, inquiry: dict) -> None:
+        """SCOPE_AUTO_REPLY に載っている scope は、登録者へ即時に定型メールを返す（ベストエフォート）。"""
+        scope = inquiry.get("scope") or ""
+        cfg = SCOPE_AUTO_REPLY.get(scope)
+        to = (inquiry.get("email") or "").strip()
+        if not cfg or not to:
+            return
+        if to.endswith("@example.com"):
+            logger.info("inquiry auto-reply skipped (test address) scope=%s to=%s", scope, to)
+            return
+        try:
+            from app.services.email_send import send_plain_email
+
+            await asyncio.to_thread(
+                send_plain_email,
+                to,
+                cfg["subject"],
+                cfg["body"],
+                from_name=cfg.get("from_name", "Done"),
+                from_account=cfg.get("from_account", "gmail"),
+            )
+            logger.info("inquiry auto-reply sent scope=%s to=%s", scope, to)
+        except Exception:
+            logger.exception("inquiry auto-reply failed scope=%s to=%s", scope, to)
 
     async def _forward_to_client(self, inquiry: dict) -> None:
         """問い合わせ内容をクライアント本人のメールへ転送する（ベストエフォート）。
