@@ -9,7 +9,7 @@ import { articleOf, isEmptyArticle, publishRequest, emptyArticle, ROOM_ID, type 
 import { startEditorial, call, findWorkspace, saveArticle, uploadAudio } from './api';
 import styles from './style.module.css';
 import { recordingBackup } from './recording-backup';
-import { RecordedAudio } from './recorded-audio';
+import { RecordedAudio, StableAudio } from './recorded-audio';
 import { InputLevel } from './input-level';
 
 export function PageBody() {
@@ -114,7 +114,7 @@ export function PageBody() {
  </div><InputLevel stream={meterStream}/>{inputError&&<p role="alert">{inputError}</p>}{recording&&<p role="status">録音中の入力：{activeInput}</p>}
  <details open={!draft.free}><summary>話したこと・音声</summary><div className={styles.actions}><button onClick={()=>void record()} disabled={busy||editing||Boolean(audioBlob)||(!recording&&(!meterStream||!backupReady))}>{recording?<Square size={16}/>:<Mic size={16}/>} {recording?'録音を止める':'録音する'}</button><button disabled={busy||editing||recording} onClick={()=>fileInput.current?.click()}><Upload size={16}/>音声を追加</button><input ref={fileInput} type="file" accept="audio/*,.webm,.mp4" hidden onChange={e=>{const f=e.target.files?.[0];if(f)void attach(f);e.target.value='';}}/></div>
  {audioBlob&&<div className={styles.audio}><RecordedAudio blob={audioBlob}/><small role="status">{busy?'録音を自動保存しています…':'保存待ちです。接続が戻ると自動で再試行します。'}</small><button data-edit-id="voice-note-audio-retry" disabled={busy||editing} onClick={()=>{attemptedAudio.current=undefined;setRetryAudio(v=>v+1);}}>再試行</button><button data-edit-id="voice-note-audio-discard" disabled={busy||editing} onClick={()=>void deleteAudio()}>録音を削除</button></div>}
- {draft.audio.map(a=><div key={a.url} className={styles.audio}><small>{a.name} · 保存済み</small>{a.url?.trim()?<audio controls src={a.url}/>:<span>音声の保存先が見つかりません。</span>}<button data-edit-id={`voice-note-audio-delete-${a.url}`} disabled={busy||editing||recording||Boolean(audioBlob)} onClick={()=>void deleteAudio(a.url)}>録音を削除</button></div>)}
+ {draft.audio.map(a=><div key={a.url} className={styles.audio}><small>{a.name} · 保存済み</small>{a.url?.trim()?<StableAudio src={a.url}/>:<span>音声の保存先が見つかりません。</span>}<button data-edit-id={`voice-note-audio-delete-${a.url}`} disabled={busy||editing||recording||Boolean(audioBlob)} onClick={()=>void deleteAudio(a.url)}>録音を削除</button></div>)}
  <label className={styles.field}>話した内容<textarea rows={5} value={draft.transcript} placeholder="思いついた順で、そのまま。音声だけでも記事にできます。" onChange={e=>update({transcript:e.target.value})}/></label><button className={styles.primary} disabled={busy||editing||recording||(!audioBlob&&!draft.transcript.trim()&&!draft.audio.length)} onClick={()=>void send('edit')}>noteにする<ArrowRight size={16}/></button><small style={{display:'block',marginTop:8}}>録音の保存・文字起こし・下書き作成まで進めます。noteには公開されません。</small></details>
  {draft.questions.length>0&&<div className={styles.notice}><strong>記事を仕上げるための確認</strong>{draft.questions.map(q=><p key={q}>{q}</p>)}</div>}
  <div className={styles.editorTop}><h2>記事の仕上がり</h2><button onClick={()=>setPreview(!preview)}>{preview?'本文を編集':'読みやすさを確認'}</button></div>
