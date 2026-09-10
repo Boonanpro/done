@@ -91,6 +91,7 @@ def _chat_instructions(chat_title: Optional[str]) -> str:
 - 進行確認: check_dan_status（「作業続いてる？」と聞かれたら推測せず必ずこれで確認）。
 - 部屋の文脈: read_room_history（この部屋で何が話されてきたかが必要なとき、推測せず自分で読む）。
 - 成果物の編集（対象は成果物タブで開いているもの）: 文言・色は set_text / set_style（数秒）。構造・レイアウトは read_source → edit_source（1〜2秒で反映）。画像は generate_image で作って自分で適用。目は look_at_page（全体）/ look_at_section（細部）/ check_contrast（可読性の数値検査）。
+- 動画の編集（制作ルームで動画エディタを開いているとき）: まず timeline_state で『今』（再生位置・選択・構造）を読む。字幕の文言、枠やぼかしの位置と時間、クリップの移動・伸縮・分割・削除、明るさや大きさ、といった小さな直しは timeline_edit で1つずつ即時反映し（数秒）、timeline_frame で自分の目で確かめてから「直しました」と言う。素材を新しく作る・声を作り直す・構成を大きく変える・ぼかしを動く物に追従させる、は delegate_to_dan（エディタの状態は自動で引き継がれる）。触るのは言われた箇所だけ。
 - まとまった制作・編集を自分でやる前に、read_skill で該当スキル（例: build）の作法を確認する。
 - 編集の使い分け: draft（set_text/set_style）はソースより表示が優先される。draftがある要素の表示を変えるなら set_text / set_style を使う。
 - 編集したら確認する: 複数の修正はまとめて実行し、最後に look_at_page で自分の目で見てから報告する。確認できた事実だけを「できた」と言う。
@@ -140,6 +141,46 @@ _CHAT_TOOLS = [
         "name": "check_dan_status",
         "description": "委譲した作業が進行中かどうかと直近の活動を確認する。進行を聞かれたら推測せずこれで確認する。",
         "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "timeline_state",
+        "description": (
+            "動画エディタの『今』を読む: 開いているコンテンツ、再生位置、選択中クリップ、再生位置にあるクリップ、"
+            "タイムライン全体の構造（レーン/クリップ/時刻/種類、clip_id付き）。動画の編集の話になったら最初に必ず読む。"
+            "『ここ』『この字幕』『いま映ってる枠』は再生位置と選択で解決する。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "outline": {"type": "boolean", "description": "true=全体構造も返す（既定）。false=状態だけ（速い）"}}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "timeline_edit",
+        "description": (
+            "動画エディタのタイムラインに小さな編集を1つ即時反映する（数秒で画面が変わる）。"
+            "op と args を渡す。op: move_clip{clip_id,new_start} / trim_clip{clip_id,edge:left|right,new_time} / "
+            "remove_clip{clip_id} / split_clip{clip_id,at} / set_clip{clip_id,text?,style?}(字幕の文言) / "
+            "set_clip_props{clip_id,props:{position|fit|crop|opacity|volume|muted|speed|transform_keys|asset_id|source_start|grade}} / "
+            "gradeは{ev,contrast,sat,temp,tint}の全置換。明るさはev(露出段数、0=無補正)、contrast/satは倍率(1=無補正)、temp/tintは0=無補正。既存の他の補正を保つなら現在値も含める。 / "
+            "add_region{timeline_start,timeline_end,x,y,width,height,style:gaussian|mosaic|frame|marker|spotlight,color?,strength?,keys?}"
+            "（ぼかし/黄色枠。座標は画面比0-1、左上原点） / set_region{clip_id,x?,y?,width?,height?,style?,color?,strength?,keys?,clear_keys?} / "
+            "add_caption{text,timeline_start,timeline_end} / add_clip{asset_id,timeline_start,duration,source_start?,position?,speed?} / "
+            "add_audio{asset_id,duration,at,source_start?,volume?,role?}。"
+            "複数の編集は1つずつ順に呼ぶ。素材の生成・複雑な構成変更は delegate_to_dan。"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "op": {"type": "string"},
+            "args": {"type": "object", "description": "opの引数"},
+            "content_id": {"type": "string", "description": "省略時はエディタで開いているコンテンツ"}},
+            "required": ["op", "args"]},
+    },
+    {
+        "type": "function",
+        "name": "timeline_frame",
+        "description": "動画の指定秒の合成後の画面（字幕・ぼかし・枠・重ね全部込み）を画像で見る。編集の前後確認に使う。約10秒。",
+        "parameters": {"type": "object", "properties": {
+            "t": {"type": "number", "description": "タイムライン秒。省略時は再生位置"},
+            "content_id": {"type": "string"}}, "required": []},
     },
     {
         "type": "function",
@@ -539,6 +580,47 @@ async def voice_edit(request: Request, body: EditRequest):
         user_id=user.user_id, project_id=None, replace_attrs=False,
     )
     return {"ok": True, "element_key": key, "id": str(result.get("id", ""))}
+
+
+class TimelineToolRequest(BaseModel):
+    room_id: str
+    action: str  # state | edit | frame
+    content_id: Optional[str] = None
+    op: Optional[str] = None
+    args: Optional[dict] = None
+    t: Optional[float] = None
+    outline: bool = True
+
+
+@router.post("/timeline")
+async def voice_timeline(request: Request, body: TimelineToolRequest):
+    """Voice agent's hands and eyes on the video editor (fast lane, no agent job)."""
+    _get_user(request)
+    from app.services import timeline_live as tl
+    import asyncio
+
+    room_id = body.room_id.strip()
+    if not room_id:
+        raise HTTPException(status_code=400, detail="room_id が空です")
+    cid = (body.content_id or "").strip()
+    if not cid:
+        st = tl.editor_state(room_id)
+        cid = str(st.get("content_id") or "") if st else ""
+    if body.action == "state":
+        return await asyncio.to_thread(tl.editor_context, room_id, cid or None, body.outline)
+    if not cid:
+        return {"ok": False, "error": "エディタが開いていない。content_id を指定するか、制作ルームで動画エディタを開いてもらう"}
+    if body.action == "edit":
+        if not body.op:
+            raise HTTPException(status_code=400, detail="op が必要")
+        return await asyncio.to_thread(tl.apply_edit, room_id, cid, body.op, body.args or {})
+    if body.action == "frame":
+        t = body.t
+        if t is None:
+            st = tl.editor_state(room_id)
+            t = float((st or {}).get("playhead") or 0.0)
+        return await asyncio.to_thread(tl.render_frame_b64, room_id, cid, float(t))
+    raise HTTPException(status_code=400, detail=f"unknown action {body.action}")
 
 
 class CaptureRequest(BaseModel):

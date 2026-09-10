@@ -2416,7 +2416,7 @@ async def send_dan_message_stream(
                     project_id=project_info.get("id"),
                     run_id=run_id,
                     skill_injection=skill_injection,
-                    timeline_refs=request.timeline_refs or [],
+                    timeline_refs=_auto_timeline_refs(room_id, request.timeline_refs),
                 )
                 if message is None:
                     # 並列保存パス: 先に cold start を起動し（最初の __anext__ でCLIスレッド開始）、
@@ -3930,6 +3930,24 @@ async def websocket_chat(websocket: WebSocket):
         # エラー時の処理
         if current_room_id and user_id:
             manager.disconnect(current_room_id, user_id)
+
+
+
+def _auto_timeline_refs(room_id: str, explicit: list | None) -> list:
+    """Explicit chat mention wins; otherwise, when the native video editor is open on
+    this room, attach its content so a plain "ここ直して" reaches the timeline tools
+    with the editor's playhead/selection (see app.services.timeline_live)."""
+    if explicit:
+        return list(explicit)
+    try:
+        from app.services import timeline_live as _tl
+
+        st = _tl.editor_state(room_id, max_age_s=600.0)
+        if st and st.get("content_id"):
+            return [{"content_id": str(st["content_id"])}]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
 
 
 # ==================== 成果物の登録・公開の唯一の入口（core 内部） ====================

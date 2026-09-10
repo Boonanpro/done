@@ -3,11 +3,13 @@
 Launched per job by the agent runner with context in env:
   DAN_ROOM_ID / DAN_DRAFT_ID / DAN_JOB_ID
 Every mutation goes through app.services.timeline_commands (validated, clamped);
-the live timeline is NEVER touched here — the orchestrator commits the draft
-with compare-and-swap after the session ends. Frames come back as inline images
+Validated operations can publish live checkpoints with compare-and-swap;
+the orchestrator records the final result after the session ends. Frames come back as inline images
 so the model literally sees the composited draft.
 """
 
+import asyncio
+import threading
 import base64
 import json
 import logging
@@ -39,11 +41,48 @@ ROOM_ID = os.environ.get("DAN_ROOM_ID", "")
 DRAFT_ID = os.environ.get("DAN_DRAFT_ID", "")
 JOB_ID = os.environ.get("DAN_JOB_ID", "")
 CONTENT_ID = os.environ.get("DAN_CONTENT_ID", "")
-MAX_TOOL_CALLS = int(os.environ.get("DAN_MAX_TOOL_CALLS", "120"))
-MAX_GENERATIONS = int(os.environ.get("DAN_MAX_GENERATIONS", "6"))
+MAX_TOOL_CALLS = int(os.environ.get("DAN_MAX_TOOL_CALLS", "0"))
+MAX_GENERATIONS = int(os.environ.get("DAN_MAX_GENERATIONS", "0"))
+
+_VISUAL_LANE = {'anyOf': [{'type': 'integer', 'minimum': 0}, {'type': 'string', 'enum': ['front']}],
+                'description': '映像レーン番号、またはfrontで実行時点の最前面に新規レーン。リンク音声などでレーン数が変わってもfrontなら番号の再計算は不要。'}
 
 _calls = 0
 _generations = 0
+_draft_lock = threading.RLock()
+_BACKGROUND_TOOLS = {'generate_speech','generate_image','watch_video','watch_render','measure_speech','render_frame','probe_audio','resolve_reference','analyze_reference','search_web_references','render_motion_project'}
+
+def _run_tool_thread(name,args):
+    if name in _BACKGROUND_TOOLS:
+        return asyncio.run(_dispatch(name,args))
+    with _draft_lock:
+        if td.refresh_checkpoint(ROOM_ID, DRAFT_ID):
+            return _ok({'ok': False, 'human_edit_received': True,
+                'note': 'ユーザーの手編集を取り込みました。最新のtimeline_outlineを読んでから必要な編集を続けてください。今回の操作は未実行です。'})
+        result = asyncio.run(_dispatch(name,args))
+        try:
+            payload = json.loads(result[0].text)
+        except (ValueError, AttributeError, IndexError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        if payload.get('ok') is not False:
+            published = td.publish_checkpoint(ROOM_ID, DRAFT_ID)
+            if published.get('published'):
+                payload['timeline_updated'] = True
+                result = _ok(payload)
+            elif not published.get('ok'):
+                return _ok({**payload, 'ok': False, 'saved_in_draft': True,
+                    'conflict': published.get('conflict', False),
+                    'error': ' / '.join(published.get('problems', []))})
+        return result
+
+def _track_asset(draft,aid):
+    # A generation may finish after unrelated edits. Merge into the latest snapshot.
+    with _draft_lock:
+        current=td.load_draft(draft['room_id'],draft['draft_id'])
+        td.track_generated_asset(current,aid)
+
 
 app = Server("timeline")
 
@@ -92,14 +131,44 @@ _NUM = {"type": "number"}
 _STR = {"type": "string"}
 
 
+_CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
+    'font':{'type':'string'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
+    'color':{'type':'string'},'outlineColor':{'type':'string'},'outlineWidth':{'type':'number'},
+    'maxWidth':{'type':'number','description':'画面幅に対する比率。'},
+    'textAlign':{'type':'string','enum':['left','center','right']},
+    'x':{'type':'number','description':'中央からの横移動量。0が中央、正は右。画面幅に対する比率。'},
+    'y':{'type':'number','description':'画面下端から上方向への位置。既定0.08が通常の下中央。0.5は中央付近、0.85は上部。画像の左上基準座標とは異なる。'}
+}}
+
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
+    return tool_definitions()
+
+
+def tool_definitions() -> list[types.Tool]:
     return [
+        _tool('apply_edits','複数のタイムライン操作をまとめて作業用下書きへ適用する。1操作でも失敗したら全操作を戻す。素材生成や外部操作は含めない。各操作は通常ツールと同じ引数。引数の値に {"$result":0,"path":"clip_id"} を置くと、このバッチの0番目の結果を参照できる（配列はcuts.0.clip_id等）。先行操作だけ参照可。',{'operations':{'type':'array','maxItems':100,'items':{'type':'object','properties':{'name':_STR,'args':{'type':'object'}},'required':['name','args']}}},['operations']),
+        _tool('animate_clip','文字・映像・図形を一つのクリップのまま滑らかに動かす。posesは相対秒tとキャンバス比x,y,w,h。文字はデザイン全体への移動・拡大（標準0,0,1,1）、図形は領域そのもの。既存の動きを置換する。',{'clip_id':_STR,'poses':{'type':'array','items':{'type':'object'}},'easing':{'type':'string','enum':['linear','cubic_out','cubic_in_out']}},['clip_id','poses']),
+        _tool('production_methods','制作方法の候補・必要素材・下書き方法・検証状態を必要時に読む。一覧外の表現も調査して作れる。',{'method_id':_STR}),
+        _tool('prepare_motion_project','編集可能な映像プロジェクトを別版にコピーする。既存映像のasset_id、任意のproject_dir、または承認済み光学文字見本template=trueを指定。返されたHTMLを通常のファイル操作で編集する。',{'asset_id':_STR,'project_dir':_STR,'template':{'type':'boolean'}}),
+        _tool('render_motion_project','HTML/GSAPプロジェクトを検査・書き出しし、編集元の保存版付きで素材登録する。配置はadd_clip、部分差替えはset_clip_props(asset_id)で明示する。映像内の文字等は保存した元コードから再編集可能。',{'project_dir':_STR,'name':_STR},['project_dir']),
+        _tool('search_web_references','Web全体から参考作品・制作資料を出典付きで検索。検索結果から映像を推測しない。',{'queries':{'type':'array','items':_STR}},['queries']),
+        _tool('resolve_reference', '参考URL・部屋の素材IDを再生可能なitemと保存IDへ解決。X動画対応。分析前に提示できる。', {'source':_STR}, ['source']),
+        _tool('read_references','作品に保存した参考素材と分析を読む。',{'reference_id':_STR}),
+        _tool('analyze_reference','保存した参考をGeminiで映像・音声分析。動画はAgentic。同じ質問の結果は再利用。長い分析は提示や他作業と並行する。',{'reference_id':_STR,'question':_STR},['reference_id']),
+        _tool('present_references', __import__('app.services.editor_presentation',fromlist=['DESCRIPTION']).DESCRIPTION, {'items':{'type':'array','items':__import__('app.services.editor_presentation',fromlist=['ITEM_SCHEMA']).ITEM_SCHEMA}}, ['items']),
+        _tool('ask_user','作業に必要な質問をエディターの音声・チャットへ届け、返答を待つ。回答後は同じ作業を続ける。',{'question':_STR},['question']),
+        _tool('editor_help','エディターの保存・座標・提案仕様を読む。',{'topic':_STR},[]),
+        _tool('report_result','下書きの作業・検品結果を記録する。achievedは依頼達成、needs_userは本人の操作待ち、blockedは進められない状態。この後に応答を終えるとアプリが下書きを本番へ検証・保存し、会話へ保存結果を通知する。保存前の本番画面を待つ必要はない。',{'outcome':{'type':'string','enum':['achieved','needs_user','blocked']},'summary':_STR},['outcome','summary']),
+        _tool('read_project_chat','必要なときだけ、この部屋の通常チャットの履歴を読む。',{'limit':_NUM}),
+        _tool('conversation_history','この作品のユーザーとダン両方の発言を役割付きで読む。短い「それで」等が何への回答か確認できる。assistantの提案をuserの指定と混同しない。beforeを渡すと以前の会話を読める。通常チャットは混入しない。',{'limit':_NUM,'before':_NUM}),
+        _tool('check_skill', '制作スキルを読む。name省略で利用可能なスキル一覧。', {'name': _STR}),
         _tool("timeline_outline", "タイムライン全体の構造（レーン/クリップ/時刻/種類）を読む。作業前に必ず一度読むこと。", {}),
         _tool("list_assets", "部屋のアセット一覧（asset_id/ファイル名/種類/長さ）。配置ツールに渡すasset_idはここで確認する。", {}),
         _tool("timeline_transcript", "動画の発話内容（文字起こし）をタイムライン時刻つきで読む。内容理解はこれを根拠にする。",
               {"t0": _NUM, "t1": _NUM}),
-        _tool("render_frame", "指定タイムライン時刻の合成後フレーム（カット/テロップ/ぼかし/画像すべて反映）を画像として見る。編集後の確認に必ず使う。"
+        _tool('probe_audio', 'タイムライン音声をネイティブ再生経路で短く測定する。各対象クリップ冒頭最大0.5秒の復号・信号の有無を確認。全編の試聴や音質・同期の合否判定ではない。書き出し不要。', {'t0': _NUM, 't1': _NUM}, ['t0', 't1']),
+        _tool("render_frame", "指定タイムライン時刻の合成後フレーム（カット/テロップ/ぼかし/画像すべて反映）を画像として見る。見た目の変更確認に使う。"
               "1回の呼び出しに約10秒かかるため、複数時刻を見るときは必ず ts で一括指定すること（1回分強の時間でまとめて返る）。",
               {"t": _NUM, "ts": {"type": "array", "items": _NUM, "maxItems": 8,
                                  "description": "複数時刻を一括レンダ（推奨）。tより優先"}}),
@@ -119,22 +188,23 @@ async def list_tools() -> list[types.Tool]:
               {"asset_id": _STR, "timeline_start": _NUM, "timeline_end": _NUM,
                "x": _NUM, "y": _NUM, "width": _NUM, "height": _NUM, "source_start": _NUM},
               ["asset_id", "timeline_start", "timeline_end", "x", "y", "width", "height"]),
-        _tool("add_caption", "テロップ追加。styleは省略可（既存テロップと同デザインになる）。",
-              {"text": _STR, "timeline_start": _NUM, "timeline_end": _NUM, "style": {"type": "object"}},
+        _tool("add_caption", "テロップ追加。styleは省略可。fontSizeは相対倍率(1=約64px基準)、color/outlineColorは色文字列、outlineWidthは相対幅、xは中央からの横移動(既定0)、yは下端から上への位置(既定0.08)。maxWidthは画面幅の比率。",
+              {"text": _STR, "timeline_start": _NUM, "timeline_end": _NUM, "style": _CAPTION_STYLE, "lane": _VISUAL_LANE},
               ["text", "timeline_start", "timeline_end"]),
         _tool("insert_freeze", "既存クリップの1フレームを静止画クリップとしてtimeline_startからduration秒間挿入。",
               {"source_clip_id": _STR, "at_source_time": _NUM, "timeline_start": _NUM, "duration": _NUM},
               ["source_clip_id", "timeline_start", "duration"]),
         _tool("set_clip", "テロップの本文やスタイルを変更。",
-              {"clip_id": _STR, "text": _STR, "style": {"type": "object"}}, ["clip_id"]),
-        _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す（CTAアート・ロゴ風カード等）。日本語文字を入れる場合はpromptに正確な文字列を指定。aspect_ratioは 9:16 等。",
-              {"prompt": _STR, "aspect_ratio": _STR}, ["prompt"]),
-        _tool("generate_video", "Higgsfieldで短尺動画を生成し編集可能なアセットとして登録、asset_idを返す。"
-              "配置は append_clip / insert_clip / add_overlay で。model: gemini_omni(最安24cr/8s・2〜10秒・音有無不定・参照不可) / "
-              "seedance_2_5(最高品質65cr/10s・5/10/15/30秒・音声付き・--image/--video参照可) / "
-              "seedance_2_0(45cr/10s・〜15秒・参照可) / kling3_0(20cr/10s・5/10秒・start-image可)。"
-              "既存クリップの作り直しでは、そのクリップが何を描いているか（元プロンプトや視聴内容）を必ずプロンプトに引き継ぐこと。",
+              {"clip_id": _STR, "text": _STR, "style": _CAPTION_STYLE}, ["clip_id"]),
+        _tool("measure_speech", "実際の再生音声から単語とタイムライン時刻を計測する。字幕に合わせて推測せず台詞の境界を確かめる。",{'start':_NUM,'end':_NUM},['start','end']),
+        _tool("match_source_audio", "編集済み素材と別の収録素材で同じ発話を探す。reference側の時刻に対応するcandidate側の実測時刻と相関を返す。ずれが変化する場合は区間を細かく調べる。映像の確認も必要。",{'reference_asset_id':_STR,'candidate_asset_id':_STR,'times':{'type':'array','items':_NUM},'window':_NUM},['reference_asset_id','candidate_asset_id','times']),
+        _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す。既存テイストはreference_asset_idsに静止画素材IDを指定して参照できる。model省略はgpt_image_2。aspect_ratio省略は作品の比率。",
+              {"prompt": _STR, "aspect_ratio": _STR, "model": _STR,
+               "reference_asset_ids":{"type":"array","items":_STR}}, ["prompt"]),
+        _tool("generate_video", "許可済みの制作予算で動画を生成し、素材として登録する。provider省略はGoogle API直結でHiggsfieldクレジット不使用。Google modelはgemini-omni-1.1-flash。reference_mode=styleは参考のテイストから別内容を制作（参照動画3秒まで）、editは元動画の修正（10秒まで）。durationは希望尺で実際の尺は結果を読む。Higgsfieldは明示指定した場合のみ。結果は配置されないのでadd_clip等でタイムラインに置く。既存成果があればimport_mediaで再利用する。",
               {"prompt": _STR, "aspect_ratio": _STR, "duration": _NUM, "model": _STR,
+               "provider": {"type":"string","enum":["google","higgsfield"]},
+               "reference_mode":{"type":"string","enum":["style","edit"]},
                "reference_path": _STR, "resolution": _STR}, ["prompt"]),
         _tool("import_image", "実在の画像を部屋の素材として取り込み asset_id を返す。url にはWeb上の画像URL"
               "（WebSearch/WebFetchで見つけた本物のロゴ等）またはローカルファイルパスを指定。生成ではなく本物が必要な時はこちらを使う。",
@@ -149,7 +219,66 @@ async def list_tools() -> list[types.Tool]:
         _tool("watch_video", "指定範囲の映像を『動画として』視聴する（動き・テンポ・話し方・音声込み。静止画のrender_frameでは分からないもの用）。"
               "questionに知りたいことを書くと視聴結果を答える。1回1〜2分かかるので範囲は要点に絞る（最大120秒）。",
               {"t0": _NUM, "t1": _NUM, "question": _STR}, ["t0", "t1"]),
+        # ---- layers: region effects, generic clip edits, layering, speech, captions ----
+        _tool("editor_state", "ユーザーが開いているエディタの『今』（開いているコンテンツ・再生位置・選択中クリップ）。"
+              "『ここ』『このクリップ』『いま見ているところ』はこれで解決する。作業開始時に必ず一度読む。", {}),
+        _tool("clips_at", "指定時刻に存在する全クリップ（全レーン、奥→手前）。『◯秒のところの字幕/枠/ぼかし』を特定する。",
+              {"t": _NUM}, ["t"]),
+        _tool("add_region", "領域効果クリップを映像レーンに置く: style=gaussian/soft(ぼかし) mosaic(モザイク) "
+              "frame(矩形の枠線＝黄色枠などの強調) marker(マーカー塗り) spotlight(周囲を暗く) solid(塗り潰し) zoom。"
+              "x,y,width,height は画面比の正規化座標(0-1、左上原点)。効果は自分より下のレーン全体に効くので、"
+              "対象の絵より上のレーンに置かれる（自動）。動く対象は keys=[{t,x,y,w,h}](クリップ先頭からの秒)で追従。"
+              "枠は color='#f5b800' opacity=1 のように色指定。ぼかしの強さは strength(2-64)。",
+              {"timeline_start": _NUM, "timeline_end": _NUM, "x": _NUM, "y": _NUM, "width": _NUM, "height": _NUM,
+               "style": _STR, "strength": _NUM, "color": _STR, "opacity": _NUM, "rotation": _NUM,
+               "keys": {"type": "array", "items": {"type": "object"}}, "lane": _VISUAL_LANE},
+              ["timeline_start", "timeline_end", "x", "y", "width", "height"]),
+        _tool("set_region", "既存の領域効果（ぼかし/枠など）の矩形・スタイル・色・強さ・キーフレームを変更。keysは全置換、clear_keysで追従を解除。",
+              {"clip_id": _STR, "x": _NUM, "y": _NUM, "width": _NUM, "height": _NUM, "style": _STR,
+               "strength": _NUM, "color": _STR, "opacity": _NUM, "rotation": _NUM,
+               "keys": {"type": "array", "items": {"type": "object"}}, "clear_keys": {"type": "boolean"}},
+              ["clip_id"]),
+        _tool("set_clip_props", "映像/画像/音声クリップの属性を変更: position{x,y,width,height}(表示枠) fit(cover|contain|stretch) "
+              "crop{left,top,right,bottom}(表示枠を削る) transform_keys[{t,x,y,w,h}](寄り/パン) opacity volume muted speed(0.25-4) "
+              "video_enabled asset_id(+source_start: 絵だけ差し替え、尺は不変) source_start(素材の使う位置をずらす) "
+              "grade{ev,contrast,sat,temp,tint}は全置換。evは露出段数(0=無補正)、contrast/satは倍率(1=無補正、sat=0は白黒)、"
+              "temp/tintは0が無補正。既存の他の補正を保つ場合は現在値も含める。grade=nullで補正解除。",
+              {"clip_id": _STR, "props": {"type": "object", "properties": {
+                  "position": {"type":"object"}, "fit": {"type":"string","enum":["cover","contain","stretch"]},
+                  "crop": {"type":"object"}, "opacity": _NUM, "volume": _NUM, "muted": {"type":"boolean"},
+                  "speed": _NUM, "source_start": _NUM, "asset_id": _STR, "role": _STR, "keep_duration": {"type":"boolean"},
+                  "video_enabled": {"type":"boolean"}, "transform_keys": {"type":["array","null"],"items":{"type":"object"}},
+                  "text": _STR, "style": {"type":"object"},
+                  "grade": {"type":["object","null"],"properties":{k:_NUM for k in ['ev','contrast','sat','temp','tint']},"additionalProperties":False}
+              },"additionalProperties":False}}, ["clip_id", "props"]),
+        _tool("split_clip", "クリップ（とリンク相手）を at 秒で2つに分割。見た目は変わらない（素材位置・キーフレームも引き継ぐ）。"
+              "atは秒数または秒数配列。複数の切れ目は一度に渡せる。返却の各clip_idを次の編集に使う。", {"clip_id": _STR, "at": {"anyOf":[_NUM,{"type":"array","items":_NUM,"minItems":1}]}}, ["clip_id", "at"]),
+        _tool("add_clip", "映像/画像クリップを任意の映像レーンに置く汎用配置（ナレーションの上に被せるBロール、全画面の静止画、PiP）。"
+              "lane省略=手前の空いているレーン（無ければ新規映像レーン）。映像は既定で音声無し(with_audio=trueでリンク音声も置く)。"
+              "speedで早回し。position で表示枠。fit=contain既定。",
+              {"asset_id": _STR, "timeline_start": _NUM, "duration": _NUM, "source_start": _NUM,
+               "lane": _VISUAL_LANE, "fit": _STR, "position": {"type": "object"}, "speed": _NUM,
+               "with_audio": {"type": "boolean"}, "volume": _NUM},
+              ["asset_id", "timeline_start", "duration"]),
+        _tool("generate_speech", "Qwen3-TTSはユーザー指定により停止中。このツールは新しい音声を生成しない。既存の音声素材を利用するか、許可された別の音声生成手段を選ぶ。"
+              "wavを部屋の素材として登録し asset_id と長さを返す→add_audioで置く。textは表示用の正しい表記で書き、"
+              "読み間違いそうな語は readings={'車検証':'しゃけんしょう'} で読みを指定（既定辞書あり）。voice省略=owner。",
+              {"text": _STR, "voice": _STR, "readings": {"type": "object"}, "name": _STR}, ["text"]),
+        _tool("auto_captions", "全文字幕: segments=[{t0,t1,text}] に『その範囲で話している正確な台本』を渡すと、"
+              "発話の単語時刻に合わせて24文字以下に分割した字幕クリップを置く（範囲内の既存字幕は置き換え）。"
+              "台本はテロップに出したい表記そのもの。音声を文字起こしするので1分の範囲で約30〜60秒かかる。",
+              {"segments": {"type": "array", "items": {"type": "object"}}, "style": {"type": "object"},
+               "replace": {"type": "boolean"}}, ["segments"]),
+        _tool("watch_render", "指定範囲を『合成後の完成映像として』書き出してGeminiに視聴させる（ぼかし・枠・字幕・重ね全部込み、音声込み）。"
+              "watch_videoは素材だけを見るが、こちらは視聴者が見るものそのもの。仕上がり検品に使う。1分の範囲で約1〜2分。",
+              {"t0": _NUM, "t1": _NUM, "question": _STR}, ["t0", "t1"]),
     ]
+
+
+from app.services.timeline_operations import resolve_results as _resolve_batch_results
+
+
+from app.services.timeline_operations import split_at_times as _split_at_times
 
 
 def _ok(payload) -> list[types.TextContent]:
@@ -159,13 +288,37 @@ def _ok(payload) -> list[types.TextContent]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list:
     global _calls, _generations
+    from app.services import editor_job_updates
+    updates=editor_job_updates.receive(ROOM_ID,JOB_ID) if JOB_ID else []
+    if updates:
+        with _draft_lock:
+            draft=_load()
+            if draft.get('edit_scope') is not None:
+                from app.services.timeline_scope import make_scope
+                ids=list(draft['edit_scope']['clip_ids'])+[i for u in updates for i in u.get('clip_ids',[])]
+                draft['edit_scope']=make_scope(draft['base_sequence'],ids)
+                td.save_draft(draft)
+        return _ok({'ok':False,'instruction_updated':True,'updates':updates,
+                    'note':'ユーザーから進行中の仕事への訂正です。今回のツールはまだ実行していません。最新の条件に計画を更新してから必要な操作を呼び直してください。指定サービスを勝手に代替しないでください。'})
     _calls += 1
-    if _calls > MAX_TOOL_CALLS:
+    if MAX_TOOL_CALLS > 0 and _calls > MAX_TOOL_CALLS and name not in {'validate_draft','report_result','timeline_outline','editor_state','conversation_history','watch_render','render_frame','probe_audio'}:
         return _ok({"ok": False, "error": f"tool call limit ({MAX_TOOL_CALLS}) reached — validate and finish"})
+    from app.services import editor_activity
+    operation=editor_activity.start(ROOM_ID,JOB_ID,name,arguments or {})
     try:
-        return await _dispatch(name, arguments or {})
+        result=await _dispatch(name, arguments or {}) if name=='ask_user' else await asyncio.to_thread(_run_tool_thread,name,arguments or {})
+        payload={}
+        for block in result:
+            if getattr(block,'type',None)=='text':
+                try:payload=json.loads(block.text)
+                except ValueError:continue
+                if isinstance(payload,dict) and payload.get('ok') is False:break
+        failed=isinstance(payload,dict) and payload.get('ok') is False
+        editor_activity.finish(operation,failed,payload.get('error','') if isinstance(payload,dict) else '')
+        return result
     except Exception as exc:  # noqa: BLE001 — the model must see the failure, not a dead pipe
         logger.exception("tool %s failed", name)
+        editor_activity.finish(operation,True,str(exc))
         return _ok({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
 
@@ -174,6 +327,96 @@ async def _dispatch(name: str, a: dict) -> list:
     draft = _load()
     seq = draft["sequence"]
     assets = _assets()
+    if name in {'add_clip', 'add_caption', 'add_region'} and a.get('lane') == 'front':
+        a = {**a, 'lane': len(seq.get('tracks', []))}
+    if name == 'prepare_motion_project':
+        from app.services.editor_motion_project import prepare
+        source = a.get('project_dir')
+        if a.get('asset_id'):
+            source = ((assets.get(a['asset_id']) or {}).get('metadata') or {}).get('motion_source', {}).get('project_dir')
+            if not source:
+                return _ok({'ok':False,'error':'この素材には編集可能な映像プロジェクトが保存されていません'})
+        return _ok(prepare(_room_dir(), source, bool(a.get('template'))))
+    if name == 'render_motion_project':
+        from app.services.editor_motion_project import render
+        output, provenance = render(_room_dir(), a['project_dir'], _ffmpeg())
+        result = _import_media(draft, str(output), a.get('name') or 'Editable motion')
+        if result.get('ok'):
+            with td.ContentsLock(ROOM_ID):
+                p = _room_dir() / 'assets.json'
+                rows = json.loads(p.read_text(encoding='utf-8'))
+                for row in rows:
+                    if row['id'] == result['asset_id']:
+                        row.setdefault('metadata', {})['motion_source'] = provenance
+                p.write_text(json.dumps(rows, ensure_ascii=False), encoding='utf-8')
+            result['motion_source'] = provenance
+            result['note'] = '元コードを保存済み。新規はadd_clip、対象場面の更新はset_clip_props(asset_id)。別場面・画面比率を変更せず、配置後の実物を確認する。'
+        return _ok(result)
+    if name=='apply_edits':
+        allowed={'animate_clip','add_caption','set_clip','add_region','set_region','set_clip_props','add_clip','append_clip','insert_clip','remove_clip','trim_clip','move_clip','add_overlay','insert_freeze','add_audio','split_clip'}
+        operations=a.get('operations')
+        if not isinstance(operations,list) or not 1<=len(operations)<=100 or any(not isinstance(op,dict) or op.get('name') not in allowed or not isinstance(op.get('args'),dict) for op in operations):
+            return _ok({'ok':False,'error':'タイムラインの編集操作を1〜100件指定してください。生成・保存・外部操作は含められません。'})
+        results=[]
+        try:
+            for op in operations:
+                result=await _dispatch(op['name'],_resolve_batch_results(op['args'], results))
+                value=json.loads(result[0].text)
+                if not value.get('ok'):
+                    td.save_draft(draft)
+                    return _ok({'ok':False,'rolled_back':True,'failed_operation':len(results),'error':value.get('error',str(value))})
+                results.append(value)
+        except Exception as exc:
+            td.save_draft(draft)
+            return _ok({'ok':False,'rolled_back':True,'failed_operation':len(results),'error':str(exc)})
+        return _ok({'ok':True,'results':results})
+    if name=='production_methods':
+        from app.services.editor_methods import read
+        return _ok(read(a.get('method_id')))
+    if name=='animate_clip':
+        from app.services.timeline_motion import animate
+        result=animate(seq,assets,a['clip_id'],a['poses'],a.get('easing','cubic_out'))
+        if result.get('ok'):
+            draft.setdefault('log',[]).append({'t':time.time(),'tool':name,'args':a})
+            td.save_draft(draft)
+        return _ok(result)
+    if name=='search_web_references':
+        from app.services.editor_reference_search import search_web
+        return _ok(await search_web(a.get('queries')))
+    if name in {'resolve_reference','read_references','analyze_reference'}:
+        from app.services import editor_references as refs
+        if name=='resolve_reference':
+            return _ok(refs.resolve(ROOM_ID,draft['content_id'],a['source']))
+        if name=='read_references':
+            return _ok(refs.read(ROOM_ID,draft['content_id'],a.get('reference_id')))
+        return _ok(refs.analyze(ROOM_ID,draft['content_id'],a['reference_id'],a.get('question','表現・構成・音・制作方法を分析してください')))
+    if name=='editor_help':
+        from app.services.editor_help import read
+        return _ok(read(a.get('topic','operations')))
+    if name=='present_references':
+        from app.services.editor_presentation import present
+        return _ok(present(ROOM_ID,draft['content_id'],a.get('items')))
+    if name=='ask_user':
+        from app.services import editor_questions
+        return _ok(await editor_questions.ask(ROOM_ID,JOB_ID,str(a['question'])))
+    if name=='report_result':
+        if a.get('outcome') not in {'achieved','needs_user','blocked'}:raise ValueError('Invalid outcome')
+        draft['outcome']={'state':a['outcome'],'summary':str(a['summary'])}
+        td.save_draft(draft)
+        return _ok({'ok':True})
+    if name=='read_project_chat':
+        from app.services.supabase_client import get_supabase_client
+        rows=get_supabase_client().client.table('chat_messages').select('sender_type,content,created_at').eq('room_id',ROOM_ID).order('created_at',desc=True).limit(max(1,min(int(a.get('limit',15)),50))).execute().data
+        return _ok({'messages':list(reversed(rows or []))})
+    if name=='conversation_history':
+        from app.services import editor_project
+        return _ok({'ok':True,**editor_project.dialogue(ROOM_ID,draft['content_id'],a.get('limit',30),a.get('before'))})
+
+    if name == 'check_skill':
+        from app.agent.v2.tools import SkillRegistry
+        if a.get('name'):
+            return _ok({'text': SkillRegistry.get_prompt(str(a['name']))})
+        return _ok({'skills': [{'name': s.name, 'description': s.description} for s in SkillRegistry.list_all()]})
 
     if name == "timeline_outline":
         return [types.TextContent(type="text", text=tcx.timeline_outline(seq, assets))]
@@ -188,8 +431,17 @@ async def _dispatch(name: str, a: dict) -> list:
             gp = str(meta.get("prompt") or "").replace("\n", " ")
             rows.append(f"{aid}: {a.get('filename')} kind={a.get('kind')}"
                         + (f" duration={dur}s" if dur else "")
-                        + (f" 生成元プロンプト=「{gp[:120]}」" if gp else ""))
+                        + (f" 生成元プロンプト=「{gp[:120]}」" if gp else "")
+                        + (' 編集元あり: prepare_motion_project(asset_id)で再編集' if meta.get('motion_source') else ''))
         return [types.TextContent(type="text", text="\n".join(rows) or "(no assets)")]
+
+    if name == 'measure_speech':
+        from app.services.editor_workflows import measured_words
+        start,end=float(a['start']),float(a['end'])
+        if not 0<=start<end<=float(seq.get('duration',0))+.01:
+            return _ok({'ok':False,'error':'invalid range'})
+        words,evidence=measured_words(ROOM_ID,seq,start,end)
+        return _ok({'ok':True,'words':words,'evidence':evidence})
 
     if name == "timeline_transcript":
         analyses = _load_analyses(assets)
@@ -198,6 +450,9 @@ async def _dispatch(name: str, a: dict) -> list:
             return _ok({"ok": True, "transcript": [], "note": "no speech analysis available"})
         text = "\n".join(f"[{r['t0']:.1f}-{r['t1']:.1f}s] {r['text']}" for r in rows)
         return [types.TextContent(type="text", text=text)]
+
+    if name == 'probe_audio':
+        return _ok(tcx.probe_timeline_audio(seq, str(_room_dir()), float(a['t0']), float(a['t1'])))
 
     if name == "render_frame":
         ts = [float(v) for v in a.get("ts") or [] if isinstance(v, (int, float))][:8]
@@ -211,38 +466,69 @@ async def _dispatch(name: str, a: dict) -> list:
             return _ok(res)
         out: list = []
         for t, p in zip(ts, res["paths"]):
-            out.append(types.TextContent(type="text", text=f"composited frame at t={t:.2f}s"))
+            out.append(types.TextContent(type="text", text=json.dumps({
+                'time':t,'composited_frame_path':str(p),
+                'active_caption_clips':[{'id':c.get('id'),'text':c['text']}
+                    for track in seq.get('tracks',[]) for c in track.get('clips',[])
+                    if c.get('text') and float(c.get('timeline_start',0))<=t<float(c.get('timeline_end',0))],
+                'note':'字幕一覧はタイムライン上の情報。実際の表示は添付画像で確認。不一致が疑わしい場合はこの画像ファイルを直接開いて再確認できます。'
+            },ensure_ascii=False)))
             out.append(types.ImageContent(type="image", data=_frame_b64(Path(p)), mimeType="image/png"))
         return out
 
     if name == "validate_draft":
         problems = tc.validate_sequence(seq, assets, asset_dir=str(_room_dir()))
+        if draft.get('base_sequence') is not None:
+            from app.services.timeline_scope import violations
+            problems += violations(draft['base_sequence'], seq, draft.get('edit_scope'))
         baseline = set(draft.get("baseline_problems") or [])
         fresh = [p for p in problems if p not in baseline]
         return _ok({"ok": not fresh, "problems": fresh,
                     **({"note": f"既存タイムライン由来の問題{len(problems) - len(fresh)}件は無視されます"}
                        if len(problems) != len(fresh) else {})})
 
+    if name == 'match_source_audio':
+        from app.services.source_alignment import locate
+        return _ok(locate(ROOM_ID,a['reference_asset_id'],a['candidate_asset_id'],a['times'],float(a.get('window',2))))
     if name == "generate_image":
-        if _generations >= MAX_GENERATIONS:
+        if str(a.get("model") or "gpt_image_2") not in {"gpt_image_2","gpt-image-2"}:
+            return _ok({"ok":False,"error":"現在の制作予算では画像生成はGPT Image 2のみです。既存素材・図形・文字も使えます。"})
+        if MAX_GENERATIONS and _generations >= MAX_GENERATIONS:
             return _ok({"ok": False, "error": f"generation limit ({MAX_GENERATIONS}) reached"})
         _generations += 1
-        return _ok(_generate_image(draft, str(a.get("prompt") or ""), str(a.get("aspect_ratio") or "9:16")))
+        return _ok(_generate_image(draft, str(a.get("prompt") or ""), str(a.get("aspect_ratio") or seq.get('format') or "16:9"), a.get('reference_asset_ids') or [], 'gpt_image_2'))
 
     if name == "generate_video":
-        if _generations >= MAX_GENERATIONS:
-            return _ok({"ok": False, "error": f"generation limit ({MAX_GENERATIONS}) reached"})
+        if MAX_GENERATIONS and _generations >= MAX_GENERATIONS:
+            return _ok({"ok": False, "error": "Generation limit reached for this job"})
+        provider = a.get('provider', 'google')
+        fmt = seq.get('format', '16:9')
+        default_aspect = fmt if isinstance(fmt, str) else ('9:16' if float(fmt.get('height',720)) > float(fmt.get('width',1280)) else '16:9')
+        aspect = a.get('aspect_ratio') or default_aspect
+        if provider == 'google':
+            from app.services import google_video
+            if a.get('model') not in (None, '', google_video.MODEL, 'gemini_omni_flash_1_1'):
+                return _ok({'ok':False,'error':'Google direct uses gemini-omni-1.1-flash; choose the requested provider explicitly'})
+            _generations += 1
+            result = google_video.generate(_room_dir(), str(a['prompt']), aspect,
+                float(a.get('duration',5)), str(a.get('reference_path','')),
+                str(a.get('reference_mode','style')), str(a.get('resolution','720p')))
+            aid = uuid.uuid4().hex[:12]
+            # Draft cleanup owns only its asset copy, never the durable provider
+            # output shared by later retries or other drafts. No re-encoding.
+            dest = _room_dir() / f'google_{aid}.mp4'
+            shutil.copyfile(result['path'], dest)
+            result = {**result, 'path': str(dest)}
+            _register_media_asset(draft, aid, dest, 'video',
+                filename_hint='Google Omni video', metadata=result['metadata'])
+            return _ok({'ok':True,'asset_id':aid,**result,
+                'note':'Place this asset in the timeline; generation alone does not update the editor.'})
+        if provider != 'higgsfield':
+            return _ok({'ok':False,'error':'Unknown video provider'})
         _generations += 1
-        return _ok(_generate_video(
-            draft,
-            prompt=str(a.get("prompt") or ""),
-            aspect=str(a.get("aspect_ratio") or "9:16"),
-            duration=float(a.get("duration") or 5),
-            model=str(a.get("model") or "seedance_2_0"),
-            reference_path=str(a.get("reference_path") or ""),
-            resolution=str(a.get("resolution") or "720p"),
-        ))
-
+        return _ok(_generate_video(draft, str(a['prompt']), aspect, float(a.get('duration',5)),
+            str(a.get('model','gemini_omni_flash_1_1')),str(a.get('reference_path','')),
+            str(a.get('resolution','720p'))))
     if name == "import_image":
         return _ok(_import_image(draft, str(a.get("url") or ""), str(a.get("name") or "")))
 
@@ -256,8 +542,63 @@ async def _dispatch(name: str, a: dict) -> list:
         return _ok(_watch_video(seq, assets, float(a["t0"]), float(a["t1"]),
                                 str(a.get("question") or "")))
 
+    if name == "watch_render":
+        return _ok(_watch_render(seq, float(a["t0"]), float(a["t1"]), str(a.get("question") or "")))
+
+    if name == "editor_state":
+        return _ok(_editor_state(seq, assets))
+
+    if name == "clips_at":
+        return _ok({"ok": True, "t": float(a["t"]), "clips": tc.clips_at(seq, assets, t=float(a["t"]))})
+
+    if name == "generate_speech":
+        return _ok(_generate_speech(draft, str(a.get("text") or ""), str(a.get("voice") or "owner"),
+                                    a.get("readings") if isinstance(a.get("readings"), dict) else None,
+                                    str(a.get("name") or "")))
+
+    if name == "auto_captions":
+        segs = [s for s in (a.get("segments") or []) if isinstance(s, dict)]
+        res = _auto_captions(draft, seq, assets, segs,
+                             a.get("style") if isinstance(a.get("style"), dict) else None,
+                             bool(a.get("replace", True)))
+        return _ok(res)
+
     # ---- mutating commands on the draft ----
     cmd = {
+        "add_region": lambda: tc.add_region(seq, timeline_start=float(a["timeline_start"]),
+                                            timeline_end=float(a["timeline_end"]),
+                                            x=float(a["x"]), y=float(a["y"]),
+                                            width=float(a["width"]), height=float(a["height"]),
+                                            style=str(a.get("style") or "gaussian"),
+                                            strength=(float(a["strength"]) if a.get("strength") is not None else None),
+                                            color=(str(a["color"]) if a.get("color") else None),
+                                            opacity=(float(a["opacity"]) if a.get("opacity") is not None else None),
+                                            rotation=(float(a["rotation"]) if a.get("rotation") is not None else None),
+                                            keys=a.get("keys"),
+                                            lane=(int(a["lane"]) if a.get("lane") is not None else None)),
+        "set_region": lambda: tc.set_region(seq, clip_id=str(a["clip_id"]),
+                                            x=(float(a["x"]) if a.get("x") is not None else None),
+                                            y=(float(a["y"]) if a.get("y") is not None else None),
+                                            width=(float(a["width"]) if a.get("width") is not None else None),
+                                            height=(float(a["height"]) if a.get("height") is not None else None),
+                                            style=(str(a["style"]) if a.get("style") else None),
+                                            strength=(float(a["strength"]) if a.get("strength") is not None else None),
+                                            color=(str(a["color"]) if a.get("color") else None),
+                                            opacity=(float(a["opacity"]) if a.get("opacity") is not None else None),
+                                            rotation=(float(a["rotation"]) if a.get("rotation") is not None else None),
+                                            keys=a.get("keys"), clear_keys=bool(a.get("clear_keys", False))),
+        "set_clip_props": lambda: tc.set_clip_props(seq, assets, clip_id=str(a["clip_id"]),
+                                                    props=a.get("props") if isinstance(a.get("props"), dict) else {}),
+        "split_clip": lambda: _split_at_times(seq, str(a['clip_id']), a['at']),
+        "add_clip": lambda: tc.add_clip(seq, assets, asset_id=str(a["asset_id"]),
+                                        timeline_start=float(a["timeline_start"]), duration=float(a["duration"]),
+                                        source_start=float(a.get("source_start") or 0),
+                                        lane=(int(a["lane"]) if a.get("lane") is not None else None),
+                                        fit=str(a.get("fit") or "contain"),
+                                        position=a.get("position") if isinstance(a.get("position"), dict) else None,
+                                        speed=float(a.get("speed") or 1.0),
+                                        with_audio=bool(a.get("with_audio", False)),
+                                        volume=float(a.get("volume") if a.get("volume") is not None else 1.0)),
         "append_clip": lambda: tc.append_clip(seq, assets, asset_id=str(a["asset_id"]),
                                               source_start=float(a.get("source_start") or 0),
                                               duration=float(a["duration"]),
@@ -280,6 +621,7 @@ async def _dispatch(name: str, a: dict) -> list:
         "add_caption": lambda: tc.add_caption(seq, text=str(a.get("text") or ""),
                                               timeline_start=float(a["timeline_start"]),
                                               timeline_end=float(a["timeline_end"]),
+                                              lane=(int(a["lane"]) if a.get("lane") is not None else None),
                                               style=a.get("style") if isinstance(a.get("style"), dict) else None),
         "insert_freeze": lambda: tc.insert_freeze(seq, assets, source_clip_id=str(a["source_clip_id"]),
                                                   at_source_time=(float(a["at_source_time"]) if a.get("at_source_time") is not None else None),
@@ -419,41 +761,93 @@ def _higgsfield_cli() -> str:
     return "higgsfield"
 
 
-def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
+def _higgsfield_command():
+    cli = Path(_higgsfield_cli())
+    if cli.suffix.lower() in {'.cmd','.ps1'}:
+        entry=cli.parent/'node_modules/@higgsfield/cli/bin/higgsfield.js'
+        if entry.is_file():return [shutil.which('node') or 'node',str(entry)]
+        raise RuntimeError('Higgsfield CLI entry point missing')
+    return [str(cli)]
+
+
+def _generated_image_url(value):
+    if isinstance(value,list):
+        return next((url for item in value if (url:=_generated_image_url(item))),None)
+    if isinstance(value,dict):
+        for key in ('results','result','outputs','output','images','image','result_url','image_url','download_url','url'):
+            item=value.get(key)
+            if isinstance(item,str) and item.startswith(('https://','http://')) and key in {'result_url','download_url','image_url','url','image'}:
+                return item
+            if isinstance(item,(list,dict)):
+                found=_generated_image_url(item)
+                if found:return found
+        for key,item in value.items():
+            if key not in {'params','parameters','input','inputs','medias','references','thumbnail','thumbnail_url'} and isinstance(item,(dict,list)):
+                found=_generated_image_url(item)
+                if found:return found
+    return None
+
+
+def _generate_image(draft: dict, prompt: str, aspect: str, reference_asset_ids=None, model='gpt_image_2') -> dict:
     prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
     if not prompt:
         return {"ok": False, "error": "empty prompt"}
+    references=[]
+    for aid in reference_asset_ids or []:
+        a=_assets().get(aid,{})
+        path=Path(a.get('local_path') or '')
+        if not path.is_file() or path.suffix.lower() not in {'.png','.jpg','.jpeg','.webp'}:
+            return {'ok':False,'error':f'Reference image missing: {aid}'}
+        references += ['--image',str(path)]
+    from datetime import datetime, timezone
+    event_path=_room_dir()/'jobs'/JOB_ID/'events.jsonl'
+    event_path.parent.mkdir(parents=True,exist_ok=True)
+    with event_path.open('a',encoding='utf-8') as f:
+        f.write(json.dumps({'created_at':datetime.now(timezone.utc).isoformat(),'type':'generation','model':model,
+                           'text':f'{model}で画像を生成しています（参照画像{len(reference_asset_ids or [])}枚）'},ensure_ascii=False)+'\n')
     try:
         r = subprocess.run(
-            [_higgsfield_cli(), "generate", "create", "gpt_image_2",
+            _higgsfield_command() + ["generate", "create", model,
              "--prompt", prompt, "--aspect_ratio", aspect,
-             "--wait", "--wait-timeout", "10m", "--json"],
+             "--wait", "--wait-timeout", "10m", "--json"] + references,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=660, shell=True,
+            timeout=660, shell=False, creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "image generation timeout (11m)"}
     out = (r.stdout or "") + (r.stderr or "")
-    urls = re.findall(r"https?://[^\s\"']+\.(?:png|jpg|jpeg|webp)[^\s\"']*", out)
-    if not urls:
+    (event_path.parent/f'generation-{int(time.time())}.json').write_text(r.stdout or '',encoding='utf-8')
+    try:
+        url=_generated_image_url(json.loads(r.stdout)) if r.returncode==0 else None
+    except ValueError:
+        url=None
+    if not url:
         return {"ok": False, "error": f"no result url in generator output: {out[-400:]}"}
     aid = uuid.uuid4().hex[:12]
     dest = _room_dir() / f"gen_{aid}.png"
     try:
-        urllib.request.urlretrieve(urls[0], dest)
+        urllib.request.urlretrieve(url, dest)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"download failed: {exc}"}
-    _register_image_asset(draft, aid, dest, "generated")
-    return {"ok": True, "asset_id": aid, "path": str(dest), "note": "add_overlay / append_clip でタイムラインに配置できます"}
+    provenance={'model':model,'prompt':prompt,'aspect_ratio':aspect,'reference_asset_ids':reference_asset_ids or []}
+    _register_image_asset(draft, aid, dest, "generated",metadata=provenance)
+    return {"ok": True, "asset_id": aid, "path": str(dest), 'provenance':provenance, "note": "add_overlay / append_clip でタイムラインに配置できます"}
 
 
 def _find_generated_video_url(payload: object) -> str | None:
-    """Find a downloadable video URL without depending on one CLI response shape."""
+    """Read output media only; input references and thumbnails are not results."""
     if isinstance(payload, dict):
-        for key, value in payload.items():
-            if key.lower() in {"url", "video_url", "download_url"} and isinstance(value, str):
-                if value.startswith(("https://", "http://")):
+        if str(payload.get('status', '')).lower() in {'queued', 'pending', 'processing', 'failed'}:
+            return None
+        for key in ('result_url', 'video_url', 'download_url', 'url'):
+            value = payload.get(key)
+            if isinstance(value, str) and value.startswith(('https://', 'http://')):
+                path = value.split('?', 1)[0].lower()
+                if not path.endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
                     return value
+        for key, value in payload.items():
+            if key.lower() in {'params', 'input', 'inputs', 'medias', 'thumbnail', 'thumbnails', 'preview', 'reference', 'references'}:
+                continue
             found = _find_generated_video_url(value)
             if found:
                 return found
@@ -475,7 +869,7 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     prompt = " ".join(prompt.split())  # 改行入り引数は.cmdシムで後続引数ごと切断される
     if not prompt:
         return {"ok": False, "error": "empty prompt"}
-    supported_models = {"seedance_2_5", "seedance_2_0", "kling3_0", "gemini_omni"}
+    supported_models = {"seedance_2_5", "seedance_2_0", "kling3_0", "gemini_omni", "gemini_omni_flash_1_1"}
     if model not in supported_models:
         return {"ok": False, "error": f"unsupported Higgsfield video model: {model}"}
     if aspect not in {"16:9", "9:16", "4:3", "3:4", "1:1", "21:9", "auto"}:
@@ -493,7 +887,7 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
         clip_duration = max(2, min(10, want))
     else:
         clip_duration = min(15, want)
-    cmd = [_higgsfield_cli(), "generate", "create", model, "--prompt", prompt,
+    cmd = _higgsfield_command() + ["generate", "create", model, "--prompt", prompt,
            "--duration", str(clip_duration), "--wait", "--wait-timeout", "20m", "--json"]
     if model == "seedance_2_5":
         # width/heightだけだと既定aspect(16:9)がサーバー側で勝つ — 両方渡す(実測)
@@ -502,10 +896,15 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
         dims = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}[aspect]
         cmd += ["--width", str(dims[0]), "--height", str(dims[1]), "--aspect_ratio", aspect,
                 "--resolution", "720p", "--generate_audio", "true"]
-    elif model == "gemini_omni":
+    elif model in {"gemini_omni","gemini_omni_flash_1_1"}:
         if aspect not in {"16:9", "9:16"}:
             return {"ok": False, "error": "gemini_omni supports only 16:9 or 9:16"}
         cmd += ["--aspect_ratio", aspect]
+        if model=='gemini_omni_flash_1_1':
+            h={'480p':720,'720p':720,'1080p':1080,'4k':2160}[resolution]
+            dims=(int(h*16/9),h) if aspect=='16:9' else (h,int(h*16/9))
+            cmd += ['--width',str(dims[0]),'--height',str(dims[1]),'--resolution',resolution if resolution!='480p' else '720p',
+                    '--mode','image-to-video' if reference_path else 'text-to-video']
     else:
         cmd += ["--aspect_ratio", aspect]
     if model == "seedance_2_0":
@@ -540,9 +939,6 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
     except json.JSONDecodeError:
         url = None
     if not url:
-        candidates = re.findall(r"https?://[^\s\"']+", (result.stdout or "") + "\n" + (result.stderr or ""))
-        url = next((candidate for candidate in candidates if ".mp4" in candidate.lower()), None)
-    if not url:
         return {"ok": False, "error": "Higgsfield returned no downloadable video URL"}
 
     aid = uuid.uuid4().hex[:12]
@@ -562,8 +958,10 @@ def _generate_video(draft: dict, prompt: str, aspect: str, duration: float,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         meta["duration"] = float((json.loads(probe.stdout).get("format") or {}).get("duration") or 0)
-    except Exception:
-        pass
+        if probe.returncode or meta['duration'] <= 0:
+            return {'ok': False, 'error': '生成結果を動画として読み取れません。再生成せず、出力URLとファイル形式を確認してください。'}
+    except Exception as exc:
+        return {'ok': False, 'error': f'生成動画の検証に失敗しました: {exc}'}
     _register_media_asset(draft, aid, dest, "video", filename_hint=f"Higgsfield {model} clip", metadata=meta)
     return {"ok": True, "asset_id": aid, "kind": "video", "path": str(dest), "metadata": meta,
             "note": "Generated clip is ready. Place it with append_clip, insert_clip, or add_overlay."}
@@ -612,37 +1010,10 @@ def _import_image(draft: dict, url: str, name: str) -> dict:
 
 
 def _import_media(draft: dict, path: str, name: str) -> dict:
-    """Promote a media file produced or obtained by the general Dan toolset into
-    a room asset.  This is intentionally media-generic rather than a BGM feature."""
-    src = Path(path).expanduser()
-    if not src.is_file():
-        return {"ok": False, "error": f"media file not found: {path}"}
-    suffix = src.suffix.lower()
-    audio_exts = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"}
-    video_exts = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
-    kind = "audio" if suffix in audio_exts else "video" if suffix in video_exts else ""
-    if not kind:
-        return {"ok": False, "error": f"unsupported media extension: {suffix or '(none)'}"}
-    aid = uuid.uuid4().hex[:12]
-    dest = _room_dir() / f"agent_{aid}{suffix}"
-    try:
-        shutil.copy2(src, dest)
-    except OSError as exc:
-        return {"ok": False, "error": f"copy failed: {exc}"}
-    meta: dict = {}
-    try:
-        probe = subprocess.run(
-            [_ffprobe(), "-v", "error", "-show_entries",
-             "format=duration", "-of", "json", str(dest)],
-            capture_output=True, text=True, timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        meta["duration"] = float((json.loads(probe.stdout).get("format") or {}).get("duration") or 0)
-    except Exception:
-        pass
-    _register_media_asset(draft, aid, dest, kind, filename_hint=name, metadata=meta)
-    return {"ok": True, "asset_id": aid, "kind": kind, "path": str(dest), "metadata": meta,
-            "note": "use add_audio for audio, or append_clip/insert_clip for video"}
+    from app.services.editor_media import import_media
+    result=import_media(ROOM_ID,path,name,origin=f'agent:{JOB_ID}')
+    if result.get('ok'):_track_asset(draft,result['asset_id'])
+    return result
 
 
 def _ffmpeg() -> str:
@@ -682,6 +1053,112 @@ def _export_timeline(draft: dict) -> dict:
     if not result:
         return {"ok": False, "error": "timeline has no renderable base video clips"}
     return {"ok": True, **result, "note": "export is a reusable room asset"}
+
+
+def _editor_state(seq: dict, assets: dict) -> dict:
+    """What the user's editor shows right now (playhead / selection) + the clips under
+    the playhead, so 'here' and 'this' resolve without guessing."""
+    p = _room_dir() / "editor_state.json"
+    try:
+        st = p.stat()
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"ok": True, "open": False, "note": "エディタは開いていない（または状態が未公開）。時刻はユーザーの言葉から決める"}
+    age = time.time() - st.st_mtime
+    if age > 900:
+        return {"ok": True, "open": False, "note": f"エディタの状態が古い（{age / 60:.0f}分前）"}
+    same = str(data.get("content_id") or "") == CONTENT_ID
+    out = {"ok": True, "open": True, "same_content": same, "playhead": data.get("playhead"),
+           "playing": data.get("playing"), "selected": data.get("selected") or [], "age_s": round(age, 1)}
+    if not same:
+        out["note"] = f"エディタは別のコンテンツ({data.get('content_id')})を開いている。この作業対象は {CONTENT_ID}"
+    try:
+        t = float(data.get("playhead") or 0)
+        out["clips_under_playhead"] = tc.clips_at(seq, assets, t=t)
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def _generate_speech(draft: dict, text: str, voice: str, readings: dict | None, name: str) -> dict:
+    """Cloned-voice narration → wav asset in the room (GPU-serialized subprocess)."""
+    text = text.strip()
+    if not text:
+        return {"ok": False, "error": "text required"}
+    from app.services import timeline_speech as tsp
+
+    aid = uuid.uuid4().hex[:12]
+    dest = _room_dir() / f"agent_{aid}.wav"
+    res = tsp.synthesize(text, dest, voice=voice, readings=readings)
+    if not res.get("ok"):
+        return res
+    meta = {"duration": float(res.get("duration") or 0), "text": text, "spoken": res.get("spoken"), "voice": voice}
+    meta.update({k:res[k] for k in ('backend','pod_id','seconds','transfer_included_seconds') if res.get(k) is not None})
+    _register_media_asset(draft, aid, dest, "audio", filename_hint=(name.strip() or text[:20]) + ".wav", metadata=meta)
+    return {"ok": True, "asset_id": aid, "duration": meta["duration"], "spoken": res.get("spoken"),
+            "seconds": res.get("seconds"), "gpu_wait": res.get("gpu_wait"),
+            "backend":res.get('backend'), "pod_id":res.get('pod_id'),
+            "note": "add_audio(asset_id, duration, at, volume=1.0, role='narration') で置く"}
+
+
+def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: dict | None, replace: bool) -> dict:
+    from app.services import timeline_captions as cap
+
+    if not segments:
+        return {"ok": False, "error": "segments=[{t0,t1,text}] が必要"}
+    work = _room_dir() / "drafts" / f"cap_{draft['draft_id']}"
+    res = cap.auto_captions(seq, assets, work, segments, style=style, replace=replace)
+    if not res.get("ok"):
+        return res
+    draft.setdefault("log", []).append({"t": time.time(), "tool": "auto_captions", "args": {"segments": len(segments)}})
+    td.save_draft(draft)
+    notes = []
+    st = res.get("style")
+    for sp in res.get("specs") or []:
+        n = _ensure_caption_png(sp["text"], st if isinstance(st, dict) else None)
+        if n and n not in notes:
+            notes.append(n)
+    out = {"ok": True, "captions": res["captions"], "words_heard": res["words"],
+           "placed": [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in res.get("specs") or []]}
+    if notes:
+        out["note"] = notes[0]
+    return out
+
+
+def _watch_render(seq: dict, t0: float, t1: float, question: str) -> dict:
+    """Export [t0,t1] of the DRAFT with the preview-parity native compositor (blur, frames,
+    captions, overlays, audio) and let Gemini watch the result — the viewer's truth."""
+    if t1 <= t0:
+        return {"ok": False, "error": "t1 must be > t0"}
+    if t1 - t0 > 120:
+        return {"ok": False, "error": "範囲が長すぎます（最大120秒）。要点に絞って複数回に分けてください"}
+    if not CONTENT_ID:
+        return {"ok": False, "error": "no content context"}
+    from app.api.production_asset_routes import _render_sequence_job
+
+    export_id = f"{JOB_ID}_watch_{uuid.uuid4().hex[:6]}"
+    export_dir = _room_dir() / "jobs" / export_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+    instruction = {"timeline": {"sequence": json.loads(json.dumps(seq))},
+                   "export_ranges": [[round(t0, 3), round(t1, 3)]], "no_register": True}
+    try:
+        result = _render_sequence_job(ROOM_ID, export_id, CONTENT_ID, instruction, export_dir)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"render failed: {exc}"}
+    path = (result or {}).get("output_path")
+    if not path or not Path(path).exists():
+        return {"ok": False, "error": "render produced no file"}
+    from app.services.video_analyzer import _analyze_file_sync
+
+    prompt = (f"これは完成映像の {t0:.1f}秒〜{t1:.1f}秒 を書き出したものです（字幕・ぼかし・枠・重ねはすべて反映済み）。"
+              f"時刻はこの切り出し内の相対秒で述べてください。\n\n"
+              + (question or "字幕と発話のタイミングのずれ、隠すべき情報（ナンバー・番号・社名）の露出、"
+                             "音の切れ・不自然な繋ぎ、絵と話の食い違いを、時刻つきで列挙してください。問題が無ければ無いと言ってください。"))
+    text = _analyze_file_sync(str(path), prompt)
+    if not text:
+        return {"ok": False, "error": "Gemini returned empty response"}
+    return {"ok": True, "t0": t0, "t1": t1, "answer": text, "file": str(path),
+            "note": "answer内の時刻は範囲先頭からの相対秒"}
 
 
 def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -> dict:
@@ -779,7 +1256,7 @@ def _media_dims(path: Path) -> dict:
 
 
 def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
-                          filename_hint: str = "") -> None:
+                          filename_hint: str = "", metadata: dict | None = None) -> None:
     with td.ContentsLock(ROOM_ID):
         p = _room_dir() / "assets.json"
         data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
@@ -793,12 +1270,12 @@ def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
             "local_path": str(dest.resolve()), "filename": filename_hint or dest.name,
             "proxy_path": None, "proxy_url": None,
             "thumbnail_path": None, "thumbnail_url": None,
-            "status": "proxy_ready", "metadata": _media_dims(dest),
+            "status": "proxy_ready", "metadata": {**_media_dims(dest),**(metadata or {})},
             "created_at": now, "updated_at": now,
             "generated_by": f"agent:{JOB_ID}",
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    td.track_generated_asset(draft, aid)
+    _track_asset(draft, aid)
 
 
 def _register_media_asset(draft: dict, aid: str, dest: Path, kind: str,
@@ -818,7 +1295,7 @@ def _register_media_asset(draft: dict, aid: str, dest: Path, kind: str,
             "generated_by": f"agent:{JOB_ID}",
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    td.track_generated_asset(draft, aid)
+    _track_asset(draft, aid)
 
 
 async def main():

@@ -243,7 +243,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    return bake(build_parser().parse_args())
+    # GPU jobs are serialized: a bake launched next to a TTS job stalled both for
+    # 88 minutes (2026-09-04). The lock lives in app.services.gpu_lock.
+    try:
+        # load by file path: this venv (venv_sam3) has none of the app package's deps
+        import importlib.util
+        lock_py = Path(__file__).resolve().parents[1] / "app" / "services" / "gpu_lock.py"
+        spec = importlib.util.spec_from_file_location("gpu_lock", str(lock_py))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        GpuLock = mod.GpuLock
+    except Exception as exc:  # noqa: BLE001 — lock is best-effort when run standalone
+        print(f"[gpu-lock] unavailable ({exc}); running unserialized", file=sys.stderr)
+        return bake(build_parser().parse_args())
+    with GpuLock(label="sam3-bake"):
+        return bake(build_parser().parse_args())
 
 
 def bake(a: argparse.Namespace) -> int:

@@ -17,15 +17,45 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def probe_timeline_audio(sequence, asset_dir, t0, t1):
+    """Native decoder spot check, not a listening/quality verdict or full export."""
+    import math
+    if not all(math.isfinite(t) for t in (t0, t1)) or t0 < 0 or t1 <= t0:
+        return {'ok': False, 'error': 'Use a finite positive timeline range.'}
+    with tempfile.TemporaryDirectory(prefix='dan-audio-probe-') as folder:
+        path = Path(folder) / 'contents.json'
+        path.write_text(json.dumps([{'id': 'probe', 'timeline': {'sequence': sequence}}]), encoding='utf-8')
+        result = subprocess.run([native_exe_default(), str(path), str(asset_dir),
+            '--probe-timeline-audio', str(t0), str(t1)], capture_output=True, text=True,
+            timeout=30, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    return {'ok': result.returncode == 0, 'evidence': result.stdout.strip(),
+            'error': result.stderr[-1000:] if result.returncode else None,
+            'coverage': 'Samples up to 0.5 seconds at the start of each overlapping audio clip in the requested range. Checks native decoding and nonzero signal, not speech quality, synchronization, or the entire range.'}
+
 _NATIVE_DIR = r"D:\done-desktop\scripts\poc\production_desktop\native_ui\target\release"
 
 
 def native_exe_default() -> str:
-    """Prefer the headless copy: the editor holds native_ui.exe open (so deploys
-    can't replace it while a session runs), but native_ui_headless.exe is only used
-    by short-lived dump/validate processes and can always be updated."""
-    headless = os.path.join(_NATIVE_DIR, "native_ui_headless.exe")
-    return headless if os.path.exists(headless) else os.path.join(_NATIVE_DIR, "native_ui.exe")
+    """The SAME build the user's editor runs (deployed to ~/.done/bin) so frames the
+    agent sees, validation and export all agree with the preview. Order:
+    env DAN_NATIVE_UI_EXE → .done/bin/native_ui_headless.exe (deploy copies it so it
+    can be replaced while the editor holds native_ui.exe open) → .done/bin/native_ui.exe
+    (a running exe can still be executed a second time) → this checkout's release build
+    → the old done-desktop worktree (legacy fallback)."""
+    env = os.environ.get("DAN_NATIVE_UI_EXE") or ""
+    home_bin = os.path.join(os.path.expanduser("~"), ".done", "bin")
+    here = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "scripts", "poc", "production_desktop", "native_ui", "target", "release")
+    for cand in (env,
+                 os.path.join(home_bin, "native_ui_headless.exe"),
+                 os.path.join(home_bin, "native_ui.exe"),
+                 os.path.join(here, "native_ui.exe"),
+                 os.path.join(_NATIVE_DIR, "native_ui_headless.exe"),
+                 os.path.join(_NATIVE_DIR, "native_ui.exe")):
+        if cand and os.path.exists(cand):
+            return cand
+    return os.path.join(_NATIVE_DIR, "native_ui.exe")
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -123,25 +153,26 @@ def render_timeline_frames(sequence: dict[str, Any], asset_dir: str, ts: list[fl
     png = Path(f"{stem}.png")
     tspec = ",".join(f"{t:.3f}" for t in ts)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
-        json.dump([{"title": "draft-frame", "timeline": {"sequence": sequence}}], f, ensure_ascii=False)
+        fmt = str(sequence.get("format") or "9:16")
+        # the native canvas follows timeline.format; without it every dump is 9:16 and
+        # 16:9 timelines come back letterboxed with mis-placed regions (2026-09-04)
+        json.dump([{"title": "draft-frame", "format": fmt, "timeline": {"format": fmt, "sequence": sequence}}], f, ensure_ascii=False)
         tmp = f.name
     try:
+        from app.api.production_asset_routes import _ensure_native_caption_cache, _native_export_canvas
+        missing = _ensure_native_caption_cache('', sequence, _native_export_canvas(sequence.get('format')), asset_dir=asset_dir)
+        if missing:
+            return {'ok': False, 'error': '字幕を含む検品画像を作れませんでした。字幕キャッシュの生成に失敗しました。'}
         r = subprocess.run(
             [exe, tmp, asset_dir, "--dump-frame", tspec, str(png)],
-            capture_output=True, text=True, timeout=180 + 30 * len(ts),
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=180 + 30 * len(ts),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=dict(os.environ, NATIVE_DUMP_ALL_CAPTIONS='1'),
         )
         paths = [png] if len(ts) == 1 else [Path(f"{stem}.{k}.png") for k in range(len(ts))]
         if all(p.exists() and p.stat().st_size > 0 for p in paths):
-            # ネイティブ合成はテロップを描かない（プレビュー=Webレイヤー担当、
-            # 書き出し=ffmpeg担当）。ここで焼き込まないとエージェントの目に
-            # テロップが永遠に映らず、「表示されない」と誤解して作業が迷走する
-            # （実ジョブ2本がこれで数十分溶けた）
-            for t, p in zip(ts, paths):
-                try:
-                    _composite_captions(p, sequence, t, asset_dir)
-                except Exception:  # noqa: BLE001 — テロップ焼き込み失敗でフレーム自体は殺さない
-                    logger.exception("caption composite failed for t=%s", t)
+            # The same native compositor now owns every caption here, including
+            # animation and lane order. A second browser overlay would duplicate text.
             return {"ok": True, "paths": [str(p) for p in paths]}
         return {"ok": False, "error": (r.stdout or "")[-400:] + (r.stderr or "")[-400:]}
     except subprocess.TimeoutExpired:
@@ -160,7 +191,7 @@ def _composite_captions(frame_png: Path, sequence: dict[str, Any], t: float,
     alpha-composite it onto the dumped frame. Cached per (text,style,words[,t])."""
     active: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if track.get("type") != "caption":
+        if track.get("type") == "audio":
             continue
         for c in track.get("clips") or []:
             if c.get("style") == "note" or not str(c.get("text") or "").strip():
@@ -175,12 +206,13 @@ def _composite_captions(frame_png: Path, sequence: dict[str, Any], t: float,
 
     cache = Path(asset_dir) / "caption-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    frame = None
+    frame = Image.open(frame_png).convert("RGBA")
+    out_w, out_h = frame.size
     for c in active:
         text = str(c.get("text") or "").strip()
         design = c.get("style") if isinstance(c.get("style"), dict) else {}
         words = c.get("words") if isinstance(c.get("words"), list) else []
-        key_obj: dict[str, Any] = {"w": 1080, "h": 1920, "t": text, "d": design, "words": words}
+        key_obj: dict[str, Any] = {"w": out_w, "h": out_h, "t": text, "d": design, "words": words}
         if words:
             # karaoke highlight depends on the exact time — key per 0.1s step
             key_obj["at"] = round(t, 1)
@@ -194,7 +226,7 @@ def _composite_captions(frame_png: Path, sequence: dict[str, Any], t: float,
                 item["start"] = _f(c.get("timeline_start"))
                 item["end"] = _f(c.get("timeline_end"))
             spec.write_text(json.dumps({
-                "outW": 1080, "outH": 1920,
+                "outW": out_w, "outH": out_h,
                 "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
                 "items": [item],
             }, ensure_ascii=False), encoding="utf-8")
@@ -209,7 +241,7 @@ def _composite_captions(frame_png: Path, sequence: dict[str, Any], t: float,
                 except OSError:
                     pass
         if not (png.exists() and png.stat().st_size > 0):
-            continue
+            raise RuntimeError('Caption render did not produce an image')
         if frame is None:
             frame = Image.open(frame_png).convert("RGBA")
         overlay = Image.open(png).convert("RGBA")
@@ -231,26 +263,65 @@ def render_timeline_frame(sequence: dict[str, Any], asset_dir: str, t: float,
 
 
 def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]) -> str:
-    """Compact human/LLM-readable structure of the timeline (per lane, per clip)."""
+    """Compact human/LLM-readable structure of the timeline (per lane, per clip).
+    Lanes are layers: index 0 = backmost, higher lanes draw in front; audio lanes are
+    the only lane-level distinction. Clip kind comes from the clip's own fields."""
     lines: list[str] = [f"duration: {_f(sequence.get('duration')):.2f}s / format: {sequence.get('format') or '9:16'}"]
+    lines.append("lanes are layers: lane 0 = back, higher = front; an effect/overlay affects only lanes BELOW it")
     for ti, track in enumerate(sequence.get("tracks") or []):
         clips = track.get("clips") or []
-        lines.append(f"[lane {ti}: {track.get('type')}] {len(clips)} clips")
+        kind = str(track.get("type") or "")
+        label = "audio" if kind == "audio" else ("caption" if kind == "caption" else "visual")
+        flags = "".join(f" {k}" for k in ("locked", "hidden", "muted") if track.get(k))
+        lines.append(f"[lane {ti}: {label}{flags}] {len(clips)} clips")
         for c in sorted(clips, key=lambda x: _f(x.get("timeline_start"))):
             aid = str(c.get("asset_id") or "")
             a = assets.get(aid) or {}
-            what = a.get("filename") or ("caption" if c.get("text") is not None else "effect")
-            extra = ""
+            ts, te = _f(c.get("timeline_start")), _f(c.get("timeline_end"))
             if c.get("text") is not None:
-                extra = f' text="{str(c.get("text"))[:40]}"'
+                what = f'caption text="{str(c.get("text"))[:40]}"'
             elif c.get("region") is not None:
-                extra = " region-effect(blur/mosaic)"
-            elif c.get("freeze"):
-                extra = " freeze"
-            elif c.get("kind") == "image" or (a and str(a.get("kind")) == "image"):
-                extra = " image"
+                rg = c.get("region") or {}
+                st = c.get("style") or "gaussian"
+                what = (f"{st} region x={_f(rg.get('x')):.3f} y={_f(rg.get('y')):.3f} "
+                        f"w={_f(rg.get('width')):.3f} h={_f(rg.get('height')):.3f}")
+                if c.get("effect_color"):
+                    what += f" color={c.get('effect_color')}"
+                if c.get("region_keys"):
+                    what += f" keys={len(c.get('region_keys'))}"
+                if c.get("blur_track"):
+                    what += " tracked"
+            else:
+                what = str(a.get("filename") or "?")
+                if c.get("freeze"):
+                    what += " freeze"
+                elif c.get("kind") == "image" or (a and str(a.get("kind")) == "image"):
+                    what += " image"
+                else:
+                    what += f" src={_f(c.get('source_start')):.2f}-{_f(c.get('source_end')):.2f}"
+                    spd = _f(c.get("speed"), 1.0)
+                    if abs(spd - 1.0) > 1e-3:
+                        what += f" speed={spd:g}"
+                if kind != "audio":
+                    pz = c.get("position")
+                    if isinstance(pz, dict):
+                        what += (f" box=({_f(pz.get('x')):.2f},{_f(pz.get('y')):.2f},"
+                                 f"{_f(pz.get('width')):.2f}x{_f(pz.get('height')):.2f})")
+                    if c.get("crop"):
+                        what += " cropped"
+                    if c.get("transform_keys"):
+                        what += f" moves({len(c.get('transform_keys'))}keys)"
+                    if c.get("fit") and c.get("fit") != "cover":
+                        what += f" fit={c.get('fit')}"
+                    if c.get("video_enabled") is False:
+                        what += " picture-off"
+                else:
+                    vol = _f(c.get("volume"), 1.0)
+                    what += f" vol={vol:g}"
+                    if c.get("role"):
+                        what += f" role={c.get('role')}"
+                if c.get("link_id"):
+                    what += " linked-av"
             aid_tag = f" asset_id={aid}" if aid else ""
-            lines.append(
-                f"  {c.get('id')}: {_f(c.get('timeline_start')):.2f}-{_f(c.get('timeline_end')):.2f} {what}{extra}{aid_tag}"
-            )
+            lines.append(f"  {c.get('id')}: {ts:.2f}-{te:.2f} {what}{aid_tag}")
     return "\n".join(lines)

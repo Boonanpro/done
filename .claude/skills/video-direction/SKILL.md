@@ -5,7 +5,7 @@ description: Video planning and direction skill. Use for scripting, storyboards,
 
 # Video Direction
 
-Plan the video before generating or editing. Keep output concrete enough that `media-gen`, `studio`, and `post-production` can execute it.
+Use this for new direction or meaningful changes to a project's direction. Preserve an existing agreed plan during ordinary edits. Keep decisions concrete enough to execute with the editor or specialist tools needed for this project.
 
 ## Choose The Format
 
@@ -28,6 +28,8 @@ Plan the video before generating or editing. Keep output concrete enough that `m
 For app demos, never ask a video model to invent the UI. Generate the person/environment, then composite the real screen recording or screenshot.
 
 ## Shot Plan Template
+
+This is an optional working aid. Include fields that help this project; an empty field is not a reason to invent a user requirement or ask another question. Label creative proposals and assumptions separately from the user's requirements.
 
 ```markdown
 # Video Plan: <title>
@@ -52,7 +54,7 @@ For app demos, never ask a video model to invent the UI. Generate the person/env
 
 ## Direction Rules
 
-- Start with a visible outcome or emotional hook in the first 2 seconds.
+- Choose an opening that serves the intended viewing experience. An immediate outcome or emotional hook is useful for some short promotions, not mandatory for every film or explanation.
 - Show one complete task for demos instead of listing features.
 - Keep generated clips short and purposeful; 4-8 seconds is usually easier to control.
 - Use reference images/video whenever identity, product, motion, or style continuity matters.
@@ -61,7 +63,7 @@ For app demos, never ask a video model to invent the UI. Generate the person/env
 
 ## Handoff
 
-After planning:
+When these capabilities are needed (not a mandatory chain):
 
 - Send generation shots to `media-gen`.
 - Send exact brand/product requirements to `brand-asset-kit`.

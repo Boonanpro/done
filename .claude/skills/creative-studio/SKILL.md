@@ -7,6 +7,8 @@ description: Creative production router for Dan. Use when the user asks for vide
 
 Dan's top-level creative production entrypoint. Use this skill to translate a loose user request into the right production route, then call the specialist skills.
 
+For an existing Dan editor project, preserve its agreed direction and edit it with timeline tools. Use editor_help for the editor contract. The routes below describe available capabilities, not required stages or a fixed provider choice. Select only what the request needs; use other methods when better suited. Previously supplied goals, references and assets remain available without repeating intake.
+
 ## Routing
 
 Classify the request first:
@@ -22,7 +24,7 @@ Classify the request first:
 | "色味を整えて/LUT作って" | `post-production` | Grade, generate LUT, export variants. |
 | "ロゴ/アイコン/商品を正確に出したい" | `brand-asset-kit` + `post-production` | Prefer exact overlay/compositing over generative approximation. |
 
-## Default Workflow
+## Capabilities To Select As Needed
 
 1. **Intake**: identify goal, audience, platform, duration, aspect ratios, available assets, and whether exact UI/logo fidelity matters.
 2. **Asset kit**: use `brand-asset-kit` to collect product URL, app icon, logo, screenshots, demo recording, brand colors, fonts, reference people, and forbidden changes.

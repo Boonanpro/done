@@ -22,7 +22,24 @@ export type RenderCaption = {
   design?: CaptionDesign;
   // Per-word timings (absolute timeline seconds), e.g. from Whisper. Drive karaoke/typewriter.
   words?: CaptionWord[];
+  transform_keys?: { t: number; x: number; y: number; w?: number; h?: number }[];
+  opacity?: number;
 };
+
+// Same full-canvas transform as the native compositor. Pure time evaluation also
+// makes backwards seeks and text edits preserve the authored movement.
+export function captionMotionAt(cap: RenderCaption, time: number) {
+  const keys = (cap.transform_keys || []).filter(k => [k.t,k.x,k.y].every(Number.isFinite)).slice().sort((a,b)=>a.t-b.t);
+  if (!keys.length) return {x:0,y:0,w:1,h:1};
+  const rel = time-cap.start;
+  const last = keys[keys.length-1];
+  const index = keys.findIndex(k=>k.t>rel);
+  const a = rel<=keys[0].t ? keys[0] : index<0 ? last : keys[index-1];
+  const b = rel<=keys[0].t ? a : index<0 ? a : keys[index];
+  const f = a===b ? 0 : Math.max(0,Math.min(1,(rel-a.t)/Math.max(1e-9,b.t-a.t)));
+  const mix = (p:number,q:number)=>p+(q-p)*f;
+  return {x:mix(a.x,b.x),y:mix(a.y,b.y),w:mix(a.w??1,b.w??1),h:mix(a.h??1,b.h??1)};
+}
 
 export function captionFrame(time: number, fps = 30): number {
   const rate = Number.isFinite(fps) && fps > 1 ? fps : 30;
@@ -119,7 +136,7 @@ function renderSpanned(text: string, spans?: ColorSpan[]): React.ReactNode {
 // One caption box (position/animation/karaoke). Extracted so the layer can draw EVERY
 // active caption — the old "last active wins" single-pick made overlapping captions
 // (e.g. a side-super lane above the subtitle lane) hide each other in the preview.
-function SingleCaption({ cap, time, outH }: { cap: RenderCaption; time: number; outH: number }) {
+function SingleCaption({ cap, time, outW, outH }: { cap: RenderCaption; time: number; outW: number; outH: number }) {
   const design: CaptionDesign = cap.design || {};
   const anim = design.animation;
   const wordLevel = anim === 'typewriter' || anim === 'karaoke';
@@ -192,9 +209,12 @@ function SingleCaption({ cap, time, outH }: { cap: RenderCaption; time: number; 
     content = <p style={textStyle}>{renderSpanned(cap.text, colorSpans)}</p>;
   }
 
+  const motion = captionMotionAt(cap,time);
   return (
-    <div style={captionAnchorStyle(design, outH)}>
-      <div style={boxStyle}>{content}</div>
+    <div style={{position:'absolute',inset:0,transformOrigin:'0 0',transform:`translate(${motion.x*outW}px,${motion.y*outH}px) scale(${motion.w},${motion.h})`,opacity:cap.opacity??1}}>
+      <div style={captionAnchorStyle(design, outH)}>
+        <div style={boxStyle}>{content}</div>
+      </div>
     </div>
   );
 }
@@ -231,7 +251,7 @@ export function CaptionLayer({
     <div style={{ position: 'relative', width: outW, height: outH, overflow: 'hidden', pointerEvents: 'none' }}>
       <style>{CAPTION_FONT_FACE_CSS}</style>
       {actives.map((cap, i) => (
-        <SingleCaption key={cap.id || i} cap={cap} time={time} outH={outH} />
+        <SingleCaption key={cap.id || i} cap={cap} time={time} outW={outW} outH={outH} />
       ))}
     </div>
   );

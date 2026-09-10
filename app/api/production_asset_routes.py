@@ -56,7 +56,7 @@ class ProductionAsset(BaseModel):
     thumbnail_path: str | None = None
     thumbnail_url: str | None = None
     filename: str | None = None
-    status: Literal["registered", "processing", "proxy_ready", "failed", "missing", "ready"] = "registered"
+    status: Literal["registered", "processing", "proxy_pending", "proxy_ready", "failed", "missing", "ready"] = "registered"
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     created_at: str
@@ -244,26 +244,29 @@ def _write_jobs(room_id: str, jobs: list[dict[str, Any]]) -> None:
 
 
 def _update_job(room_id: str, job_id: str, patch: dict[str, Any]) -> None:
-    jobs = _read_jobs(room_id)
-    now = datetime.now(timezone.utc).isoformat()
-    for job in jobs:
-        if job.get("id") == job_id:
-            job.update(patch)
-            job["updated_at"] = now
-            break
-    _write_jobs(room_id, jobs)
+    from app.services.timeline_draft import ContentsLock
+    with ContentsLock(room_id):
+        jobs = _read_jobs(room_id)
+        now = datetime.now(timezone.utc).isoformat()
+        for job in jobs:
+            if job.get("id") == job_id:
+                job.update(patch)
+                job["updated_at"] = now
+                break
+        _write_jobs(room_id, jobs)
 
 
 def _update_content(room_id: str, content_id: str, patch: dict[str, Any]) -> None:
-    contents = _read_contents(room_id)
-    now = datetime.now(timezone.utc).isoformat()
-    for content in contents:
-        if content.get("id") == content_id:
-            content.update(patch)
-            content["updated_at"] = now
-            break
-    _write_contents(room_id, contents)
-
+    from app.services.timeline_draft import ContentsLock
+    with ContentsLock(room_id):
+        contents = _read_contents(room_id)
+        now = datetime.now(timezone.utc).isoformat()
+        for content in contents:
+            if content.get("id") == content_id:
+                content.update(patch)
+                content["updated_at"] = now
+                break
+        _write_contents(room_id, contents)
 
 def _update_asset(room_id: str, asset_id: str, patch: dict[str, Any]) -> None:
     assets = _read_assets(room_id)
@@ -1208,6 +1211,7 @@ def _native_export_canvas(format_value: str | None) -> tuple[int, int]:
 def _native_export_exe() -> str | None:
     candidates = [
         os.environ.get("DAN_NATIVE_UI_EXE") or "",
+        r"C:\Users\Owner\.done\bin\native_ui_headless.exe",
         r"C:\Users\Owner\.done\bin\native_ui_export.exe",
         r"C:\Users\Owner\.done\bin\native_ui.exe",
     ]
@@ -1248,11 +1252,11 @@ def _native_caption_items(sequence: dict[str, Any], canvas: tuple[int, int]) -> 
     return items
 
 
-def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any], canvas: tuple[int, int]) -> list[str]:
+def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any], canvas: tuple[int, int], *, asset_dir: str | None = None) -> list[str]:
     """Render any caption PNG the native exporter will need (synchronously — the export
     hard-fails on missing captions rather than dropping them). Returns keys still
     missing after the render attempt."""
-    cache_dir = _room_dir(room_id) / "caption-cache"
+    cache_dir = (Path(asset_dir) if asset_dir is not None else _room_dir(room_id)) / "caption-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _ready(key: str) -> bool:
@@ -1279,8 +1283,9 @@ def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any], canvas:
     try:
         script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
         cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.run([sys.executable, str(script), str(spec_path)],
-                       capture_output=True, timeout=900, creationflags=cflags)
+        env=dict(os.environ,RENDER_CAPTION_DEBUG_LOG=str(cache_dir/'export-caption.log'))
+        subprocess.run([sys.executable, str(script), str(spec_path)], stdin=subprocess.DEVNULL,
+                       capture_output=True, timeout=120, creationflags=cflags, env=env)
     except Exception as exc:  # noqa: BLE001
         logger.warning("native export caption render failed: %s", exc)
     finally:
@@ -1432,6 +1437,9 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
     except Exception as exc:  # noqa: BLE001
         logger.warning("screen blur post-pass skipped: %s", exc)
 
+    if instruction.get('no_register'):
+        return {'output_path': str(out_path), 'render_engine': 'native_compositor',
+                'render_size': f'{canvas[0]}x{canvas[1]}'}
     output_asset = _add_generated_video_asset(
         room_id,
         out_path,
@@ -4184,7 +4192,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
         task_lines = [
             "# Production Job",
             "",
-            "Use the available production, studio, and post-production workflows for this video edit.",
+            "Use the editor timeline tools for timeline changes. Load specialist workflows when their capabilities are needed for the requested work.",
             "Make the best edit decisions from the selected assets, brief, and timeline state.",
             "The production-state JSON is the UI handoff, not a restriction on how you work.",
             "",
@@ -4217,7 +4225,11 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             (
                 "Produce the best production-state handoff for the workspace. Create previews or helper files if they are useful, and always write the final state JSON for the UI."
                 if mode == "dan_edit"
-                else "Render a revised video only for the requested timeline/export job."
+                else (
+                    "Apply the requested changes to the editor timeline. Verify the affected result and report it. Export a video when requested or when needed to verify a result that cannot be checked in the editor."
+                    if mode == "dan_revise"
+                    else "Render a revised video only for the requested timeline/export job."
+                )
             ),
             "",
             "## Timeline Notes",
@@ -4233,6 +4245,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
         timeline_result = None
         render_result = None
         dan_render_path = job_dir / f"{job_id}_dan_render.mp4"
+        agent_committed = False
         if mode == "dan_edit":
             timeline_result = _build_dan_timeline(
                 room_id, user_id, job_id, instruction, instruction_path, dan_timeline_path, dan_render_path
@@ -4339,9 +4352,9 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             #  - anything needing new material / structure / generation / content
             #    understanding -> full agent on a DRAFT, committed once with CAS
             revision_text = str(instruction.get("revision_text") or instruction.get("brief") or "")
-            if _is_caption_generation_request(revision_text):
+            if _is_caption_generation_request(revision_text) and not instruction.get('editor_guarded'):
                 merged = _build_caption_generation(room_id, job_id, instruction)
-            elif _revision_needs_agent(revision_text):
+            elif instruction.get('editor_guarded') or _revision_needs_agent(revision_text):
                 from app.services.timeline_agent import run_timeline_agent
                 _append_job_event(room_id, job_id, {"type": "status", "text": "編集エージェントで実行します（動画内容を理解して編集・数分かかることがあります）"})
                 agent_res = run_timeline_agent(
@@ -4349,10 +4362,15 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                     instruction=revision_text,
                     annotations=_agent_annotations(instruction),
                     selected_clips=[c for c in (instruction.get("selected_clips") or []) if isinstance(c, dict)],
+                    expected_hash=instruction.get('editor_expected_hash'),
+                    resume_draft_id=instruction.get('resume_draft_id'),
+                    preparation_only=bool(instruction.get('preparation_only')),
                     on_event=lambda e: _append_job_event(room_id, job_id, e),
                 )
+                _update_job(room_id,job_id,{'result':agent_res})
                 if not agent_res.get("ok"):
                     raise RuntimeError("エージェント編集は反映されませんでした: " + "; ".join((agent_res.get("problems") or ["unknown"])[:3]))
+                agent_committed = True
                 # the commit already wrote contents.json — reload for bookkeeping
                 merged = None
                 for c in _read_contents(room_id):
@@ -4369,14 +4387,16 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                 raise RuntimeError("部分編集の適用に失敗しました（対象クリップなし or 差分なし）")
             sequence_result = merged
             timeline_result = {"sequence": merged}
-            _append_job_event(room_id, job_id, {"type": "status", "text": "指示した箇所だけ反映しました（MP4は未生成・プレビューで確認できます）。"})
+            _append_job_event(room_id, job_id, {"type": "status", "text": "制作処理の結果を保存しました。タイムラインへの反映有無は結果に記録しています。"})
         if timeline_result and sequence_result:
-            timeline = dict(instruction.get("timeline") or {})
-            timeline.update(timeline_result)
-            timeline["sequence"] = sequence_result
+            existing = next((c.get('timeline') or {} for c in _read_contents(room_id) if str(c.get('id')) == str(content_id)), {})
+            timeline = dict(existing) if agent_committed else _prepared_timeline(existing, instruction.get('timeline') or {}, timeline_result, sequence_result)
             instruction["timeline"] = timeline
             instruction_path.write_text(json.dumps(instruction, ensure_ascii=False, indent=2), encoding="utf-8")
-            _update_content(room_id, content_id, {"timeline": timeline})
+            # The agent already committed with CAS. A bookkeeping write here would
+            # discard metadata and could overwrite a subsequent manual edit.
+            if not agent_committed:
+                _update_content(room_id, content_id, {"timeline": timeline})
         if mode in {"render_timeline", "export", "blur_render"}:
             # Preview-parity first: the native compositor renders exactly what the
             # editor preview shows. FFmpeg re-creation only when native isn't applicable.
@@ -4408,9 +4428,13 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             result["sequence_clip_count"] = sum(len(track.get("clips") or []) for track in sequence_result.get("tracks", []))
         if render_result:
             result.update(render_result)
+        if 'agent_res' in locals():
+            result.update(agent_res)
         _append_job_event(room_id, job_id, {"type": "status", "text": result["message"]})
         _update_job(room_id, job_id, {"status": "done", "result": result, "error": None})
-        _update_content(room_id, content_id, {"status": "ready", **_timeline_patch()})
+        # The guarded editor agent already committed with CAS. Reapplying its old
+        # snapshot here could overwrite a hand edit made immediately after commit.
+        _update_content(room_id, content_id, {"status": "ready", **({} if instruction.get('editor_guarded') else _timeline_patch())})
     except Exception as exc:
         # 事故区分をユーザーの言葉で。NameError/ImportError 等はコード側の欠陥で、
         # 指示や素材が悪いわけではない — 生の例外文字列だけを見せると「何が悪かった
@@ -5666,7 +5690,17 @@ def _is_caption_generation_request(text: str) -> bool:
     )
     if not any(term.lower() in low for term in generate_terms):
         return False
-    return not any(term in text for term in negative_terms)
+    if any(term in text for term in negative_terms):
+        return False
+    # Whole-timeline caption GENERATION only. 「テロップを大きくして」「字幕の誤字を直して」
+    # 「1:24の字幕をずらして」 are edits of existing captions and belong to the agent /
+    # patch paths (misrouting them re-transcribed and replaced every caption: 2026-07).
+    edit_terms = ("直して", "修正", "変えて", "大きく", "小さく", "ずらし", "ずれ", "位置", "タイミング",
+                  "誤字", "タイポ", "色", "フォント", "サイズ", "移動", "この", "その", "1つ", "一つ", "だけ")
+    if any(term in text for term in edit_terms):
+        return False
+    generate_verbs = ("付けて", "つけて", "入れて", "生成", "作って", "起こし", "全体", "全部", "通し", "自動")
+    return any(v in text for v in generate_verbs)
 
 
 def _caption_text_len(text: str) -> int:
@@ -6997,37 +7031,103 @@ def cancel_production_job(job_id: str, room_id: str) -> dict[str, Any]:
     """Cancel a running agent job. The draft is discarded; the live timeline stays
     exactly as it was (agent edits are draft-only until commit)."""
     from app.services.timeline_agent import cancel_job
-    killed = cancel_job(job_id)
+    from app.services.production_worker import cancel
+    row=next((j for j in _read_jobs(room_id) if j['id']==job_id),{})
+    if row.get('status') not in {'queued','running'}:
+        return {'ok':True,'killed':False,'already_finished':True}
+    from app.services.timeline_draft import ContentsLock
+    # Commit and cancellation use the same lock: a stopped worker cannot publish
+    # its draft even if process termination races with its last tool response.
+    with ContentsLock(room_id):
+        folder=_room_dir(room_id)/'jobs'/job_id
+        folder.mkdir(parents=True,exist_ok=True)
+        (folder/'cancel-requested').touch()
+    killed = cancel(row) if row.get('execution')=='independent' else cancel_job(job_id)
     _update_job(room_id, job_id, {"status": "failed", "error": "canceled by user"})
-    _append_job_event(room_id, job_id, {"type": "status", "text": "キャンセルしました（タイムラインは無変更）"})
+    _append_job_event(room_id, job_id, {"type": "status", "text": "制作を停止しました。保存済みの編集は維持しています。"})
     return {"ok": True, "killed": killed}
+
+
+def _repair_terminal_content_status(room_id: str, jobs: list[dict]) -> None:
+    """A terminal job must not leave its document permanently edit-locked."""
+    latest = {}
+    active = set()
+    for job in jobs:
+        cid = job.get('content_id')
+        if not cid:
+            continue
+        latest[cid] = job
+        if job.get('status') in {'queued', 'running'}:
+            active.add(cid)
+    for content in _read_contents(room_id):
+        cid = content.get('id')
+        job = latest.get(cid, {})
+        if content.get('status') == 'running' and cid not in active and job.get('status') in {'done', 'failed'}:
+            _update_content(room_id, cid, {'status': 'ready' if job['status'] == 'done' else 'failed'})
 
 
 def _recover_stale_running_jobs() -> None:
     """Sandbox restart safety: jobs left 'running' by a dead process would spin
-    forever in the UI. At import time mark them failed (their threads are gone)."""
+    forever in the UI. Called only at application startup, never on import.
+    Another live server/test worker may still own a job in this shared workspace.
+    """
     try:
         for room_dir in ASSET_ROOT.iterdir():
             jp = room_dir / "jobs.json"
             if not jp.exists():
                 continue
-            try:
-                jobs = json.loads(jp.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            changed = False
-            for j in jobs:
-                if isinstance(j, dict) and j.get("status") == "running":
-                    j["status"] = "failed"
-                    j["error"] = "server restarted while running"
-                    changed = True
-            if changed:
-                jp.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+            from app.services.timeline_draft import ContentsLock
+            restarts=[]
+            with ContentsLock(room_dir.name):
+                try:
+                    jobs = json.loads(jp.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                changed = False
+                for j in jobs:
+                    if isinstance(j, dict) and j.get("status") in {"running", "queued"}:
+                        if _job_owner_alive(j):
+                            continue
+                        from app.services.production_worker import saved_draft
+                        draft_id=saved_draft(room_dir.name,j)
+                        snapshot={}
+                        if draft_id:
+                            try:snapshot=json.loads((room_dir/'drafts'/(draft_id+'.json')).read_text(encoding='utf-8'))
+                            except (OSError,ValueError):pass
+                        if snapshot.get('committed_at'):
+                            j.update(status='done',error=None,result={'committed':True,'draft_id':draft_id,'summary':'タイムラインへの保存は完了しています。'})
+                        elif j.get('execution')=='independent' and j.get('user_id') and j.get('recovery_attempts',0)<2:
+                            import psutil
+                            # Claim recovery while holding the file lock. A second
+                            # server starting concurrently must not launch it again.
+                            j.update(status='queued',error=None,recovery_attempts=j.get('recovery_attempts',0)+1,
+                                     worker_pid=os.getpid(),worker_started_at=psutil.Process().create_time())
+                            if draft_id:j.setdefault('instruction', {})['resume_draft_id']=draft_id
+                            restarts.append(j)
+                        else:
+                            j["status"] = "failed"
+                            j["error"] = "server restarted while running"
+                        changed = True
+                if changed:
+                    jp.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+            for j in restarts:
+                from app.services.production_worker import launch
+                try:launch(room_dir.name,j['id'],j['content_id'],j['instruction'],j['user_id'])
+                except Exception as exc:_update_job(room_dir.name,j['id'],{'status':'failed','error':str(exc)})
+            _repair_terminal_content_status(room_dir.name, _read_jobs(room_dir.name))
     except Exception:  # noqa: BLE001 — recovery must never block startup
         logger.warning("stale job recovery failed", exc_info=True)
 
 
-_recover_stale_running_jobs()
+def _job_owner_alive(job: dict) -> bool:
+    import psutil
+    try:
+        if int(job.get('worker_pid') or 0) <= 0 or float(job.get('worker_started_at') or 0) <= 0:
+            return False
+        owner=psutil.Process(int(job.get('worker_pid') or 0))
+        return abs(owner.create_time()-float(job.get('worker_started_at') or 0))<.01
+    except (psutil.Error, ValueError, TypeError):
+        return False
 
 
 @router.post("/jobs", response_model=ProductionJob)
@@ -7048,10 +7148,23 @@ async def create_job(
         created_at=now,
         updated_at=now,
     ).model_dump()
-    jobs = _read_jobs(data.room_id)
-    jobs.append(job)
-    _write_jobs(data.room_id, jobs)
-    background_tasks.add_task(_run_production_job, data.room_id, job["id"], data.content_id, data.instruction, current_user.user_id)
+    import psutil
+    job.update(worker_pid=os.getpid(),worker_started_at=psutil.Process().create_time())
+    from app.services.timeline_draft import ContentsLock
+    with ContentsLock(data.room_id):
+        jobs = _read_jobs(data.room_id)
+        jobs.append(job)
+        _write_jobs(data.room_id, jobs)
+    if data.instruction.get('editor_guarded'):
+        from app.services.production_worker import launch
+        try:
+            owner=await asyncio.to_thread(launch,data.room_id,job['id'],data.content_id,data.instruction,current_user.user_id)
+            job.update(owner,execution='independent')
+        except Exception as exc:
+            _update_job(data.room_id,job['id'],{'status':'failed','error':str(exc)})
+            raise HTTPException(503,str(exc))
+    else:
+        background_tasks.add_task(_run_production_job, data.room_id, job["id"], data.content_id, data.instruction, current_user.user_id)
     return job
 
 
@@ -7097,13 +7210,19 @@ async def list_job_events(
 # no protocol registration dependency, and a definite HTTP answer either way.
 
 
+def _prepared_timeline(existing, requested, result, sequence):
+    timeline = {**existing, **requested, **result, 'sequence': sequence}
+    timeline['format'] = sequence.get('format') or timeline.get('format') or '16:9'
+    return timeline
+
+
 class LaunchEditorRequest(BaseModel):
     room_id: str
 
 
 def _launch_editor_process(url: str) -> bool:
     home = Path(os.environ.get("USERPROFILE") or str(Path.home()))
-    exe = Path(os.environ.get("DAN_NATIVE_EDITOR_EXE") or (home / ".done" / "bin" / "native_ui.exe"))
+    exe = Path(os.environ.get("DAN_NATIVE_EDITOR_EXE") or (home / ".done" / "bin" / "native_ui_editor.exe"))
     if not exe.exists():
         logger.warning("launch-editor: exe not found: %s", exe)
         return False
@@ -7199,9 +7318,33 @@ def launch_editor(
 ):
     _room_dir(data.room_id)  # 400 on malformed room_id
     url = f"done://production?room_id={data.room_id}"
-    # forward the caller's own bearer token so the app persists it exactly like the
-    # old deep-link path did (native_token.txt stays fresh for bare launches)
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        url += "&token=" + urllib.parse.quote(auth[7:], safe="")
+    from app.services.native_editor_auth import prepare_login
+    access_token = prepare_login(current_user)
+    url += "&token=" + urllib.parse.quote(access_token, safe="")
     return {"launched": _launch_editor_process(url)}
+
+
+# --- Editor presence ---------------------------------------------------------------
+# The native editor writes {room}/editor_state.json (content_id, playhead, selection)
+# every time it changes. Chat / voice Dan read it here so "this clip" / "here" resolve
+# to the thing the user is actually looking at. One-way, file based, no sockets.
+
+def read_editor_state(room_id: str, max_age_s: float = 600.0) -> dict[str, Any] | None:
+    p = _room_dir(room_id) / "editor_state.json"
+    try:
+        st = p.stat()
+        if time.time() - st.st_mtime > max_age_s:
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["age_s"] = round(time.time() - st.st_mtime, 1)
+    return data
+
+
+@router.get("/editor-state")
+def get_editor_state(room_id: str, current_user: TokenData = Depends(get_current_user)):
+    """What the native editor has open right now (None when it is closed / stale)."""
+    return {"state": read_editor_state(room_id)}

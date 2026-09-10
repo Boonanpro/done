@@ -1216,6 +1216,88 @@ fn split_transform_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Va
 ///   2. at the ORIGINAL time on another lane with space (per source lane; a new lane is
 ///      appended when none fits) — the red-flagged invisible-overlap case can't happen.
 /// Linked A/V copies get a fresh shared link_id so they link to each other, not the originals.
+/// Three-way save: preserve external metadata/other works while rejecting edits
+/// to the same field. Timeline arrays remain atomic; overlapping edits aren't guessed.
+pub fn merge_save(base: &Value, disk: &Value, edited: &Value) -> Result<Value,String> {
+    if edited==base {return Ok(disk.clone());}
+    if disk==base || disk==edited {return Ok(edited.clone());}
+    if let (Some(b),Some(d),Some(e))=(base.as_object(),disk.as_object(),edited.as_object()) {
+        let mut out=serde_json::Map::new();
+        let keys:std::collections::BTreeSet<_>=b.keys().chain(d.keys()).chain(e.keys()).collect();
+        for k in keys {
+            let (bv,dv,ev)=(b.get(k),d.get(k),e.get(k));
+            let result=if ev==bv {dv.cloned()} else if dv==bv || dv==ev {ev.cloned()}
+                else if let (Some(bv),Some(dv),Some(ev))=(bv,dv,ev) {Some(merge_save(bv,dv,ev).map_err(|err|format!("{k}.{err}"))?)}
+                else {return Err(k.to_string());};
+            if let Some(value)=result {out.insert(k.clone(),value);}
+        }
+        return Ok(Value::Object(out));
+    }
+    if let (Some(b),Some(d),Some(e))=(base.as_array(),disk.as_array(),edited.as_array()) {
+        // Root content lists only; clip/track lists must never be spliced blindly.
+        if b.iter().chain(d.iter()).chain(e.iter()).all(|v|v.get("id").is_some() && v.get("timeline").is_some()) {
+            let to_map=|rows:&Vec<Value>| -> Value {Value::Object(rows.iter().map(|v|(v["id"].as_str().unwrap_or("").to_string(),v.clone())).collect())};
+            let merged=merge_save(&to_map(b),&to_map(d),&to_map(e))?;
+            let mut order:Vec<String>=d.iter().map(|v|v["id"].as_str().unwrap_or("").to_string()).collect();
+            for v in e {let id=v["id"].as_str().unwrap_or("").to_string();if !order.contains(&id){order.push(id);}}
+            return Ok(Value::Array(order.iter().filter_map(|id|merged.get(id).cloned()).collect()));
+        }
+    }
+    Err("同じ項目が別の操作で変更されています".into())
+}
+
+pub fn copy_clips(root: &Value, ids: &[String]) -> Value {
+    let ids = expand_links(root, ids);
+    let mut bundle = root.clone();
+    if let Some(tracks) = tracks_mut(&mut bundle) {
+        for tr in tracks {
+            if let Some(cs) = tr.get_mut("clips").and_then(Value::as_array_mut) {
+                cs.retain(|c| ids.contains(&sid(c)));
+            }
+        }
+    }
+    bundle
+}
+
+pub fn paste_clips(root: &mut Value, bundle: &Value, at: f64, salt: u64) -> Vec<String> {
+    let mut work = bundle.clone();
+    let originals: Vec<String> = tracks_ref(&work).into_iter().flatten()
+        .flat_map(|t| t.get("clips").and_then(Value::as_array).into_iter().flatten()).map(sid).collect();
+    if originals.is_empty() || !at.is_finite() { return vec![]; }
+    duplicate_clips(&mut work, &originals, salt);
+    let start = tracks_ref(&work).into_iter().flatten()
+        .flat_map(|t| t.get("clips").and_then(Value::as_array).into_iter().flatten())
+        .filter(|c| !originals.contains(&sid(c))).map(|c| f(c,"timeline_start")).fold(f64::INFINITY,f64::min);
+    let Some(targets) = tracks_mut(root) else { return vec![]; };
+    let mut added = vec![];
+    for (index,tr) in tracks_ref(&work).into_iter().flatten().enumerate() {
+        let mut copies: Vec<Value> = tr.get("clips").and_then(Value::as_array).into_iter().flatten()
+            .filter(|c| !originals.contains(&sid(c))).cloned().collect();
+        if copies.is_empty() { continue; }
+        for c in &mut copies {
+            let ts=f(c,"timeline_start")-start+at.max(0.0);
+            let te=f(c,"timeline_end")-start+at.max(0.0);
+            setf(c,"timeline_start",ts);
+            setf(c,"timeline_end",te);
+            if let Some(o)=c.as_object_mut() { o.remove("approved"); o.remove("locked"); }
+            added.push(sid(c));
+        }
+        let target = targets.iter().position(|t| t.get("id")==tr.get("id")
+            && !t.get("locked").and_then(Value::as_bool).unwrap_or(false)
+            && !t.get("clips").and_then(Value::as_array).into_iter().flatten().any(|old|
+                copies.iter().any(|c| f(old,"timeline_start")<f(c,"timeline_end")-0.001 && f(c,"timeline_start")<f(old,"timeline_end")-0.001)));
+        if let Some(i)=target {
+            if let Some(cs)=targets[i].get_mut("clips").and_then(Value::as_array_mut) { cs.extend(copies); cs.sort_by(|a,b|f(a,"timeline_start").total_cmp(&f(b,"timeline_start"))); }
+        } else {
+            let mut lane=tr.clone();
+            lane["id"]=Value::from(format!("paste_lane_{salt}_{index}"));
+            lane["locked"]=Value::Bool(false);lane["clips"]=Value::Array(copies);
+            targets.push(lane);
+        }
+    }
+    added
+}
+
 pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
     // block bounds
     let mut bs = f64::MAX;
@@ -1390,7 +1472,7 @@ pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
                 }
             }
             None => {
-                let lane_kind = if want_audio { "audio" } else { "overlay" };
+                let lane_kind = if want_audio { "audio" } else { "video" };
                 tracks.push(serde_json::json!({
                     "id": format!("{lane_kind}_dup_{salt}_{si}"),
                     "type": lane_kind,
@@ -1647,7 +1729,7 @@ pub fn freeze_frame_with_still(
             freeze_track_idx = Some(clear.unwrap_or_else(|| {
                 let at = ti + 1;
                 tracks.insert(at, serde_json::json!({
-                    "id": format!("freeze_overlay_{salt}"), "type": "overlay",
+                    "id": format!("freeze_overlay_{salt}"), "type": "video",
                     "label": "Freeze frame", "clips": []
                 }));
                 at
@@ -1729,7 +1811,7 @@ pub fn insert_asset(raw: &mut Value, t: f64, dur: f64, asset_id: &str, has_audio
     }
 }
 
-/// Add a region effect clip (blur/mosaic) on the effect lane (created when missing).
+/// Add a region effect clip (blur/mosaic/note) on the front-most free visual lane (a new "video" lane when all are busy).
 pub fn add_effect_clip(
     raw: &mut Value,
     t: f64,
@@ -1789,7 +1871,7 @@ pub fn add_effect_clip(
                 .map(|(i, _)| i)
                 .max();
             let insert_at = front.map(|i| i + 1).unwrap_or(tracks.len());
-            tracks.insert(insert_at, serde_json::json!({"type": "overlay", "clips": [clip]}));
+            tracks.insert(insert_at, serde_json::json!({"type": "video", "clips": [clip]}));
         }
     }
 }
@@ -1985,6 +2067,7 @@ pub fn set_canvas_format(root: &mut Value, fmt: &str) {
     let Some(tl) = c.get_mut("timeline").and_then(|t| t.as_object_mut()) else { return };
     let old_fmt = tl
         .get("format")
+        .or_else(|| tl.get("sequence").and_then(|s| s.get("format")))
         .and_then(|v| v.as_str())
         .unwrap_or("9:16")
         .to_string();
@@ -2027,6 +2110,23 @@ pub fn save(root: &Value, contents_path: &str) -> anyhow::Result<()> {
     std::fs::write(&tmp, serde_json::to_string(root)?)?;
     std::fs::rename(&tmp, contents_path)?;
     Ok(())
+}
+
+pub struct ContentsGuard(std::path::PathBuf);
+impl Drop for ContentsGuard {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
+pub fn lock_contents(contents_path: &str) -> anyhow::Result<ContentsGuard> {
+    use std::io::Write;
+    let path = std::path::Path::new(contents_path).with_file_name("contents.lock");
+    // Keep the UI responsive: a busy writer is retried by autosave, not waited on.
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+    if let Err(e) = write!(file, "{}", std::process::id()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e.into());
+    }
+    Ok(ContentsGuard(path))
 }
 
 /// Add/replace or remove the popout effect on the given clips.
@@ -2302,7 +2402,7 @@ pub fn place_asset(
             insert_at,
             serde_json::json!({
                 "id": format!("overlay_drop_{salt}"),
-                "type": "overlay",
+                "type": "video",
                 "label": "Dropped media",
                 "clips": []
             }),
@@ -2314,7 +2414,7 @@ pub fn place_asset(
     let target_kind = tracks[visual_target]
         .get("type")
         .and_then(|v| v.as_str())
-        .unwrap_or("overlay")
+        .unwrap_or("video")
         .to_string();
     let mut vclip = serde_json::json!({
         "id": vid_id.clone(),
@@ -2496,7 +2596,7 @@ pub fn move_group_to_track(
         let kind = tracks[dst_ti]
             .get("type")
             .and_then(|v| v.as_str())
-            .unwrap_or("overlay")
+            .unwrap_or("video")
             .to_string();
         if let Some(o) = clip.as_object_mut() {
             o.insert("track".into(), serde_json::json!(kind));
@@ -2512,6 +2612,38 @@ pub fn move_group_to_track(
 /// The above-the-top drop zone gets a fresh lane, then uses the same rigid group move. Once
 /// the selection already occupies an otherwise-empty provisional top lane, repeated drag
 /// frames are idempotent instead of continuously creating lanes.
+/// Move standalone AUDIO clips (BGM / narration) onto another audio lane, or onto a
+/// fresh audio lane appended at the bottom when `target` is None. Linked A/V audio is
+/// never moved here (it follows its video). 「音声レーンが増やせない」対策。
+pub fn move_audio_clips_to_track(raw: &mut Value, ids: &[String], target: Option<usize>, salt: u64) {
+    let Some(tracks) = tracks_mut(raw) else { return };
+    let mut moved: Vec<Value> = Vec::new();
+    for tr in tracks.iter_mut() {
+        if tr.get("type").and_then(|v| v.as_str()) != Some("audio") { continue; }
+        if let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
+            let mut keep = Vec::new();
+            for c in clips.drain(..) {
+                let is_sel = ids.contains(&sid(&c));
+                let linked = c.get("link_id").and_then(|v| v.as_str()).is_some();
+                if is_sel && !linked { moved.push(c); } else { keep.push(c); }
+            }
+            *clips = keep;
+        }
+    }
+    if moved.is_empty() { return; }
+    let ti = match target {
+        Some(ti) if tracks.get(ti).and_then(|t| t.get("type")).and_then(|v| v.as_str()) == Some("audio") => ti,
+        _ => {
+            tracks.push(serde_json::json!({"id": format!("audio_lane{salt}"), "type": "audio", "clips": []}));
+            tracks.len() - 1
+        }
+    };
+    if let Some(clips) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+        for c in moved { clips.push(c); }
+        clips.sort_by(|a, b| f(a, "timeline_start").partial_cmp(&f(b, "timeline_start")).unwrap_or(std::cmp::Ordering::Equal));
+    }
+}
+
 pub fn move_group_to_new_top_track(raw: &mut Value, ids: &[String], anchor_id: &str) {
     let Some(tracks) = raw
         .get_mut(0)
@@ -2543,9 +2675,10 @@ pub fn move_group_to_new_top_track(raw: &mut Value, ids: &[String], anchor_id: &
                 .and_then(|c| c.as_array())
                 .map(|cs| cs.iter().any(|c| ids.contains(&sid(c))))
                 .unwrap_or(false);
-            has.then(|| tr.get("type").and_then(|v| v.as_str()).unwrap_or("overlay").to_string())
+            // レーンは映像か音声かだけ（役割レーンは持たない）: 新しい層は常に "video"
+            has.then(|| if tr.get("type").and_then(|v| v.as_str()) == Some("audio") { "audio".to_string() } else { "video".to_string() })
         })
-        .unwrap_or_else(|| "overlay".to_string());
+        .unwrap_or_else(|| "video".to_string());
     tracks.insert(front + 1, serde_json::json!({"type": kind, "clips": []}));
     let target = front + 1;
     // Release the mutable borrow before calling the general mover.
@@ -2615,7 +2748,7 @@ pub fn move_to_new_top_track(raw: &mut serde_json::Value, ids: &[String]) {
             return;
         }
     }
-    let tkind = lane_kind.unwrap_or_else(|| "overlay".to_string());
+    let tkind = lane_kind.unwrap_or_else(|| "video".to_string());
     for c in &mut moved {
         if let Some(o) = c.as_object_mut() {
             o.insert("track".into(), serde_json::json!(tkind));
@@ -3054,6 +3187,35 @@ pub fn reorder_tracks(raw: &mut serde_json::Value, from: usize, to: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_merges_progress_but_rejects_competing_clip_edits() {
+        let base=serde_json::json!([{"id":"work","title":"Test","timeline":{"sequence":{"tracks":[{"id":"v","clips":[]}]}}}]);
+        let mut disk=base.clone();disk[0]["editor_work"]=serde_json::json!([{"status":"running"}]);
+        let mut edited=base.clone();edited[0]["timeline"]["sequence"]["tracks"][0]["clips"]=serde_json::json!([{"id":"new"}]);
+        let merged=merge_save(&base,&disk,&edited).unwrap();
+        assert_eq!(merged[0]["editor_work"],disk[0]["editor_work"]);
+        assert_eq!(merged[0]["timeline"],edited[0]["timeline"]);
+        disk[0]["timeline"]["sequence"]["tracks"][0]["clips"]=serde_json::json!([{"id":"external"}]);
+        assert!(merge_save(&base,&disk,&edited).is_err());
+    }
+
+    #[test]
+    fn clipboard_keeps_linked_sources_and_does_not_overwrite_destination() {
+        let mut raw=serde_json::json!([{"timeline":{"sequence":{"tracks":[
+            {"id":"v","type":"video","clips":[{"id":"v1","asset_id":"a","link_id":"pair","source_start":7.,"source_end":9.,"timeline_start":1.,"timeline_end":3.}]},
+            {"id":"a","type":"audio","clips":[{"id":"a1","asset_id":"a","link_id":"pair","source_start":7.,"source_end":9.,"timeline_start":1.,"timeline_end":3.}]}
+        ]}}}]);
+        let before=raw.clone();let bundle=copy_clips(&raw,&["v1".into()]);
+        let ids=paste_clips(&mut raw,&bundle,2.,42);
+        assert_eq!(ids.len(),2);
+        let tracks=tracks_ref(&raw).unwrap();
+        assert_eq!(&tracks[..2],&tracks_ref(&before).unwrap()[..]);
+        let copies:Vec<&Value>=tracks.iter().flat_map(|t|t["clips"].as_array().unwrap()).filter(|c|ids.contains(&sid(c))).collect();
+        assert_eq!(copies[0]["link_id"],copies[1]["link_id"]);
+        assert_ne!(copies[0]["link_id"],"pair");
+        for c in copies { assert_eq!(f(c,"timeline_start"),2.);assert_eq!(f(c,"source_start"),7.); }
+    }
 
     #[test]
     fn canvas_format_convert_preserves_shape_and_roundtrips() {

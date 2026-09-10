@@ -17,6 +17,22 @@ mod frame_boundary_tests {
     use super::*;
 
     #[test]
+    fn caption_motion_is_seekable_and_text_independent() {
+        let mut c: Clip = serde_json::from_value(serde_json::json!({
+            "id":"title", "text":"Before", "timeline_start":2.0,"timeline_end":5.0,
+            "transform_keys":[{"t":0.0,"x":-0.2,"y":0.1},{"t":2.0,"x":0.2,"y":0.3,"w":2.0,"h":2.0}]
+        })).unwrap();
+        let at = c.caption_box_at(3.0,(0.1,0.2,0.3,0.4));
+        assert!((at.0-0.15).abs()<1e-9 && (at.1-0.5).abs()<1e-9);
+        assert!((at.2-0.45).abs()<1e-9 && (at.3-0.6).abs()<1e-9);
+        c.text = Some("Edited".into());
+        c.caption_box_at(4.0,(0.1,0.2,0.3,0.4));
+        assert_eq!(at,c.caption_box_at(3.0,(0.1,0.2,0.3,0.4)));
+        c.transform_keys = None;
+        assert_eq!((0.1,0.2,0.3,0.4),c.caption_box_at(3.0,(0.1,0.2,0.3,0.4)));
+    }
+
+    #[test]
     fn adjacent_clips_switch_on_the_exact_integer_frame() {
         let raw = serde_json::json!([{
             "timeline": {"sequence": {
@@ -632,6 +648,14 @@ impl Clip {
     /// Display box at timeline time `t` (keyframed clips animate; others = display_box).
     pub fn display_box_at(&self, t: f64) -> Pos {
         self.transform_at(t).0
+    }
+
+    /// Text remains editable; keyframes transform its full-canvas design plane.
+    /// Shared by GPU drawing and selection geometry. No keys preserves old pixels.
+    pub fn caption_box_at(&self, t: f64, b: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+        if self.transform_keys.is_none() { return b; }
+        let p = self.display_box_at(t);
+        (p.x + b.0 * p.width, p.y + b.1 * p.height, b.2 * p.width, b.3 * p.height)
     }
 
     /// Per-edge crop at timeline time `t` (None when effectively no crop, like crop_ltrb).

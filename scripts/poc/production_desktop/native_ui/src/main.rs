@@ -27,9 +27,50 @@ use std::time::Instant;
 
 use eframe::egui;
 
+fn timeline_body_height(ui: &egui::Ui) -> f32 {
+    // horizontal() reserves at least interact_size.y, even for a 12px scrollbar.
+    // Forgetting the inter-widget gap feeds overflow back into the resizable panel.
+    let footer = ui.spacing().interact_size.y.max(12.0);
+    (ui.available_height() - footer - ui.spacing().item_spacing.y).max(0.0)
+}
+
+#[cfg(test)]
+mod timeline_layout_tests {
+    use super::*;
+
+    #[test]
+    fn timeline_height_stays_at_the_users_size() {
+        for height in [160.0, 260.0, 420.0] {
+            let ctx = egui::Context::default();
+            let mut first = 0.0;
+            for frame in 0..240 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    ctx.style_mut(|s| s.spacing.item_spacing = egui::vec2(8.0, 8.0));
+                    let panel = egui::TopBottomPanel::bottom("timeline")
+                        .resizable(true).default_height(height).height_range(140.0..=700.0)
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| { ui.button("Timeline").on_hover_text("toolbar"); });
+                            ui.add_space(2.0);
+                            let h = timeline_body_height(ui);
+                            ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+                            ui.horizontal(|ui| { ui.allocate_exact_size(egui::vec2(200.0, 12.0), egui::Sense::hover()); });
+                        });
+                    if frame == 0 { first = panel.response.rect.height(); }
+                    assert!((panel.response.rect.height() - first).abs() < 0.1,
+                        "panel drift at frame {frame}: {} -> {}", first, panel.response.rect.height());
+                });
+            }
+        }
+    }
+}
+
 const ROOM: &str = "D:/done/uploads/production-assets/bd05fcc0-c143-4d1c-828e-7624e087b6c1";
 // design tokens (Filmora-reference dark theme: near-black stage, teal accent, pink playhead)
-const UI_ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 190, 150);
+const UI_ACCENT: egui::Color32 = egui::Color32::from_rgb(184, 206, 255);
 const UI_PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(255, 74, 85);
 const UI_PANEL: egui::Color32 = egui::Color32::from_rgb(24, 24, 27);
 const UI_STAGE: egui::Color32 = egui::Color32::from_rgb(12, 12, 14);
@@ -67,7 +108,7 @@ fn set_canvas_from_content(raw: &serde_json::Value) {
     let mut w = seq.and_then(|s| s.get("width")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let mut h = seq.and_then(|s| s.get("height")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     if w == 0 || h == 0 {
-        let fmt = tl.and_then(|t| t.get("format")).and_then(|v| v.as_str()).unwrap_or("9:16");
+        let fmt = tl.and_then(|t| t.get("format")).or_else(|| seq.and_then(|s| s.get("format"))).or_else(|| c.get("format")).and_then(|v| v.as_str()).unwrap_or("9:16");
         let d = canvas_for_format(fmt);
         w = d.0;
         h = d.1;
@@ -250,6 +291,7 @@ fn audio_thread(shared: Arc<Shared>) {
     let mut last_gen = u64::MAX;
     let mut last_tick = Instant::now();
     let mut last_speed = 1.0f64;
+    let mut audio_error_at: Option<Instant> = None;
     loop {
         let (playing, t_req, speed, gen) = {
             let r = shared.req.lock().unwrap();
@@ -322,7 +364,12 @@ fn audio_thread(shared: Arc<Shared>) {
             last_speed = speed;
         }
         if playing {
-            let _ = audio.fill(&doc, speed);
+            if let Err(err) = audio.fill(&doc, speed) {
+                if audio_error_at.map(|t| t.elapsed().as_secs() >= 2).unwrap_or(true) {
+                    eprintln!("AUDIO_FILL_ERROR {err:#}");
+                    audio_error_at = Some(Instant::now());
+                }
+            } else { audio_error_at = None; }
             let c = audio.clock().min(doc.duration());
             let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
             if (c - prev).abs() > 0.3 {
@@ -1175,7 +1222,8 @@ fn compose(
             if let Some((tex, wh, _, _)) = comp.caption_get(&key) {
                 let xf = caption_style_num(&style_owned, "x", 0.0);
                 let yf = caption_style_num(&style_owned, "y", 0.08).clamp(0.0, 0.92);
-                let _ = comp.draw_alpha_opacity(d3d, &tex, wh, (xf, 0.08 - yf, 1.0, 1.0), c.visual_opacity());
+                let dst = c.caption_box_at(t_geo, (xf, 0.08 - yf, 1.0, 1.0));
+                let _ = comp.draw_alpha_opacity(d3d, &tex, wh, dst, c.visual_opacity());
             }
             continue;
         }
@@ -1357,9 +1405,17 @@ fn compose(
                 }
             }
             if let Some((tex, (iw, ih))) = comp.still_get(&key) {
+                // Explicit cover must fill the box just as it does for video.
                 // Legacy/default images remain contain-fitted; an explicit X/Y resize
                 // switches to stretch and the source fills the edited box itself.
                 let (bx, by, bw, bh) = (b.x, b.y, b.width, b.height);
+                if c.fit.as_deref() == Some("cover") {
+                    comp.set_grade(grade_params(c));
+                    comp.draw_alpha_cover_opacity(d3d, &tex, (iw, ih),
+                        (bx, by, bw, bh), c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+                    used.push(path);
+                    continue;
+                }
                 if c.stretches_to_box() {
                     comp.set_grade(grade_params(c));
                     let _ = comp.draw_alpha_opacity(
@@ -2030,9 +2086,14 @@ fn warm_upcoming(
 // 起動するたび native_token.txt が新しくなるので、401 を受けたらファイルを
 // 読み直して自己復帰する（開きっぱなしのエディタが翌日サイレントに
 // 使えなくなる問題の根治）。
+mod assistant_panel;
 static API_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+static TOKEN_REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn token_file_path() -> String {
+    if let Ok(directory) = std::env::var("DONE_NATIVE_AUTH_DIR") {
+        return std::path::Path::new(&directory).join("native_token.txt").to_string_lossy().to_string();
+    }
     format!(
         "{}/.done/native_token.txt",
         std::env::var("USERPROFILE").unwrap_or_default().replace(char::from(92), "/")
@@ -2041,6 +2102,7 @@ fn token_file_path() -> String {
 
 /// 401 を受けたとき: 保存ファイルのトークンが今より新しければ差し替えて true
 fn refresh_api_token_from_file() -> bool {
+    let _refresh_guard = TOKEN_REFRESH_LOCK.lock().unwrap();
     let Some(fresh) = std::fs::read_to_string(token_file_path())
         .ok()
         .map(|t| t.trim().to_string())
@@ -2048,11 +2110,22 @@ fn refresh_api_token_from_file() -> bool {
     else {
         return false;
     };
-    let mut guard = API_TOKEN.write().unwrap();
-    if guard.as_deref() == Some(fresh.as_str()) {
-        return false;
+    if API_TOKEN.read().unwrap().as_deref() != Some(fresh.as_str()) {
+        *API_TOKEN.write().unwrap() = Some(fresh);
+        return true;
     }
-    *guard = Some(fresh);
+    // Rereading an expired access token cannot renew a login. Use the separately
+    // stored refresh credential through the normal authenticated refresh API.
+    let refresh_path = token_file_path().replace("native_token.txt", "native_refresh_token.txt");
+    let Ok(refresh) = std::fs::read_to_string(&refresh_path) else { return false; };
+    let body = serde_json::json!({"refresh_token": refresh.trim()}).to_string();
+    let Ok(raw) = http_local_once("POST", "/api/v1/editor-assistant/refresh", Some(&body)) else { return false; };
+    let Ok(pair) = serde_json::from_str::<serde_json::Value>(&raw) else { return false; };
+    let (Some(access), Some(next_refresh)) = (pair["access_token"].as_str(), pair["refresh_token"].as_str()) else { return false; };
+    if access.is_empty() || next_refresh.is_empty() { return false; }
+    if std::fs::write(&refresh_path, next_refresh).is_err() { return false; }
+    if std::fs::write(token_file_path(), access).is_err() { return false; }
+    *API_TOKEN.write().unwrap() = Some(access.to_string());
     true
 }
 
@@ -3541,6 +3614,12 @@ struct App {
     generating_content: Option<String>,
     /// 生成中の contents.json 変更検知（中間保存＝カット済みタイムラインの反映）
     gen_contents_mtime: Option<std::time::SystemTime>,
+    /// 外部書き込み検知（ダンのコミット等）: 最後にこの画面が読んだ/書いた contents.json の mtime
+    disk_mtime: Option<std::time::SystemTime>,
+    /// エディタ状態（開いているコンテンツ・再生位置・選択）の外部公開: 前回書いた内容と時刻
+    state_pub_last: String,
+    state_pub_at: Instant,
+    state_pub_written: Instant,
     /// 新規クリップの出現アニメ: クリップid → 表示開始時刻（時差でポポポッと出す）
     clip_spawn: std::collections::HashMap<String, Instant>,
     lib_gen_stash: Option<serde_json::Value>,
@@ -3573,6 +3652,7 @@ struct App {
     recut_tail: f32,
     recut_busy: bool,
     revise_open: bool,
+    assistant: assistant_panel::AssistantPanel,
     revise_text: String,
     /// ダンに指示の場所指定: プレビューを囲むモード / 囲んだ正規化矩形 / その時刻
     revise_pick: bool,
@@ -3614,6 +3694,7 @@ struct App {
     // identical states, so Ctrl+Z seemed to only ever go one step back).
     pending_undo: Option<serde_json::Value>,
     redo: Vec<String>,
+    clip_clipboard: Option<serde_json::Value>,
     save_at: Option<Instant>,
     /// Canonical JSON snapshot last read from / written to disk.  A server-side agent
     /// may update the same timeline while this window is open; never let a stale editor
@@ -3842,6 +3923,10 @@ impl App {
             title_set: false,
             generating_content: None,
             gen_contents_mtime: None,
+            disk_mtime: None,
+            state_pub_last: String::new(),
+            state_pub_at: Instant::now(),
+            state_pub_written: Instant::now() - std::time::Duration::from_secs(60),
             clip_spawn: Default::default(),
             lib_gen_stash: None,
             marquee: None,
@@ -3868,6 +3953,7 @@ impl App {
             recut_tail: 0.10,
             recut_busy: false,
             revise_open: false,
+            assistant: assistant_panel::AssistantPanel::new(),
             revise_text: String::new(),
             revise_pick: false,
             revise_region: None,
@@ -3887,6 +3973,7 @@ impl App {
             undo: Vec::new(),
             pending_undo: None,
             redo: Vec::new(),
+            clip_clipboard: None,
             save_at: normalized_on_load.then(|| Instant::now() + std::time::Duration::from_millis(1200)),
             disk_fingerprint,
             thumbs: Default::default(),
@@ -4041,11 +4128,8 @@ impl App {
     }
 
     fn apply_edit(&mut self, snapshot: bool, f: impl FnOnce(&mut serde_json::Value)) {
-        // 生成中コンテンツは読み取り専用（ダンの中間保存と衝突させない）
-        if self.is_generating_open() {
-            self.toast("🎬 ダンが制作中です。編集は完成後に可能になります");
-            return;
-        }
+        // Human edits remain available while Dan works. save_document merges
+        // disjoint changes and refuses a conflicting overwrite.
         if snapshot {
             self.pending_undo = None;
             self.undo.push(self.doc.raw.to_string());
@@ -4114,23 +4198,38 @@ impl App {
     /// edits are written by another process, so an unconditional save-on-exit would
     /// otherwise erase them with this window's stale in-memory document.
     fn save_document(&mut self) -> anyhow::Result<bool> {
-        if self.is_generating_open() {
-            // 生成中は書き込まない（ダンの中間保存が唯一の書き手）
-            return Ok(false);
-        }
+        let _contents_guard = match edits::lock_contents(&self.doc.contents_path) {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.save_at = Some(Instant::now() + std::time::Duration::from_millis(200));
+                return Ok(false);
+            }
+        };
         let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&self.doc.contents_path)?)?;
         let fingerprint = serde_json::to_string(&on_disk)?;
-        if fingerprint != self.disk_fingerprint {
-            self.save_at = None;
-            self.toast = Some(("外部更新を検出：この画面からの古い保存を停止しました。再度開いてください。".into(), Instant::now()));
-            eprintln!("save blocked: contents.json changed outside this editor instance");
-            return Ok(false);
-        }
+        let disk_form = edits::seq_swap_out(&self.doc.raw);
+        let disk_form = if fingerprint != self.disk_fingerprint {
+            let baseline:serde_json::Value=serde_json::from_str(&self.disk_fingerprint)?;
+            match edits::merge_save(&baseline,&on_disk,&disk_form) {
+                Ok(merged)=>merged,
+                Err(_)=>{
+                    self.save_at=None;
+                    self.toast("同じ場面が外部で変更されています。保存は保留しました。手編集はこの画面に残っています。");
+                    return Ok(false);
+                }
+            }
+        } else {disk_form};
         // メモリはアクティブタブが sequence に入っているので、ディスク形
         // （sequence=メイン・サブは subseqs）へ変換して書く
-        let disk_form = edits::seq_swap_out(&self.doc.raw);
         edits::save(&disk_form, &self.doc.contents_path)?;
         self.disk_fingerprint = disk_form.to_string();
+        let mut live_form=disk_form;
+        edits::seq_swap_in(&mut live_form);
+        if live_form!=self.doc.raw {
+            let doc=Arc::new(model::Doc::from_raw(live_form,&self.doc.contents_path,&self.doc.asset_dir)?);
+            self.doc=doc.clone();*self.shared.doc.lock().unwrap()=doc;
+        }
+        self.remember_disk_mtime();
         Ok(true)
     }
 
@@ -4889,7 +4988,6 @@ var p=window.__nativeCaptionPayload;if(!p||!window.ipc)return;\
 var fps=(Number.isFinite(p.fps)&&p.fps>1)?p.fps:30;\
 var fr=Math.round(t*fps),hidden=new Set(p.hiddenCaptionIds||[]);\
 var acts=p.captions.filter(function(c){return c.text&&c.text.trim()&&!hidden.has(c.id)&&fr>=Math.round(c.start*fps)&&fr<Math.round(c.end*fps)});\
-acts=acts.length?[acts[acts.length-1]]:[];\
 var root=document.querySelector('div[data-ready]');if(!root)return;\
 var cont=root.firstElementChild;if(!cont)return;\
 var layer=cont.firstElementChild;if(!layer)return;\
@@ -4897,7 +4995,7 @@ var cr=layer.getBoundingClientRect();if(!(cr.width>1))return;\
 var kids=[].filter.call(layer.children,function(el){return el.tagName!=='STYLE'});\
 if(kids.length!==acts.length)return;\
 var out={};\
-for(var i=0;i<acts.length;i++){var b=(kids[i].firstElementChild||kids[i]).getBoundingClientRect();\
+for(var i=0;i<acts.length;i++){var para=kids[i].querySelector('p');var b=(para?para.parentElement:(kids[i].firstElementChild||kids[i])).getBoundingClientRect();\
 out[acts[i].id||String(i)]=[(b.left-cr.left)/cr.width,(b.top-cr.top)/cr.height,b.width/cr.width,b.height/cr.height];}\
 window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 }catch(e){}};";
@@ -4967,6 +5065,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     "end": c.timeline_end,
                     "design": c.style.clone().unwrap_or_else(|| serde_json::json!({})),
                     "words": c.words.clone(),
+                    "transform_keys": c.transform_keys.clone(),
+                    "opacity": c.visual_opacity(),
                 }));
             }
         }
@@ -5045,7 +5145,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 unsafe { make_caption_window_tree_visual_only(hwnd.0 as isize) };
             }
         }
-        let _ = web.set_visible(visible);
+        let _ = web.set_visible(visible && !(self.assistant.open && self.assistant.immersive));
         if !visible {
             return;
         }
@@ -5660,10 +5760,45 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         });
     }
 
+    fn copy_selected(&mut self) {
+        if self.selected.is_empty() { return; }
+        self.clip_clipboard=Some(edits::copy_clips(&self.doc.raw,&self.selected));
+        self.toast("選択部分をコピーしました");
+    }
+
+    fn paste_at_playhead(&mut self) {
+        if let Some(bundle)=self.clip_clipboard.clone() {
+            let at=self.t;
+            let salt=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+            self.apply_edit(true,move |raw| { edits::paste_clips(raw,&bundle,at,salt); });
+            self.toast("再生位置に貼り付けました");
+        }
+    }
+
     /// icon strip above the ruler: undo/redo, split, delete, zoom (Filmora layout)
     fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
+            ui.menu_button("編集", |ui| {
+                if ui.add_enabled(!self.selected.is_empty(),egui::Button::new("コピー　Ctrl+C")).clicked() {
+                    self.copy_selected();ui.close_menu();
+                }
+                if ui.add_enabled(self.clip_clipboard.is_some(),egui::Button::new("再生位置に貼り付け　Ctrl+V")).clicked() {
+                    self.paste_at_playhead();ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("保存　Ctrl+S").clicked() {
+                    match self.save_document() {
+                        Ok(true)=>{self.save_at=None;self.toast("保存しました");},
+                        Ok(false)=>{},
+                        Err(e)=>self.toast(&format!("保存できませんでした: {e}")),
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("操作一覧　F1").clicked() {
+                    self.show_help=true;ui.close_menu();
+                }
+            });
             let mut ibtn = |ui: &mut egui::Ui, glyph: &str, tip: &str, enabled: bool| -> bool {
                 ui.add_enabled(
                     enabled,
@@ -7724,7 +7859,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             if !before.contains(&id) {
                 self.clip_spawn
                     .insert(id, Instant::now() + std::time::Duration::from_millis(delay));
-                delay += 60;
+                delay = (delay + 40).min(160);
             }
         }
     }
@@ -7744,7 +7879,200 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             && self.generating_content.as_deref() == Some(self.content_id().as_str())
     }
 
+    /// contents.json の mtime を今の値で記憶する（open / save の直後に呼ぶ）
+    fn remember_disk_mtime(&mut self) {
+        let path = format!("{}/contents.json", self.doc.asset_dir);
+        self.disk_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    }
+
+    /// 外部更新の取り込み（2秒ポーリングから）。再生位置・選択・再生状態は保ったまま開き直す。
+    fn poll_external_update(&mut self, viewport_width: f32) {
+        let path = format!("{}/contents.json", self.doc.asset_dir);
+        let Ok(mt) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return };
+        if self.disk_mtime.map_or(false, |prev| mt <= prev) {
+            return;
+        }
+        let Ok(txt) = std::fs::read_to_string(&path) else { return };
+        let Ok(on_disk) = serde_json::from_str::<serde_json::Value>(&txt) else { return };
+        let fp = serde_json::to_string(&on_disk).unwrap_or_default();
+        if fp == self.disk_fingerprint {
+            return; // 自分の保存
+        }
+        let cid = self.content_id();
+        if cid.is_empty() {
+            return;
+        }
+        if self.save_at.is_some() {
+            return;
+        }
+        self.disk_mtime = Some(mt);
+        let keep_t = self.t;
+        let keep_sel = self.selected.clone();
+        let keep_playing = self.playing;
+        let keep_pps = self.pps;
+        let keep_scroll_x = self.scroll_x;
+        let before = self.clip_id_set();
+        let old_clips: std::collections::HashMap<String, String> = self.doc.seq.tracks.iter()
+            .flat_map(|t| t.clips.iter()).map(|c| (c.id.clone(), format!("{c:?}"))).collect();
+        let previous_raw = self.doc.raw.to_string();
+        let previous_undo = self.undo.clone();
+        self.open_content(&cid);
+        self.undo = previous_undo;
+        self.undo.push(previous_raw);
+        self.redo.clear();
+        self.t = keep_t.min(self.dur.max(0.0));
+        let ids = self.clip_id_set();
+        self.selected = keep_sel.into_iter().filter(|s| ids.contains(s)).collect();
+        self.playing = keep_playing;
+        self.pps = keep_pps;
+        self.scroll_x = keep_scroll_x;
+        if before.is_empty() && !ids.is_empty() && self.dur > 0.0 {
+            self.zoom_fit(viewport_width);
+        }
+        self.stagger_new_clips(&before);
+        for clip in self.doc.seq.tracks.iter().flat_map(|t| t.clips.iter()) {
+            if old_clips.get(&clip.id).map_or(false, |old| old != &format!("{clip:?}")) {
+                self.clip_spawn.insert(clip.id.clone(), Instant::now());
+            }
+        }
+        self.push_req(false);
+        // The changed clips themselves provide feedback; avoid a toast per edit.
+    }
+
+    /// エディタ状態を部屋フォルダへ公開（editor_state.json）。チャット/音声のダンが
+    /// 「いまどのコンテンツの何秒を見て、何を選んでいるか」を読むための一方向チャネル。
+    fn assistant_ui(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let assistant_context = serde_json::json!({
+            "room_id": self.room_id(), "content_id": if self.screen == Screen::Editor { self.content_id() } else { String::new() },
+            "playhead": (self.t * 1000.0).round() / 1000.0,
+            "unsaved": self.save_at.is_some(),
+            "pointer": self.assistant.pointer,
+            "visible_targets": self.assistant.targets,
+            "region_selection": self.assistant.selection,
+            "preview_viewport": self.assistant.viewport,
+            "selected": self.doc.seq.tracks.iter().flat_map(|tr| tr.clips.iter())
+                .filter(|c| self.selected.contains(&c.id))
+                .map(|c| serde_json::json!({"id": c.id, "text": c.text,
+                    "approved": self.doc.raw.as_array().and_then(|a| a.first())
+                        .and_then(|c0| c0.pointer("/timeline/sequence/tracks")).and_then(|t| t.as_array())
+                        .map(|tracks| tracks.iter().filter_map(|t| t["clips"].as_array())
+                            .flatten().any(|raw| raw["id"].as_str() == Some(c.id.as_str()) && raw["approved"] == true))
+                        .unwrap_or(false),
+                    "timeline_start": c.timeline_start, "timeline_end": c.timeline_end}))
+                .collect::<Vec<_>>()
+        });
+        let assistant_token = API_TOKEN.read().unwrap().clone().unwrap_or_default();
+        for command in self.assistant.show(ctx, frame, assistant_context, &assistant_token) {
+            match command.as_str() {
+                "auth" => {}, // assistant.show already renewed and published it
+                "return_keyboard" => {
+                    if let Some(id) = ctx.memory(|m| m.focused()) {
+                        ctx.memory_mut(|m| m.surrender_focus(id));
+                    }
+                },
+                "toggle_play" if self.screen == Screen::Editor => self.toggle_play(),
+                "close" => self.assistant.open = false,
+                "stage_full" => { self.assistant.immersive = true; self.pause_at_displayed(); },
+                "stage_compact" => self.assistant.immersive = false,
+                _ if command.starts_with("external:https://") => { let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &command[9..]]).spawn(); },
+                "undo" => { self.poll_external_update(ctx.screen_rect().width()); self.do_undo(); },
+                "refresh" => self.poll_external_update(ctx.screen_rect().width()),
+                "pick" => { self.assistant.pick = true; self.assistant.open = true; self.assistant.immersive = false; },
+                "clear_focus" => { self.assistant.focus = None; self.assistant.selection = None; },
+                _ if command.starts_with('{') => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&command) {
+                        let id = v["request_id"].as_str().unwrap_or("");
+                        let action = &v["action"];
+                        if action["content_id"].as_str() == Some(self.content_id().as_str()) && self.screen == Screen::Editor {
+                            match action["kind"].as_str().unwrap_or("") {
+                                "production_activity" => {
+                                    self.assistant.production=action["operations"].as_array().cloned().unwrap_or_default();
+                                    self.assistant.production_at=Some(Instant::now());
+                                    ctx.request_repaint();
+                                },
+                                "seek" | "focus" => {
+                                    self.pause_at_displayed();
+                                    self.t = action["t"].as_f64().unwrap_or(self.t).clamp(0.0, self.dur);
+                                    if action["kind"] == "focus" { self.assistant.focus = Some(action.clone()); }
+                                    self.push_req(false);
+                                    ctx.request_repaint();
+                                    self.assistant.reply(id, serde_json::json!({"ok": true}));
+                                },
+                                _ => self.assistant.reply(id, serde_json::json!({"ok": false, "error": "未対応の画面操作です"})),
+                            }
+                        } else { self.assistant.reply(id, serde_json::json!({"ok": false, "error": "開いている動画が変わりました"})); }
+                    }
+                },
+                _ if command.starts_with("open:") && self.save_at.is_none() => self.open_content(&command[5..]),
+                _ => {},
+            }
+        }
+    }
+
+    fn publish_editor_state(&mut self) {
+        if self.state_pub_at.elapsed().as_millis() < 500 {
+            return;
+        }
+        self.state_pub_at = Instant::now();
+        let cid = self.content_id();
+        let sel: Vec<serde_json::Value> = self
+            .selected
+            .iter()
+            .filter_map(|id| {
+                self.doc.seq.tracks.iter().enumerate().find_map(|(ti, tr)| {
+                    tr.clips.iter().find(|c| &c.id == id).map(|c| {
+                        serde_json::json!({
+                            "id": c.id, "lane": ti, "timeline_start": c.timeline_start,
+                            "timeline_end": c.timeline_end,
+                            "text": c.text, "asset_id": c.asset_id,
+                            "region": c.region.is_some(),
+                        })
+                    })
+                })
+            })
+            .collect();
+        let in_editor = self.screen == Screen::Editor;
+        let state = serde_json::json!({
+            "room_id": self.room_id(),
+            // ライブラリ画面では何も開いていない（raw[0] の id は意味を持たない）
+            "content_id": if in_editor { cid.clone() } else { String::new() },
+            "playhead": (self.t * 1000.0).round() / 1000.0,
+            "playing": self.playing,
+            "duration": self.dur,
+            "pixels_per_second": self.pps,
+            "scroll_x": self.scroll_x,
+            "selected": sel,
+            "editor": if self.screen == Screen::Editor { "editor" } else { "library" },
+            "build": env!("NATIVE_BUILD_TAG"),
+        });
+        let body = state.to_string();
+        // 再生中は playhead が毎回変わるので、書くのは秒精度で丸めた指紋が変わった時だけ
+        let fp = format!("{cid}|{:.0}|{}|{}", self.t, self.playing, sel.len());
+        // 変化が無くても 20 秒ごとに書く（ハートビート）: 読む側は mtime で
+        // 「エディタが生きているか」を判定するため
+        let heartbeat = self.state_pub_written.elapsed().as_secs() >= 20;
+        if !heartbeat {
+            if fp == self.state_pub_last && self.playing {
+                return;
+            }
+            if body == self.state_pub_last {
+                return;
+            }
+        }
+        self.state_pub_written = Instant::now();
+        self.state_pub_last = if self.playing { fp } else { body.clone() };
+        let path = format!("{}/editor_state.json", self.doc.asset_dir);
+        let tmp = format!("{path}.tmp");
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
     fn open_content(&mut self, content_id: &str) {
+        self.assistant.pointer = serde_json::Value::Null;
+        self.assistant.focus = None;
+        self.assistant.selection = None;
+        self.assistant.targets.clear();
         let path = format!("{}/contents.json", self.doc.asset_dir);
         let Ok(txt) = std::fs::read_to_string(&path) else { return };
         let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(&txt) else { return };
@@ -7790,6 +8118,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.screen = Screen::Editor;
             self.push_req(false);
             self.migrate_legacy_freezes();
+            self.remember_disk_mtime();
         }
     }
 
@@ -8441,7 +8770,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let key = caption_cache_key(c, &text, &style);
         let font = caption_style_num(&style, "fontSize", 1.0).max(0.05);
         if let Some(bbox) = self.caption_png_boxes.get(&key) {
-            return Some(caption_runtime_dst(c, *bbox, font));
+            return Some(c.caption_box_at(self.displayed_t(), caption_runtime_dst(c, *bbox, font)));
         }
         let png = std::path::Path::new(&self.doc.asset_dir)
             .join("caption-cache")
@@ -8459,7 +8788,76 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.caption_png_boxes.clear();
         }
         self.caption_png_boxes.insert(key, bbox);
-        Some(caption_runtime_dst(c, bbox, font))
+        Some(c.caption_box_at(self.displayed_t(), caption_runtime_dst(c, bbox, font)))
+    }
+
+    fn assistant_preview(&mut self, ui: &mut egui::Ui, resp: &egui::Response, vid: egui::Rect) -> bool {
+        self.assistant.viewport = serde_json::json!({"x":vid.left(),"y":vid.top(),"w":vid.width(),"h":vid.height(),"scale":ui.ctx().pixels_per_point()});
+        let t = self.displayed_grid_t();
+        let clips: Vec<_> = self.doc.seq.tracks.iter().filter(|tr| tr.kind != "audio").flat_map(|tr| tr.clips.iter())
+            .filter(|c| t >= c.timeline_start && t < c.timeline_end).cloned().collect();
+        let mut targets = Vec::new();
+        for c in &clips {
+            let rect = if let Some(r) = c.region_at(t) { Some(r) }
+                else if c.text.is_some() && c.asset_id.is_none() {
+                    let live = self.caption_live_boxes.lock().ok().and_then(|m| m.get(&c.id).copied());
+                    live.map(|[x,y,w,h]| (x,y,w,h)).or_else(|| self.caption_png_box(c))
+                } else if c.asset_id.is_some() { Some((0.0,0.0,1.0,1.0)) } else { None };
+            if let Some((x,y,w,h)) = rect {
+                targets.push(serde_json::json!({"id":c.id,"text":c.text,"asset_id":c.asset_id,
+                    "rect":[x,y,w,h],"start":c.timeline_start,"end":c.timeline_end}));
+            }
+        }
+        self.assistant.targets = targets;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let pointer = resp.interact_pointer_pos().or_else(|| resp.hover_pos()).filter(|p| vid.contains(*p));
+        if let Some(pt) = pointer {
+            if now.saturating_sub(self.assistant.pointer["at_ms"].as_u64().unwrap_or(0)) >= 80 {
+                let x = ((pt.x-vid.left())/vid.width()) as f64;
+                let y = ((pt.y-vid.top())/vid.height()) as f64;
+                let mut trail = self.assistant.pointer["trail"].as_array().cloned().unwrap_or_default();
+                trail.retain(|v| now.saturating_sub(v["at_ms"].as_u64().unwrap_or(0)) < 5000);
+                trail.push(serde_json::json!({"x":x,"y":y,"t":t,"at_ms":now}));
+                self.assistant.pointer = serde_json::json!({"x":x,"y":y,"t":t,"at_ms":now,"trail":trail});
+            }
+        }
+        let p = ui.painter_at(vid);
+        if let Some(f) = &self.assistant.focus {
+            if let Some(r) = f["rect"].as_array().filter(|r| r.len()==4) {
+                let x=r[0].as_f64().unwrap_or(0.0) as f32; let y=r[1].as_f64().unwrap_or(0.0) as f32;
+                let w=r[2].as_f64().unwrap_or(0.0) as f32; let h=r[3].as_f64().unwrap_or(0.0) as f32;
+                let rr=egui::Rect::from_min_size(vid.min+egui::vec2(x*vid.width(),y*vid.height()),egui::vec2(w*vid.width(),h*vid.height()));
+                let col=egui::Color32::from_rgb(100,210,255);
+                p.rect_filled(rr,3.0,col.gamma_multiply(0.12)); p.rect_stroke(rr,3.0,egui::Stroke::new(2.0,col));
+                p.text(rr.left_top()+egui::vec2(4.0,4.0),egui::Align2::LEFT_TOP,f["label"].as_str().unwrap_or("この辺り？"),egui::FontId::proportional(14.0),col);
+            }
+        }
+        if !self.assistant.pick { return false; }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        p.text(vid.center_top()+egui::vec2(0.0,12.0),egui::Align2::CENTER_TOP,"指示する場所を囲んでください（Escで終了）",egui::FontId::proportional(14.0),UI_ACCENT);
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) { self.assistant.pick=false; self.assistant.drag=None; return true; }
+        if resp.drag_started() { self.assistant.drag=pointer; }
+        if let (Some(a),Some(b))=(self.assistant.drag,pointer) {
+            let r=egui::Rect::from_two_pos(a,b).intersect(vid);
+            p.rect_stroke(r,0.0,egui::Stroke::new(2.0,UI_ACCENT));
+            if resp.drag_stopped() {
+                self.assistant.drag=None; self.assistant.pick=false;
+                if r.width()>3.0 && r.height()>3.0 {
+                    let x=((r.left()-vid.left())/vid.width()) as f64; let y=((r.top()-vid.top())/vid.height()) as f64;
+                    let w=(r.width()/vid.width()) as f64; let h=(r.height()/vid.height()) as f64;
+                    let mut hits: Vec<_>=self.assistant.targets.iter().filter(|v| {
+                        let b=&v["rect"]; let bx=b[0].as_f64().unwrap_or(0.0); let by=b[1].as_f64().unwrap_or(0.0);
+                        bx<x+w && bx+b[2].as_f64().unwrap_or(0.0)>x && by<y+h && by+b[3].as_f64().unwrap_or(0.0)>y
+                    }).cloned().collect();
+                    if hits.iter().any(|v| v["text"].is_string()) { hits.retain(|v| v["text"].is_string()); }
+                    self.selected=hits.iter().filter_map(|v| v["id"].as_str().map(str::to_string)).collect();
+                    self.assistant.selection=Some(serde_json::json!({"rect":[x,y,w,h],"t":t,"targets":hits}));
+                    self.assistant.focus=Some(serde_json::json!({"rect":[x,y,w,h],"label":"選択した範囲"}));
+                    self.pause_at_displayed();
+                }
+            }
+        }
+        true
     }
 
     fn preview_inspector(&mut self, ui: &mut egui::Ui, resp: &egui::Response) {
@@ -8473,6 +8871,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             let scale = (img.width() / cw).min(img.height() / ch);
             egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
         };
+        if self.assistant_preview(ui, resp, vid) { return; }
         // The caption WebView is visual-only, so preview gestures arrive through the
         // normal egui response just like every other editor interaction.
         let pointer_pos = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
@@ -9381,9 +9780,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui) {
         const NEW_TOP_LANE: usize = usize::MAX;
+        const NEW_BOTTOM_LANE: usize = usize::MAX - 1;
         const GUTTER: f32 = 112.0; // lane headers (lock/eye/mute/solo/magnet icons)
-        const BOTTOM: f32 = 24.0; // zoom slider + scrollbar
-        let h = ui.available_height() - BOTTOM;
+        let h = timeline_body_height(ui);
         let w = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
         let body = egui::Rect::from_min_max(egui::pos2(rect.left() + GUTTER, rect.top()), rect.max);
@@ -10201,6 +10600,27 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         }
                     }
                 }
+                if self.assistant.production_at.map(|t|t.elapsed().as_secs()<10).unwrap_or(false) {
+                    let working=self.assistant.production.iter().any(|op| {
+                        let ids=op["clip_ids"].as_array();
+                        if ids.map(|v|!v.is_empty()).unwrap_or(false) {
+                            return ids.unwrap().iter().any(|id|id.as_str()==Some(c.id.as_str()));
+                        }
+                        match op["tool"].as_str().unwrap_or("") {
+                            "generate_speech" => tr.kind=="audio",
+                            "generate_video" | "generate_image" => c.asset_id.is_some() && tr.kind!="audio",
+                            _ => false,
+                        }
+                    });
+                    if working {
+                        let phase=ui.input(|i|i.time) as f32;
+                        let strength=0.55+0.35*(phase*3.0).sin();
+                        p.rect_stroke(r.shrink(1.0),4.0,egui::Stroke::new(2.0,egui::Color32::from_rgba_unmultiplied(150,235,201,(strength*255.0) as u8)));
+                        let x=r.left()+((phase*0.35).fract())*r.width();
+                        p.line_segment([egui::pos2(x,r.top()+2.0),egui::pos2(x,r.bottom()-2.0)],egui::Stroke::new(2.0,egui::Color32::from_rgba_unmultiplied(180,240,220,110)));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    }
+                }
                 let sel = self.selected.contains(&c.id);
                 let hovered = pointer.map(|pt| r.contains(pt)).unwrap_or(false);
                 p.rect_stroke(
@@ -10255,6 +10675,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
+        if self.hover_lane == Some(NEW_BOTTOM_LANE) && matches!(self.drag, Drag::Move { .. }) {
+            if let Some(&(_, y0, lh)) = lane_tops.last() {
+                let r = egui::Rect::from_min_max(egui::pos2(body.left(), y0 + lh), egui::pos2(body.right(), (y0 + lh + 40.0).min(body.bottom())));
+                p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 170, 255, 34));
+                p.line_segment([egui::pos2(r.left(), r.top()), egui::pos2(r.right(), r.top())], egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 180, 255)));
+            }
+        }
         if self.hover_lane == Some(NEW_TOP_LANE) && matches!(self.drag, Drag::Move { .. }) {
             if let Some(r) = new_top_drop {
                 p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 170, 255, 34));
@@ -10670,8 +11097,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // （上へは何本でも増やせる）
                         let above_top = body.contains(pos)
                             && lane_tops.first().map(|&(_, y0, _)| pos.y < y0).unwrap_or(false);
+                        // 最下段レーンより下 = 新規音声レーン行き（音声クリップのみ）
+                        let below_bottom = body.contains(pos)
+                            && lane_tops.last().map(|&(_, y0, lh)| pos.y > y0 + lh).unwrap_or(false);
                         self.hover_lane = if above_top {
                             Some(NEW_TOP_LANE)
+                        } else if below_bottom {
+                            Some(NEW_BOTTOM_LANE)
                         } else {
                             lane_tops
                                 .iter()
@@ -10679,6 +11111,30 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 .map(|&(ti, _, _)| ti)
                         };
                         if let Some(target) = self.hover_lane {
+                            // 音声クリップ（リンクされていない BGM/ナレーション）のレーン移動:
+                            // 別の音声レーンへ、または最下段より下で新規音声レーンへ
+                            let auds: Vec<String> = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .filter(|tr| tr.kind == "audio")
+                                .flat_map(|tr| tr.clips.iter())
+                                .filter(|c| ids.contains(&c.id) && c.link_id.is_none())
+                                .map(|c| c.id.clone())
+                                .collect();
+                            if !auds.is_empty() && target != NEW_TOP_LANE {
+                                let is_new = target == NEW_BOTTOM_LANE;
+                                let tgt_audio = !is_new && self.doc.seq.tracks.get(target).map(|t| t.kind == "audio" && !t.locked).unwrap_or(false);
+                                let already = !is_new && self.doc.seq.tracks.get(target).map(|t| t.clips.iter().any(|c| auds.contains(&c.id))).unwrap_or(true);
+                                if (is_new && prev_hover != Some(NEW_BOTTOM_LANE)) || (tgt_audio && !already) {
+                                    let salt = lane_salt();
+                                    let tgt = if is_new { None } else { Some(target) };
+                                    eprintln!("AUDIOLANE move: {} clip(s) -> {:?}", auds.len(), tgt);
+                                    self.apply_edit(false, move |raw| edits::move_audio_clips_to_track(raw, &auds, tgt, salt));
+                                    self.drag_lane_tops = None;
+                                }
+                            }
                             if target == NEW_TOP_LANE {
                                 let vids: Vec<String> = self
                                     .doc
@@ -11268,7 +11724,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 }
 
 impl App {
-    fn absorb_lib(&mut self) {
+    fn absorb_lib(&mut self, viewport_width: f32) {
         let taken: Vec<(String, Result<serde_json::Value, String>)> =
             std::mem::take(&mut *self.lib_sink.lock().unwrap());
         for (tag, res) in taken {
@@ -11479,16 +11935,11 @@ impl App {
             }
             // ライブ組み上がり: 生成中は中間保存（カット済みタイムライン等）を
             // mtime 変化で検知して開き直す。新しく現れたクリップは時差フェードイン。
-            if let Some(gcid) = self.generating_content.clone() {
-                let path = format!("{}/contents.json", self.doc.asset_dir);
-                if let Ok(mt) = std::fs::metadata(&path).and_then(|m| m.modified()) {
-                    if self.gen_contents_mtime.map_or(true, |prev| mt > prev) {
-                        self.gen_contents_mtime = Some(mt);
-                        let before = self.clip_id_set();
-                        self.open_content(&gcid);
-                        self.stagger_new_clips(&before);
-                    }
-                }
+            if self.screen == Screen::Editor {
+                // 外部書き込み（チャット/音声からのダンのコミット、別プロセスの編集）を
+                // 常時取り込む: mtime が進み、中身がこの画面の指紋と違えば開き直す。
+                // 未保存の手編集がある間は上書きせずトーストで知らせる（保存時のガードと同じ規律）。
+                self.poll_external_update(viewport_width);
             }
             self.clip_spawn.retain(|_, t| t.elapsed().as_secs_f32() < 3.0);
             if self.screen == Screen::Library
@@ -11549,117 +12000,24 @@ impl App {
             }
         }
         self.ensure_lib_thumbs(ctx);
-        egui::SidePanel::right("gen_panel").exact_width(360.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(10.0);
-                ui.heading("新しく作る");
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("素材を選んで、どう作ってほしいかを書くだけ").weak().small());
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("どう作ってほしいか").strong());
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.lib.brief)
-                        .desired_rows(4)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("例: カットしてテロップを付けて\n（空なら: テンポ良く無音をカットしてテロップ付き）"),
-                );
-                ui.add_space(6.0);
-                ui.add(egui::TextEdit::singleline(&mut self.lib.title).hint_text("タイトル（空なら自動）").desired_width(f32::INFINITY));
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("形式").weak());
-                    for f in ["9:16", "16:9", "1:1", "4:5"] {
-                        if ui.selectable_label(self.lib.format == f, f).clicked() {
-                            self.lib.format = f.into();
-                        }
+        egui::TopBottomPanel::top("library_creation").show(ctx, |ui| {
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("思い描く動画を、ダンと。").size(24.0));
+                    ui.label(egui::RichText::new("話しながら、イメージを形にしていきましょう。").weak());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(16.0);
+                    if ui.add(egui::Button::new(egui::RichText::new("ダンと制作").size(16.0).color(egui::Color32::from_rgb(22,27,36)))
+                        .min_size(egui::vec2(160.0,48.0)).fill(UI_ACCENT)).clicked() {
+                        self.assistant.immersive=true; self.assistant.open=true;
                     }
                 });
-                ui.add_space(8.0);
-                ui.group(|ui| {
-                    ui.label(egui::RichText::new("Create an AI video sequence").strong());
-                    ui.label(egui::RichText::new("Describe the 30s main video here. The result is registered as an editable video clip at the start of a new timeline.").small().weak());
-                    ui.label(egui::RichText::new("Selected images/videos remain reference material for the AI; selecting them never switches AI generation off.").small().weak());
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Model").weak());
-                    if ui.selectable_label(self.lib.ai_model == "seedance_2_5", "Seedance 2.5 (recommended)").clicked() {
-                        self.lib.ai_model = "seedance_2_5".into();
-                    }
-                    if ui.selectable_label(self.lib.ai_model == "seedance_2_0", "Seedance 2.0").clicked() {
-                        self.lib.ai_model = "seedance_2_0".into();
-                        if self.lib.ai_duration > 15 { self.lib.ai_duration = 15; }
-                    }
-                    if ui.selectable_label(self.lib.ai_model == "kling3_0", "Kling 3.0").clicked() {
-                        self.lib.ai_model = "kling3_0".into();
-                        if self.lib.ai_duration > 10 { self.lib.ai_duration = 10; }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Length").weak());
-                    for secs in [5, 10, 15, 30] {
-                        let supported = match self.lib.ai_model.as_str() {
-                            "seedance_2_5" => true,
-                            "seedance_2_0" => secs <= 15,
-                            _ => secs <= 10,
-                        };
-                        if ui.add_enabled(supported, egui::SelectableLabel::new(self.lib.ai_duration == secs, format!("{secs}s"))).clicked() {
-                            self.lib.ai_duration = secs;
-                        }
-                    }
-                });
-                if self.lib.ai_model != "seedance_2_5" {
-                    ui.label(egui::RichText::new("30s is available with Seedance 2.5.").small().color(egui::Color32::from_rgb(240, 190, 80)));
-                }
-                let can_ai = !self.lib.brief.trim().is_empty() && !self.lib.started;
-                if ui.add_enabled(can_ai, egui::Button::new(
-                    egui::RichText::new("AI video: create new").size(14.0).color(egui::Color32::WHITE),
-                ).min_size(egui::vec2(330.0, 40.0)).rounding(8.0).fill(if can_ai { egui::Color32::from_rgb(110, 75, 190) } else { egui::Color32::from_gray(45) })).clicked() {
-                    self.start_ai_video();
-                }
-                ui.add_space(8.0);
-                ui.separator();
-                let n = self.lib.selected_assets.len();
-                let can = n > 0 && !self.lib.started;
-                if ui
-                    .add_enabled(
-                        can,
-                        egui::Button::new(
-                            egui::RichText::new(format!("▶  ダンに作らせる（素材{n}件）"))
-                                .size(14.0)
-                                .color(egui::Color32::WHITE),
-                        )
-                        .min_size(egui::vec2(330.0, 40.0))
-                        .rounding(8.0)
-                        .fill(if can { UI_ACCENT } else { egui::Color32::from_gray(45) }),
-                    )
-                    .clicked()
-                {
-                    self.start_generation();
-                }
-                if n == 0 && !self.lib.started {
-                    ui.label(
-                        egui::RichText::new("← 左の素材をクリックして選んでください")
-                            .small()
-                            .color(egui::Color32::from_rgb(240, 190, 80)),
-                    );
-                }
-                if self.lib.started {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("ダンが制作中…（数分。完成すると自動で開きます）");
-                    });
-                    for ev in &self.lib.events {
-                        ui.label(egui::RichText::new(ev).small().weak());
-                    }
-                }
-                if let Some(e) = &self.lib.error {
-                    ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
-                }
             });
+            ui.add_space(16.0);
         });
-        // 新規部屋（素材もコンテンツも無い）はリスト画面ではなく案内画面を出す。
-        // lib.loaded で初回取得完了を待つので、読込中に一瞬出ることはない。
         let room_empty = self.lib.loaded && self.lib.assets.is_empty() && self.lib.contents.is_empty();
         let dragging_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if room_empty {
@@ -11729,7 +12087,7 @@ impl App {
                     }
                     ui.add_space(16.0);
                     ui.label(
-                        egui::RichText::new("① 素材を入れる　→　② 右の「▶ ダンに作らせる」で自動編集　→　③ できた動画を開いて仕上げ")
+                        egui::RichText::new("素材がなくても「ダンと制作」から始められます。")
                             .size(12.5)
                             .color(egui::Color32::from_gray(150)),
                     );
@@ -11846,7 +12204,7 @@ impl App {
                         }
                     }
                     if contents.is_empty() {
-                        ui.label(egui::RichText::new("まだありません。素材を選んで右の「ダンに作らせる」から").weak());
+                        ui.label(egui::RichText::new("まだ作品がありません。「ダンと制作」から始めましょう。").weak());
                     }
                 });
                 // ---- user assets ----
@@ -11856,7 +12214,7 @@ impl App {
                     .iter()
                     .partition(|a| a.get("source_type").and_then(|v| v.as_str()) != Some("generated"));
                 ui.label(egui::RichText::new("あなたの素材").strong().size(13.0));
-                ui.label(egui::RichText::new("クリックで選択 → 右の「ダンに作らせる」").weak().small());
+                ui.label(egui::RichText::new("素材をクリックして選択できます").weak().small());
                 ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
                     for a in &mine {
@@ -12048,6 +12406,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _uistat = UiStatGuard::begin(self);
+        self.publish_editor_state();
         // 部屋名が判明したらタイトルバーへ（どの部屋のエディタか一目で分かる）
         if !self.title_set {
             if let Some(label) = self.room_label.clone() {
@@ -12075,11 +12434,19 @@ impl eframe::App for App {
                 });
             }
         });
-        self.absorb_lib();
+        self.absorb_lib(ctx.screen_rect().width());
+        // Finish pending saves before either the library or editor can return.
+        if let Some(at) = self.save_at {
+            if Instant::now() >= at {
+                self.save_at = None;
+                if let Err(e) = self.save_document() { eprintln!("save: {e:#}"); }
+            }
+        }
         if self.screen == Screen::Library {
             if let Some(web) = self.caption_web.as_ref() {
                 let _ = web.set_visible(false);
             }
+            self.assistant_ui(ctx, frame);
             self.library_ui(ctx);
             return;
         }
@@ -12091,7 +12458,7 @@ impl eframe::App for App {
                     let ev = self.lib.events.last().cloned().unwrap_or_default();
                     ui.label(
                         egui::RichText::new(format!(
-                            "🎬 ダンが制作中… {ev}　（タイムラインは出来上がり順に表示。編集は完成後に可能になります）"
+                            "ダンが編集中 · {ev}　途中でも再生・編集できます"
                         ))
                         .size(12.5)
                         .color(egui::Color32::from_rgb(120, 220, 190)),
@@ -12234,22 +12601,39 @@ impl eframe::App for App {
                 .map(|c| c.id.clone())
                 .collect();
         }
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+            match self.save_document() {
+                Ok(true) => { self.save_at=None; self.toast("保存しました"); },
+                Ok(false) => {},
+                Err(e) => self.toast(&format!("保存できませんでした: {e}")),
+            }
+        }
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::C)) && !self.selected.is_empty() {
+            self.copy_selected();
+        }
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::V)) {
+            self.paste_at_playhead();
+        }
         if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
-            self.do_undo();
+            if ctx.input(|i|i.modifiers.shift) {self.do_redo();} else {self.do_undo();}
         }
         if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::Y)) {
             self.do_redo();
         }
-        if let Some(at) = self.save_at {
-            if Instant::now() >= at {
-                self.save_at = None;
-                if let Err(e) = self.save_document() {
-                    eprintln!("save: {e:#}");
-                }
+        // Plain Space belongs to transport even after clicking a text field.
+        // Preserve IME conversion and Shift+Space for literal whitespace.
+        let transport_space = ctx.input_mut(|i| {
+            if !i.modifiers.is_none() || i.events.iter().any(|e| matches!(e, egui::Event::Ime(_))) {
+                return false;
             }
-        }
-
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            let initial = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Space, pressed: true, repeat: false, .. }));
+            let pressed = i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+            if pressed {
+                i.events.retain(|e| !matches!(e, egui::Event::Text(s) if s == " "));
+            }
+            pressed && initial
+        });
+        if transport_space {
             self.toggle_play();
         }
         // auto-resume after a timeline interaction paused playback: wait until the ring
@@ -12794,6 +13178,8 @@ impl eframe::App for App {
                         .get(0)
                         .and_then(|c| c.get("timeline"))
                         .and_then(|t| t.get("format"))
+                        .or_else(|| self.doc.raw.get(0).and_then(|c| c.pointer("/timeline/sequence/format")))
+                        .or_else(|| self.doc.raw.get(0).and_then(|c| c.get("format")))
                         .and_then(|v| v.as_str())
                         .unwrap_or("9:16")
                         .to_string();
@@ -12814,15 +13200,10 @@ impl eframe::App for App {
                         self.push_req(false);
                     }
                 }
-                if ui
-                    .selectable_label(self.revise_open, "🤖 ダンに指示")
-                    .on_hover_text("この動画への修正指示を言葉で送る（例: 冒頭をもっとテンポ良く）")
-                    .clicked()
-                {
-                    self.revise_open = !self.revise_open;
-                    if self.revise_open && self.lib.assets.is_empty() {
-                        self.lib_refresh();
-                    }
+                if ui.selectable_label(self.assistant.open, "ダンと制作").clicked() {
+                    self.assistant.open = !self.assistant.open;
+                    self.assistant.immersive=false;
+                    self.revise_open = false;
                 }
                 // サブタブでは I/O=緑の飛び飛び区間（モードボタンは廃止。
                 // タブが役割を決める: メイン=青い単一書き出し範囲／サブ=緑区間）
@@ -13099,6 +13480,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| self.transport_ui(ui));
             self.inspector_ui(ctx);
         }
+        self.assistant_ui(ctx, frame);
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
@@ -13162,7 +13544,7 @@ impl eframe::App for App {
                         // プレビュー上のクリックで素材を選択（タイムラインを触らずに選べる）。
                         // clicked はドラッグ無しの離しでだけ真なので、範囲指定・移動ドラッグとは干渉しない。
                         // 上のレーンから順に、クリック点を実効箱に含む一番手前のクリップを選ぶ。
-                        if resp.clicked() && !self.revise_pick && !self.blur_mode {
+                        if resp.clicked() && !self.revise_pick && !self.blur_mode && !self.assistant.pick {
                             if let Some(p) = resp.interact_pointer_pos() {
                                 let vid = egui::Rect::from_center_size(resp.rect.center(), size);
                                 let fx = ((p.x - vid.left()) / vid.width()).clamp(0.0, 1.0) as f64;
@@ -13235,18 +13617,12 @@ impl eframe::App for App {
                                         let fy = ((rr.top() - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
                                         let fw = (rr.width() / vid.width()).min(1.0) as f64;
                                         let fh = (rr.height() / vid.height()).min(1.0) as f64;
-                                        // 指示クリップ: クリップの頭と尻がそのままAI作業の時間範囲。
-                                        // 普通のクリップとして移動/トリムでき、送信時に消費される
-                                        let t0 = self.displayed_grid_t();
-                                        let salt = self.salt;
-                                        self.salt += 1;
-                                        self.apply_edit(true, move |raw| {
-                                            edits::add_effect_clip(raw, t0, 3.0, (fx, fy, fw, fh), "note", salt)
-                                        });
-                                        self.push_req(false);
+                                        self.assistant.selection = Some(serde_json::json!({"rect":[fx,fy,fw,fh],"t":self.displayed_grid_t()}));
+                                        self.assistant.focus = Some(serde_json::json!({"rect":[fx,fy,fw,fh],"label":"選択した範囲"}));
                                         self.revise_pick = false;
-                                        self.revise_open = true;
-                                        self.toast("指示クリップを置きました（長さ/位置は普通のクリップとして調整可）");
+                                        self.assistant.open = true;
+                                        self.assistant.pick = true;
+                                        self.toast("ダンに指示する範囲を選べます");
                                     }
                                 }
                             }
@@ -13348,109 +13724,8 @@ impl eframe::App for App {
             }
         }
         if self.revise_open {
-            let mut open = self.revise_open;
-            let mut sent = false;
-            egui::Window::new("ダンに指示")
-                .open(&mut open)
-                .resizable(false)
-                .default_width(340.0)
-                .show(ctx, |ui| {
-                    ui.label("この動画をどう直してほしいか、言葉で指示してください");
-                    let text_resp = ui.add(
-                        egui::TextEdit::multiline(&mut self.revise_text)
-                            .desired_rows(4)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("例: 冒頭の自己紹介を短くして、テロップを大きめに"),
-                    );
-                    self.text_focus_ids.push(text_resp.id);
-                    ui.add_space(4.0);
-                    // 場所の指定: プレビューを囲むと「指示クリップ」がタイムラインに生まれ、
-                    // クリップの頭〜尻がAI作業の時間範囲・矩形が場所になる（送信時に消費）
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(self.revise_pick, "◱ 場所を囲んで指示クリップを置く")
-                            .on_hover_text("プレビューをドラッグで囲む→指示クリップがタイムラインに置かれます。
-長さ=作業の時間範囲・矩形=場所。普通のクリップとして調整可、送信時に消費")
-                            .clicked()
-                        {
-                            self.revise_pick = !self.revise_pick;
-                        }
-                        let n_notes = self
-                            .doc
-                            .seq
-                            .tracks
-                            .iter()
-                            .flat_map(|tr| tr.clips.iter())
-                            .filter(|c| c.style.as_ref().and_then(|v| v.as_str()) == Some("note"))
-                            .count();
-                        if n_notes > 0 {
-                            ui.label(
-                                egui::RichText::new(format!("📝 指示クリップ {n_notes}個を添付"))
-                                    .small()
-                                    .color(egui::Color32::from_rgb(150, 110, 220)),
-                            );
-                        }
-                        let n_sel = self.selected.len();
-                        if n_sel > 0 {
-                            ui.label(
-                                egui::RichText::new(format!("🎯 選択中のクリップ {n_sel}個を対象として添付"))
-                                    .small()
-                                    .color(egui::Color32::from_rgb(120, 200, 150)),
-                            )
-                            .on_hover_text("いま選択しているクリップが「この指示の対象」としてダンに渡ります");
-                        }
-                    });
-                    ui.add_space(4.0);
-                    let can = !self.revise_text.trim().is_empty() && !self.lib.started;
-                    if ui
-                        .add_enabled(can, egui::Button::new("▶ ダンに修正させる").min_size(egui::vec2(320.0, 28.0)))
-                        .clicked()
-                    {
-                        sent = true;
-                    }
-                    if self.lib.started {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("ダンが修正中…（完成すると自動で反映されます）");
-                        });
-                        // 進捗ログ: ユーザーがダンの働きぶりを評価する一次情報。
-                        // small+weakで読めなかったので、通常サイズ+実況/作業の色分け
-                        // +自動で最新に追従するスクロールに
-                        egui::ScrollArea::vertical()
-                            .id_salt("revise_events")
-                            .max_height(240.0)
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                for ev in &self.lib.events {
-                                    let is_action = ev
-                                        .chars()
-                                        .next()
-                                        .map(|c| !c.is_ascii() && !('ぁ'..='ヿ').contains(&c) && !('一'..='鿿').contains(&c))
-                                        .unwrap_or(false);
-                                    let rt = if is_action {
-                                        // ツール実行の行（絵文字始まり）: 少し明るい青緑
-                                        egui::RichText::new(ev)
-                                            .color(egui::Color32::from_rgb(140, 200, 220))
-                                    } else {
-                                        // ダンの実況コメント: 通常の文字色
-                                        egui::RichText::new(ev)
-                                            .color(egui::Color32::from_rgb(225, 225, 225))
-                                    };
-                                    ui.label(rt);
-                                }
-                            });
-                    }
-                    if let Some(e) = &self.lib.error {
-                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
-                    }
-                });
-            self.revise_open = open;
-            if sent {
-                self.playing = false;
-                self.push_req(false);
-                self.start_revision();
-                self.revise_text.clear();
-            }
+            self.assistant.open = true;
+            self.revise_open = false;
         }
         if std::env::var("NATIVE_RECUT_OPEN").map(|v| !v.is_empty()).unwrap_or(false) {
             std::env::set_var("NATIVE_RECUT_OPEN", "");
@@ -13602,6 +13877,9 @@ impl eframe::App for App {
                         ("ヘッダアイコン", "🔒ロック / 👁表示 / 🔇ミュート / Sソロ / 磁マグネット"),
                         ("Ctrl+Z / Y", "元に戻す / やり直し"),
                         ("Ctrl+D", "選択クリップを複製（直後に）"),
+                        ("Ctrl+C / V", "コピー / 再生位置に貼り付け"),
+                        ("Ctrl+S", "保存"),
+                        ("Ctrl+Shift+Z", "やり直し"),
                         ("Ctrl+A", "全クリップ選択"),
                         ("Ctrl+クリック", "複数選択"),
                         ("空白ドラッグ", "矩形で複数選択（マーキー）"),
@@ -13619,6 +13897,15 @@ impl eframe::App for App {
         // media-cache and PNG-cache paths. This runs after all text widgets have seen
         // this frame's IME events, never in the keystroke handler itself.
         self.commit_caption_drafts(None);
+        // Mouse-operated buttons/sliders must not keep Space/Enter activation.
+        // Actual text and numeric editors advertise an IME output and keep focus.
+        if ctx.input(|i| i.pointer.any_released()) && ctx.output(|o| o.ime.is_none()) {
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                if !self.text_focus_ids.contains(&id) {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
+                }
+            }
+        }
         // 再描画ポリシー: かつては無条件 request_repaint() で常時約100fps＝停止中でも
         // 1コアを食い続けていた（実測83%CPU）。操作・再生・ドラッグ中だけ全速、
         // アイドルは10fpsに落とす。ポーラー類(保存デバウンス/ベイク回収/HTTP結果)は
@@ -15935,9 +16222,9 @@ fn main() -> eframe::Result<()> {
             vis.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(40, 40, 45);
             vis.widgets.hovered.bg_fill = egui::Color32::from_rgb(56, 56, 62);
             vis.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(56, 56, 62);
-            vis.widgets.active.bg_fill = egui::Color32::from_rgb(0, 120, 96);
-            vis.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0, 120, 96);
-            vis.selection.bg_fill = egui::Color32::from_rgb(0, 122, 98);
+            vis.widgets.active.bg_fill = egui::Color32::from_rgb(57, 72, 102);
+            vis.widgets.active.weak_bg_fill = egui::Color32::from_rgb(57, 72, 102);
+            vis.selection.bg_fill = egui::Color32::from_rgb(57, 72, 102);
             vis.selection.stroke = egui::Stroke::new(1.0, UI_ACCENT);
             for w in [
                 &mut vis.widgets.noninteractive,
@@ -15950,8 +16237,8 @@ fn main() -> eframe::Result<()> {
             }
             cc.egui_ctx.set_visuals(vis);
             cc.egui_ctx.style_mut(|st| {
-                st.spacing.button_padding = egui::vec2(10.0, 5.0);
-                st.spacing.item_spacing = egui::vec2(7.0, 6.0);
+                st.spacing.button_padding = egui::vec2(12.0, 8.0);
+                st.spacing.item_spacing = egui::vec2(8.0, 8.0);
             });
             let mut app = App::new(&contents, &dir)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
@@ -15959,7 +16246,8 @@ fn main() -> eframe::Result<()> {
             // generation -> open), the full production entry point
             let all: Vec<String> = std::env::args().collect();
             let explicit = !positional_args(&all).is_empty();
-            if !explicit {
+            if std::env::var("DONE_EDITOR_VOICE").as_deref()==Ok("1") { app.assistant.open=true; app.assistant.immersive=true; }
+            if !explicit || all.iter().any(|a| a=="--library") {
                 app.screen = Screen::Library;
                 app.lib_refresh();
             }
