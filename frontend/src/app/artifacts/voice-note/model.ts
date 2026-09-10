@@ -21,3 +21,7 @@ export function validArticle(a: Article): string | null {
 export function publishRequest(id: string) {
   return `音声noteの記事 ${id} について、保存済みのタイトル・無料本文・有料本文・価格を確認したのでnoteへの投稿を承認します。D:/done/frontend/src/app/artifacts/voice-note/WORKFLOW.mdに従い、所有者のデータを取得し、接続先noteの本人アカウントを確認して、見出し・太字・有料ラインを反映して投稿してください。scheduledAtがあればその日時に公開し、未来ならwatchで登録してください。二重投稿を避け、既にnoteUrlがあれば既存記事を確認してください。公開成功を実ページで確認できた場合だけnoteUrlとstatusを更新。失敗・未接続は公開済みにしない。`;
 }
+
+export function isEmptyArticle(a: Article): boolean {
+ return (!a.title.trim() || a.title==='無題の記事') && !a.transcript.trim() && !a.free.trim() && !a.paid.trim() && !a.audio.length && !a.questions.length && !a.transcribedAudio?.length && !a.editorial && a.status==='素材' && !a.noteUrl && !a.scheduledAt && !a.checkedAt && !a.price && !a.purchases && !a.gross && !a.received;
+}
