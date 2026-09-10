@@ -24,7 +24,7 @@ export function RecordedAudio({ blob }: { blob: Blob }) {
           : '音が入っています。再生して声の内容を確認してください。';
       if (active) setCheck({ blob, message });
     }).catch(() => {
-      if (active) setCheck({ blob, message: '音量を確認できませんでした。録音を保存すると、ダンがファイルを確認できます。' });
+      if (active) setCheck({ blob, message: '音量を確認できませんでした。録音を再生して内容を確認してください。' });
     }).finally(() => { void context.close(); });
     return () => { active = false; URL.revokeObjectURL(url); };
   }, [blob]);
