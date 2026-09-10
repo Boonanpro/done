@@ -27,3 +27,9 @@ export async function uploadAudio(file: File): Promise<{name:string;url:string}>
   if(!r.ok)throw new Error('音声を保存できませんでした。もう一度お試しください。');
   const value=await r.json();return {name:file.name,url:value.url};
 }
+
+export async function startEditorial(id:string):Promise<Row> {
+ const token=useAuthStore.getState().token;
+ const r=await fetch('/api/voice-note/editorial',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({id})});
+ const data=await r.json();if(!r.ok)throw new Error(data.error||'記事作成を開始できませんでした。');return data.row;
+}
