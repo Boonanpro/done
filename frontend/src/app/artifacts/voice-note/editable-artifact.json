@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "slug": "voice-note",
+  "title": "話して、noteに。",
+  "requiredText": ["話して、noteに。", "考えは、話すところから。", "つくる", "記事一覧", "実績"],
+  "references": []
+}
