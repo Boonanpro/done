@@ -335,8 +335,8 @@ async function connect(){
     dc.onmessage=e=>{
       if(gen!==generation)return;
       const event=JSON.parse(e.data);
-      if(event.type==='output_audio_buffer.started'){audioPlaying=true;record('voice_output_started',{turn_id:turn?.turn_id});}
-      if(['output_audio_buffer.stopped','output_audio_buffer.cleared'].includes(event.type)){audioPlaying=false;pumpSpeech();}
+      if(event.type==='output_audio_buffer.started'){audioPlaying=true;if(activeNotice)activeNotice.audioStarted=true;record('voice_output_started',{turn_id:turn?.turn_id});}
+      if(['output_audio_buffer.stopped','output_audio_buffer.cleared'].includes(event.type)){audioPlaying=false;if(activeNotice&&event.type==='output_audio_buffer.stopped'){activeNotice.audioEnded=true;finishNotice();}pumpSpeech();}
       if(event.type==='input_audio_buffer.speech_started'){startSpeech(event.item_id).catch(error);return;}
       if(event.type==='input_audio_buffer.speech_stopped'){stopSpeech().catch(e=>{error(e);setBusy(false);});return;}
       if(event.type==='response.created'){responses.set(event.response.id,Number(event.response.metadata?.editor_epoch??epoch));if(event.response.metadata?.editor_relay==='1')relayResponses.add(event.response.id);}
@@ -448,7 +448,7 @@ async function onEvent(e){
     if(!tid){pendingTranscripts.set(e.item_id,e.transcript);if(pendingTranscripts.size>100)pendingTranscripts.delete(pendingTranscripts.keys().next().value);}
     if(e.transcript?.trim())message(e.transcript,'user');return;
   }
-  if(['response.output_audio_transcript.done','response.audio_transcript.done','response.output_text.done'].includes(e.type)){if(activeNotice){activeNotice.spoken=true;activeNotice.transcript=e.transcript||e.text;spokenJobs.add(activeNotice.job_id);record('completion_spoken',{job_id:activeNotice.job_id,text:activeNotice.transcript});}record('assistant_transcript',{text:e.transcript||e.text});return;}
+  if(['response.output_audio_transcript.done','response.audio_transcript.done','response.output_text.done'].includes(e.type)){if(activeNotice){activeNotice.transcript=e.transcript||e.text;record('completion_audio_generated',{job_id:activeNotice.job_id});}record('assistant_transcript',{text:e.transcript||e.text});return;}
   if(['response.output_audio_transcript.delta','response.audio_transcript.delta','response.output_text.delta'].includes(e.type)){
     if(!answer)answer=message('','assistant');answer.textContent+=e.delta||'';$('log').scrollTop=$('log').scrollHeight;return;
   }
@@ -458,6 +458,12 @@ async function onEvent(e){
       if(!b)throw Error('指示は中止されました');
       state('確認・編集しています…');
       record('tool_started',{name:e.name,args:JSON.parse(e.arguments||'{}')});
+      if(['batch_edit','timeline_edit'].includes(e.name)){
+        const parsed=JSON.parse(e.arguments||'{}');
+        const ops=parsed.operations||[{op:parsed.op,args:parsed.args||{}}];
+        const ids=ops.flatMap(o=>[o.args?.clip_id,...(o.args?.clip_ids||[])]).filter(id=>typeof id==='string');
+        directOperations.set(e.call_id,{tool:e.name,category:'editing',clip_ids:ids});publishWorkActivity();
+      }
       const args=JSON.parse(e.arguments||'{}');
       if(e.name==='read_editor_context')result={ok:true,...b.context};
       else if(e.name==='wait_for_user'){waitingForUser=true;saveConversation();b.silent=true;result={ok:true};}
@@ -484,6 +490,7 @@ async function onEvent(e){
       if(result.presentation)renderReferences(result.presentation);
       if(result.job_id){jobs.set(result.job_id,{room:b.context.room_id});message(result.state==='instruction_pending'?'追加指示を送りました。制作側の受領を待っています。':'制作を依頼しました。進行状況を下に表示します。');}
     }catch(ex){record('tool_client_error',{name:e.name,message:ex.message});result={ok:false,error:ex.message};}
+    finally{directOperations.delete(e.call_id);publishWorkActivity();}
     if(myEpoch!==epoch)return;
     if(e.astra){b.astraOutputs.push({call_id:e.call_id,result});return;}
     b.hadTools=true;
@@ -493,7 +500,7 @@ async function onEvent(e){
     record('response_done',{status:e.response?.status,details:e.response?.status_details,usage:e.response?.usage});
     active=false;
     if(e.response?.status==='completed')clearResponseError();
-    if(activeNotice&&e.response?.status==='completed'){if(activeNotice.transcript)send({type:'conversation.item.create',item:{type:'message',role:'assistant',content:[{type:'output_text',text:activeNotice.transcript}]}});activeNotice=null;saveConversation();setBusy(false);return;}
+    if(activeNotice&&e.response?.status==='completed'){activeNotice.generated=true;finishNotice();return;}
     if(e.response?.status==='incomplete'){
       if(e.response.status_details?.reason==='max_output_tokens' && turn && (turn.continuations||0)<2){
         turn.continuations=(turn.continuations||0)+1;
@@ -614,9 +621,24 @@ async function approve(value){
 $('approve').onclick=()=>approve(true);$('unlock').onclick=()=>approve(false);
 window.addEventListener('beforeunload',disconnect);
 let statusPending=false;
+const directOperations=new Map();
+let productionSnapshot={highlights:[],active_count:0,label:null};
+function publishWorkActivity(){
+  if(!context?.content_id)return;
+  nativeCommand(JSON.stringify({action:{kind:'production_activity',content_id:context.content_id,
+    ...productionSnapshot,operations:[...productionSnapshot.highlights,...directOperations.values()]}}));
+}
+
 const announcedJobs=new Set();
+function finishNotice(){
+  if(!activeNotice?.generated||!activeNotice.audioStarted||!activeNotice.audioEnded)return;
+  const notice=activeNotice;notice.spoken=true;spokenJobs.add(notice.job_id);
+  record('completion_spoken',{job_id:notice.job_id,text:notice.transcript});
+  if(notice.transcript)send({type:'conversation.item.create',item:{type:'message',role:'assistant',content:[{type:'output_text',text:notice.transcript}]}});
+  activeNotice=null;active=false;saveConversation();setBusy(false);pumpSpeech();
+}
 async function announceCompletion(){
-  if(relayActive||relayQueue.length||reasonRunning)return;
+  if(activeNotice||relayActive||relayQueue.length||reasonRunning)return;
   if(!completionNotices.length)return;
   const blocked=notificationsPaused?'notifications_paused':!micOn?'microphone_off':dc?.readyState!=='open'?'disconnected':busy?'turn_pending':active?'responding':speech?'user_speaking':audioPlaying?'audio_playing':renewing?'reconnecting':Date.now()<noticeRetryAt?'retry_delay':'';
   if(blocked){if(blocked!==lastNoticeBlock){record('completion_waiting',{reason:blocked,job_id:completionNotices[0].job_id});lastNoticeBlock=blocked;}return;}
@@ -625,18 +647,19 @@ async function announceCompletion(){
   if(notice.kind==='question'&&notice.question_id!==pendingQuestion?.id)return;
   if(notice.content_id!==context?.content_id||notice.room_id!==context?.room_id)return;
   active=true;answer=null;
-  activeNotice=notice;
+  activeNotice={...notice,generated:false,audioStarted:false,audioEnded:false};
+  const delivery=activeNotice;
   if(turn)turn.hadTools=false;
   record('completion_announcement_requested',{job_id:notice.job_id,queued_ms:notice.queued_at?Date.now()-notice.queued_at:null});
   const noticeEpoch=epoch;
   try{
     const result=await api('/notice',{room_id:notice.room_id,content_id:notice.content_id,job_id:notice.job_id,kind:notice.kind||'completion',question_id:notice.question_id});
-    if(noticeEpoch!==epoch||activeNotice!==notice)return;
+    if(noticeEpoch!==epoch||activeNotice!==delivery)return;
     if(!result.text)throw Error('作業の報告を取得できませんでした');
   send({type:'response.create',response:{metadata:{editor_epoch:String(epoch)},output_modalities:['audio'],tool_choice:'none',conversation:'none',
     input:[{type:'message',role:'user',content:[{type:'input_text',text:speechText(result.text)}]}],
     instructions:'入力の文章だけをそのまま日本語で読み上げてください。追加や言い換えは不要です。'}});
-  }catch(e){if(noticeEpoch===epoch&&activeNotice===notice)handleResponseError({message:e.message});}
+  }catch(e){if(noticeEpoch===epoch&&activeNotice===delivery)handleResponseError({message:e.message});}
 }
 setInterval(announceCompletion,500);
 function renderProductionStatus(s,captured){
@@ -649,7 +672,7 @@ function renderProductionStatus(s,captured){
   pendingQuestion=currentQuestion;
   const host=$('work-status');host.replaceChildren();
   const names={Write:'映像の編集元を作成',Edit:'映像の編集元を修正',apply_edits:'変更をまとめて反映',animate_clip:'動きを調整',prepare_motion_project:'編集元を準備',render_motion_project:'動きのある映像を書き出す',generate_video:'映像を生成',generate_image:'画像を生成',generate_speech:'声を生成',watch_render:'通しで検品',render_frame:'画面を確認',validate_draft:'編集結果を検証',auto_captions:'字幕を合わせる',browser:'サービスを操作',get_credentials:'接続を確認',WebSearch:'必要な情報を検索',WebFetch:'サービスの情報を確認',Bash:'素材・サービスを準備',Read:'資料を確認',Glob:'素材を探す',ToolSearch:'使う道具を探す'};
-  const highlights=[];
+  const highlights=[];const phases=[];
   for(const j of (s.jobs||[])){
     const ongoing=['running','queued'].includes(j.status);
     if(!ongoing){
@@ -668,6 +691,8 @@ function renderProductionStatus(s,captured){
             ?{saved:true,user_commit_required:false,detail:'制作担当の報告を受けた後、アプリがタイムラインへの保存を完了しました。'}
             :undefined,
           ...(typeof j.result?.committed==='boolean'?{timeline_updated:j.result.committed}:{}),...(j.error?{error:j.error}:{})};
+        nativeCommand(JSON.stringify({action:{kind:'work_finished',content_id:captured.content_id,job_id:j.id,status:j.status,committed:j.result?.committed}}));
+        record('production_finished',{job_id:j.id,status:j.status,committed:j.result?.committed});
         message(j.result?.outcome?.summary||j.result?.summary||(j.status==='done'?'処理が終わりました。':`作業が止まりました：${j.error||j.status}`));
         // A previous preparation result is historical once a later production
         // has started. Do not announce it as the current state minutes later.
@@ -684,6 +709,7 @@ function renderProductionStatus(s,captured){
       }
     }
     const op=(j.activity||[]).find(a=>a.state==='running')||j.activity?.[0];
+    phases.push(j.question?'返答を待っています':op?.category==='review'?'仕上がりを確認中':op?.category==='editing'?'タイムラインを編集中':op?.category==='generation'?'素材を制作中':'作業内容を確認中');
     const title=document.createElement('strong');
     title.textContent=j.question?'あなたの返答を待っています':op?.state==='running'?(names[op.tool]||names[op.tool?.split('__').at(-1)]||'内容を確認・編集'):'次の作業を判断中';
     const indicator=document.createElement('span');indicator.className='activity-indicator';
@@ -701,7 +727,7 @@ function renderProductionStatus(s,captured){
     card.append(steps);host.append(card);
     if(ongoing){
       jobs.set(j.id,{room:captured.room_id});
-      if(op?.state==='running')highlights.push({clip_ids:op.clip_ids?.length?op.clip_ids:(j.selected_clips||[]).map(c=>c.id||c.clip_id).filter(Boolean),tool:op.tool,category:op.category});
+      if(op?.state==='running'&&['editing','generation'].includes(op.category))highlights.push({clip_ids:op.clip_ids?.length?op.clip_ids:(j.selected_clips||[]).map(c=>c.id||c.clip_id).filter(Boolean),tool:op.tool,category:op.category});
     }
   }
   for(let i=completionNotices.length-1;i>=0;i--){
@@ -711,7 +737,8 @@ function renderProductionStatus(s,captured){
     if(job&&(s.jobs||[]).some(other=>other.id!==job.id&&other.created_at>job.updated_at))completionNotices.splice(i,1);
   }
   saveConversation();
-  nativeCommand(JSON.stringify({action:{kind:'production_activity',content_id:captured.content_id,operations:highlights}}));
+  productionSnapshot={highlights,active_count:(s.jobs||[]).filter(j=>['running','queued'].includes(j.status)).length,label:phases.length?[...new Set(phases)].join(' · '):null};
+  publishWorkActivity();
 }
 setInterval(async()=>{
   if(statusPending || !context?.content_id)return;

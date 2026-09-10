@@ -20,7 +20,7 @@ mod gpu_present;
 mod media;
 mod model;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -254,6 +254,7 @@ struct Shared {
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
     underruns: AtomicU64,
+    audio_unavailable: AtomicBool,
     ring_level: std::sync::atomic::AtomicUsize,
     /// (timeline_t, effective_t of the pixels, frame)
     ring: Mutex<std::collections::VecDeque<(f64, f64, Frame)>>,
@@ -277,7 +278,7 @@ struct Shared {
 /// doing, so an expensive video seek can never make sound stutter again. Also owns the
 /// master clock and restarts the stream when the playhead jumps (scrub while playing).
 fn audio_thread(shared: Arc<Shared>) {
-    let Ok(mut audio) = media::AudioOut::new() else { return };
+    let mut audio = audio_transport::Transport::<media::AudioOut>::new();
     let min_ready = |speed: f64| -> usize {
         if speed >= 3.0 {
             20
@@ -370,6 +371,7 @@ fn audio_thread(shared: Arc<Shared>) {
                     audio_error_at = Some(Instant::now());
                 }
             } else { audio_error_at = None; }
+            shared.audio_unavailable.store(audio.unavailable(), Ordering::Relaxed);
             let c = audio.clock().min(doc.duration());
             let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
             if (c - prev).abs() > 0.3 {
@@ -2087,6 +2089,7 @@ fn warm_upcoming(
 // 読み直して自己復帰する（開きっぱなしのエディタが翌日サイレントに
 // 使えなくなる問題の根治）。
 mod assistant_panel;
+mod audio_transport;
 static API_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static TOKEN_REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -3716,6 +3719,7 @@ struct App {
     gl_video: Arc<gpu_present::GlVideo>,
     last_seq: u64,
     playing: bool,
+    transport_button: Option<egui::Rect>,
     playback_speed: f64,
     preview_fullscreen: bool,
     /// 全画面プレビュー(P)の小型トランスポート: 最後にマウスが動いた時刻。
@@ -3874,6 +3878,7 @@ impl App {
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
             underruns: AtomicU64::new(0),
+            audio_unavailable: AtomicBool::new(false),
             dirty_from_bits: AtomicU64::new(f64::INFINITY.to_bits()),
             caption_epoch: AtomicU64::new(0),
             ring_level: std::sync::atomic::AtomicUsize::new(0),
@@ -3987,6 +3992,7 @@ impl App {
             gl_video: Arc::new(gpu_present::GlVideo::new()),
             last_seq: 0,
             playing: false,
+            transport_button: None,
             playback_speed: 1.0,
             preview_fullscreen: false,
             fs_bar_last_move: None,
@@ -5677,21 +5683,33 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 self.playing = false;
                 self.step_once(-1.0);
             }
-            let glyph = if self.playing { "⏸" } else { "▶" };
-            if ui
-                .add(
-                    egui::Button::new(egui::RichText::new(glyph).size(21.0).color(egui::Color32::WHITE))
-                        .min_size(egui::vec2(44.0, 32.0))
-                        .rounding(16.0)
-                        .fill(if self.playing {
-                            egui::Color32::from_rgb(60, 60, 66)
-                        } else {
-                            UI_ACCENT
-                        }),
-                )
-                .on_hover_text("再生 / 一時停止 (Space)")
-                .clicked()
-            {
+            // The transport owns its geometry; fallback-font glyph metrics must
+            // never shift the adjacent step buttons or the seek bar.
+            let (play_rect, play_button) = ui.allocate_exact_size(
+                egui::vec2(44.0, 36.0), egui::Sense::click());
+            let play_button = play_button.on_hover_text("再生 / 一時停止 (Space)");
+            let fill = if self.playing { egui::Color32::from_rgb(60,60,66) } else { UI_ACCENT };
+            ui.painter().rect_filled(play_rect,16.0,fill);
+            if play_button.hovered() || play_button.has_focus() {
+                ui.painter().rect_stroke(play_rect.shrink(1.0),16.0,
+                    egui::Stroke::new(1.0,egui::Color32::from_white_alpha(100)));
+            }
+            let center=play_rect.center();
+            if self.playing {
+                for dx in [-4.5,4.5] {
+                    ui.painter().rect_filled(egui::Rect::from_center_size(
+                        center+egui::vec2(dx,0.0),egui::vec2(4.0,16.0)),0.5,egui::Color32::WHITE);
+                }
+            } else {
+                ui.painter().add(egui::Shape::convex_polygon(vec![
+                    center+egui::vec2(-5.0,-8.0), center+egui::vec2(8.0,0.0),
+                    center+egui::vec2(-5.0,8.0)],egui::Color32::WHITE,egui::Stroke::NONE));
+            }
+            play_button.widget_info(|| egui::WidgetInfo::labeled(
+                egui::WidgetType::Button, true, if self.playing { "一時停止" } else { "再生" }));
+            self.transport_button=Some(play_button.rect);
+            if play_button.clicked() {
+                play_button.surrender_focus();
                 self.toggle_play();
             }
             if tbtn(ui, "⏩", "1フレーム進む (→)") {
@@ -5702,6 +5720,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 self.playing = false;
                 self.t = self.dur;
                 self.push_req(false);
+            }
+            if self.shared.audio_unavailable.load(Ordering::Relaxed) {
+                ui.label(egui::RichText::new("音声出力を再接続中").size(11.0).color(egui::Color32::from_rgb(230,190,110)));
             }
             ui.add_space(8.0);
             // timecode (current / total)
@@ -7874,6 +7895,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
     }
 
     /// 開いているコンテンツが生成中（＝ライブ表示・編集ロック対象）か
+    fn refresh_job_state(&mut self) {
+        let path=format!("{}/jobs.json", self.doc.asset_dir);
+        let Ok(text)=std::fs::read_to_string(path) else { return };
+        let Ok(rows)=serde_json::from_str::<Vec<serde_json::Value>>(&text) else { return };
+        let cid=self.content_id();
+        let active=rows.iter().any(|j| j["content_id"].as_str()==Some(cid.as_str())
+            && matches!(j["status"].as_str(), Some("running" | "queued")));
+        self.generating_content=if active { Some(cid) } else { None };
+        if !active { self.assistant.production.clear(); self.assistant.production_label=None; }
+    }
+
     fn is_generating_open(&self) -> bool {
         self.generating_content.is_some()
             && self.generating_content.as_deref() == Some(self.content_id().as_str())
@@ -7906,7 +7938,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             return;
         }
         self.disk_mtime = Some(mt);
-        let keep_t = self.t;
+        let keep_t = self.displayed_t();
         let keep_sel = self.selected.clone();
         let keep_playing = self.playing;
         let keep_pps = self.pps;
@@ -7916,7 +7948,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .flat_map(|t| t.clips.iter()).map(|c| (c.id.clone(), format!("{c:?}"))).collect();
         let previous_raw = self.doc.raw.to_string();
         let previous_undo = self.undo.clone();
-        self.open_content(&cid);
+        self.open_content_impl(&cid, false);
         self.undo = previous_undo;
         self.undo.push(previous_raw);
         self.redo.clear();
@@ -7944,7 +7976,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
     fn assistant_ui(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let assistant_context = serde_json::json!({
             "room_id": self.room_id(), "content_id": if self.screen == Screen::Editor { self.content_id() } else { String::new() },
-            "playhead": (self.t * 1000.0).round() / 1000.0,
+            "playhead": (self.displayed_t() * 1000.0).round() / 1000.0,
             "unsaved": self.save_at.is_some(),
             "pointer": self.assistant.pointer,
             "visible_targets": self.assistant.targets,
@@ -7988,7 +8020,19 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 "production_activity" => {
                                     self.assistant.production=action["operations"].as_array().cloned().unwrap_or_default();
                                     self.assistant.production_at=Some(Instant::now());
+                                    self.assistant.production_label=action["label"].as_str().map(str::to_owned);
+                                    if action["active_count"].as_u64()==Some(0) { self.generating_content=None; }
                                     ctx.request_repaint();
+                                },
+                                "work_finished" => {
+                                    self.refresh_job_state();
+                                    let text=match (action["status"].as_str(),action["committed"].as_bool()) {
+                                        (Some("done"),Some(true)) => "ダンの編集が完了しました",
+                                        (Some("done"),_) => "ダンの作業が終了しました",
+                                        (Some("canceled"),_) => "作業を停止しました",
+                                        _ => "作業が止まりました。会話欄で結果を確認できます",
+                                    };
+                                    self.toast(text);ctx.request_repaint();
                                 },
                                 "seek" | "focus" => {
                                     self.pause_at_displayed();
@@ -8036,9 +8080,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             "room_id": self.room_id(),
             // ライブラリ画面では何も開いていない（raw[0] の id は意味を持たない）
             "content_id": if in_editor { cid.clone() } else { String::new() },
-            "playhead": (self.t * 1000.0).round() / 1000.0,
+            "playhead": (self.displayed_t() * 1000.0).round() / 1000.0,
             "playing": self.playing,
             "duration": self.dur,
+            "transport_button": self.transport_button.map(|r| serde_json::json!({"x":r.center().x,"y":r.center().y})),
+            "audio_unavailable": self.shared.audio_unavailable.load(Ordering::Relaxed),
+            "production_label": self.assistant.production_label,
             "pixels_per_second": self.pps,
             "scroll_x": self.scroll_x,
             "selected": sel,
@@ -8047,7 +8094,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         });
         let body = state.to_string();
         // 再生中は playhead が毎回変わるので、書くのは秒精度で丸めた指紋が変わった時だけ
-        let fp = format!("{cid}|{:.0}|{}|{}", self.t, self.playing, sel.len());
+        let fp = format!("{cid}|{:.1}|{}|{}", self.displayed_t(), self.playing, sel.len());
         // 変化が無くても 20 秒ごとに書く（ハートビート）: 読む側は mtime で
         // 「エディタが生きているか」を判定するため
         let heartbeat = self.state_pub_written.elapsed().as_secs() >= 20;
@@ -8069,6 +8116,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
     }
 
     fn open_content(&mut self, content_id: &str) {
+        self.open_content_impl(content_id, true);
+    }
+
+    fn open_content_impl(&mut self, content_id: &str, publish: bool) {
         self.assistant.pointer = serde_json::Value::Null;
         self.assistant.focus = None;
         self.assistant.selection = None;
@@ -8116,7 +8167,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.redo.clear();
             self.pop_states.clear();
             self.screen = Screen::Editor;
-            self.push_req(false);
+            if publish { self.push_req(false); }
             self.migrate_legacy_freezes();
             self.remember_disk_mtime();
         }
@@ -10223,7 +10274,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         egui::Order::Foreground,
                         egui::Id::new("clip_spawn_veil"),
                     ));
-                    vp.rect_filled(r, 4.0, egui::Color32::from_rgba_unmultiplied(15, 15, 18, v));
+                    vp.rect_filled(r, 4.0, egui::Color32::from_rgba_unmultiplied(160,205,255,v/8));
+                    vp.rect_stroke(r.shrink(1.0),4.0,egui::Stroke::new(2.0,egui::Color32::from_rgba_unmultiplied(180,220,255,v)));
                     ui.ctx().request_repaint();
                 }
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
@@ -10602,6 +10654,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 }
                 if self.assistant.production_at.map(|t|t.elapsed().as_secs()<10).unwrap_or(false) {
                     let working=self.assistant.production.iter().any(|op| {
+                        if !matches!(op["category"].as_str(), Some("editing" | "generation")) { return false; }
                         let ids=op["clip_ids"].as_array();
                         if ids.map(|v|!v.is_empty()).unwrap_or(false) {
                             return ids.unwrap().iter().any(|id|id.as_str()==Some(c.id.as_str()));
@@ -11936,6 +11989,7 @@ impl App {
             // ライブ組み上がり: 生成中は中間保存（カット済みタイムライン等）を
             // mtime 変化で検知して開き直す。新しく現れたクリップは時差フェードイン。
             if self.screen == Screen::Editor {
+                self.refresh_job_state();
                 // 外部書き込み（チャット/音声からのダンのコミット、別プロセスの編集）を
                 // 常時取り込む: mtime が進み、中身がこの画面の指紋と違えば開き直す。
                 // 未保存の手編集がある間は上書きせずトーストで知らせる（保存時のガードと同じ規律）。
@@ -12455,10 +12509,12 @@ impl eframe::App for App {
             egui::TopBottomPanel::top("gen_banner").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(14.0));
-                    let ev = self.lib.events.last().cloned().unwrap_or_default();
+                    let label = if self.assistant.production_at.map(|t|t.elapsed().as_secs()<10).unwrap_or(false) {
+                        self.assistant.production_label.as_deref().unwrap_or("ダンが作業しています")
+                    } else { "ダンが作業しています" };
                     ui.label(
                         egui::RichText::new(format!(
-                            "ダンが編集中 · {ev}　途中でも再生・編集できます"
+                            "{label}　· 再生・編集できます"
                         ))
                         .size(12.5)
                         .color(egui::Color32::from_rgb(120, 220, 190)),

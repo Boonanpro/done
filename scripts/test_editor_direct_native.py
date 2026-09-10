@@ -76,7 +76,68 @@ def main():
                 assert state.get('content_id')==cid,state
                 assert state.get('pixels_per_second',0)>100,state
                 report['steps'][-1]['pixels_per_second']=state['pixels_per_second']
-            if os.environ.get('EDITOR_TEST_FOCUS')=='voice-add':
+            if os.environ.get('EDITOR_TEST_FOCUS')=='transport':
+                from app.services.editor_media import import_media
+                from app.services.editor_workflows import batch_edit
+                from app.services import editor_activity
+                asset=import_media(room,str(ROOT/'exports/omni-direct-comparison/b_from_reference.mp4'))
+                duration=asset['metadata']['duration']
+                ops=[{'op':'add_clip','args':{'asset_id':asset['asset_id'],'timeline_start':i*duration,'duration':duration,'with_audio':True}} for i in range(4)]
+                ops.append({'op':'add_caption','args':{'text':'確認用','timeline_start':0,'timeline_end':20,'lane':'front'}})
+                assert batch_edit(room,cid,ops,None,td.sequence_hash(seq()))['committed']
+                page.wait_for_timeout(2200)
+                def state():return json.loads((folder/'editor_state.json').read_text(encoding='utf-8'))
+                def until(check):
+                    deadline=time.monotonic()+8
+                    while time.monotonic()<deadline:
+                        current=state()
+                        if check(current):return current
+                        page.wait_for_timeout(100)
+                    raise AssertionError(state())
+                # Use Space in the real embedded panel, then the actual native button.
+                page.keyboard.press('Space');until(lambda x:x['playing'] and x['playhead']>1)
+                before_play=state()['playhead']
+                caption=next(c for t in seq()['tracks'] for c in t['clips'] if c.get('text'))
+                assert batch_edit(room,cid,[{'op':'set_clip','args':{'clip_id':caption['id'],'text':'変更が見える'}}],None,td.sequence_hash(seq()))['committed']
+                page.evaluate("nativeCommand('refresh')");page.wait_for_timeout(1500)
+                after_play=state()['playhead'];assert after_play>before_play+.5,(before_play,after_play)
+                import win32gui,win32process,pyautogui
+                windows=[]
+                win32gui.EnumWindows(lambda h,_:windows.append(h) if win32process.GetWindowThreadProcessId(h)[1]==proc.pid and win32gui.IsWindowVisible(h) and win32gui.GetClientRect(h)[2]>500 else None,None)
+                hwnd=windows[0];origin=win32gui.ClientToScreen(hwnd,(0,0));scale=ctypes.windll.user32.GetDpiForWindow(hwnd)/96
+                button=state()['transport_button']
+                from scripts.poc.production_desktop.native_ui.selftest_gpu_present import shot
+                shot(hwnd,str(folder/'transport-before.png'))
+                report['button_probe']={'hwnd':hwnd,'origin':origin,'scale':scale,'button':button,'rect':win32gui.GetWindowRect(hwnd),'foreground':win32gui.GetForegroundWindow()}
+                print('BUTTON',report['button_probe'],flush=True)
+                win32gui.SetWindowPos(hwnd,-1,0,0,0,0,0x0013);page.wait_for_timeout(300)
+                pyautogui.click(origin[0]+button['x']*scale,origin[1]+button['y']*scale)
+                until(lambda x:not x['playing']);paused=state()['playhead']
+                page.wait_for_timeout(500);assert abs(state()['playhead']-paused)<.05
+                def space():
+                    # Target this test window's native key handler even when another
+                    # application owns Windows foreground activation.
+                    win32gui.PostMessage(hwnd,0x100,0x20,0x390001)
+                    win32gui.PostMessage(hwnd,0x101,0x20,0xC0390001)
+                space();until(lambda x:x['playing'] and x['playhead']>paused+.2)
+                space();until(lambda x:not x['playing'])
+                report['transport_live_edit']={'before':before_play,'after':after_play,'native_button_and_space':True}
+                # A controlled job fixture exercises the real status API and native UI.
+                job={'id':'completion-fixture','content_id':cid,'status':'running','created_at':'2026-09-10T08:00:00Z','updated_at':'2026-09-10T08:00:01Z','instruction':{'selected_clips':[{'id':caption['id']}]}}
+                def write_job(): (folder/'jobs.json').write_text(json.dumps([job]),encoding='utf-8')
+                write_job();operation=editor_activity.start(room,job['id'],'set_clip',{'clip_id':caption['id']})
+                until(lambda x:x.get('production_label')=='タイムラインを編集中')
+                editor_activity.finish(operation);review=editor_activity.start(room,job['id'],'watch_render',{})
+                until(lambda x:x.get('production_label')=='仕上がりを確認中')
+                assert page.evaluate('productionSnapshot.highlights.length')==0
+                editor_activity.finish(review);job.update(status='done',updated_at='2026-09-10T08:00:02Z',result={'committed':True,'outcome':{'kind':'achieved','summary':'確認用の文字変更が完了しました。'}});write_job()
+                until(lambda x:x.get('production_label') is None)
+                page.wait_for_function("audit.some(e=>e.type==='completion_spoken'&&e.job_id==='completion-fixture')",timeout=90000)
+                assert page.evaluate('!activeNotice&&productionSnapshot.active_count===0&&productionSnapshot.highlights.length===0')
+                assert page.locator('.production-card').count()==0
+                report['completion']=page.evaluate("audit.filter(e=>e.type.startsWith('completion_')||e.type==='production_finished')")
+                print('PASS native playback during external edit, button/Space, editing→review→done, real spoken completion',flush=True)
+            elif os.environ.get('EDITOR_TEST_FOCUS')=='voice-add':
                 from app.services.editor_media import import_media
                 from app.services.editor_workflows import batch_edit
                 asset=import_media(room,str(ROOT/'exports/omni-direct-comparison/b_from_reference.mp4'))

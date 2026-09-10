@@ -18,6 +18,7 @@ pub struct AssistantPanel {
     pub selection: Option<serde_json::Value>,
     pub viewport: serde_json::Value,
     pub production: Vec<serde_json::Value>,
+    pub production_label: Option<String>,
     pub production_at: Option<std::time::Instant>,
 }
 
