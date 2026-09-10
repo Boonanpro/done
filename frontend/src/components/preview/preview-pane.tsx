@@ -582,6 +582,7 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
               key={`${artifact.id}:${iframeSrc}`}
               ref={iframeRef}
               src={iframeSrc}
+              allow="microphone 'src'"
               onLoad={() => {
                 setLoadedArtifactId(artifact.id);
                 setIframeLoadSeq((s) => s + 1);
