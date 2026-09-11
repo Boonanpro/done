@@ -1,0 +1,197 @@
+{
+  "scope": "Real Claude CLI + production browser dispatch on isolated local fixture. Wall time includes startup/model/tool/network. Not a production Dan conversation or external-site task.",
+  "runs": [
+    {
+      "mode": "individual",
+      "repetition": 0,
+      "model": "sonnet",
+      "resolved_model": "claude-sonnet-5",
+      "wall_seconds": 13.06,
+      "completed": true,
+      "tool_calls": 9,
+      "failed_tool_calls": 0,
+      "assistant_messages": 3,
+      "tool_seconds": 0.7,
+      "exit_code": 0,
+      "cost_usd_reported": 0.0830314,
+      "actions": [
+        "open",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type"
+      ],
+      "repeated_field_requests": 0
+    },
+    {
+      "mode": "optimized",
+      "repetition": 0,
+      "model": "sonnet",
+      "resolved_model": "claude-sonnet-5",
+      "wall_seconds": 9.44,
+      "completed": true,
+      "tool_calls": 2,
+      "failed_tool_calls": 0,
+      "assistant_messages": 3,
+      "tool_seconds": 0.41,
+      "exit_code": 0,
+      "cost_usd_reported": 0.030401200000000003,
+      "actions": [
+        "open",
+        "fill_form"
+      ],
+      "repeated_field_requests": 0
+    },
+    {
+      "mode": "optimized",
+      "repetition": 1,
+      "model": "sonnet",
+      "resolved_model": "claude-sonnet-5",
+      "wall_seconds": 11.57,
+      "completed": true,
+      "tool_calls": 2,
+      "failed_tool_calls": 0,
+      "assistant_messages": 3,
+      "tool_seconds": 0.42,
+      "exit_code": 0,
+      "cost_usd_reported": 0.0302944,
+      "actions": [
+        "open",
+        "fill_form"
+      ],
+      "repeated_field_requests": 0
+    },
+    {
+      "mode": "individual",
+      "repetition": 1,
+      "model": "sonnet",
+      "resolved_model": "claude-sonnet-5",
+      "wall_seconds": 13.22,
+      "completed": true,
+      "tool_calls": 9,
+      "failed_tool_calls": 0,
+      "assistant_messages": 3,
+      "tool_seconds": 0.7,
+      "exit_code": 0,
+      "cost_usd_reported": 0.0829158,
+      "actions": [
+        "open",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type"
+      ],
+      "repeated_field_requests": 0
+    },
+    {
+      "mode": "individual",
+      "repetition": 2,
+      "model": "sonnet",
+      "resolved_model": "claude-sonnet-5",
+      "wall_seconds": 13.13,
+      "completed": true,
+      "tool_calls": 9,
+      "failed_tool_calls": 0,
+      "assistant_messages": 3,
+      "tool_seconds": 0.66,
+      "exit_code": 0,
+      "cost_usd_reported": 0.0828638,
+      "actions": [
+        "open",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type",
+        "type"
+      ],
+      "repeated_field_requests": 0
+    },
+    {
+      "mode": "optimized",
+      "repetition": 2,
+      "model": "sonnet",
+      "resolved_model": "claude-sonnet-5",
+      "wall_seconds": 9.49,
+      "completed": true,
+      "tool_calls": 2,
+      "failed_tool_calls": 0,
+      "assistant_messages": 3,
+      "tool_seconds": 0.39,
+      "exit_code": 0,
+      "cost_usd_reported": 0.030585,
+      "actions": [
+        "open",
+        "fill_form"
+      ],
+      "repeated_field_requests": 0
+    }
+  ],
+  "public_sites": {
+    "scope": "Read-only fresh-context page navigation; no AI inference, no login, no purchases or form submission. One sample per path, not a site-wide success-rate estimate.",
+    "runs": [
+      {
+        "site": "Amazon Japan",
+        "mode": "legacy_force",
+        "completed": true,
+        "click_attempts": 1,
+        "initial_http_status": 200,
+        "selected_link": "Anker PowerLine USB-C & USB-A ケーブル (USB3.0対応) 0.9m | iPhone 17 / 16 / 15 /Xperia",
+        "destination_title": "Amazon.co.jp: Anker PowerLine USB-C & USB-A ケーブル (USB3.0対応) 0.9m | iPhone 17 / 16 / 15 /Xperia/Galaxy/LG/iPad Pro/MacBook その他 Android 等 USB-C機器対応 テレワーク リモート 在宅勤務 : パソコン・周辺機器",
+        "destination_matches": true,
+        "wall_seconds": 3.44
+      },
+      {
+        "site": "Amazon Japan",
+        "mode": "guarded",
+        "completed": true,
+        "click_attempts": 1,
+        "initial_http_status": 200,
+        "selected_link": "Anker PowerLine USB-C & USB-A ケーブル (USB3.0対応) 0.9m | iPhone 17 / 16 / 15 /Xperia",
+        "click_outcome": "dispatched",
+        "destination_title": "Amazon.co.jp: Anker PowerLine USB-C & USB-A ケーブル (USB3.0対応) 0.9m | iPhone 17 / 16 / 15 /Xperia/Galaxy/LG/iPad Pro/MacBook その他 Android 等 USB-C機器対応 テレワーク リモート 在宅勤務 : パソコン・周辺機器",
+        "destination_matches": true,
+        "wall_seconds": 4.05
+      },
+      {
+        "site": "Wikipedia Japanese",
+        "mode": "legacy_force",
+        "completed": true,
+        "click_attempts": 1,
+        "initial_http_status": 200,
+        "selected_link": "ノート",
+        "destination_title": "ノート:メインページ - Wikipedia",
+        "destination_matches": true,
+        "wall_seconds": 1.63
+      },
+      {
+        "site": "Wikipedia Japanese",
+        "mode": "guarded",
+        "completed": true,
+        "click_attempts": 1,
+        "initial_http_status": 200,
+        "selected_link": "ノート",
+        "click_outcome": "dispatched",
+        "destination_title": "ノート:メインページ - Wikipedia",
+        "destination_matches": true,
+        "wall_seconds": 1.61
+      }
+    ]
+  },
+  "ref_characters_200_elements": {
+    "previous": 3600,
+    "compact": 2365,
+    "note": "Characters only, not tokenizer measurements."
+  },
+  "tests_passed": 34
+}
