@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import AsyncIterator, List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
+from app.tools.browser_metrics import measure_browser_request
 
 # セッション管理: インメモリキャッシュ + DB永続化
 _cli_sessions: Dict[str, str] = {}
@@ -1514,6 +1515,14 @@ def _build_system_prompt(
     )
     parts.append(_ABSOLUTE_RULES)
     parts.append(_BROWSER_AUTH_RULES)
+    parts.append(
+        "## ブラウザの速度と検証\n"
+        "操作結果には画面と要素一覧が既に含まれる。新しい変化を確認する理由がない限り、直後に同じ画面のスクリーンショットを取り直さない。"
+        "確認済みの独立した通常入力欄はbrowserのfill_formでまとめ、返された全項目の検証結果を確認する。"
+        "依存する入力欄・認証・送信は個別に扱う。実DOMで結果条件が分かるclick/typeにはexpectを指定する。"
+        "クリック診断が返ったらreasonとnext_actionを読み、覆っている要素を確認する。座標操作で盲目的に強行しない。"
+        "dispatchedが不明なら操作済みの可能性がある。再送信せず画面やwait_forで結果を確認する。"
+    )
 
     return "\n\n".join(parts)
 _CLI_PROJECT_TEMPLATE = """## プロジェクト
@@ -3386,6 +3395,7 @@ async def _process_via_streaming_session(
         yield raw
 
 
+@measure_browser_request
 async def process_message_cli(
     room_id: str,
     user_id: str,
