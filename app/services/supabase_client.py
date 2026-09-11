@@ -31,7 +31,10 @@ def build_client_options() -> ClientOptions:
             keepalive_expiry=DB_KEEPALIVE_EXPIRY_S,
         ),
         follow_redirects=True,
-        http2=True,
+        # HTTP/1.1 に固定する。h2 だとサーバー（Cloudflare/Supabase）が閉じた接続を
+        # 再利用前に検知できず「Server disconnected」が頻発した（2026-09-11、30 秒に
+        # 1 回のペース）。h1 の接続プールは再利用前にソケット閉鎖を検知して繋ぎ直す。
+        http2=False,
     )
     return ClientOptions(
         postgrest_client_timeout=DB_TIMEOUT_S,

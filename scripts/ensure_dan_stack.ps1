@@ -28,15 +28,21 @@ function Write-WatchdogLog([string]$Message) {
 function Test-Responding([string]$Url) {
     # Treat any HTTP 2xx-4xx as "responding" — 401/404 etc still mean a
     # process answered, which is all we want to know.
-    try {
-        $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 6 -ErrorAction Stop
-        return $true
-    } catch {
-        $sc = $null
-        try { $sc = $_.Exception.Response.StatusCode.value__ } catch {}
-        if ($sc -ne $null -and $sc -ge 200 -and $sc -lt 500) { return $true }
-        return $false
+    # 2026-09-11: core は DB 待ちで数秒応答が遅れることがある。6 秒で「落ちた」と
+    # 誤判定して二重起動を仕掛けていたので、上限を 20 秒にし、失敗時は 5 秒おいて
+    # もう一度だけ確かめてから down と判定する。
+    foreach ($attempt in 1..2) {
+        try {
+            $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            return $true
+        } catch {
+            $sc = $null
+            try { $sc = $_.Exception.Response.StatusCode.value__ } catch {}
+            if ($sc -ne $null -and $sc -ge 200 -and $sc -lt 500) { return $true }
+            if ($attempt -eq 1) { Start-Sleep -Seconds 5 }
+        }
     }
+    return $false
 }
 
 # 1) Frontend ------------------------------------------------------------

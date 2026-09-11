@@ -4661,12 +4661,36 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         _update_asset(room_id, asset_id, {"status": "failed", "error": str(exc)})
 
 
+def _coerce_asset_for_response(asset: dict[str, Any]) -> dict[str, Any]:
+    """assets.json の行を応答モデルに通る形へ補正する。
+
+    別経路（ダン指示エージェント・スクリプト）が書いた行は source_type / original_uri /
+    created_at / updated_at を欠くことがあり、1 行でも欠けると一覧全体が 500 になって
+    ネイティブエディタが素材ゼロで固まる（2026-09-11 実発生: contact_revision_*）。
+    欠損は既定値で埋め、未知の列挙値は "generated" / "registered" に寄せる。
+    """
+    row = dict(asset)
+    now = datetime.now(timezone.utc).isoformat()
+    row.setdefault("original_uri", row.get("local_path") or row.get("proxy_path") or "")
+    row.setdefault("created_at", row.get("updated_at") or now)
+    row.setdefault("updated_at", row.get("created_at") or now)
+    if row.get("source_type") not in ("local_path", "nas_path", "cloud_url", "upload", "generated", "agent_workspace"):
+        row["source_type"] = "generated"
+    if row.get("kind") not in ("video", "image", "audio", "file"):
+        row["kind"] = "file"
+    if row.get("status") not in ("registered", "processing", "proxy_pending", "proxy_ready", "failed", "missing", "ready"):
+        row["status"] = "registered"
+    if not isinstance(row.get("metadata"), dict):
+        row["metadata"] = {}
+    return row
+
+
 @router.get("", response_model=list[ProductionAsset])
 async def list_assets(
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
-    return _read_assets(room_id)
+    return [_coerce_asset_for_response(a) for a in _read_assets(room_id) if isinstance(a, dict)]
 
 
 @router.post("/register", response_model=ProductionAsset)
