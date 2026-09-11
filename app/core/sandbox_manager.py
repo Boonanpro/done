@@ -107,8 +107,10 @@ class SandboxManager:
             try:
                 if pid is not None:
                     self._kill_tree(pid, timeout=timeout)
-                # 念のため: ポート上の残存リスナーも全部 kill
-                self._kill_listeners_on_port(self.port)
+                    # 自分が起動したサンドボックスの残骸だけ掃除する。自分の子が
+                    # 無いのにポート上のリスナーを殺すと、二重起動した core の
+                    # 終了時に健全なサンドボックスを道連れにする（2026-08-26 実発生）。
+                    self._kill_listeners_on_port(self.port)
             except Exception as e:
                 logger.warning("error during sandbox stop: %s", e)
             finally:
