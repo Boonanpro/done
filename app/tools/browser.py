@@ -15,6 +15,19 @@ import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+from app.tools.browser_metrics import record_timing
+
+
+class _CommandCancellation:
+    def __init__(self, session_event=None):
+        self.local = threading.Event()
+        self.session_event = session_event
+
+    def set(self):
+        self.local.set()
+
+    def is_set(self):
+        return self.local.is_set() or bool(self.session_event and self.session_event.is_set())
 
 
 # ===== Executor用: 専用スレッドでPlaywrightを実行 =====
@@ -757,22 +770,35 @@ async def _executor_worker():
         # コマンドループ
         while not _executor_shutdown.is_set():
             try:
-                cmd, args, result_future = _executor_command_queue.get(timeout=0.1)
+                cmd, args, request = _executor_command_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
+            reply = request["reply"] if request else _executor_result_queue
+            if request and request["cancelled"].is_set():
+                continue
+            started = time.perf_counter()
+            outcome = "error"
             try:
+                if request:
+                    args = {**args, "_cancelled": request["cancelled"]}
                 result = await _execute_page_command(pages_state, context, cmd, args)
-                _executor_result_queue.put(("success", result))
+                outcome = "failed" if isinstance(result, dict) and result.get("success") is False else "success"
+                reply.put(("success", result))
             except Exception as e:
                 error_str = str(e).lower()
                 # ブラウザクローズエラーを検出
                 if "closed" in error_str or "target" in error_str or "disposed" in error_str:
                     print(f"[EXECUTOR_BROWSER] Browser has been closed: {e}")
                     _executor_browser_alive.clear()  # ブラウザ死亡をマーク
-                    _executor_result_queue.put(("browser_closed", str(e)))
+                    reply.put(("browser_closed", str(e)))
                     break  # ワーカーループを終了してスレッドを終了させる
-                _executor_result_queue.put(("error", str(e)))
+                reply.put(("error", str(e)))
+            finally:
+                # No URLs, form contents, selectors, screenshots or credentials.
+                logger.info("BROWSER_TIMING command=%s execution_ms=%.2f", cmd,
+                            (time.perf_counter() - started) * 1000)
+                record_timing("execution", cmd, (time.perf_counter() - started) * 1000, outcome)
 
     except Exception as exc:
         _executor_start_error = str(exc)
@@ -868,6 +894,19 @@ async def _page_evaluate(page, expression: str, arg=None):
 async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
     page = pages_state["current"]
+
+    if cmd == "fill_form":
+        from app.tools.browser_actions import fill_form
+        return await fill_form(page, args["fields"], args["expected_url"], args.get("_cancelled"))
+    if cmd == "guarded_click":
+        from app.tools.browser_actions import guarded_click
+        return await guarded_click(page, args["ref"], args.get("timeout", 10000), args.get("_cancelled"))
+    if cmd == "wait_for_condition":
+        from app.tools.browser_actions import wait_for_condition
+        return await wait_for_condition(page, args["condition"])
+    if cmd == "check_condition_before_action":
+        from app.tools.browser_actions import check_condition_before_action
+        return await check_condition_before_action(page, args["condition"])
 
     # タブ管理コマンド
     if cmd == "switch_to_latest_tab":
@@ -1162,7 +1201,15 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
 
             const elements = [];
             const seen = new Set();
-            let refId = 1;
+            // Keep references attached to DOM identity. Re-numbering from e1
+            // on every observation can silently redirect a previously seen ref.
+            if (!window.__danRefState || window.__danRefState.version !== 2) {
+                const bytes = crypto.getRandomValues(new Uint8Array(6));
+                const prefix = btoa(String.fromCharCode(...bytes)).replaceAll('+','-').replaceAll('/','_');
+                document.querySelectorAll('[data-dan-ref]').forEach(el => el.removeAttribute('data-dan-ref'));
+                window.__danRefState = {version: 2, prefix, next: 1, nodes: new WeakMap()};
+            }
+            const refState = window.__danRefState;
 
             for (const selector of interactiveSelectors) {
                 for (const el of document.querySelectorAll(selector)) {
@@ -1176,7 +1223,11 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
                     if (style.display === 'none' || style.visibility === 'hidden') continue;
 
                     // data-ref属性を付与
-                    const ref = `e${refId++}`;
+                    let ref = refState.nodes.get(el);
+                    if (!ref) {
+                        ref = `${refState.prefix}:${(refState.next++).toString(36)}`;
+                        refState.nodes.set(el, ref);
+                    }
                     el.setAttribute('data-dan-ref', ref);
 
                     // 要素情報を収集
@@ -1413,14 +1464,12 @@ def _send_executor_command(cmd: str, **args) -> dict:
     for attempt in range(max_retries):
         _ensure_executor_thread()
 
-        # 結果キューをクリア
-        while not _executor_result_queue.empty():
-            try:
-                _executor_result_queue.get_nowait()
-            except queue.Empty:
-                break
-
-        _executor_command_queue.put((cmd, args, None))
+        # Per-request replies prevent a timed-out command's late result from
+        # being mistaken for the next command's success.
+        request = {"reply": queue.Queue(), "cancelled": _CommandCancellation(
+            CancellationRegistry.get_event(CancellationRegistry.get_current_session()))}
+        _executor_command_queue.put((cmd, args, request))
+        started = time.perf_counter()
 
         # 結果を待機（短いタイムアウトでループし、キャンセルをチェック）
         wait_timeout = 2.0  # 2秒ごとにキャンセルチェック
@@ -1430,15 +1479,22 @@ def _send_executor_command(cmd: str, **args) -> dict:
         while elapsed < total_timeout:
             # キャンセルチェック
             if CancellationRegistry.check_cancelled():
+                request["cancelled"].set()
                 session_id = CancellationRegistry.get_current_session()
                 print(f"[EXECUTOR_BROWSER] Command cancelled during execution: {cmd}")
                 raise CancelledError(session_id or "unknown", "ブラウザ操作がキャンセルされました")
 
             try:
-                status, result = _executor_result_queue.get(timeout=wait_timeout)
+                status, result = request["reply"].get(timeout=wait_timeout)
+                logger.info("BROWSER_TIMING command=%s roundtrip_ms=%.2f status=%s", cmd,
+                            (time.perf_counter() - started) * 1000, status)
+                record_timing("roundtrip", cmd, (time.perf_counter() - started) * 1000, status)
                 if status == "error":
                     raise RuntimeError(result)
                 elif status == "browser_closed":
+                    # A click/input may already have happened. Never replay it.
+                    if cmd not in {"get_url", "get_tab_count", "screenshot_base64", "get_interactive_elements", "get_page_context"}:
+                        raise RuntimeError("Browser closed; action outcome is unknown. Inspect before retrying.")
                     # ブラウザが閉じられた - 再起動してリトライ
                     if attempt < max_retries - 1:
                         print(f"[EXECUTOR_BROWSER] Browser was closed, restarting... (attempt {attempt + 1})")
@@ -1453,6 +1509,7 @@ def _send_executor_command(cmd: str, **args) -> dict:
 
         # ここに来たらタイムアウト（browser_closedでbreakした場合は除く）
         if elapsed >= total_timeout:
+            request["cancelled"].set()
             raise RuntimeError("Executor command timed out")
 
 
@@ -1672,6 +1729,18 @@ class ExecutorPageProxy:
             None, lambda: _send_executor_command("aria_snapshot")
         )
         return result.get("snapshot", {})
+
+    async def fill_form(self, fields: list, expected_url: str) -> dict:
+        return await asyncio.to_thread(_send_executor_command, "fill_form", fields=fields, expected_url=expected_url)
+
+    async def guarded_click(self, ref: str, timeout: int = 10000) -> dict:
+        return await asyncio.to_thread(_send_executor_command, "guarded_click", ref=ref, timeout=timeout)
+
+    async def wait_for_condition(self, condition: dict) -> dict:
+        return await asyncio.to_thread(_send_executor_command, "wait_for_condition", condition=condition)
+
+    async def check_condition_before_action(self, condition: dict) -> dict:
+        return await asyncio.to_thread(_send_executor_command, "check_condition_before_action", condition=condition)
 
     async def get_interactive_elements(self) -> list:
         """
