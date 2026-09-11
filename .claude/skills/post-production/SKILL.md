@@ -21,7 +21,7 @@ When cutting talking-head, camera, or demo footage:
 
 Do not report an edit as final if the cut removed necessary context. Report it as a rough cut and ask for review when message coverage is uncertain.
 
-For UGC / operation-demo edits, follow the detailed rules in `edit_policy.md` (same directory): cut ONLY restatements (keep filler, never clip sentence ends, keep a 0.3-0.5s breath), compress only inter-sentence silence, show the full operation flow from app launch, captions as outline+shadow (no black box) and none during PiP/screen sections. The production tab (dan_edit) injects this policy automatically; in chat, read it before editing this kind of footage.
+For UGC / operation-demo edits, `edit_policy.md` describes preserving meaning and checking cuts. Pacing, caption design, framing and coverage follow the current brief. In the Dan editor, use timeline tools and editor_help for saving and proportionate verification; this skill does not require a separate finishing or export stage for every edit.
 
 ## Privacy Blur And Redaction
 
@@ -65,7 +65,7 @@ For screen recordings where specific on-screen text must be hidden while everyth
 2. **Cut template images**: crop the exact target (e.g. a name) from a representative frame, save as grayscale PNG. One template per distinct appearance of the target.
 3. **Match every frame**: decode frames one by one and run `cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)`, accept at score >= ~0.55. If the same text also appears elsewhere in frame (thumbnails, camera roll), restrict the search to a y-band so the wrong instance is never grabbed.
 4. **Mask by relative offset** `(dx, dy, w, h)` from the matched top-left. The mask then follows scrolling automatically and stays tight.
-5. **Fail safe — never leak**: frame not matched → reuse the last known position; target never seen in the segment → blur the entire frame. Over-hiding beats leaking.
+5. **Resolve missed tracking**: a missed match is an unresolved interval. Inspect that interval and correct the target's tracking or keyframes. Do not silently reuse a stale position or replace the result with full-frame blur. Until corrected and checked, keep that interval out of a final external delivery and report the remaining issue.
 6. **Report the tracking rate** (`tracked=hits/total` per segment). A low rate means failure: re-cut the template or adjust the search band before delivering.
 
 Core pattern:
@@ -74,18 +74,18 @@ Core pattern:
 res = cv2.matchTemplate(gray[band0:band1, :], tpl, cv2.TM_CCOEFF_NORMED)
 _, mx, _, loc = cv2.minMaxLoc(res)
 if mx >= 0.55:
-    pos = (loc[0], loc[1] + band0); last = pos; hits += 1
+    pos = (loc[0], loc[1] + band0); hits += 1
 else:
-    pos = last                       # fall back to last known position
+    pos = None                      # unresolved: inspect/correct this interval
 if pos is not None:
     mask(frame, pos[0] + dx, pos[1] + dy, w, h)
 else:
-    mask(frame, 0, 0, W, H)          # never seen -> blur everything, never leak
+    unresolved_frames.append(frame_index)  # not approved for final delivery
 ```
 
 Destruction must be two-stage: pixelate first (downscale ~1/14 with INTER_AREA, upscale with INTER_NEAREST), then GaussianBlur on top. A plain Gaussian blur of known-font text can be partially reversed; for maximum irreversibility use an opaque fill.
 
-Known weakness: the last-known-position fallback lags if the page scrolls during a miss streak. This is why the tracking rate and the frame-by-frame review below are mandatory, not optional.
+Tracking rate alone does not establish correct masking. Review corrected intervals and their boundaries before final delivery.
 
 After masking, always:
 

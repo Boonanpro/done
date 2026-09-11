@@ -132,6 +132,22 @@ async def realtime_delegate_websocket(websocket: WebSocket):
             try:
                 from app.agent.cli_runner import process_message_cli
 
+                # 動画エディタが開いている部屋なら、その content を timeline_refs として
+                # 自動添付（ダンのセッションに timeline MCP が付く）＋再生位置/選択を本文に添える。
+                # 音声で「ここ直して」がエディタの『今』に結びつく唯一の経路。
+                timeline_refs: list[dict] = []
+                try:
+                    from app.services import timeline_live as _tl
+
+                    _st = _tl.editor_state(room_id)
+                    if _st and _st.get("content_id"):
+                        timeline_refs = [{"content_id": str(_st["content_id"])}]
+                        ctx_text = _tl.context_text(room_id, str(_st["content_id"]))
+                        if ctx_text:
+                            task = f"{task}\n\n{ctx_text}"
+                except Exception:  # noqa: BLE001 — presence is best-effort
+                    timeline_refs = []
+
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=user_id,
@@ -140,6 +156,7 @@ async def realtime_delegate_websocket(websocket: WebSocket):
                     # 部屋に残るのは音声の文字起こし（🎙）だけ。ダンのCLIセッション自体は
                     # 同じ room キーで継続するため、委譲内容の記憶はダン側に残る。
                     skip_save=True,
+                    timeline_refs=timeline_refs,
                 ):
                     et = event.get("type", "")
                     if et == "reasoning":

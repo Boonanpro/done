@@ -70,3 +70,11 @@ rapidocr-onnxruntime>=1.3.0
 opencv-python>=4.8.0
 faster-whisper>=1.1.0
 
+# Editor source-audio alignment and production worker ownership checks
+numpy>=1.24.0
+scipy>=1.11.0
+psutil>=5.9.0
+
+
+# SSH transport for the user-owned cloud voice service
+paramiko>=3.5,<6

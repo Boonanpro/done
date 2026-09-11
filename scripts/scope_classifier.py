@@ -124,6 +124,15 @@ _APP_API_DIR_TO_OWNER: dict[str, Scope] = {
 
 # Patterns that are infrastructure (Dan core / shared frontend).
 _INFRA_PATTERNS: tuple[str, ...] = (
+    # Shared editable-motion starter loaded by editor_motion_project.prepare.
+    # Deliberately exclude comparison recordings, renders and other videos.
+    "videos/reference-01-finish/index.html",
+    "videos/reference-01-finish/hyperframes.json",
+    "videos/reference-01-finish/package.json",
+    "videos/reference-01-finish/meta.json",
+    "videos/reference-01-finish/assets/Inter.ttf",
+    "videos/reference-01-finish/assets/Inter-OFL.txt",
+    "videos/reference-01-finish/assets/gsap.min.js",
     # backend
     "app/**",
     # standalone services (phone voice bridge etc.)

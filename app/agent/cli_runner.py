@@ -153,6 +153,10 @@ def _load_session(room_id: str) -> Optional[str]:
     """DBからCLIセッションIDを読み込む（インメモリキャッシュ優先）"""
     if room_id in _cli_sessions:
         return _cli_sessions[room_id]
+    if room_id.startswith('editor_'):
+        p=_editor_session_path(room_id)
+        try:return p.read_text(encoding='utf-8').strip() or None
+        except FileNotFoundError:return None
     try:
         from app.services.supabase_client import get_supabase_client
         sb = get_supabase_client().client
@@ -170,6 +174,10 @@ def _load_session(room_id: str) -> Optional[str]:
 def _save_session(room_id: str, session_id: str):
     """CLIセッションIDをDBに永続化"""
     _cli_sessions[room_id] = session_id
+    if room_id.startswith('editor_'):
+        p=_editor_session_path(room_id);p.parent.mkdir(parents=True,exist_ok=True)
+        tmp=p.with_suffix('.tmp');tmp.write_text(session_id,encoding='utf-8');tmp.replace(p)
+        return
     try:
         from app.services.supabase_client import get_supabase_client
         from datetime import datetime, timezone
@@ -188,11 +196,19 @@ def _clear_cli_session(room_id: str) -> None:
     next turn starts a fresh conversation instead of resuming a stale or
     poisoned transcript."""
     _cli_sessions.pop(room_id, None)
+    if room_id.startswith('editor_'):
+        _editor_session_path(room_id).unlink(missing_ok=True)
+        return
     try:
         from app.services.supabase_client import get_supabase_client
         get_supabase_client().client.table("cli_sessions").delete().eq("room_id", room_id).execute()
     except Exception as e:
         _cli_debug(f"_clear_cli_session failed: {e}")
+
+
+def _editor_session_path(room_id: str) -> Path:
+    import hashlib
+    return PROJECT_ROOT/'uploads'/'editor-sessions'/(hashlib.sha256(room_id.encode()).hexdigest()+'.txt')
 
 
 def _is_parse_error_text(text: Optional[str]) -> bool:
@@ -3397,6 +3413,8 @@ async def process_message_cli(
     skip_resume: bool = False,
     cwd: Optional[str] = None,
     timeline_refs: Optional[List[Dict[str, Any]]] = None,
+    model_override: Optional[str] = None,
+    mcp_config_override: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -3426,7 +3444,7 @@ async def process_message_cli(
         )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"
-    mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
+    mcp_config_path = mcp_config_override or _build_mcp_config(room_id, user_id, credentials)
     timeline_draft: Optional[Dict[str, Any]] = None
     timeline_turn_succeeded = False
     if timeline_refs:
@@ -3459,8 +3477,17 @@ async def process_message_cli(
                     "\n\n## Mentioned timeline\n"
                     f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
                     "Use mcp__timeline__* to inspect, edit, or export it. Timeline mutations are isolated "
-                    "in a draft and are committed only after this chat turn validates successfully."
+                    "in a draft and are committed only after this chat turn validates successfully. "
+                    "Lanes are layers (video/audio only); blur and highlight frames are region clips "
+                    "(add_region / set_region); touch only what the user asked for; check with render_frame."
                 )
+                try:
+                    from app.services import timeline_live as _tl
+                    _ctx = _tl.context_text(room_id, content_id)
+                    if _ctx:
+                        system_prompt += "\n\n" + _ctx
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("timeline mention setup failed: %s", exc)
                 timeline_draft = None
@@ -3473,7 +3500,13 @@ async def process_message_cli(
     # that already runs on transcript bloat or poison. Persona, tools and memory
     # all live outside the CLI transcript, so a mid-room switch loses nothing
     # beyond the transcript's raw detail.
-    cli_model, backend = resolve_room_backend(room_id)
+    if model_override:
+        if model_override not in _ALLOWED_CLI_MODELS:
+            raise ValueError(f'Unknown model: {model_override}')
+        cli_model=model_override
+        backend='codex' if _codex.is_codex_model(cli_model) else 'claude'
+    else:
+        cli_model, backend = resolve_room_backend(room_id)
     if resume_session_id and _codex.backend_for_session(resume_session_id) != backend:
         _cli_debug(
             f"backend switch → {backend} (model={cli_model}); dropping saved "

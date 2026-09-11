@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("WSS proxy failed to start: %s", e)
 
+    # 部屋ログの押し込みフィード（room_feed）の購読者は core にしかいない。
+    # ここで「自分が core」と印を付けると、core 外のプロセスからの publish は
+    # 内部APIへ転送される（送信案カード等が画面へ即時に届く）。
+    from app.services.room_feed import mark_core_process
+    mark_core_process()
+
     manager = SandboxManager(port=SANDBOX_PORT)
     set_manager(manager)
     logger.info("dan_core started (sandbox manager ready, port=%s)", SANDBOX_PORT)

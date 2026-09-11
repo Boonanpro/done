@@ -575,6 +575,13 @@ impl Compositor {
         self.draw_with_shader(d3d, tex, src_wh, dst, false, None, None, Some(&self.ps_alpha), opacity)
     }
 
+    pub fn draw_alpha_cover_opacity(
+        &self, d3d: &D3d, tex: &ID3D11Texture2D, src_wh: (u32, u32),
+        dst: (f64, f64, f64, f64), crop: Option<(f64, f64, f64, f64)>, opacity: f32,
+    ) -> Result<()> {
+        self.draw_with_shader(d3d, tex, src_wh, dst, true, None, crop, Some(&self.ps_alpha), opacity)
+    }
+
     /// Per-edge MASK crop: trimmed strips reveal the background; kept pixels stay put.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_cropped_opacity(

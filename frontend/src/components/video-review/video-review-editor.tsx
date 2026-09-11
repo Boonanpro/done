@@ -85,6 +85,8 @@ export type SequenceClip = {
   // Non-destructive source placement inside the clip's box: zoom + pan. null/absent =
   // today's cover look. scale<1 reveals the full source frame (no pixels cropped).
   transform?: { scale: number; x: number; y: number } | null;
+  transform_keys?: RenderCaption['transform_keys'];
+  opacity?: number;
   // Trim the source frame's edges (0-1 fraction of the source). Applied before placement.
   crop?: { top: number; bottom: number; left: number; right: number } | null;
   // Per-clip audio volume multiplier (1 = unchanged).
@@ -938,6 +940,8 @@ export function VideoReviewEditor({
           end: Number(c.timeline_end || 0),
           design: (c.style || {}) as CaptionDesign,
           words: c.words || undefined,
+          transform_keys: c.transform_keys,
+          opacity: c.opacity,
         });
       }
     }

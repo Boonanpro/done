@@ -1,12 +1,9 @@
-"""Timeline draft store — the agent NEVER edits the live timeline.
+"""Timeline working copies with validated incremental publication.
 
-A draft is a snapshot of one content's sequence taken at job start. Every agent
-tool operates on the draft file; the live contents.json is untouched until
-commit_draft(), which re-validates the whole draft and applies it with
-compare-and-swap (the live sequence must still hash to what the draft was cut
-from — a manual edit during the job turns into an explicit CONFLICT, never a
-silent overwrite). Assets generated during the job are tracked on the draft so
-a discard/failed commit can garbage-collect them.
+Tools edit a draft, then publish a complete operation using compare-and-swap.
+Preparation-only drafts stay private until final commit. Human saves are adopted
+before another operation; concurrent unpublished edits produce a conflict.
+Published assets remain available to the live timeline and its undo history.
 
 Layout: {room_dir}/drafts/{draft_id}.json
 """
@@ -127,6 +124,7 @@ def create_draft(room_id: str, content_id: str, job_id: str = "") -> dict[str, A
             "base_hash": sequence_hash(seq),
             "created_at": time.time(),
             "sequence": json.loads(json.dumps(seq)),  # deep copy
+            "base_sequence": json.loads(json.dumps(seq)),
             "generated_asset_ids": [],
             "log": [],
         }
@@ -156,7 +154,7 @@ def track_generated_asset(draft: dict[str, Any], asset_id: str) -> None:
     save_draft(draft)
 
 
-def commit_draft(room_id: str, draft_id: str, validate) -> dict[str, Any]:
+def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> dict[str, Any]:
     """Validate then apply the draft to the live content with compare-and-swap.
 
     `validate` is a callable(sequence, room_id) -> list[str] of problems; commit
@@ -164,9 +162,14 @@ def commit_draft(room_id: str, draft_id: str, validate) -> dict[str, Any]:
     On success the draft file is marked committed (kept for audit/undo)."""
     draft = load_draft(room_id, draft_id)
     problems = validate(draft["sequence"], room_id)
+    if draft.get("base_sequence") is not None:
+        from app.services.timeline_scope import violations
+        problems += violations(draft["base_sequence"], draft["sequence"], draft.get("edit_scope"))
     if problems:
         return {"ok": False, "conflict": False, "problems": problems}
     with ContentsLock(room_id):
+        if draft.get('job_id') and (_room_dir(room_id)/'jobs'/draft['job_id']/'cancel-requested').exists():
+            return {"ok":False,"conflict":False,"problems":["制作はユーザーにより停止されました"]}
         contents = _read_contents_raw(room_id)
         content = _find_content(contents, draft["content_id"])
         if content is None:
@@ -184,10 +187,60 @@ def commit_draft(room_id: str, draft_id: str, validate) -> dict[str, Any]:
             }
         # single-writer swap
         content.setdefault("timeline", {})["sequence"] = draft["sequence"]
+        fmt = draft['sequence'].get('format') or content['timeline'].get('format') or content.get('format')
+        if fmt:
+            content['timeline']['format'] = fmt
+            content['format'] = fmt
         _write_contents_raw(room_id, contents)
-    draft["committed_at"] = time.time()
+    if checkpoint:
+        draft['base_hash'] = sequence_hash(draft['sequence'])
+        draft['published_sequence'] = json.loads(json.dumps(draft['sequence']))
+        draft['published_at'] = time.time()
+    else:
+        draft["committed_at"] = time.time()
     save_draft(draft)
     return {"ok": True, "conflict": False, "problems": []}
+
+
+def publish_checkpoint(room_id: str, draft_id: str) -> dict[str, Any]:
+    """Publish one complete tool transaction, never its intermediate sub-operations.
+
+    The original snapshot remains the authority for scope/approved clips. A manual
+    save changes the CAS hash and stops publication rather than erasing that edit.
+    """
+    draft = load_draft(room_id, draft_id)
+    if not draft.get('live_updates'):
+        return {'ok': True, 'published': False}
+    if sequence_hash(draft['sequence']) == draft['base_hash']:
+        return {'ok': True, 'published': False}
+    from app.services import timeline_commands as tc
+    p = _room_dir(room_id) / 'assets.json'
+    assets = {str(a['id']): a for a in json.loads(p.read_text(encoding='utf-8'))} if p.exists() else {}
+    baseline = set(draft.get('baseline_problems', []))
+    result = commit_draft(room_id, draft_id,
+        lambda seq, room: [x for x in tc.validate_sequence(seq, assets, asset_dir=str(_room_dir(room))) if x not in baseline],
+        checkpoint=True)
+    return {**result, 'published': result['ok']}
+
+
+def refresh_checkpoint(room_id: str, draft_id: str) -> bool:
+    """Adopt a human save before the next AI operation when no unpublished edit exists."""
+    draft = load_draft(room_id, draft_id)
+    if not draft.get('live_updates'):
+        return False
+    with ContentsLock(room_id):
+        content = _find_content(_read_contents_raw(room_id), draft['content_id'])
+        live = _content_sequence(content) if content else None
+        if live is None or sequence_hash(live) == draft['base_hash']:
+            return False
+        if sequence_hash(draft['sequence']) != draft['base_hash']:
+            raise ValueError('手編集と未反映のAI編集が重なっています。最新のタイムラインと下書きを確認してください。')
+        draft['sequence'] = json.loads(json.dumps(live))
+        draft['base_sequence'] = json.loads(json.dumps(live))
+        draft['base_hash'] = sequence_hash(live)
+        draft['published_sequence'] = json.loads(json.dumps(live))
+        save_draft(draft)
+    return True
 
 
 def discard_draft(room_id: str, draft_id: str, delete_generated_assets) -> None:
@@ -198,7 +251,8 @@ def discard_draft(room_id: str, draft_id: str, delete_generated_assets) -> None:
     except ValueError:
         return
     gen = draft.get("generated_asset_ids") or []
-    if gen and not draft.get("committed_at"):
+    # Published checkpoints and native undo history may still reference these.
+    if gen and not draft.get("committed_at") and not draft.get('published_at'):
         try:
             delete_generated_assets(room_id, gen)
         except Exception:  # noqa: BLE001 — GC must not mask the discard

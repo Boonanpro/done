@@ -231,6 +231,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           end: Number(c.timeline_end || 0),
           design: (c.style || {}) as CaptionDesign,
           words: c.words || undefined,
+          transform_keys: c.transform_keys,
+          opacity: c.opacity,
         })),
     [captionClips],
   );

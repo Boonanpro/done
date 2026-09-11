@@ -1,4 +1,4 @@
-"""GPT Image 2 を OpenAI API 直で叩く画像生成CLI。
+"""GPT Image 2.5 Sunburst を OpenAI API 直で叩く画像生成CLI。
 
 ダンの汎用画像生成（LP・デザイン・文字入り画像）はこれが正規経路。
 Higgsfield は動画・Soul ID・Nano Banana 系専用（GPT Image 2 をここへ一本化した
@@ -27,6 +27,7 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parent.parent  # D:/done（cwd に依存しない）
+DEFAULT_MODEL = "gpt-image-2.5-sunburst"
 
 # 概算単価（2026-08 時点の公表レート。請求の正は OpenAI ダッシュボード）
 _USD_PER_M = {"text_in": 5.0, "image_in": 8.0, "image_out": 30.0}
@@ -68,6 +69,7 @@ def _validate_size(size: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", required=True, help="出力PNGパス")
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="画像モデルの正式ID")
     ap.add_argument("--size", default="1520x2688", help="WxH（既定=LPタイル寸法）")
     ap.add_argument("--quality", default="low", choices=["low", "medium", "high", "auto"])
     ap.add_argument("--image", action="append", default=[],
@@ -95,7 +97,7 @@ def main() -> None:
         r = requests.post(
             "https://api.openai.com/v1/images/edits",
             headers=headers,
-            data={"model": "gpt-image-2", "prompt": prompt, "size": size,
+            data={"model": args.model, "prompt": prompt, "size": size,
                   "quality": args.quality},
             files=files,
             timeout=600,
@@ -104,7 +106,7 @@ def main() -> None:
         r = requests.post(
             "https://api.openai.com/v1/images/generations",
             headers=headers,
-            json={"model": "gpt-image-2", "prompt": prompt, "size": size,
+            json={"model": args.model, "prompt": prompt, "size": size,
                   "quality": args.quality},
             timeout=600,
         )
@@ -125,6 +127,8 @@ def main() -> None:
         + usage.get("output_tokens", 0) / 1e6 * _USD_PER_M["image_out"]
     )
     result = {
+        "requested_model": args.model,
+        "returned_model": body.get("model"),
         "out": str(out),
         "size": size,
         "quality": args.quality,
@@ -133,7 +137,7 @@ def main() -> None:
         "cost_usd_approx": round(cost, 4),
     }
     print(json.dumps(result, ensure_ascii=False) if args.json
-          else f"saved {out} ({size}, {args.quality}, ~${cost:.3f})")
+          else f"saved {out} ({args.model}, {size}, {args.quality}, ~${cost:.3f})")
 
 
 if __name__ == "__main__":

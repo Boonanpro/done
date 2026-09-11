@@ -1,11 +1,11 @@
 ---
 name: studio
-description: Dan video studio compatibility skill. Use for video production requests, operation demo capture, timeline assembly, Remotion editing, screen recording, tutorial/demo videos, and when existing Dan tools like studio_record, studio_encode, studio_probe, studio_extract_frame, and send_file are needed. For broad creative requests, route through creative-studio first.
+description: Screen capture, browser operation demos, and existing Remotion project editing with Dan studio tools. Use when these capabilities are needed. Ordinary Dan editor clip placement, trimming, captions and audio changes use its timeline tools directly.
 ---
 
 # studio
 
-This skill remains the execution layer for real capture and timeline assembly. For new broad creative work, start with `creative-studio`, then return here when real screen capture or Remotion editing is needed.
+Use this skill for real screen capture or existing Remotion work. In the Dan editor, the timeline and editor_help define the editing and saving contract. A reference to a studio tool does not require restarting creative intake, creating a separate composition, or exporting an otherwise complete timeline edit.
 
 ## Role In The New System
 

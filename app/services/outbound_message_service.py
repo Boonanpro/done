@@ -496,16 +496,17 @@ class OutboundMessageService:
 
     # ------------------------------------------------------------------
     def _post_room_message(self, room_id: Optional[str], content: str) -> None:
+        """カード行（`[送信案: id]`）や送信/破棄の控えを部屋ログへ追記する。
+
+        このサービスは MCP 子プロセスで動くことが多い。DB に直接書くと core の
+        押し込みフィードが知らず、画面は一覧を取り直すまでカードを出せない
+        （2026-09-11 の「カードが出ない」）。追記は room_log 経由で core に一本化。
+        """
         if not room_id:
             return
         try:
-            from app.services.chat_service import record_message_delivery_sync
-            msg_id = str(uuid.uuid4())
-            self.sb.table("chat_messages").insert({
-                "id": msg_id, "room_id": room_id, "sender_id": None,
-                "sender_type": "ai", "content": content,
-            }).execute()
-            record_message_delivery_sync(self.sb, room_id, msg_id, content=content)
+            from app.services.room_log import append as append_room_log
+            append_room_log(room_id, content, sender_type="ai", sender_id=None)
         except Exception:
             logger.warning("post room message failed room=%s", room_id, exc_info=True)
 

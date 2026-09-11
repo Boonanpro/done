@@ -248,8 +248,13 @@ def build_codex_profile(
     except Exception as e:  # noqa: BLE001
         logger.warning("codex profile: parity context failed: %s", e)
         extra = ""
+    # Editor turns already carry the entire current system prompt through
+    # wrap_turn_content. Do not also freeze a second copy into a new thread.
+    # Existing threads retain their context until normal rotation; do not reset
+    # a user's ongoing conversation just to shrink its input.
+    profile_prompt = '' if room_id.startswith('editor_') else (system_prompt or '')
     instructions = (
-        (system_prompt or "")
+        profile_prompt
         + ("\n\n---\n\n" + extra if extra else "")
         + "\n\n---\n\n## 実行時コンテキストの扱い\n\n"
         "各ユーザーメッセージ冒頭の <runtime_system_context> が、その時点のシステム指示・"
@@ -613,6 +618,9 @@ def run_codex_process(
             if itype in ("command_execution", "file_change", "mcp_tool_call", "web_search", "todo_list", "plan"):
                 for ev in _item_to_events(item):
                     _emit_tool(ev)
+                    if room_id.startswith('editor_') and etype in ('item.started','item.completed'):
+                        event_queue.put({**ev,'type':'tool_progress',
+                                         'state':'running' if etype=='item.started' else 'failed' if item.get('status')=='failed' or item.get('exit_code',0) not in (None,0) else 'done'})
                 continue
             if etype != "item.completed":
                 continue
