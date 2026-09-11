@@ -339,6 +339,27 @@ class StreamingSession:
         self._pending.put(content)
         self._last_activity = time.time()
 
+    # --- prewarm (proactive rotation) ----------------------------------
+    def prewarm(self, priming_text: str, sink: EventSink, timeout: float = 180.0) -> bool:
+        """Start the process and prime it with context in the BACKGROUND so the
+        next real user turn lands on a warm session (context already prefilled,
+        KV cache built) instead of paying the fresh-session reseed cost on the
+        critical path.
+
+        Runs one priming turn whose output is discarded by the caller's sink
+        (which also captures the session_id for --resume durability). Returns
+        True if the session is alive and primed afterwards. Any failure returns
+        False and the caller simply keeps the old session — the next send then
+        takes the normal (slower) path, so prewarm is a pure optimization that
+        can never break correctness."""
+        try:
+            if not self.is_alive():
+                self.start()
+            self.run_turn(priming_text, sink, timeout=timeout)
+            return self.is_alive()
+        except Exception:
+            return False
+
     # --- user cancel (Escキー相当) --------------------------------------
     def interrupt(self) -> bool:
         """Gracefully stop the CURRENT turn (the CLI ends it with a result
@@ -527,3 +548,13 @@ def get_or_create_session(
 def has_active_session(room_id: str) -> bool:
     s = get_session(room_id)
     return bool(s and s.is_alive())
+
+
+def install_session(room_id: str, session: "StreamingSession") -> Optional["StreamingSession"]:
+    """Atomically make `session` the room's session, returning the one it
+    replaced (the caller stops it). Used by proactive rotation to swap in a
+    prewarmed replacement without a window where the room has no session."""
+    with _registry_lock:
+        old = _sessions.get(room_id)
+        _sessions[room_id] = session
+    return old
