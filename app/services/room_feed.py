@@ -15,13 +15,56 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import threading
 import time
+import urllib.request
 from collections import defaultdict
 from typing import Any, AsyncIterator, Optional
 
 logger = logging.getLogger(__name__)
+
+# 購読者は core プロセスにしかいない。core 以外（MCP 子プロセス・サンドボックス・
+# ポーラー）で publish_message が呼ばれたら、core の内部APIへ転送する。
+# core は起動時に mark_core_process() を呼ぶ。
+_IN_CORE = False
+_FORWARD_TIMEOUT_S = 2.0
+
+
+def mark_core_process() -> None:
+    global _IN_CORE
+    _IN_CORE = True
+
+
+def in_core_process() -> bool:
+    return _IN_CORE
+
+
+def _core_base_url() -> str:
+    return f"http://127.0.0.1:{os.environ.get('DAN_CORE_PORT', '9000')}"
+
+
+def _forward_to_core(room_id: str, msg: dict) -> int:
+    """core 外から: 保存済みの行を core に渡して配信してもらう。届かなくても例外にしない。"""
+    try:
+        body = json.dumps(
+            {"already_saved": True, "message": msg}, ensure_ascii=False, default=str
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_core_base_url()}/api/v1/chat/internal/rooms/{room_id}/messages",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_FORWARD_TIMEOUT_S) as resp:  # noqa: S310
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        return int(data.get("delivered") or 0)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("room_feed: forward to core failed room=%s: %s", room_id[:8], e)
+        return 0
+
 
 _lock = threading.Lock()
 # user_id → {queue: loop}
@@ -105,8 +148,12 @@ def publish(user_ids: list[str], event: dict) -> int:
 
 
 def publish_message(room_id: str, msg: dict) -> int:
-    """メッセージ保存直後に呼ぶ。購読者がいなければ即 return（DB照会もしない）。"""
-    if subscriber_count() == 0 or not room_id:
+    """メッセージ保存直後に呼ぶ。core 外なら core へ転送。購読者がいなければ即 return（DB照会もしない）。"""
+    if not room_id:
+        return 0
+    if not _IN_CORE:
+        return _forward_to_core(room_id, msg)
+    if subscriber_count() == 0:
         return 0
     users = _room_members(room_id)
     if not users:

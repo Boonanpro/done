@@ -2937,7 +2937,7 @@ async def set_dan_session_model(
     if turn_active:
         raise HTTPException(status_code=409, detail="ダンが作業中です。完了してから切り替えてください")
 
-    _, current_backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
+    current_model, current_backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
     new_backend = backend_for_model(model)
 
     meta = project.get("metadata") if isinstance(project.get("metadata"), dict) else {}
@@ -2949,15 +2949,16 @@ async def set_dan_session_model(
     )
     _cr.invalidate_room_model_cache(session_id)
 
-    if new_backend != current_backend and current_backend == "claude":
-        # 常駐 Claude セッションが遊んでいれば畳む（次ターンは Codex が DB reseed で始める）
+    if current_model != model and current_backend == "claude":
+        # Claude同士でも起動時の --model は変わらないため、常駐プロセスを畳む。
+        # 保存済み会話は残し、次ターンに選択したモデルで再開する。
         try:
             from app.agent.streaming_session import get_session as _get_ss
             _ss = _get_ss(session_id)
             if _ss is not None and _ss.is_alive():
-                _ss.stop()
+                await asyncio.to_thread(_ss.stop)
         except Exception:
-            pass
+            logger.exception("Failed to stop previous model for room %s", session_id[:8])
     logger.info(
         "[MODEL] room=%s model=%s backend %s → %s", session_id[:8], model, current_backend, new_backend
     )
@@ -3961,6 +3962,38 @@ def _require_loopback(request: Request) -> None:
     client_host = request.client.host if request.client else ""
     if client_host not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(status_code=403, detail="Internal only")
+
+
+@router.post("/internal/rooms/{room_id}/messages")
+async def internal_room_message(room_id: str, request: Request) -> dict:
+    """部屋ログへの追記／配信の内部入口（loopback 限定）。
+
+    core の外（MCP 子プロセス・サンドボックス・ポーラー）が部屋にメッセージを
+    出す時はここに頼む。core が insert して押し込みフィードへ流すので、画面は
+    一覧を取り直さなくても即座に知る。`already_saved` 付きなら insert 済みの行を
+    配信だけする（room_feed が core 外から自動転送してくる経路）。
+    """
+    _require_loopback(request)
+    payload = await request.json()
+    from app.services.room_feed import publish_message, _slim_message
+
+    if payload.get("already_saved"):
+        msg = payload.get("message") or {}
+        if not msg.get("id"):
+            raise HTTPException(status_code=400, detail="message.id is required")
+        delivered = await asyncio.to_thread(publish_message, room_id, msg)
+        return {"ok": True, "saved": False, "delivered": delivered}
+
+    content = str(payload.get("content") or "")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+    sender_type = str(payload.get("sender_type") or "ai")
+    sender_id = payload.get("sender_id") or None
+
+    from app.services.room_log import append_local
+
+    row = await asyncio.to_thread(append_local, room_id, content, sender_type, sender_id)
+    return {"ok": True, "saved": True, "message": _slim_message(row)}
 
 
 @router.post("/internal/artifacts/register")
