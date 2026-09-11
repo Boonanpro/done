@@ -826,7 +826,8 @@ def _query_stats(svc, page_url: str, query: str, start: date, end: date) -> dict
         "clicks": r.get("clicks", 0),
         "impressions": r.get("impressions", 0),
         "ctr": round(r.get("ctr", 0) * 100, 2),
-        "position": round(r.get("position", 0), 2) if r else None,
+        # 表示ゼロの期間は順位が 0 で返ってくる（＝1位と区別できない）ので「順位なし」にする
+        "position": round(r.get("position", 0), 2) if r and r.get("impressions", 0) > 0 else None,
     }
 
 
@@ -849,7 +850,9 @@ def cmd_evaluate(args=None) -> list[dict]:
         bpos, apos = base.get("position"), after.get("position")
         per_day = lambda s: (s["impressions"] / s["days"]) if s["days"] else 0  # noqa: E731
         verdict = "neutral"
-        if apos is None and bpos is not None:
+        if bpos is None and apos is not None:
+            verdict = "won"  # 変更前は出ていなかった語で表示され始めた
+        elif apos is None and bpos is not None:
             verdict = "lost" if per_day(base) >= 1 else "neutral"  # 表示が消えた
         elif bpos is not None and apos is not None:
             if apos <= bpos - 1.0 or (after["clicks"] > base["clicks"] * after["days"] / max(base["days"], 1) and apos <= bpos):
@@ -918,6 +921,11 @@ def cmd_polish(args=None) -> dict | None:
             others.append({"page": page, "query": query, "position": round(pos, 1), "impressions": impr})
     if others:
         activity("polish_manual_candidates", items=sorted(others, key=lambda x: -x["impressions"])[:10])
+    if getattr(args, "force_slug", None):
+        # 動作確認用: 実データが無くても、指定したページ・検索語で改善の流れを通す
+        fs = args.force_slug
+        cands = [{"slug": fs, "page": f"{ORIGIN}/guides/{fs}", "query": args.force_query or guides[fs]["keyword"], "position": 8.0, "impressions": 0, "score": 1}]
+        locked.discard(fs)
     if not cands:
         log(f"polish: 対象なし（自動で直せるページで、表示{min_impr}回以上・2〜20位の言葉がまだ無い）")
         return None
@@ -982,6 +990,11 @@ def cmd_polish(args=None) -> dict | None:
         activity("polish_rejected", slug=c["slug"], query=c["query"])
         return None
     page, cites = finalize_citations(page, sources)
+    if getattr(args, "dry_run", False):
+        out = OUT_DIR / f"polish-draft-{c['slug']}.json"
+        out.write_text(json.dumps({"gap": gap, "page": page, "citations": cites, "check": check}, ensure_ascii=False, indent=1), encoding="utf-8")
+        log(f"polish dry-run: {out}")
+        return None
     before = _query_stats(svc, c["page"], c["query"], end - timedelta(days=13), end)
     snap = {k: g.get(k) for k in PAGE_FIELDS + ("citations",)}
     snap["revision"] = g["revision"]
@@ -1252,6 +1265,9 @@ def main() -> None:
     n.add_argument("--dry-run", action="store_true")
     pl = sub.add_parser("polish")
     pl.add_argument("--min-impressions", default="3")
+    pl.add_argument("--force-slug")
+    pl.add_argument("--force-query")
+    pl.add_argument("--dry-run", action="store_true")
     sub.add_parser("evaluate")
     sub.add_parser("keywords")
     i = sub.add_parser("indexnow")
