@@ -18,6 +18,7 @@ import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
 import { findGuestHome, forgetGuestHome } from '@/lib/guest-home';
+import { mergeLatest, mergeOlder, isAtBottom, isNearTop } from '@/lib/collab-scroll';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
 
@@ -65,6 +66,12 @@ export default function GuestJoinPage() {
   const [input, setInput] = useState('');
   const [isJoining, setIsJoining] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // スクロール制御: 「下にいる時だけ」新着で下へ送る。上へ遡っている間は動かさない
+  const atBottomRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const noMoreOlderRef = useRef(false);
+  const messagesRef = useRef<CollabMessageResponse[]>([]);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -182,6 +189,7 @@ export default function GuestJoinPage() {
     if (roomId && guestToken) {
       api.collab.getMessages(roomId, 50, guestToken).then((data) => {
         setMessages(data.messages);
+        noMoreOlderRef.current = data.messages.length < 50;
       }).catch(() => {});
     }
   }, [roomId, guestToken]);
@@ -271,7 +279,7 @@ export default function GuestJoinPage() {
     if (!roomId || !guestToken || isConnected) return;
     const timer = setInterval(() => {
       api.collab.getMessages(roomId, 50, guestToken)
-        .then((data) => setMessages(data.messages))
+        .then((data) => setMessages((prev) => mergeLatest(prev, data.messages)))
         .catch(() => {});
     }, 5000);
     return () => clearInterval(timer);
@@ -280,11 +288,51 @@ export default function GuestJoinPage() {
   // Push notifications
   const { permission: pushPermission, subscribe: pushSubscribe } = usePushNotification(roomId || '', 'guest');
 
-  // Auto-scroll
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // 過去を読み足す（上端に近づいた時）。読んだ分だけ下へずらして、見ていた行を動かさない
+  const loadOlder = useCallback(async () => {
+    if (!roomId || !guestToken) return;
+    if (loadingOlderRef.current || noMoreOlderRef.current) return;
+    const oldest = messagesRef.current.find((m) => !m.id.startsWith('temp-'));
+    if (!oldest) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const el = scrollRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    try {
+      const data = await api.collab.getMessages(roomId, 50, guestToken, oldest.created_at);
+      if (data.messages.length === 0) {
+        noMoreOlderRef.current = true;
+        return;
+      }
+      if (data.messages.length < 50) noMoreOlderRef.current = true;
+      setMessages((prev) => mergeOlder(prev, data.messages));
+      requestAnimationFrame(() => {
+        const cur = scrollRef.current;
+        if (cur) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
+      });
+    } catch {
+      // 失敗時は次のスクロールで再試行
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
     }
+  }, [roomId, guestToken]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    atBottomRef.current = isAtBottom(el);
+    if (isNearTop(el)) void loadOlder();
+  }, [loadOlder]);
+
+  // 新着で最下部へ送るのは「いま最下部にいる時」だけ。
+  // 上へ遡っている最中に送ると、5秒ごとのポーリングのたびに下へ戻されて遡れない。
+  useEffect(() => {
+    if (!atBottomRef.current) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   // Join room
@@ -341,6 +389,7 @@ export default function GuestJoinPage() {
   const handleSend = async () => {
     const content = input.trim();
     if ((!content && pendingFiles.length === 0) || isUploading) return;
+    atBottomRef.current = true;  // 自分が送った時は遡っていても最新へ戻る
     const finalContent = danMode && content ? `@ダン ${content}` : content;
     const metadata: Record<string, unknown> = {};
     // 添付は送信時にまとめてアップロード → files[] として本文と同じメッセージに載せる
@@ -532,8 +581,13 @@ export default function GuestJoinPage() {
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
+      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll}>
         <div className="space-y-3 py-4">
+          {loadingOlder && (
+            <div className="flex justify-center py-2">
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            </div>
+          )}
           {messages.map((msg, i) => {
             const prevDate = i > 0 ? new Date(messages[i - 1].created_at).toDateString() : '';
             const curDate = new Date(msg.created_at).toDateString();

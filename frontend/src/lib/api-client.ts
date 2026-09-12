@@ -1893,11 +1893,14 @@ export const api = {
         headers: { 'X-Guest-Token': token },
       }),
 
-    getMessages: (roomId: string, limit?: number, token?: string) => {
+    // before: この時刻より前（＝過去へ遡る）。上端までスクロールした時の読み足しで使う
+    getMessages: (roomId: string, limit?: number, token?: string, before?: string) => {
       const headers: Record<string, string> = {};
       if (token) headers['X-Guest-Token'] = token;
+      const query = new URLSearchParams({ limit: String(limit ?? 50) });
+      if (before) query.set('before', before);
       return request<{ messages: CollabMessageResponse[] }>(
-        `/collab/rooms/${roomId}/messages?limit=${limit ?? 50}`,
+        `/collab/rooms/${roomId}/messages?${query.toString()}`,
         { headers }
       );
     },

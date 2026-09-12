@@ -13,6 +13,7 @@ import { OutboundMessageCard } from '@/components/chat/outbound-message-card';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
+import { mergeLatest, mergeOlder, isAtBottom, isNearTop } from '@/lib/collab-scroll';
 import { useUnreadStore } from '@/stores/unread-store';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
 import { usePushNotification } from '@/hooks/usePushNotification';
@@ -81,6 +82,12 @@ export default function CollabRoomPage() {
   const [messages, setMessages] = useState<CollabMessageResponse[]>([]);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // スクロール制御: 「下にいる時だけ」新着で下へ送る。上へ遡っている間は動かさない
+  const atBottomRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const noMoreOlderRef = useRef(false);
+  const messagesRef = useRef<CollabMessageResponse[]>([]);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -137,6 +144,7 @@ export default function CollabRoomPage() {
   useEffect(() => {
     if (messagesData?.messages) {
       setMessages(messagesData.messages);
+      noMoreOlderRef.current = messagesData.messages.length < 50;
     }
   }, [messagesData]);
 
@@ -214,7 +222,7 @@ export default function CollabRoomPage() {
     if (!roomId || isConnected) return;
     const timer = setInterval(() => {
       api.collab.getMessages(roomId)
-        .then((d) => setMessages(d.messages))
+        .then((d) => setMessages((prev) => mergeLatest(prev, d.messages)))
         .catch(() => {});
       api.collab.getDanStatus(roomId)
         .then((s) => setDanThinking(!!s.thinking))
@@ -226,11 +234,51 @@ export default function CollabRoomPage() {
   // Push notifications
   usePushNotification(roomId, 'owner');
 
-  // Auto-scroll
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // 過去を読み足す（上端に近づいた時）。読んだ分だけ下へずらして、見ていた行を動かさない
+  const loadOlder = useCallback(async () => {
+    if (!roomId) return;
+    if (loadingOlderRef.current || noMoreOlderRef.current) return;
+    const oldest = messagesRef.current.find((m) => !m.id.startsWith('temp-'));
+    if (!oldest) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const el = scrollRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    try {
+      const data = await api.collab.getMessages(roomId, 50, undefined, oldest.created_at);
+      if (data.messages.length === 0) {
+        noMoreOlderRef.current = true;
+        return;
+      }
+      if (data.messages.length < 50) noMoreOlderRef.current = true;
+      setMessages((prev) => mergeOlder(prev, data.messages));
+      requestAnimationFrame(() => {
+        const cur = scrollRef.current;
+        if (cur) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
+      });
+    } catch {
+      // 失敗時は次のスクロールで再試行
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
     }
+  }, [roomId]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    atBottomRef.current = isAtBottom(el);
+    if (isNearTop(el)) void loadOlder();
+  }, [loadOlder]);
+
+  // 新着で最下部へ送るのは「いま最下部にいる時」だけ。
+  // 上へ遡っている最中に送ると、4秒ごとのポーリングのたびに下へ戻されて遡れない。
+  useEffect(() => {
+    if (!atBottomRef.current) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
 
@@ -239,6 +287,7 @@ export default function CollabRoomPage() {
   const handleSend = async () => {
     const content = input.trim();
     if ((!content && pendingFiles.length === 0) || isUploading) return;
+    atBottomRef.current = true;  // 自分が送った時は遡っていても最新へ戻る
     const metadata: Record<string, unknown> = {};
     // 添付は送信時にまとめてアップロード → files[] として本文と同じメッセージに載せる
     const filesToSend = pendingFiles;
@@ -567,8 +616,13 @@ export default function CollabRoomPage() {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
+      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll}>
         <div className="space-y-3 py-4">
+          {loadingOlder && (
+            <div className="flex justify-center py-2">
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            </div>
+          )}
           {messages.map((msg, i) => {
             // 相談スレッドに属する私的メッセージ（あなたの返信・ダンの続き）は
             // 親のスレッド内に表示するので、単独では出さない
