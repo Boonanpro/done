@@ -242,6 +242,9 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   const [highlightId, setHighlightId] = useState<string | null>(null);
   // 長押しメニュー（スタンプ/返信）を開いているメッセージ。画面のどこを触っても閉じる
   const [pickerFor, setPickerFor] = useState<string | null>(null);
+  // WebSocket（dan.paina.info は Cloudflare の名前付きトンネル経由なので WS が通る。
+  // 繋がっている間はポーリングを止め、届いた瞬間に画面へ出す）
+  const [wsConnected, setWsConnected] = useState(false);
   const listRef = useRef<FlatList>(null);
 
   // 受信合流点: client_msg_id の仮バブルは差し替え（Web と同一ロジック）
@@ -265,7 +268,63 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     }
   }, [roomId, title, request]);
 
-  // メッセージ＋考え中: 4秒ポーリング
+  // WebSocket: 新着・考え中・リアクションを押し込みで受け取る。
+  // 切れたら指数バックオフで張り直し、その間はポーリングが受け持つ。
+  useEffect(() => {
+    if (!token || !roomId) return;
+    let alive = true;
+    let ws: WebSocket | null = null;
+    let retry = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (!alive) return;
+      const wsUrl = `${apiBase.replace(/^http/, 'ws')}/api/v1/collab/ws/${roomId}`;
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => ws?.send(JSON.stringify({ type: 'auth', token }));
+      ws.onmessage = (e) => {
+        if (!alive) return;
+        try {
+          const d = JSON.parse(String(e.data));
+          switch (d.type) {
+            case 'auth_success':
+              retry = 0;
+              setWsConnected(true);
+              break;
+            case 'new_message':
+              animateNextLayout();
+              mergeMessage(d.message);
+              if (String(d.message?.sender_type || '').startsWith('dan_')) setDanThinking(false);
+              break;
+            case 'dan_thinking': setDanThinking(true); break;
+            case 'dan_done': setDanThinking(false); break;
+            case 'reaction':
+              setMessages((prev) => prev.map((m) => (
+                m.id === d.message_id ? { ...m, metadata: { ...(m.metadata || {}), reactions: d.reactions } } : m
+              )));
+              break;
+          }
+        } catch { /* 壊れた行は捨てる */ }
+      };
+      ws.onerror = () => { try { ws?.close(); } catch { /* noop */ } };
+      ws.onclose = () => {
+        if (!alive) return;
+        setWsConnected(false);
+        const delay = Math.min(1000 * 2 ** retry, 30000);
+        retry += 1;
+        timer = setTimeout(connect, delay);
+      };
+    };
+    connect();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      try { ws?.close(); } catch { /* noop */ }
+      setWsConnected(false);
+    };
+  }, [roomId, token, apiBase, mergeMessage]);
+
+  // 受信のフォールバック: WS が繋がっていない時だけ4秒ポーリング
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -284,9 +343,10 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         .catch(() => {});
     };
     load();
+    if (wsConnected) return () => { alive = false; };   // 初回だけ取り、あとは WS 任せ
     const t = setInterval(load, 4_000);
     return () => { alive = false; clearInterval(t); };
-  }, [roomId, request]);
+  }, [roomId, request, wsConnected]);
 
   // 参加者＋既読位置: 10秒。自分の既読も更新
   useEffect(() => {
