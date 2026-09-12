@@ -189,7 +189,6 @@ export default function GuestJoinPage() {
     if (roomId && guestToken) {
       api.collab.getMessages(roomId, 50, guestToken).then((data) => {
         setMessages(data.messages);
-        noMoreOlderRef.current = data.messages.length < 50;
       }).catch(() => {});
     }
   }, [roomId, guestToken]);
@@ -307,7 +306,6 @@ export default function GuestJoinPage() {
         noMoreOlderRef.current = true;
         return;
       }
-      if (data.messages.length < 50) noMoreOlderRef.current = true;
       setMessages((prev) => mergeOlder(prev, data.messages));
       requestAnimationFrame(() => {
         const cur = scrollRef.current;

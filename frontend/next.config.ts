@@ -15,7 +15,14 @@ const nextConfig: NextConfig = {
   // 本番ビルド(ダッシュボード, 3000)と開発サーバー(成果物プレビュー, 3001)を同じ
   // リポジトリで同時に動かすため、出力先を分ける。既定 .next は dev 用。
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  typescript: { tsconfigPath: process.env.NEXT_TSCONFIG || 'tsconfig.json' },
   reactStrictMode: true,
+  // /api/voice-note/editorial は process.cwd() で python ワーカーを spawn する
+  // ローカル専用ルート。Next のファイルトレースが process.cwd() を見て frontend/ を
+  // まるごと同梱し、関数が 1.16GB になって Vercel のビルドが落ちるため除外する。
+  outputFileTracingExcludes: {
+    '/api/voice-note/editorial': ['**/*'],
+  },
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,
   turbopack: {},

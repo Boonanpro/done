@@ -144,7 +144,6 @@ export default function CollabRoomPage() {
   useEffect(() => {
     if (messagesData?.messages) {
       setMessages(messagesData.messages);
-      noMoreOlderRef.current = messagesData.messages.length < 50;
     }
   }, [messagesData]);
 
@@ -253,7 +252,6 @@ export default function CollabRoomPage() {
         noMoreOlderRef.current = true;
         return;
       }
-      if (data.messages.length < 50) noMoreOlderRef.current = true;
       setMessages((prev) => mergeOlder(prev, data.messages));
       requestAnimationFrame(() => {
         const cur = scrollRef.current;
