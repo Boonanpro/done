@@ -13,9 +13,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Loader2, Mail, MessageCircle, Send, Trash2 } from 'lucide-react';
+import { Check, Copy, Loader2, Mail, MessageCircle, Send, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type ProposalResponse } from '@/lib/api-client';
+import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 
 const CHANNEL_LABEL: Record<string, string> = {
   email: 'メール',
@@ -50,6 +51,13 @@ type ActionData = {
   sent_at?: string | null;
   sent_manually?: boolean;
   discarded_by?: string;
+  // collab: 添付（propose 時点で窓口の保存先に写してある）／名義／版
+  attachments?: { name: string; url: string; type?: string; size?: number }[] | null;
+  sender?: 'dan' | 'owner' | null;
+  revision?: number;
+  dan_updated_at?: string | null;
+  // ユーザー編集中にダンが用意した新版（採用するまで本文は据え置き）
+  pending_update?: { body: string; intent?: string | null; at: string } | null;
 };
 
 function fmtTime(iso?: string | null): string {
@@ -87,7 +95,26 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
   // 送信/破棄の退場アニメーション（ボタン→送信→カード消滅の繋がり感）
   const [exiting, setExiting] = useState(false);
   const [gone, setGone] = useState(false);
+  const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
   const lastServer = useRef<{ body: string; subject: string } | null>(null);
+
+  // 名義の切替（collab のみ）。押した瞬間に保存する
+  const senderMutation = useMutation({
+    mutationFn: (sender: 'dan' | 'owner') => api.proposals.updateDraft(proposalId, { sender }),
+    onSuccess: (updated: ProposalResponse) => queryClient.setQueryData(queryKey, updated),
+    onError: (e: Error) => toast.error(`名義の変更に失敗: ${e.message}`),
+  });
+  // ダンの新版を採用（ユーザー編集を置き換える）
+  const applyUpdateMutation = useMutation({
+    mutationFn: () => api.proposals.updateDraft(proposalId, { apply_update: true }),
+    onSuccess: (updated: ProposalResponse) => {
+      queryClient.setQueryData(queryKey, updated);
+      lastServer.current = null;   // 次の同期で本文をサーバー値に置き換える
+      setDirty(false);
+      toast.success('ダンの新しい版を反映しました');
+    },
+    onError: (e: Error) => toast.error(`反映に失敗: ${e.message}`),
+  });
 
   useEffect(() => {
     if (!proposal) return;
@@ -213,6 +240,9 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
 
   const Icon = channel === 'email' ? Mail : MessageCircle;
   const label = channelLabel(channel);
+  const senderOwner = ad.sender === 'owner';
+  const { media: attMedia, others: attOthers } = collabMediaItems({ files: ad.attachments || [] });
+  const pendingUpdate = ad.pending_update && ad.pending_update.at !== updateDismissed ? ad.pending_update : null;
   const status = proposal.status as string;
   const sent = status === 'sent';
   const sending = status === 'sending'; // ダンが手動送信のためロック中（編集・送信不可）
@@ -272,7 +302,8 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
             <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-600 dark:text-emerald-400">
               <Check className="h-3 w-3" />
               送信済み {fmtTime(ad.sent_at)}
-              {ad.sent_by === 'user' ? '（あなた）' : '（ダン）'}
+              {ad.sent_by === 'user' ? '（あなたが送信）' : '（ダンが送信）'}
+              {channel === 'collab' ? `・名義: ${senderOwner ? 'あなた' : 'ダン'}` : ''}
               {ad.user_edited ? '・修正あり' : ''}
             </span>
           )}
@@ -285,6 +316,7 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
           {discarded && <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground">破棄</span>}
           {pending && (
             <span className="text-muted-foreground">
+              {(ad.revision || 1) > 1 && ad.dan_updated_at ? `更新 ${fmtTime(ad.dan_updated_at)}・` : ''}
               {saving ? '保存中…' : dirty ? '未保存' : savedAt ? '保存済み' : ad.user_edited ? '編集済み' : '下書き'}
             </span>
           )}
@@ -303,6 +335,64 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
 
       {/* 本文 */}
       <div className="flex flex-col gap-2 px-3 py-2">
+        {pending && pendingUpdate && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5 text-xs">
+            <RefreshCw className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span className="min-w-0 flex-1">
+              ダンが新しい版を用意しました（{fmtTime(pendingUpdate.at)}）。あなたが直している本文はそのままです。
+            </span>
+            <button
+              type="button"
+              disabled={applyUpdateMutation.isPending}
+              onClick={() => applyUpdateMutation.mutate()}
+              className="rounded-md bg-primary px-2 py-1 text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              新しい版にする
+            </button>
+            <button
+              type="button"
+              onClick={() => setUpdateDismissed(pendingUpdate.at)}
+              className="rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              このまま
+            </button>
+          </div>
+        )}
+        {channel === 'collab' && pending && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground">名義:</span>
+            <div className="inline-flex overflow-hidden rounded-md border border-border">
+              {(['dan', 'owner'] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={senderMutation.isPending}
+                  onClick={() => { if ((ad.sender || 'dan') !== s) senderMutation.mutate(s); }}
+                  className={`px-2.5 py-1 transition-colors ${
+                    (ad.sender || 'dan') === s ? 'bg-primary text-primary-foreground' : 'bg-background hover:bg-muted'
+                  }`}
+                >
+                  {s === 'dan' ? 'ダン' : 'あなた'}
+                </button>
+              ))}
+            </div>
+            <span className="text-muted-foreground">
+              {senderOwner ? '相手にはあなた本人の発言として届きます' : '相手にはダンの発言として届きます'}
+            </span>
+          </div>
+        )}
+        {(attMedia.length > 0 || attOthers.length > 0) && (
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">添付（一緒に届きます）</span>
+            {attMedia.length > 0 && <MediaGrid items={attMedia} />}
+            {attOthers.map((f) => (
+              <a key={f.url} href={f.url} target="_blank" rel="noopener noreferrer"
+                 className="inline-flex w-fit items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs hover:bg-muted">
+                <FileText className="h-3.5 w-3.5 text-primary" /> {f.name}
+              </a>
+            ))}
+          </div>
+        )}
         {showSubject && (
           pending ? (
             <input

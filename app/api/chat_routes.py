@@ -3487,6 +3487,10 @@ class OutboundDraftUpdateRequest(BaseModel):
     body: Optional[str] = None
     subject: Optional[str] = None
     to: Optional[str] = None
+    # collab: 名義（"dan" | "owner"）
+    sender: Optional[str] = None
+    # collab: ダンが用意した新版（pending_update）を採用する
+    apply_update: Optional[bool] = None
 
 
 @router.patch("/proposals/{proposal_id}/draft", response_model=ProposalResponse)
@@ -3502,6 +3506,7 @@ async def update_outbound_draft(
         await asyncio.to_thread(
             OutboundMessageService().update_draft, proposal_id, current_user.user_id,
             body=request.body, subject=request.subject, to=request.to,
+            sender=request.sender, apply_update=bool(request.apply_update),
         )
         proposal = await service.get_proposal(proposal_id, current_user.user_id)
         return ProposalResponse(**proposal)
@@ -3961,6 +3966,38 @@ def _require_loopback(request: Request) -> None:
     client_host = request.client.host if request.client else ""
     if client_host not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(status_code=403, detail="Internal only")
+
+
+@router.post("/internal/rooms/{room_id}/messages")
+async def internal_room_message(room_id: str, request: Request) -> dict:
+    """部屋ログへの追記／配信の内部入口（loopback 限定）。
+
+    core の外（MCP 子プロセス・サンドボックス・ポーラー）が部屋にメッセージを
+    出す時はここに頼む。core が insert して押し込みフィードへ流すので、画面は
+    一覧を取り直さなくても即座に知る。`already_saved` 付きなら insert 済みの行を
+    配信だけする（room_feed が core 外から自動転送してくる経路）。
+    """
+    _require_loopback(request)
+    payload = await request.json()
+    from app.services.room_feed import publish_message, _slim_message
+
+    if payload.get("already_saved"):
+        msg = payload.get("message") or {}
+        if not msg.get("id"):
+            raise HTTPException(status_code=400, detail="message.id is required")
+        delivered = await asyncio.to_thread(publish_message, room_id, msg)
+        return {"ok": True, "saved": False, "delivered": delivered}
+
+    content = str(payload.get("content") or "")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+    sender_type = str(payload.get("sender_type") or "ai")
+    sender_id = payload.get("sender_id") or None
+
+    from app.services.room_log import append_local
+
+    row = await asyncio.to_thread(append_local, room_id, content, sender_type, sender_id)
+    return {"ok": True, "saved": True, "message": _slim_message(row)}
 
 
 @router.post("/internal/artifacts/register")

@@ -1134,7 +1134,7 @@ export const api = {
       request<ProposalResponse>(`/chat/proposals/${proposalId}`),
 
     // 送信案カード（compose_message）
-    updateDraft: (proposalId: string, patch: { body?: string; subject?: string; to?: string }) =>
+    updateDraft: (proposalId: string, patch: { body?: string; subject?: string; to?: string; sender?: 'dan' | 'owner'; apply_update?: boolean }) =>
       request<ProposalResponse>(`/chat/proposals/${proposalId}/draft`, {
         method: 'PATCH',
         body: JSON.stringify(patch),

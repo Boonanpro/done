@@ -1833,16 +1833,22 @@ async def internal_send_message(
     data = await request.json()
     room_id = (data.get("room_id") or "").strip()
     content = (data.get("content") or "").strip()
-    if not room_id or not content:
-        raise HTTPException(status_code=422, detail="room_id and content required")
+    files = [f for f in (data.get("files") or []) if isinstance(f, dict) and f.get("url")]
+    if not room_id or (not content and not files):
+        raise HTTPException(status_code=422, detail="room_id and content (or files) required")
     room = await service.get_room(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
     sender_name = (data.get("sender_name") or "ダン").strip() or "ダン"
+    # 名義: 既定はダン（dan_owner）。送信案カードで「あなた」を選ぶとユーザー本人（owner）として届く
+    sender_type = "owner" if (data.get("sender_type") or "") == "owner" else "dan_owner"
     # visibility="owner_only" はダンからユーザーへの「相談」: 相手には見せない
     owner_only = (data.get("visibility") or "").strip() == "owner_only"
-    metadata = {"via": "consult" if owner_only else "outbound_card"}
+    metadata: dict = {"via": "consult" if owner_only else "outbound_card"}
+    if files:
+        metadata["files"] = files
+        metadata["file"] = files[0]
     if owner_only:
         metadata["visibility"] = "owner_only"
         # 既存の相談スレッドの続きなら、そのスレッド（親メッセージ）にぶら下げる
@@ -1852,11 +1858,12 @@ async def internal_send_message(
 
     message = await service.send_message(
         room_id=room_id,
-        sender_type="dan_owner",
+        sender_type=sender_type,
         sender_name=sender_name,
         content=content,
         metadata=metadata,
     )
+    preview = _preview_text({"content": content, "metadata": metadata})
 
     payload = {
         "type": "new_message",
@@ -1880,10 +1887,10 @@ async def internal_send_message(
         room_id,
         {"type": "new_message_notification", "room_id": room_id,
          "room_title": room.get("title", ""),
-         "sender_name": sender_name, "content": content[:100]},
+         "sender_name": sender_name, "content": preview[:100]},
         service,
     ))
     # 通常送信は相手（guest）側へ、相談はユーザー（owner）側へ Push
-    asyncio.ensure_future(_send_push(room_id, "guest" if owner_only else "owner", sender_name, content))
+    asyncio.ensure_future(_send_push(room_id, "guest" if owner_only else "owner", sender_name, preview))
 
     return {"message_id": message["id"], "delivery": "owner_only" if owner_only else "broadcast"}

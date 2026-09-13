@@ -507,6 +507,9 @@ COMPOSE_MESSAGE_TOOL = {
 【フォーム送信の場合】channel="web_form"、target_url にフォームのURL、to にはフォームの持ち主（会社名など）を入れる。件名不要。
 【Instagram】DM は channel="instagram_dm"、to=相手のユーザーネーム、from_account=送信元アカウント。受信DMへの返信なら reply_to_thread_id（受信通知にある thread_id）も渡す。コメント返信は channel="instagram_comment"、reply_to_post_url=投稿URL、reply_to_comment_id=返信先コメントID。どちらもカードの送信ボタン／send でサーバーから直接送れる。
 【コラボチャット】外部窓口（collab_thread で作った招待制チャット）への送信は channel="collab"、collab_room_id=窓口のルームID、to=相手の名前。件名不要。カードの送信ボタン／send でサーバーから直接相手のチャットに届く（リアルタイム配信＋Push通知付き）。文体は**チャット**: 宛名・「お世話になっております」等の定型挨拶・署名は書かず、会話の流れに続く自然な話し方で簡潔に（通常2〜6行）。
+- **1窓口=1下書き**: 同じ窓口に未送信の下書きがあれば、propose は新しいカードを作らず**その下書きを更新**する（proposal_id は同じまま返る）。作業が進んだら（例: 動画も直した）、完了した内容を含めた本文で propose し直せばよい。前のカードを消す必要はない。本文は常に「今この瞬間の状況」を書くこと（「これから直します」を、直し終えた後に残さない）。
+- **添付**: 修正した画像・動画・ファイルを相手に届けるなら attachments に渡す（ローカルパス / 本体チャットのアップロードURL / 窓口の配信URL）。本体チャットに [添付動画:] で貼るだけでは相手には届かない。
+- **名義**: 既定はダンとして届く。相手にとって本人の言葉であるべき内容（お詫び・約束・感謝の本旨）は sender="owner"（ユーザー本人名義）を提案してよい。ユーザーはカード上で切り替えられる。
 
 【何が起きるか】action="propose" でこの部屋に「送信案カード」が出る。カードには宛先・件名・本文があり、ユーザーはその場で本文を直せて、送信ボタンを押せばそのまま送られる（あなたを起こさずに送信される）。送信・編集・破棄の結果は次のターンの冒頭で自動的にあなたに知らされる。
 
@@ -536,6 +539,8 @@ COMPOSE_MESSAGE_TOOL = {
             "reply_to_post_url": {"type": "string", "description": "コメント返信用: 投稿URL"},
             "reply_to_comment_id": {"type": "string", "description": "コメント返信用: 返信先コメントのID"},
             "collab_room_id": {"type": "string", "description": "channel=\"collab\" 用: 送信先コラボルームのID（collab_thread の結果や受信通知にある）"},
+            "attachments": {"type": "array", "items": {"type": "string"}, "description": "collab用: 相手に一緒に届ける画像・動画・ファイル。ローカルの絶対パス（例: D:/done/uploads/xxx.mp4）、本体チャットの /api/v1/files/… URL、窓口の /api/v1/collab/files/… URL のいずれか"},
+            "sender": {"type": "string", "enum": ["dan", "owner"], "description": "collab用: 名義。dan=ダンとして届く（既定）/ owner=ユーザー本人として届く"},
             "body": {"type": "string", "description": "propose時必須。送る本文そのもの（挨拶〜署名まで完成形）"},
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
@@ -4233,15 +4238,37 @@ async def _execute_compose_message(
                 "url": (params.get("target_url") or "").strip() or None,
                 "note": (params.get("target_note") or "").strip() or None,
             }
+            atts = params.get("attachments")
+            if isinstance(atts, str):
+                atts = [a.strip() for a in atts.split(",") if a.strip()]
             row = await _aio.to_thread(
                 svc.create_draft, user_id=user_id, room_id=room_id, channel=channel, to=to,
                 body=body, subject=subject or None, intent=params.get("intent"),
                 to_name=params.get("to_name"), from_name=params.get("from_name"),
                 reply_to=reply_to, target=target,
                 from_account=params.get("from_account"),
+                attachments=atts or None, sender=params.get("sender"),
             )
             channel = (row.get("action_data") or {}).get("channel") or channel
             sendable = channel in SERVER_SENDABLE
+            revised = row.get("_revised")
+            if revised == "replaced":
+                return {
+                    "success": True, "proposal_id": row["id"], "updated": True,
+                    "message": (
+                        "この窓口には未送信の下書きがあったので、新しいカードは作らずその下書きを更新しました"
+                        "（proposal_id は同じ）。ユーザーの画面のカードも新しい本文になっています。"
+                        "本文はチャットに繰り返さないこと。"
+                    ),
+                }
+            if revised == "pending_update":
+                return {
+                    "success": True, "proposal_id": row["id"], "updated": True, "held": True,
+                    "message": (
+                        "この窓口の下書きはユーザーが手で編集中だったので、上書きせず新版を「更新あり」として"
+                        "カードの横に置きました（ユーザーが1タップで採用できます）。新しいカードは作っていません。"
+                    ),
+                }
             tail = (
                 'ユーザーから「送って」と言われたら compose_message(action="send", proposal_id) で送れます。'
                 if sendable else

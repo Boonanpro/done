@@ -71,7 +71,14 @@ interface Proposal {
   id: string;
   status: string;
   content: string;
-  action_data?: { to?: string; to_name?: string | null; intent?: string | null } | null;
+  action_data?: {
+    to?: string; to_name?: string | null; intent?: string | null;
+    attachments?: { name: string; url: string; type?: string; size?: number }[] | null;
+    sender?: 'dan' | 'owner' | null;
+    revision?: number;
+    dan_updated_at?: string | null;
+    pending_update?: { body: string; at: string } | null;
+  } | null;
 }
 
 const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#6366f1'];
@@ -650,7 +657,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
               </View>
             )}
             {proposals.map((p) => (
-              <ProposalCard key={p.id} proposal={p} request={request} />
+              <ProposalCard key={p.id} proposal={p} request={request} apiBase={apiBase} />
             ))}
           </View>
         }
@@ -942,13 +949,34 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
 // ============================================================
 // 送信案カード（承認・編集・破棄）
 // ============================================================
-function ProposalCard({ proposal, request }: { proposal: Proposal; request: RequestFn }) {
+function ProposalCard({ proposal, request, apiBase }: { proposal: Proposal; request: RequestFn; apiBase: string }) {
   const [body, setBody] = useState(proposal.content || '');
-  const [busy, setBusy] = useState<'send' | 'discard' | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState<'send' | 'discard' | 'sender' | 'apply' | null>(null);
   const [gone, setGone] = useState(false);
+  const [dismissedAt, setDismissedAt] = useState<string | null>(null);
+  const [sender, setSender] = useState<'dan' | 'owner'>(proposal.action_data?.sender === 'owner' ? 'owner' : 'dan');
   const ad = proposal.action_data || {};
 
+  // ダンが下書きを更新した（作業が進んだ）ら、こちらで編集中でない限り本文を追従させる
+  const lastContent = useRef(proposal.content || '');
+  useEffect(() => {
+    if (proposal.content !== lastContent.current) {
+      lastContent.current = proposal.content || '';
+      if (!dirty) setBody(proposal.content || '');
+    }
+  }, [proposal.content, dirty]);
+  useEffect(() => {
+    if (ad.sender === 'owner' || ad.sender === 'dan') setSender(ad.sender);
+  }, [ad.sender]);
+
   if (gone) return null;
+
+  const pendingUpdate = ad.pending_update && ad.pending_update.at !== dismissedAt ? ad.pending_update : null;
+  const attItems: MediaGridItem[] = (ad.attachments || [])
+    .filter((f) => (f.type || '').startsWith('image/') || (f.type || '').startsWith('video/'))
+    .map((f) => ({ url: f.url.startsWith('http') ? f.url : `${apiBase}${f.url}`, kind: (f.type || '').startsWith('video/') ? 'video' : 'image', name: f.name }));
+  const attOthers = (ad.attachments || []).filter((f) => !((f.type || '').startsWith('image/') || (f.type || '').startsWith('video/')));
 
   const act = async (kind: 'send' | 'discard') => {
     setBusy(kind);
@@ -968,6 +996,25 @@ function ProposalCard({ proposal, request }: { proposal: Proposal; request: Requ
     }
   };
 
+  const changeSender = async (next: 'dan' | 'owner') => {
+    if (next === sender || busy) return;
+    setSender(next); setBusy('sender');
+    try {
+      await request(`/chat/proposals/${proposal.id}/draft`, { method: 'PATCH', body: JSON.stringify({ sender: next }) });
+    } catch {
+      setSender(sender);
+    } finally { setBusy(null); }
+  };
+
+  const applyUpdate = async () => {
+    setBusy('apply');
+    try {
+      const updated = await request<Proposal>(`/chat/proposals/${proposal.id}/draft`, { method: 'PATCH', body: JSON.stringify({ apply_update: true }) });
+      lastContent.current = updated.content || '';
+      setBody(updated.content || ''); setDirty(false);
+    } catch { /* 次のポーリングで再表示 */ } finally { setBusy(null); }
+  };
+
   return (
     <View style={s.card}>
       <View style={s.cardHead}>
@@ -975,11 +1022,46 @@ function ProposalCard({ proposal, request }: { proposal: Proposal; request: Requ
         <Text style={s.cardTitle} numberOfLines={1}>
           返信案 → {ad.to_name || ad.to || '相手'}{ad.intent ? ` — ${ad.intent}` : ''}
         </Text>
+        {(ad.revision || 1) > 1 && !!ad.dan_updated_at && (
+          <Text style={s.cardMeta}>更新 {fmtTime(ad.dan_updated_at)}</Text>
+        )}
       </View>
+      {pendingUpdate && (
+        <View style={s.cardUpdate}>
+          <Ionicons name="refresh" size={14} color={C.accent} />
+          <Text style={[s.cardUpdateText, { flex: 1 }]}>ダンが新しい版を用意しました（{fmtTime(pendingUpdate.at)}）</Text>
+          <Pressable style={[s.cardBtn, s.cardBtnPrimary, { paddingVertical: 5, paddingHorizontal: 10 }]} disabled={!!busy} onPress={applyUpdate}>
+            {busy === 'apply' ? <ActivityIndicator size="small" color="#0c1513" /> : <Text style={{ color: '#0c1513', fontSize: 12, fontWeight: '600' }}>新しい版にする</Text>}
+          </Pressable>
+          <Pressable hitSlop={8} onPress={() => setDismissedAt(pendingUpdate.at)}>
+            <Ionicons name="close" size={16} color={C.muted} />
+          </Pressable>
+        </View>
+      )}
+      <View style={s.cardSenderRow}>
+        <Text style={s.cardMeta}>名義:</Text>
+        {(['dan', 'owner'] as const).map((k) => (
+          <Pressable key={k} onPress={() => changeSender(k)} style={[s.cardSenderBtn, sender === k && s.cardSenderBtnOn]}>
+            <Text style={[s.cardSenderText, sender === k && { color: '#0c1513', fontWeight: '600' }]}>{k === 'dan' ? 'ダン' : 'あなた'}</Text>
+          </Pressable>
+        ))}
+        <Text style={[s.cardMeta, { flex: 1 }]} numberOfLines={1}>
+          {sender === 'owner' ? '本人の発言として届く' : 'ダンの発言として届く'}
+        </Text>
+      </View>
+      {(attItems.length > 0 || attOthers.length > 0) && (
+        <View style={{ gap: 4, marginBottom: 6 }}>
+          <Text style={s.cardMeta}>添付（一緒に届きます）</Text>
+          {attItems.length > 0 && <MediaGrid items={attItems} width={220} />}
+          {attOthers.map((f) => (
+            <Text key={f.url} style={s.fileLink}>📎 {f.name}</Text>
+          ))}
+        </View>
+      )}
       <TextInput
         style={s.cardBody}
         value={body}
-        onChangeText={setBody}
+        onChangeText={(t) => { setBody(t); setDirty(t !== (proposal.content || '')); }}
         multiline
       />
       <View style={s.cardBtns}>
@@ -1091,6 +1173,13 @@ const s = StyleSheet.create({
   cardTitle: { color: C.text, fontSize: 12, fontWeight: '600', flex: 1 },
   cardBody: { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, color: C.text, fontSize: 14, lineHeight: 20, padding: 10, minHeight: 80, textAlignVertical: 'top' },
   cardBtns: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 },
+  cardMeta: { color: C.muted, fontSize: 11 },
+  cardUpdate: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1f3a33', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, marginBottom: 8 },
+  cardUpdateText: { color: C.text, fontSize: 12 },
+  cardSenderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
+  cardSenderBtn: { borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
+  cardSenderBtnOn: { backgroundColor: C.accent, borderColor: C.accent },
+  cardSenderText: { color: C.text, fontSize: 12 },
   cardBtn: { borderRadius: 10, paddingHorizontal: 16, paddingVertical: 8, alignItems: 'center', justifyContent: 'center' },
   cardBtnGhost: { borderWidth: 1, borderColor: C.border },
   cardBtnPrimary: { backgroundColor: C.accent },

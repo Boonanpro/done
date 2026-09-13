@@ -127,8 +127,12 @@ class OutboundMessageService:
         reply_to: Optional[dict] = None,
         target: Optional[dict] = None,
         from_account: Optional[str] = None,
+        attachments: Optional[list] = None,
+        sender: Optional[str] = None,
     ) -> dict:
         """reply_to: 既存スレッドへの返信なら {message_id, references, subject, detected_message_id}。
+        attachments: 相手へ一緒に届ける画像・動画・ファイル（ローカルパス or URL）。collab のみ。
+        sender: "dan"（既定）| "owner" — どちらの名義で相手に届くか。collab のみ。
         指定時は件名不要（Re: を自動付与し、email は In-Reply-To/References でスレッドに繋ぐ）。
         target: フォーム等の送信先 {url, note}。文面カードはそのまま、送信はダンが browser で行う。"""
         channel = (channel or "other").strip().lower().replace(" ", "_") or "other"
@@ -143,6 +147,22 @@ class OutboundMessageService:
             subject = _reply_subject(reply_to.get("subject"))
         if channel == "email" and not subject and not reply_to:
             raise ValueError("email の新規送信には subject が必要です")
+
+        collab_room_id = (reply_to or {}).get("collab_room_id") or (target or {}).get("collab_room_id")
+        staged_files = self._stage_collab_attachments(collab_room_id, attachments) if (channel == "collab" and attachments) else []
+        sender = (sender or "").strip().lower() or "dan"
+        if sender not in ("dan", "owner"):
+            sender = "dan"
+
+        # 1窓口=1下書き: 同じ窓口に未送信の下書きがあれば、新しいカードを作らず育てる。
+        # 作業が進むたびにカードが増えて古い文面が残る事故（2026-09-12）の根本対策。
+        # ユーザーが本文を手で直している時だけは上書きせず、新版を「更新あり」として横に置く。
+        if channel == "collab" and collab_room_id:
+            existing = self._find_pending_collab_draft(user_id, collab_room_id)
+            if existing:
+                return self._revise_collab_draft(existing, body=body, intent=intent, to_name=to_name,
+                                                 files=staged_files, sender=sender if sender != "dan" else None)
+
         action_data: dict[str, Any] = {
             "action": "outbound_draft",
             "channel": channel,
@@ -157,6 +177,13 @@ class OutboundMessageService:
             "from_name": (from_name or "").strip() or None,
             "original_body": body,
             "original_subject": subject,
+            # collab: 相手へ一緒に届ける添付（propose 時点で窓口の保存先へ写してある）
+            "attachments": staged_files or None,
+            # collab: 名義。"dan"=ダンとして届く / "owner"=ユーザー本人として届く（カードで切替可）
+            "sender": sender if channel == "collab" else None,
+            "revision": 1,
+            "dan_updated_at": _now(),
+            "pending_update": None,
             "user_edited": False,
             "sent_by": None,
             "sent_at": None,
@@ -189,7 +216,8 @@ class OutboundMessageService:
     # 編集（カードのオートセーブ）
     # ------------------------------------------------------------------
     def update_draft(self, proposal_id: str, user_id: str, *, body: Optional[str] = None,
-                     subject: Optional[str] = None, to: Optional[str] = None) -> dict:
+                     subject: Optional[str] = None, to: Optional[str] = None,
+                     sender: Optional[str] = None, apply_update: bool = False) -> dict:
         row = self.get(proposal_id, user_id)
         if not row:
             raise ValueError("送信案が見つかりません")
@@ -206,9 +234,127 @@ class OutboundMessageService:
             ad["subject"] = subject.strip() or None
         if to is not None:
             ad["to"] = to.strip()
+        if sender in ("dan", "owner"):
+            ad["sender"] = sender
+        if apply_update and ad.get("pending_update"):
+            # ダンが用意した新版を採用（ユーザー編集を捨てて置き換える。明示操作のみ）
+            pu = ad.pop("pending_update") or {}
+            upd["content"] = pu.get("body") or row["content"]
+            ad["original_body"] = upd["content"]
+            ad["ack_body"] = upd["content"]
+            ad["user_edited"] = False
+            if pu.get("intent"):
+                ad["intent"] = pu["intent"]
+            if pu.get("attachments") is not None:
+                ad["attachments"] = pu["attachments"]
+            ad["revision"] = int(ad.get("revision") or 1) + 1
+            ad["pending_update"] = None
         upd["action_data"] = ad
         r = self.sb.table("dan_proposals").update(upd).eq("id", proposal_id).execute()
         return r.data[0]
+
+    # ------------------------------------------------------------------
+    # collab: 1窓口=1下書き のための補助
+    # ------------------------------------------------------------------
+    def _find_pending_collab_draft(self, user_id: str, collab_room_id: str) -> Optional[dict]:
+        try:
+            r = (self.sb.table("dan_proposals").select("*")
+                 .eq("user_id", user_id).eq("type", "outbound").eq("status", "pending")
+                 .order("created_at", desc=True).limit(30).execute())
+        except Exception:
+            return None
+        for row in r.data or []:
+            ad = row.get("action_data") or {}
+            if ad.get("channel") != "collab":
+                continue
+            cid = (ad.get("reply_to") or {}).get("collab_room_id") or (ad.get("target") or {}).get("collab_room_id")
+            if cid == collab_room_id:
+                return row
+        return None
+
+    def _revise_collab_draft(self, row: dict, *, body: str, intent: Optional[str], to_name: Optional[str],
+                             files: list, sender: Optional[str]) -> dict:
+        ad = dict(row.get("action_data") or {})
+        now = _now()
+        upd: dict[str, Any] = {"updated_at": now}
+        new_files = files if files else (ad.get("attachments") or None)
+        if ad.get("user_edited"):
+            # ユーザーが手で直している最中。上書きせず新版を横に置く（カードに「更新あり」）
+            ad["pending_update"] = {"body": body, "intent": (intent or "").strip() or None,
+                                    "attachments": new_files, "at": now}
+            ad["dan_updated_at"] = now
+            revised_kind = "pending_update"
+        else:
+            upd["content"] = body
+            ad["original_body"] = body
+            ad["ack_body"] = body          # 自分の更新をダイジェストで「ユーザー編集」と誤報しない
+            ad["ack_status"] = "pending"
+            if intent:
+                ad["intent"] = intent.strip() or ad.get("intent")
+            if to_name:
+                ad["to_name"] = to_name.strip() or ad.get("to_name")
+            ad["attachments"] = new_files
+            ad["revision"] = int(ad.get("revision") or 1) + 1
+            ad["dan_updated_at"] = now
+            ad["pending_update"] = None
+            revised_kind = "replaced"
+        if sender:
+            ad["sender"] = sender
+        if ad.get("intent"):
+            upd["title"] = f"{channel_label('collab')}: {ad.get('to_name') or ad.get('to')} / {ad['intent']}"[:255]
+        upd["action_data"] = ad
+        r = self.sb.table("dan_proposals").update(upd).eq("id", row["id"]).execute()
+        out = dict(r.data[0])
+        out["_revised"] = revised_kind
+        return out
+
+    def _stage_collab_attachments(self, collab_room_id: Optional[str], attachments: list) -> list:
+        """propose 時点で添付を窓口の保存先（uploads/collab/<room>/）へ写し、配信URLにする。
+        カードでその場でプレビューでき、送信時は同じファイルを files[] として相手へ渡す。"""
+        if not collab_room_id:
+            raise ValueError("添付を付けるには collab_room_id が必要です")
+        import mimetypes
+        import os
+        import shutil
+        import uuid
+        from pathlib import Path
+        from app.services.video_faststart import faststart_inplace
+        root = Path(__file__).resolve().parent.parent.parent
+        dest_dir = root / "uploads" / "collab" / collab_room_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out: list[dict] = []
+        for item in attachments or []:
+            src = (item.get("path") if isinstance(item, dict) else str(item or "")).strip()
+            if not src:
+                continue
+            if src.startswith("/api/v1/collab/files/") or src.startswith("http://") or src.startswith("https://"):
+                # 既に配信URL（窓口にアップロード済み等）ならそのまま
+                name = (item.get("name") if isinstance(item, dict) else None) or src.rsplit("/", 1)[-1]
+                mtype = (item.get("type") if isinstance(item, dict) else None) or mimetypes.guess_type(name)[0] or "application/octet-stream"
+                out.append({"name": name, "url": src, "type": mtype})
+                continue
+            # /api/v1/files/<name> 形式（本体チャットのアップロード）はローカルの uploads/ に実体がある
+            if src.startswith("/api/v1/files/"):
+                src = str(root / "uploads" / src[len("/api/v1/files/"):])
+            p = Path(src)
+            if not p.is_absolute():
+                p = root / p
+            if not p.exists() or not p.is_file():
+                raise ValueError(f"添付ファイルが見つかりません: {src}")
+            ext = p.suffix.lower()
+            saved = f"{uuid.uuid4()}{ext}"
+            dst = dest_dir / saved
+            shutil.copy2(p, dst)
+            if ext in (".mp4", ".m4v", ".mov"):
+                faststart_inplace(dst)
+            mtype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+            out.append({
+                "name": (item.get("name") if isinstance(item, dict) else None) or p.name,
+                "url": f"/api/v1/collab/files/{collab_room_id}/{saved}",
+                "type": mtype,
+                "size": dst.stat().st_size,
+            })
+        return out
 
     # ------------------------------------------------------------------
     # 送信 / 送信済み記録 / 破棄
@@ -297,14 +443,25 @@ class OutboundMessageService:
         if not collab_room_id:
             raise ValueError("collab_room_id が未指定です（送信先コラボルームのID）")
         body = row["content"]
+        files = [f for f in (ad.get("attachments") or []) if isinstance(f, dict) and f.get("url")]
+        # 名義: "owner" ならユーザー本人の発言として届く（表示名も本人）。既定はダン
+        as_owner = (ad.get("sender") or "dan") == "owner"
+        sender_type = "owner" if as_owner else "dan_owner"
+        sender_name = "ダン"
+        if as_owner:
+            sender_name = await self._owner_display_name(row.get("user_id"))
         import os
         import httpx
         sandbox_port = os.environ.get("DAN_SANDBOX_PORT", "8000")
+        payload = {"room_id": collab_room_id, "content": body, "sender_name": sender_name,
+                   "sender_type": sender_type}
+        if files:
+            payload["files"] = files
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(
                     f"http://127.0.0.1:{sandbox_port}/api/v1/collab/internal/send",
-                    json={"room_id": collab_room_id, "content": body, "sender_name": "ダン"},
+                    json=payload,
                 )
                 r.raise_for_status()
                 ad["send_result"] = r.json()
@@ -312,11 +469,24 @@ class OutboundMessageService:
             logger.warning("collab internal send failed (sandbox down?); writing to DB directly",
                            exc_info=True)
             from app.services.collab_service import CollabService
+            metadata: dict[str, Any] = {"via": "outbound_card"}
+            if files:
+                metadata["files"] = files
+                metadata["file"] = files[0]
             msg = await CollabService().send_message(
-                room_id=collab_room_id, sender_type="dan_owner", sender_name="ダン",
-                content=body, metadata={"via": "outbound_card"},
+                room_id=collab_room_id, sender_type=sender_type, sender_name=sender_name,
+                content=body, metadata=metadata,
             )
             ad["send_result"] = {"message_id": msg["id"], "delivery": "db_only"}
+
+    async def _owner_display_name(self, user_id: Optional[str]) -> str:
+        try:
+            r = self.sb.table("users").select("display_name,email").eq("id", user_id).limit(1).execute()
+            if r.data:
+                return r.data[0].get("display_name") or (r.data[0].get("email") or "").split("@")[0] or "オーナー"
+        except Exception:
+            pass
+        return "オーナー"
 
     async def _send_instagram(self, row: dict, ad: dict, *, user_id: str, sent_by: str, proposal_id: str) -> None:
         """Instagram DM / コメントを巡回用プロファイルから内部APIで送る。"""
@@ -496,16 +666,17 @@ class OutboundMessageService:
 
     # ------------------------------------------------------------------
     def _post_room_message(self, room_id: Optional[str], content: str) -> None:
+        """カード行（`[送信案: id]`）や送信/破棄の控えを部屋ログへ追記する。
+
+        このサービスは MCP 子プロセスで動くことが多い。DB に直接書くと core の
+        押し込みフィードが知らず、画面は一覧を取り直すまでカードを出せない
+        （2026-09-11 の「カードが出ない」）。追記は room_log 経由で core に一本化。
+        """
         if not room_id:
             return
         try:
-            from app.services.chat_service import record_message_delivery_sync
-            msg_id = str(uuid.uuid4())
-            self.sb.table("chat_messages").insert({
-                "id": msg_id, "room_id": room_id, "sender_id": None,
-                "sender_type": "ai", "content": content,
-            }).execute()
-            record_message_delivery_sync(self.sb, room_id, msg_id, content=content)
+            from app.services.room_log import append as append_room_log
+            append_room_log(room_id, content, sender_type="ai", sender_id=None)
         except Exception:
             logger.warning("post room message failed room=%s", room_id, exc_info=True)
 
