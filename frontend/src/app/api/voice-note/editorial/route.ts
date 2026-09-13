@@ -14,9 +14,10 @@ export async function POST(req: NextRequest) {
   const cookie = req.cookies.get('done_access_token')?.value;
   const authorization = cookie ? `Bearer ${cookie}` : req.headers.get('authorization');
   if (!authorization?.startsWith('Bearer ')) return NextResponse.json({error:'ログインが必要です。'}, {status:401});
-  let id: string; let mode: string | undefined;
-  try { ({id,mode} = await req.json()); } catch { return NextResponse.json({error:'記事を選んでください。'}, {status:400}); }
-  if(mode!==undefined&&mode!=='title')return NextResponse.json({error:'作成方法が不正です。'},{status:400});
+  let id: string; let mode: string | undefined; let instruction: string | undefined; let intent: string | undefined; let selection: string | undefined; let imageUrl: string | undefined;
+  try { ({id,mode,instruction,intent,selection,imageUrl} = await req.json()); } catch { return NextResponse.json({error:'記事を選んでください。'}, {status:400}); }
+  if(mode!==undefined&&mode!=='title'&&mode!=='assistant')return NextResponse.json({error:'作成方法が不正です。'},{status:400});
+  if(mode==='assistant'&&(typeof instruction!=='string'||!instruction.trim()||instruction.length>12000||!['text','image'].includes(intent||'')||(selection!==undefined&&(typeof selection!=='string'||selection.length>50000))||(imageUrl!==undefined&&typeof imageUrl!=='string')))return NextResponse.json({error:'AIへの指示を入力してください。'},{status:400});
   if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)) return NextResponse.json({error:'記事を選んでください。'}, {status:400});
   const url = `${backend}/api/v1/dan-notion/blocks/${id}`;
   const headers = {Authorization:authorization, 'Content-Type':'application/json'};
@@ -32,14 +33,15 @@ export async function POST(req: NextRequest) {
     row = await latest.json();
     const article = row.properties.article;
     if (article.editorial?.state === 'running' && Date.now()-article.editorial.updatedAt < 15*60_000) return NextResponse.json({row}, {status:202});
-    if (!article.transcript?.trim() && !article.audio?.length) return NextResponse.json({error:'音声か話した内容を追加してください。'}, {status:400});
+    if (mode!=='assistant'&&!article.transcript?.trim() && !article.audio?.length) return NextResponse.json({error:'音声か話した内容を追加してください。'}, {status:400});
+    if(mode==='assistant'&&imageUrl&&![article.free,article.paid].some(t=>typeof t==='string'&&t.includes(`](${imageUrl})`)))return NextResponse.json({error:'記事内の画像を選んでください。'},{status:400});
     if(mode==='title'&&!article.title?.trim())return NextResponse.json({error:'タイトルを入力してください。'},{status:400});
     const jobId = randomUUID();
     const editorial = {id:jobId, state:'running', message:'記事作成を開始しています。', updatedAt:Date.now()};
     const saved = await fetch(url, {method:'PATCH', headers, body:JSON.stringify({properties:{...row.properties,article:{...article,editorial}}})});
     if (!saved.ok) return NextResponse.json({error:'処理状況を保存できませんでした。'}, {status:502});
     const updated = await saved.json();
-    const child = spawn(process.env.DAN_PYTHON || 'python', [path.join(process.cwd(),'src/app/artifacts/voice-note/editorial-worker.py')], {windowsHide:true, stdio:['pipe','ignore','ignore'], env:{...process.env,PYTHONIOENCODING:'utf-8'}});
+    const child = spawn(process.env.DAN_PYTHON || 'python', [path.join(process.cwd(),`src/app/artifacts/voice-note/${mode==='assistant'?'assistant-worker':'editorial-worker'}.py`)], {windowsHide:true, stdio:['pipe','ignore','ignore'], env:{...process.env,PYTHONIOENCODING:'utf-8'}});
     child.stdin.on('error', ()=>{});
     const reportExit = async()=>{
       try {
@@ -53,7 +55,7 @@ export async function POST(req: NextRequest) {
     };
     child.on('error', ()=>{void reportExit();});
     child.on('close', ()=>{void reportExit();});
-    child.stdin.end(JSON.stringify({id,jobId,authorization,backend,fixedTitle:mode==='title'?article.title:undefined}));
+    child.stdin.end(JSON.stringify({id,jobId,authorization,backend,fixedTitle:mode==='title'?article.title:undefined,instruction,intent,selection,imageUrl}));
     child.unref();
     return NextResponse.json({row:updated}, {status:202});
   } finally { locks.delete(id); }
