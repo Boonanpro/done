@@ -11,10 +11,19 @@ import styles from './style.module.css';
 import { recordingBackup } from './recording-backup';
 import { RecordedAudio, StableAudio } from './recorded-audio';
 import { InputLevel } from './input-level';
-const markdownMedia={img:({src,alt}:{src?:string|Blob;alt?:string})=><span style={{display:'block',margin:'24px 0'}}><img src={src} alt={alt||''} style={{margin:0}}/><small style={{display:'block',color:'#66756d',fontSize:12,lineHeight:1.7,marginTop:8}}>{alt}</small></span>};
+
 
 export function PageBody() {
  const [root,setRoot]=useState<Row>();const [rows,setRows]=useState<Row[]>([]);const [selected,setSelected]=useState<Row>();
+ const [boundary,setBoundary]=useState<string|null>(null);const boundaryInput=useRef<HTMLTextAreaElement>(null);
+ const [mediaUndo,setMediaUndo]=useState<Pick<Article,'free'|'paid'|'images'>|null>(null);
+ useEffect(()=>{setBoundary(null);setMediaUndo(null);},[selected?.id]);
+ function removeImage(src:string){
+  setMediaUndo({free:draft.free,paid:draft.paid,images:draft.images});
+  const remove=(text:string)=>text.replace(/!\[[^\]]*\]\(([^)]+)\)/g,(match,url)=>url===src?'':match);
+  update({free:remove(draft.free),paid:remove(draft.paid),images:draft.images?.filter(i=>i.url!==src),status:'編集中'});
+ }
+ const markdownMedia={img:({src,alt}:{src?:string|Blob;alt?:string})=><span style={{display:'block',margin:'24px 0'}}><img src={src} alt={alt||''}/><small>{alt}</small>{typeof src==='string'&&<button type="button" onClick={()=>removeImage(src)}>この画像を削除</button>}</span>};
  const [draft,setDraft]=useState<Article>(emptyArticle);const [tab,setTab]=useState('つくる');const [busy,setBusy]=useState(false);
  const editing=draft.editorial?.state==='running' && Date.now()-draft.editorial.updatedAt<15*60_000;
  const [dirty,setDirty]=useState(false);const [message,setMessage]=useState('');const [error,setError]=useState('');
@@ -55,7 +64,7 @@ export function PageBody() {
  useEffect(()=>{const fn=(e:BeforeUnloadEvent)=>{if(dirty||audioBlob||recording){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',fn);return()=>window.removeEventListener('beforeunload',fn);},[dirty,audioBlob,recording]);
  const update=(patch:Partial<Article>)=>{setDraft(v=>({...v,...patch}));setDirty(true);};
  async function run(fn:()=>Promise<void>){if(actionLock.current||busy||editing)return;actionLock.current=true;setBusy(true);setError('');setMessage('');try{await fn();}catch(e){setError((e as Error).message);}finally{actionLock.current=false;setBusy(false);}}
- async function save(){if(!selected)throw new Error('記事を作成してください。');const r=await saveArticle(selected,draft);setSelected(r);setRows(v=>v.map(x=>x.id===r.id?r:x));setDirty(false);return r;}
+ async function save(){if(!selected)throw new Error('記事を作成してください。');const r=await saveArticle(selected,draft);setSelected(r);setDraft(articleOf(r));setRows(v=>v.map(x=>x.id===r.id?r:x));setDirty(false);return r;}
  async function create(){await run(async()=>{if(!root)throw new Error('保存先に接続してください。');if(recording||audioBlob)throw new Error('録音を保存してから記事を切り替えてください。');let list=rows;if(selected&&dirty){const saved=await save();list=rows.map(r=>r.id===saved.id?saved:r);}const unused=list.find(r=>isEmptyArticle(articleOf(r)));if(unused){setSelected(unused);setDraft(articleOf(unused));setDirty(false);setTab('つくる');return;}const a=emptyArticle();const r=await call<Row>('/dan-notion/blocks','POST',{type:'page',parent_id:root.id,properties:{title:a.title,kind:'voice_note_article',article:a},content:[]});setRows(v=>[...v,r]);setSelected(r);setDraft(a);setDirty(false);setTab('つくる');});}
  function requestDelete(row:Row){setDeleteTarget(row);setConfirm('delete');}
  async function removeArticles(){await run(async()=>{
@@ -121,6 +130,8 @@ export function PageBody() {
  {draft.questions.length>0&&<div className={styles.notice}><strong>記事を仕上げるための確認</strong>{draft.questions.map(q=><p key={q}>{q}</p>)}</div>}
  {draft.editorialNotes&&<details className={styles.notice}><summary>編集メモ（投稿本文には含みません）</summary><ReactMarkdown>{draft.editorialNotes}</ReactMarkdown></details>}
  <div className={styles.editorTop}><h2>記事の仕上がり</h2><button onClick={()=>setPreview(!preview)}>{preview?'本文を編集':'読みやすさを確認'}</button></div>
+ <div className={styles.editorTop}><button type="button" disabled={!draft.free&&!draft.paid} onClick={()=>setBoundary([draft.free,draft.paid].filter(Boolean).join('\n\n'))}>有料ラインの位置を変える</button>{mediaUndo&&<button type="button" onClick={()=>{update(mediaUndo);setMediaUndo(null);}}>画像の削除を取り消す</button>}</div>
+ {boundary!==null&&<div className={styles.notice}><label className={styles.field}>有料部分の開始位置をクリックしてください。本文もここで直せます。<textarea aria-label="区切りを選ぶ本文" ref={boundaryInput} rows={18} value={boundary} onChange={e=>setBoundary(e.target.value)}/></label><button type="button" onClick={()=>{const at=boundaryInput.current?.selectionStart??0;if(at===0||at===boundary.length){setError('本文の途中で開始位置を選んでください。');return;}update({free:boundary.slice(0,at),paid:boundary.slice(at),status:'編集中'});setBoundary(null);setError('');}}>カーソルの位置から有料にする</button><button type="button" onClick={()=>setBoundary(null)}>キャンセル</button><small>位置を決めた後、保存してください。価格0なら全文無料のままです。</small></div>}
  {preview?<div className={styles.paper}>{draft.free?<ReactMarkdown components={markdownMedia}>{draft.free}</ReactMarkdown>:<p className={styles.placeholder}>記事ができると、ここで見出しや太字を含めて確認できます。</p>}{draft.free&&<div className={styles.payline}><LockKeyhole size={15}/>{draft.price>0?`ここから有料 · ¥${draft.price.toLocaleString()}`:'有料にする場合の区切り（現在は無料設定）'}</div>}{draft.paid&&<ReactMarkdown components={markdownMedia}>{draft.paid}</ReactMarkdown>}</div>:<><label className={styles.field}>無料で読める部分<textarea rows={10} value={draft.free} onChange={e=>update({free:e.target.value,status:'編集中'})}/></label><div className={styles.payline}>この下から有料部分</div><label className={styles.field}>購入した人が読める部分<textarea rows={10} value={draft.paid} onChange={e=>update({paid:e.target.value,status:'編集中'})}/></label><small>見出しは ##、強調は **太字** で囲みます。</small></>}
  {Boolean(draft.revisions?.length)&&<details className={styles.notice}><summary>前の原稿（{draft.revisions?.length}件）</summary>{draft.revisions?.map((r,i)=><details key={i}><summary>{new Date(r.savedAt).toLocaleString('ja-JP')} · {r.title}</summary><div className={styles.paper}><ReactMarkdown>{r.free}</ReactMarkdown><div className={styles.payline}>有料にする場合の区切り</div><ReactMarkdown>{r.paid}</ReactMarkdown></div></details>)}</details>}
  <div className={styles.settings}><label className={styles.field}>販売価格（円・0で無料）<input type="number" min="0" step="1" value={draft.price} onChange={e=>update({price:Number(e.target.value)})}/></label><label className={styles.field}>公開希望日時（日本時間・空欄で今すぐ）<input type="datetime-local" value={draft.scheduledAt} onChange={e=>update({scheduledAt:e.target.value})}/></label></div>
