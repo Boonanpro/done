@@ -294,10 +294,15 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
   // release used by the full-screen view, and takes precedence over retired
   // shared /preview paths left on older artifact cards.
   const releaseUrl = artifact?.delivery_url || draftUrl || shareUrl || publicPreviewUrl;
-  const publicShareUrl = artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '';
+  // The private editor depends on the dashboard session and local editorial worker.
+  // Keep both embedded and full-screen editing on the dashboard origin.
+  const privateEditorUrl = artifact?.slug === 'voice-note'
+    ? `${typeof window === 'undefined' ? '' : window.location.origin}/preview/voice-note`
+    : '';
+  const publicShareUrl = privateEditorUrl || (artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '');
   // クロスオリジン化: プレビューiframe は成果物配信オリジンを
   // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
-  const baseIframeSrc = absolutePublicUrl(releaseUrl);
+  const baseIframeSrc = privateEditorUrl || absolutePublicUrl(releaseUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
   // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
   // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。
