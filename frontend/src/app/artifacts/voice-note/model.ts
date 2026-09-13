@@ -1,6 +1,8 @@
 export const ROOM_ID = 'e47f056e-77b1-4e39-9173-4a01dfadbc03';
 export const KIND = 'voice_note_workspace';
 export type Article = {
+ revisions?: {savedAt:number;title:string;free:string;paid:string;price:number;editorialNotes?:string}[];
+ images?: {url:string;caption:string}[];
   editorialNotes?: string;
   editorial?: {id:string; state:'running'|'done'|'error'; message:string; updatedAt:number};
   transcribedAudio?: string[];
