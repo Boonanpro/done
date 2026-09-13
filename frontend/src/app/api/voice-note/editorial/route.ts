@@ -8,7 +8,9 @@ const backend = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 const locks = new Set<string>();
 export async function POST(req: NextRequest) {
   const origin = req.headers.get('origin');
-  if (origin && new URL(origin).host !== req.headers.get('host')) return NextResponse.json({error:'この画面からは実行できません。'}, {status:403});
+  // The public tunnel forwards to localhost, so Host may be the internal server.
+  const publicOrigin = process.env.DAN_PUBLIC_ORIGIN || 'https://dan.paina.info';
+  if (origin && origin !== publicOrigin && new URL(origin).host !== req.headers.get('host')) return NextResponse.json({error:'この画面からは実行できません。'}, {status:403});
   const cookie = req.cookies.get('done_access_token')?.value;
   const authorization = cookie ? `Bearer ${cookie}` : req.headers.get('authorization');
   if (!authorization?.startsWith('Bearer ')) return NextResponse.json({error:'ログインが必要です。'}, {status:401});
