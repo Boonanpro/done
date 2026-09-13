@@ -60,7 +60,18 @@ export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({fre
   if(!editor.contains(current.commonAncestorContainer))return;
   const ranges=event.getTargetRanges?.()||[];
   const touches=ranges.some(part=>{const r=document.createRange();r.setStart(part.startContainer,part.startOffset);r.setEnd(part.endContainer,part.endOffset);return r.intersectsNode(line);});
-  if(touches||(!current.collapsed&&current.intersectsNode(line))){event.preventDefault();return;}
+  if(touches||(!current.collapsed&&current.intersectsNode(line))){
+   event.preventDefault();
+   if(!current.collapsed&&event.inputType.startsWith('delete')){
+    // Delete only the selected content on either side. Keep the actual boundary node.
+    const left=current.cloneRange(),right=current.cloneRange();
+    left.setEndBefore(line);right.setStartAfter(line);
+    right.deleteContents();left.deleteContents();
+    const cursor=document.createRange();cursor.setStartBefore(line);cursor.collapse(true);
+    selection.removeAllRanges();selection.addRange(cursor);emit();capture();
+   }
+   return;
+  }
   if(event.inputType==='insertParagraph'&&current.collapsed){
    const element=current.startContainer.nodeType===3?current.startContainer.parentElement:current.startContainer as HTMLElement;
    const heading=element?.closest('h1,h2,h3,h4,h5,h6');
