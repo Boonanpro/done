@@ -9,3 +9,5 @@
 /* Paragraph semantics determine size, including browser-inserted inline font styles. */
 .inlinePaper p{font-size:16px!important}.inlinePaper h2{font-size:23px!important}.inlinePaper h3{font-size:19px!important}.inlinePaper :is(p,h1,h2,h3,h4,h5,h6) :is(span,font,strong,b,em,i,a){font-size:inherit!important}
 .aiPanel{position:fixed;right:16px;bottom:16px;z-index:60;width:min(380px,calc(100vw - 32px));max-height:70dvh;overflow:auto;margin:0;box-shadow:0 12px 40px #192b2630;background:#f7faf8}.aiPanel header strong{font-size:13px}.aiPanel header button{padding:7px;min-width:36px}.app .aiLauncher{position:fixed;right:16px;bottom:16px;z-index:60;width:52px;height:52px;border-radius:50%;background:#087b64;color:white;box-shadow:0 8px 24px #192b2630}.app{padding-bottom:300px}
+
+.aiStatus{padding:10px 12px;background:#e8f3ef;border-radius:8px;font-size:13px;line-height:1.6;color:#215d4e}.aiStatus progress{display:block;width:100%;margin-top:8px}
