@@ -14,8 +14,9 @@ export async function POST(req: NextRequest) {
   const cookie = req.cookies.get('done_access_token')?.value;
   const authorization = cookie ? `Bearer ${cookie}` : req.headers.get('authorization');
   if (!authorization?.startsWith('Bearer ')) return NextResponse.json({error:'ログインが必要です。'}, {status:401});
-  let id: string;
-  try { ({id} = await req.json()); } catch { return NextResponse.json({error:'記事を選んでください。'}, {status:400}); }
+  let id: string; let mode: string | undefined;
+  try { ({id,mode} = await req.json()); } catch { return NextResponse.json({error:'記事を選んでください。'}, {status:400}); }
+  if(mode!==undefined&&mode!=='title')return NextResponse.json({error:'作成方法が不正です。'},{status:400});
   if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)) return NextResponse.json({error:'記事を選んでください。'}, {status:400});
   const url = `${backend}/api/v1/dan-notion/blocks/${id}`;
   const headers = {Authorization:authorization, 'Content-Type':'application/json'};
@@ -32,6 +33,7 @@ export async function POST(req: NextRequest) {
     const article = row.properties.article;
     if (article.editorial?.state === 'running' && Date.now()-article.editorial.updatedAt < 15*60_000) return NextResponse.json({row}, {status:202});
     if (!article.transcript?.trim() && !article.audio?.length) return NextResponse.json({error:'音声か話した内容を追加してください。'}, {status:400});
+    if(mode==='title'&&!article.title?.trim())return NextResponse.json({error:'タイトルを入力してください。'},{status:400});
     const jobId = randomUUID();
     const editorial = {id:jobId, state:'running', message:'記事作成を開始しています。', updatedAt:Date.now()};
     const saved = await fetch(url, {method:'PATCH', headers, body:JSON.stringify({properties:{...row.properties,article:{...article,editorial}}})});
@@ -51,7 +53,7 @@ export async function POST(req: NextRequest) {
     };
     child.on('error', ()=>{void reportExit();});
     child.on('close', ()=>{void reportExit();});
-    child.stdin.end(JSON.stringify({id,jobId,authorization,backend}));
+    child.stdin.end(JSON.stringify({id,jobId,authorization,backend,fixedTitle:mode==='title'?article.title:undefined}));
     child.unref();
     return NextResponse.json({row:updated}, {status:202});
   } finally { locks.delete(id); }
