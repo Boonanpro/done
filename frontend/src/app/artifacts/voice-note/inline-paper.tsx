@@ -29,7 +29,7 @@ function markdown(node:Node):string {
  }
 }
 function clean(text:string){return text.replace(/\n{3,}/g,'\n\n').trim();}
-export type PaperHandle={freezeSelection:()=>void;replaceSelection:(text:string)=>boolean;insertImage:(url:string,target?:string)=>void;format:(command:string)=>void};
+export type PaperHandle={freezeSelection:()=>void;replaceSelection:(text:string)=>boolean;insertImage:(url:string,target?:string)=>void;format:(command:string,value?:string)=>void};
 type Props={free:string;paid:string;disabled:boolean;onMove:(free:string,paid:string)=>void;onDelete:(src:string)=>void;onSelection:(text:string)=>void;onImage:(src:string)=>void};
 export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({free,paid,disabled,onMove,onDelete,onSelection,onImage},ref){
  const root=useRef<HTMLDivElement>(null),last=useRef(''),selected=useRef<Range|null>(null),drag=useRef<HTMLElement|null>(null),target=useRef<Element|null>(null),guide=useRef<HTMLDivElement>(null);
@@ -42,7 +42,7 @@ export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({fre
  freezeSelection(){frozen.current=selected.current?.cloneRange()||null;},
  replaceSelection(text){selected.current=frozen.current;if(!restore())return false;const html=renderToStaticMarkup(<ReactMarkdown>{text}</ReactMarkdown>).replace(/^<p>([\s\S]*)<\/p>$/,'$1');document.execCommand('insertHTML',false,html);emit();return true;},
  insertImage(url,imageTarget){if(imageTarget){const image=Array.from(root.current?.querySelectorAll('img')||[]).find(i=>i.getAttribute('src')===imageTarget);if(image){image.setAttribute('src',url);emit();last.current='';return;}}selected.current=frozen.current;if(!restore()){root.current?.focus();const range=document.createRange();range.selectNodeContents(root.current!);range.collapse(false);window.getSelection()?.removeAllRanges();window.getSelection()?.addRange(range);}document.execCommand('insertHTML',false,renderToStaticMarkup(<p><img src={url} alt=""/></p>));emit();last.current='';},
- format(command){if(restore()){document.execCommand(command);emit();}}
+ format(command,value){if(restore()){const range=window.getSelection()?.getRangeAt(0),line=root.current?.querySelector('[data-paid-line]');if(range&&line&&range.intersectsNode(line))return;document.execCommand(command,false,value);emit();capture();}}
  }));
  useEffect(()=>{const next=JSON.stringify([free,paid]);if(next===last.current)return;last.current=next;selected.current=null;
  const media={img:({src,alt}:{src?:string|Blob;alt?:string})=><span className={styles.mediaFrame} contentEditable={false}><img src={src} alt={alt||''}/><small data-ui>{alt}</small><button data-ui data-image-delete type="button" className={styles.mediaDelete} aria-label="画像を削除" title="画像を削除"><Trash2 size={17}/></button><button data-ui data-image-ai type="button" className={`${styles.mediaDelete} ${styles.mediaAI}`} aria-label="画像をAIで編集" title="画像をAIで編集"><Sparkles size={17}/></button></span>};
@@ -50,6 +50,34 @@ export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({fre
  if(root.current)root.current.innerHTML=renderToStaticMarkup(<><ReactMarkdown components={media}>{free||'\u200b'}</ReactMarkdown>{line}<ReactMarkdown components={media}>{paid||'\u200b'}</ReactMarkdown></>);
  },[free,paid]);
  useEffect(()=>{const fn=()=>capture();document.addEventListener('selectionchange',fn);return()=>document.removeEventListener('selectionchange',fn);},[]);
+ // Protect the boundary before the browser mutates the editable DOM (including cut/mobile deletion).
+ useEffect(()=>{
+ const editor=root.current;if(!editor)return;
+ const beforeInput=(event:InputEvent)=>{
+  const line=editor.querySelector('[data-paid-line]');const selection=window.getSelection();
+  if(!line||!selection?.rangeCount)return;
+  const current=selection.getRangeAt(0);
+  if(!editor.contains(current.commonAncestorContainer))return;
+  const ranges=event.getTargetRanges?.()||[];
+  const touches=ranges.some(part=>{const r=document.createRange();r.setStart(part.startContainer,part.startOffset);r.setEnd(part.endContainer,part.endOffset);return r.intersectsNode(line);});
+  if(touches||(!current.collapsed&&current.intersectsNode(line))){event.preventDefault();return;}
+  if(event.inputType==='insertParagraph'&&current.collapsed){
+   const element=current.startContainer.nodeType===3?current.startContainer.parentElement:current.startContainer as HTMLElement;
+   const heading=element?.closest('h1,h2,h3,h4,h5,h6');
+   if(heading&&editor.contains(heading)){
+    const before=current.cloneRange();before.selectNodeContents(heading);before.setEnd(current.startContainer,current.startOffset);
+    const after=current.cloneRange();after.selectNodeContents(heading);after.setStart(current.endContainer,current.endOffset);
+    if(!before.toString()||!after.toString()){
+     event.preventDefault();const p=document.createElement('p');p.appendChild(document.createElement('br'));
+     heading.parentNode!.insertBefore(p,!before.toString()?heading:heading.nextSibling);
+     const cursor=document.createRange();cursor.selectNodeContents(p);cursor.collapse(true);selection.removeAllRanges();selection.addRange(cursor);emit();capture();
+    }
+   }
+  }
+ };
+ editor.addEventListener('beforeinput',beforeInput);
+ return()=>editor.removeEventListener('beforeinput',beforeInput);
+ },[]);
  function end(cancel=false){if(drag.current&&!cancel&&target.current){root.current!.insertBefore(drag.current,target.current);emit();}drag.current=null;target.current=null;if(guide.current)guide.current.style.display='none';}
  return <div className={styles.draggablePaper}>
  <div ref={root} role="textbox" aria-label="記事本文" aria-multiline="true" contentEditable={!disabled} suppressContentEditableWarning className={`${styles.paper} ${styles.inlinePaper}`} onInput={emit}
