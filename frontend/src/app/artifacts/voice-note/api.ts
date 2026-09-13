@@ -20,6 +20,17 @@ export async function saveArticle(row: Row, article: Article): Promise<Row> {
   if(previous?.checkedAt&&previous.salesMonth!==article.salesMonth) history[previous.salesMonth]={purchases:previous.purchases,gross:previous.gross,received:previous.received,checkedAt:previous.checkedAt};
   return call<Row>('/dan-notion/blocks/'+row.id,'PATCH',{properties:{...current.properties,monthly_history:history,title:article.title,article},content:[{type:'text',text:[article.title,article.free,article.paid].filter(Boolean).join('\n\n')}]});
 }
+export async function uploadImage(file: File): Promise<string> {
+  if(!/^image\/(png|jpeg|gif|webp|avif|bmp)$/i.test(file.type))throw new Error('PNG・JPEG・GIF・WebP・AVIF・BMPの画像を使ってください。');
+  if(file.size>20*1024*1024)throw new Error('画像は20MB以下にしてください。');
+  const data=new FormData();data.append('file',file);
+  const token=useAuthStore.getState().token;
+  const response=await fetch('/api/v1/files/upload',{method:'POST',credentials:'include',headers:token?{Authorization:`Bearer ${token}`}:{},body:data});
+  if(!response.ok)throw new Error('画像を保存できませんでした。もう一度貼り付けてください。');
+  const value=await response.json();
+  if(typeof value.url!=='string'||!value.url)throw new Error('画像の保存先を取得できませんでした。');
+  return value.url;
+}
 export async function uploadAudio(file: File): Promise<{name:string;url:string}> {
   if(file.size>500*1024*1024) throw new Error('音声は500MB以下にしてください。');
   const data=new FormData();data.append('file',file);

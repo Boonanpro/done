@@ -5,6 +5,7 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 import {GripVertical,LockKeyhole,Trash2,Sparkles} from 'lucide-react';
 import styles from './style.module.css';
+import {uploadImage} from './api';
 const BOUNDARY='<!--voice-note-paid-->';
 function markdown(node:Node):string {
  if(node.nodeType===3)return (node.textContent||'').replace(/\u00a0/g,' ').replace(/\u200b/g,'');
@@ -36,6 +37,31 @@ export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({fre
  const root=useRef<HTMLDivElement>(null),last=useRef(''),selected=useRef<Range|null>(null),drag=useRef<HTMLElement|null>(null),target=useRef<Element|null>(null),guide=useRef<HTMLDivElement>(null);
  const callbacks=useRef({onMove,onDelete,onSelection,onImage});callbacks.current={onMove,onDelete,onSelection,onImage};
  const [toolbar,setToolbar]=useState<{left:number;top:number}|null>(null);
+ const [imageError,setImageError]=useState('');
+ async function addImages(files:File[],position?:Range|null){
+  const editor=root.current;if(disabled||!editor)return;
+  setImageError('');
+  const range=position?.cloneRange()||selected.current?.cloneRange()||document.createRange();
+  if(!editor.contains(range.commonAncestorContainer)){range.selectNodeContents(editor);range.collapse(false);}
+  range.collapse(true);
+  const element=range.startContainer.nodeType===3?range.startContainer.parentElement:range.startContainer as Element;
+  const protectedNode=element?.closest('[contenteditable="false"]');
+  if(protectedNode&&editor.contains(protectedNode))range.setStartBefore(protectedNode);
+  range.collapse(true);
+  const pending=files.map(file=>{
+   const slot=document.createElement('span');slot.dataset.ui='';slot.contentEditable='false';slot.textContent='画像を保存中…';
+   range.insertNode(slot);range.setStartAfter(slot);range.collapse(true);return {file,slot};
+  });
+  for(const {file,slot} of pending){
+   try{
+    const url=await uploadImage(file);
+    if(root.current!==editor||!editor.contains(slot))continue;
+    const frame=document.createElement('span');frame.className=styles.mediaFrame;frame.contentEditable='false';
+    frame.innerHTML=renderToStaticMarkup(<><img src={url} alt=""/><button data-ui data-image-delete type="button" className={styles.mediaDelete} aria-label="画像を削除"><Trash2 size={17}/></button><button data-ui data-image-ai type="button" className={`${styles.mediaDelete} ${styles.mediaAI}`} aria-label="画像をAIで編集"><Sparkles size={17}/></button></>);
+    slot.replaceWith(frame);emit();
+   }catch(error){slot.remove();if(root.current===editor)setImageError(error instanceof Error?error.message:'画像を挿入できませんでした。');}
+  }
+ }
  const markerHTML=useRef('');const frozen=useRef<Range|null>(null);
  function emit(){if(!root.current)return;if(!root.current.querySelector('[data-paid-line]'))root.current.insertAdjacentHTML('beforeend',markerHTML.current);const text=markdown(root.current);const parts=text.split(BOUNDARY);const next=[clean(parts[0]),clean(parts.slice(1).join(''))];last.current=JSON.stringify(next);callbacks.current.onMove(next[0],next[1]);}
  function capture(){
@@ -113,11 +139,14 @@ export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({fre
  },[]);
  function end(cancel=false){if(drag.current&&!cancel&&target.current){root.current!.insertBefore(drag.current,target.current);emit();}drag.current=null;target.current=null;if(guide.current)guide.current.style.display='none';}
  return <div className={styles.draggablePaper}>
+ {imageError&&<p role="alert">{imageError}</p>}
  {toolbar&&!disabled&&createPortal(<div role="toolbar" aria-label="文字の装飾" className={styles.selectionToolbar} style={{left:toolbar.left,top:toolbar.top}} onMouseDown={e=>e.preventDefault()}>
  {([{label:'本文',command:'formatBlock',value:'p'},{label:'見出し',command:'formatBlock',value:'h2'},{label:'小見出し',command:'formatBlock',value:'h3'},{label:'太字',command:'bold'},{label:'斜体',command:'italic'}]).map(item=><button type="button" key={item.label} onClick={()=>format(item.command,item.value)}>{item.label}</button>)}
  </div>,document.body)}
  <div ref={root} role="textbox" aria-label="記事本文" aria-multiline="true" contentEditable={!disabled} suppressContentEditableWarning className={`${styles.paper} ${styles.inlinePaper}`} onInput={emit}
- onPaste={e=>{e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));emit();}}
+ onPaste={e=>{e.preventDefault();if(disabled)return;const files=Array.from(e.clipboardData.files);if(files.length){const s=window.getSelection();void addImages(files,s?.rangeCount?s.getRangeAt(0):null);return;}document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));emit();}}
+ onDragOver={e=>{if(e.dataTransfer.types.includes('Files')){e.preventDefault();e.dataTransfer.dropEffect=disabled?'none':'copy';}}}
+ onDrop={e=>{if(!e.dataTransfer.files.length)return;e.preventDefault();if(disabled)return;const doc=document as Document&{caretRangeFromPoint?:(x:number,y:number)=>Range|null;caretPositionFromPoint?:(x:number,y:number)=>{offsetNode:Node;offset:number}|null};let range=doc.caretRangeFromPoint?.(e.clientX,e.clientY);if(!range){const point=doc.caretPositionFromPoint?.(e.clientX,e.clientY);if(point){range=document.createRange();range.setStart(point.offsetNode,point.offset);}}void addImages(Array.from(e.dataTransfer.files),range);}}
  onClick={e=>{const el=e.target as HTMLElement;const button=el.closest('[data-image-delete],[data-image-ai]');if(button){const src=button.parentElement?.querySelector('img')?.getAttribute('src');if(src){if(button.hasAttribute('data-image-delete'))callbacks.current.onDelete(src);else callbacks.current.onImage(src);}}}}
  onPointerDown={e=>{const el=e.target as HTMLElement;if(el.closest('[data-ui]')){e.preventDefault();return;}const line=el.closest<HTMLElement>('[data-paid-line]');if(line&&!disabled){e.preventDefault();drag.current=line;e.currentTarget.setPointerCapture(e.pointerId);}}}
  onPointerMove={e=>{if(!drag.current)return;const choices=Array.from(root.current!.children).filter(n=>n!==drag.current);if(!choices.length)return;target.current=choices.reduce((a,b)=>Math.abs(a.getBoundingClientRect().top-e.clientY)<Math.abs(b.getBoundingClientRect().top-e.clientY)?a:b);if(guide.current){guide.current.style.display='block';guide.current.style.top=(target.current.getBoundingClientRect().top-root.current!.parentElement!.getBoundingClientRect().top)+'px';}let s:HTMLElement|null=root.current;while(s&&s.scrollHeight<=s.clientHeight+1)s=s.parentElement;if(s){const rect=s.getBoundingClientRect();if(e.clientY<Math.max(0,rect.top)+60)s.scrollTop-=24;if(e.clientY>Math.min(innerHeight,rect.bottom)-60)s.scrollTop+=24;}}}
