@@ -1,5 +1,6 @@
 'use client';
-import {forwardRef,useEffect,useImperativeHandle,useRef} from 'react';
+import {forwardRef,useEffect,useImperativeHandle,useRef,useState} from 'react';
+import {createPortal} from 'react-dom';
 import {renderToStaticMarkup} from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 import {GripVertical,LockKeyhole,Trash2,Sparkles} from 'lucide-react';
@@ -34,22 +35,43 @@ type Props={free:string;paid:string;disabled:boolean;onMove:(free:string,paid:st
 export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({free,paid,disabled,onMove,onDelete,onSelection,onImage},ref){
  const root=useRef<HTMLDivElement>(null),last=useRef(''),selected=useRef<Range|null>(null),drag=useRef<HTMLElement|null>(null),target=useRef<Element|null>(null),guide=useRef<HTMLDivElement>(null);
  const callbacks=useRef({onMove,onDelete,onSelection,onImage});callbacks.current={onMove,onDelete,onSelection,onImage};
+ const [toolbar,setToolbar]=useState<{left:number;top:number}|null>(null);
  const markerHTML=useRef('');const frozen=useRef<Range|null>(null);
  function emit(){if(!root.current)return;if(!root.current.querySelector('[data-paid-line]'))root.current.insertAdjacentHTML('beforeend',markerHTML.current);const text=markdown(root.current);const parts=text.split(BOUNDARY);const next=[clean(parts[0]),clean(parts.slice(1).join(''))];last.current=JSON.stringify(next);callbacks.current.onMove(next[0],next[1]);}
- function capture(){const s=window.getSelection();if(!s?.rangeCount||!root.current?.contains(s.anchorNode)||!root.current.contains(s.focusNode))return;selected.current=s.getRangeAt(0).cloneRange();callbacks.current.onSelection(s.toString());}
+ function capture(){
+ const s=window.getSelection(),editor=root.current;
+ if(!s?.rangeCount||!editor?.contains(s.anchorNode)||!editor.contains(s.focusNode)){setToolbar(null);return;}
+ const range=s.getRangeAt(0);selected.current=range.cloneRange();callbacks.current.onSelection(s.toString());
+ if(s.isCollapsed||!s.toString().trim()){setToolbar(null);return;}
+ const rects=Array.from(range.getClientRects()).filter(r=>r.width&&r.height&&r.bottom>0&&r.top<innerHeight);
+ const rect=rects[0];if(!rect){setToolbar(null);return;}
+ const width=Math.min(320,innerWidth-16);
+ setToolbar({left:Math.max(8,Math.min(rect.left,innerWidth-width-8)),top:rect.top>=52?rect.top-46:Math.min(innerHeight-48,rect.bottom+6)});
+ }
+ function format(command:string,value?:string){if(restore()){const range=window.getSelection()?.getRangeAt(0),line=root.current?.querySelector('[data-paid-line]');if(range&&line&&range.intersectsNode(line))return;document.execCommand(command,false,value);emit();capture();}}
  function restore(){if(!selected.current||!root.current?.contains(selected.current.commonAncestorContainer))return false;const s=window.getSelection();s?.removeAllRanges();s?.addRange(selected.current);return true;}
  useImperativeHandle(ref,()=>({
  freezeSelection(){frozen.current=selected.current?.cloneRange()||null;},
  replaceSelection(text){selected.current=frozen.current;if(!restore())return false;const html=renderToStaticMarkup(<ReactMarkdown>{text}</ReactMarkdown>).replace(/^<p>([\s\S]*)<\/p>$/,'$1');document.execCommand('insertHTML',false,html);emit();return true;},
  insertImage(url,imageTarget){if(imageTarget){const image=Array.from(root.current?.querySelectorAll('img')||[]).find(i=>i.getAttribute('src')===imageTarget);if(image){image.setAttribute('src',url);emit();last.current='';return;}}selected.current=frozen.current;if(!restore()){root.current?.focus();const range=document.createRange();range.selectNodeContents(root.current!);range.collapse(false);window.getSelection()?.removeAllRanges();window.getSelection()?.addRange(range);}document.execCommand('insertHTML',false,renderToStaticMarkup(<p><img src={url} alt=""/></p>));emit();last.current='';},
- format(command,value){if(restore()){const range=window.getSelection()?.getRangeAt(0),line=root.current?.querySelector('[data-paid-line]');if(range&&line&&range.intersectsNode(line))return;document.execCommand(command,false,value);emit();capture();}}
+ format
  }));
  useEffect(()=>{const next=JSON.stringify([free,paid]);if(next===last.current)return;last.current=next;selected.current=null;
- const media={img:({src,alt}:{src?:string|Blob;alt?:string})=><span className={styles.mediaFrame} contentEditable={false}><img src={src} alt={alt||''}/><small data-ui>{alt}</small><button data-ui data-image-delete type="button" className={styles.mediaDelete} aria-label="画像を削除" title="画像を削除"><Trash2 size={17}/></button><button data-ui data-image-ai type="button" className={`${styles.mediaDelete} ${styles.mediaAI}`} aria-label="画像をAIで編集" title="画像をAIで編集"><Sparkles size={17}/></button></span>};
+ const media={img:({src,alt}:{src?:string|Blob;alt?:string})=><span className={styles.mediaFrame} contentEditable={false}><img src={src} alt={alt||''}/><button data-ui data-image-delete type="button" className={styles.mediaDelete} aria-label="画像を削除" title="画像を削除"><Trash2 size={17}/></button><button data-ui data-image-ai type="button" className={`${styles.mediaDelete} ${styles.mediaAI}`} aria-label="画像をAIで編集" title="画像をAIで編集"><Sparkles size={17}/></button></span>};
  const line=<div data-paid-line contentEditable={false} className={styles.dragLine}><button type="button" aria-label="有料ラインを移動" title="ドラッグで移動" className={styles.lineHandle}><GripVertical size={18}/><LockKeyhole size={13}/>ここから先は有料部分です</button></div>;markerHTML.current=renderToStaticMarkup(line);
- if(root.current)root.current.innerHTML=renderToStaticMarkup(<><ReactMarkdown components={media}>{free||'\u200b'}</ReactMarkdown>{line}<ReactMarkdown components={media}>{paid||'\u200b'}</ReactMarkdown></>);
+ if(root.current){
+ root.current.innerHTML=renderToStaticMarkup(<><ReactMarkdown components={media}>{free||'\u200b'}</ReactMarkdown>{line}<ReactMarkdown components={media}>{paid||'\u200b'}</ReactMarkdown></>);
+ // Legacy image descriptions become ordinary paragraphs on the next edit/save.
+ root.current.querySelectorAll('img[alt]').forEach(image=>{
+ const caption=image.getAttribute('alt');if(!caption)return;
+ const paragraph=document.createElement('p');paragraph.textContent=caption;
+ const anchor=image.closest('p')||image.parentElement!;
+ anchor.after(paragraph);image.setAttribute('alt','');
+ });
+ }
+
  },[free,paid]);
- useEffect(()=>{const fn=()=>capture();document.addEventListener('selectionchange',fn);return()=>document.removeEventListener('selectionchange',fn);},[]);
+ useEffect(()=>{const fn=()=>capture();document.addEventListener('selectionchange',fn);window.addEventListener('scroll',fn,true);window.addEventListener('resize',fn);return()=>{document.removeEventListener('selectionchange',fn);window.removeEventListener('scroll',fn,true);window.removeEventListener('resize',fn);};},[]);
  // Protect the boundary before the browser mutates the editable DOM (including cut/mobile deletion).
  useEffect(()=>{
  const editor=root.current;if(!editor)return;
@@ -91,6 +113,9 @@ export const InlinePaper=forwardRef<PaperHandle,Props>(function InlinePaper({fre
  },[]);
  function end(cancel=false){if(drag.current&&!cancel&&target.current){root.current!.insertBefore(drag.current,target.current);emit();}drag.current=null;target.current=null;if(guide.current)guide.current.style.display='none';}
  return <div className={styles.draggablePaper}>
+ {toolbar&&!disabled&&createPortal(<div role="toolbar" aria-label="文字の装飾" className={styles.selectionToolbar} style={{left:toolbar.left,top:toolbar.top}} onMouseDown={e=>e.preventDefault()}>
+ {([{label:'本文',command:'formatBlock',value:'p'},{label:'見出し',command:'formatBlock',value:'h2'},{label:'小見出し',command:'formatBlock',value:'h3'},{label:'太字',command:'bold'},{label:'斜体',command:'italic'}]).map(item=><button type="button" key={item.label} onClick={()=>format(item.command,item.value)}>{item.label}</button>)}
+ </div>,document.body)}
  <div ref={root} role="textbox" aria-label="記事本文" aria-multiline="true" contentEditable={!disabled} suppressContentEditableWarning className={`${styles.paper} ${styles.inlinePaper}`} onInput={emit}
  onPaste={e=>{e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));emit();}}
  onClick={e=>{const el=e.target as HTMLElement;const button=el.closest('[data-image-delete],[data-image-ai]');if(button){const src=button.parentElement?.querySelector('img')?.getAttribute('src');if(src){if(button.hasAttribute('data-image-delete'))callbacks.current.onDelete(src);else callbacks.current.onImage(src);}}}}
