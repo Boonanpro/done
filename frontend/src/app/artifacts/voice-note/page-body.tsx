@@ -28,6 +28,15 @@ export function PageBody() {
  const [draft,setDraft]=useState<Article>(emptyArticle);const [tab,setTab]=useState('つくる');const [busy,setBusy]=useState(false);
  const editing=draft.editorial?.state==='running' && Date.now()-draft.editorial.updatedAt<15*60_000;
  const [dirty,setDirty]=useState(false);const [message,setMessage]=useState('');const [error,setError]=useState('');
+ const [saving,setSaving]=useState(false);const [saveError,setSaveError]=useState('');
+ const live=useRef({selected,draft,dirty});live.current={selected,draft,dirty};
+ const savingTask=useRef<Promise<Row>|null>(null);
+ const cacheKey=(id:string)=>`voice-note-draft:${ROOM_ID}:${id}`;
+ function openDraft(row:Row){
+  let next=articleOf(row),pending=false,base=row;
+  try{const cached=JSON.parse(sessionStorage.getItem(cacheKey(row.id))||'null');if(cached?.draft){next=cached.draft;pending=true;base={...row,updated_at:cached.updatedAt};}}catch{}
+  live.current={selected:base,draft:next,dirty:pending};setSelected(base);setDraft(next);setDirty(pending);setSaveError('');
+ }
  const [recording,setRecording]=useState(false);const [confirm,setConfirm]=useState<'publish'|'delete'|'empty'|null>(null);
  const [deleteTarget,setDeleteTarget]=useState<Row>();const actionLock=useRef(false);
  const emptyRows=rows.filter(r=>isEmptyArticle(articleOf(r)));
@@ -60,12 +69,29 @@ export function PageBody() {
    return()=>{cancelled=true;current?.getTracks().forEach(t=>t.stop());};
  },[monitoring,inputId,inputRetry]);
  const gate=useSetupGate(async()=>Boolean(await findWorkspace()));
- async function refresh(selectId?:string){setLoading(true);setError('');try{const w=await findWorkspace();if(!w)throw new Error('本人アカウントで編集室を開いてください。');setRoot(w);const list=await call<Row[]>('/dan-notion/blocks/'+w.id+'/children');setRows(list);if(selectId){const r=list.find(x=>x.id===selectId);if(r){setSelected(r);setDraft(articleOf(r));setDirty(false);}}}catch(e){setError((e as Error).message);}finally{setLoading(false);}}
+ async function refresh(selectId?:string){setLoading(true);setError('');try{const w=await findWorkspace();if(!w)throw new Error('本人アカウントで編集室を開いてください。');setRoot(w);const list=await call<Row[]>('/dan-notion/blocks/'+w.id+'/children');setRows(list);if(selectId){const r=list.find(x=>x.id===selectId);if(r){openDraft(r);}}}catch(e){setError((e as Error).message);}finally{setLoading(false);}}
  useEffect(()=>{void refresh();return()=>{recorder.current?.stream.getTracks().forEach(t=>t.stop());};},[]);
  useEffect(()=>{const fn=(e:BeforeUnloadEvent)=>{if(dirty||audioBlob||recording){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',fn);return()=>window.removeEventListener('beforeunload',fn);},[dirty,audioBlob,recording]);
- const update=(patch:Partial<Article>)=>{setDraft(v=>({...v,...patch}));setDirty(true);};
- async function run(fn:()=>Promise<void>){if(actionLock.current||busy||editing)return;actionLock.current=true;setBusy(true);setError('');setMessage('');try{await fn();}catch(e){setError((e as Error).message);}finally{actionLock.current=false;setBusy(false);}}
- async function save(){if(!selected)throw new Error('記事を作成してください。');const r=await saveArticle(selected,draft);setSelected(r);setDraft(articleOf(r));setRows(v=>v.map(x=>x.id===r.id?r:x));setDirty(false);return r;}
+ const update=(patch:Partial<Article>)=>{const next={...live.current.draft,...patch};live.current={...live.current,draft:next,dirty:true};setDraft(next);setDirty(true);setSaveError('');if(live.current.selected)try{sessionStorage.setItem(cacheKey(live.current.selected.id),JSON.stringify({draft:next,updatedAt:live.current.selected.updated_at}));}catch{setSaveError('端末への下書き保存に失敗しました。保存ボタンで保存してください。');}};
+ async function run(fn:()=>Promise<void>){if(actionLock.current||busy||editing)return;actionLock.current=true;setBusy(true);setError('');setMessage('');try{if(savingTask.current)await savingTask.current;await fn();}catch(e){setError((e as Error).message);}finally{actionLock.current=false;setBusy(false);}}
+ async function save():Promise<Row>{
+  if(savingTask.current){await savingTask.current;if(live.current.dirty)return save();return live.current.selected!;}
+  const current=live.current;if(!current.selected)throw new Error('記事を作成してください。');
+  setSaving(true);setSaveError('');
+  const task=(async()=>{
+   const r=await saveArticle(current.selected!,current.draft);
+   setRows(v=>v.map(x=>x.id===r.id?r:x));
+   if(live.current.selected?.id===r.id){
+    const unchanged=live.current.draft===current.draft;
+    live.current={selected:r,draft:unchanged?articleOf(r):live.current.draft,dirty:!unchanged};
+    setSelected(r);setDraft(live.current.draft);setDirty(!unchanged);
+    try{if(unchanged)sessionStorage.removeItem(cacheKey(r.id));else sessionStorage.setItem(cacheKey(r.id),JSON.stringify({draft:live.current.draft,updatedAt:r.updated_at}));}catch{}
+   }
+   return r;
+  })();savingTask.current=task;
+  try{return await task;}catch(e){setSaveError((e as Error).message);throw e;}finally{savingTask.current=null;setSaving(false);}
+ }
+ useEffect(()=>{if(!dirty||!selected||busy||editing||saving||saveError)return;const timer=setTimeout(()=>{void save().catch(()=>{});},500);return()=>clearTimeout(timer);},[draft,dirty,selected?.id,busy,editing,saving,saveError]);
  async function create(){await run(async()=>{if(!root)throw new Error('保存先に接続してください。');if(recording||audioBlob)throw new Error('録音を保存してから記事を切り替えてください。');let list=rows;if(selected&&dirty){const saved=await save();list=rows.map(r=>r.id===saved.id?saved:r);}const unused=list.find(r=>isEmptyArticle(articleOf(r)));if(unused){setSelected(unused);setDraft(articleOf(unused));setDirty(false);setTab('つくる');return;}const a=emptyArticle();const r=await call<Row>('/dan-notion/blocks','POST',{type:'page',parent_id:root.id,properties:{title:a.title,kind:'voice_note_article',article:a},content:[]});setRows(v=>[...v,r]);setSelected(r);setDraft(a);setDirty(false);setTab('つくる');});}
  function requestDelete(row:Row){setDeleteTarget(row);setConfirm('delete');}
  async function removeArticles(){await run(async()=>{
@@ -84,7 +110,7 @@ export function PageBody() {
   }
   setConfirm(null);setDeleteTarget(undefined);setMessage(`${count}件の記事を削除しました。`);
  });}
- async function pick(row:Row){await run(async()=>{if(recording||audioBlob)throw new Error('録音を保存してから記事を切り替えてください。');if(selected&&dirty)await save();setSelected(row);setDraft(articleOf(row));setDirty(false);setTab('つくる');});}
+ async function pick(row:Row){await run(async()=>{if(recording||audioBlob)throw new Error('録音を保存してから記事を切り替えてください。');if(selected&&dirty)await save();openDraft(row);setTab('つくる');});}
  async function persistAudio(file:File){if(!selected)throw new Error('記事を作成してください。');const audio=await uploadAudio(file);const a={...draft,audio:[...draft.audio,audio]};const r=await saveArticle(selected,a);setSelected(r);setRows(v=>v.map(x=>x.id===r.id?r:x));setDraft(a);setDirty(false);setAudioBlob(undefined);await backupWrites.current.catch(()=>{});if(backupKey)await recordingBackup(backupKey,null).catch(()=>{setError('端末の予備録音を消去できませんでした。');});return r;}
  async function attach(file:File){await run(async()=>{await persistAudio(file);setMessage('音声を保存しました。「noteにする」で制作を始めます。');});}
  useEffect(()=>{setBackupReady(false);if(!backupKey)return;let cancelled=false;void recordingBackup(backupKey).then(blob=>{if(!cancelled&&blob){setAudioBlob(blob);setMessage('端末に残っていた録音を復元しました。');}}).catch(()=>{if(!cancelled)setError('端末への予備保存が使えません。');}).finally(()=>{if(!cancelled)setBackupReady(true);});return()=>{cancelled=true;};},[backupKey]);
@@ -117,7 +143,8 @@ export function PageBody() {
  {loading?<div className={styles.empty}>編集室を読み込んでいます…</div>:!root?<div className={styles.empty}><EditableText as="h2" editId="voice-note-home-auth-title">ダンの本人アカウントで開く編集室です。</EditableText><EditableText as="p" editId="voice-note-home-auth-copy">公開ページに記事本文は表示されません。</EditableText><EditableText as="button" editId="voice-note-home-retry" onClick={()=>void refresh()}>接続を再確認</EditableText></div>:<>
  {tab==='つくる'&&<div className={styles.workspace}><aside className={styles.side}><button className={styles.primary} disabled={busy||editing||recording||Boolean(audioBlob)} onClick={()=>void create()}><Plus size={17}/>新しい記事</button><small>記事の素材と下書き</small>{rows.map(r=><div className={styles.articleItem} key={r.id}><button className={selected?.id===r.id?styles.chosen:styles.item} onClick={()=>void pick(r)} disabled={busy||editing||recording||Boolean(audioBlob)}><span>{articleOf(r).title}</span><small>{articleOf(r).status}</small></button><button aria-label={`${articleOf(r).title}を削除`} disabled={busy||editing||recording||Boolean(audioBlob)} title="記事を削除" onClick={()=>requestDelete(r)}><Trash2 size={16}/></button></div>)}<div className={styles.hint}><strong>こんな話から</strong><p>最近、面倒だったこと。<br/>試して失敗したこと。<br/>前より楽になった工夫。</p></div></aside>
  {!selected?<section className={styles.start}><div className={styles.mic}><Mic size={34}/></div><EditableText as="h2" editId="voice-note-home-start">いつもの話が、記事の種になる。</EditableText><EditableText as="p" editId="voice-note-home-start-copy">音声を録る。ファイルを追加する。<br/>このチャットで話す。どこからでも始められます。</EditableText><EditableText as="button" editId="voice-note-home-first-article" className={styles.primary} onClick={()=>void create()} disabled={busy||editing}>最初の記事をつくる<ArrowRight size={17}/></EditableText><div className={styles.flow}><span>01 話す</span><span>02 noteにする</span><span>03 確認して投稿</span></div></section>:<fieldset className={styles.editor} disabled={busy||editing}>
- {draft.editorial&&<div role="status" aria-live="polite" style={{padding:12,background:'#eef7f4',borderRadius:8}}>{draft.editorial.state==='running'&&!editing?'処理の応答が途切れました。再試行してください。':draft.editorial.message}{editing&&<progress aria-label="記事を作成中" style={{display:'block',width:'100%',marginTop:8}}/>}</div>}<div className={styles.editorTop}><span>{draft.status}</span><span>{recording?'録音中':audioBlob?'録音の保存待ち':dirty?'未保存の変更があります':'保存済み'}</span><button disabled={busy||editing||!dirty} onClick={()=>void run(async()=>{await save();setMessage('保存しました。');})}>保存</button></div>
+ {draft.editorial&&<div role="status" aria-live="polite" style={{padding:12,background:'#eef7f4',borderRadius:8}}>{draft.editorial.state==='running'&&!editing?'処理の応答が途切れました。再試行してください。':draft.editorial.message}{editing&&<progress aria-label="記事を作成中" style={{display:'block',width:'100%',marginTop:8}}/>}</div>}<div className={styles.editorTop}><span>{draft.status}</span><span role="status" aria-label="保存状況">{recording?'録音中':audioBlob?'録音の保存待ち':saveError?'保存できませんでした':saving||dirty?'保存中…':'保存済み'}</span><button disabled={busy||editing||saving||!dirty} onClick={()=>void run(async()=>{await save();setMessage('保存しました。');})}>{saveError?'保存を再試行':'保存'}</button></div>
+ {saveError&&<p role="alert">{saveError}</p>}
  <label className={styles.field}>タイトル<input value={draft.title} onChange={e=>update({title:e.target.value})}/></label>
  <EditableText as="button" editId="voice-note-regenerate-title" disabled={busy||editing||recording||Boolean(audioBlob)||!draft.title.trim()||(!draft.transcript.trim()&&!draft.audio.length)} onClick={()=>void send('edit','title')} title="このタイトルで本文を作り直す" aria-label="このタイトルで本文を作り直す"><RefreshCw size={17}/></EditableText>
  <div role="group" aria-label="録音に使う入力" style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:16}}>
