@@ -294,10 +294,10 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
   // release used by the full-screen view, and takes precedence over retired
   // shared /preview paths left on older artifact cards.
   const releaseUrl = artifact?.delivery_url || draftUrl || shareUrl || publicPreviewUrl;
-  // The private editor depends on the dashboard session and local editorial worker.
+  // Private tools depend on the dashboard session and its backend services.
   // Keep both embedded and full-screen editing on the dashboard origin.
-  const privateEditorUrl = artifact?.slug === 'voice-note'
-    ? `${typeof window === 'undefined' ? '' : window.location.origin}/preview/voice-note`
+  const privateEditorUrl = artifact && ['voice-note', 'pornblocker-guard-beacon', 'pornblocker-roadmap', 'aix-dashboard'].includes(artifact.slug)
+    ? `${typeof window === 'undefined' ? '' : window.location.origin}/preview/${artifact.slug}`
     : '';
   const publicShareUrl = privateEditorUrl || (artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '');
   // クロスオリジン化: プレビューiframe は成果物配信オリジンを
