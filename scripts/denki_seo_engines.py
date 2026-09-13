@@ -1251,6 +1251,33 @@ def cmd_daily(args) -> None:
         except Exception as e:  # noqa: BLE001
             log(f"sitemap submit failed: {e}")
     log("===== daily end =====")
+    _notify_room_if_failed(touched)
+
+
+ROOM_ID = "60760f4c-e236-49f4-a72c-c556bc56fa68"  # 電気主任技術者応援サイトの部屋
+
+
+def _notify_room_if_failed(touched: list[str]) -> None:
+    """その日の解説ページが出なかった時だけ、部屋へ短く知らせる（成功日は静かに）。"""
+    if any("/guides/" in u and not u.endswith("/guides") for u in touched):
+        return
+    today = jst_today().isoformat()
+    tail = ""
+    try:
+        lines = (Path(__file__).resolve().parent.parent / ".tmp" / "denki_seo_daily.log").read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = "\n".join(l for l in lines[-40:] if today in l and ("failed" in l or "非公開" in l or "対象なし" in l or "候補なし" in l))[-600:]
+    except Exception:  # noqa: BLE001
+        pass
+    body = f"[SEO自動運用の見張り] {today} の解説ページが公開されませんでした。原因を調べて復旧してください。\n{tail}"
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:9000/api/v1/chat/internal/rooms/{ROOM_ID}/messages",
+            data=json.dumps({"content": body, "sender_type": "system"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=15).read()
+        log("failure notice posted to room")
+    except Exception as e:  # noqa: BLE001
+        log(f"failure notice failed: {e}")
 
 
 def main() -> None:
