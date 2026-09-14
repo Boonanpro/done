@@ -96,6 +96,24 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
   const [exiting, setExiting] = useState(false);
   const [gone, setGone] = useState(false);
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
+  // カード上でダンに直接聞く／指示する（相手には見えない）。返事は窓口の非公開バブル、
+  // 直した結果は同じカードに反映される（1窓口=1下書き）
+  const [askText, setAskText] = useState('');
+  const askMutation = useMutation({
+    mutationFn: async () => {
+      const roomId = (ad.reply_to as { collab_room_id?: string } | null)?.collab_room_id;
+      if (!roomId) throw new Error('窓口が特定できません');
+      const text = askText.trim();
+      if (!text) return null;
+      return api.collab.sendMessage(roomId, text, undefined, { visibility: 'owner_only', about_proposal: proposalId });
+    },
+    onSuccess: () => {
+      setAskText('');
+      toast.success('ダンに送りました。返事は窓口の非公開バブルに出ます');
+      queryClient.invalidateQueries({ queryKey: ['collab-messages'] });
+    },
+    onError: (e: Error) => toast.error(`送れませんでした: ${e.message}`),
+  });
   const lastServer = useRef<{ body: string; subject: string } | null>(null);
 
   // 名義の切替（collab のみ）。押した瞬間に保存する
@@ -450,6 +468,25 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
             title="この送信案を破棄"
           >
             <Trash2 className="h-4 w-4" /> 破棄
+          </button>
+        </div>
+      )}
+      {pending && channel === 'collab' && (
+        <div className="flex items-center gap-2 border-t border-border bg-violet-500/5 px-3 py-2">
+          <input
+            value={askText}
+            onChange={(e) => setAskText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing && askText.trim()) askMutation.mutate(); }}
+            placeholder="ダンへ（相手には見えません）: 例「これ何？今やって」"
+            className="flex-1 rounded-md border border-violet-500/30 bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+          />
+          <button
+            type="button"
+            disabled={!askText.trim() || askMutation.isPending}
+            onClick={() => askMutation.mutate()}
+            className="inline-flex items-center gap-1 rounded-md bg-violet-600 px-2.5 py-1 text-sm text-white hover:bg-violet-700 disabled:opacity-50"
+          >
+            {askMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
           </button>
         </div>
       )}

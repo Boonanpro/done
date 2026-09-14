@@ -143,7 +143,8 @@ async def _waiter(collab_room_id: str) -> None:
 
 
 def schedule_owner_instruction(collab_room_id: str, content: str,
-                               thread_root: str = None, public: bool = False) -> bool:
+                               thread_root: str = None, public: bool = False,
+                               about_proposal: str = None) -> bool:
     """ユーザーが窓口画面で送ったメッセージを origin ルームのダンに即時に届ける。
     デバウンスしない（本人との会話なので即応）。
 
@@ -158,14 +159,15 @@ def schedule_owner_instruction(collab_room_id: str, content: str,
     except RuntimeError:
         logger.warning("[collab-wake] no running loop for owner instruction %s", collab_room_id[:8])
         return False
-    task = loop.create_task(_owner_instruction_turn(collab_room_id, content.strip(), thread_root, public))
+    task = loop.create_task(_owner_instruction_turn(collab_room_id, content.strip(), thread_root, public, about_proposal))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
     return True
 
 
 async def _owner_instruction_turn(collab_room_id: str, content: str,
-                                  thread_root: str = None, public: bool = False) -> None:
+                                  thread_root: str = None, public: bool = False,
+                                  about_proposal: str = None) -> None:
     from app.services.collab_service import CollabService
 
     svc = CollabService()
@@ -178,14 +180,15 @@ async def _owner_instruction_turn(collab_room_id: str, content: str,
     await _notify_status(collab_room_id, "thinking")
     try:
         await _owner_instruction_turn_inner(svc, room, collab_room_id, origin_room_id,
-                                            content, thread_root, public)
+                                            content, thread_root, public, about_proposal)
     finally:
         await _notify_status(collab_room_id, "done")
 
 
 async def _owner_instruction_turn_inner(svc, room: dict, collab_room_id: str,
                                         origin_room_id: str, content: str,
-                                        thread_root: str = None, public: bool = False) -> None:
+                                        thread_root: str = None, public: bool = False,
+                                        about_proposal: str = None) -> None:
     from app.services.followup_poller import _resolve_project_id, _room_busy
 
     waited = 0
@@ -228,12 +231,18 @@ async def _owner_instruction_turn_inner(svc, room: dict, collab_room_id: str,
             f"この部屋への出力は「窓口ログ:」で始まる1行だけ。"
         )
     else:
+        draft_block = _draft_context(about_proposal)
         prompt = (
             f"[窓口でのユーザー指示 / collab]\n"
             f"ユーザー（雇い主）が外部窓口「{room.get('title')}」の画面で、あなた宛に（相手に見えない形で）返答/指示しました。\n\n"
             f"## 窓口の直近の流れ\n{ctx}\n\n"
+            + draft_block +
             f"## ユーザーの発言\n{content}\n\n"
             f"## 出力先\n"
+            + (f"上の下書きについての発言です。質問なら collab_thread(action=\"consult\") で答える。"
+               f"直せる内容なら直してから、完了した状態の本文で compose_message(action=\"propose\", channel=\"collab\", "
+               f"collab_room_id=\"{collab_room_id}\", ...) を呼ぶ（同じカードが更新される。新しいカードは増えない）。\n"
+               if draft_block else "") +
             f"あなたが出した相談への返答なら、その方針に従って作業・返信案"
             f"（compose_message(action=\"propose\", channel=\"collab\", collab_room_id=\"{collab_room_id}\", ...））"
             f"・相手への確認を進める。新たな指示ならそれに従う。さらに確認や報告が要る時は "
@@ -364,6 +373,34 @@ def _text_for_dan(m: dict) -> str:
     return "\n".join(lines)
 
 
+# 相手への報告に「後でやります」を書く前に、自分で完了できることは完了させる（2026-09-14 ユーザー方針）
+_DO_FIRST_RULE = (
+    "報告を書く前に、自分で完了できることは完了させてから書く。"
+    "「後で直します」「作り直す時に」と書いてよいのは、今できない理由（相手や第三者の返事待ち・日数がかかる・"
+    "ユーザーの判断が要る）がある時だけで、その時は理由か目安を一緒に書く。\n"
+)
+
+
+def _draft_context(proposal_id: Optional[str]) -> str:
+    """カード上の「ダンへ」から来た発言に、話題の下書き（現在の本文・添付）を添える。"""
+    if not proposal_id:
+        return ""
+    try:
+        from app.services.outbound_message_service import OutboundMessageService
+        row = OutboundMessageService().get(proposal_id)
+    except Exception:
+        row = None
+    if not row:
+        return ""
+    ad = row.get("action_data") or {}
+    files = ad.get("attachments") or []
+    att = ("\n添付: " + ", ".join(f.get("name") or f.get("url", "") for f in files)) if files else ""
+    return (
+        f"## 話題の下書き（送信案 {row['id']}・{row.get('status')}）\n"
+        f"{(row.get('content') or '').strip()}{att}\n\n"
+    )
+
+
 async def _fallback_proposal(svc, collab_room_id: str, batch: List[dict]) -> None:
     """wake できない時は通知タブへ（複数件は1つの通知にまとめる）。"""
     joined = "\n---\n".join((m.get("content") or "").strip() for m in batch)[:2400]
@@ -445,6 +482,7 @@ async def _build_prompt(svc, room: dict, batch: List[dict]) -> str:
         f"等の定型挨拶・締めの「よろしくお願いいたします」・署名は書かない。会話の流れに自然に続く話し方で、"
         f"相手のトーンと長さに合わせて簡潔に（通常2〜6行。確認事項が多い時だけ箇条書きで長くてよい）。"
         f"連投にはカード**1枚**でまとめて応じる（1通ごとに返さない）。\n"
+        + _DO_FIRST_RULE +
         f"**相手の依頼内容を復唱しない**。依頼どおりにやったなら「反映しました、ご確認ください」程度で足りる。"
         f"書いてよいのは、相手がまだ知らないこと（相違点・気を利かせた追加・確認したいこと）だけ。"
         f"依頼と同じ内容の羅列（日付・金額・文言の繰り返し）はオウム返しであり禁止。"

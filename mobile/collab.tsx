@@ -657,7 +657,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
               </View>
             )}
             {proposals.map((p) => (
-              <ProposalCard key={p.id} proposal={p} request={request} apiBase={apiBase} />
+              <ProposalCard key={p.id} proposal={p} request={request} apiBase={apiBase} roomId={roomId} />
             ))}
           </View>
         }
@@ -949,7 +949,19 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
 // ============================================================
 // 送信案カード（承認・編集・破棄）
 // ============================================================
-function ProposalCard({ proposal, request, apiBase }: { proposal: Proposal; request: RequestFn; apiBase: string }) {
+function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Proposal; request: RequestFn; apiBase: string; roomId: string }) {
+  // カード上でダンに直接聞く／指示する（相手には見えない）
+  const [ask, setAsk] = useState('');
+  const [asking, setAsking] = useState(false);
+  const sendAsk = async () => {
+    const text = ask.trim(); if (!text || asking) return;
+    setAsking(true);
+    try {
+      await request(`/collab/rooms/${roomId}/messages`, { method: 'POST',
+        body: JSON.stringify({ content: text, metadata: { visibility: 'owner_only', about_proposal: proposal.id } }) });
+      setAsk('');
+    } catch (e) { Alert.alert('送れませんでした', String((e as Error).message)); } finally { setAsking(false); }
+  };
   const [body, setBody] = useState(proposal.content || '');
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'send' | 'discard' | 'sender' | 'apply' | null>(null);
@@ -1077,6 +1089,19 @@ function ProposalCard({ proposal, request, apiBase }: { proposal: Proposal; requ
           )}
         </Pressable>
       </View>
+      <View style={s.cardAskRow}>
+        <TextInput
+          style={s.cardAskInput}
+          placeholder="ダンへ（相手には見えません）"
+          placeholderTextColor={C.muted2}
+          value={ask}
+          onChangeText={setAsk}
+          onSubmitEditing={sendAsk}
+        />
+        <Pressable style={[s.threadSend, (!ask.trim() || asking) && { opacity: 0.4 }]} disabled={!ask.trim() || asking} onPress={sendAsk}>
+          {asking ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="send" size={14} color="#fff" />}
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -1174,6 +1199,8 @@ const s = StyleSheet.create({
   cardBody: { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, color: C.text, fontSize: 14, lineHeight: 20, padding: 10, minHeight: 80, textAlignVertical: 'top' },
   cardBtns: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 },
   cardMeta: { color: C.muted, fontSize: 11 },
+  cardAskRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
+  cardAskInput: { flex: 1, backgroundColor: C.bg, borderRadius: 10, color: C.text, fontSize: 13, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: '#4c3d6e88' },
   cardUpdate: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#1f3a33', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, marginBottom: 8 },
   cardUpdateText: { color: C.text, fontSize: 12 },
   cardSenderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },

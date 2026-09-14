@@ -3710,8 +3710,11 @@ async def collab_inbound(request: Request):
     if is_owner_private:
         from app.services.collab_wakeup import schedule_owner_instruction
         thread_root = (((message.get("metadata") or {}).get("reply_to")) or {}).get("id")
+        # カード上の「ダンへ」から来た発言なら、その下書きを話題として添える
+        about = (message.get("metadata") or {}).get("about_proposal")
         ok = schedule_owner_instruction(collab_room_id, text_for_dan,
-                                        thread_root=thread_root)
+                                        thread_root=thread_root,
+                                        about_proposal=str(about) if about else None)
         return {"status": "owner_instruction_scheduled" if ok else "ignored"}
 
     # ユーザーの公開発言: ダン宛てかどうかはダンが判断し、宛てられていれば公開の場で直接返答
