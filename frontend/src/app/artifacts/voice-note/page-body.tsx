@@ -53,9 +53,13 @@ export function PageBody() {
  useEffect(()=>{try{setInputId(localStorage.getItem('voice-note-microphone-choice-v2')||'');}catch{}const refreshInputs=()=>{void scanInputs().catch(()=>{});};refreshInputs();navigator.mediaDevices?.addEventListener('devicechange',refreshInputs);return()=>navigator.mediaDevices?.removeEventListener('devicechange',refreshInputs);},[]);
  const [inputError,setInputError]=useState('');
  const [inputRetry,setInputRetry]=useState(0);
- const monitoring=Boolean(root&&selected&&tab==='つくる');
+ const [checkingMic,setCheckingMic]=useState(false);
+ const [recordMeter,setRecordMeter]=useState<MediaStream|null>(null);
+ const recordingRequest=useRef(0);
+ useEffect(()=>{setCheckingMic(false);return()=>{recordingRequest.current++;};},[selected?.id,tab]);
+ const monitoring=Boolean(checkingMic&&root&&selected&&tab==='つくる');
  useEffect(()=>{
-   if(!monitoring)return;
+   if(!monitoring){setMeterStream(null);setInputError('');return;}
    let cancelled=false;let current:MediaStream|undefined;
    setMeterStream(null);setInputError('');
    void (async()=>{
@@ -119,17 +123,20 @@ export function PageBody() {
  useEffect(()=>{const retry=()=>{attemptedAudio.current=undefined;setRetryAudio(v=>v+1);};window.addEventListener('online',retry);const timer=setInterval(retry,30000);return()=>{window.removeEventListener('online',retry);clearInterval(timer);};},[]);
  async function deleteAudio(url?:string){if(!window.confirm('この録音を削除しますか？'))return;await run(async()=>{if(recording)throw new Error('録音を止めてから削除してください。');if(url){if(!selected)return;const a={...draft,audio:draft.audio.filter(x=>x.url!==url)};const r=await saveArticle(selected,a);setSelected(r);setRows(v=>v.map(x=>x.id===r.id?r:x));setDraft(a);setDirty(false);}else{await backupWrites.current.catch(()=>{});await recordingBackup(backupKey,null);setAudioBlob(undefined);}setMessage('録音を削除しました。文字起こしと記事本文は残しています。');});}
  async function record(){
- if(recording){recorder.current?.stop();return;}
+ if(recording){if(recorder.current?.state==='recording')recorder.current.stop();return;}
  await run(async()=>{
-   if(!meterStream?.active)throw new Error('入力の準備ができていません。マイクの許可と入力機器を確認してください。');
    if(!backupReady)throw new Error('録音の復元確認中です。少しお待ちください。');
-   const recordingStream=meterStream.clone();
+   const request=++recordingRequest.current;
+   const recordingStream=meterStream?.active?meterStream.clone():await navigator.mediaDevices.getUserMedia({audio:inputId?{deviceId:{exact:inputId}}:{deviceId:{ideal:'default'}}});
+   if(request!==recordingRequest.current){recordingStream.getTracks().forEach(t=>t.stop());return;}
+   setCheckingMic(false);setInputError('');setActiveInput(recordingStream.getAudioTracks()[0]?.label||'端末の標準入力');
+   void scanInputs().catch(()=>{});
    try{
      const r=new MediaRecorder(recordingStream);recorder.current=r;const chunks:Blob[]=[];
      r.ondataavailable=e=>{if(e.data.size){chunks.push(e.data);const backup=new Blob(chunks,{type:r.mimeType});backupWrites.current=backupWrites.current.catch(()=>{}).then(()=>recordingBackup(backupKey,backup)).catch(()=>{setError('端末への予備保存に失敗しました。画面を閉じず録音を止めてください。');});}};
-     r.onstop=()=>{setRecording(false);setAudioBlob(new Blob(chunks,{type:r.mimeType}));recordingStream.getTracks().forEach(t=>t.stop());};
-     r.onerror=()=>{recordingStream.getTracks().forEach(t=>t.stop());setRecording(false);setError('録音が中断しました。');};
-     r.start(1000);setRecording(true);
+     r.onstop=()=>{setRecordMeter(null);setRecording(false);setAudioBlob(new Blob(chunks,{type:r.mimeType}));recordingStream.getTracks().forEach(t=>t.stop());};
+     r.onerror=()=>{recordingStream.getTracks().forEach(t=>t.stop());setRecordMeter(null);setRecording(false);setError('録音が中断しました。');};
+     r.start(1000);setRecordMeter(recordingStream);setRecording(true);
    }catch(e){recordingStream.getTracks().forEach(t=>t.stop());throw e;}
  });}
  async function generateX(){await run(async()=>{const row=await save();const token=(await import('@/stores/auth-store')).useAuthStore.getState().token;const response=await fetch('/api/voice-note/editorial',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({id:row.id,mode:'social',instruction:articleOf(row).xDraft?.instruction||''})});const data=await response.json();if(!response.ok)throw new Error(data.error||'X原稿を作成できませんでした。');setSelected(data.row);setDraft(articleOf(data.row));setRows(v=>v.map(x=>x.id===row.id?data.row:x));setDirty(false);});}
@@ -160,7 +167,7 @@ export function PageBody() {
  return <main className={styles.app}>
  <header className={styles.header}><div className={styles.brand}><FileText size={23}/><EditableText as="span" editId="voice-note-home-brand">話して、noteに。</EditableText></div><EditableText as="span" editId="voice-note-home-private" className={styles.private}><LockKeyhole size={14}/>自分だけの編集室</EditableText></header>
  <div className={styles.top}><div><EditableText as="p" editId="voice-note-home-eyebrow" className={styles.eyebrow}>あなたの経験を、誰かの役に立つ記事へ。</EditableText><EditableText as="h1" editId="voice-note-home-heading">考えは、話すところから。</EditableText><EditableText as="p" editId="voice-note-home-lead" className={styles.lead}>まとまっていなくて大丈夫。話した内容を残して、ダンと記事に仕上げます。</EditableText></div><div className={styles.goal}><EditableText as="small" editId="voice-note-home-goal-label">今月の{basis==='gross'?'売上':'受取額'} / 目標</EditableText><EditableText as="strong" editId="voice-note-home-goal-value">{measured.length?'¥'+amount.toLocaleString():'未集計'} <span>/ ¥{target.toLocaleString()}</span></EditableText><progress max={target} value={amount}/><EditableText as="small" editId="voice-note-home-goal-help">{measured.length?'確認済みの実績を集計':'売上を確認したら「実績」に記録'}</EditableText></div></div>
- <nav className={styles.tabs} aria-label="編集室のメニュー">{['つくる','記事一覧','実績'].map(t=><EditableText as="button" editId={`voice-note-home-tab-${t}`} key={t} aria-current={tab===t?'page':undefined} onClick={()=>setTab(t)}>{t}</EditableText>)}<EditableText as="button" editId="voice-note-home-refresh" className={styles.refresh} disabled={busy||editing||dirty||recording||Boolean(audioBlob)} onClick={()=>void refresh(selected?.id)}><RefreshCw size={15}/>更新</EditableText></nav>
+ <nav className={styles.tabs} aria-label="編集室のメニュー">{['つくる','記事一覧','実績'].map(t=><EditableText as="button" editId={`voice-note-home-tab-${t}`} key={t} aria-current={tab===t?'page':undefined} disabled={recording||busy} onClick={()=>setTab(t)}>{t}</EditableText>)}<EditableText as="button" editId="voice-note-home-refresh" className={styles.refresh} disabled={busy||editing||dirty||recording||Boolean(audioBlob)} onClick={()=>void refresh(selected?.id)}><RefreshCw size={15}/>更新</EditableText></nav>
  <div aria-live="polite">{error&&<p role="alert" data-edit-id="voice-note-home-error" className={styles.error}>{error}</p>}{message&&<p data-edit-id="voice-note-home-result" className={styles.notice}>{message}</p>}</div>
  {loading?<div className={styles.empty}>編集室を読み込んでいます…</div>:!root?<div className={styles.empty}><EditableText as="h2" editId="voice-note-home-auth-title">ダンの本人アカウントで開く編集室です。</EditableText><EditableText as="p" editId="voice-note-home-auth-copy">公開ページに記事本文は表示されません。</EditableText><EditableText as="button" editId="voice-note-home-retry" onClick={()=>void refresh()}>接続を再確認</EditableText></div>:<>
  {tab==='つくる'&&<div className={styles.workspace}><aside className={styles.side}><button className={styles.primary} disabled={busy||editing||recording||Boolean(audioBlob)} onClick={()=>void create()}><Plus size={17}/>新しい記事</button><small>記事の素材と下書き</small>{rows.map(r=><div className={styles.articleItem} key={r.id}><button className={selected?.id===r.id?styles.chosen:styles.item} onClick={()=>void pick(r)} disabled={busy||editing||recording||Boolean(audioBlob)}><span>{articleOf(r).title}</span><small>{articleOf(r).status}</small></button><button aria-label={`${articleOf(r).title}を削除`} disabled={busy||editing||recording||Boolean(audioBlob)} title="記事を削除" onClick={()=>requestDelete(r)}><Trash2 size={16}/></button></div>)}<div className={styles.hint}><strong>こんな話から</strong><p>最近、面倒だったこと。<br/>試して失敗したこと。<br/>前より楽になった工夫。</p></div></aside>
@@ -172,8 +179,8 @@ export function PageBody() {
  <div role="group" aria-label="録音に使う入力" style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:16}}>
  <EditableText as="button" editId="voice-note-input-default" type="button" aria-pressed={!inputId} disabled={recording} onClick={()=>{chooseInput('');setInputRetry(v=>v+1);}} style={{background:!inputId?'#07856d':undefined,color:!inputId?'white':undefined}}>端末の標準入力</EditableText>
  {inputs.filter(d=>d.deviceId!=='default'&&d.deviceId!=='communications').map((d,i)=><button key={d.deviceId} type="button" aria-pressed={inputId===d.deviceId} disabled={recording} onClick={()=>{chooseInput(d.deviceId);setInputRetry(v=>v+1);}} style={{background:inputId===d.deviceId?'#07856d':undefined,color:inputId===d.deviceId?'white':undefined,overflowWrap:'anywhere'}}>{d.label||`入力 ${i+1}`}</button>)}
- </div><InputLevel stream={meterStream}/>{inputError&&<p role="alert">{inputError}</p>}{recording&&<p role="status">録音中の入力：{activeInput}</p>}
- <details open={!draft.free}><summary>話したこと・音声</summary><div className={styles.actions}><button onClick={()=>void record()} disabled={busy||editing||Boolean(audioBlob)||(!recording&&(!meterStream||!backupReady))}>{recording?<Square size={16}/>:<Mic size={16}/>} {recording?'録音を止める':'録音する'}</button><button disabled={busy||editing||recording} onClick={()=>fileInput.current?.click()}><Upload size={16}/>音声を追加</button><input ref={fileInput} type="file" accept="audio/*,.webm,.mp4" hidden onChange={e=>{const f=e.target.files?.[0];if(f)void attach(f);e.target.value='';}}/></div>
+ </div><EditableText as="button" editId="voice-note-mic-check" type="button" disabled={recording} aria-pressed={checkingMic} onClick={()=>setCheckingMic(v=>!v)}>{checkingMic?'マイクチェックを終える':'マイクチェック'}</EditableText>{(recording||checkingMic)&&<InputLevel stream={recording?recordMeter:meterStream}/>}{inputError&&<p role="alert">{inputError}</p>}{recording&&<p role="status">録音中の入力：{activeInput}</p>}
+ <details open={!draft.free}><summary>話したこと・音声</summary><div className={styles.actions}><button onClick={()=>void record()} disabled={busy||editing||Boolean(audioBlob)||(!recording&&!backupReady)}>{recording?<Square size={16}/>:<Mic size={16}/>} {recording?'録音を止める':'録音する'}</button><button disabled={busy||editing||recording} onClick={()=>fileInput.current?.click()}><Upload size={16}/>音声を追加</button><input ref={fileInput} type="file" accept="audio/*,.webm,.mp4" hidden onChange={e=>{const f=e.target.files?.[0];if(f)void attach(f);e.target.value='';}}/></div>
  {audioBlob&&<div className={`${styles.audio} ${styles.mediaFrame}`}><RecordedAudio blob={audioBlob}/><small role="status">{busy?'録音を自動保存しています…':'保存待ちです。接続が戻ると自動で再試行します。'}</small><button data-edit-id="voice-note-audio-retry" disabled={busy||editing} onClick={()=>{attemptedAudio.current=undefined;setRetryAudio(v=>v+1);}}>再試行</button><button className={styles.mediaDelete} aria-label="録音を削除" title="録音を削除" data-edit-id="voice-note-audio-discard" disabled={busy||editing} onClick={()=>void deleteAudio()}><Trash2 size={17}/></button></div>}
  {draft.audio.map(a=><div key={a.url} className={`${styles.audio} ${styles.mediaFrame}`}><small>{a.name} · 保存済み</small>{a.url?.trim()?<StableAudio src={a.url}/>:<span>音声の保存先が見つかりません。</span>}<button className={styles.mediaDelete} aria-label="録音を削除" title="録音を削除" data-edit-id={`voice-note-audio-delete-${a.url}`} disabled={busy||editing||recording||Boolean(audioBlob)} onClick={()=>void deleteAudio(a.url)}><Trash2 size={17}/></button></div>)}
  <label className={styles.field}>話した内容<textarea rows={5} value={draft.transcript} placeholder="思いついた順で、そのまま。音声だけでも記事にできます。" onChange={e=>update({transcript:e.target.value})}/></label><button className={styles.primary} disabled={busy||editing||recording||(!audioBlob&&!draft.transcript.trim()&&!draft.audio.length)} onClick={()=>void send('edit')}>noteにする<ArrowRight size={16}/></button></details>
