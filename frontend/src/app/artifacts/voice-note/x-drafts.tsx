@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { EditableText } from '@/components/dan/editable';
 import type { Article } from './model';
 import styles from './style.module.css';
@@ -9,7 +9,9 @@ export function intentUrl(text:string,id?:string){const q=new URLSearchParams({t
 const blank:NonNullable<Article['xDraft']>={post:'',articleTitle:'',articleBody:'',reply:'',postUrl:'',instruction:''};
 
 export function XDrafts({article,onChange,onGenerate,disabled}:{article:Article;onChange:(patch:Partial<Article>)=>void;onGenerate:()=>Promise<void>;disabled:boolean}){
- const [view,setView]=useState<'post'|'article'|'reply'>('post');const [notice,setNotice]=useState('');
+ const [view,setViewState]=useState<'post'|'article'|'reply'>('post');const [notice,setNotice]=useState('');
+ useEffect(()=>{const restore=()=>{const value=new URL(location.href).searchParams.get('x');setViewState(value==='article'||value==='reply'?value:'post');};restore();window.addEventListener('popstate',restore);return()=>window.removeEventListener('popstate',restore);},[]);
+ function setView(value:'post'|'article'|'reply'){setViewState(value);const url=new URL(location.href);url.searchParams.set('x',value);url.hash='voice-note-x-drafts';if(url.href!==location.href)history.pushState(null,'',url);}
  const d=article.xDraft||blank;
  const patch=(p:Partial<typeof d>)=>onChange({xDraft:{...d,...p}});
  const reply=[d.reply,article.noteUrl].filter(Boolean).join('\n\n');const id=replyId(d.postUrl);
