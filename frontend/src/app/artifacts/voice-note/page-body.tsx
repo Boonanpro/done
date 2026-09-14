@@ -131,7 +131,27 @@ export function PageBody() {
      r.start(1000);setRecording(true);
    }catch(e){recordingStream.getTracks().forEach(t=>t.stop());throw e;}
  });}
- async function send(kind:'edit'|'publish',mode?:'title'){if(kind==='edit'){await run(async()=>{if(recording)throw new Error('録音を止めてからnoteにしてください。');setMessage(audioBlob?'録音を保存しています…':'記事作成を始めています…');const row=audioBlob?await persistAudio(new File([audioBlob],'録音.'+(audioBlob.type.includes('mp4')?'m4a':'webm'),{type:audioBlob.type})):await save();setMessage('記事作成を始めています…');const updated=await startEditorial(row.id,mode);setSelected(updated);setDraft(articleOf(updated));setRows(v=>v.map(x=>x.id===updated.id?updated:x));setDirty(false);setMessage('');});return;}await run(async()=>{if(kind==='publish'&&(!draft.title.trim()||!draft.free.trim()||(draft.price>0&&!draft.paid.trim())))throw new Error('タイトル・本文・有料部分を入力してください。');const row=await save();setConfirm(null);setMessage('noteへの投稿を開始しています。');await api.sm.sendMessageStream({message:publishRequest(row.id),session_id:ROOM_ID,client_message_id:crypto.randomUUID()},{onError:e=>setError(e),onComplete:()=>{void refresh(row.id);},onAIMessage:m=>setMessage(m.content),onInterrupted:()=>setMessage('接続が切れました。このチャットの処理状況を確認してから更新してください。')});});}
+ async function send(kind:'edit'|'publish',mode?:'title'){if(kind==='edit'){await run(async()=>{if(recording)throw new Error('録音を止めてからnoteにしてください。');setMessage(audioBlob?'録音を保存しています…':'記事作成を始めています…');const row=audioBlob?await persistAudio(new File([audioBlob],'録音.'+(audioBlob.type.includes('mp4')?'m4a':'webm'),{type:audioBlob.type})):await save();setMessage('記事作成を始めています…');const updated=await startEditorial(row.id,mode);setSelected(updated);setDraft(articleOf(updated));setRows(v=>v.map(x=>x.id===updated.id?updated:x));setDirty(false);setMessage('');});return;}
+  await run(async()=>{
+   paper.current?.flush();
+   const current=live.current.draft;
+   if(!current.title.trim()||!current.free.trim()||(current.price>0&&!current.paid.trim()))throw new Error('タイトル・本文・有料部分を入力してください。');
+   const row=await save();setConfirm(null);setMessage('投稿依頼を送信しています。');
+   let failure='';
+   await api.sm.sendMessageStream({message:publishRequest(row.id),session_id:ROOM_ID,client_message_id:crypto.randomUUID()},{
+    onUserMessage:()=>setMessage('投稿依頼を受け付けました。noteへの公開を確認しています。'),
+    onError:e=>{failure=e;},
+    onComplete:()=>{},
+    onAIMessage:m=>setMessage(m.content),
+    onInterrupted:()=>{if(!failure)failure='接続が切れたため、公開結果を確認できません。二重投稿を避けるため、記事一覧を更新して結果を確認してください。';}
+   });
+   if(failure){setMessage('');throw new Error(failure);}
+   await refresh(row.id);
+   const result=articleOf(await call<Row>('/dan-notion/blocks/'+row.id));
+   if(result.status==='公開済み'&&result.noteUrl)setMessage('noteへの公開を確認しました。');
+   else if(!result.scheduledAt){setMessage('');throw new Error('投稿処理が終了しましたが、公開完了を確認できませんでした。note側の状態を確認してください。');}
+  });
+ }
  useEffect(()=>{if(!selected||!editing)return;let stopped=false;const id=selected.id;const poll=async()=>{try{const row=await call<Row>('/dan-notion/blocks/'+id);if(!stopped){setError('');setSelected(row);setDraft(articleOf(row));setRows(v=>v.map(x=>x.id===id?row:x));setDirty(false);}}catch{if(!stopped)setError('進捗を取得できません。接続が戻ると再確認します。');}};const timer=setInterval(()=>{void poll();},2000);return()=>{stopped=true;clearInterval(timer);};},[selected?.id,editing]);
  const month=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Tokyo'}).slice(0,7);
  const measured=rows.map(articleOf).filter(a=>a.salesMonth===month&&a.checkedAt);const basis=root?.properties.target_basis==='gross'?'gross':'received';const amount=measured.reduce((n,a)=>n+a[basis],0);const target=Number(root?.properties.monthly_target)||300000;
