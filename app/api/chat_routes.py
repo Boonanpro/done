@@ -44,7 +44,7 @@ from app.models.chat_schemas import (
     SessionActivateResponse, SessionUpdateRequest,
 )
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 
 class CancelRequest(BaseModel):
@@ -62,6 +62,26 @@ WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
 COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
+
+
+def _message_responses(rows) -> list[MessageResponse]:
+    """保存済みメッセージ行を応答型に詰める。検証に失敗した行だけ落とす。
+
+    以前は1行でも検証に失敗すると pydantic の ValidationError（ValueError の
+    子クラス）が権限拒否用の except ValueError に吸われ、部屋全体が 403 に
+    なって開けなくなった（sender_type='system' の行1件で発生、2026-09-14）。
+    データ1行の不整合で部屋が死なないよう、壊れた行は警告して飛ばす。
+    """
+    out: list[MessageResponse] = []
+    for m in rows:
+        try:
+            out.append(MessageResponse(**m))
+        except ValidationError as e:
+            logger.warning(
+                "message row skipped (id=%s room=%s): %s",
+                (m or {}).get("id"), str((m or {}).get("room_id"))[:8], str(e).splitlines()[0],
+            )
+    return out
 DAN_LATENCY_LOG = Path(__file__).resolve().parents[2] / "dan_latency.log"
 
 
@@ -1694,7 +1714,7 @@ async def search_messages(
         if not q or not q.strip():
             return MessagesListResponse(messages=[])
         messages = await service.search_messages(room_id, current_user.user_id, q, limit=min(limit, 100))
-        return MessagesListResponse(messages=[MessageResponse(**m) for m in messages])
+        return MessagesListResponse(messages=_message_responses(messages))
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
@@ -1713,7 +1733,7 @@ async def get_messages(
     """Get messages from a room"""
     try:
         messages = await service.get_messages(room_id, current_user.user_id, limit=limit, before=before)
-        return MessagesListResponse(messages=[MessageResponse(**m) for m in messages])
+        return MessagesListResponse(messages=_message_responses(messages))
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
@@ -1878,7 +1898,7 @@ async def get_dan_messages(
     try:
         dan_room = await service.get_or_create_dan_room(current_user.user_id)
         messages = await service.get_messages(dan_room["id"], current_user.user_id, limit=limit, before=before)
-        return MessagesListResponse(messages=[MessageResponse(**m) for m in messages])
+        return MessagesListResponse(messages=_message_responses(messages))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2827,7 +2847,7 @@ async def switch_dan_session(
             "success": result["success"],
             "session_id": result["session_id"],
             "room": dan_room,
-            "messages": {"messages": [MessageResponse(**m) for m in messages]},
+            "messages": {"messages": _message_responses(messages)},
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -3190,7 +3210,7 @@ async def open_room(
 
     async def _messages():
         msgs = await service.get_messages(room_id, user_id, limit=limit)
-        return [MessageResponse(**m).model_dump(mode="json") for m in msgs]
+        return [m.model_dump(mode="json") for m in _message_responses(msgs)]
 
     async def _artifacts():
         svc = ChatArtifactService()

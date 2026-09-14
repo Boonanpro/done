@@ -432,6 +432,18 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
     );
   }
 
+  // 本人でもダンでもない行（Doneルームからの委譲依頼、見張りの通知など）は
+  // 吹き出しにせず、中央寄せの控えめな案内として描く。
+  if (msg.sender_type === 'system') {
+    return (
+      <div className="flex justify-center px-2">
+        <div className="max-w-[85%] min-w-0 rounded-lg border border-border/60 bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+          {msg.content}
+        </div>
+      </div>
+    );
+  }
+
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
     // 長文・URL・英数字の連続など折り返せない塊があると、items-end の
@@ -2872,7 +2884,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                     >
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
                         <span className="font-medium text-foreground/80">
-                          {m.sender_type === 'ai' ? 'ダン' : m.sender_name}
+                          {m.sender_type === 'ai' ? 'ダン' : m.sender_type === 'system' ? 'システム' : m.sender_name}
                         </span>
                         <span>{new Date(m.created_at).toLocaleString('ja-JP')}</span>
                       </div>

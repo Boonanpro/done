@@ -3389,7 +3389,7 @@ export interface components {
          * @description Message sender type
          * @enum {string}
          */
-        SenderType: "human" | "ai";
+        SenderType: "human" | "ai" | "system";
         /**
          * StorageType
          * @description ストレージタイプ

@@ -32,9 +32,15 @@ class MemberRole(str, Enum):
 
 
 class SenderType(str, Enum):
-    """Message sender type"""
+    """Message sender type
+
+    system = 本人でもダンでもない行（Doneルームからの委譲依頼、見張りの通知など）。
+    この値を落とすと、system 行が1件ある部屋のメッセージ取得が丸ごと検証エラーに
+    なり、部屋が開けなくなる（2026-09-14 実発生）。
+    """
     HUMAN = "human"
     AI = "ai"
+    SYSTEM = "system"
 
 
 # ==================== Auth Schemas ====================

@@ -73,7 +73,7 @@ export interface TokenResponse {
 export interface ReplyToMessage {
   id: string;
   sender_name: string;
-  sender_type: 'human' | 'ai';
+  sender_type: 'human' | 'ai' | 'system';
   content: string;
   created_at: string;
 }
@@ -89,7 +89,7 @@ export interface MessageResponse {
   room_id: string;
   sender_id: string;
   sender_name: string;
-  sender_type: 'human' | 'ai';
+  sender_type: 'human' | 'ai' | 'system';
   content: string;
   created_at: string;
   ai_context?: {
