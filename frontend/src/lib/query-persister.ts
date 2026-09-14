@@ -17,6 +17,9 @@ export const PERSISTED_QUERY_KEYS = new Set([
   // コミュニケーション（一覧・部屋・メッセージ・参加者）も同じ扱い。一覧は以前
   // 2〜4秒のAPIを毎回待って骨組み表示していたので、手元の写しを先に描く
   'collab-rooms', 'collab-room', 'collab-messages', 'collab-participants',
+  // 送信案カード（一覧＋各カード本体）。写しが無いと開くたびに「読み込み中…」→出現し直しになり、
+  // 中身は変わっていないのに「再生成された」ように見える（2026-09-14）
+  'collab-outbound', 'outbound-proposal',
 ]);
 export const PERSIST_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 保存形式を変えた時にここを上げると古い写しを捨てる

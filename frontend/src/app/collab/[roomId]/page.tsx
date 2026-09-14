@@ -733,7 +733,7 @@ export default function CollabRoomPage() {
             <div className="flex flex-col items-end space-y-3 pt-2">
               <div className="flex items-center gap-1.5 text-xs text-violet-300">
                 <Bot className="h-3.5 w-3.5" />
-                ダンが返信案を用意しています（送信するまで相手には見えません）
+                ダンの返信案（未送信・送信するまで相手には見えません）
               </div>
               {pendingProposals.map((p) => (
                 <OutboundMessageCard key={p.id} proposalId={p.id} />
