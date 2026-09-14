@@ -1,6 +1,14 @@
 ﻿# この部屋の音声note運用
 
 room_id: e47f056e-77b1-4e39-9173-4a01dfadbc03
+
+## 2026-09-14 読み込みとページの住所
+- `?article=<id>` で記事、`view=articles/results` で記事一覧/実績、`x=post/article/reply` でX原稿の表示を保持する。戻る/進むでも入力を保存してから切り替える。
+- `/api/voice-note/workspace` は既存の本人認証を確認してから、本人のこの編集室に属する記事だけを取得する。DBから現行原稿の項目を選び、重いrevisionsと重複contentを初回取得に含めない。
+- 履歴は「前の原稿」を開いた時だけ取得し、個々の本文はその履歴を開いた時だけ描画。保存時はサーバー上の履歴・追加項目を必ず引き継ぐ。更新日時のUTC表記差（Z/+00:00）は同一として比較し、小数秒の精度を落とさない。
+- 同じタブ・同じ本人の保存済み原稿を先に表示し、裏で最新版を確認する。確認中は編集を止める。認証失敗時は原稿を閉じる。未保存下書きの復元と競合検知は従来どおり維持。
+- Xとnoteの重複に関する本人の相談は継続中。今回の修正で保存済みX原稿や生成方針を自動変更しない。
+
 成果物: voice-note。保存先は既存の認証付き /api/v1/dan-notion/blocks。公開artifact_documentsには記事を保存しない。
 root page: properties.kind=voice_note_workspace, room_id。子pageのproperties.articleにmodel.tsのArticleを保存。
 DB設計とAPIは既存blocksと認証付きdan-notion APIを再利用する。新規の公開データAPIは設けない。
