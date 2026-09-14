@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("WSS proxy failed to start: %s", e)
 
+    # 部屋ログの押し込みフィード（room_feed）の購読者は core にしかいない。
+    # ここで「自分が core」と印を付けると、core 外のプロセスからの publish は
+    # 内部APIへ転送される（送信案カード等が画面へ即時に届く）。
+    from app.services.room_feed import mark_core_process
+    mark_core_process()
+
     manager = SandboxManager(port=SANDBOX_PORT)
     set_manager(manager)
     logger.info("dan_core started (sandbox manager ready, port=%s)", SANDBOX_PORT)
@@ -209,6 +215,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Slow-request logger. ページ更新やエディタ起動が「時々劇遅」になる正体を推測で
+# なく実測で掴むため、閾値(既定2秒)を超えた HTTP 応答だけをパスと所要時間つきで
+# dan_slow_requests.log に残す。遅い時間帯にこのログを見れば犯人のエンドポイントと
+# 秒数が一目で分かる。SSE(/feed 等)は開きっぱなしなので除外。無効化=DAN_SLOWLOG=0。
+import time as _time  # noqa: E402
+from datetime import datetime as _dt, timezone as _tz  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_SLOWLOG_ENABLED = os.environ.get("DAN_SLOWLOG", "1") != "0"
+_SLOWLOG_THRESHOLD = float(os.environ.get("DAN_SLOWLOG_THRESHOLD_S", "2.0"))
+_SLOWLOG_SKIP = ("/feed", "/stream", "/ws/", "/realtime")
+_SLOWLOG_PATH = _Path(__file__).resolve().parents[2] / "dan_slow_requests.log"
+
+
+@app.middleware("http")
+async def _slow_request_logger(request, call_next):
+    if not _SLOWLOG_ENABLED:
+        return await call_next(request)
+    path = request.url.path
+    if any(s in path for s in _SLOWLOG_SKIP):
+        return await call_next(request)
+    t0 = _time.perf_counter()
+    response = await call_next(request)
+    dt = _time.perf_counter() - t0
+    if dt >= _SLOWLOG_THRESHOLD:
+        try:
+            with open(_SLOWLOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(f"{_dt.now(_tz.utc).isoformat()} {dt:.2f}s {request.method} {path} status={response.status_code}\n")
+        except Exception:
+            pass
+        logger.warning("SLOW_REQUEST %.2fs %s %s", dt, request.method, path)
+    return response
 
 app.include_router(sandbox_router)
 app.include_router(chat_router, prefix="/api/v1")

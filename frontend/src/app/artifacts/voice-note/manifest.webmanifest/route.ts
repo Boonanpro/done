@@ -1,0 +1,1 @@
+export function GET(){return Response.json({name:'話して、noteに。',short_name:'音声note',start_url:'.',display:'standalone',background_color:'#f6f7f3',theme_color:'#087b64'},{headers:{'Content-Type':'application/manifest+json'}});}

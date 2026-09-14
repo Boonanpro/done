@@ -2,12 +2,45 @@
 Supabase Client Service
 """
 from typing import Optional, Any
-from supabase import create_client, Client
+import os
+from supabase import create_client, Client, ClientOptions
 from datetime import datetime, timezone
 import uuid
 
+import httpx
+
 from app.config import settings
 from app.services.encryption import get_encryption_service
+
+
+# 同期クライアントはイベントループ上で呼ばれる箇所が多い。既定の 120 秒待ちだと
+# 死んだ接続の上で core 全体が数分固まる（2026-09-11: 部屋オープンが画面側で 7 分、
+# サーバー処理は 0.5 秒）。1 呼び出しの上限を短くし、古い keep-alive 接続は
+# 再利用前に捨てて「Server disconnected」を減らす。
+DB_TIMEOUT_S = float(os.environ.get("DAN_DB_TIMEOUT_S", "15"))
+DB_CONNECT_TIMEOUT_S = float(os.environ.get("DAN_DB_CONNECT_TIMEOUT_S", "5"))
+DB_KEEPALIVE_EXPIRY_S = float(os.environ.get("DAN_DB_KEEPALIVE_EXPIRY_S", "20"))
+
+
+def build_client_options() -> ClientOptions:
+    http_client = httpx.Client(
+        timeout=httpx.Timeout(DB_TIMEOUT_S, connect=DB_CONNECT_TIMEOUT_S),
+        limits=httpx.Limits(
+            max_connections=50,
+            max_keepalive_connections=20,
+            keepalive_expiry=DB_KEEPALIVE_EXPIRY_S,
+        ),
+        follow_redirects=True,
+        # HTTP/1.1 に固定する。h2 だとサーバー（Cloudflare/Supabase）が閉じた接続を
+        # 再利用前に検知できず「Server disconnected」が頻発した（2026-09-11、30 秒に
+        # 1 回のペース）。h1 の接続プールは再利用前にソケット閉鎖を検知して繋ぎ直す。
+        http2=False,
+    )
+    return ClientOptions(
+        postgrest_client_timeout=DB_TIMEOUT_S,
+        storage_client_timeout=max(DB_TIMEOUT_S, 60),
+        httpx_client=http_client,
+    )
 
 
 class SupabaseClient:
@@ -24,6 +57,7 @@ class SupabaseClient:
         self.client: Client = create_client(
             settings.SUPABASE_URL,
             key,
+            options=build_client_options(),
         )
         self.encryption = get_encryption_service()
     

@@ -9,6 +9,8 @@ import re
 import asyncio
 import logging
 import os
+import time
+from app.tools.browser_metrics import record_timing
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional, Tuple
@@ -374,12 +376,18 @@ BROWSER_TOOL = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "fill_totp_code", "wait_for_otp_from_app", "wait_for_link_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "upload_file", "solve_captcha", "human_click", "human_drag", "puzzle_fit"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_form", "wait_for", "fill_credential", "fill_totp_code", "wait_for_otp_from_app", "wait_for_link_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "upload_file", "solve_captcha", "human_click", "human_drag", "puzzle_fit"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）。action=fill_credentialではログイン先URLで保存済み認証情報を照合するのに使える"},
             "ref": {"type": "string", "description": "操作対象の要素ref（例: @e1）"},
             "text": {"type": "string", "description": "入力テキスト（action=type）"},
+            "fields": {"type": "array", "minItems": 1, "maxItems": 20,
+                "description": "fill_form: 今の画面で確認済みの通常入力欄をまとめて入力・検証する。依存する欄やパスワードは個別操作。送信しない。失敗時は再観察し、全体を再実行しない。",
+                "items": {"type": "object", "properties": {"ref": {"type": "string"}, "value": {"type": "string"}}, "required": ["ref", "value"], "additionalProperties": False}},
+            "expected_url": {"type": "string", "description": "fill_form: 最後に確認した現在ページの正確なURL（画面遷移時は中止）"},
+            "expect": {"type": "object", "description": "click/type/wait_for: 実DOMから確認した操作後の条件。selectorがvisible/hiddenになるまで待ち、text指定時は完全一致も確認。clickでは同じタブに結果が出る操作だけに使う（新タブには指定しない）。すでに成立している無関係な条件を使わない。失敗しても操作を再実行せず画面確認。",
+                "properties": {"selector": {"type": "string"}, "state": {"type": "string", "enum": ["visible", "hidden"]}, "text": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000}}, "required": ["selector"], "additionalProperties": False},
             "field": {"type": "string", "enum": ["password", "username"], "description": "action=fill_credentialで入れる項目。password=保存済みパスワード, username=保存済みログインID（既定: password）"},
             "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type / fill_credential, デフォルト: false）"},
             "timeout_seconds": {"type": "integer", "description": "待機のタイムアウト秒数（action=wait_for_otp_from_app は既定30 / wait_for_link_from_app は既定60）"},
@@ -407,6 +415,13 @@ BROWSER_TOOL = {
         "required": ["action"]
     }
 }
+
+BROWSER_TOOL["description"] += (
+    " 高速操作: 同じ画面の確認済み・独立した通常入力欄はfill_form(fields, expected_url)でまとめて入力する。"
+    "各値と要素の同一性を検証し、最後に画面を返す。送信・認証・動的に追加される欄は個別に扱う。"
+    " click/typeの結果を示す実DOM条件が分かる時はexpectを指定すると固定待機を省き、条件成立時に進める。"
+    " wait_forは操作を繰り返さず結果だけ待つ。期待条件未成立や部分失敗では現在の画面を確認する。"
+)
 
 # ============================================
 # URL読み込みツール（Jina Reader）
@@ -2999,6 +3014,15 @@ async def _fill_code_into_inputs(page, ref: str, code: str) -> str:
 
 
 async def _get_browser_state(page) -> Dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        return await _get_browser_state_impl(page)
+    finally:
+        logger.info("BROWSER_TIMING phase=observation elapsed_ms=%.2f", (time.perf_counter() - started) * 1000)
+        record_timing("observation", "full_state", (time.perf_counter() - started) * 1000)
+
+
+async def _get_browser_state_impl(page) -> Dict[str, Any]:
     """
     操作後のページ状態を取得（スクリーンショット + 要素リスト）
 
@@ -3156,7 +3180,42 @@ async def _get_browser_state(page) -> Dict[str, Any]:
     }
 
 
+async def _browser_expect_state(page, condition, login_was_authorized=None):
+    verified = False
+    try:
+        await page.wait_for_condition(condition)
+        verified = True
+    except Exception:
+        # A timeout says nothing about whether the action happened. Return the
+        # actual screen; never repeat a click or submit automatically.
+        pass
+    if login_was_authorized is False and _looks_like_login_url(page.url):
+        await page.go_back()
+        verified = False
+    state = await _get_browser_state(page)
+    state["success"] = verified
+    state["condition_verified"] = verified
+    message = "Expected page condition verified; inspect the result before reporting completion."
+    if not verified:
+        message = "Expected condition was not verified. The action may have happened. Inspect this screen; do not blindly repeat the action."
+        state["error"] = message
+    state["content"].insert(0, {"type": "text", "text": message})
+    return state
+
+
 async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    started = time.perf_counter()
+    status = "error"
+    try:
+        result = await _execute_browser_tool_impl(action, params)
+        status = "failed" if isinstance(result, dict) and result.get("success") is False else "success"
+        return result
+    finally:
+        logger.info("BROWSER_TIMING phase=tool action=%s elapsed_ms=%.2f", action, (time.perf_counter() - started) * 1000)
+        record_timing("tool", action if action in BROWSER_TOOL["input_schema"]["properties"]["action"]["enum"] else "unknown", (time.perf_counter() - started) * 1000, status)
+
+
+async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
     ブラウザツールを実行
 
@@ -3170,7 +3229,28 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
     from app.tools.browser import get_executor_page
 
     try:
+        condition = params.get("expect")
+        if condition is not None:
+            from app.tools.browser_actions import validate_condition
+            validate_condition(condition)
+            if action not in {"click", "type", "wait_for"}:
+                return {"success": False, "error": "expect is supported for click/type/wait_for only"}
         page = await get_executor_page()
+
+        if condition is not None and action in {"click", "type"}:
+            await page.check_condition_before_action(condition)
+
+        if action == "fill_form":
+            result = await page.fill_form(params.get("fields"), params.get("expected_url"))
+            state = await _get_browser_state(page)
+            state.update(result)
+            state["content"].insert(0, {"type": "text", "text": f"Form input verification: {result}. This does not verify submission or server-side saving."})
+            return state
+
+        if action == "wait_for":
+            if condition is None:
+                return {"success": False, "error": "expect is required"}
+            return await _browser_expect_state(page, condition)
 
         if action in {"open", "open_target"}:
             url = params.get("url")
@@ -3285,16 +3365,25 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 tab_count_before = 1
 
             if ref:
-                # force=True: Amazonカルーセル等のオーバーレイによるクリック妨害を回避
-                # data-dan-refで特定済みの要素なのでforceで安全
-                await page.click_by_ref(ref, force=True, timeout=BROWSER_CLICK_TIMEOUT)
+                # Let Playwright verify visibility, stability and hit target.
+                # A ref identifies an element, but does not prove it is clickable.
+                click_result = await page.guarded_click(ref, timeout=BROWSER_CLICK_TIMEOUT)
+                if not click_result.get("success"):
+                    state = await _get_browser_state(page)
+                    state.update(click_result)
+                    state["error"] = click_result.get("reason", "Click was not verified")
+                    state["content"].insert(0, {"type": "text", "text": f"Click diagnosis: {click_result}"})
+                    return state
             elif x is not None and y is not None:
                 await page.mouse.click(x, y)
             else:
                 return {"success": False, "error": "ref または x,y座標が必要です"}
 
             # クリック後、新タブが開いたか確認
-            await page.wait_for_timeout(500)
+            if condition is None:
+                await page.wait_for_timeout(500)
+            else:
+                return await _browser_expect_state(page, condition, login_was_authorized)
             try:
                 tab_after = await page.get_tab_count()
                 tab_count_after = tab_after.get("count", 1)
@@ -3334,11 +3423,14 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             ref = params.get("ref")
             text = params.get("text")
             press_enter = params.get("press_enter", False)
-            if not ref or not text:
+            if not ref or not isinstance(text, str):
                 return {"success": False, "error": "ref と text が必要です"}
             await page.fill_by_ref(ref, text)
             if press_enter:
                 await page.keyboard.press("Enter")
+            if condition is not None:
+                return await _browser_expect_state(page, condition)
+            if press_enter:
                 # Enter後のナビゲーション完了を待つ（"load"でリソース読み込みまで待機）
                 try:
                     await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
@@ -3783,7 +3875,8 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             if not ref or not value:
                 return {"success": False, "error": "ref と value が必要です"}
             # refからセレクタを構築して select_option を呼ぶ
-            selector = f'[data-dan-ref="{ref}"]'
+            from app.tools.browser_actions import ref_selector
+            selector = ref_selector(ref)
             await page.locator(selector).select_option(value)
             return await _get_browser_state(page)
 
@@ -3843,7 +3936,8 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
         elif action == "hover":
             ref = params.get("ref")
             if ref:
-                selector = f'[data-dan-ref="{ref}"]'
+                from app.tools.browser_actions import ref_selector
+                selector = ref_selector(ref)
                 await page.locator(selector).hover()
             elif params.get("x") is not None and params.get("y") is not None:
                 await page.mouse.move(float(params["x"]), float(params["y"]))
@@ -4556,5 +4650,3 @@ def _get_project_service():
         key = settings.SUPABASE_SERVICE_ROLE_KEY or settings.SUPABASE_KEY
         service.supabase = create_client(settings.SUPABASE_URL, key)
         return service
-
-

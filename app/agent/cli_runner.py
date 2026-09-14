@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import AsyncIterator, List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
+from app.tools.browser_metrics import measure_browser_request
 
 # セッション管理: インメモリキャッシュ + DB永続化
 _cli_sessions: Dict[str, str] = {}
@@ -672,6 +673,116 @@ def _transcript_exceeds_limit(session_id: str) -> bool:
         return path.stat().st_size >= _TRANSCRIPT_RESET_BYTES
     except Exception:
         return False
+
+
+# Proactive rotation: the felt "送っても動かない" latency is the fresh-session
+# reseed prefill (~15-23s to first token) that today fires AT SEND TIME once the
+# transcript crosses the hard limit. We move that cost OFF the critical path:
+# when a turn ends with the transcript past a SOFT threshold, a background thread
+# builds the DB reseed, spawns a replacement session, primes it (so its KV cache
+# is warm), and atomically swaps it in. The next user message then lands on a
+# small, warm session — context preserved (from the DB reseed), no send-time wait.
+# Set DAN_PREWARM_ROTATE=0 to disable (falls back to send-time recycle).
+_TRANSCRIPT_SOFT_BYTES = int(os.getenv("DAN_TRANSCRIPT_SOFT_BYTES", str(900_000)))
+_PREWARM_ROTATE = os.getenv("DAN_PREWARM_ROTATE", "1").strip().lower() in ("1", "true", "yes", "on")
+_PREWARM_IDLE_TIMEOUT = int(os.getenv("DAN_PREWARM_IDLE_TIMEOUT", "180"))
+_prewarm_inflight: set = set()
+_prewarm_lock = threading.Lock()
+
+
+def _transcript_soft_exceeded(session_id: Optional[str]) -> bool:
+    """True when a transcript is big enough to rotate proactively (below the hard
+    limit but past the soft one). Best-effort; False if disabled or unknown."""
+    if not session_id or _TRANSCRIPT_RESET_BYTES <= 0 or _TRANSCRIPT_SOFT_BYTES <= 0:
+        return False
+    path = _session_transcript_path(session_id)
+    if path is None:
+        return False
+    try:
+        return path.stat().st_size >= _TRANSCRIPT_SOFT_BYTES
+    except Exception:
+        return False
+
+
+def _schedule_prewarm_rotation(
+    room_id: str,
+    project_id: Optional[str],
+    old_session,
+    build_cmd,
+    env: Dict[str, str],
+    run_cwd: str,
+    model: str,
+) -> None:
+    """At turn end, if the live transcript is past the soft threshold, rotate to
+    a freshly reseeded + primed session in the BACKGROUND so the next send is
+    instant. No-op unless enabled and the transcript is actually large. Fully
+    fail-safe: any error leaves the existing session in place."""
+    if not _PREWARM_ROTATE:
+        return
+    from app.agent.streaming_session import StreamingSession, install_session
+
+    with _prewarm_lock:
+        if room_id in _prewarm_inflight:
+            return
+        _prewarm_inflight.add(room_id)
+
+    def _run() -> None:
+        try:
+            reseed = _build_reseed_context(room_id, project_id=project_id)
+            if not reseed:
+                return
+            priming = _wrap_latest_user_message(
+                reseed,
+                "[CONTEXT PRELOAD] これは裏側の文脈読み込みです。ユーザーには表示されません。"
+                "作業や返信は一切せず、必ず半角で READY とだけ返してください。",
+            )
+            replacement = StreamingSession(room_id, build_cmd, env, run_cwd)
+            replacement.model = model
+            captured: Dict[str, Any] = {}
+
+            def _discard(ev: Dict[str, Any]) -> None:
+                if isinstance(ev, dict) and ev.get("type") == "system":
+                    sid = ev.get("session_id")
+                    if sid:
+                        captured["session_id"] = sid
+
+            # Idle-gap timeout for the priming turn only. A compliant prime
+            # ("reply READY") finishes in seconds; this just bounds how long a
+            # misbehaving prime can hold a background process (never 30 min).
+            primed = replacement.prewarm(priming, _discard, timeout=_PREWARM_IDLE_TIMEOUT)
+            if not primed or not replacement.is_alive():
+                try:
+                    replacement.stop()
+                except Exception:
+                    pass
+                return
+
+            # Only swap if the old session is idle. If a new user turn started
+            # while we primed, keep the old (in-use) session and discard ours —
+            # rotating a busy session would desync a live stream.
+            if old_session is not None and old_session.is_turn_active():
+                try:
+                    replacement.stop()
+                except Exception:
+                    pass
+                return
+
+            prev = install_session(room_id, replacement)
+            if captured.get("session_id"):
+                _save_session(room_id, captured["session_id"])
+            if prev is not None and prev is not replacement:
+                try:
+                    prev.stop()
+                except Exception:
+                    pass
+            _cli_debug(f"[STREAMING] prewarm rotation complete for room {room_id[:8]}")
+        except Exception as e:  # noqa: BLE001
+            _cli_debug(f"[STREAMING] prewarm rotation failed for room {room_id[:8]}: {e}")
+        finally:
+            with _prewarm_lock:
+                _prewarm_inflight.discard(room_id)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # Image-eviction guard (root fix for screenshot-driven bloat & collapse).
@@ -1514,6 +1625,14 @@ def _build_system_prompt(
     )
     parts.append(_ABSOLUTE_RULES)
     parts.append(_BROWSER_AUTH_RULES)
+    parts.append(
+        "## ブラウザの速度と検証\n"
+        "操作結果には画面と要素一覧が既に含まれる。新しい変化を確認する理由がない限り、直後に同じ画面のスクリーンショットを取り直さない。"
+        "確認済みの独立した通常入力欄はbrowserのfill_formでまとめ、返された全項目の検証結果を確認する。"
+        "依存する入力欄・認証・送信は個別に扱う。実DOMで結果条件が分かるclick/typeにはexpectを指定する。"
+        "クリック診断が返ったらreasonとnext_actionを読み、覆っている要素を確認する。座標操作で盲目的に強行しない。"
+        "dispatchedが不明なら操作済みの可能性がある。再送信せず画面やwait_forで結果を確認する。"
+    )
 
     return "\n\n".join(parts)
 _CLI_PROJECT_TEMPLATE = """## プロジェクト
@@ -3222,6 +3341,7 @@ async def _process_via_streaming_session(
     def run() -> None:
         nonlocal session, resume_session_id, send_content
         t0 = time.time()
+        res = None
         # 無音ツール実行中も run を stale sweep から守る心拍（finallyで停止）
         _hb_stop = _start_run_heartbeat(run_id)
         try:
@@ -3366,6 +3486,27 @@ async def _process_via_streaming_session(
             _emit({"type": "error", "message": str(e)})
         finally:
             _hb_stop.set()
+            # Proactive rotation: a clean, non-hung turn that left the transcript
+            # past the soft threshold triggers a background reseed+prewarm so the
+            # NEXT send is instant. Guarded to clean successes only — error/hang
+            # paths already tear the session down and reseed themselves.
+            try:
+                clean = (
+                    isinstance(res, dict)
+                    and res.get("type") == "result"
+                    and not res.get("is_error")
+                    and not getattr(session, "last_turn_hung", False)
+                    and session is not None
+                    and session.is_alive()
+                    and not session.is_turn_active()
+                )
+                sid = state.get("session_id")
+                if clean and _transcript_soft_exceeded(sid):
+                    _schedule_prewarm_rotation(
+                        room_id, project_id, session, build_cmd, env, run_cwd, cli_model,
+                    )
+            except Exception as _rot_e:  # noqa: BLE001
+                _cli_debug(f"[STREAMING] rotation schedule skipped: {_rot_e}")
             _emit(_SENTINEL)
 
     threading.Thread(target=run, daemon=True).start()
@@ -3386,6 +3527,7 @@ async def _process_via_streaming_session(
         yield raw
 
 
+@measure_browser_request
 async def process_message_cli(
     room_id: str,
     user_id: str,

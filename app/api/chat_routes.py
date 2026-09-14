@@ -2957,7 +2957,7 @@ async def set_dan_session_model(
     if turn_active:
         raise HTTPException(status_code=409, detail="ダンが作業中です。完了してから切り替えてください")
 
-    _, current_backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
+    current_model, current_backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
     new_backend = backend_for_model(model)
 
     meta = project.get("metadata") if isinstance(project.get("metadata"), dict) else {}
@@ -2969,15 +2969,16 @@ async def set_dan_session_model(
     )
     _cr.invalidate_room_model_cache(session_id)
 
-    if new_backend != current_backend and current_backend == "claude":
-        # 常駐 Claude セッションが遊んでいれば畳む（次ターンは Codex が DB reseed で始める）
+    if current_model != model and current_backend == "claude":
+        # Claude同士でも起動時の --model は変わらないため、常駐プロセスを畳む。
+        # 保存済み会話は残し、次ターンに選択したモデルで再開する。
         try:
             from app.agent.streaming_session import get_session as _get_ss
             _ss = _get_ss(session_id)
             if _ss is not None and _ss.is_alive():
-                _ss.stop()
+                await asyncio.to_thread(_ss.stop)
         except Exception:
-            pass
+            logger.exception("Failed to stop previous model for room %s", session_id[:8])
     logger.info(
         "[MODEL] room=%s model=%s backend %s → %s", session_id[:8], model, current_backend, new_backend
     )

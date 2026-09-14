@@ -1097,6 +1097,10 @@ function ChatInput({
             setWarmupMode(projectId, null);
             onSseStateChange?.(false);
             invalidateProjectChrome();
+            // ターン完了時に一覧を1回取り直す。ターン中にツールが書いた行（送信案カード、
+            // 破棄の控え等）はストリームに乗らないことがある。取得はキャッシュとの
+            // 一方通行マージなので、昔の「最新回答が一瞬消える」事故は起きない。
+            queryClient.refetchQueries({ queryKey: ['project-messages', roomId] });
 
             if (!titleGeneratedRef.current) {
               const cached = queryClient.getQueryData<{ title?: string }>(['project', projectId]);
@@ -2163,8 +2167,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     enabled: !!project?.room_id && queriesReleased,
     staleTime: 5 * 1000,
     retry: 1,
+    // ポーリングは止め切らない。ストリーム接続中は押し込み（SSE/feed）が主経路なので
+    // 間隔を広げるだけにし、取りこぼしても最長 15 秒で追いつく。以前は false で
+    // 完全停止していたため、ストリームに乗らない行が再読み込みまで出なかった。
     refetchInterval: (query) => (
-      sseConnectedRef.current || warmupMode ? false : (query.state.error ? 15000 : 3000)
+      sseConnectedRef.current || warmupMode ? 15000 : (query.state.error ? 15000 : 3000)
     ),
   });
 
@@ -2283,7 +2290,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     const chronologicalMessages = [...messages].reverse();
     const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
     const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
-    const liveAnchorMessageTime = liveAnchorTime;
     // Anchor the live execution block to the current RUN's start, not the last
     // human message. Without this, a follow-up sent mid-run (a newer human msg)
     // drags the live block below it, so Dan's in-progress output appears to jump
@@ -2306,15 +2312,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       ) {
         continue;
       }
-      if (
-        !!warmupMode &&
-        msg.sender_type === 'ai' &&
-        liveAnchorMessageTime > 0 &&
-        new Date(msg.created_at).getTime() >= liveAnchorMessageTime
-      ) {
-        continue;
-      }
-
+      // 保存済みの行（ログの真実）を画面側の状態で隠さない。以前は warmupMode の間、
+      // 直近のユーザー発言より新しいAI行を隠していたが、ストリームが途中で切れて
+      // warmupMode が解除されないと、ターン中にツールが書いた行（送信案カード等）が
+      // 永久に見えなくなった（2026-09-11）。同じターンの重複は savedTurnIds で除く。
       timedItems.push({
         item: { kind: 'message', msg },
         sortKey: new Date(msg.created_at).getTime(),

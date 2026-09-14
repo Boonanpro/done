@@ -294,10 +294,15 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
   // release used by the full-screen view, and takes precedence over retired
   // shared /preview paths left on older artifact cards.
   const releaseUrl = artifact?.delivery_url || draftUrl || shareUrl || publicPreviewUrl;
-  const publicShareUrl = artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '';
+  // Private tools depend on the dashboard session and its backend services.
+  // Keep both embedded and full-screen editing on the dashboard origin.
+  const privateEditorUrl = artifact && ['voice-note', 'pornblocker-guard-beacon', 'pornblocker-roadmap', 'aix-dashboard'].includes(artifact.slug)
+    ? `${typeof window === 'undefined' ? '' : window.location.origin}/preview/${artifact.slug}`
+    : '';
+  const publicShareUrl = privateEditorUrl || (artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '');
   // クロスオリジン化: プレビューiframe は成果物配信オリジンを
   // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
-  const baseIframeSrc = absolutePublicUrl(releaseUrl);
+  const baseIframeSrc = privateEditorUrl || absolutePublicUrl(releaseUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
   // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
   // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。
@@ -582,6 +587,7 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
               key={`${artifact.id}:${iframeSrc}`}
               ref={iframeRef}
               src={iframeSrc}
+              allow="microphone 'src'"
               onLoad={() => {
                 setLoadedArtifactId(artifact.id);
                 setIframeLoadSeq((s) => s + 1);
