@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str = ""
+    # Claude CLI (Max 定額) のログインが切れた時の復旧経路。自宅PCで
+    # `claude setup-token` を実行して発行した長期 OAuth トークンをここに置くと、
+    # ダンが CLI を起動する env に CLAUDE_CODE_OAUTH_TOKEN として注入される
+    # (~/.claude の認証状態に依存しなくなる)。.env の編集だけで次のターンから
+    # 効く（ダンコアの再起動は不要）。
+    CLAUDE_CODE_OAUTH_TOKEN: str = ""
 
     # MiniMax (M2.5 - main chat LLM)
     MINIMAX_API_KEY: str = ""

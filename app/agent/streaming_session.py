@@ -138,6 +138,12 @@ class StreamingSession:
         # such a call must NOT start a parallel loop (that double-processes the
         # CLI output and double-saves) — it is routed as a follow-up instead.
         self._running = False
+        # 直近の非JSON出力（stderr は stdout にマージ済み）。プロセスが result を
+        # 出さずに死んだ時の原因判定用（例: CLI ログイン切れの "Please run /login"）。
+        self._raw_tail: list = []
+
+    def raw_tail(self) -> str:
+        return "\n".join(self._raw_tail)
 
     # --- lifecycle ------------------------------------------------------
     def is_alive(self) -> bool:
@@ -420,6 +426,9 @@ class StreamingSession:
                 try:
                     ev = json.loads(line)
                 except Exception:
+                    self._raw_tail.append(line[:300])
+                    if len(self._raw_tail) > 20:
+                        del self._raw_tail[0]
                     continue
                 self._last_activity = time.time()
                 self._dispatch(ev)

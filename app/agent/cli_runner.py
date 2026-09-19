@@ -221,6 +221,79 @@ def _is_thinking_desync_error(text: Optional[str]) -> bool:
     )
 
 
+# Claude CLI 自身のログイン切れ（~/.claude の OAuth 失効・/logout・revoke）の
+# シグネチャ。Max 定額で動かすため ANTHROPIC_API_KEY を外して起動しているので、
+# CLI のログインが切れると全部屋が一斉に「Not logged in · Please run /login」
+# 相当のエラーで返るようになる（2026-09-19 実発生）。セッション自体は無事。
+_AUTH_ERROR_MARKERS = (
+    "please run /login",
+    "not logged in",
+    "oauth token has expired",
+    "oauth token revoked",
+    "oauth token is invalid",
+    "invalid api key",
+    "invalid authentication",
+    "authentication_error",
+    "authentication failed",
+    "api error: 401",
+)
+
+
+def _is_auth_error_text(text: Optional[str]) -> bool:
+    """True when a turn failed because the Claude CLI itself is logged out."""
+    low = (text or "").lower()
+    return any(marker in low for marker in _AUTH_ERROR_MARKERS)
+
+
+def _read_dotenv_value(key: str) -> str:
+    """D:/done/.env から key を毎回読み直す（settings は起動時に固定されるため）。
+
+    認証復旧はダンコア（再起動しないプロセス）の中で起きるので、.env に
+    トークンを書いた直後の次ターンから効かせるには生ファイルを見る必要がある。
+    """
+    try:
+        for line in (PROJECT_ROOT / ".env").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_claude_oauth_token() -> str:
+    """CLI に渡す長期 OAuth トークン（`claude setup-token` の出力）を解決する。
+
+    優先順: プロセス環境変数 → settings（起動時の .env） → 生 .env 再読込。
+    """
+    token = (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+    if token:
+        return token
+    try:
+        from app.config import settings
+        token = (getattr(settings, "CLAUDE_CODE_OAUTH_TOKEN", "") or "").strip()
+    except Exception:
+        token = ""
+    if token:
+        return token
+    return _read_dotenv_value("CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def _inject_claude_cli_auth(env: dict) -> dict:
+    """ログイン切れ復旧経路: .env のトークンを CLI 起動 env に注入する。
+
+    トークン未設定なら何もしない（従来通り ~/.claude のログイン状態を使う）。
+    """
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        token = _resolve_claude_oauth_token()
+        if token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return env
+
+
 # Lines from history that would re-poison a fresh session if fed back verbatim.
 _RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
 
@@ -265,6 +338,20 @@ _RECOVERY_MESSAGES = {
         "en": "(A long-running task went silent for a while, so I paused here. Tools may "
         "have already run, so the work itself may have progressed. Send \"continue\" "
         "or \"where are we?\" to resume.)",
+    },
+    "auth_expired": {
+        "ja": "Claude CLI のログインが切れているため応答できません（ダンコアを動かしている"
+        "PC側の認証が失効しました。会話の文脈は保持されています）。復旧方法はどちらか:\n"
+        "1. そのPCのターミナルで `claude login` を実行してブラウザでログインし直す\n"
+        "2. `claude setup-token` で長期トークンを発行し、D:/done/.env に "
+        "`CLAUDE_CODE_OAUTH_TOKEN=<token>` を追記する（以後ログイン切れの影響を受けない）\n"
+        "どちらもダンコアの再起動は不要で、次のメッセージから復旧します。",
+        "en": "The Claude CLI is logged out, so I can't respond (the login on the PC running "
+        "Dan Core expired; the conversation context is preserved). To recover, either:\n"
+        "1. run `claude login` in a terminal on that PC and sign in via the browser, or\n"
+        "2. run `claude setup-token` and add `CLAUDE_CODE_OAUTH_TOKEN=<token>` to D:/done/.env "
+        "(then future logouts no longer affect Dan).\n"
+        "No Dan Core restart is needed; the next message will work.",
     },
     "loop_detected": {
         "ja": "同じ操作を何度も繰り返して先に進めなくなっていたため、いったん区切りました。"
@@ -1577,6 +1664,7 @@ def run_oneshot_cli(
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["NO_COLOR"] = "1"
+    _inject_claude_cli_auth(env)
 
     # CLAUDE.md / プロジェクトフック / MCP を巻き込まないよう空の中立 cwd で実行
     run_cwd = cwd or str(_ONESHOT_CWD)
@@ -1807,12 +1895,17 @@ def _run_cli_process(
 
     # stderrドレインスレッド: stderrを継続的に読み捨ててバッファ満杯によるデッドロックを防ぐ
     # （stderrバッファが満杯になるとプロセスがwrite()でブロックし、stdoutも止まる）
+    stderr_tail: list = []
+
     def _drain_stderr():
         try:
             for line in process.stderr:
                 line = line.strip()
                 if line:
                     _cli_debug(f"CLI stderr: {line[:200]}")
+                    stderr_tail.append(line[:300])
+                    if len(stderr_tail) > 20:
+                        del stderr_tail[0]
         except Exception:
             pass
 
@@ -2098,8 +2191,13 @@ def _run_cli_process(
     _cli_debug(f"CLI process exited with code {return_code}")
 
     if return_code != 0 and result_data is None:
-        # stderrはドレインスレッドが読んでいるので、ここではログのみ
-        event_queue.put({"type": "error", "message": f"CLI exited with code {return_code}"})
+        stderr_thread.join(timeout=2)
+        if _is_auth_error_text("\n".join(stderr_tail)):
+            # CLI ログイン切れで result を出さずに落ちた。復旧手順を返す。
+            event_queue.put({"type": "error", "message": _recovery_message("auth_expired")})
+        else:
+            # stderrはドレインスレッドが読んでいるので、ここではログのみ
+            event_queue.put({"type": "error", "message": f"CLI exited with code {return_code}"})
 
     return result_data
 
@@ -2200,6 +2298,7 @@ def _run_cli_in_thread(
     ]:
         if val and key not in env:
             env[key] = val
+    _inject_claude_cli_auth(env)
 
     result_data = None
     done_saved = False
@@ -2320,6 +2419,9 @@ def _run_cli_in_thread(
             elif is_error and _is_thinking_desync_error(result_text):
                 text = _recovery_message("thinking_desync", _detect_user_lang(content))
                 _clear_cli_session(room_id)
+            elif is_error and _is_auth_error_text(result_text):
+                # CLI ログイン切れ: セッションは無事なので消さない。復旧手順だけ出す。
+                text = _recovery_message("auth_expired", _detect_user_lang(content))
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
@@ -2619,6 +2721,7 @@ async def _process_via_streaming_session(
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["NO_COLOR"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    _inject_claude_cli_auth(env)
     run_cwd = cwd or str(CLI_WORKSPACE)
 
     from app.agent.streaming_session import get_session
@@ -2879,6 +2982,11 @@ async def _process_via_streaming_session(
                     text = _recovery_message("parse_error", _detect_user_lang(content))
                 elif is_error and _is_thinking_desync_error(result_text):
                     text = _recovery_message("thinking_desync", _detect_user_lang(content))
+                elif is_error and _is_auth_error_text(result_text):
+                    # CLI ログイン切れ: 復旧手順を出す（セッションは無事、run() 側で
+                    # プロセスだけ落として次ターンが新 env＝新トークンで立ち上がるようにする）。
+                    text = _recovery_message("auth_expired", _detect_user_lang(content))
+                    state["auth_expired"] = True
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
@@ -2981,6 +3089,36 @@ async def _process_via_streaming_session(
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=str(uuid.uuid4()), content="cancelled")
                     _update_run_sync(run_id, state="completed")
                 _emit({"type": "cancelled", "session_id": None})
+            elif state.get("auth_expired") or (
+                res and res.get("is_error") and _is_auth_error_text(res.get("result") or "")
+            ):
+                # CLI ログイン切れ。トランスクリプトは無事なので保存済みセッション id は
+                # 残す（--resume で文脈が戻る）。長寿命プロセスだけ落として、次ターンが
+                # 新しい env（.env に追記された CLAUDE_CODE_OAUTH_TOKEN / 再ログイン後の
+                # ~/.claude）で起動し直せるようにする。
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                _cli_debug(f"[STREAMING] auth expired; process dropped for room {room_id[:8]}")
+            elif not state["any_result"] and _is_auth_error_text(getattr(session, "raw_tail", lambda: "")()):
+                # プロセスが result を出さずに死に、非JSON行にログイン切れの兆候がある。
+                # 「復元に失敗」の誤案内にせず、復旧手順を返して終える。
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                text = _recovery_message("auth_expired", _detect_user_lang(content))
+                t_id = str(uuid.uuid4())
+                if not skip_save:
+                    _save_ai_message_sync(room_id, text, turn_id=t_id)
+                if project_id and run_id:
+                    _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=t_id, content="auth_expired")
+                    _update_run_sync(run_id, state="failed")
+                _emit({
+                    "type": "result", "text": text, "session_id": state["session_id"],
+                    "is_error": True, "cli_saved": not skip_save, "continuation": False, "turn_id": t_id,
+                })
             elif res and res.get("is_error") and _is_thinking_desync_error(res.get("result") or ""):
                 # The resumed transcript had a split/desynced thinking turn, so
                 # Anthropic rejected the replay with the "thinking blocks cannot
