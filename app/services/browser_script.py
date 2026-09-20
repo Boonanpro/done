@@ -45,7 +45,7 @@ async def resolve(page, locator):
     await page.get_interactive_elements()
     query=json.dumps(locator,ensure_ascii=False)
     result=await page.evaluate('''(() => {const q='''+query+''';const norm=s=>(s||'').replace(/\s+/g,' ').trim();
-      const nodes=[...document.querySelectorAll('[data-dan-ref]')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height);
+      const nodes=(window.__danDeep?window.__danDeep('[data-dan-ref]'):[...document.querySelectorAll('[data-dan-ref]')]).filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height);
       const role=e=>e.getAttribute('role')||({BUTTON:'button',A:'link',TEXTAREA:'textbox',SELECT:'combobox'}[e.tagName])||
         (e.tagName==='INPUT'?(['submit','button'].includes(e.type)?'button':['checkbox','radio'].includes(e.type)?e.type:'textbox'):'');
       const name=e=>norm(e.getAttribute('aria-label')||(e.labels&&e.labels[0]?.innerText)||e.innerText||e.placeholder||e.value);

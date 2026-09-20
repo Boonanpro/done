@@ -444,6 +444,26 @@ BROWSER_TOOL['input_schema']['properties']['ready'] = {
     'description': 'open_target専用。以前に観測した目的ページ固有の表示条件を指定し、約6秒の推測待機を条件待機に置換する。ログイン成否の証明ではない。未確認のselectorや汎用bodyを指定しない。失敗時はページを返し、操作を自動再試行しない。'}
 BROWSER_TOOL['description'] += ' 確認済みの複数段階はbrowser_plan(expected_url,steps)でまとめられる。'
 
+# 読む・探す・文字で押す: evaluate にJSを書く往復を定型の操作に置き換える（app/services/browser_reading.py）。
+BROWSER_TOOL['input_schema']['properties']['action']['enum'] += ['find', 'read']
+BROWSER_TOOL['input_schema']['properties'].update({
+    'label': {'type': 'string', 'maxLength': 300, 'description': 'click: refの代わりに、押したい要素の表示文字。完全一致（無ければ部分一致）する見えているクリック対象が1つだけなら押す。複数/0件なら押さずに候補のrefを返す'},
+    'role': {'type': 'string', 'description': 'click(label)の絞り込み（link, button, tab など。任意）'},
+    'query': {'type': 'string', 'maxLength': 300, 'description': 'find: 探したい表示文字（部分一致・大小無視）。要素一覧に無い要素やShadow DOM内も探し、refを返す'},
+    'regex': {'type': 'boolean', 'description': 'find: queryを正規表現として扱う'},
+    'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50, 'description': 'find: 返す件数（既定20）'},
+    'after': {'type': 'string', 'description': 'read: この文字列が現れる位置から読む'},
+    'offset': {'type': 'integer', 'minimum': 0, 'description': 'read: 本文の何文字目から読むか（続きを読む時）'},
+    'max_chars': {'type': 'integer', 'minimum': 100, 'maximum': 12000, 'description': 'read: 読む文字数（既定4000）'},
+    'tables': {'type': 'boolean', 'description': 'read: 範囲内の表を行ごとに「セル | セル」で返す'},
+})
+BROWSER_TOOL['input_schema']['properties']['selector']['description'] += '／read: 読む範囲のCSSセレクタ（任意。未指定は本文全体）'
+BROWSER_TOOL['description'] += (
+    ' 操作後の観測結果には画面の本文（先頭部分）が含まれる。read: 本文の続き・指定範囲(selector/after/offset)・表(tables)を読む。'
+    'find(query): 表示文字で要素を探してrefを得る。click(label): 表示文字で押す。'
+    'ページを読む・要素を探す・文字で押す用途はこれらで足り、evaluateにJSを書く往復が要らない。'
+)
+
 # ============================================
 # URL読み込みツール（Jina Reader）
 # ============================================
@@ -2984,6 +3004,14 @@ def _looks_like_login_url(url: str) -> bool:
     ))
 
 
+def _known_login_page(url: str) -> bool:
+    try:
+        from app.services import browser_recipes
+        return browser_recipes.enabled() and bool(browser_recipes.find(browser_recipes.url_key(url)))
+    except Exception:
+        return False
+
+
 # 確認コードの入力欄が「1桁ずつ6個」に分かれているサイト向け。
 # ref の欄へ6桁をまとめて入れると maxlength=1 で先頭1桁に切られ、
 # 「コードが未入力」として弾かれる（2captcha の 2FA 画面がこれ）。
@@ -2991,9 +3019,8 @@ def _looks_like_login_url(url: str) -> bool:
 _FILL_CODE_JS = """
 (args) => {
   const code = String(args.code || '').trim();
-  const target = document.querySelector(
-    '[data-dan-ref="' + String(args.ref || '').replace('@', '') + '"]'
-  );
+  const selector = '[data-dan-ref="' + String(args.ref || '').replace('@', '') + '"]';
+  const target = window.__danDeep ? window.__danDeep(selector)[0] : document.querySelector(selector);
   if (!target || !code) return {mode: 'none'};
 
   const setValue = (el, v) => {
@@ -3108,17 +3135,24 @@ async def _get_browser_state_impl(page) -> Dict[str, Any]:
 
     url = page.url
     visible_text = ''
-    if _browser_observation.get() == 'dom':
-        document = await page.evaluate("({title:document.title,text:document.body.innerText.slice(0,4000)})")
-        title = document.get('title','') if isinstance(document,dict) else str(document)
-        visible_text = document.get('text','') if isinstance(document,dict) else ''
-    else:
-        title = await page.evaluate("document.title")
+    title = await page.evaluate("document.title")
+    # 本文は画像つきの観測にも載せる。載せないと「操作→本文を読むためだけのevaluate」の
+    # 往復が毎回発生する（1か月の実ログで本文読みの6割が操作直後だった）。
+    text_note = ''
+    try:
+        from app.services.browser_reading import page_text
+        limit = 4000 if _browser_observation.get() == 'dom' else 2500
+        document = await page_text(page, limit)
+        visible_text = document.get('text', '')
+        if document.get('total', 0) > len(visible_text):
+            text_note = f"（全{document['total']}字中の先頭{len(visible_text)}字。続きは read の offset={len(visible_text)}）"
+    except Exception as e:
+        logger.warning(f"[BROWSER] page text failed: {e}")
 
     # テキスト部分: URL + タイトル + ページ状態 + 要素一覧
     text_parts = [f"URL: {url}", f"タイトル: {title}"]
     if visible_text:
-        text_parts.append('画面の本文:\n'+visible_text)
+        text_parts.append(f'画面の本文{text_note}:\n'+visible_text)
 
     # 添付する写真は縮小されている。写真から座標を読んで操作する時に換算を
     # 忘れると、掴む位置が対象の外に落ちて「何も動かない」状態になるため、
@@ -3274,7 +3308,9 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
     if action in {'screenshot','human_click','human_drag','puzzle_fit','solve_captcha'}: mode='full'
     observation_token = _browser_observation.set(mode)
     try:
-        result = await _execute_browser_tool_impl(action, params)
+        # 操作の記憶: 成功したログイン手順を記録し、次回の open_target で再生する。
+        from app.services.browser_recipes import around as _with_recipes
+        result = await _with_recipes(action, params, _execute_browser_tool_impl)
         status = "failed" if isinstance(result, dict) and result.get("success") is False else "success"
         return result
     finally:
@@ -3328,6 +3364,10 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
         if condition is not None and action in {"click", "type"}:
             await page.check_condition_before_action(condition)
 
+        if action in {"find", "read"}:
+            from app.services import browser_reading
+            return await (browser_reading.find if action == "find" else browser_reading.read)(page, params)
+
         if action == "fill_form":
             result = await page.fill_form(params.get("fields"), params.get("expected_url"))
             state = await _get_browser_state(page)
@@ -3373,15 +3413,23 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                 # ブラウザ起動直後は遷移が終わるまで about:blank が返り続けることがある。
                 # URLが確定するまでは判定を保留しないと、同じく誤判定になる。
                 settled_polls = 0
+                # 遅延リダイレクトの実績が無いと分かっているホストは待ちを縮める（操作の記憶）。
+                from app.services import browser_recipes as _memory
+                settle_limit = _memory.settle_polls(url)
                 for _ in range(100):  # 最大20秒
                     current_url = page.url or ""
                     if not current_url or current_url.startswith("about:"):
                         await page.wait_for_timeout(200)
                         continue
                     if _looks_like_login_url(current_url):
+                        _memory.record_settle(url, settled_polls, bounced_late=settled_polls > 0)
                         break
                     settled_polls += 1
-                    if settled_polls >= 30:  # URL確定後の遅延リダイレクト待ちは6秒
+                    if settled_polls >= settle_limit:  # URL確定後の遅延リダイレクト待ち（既定6秒）
+                        _memory.record_settle(url, settled_polls, bounced_late=False)
+                        break
+                    # 手順を覚えているログインページに着いたなら、もう行き先は分かっている。
+                    if settled_polls >= 2 and _known_login_page(current_url):
                         break
                     await page.wait_for_timeout(200)
             state = await _get_browser_state(page)
@@ -3459,6 +3507,16 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             ref = params.get("ref")
             x = params.get("x")
             y = params.get("y")
+            if not ref and x is None and isinstance(params.get("label"), str) and params["label"].strip():
+                from app.services import browser_reading
+                ref, not_unique = await browser_reading.locate(page, params)
+                if not ref:
+                    return not_unique
+                if os.environ.get("DAN_COMMAND_JOB_ID"):
+                    # 確認ゲートは ref の実要素を見て判定する。ここでは押さず ref を返す。
+                    return {"success": False, "dispatched": False, "reason": "use_ref", "ref": ref,
+                            "content": [{"type": "text", "text": f"対象は {ref} です。何も押していません。click(ref=\"{ref}\") で実行してください。"}]}
+                params["ref"] = ref  # 操作の記録が対象を特定できるように
             login_was_authorized = bool(_browser_auth_state.get("login_url"))
 
             # クリック前のタブ数を記録
@@ -3509,6 +3567,11 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                 except Exception:
                     pass
             if _looks_like_login_url(page.url) and not login_was_authorized:
+                try:
+                    from app.services import browser_recipes as _memory
+                    _memory.distrust(_browser_auth_state.get("target_url") or page.url)
+                except Exception:
+                    pass
                 try:
                     await page.go_back()
                     await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
@@ -3839,7 +3902,8 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                 source=source,
                 email_address=email_address,
                 timeout_seconds=timeout_seconds,
-                poll_interval=2,
+                # SMSはDBを見るだけなので細かく見る。メールは毎回IMAP接続するので従来どおり。
+                poll_interval=0.5 if source == "sms" else 2,
             )
 
             if not otp_code:

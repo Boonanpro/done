@@ -62,7 +62,8 @@ async def browser_target(arguments):
     page = await get_executor_page()
     data = json.dumps({'ref':str(arguments.get('ref','')).lstrip('@'),'x':arguments.get('x'),'y':arguments.get('y')})
     return await page.evaluate('''(() => {const a='''+data+''';
-      const e=a.ref?document.querySelector('[data-dan-ref="'+CSS.escape(a.ref)+'"]'):
+      const sel='[data-dan-ref="'+CSS.escape(a.ref)+'"]';
+      const e=a.ref?(window.__danDeep?window.__danDeep(sel)[0]:document.querySelector(sel)):
         (a.x!=null?document.elementFromPoint(a.x,a.y):document.activeElement);
       const t=e?.closest('button,a,input,[role="button"]')||e;
       return {url:location.href,label:(t?.innerText||t?.value||t?.getAttribute('aria-label')||'').trim(),
@@ -75,7 +76,7 @@ READ_TOOLS = {'read_file','read_url','check_skill','get_personal_info','remember
 READ_ACTIONS = {'open','open_target','screenshot','scroll','get_state','get_tabs','switch_tab','wait_for',
                 'hold','release','session_status','fill_credential','fill_totp_code','wait_for_otp_from_app',
                 'solve_captcha','type','fill_form','select','close','content','back','reload','hover',
-                'wait_for_link_from_app'}
+                'wait_for_link_from_app','find','read'}
 SENSITIVE = re.compile(r'購入|注文.*確定|予約.*確定|予約する|決済|支払|送信|投稿|公開|削除|払戻|取り消|取消|確定|\b(pay|purchase|place order|book now|send|publish|delete|confirm)\b', re.I)
 
 def needs_confirmation(target):

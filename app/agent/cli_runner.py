@@ -1704,6 +1704,9 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
             "dan-tools": {
                 "command": "python",
                 "args": [str(PROJECT_ROOT / "app" / "mcp_server.py")],
+                # ダンの道具は最初から読み込む。後回し(ToolSearch)だと、ブラウザを使うターンの
+                # 83%が「道具の定義を取りに行くだけの往復」(約4秒)から始まっていた。
+                "alwaysLoad": True,
                 "env": {
                     "DAN_USER_ID": user_id,
                     "DAN_SESSION_ID": room_id,

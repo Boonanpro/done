@@ -1219,18 +1219,29 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
 
             const elements = [];
             const seen = new Set();
+            // Open shadow roots are part of what the user sees (consent/campaign
+            // modals often live there). document.querySelectorAll stops at the host.
+            window.__danDeep = (selector) => {
+                const out = [];
+                const walk = (root) => {
+                    out.push(...root.querySelectorAll(selector));
+                    for (const host of root.querySelectorAll('*')) if (host.shadowRoot) walk(host.shadowRoot);
+                };
+                walk(document);
+                return out;
+            };
             // Keep references attached to DOM identity. Re-numbering from e1
             // on every observation can silently redirect a previously seen ref.
             if (!window.__danRefState || window.__danRefState.version !== 2) {
                 const bytes = crypto.getRandomValues(new Uint8Array(6));
                 const prefix = btoa(String.fromCharCode(...bytes)).replaceAll('+','-').replaceAll('/','_');
-                document.querySelectorAll('[data-dan-ref]').forEach(el => el.removeAttribute('data-dan-ref'));
+                window.__danDeep('[data-dan-ref]').forEach(el => el.removeAttribute('data-dan-ref'));
                 window.__danRefState = {version: 2, prefix, next: 1, nodes: new WeakMap()};
             }
             const refState = window.__danRefState;
 
             for (const selector of interactiveSelectors) {
-                for (const el of document.querySelectorAll(selector)) {
+                for (const el of window.__danDeep(selector)) {
                     if (seen.has(el)) continue;
                     seen.add(el);
 

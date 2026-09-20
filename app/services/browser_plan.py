@@ -123,7 +123,7 @@ def validate(params):
 # Read-only metadata. No values, page body, credentials or arbitrary model JS.
 INSPECT = r"""candidates => {
   const norm = s => (s || '').replace(/\s+/g, ' ').trim();
-  const nodes = [...document.querySelectorAll('[data-dan-ref]')];
+  const nodes = window.__danDeep ? window.__danDeep('[data-dan-ref]') : [...document.querySelectorAll('[data-dan-ref]')];
   const role = e => e.getAttribute('role') || ({BUTTON:'button',A:'link',TEXTAREA:'textbox',SELECT:'combobox'}[e.tagName]) ||
     (e.tagName === 'INPUT' ? (['submit','button'].includes(e.type) ? 'button' : e.type==='search'?'searchbox':'textbox') : '');
   const name = e => norm(e.getAttribute('aria-label') ||
