@@ -291,3 +291,18 @@ async def test_unreadable_page_during_navigation_does_not_abort_the_login(bank, 
     monkeypatch.setattr(browser_recipes, 'snapshot', flaky)
     result = await _execute_browser_tool('open_target', {'url': ORIGIN+'/login'})
     assert calls['n'] > 4 and result['replay']['replayed_login'] and page.url == ORIGIN+'/account'
+
+
+@pytest.mark.asyncio
+async def test_remembered_entrance_is_told_instead_of_guessed(bank):
+    page, site, directory = bank
+    assert recipes.entry_hint(ORIGIN+'/anything') is None
+    await manual_login(page)
+    # Looking up credentials, or opening a stale URL from old notes, both point at the entrance that works.
+    from app.agent.v2.tools import _remembered_login_note
+    assert ORIGIN+'/login' in _remembered_login_note(None, 'bank.example.test')
+    await page.evaluate("window.name=''")
+    dead = await _execute_browser_tool('open_target', {'url': ORIGIN+'/old-login-page-from-notes'})
+    assert 'replay' not in dead and ORIGIN+'/login' in dead['content'][-1]['text']
+    opened = await _execute_browser_tool('open_target', {'url': ORIGIN+'/login'})
+    assert opened['replay']['replayed_login'] and '記憶済み' not in json.dumps(opened['content'], ensure_ascii=False)
