@@ -341,7 +341,10 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.browser_plan import TOOL as BROWSER_PLAN_TOOL
     from app.services.browser_flow import TOOL as BROWSER_FLOW_TOOL
     from app.services.jev_browser_budget import enabled as jev_browser_enabled
+    from app.services.dan_lookup import LOOKUP_TOOL, WAIT_TOOL
     return [
+        LOOKUP_TOOL,
+        WAIT_TOOL,
         BROWSER_TOOL,
         BROWSER_PLAN_TOOL,
         *([BROWSER_FLOW_TOOL] if jev_browser_enabled() else []),
@@ -1231,6 +1234,12 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "read_url":
         return ("_jina", "read")
 
+    if tool_name == "lookup":
+        return ("_lookup", "read")
+
+    if tool_name == "wait_until":
+        return ("_wait_until", "wait")
+
     if tool_name == "schedule_followup":
         return ("_followup", "schedule")
 
@@ -1309,7 +1318,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name == "_jina":
+        if skill_name in {"_jina", "_lookup", "_wait_until"}:
             return
 
         error_type = result.get("error_type")
@@ -2408,6 +2417,15 @@ async def execute_tool(
     # ★★★ URL読み込み（Jina Reader）★★★
     if skill_name == "_jina":
         return await _execute_read_url(params)
+
+    # ★★★ ダン自身のデータを読む／条件まで待つ（使い捨てPythonと sleep の定型化）★★★
+    if skill_name == "_lookup":
+        from app.services.dan_lookup import lookup
+        return await lookup(params, user_id, session_id)
+
+    if skill_name == "_wait_until":
+        from app.services.dan_lookup import wait_until
+        return await wait_until(params)
 
     # ★★★ 続報の予約（後で自動で起こして報告させる）★★★
     if skill_name == "_followup":
