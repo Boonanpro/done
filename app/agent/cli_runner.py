@@ -1632,6 +1632,15 @@ def _build_system_prompt(
         "依存する入力欄・認証・送信は個別に扱う。実DOMで結果条件が分かるclick/typeにはexpectを指定する。"
         "クリック診断が返ったらreasonとnext_actionを読み、覆っている要素を確認する。座標操作で盲目的に強行しない。"
         "dispatchedが不明なら操作済みの可能性がある。再送信せず画面やwait_forで結果を確認する。"
+        "観測済みの候補と結果条件で進められる複数段階はbrowser_plan(expected_url,steps)にまとめる。"
+        "候補が複数ならJevが意味照合するが、目的・入力値・許可・最終品質は自分で判断する。"
+        "新しい判断が必要な地点で手順を区切る。needs_agentが返ったらcompletedを読み、済んだ操作を繰り返さない。"
+        "DOMで成否を判定できる通常操作はobservation=domを選べる。外観・画像・canvasの判断と最終視覚検品は画像を使う。"
+        "open_targetで目的ページ固有の表示条件が既知ならreadyを指定すると約6秒の固定猶予を条件待機に置き換えられる。"
+        "ready成立だけでログイン成功とは断定せず、認証状態はページの証拠で確認する。"
+        "browser_flowが利用可能なら、観測済み候補の間で各画面の状態から次の通常移動を選ぶ小さな目標を任せられる。"
+        "各段階の条件が画面の特定箇所に表示される場合は、観測したinstruction_selectorを指定して照合対象を明確にする。"
+        "goalと実DOMのuntil条件を指定し、認証・確定操作・未知の候補は自分へ戻す。既知の単一路線にJevを追加しない。"
     )
 
     return "\n\n".join(parts)
@@ -1698,6 +1707,7 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
                 "env": {
                     "DAN_USER_ID": user_id,
                     "DAN_SESSION_ID": room_id,
+                    "DAN_CORE_PORT": os.environ.get("DAN_CORE_PORT", "9000"),
                     "DAN_CREDENTIALS": json.dumps(credentials or {}),
                     "DAN_IS_PLANNING": "",
                     "ENCRYPTION_KEY": os.environ.get("ENCRYPTION_KEY", "") or _get_encryption_key(),

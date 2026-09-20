@@ -139,12 +139,12 @@ def _reassign_executor_cdp_port() -> int:
     return _executor_cdp_port
 
 
-def _executor_window_position() -> tuple[int, int]:
+def _executor_window_position(room_id: Optional[str] = None) -> tuple[int, int]:
     """部屋ごとにウィンドウ位置をずらし、複数部屋のヘッドフルChromeが
     完全に重なって見分けられなくなるのを避ける。"""
     import hashlib
 
-    room = _browser_room_id()
+    room = _browser_room_id() if room_id is None else room_id
     if not room:
         return (40, 40)
     h = int(hashlib.sha1(room.encode("utf-8")).hexdigest()[:8], 16)
@@ -516,14 +516,14 @@ def _spawn_detached_browser(
     window_y: int,
 ) -> None:
     """
-    ブラウザを「このプロセスの子」にせず独立プロセスとして起動する。
+    所有プロセスからブラウザをコンソール非依存で起動する。
 
     Playwright に起動させると、親プロセス（部屋ごとのMCPサーバ）が終了した
     瞬間にブラウザも道連れで殺される。ダンの常駐セッションは transcript 肥大
     ・パースエラー・ハングのたびに畳まれるため、そのたびにログイン途中の
     ページやOTP入力欄ごとブラウザが消え、ユーザーが渡したコードが無駄になって
-    いた。detached で起動して CDP で外から繋ぐ形にすると、ターンをまたいでも
-    同じブラウザ・同じタブが生き残る。
+    いた。DETACHED_PROCESS は Windows Job Object からは分離しない。
+    部屋付きブラウザは必ず Dan Core がこの関数を呼び、CLI は CDP 接続だけ行う。
     """
     args = [
         executable,
@@ -540,8 +540,10 @@ def _spawn_detached_browser(
         "about:blank",
     ]
     creationflags = 0
+    if Path(user_data_dir).name.startswith('browser_data--voice-job-'):
+        args.insert(1, '--headless=new')
     if os.name == "nt":
-        # DETACHED_PROCESS: 親が死んでも道連れにしない
+        # Console detachment only. The caller must be the persistent owner.
         creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     subprocess.Popen(
         args,
@@ -686,14 +688,30 @@ async def _executor_worker():
         user_data_dir = str(profile_dir)
         os.makedirs(user_data_dir, exist_ok=True)
 
-        cdp_port = _resolve_executor_cdp_port()
+        if _browser_room_id():
+            # A Codex MCP job kills *all* descendants on a normal turn exit,
+            # including DETACHED_PROCESS children. Only Core may launch them.
+            from app.services.browser_lifecycle import request_session
+            session = await asyncio.to_thread(request_session, "ensure", _browser_room_id())
+            cdp_port = session["port"]
+            global _executor_cdp_port
+            _executor_cdp_port = cdp_port
+            browser = await playwright.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{cdp_port}", timeout=5000,
+            )
+            context = browser.contexts[0]
+            attached_to_existing_browser = True
+            if _pending_cookie_import:
+                await _import_master_cookies(context)
+        else:
+            cdp_port = _resolve_executor_cdp_port()
 
         # 再接続は「この部屋のポート」が実際に開いている時だけ試す。
         # 以前は 9223 固定で、別部屋が立てたブラウザに相乗りしてタブを
         # 奪い合っていた。ポートが部屋ごとに違う今、ここで繋がるのは
         # 自室のブラウザだけ。
         connect_exc: Optional[Exception] = None
-        if _port_listening(cdp_port):
+        if not attached_to_existing_browser and _port_listening(cdp_port):
             try:
                 browser = await playwright.chromium.connect_over_cdp(
                     f"http://127.0.0.1:{cdp_port}",
@@ -1416,7 +1434,7 @@ def _ensure_executor_thread():
         print("[EXECUTOR_BROWSER] Waiting for browser to be ready...")
 
         # 準備完了を待機
-        if not _executor_ready.wait(timeout=30):
+        if not _executor_ready.wait(timeout=45 if _browser_room_id() else 30):
             _write_browser_recovery_log(
                 "worker_ready_timeout",
                 profile=str(_executor_profile_dir()),
@@ -2009,6 +2027,11 @@ async def close_executor_browser():
     ブラウザプロセスを明示的に終了させる。
     """
     global _executor_thread
+    if _browser_room_id():
+        from app.services.browser_lifecycle import request_session
+        await asyncio.to_thread(request_session, "close", _browser_room_id())
+        _executor_browser_alive.clear()
+        return
     _executor_shutdown.set()
     if _executor_thread and _executor_thread.is_alive():
         _executor_thread.join(timeout=10)
@@ -2021,78 +2044,17 @@ async def close_executor_browser():
 
 
 async def close_idle_browsers(idle_seconds: int = 1800) -> list[dict]:
-    """放置されている部屋のブラウザを閉じる（ダンコアから定期的に呼ぶ）。
-
-    ブラウザはターンをまたいで生き残る設計なので、閉じる者がいないと部屋の数だけ
-    Chrome が残り続ける。一方で「OTP待ちの最中に閉じる」のは今回直したばかりの
-    事故そのものなので、判定は最終使用時刻だけで行い、賢く推測しようとしない。
-    待ち時間は数分〜十数分なので 30 分あれば十分に余裕がある。
-
-    閉じ方は CDP 経由の正常終了。強制終了は書き込み途中の Cookie を失い、次回起動
-    時に「前回異常終了」の復元バーを出すため、応答しない時だけの最終手段にする。
-    """
-    from playwright.async_api import async_playwright
-
-    closed: list[dict] = []
-    base = Path.home() / ".ai_secretary"
-    if not base.exists():
-        return closed
-
-    # 例外: 有効な見張り（一回きりの 'at' 予約、または hold_browser 指定）を持つ
-    # 部屋は「待機中」であって「放置」ではないので閉じない。時刻だけで判定する
-    # 原則は維持しつつ、待つという宣言がDBに登録されている場合のみ尊重する。
-    held_profiles: set[str] = set()
+    """Core cleanup respects durable human/auth holds and scheduled watches."""
+    from app.services.browser_lifecycle import reap_idle
     try:
-        import asyncio as _aio
         from app.services.followups import held_room_ids
-        rooms = await _aio.to_thread(held_room_ids)
+        rooms = await asyncio.to_thread(held_room_ids, strict=True)
         held_profiles = {f"browser_data--{_safe_room_slug(r)}" for r in rooms}
     except Exception:
-        pass  # 判定に失敗しても掃除自体は続行（従来動作）
-
-    now = time.time()
-    for profile in sorted(base.glob("browser_data--*")):
-        if profile.name in held_profiles:
-            continue
-        port_file = profile / _PORT_FILE_NAME
-        if not port_file.exists():
-            continue
-        try:
-            port = int(port_file.read_text(encoding="utf-8").strip())
-        except Exception:
-            continue
-        if not _port_listening(port):
-            continue  # 既に終了している
-
-        last_use_file = profile / _LAST_USE_FILE_NAME
-        try:
-            last_use = float(last_use_file.read_text(encoding="utf-8").strip())
-        except Exception:
-            # 記録が無い＝この仕組みより前から動いているブラウザ。いきなり閉じると
-            # 進行中の作業を巻き込むので、まず時刻を刻んで次の周回から判定する。
-            _safe_write_last_use(last_use_file, now)
-            continue
-
-        idle = now - last_use
-        if idle < idle_seconds:
-            continue
-
-        ok = await _graceful_close_cdp(async_playwright, port)
-        if not ok:
-            processes, scan_ok = _list_dedicated_browser_processes(profile)
-            if scan_ok and processes:
-                _terminate_dedicated_browser_processes(processes)
-        closed.append({
-            "profile": profile.name,
-            "port": port,
-            "idle_minutes": round(idle / 60, 1),
-            "graceful": ok,
-        })
-        _write_browser_recovery_log(
-            "idle_browser_closed", profile=profile.name, port=port,
-            idle_minutes=round(idle / 60, 1), graceful=ok,
-        )
-    return closed
+        # Cannot prove a watch is finished when its DB is unavailable.
+        logger.warning("Browser cleanup skipped: watch holds could not be read", exc_info=True)
+        return []
+    return await asyncio.to_thread(reap_idle, idle_seconds, held_profiles)
 
 
 def _safe_write_last_use(path: Path, value: float) -> None:
@@ -2105,10 +2067,9 @@ def _safe_write_last_use(path: Path, value: float) -> None:
 async def _graceful_close_cdp(async_playwright, port: int, wait_seconds: float = 10.0) -> bool:
     """CDP に繋いで正常終了させる。Cookie を書き切らせるのが目的。
 
-    注意: connect_over_cdp した browser への close() は「接続を切る」だけで、
-    自分で起動していないブラウザは終了しない（Playwright の仕様）。実際に終了
-    させるには全ページを閉じる必要がある。最後のウィンドウが閉じると Chrome は
-    通常終了し、その過程で Cookie をディスクへ書き切る。
+    connect_over_cdp の browser.close() は接続を切るだけなので、Chrome 自体へ
+    Browser.close を送る。全ページを閉じるだけでは headless/background mode の
+    Chrome が残るため、終了は必ずポートが閉じるまで確認する。
 
     戻り値は「本当に終了したか」。ポートが閉じるまで確認し、閉じなければ False を
     返して呼び出し側の強制終了にフォールバックさせる。
@@ -2118,12 +2079,13 @@ async def _graceful_close_cdp(async_playwright, port: int, wait_seconds: float =
             browser = await pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{port}", timeout=5000
             )
-            for context in browser.contexts:
-                for pg in list(context.pages):
-                    try:
-                        await pg.close()
-                    except Exception:
-                        pass
+            session = await browser.new_browser_cdp_session()
+            try:
+                await session.send("Browser.close")
+            except Exception:
+                # Chrome can disconnect before the command reply is delivered.
+                # The port check below decides whether shutdown succeeded.
+                pass
             try:
                 await browser.close()
             except Exception:
