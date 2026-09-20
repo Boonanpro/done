@@ -184,6 +184,31 @@ def report(recipe, success, elapsed_ms):
     _write(_host_file(host), existing)
 
 
+# ---- telling the model that a login is already remembered ----------------
+# Observed: Dan looked up credentials, then opened a login URL from its own notes
+# that no longer existed (17s lost), although a working entrance was remembered.
+
+def entry_hint(*places):
+    """One sentence for the first place (URL or bare host) that has a remembered login."""
+    try:
+        if not enabled():
+            return None
+        for place in places:
+            if not place:
+                continue
+            text = str(place)
+            host = urlsplit(text if '//' in text else '//'+text).hostname
+            known = [r for r in recipes_for(host) if r.get('enabled', True) and r.get('start_url')] if host else []
+            if known:
+                best = max(known, key=lambda r: (r.get('successes', 0), r.get('created', 0)))
+                return ('このサイトはログイン手順を記憶済み。ログインが必要なら browser(action="open_target", url="'+best['start_url']+
+                        '") を開くだけで、ID・パスワード・確認コードの入力まで自動で再生される'
+                        '（認証情報を取り直したり、別のログインURLを探したりしなくてよい）。')
+    except Exception:
+        logger.debug('entry hint unavailable', exc_info=True)
+    return None
+
+
 # ---- how long a site needs before its URL can be trusted ------------------
 # open_target waits ~6s after load because some sites (Apple) bounce to a login
 # page by script well after the DOM is ready. Most sites never do. Remember per
@@ -264,6 +289,8 @@ async def around(action, params, execute):
     if action in {'open_target', 'click'} and not (isinstance(result, dict) and result.get('success') is False):
         try:
             from app.services.browser_replay import maybe_replay
+            if action == 'open_target':
+                before = result
             if action == 'click':
                 # Dan often reaches the login page through a "ログイン" link, not by URL.
                 # Only an arrival counts: a click that stays on the page is Dan's own work.
@@ -271,6 +298,11 @@ async def around(action, params, execute):
                 if url_before is None or url_key((await get_executor_page()).url or '') == url_before:
                     return result
             result = await maybe_replay(params, result)
+            if action == 'open_target' and result is before and isinstance(result, dict) and isinstance(result.get('content'), list):
+                # Opened some other page of a site whose login is remembered (or a dead URL).
+                hint = entry_hint(params.get('url'))
+                if hint and hint.split('url="')[1].split('"')[0] != params.get('url'):
+                    result['content'].append({'type': 'text', 'text': hint})
         except Exception:
             logger.warning('browser replay unavailable', exc_info=True)
     return result

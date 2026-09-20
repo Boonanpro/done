@@ -2118,7 +2118,7 @@ async def execute_tool(
                     "message": (
                         f"{url} には複数の認証情報が保存されています: {', '.join(names)}。"
                         "どれを使うか service で指定して取り直すこと。"
-                    ),
+                    ) + _remembered_login_note(url),
                 }
 
         # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
@@ -2136,7 +2136,8 @@ async def execute_tool(
                 "service": matched_service,
                 "login_id": stored_creds.get("id", ""),
                 "password": stored_creds.get("password", ""),
-                "message": f"{matched_service} の認証情報が見つかりました",
+                "message": f"{matched_service} の認証情報が見つかりました"
+                           + _remembered_login_note(url, stored_creds.get("login_url"), stored_creds.get("url")),
             }
         else:
             label = service or url
@@ -3002,6 +3003,16 @@ def _looks_like_login_url(url: str) -> bool:
         "/login", "/signin", "/sign-in", "/auth/login", "/account/login",
         "login=", "signin=", "sign_in=",
     ))
+
+
+def _remembered_login_note(*places) -> str:
+    """認証情報を調べた時点で、記憶済みの入口があることを伝える（無ければ空文字）。"""
+    try:
+        from app.services.browser_recipes import entry_hint
+        hint = entry_hint(*places)
+        return (" " + hint) if hint else ""
+    except Exception:
+        return ""
 
 
 def _known_login_page(url: str) -> bool:
