@@ -49,7 +49,7 @@ def measure_browser_request(function):
                 async for event in stream:
                     if event.get("type") == "tool_use":
                         counts["tool_calls"] += 1
-                        if event.get("name", "").split("__")[-1] == "browser":
+                        if event.get("name", "").split("__")[-1] in {"browser", "browser_plan", "browser_flow", "browser_script"}:
                             counts["browser_calls"] += 1
                     elif event.get("type") == "error":
                         counts["error_events"] += 1

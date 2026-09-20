@@ -36,6 +36,37 @@ async def guarded_click(page, ref, timeout=10000, cancelled=None):
             # Trial checks may scroll, but cannot emit a click or submit a form.
             await handle.click(trial=True, timeout=min(1000, remaining()))
         except Exception:
+            # Styled checkboxes/radios sit under their own <label>. The label is
+            # the control a person clicks; it is not a foreign overlay.
+            label = None
+            try:
+                label = (await handle.evaluate_handle("""el => {
+                    if (!(el instanceof HTMLInputElement) || !['checkbox','radio'].includes(el.type) || !el.labels) return null;
+                    const r = el.getBoundingClientRect();
+                    const hit = document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);
+                    return [...el.labels].find(l => hit && (l === hit || l.contains(hit))) || null;
+                }""")).as_element()
+            except Exception:
+                label = None
+            if label is not None:
+                try:
+                    try:
+                        await label.click(trial=True, timeout=min(1000, remaining()))
+                    except Exception:
+                        label_clear = False  # the label itself is covered: fall through to the overlay diagnosis
+                    else:
+                        label_clear = True
+                    if label_clear:
+                        if cancelled and cancelled.is_set():
+                            return {"success": False, "reason": "cancelled", "dispatched": False}
+                        try:
+                            await label.click(timeout=remaining())
+                        except Exception:
+                            return {"success": False, "reason": "click_outcome_unknown", "dispatched": None,
+                                    "next_action": "The label click may already have happened. Inspect the checkbox state; do not repeat blindly."}
+                        return {"success": True, "dispatched": True, "via_label": True}
+                finally:
+                    await label.dispose()
             try:
                 probe = await handle.evaluate("""el => {
                     if (!el.isConnected) return {reason: 'stale_ref'};
@@ -45,7 +76,13 @@ async def guarded_click(page, ref, timeout=10000, cancelled=None):
                     for (const [fx,fy] of points) {
                         const x = r.left + r.width*fx, y = r.top + r.height*fy;
                         if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
-                        const hit = document.elementFromPoint(x,y);
+                        let hit = document.elementFromPoint(x,y);
+                        // elementFromPoint stops at a shadow host; the target may be inside it.
+                        while (hit && hit.shadowRoot) {
+                            const inner = hit.shadowRoot.elementFromPoint(x,y);
+                            if (!inner || inner === hit) break;
+                            hit = inner;
+                        }
                         if (hit && (hit === el || el.contains(hit))) {
                             const s = getComputedStyle(el);
                             return {position: {x: r.width*fx-parseFloat(s.borderLeftWidth||0),

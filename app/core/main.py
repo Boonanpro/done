@@ -56,6 +56,10 @@ async def lifespan(app: FastAPI):
     from app.services.room_feed import mark_core_process
     mark_core_process()
 
+    # Browser processes must belong to Core, not a short-lived Codex MCP job.
+    from app.services.browser_lifecycle import initialize_core
+    initialize_core()
+
     manager = SandboxManager(port=SANDBOX_PORT)
     set_manager(manager)
     logger.info("dan_core started (sandbox manager ready, port=%s)", SANDBOX_PORT)
@@ -195,6 +199,9 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+from app.core.api.browser_routes import router as browser_manager_router
+app.include_router(browser_manager_router)
 
 
 ALLOWED_ORIGINS = [

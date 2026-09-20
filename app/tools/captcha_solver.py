@@ -36,7 +36,8 @@ RES_URL = "https://2captcha.com/res.php"
 # how long to wait for a worker to return a token
 DEFAULT_SOLVE_TIMEOUT = 180.0
 POLL_INTERVAL = 5.0
-FIRST_POLL_DELAY = 15.0
+# 早く聞いても NOT_READY が返るだけ。速い解答(Turnstile等)を10秒寝て待たない。
+FIRST_POLL_DELAY = 5.0
 
 
 class CaptchaError(RuntimeError):
