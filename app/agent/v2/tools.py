@@ -3005,6 +3005,16 @@ def _looks_like_login_url(url: str) -> bool:
     ))
 
 
+def _enter_wait_state() -> str:
+    """Enter 後にどこまで待つか。手順の再生中は再生側が「ログイン画面を抜けたか」を自分で
+    確認し続けるので、画像や解析タグまで含む load 完了（実測3.7〜6.2秒）を待つ意味がない。"""
+    try:
+        from app.services.browser_recipes import replaying
+        return "domcontentloaded" if replaying.get() else "load"
+    except Exception:
+        return "load"
+
+
 def _remembered_login_note(*places) -> str:
     """認証情報を調べた時点で、記憶済みの入口があることを伝える（無ければ空文字）。"""
     try:
@@ -3611,7 +3621,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             if press_enter:
                 # Enter後のナビゲーション完了を待つ（"load"でリソース読み込みまで待機）
                 try:
-                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
+                    await page.wait_for_load_state(_enter_wait_state(), timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     # タイムアウト時はフォールバック
                     await page.wait_for_timeout(2000)
@@ -3683,7 +3693,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             if params.get("press_enter", False):
                 await page.keyboard.press("Enter")
                 try:
-                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
+                    await page.wait_for_load_state(_enter_wait_state(), timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     await page.wait_for_timeout(2000)
 
@@ -3855,7 +3865,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             if params.get("press_enter", False):
                 await page.keyboard.press("Enter")
                 try:
-                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
+                    await page.wait_for_load_state(_enter_wait_state(), timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     await page.wait_for_timeout(2000)
 

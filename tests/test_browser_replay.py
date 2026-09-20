@@ -15,7 +15,7 @@ SECRET = 'correct-horse'
 
 LOGIN = '''<h1>架空銀行 ログイン</h1>
 <label>ユーザーネーム<input id="user"></label>
-<label>パスワード<input id="pw" type="password"></label>
+<label>パスワード<input id="pw" type="password" onkeydown="if(event.key==='Enter')document.querySelector('#go').click()"></label>
 <button onclick="if(document.querySelector('#pw').value==='%s'){window.name=(window.name||'')+'L';location.href='/NEXT'}
   else{document.querySelector('#err').textContent='認証に失敗しました'}" id="go">LABEL</button>
 <a href="/help">ヘルプ</a><p id="err"></p>'''
@@ -28,12 +28,18 @@ NOTICE = '<h1>重要なお知らせ</h1><p>規約が変わりました</p><butto
 
 class Site:
     def __init__(self):
-        self.label, self.next, self.popup = 'ログイン', 'account', False
+        self.label, self.next, self.popup, self.slow = 'ログイン', 'account', False, False
 
     async def handle(self, route):
         path = route.request.url.split(ORIGIN)[1].split('?')[0]
         body = {'/login': LOGIN.replace('%s', SECRET).replace('LABEL', self.label).replace('NEXT', self.next),
                 '/otp': OTP, '/account': ACCOUNT, '/notice': NOTICE, '/top': TOP}.get(path, '<h1>404</h1>')
+        if path == '/slow.png':
+            import asyncio
+            await asyncio.sleep(4)
+            return await route.fulfill(content_type='image/png', body=b'')
+        if path == '/account' and self.slow:
+            body += '<img src="/slow.png">'
         if path == '/entry':  # the same form behind a URL that does not look like a login
             body = LOGIN.replace('%s', SECRET).replace('LABEL', self.label).replace('NEXT', self.next)
         if path == '/login' and self.popup == 'shadow':
@@ -306,3 +312,28 @@ async def test_remembered_entrance_is_told_instead_of_guessed(bank):
     assert 'replay' not in dead and ORIGIN+'/login' in dead['content'][-1]['text']
     opened = await _execute_browser_tool('open_target', {'url': ORIGIN+'/login'})
     assert opened['replay']['replayed_login'] and '記憶済み' not in json.dumps(opened['content'], ensure_ascii=False)
+
+
+def test_enter_waits_for_full_load_only_outside_a_replay():
+    """A replay verifies 'left the login page' itself; the full load event (3.7-6.2s on the real bank) adds nothing."""
+    from app.agent.v2.tools import _enter_wait_state
+    assert _enter_wait_state() == 'load'
+    token = recipes.replaying.set(True)
+    try:
+        assert _enter_wait_state() == 'domcontentloaded'
+    finally:
+        recipes.replaying.reset(token)
+    assert _enter_wait_state() == 'load'
+
+
+@pytest.mark.asyncio
+async def test_login_submitted_with_enter_is_replayed(bank):
+    page, site, directory = bank
+    site.slow = True
+    await _execute_browser_tool('open_target', {'url': ORIGIN+'/login'})
+    await _execute_browser_tool('fill_credential', {'ref': await ref(page, '#user'), 'field': 'username', 'url': ORIGIN+'/login'})
+    await _execute_browser_tool('fill_credential', {'ref': await ref(page, '#pw'), 'url': ORIGIN+'/login', 'press_enter': True})
+    await _execute_browser_tool('screenshot', {})
+    assert saved(directory)[0]['steps'][-1]['params'].get('press_enter') is True
+    result = await _execute_browser_tool('open_target', {'url': ORIGIN+'/login'})
+    assert result['replay']['replayed_login'] and page.url == ORIGIN+'/account'
