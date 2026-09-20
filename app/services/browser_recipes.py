@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 AUTH = {'fill_credential', 'fill_totp_code', 'wait_for_otp_from_app', 'wait_for_link_from_app', 'solve_captcha'}
 # Steps code can repeat without a model writing a string for them.
 REPLAYABLE = AUTH | {'click', 'keyboard_press', 'wait_for'}
-OBSERVE_ONLY = {'screenshot', 'content', 'hover', 'scroll'}
-SESSION_CONTROL = {'session_status', 'hold', 'release', 'close'}
+OBSERVE_ONLY = {'screenshot', 'content', 'hover', 'scroll', 'find', 'read'}
+# follow is a container: the clicks inside it pass through here one by one.
+SESSION_CONTROL = {'session_status', 'hold', 'release', 'close', 'follow'}
 REF_KEYS = ('ref', 'image_ref', 'input_ref')
 SAFE_PARAMS = {
     'click': (), 'keyboard_press': ('key',), 'wait_for': ('expect',),

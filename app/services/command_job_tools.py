@@ -121,6 +121,8 @@ async def guard(job_id, name, arguments):
         return  # The runner checks this same gate for each nested operation.
     if name == 'browser':
         action = arguments.get('action','screenshot')
+        if action == 'follow':
+            return  # A container like run_plan: browser_follow passes every inner click through this gate.
         if action == 'run_plan':
             # The bounded runner validates the complete plan, checks revisions,
             # then invokes this boundary for each ordinary operation.

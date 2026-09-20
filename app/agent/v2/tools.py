@@ -445,7 +445,7 @@ BROWSER_TOOL['input_schema']['properties']['ready'] = {
 BROWSER_TOOL['description'] += ' 確認済みの複数段階はbrowser_plan(expected_url,steps)でまとめられる。'
 
 # 読む・探す・文字で押す: evaluate にJSを書く往復を定型の操作に置き換える（app/services/browser_reading.py）。
-BROWSER_TOOL['input_schema']['properties']['action']['enum'] += ['find', 'read']
+BROWSER_TOOL['input_schema']['properties']['action']['enum'] += ['find', 'read', 'follow']
 BROWSER_TOOL['input_schema']['properties'].update({
     'label': {'type': 'string', 'maxLength': 300, 'description': 'click: refの代わりに、押したい要素の表示文字。完全一致（無ければ部分一致）する見えているクリック対象が1つだけなら押す。複数/0件なら押さずに候補のrefを返す'},
     'role': {'type': 'string', 'description': 'click(label)の絞り込み（link, button, tab など。任意）'},
@@ -456,12 +456,19 @@ BROWSER_TOOL['input_schema']['properties'].update({
     'offset': {'type': 'integer', 'minimum': 0, 'description': 'read: 本文の何文字目から読むか（続きを読む時）'},
     'max_chars': {'type': 'integer', 'minimum': 100, 'maximum': 12000, 'description': 'read: 読む文字数（既定4000）'},
     'tables': {'type': 'boolean', 'description': 'read: 範囲内の表を行ごとに「セル | セル」で返す'},
+    'path': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {'type': 'string', 'maxLength': 120},
+             'description': 'follow: 続けて押したい物の表示文字を順に並べる（例: ["口座情報", "入出金明細"]）。多少の表記ゆれは吸収される'},
+    'goal': {'type': 'string', 'maxLength': 300, 'description': 'follow: 道筋が分からない時に、行き先を言葉で渡す（例: 9月の入出金明細を表示する）'},
+    'max_steps': {'type': 'integer', 'minimum': 1, 'maximum': 10, 'description': 'follow(goal): 押す回数の上限（既定6）'},
 })
 BROWSER_TOOL['input_schema']['properties']['selector']['description'] += '／read: 読む範囲のCSSセレクタ（任意。未指定は本文全体）'
 BROWSER_TOOL['description'] += (
     ' 操作後の観測結果には画面の本文（先頭部分）が含まれる。read: 本文の続き・指定範囲(selector/after/offset)・表(tables)を読む。'
     'find(query): 表示文字で要素を探してrefを得る。click(label): 表示文字で押す。'
     'ページを読む・要素を探す・文字で押す用途はこれらで足り、evaluateにJSを書く往復が要らない。'
+    ' follow: メニューをたどる・次へ進む等、押す物が2つ以上続く時は1回で任せられる。path=表示文字の並び、または goal=行き先の説明。'
+    '1手ずつの往復が消える。入力・認証・支払い・送信・迷った時はそこで止まって、どこまで押したかと現在の画面を返す。'
+    '返った画面が目的どおりかは自分で確認する。'
 )
 
 # ============================================
@@ -3384,6 +3391,10 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
 
         if condition is not None and action in {"click", "type"}:
             await page.check_condition_before_action(condition)
+
+        if action == "follow":
+            from app.services import browser_follow
+            return await browser_follow.run(page, params)
 
         if action in {"find", "read"}:
             from app.services import browser_reading
