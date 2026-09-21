@@ -52,6 +52,11 @@ PAGE = "() => {" + PRELUDE + r"""
 }"""
 
 
+import contextvars
+
+walking = contextvars.ContextVar('dan_browser_following', default=False)
+
+
 class Stop(Exception):
     def __init__(self, reason, doubt=None):
         super().__init__(reason)
@@ -153,6 +158,7 @@ async def run(page, params):
 
     started = time.perf_counter()
     job_id = os.environ.get('DAN_COMMAND_JOB_ID')
+    walk_token = walking.set(True)
     pressed, reason, jev_calls, done, doubt, counter = [], None, 0, False, None, None
     try:
         async with Decisions(os.environ.get('DAN_USER_ID'), max_calls=limit+1) as decisions:
@@ -222,6 +228,7 @@ async def run(page, params):
     except Exception as exc:
         reason = 'execution_'+type(exc).__name__
 
+    walking.reset(walk_token)
     jev_calls = counter.calls if counter is not None else 0
     elapsed = round((time.perf_counter()-started)*1000, 2)
     record_timing('workflow', 'browser_follow', elapsed, 'handoff' if reason else 'completed', {'tool_calls': len(pressed)})
