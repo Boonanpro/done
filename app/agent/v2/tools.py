@@ -342,9 +342,11 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.browser_flow import TOOL as BROWSER_FLOW_TOOL
     from app.services.jev_browser_budget import enabled as jev_browser_enabled
     from app.services.dan_lookup import LOOKUP_TOOL, WAIT_TOOL
+    from app.services.desktop_control import TOOL as DESKTOP_TOOL
     return [
         LOOKUP_TOOL,
         WAIT_TOOL,
+        DESKTOP_TOOL,
         BROWSER_TOOL,
         BROWSER_PLAN_TOOL,
         *([BROWSER_FLOW_TOOL] if jev_browser_enabled() else []),
@@ -1240,6 +1242,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
 
+    if tool_name == "desktop":
+        return ("_desktop", "__from_params")
+
     if tool_name == "schedule_followup":
         return ("_followup", "schedule")
 
@@ -1318,7 +1323,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop"}:
             return
 
         error_type = result.get("error_type")
@@ -2427,6 +2432,11 @@ async def execute_tool(
         from app.services.dan_lookup import wait_until
         return await wait_until(params)
 
+    # ★★★ デスクトップアプリの操作（ブラウザ以外: LINE, Discord, 設定画面など）★★★
+    if skill_name == "_desktop":
+        from app.services.desktop_control import run as run_desktop
+        return await run_desktop(params)
+
     # ★★★ 続報の予約（後で自動で起こして報告させる）★★★
     if skill_name == "_followup":
         return await _execute_schedule_followup(params, session_id, user_id)
@@ -2620,7 +2630,7 @@ def format_tool_result(
     images = []
 
     # ★ ブラウザツール: content blocks形式で画像+テキストを直接返す
-    if skill_name == "_browser" and "content" in result:
+    if skill_name in ("_browser", "_desktop") and "content" in result:
         text_parts = []
         for block in result["content"]:
             if block.get("type") == "image":
@@ -3040,6 +3050,29 @@ def _enter_wait_state() -> str:
         return "load"
 
 
+_click_streak = {'count': 0}
+
+
+def _suggest_follow(action: str, params: Dict[str, Any], result: Any) -> Any:
+    """説明文に書いただけでは follow は使われなかった（100件の計測で1回）。クリックが2回続いたその場で、
+    次からまとめられることを結果の中で伝える。follow の内側のクリックと、失敗したクリックには付けない。"""
+    try:
+        from app.services.browser_follow import walking
+        if walking.get():
+            return result
+        if action == 'click' and isinstance(result, dict) and result.get('success') is not False and (params.get('ref') or params.get('label')):
+            _click_streak['count'] += 1
+            if _click_streak['count'] >= 2 and isinstance(result.get('content'), list):
+                result['content'].append({'type': 'text', 'text': (
+                    'クリックが続いています。この先も押す物が分かっているなら、browser(action="follow", path=["表示文字1", "表示文字2"]) '
+                    'か goal="行き先の説明" で1回にまとめられます（1手ごとの往復が消えます）。')})
+        elif action not in {'screenshot', 'scroll', 'read', 'find', 'wait_for', 'hover'}:
+            _click_streak['count'] = 0
+    except Exception:
+        pass
+    return result
+
+
 def _remembered_login_note(*places) -> str:
     """認証情報を調べた時点で、記憶済みの入口があることを伝える（無ければ空文字）。"""
     try:
@@ -3357,6 +3390,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
         # 操作の記憶: 成功したログイン手順を記録し、次回の open_target で再生する。
         from app.services.browser_recipes import around as _with_recipes
         result = await _with_recipes(action, params, _execute_browser_tool_impl)
+        result = _suggest_follow(action, params, result)
         status = "failed" if isinstance(result, dict) and result.get("success") is False else "success"
         return result
     finally:
@@ -4868,3 +4902,12 @@ def _get_project_service():
         key = settings.SUPABASE_SERVICE_ROLE_KEY or settings.SUPABASE_KEY
         service.supabase = create_client(settings.SUPABASE_URL, key)
         return service
+
+
+# 100件の前後比較で、ダンの道具を最初から読み込むようにした後、検索の仕事が14%遅くなった。原因は、
+# すぐ手元にある read_url（外部の変換サービス経由。実測 中央値8.5秒・遅い時38秒）が、組み込みのページ取得
+# （中央値5.0秒）の代わりに選ばれるようになったこと。どちらを選ぶべきかを道具の説明に書く。
+READ_URL_TOOL['description'] += (
+    '\n組み込みの検索（WebSearch / web_search）とページ取得（WebFetch）が使える時は、そちらのほうが速い。'
+    'read_url は、それらで中身が取れなかったページ（JavaScriptで描画されるページなど）に使う。'
+)
