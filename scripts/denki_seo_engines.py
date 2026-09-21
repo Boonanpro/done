@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -157,7 +158,34 @@ def claude(prompt: str, timeout: int = 900, model: str = WRITER_MODEL) -> str | 
             return out
         log(f"claude oneshot failed (attempt {attempt + 1})")
         time.sleep(20)
+    _log_claude_failure_reason(model)
     return None
+
+
+def _log_claude_failure_reason(model: str) -> None:
+    """失敗の理由を残す。run_oneshot_cli は異常終了時に標準出力を捨てるが、
+    CLI は利用上限・ログイン切れの文面を標準出力へ出すため、短い試し呼び出しで拾う。"""
+    import subprocess
+
+    try:
+        from app.agent.cli_runner import _resolve_claude_cli
+
+        claude_cmd, cli_js = _resolve_claude_cli()
+        if not claude_cmd:
+            log("claude failure reason: CLI が見つからない")
+            return
+        cmd = ([claude_cmd, cli_js] if cli_js else [claude_cmd]) + [
+            "-p", "ping", "--output-format", "text", "--model", model,
+        ]
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
+        proc = subprocess.run(
+            cmd, input="", capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=env, timeout=120,
+        )
+        text = " ".join(((proc.stdout or "") + " " + (proc.stderr or "")).split())[:400]
+        log(f"claude failure reason: exit={proc.returncode} output={text!r}")
+    except Exception as e:  # 診断の失敗で本処理を止めない
+        log(f"claude failure reason: 診断できず {e!r}")
 
 
 def claude_json(prompt: str, timeout: int = 900):
@@ -1257,6 +1285,11 @@ def cmd_daily(args) -> None:
 ROOM_ID = "60760f4c-e236-49f4-a72c-c556bc56fa68"  # 電気主任技術者応援サイトの部屋
 
 
+def _looks_like_login_expired(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in ("/login", "please run", "invalid api key", "authentication_error", "oauth token", "not logged in"))
+
+
 def _notify_room_if_failed(touched: list[str]) -> None:
     """その日の解説ページが出なかった時だけ、部屋へ短く知らせる（成功日は静かに）。"""
     if any("/guides/" in u and not u.endswith("/guides") for u in touched):
@@ -1265,10 +1298,14 @@ def _notify_room_if_failed(touched: list[str]) -> None:
     tail = ""
     try:
         lines = (Path(__file__).resolve().parent.parent / ".tmp" / "denki_seo_daily.log").read_text(encoding="utf-8", errors="replace").splitlines()
-        tail = "\n".join(l for l in lines[-40:] if today in l and ("failed" in l or "非公開" in l or "対象なし" in l or "候補なし" in l))[-600:]
+        tail = "\n".join(l for l in lines[-40:] if today in l and ("failed" in l or "failure reason" in l or "非公開" in l or "対象なし" in l or "候補なし" in l))[-600:]
     except Exception:  # noqa: BLE001
         pass
-    body = f"[SEO自動運用の見張り] {today} の解説ページが公開されませんでした。原因を調べて復旧してください。\n{tail}"
+    head = "原因を調べて復旧してください。"
+    if _looks_like_login_expired(tail):
+        # ログイン切れの間はダン自身も起きられない。直せるのは本人の再ログインだけなので、そう書く。
+        head = "文章を書くAI（Claude）のログインが切れているようです。みきさんの再ログインが必要です。"
+    body = f"[SEO自動運用の見張り] {today} の解説ページが公開されませんでした。{head}\n{tail}"
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:9000/api/v1/chat/internal/rooms/{ROOM_ID}/messages",
