@@ -202,6 +202,8 @@ app = FastAPI(
 
 from app.core.api.browser_routes import router as browser_manager_router
 app.include_router(browser_manager_router)
+from app.core.api.command_job_routes import router as command_job_router
+app.include_router(command_job_router)
 
 
 ALLOWED_ORIGINS = [

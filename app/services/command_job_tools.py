@@ -73,7 +73,7 @@ READ_TOOLS = {'read_file','read_url','check_skill','get_personal_info','remember
               'get_credentials','save_credentials','get_current_time','command_center','write_file','edit_file',
               'save_totp_secret','attach_image','schedule_followup','watch','split_to_new_room',
               'studio_record','studio_encode','studio_probe','studio_extract_frame','studio_evaluate',
-              'lookup','wait_until'}
+              'lookup','wait_until','get_location'}
 READ_ACTIONS = {'open','open_target','screenshot','scroll','get_state','get_tabs','switch_tab','wait_for',
                 'hold','release','session_status','fill_credential','fill_totp_code','wait_for_otp_from_app',
                 'solve_captcha','type','fill_form','select','close','content','back','reload','hover',
@@ -96,7 +96,7 @@ def needs_confirmation(target):
     # Compound menu entries describe available workflows, not an execution.
     if re.fullmatch(r'予約確認\s*[/／]\s*変更\s*[/／]\s*払戻(?:\s*予約件数\s*\d+件)?',label):
         return False
-    if re.fullmatch(r'(?:予約|購入|注文|送信|投稿|支払|払戻)(?:履歴|一覧|詳細|状況)(?:を(?:見る|開く|確認))?',label):
+    if re.fullmatch(r'(?:予約|購入|注文|送信|投稿|支払|払戻)(?:履歴|一覧|詳細|状況|明細|照会)(?:を(?:見る|開く|確認))?',label):
         return False
     if re.fullmatch(r'(?:予約|購入|注文|支払|払戻)内容の確認(?:画面)?に進む',label):
         return False
@@ -113,56 +113,11 @@ def needs_confirmation(target):
     return False
 
 async def guard(job_id, name, arguments):
-    saved=state.read(job_id)
-    if saved and saved['state'] in {'awaiting_confirmation','paused'}:
-        if name in {'read_file','read_url','get_current_time','command_center'} or (name=='browser' and arguments.get('action') in {'screenshot','get_state','get_tabs','session_status','content'}):
-            return
-    s = await available(job_id)
-    if name in {'browser_plan','browser_flow'}:
-        return  # The runner checks this same gate for each nested operation.
-    if name == 'browser':
-        action = arguments.get('action','screenshot')
-        if action == 'follow':
-            return  # A container like run_plan: browser_follow passes every inner click through this gate.
-        if action == 'run_plan':
-            # The bounded runner validates the complete plan, checks revisions,
-            # then invokes this boundary for each ordinary operation.
-            return
-        if action == 'evaluate':
-            raise RuntimeError('この作業ではブラウザの任意JavaScript実行は使えません。画面の要素参照と通常の操作道具を使ってください。')
-        if action in READ_ACTIONS:
-            # Typing Enter submits forms, and arbitrary URL schemes execute code.
-            if action in {'open','open_target'} and not re.match(r'^https?://', str(arguments.get('url',''))):
-                raise RuntimeError('HTTP(S)のページだけを開けます')
-            if not arguments.get('press_enter') and arguments.get('key') not in {'Enter','Return'}: return
-        target = await browser_target(arguments)
-        label, body = target.get('label',''), target.get('body','')
-        # Read-only inspection identifies the actual element, not the model's
-        # description. Ambiguous coordinate/key actions fail closed.
-        risky = needs_confirmation(target)
-        if re.search(r'認証|SafeKey|verification',body,re.I) and re.search(r'続け|認証|continue|verify',label,re.I):
-            if s.get('authorized_transaction_revision') == s['revision']: return
-        if not risky: return
-        page_key = target['url']+'\n'+label+'\n'+body
-        digest = fingerprint(name,arguments,page_key)
-        if not consume(job_id,digest):
-            await propose(job_id, '「'+label+'」を実行する前に確認が必要です。\n'+body[:2400], digest)
-            current = await browser_target(arguments)
-            if fingerprint(name,arguments,current['url']+'\n'+current['label']+'\n'+current['body']) != digest:
-                raise RuntimeError('確認後に画面が変わりました。内容を読み直して確認してください。')
-            if not consume(job_id,digest): raise RuntimeError('確認内容が更新されています')
-        return '提示した操作について本人の承認を受け取り、操作を許可しました。実際の成否は上のツール結果で確認してください。'
-    if name in READ_TOOLS:
-        return
-    if name=='compose_message' and arguments.get('action') in {'propose','list','discard'}: return
-    if name=='collab_thread' and arguments.get('action') in {'list','consult'}: return
-    # Other external actions, arbitrary code and file mutations also require a
-    # concrete grant. No opaque tool name is assumed to be harmless.
-    digest = fingerprint(name,arguments)
-    if not consume(job_id,digest):
-        await propose(job_id, '実行内容の確認: '+name+'\n'+json.dumps(redacted(arguments),ensure_ascii=False)[:2200], digest)
-        if not consume(job_id,digest): raise RuntimeError('確認内容が更新されています')
-    return 'この操作について本人の承認を受け取りました。実際の成否はツール結果で確認してください。'
+    """Nothing is held for approval here any more (owner's decision 2026-09-22): a voice-delegated job has the same authority
+    as chat Dan. Like chat Dan, the worker asks in words before an irreversible commitment (the rule in its instructions) and
+    the owner's answer reaches it as a follow-up. Only the owner's own pause still holds a job."""
+    await available(job_id)
+    return
 
 def redacted(value):
     if isinstance(value, dict):

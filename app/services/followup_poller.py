@@ -122,11 +122,12 @@ def _room_busy(room_id: str) -> bool:
     return False
 
 
-async def _wake(room_id: str, user_id: str, content: str) -> None:
+async def _wake(room_id: str, user_id: str, content: str) -> str:
     """Drive one full Dan turn in the room with a synthetic system message."""
     from app.agent.cli_runner import process_message_cli
 
     project_id = _resolve_project_id(room_id)
+    result = ""
     async for _ev in process_message_cli(
         room_id=room_id,
         user_id=user_id,
@@ -134,7 +135,11 @@ async def _wake(room_id: str, user_id: str, content: str) -> None:
         project_id=project_id,
         run_id=None,
     ):
-        pass  # the sink saves the report; we just drive the turn to completion
+        if _ev.get("type") == "result":
+            result = _ev.get("text") or result
+        elif _ev.get("type") == "error":
+            result = "作業中にエラーが発生しました: " + str(_ev.get("message") or "詳細不明")
+    return result
 
 
 async def _fire_at(row: Dict[str, Any]) -> None:
@@ -284,12 +289,32 @@ async def _fire_handoff(row: Dict[str, Any]) -> None:
     room is always new information."""
     from app.services.followups import mark_status
 
+    if (row.get("spec") or {}).get("command_center"):
+        from app.services.command_handoff import start
+        await start(row)
+        return
     note = row.get("plain_note") or ""
     logger.info("[watch] handoff fires room=%s note=%r", row["room_id"][:8], note[:40])
+    spec = row.get("spec") or {}
+    is_command = bool(spec.get("command_center") and spec.get("origin_project_id"))
     try:
-        await _wake(row["room_id"], row.get("user_id") or "", _HANDOFF_PROMPT.format(note=note))
+        prompt = ("[司令塔からの作業依頼]\n" + note) if is_command else _HANDOFF_PROMPT.format(note=note)
+        result = await _wake(row["room_id"], row.get("user_id") or "", prompt)
+        if is_command:
+            from app.services.command_center import execute, report_id
+            await execute({"action": "report", "project_id": spec["origin_project_id"],
+                "task": (result or "作業ターンは終了しましたが、結果を取得できませんでした。作業の部屋を確認してください。")[:2800]},
+                row["room_id"], row.get("user_id") or "", report_message_id=report_id(row['id']))
     except Exception as e:  # noqa: BLE001
         logger.error("[watch] handoff fire failed room=%s: %s", row["room_id"], e)
+        if is_command:
+            try:
+                from app.services.command_center import execute, report_id
+                await execute({"action": "report", "project_id": spec["origin_project_id"],
+                    "task": "作業または結果の取得に失敗しました。完了は確認できていません。作業の部屋を確認してください。"},
+                    row["room_id"], row.get("user_id") or "", report_message_id=report_id(row['id']))
+            except Exception:
+                logger.exception("[watch] command center failure report could not be saved")
     await asyncio.to_thread(mark_status, row["id"], "done")
 
 
@@ -298,7 +323,10 @@ async def _fire(row: Dict[str, Any]) -> None:
 
     d = decode_watch_row(row)
     kind = d.get("kind") or "at"
-    if kind == "mail":
+    if kind == "command_report":
+        from app.services.command_handoff import deliver
+        await deliver(d)
+    elif kind == "mail":
         await _fire_mail(d)
     elif kind == "every":
         await _fire_every(d)
@@ -310,10 +338,16 @@ async def _fire(row: Dict[str, Any]) -> None:
 
 async def _tick() -> None:
     from app.services.followups import claim_due_followups, mark_status
+    from app.services.command_job_runner import dispatch_pending
+
+    await dispatch_pending()
 
     rows = await asyncio.to_thread(claim_due_followups, MAX_PER_CYCLE)
     for row in rows:
-        if _room_busy(row["room_id"]):
+        from app.services.followups import decode_watch_row
+        decoded = decode_watch_row(row)
+        if (decoded.get("kind") != "command_report" and decoded.get('spec',{}).get('engine') != 'steerable_cli'
+            and _room_busy(row["room_id"])):
             # Put it back; retry on a later cycle when the room is idle.
             await asyncio.to_thread(mark_status, row["id"], "pending")
             continue
@@ -321,6 +355,8 @@ async def _tick() -> None:
 
 
 async def poller_loop() -> None:
+    from app.services.command_job_runner import recover
+    await recover()
     logger.info("[watch] poller started (interval=%ss)", POLL_INTERVAL)
     while True:
         try:

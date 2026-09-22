@@ -332,7 +332,7 @@ def reschedule_watch(
         logger.error("reschedule_watch(%s) failed: %s", row_id, e)
 
 
-def held_room_ids() -> List[str]:
+def held_room_ids(*, strict: bool = False) -> List[str]:
     """Rooms whose browser must NOT be idle-reaped: an active one-shot wait
     ('at') or any watch that explicitly asked to hold the browser open."""
     try:
@@ -342,6 +342,8 @@ def held_room_ids() -> List[str]:
         )
     except Exception as e:
         logger.warning("held_room_ids failed: %s", e)
+        if strict:
+            raise
         return []
     out = set()
     for row in res.data or []:
@@ -391,12 +393,13 @@ def claim_due_followups(limit: int = 5) -> List[Dict[str, Any]]:
     claimed = []
     for row in rows:
         try:
-            sb.table(TABLE).update({
+            result = sb.table(TABLE).update({
                 "status": "firing",
                 "attempts": (row.get("attempts") or 0) + 1,
                 "updated_at": now,
             }).eq("id", row["id"]).eq("status", "pending").execute()
-            claimed.append(row)
+            if result.data:
+                claimed.append(row)
         except Exception as e:
             logger.warning("claim_due_followups claim failed for %s: %s", row.get("id"), e)
     return claimed
@@ -417,12 +420,11 @@ def cancel_pending_for_room(room_id: str) -> int:
     message: they're back, so a stale auto-report would be noise/duplicate.
     Returns the number cancelled (best-effort)."""
     try:
-        res = (
-            _sb().table(TABLE).update({
-                "status": "cancelled",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("room_id", room_id).eq("status", "pending").execute()
-        )
+        rows = _sb().table(TABLE).select('*').eq('room_id', room_id).eq('status', 'pending').execute().data or []
+        ids = [r['id'] for r in rows if not decode_watch_row(r)['spec'].get('command_center')]
+        if not ids:
+            return 0
+        res = _sb().table(TABLE).update({'status': 'cancelled', 'updated_at': datetime.now(timezone.utc).isoformat()}).in_('id', ids).eq('status', 'pending').execute()
         return len(res.data or [])
     except Exception as e:
         logger.warning("cancel_pending_for_room(%s) failed: %s", room_id, e)

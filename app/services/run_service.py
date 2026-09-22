@@ -130,6 +130,7 @@ class RunService:
         active_proposal_id: Optional[str] = None,
         superseded_by_run_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        only_if_active: bool = False,
     ) -> Optional[dict]:
         updates = {
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -146,6 +147,8 @@ class RunService:
             updates["metadata"] = metadata
 
         query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
+        if only_if_active:
+            query = query.in_("state", list(ACTIVE_RUN_STATES))
         result = await asyncio.to_thread(query.execute)
         return result.data[0] if result.data else None
 
