@@ -146,3 +146,12 @@ rooms are idle. This is a local change; no commit/push is implied.
 - Checked 68 room statuses: zero active. Restarted the local core to refresh
   idle CLI/MCP processes. Restored the sandbox after the known restart race;
   both health endpoints returned HTTP 200. No commit or push was performed.
+
+## Jev integration on 2026-09-17
+
+`browser_plan` batches verified steps; `browser_flow` delegates bounded candidate
+matching to Jev and checks actual DOM completion. Known exact operations bypass
+Jev. A changing requirement can be scoped with `instruction_selector`; visual
+tasks retain images. `open_target.ready` replaces the redirect grace only when
+specific destination evidence is supplied. Authentication is not inferred from
+that evidence. See [measurements, quality gates, spending limits and deployment](jev-speed-assessment-20260917.md).

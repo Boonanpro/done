@@ -1,0 +1,8 @@
+[
+  {"id":"reveal","name":"段階的に見せる","effect":"余白の中の短い問いから、意味のある言葉を大きく出す。期待・発見・余韻。","avoid":"重要な説明を隠したまま終えない。緊急の操作説明には不向き。","controls":["headline","detail","pace","layout"]},
+  {"id":"compare","name":"違いを対比する","effect":"二つの状態を並べ、同じ基準で比較する。理解・納得。片側ずつ現れる。","avoid":"根拠のない優劣や数値を捏造しない。両側の情報を読める時間を取る。","controls":["headline","labels","pace","layout"]},
+  {"id":"gather","name":"断片から全体へ","effect":"離れていた情報が一つのまとまりになる。整理・安心・解決。","avoid":"要素が独立したままの話には集合を強制しない。","controls":["headline","labels","pace","layout"]},
+  {"id":"path","name":"進み方を見せる","effect":"点と線が順に結ばれ、到達地点が現れる。見通し・前進・具体的な行動。","avoid":"順序のない項目を手順だと誤認させない。","controls":["headline","labels","pace","layout"]},
+  {"id":"focus","name":"視点を寄せる","effect":"周囲の静かな形から一つの言葉へ視線を寄せる。内省・重要な一点・親密さ。","avoid":"実写や人物の感情表現の代用品だと主張しない。","controls":["headline","detail","pace","layout"]},
+  {"id":"rhythm","name":"言葉をリズムで刻む","effect":"短い言葉が異なる大きさと位置で順に現れる。活力・勢い・意外性。","avoid":"落ち着いて読みたい長い説明や静かな安心感には不向き。","controls":["headline","labels","pace","layout"]}
+]

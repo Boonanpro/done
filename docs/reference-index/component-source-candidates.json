@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "status": "source_candidates_not_quality_approved",
+  "sources": [
+    {
+      "id": "animography-mobilo",
+      "title": "Mobilo animated typeface",
+      "source_url": "https://animography.net/products/mobilo",
+      "preview_urls": ["https://vimeo.com/189551066", "https://vimeo.com/189552657", "https://vimeo.com/189751888"],
+      "family": "animated_typography",
+      "basis": "publisher_page",
+      "quality_status": "unreviewed",
+      "readiness": "External source candidate; runtime, Japanese support and selected package license require verification. Not downloaded or purchased."
+    },
+    {
+      "id": "motion-by-scott-apple-text",
+      "title": "Apple Style Text Animation",
+      "source_url": "https://www.motionbyscott.com/resource_redirect/landing_pages/2151537532",
+      "family": "animated_typography",
+      "basis": "publisher_page",
+      "quality_status": "unreviewed",
+      "runtime": "After Effects",
+      "readiness": "Free project advertised; actual download requires further interaction. Not downloaded; not natively usable in Dan."
+    },
+    {
+      "id": "motion-by-scott-glass",
+      "title": "3D Glass",
+      "source_url": "https://www.motionbyscott.com/pl/2148749673",
+      "family": "material_motion",
+      "basis": "publisher_page",
+      "quality_status": "unreviewed",
+      "runtime": "After Effects",
+      "readiness": "Free project advertised; dependencies and redistribution not verified. Not downloaded."
+    },
+    {
+      "id": "motion-by-scott-gradient",
+      "title": "Apple Style Gradients",
+      "source_url": "https://www.motionbyscott.com/050-apple-gradient",
+      "family": "procedural_background",
+      "basis": "publisher_page",
+      "quality_status": "unreviewed",
+      "runtime": "After Effects",
+      "readiness": "Source page retrieved; downloadable file not obtained. Not a validated Dan component."
+    },
+    {
+      "id": "motion-by-scott-five-text",
+      "title": "5 Text Animations",
+      "source_url": "https://www.motionbyscott.com/5-text-animations-project-files",
+      "family": "animated_typography",
+      "basis": "publisher_page",
+      "quality_status": "unreviewed",
+      "runtime": "After Effects",
+      "readiness": "Source page retrieved; downloadable file not obtained. Not a validated Dan component."
+    },
+    {
+      "id": "motion-by-scott-tunnel",
+      "title": "Tunnel Flythrough",
+      "source_url": "https://www.motionbyscott.com/tunnel-flythrough-project-files",
+      "family": "camera_motion",
+      "basis": "publisher_page",
+      "quality_status": "unreviewed",
+      "runtime": "After Effects",
+      "readiness": "Free project advertised; expression setup is a learning candidate. Not downloaded."
+    }
+  ]
+}

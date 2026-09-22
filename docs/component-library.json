@@ -1,0 +1,5370 @@
+[
+  {
+    "id": "hf-caption-clip-wipe",
+    "title": "字幕を横から現す",
+    "description": "Left-to-right clip-path wipe reveal per word",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-clip-wipe",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-clip-wipe/preview-v2.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-clip-wipe",
+    "tags": [
+      "captions",
+      "caption-style",
+      "wipe",
+      "clip-path",
+      "reveal"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-clip-wipe.html",
+        "sha256": "8b9e06353df3ea3bc0113a9c7ef3e480293a6ed75bee46744b053bf5e02dc5f6"
+      }
+    ],
+    "sha256": "d910efe52f0400cd0d8dd36267034ef3bcac6c8c871e66d8c261ee7ea395d5d7",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Clip Wipe",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-editorial-emphasis",
+    "title": "書体と大きさで強調",
+    "description": "Dual-font system with dramatic size contrast for emphasis words",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-editorial-emphasis",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-editorial-emphasis/preview.mp4?v=1779051416",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-editorial-emphasis",
+    "tags": [
+      "captions",
+      "caption-style",
+      "editorial",
+      "typography",
+      "emphasis"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-editorial-emphasis.html",
+        "sha256": "6144571b6c73dbdec282284fe2277d3c958e15cddaf362295ba9cca02e705d1c"
+      }
+    ],
+    "sha256": "b6b5cfb1724d4b376540df31a214abe90ee221de3e862d45f3ee018deea7e717",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Editorial Emphasis",
+    "reference_role": "text",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-caption-editorial-emphasis",
+      "preview_sha256": "b6b5cfb1724d4b376540df31a214abe90ee221de3e862d45f3ee018deea7e717",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "needs_design_work",
+        "strengths": [
+          "ニュートラルなサンセリフと流麗なイタリックセリフ体を組み合わせたタイポグラフィの選定方針",
+          "高コントラストなモノトーン配色による文字の識別性"
+        ],
+        "problems": [
+          {
+            "time": 1.7,
+            "issue": "強調語『frame.』の進入アニメーション時、左端フレーム外からのスライドインにより『ne.』のみが画面端に不自然に現れてから全体が表示される表示アーティファクトが発生している"
+          },
+          {
+            "time": 3.2,
+            "issue": "『HTML』の出現時にも同様に左端の境界からスライドし、『ML』のみが切り取られた状態で先行表示され可読性を損ねている"
+          },
+          {
+            "time": 4.5,
+            "issue": "テキストが画面の左側（左下寄り）に極端に押し込められており、画面の70%以上を占める右側と上部が無意味な黒ベタの余白となっており構図のバランスが崩れている"
+          },
+          {
+            "time": 6.6,
+            "issue": "『Justcode』において単語間のスペースが欠落しており、かつ表示時間が約200ミリ秒と極端に短いため内容を正しく認識できない"
+          },
+          {
+            "time": 6.8,
+            "issue": "フレーズ間の切り替えで唐突に黒画面が挟まれるハードカットがあり、スムーズな連続性がなくフリッカーのような粗さが目立つ"
+          }
+        ],
+        "suitable_for": [
+          "キネティックタイポグラフィの初期レイアウト検証・タイミングプロトタイプ"
+        ],
+        "required_changes": [
+          "テキストの配置を中央揃えにするか、16:9キャンバス全体を考慮したバランスの良いグリッドレイアウトへ再構成すること",
+          "左端で文字が欠けてスライドインする不自然なモーションを修正し、適切なマスク処理やスムーズなイージング・フェードインを適用すること",
+          "『Just code』のタイポグラフィ表記ミスを修正し、閲覧者が文字を認識できる十分な表示時間（ホールド時間）を確保すること",
+          "フレーズ間の暗転（ブラックアウト）を滑らかなトランジションやキネティックな連携モーションへ改善すること"
+        ],
+        "reason": "タイポグラフィのトーン選定には洗練された意図が感じられるものの、画面全体の余白バランスが極端に偏っており、テキスト進入時の文字欠けアーティファクト、誤字、極端に短すぎる表示時間など、本番クオリティのコンポーネントとしては未完成な要素が多く残されています。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 1665
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "video",
+            "tokens": 17556
+          },
+          {
+            "modality": "text",
+            "tokens": 7243
+          },
+          {
+            "modality": "image",
+            "tokens": 17556
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 1665,
+        "total_output_tokens": 978,
+        "total_thought_tokens": 2791,
+        "total_tokens": 47789,
+        "total_tool_use_tokens": 42355,
+        "raw_prompt_token": 7317,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 33
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 706
+              },
+              {
+                "modality": "image",
+                "tokens": 528
+              },
+              {
+                "modality": "video",
+                "tokens": 528
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 27
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 825
+              },
+              {
+                "modality": "image",
+                "tokens": 1584
+              },
+              {
+                "modality": "video",
+                "tokens": 1584
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 359
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1282
+              },
+              {
+                "modality": "image",
+                "tokens": 2244
+              },
+              {
+                "modality": "video",
+                "tokens": 2244
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 160
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1534
+              },
+              {
+                "modality": "image",
+                "tokens": 2706
+              },
+              {
+                "modality": "video",
+                "tokens": 2706
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 390
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 2011
+              },
+              {
+                "modality": "image",
+                "tokens": 2970
+              },
+              {
+                "modality": "video",
+                "tokens": 2970
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 223
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 2327
+              },
+              {
+                "modality": "image",
+                "tokens": 3432
+              },
+              {
+                "modality": "video",
+                "tokens": 3432
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 273
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 2699
+              },
+              {
+                "modality": "image",
+                "tokens": 4092
+              },
+              {
+                "modality": "video",
+                "tokens": 4092
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 686
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1326
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 33
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 706
+              },
+              {
+                "modality": "image",
+                "tokens": 528
+              },
+              {
+                "modality": "video",
+                "tokens": 528
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 27
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 825
+              },
+              {
+                "modality": "image",
+                "tokens": 1584
+              },
+              {
+                "modality": "video",
+                "tokens": 1584
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 359
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1282
+              },
+              {
+                "modality": "image",
+                "tokens": 2244
+              },
+              {
+                "modality": "video",
+                "tokens": 2244
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 160
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1534
+              },
+              {
+                "modality": "image",
+                "tokens": 2706
+              },
+              {
+                "modality": "video",
+                "tokens": 2706
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 390
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 2011
+              },
+              {
+                "modality": "image",
+                "tokens": 2970
+              },
+              {
+                "modality": "video",
+                "tokens": 2970
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 223
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 2327
+              },
+              {
+                "modality": "image",
+                "tokens": 3432
+              },
+              {
+                "modality": "video",
+                "tokens": 3432
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 273
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 2699
+              },
+              {
+                "modality": "image",
+                "tokens": 4092
+              },
+              {
+                "modality": "video",
+                "tokens": 4092
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 686
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1326
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-caption-emoji-pop",
+    "title": "絵文字つき字幕",
+    "description": "Emoji integration with stroked text and horizontal squeeze entrance",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-emoji-pop",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-emoji-pop/preview.mp4?v=1779051416",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-emoji-pop",
+    "tags": [
+      "captions",
+      "caption-style",
+      "emoji",
+      "social"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-emoji-pop.html",
+        "sha256": "79e7cad5cf54dec70e7af59c8d0583531017bacca6bc9ee057bfad386904eb9b"
+      }
+    ],
+    "sha256": "f0ad239a28c4a7ec088fe38d36d6f789f1dc84f241a683bb23d2eb692e895640",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Emoji Pop",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-glitch-rgb",
+    "title": "色ずれする字幕",
+    "description": "RGB chromatic aberration with CRT scanline overlay",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-glitch-rgb",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-glitch-rgb/preview-v2.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-glitch-rgb",
+    "tags": [
+      "captions",
+      "caption-style",
+      "glitch",
+      "cyber",
+      "tech"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-glitch-rgb.html",
+        "sha256": "65e588d27515cde0e361cddd6034a3dad647a86f50c02847c6cc453619d58648"
+      }
+    ],
+    "sha256": "158474770497613f2ee0702097982cd973650e59b339e1f33ca4ee39d141c9da",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Glitch RGB",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-kinetic-slam",
+    "title": "勢いよく飛び込む字幕",
+    "description": "Full-screen single-word display with alternating entrance directions",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-kinetic-slam",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-kinetic-slam/preview.mp4?v=1779051416",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-kinetic-slam",
+    "tags": [
+      "captions",
+      "caption-style",
+      "kinetic",
+      "typography",
+      "slam"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-kinetic-slam.html",
+        "sha256": "86b7a54e045f626d1375636a2f1cde19c2f3cbdad1df1d7d0204fe6b4452044a"
+      }
+    ],
+    "sha256": "aa94308ed616f75b79cc73b8ca0290777d382e67970f1d6ab01276e694f6e71d",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Kinetic Slam",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-matrix-decode",
+    "title": "解読される字幕",
+    "description": "Character scramble animation before text reveal",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-matrix-decode",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-matrix-decode/preview-v2.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-matrix-decode",
+    "tags": [
+      "captions",
+      "caption-style",
+      "matrix",
+      "scramble",
+      "decode"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-matrix-decode.html",
+        "sha256": "c8f703cbe6e8dd547107f2e6298f27c287a9d08b133ceab128e874ce88d36e78"
+      }
+    ],
+    "sha256": "8e48c837572eecc2231e9259f05cce578581ff6bedca436fd17e83952ef7e78e",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Matrix Decode",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-parallax-layers",
+    "title": "奥行きのある大きな字幕",
+    "description": "Behind-subject 3D text layering with vertical stretch effect",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-parallax-layers",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-parallax-layers/preview.mp4?v=1779051692",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-parallax-layers",
+    "tags": [
+      "captions",
+      "caption-style",
+      "parallax",
+      "3d",
+      "depth"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-parallax-layers.html",
+        "sha256": "e1c14eb380fa7d7b8c84798e40530e946ed140547c61d2e6f5111d712cb72d78"
+      }
+    ],
+    "sha256": "c86134da3950e139d859d934153c0c0324ded3f1f3d278615a44aba6ce8fbeb5",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Parallax Layers",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-particle-burst",
+    "title": "粒子が弾ける字幕",
+    "description": "Keyword words trigger colored particle explosions",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-particle-burst",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-particle-burst/preview.mp4?v=1779051416",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-particle-burst",
+    "tags": [
+      "captions",
+      "caption-style",
+      "particles",
+      "burst",
+      "effects"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-particle-burst.html",
+        "sha256": "48ec0a000e9c40cff891c2ca0e66ed4cf33c358bbeb2ca76fb3bdc8288bf5936"
+      }
+    ],
+    "sha256": "371d8938018763e57e2d0e7bf5744b3ca7e8a3535e46509499eb1a8547b4996e",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Particle Burst",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-pill-karaoke",
+    "title": "単語を丸い背景で強調",
+    "description": "Pill-shaped container with per-word karaoke color highlight",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-pill-karaoke",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-pill-karaoke/preview.mp4?v=1779051416",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-pill-karaoke",
+    "tags": [
+      "captions",
+      "caption-style",
+      "karaoke",
+      "pill"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-pill-karaoke.html",
+        "sha256": "cdbbc72af7fbac440c0bf5750cf9e3d4ded20f26588b00ac79399342ca60b3e3"
+      }
+    ],
+    "sha256": "3d13e060d29f31d4f97a4ac74c8991811b8a8a9cc2f3d7538519dd19c0a3564c",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Pill Karaoke",
+    "reference_role": "text"
+  },
+  {
+    "id": "hf-caption-weight-shift",
+    "title": "太さが変わる字幕",
+    "description": "Elegant font-weight transition between caption lines",
+    "family": "captions",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/components/caption-weight-shift",
+    "url": "https://static.heygen.ai/hyperframes-oss/registry/components/caption-weight-shift/preview-v2.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "caption-weight-shift",
+    "tags": [
+      "captions",
+      "caption-style",
+      "minimal",
+      "typography"
+    ],
+    "variables": [],
+    "dimensions": null,
+    "duration": null,
+    "files": [
+      {
+        "file": "caption-weight-shift.html",
+        "sha256": "8a5294debec3eadeb7ca0a8688c31a6e8c517ebb1c55ff410aa81df3807daa55"
+      }
+    ],
+    "sha256": "b80f1d6047160df6b50ce05284df6b7bd4cfc8f0a415498d5ec2a97fba222d32",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Weight Shift",
+    "reference_role": "text",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-caption-weight-shift",
+      "preview_sha256": "b80f1d6047160df6b50ce05284df6b7bd4cfc8f0a415498d5ec2a97fba222d32",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "reject",
+        "strengths": [
+          "黒背景に白文字のハイコントラスト構成で視認性は確保されている",
+          "フォントウェイト（太字と細字）の対比による最低限のタイポグラフィ階層が作られている"
+        ],
+        "problems": [
+          {
+            "time": 0.0,
+            "issue": "テキストの出現・退場におけるイージングやモーションアニメーションが一切存在せず、単なる静止テキストの差し替えに留まっている"
+          },
+          {
+            "time": 1.1,
+            "issue": "テキストの切り替わり直前に1フレームの完全な黒画面が挟まり、不要なフリッカー（ちらつき）が発生している"
+          },
+          {
+            "time": 2.0,
+            "issue": "次のフレーズへのカット切り替え時に再度ブラックフレームが混入し、表示が途切れる"
+          },
+          {
+            "time": 4.43,
+            "issue": "各フレーズの表示間隔および暗転の長さが不揃いで、タイポグラフィのリズムが破綻している"
+          },
+          {
+            "time": 7.27,
+            "issue": "最終テキスト「cinema.」への切り替え時にも黒フレーム落ちが発生し、視覚的なノイズとなっている"
+          },
+          {
+            "time": 7.5,
+            "issue": "画面下部にテキストが固定配置されているだけで画面上部の大半が空虚な余白となっており、構図としてのアートディレクションが不足している"
+          }
+        ],
+        "suitable_for": [
+          "テキスト送りのタイミング検証用プロトタイプ",
+          "字幕表示タイミングの確認用ドラフト"
+        ],
+        "required_changes": [
+          "テキストの出入りに適切なイージングを伴うモーション（フェード、スライド、キネティックタイポグラフィ等）を実装する",
+          "カット切り替え時に発生している不要なブラックフレーム（フレーム抜け・フリッカー）を完全に解消する",
+          "フレーズの単語量や重要度に応じた均整な表示タイミングとテンポの調整",
+          "画面全体の空間を活かしたタイポグラフィのスケール・レイアウト・構図の再設計"
+        ],
+        "reason": "完成されたプロダクションコンポーネントとしての要件を満たしておらず、アニメーションやイージングの設計が欠落した単なる静止テキストの連続切り替えに留まっています。さらに、切り替えの節目ごとに1フレームの黒落ちフリッカーが発生しており、技術的・デザイン的な両面において再設計が必要です。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 611
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 4781
+          },
+          {
+            "modality": "video",
+            "tokens": 39336
+          },
+          {
+            "modality": "image",
+            "tokens": 39336
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 611,
+        "total_output_tokens": 1004,
+        "total_thought_tokens": 2082,
+        "total_tokens": 87150,
+        "total_tool_use_tokens": 83453,
+        "raw_prompt_token": 13056,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 42
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 715
+              },
+              {
+                "modality": "image",
+                "tokens": 528
+              },
+              {
+                "modality": "video",
+                "tokens": 528
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 50
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 15
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 869
+              },
+              {
+                "modality": "image",
+                "tokens": 2640
+              },
+              {
+                "modality": "video",
+                "tokens": 2640
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 40
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1031
+              },
+              {
+                "modality": "image",
+                "tokens": 4092
+              },
+              {
+                "modality": "video",
+                "tokens": 4092
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 70
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1197
+              },
+              {
+                "modality": "image",
+                "tokens": 4686
+              },
+              {
+                "modality": "video",
+                "tokens": 4686
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 76
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1370
+              },
+              {
+                "modality": "image",
+                "tokens": 5280
+              },
+              {
+                "modality": "video",
+                "tokens": 5280
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1520
+              },
+              {
+                "modality": "image",
+                "tokens": 5874
+              },
+              {
+                "modality": "video",
+                "tokens": 5874
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 31
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1646
+              },
+              {
+                "modality": "image",
+                "tokens": 6402
+              },
+              {
+                "modality": "video",
+                "tokens": 6402
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 84
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1913
+              },
+              {
+                "modality": "image",
+                "tokens": 9834
+              },
+              {
+                "modality": "video",
+                "tokens": 9834
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 649
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1671
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 42
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 715
+              },
+              {
+                "modality": "image",
+                "tokens": 528
+              },
+              {
+                "modality": "video",
+                "tokens": 528
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 50
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 15
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 869
+              },
+              {
+                "modality": "image",
+                "tokens": 2640
+              },
+              {
+                "modality": "video",
+                "tokens": 2640
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 40
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1031
+              },
+              {
+                "modality": "image",
+                "tokens": 4092
+              },
+              {
+                "modality": "video",
+                "tokens": 4092
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 70
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1197
+              },
+              {
+                "modality": "image",
+                "tokens": 4686
+              },
+              {
+                "modality": "video",
+                "tokens": 4686
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 76
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1370
+              },
+              {
+                "modality": "image",
+                "tokens": 5280
+              },
+              {
+                "modality": "video",
+                "tokens": 5280
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1520
+              },
+              {
+                "modality": "image",
+                "tokens": 5874
+              },
+              {
+                "modality": "video",
+                "tokens": 5874
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 31
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1646
+              },
+              {
+                "modality": "image",
+                "tokens": 6402
+              },
+              {
+                "modality": "video",
+                "tokens": 6402
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 84
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1913
+              },
+              {
+                "modality": "image",
+                "tokens": 9834
+              },
+              {
+                "modality": "video",
+                "tokens": 9834
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 649
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1671
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-data-chart",
+    "title": "棒グラフと折れ線",
+    "description": "Animated bar + line chart with staggered reveal, NYT-style typography, and value labels",
+    "family": "data",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/data-chart",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/data-chart.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "data-chart",
+    "tags": [
+      "data",
+      "chart",
+      "statistics"
+    ],
+    "variables": [
+      {
+        "key": "--bg-color",
+        "label": "Background",
+        "type": "color",
+        "default": "#faf9f6"
+      },
+      {
+        "key": "--text-color",
+        "label": "Text color",
+        "type": "color",
+        "default": "#333333"
+      }
+    ],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 15,
+    "files": [
+      {
+        "file": "data-chart.html",
+        "sha256": "02ccb24bfa21850d19c2842853256a3c47d5fd25dc746d6b99986bef268bf027"
+      }
+    ],
+    "sha256": "f18719a01a0b08ab27108da2a4ce8bf6d2cdd099c972c483ccf5c6e921239c2d",
+    "measured": {
+      "duration": 15,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Data Chart",
+    "reference_role": "data",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-data-chart",
+      "preview_sha256": "f18719a01a0b08ab27108da2a4ce8bf6d2cdd099c972c483ccf5c6e921239c2d",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "needs_design_work",
+        "strengths": [
+          "セリフ体タイトルと落ち着いたトーンを採用したエディトリアル調の上品なスタイリング",
+          "タイトル、凡例、棒グラフ、折れ線、出典と順を追って表示される明快な情報階層構造"
+        ],
+        "problems": [
+          {
+            "time": 6,
+            "issue": "3月の棒グラフ値ラベル「$15k」を折れ線が横切るように重なり、その真上に割合ラベル「3.2%」が衝突して文字が判読不能になっている"
+          },
+          {
+            "time": 7,
+            "issue": "5月の棒グラフ値ラベル「$18k」と折れ線の割合ラベル「3.8%」が重なり合って表示崩れを起こしている"
+          },
+          {
+            "time": 2,
+            "issue": "Y軸の数値軸（金額用および割合用）やガイドラインが一切なく、複合グラフとしてのデータのスケール感が視覚的に把握しづらい"
+          },
+          {
+            "time": 5,
+            "issue": "棒グラフが1本ずつ伸びてから折れ線が描画されるシーケンスが冗長で、全体の展開に約9秒を要しテンポが遅い"
+          }
+        ],
+        "suitable_for": [
+          "レイアウト重なりの修正を前提とした、静的・スライド向けの概念的な業績サマリー"
+        ],
+        "required_changes": [
+          "棒グラフの数値と折れ線グラフのラベルが衝突しないよう、2軸グラフとして適切なスケール設定を行うか、ラベル位置（バー内配置や折れ線上部への統一など）を見直して重なりを完全に解消すること",
+          "金額軸とパーセンテージ軸の左右Y軸またはガイドラインを追加し、データ可視化としての正確性を担保すること",
+          "棒グラフと折れ線の描画タイミングをオーバーラップさせ、アニメーション全体の尺を3〜4秒程度に短縮して実用的なテンポにすること"
+        ],
+        "reason": "タイポグラフィや配色の方向性は上品であるものの、棒グラフの金額ラベルと折れ線およびパーセンテージラベルが直接衝突・重複して判読不能になっており、データ可視化コンポーネントとしての実用性に重大な欠陥が存在するため。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 833
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "image",
+            "tokens": 2508
+          },
+          {
+            "modality": "text",
+            "tokens": 1212
+          },
+          {
+            "modality": "video",
+            "tokens": 2508
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 833,
+        "total_output_tokens": 661,
+        "total_thought_tokens": 1416,
+        "total_tokens": 9138,
+        "total_tool_use_tokens": 6228,
+        "raw_prompt_token": 3080,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 598
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 741
+              },
+              {
+                "modality": "image",
+                "tokens": 990
+              },
+              {
+                "modality": "video",
+                "tokens": 990
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 580
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1415
+              },
+              {
+                "modality": "image",
+                "tokens": 1518
+              },
+              {
+                "modality": "video",
+                "tokens": 1518
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 589
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 783
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 598
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 741
+              },
+              {
+                "modality": "image",
+                "tokens": 990
+              },
+              {
+                "modality": "video",
+                "tokens": 990
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 580
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1415
+              },
+              {
+                "modality": "image",
+                "tokens": 1518
+              },
+              {
+                "modality": "video",
+                "tokens": 1518
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 589
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 783
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-flowchart",
+    "title": "分岐するフローチャート",
+    "description": "Animated decision tree with SVG connectors, sticky-note nodes, cursor interaction, and typing correction",
+    "family": "data",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/flowchart",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/flowchart.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "flowchart",
+    "tags": [
+      "diagram",
+      "flowchart",
+      "interactive"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "flowchart.html",
+        "sha256": "c5432d04f4f720de031377a35fbf07f1c2cbee72b04b40f7b79b0e26f5fd63bc"
+      }
+    ],
+    "sha256": "7ece24f7671e40d4758b76a1905bb20969e49d9f7ffb309d952c4a240539ec6b",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Flowchart",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-apple-money-count",
+    "title": "数字と立体の紙幣",
+    "description": "Apple-style finance counter that counts from $0 to $10,000, flashes green, and bursts money icons with sound.",
+    "family": "data",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/apple-money-count",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/apple-money-count.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "apple-money-count",
+    "tags": [
+      "showcase",
+      "finance",
+      "kinetic",
+      "youtube",
+      "sfx"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "apple-money-count.html",
+        "sha256": "a32f53e1544468860b001f8876d419f680cfc4129c810053e96d6a3b84ad063b"
+      },
+      {
+        "file": "assets/sfx-production.wav",
+        "sha256": "1f67e32b14a9ed2e9445c6031859054d3ab9b30194f8dd2a03b86aef52635ad9"
+      }
+    ],
+    "sha256": "0c5e5a0480985f31b04fdb4e8efe1bb5127469bd7adcf630f909c920bb38c2e7",
+    "measured": {
+      "duration": 5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Apple Money Count",
+    "reference_role": "data",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-apple-money-count",
+      "preview_sha256": "0c5e5a0480985f31b04fdb4e8efe1bb5127469bd7adcf630f909c920bb38c2e7",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "needs_design_work",
+        "strengths": [
+          "目標金額到達時（$10,000）におけるカラー変化と紙幣・コインのパーティクルによる達成感の演出意図が明確",
+          "カウントアップ自体は滑らかで、金額の桁区切りカンマ表示にも対応している"
+        ],
+        "problems": [
+          {
+            "time": 0.0,
+            "issue": "カードやコンテナ枠、タイトル、進捗ラベルなどのUIヒエラルキーが一切なく、中央に数値テキストが配置されただけの単体メカニズム検証状態になっている"
+          },
+          {
+            "time": 1.5,
+            "issue": "等幅数字（tabular-nums）が指定されていないため、桁数の増加や文字幅の変化に伴いテキスト全体が左右に小刻みに揺れている"
+          },
+          {
+            "time": 3.4,
+            "issue": "放射された紙幣やコインが金額テキストの前面に大量に重なり、肝心の達成数値（$10,000）の視認性を著しく損なっている"
+          },
+          {
+            "time": 4.1,
+            "issue": "達成値である「$10,000」が唐突にフェードアウトして消えてしまい、コンポーネントとしての確定状態（着地画面）が維持されない"
+          },
+          {
+            "time": 4.6,
+            "issue": "パーティクルの散乱後に画面全体がほぼ空白状態となり、余韻や次アクション（CTAボタン等）に繋がる構造がない"
+          }
+        ],
+        "suitable_for": [
+          "クラウドファンディングや貯蓄目標達成時の演出プロトタイプ",
+          "ゲーミフィケーション要素のあるリワード獲得演出のベースアイデア"
+        ],
+        "required_changes": [
+          "カードコンテナや目標ラベル（例: Target Achieved）を配置し、実用的なUIコンポーネントとしての階層構造を整える",
+          "フォント設定に等幅数字（tabular-nums）を適用し、カウントアップ時のリフロー・テキスト揺れを防止する",
+          "パーティクルのZ-indexや発生位置を調整し、金額テキストを隠さないよう背景または外周へ散布させる",
+          "目標到達後は金額を消去せず、達成状態として安定した表示を維持するエンドステートを設計する"
+        ],
+        "reason": "数値のカウントアップからパーティクルによる達成演出というコンセプトは分かりやすいものの、等幅フォント未指定による文字揺れ、前面パーティクルによる可読性阻害、そして目標達成値が唐突に消滅してブランクになるアウトロ処理など、プロダクションコンポーネントとしての完成度を著しく欠いています。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 300
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "image",
+            "tokens": 660
+          },
+          {
+            "modality": "text",
+            "tokens": 340
+          },
+          {
+            "modality": "video",
+            "tokens": 660
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 300,
+        "total_output_tokens": 695,
+        "total_thought_tokens": 1357,
+        "total_tokens": 4012,
+        "total_tool_use_tokens": 1660,
+        "raw_prompt_token": 1527,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 100
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 777
+              },
+              {
+                "modality": "image",
+                "tokens": 660
+              },
+              {
+                "modality": "video",
+                "tokens": 660
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 670
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1257
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 100
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 777
+              },
+              {
+                "modality": "image",
+                "tokens": 660
+              },
+              {
+                "modality": "video",
+                "tokens": 660
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 670
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1257
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-code-3d-extrude",
+    "title": "立体的なコード",
+    "description": "Syntax-highlighted code on a lit, beveled 3D slab that rotates through real space and settles to a readable rest — true WebGL depth and lighting, not a 2D transform.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-3d-extrude",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-3d-extrude.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-3d-extrude",
+    "tags": [
+      "code",
+      "code-animation",
+      "3d",
+      "webgl",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "code-3d-extrude.html",
+        "sha256": "0c09ca399fa26f1026cce71d58570e3d95e55f1c7ab96f57999f2df02db12826"
+      }
+    ],
+    "sha256": "1f5441e6fb83c3c51a0bce1362b8dd3dd18c53b630775c63f029fae5d4c8e337",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code 3D Extrude",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-diff",
+    "title": "変更前後のコード",
+    "description": "An edit shown as a colored diff — removed lines collapse in red, added lines expand in green.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-diff",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-diff.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-diff",
+    "tags": [
+      "code",
+      "code-animation",
+      "diff",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 6,
+    "files": [
+      {
+        "file": "code-diff.html",
+        "sha256": "5356890fec4947e384b044d7dda3d03601432125a4ce60087caac0e3639d9d93"
+      }
+    ],
+    "sha256": "4eb088b617cb7dfa054870ea30869afcffe11b3b0c2a5538146637bf0e3a551f",
+    "measured": {
+      "duration": 6,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Diff",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-highlight",
+    "title": "コードの一部を強調",
+    "description": "A highlight band sweeps across a target line while the surrounding context dims — draws the eye to one line.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-highlight",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-highlight.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-highlight",
+    "tags": [
+      "code",
+      "code-animation",
+      "highlight",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "code-highlight.html",
+        "sha256": "2e28ffdb11fe7b595e47488f2dfb93db514f315dd5f334c902540fcbebf2bb2f"
+      }
+    ],
+    "sha256": "5df46d15c7a6374763c207a8915f4238ddb4fb18a011b453004274ba3aad05b7",
+    "measured": {
+      "duration": 5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Highlight Sweep",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-morph",
+    "title": "コードの変形",
+    "description": "One snippet transforms into another — tokens glide between positions, leavers fade out, enterers fade in. Shiki Magic Move re-driven as a paused GSAP timeline.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-morph",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-morph.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-morph",
+    "tags": [
+      "code",
+      "code-animation",
+      "morph",
+      "refactor",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 7,
+    "files": [
+      {
+        "file": "code-morph.html",
+        "sha256": "26b2342609f1da2ef2f65fef5dbc0fc3230f78893c11569e4e055f3015f6e4a2"
+      }
+    ],
+    "sha256": "778cd0babc519a96788b7c398ae725f62b92e34b151dc5f2bb50c1aa3ac40814",
+    "measured": {
+      "duration": 7,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Morph",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-particle-assemble",
+    "title": "粒子から文字へ",
+    "description": "Thousands of GPU points scatter through space and fly to the exact glyph pixels of the code, resolving into readable syntax-highlighted text — a particle system, not a token tween.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-particle-assemble",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-particle-assemble.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-particle-assemble",
+    "tags": [
+      "code",
+      "code-animation",
+      "particles",
+      "gpu",
+      "webgl",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "code-particle-assemble.html",
+        "sha256": "2a6f422ec5d52060e3aaa26a509dfbd2d59c793964047930da7c680b9b94f681"
+      }
+    ],
+    "sha256": "048f507018c870e3f556b697cef75eb7a084528f3675b5588dcc179026d117a1",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Particle Assemble",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-scroll",
+    "title": "コードのスクロール",
+    "description": "The camera scrolls a long file to bring a target line to center and spotlights it — for walking through real modules.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-scroll",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-scroll.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-scroll",
+    "tags": [
+      "code",
+      "code-animation",
+      "scroll",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 6,
+    "files": [
+      {
+        "file": "code-scroll.html",
+        "sha256": "29291ee000f1bef15e999314d112ea153f21da2618083852323b617fee9cae86"
+      }
+    ],
+    "sha256": "bb5108f4a1e09fe37fda116797caa74398439e5bf031b745b7982c78e450712c",
+    "measured": {
+      "duration": 6,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Scroll To Line",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-shader-dissolve",
+    "title": "溶けて現れるコード",
+    "description": "The code compiles into existence: a GPU fragment shader resolves it out of seeded noise with a chromatic dissolve front and edge glow, then holds crisp.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-shader-dissolve",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-shader-dissolve.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-shader-dissolve",
+    "tags": [
+      "code",
+      "code-animation",
+      "shader",
+      "webgl",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 7,
+    "files": [
+      {
+        "file": "code-shader-dissolve.html",
+        "sha256": "32e4137d0693ccf0e85a627c7d0462174c34e04fca2f7cdf8e038ba02d47a8c1"
+      }
+    ],
+    "sha256": "4cd3d078bd5e5c12c8ef009138bce7c250fc92f759ad930e8b171538e4b4bce7",
+    "measured": {
+      "duration": 7,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Shader Dissolve",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-code-typing",
+    "title": "コードの入力",
+    "description": "Token-streamed typing reveal with a caret that tracks the frontier — deterministic, no CSS animation.",
+    "family": "code",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/code-typing",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/code-typing.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "code-typing",
+    "tags": [
+      "code",
+      "code-animation",
+      "typing",
+      "developer"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "code-typing.html",
+        "sha256": "99477451bdffeb368523b9cf7b36ca8385c0c15c2438b46597269e179f9f8fdf"
+      }
+    ],
+    "sha256": "ec19890a3ca64e672755d77ef777accc41870828073ae5da2f48bf1db6d9e292",
+    "measured": {
+      "duration": 5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Code Typing",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-cinematic-zoom",
+    "title": "ズームで切り替え",
+    "description": "Shader transition with dramatic zoom blur",
+    "family": "camera",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/cinematic-zoom",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/cinematic-zoom.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "cinematic-zoom",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "cinematic-zoom.html",
+        "sha256": "72b3a83d5de6a56fd389044aa15e785dbb40d5402cea6b95684b6b9cec0e4aba"
+      }
+    ],
+    "sha256": "a9def8f5c1a6338c831fe6d4c9c6d6c80000bdc2f045b10bcd454e24f0de520c",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Cinematic Zoom",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-whip-pan",
+    "title": "カメラを振って切り替え",
+    "description": "Shader transition simulating a fast camera whip pan",
+    "family": "camera",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/whip-pan",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/whip-pan.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "whip-pan",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "whip-pan.html",
+        "sha256": "97a690de11f6dcebd6356bea84cba1af6ae61bfe03b9b7cc75a81368c93a12c9"
+      }
+    ],
+    "sha256": "43e153337572e66de09f0d409c0dd9bbb2c81c89c23276c9bfd7bca9575a2319",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Whip Pan",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-ui-3d-reveal",
+    "title": "画面を立体的に紹介",
+    "description": "Perspective 3D reveal animation for UI elements",
+    "family": "camera",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/ui-3d-reveal",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/ui-3d-reveal.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "ui-3d-reveal",
+    "tags": [
+      "showcase",
+      "3d",
+      "reveal"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 13,
+    "files": [
+      {
+        "file": "ui-3d-reveal.html",
+        "sha256": "fbb3f7960686a1f5932bfd07b105c3029cdd898f113911be662e6bc36892e993"
+      }
+    ],
+    "sha256": "8e89ce026bd2ecfc6632c8ca646be33201e898dc2177ac564fc5d99864fe9a20",
+    "measured": {
+      "duration": 13,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "3D UI Reveal",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-app-showcase",
+    "title": "スマホのアプリ紹介",
+    "description": "Fitness app product showcase with three floating smartphone screens",
+    "family": "camera",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/app-showcase",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/app-showcase.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "app-showcase",
+    "tags": [
+      "showcase",
+      "app",
+      "3d"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5.5,
+    "files": [
+      {
+        "file": "app-showcase.html",
+        "sha256": "c7e1b4d8ec2a2c1f70a8ed67a147ba5c4985074eb475d611b2bec6d921b10ade"
+      }
+    ],
+    "sha256": "27d6d0ab395d21bde1556ad9afaecc3f16471d7491664863e85f02582e46f4a4",
+    "measured": {
+      "duration": 5.5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "App Showcase",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-chromatic-radial-split",
+    "title": "色ずれと放射",
+    "description": "Shader transition with chromatic aberration radial split",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/chromatic-radial-split",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/chromatic-radial-split.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "chromatic-radial-split",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "chromatic-radial-split.html",
+        "sha256": "d328cc320397eb2109c6a2dab030bbcca7556c06c197416c288995aeef1e4d99"
+      }
+    ],
+    "sha256": "521d97b993a22cb2f597c7ddeb8b65bab5a133d05bcc24e38fe3f85c59e19603",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Chromatic Radial Split",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-cross-warp-morph",
+    "title": "ゆがみで切り替え",
+    "description": "Shader transition with cross-warped morphing",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/cross-warp-morph",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/cross-warp-morph.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "cross-warp-morph",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "cross-warp-morph.html",
+        "sha256": "fa9748f6f6059b2575d90eb98fd14a45de3c75e7dac1e925d997bc61e56ab85e"
+      }
+    ],
+    "sha256": "d31d524cb244b6dd0ccdeafec67d7f05b7a0eb4df8198313cd26eaa573c7bd9f",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Cross Warp Morph",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-domain-warp-dissolve",
+    "title": "流れる模様の切り替え",
+    "description": "Shader transition with fractal noise domain warping",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/domain-warp-dissolve",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/domain-warp-dissolve.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "domain-warp-dissolve",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "domain-warp-dissolve.html",
+        "sha256": "7d910616bf3eb799c9904a941a5edeb99a00de14bf6e0a094844978c30b2a874"
+      }
+    ],
+    "sha256": "a8dbd727855e4c39269def9d158cb5663a0042c9f0af07befb24a34287d20797",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Domain Warp Dissolve",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-flash-through-white",
+    "title": "白い閃光",
+    "description": "Shader transition with white flash crossfade",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/flash-through-white",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/flash-through-white.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "flash-through-white",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "flash-through-white.html",
+        "sha256": "d63cdbe17d81c12ee23406dd2dacf7e6a9489121906a7a3a2f74980ece623bac"
+      }
+    ],
+    "sha256": "48ef3c8979acaf64e3dcfd6fc3751a27a892ff687ffa7946f06dfd1897dcb8ea",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Flash Through White",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-glitch",
+    "title": "デジタルノイズ",
+    "description": "Shader transition with digital glitch artifacts",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/glitch",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/glitch.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "glitch",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "glitch.html",
+        "sha256": "f8101d1a5b71aa0ce4eb44444ee95e6ad0d7d16eb8b38b5ac81422a01fc5240b"
+      }
+    ],
+    "sha256": "4a20f6333d821d87dbde3d45c0a116873dadbc5fdba4c15a7902e97c5ffef712",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Glitch",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-gravitational-lens",
+    "title": "レンズ状のゆがみ",
+    "description": "Shader transition with gravitational lensing distortion",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/gravitational-lens",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/gravitational-lens.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "gravitational-lens",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "gravitational-lens.html",
+        "sha256": "e873bcca352a2e2721c3fed5d7ea355145d9df9dc9d2454564609bea8e61e475"
+      }
+    ],
+    "sha256": "b8338bea8f57f415795f4bebd07e0548a46e4d76d0a50bf77f3717e90f42e5ca",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Gravitational Lens",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-ridged-burn",
+    "title": "燃える境界",
+    "description": "Shader transition with ridged turbulence burn effect",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/ridged-burn",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/ridged-burn.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "ridged-burn",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "ridged-burn.html",
+        "sha256": "fd6309001b327eba4004e3c334a2d45525fcd5730ba6fd2d2e095e21b5ecd477"
+      }
+    ],
+    "sha256": "3b218db426b848dc15ec4963c5de8f83d840c9ed7b896171e3b0828145d26a5b",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Ridged Burn",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-ripple-waves",
+    "title": "波紋で切り替え",
+    "description": "Shader transition with concentric ripple wave distortion",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/ripple-waves",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/ripple-waves.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "ripple-waves",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "ripple-waves.html",
+        "sha256": "4b6c4df7f51c0a5fd163cf6c584876e169de3357190a6570474f6213f2d0db83"
+      }
+    ],
+    "sha256": "33f7c026154e295a2048ea0aec4460917b269b87476185dfe5d7e82c9b0eb119",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Ripple Waves",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-sdf-iris",
+    "title": "光る開口部",
+    "description": "Shader transition with signed distance field iris reveal",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/sdf-iris",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/sdf-iris.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "sdf-iris",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "sdf-iris.html",
+        "sha256": "355dd21c493cb11d92f7153c7d8e4f0d832c67e3d094ce95e8abce73cea46e99"
+      }
+    ],
+    "sha256": "bc3d24066d0ab99e4512128ecd66dd49b79b8b5e178ace30109c43f05faed664",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "SDF Iris",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-swirl-vortex",
+    "title": "渦で切り替え",
+    "description": "Shader transition with swirling vortex distortion",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/swirl-vortex",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/swirl-vortex.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "swirl-vortex",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "swirl-vortex.html",
+        "sha256": "d2ec8ec40dd47e584463b82f806dbc474aed8e1a94648e7637032ecb0f9f481b"
+      }
+    ],
+    "sha256": "a540bcc8089fd0fc753539c20ef520666d9e071bab3d626684cd1b2012a1d9e4",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Swirl Vortex",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-thermal-distortion",
+    "title": "熱によるゆがみ",
+    "description": "Shader transition with heat haze thermal distortion",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/thermal-distortion",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/thermal-distortion.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "thermal-distortion",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "thermal-distortion.html",
+        "sha256": "cb82b1f76d6c2dcd0d555697fec0155105ba62395d555852ace032448127e276"
+      }
+    ],
+    "sha256": "d9c52e1f88aab8cec24655ee6c1e5973d8f9f930c032799e1749a01b5d3e7977",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Thermal Distortion",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-transitions-3d",
+    "title": "立体の場面転換",
+    "description": "Showcase of 3D perspective flip and rotate transitions",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/transitions-3d",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/transitions-3d.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "transitions-3d",
+    "tags": [
+      "transition",
+      "showcase"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 11,
+    "files": [
+      {
+        "file": "transitions-3d.html",
+        "sha256": "54b3034238d1383f334d6a4234d5f45e74b7f646b84558f3ffe2bcbecb3a677c"
+      }
+    ],
+    "sha256": "0e0cbb3fdff60707ffa7de7ab5c7902c983d598a8f9e435a43a05f1a478bcd3a",
+    "measured": {
+      "duration": 11,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "3D Transitions",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-transitions-grid",
+    "title": "格子の場面転換",
+    "description": "Showcase of grid-based tile transitions",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/transitions-grid",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/transitions-grid.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "transitions-grid",
+    "tags": [
+      "transition",
+      "showcase"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 11,
+    "files": [
+      {
+        "file": "transitions-grid.html",
+        "sha256": "abb3c444c9d73e97973a93f4fa810babc2deb80f575ebefb9b628599f8c94211"
+      }
+    ],
+    "sha256": "9cb21d4024a903585b67da2fcf48885aa507e5ec243c3750db14cf669b854e51",
+    "measured": {
+      "duration": 11,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Grid Transitions",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-transitions-mechanical",
+    "title": "機械的な場面転換",
+    "description": "Showcase of mechanical shutter and iris transitions",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/transitions-mechanical",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/transitions-mechanical.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "transitions-mechanical",
+    "tags": [
+      "transition",
+      "showcase"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 15,
+    "files": [
+      {
+        "file": "transitions-mechanical.html",
+        "sha256": "098589405f547834c5359d5c94a2f1dfed06c0780f23962e54c3e3577cea9c1f"
+      }
+    ],
+    "sha256": "da2bc0ddb4d1f62597772f610677a1e7960f9c587b68b88b048a6ec57c1b9c31",
+    "measured": {
+      "duration": 15,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Mechanical Transitions",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-transitions-radial",
+    "title": "放射状の場面転換",
+    "description": "Showcase of radial wipe and reveal transitions",
+    "family": "transition",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/transitions-radial",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/transitions-radial.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "transitions-radial",
+    "tags": [
+      "transition",
+      "showcase"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 20,
+    "files": [
+      {
+        "file": "transitions-radial.html",
+        "sha256": "2e723ae75e92e6e4c1c51e6c596122bb43df8c2fef1ff4363ed787588bec4111"
+      }
+    ],
+    "sha256": "e05215934f33c3c72d547cb75db4164881a9a458aa97e524736cac886d3ad8a0",
+    "measured": {
+      "duration": 20,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Radial Transitions",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-camcorder-hud",
+    "title": "ビデオカメラの表示",
+    "description": "Responsive REC, battery, editable date placeholder, and timeline-driven counter overlay for creator-camera and camcorder treatments",
+    "family": "editorial",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/camcorder-hud",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/camcorder-hud.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "camcorder-hud",
+    "tags": [
+      "camcorder",
+      "camera",
+      "recording",
+      "hud",
+      "overlay",
+      "creator",
+      "media-treatment-overlay"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "camcorder-hud.html",
+        "sha256": "f7e1b992a4ad93195ada7dc0ecb3ed0beb3916c8a40ac7a518b7745bf5f8810b"
+      }
+    ],
+    "sha256": "18521b7d67566cf5511c8f32c13647b27d8a8c2b8124f5e16029e8e3438cd61f",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Camcorder HUD",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-editorial-flash-overlay",
+    "title": "実写に閃光を重ねる",
+    "description": "Finite neutral-warm light layers for a seek-safe camera-flash cut or social reveal",
+    "family": "editorial",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/editorial-flash-overlay",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/editorial-flash-overlay.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "editorial-flash-overlay",
+    "tags": [
+      "flash",
+      "editorial",
+      "social",
+      "light",
+      "transition",
+      "overlay",
+      "media-treatment-overlay"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "editorial-flash-overlay.html",
+        "sha256": "0730392042a50c077c7eb3808bf6d76ddc0bcec6b6272fb2ce300007bd26478f"
+      }
+    ],
+    "sha256": "3a80686e667ed341e41877bccde0456ac7366ed301420040907547cd5525d24f",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Editorial Flash Overlay",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-freeze-frame-dressing",
+    "title": "人物の切り抜きと静止",
+    "description": "Timeline-driven paper, tape, and flash dressing for a freeze-frame or background-removed subject",
+    "family": "editorial",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/freeze-frame-dressing",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/freeze-frame-dressing.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "freeze-frame-dressing",
+    "tags": [
+      "freeze-frame",
+      "cutout",
+      "scrapbook",
+      "paper",
+      "social",
+      "overlay",
+      "media-treatment-overlay"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "freeze-frame-dressing.html",
+        "sha256": "8175acc1768cf941b9b6b5694aa10f11216823f43a57c74c4c9bcf9a581ec87a"
+      }
+    ],
+    "sha256": "2cdad4b96609b00dd90855fb463fbf4dc5b656c57db652e967ef6964abcf28ae",
+    "measured": {
+      "duration": 4,
+      "width": 960,
+      "height": 540
+    },
+    "upstream_title": "Freeze-Frame Dressing",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-light-leak",
+    "title": "光漏れの場面転換",
+    "description": "Shader transition with cinematic light leak overlay",
+    "family": "editorial",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/light-leak",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/light-leak.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "light-leak",
+    "tags": [
+      "transition",
+      "shader"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "light-leak.html",
+        "sha256": "018575074693864c3f0f71380f85f089c172f73717b80787640b2da3615345be"
+      }
+    ],
+    "sha256": "23b6442cd310d203a0b8c6db56ebd2a7fd0aeb5ba645f28df87ae8a06b055723",
+    "measured": {
+      "duration": 4,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Light Leak",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-organic-light-leak-overlay",
+    "title": "実写に光漏れを重ねる",
+    "description": "Finite CSS light-leak overlay for memory beats and motivated transitions",
+    "family": "editorial",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/organic-light-leak-overlay",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/organic-light-leak-overlay.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "organic-light-leak-overlay",
+    "tags": [
+      "light-leak",
+      "film",
+      "memory",
+      "transition",
+      "overlay",
+      "media-treatment-overlay"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4,
+    "files": [
+      {
+        "file": "organic-light-leak-overlay.html",
+        "sha256": "bcc5a58c8964317e7c335705449b1ab961e2ba5492f28b6f8a0406b24e45ff7e"
+      }
+    ],
+    "sha256": "03386f058e45cd743f2f2cb52ac5b4abb6a6582fbb154d45a0bea733ec4a0ffd",
+    "measured": {
+      "duration": 4,
+      "width": 960,
+      "height": 540
+    },
+    "upstream_title": "Organic Light Leak Overlay",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-ios26-liquid-glass",
+    "title": "ガラスのスマホ画面",
+    "description": "3D iPhone with a normal iOS 26 home screen, liquid glass app icons, shader wallpaper, dock, and fluid glass notifications that drop from the status area onto a GLTF device model.",
+    "family": "interface",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/ios26-liquid-glass",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/ios26-liquid-glass.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "ios26-liquid-glass",
+    "tags": [
+      "liquid-glass-html-in-canvas",
+      "webgpu",
+      "3d",
+      "iphone",
+      "ios26",
+      "notifications",
+      "gltf",
+      "html-in-canvas"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 15,
+    "files": [
+      {
+        "file": "ios26-liquid-glass.html",
+        "sha256": "d9cc2176b84958ec83d879b1444445386e6b3a4fc5ae1856a0ff1b82b033becb"
+      },
+      {
+        "file": "models/iphone.glb",
+        "sha256": "20b926be3ab68ad773af8ef83949561f1f93bc22777688efd89bc38f0840614e"
+      },
+      {
+        "file": "lib/liquid-glass.iife.js",
+        "sha256": "e960fc4e523aa639d37ebe80bebbd8da6dcb805488a77e45585e80aa9ab98e4c"
+      },
+      {
+        "file": "assets/icons/weather.jpg",
+        "sha256": "4a3b80889cebb41ae64f9a2edfe3485293f46278dbb268f47b92826ee80c4804"
+      },
+      {
+        "file": "assets/icons/stocks.jpg",
+        "sha256": "86f591a856149aaa98af2070db410dca6e2660786aba6d99d71cd37dba4af794"
+      },
+      {
+        "file": "assets/icons/find-my.jpg",
+        "sha256": "133975c557f2b1d5b3d4896c8def276e5f1cea2c7b87c46163270b95920ffa1d"
+      },
+      {
+        "file": "assets/icons/home.jpg",
+        "sha256": "e830283620536135cd8861767b752af70757d8c103ad7822f4749bc928fcdb9a"
+      },
+      {
+        "file": "assets/icons/books.jpg",
+        "sha256": "e54cc7816d9d12156d0006365927ed06244d1af737b9e1f139db0095a5778b6e"
+      },
+      {
+        "file": "assets/icons/itunes-store.jpg",
+        "sha256": "38fd49c8d14115e2d0f5b862929205461bed397aa217e0015d449f688cdc0a52"
+      },
+      {
+        "file": "assets/icons/fitness.jpg",
+        "sha256": "57085df38b273be845e77aa483dc3412a5a654a8475377f8bd263a3f96353838"
+      },
+      {
+        "file": "assets/icons/watch.jpg",
+        "sha256": "0467760f53ee4d6cf877c315cac4a109e86ca36f5b0ed59d2b22749083a36677"
+      },
+      {
+        "file": "assets/icons/contacts.jpg",
+        "sha256": "f6c2640a1c19c3e3cde9827469486a5140e9847524bc05bf4b87d44c8e820f64"
+      },
+      {
+        "file": "assets/icons/files.jpg",
+        "sha256": "0780dac27f53fe4cf22d5135f725cc1f2f78748b755db0014008e8705540084e"
+      },
+      {
+        "file": "assets/icons/translate.jpg",
+        "sha256": "28c3466d1ecbf30e95d34c0e896c72b7468a7826ecb51e2d12e484e45f84f684"
+      },
+      {
+        "file": "assets/icons/calendar.jpg",
+        "sha256": "a1c4ba842d1941d5ea467b934eee346b73f8803de48fd11556e0181d7551c69d"
+      },
+      {
+        "file": "assets/icons/chatgpt.jpg",
+        "sha256": "719ca431702bfc2320cda76829c23d234015e8b9c83a2ef9b78f372e4b80957b"
+      },
+      {
+        "file": "assets/icons/slack.jpg",
+        "sha256": "919d352f7d618546e915133e7e456978ae549dc9559e466e8551c73c6e41dbf1"
+      },
+      {
+        "file": "assets/icons/instagram.jpg",
+        "sha256": "a0ed0190c4b361cb0124b260d2fb6c748c531cb3850dd2437ac8e6a8d4d08aac"
+      },
+      {
+        "file": "assets/icons/x.jpg",
+        "sha256": "60a68dd7210c966ccbe8e6dfc24ddee0aa1193cedb3cdd6e6c8c6e02f3923611"
+      },
+      {
+        "file": "assets/icons/proton-mail.jpg",
+        "sha256": "86801da39dc457b83588754755f8f487912148ddb1c0757346e861768f632969"
+      },
+      {
+        "file": "assets/icons/gmail.jpg",
+        "sha256": "f0d9dd220ced563566fd31aa927c00d6562fd308e10e73891b0f7adf54e5ea57"
+      },
+      {
+        "file": "assets/icons/revolut.jpg",
+        "sha256": "9aa8de5cd5092f036c9cba170dc0907dccdb81aa17352538a422167cf63e0061"
+      },
+      {
+        "file": "assets/icons/photos.jpg",
+        "sha256": "2bb6166f2b46a07528739c76d82580b9af6638fcad63fc9f256dddb3193ba482"
+      },
+      {
+        "file": "assets/icons/phone.jpg",
+        "sha256": "da6ec924a99c8d3cf0e96363cdef1e89728b0eed92ad6aaa9d633ec62b02bb3c"
+      },
+      {
+        "file": "assets/icons/brave.jpg",
+        "sha256": "407d01c660156970878198f221457e867cbb47d67a94f7904211de1c1f3dfb42"
+      },
+      {
+        "file": "assets/icons/messages.jpg",
+        "sha256": "183a84d8c46fc058688c67a3cbf348d0f905dc4bfa946a3a4ed129b43f50c4a1"
+      },
+      {
+        "file": "assets/icons/whatsapp.jpg",
+        "sha256": "37cf02fd6afa7181011445c83b2378a87b234d1716c3d415c01921d57c69e1a8"
+      },
+      {
+        "file": "assets/icons/notify-messages.jpg",
+        "sha256": "183a84d8c46fc058688c67a3cbf348d0f905dc4bfa946a3a4ed129b43f50c4a1"
+      },
+      {
+        "file": "assets/icons/music.jpg",
+        "sha256": "00bd6b886fd23c9e4d2f3e6b2eeb167c516df7b861466b895188df83fe50c04d"
+      }
+    ],
+    "sha256": "03d18d954c6bc3b79db73665f4f7570547e034bcd27333b76ce5bdc9fe781c89",
+    "measured": {
+      "duration": 15,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "iOS 26 Liquid Glass Home Screen",
+    "reference_role": "interface",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-ios26-liquid-glass",
+      "preview_sha256": "03d18d954c6bc3b79db73665f4f7570547e034bcd27333b76ce5bdc9fe781c89",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "reject",
+        "strengths": [
+          "すりガラス（グラスモーフィズム）の質感や背景のブラー表現に対するルック自体の試み",
+          "通知バナーが順次スタックして表示されるカスケード入場モーションの着想"
+        ],
+        "problems": [
+          {
+            "time": 0.0,
+            "issue": "画面中央に編集ミスや注釈と思われる意図不明な手書き風ライン（シアンと白のループ線）が常時重なっており、コンポーネントおよびUI全体の品位を損ねている。"
+          },
+          {
+            "time": 1.0,
+            "issue": "通知カードの透過度が高く背面のモノクロアイコンが強く透けているため、通知タイトルや本文テキストのコントラスト比が不足し著しく可読性が低い。"
+          },
+          {
+            "time": 2.5,
+            "issue": "複数通知が重なり合うトランジション時に境界線やテキスト配置が整理されておらず、視覚的なノイズが大きい。"
+          },
+          {
+            "time": 4.5,
+            "issue": "4.5秒付近で通知が出揃った後、15秒の動画終了まで10秒以上完全に静止しており、アニメーション尺および動画構成の設計が不十分。"
+          }
+        ],
+        "suitable_for": [
+          "グラスモーフィズム表現の極初期のスタイル検討用モックアップ"
+        ],
+        "required_changes": [
+          "画面中央の不要な手書き風ライン・アーティファクトを完全に除去すること。",
+          "通知カードの背景ブラー強度、不透明度、またはテキストシャドウを調整して背景に左右されない可読性を担保すること。",
+          "不要な10秒間の静止フレームをトリミングするか、通知の展開・自動消去・スワイプインタラクションなど一連のフローを完結させること。"
+        ],
+        "reason": "画面中央に不要な落書き風ラインが残存している点、透過通知テキストの視認性が著しく破綻している点、尺の大部分（約10秒間）が完全静止している点など、プロダクション品質として重大な欠陥を抱えており不採用（reject）と判断します。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 576
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "image",
+            "tokens": 5940
+          },
+          {
+            "modality": "video",
+            "tokens": 5940
+          },
+          {
+            "modality": "text",
+            "tokens": 2355
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 576,
+        "total_output_tokens": 713,
+        "total_thought_tokens": 1599,
+        "total_tokens": 17123,
+        "total_tool_use_tokens": 14235,
+        "raw_prompt_token": 3864,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 598
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 117
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 805
+              },
+              {
+                "modality": "image",
+                "tokens": 990
+              },
+              {
+                "modality": "video",
+                "tokens": 990
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 44
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 184
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1070
+              },
+              {
+                "modality": "image",
+                "tokens": 990
+              },
+              {
+                "modality": "video",
+                "tokens": 990
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 50
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 10
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1175
+              },
+              {
+                "modality": "image",
+                "tokens": 1650
+              },
+              {
+                "modality": "video",
+                "tokens": 1650
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 65
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1339
+              },
+              {
+                "modality": "image",
+                "tokens": 2310
+              },
+              {
+                "modality": "video",
+                "tokens": 2310
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 558
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1223
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 598
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 117
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 805
+              },
+              {
+                "modality": "image",
+                "tokens": 990
+              },
+              {
+                "modality": "video",
+                "tokens": 990
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 44
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 184
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1070
+              },
+              {
+                "modality": "image",
+                "tokens": 990
+              },
+              {
+                "modality": "video",
+                "tokens": 990
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 50
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 10
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1175
+              },
+              {
+                "modality": "image",
+                "tokens": 1650
+              },
+              {
+                "modality": "video",
+                "tokens": 1650
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 54
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 65
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1339
+              },
+              {
+                "modality": "image",
+                "tokens": 2310
+              },
+              {
+                "modality": "video",
+                "tokens": 2310
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 558
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1223
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-liquid-glass-context-menu",
+    "title": "ガラスのメニュー",
+    "description": "Frosted glass context menu panel drifting over an aurora shader background",
+    "family": "interface",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/liquid-glass-context-menu",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/liquid-glass-context-menu.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "liquid-glass-context-menu",
+    "tags": [
+      "html-in-canvas",
+      "liquid-glass-html-in-canvas",
+      "webgpu"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "liquid-glass-context-menu.html",
+        "sha256": "7579e80f13b7a14a1adbea2d473ff382b5f2a29682ef253b46055cd6e017c388"
+      },
+      {
+        "file": "lib/liquid-glass.iife.js",
+        "sha256": "e960fc4e523aa639d37ebe80bebbd8da6dcb805488a77e45585e80aa9ab98e4c"
+      }
+    ],
+    "sha256": "401dbaf0bdf0c2af5e03a9854388b1a9dffacd7c17b3b3d6bb6e8a79b6796810",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Liquid Glass Context Menu",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-liquid-glass-media-controls",
+    "title": "ガラスの再生操作",
+    "description": "Frosted glass media control panels spreading over an aurora shader background",
+    "family": "interface",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/liquid-glass-media-controls",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/liquid-glass-media-controls.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "liquid-glass-media-controls",
+    "tags": [
+      "html-in-canvas",
+      "liquid-glass-html-in-canvas",
+      "webgpu"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "liquid-glass-media-controls.html",
+        "sha256": "7f95e3294080999c0a95acc699a9caee1d5e13a354425ca142bb3e3f28fa064c"
+      },
+      {
+        "file": "lib/liquid-glass.iife.js",
+        "sha256": "e960fc4e523aa639d37ebe80bebbd8da6dcb805488a77e45585e80aa9ab98e4c"
+      }
+    ],
+    "sha256": "d45969f5aff0da7c36df18c67c27a2e548755207d55f6814be133f0c886e571b",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Liquid Glass Media Controls",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-liquid-glass-notification",
+    "title": "ガラスの通知",
+    "description": "Frosted glass notification cards floating over an aurora shader background",
+    "family": "interface",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/liquid-glass-notification",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/liquid-glass-notification.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "liquid-glass-notification",
+    "tags": [
+      "html-in-canvas",
+      "liquid-glass-html-in-canvas",
+      "webgpu"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "liquid-glass-notification.html",
+        "sha256": "b024b1e09e23ebaba972066681d6efadd9547b866531dc0d65968c35ec9117c5"
+      },
+      {
+        "file": "assets/hyperframes-logo-dark.svg",
+        "sha256": "f9f942c43b465616c3af2fb8b07daf1cc05a4776903bbb27beb2bb608060e6c7"
+      },
+      {
+        "file": "lib/liquid-glass.iife.js",
+        "sha256": "e960fc4e523aa639d37ebe80bebbd8da6dcb805488a77e45585e80aa9ab98e4c"
+      }
+    ],
+    "sha256": "46e101b9f7d5992e0ccf9b523b03a87f6e8efca2952d4419b37369d56e29bdf8",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Liquid Glass Notification",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-liquid-glass-widgets",
+    "title": "ガラスのウィジェット",
+    "description": "Frosted glass stat cards, showcase panel and pill chips over an aurora shader background",
+    "family": "interface",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/liquid-glass-widgets",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/liquid-glass-widgets.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "liquid-glass-widgets",
+    "tags": [
+      "html-in-canvas",
+      "liquid-glass-html-in-canvas",
+      "webgpu"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "liquid-glass-widgets.html",
+        "sha256": "48c65dcb6b5bc92ccaae9a1073a718c180431544e03f1485dd9bc7779b423942"
+      },
+      {
+        "file": "assets/hyperframes-logo-dark.svg",
+        "sha256": "f9f942c43b465616c3af2fb8b07daf1cc05a4776903bbb27beb2bb608060e6c7"
+      },
+      {
+        "file": "lib/liquid-glass.iife.js",
+        "sha256": "e960fc4e523aa639d37ebe80bebbd8da6dcb805488a77e45585e80aa9ab98e4c"
+      }
+    ],
+    "sha256": "c283641ad4e60fc9e3bff8cdd30d03996932f8826ebd3414642545ace3ebe95c",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Liquid Glass Widgets",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-macos-notification",
+    "title": "デスクトップの通知",
+    "description": "Animated macOS-style notification banner with app icon and message",
+    "family": "interface",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/macos-notification",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/macos-notification.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "macos-notification",
+    "tags": [
+      "social",
+      "overlay",
+      "notification"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "macos-notification.html",
+        "sha256": "bd6547f25f1c80c0d7dbdef0344627e92d57ace5e31237610928700b0a664d85"
+      }
+    ],
+    "sha256": "33adc4cf5bd45c9cd278d4184c7afe96ccab9b8b0161135ddbf12aa73e3eb632",
+    "measured": {
+      "duration": 5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "macOS Notification",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-nyc-paris-flight",
+    "title": "都市を結ぶ飛行機",
+    "description": "Apple-style realistic map animation with a plane flying from New York to Paris, marker circle, landing pop, and sound effects.",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/nyc-paris-flight",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/nyc-paris-flight.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "nyc-paris-flight",
+    "tags": [
+      "showcase",
+      "travel",
+      "map",
+      "youtube",
+      "sfx"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 6,
+    "files": [
+      {
+        "file": "nyc-paris-flight.html",
+        "sha256": "185fdae537f43f6cd3750d38ef23287c1a26c86108ebde9a90bda126acd3fa2c"
+      },
+      {
+        "file": "assets/map-nyc-paris.png",
+        "sha256": "982e87145e1f7aa4b97674dba2ceabc7605d67c46234d4f105cdb336ce411688"
+      },
+      {
+        "file": "assets/sfx-mix.wav",
+        "sha256": "e3da3426014c629093ef5a50883f24de6445d5ea9f636ad029b25cb68f854493"
+      }
+    ],
+    "sha256": "99da404b830fc934cf810f602711293a979e403e5e62939677e331c4c4fc6226",
+    "measured": {
+      "duration": 6,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "NYC Paris Flight",
+    "reference_role": "motion",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-nyc-paris-flight",
+      "preview_sha256": "99da404b830fc934cf810f602711293a979e403e5e62939677e331c4c4fc6226",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "needs_design_work",
+        "strengths": [
+          "大圏航路を意識した滑らかな曲線軌跡と航空機アイコンの連動アニメーション",
+          "ベースマップのトーンを抑え、航路と都市カードの視認性を高めたクリーンなカラー構成",
+          "距離や空港コード（JFK / CDG）など実用的な情報要素が整理されている"
+        ],
+        "problems": [
+          {
+            "time": 0.5,
+            "issue": "左上カードに『Six-second transatlantic hop』というメタ的なデモ説明テキストが含まれており、プロダクション向けのUI文脈として不自然"
+          },
+          {
+            "time": 4.25,
+            "issue": "パリ到着時に機体アイコン、都市名カード、波紋エフェクト、ARRIVEDバッジが極小エリアに重なり合い視覚的混雑が発生している"
+          },
+          {
+            "time": 4.5,
+            "issue": "到着時に突如出現する赤色のパルス波紋が警告・アラートを想起させ、全体の青を基調とした爽やかなパレットと調和していない"
+          },
+          {
+            "time": 5.5,
+            "issue": "動画の最後が余韻や適切なアウトロのないまま突然真っ白なブランク画面にカットアウトして途切れている"
+          }
+        ],
+        "suitable_for": [
+          "旅行・フライト予約サービスの路線サマリー紹介",
+          "トラベルブログや動画コンテンツの移動ルート説明グラフィック",
+          "航空統計ダッシュボードのルートプレビューUI"
+        ],
+        "required_changes": [
+          "末尾の唐突な白画面カットを削除し、到着後の静止状態を十分確保するか滑らかなフェードアウトに変更する",
+          "到着時の波紋パルスおよびARRIVED表示の配色を警告色の赤から青やミント系などに変更しトーンを統一する",
+          "目的地周辺での重なりを解消するため、到着時に機体サイズを縮小させるかラベルのオフセット位置を最適化する",
+          "デモ用の文言（Six-second〜）を実際の機能に応じた適切なヘッダーテキスト（FLIGHT OVERVIEWなど）に置き換える"
+        ],
+        "reason": "フライトパスの描画やマップのミニマルなスタイリングは良好ですが、末尾の唐突な白画面飛びや、到着時の警告色のような赤パルス、狭小エリアでの要素密集、デモ用の仮テキスト残留など、プロダクション品質に達していない仕上げの甘さが見られます。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 533
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "image",
+            "tokens": 3828
+          },
+          {
+            "modality": "video",
+            "tokens": 3828
+          },
+          {
+            "modality": "text",
+            "tokens": 1529
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 533,
+        "total_output_tokens": 748,
+        "total_thought_tokens": 1511,
+        "total_tokens": 11977,
+        "total_tool_use_tokens": 9185,
+        "raw_prompt_token": 3145,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 36
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 717
+              },
+              {
+                "modality": "image",
+                "tokens": 792
+              },
+              {
+                "modality": "video",
+                "tokens": 792
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 275
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1086
+              },
+              {
+                "modality": "image",
+                "tokens": 1320
+              },
+              {
+                "modality": "video",
+                "tokens": 1320
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 50
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 22
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1195
+              },
+              {
+                "modality": "image",
+                "tokens": 1716
+              },
+              {
+                "modality": "video",
+                "tokens": 1716
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 632
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1178
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 597
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 35
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 36
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 717
+              },
+              {
+                "modality": "image",
+                "tokens": 792
+              },
+              {
+                "modality": "video",
+                "tokens": 792
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 53
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 275
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1086
+              },
+              {
+                "modality": "image",
+                "tokens": 1320
+              },
+              {
+                "modality": "video",
+                "tokens": 1320
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 50
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 22
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1195
+              },
+              {
+                "modality": "image",
+                "tokens": 1716
+              },
+              {
+                "modality": "video",
+                "tokens": 1716
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 632
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1178
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-spain-map",
+    "title": "地域別の色分け地図",
+    "description": "Animated Spain choropleth by autonomous community with staggered reveals and gradient legend — D3 conic conformal projection",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/spain-map",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/spain-map.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "spain-map",
+    "tags": [
+      "data",
+      "map",
+      "geography",
+      "spain",
+      "europe",
+      "choropleth"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "spain-map.html",
+        "sha256": "9b3a1303ef9c9648f35c552a7fa4696040ca436581e45a339ea3e633de569201"
+      }
+    ],
+    "sha256": "8edaa9f546135309b46eae85ea5c1d507577b7ed3b7ad82c18537b55c8fd62c4",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Spain Map",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-us-map",
+    "title": "州別の色分け地図",
+    "description": "Animated US choropleth map with staggered state reveals, value labels, and gradient legend — pure inline SVG with GSAP",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/us-map",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/us-map.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "us-map",
+    "tags": [
+      "data",
+      "map",
+      "geography",
+      "usa",
+      "choropleth"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "us-map.html",
+        "sha256": "49aa2c343281624853a931cef628fc5bb4ca57fb9f56b208b2c8be93c8a00b44"
+      }
+    ],
+    "sha256": "aa78c471118f45b0b4616fd97a45201a08bbd859ac004fe4b523dae55bebb845",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "US Map",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-us-map-bubble",
+    "title": "都市のバブル地図",
+    "description": "Animated US bubble map with proportional city markers, value callouts, and connection lines — composable with us-map",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/us-map-bubble",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/us-map-bubble.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "us-map-bubble",
+    "tags": [
+      "data",
+      "map",
+      "geography",
+      "usa",
+      "bubble",
+      "cities"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "us-map-bubble.html",
+        "sha256": "5d618342e3aea75f68dea79114dc45aca981f5454a7ffe62e02fabcab2d8eb46"
+      }
+    ],
+    "sha256": "fe789f730348b046a3ffb03499f995f0d53758d66ebf039a0af86207eb8f8b2b",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "US Bubble Map",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-us-map-flow",
+    "title": "地域間の流れ",
+    "description": "Animated connection arcs between US cities over a base map — composable origin-destination flow visualization",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/us-map-flow",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/us-map-flow.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "us-map-flow",
+    "tags": [
+      "data",
+      "map",
+      "geography",
+      "usa",
+      "flow",
+      "connections",
+      "arcs"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "us-map-flow.html",
+        "sha256": "d331e43b6e0bfa51dd7cdfceee8c3cf4c01186887e4c405bac3a0f5f35ba11f2"
+      }
+    ],
+    "sha256": "9b3ead2d53a9fbb4a0109a3cad5dba69bca6d88b546a249acd13091fa734e594",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "US Flow Map",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-us-map-hex",
+    "title": "六角形のデータ地図",
+    "description": "Animated hexagonal tile grid map — each state as an equal-weight hex with data fill and abbreviation label",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/us-map-hex",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/us-map-hex.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "us-map-hex",
+    "tags": [
+      "data",
+      "map",
+      "geography",
+      "usa",
+      "hexgrid",
+      "tilegrid"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 10,
+    "files": [
+      {
+        "file": "us-map-hex.html",
+        "sha256": "55825b6c64bdab3f4f54bda3e54bddbbc68f1cf73c7a93e94183be5ab10a1d7e"
+      }
+    ],
+    "sha256": "d6057531efbe9368f83c1d1db8e029d2e77e8a6a096da5107d813dda9bfd134c",
+    "measured": {
+      "duration": 10,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "US Hex Grid Map",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-world-map",
+    "title": "世界のデータ地図",
+    "description": "Animated world choropleth with country-by-country reveal, tooltip labels, and rotating globe inset — D3 Natural Earth projection",
+    "family": "geography",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/world-map",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/world-map.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "world-map",
+    "tags": [
+      "data",
+      "map",
+      "geography",
+      "world",
+      "choropleth"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 14,
+    "files": [
+      {
+        "file": "world-map.html",
+        "sha256": "f0e3f9b9841137f8639136a1bcd6fcb233c50f780ea8eb5792f20faa8f62e85d"
+      }
+    ],
+    "sha256": "3b916fe67d105f4d955d868aa5ec42864caf6925e018c558c374e9516a9f5799",
+    "measured": {
+      "duration": 14,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "World Map",
+    "reference_role": "data"
+  },
+  {
+    "id": "hf-reddit-post",
+    "title": "掲示板の投稿",
+    "description": "Animated Reddit post card overlay with upvotes and comments",
+    "family": "social",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/reddit-post",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/reddit-post.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "reddit-post",
+    "tags": [
+      "social",
+      "overlay",
+      "reddit"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "reddit-post.html",
+        "sha256": "83f0b5cbf84a7365bab9e5bab1144b48e78a091611c8f078ebd9713361c4ea31"
+      }
+    ],
+    "sha256": "60516d1b9b5fe23298f252aa53e009153aafc13c5d81cd59e1ab124ebd441fb8",
+    "measured": {
+      "duration": 5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Reddit Post Card",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-spotify-card",
+    "title": "音楽のカード",
+    "description": "Animated Spotify now-playing card with album art and progress bar",
+    "family": "social",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/spotify-card",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/spotify-card.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "spotify-card",
+    "tags": [
+      "social",
+      "overlay",
+      "spotify"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1080,
+      "height": 1920
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "spotify-card.html",
+        "sha256": "1dba3177a10ce5522bbbbf4e56302220878f360c970186f68d263ead38203c78"
+      }
+    ],
+    "sha256": "f13e2d7a5c6a84a832d8fc50b2b3c8c071fde13aedca0efa5ec0ba1040aa6a41",
+    "measured": {
+      "duration": 5,
+      "width": 1080,
+      "height": 1920
+    },
+    "upstream_title": "Spotify Now Playing",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-x-post",
+    "title": "Xの投稿",
+    "description": "Animated X/Twitter post card overlay with engagement metrics",
+    "family": "social",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/x-post",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/x-post.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "x-post",
+    "tags": [
+      "social",
+      "overlay",
+      "twitter"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 5,
+    "files": [
+      {
+        "file": "x-post.html",
+        "sha256": "b515cb899491b5171f9cabdccdac2a2d133241f36eda934f232430095fd83e29"
+      }
+    ],
+    "sha256": "d20c79f2e7ee00920be60f1497eabd326c37536aeba53c60011043a918aaa50c",
+    "measured": {
+      "duration": 5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "X Post Card",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-yt-lower-third",
+    "title": "チャンネル登録表示",
+    "description": "Animated YouTube subscribe lower third with avatar and channel info",
+    "family": "social",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/yt-lower-third",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/yt-lower-third.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "yt-lower-third",
+    "tags": [
+      "social",
+      "overlay",
+      "youtube"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 4.5,
+    "files": [
+      {
+        "file": "yt-lower-third.html",
+        "sha256": "35c8eaf005a39a52a68a2944f063628c77f5890f265da9c26de4683fcd904ba2"
+      },
+      {
+        "file": "assets/avatar.jpg",
+        "sha256": "a300f59c31d2ea16195a2ff9a9af50b29c6aecc05d505d69f2a2132a53b99032"
+      }
+    ],
+    "sha256": "a80fed6a2ff75b7ee9da06eb4e6a51314d839d56477dff09fd6219ef3edd400f",
+    "measured": {
+      "duration": 4.5,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "YouTube Lower Third",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-instagram-follow",
+    "title": "フォロー表示",
+    "description": "Animated Instagram follow overlay with profile card and follow button",
+    "family": "social",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/instagram-follow",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/instagram-follow.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "instagram-follow",
+    "tags": [
+      "social",
+      "overlay",
+      "instagram"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1080,
+      "height": 1920
+    },
+    "duration": 4.5,
+    "files": [
+      {
+        "file": "instagram-follow.html",
+        "sha256": "3809353c3d7ebf495931b874ae2d67f985bc051f1f92bddebc51a5a2dd6e1b6f"
+      },
+      {
+        "file": "assets/avatar.jpg",
+        "sha256": "a300f59c31d2ea16195a2ff9a9af50b29c6aecc05d505d69f2a2132a53b99032"
+      }
+    ],
+    "sha256": "3470db7eb770e3941b95c6742991c2ea3cf5ca20b59eaa10a933cb0c6713bae2",
+    "measured": {
+      "duration": 4.5,
+      "width": 1080,
+      "height": 1920
+    },
+    "upstream_title": "Instagram Follow",
+    "reference_role": "interface"
+  },
+  {
+    "id": "hf-vfx-liquid-background",
+    "title": "液体の背景",
+    "description": "Organic liquid simulation with vertex displacement on a subdivided plane. HTML content floats above rippling fluid surface with real-time wave dynamics.",
+    "family": "vfx",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/vfx-liquid-background",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/vfx-liquid-background.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "vfx-liquid-background",
+    "tags": [
+      "html-in-canvas",
+      "liquid",
+      "webgl",
+      "displacement",
+      "background"
+    ],
+    "variables": [
+      {
+        "key": "--bg-color",
+        "label": "Background",
+        "type": "color",
+        "default": "#0a0e17"
+      },
+      {
+        "key": "--text-color",
+        "label": "Text color",
+        "type": "color",
+        "default": "#e2e8f0"
+      }
+    ],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "vfx-liquid-background.html",
+        "sha256": "0bdc2d57d292c5d4d937908fb02c9d646ee141014a90637534f331b49a46d5df"
+      }
+    ],
+    "sha256": "393e7f7b3b32599f39bac7635214ce0de90ee98abff29e7bac05bf04b56b2db5",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Liquid Background",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-vfx-liquid-glass",
+    "title": "立体ガラスの背景",
+    "description": "VFX composition block",
+    "family": "vfx",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/vfx-liquid-glass",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/vfx-liquid-glass.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "vfx-liquid-glass",
+    "tags": [
+      "html-in-canvas",
+      "webgl"
+    ],
+    "variables": [
+      {
+        "key": "--bg-color",
+        "label": "Background",
+        "type": "color",
+        "default": "#030407"
+      },
+      {
+        "key": "--accent-color",
+        "label": "Accent",
+        "type": "color",
+        "default": "#00d4ff"
+      }
+    ],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 20,
+    "files": [
+      {
+        "file": "vfx-liquid-glass.html",
+        "sha256": "1c3d3eeb6d64c59dd8f7d211792de1b9abd73547c07bf3e79bd59e2a2882fa2f"
+      }
+    ],
+    "sha256": "e77cb289551ed16933dfca893f9f31057b7f86c1fce9d27168d1f6ce5a0cb891",
+    "measured": {
+      "duration": 20,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Liquid Glass",
+    "reference_role": "motion",
+    "quality_status": "quarantined",
+    "quality_review": {
+      "id": "hf-vfx-liquid-glass",
+      "preview_sha256": "e77cb289551ed16933dfca893f9f31057b7f86c1fce9d27168d1f6ce5a0cb891",
+      "model": "gemini-3.8-flash",
+      "review": {
+        "accessible": true,
+        "verdict": "needs_design_work",
+        "strengths": [
+          "ボロノイ状タイルの3Dディスプレイスメントや反射・ライティングの質感が高く、視覚的なインパクトがある",
+          "有機的に波打つジオメトリの動きにスムーズな補間が効いている"
+        ],
+        "problems": [
+          {
+            "time": 3,
+            "issue": "手前にせり出すタイルが下部メトリクス「12.4K」「2.4M」と重なり、文字が遮蔽されて判読不能になっている"
+          },
+          {
+            "time": 7,
+            "issue": "タイルのシャープなエッジハイライトとシアン色の細いフォントが同化し、コントラストが著しく不足している"
+          },
+          {
+            "time": 10,
+            "issue": "突出したタイルが上部テキスト「WRITE HTML -> RENDER VIDEO」の中央部を完全に覆い隠している"
+          },
+          {
+            "time": 17,
+            "issue": "3D空間内のメッシュとテキストの前後関係（Z深度・オクルージョン）が未整理で、テキストが突き抜けてめり込んでいるような不自然な破綻が生じている"
+          }
+        ],
+        "suitable_for": [
+          "テキストを含まない抽象的な3D背景ループ素材",
+          "テック系・サイバーパンク調のビジュアル演出（VJ映像など）"
+        ],
+        "required_changes": [
+          "テキストを3D空間の背後・中間ではなく最前面の固定UIレイヤーに配置し、メッシュによる遮蔽を完全に排除する",
+          "タイルの反射光に埋もれないよう、テキスト背面に暗いグラデーションやドロップシャドウを追加して十分なコントラストを確保する",
+          "極細フォントから視認性の高いウェイトに変更し、タイポグラフィの階層とサイズバランスを再構築する",
+          "テキスト表示領域におけるメッシュのZ軸変位（飛び出し量）を抑え、視覚的ノイズを軽減する"
+        ],
+        "reason": "3Dタイルのシェーディングやアニメーション自体は洗練されているものの、前景のテキストが波打つジオメトリによって頻繁に隠蔽・分断されており、情報伝達コンポーネントとしての実用性・可読性が破綻しているため。",
+        "adaptation_tested": false
+      },
+      "quality_status": "model_review_only",
+      "usage": {
+        "cached_tokens_by_modality": null,
+        "grounding_tool_count": null,
+        "input_tokens_by_modality": [
+          {
+            "modality": "text",
+            "tokens": 244
+          }
+        ],
+        "output_tokens_by_modality": null,
+        "tool_use_tokens_by_modality": [
+          {
+            "modality": "video",
+            "tokens": 1320
+          },
+          {
+            "modality": "image",
+            "tokens": 1320
+          },
+          {
+            "modality": "text",
+            "tokens": 297
+          }
+        ],
+        "total_cached_tokens": 0,
+        "total_input_tokens": 244,
+        "total_output_tokens": 631,
+        "total_thought_tokens": 1291,
+        "total_tokens": 5103,
+        "total_tool_use_tokens": 2937,
+        "raw_prompt_token": 2178,
+        "model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 598
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 51
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 44
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 758
+              },
+              {
+                "modality": "image",
+                "tokens": 1320
+              },
+              {
+                "modality": "video",
+                "tokens": 1320
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 590
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1247
+              }
+            ]
+          }
+        ],
+        "non_grounding_model_invocation_token_counts": [
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 598
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 51
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 44
+              }
+            ]
+          },
+          {
+            "prompt_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 758
+              },
+              {
+                "modality": "image",
+                "tokens": 1320
+              },
+              {
+                "modality": "video",
+                "tokens": 1320
+              }
+            ],
+            "candidates_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 590
+              }
+            ],
+            "thoughts_tokens_details": [
+              {
+                "modality": "text",
+                "tokens": 1247
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "hf-vfx-magnetic",
+    "title": "磁力のようなゆがみ",
+    "description": "VFX composition block",
+    "family": "vfx",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/vfx-magnetic",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/vfx-magnetic.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "vfx-magnetic",
+    "tags": [
+      "html-in-canvas",
+      "webgl"
+    ],
+    "variables": [
+      {
+        "key": "--bg-color",
+        "label": "Background",
+        "type": "color",
+        "default": "#0c0c0c"
+      },
+      {
+        "key": "--text-color",
+        "label": "Text color",
+        "type": "color",
+        "default": "#e8e8e8"
+      }
+    ],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 15,
+    "files": [
+      {
+        "file": "vfx-magnetic.html",
+        "sha256": "5d8cb92132690f681c0acd5ad9c9a326d79fc59e8904eba9e6d1542acd54c1dd"
+      }
+    ],
+    "sha256": "702c18aa058a6cbb633411bec772eb538bc2056953af5294d602e6d0d9380876",
+    "measured": {
+      "duration": 15,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Magnetic",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-vfx-portal",
+    "title": "穴を通る場面転換",
+    "description": "VFX composition block",
+    "family": "vfx",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/vfx-portal",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/vfx-portal.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "vfx-portal",
+    "tags": [
+      "html-in-canvas",
+      "webgl"
+    ],
+    "variables": [
+      {
+        "key": "--bg-color",
+        "label": "Background",
+        "type": "color",
+        "default": "#000000"
+      },
+      {
+        "key": "--portal-color",
+        "label": "Portal color",
+        "type": "color",
+        "default": "#fafafa"
+      }
+    ],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 10,
+    "files": [
+      {
+        "file": "vfx-portal.html",
+        "sha256": "3a70718be5486fc7936bf4f2ddbd3addf53533048f2e53dee47b5b8de82c2526"
+      }
+    ],
+    "sha256": "2ce392a25cc3e2ee64bcb008d7d0253b1a1d705f5a5ece14c67c7945347c6c99",
+    "measured": {
+      "duration": 10,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Portal",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-vfx-shatter",
+    "title": "画面が砕ける",
+    "description": "VFX composition block",
+    "family": "vfx",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/vfx-shatter",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/vfx-shatter.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "vfx-shatter",
+    "tags": [
+      "html-in-canvas",
+      "webgl"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 12,
+    "files": [
+      {
+        "file": "vfx-shatter.html",
+        "sha256": "8e74692cd23813233ad826ee1ec2379c4f6ec91128b774e8df4b8bf23bff3dbf"
+      }
+    ],
+    "sha256": "45052b5b0b616c18a6ebb7c5c98752f35b28c1a76df067ae2f7211cb097e9dfc",
+    "measured": {
+      "duration": 12,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Shatter",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-vfx-text-cursor",
+    "title": "質感のある文字演出",
+    "description": "Dramatic text reveal with cursor glow, chromatic shadow rays, and directional lighting on a black stage. Canvas-based shader post-processing with spectral color edges.",
+    "family": "vfx",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/vfx-text-cursor",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/vfx-text-cursor.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "vfx-text-cursor",
+    "tags": [
+      "html-in-canvas",
+      "text",
+      "shader",
+      "cursor",
+      "chromatic"
+    ],
+    "variables": [],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 8,
+    "files": [
+      {
+        "file": "vfx-text-cursor.html",
+        "sha256": "71834bda1e5a5a45aa137e5b0eca2b9ed408cb7dc9b47a0dd4008eb7b4cfe235"
+      }
+    ],
+    "sha256": "28c714c85b731ae6bca38f906cd66095e47cb11e1c7a0189a042b6246d70e064",
+    "measured": {
+      "duration": 8,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "VFX Text Cursor",
+    "reference_role": "motion"
+  },
+  {
+    "id": "hf-logo-outro",
+    "title": "ロゴで締める",
+    "description": "Cinematic logo reveal with piece-by-piece assembly, glow bloom, tagline fade-in, and URL pill",
+    "family": "brand",
+    "kind": "video",
+    "extension": ".mp4",
+    "inspection": "decoded; playback advanced; frames captured at 15/50/85%; see component-expansion review",
+    "source_url": "https://github.com/heygen-com/hyperframes/tree/2ab7b8686870cb435674e20d48b4100db2fa2052/registry/blocks/logo-outro",
+    "url": "https://static.heygen.ai/hyperframes-oss/docs/images/catalog/blocks/logo-outro.mp4",
+    "revision": "2ab7b8686870cb435674e20d48b4100db2fa2052",
+    "license": "Apache-2.0; retain upstream notices; verify referenced external media when adapting",
+    "component": "logo-outro",
+    "tags": [
+      "branding",
+      "outro",
+      "logo"
+    ],
+    "variables": [
+      {
+        "key": "--bg-color",
+        "label": "Background",
+        "type": "color",
+        "default": "#0a0a0f"
+      },
+      {
+        "key": "--accent-color",
+        "label": "Accent",
+        "type": "color",
+        "default": "#1a1a1f"
+      }
+    ],
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "duration": 6,
+    "files": [
+      {
+        "file": "logo-outro.html",
+        "sha256": "b3ed1e2dbdbe1f4a36bcf11e8a75f1f7eca7c29e5f75e86628fd8922629364ff"
+      }
+    ],
+    "sha256": "54f4f589f124fafa72d2fa246926abc660730a2c075f5860f338e9ef0a33eda1",
+    "measured": {
+      "duration": 6,
+      "width": 1920,
+      "height": 1080
+    },
+    "upstream_title": "Logo Outro",
+    "reference_role": "motion"
+  },
+  {
+    "id": "dan-optical-type",
+    "title": "光と奥行きの文字演出",
+    "family": "kinetic-typography",
+    "kind": "video",
+    "extension": ".mp4",
+    "component": "dan-optical-type",
+    "evidence_role": "finished_study",
+    "description": "5.5-second optical kinetic typography study: mint-green glow, oversized translucent Meet letters, fast camera pullback into dark bold Your new AI and a depth-blurred scrolling role list, then large tell them text. Carefully layered blur, chromatic fringes, gradients and timing. Editable HTML/GSAP, not footage captured from the reference.",
+    "use_cases": [
+      "製品ローンチの文字主導演出",
+      "文字の奥行き・フォーカス・光",
+      "短いキネティックタイポグラフィ"
+    ],
+    "limitations": [
+      "会話字幕の読みやすさを評価する見本ではない",
+      "英字向け。日本語化は文字組みの再調整が必要",
+      "プレビューは無音。元研究の参考音源を制作素材に流用しない",
+      "HTMLソース中のreference-audio.m4aは収録せず。独自音源に置換するかaudio要素を削除する"
+    ],
+    "source_url": "https://x.com/chddaniel/status/2096868384344526961",
+    "license": "Local visual reconstruction study; reference is not owned. Font: Inter OFL; retain bundled notices. No soundtrack supplied.",
+    "inspection": "Six frames visually inspected; previous rendered video reviewed by user; actual editor playback verified at 1280x720 for 5.5 seconds without media errors.",
+    "quality_evidence": "User said this visual study was usable for production; this is not blanket approval of other components.",
+    "revision": "848fd6773337d91135ad68977e4fb3dc1d30937fd743ae0805a7cf370d536ce1",
+    "variables": [],
+    "dimensions": [
+      1280,
+      720
+    ],
+    "duration": 5.5,
+    "files": [
+      {
+        "file": "index.html",
+        "sha256": "848fd6773337d91135ad68977e4fb3dc1d30937fd743ae0805a7cf370d536ce1"
+      },
+      {
+        "file": "design.md",
+        "sha256": "e4b1786c16be2440ad4a6875b559d72eb43010c42c278d9e7684b02bcbc5e138"
+      },
+      {
+        "file": "RESEARCH.md",
+        "sha256": "a83672c2add8a41fe772e125b395e2fc85c2b12704392bfad94fc9b2d9c00576"
+      },
+      {
+        "file": "VALIDATION.md",
+        "sha256": "94e451d61cf82a1e74d501ff3a3806935fee786923dff2c8b7a52014d93f24f0"
+      },
+      {
+        "file": "assets/Inter.ttf",
+        "sha256": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031"
+      },
+      {
+        "file": "assets/Inter-OFL.txt",
+        "sha256": "f14f2b95a38f4f20cad4d27f7710593f37534c046641be0348da7c28365f4e39"
+      },
+      {
+        "file": "assets/gsap.min.js",
+        "sha256": "c174bfce53a729418d57a8ad8625e7247c793a22fef8e2851e3cfa3de9cd8280"
+      }
+    ],
+    "sha256": "e112aef4c1b11e3e633998134abb4e609cd10913cce401bc40aed79d31484456",
+    "reference_role": "text",
+    "quality_status": "reference_approved"
+  }
+]

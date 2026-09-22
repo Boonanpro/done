@@ -1,0 +1,868 @@
+{
+  "title": "Introducing GPT-6 Astra: the most intelligent and aligned model in the world.",
+  "purpose": "対話型AIエージェントが音声指示だけで2D描画、3Dモデリング、ゲーム制作、オフィス資料作成、EC出品、法務書類推敲、生活手配（出前・予約）、3Dプリント出力まで完結させる未来のUI体験を提示するプロモーション映像。",
+  "overall_style": [
+    "ミニマルで洗練された撮影スタジオセット（温かみのある間接照明、イームズラウンジチェア、巨大プロジェクション壁面）",
+    "1979年の歴史的コンピュータサイエンス研究映像と2026年の対比構造",
+    "複数ユーザーの専門的・日常的タスクを並行処理するクロスフォーカス編集",
+    "落ち着いた知的トーンのアンビエントシンセBGMと自然なAI応答音声",
+    "デジタル空間上の思考・生成が物理世界の実体（3Dプリント模型）へと着地するストーリーライン"
+  ],
+  "structure": "1979年のMIT音声空間操作デモを引用したプロローグから始まり、2026年のセットで1つの黄色い丸を描くところからロケットの3Dモデルへと発展。タイトルコール後に4人のユーザー（デザイナー、物販、ゲーム制作、弁護士）が同時並行でタスクを依頼・検証し、最終的に最初のロケットが物理的に3Dプリントされて現実の机に置かれる円環構造。",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 9.2,
+      "visual": "1979年のMIT『Put-That-There』研究のアーカイブ映像。アームチェアに座った男性が壁面スクリーンを指差し、音声で黄色い丸を生成させる。",
+      "camera": "レトロな4:3アスペクト比、固定広角ショット",
+      "editing": "アーカイブ映像の再生。00:02付近で「1979」の黄色い数字が浮き上がり、歪んで溶けるように消去される",
+      "text_design": "中央に丸みを帯びたサンセリフの黄色い文字「1979」",
+      "audio": "レトロなVHSテープノイズ、当時の操作者の声「Create a yellow circle there.」、控えめなシンセ低音の導入",
+      "effect_on_viewer": "音声インターフェースの原点を示し、コンピュータ史における歴史的文脈とこれからの進化への期待感を醸成する",
+      "search_labels": [
+        "Put-That-There",
+        "1979",
+        "Retro Archive",
+        "MIT Architecture Machine Group"
+      ],
+      "reproduction_idea": "古いCRTモニターやテープのノイズエフェクト、色収差を適用し、画面中央の年代テキストにディスプレイスメントマップをかけて液体のように歪ませてトランジションを作る",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-01",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=0s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 9.2,
+      "end": 15.1,
+      "visual": "暗めのモダンなスタジオセット。黄色い「2026」の文字が溶け、ベージュの服を着た男性がイームズチェアに腰掛ける。巨大スクリーンにはペイントツール風のUIが投影されている。",
+      "camera": "16:9のワイドアングル、男性の後ろ姿を中央やや右に捉えたフィックス構図",
+      "editing": "カット切り替え。「2026」が溶けるアニメーションを経て実写に完全移行",
+      "text_design": "中央に太い黄色文字「2026」が浮かび、ディゾルブ・変形して消える",
+      "audio": "澄んだシンセパッドと低音のビートがフェードイン。男性の足音や服の擦れる環境音",
+      "effect_on_viewer": "約半世紀の時空の跳躍を強烈に対比させ、未来の洗練されたスマートホーム/オフィスの雰囲気を確立する",
+      "search_labels": [
+        "2026 Transition",
+        "Minimalist Studio",
+        "Eames Chair",
+        "Modern Living"
+      ],
+      "reproduction_idea": "同じ構図・画角のアームチェア配置で過去と現代のセットをマッチカットさせ、年号テキストの溶解ディゾルブで時間経過を滑らかに繋ぐ",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-02",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=9s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 15.1,
+      "end": 20.0,
+      "visual": "男性が巨大スクリーンに向かって「Can you draw me a small yellow circle?」と話しかけると、カーソルが動き画面中央右に黄色い円が描かれる。",
+      "camera": "男性の後ろ姿越しのフルショット、画面全体のUIを俯瞰する構図",
+      "editing": "長回し。指示と描画がリアルタイムに見えるテンポ",
+      "text_design": "スクリーン上にペイントソフト風のツールバーとキャンバス",
+      "audio": "男性の指示音声。AIの明瞭で穏やかな女性音声「Done.」。描画完了時の微細なUIクリック音",
+      "effect_on_viewer": "1979年のデモと同一の指示を現代の高精度AIに再現させることで、歴史の直接的な継承を実感させる",
+      "search_labels": [
+        "Voice Prompt",
+        "Yellow Circle",
+        "AI Agent Drawing",
+        "UI Automation"
+      ],
+      "reproduction_idea": "プロジェクション投影した壁面にPC画面を同期させ、音声認識に合わせてカーソルが滑らかにベジェ曲線を描いて円を自動生成するアニメーションを合成する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-03",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=15s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 20.0,
+      "end": 24.1,
+      "visual": "男性のミディアムアップ。「Okay, take this and make it the window of a rocket ship.」と身振りを交えて指示。続いて背後からの視点で黄色い丸の周りに白い長方形が引かれる。",
+      "camera": "右斜め前からの浅い被写界深度による人物クローズアップから、切り返しで背後ショット",
+      "editing": "人物の表情と画面の変化を交互に見せるショット・リバースショット",
+      "text_design": "なし",
+      "audio": "男性の肉声とバックの心地よいエレクトロニックBGM",
+      "effect_on_viewer": "単純な図形から具象的なモチーフへの自然言語による拡張プロセスを直感的に伝える",
+      "search_labels": [
+        "Prompting",
+        "Rocket Window",
+        "Gesture",
+        "UI Interaction"
+      ],
+      "reproduction_idea": "演者の手振りに合わせて画面上の矩形選択やパス描画が連動して実行されるモーショングラフィックスを制作する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-04",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=20s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 24.1,
+      "end": 27.5,
+      "visual": "男性が微笑みながら「I like this, but can you make it a lot more detailed?」と要求。画面上でロケットのノーズコーン（赤い三角）と尾翼が加わる。",
+      "camera": "人物の横顔アップから画面のディテールへのカット",
+      "editing": "テンポ良いカット割り",
+      "text_design": "なし",
+      "audio": "男性の指示音声と、ペンツールが滑るようなデジタルサウンド効果",
+      "effect_on_viewer": "段階的に作品が洗練されていく協調作業（コ・クリエーション）の楽しさを提示",
+      "search_labels": [
+        "Refinement",
+        "Iterative Design",
+        "Rocket Illustration"
+      ],
+      "reproduction_idea": "粗いワイヤーフレームからベクターアートへとステップバイステップでパーツが付加されるモーフィングアニメーションを組む",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-05",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=24s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 27.5,
+      "end": 33.2,
+      "visual": "AIが「Your yellow circle is now the window on a rocket.」と返答。スクリーン上のロケットが陰影のついたリッチなイラストになり、ノズルから炎が噴き出し、背景に星空が広がる。",
+      "camera": "男性の満足げな横顔から、スクリーン全体を捉える広角ショットへ引く",
+      "editing": "イラストが一瞬で詳細化されるエフェクトと合わせたカット切り替え",
+      "text_design": "なし",
+      "audio": "AIのレスポンス音声。星や炎が追加される際の軽快なポップ音とシンセの高揚感あるコード進行",
+      "effect_on_viewer": "子供のような落書きが一瞬で完成度の高いグラフィックアートへ昇華する驚きとカタルシス",
+      "search_labels": [
+        "Detailed Illustration",
+        "AI Generation",
+        "Rocket in Space",
+        "Audio Response"
+      ],
+      "reproduction_idea": "完成版グラフィックの各レイヤー（星空、ロケットの影、炎）をタイミングをずらしてフェードイン・スケールインさせる",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-06",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=27s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 33.2,
+      "end": 39.5,
+      "visual": "男性が「Okay, this is awesome, now make it a 3D model in Blender.」と指示。スクリーンにBlenderが起動し、スプラッシュスクリーンから3Dビューポートへ切り替わり、オレンジのワイヤーフレーム円柱が自動生成され垂直に伸びる。",
+      "camera": "男性の背中越しのミディアムワイドショット。円柱が伸びる瞬間にカメラがやや寄る",
+      "editing": "Blender起動からモデリング開始までスムーズな一連のシーケンス",
+      "text_design": "BlenderのUI、メニューバー、3D座標軸（XYZギズモ）",
+      "audio": "男性「...in Blender」、AI「Opening Blender.」、アプリケーション起動のUI音",
+      "effect_on_viewer": "2D作画にとどまらず、プロ用3D制作ソフトウェアの完全自動制御へとシームレスに跳躍する万能性を強調",
+      "search_labels": [
+        "Blender 3D",
+        "3D Modeling",
+        "Autonomous Agent",
+        "Cylinder Extrusion"
+      ],
+      "reproduction_idea": "BlenderでPythonスクリプトを用いてプリミティブの生成・押し出しアニメーションを記録し、スクリーン投影素材として使用する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-07",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=33s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 39.5,
+      "end": 44.2,
+      "visual": "カメラがクレーンで高く引き、スタジオ撮影セットの全景（照明機材、三脚付きシネマカメラ、スタッフ）を露わにする。空間に大きな光彩とともに「INTRODUCING GPT-6」および黄色いボケ文字「ASTRA」が立体的に浮かび上がり、女性がセットに入ってくる。",
+      "camera": "ダイナミックなハイアングル・ジブ/クレーンアップショット",
+      "editing": "空間全体を俯瞰するメタ視点への壮大なトランジション",
+      "text_design": "白色の「INTRODUCING GPT-6」、その下に巨大な黄色い発光タイポグラフィ「ASTRA」",
+      "audio": "BGMのメインテーマが広がり、深みのあるベースラインとリバーブの効いたシンセリードが鳴り響く",
+      "effect_on_viewer": "スタジオの裏側を見せることで映像のスケール感を高め、メインプロダクトタイトルの登場をドラマチックに演出する",
+      "search_labels": [
+        "Behind The Scenes",
+        "Crane Shot",
+        "Title Reveal",
+        "GPT-6 ASTRA",
+        "Motion Typography"
+      ],
+      "reproduction_idea": "クレーンでスタジオの照明バトンまで引く実写プレートに、3Dトラッキングで黄色い光る立体テキスト「ASTRA」をマッチムーブ合成する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-08",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=39s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 44.2,
+      "end": 49.3,
+      "visual": "柄シャツを着たブロンドの女性（ダニエル）がスクリーンの前に立つ。手元にはテニスラケットとボール。音声チャットUIに「Let's build a presentation for next season's rainwear for retailers.」と話しかける。",
+      "camera": "女性の背面からスクリーンを見上げるローアングル・ワイドショットから、スクリーン文字へのパン＆フォーカス",
+      "editing": "女性の入室から画面のテキスト生成への自然なカット",
+      "text_design": "画面上部に「New voice chat」、プロンプト文字「Let's build a presentation for next season's rainwear for retailers」がリアルタイムにタイピング表示される",
+      "audio": "女性の落ち着いた発話。BGMはリズムを刻みながら継続",
+      "effect_on_viewer": "新しいユースケース（ビジネスプレゼンテーション制作）への移行を明確にし、カジュアルな作業スタイルを示す",
+      "search_labels": [
+        "Presentation Deck",
+        "Voice Chat UI",
+        "Rainwear Fashion",
+        "Retail Pitch"
+      ],
+      "reproduction_idea": "プロジェクションに大型の音声チャットUIを表示し、演者の発話に合わせて1文字ずつテキストがタイピングされるエフェクトを付ける",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-09",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=44s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 49.3,
+      "end": 53.4,
+      "visual": "女性の斜め前からのアップ。「Make sure that it feels really high-end and that it's colorful. Make it fun.」と語りかける。",
+      "camera": "手持ち感のあるわずかな揺れを伴うミディアムクローズアップ",
+      "editing": "人物の指示内容に集中させるテンポの良い切り替え",
+      "text_design": "なし",
+      "audio": "女性の声「Make sure that it feels really high-end...」、AI「Right, I can help with that.」",
+      "effect_on_viewer": "抽象的な感性（高級感、カラフル、楽しさ）のニュアンスをAIが理解できることを示す",
+      "search_labels": [
+        "Creative Direction",
+        "Nuanced Prompting",
+        "High-end Design",
+        "Conversational AI"
+      ],
+      "reproduction_idea": "人物のクローズアップ時に背景の照明をソフトにボカし、会話の親密さとテンポ感を高める",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-10",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=49s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 53.4,
+      "end": 57.8,
+      "visual": "Googleスライドの新規ドキュメントが開き、「Hello, Danielle. Let's start creating」のモーダルが表示され、自動的にレイアウトテンプレートが生成される。女性が満足そうに歩く。",
+      "camera": "女性の横・後方からのやや引きのショット",
+      "editing": "UIのアニメーションに合わせたカメラワーク",
+      "text_design": "GoogleスライドUI、「Untitled presentation」、「Click to add title」",
+      "audio": "スライド画面が展開する小気味よいUIトランジション音",
+      "effect_on_viewer": "クラウドオフィスツールが瞬時に立ち上がり、白紙状態から自律的に構築が始まる手軽さを表現",
+      "search_labels": [
+        "Google Slides",
+        "Automated Deck",
+        "Document Creation",
+        "Danielle"
+      ],
+      "reproduction_idea": "画面録画したGoogleスライドのテンプレート読み込みシーケンスを、プロジェクターで実空間の壁に歪みなくマッピングする",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-11",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=53s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 57.8,
+      "end": 63.5,
+      "visual": "黒いシャツを着たアジア系の女性がレザーチェアに座り、「Can you go to eBay and make this listing of this table I bought a few years ago to flea market it's this wild orange table.」と話す。",
+      "camera": "左斜め前からのミディアムショット。背景には撮影機材や観葉植物がボケて写る",
+      "editing": "別のキャラクターへのカット切り替えによるマルチストーリー展開",
+      "text_design": "なし",
+      "audio": "女性の自然で早口な日常会話。AI「Sure.」",
+      "effect_on_viewer": "EC出品という具体的で身近な個人間取引のシナリオに切り替わり、AIの汎用的な実用性を提示",
+      "search_labels": [
+        "eBay Listing",
+        "Flea Market Table",
+        "E-commerce Automation",
+        "Secondary User"
+      ],
+      "reproduction_idea": "別のアングル・ライティングの人物を挿入し、同じ空間内で複数の作業が並行しているような編集リズムを作る",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-12",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=57s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 63.5,
+      "end": 66.5,
+      "visual": "巨大スクリーンにeBayのトップページが開き、検索バーがフォーカスされる。手前には女性の後頭部とノートPC。",
+      "camera": "女性の真後ろからのシンメトリーに近いワイドショット",
+      "editing": "人物ショットから画面ショットへの素早い切り替え",
+      "text_design": "eBayロゴ、検索バー、商品カテゴリーカード",
+      "audio": "ブラウザが開く音、AIの応答「Sure.」の余韻",
+      "effect_on_viewer": "音声指示だけでWebサイトのナビゲーションが即座に実行される爽快感",
+      "search_labels": [
+        "eBay Web UI",
+        "Browser Automation",
+        "Web Agent"
+      ],
+      "reproduction_idea": "Webブラウザの自動スクロールや入力UIのモックアップを大画面に表示し、アクターの後ろ姿でスケール感を出す",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-13",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=63s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 66.5,
+      "end": 73.0,
+      "visual": "最初の男性に戻る。Blender上で完成した3Dロケットが表示されている。男性が手振りを交え「Okay yeah, this is awesome. I want you to make a 3D game where I'm ducking asteroids...」と指示。",
+      "camera": "男性の背中越しのミディアムショットから、横顔のクローズアップへカット",
+      "editing": "前後の進行状況をつなぐカット展開",
+      "text_design": "Blenderの3Dビューポート上にテクスチャとシェーディングが適用されたロケットモデル",
+      "audio": "男性の興奮気味な指示音声、BGMのパーカッションがリズムを刻む",
+      "effect_on_viewer": "単なる静止モデル作成から、インタラクティブなゲーム制作へとプロンプトが高度化する過程への期待",
+      "search_labels": [
+        "3D Game Dev",
+        "Asteroids Game",
+        "Blender to Game",
+        "Interactive Prompt"
+      ],
+      "reproduction_idea": "完成した3Dモデルの回転プレビューを見せつつ、演者が手で回避動作をジェスチャーするカットを挟む",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-14",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=66s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 73.0,
+      "end": 79.5,
+      "visual": "男性「...using the arrow keys to move around and I'm using space to boost.」AI「Yep, I'm building the game.」男性が続けて「Also I'm a little hungry, can you get me some beef and rice from that spot I ordered from last week?」と頼む。",
+      "camera": "部屋全体のワイドショット。壁面ディスプレイの広大さと男性のリラックスした姿勢を捉える",
+      "editing": "ゆったりとした長回しのフィックスショット",
+      "text_design": "なし",
+      "audio": "AI「Yep, I'm building the game.」「Looking into ordering food.」",
+      "effect_on_viewer": "技術的なコード開発と日常のフードデリバリー注文という全く異なるコンテキストを同時に難なくこなすAIの驚異的なマルチタスク性能を印象付ける",
+      "search_labels": [
+        "Multitasking",
+        "Game Development",
+        "Food Delivery",
+        "Context Switching"
+      ],
+      "reproduction_idea": "重い開発タスクを頼んだ直後にカジュアルな出前の依頼をさらっと挟み、日常感と高度な技術のギャップを演出する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-15",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=73s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 79.5,
+      "end": 87.2,
+      "visual": "4人目のユーザーであるポロシャツの男性が登場。「So my law firm needs a licensing agreement template, can you generate a draft template for the lawyers at my firm to have a look at?」AI「Sure thing.」スクリーンに音声波形アニメーションが揺れる。",
+      "camera": "男性のミディアムアップから、部屋全体を見渡すワイドショットへスムーズに移行",
+      "editing": "新しいプロフェッショナルなユースケースへの場面転換",
+      "text_design": "スクリーン上に「New voice chat」とプロンプトテキストが生成される",
+      "audio": "落ち着いた男性弁護士の声、AI「Sure thing.」、滑らかなアンビエントミュージック",
+      "effect_on_viewer": "エンタメやクリエイティブだけでなく、法務・ビジネスの厳格な専門領域にも対応できる信頼性を訴求",
+      "search_labels": [
+        "Legal Tech",
+        "Licensing Agreement",
+        "Law Firm Draft",
+        "Professional AI"
+      ],
+      "reproduction_idea": "人物の服装や姿勢をビジネスライクにし、音声入力インジケータ（流体波形モーショングラフィックス）を壁面に大きく投影する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-16",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=79s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 87.2,
+      "end": 91.5,
+      "visual": "レインウェア女性に戻る。テニスラケットを持ちながら「While you're doing that, I want to play tennis this afternoon so can you look for a court for me in the lower height.」AI「Checking now, I'll see what I can find.」スクリーンには既にカラフルなスライドが並んでいる。",
+      "camera": "女性の全身とスライド画面を捉えた構図。女性がテニスのフォアハンドの素振りをする",
+      "editing": "スピーディーなカットイン",
+      "text_design": "スライド上に「24 JACKETS」「THE OPENING BUY - ONE CASE OF EACH STYLE」「$2,286 wholesale」などのテキストと黄色いレイアウト",
+      "audio": "女性の指示音声、AI「Checking now...」、ラケットを振る風切り音の微かなニュアンス",
+      "effect_on_viewer": "本業の作業（スライド作成）のバックグラウンドでプライベートの用事（テニスコート探し）を同時に依頼する優雅なライフスタイルを描く",
+      "search_labels": [
+        "Multitasking Lifestyle",
+        "Tennis Court Booking",
+        "Slide Design",
+        "Lower Haight"
+      ],
+      "reproduction_idea": "作業中に趣味の道具（ラケット）を持たせて身体的なアクティビティを演じさせ、AI任せの自由な時間を視覚化する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-17",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=87s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 91.5,
+      "end": 98.2,
+      "visual": "女性のクローズアップからスライド画面のオーバーザショルダーへ。黄色いフード付きレインジャケットを着たモデルの写真が自動で挿入され、右側の「Format options」でサイズや縦横比が自動調整される。",
+      "camera": "女性の顔アップから、スクリーン上の画像編集UIへの流れるようなピント移動",
+      "editing": "編集UIの精密な操作を見せるテンポ良いカッティング",
+      "text_design": "「Size & Rotation」「Width 6.5」「Height 4.33」「Lock aspect ratio」等のUIテキスト",
+      "audio": "画像がスナップする効果音、リッチなシンセサウンド",
+      "effect_on_viewer": "グラフィックデザインの細かな数値調整やアセット配置が手放しで美しく整っていく心地よさ",
+      "search_labels": [
+        "Auto Layout",
+        "Format Options",
+        "Photo Placement",
+        "Design Automation"
+      ],
+      "reproduction_idea": "画像選択枠やバウンディングボックスが自動で吸着し、数値パラメータが自動で回転・入力されるアニメーションを作成する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-18",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=91s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 98.2,
+      "end": 103.5,
+      "visual": "eBay女性に戻る。「Can you include the photo that I have of it in my downloads folder?」と話す。スクリーン上のファイル選択ダイアログが操作され、「orange-table-dent.png」が選ばれる。",
+      "camera": "女性の横顔から、巨大スクリーンのファイルブラウザダイアログのズームイン",
+      "editing": "会話の進行に同期したUI表示の切り替え",
+      "text_design": "macOS風のFinderファイル選択ダイアログ、「Downloads」「orange-table-dent.png」",
+      "audio": "女性の指示音声、ダイアログが開くポップ音とクリック音",
+      "effect_on_viewer": "ローカルフォルダ内のファイル構成をAIが把握し、目的のファイルを即座に特定・参照するインテリジェンスを示す",
+      "search_labels": [
+        "File System Access",
+        "Downloads Folder",
+        "eBay Upload",
+        "Local File Integration"
+      ],
+      "reproduction_idea": "画面上のOSファイルピッカーが自然にスクロールして該当ファイルを選択し「Open」が押される画面キャプチャを投影する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-19",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=98s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 103.5,
+      "end": 110.8,
+      "visual": "女性「There's like a slight dent in it. It's also saved in my downloads folder. Can you put in the description that it's just slightly damaged?」スクリーン上で「Clean up your photo」機能が走り、オレンジ色のテーブルの写真から背景が自動で綺麗に消去される。",
+      "camera": "女性のミディアムアップから、写真の背景切り抜きが行われるスクリーン全体へ",
+      "editing": "女性の口元の演技と画面の自動編集プロセスの同期",
+      "text_design": "「Edit photo」「New! Clean up your photo」「Our improved tool instantly removes the background...」",
+      "audio": "女性の指示、写真が切り抜かれる時の「シュッ」という処理効果音",
+      "effect_on_viewer": "傷や欠点の申告といった細かなニュアンスの反映と、面倒な商品画像の背景除去が一瞬で完了する利便性をアピール",
+      "search_labels": [
+        "Background Removal",
+        "Photo Clean up",
+        "Item Description",
+        "Condition Notice"
+      ],
+      "reproduction_idea": "写真編集ソフトのマスク切り抜き処理をビフォーアフターでアニメーション化し、通知ポップアップと連動させる",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-20",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=103s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 110.8,
+      "end": 118.0,
+      "visual": "法律男性に戻る。Google Docsに生成されたライセンシング契約書を見上げながら「Can you just take the limitation of liability provision and make it a little more favorable to the licensor?」と指示。",
+      "camera": "男性の斜め前アップから、背後のDocs画面を見上げるダイナミックなアングル",
+      "editing": "対話のテンポを崩さないスムーズな編集",
+      "text_design": "Google DocsのUI、「Licensing Agreement Template」「11. Limitation of Liability」の条文テキスト",
+      "audio": "男性の専門的な発話、落ち着いたBGM",
+      "effect_on_viewer": "高度な法律文書の条項解釈と、特定の立場（ライセンサー有利）への書き換えを指示できる専門性の高さを提示",
+      "search_labels": [
+        "Legal Contract",
+        "Limitation of Liability",
+        "Licensor Terms",
+        "Google Docs AI"
+      ],
+      "reproduction_idea": "契約書の法的テキストを画面いっぱいに表示し、演者が歩き回りながら専門用語で修正を要求する演出にする",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-21",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=110s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 118.0,
+      "end": 125.0,
+      "visual": "男性が後ろを向く。AIが「Okay, I've tightened it, so the licensor's liability is more narrowly capped.」と答え、画面上の条文が青くハイライトされて書き換わる。男性は「That looks pretty good. Thanks.」と満足げに頷く。",
+      "camera": "男性の背中越しのドリーイン。青く選択されたテキストにフォーカス",
+      "editing": "テキスト書き換えの瞬間に合わせた引きから寄りへのフォーカスワーク",
+      "text_design": "青くハイライトされた条文テキストの置換表示",
+      "audio": "AIの落ち着いた解説音声「Okay, I've tightened it...」、男性の満足した声「Thanks.」",
+      "effect_on_viewer": "法的なリスク管理をAIが的確に理解・要約し、納得のいく修正を即座に提示する実効性の証明",
+      "search_labels": [
+        "Clause Revision",
+        "Narrowly Capped",
+        "Legal Drafting",
+        "Highlighted Text"
+      ],
+      "reproduction_idea": "ドキュメント内の特定段落を青くハイライトし、タイピングではなく一瞬で洗練された条文に置き換わるUIアニメーションを作る",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-22",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=118s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 125.0,
+      "end": 131.0,
+      "visual": "最初の男性。届いた出前のボックスから割り箸で牛肉とご飯を食べながら、大画面に映し出された3DゲームをノートPCのキーボードでプレイしている。宇宙空間で小惑星を避けるロケットのゲーム。",
+      "camera": "食事を口に運ぶ男性のクローズアップから、ゲームが動くプロジェクター壁面のワイドショットへ",
+      "editing": "食事とゲームプレイの動きがリンクしたリズミカルなカット",
+      "text_design": "画面左上に「SCORE 2450 BOOST ■■■ CRUISE」のゲームHUD表示",
+      "audio": "咀嚼音、箸の音、小惑星を避けるゲームのSF的SE（ブースト音、浮遊音）",
+      "effect_on_viewer": "自分がさっき頼んだゲームとご飯が同時に実現し、最高のリラックス空間で楽しんでいる贅沢な充足感",
+      "search_labels": [
+        "Eating Takeout",
+        "Playing Generated Game",
+        "Asteroid Dodger",
+        "Space Game HUD"
+      ],
+      "reproduction_idea": "Three.jsやUnity等で作ったシンプルな小惑星回避ゲーム画面を投影し、演者がキーボードを操作しながらテイクアウトの中華を食べる",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-23",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=125s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 131.0,
+      "end": 136.0,
+      "visual": "プレゼン女性。「Can you change the background color to complement the rain jackets?」と見上げる。スライド「03 / WEEKENDER」の「Background」パレットが開き、カラーピッカーが自動で淡いサンドベージュ系の色を選択して背景がベージュ色に切り替わる。",
+      "camera": "女性のアップから、スライドの背景色メニューの拡大ショット",
+      "editing": "色の変化を際立たせるための寄りのカット",
+      "text_design": "「Rainwear 2027」「Change background」「Solid / Gradient」「Add to theme / Done」",
+      "audio": "女性の指示音声、カラーパレットが開き色が変わる「ポン」という心地よい効果音",
+      "effect_on_viewer": "被写体の衣装（黄色・パープル等）に合わせた色彩調和（カラーハーモニー）をAIが自動計算する美的センスを提示",
+      "search_labels": [
+        "Color Palette",
+        "Complementary Color",
+        "Theme Adjustment",
+        "Slides UI"
+      ],
+      "reproduction_idea": "スライド編集画面のカラーピッカーが自動で開き、写真のキーカラーをサンプリングして背景色を一括変更するUIを作成する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "audit_correction": "カラーピッカーが自動選択して背景色が変更される色は「パープル/パステル調」ではなく、画面右側の写真（Persimmon）に合わせた「淡いサンドベージュ系」。パープルの背景は次の別スライドのカット（02 / LONG WAY）である。",
+      "id": "yt-1QNsdr-Qx_I-segment-24",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=131s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 136.0,
+      "end": 142.5,
+      "visual": "宇宙空間で小惑星を避けるゲーム画面と、テイクアウトを食べながら満足げに微笑む男性のカットが挟まれる。続いてパープルを基調としたスライド「02 / LONG WAY」の画面に切り替わり、女性が「Oh, I love it. And what's going on with my reservation?」と尋ねる。AI「I found an open court at 5:00 p.m.」女性「Yeah, book it.」",
+      "camera": "女性の全身と完成したスライドを捉えたミディアムワイドショット",
+      "editing": "男性のゲームプレイのインサートカットを挟み、完成したパープル調のスライド画面へ戻るテンポの良いカット割り",
+      "text_design": "スライド「02 / LONG WAY」「$99 wholesale / $198 suggested retail」",
+      "audio": "女性の明るい声、AIの報告音声「I found an open court at 5:00 p.m.」、女性「Yeah, book it.」",
+      "effect_on_viewer": "仕事（資料作成）と生活（コート予約）の両方が完璧に整い、ストレスフリーな体験が完成した爽快感",
+      "search_labels": [
+        "Court Reservation",
+        "Task Complete",
+        "Yeah book it",
+        "Rainwear Presentation"
+      ],
+      "reproduction_idea": "デザインの仕上がりに対する賞賛と別タスクの進捗確認を1センテンスで繋ぎ、マルチエージェントの有能さを演出する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "audit_correction": "136.0〜142.5の間に、約137.0〜139.5秒で最初の男性がゲームをプレイしながら食事をして微笑むカットが挟まれており、この重要カットが見落とされている。その後にパープル背景のスライド（02 / LONG WAY）のカットへ移行する。",
+      "id": "yt-1QNsdr-Qx_I-segment-25",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=136s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 142.5,
+      "end": 149.0,
+      "visual": "最初の男性。食事の手を止め、箸を動かしながら「Now I want you to make a file I can send to my 3D printer.」AI「I'll get working on creating an STL file of this rocket.」スクリーンには白い3Dロケットモデルが表示される。",
+      "camera": "男性の正面ミディアムショットから、スクリーン中央のロケットへのカメラドリー",
+      "editing": "一連の物語のクライマックスへ向かうカット",
+      "text_design": "なし",
+      "audio": "男性の依頼音声、AIの返答「...creating an STL file...」",
+      "effect_on_viewer": "画面の中のデジタルコンテンツが、いよいよ現実世界へ物理出力される期待感を最高潮に高める",
+      "search_labels": [
+        "STL File Export",
+        "3D Print Preparation",
+        "Rocket CAD",
+        "Hardware Handover"
+      ],
+      "reproduction_idea": "モデリングソフトからSTLファイル形式へのエクスポートプロセスを台詞で明示し、カメラを被写体から3Dモデルへと寄せる",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-26",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=142s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 149.0,
+      "end": 153.2,
+      "visual": "棚に置かれた密閉型3Dプリンターの内部クローズアップ。プリントヘッドが動き、青いフィラメントでロケットの模型が層状に積み上げられ造形されている。",
+      "camera": "3Dプリンター内部を正面から捉えたマクロショット（被写界深度が浅くヘッドと造形物にピント）",
+      "editing": "実写のマクロカットへの切り替え",
+      "text_design": "なし",
+      "audio": "3Dプリンターのステッピングモーター音、ファンの駆動音、BGMのクライマックスフレーズ",
+      "effect_on_viewer": "デジタル生成AIがハードウェアと直結し、物理的なモノ作りまで到達した決定的な瞬間を提示",
+      "search_labels": [
+        "3D Printing Timelapse",
+        "Blue Rocket Print",
+        "Bambu Lab Printer",
+        "Physical Manifestation"
+      ],
+      "reproduction_idea": "卓上3Dプリンターで造形中の模型を低照度シネマレンズで撮影し、ヘッドのメカニカルな駆動音を強調する",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "id": "yt-1QNsdr-Qx_I-segment-27",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=149s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 153.2,
+      "end": 156.5,
+      "visual": "男性がプリンターのガラス扉を開け、完成した青いロケット模型を取り出す。手前のテーブルにあらかじめ置かれている白いロケット模型の横に、青いロケットを並べて置く。",
+      "camera": "プリンターを開ける手のミディアムショットから、手前のテーブルへのフォローパン",
+      "editing": "スムーズな動作のフォローカット",
+      "text_design": "なし",
+      "audio": "プリンターの扉が開くラッチ音、机に模型を置く「コトッ」という心地よい接触音",
+      "effect_on_viewer": "仮想空間のアイデアが人間の手で触れる実物として結実した手応えと達成感を伝える",
+      "search_labels": [
+        "Taking Finished Print",
+        "Physical Object",
+        "Hands on Product"
+      ],
+      "reproduction_idea": "プリンターから出来立てのフィギュアを取り出し、フォーカスされた手前の木製テーブルに置く一連のアクションをノーカットで収める",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "audit_correction": "手前のテーブルにはあらかじめ「白いロケット模型」が置かれており、男性が3Dプリンターから取り出した「青いロケット模型」をその隣に置く構図となっている点が記述で欠落している。",
+      "id": "yt-1QNsdr-Qx_I-segment-28",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=153s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    },
+    {
+      "start": 156.5,
+      "end": 162.871,
+      "visual": "デスクの上に置かれた青いロケット模型のクローズアップ。左側手前には白いロケット模型がボケて写る。画面中央に白文字の「OpenAI」ロゴが現れ、続いて渦巻きシンボルマークへ切り替わり、その下に黄色のテキストで「FOR THE FULL ASTRA EXPERIENCE, DOWNLOAD THE CHATGPT DESKTOP APP」が表示される。",
+      "camera": "ロケット模型にフォーカスを合わせた浅い被写界深度のフィックス・クローズアップ",
+      "editing": "ロゴとテキストが静かにフェードインするエンディング",
+      "text_design": "中央に白文字「OpenAI」ロゴおよび渦巻きシンボルマーク、その下にサンセリフの黄色テキスト「FOR THE FULL ASTRA EXPERIENCE, DOWNLOAD THE CHATGPT DESKTOP APP」",
+      "audio": "シンセの和音が心地よく減衰し、静かに余韻を残して終わる",
+      "effect_on_viewer": "冒頭の「黄色い丸」が最終的にロケットのフィギュアになったストーリーの伏線回収とともに、デスクトップアプリのダウンロードへと導く",
+      "search_labels": [
+        "OpenAI Logo",
+        "ChatGPT Desktop App",
+        "Call to Action",
+        "Final Product Rocket"
+      ],
+      "reproduction_idea": "完成した実物プロダクトの手前・背後にブランドロゴとCTAメッセージをクリーンに重ね、余韻のあるアンビエントコードで締めくくる",
+      "implementation_evidence": "inferred",
+      "confidence": "high",
+      "audit_correction": "①背景/手前にボケて写っているのは「スクリーンの残像」ではなく、先ほどまでフォーカスされていた「白いロケット模型（前ボケ）」。②OpenAIロゴは「OpenAI（白色テキスト）」から「渦巻きシンボルマーク」へと切り替わる。③下部のCTAテキスト「FOR THE FULL ASTRA EXPERIENCE, DOWNLOAD THE CHATGPT DESKTOP APP」は白色ではなく「黄色（イエロー）」で表示されている。",
+      "id": "yt-1QNsdr-Qx_I-segment-29",
+      "timestamp_precision": "approximate_seconds",
+      "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I&t=156s",
+      "observation_basis": "gemini_agentic_video",
+      "reproduction_note": "Proposed method, not evidence of the original production pipeline."
+    }
+  ],
+  "signature_techniques": [
+    {
+      "name": "歴史的アーカイブとのマッチカット・対比導入",
+      "ranges": [
+        {
+          "start": 0.0,
+          "end": 15.1
+        }
+      ],
+      "description": "1979年のMITにおける初期の音声空間対話研究映像（4:3、VHS質感）から同一の家具配置・プロンプトの2026年セット（16:9）へシームレスに移行させ、AIの進化の歴史的連続性と飛躍を際立たせる演出。"
+    },
+    {
+      "name": "プロジェクション型巨大UIによる空間的UI演出",
+      "ranges": [
+        {
+          "start": 15.1,
+          "end": 44.2
+        },
+        {
+          "start": 79.5,
+          "end": 125.0
+        }
+      ],
+      "description": "PCの小さなモニターではなく、スタジオ壁面全体にUI（ペイント、Blender、Docs、Googleスライド、ゲーム）を等身大サイズで投影し、ユーザーが部屋全体を使ってAIと対話・共創するアンビエントなコンピューティング空間を視覚化。"
+    },
+    {
+      "name": "クロスコンテクストな並行タスク・モンタージュ",
+      "ranges": [
+        {
+          "start": 44.2,
+          "end": 142.5
+        }
+      ],
+      "description": "デザイン、物販、ゲーム開発、法務という職種の異なる4人のユーザーが、仕事と私生活（テニスコート予約、出前注文）の指示を代わる代わる行い、AIが各タスクを破綻なく同時進行・完了させていく様をテンポよく交差させる構成。"
+    },
+    {
+      "name": "仮想プロンプトから物理実体化への円環ストーリー",
+      "ranges": [
+        {
+          "start": 15.1,
+          "end": 33.2
+        },
+        {
+          "start": 142.5,
+          "end": 162.871
+        }
+      ],
+      "description": "「小さな黄色い丸を描いて」という何気ない一言から始まった2Dイラストが、3Dモデル化、ゲーム化を経て、最終的に3Dプリンターで現実の青いロケット模型として出力され手元に残るという、デジタルと物理世界の境界を越える演出。"
+    }
+  ],
+  "unknowns": [
+    "大画面に映し出されているBlenderやGoogleスライド、eBay、Docs、ゲーム画面の自動操作が、実際に自律型AIエージェントのリアルタイム動作画面を録画したものなのか、それともUIモックアップやポストプロダクションによる合成アニメーションなのかは画面上からは厳密に判別できない。",
+    "タイトルに表示される「INTRODUCING GPT-6 ASTRA」が、実在する公式の未来ロードマップ名称なのか、プロトタイプコンセプトビデオ用の架空演出設定なのかは動画単体からは確認できない。"
+  ],
+  "reference_id": "yt-1QNsdr-Qx_I",
+  "source_url": "https://www.youtube.com/watch?v=1QNsdr-Qx_I",
+  "model": "gemini-3.8-flash",
+  "processing": "agentic",
+  "audit": {
+    "corrections": [
+      {
+        "segment_start": 131.0,
+        "issue": "カラーピッカーが自動選択して背景色が変更される色は「パープル/パステル調」ではなく、画面右側の写真（Persimmon）に合わせた「淡いサンドベージュ系」。パープルの背景は次の別スライドのカット（02 / LONG WAY）である。",
+        "corrected_fields": {
+          "visual": "プレゼン女性。「Can you change the background color to complement the rain jackets?」と見上げる。スライド「03 / WEEKENDER」の「Background」パレットが開き、カラーピッカーが自動で淡いサンドベージュ系の色を選択して背景がベージュ色に切り替わる。"
+        }
+      },
+      {
+        "segment_start": 136.0,
+        "issue": "136.0〜142.5の間に、約137.0〜139.5秒で最初の男性がゲームをプレイしながら食事をして微笑むカットが挟まれており、この重要カットが見落とされている。その後にパープル背景のスライド（02 / LONG WAY）のカットへ移行する。",
+        "corrected_fields": {
+          "visual": "宇宙空間で小惑星を避けるゲーム画面と、テイクアウトを食べながら満足げに微笑む男性のカットが挟まれる。続いてパープルを基調としたスライド「02 / LONG WAY」の画面に切り替わり、女性が「Oh, I love it. And what's going on with my reservation?」と尋ねる。AI「I found an open court at 5:00 p.m.」女性「Yeah, book it.」",
+          "editing": "男性のゲームプレイのインサートカットを挟み、完成したパープル調のスライド画面へ戻るテンポの良いカット割り"
+        }
+      },
+      {
+        "segment_start": 153.2,
+        "issue": "手前のテーブルにはあらかじめ「白いロケット模型」が置かれており、男性が3Dプリンターから取り出した「青いロケット模型」をその隣に置く構図となっている点が記述で欠落している。",
+        "corrected_fields": {
+          "visual": "男性がプリンターのガラス扉を開け、完成した青いロケット模型を取り出す。手前のテーブルにあらかじめ置かれている白いロケット模型の横に、青いロケットを並べて置く。"
+        }
+      },
+      {
+        "segment_start": 156.5,
+        "issue": "①背景/手前にボケて写っているのは「スクリーンの残像」ではなく、先ほどまでフォーカスされていた「白いロケット模型（前ボケ）」。②OpenAIロゴは「OpenAI（白色テキスト）」から「渦巻きシンボルマーク」へと切り替わる。③下部のCTAテキスト「FOR THE FULL ASTRA EXPERIENCE, DOWNLOAD THE CHATGPT DESKTOP APP」は白色ではなく「黄色（イエロー）」で表示されている。",
+        "corrected_fields": {
+          "visual": "デスクの上に置かれた青いロケット模型のクローズアップ。左側手前には白いロケット模型がボケて写る。画面中央に白文字の「OpenAI」ロゴが現れ、続いて渦巻きシンボルマークへ切り替わり、その下に黄色のテキストで「FOR THE FULL ASTRA EXPERIENCE, DOWNLOAD THE CHATGPT DESKTOP APP」が表示される。",
+          "text_design": "中央に白文字「OpenAI」ロゴおよび渦巻きシンボルマーク、その下にサンセリフの黄色テキスト「FOR THE FULL ASTRA EXPERIENCE, DOWNLOAD THE CHATGPT DESKTOP APP」"
+        }
+      }
+    ],
+    "verified_ranges": [
+      {
+        "start": 0.0,
+        "end": 9.2,
+        "evidence": "1979年のMIT『Put-That-There』アーカイブ映像（4:3）、音声「Create a yellow circle there.」、00:02〜00:05の黄色文字「1979」の歪み消去を確認。"
+      },
+      {
+        "start": 9.2,
+        "end": 39.5,
+        "evidence": "「2026」のテキスト溶解、イームズチェア、黄色い丸描画、ロケットイラスト詳細化、Blender 4.xの起動と円柱メッシュ生成（00:37〜00:39）まで画面・音声ともに一致。"
+      },
+      {
+        "start": 39.5,
+        "end": 44.2,
+        "evidence": "スタジオ全景へのクレーンアップショット、白文字「INTRODUCING GPT-6」および発光タイポグラフィ「ASTRA」の出現を確認。"
+      },
+      {
+        "start": 44.2,
+        "end": 125.0,
+        "evidence": "Googleスライド作成、eBay出品（Downloadsの「orange-table-dent.png」選択と背景切り抜き）、ゲーム依頼と牛丼注文、Google Docsでの契約書修正（第11条ハイライト書き換え）の台詞・UI表示を完全確認。"
+      },
+      {
+        "start": 125.0,
+        "end": 131.0,
+        "evidence": "男性が中華ボックスを食べながらゲームをプレイし、大画面左上に「SCORE 2450 BOOST ■■■ CRUISE」のHUDが表示されていることを確認。"
+      },
+      {
+        "start": 142.5,
+        "end": 153.2,
+        "evidence": "男性がSTLファイル作成を依頼し、密閉型3Dプリンター内部で青いフィラメントによるロケット造形（02:31）が行われていることを確認。"
+      },
+      {
+        "start": 153.2,
+        "end": 162.871,
+        "evidence": "プリンターから青いロケットを取り出しテーブルに置く動作、白い前ボケロケット、OpenAIロゴの推移、黄色いCTAテキストを確認。"
+      }
+    ],
+    "limitations": [
+      "プロジェクションに投影されたBlender、Googleスライド、eBay、Google Docsなどの画面操作が、自律型AIによる完全リアルタイム動作のキャプチャか、UIモックアップや事後合成によるアニメーション演出かは映像素材のみからは特定できない。",
+      "「GPT-6 ASTRA」の名称が公式な実在製品のロードマップなのか、コンセプト映像のためのブランド演出なのかは映像外部情報に依存するため断定できない。"
+    ]
+  },
+  "reviewed_stills": {
+    "method": "local contact sheet and closing frame visual inspection",
+    "timestamps_approx": [
+      7.5,
+      22.5,
+      37.5,
+      52.5,
+      67.5,
+      82.5,
+      97.5,
+      112.5,
+      127.5,
+      142.5,
+      157.5,
+      158
+    ]
+  },
+  "caveats": [
+    "29 semantic intervals, not an exhaustive frame-accurate shot list.",
+    "Independent model reinspection found and corrected four issues; it is not proof that all observations are correct.",
+    "Audio observations are model-reviewed. No claim of manual listening to every second.",
+    "Source identity comes from publisher metadata; visual analysis does not establish product-release facts."
+  ]
+}

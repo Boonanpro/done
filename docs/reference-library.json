@@ -1,0 +1,1706 @@
+[
+  {
+    "id": "9f5a2b9c0441",
+    "title": "番組の再現イラスト",
+    "description": "Detailed television reconstruction illustration; dark contours, modeled soft shadows, near-realistic proportions. Seated woman, neutral serious face, colorful studio.",
+    "family": "yoshitaka-realistic",
+    "source_url": "https://yoshitakaworks.com/geinou/",
+    "url": "https://yoshitakaworks.com/wp-content/uploads/2020/05/5時に夢中マツコ.jpg",
+    "sha256": "aec700b568b2ca11de2cdb3db9dc24ae35707c582f9f5fee851fcb0574d27a8d",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "75daa28904dd",
+    "title": "とぼけた手描き",
+    "description": "Sparse caricature of a balding man on white. Bold irregular black outlines, flat colors, exaggerated eyebrows and facial proportions. Arms folded. Stock watermark.",
+    "family": "sparse-caricature",
+    "source_url": "https://pixta.jp/illustration/71392063",
+    "url": "https://t.pimg.jp/071/392/063/1/71392063.jpg",
+    "sha256": "090f271e752006db6feb5cd5b0952ac9f3777eb3e17542718d1b0698a1ac2c68",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "ce8c2cb67354",
+    "title": "レトロポップ",
+    "description": "Fashion/pop illustration of a young woman wearing headphones and a cap. Flat coral, white and grey, clean black contours, portrait crop.",
+    "family": "retro-fashion",
+    "source_url": "https://lwart.co.jp/artist/%E3%82%B3%E3%82%A6%E3%82%B8%E3%83%9E%E3%82%AF%E3%83%AB%E3%83%9F/",
+    "url": "https://lwart.co.jp/wp-content/uploads/2024/12/アーティスト画像.jpg",
+    "sha256": "67463144762e9e51c9509a50d39e5ee19086b244f0efe33a7b2c1d879e89acfa",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "4212cfd90984",
+    "title": "近いタッチ｜春菜",
+    "description": "Detailed television reconstruction illustration; dark contours, modeled soft shadows, near-realistic proportions. Seated woman with glasses in a studio. Same drawing family as 9f5a2b9c0441.",
+    "family": "yoshitaka-realistic",
+    "source_url": "https://yoshitakaworks.com/geinou/",
+    "url": "https://yoshitakaworks.com/wp-content/uploads/2020/05/スッキリ出演近藤春菜.jpg",
+    "sha256": "42d535553512e9f48d6e2350b9c6ccbed3b85bc543a98e1148466c4598fb2c83",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "15eff959b38f",
+    "title": "デフォルメ｜男女の場面",
+    "description": "Television relationship diagram with multiple stylized young people, large Japanese headings and bright yellow backdrop. Cute simplified faces; informational comic layout.",
+    "family": "relationship-diagram",
+    "source_url": "https://yoshitakaworks.com/joshikai/",
+    "url": "https://yoshitakaworks.com/wp-content/uploads/2021/08/e04ac1e038bd3390c9699d7f3e3a3546-1280x720.jpg",
+    "sha256": "d896a181bae8c92c5d006a65162b04fce754e6b2bd84c7bc918d7536b45f6ec7",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "data"
+  },
+  {
+    "id": "9799bd699421",
+    "title": "テクノカットの番組作例",
+    "description": "Humorous baseball caricature. Large foreground batter in red helmet grins and winks, while catcher at center sweats and trembles; umpire at right. Bright field, bold outlines and comic sound-effect lettering. Overall a comic contrast between a cheerful batter and frightened catcher, NOT a uniformly troubled or somber scene.",
+    "family": "technocut-comic",
+    "source_url": "https://technocut-studio.com/work-tv/",
+    "url": "https://technocut-studio.com/wp-content/uploads/2022/03/cut_024-750x422.jpg",
+    "sha256": "de8a194461013b07d465e14ba578c00af846c4a926f9d1926e79db990b6b0010",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "f99cb7f79c8c",
+    "title": "rop-chopの再現イラスト",
+    "description": "Humorous family scene: long caricature faces, fine dark contours, warm pastel flat colors and halftone textures; smiling people, mice, musical symbols.",
+    "family": "rop-comic",
+    "source_url": "https://rop-chop-graphic.sakura.ne.jp/person21/",
+    "url": "https://rop-chop-graphic.sakura.ne.jp/illust/wp-content/uploads/2023/11/1.jpg",
+    "sha256": "21c33bec1797424567ebcb646f1f3fb1937c0e2abb75385f60fba7aaf56faba7",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "71e30c3730b0",
+    "title": "デキサ｜番組イラスト",
+    "description": "Collage of many small television illustration scenes; mixed flat cartoon styles, people and explanatory diagrams. No single scene is large enough for detailed comparison.",
+    "family": "collage",
+    "source_url": "https://www.dxa.co.jp/anime/tv/",
+    "url": "https://www.dxa.co.jp/wp-content/uploads/atama001.jpg",
+    "sha256": "01723b69593f3a26dc8f4524e2740e2e1686da4efe6eeed0ea23981432689457",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "c82cfdff99c8",
+    "title": "白黒の似顔絵｜ろっぷちょっぷ",
+    "description": "Black and white cartoon head with exaggerated long nose, large eyes and a smiling mouth. Isolated portrait, no worried scene. Prior displayed title called it worried, but that is not supported by this image.",
+    "family": "mono-caricature",
+    "source_url": "https://rop-chop-graphic.sakura.ne.jp/person22/",
+    "url": "https://rop-chop-graphic.sakura.ne.jp/illust/wp-content/uploads/2023/02/プロフィール.png",
+    "sha256": "e886f7099fee1043c698b9aab5399ccfd2f27cb2ca636c46685b41543c5b729b",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "d751b8e01079",
+    "title": "緊迫した場面｜榎本よしたか",
+    "description": "Serious reconstruction: older man confronted by suited men in a room. Near-realistic proportions, controlled dark contours, modeled shadows and muted colors. Same drawing family as 9f5a2b9c0441.",
+    "family": "yoshitaka-realistic",
+    "source_url": "https://yoshitakaworks.com/asachan-2/",
+    "url": "https://yoshitakaworks.com/wp-content/uploads/2020/05/ジャマル01.jpg",
+    "sha256": "e2c781e739f358200e6d21da9edd67840ec48d5fc2de008df5b327a51635fa0f",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "7456090a4f3b",
+    "title": "心配する表情",
+    "description": "Pastel comic scene dominated by a frustrated woman in profile reacting to a television. Furrowed brow, pouting mouth and steam-like frustration marks. A small startled figure stands behind the TV; the presenter on the TV looks relaxed, not worried. Elongated caricature faces and halftone shading. The foreground emotion is frustration rather than joy. Not photorealistic; no prominent dialogue text.",
+    "family": "rop-comic",
+    "source_url": "https://rop-chop-graphic.sakura.ne.jp/person22/",
+    "url": "https://rop-chop-graphic.sakura.ne.jp/illust/wp-content/uploads/2023/11/2.jpg",
+    "sha256": "7d003e2fcb5abd588cbc7dc807f091b3d7d61f9758d2d2e926c0445631563074",
+    "inspection": "contact-sheet visually inspected; no motion assessment",
+    "use_cases": [
+      "イラストのタッチ比較",
+      "人物の表情",
+      "番組の再現イラスト"
+    ],
+    "reference_role": "character"
+  },
+  {
+    "id": "5635b8785a8d",
+    "title": "やわらかな明朝",
+    "description": "Warm ivory Japanese serif title on charcoal and muted gold. One line, gentle upward fade. No bounce. 6-second editable typography sample.",
+    "family": "caption-serif",
+    "kind": "composition",
+    "composition": {
+      "width": 1280.0,
+      "height": 720.0,
+      "duration": 6.0,
+      "background": "#292b29",
+      "layers": [
+        {
+          "type": "rect",
+          "text": "",
+          "x": 900.0,
+          "y": 0.0,
+          "width": 380.0,
+          "height": 720.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#38372f",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 946.0,
+          "y": 96.0,
+          "width": 2.0,
+          "height": 528.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#79674c",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 120.0,
+          "y": 538.0,
+          "width": 1040.0,
+          "height": 1.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#635c4d",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "帰り道に、ひと息",
+          "x": 120.0,
+          "y": 262.0,
+          "width": 1040.0,
+          "height": 110.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 68.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#f4ead7",
+          "background": "transparent",
+          "fontFamily": "Noto Serif JP, Yu Mincho, serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 12.0
+            },
+            {
+              "offset": 0.24,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.85,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-06ce5f6b",
+      "item": "5635b8785a8d"
+    },
+    "use_cases": [
+      "日本語タイポグラフィ",
+      "字幕の見た目",
+      "文字の出現",
+      "静かなカフェの告知"
+    ],
+    "reference_role": "text"
+  },
+  {
+    "id": "971e7dcd8907",
+    "title": "親しみのあるゴシック",
+    "description": "Warm ivory Japanese sans-serif single line on charcoal. Small horizontal fade-in, no bounce. 6-second editable typography sample.",
+    "family": "caption-sans",
+    "kind": "composition",
+    "composition": {
+      "width": 1280.0,
+      "height": 720.0,
+      "duration": 6.0,
+      "background": "#292b29",
+      "layers": [
+        {
+          "type": "rect",
+          "text": "",
+          "x": 900.0,
+          "y": 0.0,
+          "width": 380.0,
+          "height": 720.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#38372f",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 946.0,
+          "y": 96.0,
+          "width": 2.0,
+          "height": 528.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#79674c",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 120.0,
+          "y": 538.0,
+          "width": 1040.0,
+          "height": 1.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#635c4d",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "帰り道に、ひと息",
+          "x": 120.0,
+          "y": 262.0,
+          "width": 1040.0,
+          "height": 110.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 64.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#f4ead7",
+          "background": "transparent",
+          "fontFamily": "Noto Sans JP, Yu Gothic, sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "x": -16.0
+            },
+            {
+              "offset": 0.18,
+              "opacity": 1.0,
+              "x": 0.0
+            },
+            {
+              "offset": 0.85,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-06ce5f6b",
+      "item": "971e7dcd8907"
+    },
+    "use_cases": [
+      "日本語タイポグラフィ",
+      "字幕の見た目",
+      "文字の出現",
+      "静かなカフェの告知"
+    ],
+    "reference_role": "text"
+  },
+  {
+    "id": "e5c4eac9c3f2",
+    "title": "ひと呼吸おく二段",
+    "description": "Two Japanese lines, second phrase larger and appears later. Warm ivory, charcoal background, subtle rise/fade. 6-second typography comparison, not footage.",
+    "family": "caption-two-line",
+    "kind": "composition",
+    "composition": {
+      "width": 1280.0,
+      "height": 720.0,
+      "duration": 6.0,
+      "background": "#292b29",
+      "layers": [
+        {
+          "type": "rect",
+          "text": "",
+          "x": 900.0,
+          "y": 0.0,
+          "width": 380.0,
+          "height": 720.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#38372f",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 946.0,
+          "y": 96.0,
+          "width": 2.0,
+          "height": 528.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#79674c",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 120.0,
+          "y": 538.0,
+          "width": 1040.0,
+          "height": 1.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#635c4d",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "帰り道に、",
+          "x": 120.0,
+          "y": 204.0,
+          "width": 1040.0,
+          "height": 90.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 52.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#f4ead7",
+          "background": "transparent",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 6.0
+            },
+            {
+              "offset": 0.18,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.85,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "ひと息",
+          "x": 120.0,
+          "y": 298.0,
+          "width": 1040.0,
+          "height": 110.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 76.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#f4ead7",
+          "background": "transparent",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 8.0
+            },
+            {
+              "offset": 0.2,
+              "opacity": 0.0,
+              "y": 8.0
+            },
+            {
+              "offset": 0.4,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.85,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-06ce5f6b",
+      "item": "e5c4eac9c3f2"
+    },
+    "use_cases": [
+      "日本語タイポグラフィ",
+      "字幕の見た目",
+      "文字の出現",
+      "静かなカフェの告知"
+    ],
+    "reference_role": "text"
+  },
+  {
+    "id": "ec6dcb660f83",
+    "title": "やわらかな明朝",
+    "description": "Japanese serif caption with only the phrase ひと息 highlighted in gold, other text ivory. Slow soft fade-in over 2.9 seconds, charcoal background. No bounce. Local editable sample.",
+    "family": "caption-serif",
+    "kind": "composition",
+    "composition": {
+      "width": 1280.0,
+      "height": 720.0,
+      "duration": 6.0,
+      "background": "#292b29",
+      "layers": [
+        {
+          "type": "rect",
+          "text": "",
+          "x": 900.0,
+          "y": 0.0,
+          "width": 380.0,
+          "height": 720.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#38372f",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 946.0,
+          "y": 96.0,
+          "width": 2.0,
+          "height": 528.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#79674c",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 120.0,
+          "y": 538.0,
+          "width": 1040.0,
+          "height": 1.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#635c4d",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "帰り道に、",
+          "x": 368.0,
+          "y": 262.0,
+          "width": 340.0,
+          "height": 110.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 68.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#f4ead7",
+          "background": "transparent",
+          "fontFamily": "Noto Serif JP, Yu Mincho, serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 8.0
+            },
+            {
+              "offset": 0.1,
+              "opacity": 0.04,
+              "y": 7.5
+            },
+            {
+              "offset": 0.22,
+              "opacity": 0.24,
+              "y": 5.5
+            },
+            {
+              "offset": 0.36,
+              "opacity": 0.66,
+              "y": 2.0
+            },
+            {
+              "offset": 0.48,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.85,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "ひと息",
+          "x": 708.0,
+          "y": 262.0,
+          "width": 204.0,
+          "height": 110.0,
+          "start": 0.0,
+          "end": 6.0,
+          "fontSize": 68.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#f2cc78",
+          "background": "transparent",
+          "fontFamily": "Noto Serif JP, Yu Mincho, serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 8.0
+            },
+            {
+              "offset": 0.1,
+              "opacity": 0.04,
+              "y": 7.5
+            },
+            {
+              "offset": 0.22,
+              "opacity": 0.24,
+              "y": 5.5
+            },
+            {
+              "offset": 0.36,
+              "opacity": 0.66,
+              "y": 2.0
+            },
+            {
+              "offset": 0.48,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.85,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-06ce5f6b",
+      "item": "ec6dcb660f83"
+    },
+    "use_cases": [
+      "日本語タイポグラフィ",
+      "字幕の見た目",
+      "文字の出現",
+      "静かなカフェの告知"
+    ],
+    "reference_role": "text"
+  },
+  {
+    "id": "e34609f1898f",
+    "title": "A｜吹き出しの往復",
+    "description": "Animated before/after comparison: orange incomplete messages repeatedly travel back and forth on top; one complete teal message travels once below. Minimal flat explanatory graphics, no live people.",
+    "family": "diagram-chat",
+    "kind": "scene",
+    "scene": {
+      "code": "\nconst canvas=document.createElement('canvas');stage.append(canvas);canvas.style.cssText='width:100%;height:100%;object-fit:contain';canvas.width=1280;canvas.height=720;\nconst c=canvas.getContext('2d');const ink='#233343',muted='#7f8b98',bad='#df8065',good='#249b88',bg='#f5f3ee';\nconst clamp=v=>Math.max(0,Math.min(1,v));const ease=v=>{v=clamp(v);return v*v*(3-2*v)};\nfunction box(x,y,w,h,r,fill,stroke){c.beginPath();c.roundRect(x,y,w,h,r);if(fill){c.fillStyle=fill;c.fill()}if(stroke){c.strokeStyle=stroke;c.lineWidth=2;c.stroke()}}\nfunction text(s,x,y,size=25,col=ink,align='left'){c.fillStyle=col;c.font='600 '+size+'px \"Noto Sans JP\",sans-serif';c.textAlign=align;c.textBaseline='middle';c.fillText(s,x,y)}\nfunction line(x,y,X,Y,col,width=3,dash=[]){c.beginPath();c.setLineDash(dash);c.moveTo(x,y);c.lineTo(X,Y);c.strokeStyle=col;c.lineWidth=width;c.stroke();c.setLineDash([])}\nfunction check(x,y,col=good){line(x-10,y,x-2,y+8,col,4);line(x-2,y+8,x+13,y-10,col,4)}\nfunction person(x,y,col){c.fillStyle=col;c.beginPath();c.arc(x,y-18,16,0,Math.PI*2);c.fill();box(x-26,y+5,52,35,15,col)}\nfunction bubble(x,y,col,complete){box(x-65,y-35,130,70,19,'#fff',col);c.beginPath();c.moveTo(x-41,y+34);c.lineTo(x-46,y+46);c.lineTo(x-22,y+34);c.fillStyle='#fff';c.fill();for(let i=0;i<3;i++){box(x-42+i*31,y-9,23,18,5,complete||i===0?col:'#e6e9ea')} }\nfunction tile(x,y,i,col){box(x-22,y-22,44,44,9,col);c.strokeStyle='#fff';c.lineWidth=3;\nif(i===0){c.beginPath();c.arc(x,y-4,7,0,Math.PI*2);c.stroke();line(x-9,y+11,x+9,y+11,'#fff')}\nif(i===1){box(x-10,y-11,20,22,3,null,'#fff');line(x-5,y-3,x+5,y-3,'#fff',2);line(x-5,y+4,x+5,y+4,'#fff',2)}\nif(i===2){c.beginPath();c.arc(x,y,12,0,Math.PI*2);c.stroke();line(x,y,x,y-7,'#fff',2);line(x,y,x+6,y+3,'#fff',2)}\n}\nfunction base(){c.fillStyle=bg;c.fillRect(0,0,1280,720);text(params.heading,64,67,34);text('情報が足りない',64,175,23,bad);text('最初にそろえる',64,440,23,good);line(64,366,1216,366,'#deded7',2);}\nsetFrame(t=>{\nbase();\nif(params.mode==='chat'){\nfor(const [y,col] of [[268,bad],[535,good]]){person(170,y,muted);person(1080,y,muted);line(235,y,1015,y,'#d5dcd9',2,[7,9]);}\nlet phase=Math.min(5,Math.floor(Math.max(0,t-0.5)/1.2)),p=ease((t-0.5-phase*1.2)/1.2);let x=phase%2===0?300+630*p:930-630*p;\nif(t<7.7){bubble(x,268,bad,false);if(phase%2===1)text('？',x,262,29,bad,'center');}\nelse {bubble(300,268,bad,false);text('まだ確認中…',680,319,23,bad,'center');}\ntext(Math.min(3,Math.floor(Math.max(0,t-0.5)/2.4)+1)+'往復',1158,268,23,bad,'center');\nconst q=ease((t-1.5)/1.7);bubble(300+630*q,535,good,true);\nif(t>3.3){check(1080,588);text('一度で伝わる',865,604,25,good,'center')}\nif(t<1.5){for(let i=0;i<3;i++){let a=ease((t-i*.22)/.65);c.globalAlpha=a;tile(269+i*31,535-85*(1-a),i,good);c.globalAlpha=1}}\n}else{\nfor(const y of [270,540]){box(220,y-45,280,90,14,'#e3e6e3');box(740,y-45,330,90,14,'#e3e6e3');line(240,y+45,1050,y+45,'#b5bdb9',3);\nfor(let i=0;i<3;i++)box(515+i*72,y-31,62,62,8,'#e8e7e1','#c8cfca');\ntext('伝わる',1150,y,22,muted,'center');}\nconst a=ease((t-.6)/1.2);\nbox(515,239,62,62,8,bad);tile(546,270,0,bad);\nlet px=295+170*a;if(t>2)px=465-Math.abs(Math.sin((t-2)*2))*24;\nperson(px,215,bad);if(t>2){text('？',652,208,40,bad,'center');text('足りないたびに戻る',410,331,22,bad,'center')}\nfor(let i=0;i<3;i++){const z=ease((t-.35-i*.35)/.8);c.globalAlpha=z;box(515+i*72,509-80*(1-z),62,62,8,good);tile(546+i*72,540-80*(1-z),i,good);c.globalAlpha=1}\nconst q=ease((t-2)/3.3);person(295+690*q,485,good);if(t>5.4){check(1110,540);text('そろえば、すっと届く',765,605,25,good,'center')}\n}\n});",
+      "duration": 9.0,
+      "width": 1280.0,
+      "height": 720.0,
+      "description": "上下の比較。上は不足のある吹き出しが3往復し、下は情報をそろえた吹き出しが一度で届く。",
+      "params": {
+        "mode": "chat",
+        "heading": "何往復もする ／ 一度で伝わる"
+      }
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-96dc804c",
+      "item": "e34609f1898f"
+    },
+    "use_cases": [
+      "説明アニメーション",
+      "情報整理",
+      "連絡の手間",
+      "ビフォーアフター",
+      "伝わり方の比較"
+    ],
+    "reference_role": "data"
+  },
+  {
+    "id": "7804f32b28a1",
+    "title": "B｜ピースの橋",
+    "description": "Animated before/after: a person icon cannot cross an incomplete bridge above; information tiles form a complete bridge below allowing the icon to cross. Flat conceptual metaphor, not live action.",
+    "family": "diagram-bridge",
+    "kind": "scene",
+    "scene": {
+      "code": "\nconst canvas=document.createElement('canvas');stage.append(canvas);canvas.style.cssText='width:100%;height:100%;object-fit:contain';canvas.width=1280;canvas.height=720;\nconst c=canvas.getContext('2d');const ink='#233343',muted='#7f8b98',bad='#df8065',good='#249b88',bg='#f5f3ee';\nconst clamp=v=>Math.max(0,Math.min(1,v));const ease=v=>{v=clamp(v);return v*v*(3-2*v)};\nfunction box(x,y,w,h,r,fill,stroke){c.beginPath();c.roundRect(x,y,w,h,r);if(fill){c.fillStyle=fill;c.fill()}if(stroke){c.strokeStyle=stroke;c.lineWidth=2;c.stroke()}}\nfunction text(s,x,y,size=25,col=ink,align='left'){c.fillStyle=col;c.font='600 '+size+'px \"Noto Sans JP\",sans-serif';c.textAlign=align;c.textBaseline='middle';c.fillText(s,x,y)}\nfunction line(x,y,X,Y,col,width=3,dash=[]){c.beginPath();c.setLineDash(dash);c.moveTo(x,y);c.lineTo(X,Y);c.strokeStyle=col;c.lineWidth=width;c.stroke();c.setLineDash([])}\nfunction check(x,y,col=good){line(x-10,y,x-2,y+8,col,4);line(x-2,y+8,x+13,y-10,col,4)}\nfunction person(x,y,col){c.fillStyle=col;c.beginPath();c.arc(x,y-18,16,0,Math.PI*2);c.fill();box(x-26,y+5,52,35,15,col)}\nfunction bubble(x,y,col,complete){box(x-65,y-35,130,70,19,'#fff',col);c.beginPath();c.moveTo(x-41,y+34);c.lineTo(x-46,y+46);c.lineTo(x-22,y+34);c.fillStyle='#fff';c.fill();for(let i=0;i<3;i++){box(x-42+i*31,y-9,23,18,5,complete||i===0?col:'#e6e9ea')} }\nfunction tile(x,y,i,col){box(x-22,y-22,44,44,9,col);c.strokeStyle='#fff';c.lineWidth=3;\nif(i===0){c.beginPath();c.arc(x,y-4,7,0,Math.PI*2);c.stroke();line(x-9,y+11,x+9,y+11,'#fff')}\nif(i===1){box(x-10,y-11,20,22,3,null,'#fff');line(x-5,y-3,x+5,y-3,'#fff',2);line(x-5,y+4,x+5,y+4,'#fff',2)}\nif(i===2){c.beginPath();c.arc(x,y,12,0,Math.PI*2);c.stroke();line(x,y,x,y-7,'#fff',2);line(x,y,x+6,y+3,'#fff',2)}\n}\nfunction base(){c.fillStyle=bg;c.fillRect(0,0,1280,720);text(params.heading,64,67,34);text('情報が足りない',64,175,23,bad);text('最初にそろえる',64,440,23,good);line(64,366,1216,366,'#deded7',2);}\nsetFrame(t=>{\nbase();\nif(params.mode==='chat'){\nfor(const [y,col] of [[268,bad],[535,good]]){person(170,y,muted);person(1080,y,muted);line(235,y,1015,y,'#d5dcd9',2,[7,9]);}\nlet phase=Math.min(5,Math.floor(Math.max(0,t-0.5)/1.2)),p=ease((t-0.5-phase*1.2)/1.2);let x=phase%2===0?300+630*p:930-630*p;\nif(t<7.7){bubble(x,268,bad,false);if(phase%2===1)text('？',x,262,29,bad,'center');}\nelse {bubble(300,268,bad,false);text('まだ確認中…',680,319,23,bad,'center');}\ntext(Math.min(3,Math.floor(Math.max(0,t-0.5)/2.4)+1)+'往復',1158,268,23,bad,'center');\nconst q=ease((t-1.5)/1.7);bubble(300+630*q,535,good,true);\nif(t>3.3){check(1080,588);text('一度で伝わる',865,604,25,good,'center')}\nif(t<1.5){for(let i=0;i<3;i++){let a=ease((t-i*.22)/.65);c.globalAlpha=a;tile(269+i*31,535-85*(1-a),i,good);c.globalAlpha=1}}\n}else{\nfor(const y of [270,540]){box(220,y-45,280,90,14,'#e3e6e3');box(740,y-45,330,90,14,'#e3e6e3');line(240,y+45,1050,y+45,'#b5bdb9',3);\nfor(let i=0;i<3;i++)box(515+i*72,y-31,62,62,8,'#e8e7e1','#c8cfca');\ntext('伝わる',1150,y,22,muted,'center');}\nconst a=ease((t-.6)/1.2);\nbox(515,239,62,62,8,bad);tile(546,270,0,bad);\nlet px=295+170*a;if(t>2)px=465-Math.abs(Math.sin((t-2)*2))*24;\nperson(px,215,bad);if(t>2){text('？',652,208,40,bad,'center');text('足りないたびに戻る',410,331,22,bad,'center')}\nfor(let i=0;i<3;i++){const z=ease((t-.35-i*.35)/.8);c.globalAlpha=z;box(515+i*72,509-80*(1-z),62,62,8,good);tile(546+i*72,540-80*(1-z),i,good);c.globalAlpha=1}\nconst q=ease((t-2)/3.3);person(295+690*q,485,good);if(t>5.4){check(1110,540);text('そろえば、すっと届く',765,605,25,good,'center')}\n}\n});",
+      "duration": 9.0,
+      "width": 1280.0,
+      "height": 720.0,
+      "description": "上下の比較。上は橋のピースが足りず人物が戻る。下は3つの情報ピースが橋になり、人物が滑らかに渡りきる。",
+      "params": {
+        "mode": "bridge",
+        "heading": "足りないと戻る ／ そろうと進める"
+      }
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-96dc804c",
+      "item": "7804f32b28a1"
+    },
+    "use_cases": [
+      "説明アニメーション",
+      "情報整理",
+      "連絡の手間",
+      "ビフォーアフター",
+      "伝わり方の比較"
+    ],
+    "reference_role": "data"
+  },
+  {
+    "id": "6773c9ff7c1f",
+    "title": "A｜吹き出しの往復",
+    "description": "Before/after: repeated questions above; five numbered teal pieces gather into one message below, pause, then travel to recipient in 1.8 seconds. Minimal flat animation, no live action.",
+    "family": "diagram-chat",
+    "kind": "scene",
+    "scene": {
+      "code": "\nconst canvas=document.createElement('canvas');stage.append(canvas);canvas.style.cssText='width:100%;height:100%;object-fit:contain';canvas.width=1280;canvas.height=720;\nconst c=canvas.getContext('2d');const ink='#233343',muted='#7f8b98',bad='#df8065',good='#249b88',bg='#f5f3ee';\nconst clamp=v=>Math.max(0,Math.min(1,v));const ease=v=>{v=clamp(v);return v*v*(3-2*v)};\nfunction box(x,y,w,h,r,fill,stroke){c.beginPath();c.roundRect(x,y,w,h,r);if(fill){c.fillStyle=fill;c.fill()}if(stroke){c.strokeStyle=stroke;c.lineWidth=2;c.stroke()}}\nfunction text(s,x,y,size=25,col=ink,align='left'){c.fillStyle=col;c.font='600 '+size+'px \"Noto Sans JP\",sans-serif';c.textAlign=align;c.textBaseline='middle';c.fillText(s,x,y)}\nfunction line(x,y,X,Y,col,width=3,dash=[]){c.beginPath();c.setLineDash(dash);c.moveTo(x,y);c.lineTo(X,Y);c.strokeStyle=col;c.lineWidth=width;c.stroke();c.setLineDash([])}\nfunction check(x,y,col=good){line(x-10,y,x-2,y+8,col,4);line(x-2,y+8,x+13,y-10,col,4)}\nfunction person(x,y,col){c.fillStyle=col;c.beginPath();c.arc(x,y-18,16,0,Math.PI*2);c.fill();box(x-26,y+5,52,35,15,col)}\nfunction bubble(x,y,col,complete){box(x-65,y-35,130,70,19,'#fff',col);c.beginPath();c.moveTo(x-41,y+34);c.lineTo(x-46,y+46);c.lineTo(x-22,y+34);c.fillStyle='#fff';c.fill();for(let i=0;i<3;i++){box(x-42+i*31,y-9,23,18,5,complete||i===0?col:'#e6e9ea')} }\nfunction tile(x,y,i,col){box(x-22,y-22,44,44,9,col);c.strokeStyle='#fff';c.lineWidth=3;\nif(i===0){c.beginPath();c.arc(x,y-4,7,0,Math.PI*2);c.stroke();line(x-9,y+11,x+9,y+11,'#fff')}\nif(i===1){box(x-10,y-11,20,22,3,null,'#fff');line(x-5,y-3,x+5,y-3,'#fff',2);line(x-5,y+4,x+5,y+4,'#fff',2)}\nif(i===2){c.beginPath();c.arc(x,y,12,0,Math.PI*2);c.stroke();line(x,y,x,y-7,'#fff',2);line(x,y,x+6,y+3,'#fff',2)}\n}\nfunction base(){c.fillStyle=bg;c.fillRect(0,0,1280,720);text(params.heading,64,67,34);text('情報が足りない',64,175,23,bad);text('最初にそろえる',64,440,23,good);line(64,366,1216,366,'#deded7',2);}\nsetFrame(t=>{\nbase();\nif(params.mode==='chat'){\nfor(const [y,col] of [[268,bad],[535,good]]){person(170,y,muted);person(1080,y,muted);line(235,y,1015,y,'#d5dcd9',2,[7,9]);}\nlet phase=Math.min(5,Math.floor(Math.max(0,t-0.5)/1.2)),p=ease((t-0.5-phase*1.2)/1.2);let x=phase%2===0?300+630*p:930-630*p;\nif(t<7.7){bubble(x,268,bad,false);if(phase%2===1)text('？',x,262,29,bad,'center');}\nelse {bubble(300,268,bad,false);text('まだ確認中…',680,319,23,bad,'center');}\ntext(Math.min(3,Math.floor(Math.max(0,t-0.5)/2.4)+1)+'往復',1158,268,23,bad,'center');\nconst n=params.informationCount;\nconst join=ease((t-params.gatherStart)/params.gatherDuration);\nconst wrap=ease((t-2.65)/.5);\nconst travel=ease((t-params.sendStart)/params.travelDuration);\nconst center=390+520*travel;\nif(wrap>0){\nc.globalAlpha=wrap;\nbox(center-100,492,200,86,20,'#fff',good);\nc.beginPath();c.moveTo(center-72,577);c.lineTo(center-80,592);c.lineTo(center-48,577);c.fillStyle='#fff';c.fill();\nc.globalAlpha=1;\n}\nconst origins=[[280,490],[395,490],[510,490],[335,615],[465,615]];\nfor(let i=0;i<n;i++){\nconst tx=390+(i-(n-1)/2)*34;\nconst sx=origins[i][0],sy=origins[i][1];\nconst px=sx+(tx-sx)*join+520*travel;\nconst py=sy+(535-sy)*join;\nconst size=46-18*join;\nbox(px-size/2,py-size/2,size,size,7,good);\ntext(String(i+1),px,py,22-6*join,'#fff','center');\n}\nif(t>=3.15&&t<params.sendStart){check(390,610);}\nif(t>params.sendStart+params.travelDuration+.1){check(1080,588);text('一度で伝わる',865,628,25,good,'center')}\n\n}else{\nfor(const y of [270,540]){box(220,y-45,280,90,14,'#e3e6e3');box(740,y-45,330,90,14,'#e3e6e3');line(240,y+45,1050,y+45,'#b5bdb9',3);\nfor(let i=0;i<3;i++)box(515+i*72,y-31,62,62,8,'#e8e7e1','#c8cfca');\ntext('伝わる',1150,y,22,muted,'center');}\nconst a=ease((t-.6)/1.2);\nbox(515,239,62,62,8,bad);tile(546,270,0,bad);\nlet px=295+170*a;if(t>2)px=465-Math.abs(Math.sin((t-2)*2))*24;\nperson(px,215,bad);if(t>2){text('？',652,208,40,bad,'center');text('足りないたびに戻る',410,331,22,bad,'center')}\nfor(let i=0;i<3;i++){const z=ease((t-.35-i*.35)/.8);c.globalAlpha=z;box(515+i*72,509-80*(1-z),62,62,8,good);tile(546+i*72,540-80*(1-z),i,good);c.globalAlpha=1}\nconst q=ease((t-2)/3.3);person(295+690*q,485,good);if(t>5.4){check(1110,540);text('そろえば、すっと届く',765,605,25,good,'center')}\n}\n});",
+      "duration": 9.0,
+      "width": 1280.0,
+      "height": 720.0,
+      "description": "上段の往復は元のまま。下段は五つの番号付き情報が集まり、一つの吹き出しにまとまって一拍止まってから、相手へ一度で届く。",
+      "params": {
+        "mode": "chat",
+        "heading": "何往復もする ／ 一度で伝わる",
+        "informationCount": 5,
+        "gatherStart": 1,
+        "gatherDuration": 1.6,
+        "sendStart": 3.9,
+        "travelDuration": 1.8
+      }
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-96dc804c",
+      "item": "6773c9ff7c1f"
+    },
+    "use_cases": [
+      "説明アニメーション",
+      "情報整理",
+      "連絡の手間",
+      "ビフォーアフター",
+      "伝わり方の比較"
+    ],
+    "reference_role": "data"
+  },
+  {
+    "id": "5456bbb95d3c",
+    "title": "A｜吹き出しの往復",
+    "description": "Same five-piece gathering and repeated questions comparison, but completed message travels slowly over 3 seconds. Only travel speed differs from 6773c9ff7c1f. Minimal flat animation.",
+    "family": "diagram-chat",
+    "kind": "scene",
+    "scene": {
+      "code": "\nconst canvas=document.createElement('canvas');stage.append(canvas);canvas.style.cssText='width:100%;height:100%;object-fit:contain';canvas.width=1280;canvas.height=720;\nconst c=canvas.getContext('2d');const ink='#233343',muted='#7f8b98',bad='#df8065',good='#249b88',bg='#f5f3ee';\nconst clamp=v=>Math.max(0,Math.min(1,v));const ease=v=>{v=clamp(v);return v*v*(3-2*v)};\nfunction box(x,y,w,h,r,fill,stroke){c.beginPath();c.roundRect(x,y,w,h,r);if(fill){c.fillStyle=fill;c.fill()}if(stroke){c.strokeStyle=stroke;c.lineWidth=2;c.stroke()}}\nfunction text(s,x,y,size=25,col=ink,align='left'){c.fillStyle=col;c.font='600 '+size+'px \"Noto Sans JP\",sans-serif';c.textAlign=align;c.textBaseline='middle';c.fillText(s,x,y)}\nfunction line(x,y,X,Y,col,width=3,dash=[]){c.beginPath();c.setLineDash(dash);c.moveTo(x,y);c.lineTo(X,Y);c.strokeStyle=col;c.lineWidth=width;c.stroke();c.setLineDash([])}\nfunction check(x,y,col=good){line(x-10,y,x-2,y+8,col,4);line(x-2,y+8,x+13,y-10,col,4)}\nfunction person(x,y,col){c.fillStyle=col;c.beginPath();c.arc(x,y-18,16,0,Math.PI*2);c.fill();box(x-26,y+5,52,35,15,col)}\nfunction bubble(x,y,col,complete){box(x-65,y-35,130,70,19,'#fff',col);c.beginPath();c.moveTo(x-41,y+34);c.lineTo(x-46,y+46);c.lineTo(x-22,y+34);c.fillStyle='#fff';c.fill();for(let i=0;i<3;i++){box(x-42+i*31,y-9,23,18,5,complete||i===0?col:'#e6e9ea')} }\nfunction tile(x,y,i,col){box(x-22,y-22,44,44,9,col);c.strokeStyle='#fff';c.lineWidth=3;\nif(i===0){c.beginPath();c.arc(x,y-4,7,0,Math.PI*2);c.stroke();line(x-9,y+11,x+9,y+11,'#fff')}\nif(i===1){box(x-10,y-11,20,22,3,null,'#fff');line(x-5,y-3,x+5,y-3,'#fff',2);line(x-5,y+4,x+5,y+4,'#fff',2)}\nif(i===2){c.beginPath();c.arc(x,y,12,0,Math.PI*2);c.stroke();line(x,y,x,y-7,'#fff',2);line(x,y,x+6,y+3,'#fff',2)}\n}\nfunction base(){c.fillStyle=bg;c.fillRect(0,0,1280,720);text(params.heading,64,67,34);text('情報が足りない',64,175,23,bad);text('最初にそろえる',64,440,23,good);line(64,366,1216,366,'#deded7',2);}\nsetFrame(t=>{\nbase();\nif(params.mode==='chat'){\nfor(const [y,col] of [[268,bad],[535,good]]){person(170,y,muted);person(1080,y,muted);line(235,y,1015,y,'#d5dcd9',2,[7,9]);}\nlet phase=Math.min(5,Math.floor(Math.max(0,t-0.5)/1.2)),p=ease((t-0.5-phase*1.2)/1.2);let x=phase%2===0?300+630*p:930-630*p;\nif(t<7.7){bubble(x,268,bad,false);if(phase%2===1)text('？',x,262,29,bad,'center');}\nelse {bubble(300,268,bad,false);text('まだ確認中…',680,319,23,bad,'center');}\ntext(Math.min(3,Math.floor(Math.max(0,t-0.5)/2.4)+1)+'往復',1158,268,23,bad,'center');\nconst n=params.informationCount;\nconst join=ease((t-params.gatherStart)/params.gatherDuration);\nconst wrap=ease((t-2.65)/.5);\nconst travel=ease((t-params.sendStart)/params.travelDuration);\nconst center=390+520*travel;\nif(wrap>0){\nc.globalAlpha=wrap;\nbox(center-100,492,200,86,20,'#fff',good);\nc.beginPath();c.moveTo(center-72,577);c.lineTo(center-80,592);c.lineTo(center-48,577);c.fillStyle='#fff';c.fill();\nc.globalAlpha=1;\n}\nconst origins=[[280,490],[395,490],[510,490],[335,615],[465,615]];\nfor(let i=0;i<n;i++){\nconst tx=390+(i-(n-1)/2)*34;\nconst sx=origins[i][0],sy=origins[i][1];\nconst px=sx+(tx-sx)*join+520*travel;\nconst py=sy+(535-sy)*join;\nconst size=46-18*join;\nbox(px-size/2,py-size/2,size,size,7,good);\ntext(String(i+1),px,py,22-6*join,'#fff','center');\n}\nif(t>=3.15&&t<params.sendStart){check(390,610);}\nif(t>params.sendStart+params.travelDuration+.1){check(1080,588);text('一度で伝わる',865,628,25,good,'center')}\n\n}else{\nfor(const y of [270,540]){box(220,y-45,280,90,14,'#e3e6e3');box(740,y-45,330,90,14,'#e3e6e3');line(240,y+45,1050,y+45,'#b5bdb9',3);\nfor(let i=0;i<3;i++)box(515+i*72,y-31,62,62,8,'#e8e7e1','#c8cfca');\ntext('伝わる',1150,y,22,muted,'center');}\nconst a=ease((t-.6)/1.2);\nbox(515,239,62,62,8,bad);tile(546,270,0,bad);\nlet px=295+170*a;if(t>2)px=465-Math.abs(Math.sin((t-2)*2))*24;\nperson(px,215,bad);if(t>2){text('？',652,208,40,bad,'center');text('足りないたびに戻る',410,331,22,bad,'center')}\nfor(let i=0;i<3;i++){const z=ease((t-.35-i*.35)/.8);c.globalAlpha=z;box(515+i*72,509-80*(1-z),62,62,8,good);tile(546+i*72,540-80*(1-z),i,good);c.globalAlpha=1}\nconst q=ease((t-2)/3.3);person(295+690*q,485,good);if(t>5.4){check(1110,540);text('そろえば、すっと届く',765,605,25,good,'center')}\n}\n});",
+      "duration": 9.0,
+      "width": 1280.0,
+      "height": 720.0,
+      "description": "上段の往復と下段の五つの情報がまとまる動きは維持。まとまった吹き出しが相手へ届く移動だけを1.8秒から3秒へゆっくりに調整。",
+      "params": {
+        "mode": "chat",
+        "heading": "何往復もする ／ 一度で伝わる",
+        "informationCount": 5,
+        "gatherStart": 1,
+        "gatherDuration": 1.6,
+        "sendStart": 3.9,
+        "travelDuration": 3
+      }
+    },
+    "source_url": "",
+    "inspection": "Existing Dan generic test sample, previously rendered; recheck at multiple times before accepting.",
+    "origin": {
+      "room": "visual-voice-96dc804c",
+      "item": "5456bbb95d3c"
+    },
+    "use_cases": [
+      "説明アニメーション",
+      "情報整理",
+      "連絡の手間",
+      "ビフォーアフター",
+      "伝わり方の比較"
+    ],
+    "reference_role": "data"
+  },
+  {
+    "id": "mdn-flower",
+    "title": "静かな花の接写",
+    "description": "Five-second live-action time-lapse close-up of a pink flower opening, shallow depth of field and green leaves. Fixed viewpoint, no people, no CGI. Motion of petals is visible; this is accelerated natural motion, not real-time.",
+    "family": "mdn-flower",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://interactive-examples.mdn.mozilla.net/pages/tabbed/video.html",
+    "url": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+    "sha256": "0cd83d944a6ca7822b4a8306cecc60a36e859b041f6702c6a1ad9ead78924451",
+    "inspection": "Frames inspected at start, middle and end, duration measured; playback checked separately.",
+    "use_cases": [
+      "自然の観察映像",
+      "静けさ",
+      "小さな変化",
+      "時間経過",
+      "実写の寄り"
+    ],
+    "reference_role": "scene"
+  },
+  {
+    "id": "samplelib-road",
+    "title": "街の道路",
+    "description": "5.7-second real outdoor video looking across a leafy park toward a street. Cars and a bus move behind trees; slight handheld camera movement and daylight shadows. Not CGI, not an indoor or people-focused scene.",
+    "family": "samplelib-road",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://samplelib.com/sample-mp4.html",
+    "url": "https://download.samplelib.com/mp4/sample-5s.mp4",
+    "sha256": "05bd857af7f70bf51b6aac1144046973bf3325c9101a554bc27dc9607dbbd8f5",
+    "inspection": "Frames inspected at start, middle and end, duration measured; playback checked separately.",
+    "use_cases": [
+      "日常の風景",
+      "生活の気配",
+      "街の実写",
+      "屋外の動き",
+      "場所の雰囲気"
+    ],
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-sintel-snow",
+    "title": "雪山の冒険",
+    "description": "Wide snowy mountains to a stylized young woman traveling in a blizzard. Muted grey light, environmental scale, cinematic fantasy adventure. 3D animation, not live action.",
+    "family": "film-snow",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/sintel/",
+    "attribution": "Blender Foundation / sintel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 1,
+      "duration": 7
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "b89c3a72a7cccff47065b9e8a6e7384f40342a0b85d5998623044672326f52b2",
+    "reproduction_status": "reference_only",
+    "technique_notes": "Wide snowy mountains to a stylized young woman traveling in a blizzard. Muted grey light, environmental scale, cinematic fantasy adventure. 3D animation, not live action.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-sintel-dialogue",
+    "title": "暖かな室内の対話",
+    "description": "Alternating close shots of an older bearded man and a young woman in a dim warm interior. Stylized 3D dramatic dialogue, weathered face and controlled shadows.",
+    "family": "film-dialogue",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/sintel/",
+    "attribution": "Blender Foundation / sintel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 12,
+      "duration": 4
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "ec6cb722f27645fa5210e96cbc6a44549529f1c36a48885add9f9a65737c1c60",
+    "reproduction_status": "reference_only",
+    "technique_notes": "Alternating close shots of an older bearded man and a young woman in a dim warm interior. Stylized 3D dramatic dialogue, weathered face and controlled shadows.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-sintel-emotion",
+    "title": "夕日の表情",
+    "description": "A young animated woman reacts and reaches toward a small dragon against a golden sunset. Close-ups and reverse views with short dark fades, warm rim light, emotional character focus, polished stylized 3D fantasy.",
+    "family": "film-emotion",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/sintel/",
+    "attribution": "Blender Foundation / sintel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 27,
+      "duration": 5
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "d8b339989c23a05a16c73748dc0ce2a59a6d45e78d1f402bb0886bfdc3d74194",
+    "reproduction_status": "reference_only",
+    "technique_notes": "A young animated woman reacts and reaches toward a small dragon against a golden sunset. Close-ups and reverse views with short dark fades, warm rim light, emotional character focus, polished stylized 3D fantasy.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-sintel-landscape",
+    "title": "砂丘の広がり",
+    "description": "Wide golden dunes under a pale sky, an isolated traveler gives scale. Quiet expansive fantasy landscape, stylized 3D, not footage of a real mountain villa.",
+    "family": "film-landscape",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/sintel/",
+    "attribution": "Blender Foundation / sintel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 36,
+      "duration": 4
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "01f8d64668e4779ed22f6f29555f1f5d1424d83342e6a195505e676985cd0861",
+    "reproduction_status": "reference_only",
+    "technique_notes": "Wide golden dunes under a pale sky, an isolated traveler gives scale. Quiet expansive fantasy landscape, stylized 3D, not footage of a real mountain villa.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-tears-human",
+    "title": "実写の表情と距離",
+    "description": "Live-action woman followed by a young man in close-up outdoors by a canal. Shallow depth of field, natural skin, restrained serious emotion and warm greenery. Cinematic conversation reference, not an animated avatar.",
+    "family": "film-human",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/tears-of-steel/",
+    "attribution": "Blender Foundation / tears-of-steel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 1,
+      "duration": 3
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "0b931d6cc62a8f4348783c7f631a0a4cd3d1ccae501ab202679d0a88fb852f35",
+    "reproduction_status": "reference_only",
+    "technique_notes": "Live-action woman followed by a young man in close-up outdoors by a canal. Shallow depth of field, natural skin, restrained serious emotion and warm greenery. Cinematic conversation reference, not an animated avatar.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-tears-scifi",
+    "title": "実写とSFの融合",
+    "description": "Dark live-action science-fiction teaser montage with mechanical equipment and a hologram-like futuristic display. Cool desaturated tones, detailed practical surfaces and composited VFX. Not peaceful lifestyle footage.",
+    "family": "film-scifi",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/tears-of-steel/",
+    "attribution": "Blender Foundation / tears-of-steel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 6,
+      "duration": 8
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "51d13afdb92a9b1d2975934913e0b3d107063608f7180feb2a777192c5f295bf",
+    "reproduction_status": "reference_only",
+    "technique_notes": "Dark live-action science-fiction teaser montage with mechanical equipment and a hologram-like futuristic display. Cool desaturated tones, detailed practical surfaces and composited VFX. Not peaceful lifestyle footage.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-tears-interior",
+    "title": "静かな室内の緊張",
+    "description": "Live-action dim blue-grey industrial interior with people, foreground silhouettes and window light. Restrained cinematic tension, deep layered framing, not colorful cartoon.",
+    "family": "film-interior",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/tears-of-steel/",
+    "attribution": "Blender Foundation / tears-of-steel",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 32,
+      "duration": 2
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "4d1f8de4feb6b5a6bbf0a68e34ed3ec7d071936c5126cba203fb10eaa8d5fb97",
+    "reproduction_status": "reference_only",
+    "technique_notes": "Live-action dim blue-grey industrial interior with people, foreground silhouettes and window light. Restrained cinematic tension, deep layered framing, not colorful cartoon.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "film-bunny-comedy",
+    "title": "森のキャラクターアニメ",
+    "description": "A group of small cartoon animals in a lush green forest. Polished stylized 3D, dappled shadows and comic character acting. Animated comedy, not live action.",
+    "family": "film-comedy",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://studio.blender.org/films/big-buck-bunny/",
+    "attribution": "Blender Foundation / big-buck-bunny",
+    "license": "CC BY (see original film attribution)",
+    "license_source": "https://studio.blender.org/remixing/",
+    "source_range": {
+      "start": 19,
+      "duration": 4
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "0169be3d99e512462584c83c74c0e3251fdf829eb1b84d940233072a2d00aedd",
+    "reproduction_status": "reference_only",
+    "technique_notes": "A group of small cartoon animals in a lush green forest. Polished stylized 3D, dappled shadows and comic character acting. Animated comedy, not live action.",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "stock-villa",
+    "title": "緑の山と白い家",
+    "description": "Vertical aerial video slowly moving sideways past a white modern house, green fields and wooded mountains under a clear blue sky. Bright natural daylight, calm architectural/lifestyle establishing shot. No people or fictional technology. Source location is not verified as Japan.",
+    "family": "lifestyle-villa",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://www.pexels.com/video/34667982/",
+    "attribution": "just a hobby / Pexels",
+    "license": "Pexels License",
+    "license_source": "https://www.pexels.com/license/",
+    "source_range": {
+      "start": 0,
+      "duration": 7
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "4a6b5ccbbaf8e897886517fdeef978fc159a80a8d8d5fc5634a212e3984249dd",
+    "reproduction_status": "reference_only",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "stock-car",
+    "title": "車内で仕事をする距離感",
+    "description": "Horizontal observational close video of a woman in a burgundy jacket typing on a laptop in a car back seat. Soft subdued daylight, slow downward camera movement towards her hands and computer. Realistic mobile-work detail shot, not a Cybercab or autonomous-driving demonstration.",
+    "family": "lifestyle-car",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://www.pexels.com/video/3048178/",
+    "attribution": "fauxels / Pexels",
+    "license": "Pexels License",
+    "license_source": "https://www.pexels.com/license/",
+    "source_range": {
+      "start": 0,
+      "duration": 7
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "ef76bea48626f33044951cb16e919c063158c830943239a323ff84058757799d",
+    "reproduction_status": "reference_only",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "stock-city",
+    "title": "夜の都市を見渡す",
+    "description": "Vertical high-angle night cityscape with illuminated dense buildings and long red traffic avenues under a dark purple sky. Very restrained camera movement, cinematic urban establishing view. Location is not verified as Osaka; no characters or interior scenes.",
+    "family": "lifestyle-city",
+    "kind": "video",
+    "extension": ".mp4",
+    "source_url": "https://www.pexels.com/video/11933153/",
+    "attribution": "Gerson Bahena / Pexels",
+    "license": "Pexels License",
+    "license_source": "https://www.pexels.com/license/",
+    "source_range": {
+      "start": 0,
+      "duration": 7
+    },
+    "inspection": "Source contact frames visually inspected; browser decode and playback verified 2026-09-17",
+    "sha256": "8b672f109b61915b02fda4e364eb5379c91b0067cbd5d269c506d3a17f2f5f51",
+    "reproduction_status": "reference_only",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "stock-coffee-window",
+    "title": "窓辺でコーヒーを注ぐ",
+    "family": "observational-daily-ritual",
+    "kind": "video",
+    "extension": ".mp4",
+    "description": "A woman partly cropped at the right pours coffee from a French press into a white mug on a dark wooden tray beside a large window. Backlit steam, soft green hills outside, gentle shallow focus, restrained lateral camera drift. Warm naturalistic live-action domestic ritual; no titles, effects or fast cuts.",
+    "use_cases": [
+      "生活Vlogの小さな楽しみ",
+      "飲み物と手元の撮影",
+      "自然光と静かな時間",
+      "日常のBロール"
+    ],
+    "limitations": [
+      "単一ショット。完成したVlogの構成・字幕・音の見本ではない",
+      "朝の自然光。夜の帰宅シーンの実物ではない"
+    ],
+    "source_url": "https://www.pexels.com/video/a-woman-pouring-coffee-7301093/",
+    "download_url": "https://videos.pexels.com/video-files/7301093/7301093-uhd_3840_2160_25fps.mp4",
+    "attribution": "Taryn Elliott / Pexels",
+    "license": "Pexels License",
+    "license_source": "https://www.pexels.com/license/",
+    "source_range": {
+      "start": 5,
+      "duration": 8
+    },
+    "inspection": "8 sampled frames visually inspected; actual Edge playback advanced, 960x540, 8 seconds, no media error",
+    "sha256": "25c3fe78d9ff11020c7ea316414c07fceb0077ef8b612cd1fccc525a3518fccb",
+    "reproduction_status": "reference_only",
+    "original_work": false,
+    "reference_role": "scene"
+  },
+  {
+    "id": "dan-caption-reflective",
+    "title": "余韻のある語り",
+    "family": "caption-reflective",
+    "kind": "composition",
+    "composition": {
+      "width": 1920.0,
+      "height": 1080.0,
+      "duration": 8.0,
+      "background": "#10241e",
+      "layers": [
+        {
+          "type": "video",
+          "text": "",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "start": 0.0,
+          "end": 8.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "transparent",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "cover",
+          "url": "/api/v1/editor-assistant/reference-library/media/stock-coffee-window",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "start": 0.0,
+          "end": 8.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "linear-gradient(0deg,rgba(13,24,21,.68),transparent 65%)",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "忙しい日は、一杯ぶんの余白を。",
+          "x": 100.0,
+          "y": 834.0,
+          "width": 1720.0,
+          "height": 110.0,
+          "start": 0.5,
+          "end": 7.7,
+          "fontSize": 62.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fffaf0",
+          "background": "transparent",
+          "fontFamily": "Yu Mincho, serif",
+          "fontWeight": "500",
+          "textAlign": "left",
+          "objectFit": "contain",
+          "letterSpacing": 5.0,
+          "lineHeight": 1.45,
+          "textShadow": "0 2px 14px rgba(0,0,0,.55)",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 9.0
+            },
+            {
+              "offset": 0.08,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.91,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0,
+              "y": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "description": "Silent real coffee footage with restrained ivory Japanese Mincho on-screen captions low-left, generous tracking, soft shadow and slow entrance. Quiet observational memoir, personal documentary and reflective Vlog. No spoken narration. Not a comedy telop or word-by-word karaoke.",
+    "use_cases": [
+      "内省的なVlog",
+      "ドキュメンタリーの回想",
+      "生活の余韻を残す語り"
+    ],
+    "limitations": [
+      "無音の字幕デザイン見本。ナレーション音声は含まない",
+      "人物・台詞に合わせた完成編集ではない",
+      "フォントは端末の日本語フォントに依存。書き出す環境で字幅を確認する"
+    ],
+    "source_url": "https://www.pexels.com/video/a-woman-pouring-coffee-7301093/",
+    "license": "Original editable caption design. Footage: Taryn Elliott / Pexels, Pexels license.",
+    "inspection": "Actual editor playback and typography inspected at 3 seconds; text fits; source footage verified separately. Design study, not user-approved final quality.",
+    "evidence_role": "design_study",
+    "reference_role": "text"
+  },
+  {
+    "id": "dan-caption-clear",
+    "title": "すっと読める会話",
+    "family": "caption-clear",
+    "kind": "composition",
+    "composition": {
+      "width": 1920.0,
+      "height": 1080.0,
+      "duration": 8.0,
+      "background": "#10241e",
+      "layers": [
+        {
+          "type": "video",
+          "text": "",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "start": 0.0,
+          "end": 8.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "transparent",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "cover",
+          "url": "/api/v1/editor-assistant/reference-library/media/stock-coffee-window",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "start": 0.0,
+          "end": 8.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "linear-gradient(0deg,rgba(13,24,21,.68),transparent 65%)",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "忙しい日は、一杯ぶんの余白を。",
+          "x": 192.0,
+          "y": 834.0,
+          "width": 1536.0,
+          "height": 110.0,
+          "start": 0.5,
+          "end": 7.7,
+          "fontSize": 62.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fffaf0",
+          "background": "transparent",
+          "fontFamily": "Yu Gothic, sans-serif",
+          "fontWeight": "600",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "letterSpacing": 1.0,
+          "lineHeight": 1.45,
+          "strokeWidth": 2.0,
+          "textShadow": "0 3px 9px rgba(0,0,0,.7)",
+          "strokeColor": "rgba(15,22,20,.8)",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 9.0
+            },
+            {
+              "offset": 0.08,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.91,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0,
+              "y": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "description": "Actual moving coffee footage with a clean centered Japanese Gothic caption, moderate size, fine dark edge and subtle shadow. Readable conversational explanation without a boxed panel or spectacle. Two timed sentences would use separate text layers.",
+    "use_cases": [
+      "会話主体の動画",
+      "解説",
+      "読みやすさを優先する字幕"
+    ],
+    "limitations": [
+      "無音の字幕デザイン見本。ナレーション音声は含まない",
+      "人物・台詞に合わせた完成編集ではない",
+      "フォントは端末の日本語フォントに依存。書き出す環境で字幅を確認する"
+    ],
+    "source_url": "https://www.pexels.com/video/a-woman-pouring-coffee-7301093/",
+    "license": "Original editable caption design. Footage: Taryn Elliott / Pexels, Pexels license.",
+    "inspection": "Actual editor playback and typography inspected at 3 seconds; text fits; source footage verified separately. Design study, not user-approved final quality.",
+    "evidence_role": "design_study",
+    "reference_role": "text"
+  },
+  {
+    "id": "dan-caption-emphasis",
+    "title": "ひと言を残す",
+    "family": "caption-emphasis",
+    "kind": "composition",
+    "composition": {
+      "width": 1920.0,
+      "height": 1080.0,
+      "duration": 8.0,
+      "background": "#10241e",
+      "layers": [
+        {
+          "type": "video",
+          "text": "",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "start": 0.0,
+          "end": 8.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "transparent",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "cover",
+          "url": "/api/v1/editor-assistant/reference-library/media/stock-coffee-window",
+          "keyframes": []
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1080.0,
+          "start": 0.0,
+          "end": 8.0,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "linear-gradient(0deg,rgba(13,24,21,.68),transparent 65%)",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": []
+        },
+        {
+          "type": "text",
+          "text": "忙しい日は、",
+          "x": 100.0,
+          "y": 708.0,
+          "width": 1000.0,
+          "height": 76.0,
+          "start": 0.5,
+          "end": 7.7,
+          "fontSize": 44.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fffaf0",
+          "background": "transparent",
+          "fontFamily": "Yu Gothic, sans-serif",
+          "fontWeight": "600",
+          "textAlign": "left",
+          "objectFit": "contain",
+          "letterSpacing": 3.0,
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 9.0
+            },
+            {
+              "offset": 0.08,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.91,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0,
+              "y": 0.0
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "text": "",
+          "x": 100.0,
+          "y": 828.0,
+          "width": 650.0,
+          "height": 98.0,
+          "start": 1.15,
+          "end": 7.7,
+          "fontSize": 48.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#fff",
+          "background": "#e5efb6",
+          "fontFamily": "sans-serif",
+          "fontWeight": "500",
+          "textAlign": "center",
+          "objectFit": "contain",
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "x": -14.0
+            },
+            {
+              "offset": 0.045,
+              "opacity": 1.0,
+              "x": 0.0
+            },
+            {
+              "offset": 0.94,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "一杯ぶんの余白を。",
+          "x": 128.0,
+          "y": 828.0,
+          "width": 1200.0,
+          "height": 98.0,
+          "start": 1.15,
+          "end": 7.7,
+          "fontSize": 66.0,
+          "borderRadius": 0.0,
+          "source_start": 0.0,
+          "color": "#152c23",
+          "background": "transparent",
+          "fontFamily": "Yu Gothic, sans-serif",
+          "fontWeight": "700",
+          "textAlign": "left",
+          "objectFit": "contain",
+          "letterSpacing": 1.0,
+          "lineHeight": 1.45,
+          "keyframes": [
+            {
+              "offset": 0.0,
+              "opacity": 0.0,
+              "y": 8.0
+            },
+            {
+              "offset": 0.055,
+              "opacity": 1.0,
+              "y": 0.0
+            },
+            {
+              "offset": 0.94,
+              "opacity": 1.0
+            },
+            {
+              "offset": 1.0,
+              "opacity": 0.0
+            }
+          ]
+        }
+      ]
+    },
+    "description": "Real lifestyle footage with editorial hierarchy: a small setup line, then a larger dark Japanese phrase arriving on a muted citron highlight. Asymmetric lower-left composition. Emphasis stays readable; no bouncing emojis or per-word animation.",
+    "use_cases": [
+      "短い暮らしの提案",
+      "言葉を印象づけるSNS動画",
+      "穏やかなブランド映像"
+    ],
+    "limitations": [
+      "無音の字幕デザイン見本。ナレーション音声は含まない",
+      "人物・台詞に合わせた完成編集ではない",
+      "フォントは端末の日本語フォントに依存。書き出す環境で字幅を確認する"
+    ],
+    "source_url": "https://www.pexels.com/video/a-woman-pouring-coffee-7301093/",
+    "license": "Original editable caption design. Footage: Taryn Elliott / Pexels, Pexels license.",
+    "inspection": "Actual editor playback and typography inspected at 3 seconds; text fits; source footage verified separately. Design study, not user-approved final quality.",
+    "evidence_role": "design_study",
+    "reference_role": "text"
+  },
+  {
+    "id": "stock-family-kitchen",
+    "title": "家族の小さなやり取り",
+    "family": "observational-family-life",
+    "kind": "video",
+    "extension": ".mp4",
+    "reference_role": "scene",
+    "description": "Naturalistic live-action mother and toddler at a kitchen counter by a large window. Medium two-shot from beside the window, soft daylight, neutral grey clothing and a pale green mixing bowl. The child tastes a spoon while the mother bends toward him; both turn toward each other and smile. Mostly static camera; affection emerges through small gestures and changing facial expressions. No captions, graphic effects, montage or narration.",
+    "use_cases": [
+      "家族の日常の記録",
+      "将来見返す私的な思い出",
+      "親子の自然なやり取り",
+      "人の表情を見せる静かな生活映像"
+    ],
+    "limitations": [
+      "既存の撮影素材。ユーザー本人の家族を撮った映像ではない",
+      "単一ショット。完成した家族動画の構成や音楽の見本ではない",
+      "自然な印象の撮影だが、撮影時に演出がなかったとは断定しない"
+    ],
+    "source_url": "https://www.pexels.com/video/mother-and-son-spending-time-together-4941885/",
+    "download_url": "https://videos.pexels.com/video-files/4941885/4941885-hd_1920_1080_25fps.mp4",
+    "attribution": "Taryn Elliott / Pexels",
+    "license": "Pexels License",
+    "license_source": "https://www.pexels.com/license/",
+    "source_range": {
+      "start": 0,
+      "duration": 8
+    },
+    "inspection": "Eight one-second samples visually inspected for framing, light and changing expressions.",
+    "sha256": "14f1cdc62ba366bfae703aaf4993f114c3152fcf37e8321a2ea9c93d674d9ff9",
+    "reproduction_status": "reference_only",
+    "original_work": false
+  }
+]
