@@ -1,0 +1,12 @@
+# Preparation only: replace both placeholders after Cloudflare authorization.
+# Keep the generated credentials file outside the repository.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: C:/Users/Owner/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+protocol: http2
+ingress:
+  - hostname: dan.paina.info
+    service: http://127.0.0.1:3000
+    originRequest:
+      # This is the Dan UI, not one of its hosted custom-domain artifacts.
+      httpHostHeader: localhost:3000
+  - service: http_status:404

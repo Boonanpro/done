@@ -1,0 +1,8 @@
+firmware/.pio/
+firmware/managed_components/
+firmware/sdkconfig.atom-uac-test*
+__pycache__/
+*.jsonl
+*.log
+*.wav
+pairing*.json
