@@ -35,6 +35,7 @@ function conversationKey(c=context){return 'editor-conversation:'+c.room_id+':'+
 function saveConversation(){
   if(!context?.room_id)return;
   const owner=typeof liveEditingContext==='function'?liveEditingContext():context;
+  if(deletedConversationOwners.has(conversationKey(owner)))return;
   try{localStorage.setItem(conversationKey(owner),JSON.stringify({notificationPolicy:2,trackedJobs:[...jobs.keys()],notices:activeNotice?[activeNotice,...completionNotices]:completionNotices,messages:conversationMemory,content_id:owner.content_id,previousTurn,notificationsPaused,waitingForUser}));}catch(e){recordStorageFailure(e);}
 }
 function recordStorageFailure(e){audit.push({at:new Date().toISOString(),type:'history_storage_error',message:String(e)});}
@@ -147,16 +148,52 @@ function target(c,frozen=false){
   $('target').textContent=`${stamp} · `+(selected.length?(texts.length===1?`「${texts[0].slice(0,45)}」`:`${selected.length}個を選択中`):'音声なら画面を指して話せます');
   $('target').classList.toggle('frozen',frozen);
 }
+const deletedConversationOwners=new Set();
+function clearConversationView(){
+  jobs.clear();announcedJobs.clear();seenQuestions.clear();completionNotices.length=0;
+  activeNotice=null;conversationMemory.length=0;$('log').replaceChildren();
+  notificationsPaused=false;waitingForUser=false;previousTurn=null;targetTurn=null;pendingQuestion=null;
+  presentationId=null;resetPresentationFeed();document.body.classList.remove('has-references');
+  $('brief').textContent='会話で決めた内容をここに残します。';
+  if(LIVE_VOICE)liveDeferredReports.length=0;
+}
+async function reconcileConversationProjects(){
+  const room=context?.room_id;if(!room)return;
+  const result=await api('/conversation-projects',{room_id:room});
+  if(context?.room_id!==room)return;
+  const valid=new Set(result.content_ids);
+  for(const prefix of ['editor-conversation:'+room+':','dan-consultation-v1:'+room+':']){
+    for(const key of Object.keys(localStorage)){
+      if(key.startsWith(prefix)&&key.slice(prefix.length)!=='library'&&!valid.has(key.slice(prefix.length)))localStorage.removeItem(key);
+    }
+  }
+  const legacyKey='editor-conversation:'+room;
+  try{const legacy=JSON.parse(localStorage.getItem(legacyKey)||'null');if(legacy?.content_id&&!valid.has(legacy.content_id))localStorage.removeItem(legacyKey);}catch{}
+  // A paused call still owns its old project. Deletion ends that ownership;
+  // ordinary browsing of another existing project does not.
+  const owner=LIVE_VOICE?liveEditingContext():context;
+  if(owner?.content_id&&!valid.has(owner.content_id)){
+    deletedConversationOwners.add(conversationKey(owner));
+    disconnect('content_deleted');clearConversationView();
+    if(context.content_id&&valid.has(context.content_id))restoreConversation(room);
+  }
+  if(context.content_id&&!valid.has(context.content_id)){
+    deletedConversationOwners.add(conversationKey(context));
+    context={...context,content_id:'',selected:[],editor_visible:false};
+    clearConversationView();
+  }
+}
 window.__updateEditorContext=c=>{
+  if(deletedConversationOwners.has(conversationKey(c)))c={...c,content_id:'',selected:[],editor_visible:false};
   // Browsing the library is not the end of the ongoing production conversation.
-  if(context?.room_id===c.room_id && context.content_id && !c.content_id)
+  if(context?.room_id===c.room_id && context.content_id && !c.content_id && LIVE_VOICE&&(liveConnection?.started||livePausedContext))
     c={...c,content_id:context.content_id,editor_visible:false,selected:[],visible_targets:[],pointer:{}};
   const roomChanged=context && context.room_id!==c.room_id;
-  const newConversation=context&&context.content_id!==c.content_id&&!(LIVE_VOICE&&(liveConnection?.started||livePausedContext));
+  const newConversation=context&&context.content_id!==c.content_id&&(c.content_id===pendingNewId||!(LIVE_VOICE&&(liveConnection?.started||livePausedContext)));
   if(context && (context.content_id!==c.content_id || context.room_id!==c.room_id)){
     saveConversation();
     if(roomChanged||!LIVE_VOICE){pendingQuestion=null;presentationId=null;resetPresentationFeed();document.body.classList.remove('has-references');}
-    if(roomChanged||newConversation){if(roomChanged)disconnect('room_changed');jobs.clear();announcedJobs.clear();seenQuestions.clear();completionNotices.length=0;activeNotice=null;conversationMemory.length=0;$('log').replaceChildren();notificationsPaused=false;waitingForUser=false;previousTurn=null;targetTurn=null;pendingQuestion=null;resetPresentationFeed();}
+    if(roomChanged||newConversation){disconnect(roomChanged?'room_changed':'conversation_changed');clearConversationView();}
     else if(!LIVE_VOICE&&(busy||active))interrupt().catch(error);
     record('editor_context_changed',{from:context.content_id,to:c.content_id,room_changed:!!roomChanged});
     if(roomChanged||!LIVE_VOICE){targetTurn=null; previousTurn=null; $('scope').value=c.content_id===pendingNewId?'whole':'selected'; pendingNewId=null;
@@ -604,10 +641,11 @@ async function toggleMic(){
   }catch(e){mic?.getTracks().forEach(t=>t.stop());mic=null;error(e);}
 }
 function disconnect(reason='user',internal=false){
+  saveConversation(); // Save to the call's owner before clearing paused ownership.
   if(LIVE_VOICE){closeLiveTransport();livePausedContext=null;}
   reasonController?.abort();reasonController=null;reasonRunning=false;relayQueue.length=0;relayActive=false;relayResponses.clear();
   if(!internal)recoveryId++;
-  record('disconnected',{reason:typeof reason==='string'?reason:'user',mic_on:micOn});saveConversation();
+  record('disconnected',{reason:typeof reason==='string'?reason:'user',mic_on:micOn});
   if(!internal&&(micOn||connectedAt))endTone();
   if(activeNotice)completionNotices.unshift(activeNotice);audioPlaying=false;activeNotice=null;
   for(const resolve of [...transcriptWaiters.values()])resolve('');
@@ -752,7 +790,7 @@ function renderProductionStatus(s,captured){
   if(s.clip_count>0&&draftWaitingCid===captured.content_id){
     draftWaitingCid=null;window.__setStageMode(false);nativeCommand('stage_compact');nativeCommand('refresh');
   }
-  if(s.presentation)renderReferences(s.presentation);
+  if(s.presentation&&context?.room_id===captured.room_id&&context?.content_id===captured.content_id)renderReferences(s.presentation);
   stageWorking=(s.jobs||[]).some(j=>['running','queued'].includes(j.status)&&!j.question);
   const currentQuestion=(s.jobs||[]).find(j=>j.question&&(['running','queued'].includes(j.status)||jobs.has(j.id)))?.question||null;
   pendingQuestion=currentQuestion;
@@ -842,9 +880,12 @@ function renderProductionStatus(s,captured){
   publishWorkActivity();
 }
 setInterval(async()=>{
-  if(statusPending || !context?.content_id)return;
-  const captured=LIVE_VOICE?liveEditingContext():context;statusPending=true;
+  if(statusPending || !context?.room_id)return;
+  statusPending=true;
   try{
+    await reconcileConversationProjects();
+    if(!context?.content_id)return;
+    const captured=LIVE_VOICE?liveEditingContext():context;
     const s=await api('/project-status',captured);
     if(context?.room_id!==captured.room_id || (!LIVE_VOICE&&context?.content_id!==captured.content_id))return;
     renderProductionStatus(s,captured);
@@ -868,6 +909,7 @@ async function startVoiceStage(){
 }
 async function ensureStageContent(){
     if(!context?.room_id)throw Error('制作ルームを開いてください');
+    await reconcileConversationProjects();
     if(!context.content_id){
       for(let i=0;i<50&&context.unsaved;i++)await delay(100);
       if(context.unsaved)throw Error('手編集を保存してから新しい作品を始めてください');

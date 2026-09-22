@@ -11,14 +11,61 @@ function runtime(){
  record:(type,data)=>events.push({type,...data}),send:e=>sent.push(e),message:()=>({textContent:''}),saveConversation:()=>{},
  flushAudit:async()=>{},begin:async c=>{calls.push(c);return {context:c};},runReasoning:async()=>{},setBusy:()=>{},error:e=>{throw e;},
  window:{},busy:true,active:true,LIVE_VOICE:true,pendingQuestion:{id:'question'},presentationId:null,targetTurn:'target',previousTurn:'previous',pendingNewId:null,
- $:id=>elements[id]||(elements[id]={}),target:()=>{},restoreConversation:()=>{},startingVoice:false,
+ $:id=>elements[id]||(elements[id]={replaceChildren(){}}),target:()=>{},restoreConversation:()=>{},startingVoice:false,
+ conversationKey:c=>'editor-conversation:'+c.room_id+':'+(c.content_id||'library'),
+ jobs:new Map(),announcedJobs:new Set(),seenQuestions:new Set(),completionNotices:[],
+ localStorage:{removeItem(key){delete this[key];}},
+ disconnect:reason=>{events.push({type:'disconnect',reason});vm.runInContext('liveConnection=null;livePausedContext=null',box);},
  interrupt:()=>{throw Error('Browsing must not cancel work');},resetPresentationFeed:()=>{},document:{body:{classList:{remove:()=>{}}}}};
  vm.createContext(box);vm.runInContext(fs.readFileSync('app/static/editor-live.js','utf8'),box);
  const assistant=fs.readFileSync('app/static/editor-assistant.js','utf8');
- vm.runInContext(assistant.slice(assistant.indexOf('window.__updateEditorContext='),assistant.indexOf('window.__editorAck=')),box);
+ vm.runInContext(assistant.slice(assistant.indexOf('const deletedConversationOwners='),assistant.indexOf('window.__editorAck=')),box);
  vm.runInContext('liveConnection={started:true,startedAt:100000,id:"session",editContext:structuredClone(context),rows:{},views:[]};liveObserve(context)',box);
  return {box,events,sent,calls,at:t=>now=100000+t,run:s=>vm.runInContext(s,box)};
 }
+
+test('explicit new work resets a paused call while ordinary browsing remains supported',()=>{
+ const r=runtime();r.box.conversationMemory.push({text:'old work'});
+ r.run('livePausedContext=liveConnection.editContext;liveConnection=null;pendingNewId="B"');
+ r.run('window.__updateEditorContext({room_id:"room",content_id:"B"})');
+ assert.equal(r.box.conversationMemory.length,0);
+ assert.equal(r.run('livePausedContext'),null);
+ assert.equal(r.box.context.content_id,'B');
+});
+
+test('deleted work clears paused history and storage; stale native IDs cannot revive it',async()=>{
+ const r=runtime();r.box.conversationMemory.push({text:'deleted work'});
+ r.box.localStorage['editor-conversation:room:A']='old';
+ r.box.localStorage['dan-consultation-v1:room:A']='old memo';
+ r.box.localStorage['editor-conversation:room:B']='keep';
+ r.box.api=async()=>({content_ids:['B']});
+ await r.run('reconcileConversationProjects()');
+ assert.equal(r.box.context.content_id,'');
+ assert.equal(r.box.conversationMemory.length,0);
+ assert.equal(r.box.localStorage['editor-conversation:room:A'],undefined);
+ assert.equal(r.box.localStorage['dan-consultation-v1:room:A'],undefined);
+ assert.equal(r.box.localStorage['editor-conversation:room:B'],'keep');
+ r.run('window.__updateEditorContext({room_id:"room",content_id:"A"})');
+ assert.equal(r.box.context.content_id,'');
+});
+
+test('legacy consultation instructions are not restored into a new Live session',()=>{
+ const r=runtime();r.box.localStorage.getItem=()=>JSON.stringify({version:2,instruction:'Resume old work'});
+ assert.equal(r.run('readConsultationMemo(liveConnection)'),null);
+});
+
+test('late sheet update after deletion cannot repopulate storage or notify another call',async()=>{
+ const r=runtime();let finish;
+ r.box.localStorage.getItem=()=>null;
+ r.box.localStorage.setItem=()=>{throw Error('Deleted sheet was restored');};
+ r.box.api=()=>new Promise(resolve=>{finish=resolve;});
+ const pending=r.run('executeLiveConsultationTool({name:"update_consultation_sheet",arguments:"{}"},liveConnection,context)');
+ r.run('deletedConversationOwners.add(conversationKey(context))');
+ finish({version:3});
+ const result=await pending;
+ assert.equal(result.saved,false);
+ assert.equal(r.sent.length,0);
+});
 
 test('native Responses tools return all results once and retain their original project',async()=>{
  const r=runtime(),executed=[];

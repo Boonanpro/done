@@ -382,6 +382,13 @@ class NewContent(BaseModel):
     room_id: str
 
 
+@router.post('/conversation-projects')
+def conversation_projects(request: Request, body: NewContent):
+    _get_user(request)
+    room_path(body.room_id)
+    return {'content_ids': [c['id'] for c in td._read_contents_raw(body.room_id) if c.get('id')]}
+
+
 class ReferenceInput(BaseModel):
     room_id: str
     content_id: str
@@ -1129,10 +1136,15 @@ class EventBatch(BaseModel):
 @router.post('/events')
 async def events(request:Request,body:EventBatch):
     user=_get_user(request)
+    valid_content_ids={c.get('id') for c in td._read_contents_raw(body.room_id)}
     folder=room_path(body.room_id)/'assistant'/'events';folder.mkdir(parents=True,exist_ok=True)
     path=folder/f'{user.user_id}_{body.session_id}.jsonl'
     with path.open('a',encoding='utf-8') as f:
         for event in body.events:
+            # A closing browser may flush after deletion. Do not recreate the
+            # removed work's transcript from that delayed batch.
+            if event.get('content_id') and event['content_id'] not in valid_content_ids:
+                continue
             if event.get('type') == 'user_transcript' and event.get('turn_id'):
                 try:
                     async with _turn_lock(body.room_id, event['turn_id']):

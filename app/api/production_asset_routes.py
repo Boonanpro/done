@@ -5408,6 +5408,8 @@ async def delete_content(
     if len(next_contents) == len(contents):
         raise HTTPException(status_code=404, detail="Content not found")
     _write_contents(room_id, next_contents)
+    from app.services.editor_conversation_lifecycle import purge
+    purge(_room_dir(room_id), content_id)
     jobs = _read_jobs(room_id)
     removed_jobs = [job for job in jobs if job.get("content_id") == content_id]
     _write_jobs(room_id, [job for job in jobs if job.get("content_id") != content_id])

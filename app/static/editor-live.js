@@ -327,7 +327,7 @@ function consultationMemoKey(session){
  return 'dan-consultation-v1:'+c?.room_id+':'+c?.content_id;
 }
 function readConsultationMemo(session){
- try{const memo=JSON.parse(localStorage.getItem(consultationMemoKey(session))||'null');return [2,3].includes(memo?.version)?memo:null;}catch{return null;}
+ try{const memo=JSON.parse(localStorage.getItem(consultationMemoKey(session))||'null');return memo?.version===3?memo:null;}catch{return null;}
 }
 // Temporary, read-only instrumentation of the actual consultation state.
 // It does not infer answers, send requests, or influence the conversation.
@@ -366,6 +366,7 @@ function installConsultationInspector(){
 if(typeof document!=='undefined')document.addEventListener?.('DOMContentLoaded',installConsultationInspector,{once:true});
 
 async function executeLiveConsultationTool(item,session,captured){
+ if(deletedConversationOwners.has(conversationKey(captured)))return {error:'content_deleted'};
  const args=JSON.parse(item.arguments||'{}');
  const owner={editContext:captured};
  const sheet=()=>{const memo=readConsultationMemo(owner);return memo?.version===3?memo:null;};
@@ -373,9 +374,10 @@ async function executeLiveConsultationTool(item,session,captured){
   displayed:context?.room_id===captured.room_id&&context?.content_id===captured.content_id?referenceDecisionItems():[],production:liveFacts().production};
  if(item.name==='update_consultation_sheet'){
   const updated=await api('/consultation/update',{previous:sheet(),changes:args.changes,reference_agreed:args.reference_agreed});
+  if(deletedConversationOwners.has(conversationKey(captured)))return {saved:false,reason:'content_deleted'};
   localStorage.setItem(consultationMemoKey(owner),JSON.stringify(updated));
   record('consultation_sheet_updated',{room_id:captured.room_id,content_id:captured.content_id,sheet:updated,source:'live_responses_tool'});
-  liveAppend('thinking',JSON.stringify({kind:'consultation_sheet',sheet:updated,read_silently:true}));
+  if(session===liveConnection)liveAppend('thinking',JSON.stringify({kind:'consultation_sheet',sheet:updated,read_silently:true}));
   return {saved:true,sheet:updated};
  }
  if(item.name==='search_reference_library'){
@@ -728,7 +730,7 @@ async function connectLive(){
     const e=JSON.parse(data);
     if(e.type==='session.closed'){session.finalized=true;record('live_session_closed',{reason:e.reason,usage:e.usage});flushAudit().catch(()=>{});session.finalize?.();if(!session.closing&&gen===generation)recoverConnection('live_'+e.reason).catch(error);return;}
     if(gen!==generation||liveConnection!==session)return;
-    if(e.type==='session.started'){session.started=true;session.id=e.session.id;connectedAt=Date.now();session.startedAt=connectedAt;session.editContext=structuredClone(livePausedContext?.room_id===context?.room_id?livePausedContext:context);livePausedContext=null;session.views=[];liveObserve(context,session);const memo=readConsultationMemo(session);if(memo)liveAppend('thinking',JSON.stringify({kind:'consultation_memo',...memo,instruction:'Resume this consultation without asking established facts again. Read silently.'}));record('connection_stage',{stage:'ready',model:'gpt-live-1',live_session_id:session.id});state('接続しました');ready();return;}
+    if(e.type==='session.started'){session.started=true;session.id=e.session.id;connectedAt=Date.now();session.startedAt=connectedAt;session.editContext=structuredClone(livePausedContext?.room_id===context?.room_id?livePausedContext:context);livePausedContext=null;session.views=[];liveObserve(context,session);const memo=readConsultationMemo(session);if(memo)liveAppend('thinking',JSON.stringify({kind:'consultation_sheet',sheet:memo,read_silently:true}));record('connection_stage',{stage:'ready',model:'gpt-live-1',live_session_id:session.id});state('接続しました');ready();return;}
     if(['session.input_transcript.delta','session.output_transcript.delta'].includes(e.type)){liveTranscript(e,session);return;}
     if(['session.commentary.appended','session.thinking.appended','session.instructions.appended'].includes(e.type)){record('live_append_ack',{kind:e.type,client_event_id:e.client_event_id});return;}
     if(e.type==='response.event'){handleLiveResponseEvent(e,session).catch(error);return;}
