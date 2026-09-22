@@ -219,8 +219,9 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     # consumed by older notification workers, which cannot execute this job.
     from app.services import command_job_state
     job_id = str(uuid4())
+    engine = 'api' if str(params.get('engine') or '') == 'api' else 'cli'   # api: Responses API worker; cli: Codex CLI (default)
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
-        origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core')
+        origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine)
     try:
         await _wake_job(job_id)
     except Exception:

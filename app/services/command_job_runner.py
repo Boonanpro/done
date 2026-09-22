@@ -65,6 +65,10 @@ async def run(row):
     s = state.create(job_id, user_id=row['user_id'], room_id=row['room_id'],
         origin_room_id=spec['origin_room_id'], origin_project_id=spec['origin_project_id'],
         task=spec['task'], report_message_id=report_id(job_id))
+    if s.get('engine') == 'api' and not s.get('run_id'):
+        # The API job (Responses API in a small worker) shares everything here except the model loop.
+        from app.services import api_job_runner
+        return await api_job_runner.run(row)
     # Restart recovery never replays a potentially committed transaction.
     if s.get('run_id'):
         if s['state'] == 'completed' and s.get('result'):

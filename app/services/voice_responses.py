@@ -15,6 +15,7 @@ import os
 
 BACKEND_MODEL = os.environ.get('DAN_VOICE_BACKEND_MODEL', 'gpt-5.6-terra')
 REASONING = os.environ.get('DAN_VOICE_BACKEND_REASONING', 'low')
+WORK_ENGINE = os.environ.get('DAN_VOICE_WORK_ENGINE', 'api')   # work started from a call: 'api' (Responses API worker, 2026-09-23) or 'cli' (Codex CLI)
 
 INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手は本人（このアカウントの持ち主）で、返事は声で読み上げられます。
 - 返事は普通の話し言葉で、聞かれたことに答える。道具の名前や内部の状態は書かない。
@@ -101,7 +102,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
             except Exception: said = None
         if not said:
             from app.services.command_center import execute
-            await execute({'action': 'work', 'task': f'パソコンで「{target}」を開く（開くだけ。コマンド1回で）。'}, room_id, user_id)
+            await execute({'action': 'work', 'task': f'パソコンで「{target}」を開く（開くだけ。コマンド1回で）。', 'engine': WORK_ENGINE}, room_id, user_id)
             return {'result': f'{target}を開く作業をダンに渡しました。'}
         return {'result': said}
     if name == 'start_work':
@@ -109,7 +110,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         task = '今回のユーザー発言（原文）:\n'+str(args.get('task') or '')[:2000]
         context = json.dumps(dialogue[-8:], ensure_ascii=False)
         if len(context) <= 2600-len(task): task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context
-        out = await execute({'action': 'work', 'task': task+v1.VOICE_TASK}, room_id, user_id)
+        out = await execute({'action': 'work', 'task': task+v1.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
         return {'accepted': bool(out.get('accepted')), 'note': '作業は始まった。結果は後で別に届く。本人に今言うことはない（確認中・時間がかかる等も言わない）。'}
     if name == 'job_status':
         jobs = await asyncio.to_thread(v1.list_owned, user_id, room_id)
@@ -158,4 +159,4 @@ async def replay_in_background(flow, values, task, user_id, room_id, dialogue, s
     if task:
         from app.services.command_center import execute
         note = '（記憶した手順の再生は途中で止まった: ' + str(outcome.get('reason') or '')[:80] + '。通常どおり進める）'
-        await execute({'action': 'work', 'task': '今回のユーザー発言（原文）:' + chr(10) + task[:2000] + chr(10) + note + v1.VOICE_TASK}, room_id, user_id)
+        await execute({'action': 'work', 'task': '今回のユーザー発言（原文）:' + chr(10) + task[:2000] + chr(10) + note + v1.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
