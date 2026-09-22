@@ -11,6 +11,7 @@ import time
 import os
 import sys
 import threading
+import psutil
 from datetime import datetime
 
 CLOUDFLARED = os.path.join(
@@ -66,14 +67,22 @@ VERCEL_CMD = os.path.join(os.environ.get("APPDATA", ""), "npm", "vercel.cmd")
 
 
 def kill_existing_tunnels():
-    """Kill any existing cloudflared processes."""
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "cloudflared.exe"],
-            capture_output=True, timeout=10, creationflags=_NO_WINDOW
-        )
-    except Exception:
-        pass
+    """Restart only our legacy quick tunnels; preserve named connectors."""
+    for process in psutil.process_iter(['name', 'cmdline']):
+        try:
+            args = process.info.get('cmdline') or []
+            if (process.info.get('name') or '').lower() != 'cloudflared.exe':
+                continue
+            if '--url' not in args:
+                continue
+            index = args.index('--url') + 1
+            if index < len(args) and args[index] in (
+                f'http://127.0.0.1:{CORE_PORT}',
+                f'http://127.0.0.1:{SANDBOX_PORT}',
+            ):
+                process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
 
 
 def start_tunnel(name: str, port: int) -> str:
@@ -82,7 +91,7 @@ def start_tunnel(name: str, port: int) -> str:
     proc = subprocess.Popen(
         # --protocol http2: quick tunnels default to QUIC (UDP 7844). On networks
         # where UDP is blocked/unstable this flaps with "control stream encountered
-        # a failure while serving" and never serves requests. http2 (TCP 443) is
+        # a failure while serving" and never serves requests. http2 (TCP 7844) is
         # reliable here.
         [CLOUDFLARED, "tunnel", "--protocol", "http2", "--url", f"http://127.0.0.1:{port}"],
         stdout=subprocess.PIPE,

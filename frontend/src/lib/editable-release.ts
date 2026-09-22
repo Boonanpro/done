@@ -65,6 +65,12 @@ export function toEditableOverrides(
     for (const [k, v] of Object.entries(model?.attrs || {})) {
       if (typeof v === 'string') extraAttrs[k] = v;
     }
+    // Image/video controls save lightweight attribute patches directly on the
+    // row, rather than inside model_v2. These are the latest media/link edits.
+    // Never forward serialization metadata such as model_v2/text as HTML attrs.
+    for (const k of ['src', 'alt', 'poster', 'href', 'title', 'target', 'rel', 'width', 'height', 'aria-label']) {
+      if (typeof attrs[k] === 'string') extraAttrs[k] = attrs[k];
+    }
     out[key.slice(1)] = {
       text: typeof model?.text === 'string' ? model.text : null,
       spans: Array.isArray(model?.spans) ? model.spans : [],

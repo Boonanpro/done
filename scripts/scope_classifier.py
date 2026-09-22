@@ -137,6 +137,8 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "app/**",
     # standalone services (phone voice bridge etc.)
     "services/**",
+    # Dan's wearable voice device, bridge, firmware and provisioning tools.
+    "devices/atom-echo-s3r/**",
     # repo-root tooling manifests
     "skills-lock.json",
     # ops / tooling
@@ -152,6 +154,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "docs/**",
     # frontend infra
     "frontend/next.config.*",
+    "frontend/.gitignore",
     "frontend/package.json",
     "frontend/tsconfig.json",
     "frontend/tailwind.config.*",
@@ -193,6 +196,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/public/sw.js",
     "frontend/public/workbox-*.js",
     "frontend/public/audio-worklet-processor.js",
+    "frontend/public/atom-wifi-worklet.js",
     "frontend/public/file.svg",
     "frontend/public/globe.svg",
     "frontend/public/next.svg",

@@ -11,6 +11,9 @@
 @source "./artifacts/arm-roll/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/bookings/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/denki-knowledge/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/editable-lp-lab/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/floor-lp-compare/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/floor-lp-native/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/himawari-seitai/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/inspection-report/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/itsuki-lab/**/*.{ts,tsx,js,jsx,mdx}";
@@ -31,6 +34,7 @@
 @source "./artifacts/salonboard-styleup/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/styleup-lp/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/test-edit/**/*.{ts,tsx,js,jsx,mdx}";
+@source "./artifacts/voice-note/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/voice-playground/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/yonago-gojo/**/*.{ts,tsx,js,jsx,mdx}";
 @source "./artifacts/yonago-gojo-comp/**/*.{ts,tsx,js,jsx,mdx}";

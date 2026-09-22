@@ -76,7 +76,16 @@ def _health(port: int) -> bool:
 
 def build() -> Path:
     dist = f".next-prod-{int(time.time())}"
-    env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TELEMETRY_DISABLED="1")
+    # Each build owns its generated route types and incremental cache. Never
+    # append historical .next directories to the shared development tsconfig.
+    config_name = f"tsconfig{dist}.json"
+    config = json.loads((FRONTEND / 'tsconfig.json').read_text(encoding='utf-8'))
+    config['include'] = ['next-env.d.ts', 'src/**/*.ts', 'src/**/*.tsx', '*.ts', '*.mts',
+                         f'{dist}/types/**/*.ts', f'{dist}/dev/types/**/*.ts']
+    config['exclude'] = ['node_modules']
+    config['compilerOptions']['tsBuildInfoFile'] = f'{dist}/tsconfig.tsbuildinfo'
+    (FRONTEND / config_name).write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+    env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TSCONFIG=config_name, NEXT_TELEMETRY_DISABLED="1")
     log(f"build -> {dist}")
     t0 = time.time()
     logf = open(TMP / "next_build.log", "w", encoding="utf-8")
@@ -126,7 +135,7 @@ def start() -> None:
     flags = NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     next_bin = FRONTEND / "node_modules" / "next" / "dist" / "bin" / "next"
     p = subprocess.Popen(
-        [NODE, str(next_bin), "start", "-p", str(PORT), "-H", "0.0.0.0"],
+        [NODE, str(next_bin), "start", "-p", str(PORT), "-H", "::"],
         cwd=str(FRONTEND), env=env, stdout=out, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True,
     )
@@ -149,6 +158,8 @@ def _prune_builds(keep: str) -> None:
     for d in builds[:-KEEP_BUILDS]:
         if d.name == keep:
             continue
+        if d.resolve().parent != FRONTEND.resolve():
+            raise RuntimeError('Refusing to prune a build outside the frontend directory')
         shutil.rmtree(d, ignore_errors=True)
         log(f"pruned {d.name}")
 

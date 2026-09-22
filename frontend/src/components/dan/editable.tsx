@@ -138,3 +138,23 @@ export function EditableLink({
 export function editableMediaProps(editId: string): { 'data-edit-id': string } {
   return { 'data-edit-id': editId };
 }
+
+/** Editable structure/media must consume releases too: an ID alone only enables
+ * draft DOM patches. Keep children intact when applying layout or media edits. */
+export function EditableElement<T extends ElementType = 'div'>({
+  as,
+  editId,
+  children,
+  ...props
+}: { as?: T; editId: string; children?: ReactNode } & Omit<
+  ComponentPropsWithoutRef<T>, 'as' | 'children' | 'data-edit-id'
+>) {
+  const overrides = useContext(EditableOverridesContext);
+  const { style, ...rest } = props as { style?: CSSProperties } & Record<string, unknown>;
+  return createElement(as || 'div', {
+    ...rest,
+    'data-edit-id': editId,
+    style,
+    ...overrideProps(overrides[editId], style),
+  }, children);
+}

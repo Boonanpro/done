@@ -1,4 +1,4 @@
-# DanStackWatchdog — single-shot health check + restart for the local Dan stack.
+﻿# DanStackWatchdog — single-shot health check + restart for the local Dan stack.
 #
 # Task Scheduler fires this every minute. For each service:
 #   1. Probe its liveness.
@@ -10,7 +10,7 @@
 #   - Dan Core       FastAPI on 127.0.0.1:9000             -> dan_core_autostart.bat
 #   - Sandbox        FastAPI on 127.0.0.1:8000             -> core POST /api/v1/sandbox/restart
 #                                                            (falls back to dan_core_autostart.bat if core is also down)
-#   - Cloudflared    two quick tunnels (core + sandbox)    -> scripts/start_tunnel.py
+#   - Cloudflared    named Dan connector + legacy quick tunnels during migration
 #
 # Replaces the older ensure_frontend_3000.ps1 (which only handled frontend).
 
@@ -74,7 +74,8 @@ if (-not $coreUp) {
 }
 
 # 3) Cloudflare tunnels --------------------------------------------------
-$cf = @(Get-Process -Name cloudflared -ErrorAction SilentlyContinue)
+$cf = @(Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match '--url\s+"?http://127\.0\.0\.1:(9000|8000)(?:"|\s|$)' })
 if ($cf.Count -lt 2) {
     Write-WatchdogLog "cloudflared count=$($cf.Count) (expected 2) -> relaunch start_tunnel.py"
     # Clear any half-dead start_tunnel.py supervisor so we don't end up with two.
@@ -87,4 +88,12 @@ if ($cf.Count -lt 2) {
     Start-Process -FilePath 'cmd.exe' `
         -ArgumentList '/c', "cd /d $Root && `"$Python`" scripts\start_tunnel.py > $Root\tunnel.log 2>&1" `
         -WindowStyle Hidden
+}
+
+# The fixed connector is independent of the two legacy quick tunnels. Its
+# launcher is idempotent and cloudflared reconnects itself on network changes.
+try {
+    & "$Root\scripts\start_named_tunnel.ps1" | ForEach-Object { Write-WatchdogLog $_ }
+} catch {
+    Write-WatchdogLog "named tunnel start failed: $($_.Exception.Message)"
 }
