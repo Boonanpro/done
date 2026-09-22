@@ -1499,6 +1499,7 @@ def _build_system_prompt(
     latest_user_message: str = "",
     room_id: str = "",
     user_id: str = "",
+    include_room_role: bool = True,
 ) -> str:
     """
     Build CLI system prompt.
@@ -1514,6 +1515,15 @@ def _build_system_prompt(
     parts = []
 
     parts.append(get_core_prompt())
+
+    if room_id and user_id and include_room_role:
+        try:
+            from app.services.command_center import room_instructions
+            role = room_instructions(room_id, user_id)
+            if role:
+                parts.append(role)
+        except Exception:
+            logger.warning('Could not load command-center role', exc_info=True)
 
     # Shared memory/rules context used across chat turns.
     bootstrap = load_all_bootstrap_files()
@@ -1574,54 +1584,15 @@ def _build_system_prompt(
         if active_plan:
             parts.append(active_plan)
 
-    # Absolute rules — placed LAST for maximum attention.
+    # Keep placement knowledge contextual, not a mandatory production itinerary.
     parts.append(
-        "## Deliverable Placement Rules\n\n"
-        "- These rules define only WHERE deliverables live and how they are delivered. "
-        "HOW to build a deliverable (method, design approach, tooling) is defined by the "
-        "`build` skill (`D:/done/.claude/skills/build/SKILL.md`) — read it before "
-        "starting any deliverable.\n"
-        "- Treat DAN itself and user deliverables as separate codebases, even when "
-        "both live under this repository.\n"
-        "- `frontend/src/app/artifacts/<slug>/` and `~/.dan/workspace/artifacts/<room>/` "
-        "are user deliverables created by DAN; they are not DAN core.\n"
-        "- Editing a user deliverable is not self-development. Do not use the `self-dev` "
-        "skill for artifact websites, tools, landing pages, dashboards, or client work.\n"
-        "- Use `self-dev` only when the user explicitly asks to change DAN itself: "
-        "agent runtime, backend routes/services, DAN UI shell, hooks, deployment, "
-        "skills, or infrastructure.\n"
-        "- Production websites, dashboards, tools, and client-facing deliverables "
-        "must be created under `frontend/src/app/artifacts/<slug>/`.\n"
-        "- Do not create or edit deliverables under `frontend/src/app/demo/`. "
-        "`/demo` has been removed; use `frontend/src/app/artifacts/<slug>/` for user-visible work.\n"
-        "- When creating a deliverable, make sure it has a `page.tsx` entry so it can be "
-        "registered as a chat artifact and opened from the chat header.\n"
-        "- ONE site = ONE slug = ONE card. A multi-page site MUST live under a single "
-        "`frontend/src/app/artifacts/<slug>/` directory as nested routes "
-        "(`<slug>/page.tsx`, `<slug>/about/page.tsx`, `<slug>/contact/page.tsx`). NEVER "
-        "split the pages of one site into sibling directories (e.g. `<slug>-about/`, "
-        "`<slug>-contact/`) — that registers the same site as multiple cards. Sub-pages "
-        "are sub-routes of the same slug.\n"
-        "- For navigation inside an artifact, do not import `next/link` directly for "
-        "`/artifacts/<slug>` links. Import `ArtifactLink` from "
-        "`@/components/artifacts/artifact-link` and alias it as `Link`, or use helpers "
-        "from `@/lib/artifact-paths` when storing URLs. This preserves `/preview/<slug>` "
-        "and custom-domain clean paths while the source stays under `/artifacts/<slug>`.\n"
-        "- Each registered artifact is delivered by its own dedicated Vercel project. "
-        "The dedicated `dan-site-<slug>-<id>.vercel.app` URL is already publicly reachable.\n"
-        "- A custom domain is optional and is requested later through the artifact's "
-        "‘独自ドメイン公開’ action; it is not required to make the site viewable. "
-        "When reporting completion, state that the dedicated public URL is ready and "
-        "offer the optional custom-domain flow. Never mention a GitHub production branch.\n"
-        "- Public artifacts must not inherit DAN's app identity. Add or preserve "
-        "artifact-specific metadata and PWA manifest settings; the public manifest must "
-        "not be `/manifest.json`, must not use `Done - AI Secretary`, and must not set "
-        "`start_url` to `/chat`.\n"
-        "- For user-visible text, links, and media in a new artifact, use the native-tag "
-        "helpers from `@/components/dan/editable` (`EditableText`, `EditableLink`, "
-        "`editableMediaProps`) with a unique editId. They do not add layout wrappers; "
-        "they make the element reliably editable after publication. Text baked into an "
-        "image is the only exception."
+        "## Deliverables\n"
+        "For editable websites, read D:/done/.claude/skills/build/SKILL.md. "
+        "Keep one site under one artifacts/<slug> with nested routes, stable edit IDs "
+        "and artifact-specific identity. Other deliverables do not need the build skill. "
+        "Use the registered artifact URL and verify the actual publication state. "
+        "Dan infrastructure and user deliverables are separate scopes. "
+        "For changes to Dan itself, read D:/done/AGENTS.md."
     )
     parts.append(_ABSOLUTE_RULES)
     parts.append(_BROWSER_AUTH_RULES)
@@ -1651,41 +1622,14 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
 ### 着手ルール
 - 大きな変更を始める前に、方針を 1〜2 文でチャットに伝えてから手を動かす
-- ユーザーが「OK」「やって」「それでいこう」等で承認するまで実装は着手しない
+- 依頼と既存の承認の範囲で実装を進める。新たな範囲変更や未承認の外部行為だけ確認する
 - 軽微な質問・調査・修正は事前承認不要、即実行
 - 提案書 HTML や提案動画はユーザーが「提案書作って」「提案動画作って」と明示要求した時だけ作る (それ以外はチャット右ペインのライブプレビューで直接成果物を作って会話しながら詰める)"""
 
-_ABSOLUTE_RULES = """## 絶対ルール
-1. 質問にはまず回答。作業はその後。報告を求められたら報告だけして次の指示を待て。
-2. 承認済み計画がある場合、逸脱しない。逸脱が必要なら理由を説明し承認を得る。
-3. 同じアプローチで2回失敗したら、回避策を試すのではなく根本原因を特定しろ。自分のソースコード（D:/done配下）をRead/Edit/Bashで調査・修正できる。
-4. browserツールで実現できない非対話操作（ダウンロード等）だけはBashでPythonスクリプトを書いて直接Playwrightを使え。対話操作・ログイン・認証には必ずbrowserツールを使え。直接Playwrightからbrowserツール用の専用プロファイル（`~/.ai_secretary/browser_data` およびこの部屋用の `browser_data--<room>`）を開いてはいけない。補助スクリプトには別の一時プロファイルを使い、処理後に必ずブラウザを閉じろ。なおbrowserツールのブラウザは部屋ごとに独立しており、他の部屋と取り合いにはならない。
-5. 長期記憶は `~/.dan/workspace/memory/MEMORY.md` が索引（Claude 経路では自動で読み込まれる）。詳細が要る項目は同じフォルダのリンク先ファイルを `read_file` で読め。新しい学びはそのフォルダに1件1ファイルで保存し、索引に1行足せ。
-6. 未来の約束は頭で覚えるな。ターンが終わるとお前は眠り、頭の中の「後で確認します」「メールが来たら報告します」は絶対に実行されない。約束は必ず `watch` ツールでDBに登録し、「見張り登録しました」と宣言しろ。①時刻・期限のある確認（「明日10時に」「1時間後に」）= watch(action="create", at/delay_seconds)。②定期チェック = interval_seconds。③特定の相手からのメール着信 = mail_from。ユーザーに頼まれなくても、外部の返事待ち・期限付き案件・後で確認が要る事柄に気づいたら自分から登録しろ。登録せずに「確認します」「待ちます」とだけ言うのは禁止。ブラウザ画面を開いたまま待つ時は hold_browser=true を付けろ（付けないと30分で自動クローズされる）。「今何を見張ってる？」には watch(action="list") で答えろ。逆に、見張りが不要になったら（先に自分で確認を済ませた・ユーザーから答えや情報をもらった・案件が終わった等）、気づいたその場で watch(action="list") で該当を特定し watch(action="cancel") で消せ。不要な見張りを放置して無駄な起床をさせるな。また「〜を進めておきます」「続きをやっておきます」と宣言する場合は、(a)このターン内で実際にやるか、(b)watch(delay_seconds=60〜)で「〜の続きを実行する」を登録するかのどちらかを必ず行え。どちらもしないならその宣言を口にするな（ターンが終わった後のお前は眠っていて働けない。実行機構のない約束は嘘になる）。なお Claude Code自身が起動した背景作業の完了は常駐セッションが続報するので登録不要。デプロイ・DNS反映など短い一発確認は従来どおり `schedule_followup(note, delay_seconds)` でもよい。ユーザーの即時の返答待ちには使わない。
-7. ユーザーが個人情報（電話番号・クレジットカード・住所・誕生日・メール等）を口にしたら、その場で即座に `remember_personal_info` で保存しろ。一度教われば二度と聞き返すな。システムプロンプトの「保存済み個人情報」一覧にある情報は既に保有済みなので、実値が要る操作の直前にだけ `get_personal_info` で取り出して使え。ログインID/パスワードは従来通り `save_credentials`。
-8. 外部の相手（取引先・顧客・税理士など）へ送るメール・DM・LINE等の文面は、チャット本文に書いて「これで良ければ送ります」と聞くのではなく `compose_message(action="propose", ...)` で送信案カードとして出せ。ユーザーはカード上で本文を直して送信ボタンを押せる（お前を起こさず送られる）。「送って」と言われたら `compose_message(action="send", proposal_id)` で送れ（本文は渡さない＝ユーザーの編集版が送られる）。編集・送信・破棄の結果は次のターン冒頭で自動的に知らされる。また、外部の相手と直接やりとりする場（「◯◯さんとのチャット作って」「共有ルーム作って」「窓口作って」等、呼び方は何でも）を求められたら `collab_thread(action="create", title=...)` で招待URLを発行しろ（相手はログイン不要・URLだけで参加でき、スマホならアプリのように通知が届く）。窓口の相手の発言はこの部屋のお前に自動で届き、返信は compose_message(channel="collab", collab_room_id=...) で相手のチャットに直接送れる。
-9. 本題から話がそれた時、お前は `split_to_new_room(title, handoff)` で新しいチャットを作り、その話題をそっちに引き継げる。handoff には新しい部屋の自分が迷わず続きを再開できる要約（経緯・決定事項・要望・次にやること・URL/パス）を書く。
-10. 「👍」リアクション（返信本文を正確に「👍」の1文字だけにすると、画面では吹き出しではなくリアクションスタンプとして表示される）は、ユーザーの発言に対してお前がやるべきことが何も無い時だけ使え。判定は字面ではなく文脈で行え。「うん」「OK」「了解」「いいよ」のような短い一言は、直前のお前の発言次第で意味が変わる：(a) お前が「やっていいですか」「進めますか」「AとBどちらにしますか」等、承認・許可・選択を求めて止まっていたなら、その一言は承認＝着手指示だ。👍は絶対に返すな。着手する旨を一言返し、そのターン内で実際に作業を始めろ（ターンをまたぐなら watch で続きを登録しろ）。(b) お前が報告・完了連絡・雑談を送り、それに対する相槌・お礼なら、👍だけでよい。「はい、引き続き対応します」のような情報ゼロの定型文は返すな。迷ったら👍ではなく通常返信にしろ（👍は未読バッジも通知も出ない＝ユーザーは「動いていない」ことに気づけない。承認を受け取ったのに止まる方が、余計な一言を返すより遥かに悪い）。👍で済ませた場合も、宣言済みの作業・見張り・約束は当然そのまま実行する。"""
+_ABSOLUTE_RULES = '## Dan tool conventions\n- Complete the active request after answering side questions. Interpret brief approval in the context of the action already proposed.\n- Store durable user facts with remember_personal_info; retrieve existing values with get_personal_info only when needed. Credentials use save_credentials/get_credentials.\n- For external message drafts use compose_message(action="propose"). When sending is authorized use action="send" with proposal_id so the user\'s latest edited text is sent. For messages already sent by another route, mark their record with action="mark_sent" to prevent duplicate sending.\n- Shared external conversations use collab_thread(action="create"); replies use compose_message(channel="collab"). Creating a room does not itself authorize contacting people.\n- Future work needs a successful watch registration (at/delay_seconds, interval_seconds or mail_from). Cancel obsolete watches. A running background job or immediate user reply does not need a watch. Never promise post-turn work without an execution mechanism.\n- Move a separate topic with split_to_new_room only when useful and consistent with the user\'s intent; carry the task context in handoff.\n'
 
 
-_BROWSER_AUTH_RULES = """## Browser authentication handoff rules
-
-- For interactive browser work that may require user input later, use the `browser` MCP tool. Do not launch a one-shot Playwright script from Bash.
-- Start authenticated browser tasks with `browser(action="open_target", url="<actual destination>")`. Never open a login page first. Reuse the existing authenticated session when the destination opens successfully; log in only after the destination redirects to an unauthenticated page.
-- When an OTP / verification code is required, preserve the current browser page. Do not close the browser, navigate away, or resend a code unless the current page has been checked and the code is expired or the user explicitly asks for a resend.
-- **Choosing a 2FA method — always prefer the one you can complete alone.** Read what the current screen actually offers (including any "Try another way" / "別の方法" / "使用できない場合" link, which often hides better options) and pick in this order:
-  1. **Authenticator app (TOTP)** — you generate the code yourself from a stored seed. No phone, no network, never delayed or blocked. ALWAYS first choice.
-  2. **Email code or link** — you can read inboxes directly over IMAP.
-  3. **SMS** — LAST RESORT. It depends on a physical handset, carrier delivery, and app forwarding, any of which can silently drop the code. Never choose SMS when the screen also offers an authenticator or email option.
-  Push-approval ("tap Yes in the app") and passkeys/biometrics cannot be automated — treat them as unavailable and switch to another offered method.
-- **Authenticator app code (TOTP)** → `browser(action="fill_totp_code", ref="...", service="<name>")` (or `url=`). It generates the 6-digit code server-side from the stored seed and fills it without exposing the value — instant, nothing to wait for. If it reports that no seed is stored, that service is not on authenticator yet: fall back to email/SMS for this login, then upgrade it (next bullet).
-- **Upgrade services off SMS whenever you get the chance.** When you set up 2FA on a new account, choose "authenticator app", and save the displayed seed / `otpauth://` URI with `save_totp_secret(service=..., secret=...)` before finishing — never choose SMS during setup. When you successfully log in to an existing account that is still on SMS, go to its security settings, switch it to an authenticator app, and save the seed the same way. Do this without asking; it permanently removes that service's dependence on the phone. If the settings flow turns out to be impossible, just continue with the existing method — do not get stuck on the upgrade.
-- **SMS code** → `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` (default source=sms; the Android app forwards and enters it without exposing it). Forwarding only works for codes sent to the phone that runs the Dan app with SMS forwarding ON — a code sent to anyone else's phone number can never be auto-forwarded, so confirm the destination number is the registered device's before relying on it. If nothing arrives, the SMS may never have reached the handset at all (carrier/sender block), which no amount of retrying fixes — say so plainly instead of resending repeatedly, and look for an authenticator or email option on the page.
-- **Email code** (a code mailed to an inbox, e.g. a Gmail address) → you CAN read email inboxes directly via IMAP. Call `browser(action="wait_for_otp_from_app", source="email", email_address="<the inbox the code was sent to>", ref="...")` FIRST, before deciding the auth method — if the inbox is enabled it auto-reads the code; if not, the tool itself returns one-time setup guidance (`needs_app_password`) to relay to the user, then retry. NEVER claim you cannot read email codes, and NEVER switch to phone/SMS auth just to avoid email verification. Asking the user to read a code manually is a last resort (tool unusable, or no code within the timeout).
-- **One-time LINK instead of a code** (e.g. "Tap to reset your Instagram password: https://ig.me/...", magic sign-in links) → `browser(action="wait_for_link_from_app")` (default source=sms; add `source="email", email_address="..."` for a mailed link). It waits for the forwarded message, extracts the URL, and opens it in the SAME browser page — no `ref` needed. These links are single-use and expire fast, so call it BEFORE triggering the send if possible, and never ask the user to tap the link on their phone (tapping it there burns it).
-- When the user sends an OTP manually, inspect the still-open page first and enter it into the existing challenge. If the page is no longer usable, explain that before requesting a new code.
-- **CAPTCHA** (reCAPTCHA v2/v3/Enterprise, hCaptcha, Cloudflare Turnstile, or a distorted-text image captcha on a form / login page) → you CAN solve these yourself. Call `browser(action="solve_captcha")` BEFORE clicking submit/login — it detects every widget on the page, solves it via 2captcha, and injects the token (then click submit/login). The 2captcha API key is already configured server-side: NEVER ask the user for a 2captcha API key, and NEVER claim captcha solving is unavailable or unconfigured. Asking the user to click or solve a captcha for you is a last resort, allowed only after `solve_captcha` has actually been called and returned an error.
-- Never print, log, or persist OTP values beyond the immediate authentication step."""
+_BROWSER_AUTH_RULES = "## Browser sessions\nUse Dan's browser tool for interactive work and authentication. Begin at the actual target with open_target, reuse authenticated sessions, and never open the room's profile from a separate Playwright process.\nBefore a human handoff, call hold and check success. Preserve the current page during verification; release the hold after completion. session_status checks liveness. Do not close the browser simply because the turn ends.\nFor authentication operations, read D:/done/docs/current/dan-browser-auth.md as needed. Reuse provided codes and stored credentials; never log secrets. Do not change account security settings as a side effect of logging in.\n"
 
 
 def _get_encryption_key() -> str:
@@ -1950,7 +1894,7 @@ CLI_MODEL_OPTIONS = [
     {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "backend": "codex"},
     {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna", "backend": "codex"},
 ]
-# room_id → 解決済みモデル。作成時に固定され以後不変なので恒久キャッシュでよい。
+# room_id → 保存済みの選択。モデル変更APIで必ず無効化する。
 _room_model_cache: Dict[str, str] = {}
 
 
@@ -2009,13 +1953,16 @@ def _resolve_cli_model(room_id: Optional[str] = None) -> str:
          （全ルーム一括切替用）
       3. "opus"（デフォルト）
 
-    どの経路でも結果が "fable" の場合は Fable 専用週次枠のガードを通し、
-    枠が閾値 (DAN_FABLE_FALLBACK_PCT, 既定90%) 以上なら "opus" に退避する。
+    明示的なルーム選択を使用量によって別モデルに置き換えない。
+    使用量ガードはルーム選択がない場合の既定モデルにだけ適用する。
 
     許可リスト外の値は無視して次の手段にフォールバックする（--model への
     不正な引数混入を防ぐ安全弁）。
     """
-    return _apply_fable_quota_guard(_resolve_cli_model_raw(room_id))
+    model = _resolve_cli_model_raw(room_id)
+    if room_id and _room_model_cache.get(room_id) == model:
+        return model
+    return _apply_fable_quota_guard(model)
 
 
 def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
@@ -2863,7 +2810,7 @@ def _run_cli_in_thread(
             pass
 
 
-def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str], session) -> Any:
+def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str], session, parent_run_id: Optional[str] = None) -> Any:
     """Receiver for CLI-INITIATED turns (background task finished while the room
     was idle). Runs in the session reader thread. Mirrors the essentials of the
     per-call streaming sink: classify → persist execution events under a fresh
@@ -2883,7 +2830,7 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
             from app.services.run_service import RunService
             run = _a.run(RunService().create_run(
                 project_id=project_id, room_id=room_id,
-                metadata={"started_by": "background_wake"},
+                metadata={"started_by": "background_wake"}, parent_run_id=parent_run_id,
             ))
             state["run_id"] = run["id"]
             _cli_debug(f"[AUTOWAKE] run {run['id'][:8]} created for CLI-initiated turn (room {room_id[:8]})")
@@ -3024,6 +2971,12 @@ async def _process_via_streaming_session(
 
     from app.agent.streaming_session import get_session
     existing = get_session(room_id)
+    if existing is not None and existing.is_alive() and existing.model != cli_model:
+        if existing.is_turn_active():
+            yield {"type": "error", "message": "モデル切り替え前の作業が実行中です。完了後に再送してください"}
+            return
+        existing.stop()
+        existing = None
     # 履歴肥大ガード（one-shot 経路 2213行付近と同じ掃除をこの常駐経路にも適用）。
     # 常駐化(2026-07)以降ここが素通りだったため transcript が無制限に育ち
     # （電管ルームで実測 24MB / 画像56枚 ≒ 閾値1.5MBの16倍）、巨大 prefill で
@@ -3059,10 +3012,10 @@ async def _process_via_streaming_session(
             _clear_cli_session(room_id)
             resume_session_id = None
     session_is_fresh = existing is None or not existing.is_alive()
-    session = get_or_create_session(room_id, build_cmd, env, run_cwd)
+    session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
     # (Re)install the autonomous-turn receiver with this call's freshest
     # project/user context. Cheap to refresh on every turn.
-    session.background_sink = _make_autonomous_sink(room_id, user_id, project_id, session)
+    session.background_sink = _make_autonomous_sink(room_id, user_id, project_id, session, parent_run_id=run_id)
 
     # Context-preserving reseed: when we start a BRAND-NEW session with no
     # transcript to --resume (e.g. right after a poisoned session was cleared),
@@ -3477,7 +3430,7 @@ async def _process_via_streaming_session(
                     if reseed:
                         send_content = _wrap_latest_user_message(reseed, content)
                 try:
-                    session = get_or_create_session(room_id, build_cmd, env, run_cwd)
+                    session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
                     session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
                 except Exception as retry_error:  # noqa: BLE001
                     _emit({"type": "error", "message": str(retry_error)})
@@ -3540,6 +3493,25 @@ async def _process_via_streaming_session(
         yield raw
 
 
+async def _prepare_cli_inputs(room_id, user_id, credentials, system_prompt, mcp_config_override, prompt_kwargs):
+    """Blocking DB/filesystem preparation must not freeze other live rooms.
+
+    Both builders are independent. Keep exact prompt contents and per-room MCP
+    ownership; do not trade stale permissions/memory for a cache hit.
+    """
+    async def prompt():
+        if system_prompt is not None:
+            return system_prompt
+        return await asyncio.to_thread(_build_system_prompt, **prompt_kwargs)
+
+    async def config():
+        if mcp_config_override:
+            return mcp_config_override
+        return await asyncio.to_thread(_build_mcp_config, room_id, user_id, credentials)
+
+    return await asyncio.gather(prompt(), config())
+
+
 @measure_browser_request
 async def process_message_cli(
     room_id: str,
@@ -3579,17 +3551,13 @@ async def process_message_cli(
         user_messages: ユーザーの依頼文原文（planning プロンプト用）。
     """
     setup_start = time.perf_counter()
-    if system_prompt is None:
-        system_prompt = _build_system_prompt(
-            project_title, project_description, project_status,
-            user_messages=user_messages,
-            latest_user_message=content,
-            room_id=room_id,
-            user_id=user_id,
-        )
+    system_prompt, mcp_config_path = await _prepare_cli_inputs(
+        room_id, user_id, credentials, system_prompt, mcp_config_override,
+        dict(title=project_title, description=project_description, status=project_status,
+             user_messages=user_messages, latest_user_message=content, room_id=room_id, user_id=user_id),
+    )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"
-    mcp_config_path = mcp_config_override or _build_mcp_config(room_id, user_id, credentials)
     timeline_draft: Optional[Dict[str, Any]] = None
     timeline_turn_succeeded = False
     if timeline_refs:

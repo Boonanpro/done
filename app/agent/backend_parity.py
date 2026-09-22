@@ -31,9 +31,8 @@ MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 MEMORY_INDEX_MAX_LINES = 200
 MEMORY_INDEX_MAX_BYTES = 25 * 1024
 
-# CLAUDE.md files Claude loads on demand while working in Dan's codebase.
-# (Nested vendored copies under safeguard-*/temp/ are third-party and skipped.)
-_DEFAULT_PARITY_DOCS = "D:/done/CLAUDE.md"
+# Native Dan instructions; legacy environment overrides remain supported.
+_DEFAULT_PARITY_DOCS = str(Path(__file__).resolve().parents[2] / "AGENTS.md")
 
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
@@ -77,7 +76,7 @@ def load_parity_docs() -> list[tuple[Path, str]]:
 
 
 def parity_static(backend: str) -> str:
-    """Rarely-changing context (CLAUDE.md files). Goes into the backend's
+    """Rarely-changing project context. Goes into the backend's
     per-thread instructions; a change rotates the thread (see codex_runner)."""
     if backend == "claude":
         return ""
@@ -85,8 +84,7 @@ def parity_static(backend: str) -> str:
     for path, text in load_parity_docs():
         parts.append(
             f"## コードベース規律（{path.as_posix()}）\n\n"
-            "ダン自身のコード・成果物・公開の扱いに関する規律。Claude Code はこの"
-            "ファイルを自動で読むが、この経路では以下に同梱する。\n\n"
+            "ダン自身のコード・成果物・公開の扱いに関する規律。\n\n"
             f"{text}"
         )
     return "\n\n---\n\n".join(parts)

@@ -105,6 +105,7 @@ class StreamingSession:
         idle_timeout: float = 600.0,
     ):
         self.room_id = room_id
+        self.model: Optional[str] = None
         self._build_cmd = build_cmd
         self._env = env
         self._cwd = cwd
@@ -534,12 +535,19 @@ def get_or_create_session(
     build_cmd: Callable[[], list],
     env: Dict[str, str],
     cwd: str,
+    *,
+    model: Optional[str] = None,
 ) -> StreamingSession:
     with _registry_lock:
         s = _sessions.get(room_id)
         if s and s.is_alive():
-            return s
+            if model is None or s.model == model:
+                return s
+            if s.is_turn_active():
+                raise RuntimeError("Cannot switch model during an active turn")
+            s.stop()
         s = StreamingSession(room_id, build_cmd, env, cwd)
+        s.model = model
         _sessions[room_id] = s
     s.start()
     return s

@@ -106,6 +106,7 @@ def compute_static_hash(system_prompt: str) -> str:
         return static_fingerprint(
             get_core_prompt(), load_all_bootstrap_files(),
             cr._build_runtime_contract_section(), parity_static("codex"),
+            cr._ABSOLUTE_RULES, cr._BROWSER_AUTH_RULES, cr._CLI_PROJECT_TEMPLATE,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("codex static hash failed: %s", e)
@@ -248,11 +249,9 @@ def build_codex_profile(
     except Exception as e:  # noqa: BLE001
         logger.warning("codex profile: parity context failed: %s", e)
         extra = ""
-    # Editor turns already carry the entire current system prompt through
-    # wrap_turn_content. Do not also freeze a second copy into a new thread.
-    # Existing threads retain their context until normal rotation; do not reset
-    # a user's ongoing conversation just to shrink its input.
-    profile_prompt = '' if room_id.startswith('editor_') else (system_prompt or '')
+    # Every turn carries current instructions through wrap_turn_content.
+    # Freeze only the stable project contract, not a duplicate of room state.
+    profile_prompt = ''  # Current context is delivered once by wrap_turn_content.
     instructions = (
         profile_prompt
         + ("\n\n---\n\n" + extra if extra else "")
@@ -265,8 +264,8 @@ def build_codex_profile(
     lines = [
         "# Auto-generated per-room Codex profile (Dan). Safe to delete.",
         f"model_reasoning_effort = {_toml_inline_string(effort)}",
-        # Dan's workspace rules live in CLAUDE.md; let Codex read the same file.
-        'project_doc_fallback_filenames = ["CLAUDE.md"]',
+        # AGENTS.md is the native entry point; do not also load legacy rules.
+        'project_doc_fallback_filenames = []',
         f"developer_instructions = {_toml_basic_string(instructions)}",
         "",
     ]
