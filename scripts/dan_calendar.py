@@ -63,7 +63,16 @@ def main():
                                  description=args.description, location=args.location)
             print(json.dumps(r, ensure_ascii=False))
     except Exception as e:  # noqa: BLE001
-        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        out = {"error": str(e)}
+        if "invalid_grant" in str(e) or "expired or revoked" in str(e):
+            # The Google connection has expired: reconnect on the spot instead of reporting "cannot read the calendar".
+            try:
+                out["reconnect_url"] = svc.get_auth_url(uid)
+                out["how_to_reconnect"] = ("Googleカレンダーの接続が失効している。reconnect_url をブラウザで開き、運用者のGoogleアカウントで同意まで進める"
+                                           "（ログインは保存済みの情報、2段階認証はスマホの承認）。同意が終わると自動で保存されるので、同じコマンドをもう一度実行する。")
+            except Exception as inner:  # noqa: BLE001
+                out["reconnect_error"] = str(inner)[:200]
+        print(json.dumps(out, ensure_ascii=False))
         sys.exit(1)
 
 

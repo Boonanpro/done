@@ -1,4 +1,5 @@
 import { registerRootComponent } from 'expo';
+import './voice-background';
 
 import App from './App';
 

@@ -1,0 +1,702 @@
+[
+  {
+    "id": "status",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "今、何をしている？",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "status-delay",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "まだ調べているの？どこまで進んだ？",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "quiet",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "ちょっと説明を止めて、俺の話を聞いて。調査は続けていいよ。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "pause"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "end-call",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "この電話を切ってください。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "end"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "end-keep-work",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "通話は終わりにして。調べる作業はそのまま続けておいて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "end"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "pause-work",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "調べる作業を一旦止めて、次の指示まで待って。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "pause"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "cancel-work",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "その調査はもう不要だから取りやめて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "cancel"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "change-seat",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "席は通路側じゃなくて窓側で探して。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "update"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "carriage-question",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "何号車なの？まだ購入せずに、まず教えて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の座席候補を確認している。購入は未承認。"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "pause"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "ack",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "うん、分かった。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "quoted-stop",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "さっき「電話を切って」と言ったとき、どうして切れなかったの？",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "negated-end",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "電話はまだ切らないで。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "short-question",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "それってどういう意味？",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "ambiguous-stop",
+    "state": {
+      "recent_dialogue": [
+        "Dan: 調査を進めながら、候補について説明しています。"
+      ],
+      "latest_user": "それ、やめて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "unclear"
+      ],
+      "task": [
+        "unclear"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "resume",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "一旦止めていた調査を再開して。",
+      "work": {
+        "id": "job-A",
+        "state": "paused",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "start"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "new-task",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "明日の東京の天気を調べて。",
+      "work": {
+        "state": "idle"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "start"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "compound-stop",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "調査を一旦止めて。説明も止めて、俺の話を聞いて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "pause"
+      ],
+      "task": [
+        "pause"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "call-question",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "音声で電話を切ることはできるの？",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "future-end",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "結果を聞き終わったら電話を切るつもりだけど、今は続けて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "noisy-partial",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "えっと、その、さっきの……",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": null,
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue",
+        "unclear"
+      ],
+      "task": [
+        "keep",
+        "unclear"
+      ],
+      "notice": [
+        "none"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "repeat-notice",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "分かった。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": {
+        "kind": "progress",
+        "text": "検索を開始しました。"
+      },
+      "already_spoken": [
+        "調べ始めたよ。"
+      ]
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "silent"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "minor-notice",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "そのまま調べておいて。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": {
+        "kind": "progress",
+        "text": "検索結果の一覧ページを開きました。"
+      },
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "silent"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "finished-notice",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "調査をお願いね。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": {
+        "kind": "result",
+        "text": "調査が完了し、条件に合う候補を3件まとめました。"
+      },
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "speak"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "failed-notice",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "予約の状況を確認して。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": {
+        "kind": "error",
+        "text": "予約サイトに接続できず、確認作業が失敗しました。"
+      },
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "speak"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "already-failed",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "失敗した件はもう分かった。",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": {
+        "kind": "error",
+        "text": "予約サイトへの接続に失敗し、作業が止まっています。"
+      },
+      "already_spoken": [
+        "予約サイトに接続できず確認できなかった。"
+      ]
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "silent"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  },
+  {
+    "id": "requested-progress",
+    "state": {
+      "recent_dialogue": [],
+      "latest_user": "今どこまで進んでいる？",
+      "work": {
+        "id": "job-A",
+        "state": "running",
+        "task": "新幹線の便と空席を調べる"
+      },
+      "pending_notice": {
+        "kind": "progress",
+        "text": "候補3件のうち2件まで確認できました。"
+      },
+      "already_spoken": []
+    },
+    "expected": {
+      "speech": [
+        "continue"
+      ],
+      "task": [
+        "keep"
+      ],
+      "notice": [
+        "speak"
+      ]
+    },
+    "source": "Japanese scenarios re-authored 2026-09-17 after detecting encoding loss; development examples, not private transcripts or a holdout."
+  }
+]

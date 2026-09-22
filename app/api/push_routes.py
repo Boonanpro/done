@@ -60,6 +60,33 @@ async def subscribe_native(
     return {"success": True}
 
 
+class NativeLocationRequest(BaseModel):
+    lat: float
+    lng: float
+    accuracy: Optional[float] = None
+    at: Optional[str] = None
+
+
+@router.post("/native/location")
+async def report_native_location(
+    req: NativeLocationRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """The phone app reports where the owner is (while the app is open). Only the latest fix is kept."""
+    from app.services import user_location
+    try:
+        record = await user_location.report(current_user.user_id, req.lat, req.lng, req.accuracy, (req.at or "")[:40] or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"success": True, "area": record["area"]}
+
+
+@router.get("/native/location")
+async def read_native_location(current_user: TokenData = Depends(get_current_user)):
+    from app.services import user_location
+    return user_location.current(current_user.user_id) or {}
+
+
 @router.post("/native/unsubscribe")
 async def unsubscribe_native(
     req: NativeSubscribeRequest,

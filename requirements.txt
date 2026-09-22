@@ -78,3 +78,5 @@ psutil>=5.9.0
 
 # SSH transport for the user-owned cloud voice service
 paramiko>=3.5,<6
+budoux>=0.7,<1
+tiktoken>=0.12,<1

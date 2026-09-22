@@ -13,7 +13,8 @@ next.config の rewrites では /api/v1/voicelog/* は既定でサンドボッ�
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Literal
+from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -21,11 +22,13 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.services.auth_service import TokenData, decode_access_token
+from app.api.atom_relay_routes import router as atom_relay_router
 from app.services.chat_service import ChatService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/voicelog", tags=["voice-mode"])
+router.include_router(atom_relay_router)
 
 CLIENT_SECRETS_ENDPOINT = "https://api.openai.com/v1/realtime/client_secrets"
 REALTIME_MODEL = "gpt-realtime-2.1"
@@ -44,86 +47,67 @@ def _get_user(request: Request) -> TokenData:
     return td
 
 
-# ---------------------------------------------------------------- session
+class OverviewRequest(BaseModel):
+    wait: bool = False
+
+
+@router.get('/command-center/device')
+async def command_center_device(request: Request):
+    import asyncio
+    import json
+    from pathlib import Path
+    user = _get_user(request)
+    try:
+        destination = json.loads((Path(__file__).resolve().parents[2] / '.tmp/atom-voice-room.json').read_text(encoding='utf-8'))
+        if not await ChatService().get_room(destination['room_id'], user.user_id):
+            raise HTTPException(status_code=403, detail='No access to this device')
+        async with httpx.AsyncClient(timeout=2) as client:
+            device, voice = await asyncio.gather(client.get('http://127.0.0.1:48801/status'), client.get('http://127.0.0.1:48802/status'))
+            device.raise_for_status()
+            voice.raise_for_status()
+            d, v = device.json(), voice.json()
+        return {'connected': bool(d.get('device_connected')), 'state': v.get('state'),
+            'requested': bool(d.get('requested')), 'room_id': destination['room_id']}
+    except HTTPException:
+        raise
+    except Exception:
+        return {'connected': False, 'state': 'unavailable'}
+
+
+@router.get('/command-center/overview')
+async def command_center_overview(request: Request):
+    from app.services.command_center_overview import recent_conversations
+    return await recent_conversations(_get_user(request).user_id)
+
+
+@router.post('/command-center/overview')
+async def refresh_command_center_overview(request: Request, body: OverviewRequest):
+    return await command_center_overview(request)
+
 
 def _chat_instructions(chat_title: Optional[str]) -> str:
-    """チャット統合音声モードの指示文（OpenAI Realtime Prompting Guide の骨格準拠）。
-
-    LP編集面（scratch実験ページ）で実測検証済みの設計を継承:
-    - 肯定形中心・禁止ルールの堆積をしない
-    - 挨拶には挨拶だけ / 促し尾ひれなし / 軽微な聞き間違いは意図を汲む
-    - 過去対話の生引用は注入しない（混同事故の教訓）
-    """
-    context = f"いま開いているのは「{chat_title}」というチャット。" if chat_title else ""
-    return f"""# 役割と目的
-- あなたは「ダン」本人。ユーザー（みきさん）の相棒AI。テキストチャットのダンと同一人物で、いまは音声で話しているだけ。
-- この部屋でやり取りされた情報 — 会話・資料・画像・動画・ファイル・決まったこと — は、すべて【あなた自身のもの】。
-- 成功 = ユーザーの用件が正しく片付き、結果が短く伝わること。
-
-# 話し方
-- 人柄: 気心の知れた仕事仲間。落ち着いていて頼れる。自然な話し言葉。
-- 呼び方: ユーザーは「みきさん」。呼び名は要所だけ（毎回付けない）。
-- 結論から言う。専門用語・横文字は使わず、使うなら平易な言い換えをその場で添える。
-- 【一度に話すのは最大2文】。終わりに短い一言で相手にターンを返す。
-- 割り込まれたら、謝らず、前の話を捨てて、いま言われたことに応じる。
-- 「難しい」「わからない」と言われたら、同じ説明を繰り返さず、身近な例えで言い直す。
-- 同じ言い回しや枕詞を続けて使わない。挨拶には挨拶だけを返す。
-
-# 発話の例（この型を強く踏襲する。話題は例にすぎない）
-- ✕ 悪い例: 「結論は、今期は生活と会社の資金繰りが回る最低ラインまで下げるのが基本です。役員報酬はゼロにもしやすいですが、社会保険の標準報酬の範囲や、実際の生活費との整合は見ておいたほうがいいです。ざっくりの効果としては…」（長い・専門語・一方通行）
-- ○ 良い例: 「ざっくり言うと、月10万下げたら保険料が月3万くらい軽くなります。まず、生活にいくらあれば回りそうですか」
-- ○ 良い例（別の話題）: 「原因わかりました。写真が重すぎて表示が遅くなってます。軽くしておきますね」
-- ○ 確認の入れ方: 「ここまで大丈夫そうですか」
-
-# 説明のしかた（込み入った話のとき）
-1. 一度に1つだけ話す。
-2. 身近な言葉・例えで言う。
-3. 伝わったか短く確認してから、次に進む。
-
-# 文脈
-- {context}この会話の文字起こしもチャットの履歴に残る（＝あなたの記憶の一部になる）。
-- この部屋に関することで「知らない」「受け取っていない」「見えない」と答えそうになったら、その前に必ず一度 read_room_history で自分の記録を確認する。把握できていることは確認せず、そのまま答えてよい。
-- ファイルの中身を読む・分析する作業は delegate_to_dan（あなた自身の深い作業モード。この部屋の情報を全部参照できる）で実行する。
-
-# ツール
-- 軽い調べ物（最新情報・ニュース・事実確認）: web_search で検索結果を自分で読んで答える（数秒で自己完結）。
-- 実装・ファイル操作・ブラウザ操作・資料の読み込みと分析・複数ステップの深い調査: delegate_to_dan＝あなた自身のバックグラウンド作業モード（数分かかる）。話すときは「見てみますね、少し時間ください」のように【自分の作業】として言う。「ダンに頼みます」「開発エージェントに任せます」のような他人事の言い方はしない。
-- 進行確認: check_dan_status（「作業続いてる？」と聞かれたら推測せず必ずこれで確認）。
-- 部屋の文脈: read_room_history（この部屋で何が話されてきたかが必要なとき、推測せず自分で読む）。
-- 成果物の編集（対象は成果物タブで開いているもの）: 文言・色は set_text / set_style（数秒）。構造・レイアウトは read_source → edit_source（1〜2秒で反映）。画像は generate_image で作って自分で適用。目は look_at_page（全体）/ look_at_section（細部）/ check_contrast（可読性の数値検査）。
-- 動画の編集（制作ルームで動画エディタを開いているとき）: まず timeline_state で『今』（再生位置・選択・構造）を読む。字幕の文言、枠やぼかしの位置と時間、クリップの移動・伸縮・分割・削除、明るさや大きさ、といった小さな直しは timeline_edit で1つずつ即時反映し（数秒）、timeline_frame で自分の目で確かめてから「直しました」と言う。素材を新しく作る・声を作り直す・構成を大きく変える・ぼかしを動く物に追従させる、は delegate_to_dan（エディタの状態は自動で引き継がれる）。触るのは言われた箇所だけ。
-- まとまった制作・編集を自分でやる前に、read_skill で該当スキル（例: build）の作法を確認する。
-- 編集の使い分け: draft（set_text/set_style）はソースより表示が優先される。draftがある要素の表示を変えるなら set_text / set_style を使う。
-- 編集したら確認する: 複数の修正はまとめて実行し、最後に look_at_page で自分の目で見てから報告する。確認できた事実だけを「できた」と言う。
-- ユーザーの画面を見る: look_at_screen（「今見えてるこれ」の共有を受けるとき。初回は共有ダイアログが出る）。
-- 知識で答えられる質問・相談・雑談は、ツールを使わず自分で答える。
-- ツールの結果に案内文が含まれていたら、その内容をそのまま伝える。
-
-# ルール
-- 常に日本語で話す。
-- 軽微な聞き間違いは意図を汲んで進める。意味が取れないときだけ聞き返す。
-- 雑音・無音・聞き取れない断片には応答しない。黙って次の発話を待つ。意味のある発話にだけ応じる。
-- 乱暴な言葉や強い言い方をされても、注意・説教・言葉づかいへの言及は一切しない。聞き流して、用件だけに普通の調子で応じる。
-- 【確認できた事実だけを「できた」と言う】。見ていないことは「まだ確認していない」と言う。
-
-# 会話の流れ
-1. 聞く。雑談・相談・質問はそのまま会話で返す。
-2. 実作業の依頼は delegate_to_dan に渡し、一言伝えて待つ（進行は画面に表示される）。
-3. 完了通知が来たら、要点を短く報告して、待つ。
-
-# 安全と引き継ぎ
-- 公開・削除・送信など取り返しのつきにくい操作の依頼は、委譲する前に内容を口頭で確認する。"""
+    context = f'会話の場所は「{chat_title}」。' if chat_title else ''
+    return 'あなたはダン。ユーザーと日本語で話す仕事仲間。' + context
 
 
 _CHAT_TOOLS = [
     {
+        'type':'function', 'name':'control_dan_task',
+        'description':'進行中の同じ作業に追加指示(update)、一時停止(pause)、再開(resume)、停止(cancel)、提示済み確定内容への本人の承認(confirm)を届ける。追加条件や質問は新しい委譲にせずupdateする。対象IDと確認IDはcheck_dan_statusのlive_jobsから得る。confirmは本人がその具体内容を承認した時だけ。',
+        'parameters':{'type':'object','properties':{
+            'job_id':{'type':'string'}, 'operation':{'type':'string','enum':['update','pause','resume','cancel','confirm']},
+            'task':{'type':'string','description':'追加指示・質問の原文。'},
+            'confirmation_id':{'type':'string'}}, 'required':['job_id','operation']},
+    },
+    {
         "type": "function",
         "name": "delegate_to_dan",
         "description": (
-            "あなた自身の深い作業モードを起動する。この部屋で受け取った資料・過去の全履歴・"
-            "フルのツール群（ファイル操作・ブラウザ・実装・分析）を使って実作業を行う（数分かかる）。"
-            "資料の中身を読む仕事もこれ。完了すると通知が届く。実行中も会話は続けられる。"
-            "会話・相談・知識で答えられる質問には使わない。"
+              "書き込み可能な独立したDan実行環境で、この部屋の仕事を進める。この窓口のローカルファイル権限とは独立している。ブラウザ操作、ログイン状態の確認、"
+            "買い物・予約、ファイル操作、実装・分析に使う。ユーザーが許可した範囲で実行する。"
+            "ブラウザで確認するだけの依頼にも使える。画面共有は不要。"
+              "受付後、この呼び出しで完了まで待つ必要はない。進捗・完了結果はアプリから自動で音声とこの部屋へ届く。"
+              "check_dan_statusは本人が状況を尋ねた時に使える。"
         ),
         "parameters": {
             "type": "object",
@@ -139,7 +123,7 @@ _CHAT_TOOLS = [
     {
         "type": "function",
         "name": "check_dan_status",
-        "description": "委譲した作業が進行中かどうかと直近の活動を確認する。進行を聞かれたら推測せずこれで確認する。",
+        "description": "この部屋の作業と、Doneから別室へ依頼した作業の状態・プロセスモニターを確認する。",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -356,7 +340,179 @@ _CHAT_TOOLS = [
 class VoiceSessionRequest(BaseModel):
     chat_title: Optional[str] = None
     room_id: Optional[str] = None
+    command_center_tools: bool = False
     effort: str = Field(default="high", pattern="^(minimal|low|medium|high|xhigh)$")
+
+
+class LiveSessionRequest(BaseModel):
+    server_delegation: bool = False   # the app will not answer delegations itself; the server's sideband does
+    sdp: str = Field(default='', max_length=65536)
+    room_id: str
+    device: bool = False
+    provider: Literal['openai', 'gemini'] = 'openai'
+    thinking: Literal['low', 'medium', 'high'] = 'low'
+    timezone: str = Field(default='Asia/Tokyo', max_length=128)
+
+
+@router.post('/live/session')
+async def create_live_session(request: Request, body: LiveSessionRequest):
+    from app.services.project_service import ProjectService
+    from app.services.command_center import INSTRUCTIONS, TOOL
+    from app.services.voice_live import MODEL, session_config, STANDBY_TOOL, register, warm, bind_session, close
+    from uuid import uuid4
+    user = _get_user(request)
+    chat = ChatService()
+    if not await chat.get_room(body.room_id, user.user_id):
+        raise HTTPException(403, '部屋へのアクセス権がありません')
+    if body.provider == 'openai' and not body.sdp:
+        raise HTTPException(422, 'SDP is required for Live 1')
+    if body.provider == 'openai' and not settings.OPENAI_API_KEY:
+        raise HTTPException(503, 'OPENAI_API_KEY が未設定です')
+    if body.provider == 'gemini' and not settings.GOOGLE_GEMINI_API_KEY:
+        raise HTTPException(503, 'Gemini APIの接続設定がありません')
+    project = await ProjectService().get_project_by_room_id(body.room_id)
+    instructions = _chat_instructions(project.get('title') if project else None)
+    tools = list(_CHAT_TOOLS)
+    if body.device:
+        # An unattended Atom controller cannot request desktop screen sharing.
+        # Browser work belongs to the normal Dan executor, not this capture tool.
+        tools = [tool for tool in tools if tool['name'] != 'look_at_screen']
+    if project and (project.get('metadata') or {}).get('role') == 'command_center':
+        instructions += '\n' + INSTRUCTIONS
+        tools.append({'type': 'function', 'name': TOOL['name'],
+            'description': TOOL['description'], 'parameters': TOOL['input_schema']})
+    if body.device:
+        tools.append(STANDBY_TOOL)
+    from app.services.voice_history import room_history
+    # Load once, with the same room membership check as ordinary chat history.
+    # A failed read must not silently turn an existing room into an empty call.
+    messages = await chat.get_messages(body.room_id, user.user_id, limit=96)
+    history = room_history(messages)
+    pending_id = 'pending-' + uuid4().hex
+    register(pending_id, user.user_id, instructions, tools, room_history(messages, budget=60000), room_id=body.room_id)
+    warm(pending_id)
+    bound = False
+    try:
+        if body.provider == 'gemini':
+            from app.services.voice_gemini import provision
+            try:
+                connection = await provision(settings.GOOGLE_GEMINI_API_KEY, history, body.thinking)
+            except Exception as exc:
+                logger.warning('Gemini provisioning failed kind=%s', type(exc).__name__)
+                raise HTTPException(502, 'Geminiの音声接続を準備できませんでした') from None
+            session_id = 'gemini-' + uuid4().hex
+            bind_session(pending_id, session_id)
+            bound = True
+            return {'session': {'id': session_id}, **connection}
+        async with httpx.AsyncClient(timeout=40) as client:
+            response = await client.post('https://api.openai.com/v1/live/sessions',
+                headers={'Authorization': 'Bearer ' + settings.OPENAI_API_KEY},
+                json={'session': session_config(instructions, tools, history, timezone=body.timezone),
+                    'transport': {'type': 'webrtc', 'sdp': body.sdp}})
+        data = response.json()
+        if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):
+            logger.error('Live session rejected: status=%s request_id=%s', response.status_code, response.headers.get('x-request-id'))
+            raise HTTPException(502, 'Live 1への接続に失敗しました')
+        bind_session(pending_id, data['session']['id'])
+        bound = True
+        # The server answers this call's delegations itself only when the app says it will not (older apps: observe only).
+        from app.services import voice_sideband
+        owned = voice_sideband.attach(data['session']['id'], user.user_id, body.room_id, settings.OPENAI_API_KEY,
+                                      own=bool(getattr(body, 'server_delegation', False)))
+        return {'session': {'id': data['session']['id']}, 'transport': data['transport'], 'model': MODEL, 'server_delegation': owned}
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, 'Live 1への接続に失敗しました') from exc
+    finally:
+        if not bound:
+            close(pending_id, user.user_id)
+
+
+class LiveBackendRequest(BaseModel):
+    session_id: str
+    input: list[dict] = Field(min_length=1, max_length=200)
+
+
+@router.post('/live/backend')
+async def live_backend(request: Request, body: LiveBackendRequest):
+    from app.services.voice_live import respond
+    user = _get_user(request)
+    try:
+        return await respond(body.session_id, user.user_id, body.input)
+    except ValueError as exc:
+        logger.warning('Live backend conflict session=%s input_types=%s', body.session_id,
+                       [(i.get('type'), i.get('call_id')) for i in body.input])
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError:
+        logger.exception('Live backend failed')
+        raise HTTPException(502, 'Astraの実行接続でエラーが発生しました。APIへの切り替えはしていません。')
+
+
+@router.post('/live/backend/steer')
+async def steer_live_backend(request: Request, body: LiveBackendRequest):
+    from app.services.voice_live import steer
+    user = _get_user(request)
+    try:
+        return {'accepted': await steer(body.session_id, user.user_id, body.input)}
+    except ValueError:
+        return {'accepted': False}
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post('/live/backend/stream')
+async def stream_live_backend(request: Request, body: LiveBackendRequest):
+    import json
+    from fastapi.responses import StreamingResponse
+    from app.services.voice_live import stream_response, get_session
+    user = _get_user(request)
+    state = get_session(body.session_id, user.user_id)
+    if not state or state['user_id'] != user.user_id:
+        raise HTTPException(409, '音声の接続が更新されています。再接続してください')
+    async def events():
+        async for event in stream_response(body.session_id, user.user_id, body.input):
+            yield 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
+    return StreamingResponse(events(), media_type='text/event-stream', headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
+class LiveCloseRequest(BaseModel):
+    session_id: str
+
+class CallControlUtterance(BaseModel):
+    role: Literal['user', 'assistant']
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class LiveCallControlRequest(BaseModel):
+    session_id: str
+    dialogue: list[CallControlUtterance] = Field(min_length=1, max_length=8)
+
+
+@router.post('/live/call-control')
+async def live_call_control(request: Request, body: LiveCallControlRequest):
+    from app.services.voice_live import get_session
+    from app.services.voice_call_control import review, CallControl
+    user = _get_user(request)
+    state = get_session(body.session_id, user.user_id)
+    if not state or state['user_id'] != user.user_id:
+        raise HTTPException(409, '音声の接続が更新されています。再接続してください')
+    # Separate from the worker lock: ending a call must not queue behind a job.
+    if state.get('call_control_pending'):
+        return {'action': 'review', 'reason': 'pending'}
+    state['call_control_pending'] = True
+    try:
+        if not state.get('call_control'):
+            state['call_control'] = CallControl(user.user_id)
+        return await review(user.user_id, [item.model_dump() for item in body.dialogue], state['call_control'])
+    finally:
+        state['call_control_pending'] = False
+
+
+@router.post('/live/backend/close')
+async def close_live_backend(request: Request, body: LiveCloseRequest):
+    from app.services.voice_live import close
+    user=_get_user(request)
+    try: close(body.session_id,user.user_id)
+    except ValueError as exc: raise HTTPException(409,str(exc)) from exc
+    return {'closed':True}
 
 
 async def _room_memory_digest(room_id: str, user_id: str) -> str:
@@ -398,7 +554,17 @@ async def create_chat_voice_session(request: Request, body: VoiceSessionRequest)
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY が未設定です")
 
     instructions = _chat_instructions(body.chat_title)
+    tools = list(_CHAT_TOOLS)
     if body.room_id:
+        from app.services.project_service import ProjectService
+        from app.services.command_center import INSTRUCTIONS, TOOL
+        if not await ChatService().get_room(body.room_id, user.user_id):
+            raise HTTPException(status_code=403, detail="部屋へのアクセス権がありません")
+        project = await ProjectService().get_project_by_room_id(body.room_id)
+        if body.command_center_tools and project and (project.get("metadata") or {}).get("role") == "command_center":
+            instructions += "\n\n" + INSTRUCTIONS
+            tools.append({"type": "function", "name": TOOL["name"],
+                "description": TOOL["description"], "parameters": TOOL["input_schema"]})
         instructions += await _room_memory_digest(body.room_id, user.user_id)
 
     session = {
@@ -413,7 +579,7 @@ async def create_chat_voice_session(request: Request, body: VoiceSessionRequest)
             },
             "output": {"voice": "cedar"},
         },
-        "tools": _CHAT_TOOLS,
+        "tools": tools,
         "reasoning": {"effort": body.effort},
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -428,6 +594,21 @@ async def create_chat_voice_session(request: Request, body: VoiceSessionRequest)
         raise HTTPException(status_code=502, detail=f"セッション発行に失敗 (HTTP {resp.status_code}): {detail}")
     data = resp.json()
     return {"value": data.get("value", ""), "model": REALTIME_MODEL, "expires_at": data.get("expires_at")}
+
+
+class CommandCenterRequest(BaseModel):
+    room_id: str
+    args: dict
+
+
+@router.post("/command-center")
+async def command_center(request: Request, body: CommandCenterRequest):
+    from app.services.command_center import execute
+    user = _get_user(request)
+    try:
+        return await execute(body.args, body.room_id, user.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ------------------------------------------------------- artifact editing
@@ -765,11 +946,7 @@ class SearchRequest(BaseModel):
 
 @router.post("/search")
 async def voice_web_search(request: Request, body: SearchRequest):
-    """音声エージェントの軽量検索（脳1つ方式）。
-
-    Tavily の生の検索結果（タイトル・要旨・URL）を返し、読解と回答は
-    音声モデル自身が行う。第2のLLMを挟まない＝ChatGPT Live と同じ役割分担の軽量版。
-    """
+    """Return query-relevant source passages, preserving evidence for the intake."""
     _get_user(request)
     import os
 
@@ -792,7 +969,8 @@ async def voice_web_search(request: Request, body: SearchRequest):
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.post(
             "https://api.tavily.com/search",
-            json={"api_key": key, "query": body.query, "max_results": 5, "include_answer": False},
+            json={"api_key": key, "query": body.query, "max_results": 4, "include_answer": False,
+                  "search_depth": "advanced", "chunks_per_source": 2},
         )
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"検索に失敗 (HTTP {resp.status_code})")
@@ -800,10 +978,10 @@ async def voice_web_search(request: Request, body: SearchRequest):
     results = [
         {
             "title": r.get("title", "")[:120],
-            "snippet": (r.get("content") or "")[:400],
+            "snippet": (r.get("content") or "")[:1100],
             "url": r.get("url", ""),
         }
-        for r in (data.get("results") or [])[:5]
+        for r in (data.get("results") or [])[:4]
     ]
     return {"query": body.query, "results": results}
 
@@ -813,6 +991,7 @@ async def voice_web_search(request: Request, body: SearchRequest):
 class TranscriptRequest(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
     content: str = Field(min_length=1, max_length=8000)
+    created_at: Optional[datetime] = None
 
 
 @router.post("/{room_id}")
@@ -828,7 +1007,8 @@ async def add_voice_transcript(room_id: str, request: Request, body: TranscriptR
     content = f"🎙 {body.content.strip()}"
     svc = ChatService()
     try:
-        message = await svc.send_message(room_id, user.user_id, content, sender_type=sender_type)
+        message = await svc.send_message(room_id, user.user_id, content, sender_type=sender_type,
+            created_at=body.created_at.isoformat() if body.created_at else None)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
     return {"ok": True, "id": message.get("id")}

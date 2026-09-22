@@ -1,0 +1,161 @@
+"""Responses delegation: the speech model (GPT-Live) hands the turn to a backend model (GPT-5.6) that holds Dan's tools
+as functions and calls them with its own understanding of the request. This server only executes the functions.
+
+Why (2026-09-22): in client delegation the delegation event carried no text, so the backend had to re-guess what the
+speech model already understood; the guessing layer produced the wrong turns and the unnatural replies. ChatGPT's own
+voice works in the form implemented here: the model that understood the request is the one that chooses the tool.
+
+What lives here: the backend model's instructions, the function definitions, and their execution against Dan's parts.
+The web search is OpenAI's own (tools: web_search). Long work still goes to Dan's job runner (Codex CLI, flat rate).
+Switch: DAN_VOICE_DELEGATION=client falls back to the previous form.
+"""
+import asyncio
+import json
+import os
+
+BACKEND_MODEL = os.environ.get('DAN_VOICE_BACKEND_MODEL', 'gpt-5.6-terra')
+REASONING = os.environ.get('DAN_VOICE_BACKEND_REASONING', 'low')
+
+INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手は本人（このアカウントの持ち主）で、返事は声で読み上げられます。
+- 返事は普通の話し言葉で、聞かれたことに答える。道具の名前や内部の状態は書かない。
+- 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
+- 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気や近くの店は get_location の現在地を使う。
+- パソコンでサイトやアプリを開くだけなら open_on_pc。ログイン・確認・送信・登録など複数手順の作業は start_work（受け付けたことだけを一言で。作業の結果は後で別に届く）。
+- 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
+- サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
+- 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わず短く答える。
+- 複数の道具が要る質問（本人の住所と外の情報を比べる等）は続けて呼び、まとめて答える。
+- 道具の結果の source は出どころ（どのアカウント・どのカレンダー・どの記録を見たか）。「何を見て言った」と聞かれた時にそれで答える。普段は言わない。
+- 取り返しのつかない確定（購入・送信・削除・支払い）の前だけ、内容と金額を言葉で伝えて本人の返事を待つ。それ以外は承認を求めず進める。"""
+
+TOOLS = [
+    {'type': 'web_search'},
+    {'type': 'function', 'name': 'get_saved_information', 'description': '本人が登録してある自分の情報（名前・住所・郵便番号・電話・カード・口座・免許・会社など）を読む。',
+     'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を知りたいか（例: 郵便番号、実家の住所、アメックスの有効期限）'}}, 'required': ['what'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。',
+     'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '探す話題（例: 9月18日の新幹線のキャンセル）'}}, 'required': ['query'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'get_calendar', 'description': '本人のGoogleカレンダーの今後の予定。接続が切れていれば expired が返る。',
+     'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'open_on_pc', 'description': 'このパソコンで、サイトやアプリを開く・起動する（開くだけ）。',
+     'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（ログインして確認する、送信する、登録する、予約する、直す、作るなど複数手順のもの）。結果は後で別に届く。',
+     'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'}}, 'required': ['task'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'job_status', 'description': '今動いている作業の様子（どの画面で何をしているか、結果）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する。',
+     'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'end_call', 'description': '通話を終える。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+]
+
+
+def tools():
+    """The function list of this session. The remembered operations are NOT baked into a description: the memory grows
+    during a call (a flow recorded by a job minutes ago must be replayable in the same call), so the backend lists them
+    when it needs them (list_operations, local and instant)."""
+    listing = {'type': 'function', 'name': 'list_operations', 'description': '一度やったブラウザの手順の記憶の一覧（id・サイト・入力の穴と例）。サイトでの作業を頼む前に見る。',
+               'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}
+    replay = {'type': 'function', 'name': 'replay_operation', 'description': 'list_operations にある手順を、大きいモデルなしに新しい値で再生する。すぐ「始めた」と返り、結果（結果ページの要点）は後で別に届く。再生できなければ自動で通常の作業（start_work と同じ）に切り替わるので、呼び直さなくてよい。購入・取消などの確定は再生では押さない。',
+              'parameters': {'type': 'object', 'properties': {'id': {'type': 'string', 'description': '手順の id'}, 'values': {'type': 'object', 'additionalProperties': {'type': 'string'}, 'description': '入力の穴→値'},
+                                                          'task': {'type': 'string', 'description': '本人の言葉のままの依頼（再生できなかった時に通常の作業として使う）'}},
+                             'required': ['id', 'values', 'task'], 'additionalProperties': False}}
+    return [*TOOLS, listing, replay]
+
+
+def delegation():
+    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS, 'tools': tools(), 'tool_choice': 'auto',
+                                              'parallel_tool_calls': True, 'reasoning': {'effort': REASONING}}}
+
+
+async def run_function(name, args, user_id, room_id, dialogue, speak=None):
+    """Execute one of the functions above with Dan's own parts. Returns a JSON-able dict the backend model reads.
+    `speak(text)` (from the sideband) delivers a later result to the call as spoken commentary: a function must return
+    within about a second, because the speech model answers nothing while a delegation is in flight (2026-09-22 18:48:
+    a 44s replay inside the delegation left the owner's next words unanswered)."""
+    from app.services import voice_intake2 as v2, voice_intake as v1
+    from app.services.jev_decisions import Decisions
+    if name == 'get_saved_information':
+        what = str(args.get('what') or '')
+        async with Decisions(user_id, timeout=3, max_calls=3) as judge:
+            keys, _, _, _ = await v2.saved_items(judge, user_id, what, [{'role': 'user', 'text': what}])
+        facts = await v2.values(user_id, keys) if keys else []
+        source = {'what': '本人がダンに保存した自分の情報'}
+        return {'saved': [{'label': f['label'], 'value': f['value'], 'say': f.get('say')} for f in facts], 'source': source} if facts else {'saved': [], 'note': 'この情報は保存されていません。', 'source': source}
+    if name == 'search_records':
+        from app.services.voice_past import gather
+        found = await gather(user_id, str(args.get('query') or ''), dialogue, [])
+        return {'records': found['records'][:8], 'recent_work': found['jobs'][:3],
+                'source': {'what': '本人とダンの会話記録と作業の記録（直近45日）', 'searched_words': found['keywords']}}
+    if name == 'get_location':
+        from app.services.user_location import tool, current
+        here = current(user_id)
+        return {**await tool(user_id), 'source': {'what': '本人のスマホが知らせた位置', 'at': here['at'] if here else None}}
+    if name == 'get_calendar':
+        return await v2.calendar(user_id, int(args.get('days') or 14))
+    if name == 'open_on_pc':
+        target = str(args.get('target') or '').strip()
+        from app.services.voice_intake3 import open_target
+        said = open_target(target) or open_target(target.lower())
+        if not said and target.startswith('http'):
+            import webbrowser
+            try: webbrowser.open(target); said = f'{target}をパソコンで開きました。'
+            except Exception: said = None
+        if not said:
+            from app.services.command_center import execute
+            await execute({'action': 'work', 'task': f'パソコンで「{target}」を開く（開くだけ。コマンド1回で）。'}, room_id, user_id)
+            return {'result': f'{target}を開く作業をダンに渡しました。'}
+        return {'result': said}
+    if name == 'start_work':
+        from app.services.command_center import execute
+        task = '今回のユーザー発言（原文）:\n'+str(args.get('task') or '')[:2000]
+        context = json.dumps(dialogue[-8:], ensure_ascii=False)
+        if len(context) <= 2600-len(task): task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context
+        out = await execute({'action': 'work', 'task': task+v1.VOICE_TASK}, room_id, user_id)
+        return {'accepted': bool(out.get('accepted')), 'note': '作業は始まった。結果は後で別に届く。本人に今言うことはない（確認中・時間がかかる等も言わない）。'}
+    if name == 'job_status':
+        jobs = await asyncio.to_thread(v1.list_owned, user_id, room_id)
+        return v1.work_status(jobs)
+    if name == 'steer_job':
+        from app.services.command_center import execute
+        jobs = await asyncio.to_thread(v1.list_owned, user_id, room_id)
+        active = [s for s in jobs if s['state'] not in ('completed', 'failed', 'cancelled')]
+        if not active: return {'error': '動いている作業はありません。'}
+        return await execute({'action': 'control_job', 'job_id': active[0]['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
+    if name == 'list_operations':
+        from app.services.browser_flows import all_flows, describe
+        flows = all_flows()
+        return {'operations': [describe(f) for f in flows[:30]], 'note': '' if flows else 'まだ記憶している手順はない。start_work で頼めば、その1回で記憶される。'}
+    if name == 'replay_operation':
+        from app.services.browser_flows import all_flows
+        flow = next((f for f in all_flows() if f['id'] == args.get('id')), None)
+        if not flow: return {'error': 'その手順はありません'}
+        asyncio.get_running_loop().create_task(replay_in_background(flow, args.get('values') or {}, str(args.get('task') or ''), user_id, room_id, dialogue, speak))
+        return {'started': True, 'note': '再生を始めた。結果は後で別に届く。本人に今言うことはない。'}
+    if name == 'end_call':
+        return {'ok': True}
+    return {'error': f'未知の関数 {name}'}
+
+
+async def replay_in_background(flow, values, task, user_id, room_id, dialogue, speak):
+    """The replay, off the delegation: when it reaches its end page, the page's substance is spoken; when it cannot, the
+    task goes to Dan's job runner as a normal job (its result is spoken by the job feed), with nothing said in between."""
+    from app.services.browser_flows import run
+    from app.services import voice_intake as v1
+    try:
+        outcome = await run(flow, values)
+    except Exception as exc:
+        outcome = {'replayed': False, 'reason': f'{type(exc).__name__}'}
+    if outcome.get('replayed'):
+        try:
+            from app.agent.v2.tools import _execute_browser_tool
+            page = await _execute_browser_tool('read', {'max_chars': 2500})
+            text = ' '.join(b.get('text', '') for b in page.get('content', []) if b.get('type') == 'text')
+            text = text.split('本文:', 1)[-1].strip()[:600]
+        except Exception:
+            text = ''
+        if speak and text:
+            await speak('再生した手順「' + flow.get('name', '')[:40] + '」の結果ページ: ' + text)
+        return
+    if task:
+        from app.services.command_center import execute
+        note = '（記憶した手順の再生は途中で止まった: ' + str(outcome.get('reason') or '')[:80] + '。通常どおり進める）'
+        await execute({'action': 'work', 'task': '今回のユーザー発言（原文）:' + chr(10) + task[:2000] + chr(10) + note + v1.VOICE_TASK}, room_id, user_id)

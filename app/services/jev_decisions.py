@@ -22,9 +22,26 @@ def choice_answers(data, questions):
         raise ValueError('answer_set')
     for name, question in questions.items():
         answer = answers[name]
-        options = question['criteria']
-        if not isinstance(answer, dict) or answer.get('type') != 'choice':
+        kind = question.get('type', 'choice')
+        if not isinstance(answer, dict) or answer.get('type') != kind:
             raise ValueError('answer_type')
+        if kind == 'noul':   # one probability that the statement is true
+            value = answer.get('noul')
+            if type(value) not in (float, int) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError('noul_value')
+            continue
+        if kind == 'score':   # a position on ordered rubric levels, with the distribution over levels
+            levels = {str(i) for i in range(len(question['criteria']))}
+            probs = answer.get('probabilities')
+            if not isinstance(probs, dict) or set(probs) != levels or abs(sum(probs.values()) - 1) > .01:
+                raise ValueError('score_distribution')
+            if any(type(v) not in (float, int) or not math.isfinite(v) or not 0 <= v <= 1 for v in probs.values()):
+                raise ValueError('score_values')
+            value = answer.get('score')
+            if type(value) not in (float, int) or not math.isfinite(value) or not 0 <= value <= len(levels) - 1:
+                raise ValueError('score_value')
+            continue
+        options = question['criteria']
         probs = answer.get('probabilities')
         if not isinstance(probs, dict) or set(probs) != set(options):
             raise ValueError('distribution_keys')
@@ -98,7 +115,13 @@ class Decisions:
         body = {'model': 'jev-latest', 'state': state, 'questions': questions}
         if len(json.dumps(body, ensure_ascii=False).encode('utf-8')) > 24000:
             return {'available': False, 'reason': 'state_too_large', 'elapsed_ms': 0}
-        if not questions or any(q.get('type') != 'choice' or not 2 <= len(q.get('criteria', {})) <= 255 for q in questions.values()):
+        def well_formed(q):
+            kind = q.get('type', 'choice')
+            if kind == 'choice': return isinstance(q.get('criteria'), dict) and 2 <= len(q['criteria']) <= 255
+            if kind == 'score': return isinstance(q.get('criteria'), list) and 2 <= len(q['criteria']) <= 10
+            if kind == 'noul': return bool(q.get('instructions'))
+            return False
+        if not questions or not all(well_formed(q) for q in questions.values()):
             return {'available': False, 'reason': 'invalid_questions', 'elapsed_ms': 0}
         started = time.perf_counter()
         async def request():

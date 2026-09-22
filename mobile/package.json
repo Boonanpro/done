@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.ts",
   "scripts": {
+    "postinstall": "node scripts/patch-incall-focus.cjs && node scripts/patch-webrtc-field-trials.cjs",
     "start": "expo start",
     "start:lan": "expo start --lan",
     "start:tunnel": "expo start --tunnel",
@@ -19,6 +20,7 @@
     "expo-document-picker": "~14.0.8",
     "expo-file-system": "~19.0.24",
     "expo-image-picker": "~17.0.11",
+    "expo-location": "~19.0.8",
     "expo-notifications": "~0.32.17",
     "expo-secure-store": "~15.0.8",
     "expo-status-bar": "~3.0.9",

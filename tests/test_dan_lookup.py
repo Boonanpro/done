@@ -132,3 +132,19 @@ async def test_wait_until_url_and_port():
         assert (await dan_lookup.wait_until({'port': port, 'timeout_seconds': 3}))['success']
     finally:
         server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_addresses_lists_the_owners_mailboxes_without_secrets(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import dan_lookup
+    service = AsyncMock()
+    service.list_credentials.return_value = [{'service': 'note'}, {'service': 'shop'}, {'service': 'bank'}, {'service': 'robot'}]
+    logins = {'note': 'me@example.com', 'shop': 'ME@example.com', 'bank': 'member-0012', 'robot': 'x@proj.iam.gserviceaccount.com'}
+    service.get_credential.side_effect = lambda user, name: {'id': logins[name], 'password': 'SECRET'}
+    monkeypatch.setattr('app.services.credentials_service.get_credentials_service', lambda: service)
+    otp = AsyncMock(); otp.has_imap_access.return_value = True
+    monkeypatch.setattr('app.services.otp_service.get_otp_service', lambda: otp)
+    out = (await dan_lookup.lookup({'source': 'addresses'}, 'u', None))['output']
+    assert 'me@example.com — 2件' in out and 'member-0012' not in out and 'gserviceaccount' not in out and 'SECRET' not in out
+    assert '必ず本人に確認' in out

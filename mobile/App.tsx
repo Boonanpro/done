@@ -53,10 +53,12 @@ import {
   type ExecutionEvent,
   type TurnBlock,
 } from './chatTimeline';
-import { VoiceOverlay } from './voice';
+import { VoiceHost, useVoice } from './voice-host';
+import { AtomRelayControl } from './atom-relay-control';
+import { reportLocation, watchLocation } from './location-report';
 import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
 
-const DEFAULT_API_BASE_URL = 'https://frontend-liard-rho-29.vercel.app';
+const DEFAULT_API_BASE_URL = 'https://dan.paina.info';
 const API_BASE_URL =
   typeof Constants.expoConfig?.extra?.apiBaseUrl === 'string' &&
   Constants.expoConfig.extra.apiBaseUrl.trim()
@@ -206,6 +208,7 @@ type ProjectResponse = {
   last_message_at?: string | null;
   last_message_preview?: string | null;
   pinned_at?: string | null;
+  metadata?: {role?: string};
   // ダンがこのプロジェクトで今まさに作業中か（一覧の「作業中」インジケーター用）
   has_active_run?: boolean;
   updated_at?: string | null;
@@ -1243,14 +1246,18 @@ function RunningDot({ style }: { style?: StyleProp<ViewStyle> }) {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AppMain />
+      <VoiceHost><AppMain /></VoiceHost>
     </SafeAreaProvider>
   );
 }
 
 function AppMain() {
-  const insets = useSafeAreaInsets();
+  const voice = useVoice();
+  const [projectQuery, setProjectQuery] = useState('');
+  const safeInsets = useSafeAreaInsets();
+  const insets = {...safeInsets, top: voice.minimized ? 0 : safeInsets.top};
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
+  useEffect(() => { if (auth.status === 'signed_out') voice.stop(); }, [auth.status]);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
@@ -1374,7 +1381,7 @@ function AppMain() {
   const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
   // In-chat keyword search (find past messages across full history).
   const [searchOpen, setSearchOpen] = useState(false);
-  const [voiceOpen, setVoiceOpen] = useState(false);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -2213,6 +2220,22 @@ function AppMain() {
   useEffect(() => {
     void syncNotificationBadge(unreadTotal);
   }, [syncNotificationBadge, unreadTotal]);
+
+  // 現在地をダンに知らせる（アプリを開いている間だけ。チャットでも音声でも「この近く」に答えられるように）
+  useEffect(() => {
+    if (!token) return;
+    let stop: (() => void) | null = null;
+    const start = () => {
+      void reportLocation(API_BASE_URL, token);
+      void watchLocation(API_BASE_URL, token).then((s) => { stop = s; });
+    };
+    if (AppState.currentState === 'active') start();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') start();
+      else { stop?.(); stop = null; }
+    });
+    return () => { sub.remove(); stop?.(); };
+  }, [token]);
 
   useEffect(() => {
     if (!token) return;
@@ -3429,7 +3452,7 @@ function AppMain() {
             <Text style={styles.brandMarkText}>D</Text>
           </View>
           <Text style={styles.title}>Done</Text>
-          <Text style={styles.subtitle}>Native development build</Text>
+          <Text style={styles.subtitle}>相談から実行まで、いつものDanと。</Text>
 
           <View style={styles.form}>
             <TextInput
@@ -3463,7 +3486,7 @@ function AppMain() {
               {loginBusy ? (
                 <ActivityIndicator color="#111" />
               ) : (
-                <Text style={styles.primaryButtonText}>Log in</Text>
+                <Text style={styles.primaryButtonText}>ログイン</Text>
               )}
             </Pressable>
           </View>
@@ -3472,13 +3495,16 @@ function AppMain() {
     );
   }
 
+  const hub = projects.find(project => project.metadata?.role === 'command_center');
+  const startHubVoice = () => { if (hub?.room_id && token) voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token}); };
+
   if (screen === 'projects') {
     return (
       <View style={styles.screen}>
         <StatusBar style="light" />
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <View style={styles.appBarTitleBlock}>
-            <Text style={styles.appBarTitle}>Done</Text>
+            <Text style={styles.appBarTitle}>ホーム</Text>
           </View>
           <Pressable
             onPress={() => setScreen('collab')}
@@ -3503,7 +3529,21 @@ function AppMain() {
 
         <FlatList
           contentContainerStyle={[styles.projectListContent, { paddingBottom: insets.bottom + 96 }]}
-          data={projects}
+          data={projects.filter(p => p.metadata?.role !== 'command_center' && `${p.title} ${p.last_message_preview || ''}`.toLowerCase().includes(projectQuery.toLowerCase()))}
+          ListHeaderComponent={<View style={styles.homeHeader}>
+            {hub && <View style={styles.hubCard}>
+              <Text style={styles.hubTitle}>Done</Text>
+              <Text style={styles.hubDescription}>あの件の続きも、ちょっとした頼みごとも。</Text>
+              <View style={styles.hubActions}>
+                <Pressable accessibilityRole="button" onPress={startHubVoice} style={styles.hubSpeak}><Ionicons name="mic" size={20} color="#102b20"/><Text style={styles.hubSpeakText}>話しかける</Text></Pressable>
+                <Pressable accessibilityRole="button" onPress={() => handleSelectProject(hub.id)} style={styles.hubChat}><Text style={styles.hubChatText}>チャットを開く</Text><Ionicons name="arrow-forward" size={16} color="#e1ece5"/></Pressable>
+              </View>
+              {token && <AtomRelayControl apiBase={API_BASE_URL} token={token} callActive={!!voice.roomId}
+                onStartDirect={hub?.room_id ? () => {if(hub.room_id) voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token,audioEndpoint:'atom'});} : undefined} />}
+            </View>}
+            <View style={styles.projectSection}><Text style={styles.projectSectionTitle}>プロジェクト</Text><Pressable accessibilityRole="button" onPress={handleNewProject} style={styles.newProjectAction}><Ionicons name="add" size={18} color="#c0cebf"/><Text style={styles.homeNewProjectText}>新規</Text></Pressable></View>
+            <View style={styles.projectSearch}><Ionicons name="search" size={18} color="#969c96"/><TextInput accessibilityLabel="プロジェクトを検索" placeholder="プロジェクト・最近の会話を検索" placeholderTextColor="#969c96" value={projectQuery} onChangeText={setProjectQuery} style={styles.projectSearchInput}/></View>
+          </View>}
           keyExtractor={(item) => item.id}
           refreshControl={
             <RefreshControl
@@ -3517,8 +3557,8 @@ function AppMain() {
             !loadingProjects ? (
               <View style={styles.emptyState}>
                 <Ionicons name="chatbubbles-outline" size={48} color="#5a5550" />
-                <Text style={styles.emptyTitle}>No chats yet</Text>
-                <Text style={styles.emptyHint}>Tap + to start a new conversation with DAN.</Text>
+                <Text style={styles.emptyTitle}>{projectQuery ? '一致するプロジェクトがありません' : 'プロジェクトはまだありません'}</Text>
+                <Text style={styles.emptyHint}>{projectQuery ? '別の言葉で検索してください' : 'Doneで相談するか、新しいプロジェクトを作成できます'}</Text>
               </View>
             ) : null
           }
@@ -3570,17 +3610,6 @@ function AppMain() {
             );
           }}
         />
-
-        <Pressable
-          onPress={handleNewProject}
-          style={({ pressed }) => [
-            styles.fab,
-            { bottom: insets.bottom + 20 },
-            pressed && styles.fabPressed,
-          ]}
-        >
-          <Ionicons name="add" size={28} color="#111" />
-        </Pressable>
 
         <ProjectActionSheet
           sheet={actionSheet}
@@ -3812,7 +3841,18 @@ function AppMain() {
           </View>
           <View style={styles.appBarRight}>
             <Pressable
-              onPress={() => setVoiceOpen(true)}
+              onPress={() => { if (currentProject?.room_id && token) voice.start({roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token}); }}
+              onLongPress={() => {
+                if (!currentProject?.room_id || !token) return;
+                const call = {roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token};
+                Alert.alert('音声機器を選ぶ', 'この部屋で会話を始めます。', [
+                  {text:'スマホ・イヤホン',onPress:()=>voice.start(call)},
+                  {text:'Atom',onPress:()=>voice.start({...call,audioEndpoint:'atom'})},
+                  {text:'キャンセル',style:'cancel'},
+                ]);
+              }}
+              accessibilityLabel="音声で話す" accessibilityRole="button"
+              accessibilityHint="長押しすると音声機器を選べます"
               hitSlop={10}
               style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
             >
@@ -4086,7 +4126,7 @@ function AppMain() {
           <TextInput
             multiline
             onChangeText={setDraft}
-            placeholder="Ask DAN"
+            placeholder="Danに話しかける…"
             placeholderTextColor="#77736b"
             style={styles.composerInput}
             value={draft}
@@ -4113,22 +4153,13 @@ function AppMain() {
             >
               {/* No spinner here — the live "working" indicator already shows in
                   Dan's chat bubble; a second one on the send button is redundant. */}
-              <Text style={styles.sendButtonText}>Send</Text>
+              <Text style={styles.sendButtonText}>送信</Text>
             </Pressable>
           )}
         </View>
       </KeyboardAvoidingView>
 
-      {currentProject?.room_id ? (
-        <VoiceOverlay
-          visible={voiceOpen}
-          onClose={() => setVoiceOpen(false)}
-          roomId={currentProject.room_id}
-          chatTitle={currentProject.title || undefined}
-          apiBase={API_BASE_URL}
-          token={token ?? null}
-        />
-      ) : null}
+
 
       <Modal
         visible={searchOpen}
@@ -4303,6 +4334,16 @@ function AppMain() {
 }
 
 const styles = StyleSheet.create({
+  homeHeader:{paddingHorizontal:10,paddingBottom:8},
+  hubCard:{padding:24,borderRadius:24,backgroundColor:'#203b31',marginTop:8,marginBottom:24},
+  hubEyebrow:{color:'#afc6b8',fontSize:13,fontWeight:'500'},hubTitle:{color:'#f0f5ed',fontSize:36,fontWeight:'600',marginTop:8},
+  hubDescription:{color:'#c2d0c6',fontSize:15,lineHeight:23,marginTop:8},hubActions:{flexDirection:'row',gap:12,marginTop:24,alignItems:'center',flexWrap:'wrap'},
+  hubSpeak:{flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#cbe9cd',paddingHorizontal:18,minHeight:48,borderRadius:24},hubSpeakText:{fontSize:16,fontWeight:'600',color:'#102b20'},
+  hubChat:{minHeight:48,flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:4},hubChatText:{color:'#e1ece5',fontSize:15},
+  projectSection:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginBottom:12},projectSectionTitle:{fontSize:22,color:'#f4f0e8',fontWeight:'600'},
+  newProjectAction:{flexDirection:'row',alignItems:'center',gap:4,minHeight:44,paddingHorizontal:12},homeNewProjectText:{color:'#c0cebf',fontSize:15},
+  projectSearch:{flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#232521',borderRadius:14,paddingHorizontal:14,marginBottom:8},projectSearchInput:{flex:1,minHeight:48,color:'#f4f0e8',fontSize:15},
+
   screen: {
     flex: 1,
     backgroundColor: '#12110f',

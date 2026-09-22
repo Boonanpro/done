@@ -4,6 +4,7 @@
  */
 
 import { useAuthStore } from '@/stores/auth-store';
+import { refreshSession, SessionRefreshError } from './session-refresh';
 
 // API Base URL - env 値に trailing whitespace / 改行が混入すると URL が壊れるので trim
 const API_BASE_URL = '';
@@ -746,17 +747,37 @@ async function request<T>(
     ...options.headers,
   };
 
-  const response = await fetch(url, {
+  let response = await fetch(url, {
     ...options,
     headers,
     credentials: options.credentials ?? 'include',
   });
 
+  const authEndpoint = ['/chat/login', '/chat/register', '/chat/refresh'].includes(endpoint);
+  const guestPage = typeof window !== 'undefined' && window.location.pathname.startsWith('/collab/join');
+  if (response.status === 401 && !authEndpoint && !guestPage) {
+    try {
+      const renewed = await refreshSession(value => {
+        setStoredToken(value);
+        setImmediateToken(value);
+        useAuthStore.getState().setToken(value);
+      });
+      response = await fetch(url, {
+        ...options,
+        headers: { ...headers, Authorization: `Bearer ${renewed}` },
+        credentials: options.credentials ?? 'include',
+      });
+    } catch (error) {
+      // An unavailable server is not evidence that the login was revoked.
+      if (!(error instanceof SessionRefreshError) || error.status !== 401) throw error;
+    }
+  }
+
   if (!response.ok) {
     // 401 Unauthorized: セッション切れ → ログインページにリダイレクト
     if (response.status === 401) {
       // ログインエンドポイント自体の401はリダイレクトしない（パスワード間違い等）
-      const isLoginEndpoint = endpoint === '/chat/login' || endpoint === '/chat/register';
+      const isLoginEndpoint = authEndpoint;
       // 外部ゲスト（コラボ招待ページ）はオーナー用ログイン画面に飛ばさない。
       // トークン切れは招待ページ側が再入室フローで処理する。
       const isGuestPage =
@@ -775,8 +796,7 @@ async function request<T>(
         // ログインページにリダイレクト（ブラウザ環境のみ）
         if (typeof window !== 'undefined') {
           window.location.href = '/login';
-          // リダイレクト中はエラーをスローしない
-          return new Promise(() => {});
+          // Let callers settle instead of leaving their loading states pending.
         }
       }
     }
@@ -827,6 +847,9 @@ function isTransientNetworkError(message?: string): boolean {
 // ==================== API Methods ====================
 
 export const api = {
+  commandCenter: {
+    device: () => request<{ connected: boolean; state: string; requested?: boolean; room_id?: string }>('/voicelog/command-center/device'),
+  },
   // Auth endpoints
   auth: {
     login: (data: LoginRequest) =>

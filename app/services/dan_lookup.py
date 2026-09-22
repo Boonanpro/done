@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from pathlib import Path
 
-SOURCES = ('messages', 'mail', 'message_cards', 'artifacts', 'watches', 'inquiries')
+SOURCES = ('messages', 'mail', 'message_cards', 'artifacts', 'watches', 'inquiries', 'addresses')
 
 LOOKUP_TOOL = {
     'name': 'lookup',
@@ -27,7 +27,8 @@ LOOKUP_TOOL = {
         'message_cards=外部宛メッセージの送信案カードと送信結果（status: pending/sent/discarded 等）／'
         'artifacts=登録済みの成果物と公開URL（room_id省略時は全部）／'
         'watches=見張り・続報の予約の詳細（room_id省略時はこの部屋。all_rooms=trueで全部屋）／'
-        'inquiries=公開サイトのフォームに届いた問い合わせ（scope=サイトの識別子）。'
+        'inquiries=公開サイトのフォームに届いた問い合わせ（scope=サイトの識別子）／'
+        'addresses=本人が使っているメールアドレスの一覧（どのサービスの登録に使っているか、ダンが受信箱を読めるか）。新規登録でどのアドレスを使うか本人に選んでもらう時に使う。'
         '本文は長いと切り詰める。id を指定すると1件を全文で返す（messages, mail, message_cards, inquiries）。'
     ),
     'input_schema': {'type': 'object', 'properties': {
@@ -252,10 +253,32 @@ async def _inquiries(p, user_id, room_id):
     return _result('問い合わせ', out)
 
 
+async def _addresses(p, user_id, room_id):
+    """The owner's own mail addresses, for "which one shall I register with?". Addresses only, never a password."""
+    from app.services.credentials_service import get_credentials_service
+    from app.services.otp_service import get_otp_service
+    service = get_credentials_service()
+    used = {}
+    for row in await service.list_credentials(user_id):
+        name = row.get('service') or ''
+        try: login = ((await service.get_credential(user_id, name)) or {}).get('id') or ''
+        except Exception: login = ''
+        if re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', login.strip()):
+            if 'gserviceaccount' in login: continue   # a machine identity, not a mailbox
+            used.setdefault(login.strip().lower(), []).append(name)
+    rows = []
+    for address, services in sorted(used.items(), key=lambda x: -len(x[1])):
+        try: readable = await get_otp_service().has_imap_access(user_id, address)
+        except Exception: readable = False
+        rows.append(f"{address} — {len(services)}件の登録で使用（{', '.join(services[:6])}{' ほか' if len(services) > 6 else ''}）"
+                    + (' ／ダンが受信箱を読める（確認メールやコードを自分で処理できる）' if readable else ' ／ダンは受信箱を読めない（確認メールは本人が見る必要がある）'))
+    return _result('本人のメールアドレス', rows, '新規登録に使うアドレスとパスワードの決め方（自動生成して保存／本人が指定）は、必ず本人に確認する。')
+
+
 async def lookup(params, user_id, room_id):
     source = params.get('source')
     handler = {'messages': _messages, 'mail': _mail, 'message_cards': _message_cards, 'artifacts': _artifacts,
-               'watches': _watches, 'inquiries': _inquiries}.get(source)
+               'watches': _watches, 'inquiries': _inquiries, 'addresses': _addresses}.get(source)
     if not handler:
         return {'success': False, 'error': 'source は '+' / '.join(SOURCES)+' のいずれか'}
     try:
