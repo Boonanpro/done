@@ -56,7 +56,7 @@ SNAPSHOT = r"""() => {
     (e.labels && [...e.labels].map(l=>l.innerText).join(' ')) || e.innerText ||
     (e.tagName==='INPUT' && ['submit','button'].includes(e.type) ? e.value : '') || e.getAttribute('alt') || e.placeholder || '');
   const deep = s => window.__danDeep ? window.__danDeep(s) : [...document.querySelectorAll(s)];
-  const elements = deep('[data-dan-ref]').filter(vis).slice(0, 400).map(e => ({
+  const elements = deep('[data-dan-ref]').filter(vis).slice(0, 1000).map(e => ({
     ref:'@'+e.getAttribute('data-dan-ref'), role:role(e), name:name(e).slice(0,120), tag:e.tagName,
     type:e.type || '', id:e.id || '', name_attr:e.getAttribute('name') || '', disabled:!!e.disabled}));
   return {url:location.href, password:deep('input[type="password"]').some(vis), elements};
@@ -304,6 +304,9 @@ async def around(action, params, execute):
                 hint = entry_hint(params.get('url'))
                 if hint and hint.split('url="')[1].split('"')[0] != params.get('url'):
                     result['content'].append({'type': 'text', 'text': hint})
+            # Nothing remembered for this page: a first login has the same shape everywhere, so code does it too.
+            from app.services.browser_login import maybe_login
+            result = await maybe_login(params, result)
         except Exception:
             logger.warning('browser replay unavailable', exc_info=True)
     return result
@@ -332,36 +335,72 @@ async def before_action(action, params):
         return None  # nothing to identify; keeps ordinary browsing free of extra work
     from app.tools.browser import get_executor_page
     page = await get_executor_page()
-    return await snapshot(page)
+    snap = await snapshot(page)
+    if action == 'click' and not params.get('ref') and params.get('x') is not None and params.get('y') is not None:
+        # A click by coordinates (the model measured the spot from a screenshot) is a click on whatever element is there:
+        # resolve it now, before the page changes, so the step can be recorded and re-found like a ref click.
+        try:
+            snap['ref_at_point'] = await page.evaluate(
+                "([x, y]) => {const e = document.elementFromPoint(x, y); const t = e && e.closest('[data-dan-ref]');"
+                " return t ? '@'+t.getAttribute('data-dan-ref') : null}", [params['x'], params['y']])
+        except Exception:
+            snap['ref_at_point'] = None
+    return snap
 
 
 async def after_action(action, params, result, pre):
-    if not enabled() or replaying.get() or action in SESSION_CONTROL:
+    if not enabled() or replaying.get():
         return
     path = _run_file()
+    if action in SESSION_CONTROL:
+        if action in ('release', 'close'):
+            run = _read(path, None)
+            if run:
+                from app.services import browser_flows
+                browser_flows.save_flow(run, _task_words()); _write(path, run)
+        return
     if action not in {'open', 'open_target'} and not path.exists():
         return
     from app.tools.browser import get_executor_page
     page = await get_executor_page()
-    if action in OBSERVE_ONLY or (isinstance(result, dict) and result.get('success') is False):
+    failed = isinstance(result, dict) and result.get('success') is False
+    if failed and action == 'click' and pre is not None:
+        # The tool says failed when its `expect` never came true, but the site may have navigated anyway (EX, 2026-09-22:
+        # the search button "failed" three times and the page moved each time). What moved the page is a step.
+        moved = await snapshot(page)
+        failed = url_key(moved['url']) == url_key(pre['url'])
+    if action in OBSERVE_ONLY or failed:
         # A look (or a step without effect) still shows where the previous step
         # really ended: sites navigate after the tool call has already returned.
         run = _read(path, None)
-        if run and run['steps']:
-            _settle(run, await snapshot(page))
+        if run:
+            snap = await snapshot(page)
+            if run['steps']:
+                _settle(run, snap)
+            if action in OBSERVE_ONLY and not (isinstance(result, dict) and result.get('success') is False):
+                from app.services import browser_flows
+                browser_flows.note_observation(run, snap)   # reading after acting: the flow may be at its goal
+                browser_flows.save_flow(run, _task_words())
             _write(path, run)
         return
     if action in {'open', 'open_target'}:
+        old = _read(path, None)
+        if old:
+            from app.services import browser_flows
+            browser_flows.save_flow(old, _task_words())   # a new open starts a new run: keep what the last one taught
         post = await snapshot(page)
-        _write(path, {'id': hashlib.sha1(os.urandom(16)).hexdigest()[:12], 'start_url': params.get('url'),
-                      'landing': url_key(post['url']), 'started': time.time(), 'updated': time.time(),
-                      'steps': [], 'saved': None})
+        start_run(params.get('url'), url_key(post['url']))
         return
     run = _read(path, None)
     if not run or pre is None or time.time()-run['updated'] > RUN_IDLE_SECONDS:
         return
+    if action == 'click' and not params.get('ref') and pre.get('ref_at_point'):
+        params = {**params, 'ref': pre['ref_at_point']}   # the element under the coordinates, found before the click
     _settle(run, pre)
     post = await snapshot(page)
+    from app.services import browser_flows
+    browser_flows.record_step(run, action, params, pre, post)   # the flow recording: every step with its value, secrets excluded
+    _write(path, run)
     if action == 'type':
         converted = await _username_step(page, params, pre)
         if converted:
@@ -388,14 +427,41 @@ async def after_action(action, params, result, pre):
         if action == 'click' and not targets:
             action = None  # coordinate clicks cannot be re-found
     if not action or len(run['steps']) >= MAX_STEPS:
-        path.unlink(missing_ok=True)  # The rest needs a model; what was saved stays saved.
+        # The login recording is over (a non-login step happened); the flow recording goes on in the same run.
+        run['login_over'] = True
+        run['updated'] = time.time()
+        _write(path, run)
         return
+    if run.get('login_over'):
+        run['updated'] = time.time(); _write(path, run); return
     run['steps'].append({'action': action, 'params': safe, 'targets': targets, 'pre': url_key(pre['url']),
                          'pre_landmarks': landmarks(pre),
                          'post': {'key': url_key(post['url']), 'login_like': login_like(post), 'landmarks': landmarks(post)}})
     run['updated'] = time.time()
     _save_if_logged_in(run)
     _write(path, run)
+
+
+def start_run(start_url, landing_key, login_over=False):
+    """A new recording: the login recorder (steps) and the flow recorder (flow_steps) share it. After a replayed login the
+    login part is already known, so the run starts with login_over=True at the logged-in page (2026-09-22: without this,
+    nothing done after an automatic login was ever remembered)."""
+    run = {'id': hashlib.sha1(os.urandom(16)).hexdigest()[:12], 'start_url': start_url, 'landing': landing_key,
+           'started': time.time(), 'updated': time.time(), 'steps': [], 'saved': None}
+    if login_over: run['login_over'] = True
+    _write(_run_file(), run)
+    return run
+
+
+def _task_words():
+    job_id = os.environ.get('DAN_COMMAND_JOB_ID')
+    if not job_id: return ''
+    try:
+        from app.services import command_job_state
+        task = (command_job_state.read(job_id) or {}).get('task') or ''
+        return task.split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:200]
+    except Exception:
+        return ''
 
 
 def _settle(run, snap):

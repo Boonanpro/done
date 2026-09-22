@@ -147,37 +147,47 @@ class CalendarService:
     # ==================== カレンダー操作 ====================
 
     def get_events(self, user_id: str, days: int = 7, max_results: int = 20) -> List[dict]:
-        """今後N日間の予定を取得"""
+        """今後N日間の予定を取得（連携アカウントが見ている全カレンダー。各予定に calendar 名が付く）"""
+        return self.get_events_with_source(user_id, days, max_results)['events']
+
+    def get_events_with_source(self, user_id: str, days: int = 7, max_results: int = 20) -> dict:
+        """予定と、その出どころ（どのアカウントの、どのカレンダーを見たか）。
+        「何を見て言った」に答えられない読み取りは読み取りではない: 読む道具は必ず source を返す。"""
         creds = self._get_credentials(user_id)
         if not creds:
-            return [{"error": "カレンダー未連携。設定画面から連携してください。"}]
+            return {'events': [{"error": "カレンダー未連携。設定画面から連携してください。"}], 'source': None}
 
         service = build('calendar', 'v3', credentials=creds)
         now = datetime.now(timezone.utc)
         time_max = now + timedelta(days=days)
-
-        result = service.events().list(
-            calendarId='primary',
-            timeMin=now.isoformat(),
-            timeMax=time_max.isoformat(),
-            maxResults=max_results,
-            singleEvents=True,
-            orderBy='startTime',
-        ).execute()
+        calendars = [c for c in service.calendarList().list(maxResults=20).execute().get('items', []) if c.get('selected', True)]
+        account = next((c['id'] for c in calendars if c.get('primary')), '')
 
         events = []
-        for item in result.get('items', []):
-            start = item.get('start', {})
-            end = item.get('end', {})
-            events.append({
-                'id': item['id'],
-                'title': item.get('summary', '(タイトルなし)'),
-                'start': start.get('dateTime', start.get('date', '')),
-                'end': end.get('dateTime', end.get('date', '')),
-                'location': item.get('location', ''),
-                'description': item.get('description', ''),
-            })
-        return events
+        for calendar in calendars[:10]:
+            result = service.events().list(
+                calendarId=calendar['id'],
+                timeMin=now.isoformat(),
+                timeMax=time_max.isoformat(),
+                maxResults=max_results,
+                singleEvents=True,
+                orderBy='startTime',
+            ).execute()
+            for item in result.get('items', []):
+                start = item.get('start', {})
+                end = item.get('end', {})
+                events.append({
+                    'id': item['id'],
+                    'title': item.get('summary', '(タイトルなし)'),
+                    'start': start.get('dateTime', start.get('date', '')),
+                    'end': end.get('dateTime', end.get('date', '')),
+                    'location': item.get('location', ''),
+                    'description': item.get('description', ''),
+                    'calendar': calendar.get('summaryOverride') or calendar.get('summary') or calendar['id'],
+                })
+        events.sort(key=lambda e: e['start'])
+        return {'events': events[:max_results],
+                'source': {'account': account, 'calendars': [c.get('summaryOverride') or c.get('summary') or c['id'] for c in calendars[:10]]}}
 
     def create_event(self, user_id: str, title: str, start: str, end: str,
                      description: str = "", location: str = "") -> dict:

@@ -47,8 +47,15 @@ def _strip_www(host: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+# Second-level public suffixes: under these, the registrable name is three labels (jr-central.co.jp, not co.jp).
+# Without this every .co.jp site matched every other one (2026-09-22: a JR login page returned the bank credentials).
+_SECOND_LEVEL = {"co", "ne", "or", "ac", "go", "gr", "ad", "ed", "lg", "com", "net", "org", "gov", "edu"}
+
+
 def _base_domain(host: str) -> str:
     parts = host.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL:
+        return ".".join(parts[-3:])
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 

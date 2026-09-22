@@ -60,6 +60,8 @@ async def bank(monkeypatch, tmp_path):
     monkeypatch.setenv('DAN_BROWSER_OBSERVATION', 'dom')
     monkeypatch.delenv('DAN_COMMAND_JOB_ID', raising=False)
     monkeypatch.delenv('DAN_BROWSER_REPLAY', raising=False)
+    # These tests play the large model logging in by hand (that is what gets recorded); tests/test_browser_login.py covers the login done by code.
+    monkeypatch.setenv('DAN_BROWSER_AUTOLOGIN', '0')
     monkeypatch.setattr('app.tools.browser._browser_room_id', lambda: '')
     service = AsyncMock()
     stored = {'service': 'kakuu-bank', 'id': 'owner01', 'password': SECRET, 'login_url': ORIGIN+'/login'}

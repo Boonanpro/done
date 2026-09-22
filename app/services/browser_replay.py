@@ -41,14 +41,18 @@ def resolve(step, snap):
     return refs
 
 
-def reached(recipe, snap):
+def reached(recipe, snap, by_url=False):
     """Left the login: no longer asked to authenticate and away from every page
     the procedure acted on. Which page came next (home, a notice, a campaign)
-    varies by day, so it is shown to the model rather than compared."""
+    varies by day, so it is shown to the model rather than compared.
+    by_url: only a page outside the procedure's pages counts (no landmark guess): safe to accept before any auth step,
+    e.g. when a live session took the first click straight to the logged-in page."""
     if recipes.login_like(snap):
         return False
     if recipes.url_key(snap['url']) not in recipe['login_pages']:
         return True
+    if by_url:
+        return False
     before, after = set(recipe['auth_landmarks']), set(recipes.landmarks(snap))
     return bool(before | after) and len(before & after)/len(before | after) < .5
 
@@ -63,6 +67,22 @@ def startable(steps, snap):
 # While the site navigates, the page cannot be read at all (the evaluate
 # raises). That is "not there yet", never a reason to abandon a login midway.
 NAVIGATING = {'url': '', 'password': True, 'elements': []}
+
+
+TRANSIENT = ('unstable_or_occluded', 'not_visible', 'intercepted')   # the page was still settling: the same step a moment later is fine
+TRANSIENT_RETRIES = 3
+
+
+async def attempt(execute, action, args, page):
+    """One recorded step, retried when the tool refused it for a transient reason. A replay acts right after the page opened,
+    where the model would still have been thinking; a click judged 'unstable_or_occluded' at t+2s succeeds at t+4s."""
+    outcome = await execute(action, args)
+    for _ in range(TRANSIENT_RETRIES):
+        if not (isinstance(outcome, dict) and outcome.get('success') is False and any(t in str(outcome.get('reason') or outcome.get('error') or '') for t in TRANSIENT)):
+            break
+        await page.wait_for_timeout(1000)
+        outcome = await execute(action, args)
+    return outcome
 
 
 async def observe(page):
@@ -136,21 +156,20 @@ async def run(page, recipe, snap):
     done, reason, uncertain, jev_calls, skipped = [], None, None, 0, 0
     token = recipes.replaying.set(True)
     try:
-        recipes._run_file().unlink(missing_ok=True)  # a half-replayed run must not become a recipe
         async with Decisions(user_id, max_calls=4) as decisions:
             authed = False
             for index, step in enumerate(recipe['steps']):
                 CancellationRegistry.check_cancelled_raise()
                 refs, deadline = resolve(step, snap), time.perf_counter()+STEP_WAIT_SECONDS
                 while refs is None and time.perf_counter() < deadline:
-                    if authed and reached(recipe, snap):
-                        break  # e.g. a trusted device skipped the OTP page
+                    if (authed and reached(recipe, snap)) or reached(recipe, snap, by_url=True):
+                        break  # e.g. a trusted device skipped the OTP page, or a live session skipped the login itself
                     if step['action'] == 'click' and index+1 < len(recipe['steps']) and resolve(recipe['steps'][index+1], snap):
                         break  # an optional step (a popup that is not shown today)
                     await page.wait_for_timeout(int(POLL_SECONDS*1000))
                     snap = await observe(page)
                     refs = resolve(step, snap)
-                if refs is None and authed and reached(recipe, snap):
+                if refs is None and ((authed and reached(recipe, snap)) or reached(recipe, snap, by_url=True)):
                     skipped += len(recipe['steps'])-index
                     break
                 if refs is None and step['action'] == 'click' and index+1 < len(recipe['steps']) and resolve(recipe['steps'][index+1], snap):
@@ -171,14 +190,14 @@ async def run(page, recipe, snap):
                     await gate.guard(job_id, 'browser', {'action': step['action'], **args})
                 CancellationRegistry.check_cancelled_raise()
                 uncertain = index+1
-                outcome = await _execute_browser_tool(step['action'], args)
+                outcome = await attempt(_execute_browser_tool, step['action'], args, page)
                 if isinstance(outcome, dict) and outcome.get('success') is False:
                     raise Handoff('step_failed')
                 uncertain = None
                 authed = authed or step['action'] in recipes.AUTH
-                done.append(step['action']+(' '+json.dumps(next(iter(step['targets'].values()))['name'], ensure_ascii=False)
-                                           if step['targets'] else ''))
                 snap = await observe(page)
+                done.append(step['action']+(' '+json.dumps(next(iter(step['targets'].values()))['name'], ensure_ascii=False)
+                                           if step['targets'] else '')+' -> '+recipes.url_key(snap.get('url') or ''))   # where the step left the browser
             deadline = time.perf_counter()+END_WAIT_SECONDS
             while not reached(recipe, snap) and time.perf_counter() < deadline:
                 await page.wait_for_timeout(int(POLL_SECONDS*1000))
@@ -193,6 +212,11 @@ async def run(page, recipe, snap):
         recipes.replaying.reset(token)
     elapsed = round((time.perf_counter()-started)*1000, 2)
     recipes.report(recipe, reason is None, elapsed)
+    # A replay attempt, finished or half way, restarts the recording at the page it left the browser on: the replayed steps
+    # are never recorded (replaying gate), a half-replayed login cannot become a recipe, and what Dan does next is recorded
+    # (a flow when logged in; the login by hand when not). Deleting the run here lost every flow after a failed replay.
+    try: recipes.start_run(None, recipes.url_key(snap['url']), login_over=reason is None)
+    except Exception: pass
     record_timing('workflow', 'browser_replay', elapsed, 'handoff' if reason else 'verified', {'tool_calls': len(done)})
     final = {}
     if not CancellationRegistry.check_cancelled():  # no further browser work once cancelled

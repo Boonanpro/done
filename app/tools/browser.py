@@ -696,9 +696,23 @@ async def _executor_worker():
             cdp_port = session["port"]
             global _executor_cdp_port
             _executor_cdp_port = cdp_port
-            browser = await playwright.chromium.connect_over_cdp(
-                f"http://127.0.0.1:{cdp_port}", timeout=5000,
-            )
+            try:
+                browser = await playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{cdp_port}", timeout=20000,
+                )
+            except Exception as exc:
+                # A browser left by an earlier job can refuse the CDP handshake (2026-09-22: "Timeout 5000ms exceeded"
+                # after the WebSocket had connected, twice in a row). A job must not die on that: the room's browser is
+                # closed and reopened, and the job goes on with a fresh window (what was on screen is lost, nothing else).
+                print(f"[EXECUTOR_BROWSER] Reconnect to the room's browser failed ({type(exc).__name__}); reopening it")
+                _write_browser_recovery_log("core_browser_reconnect_failed", port=cdp_port, error=str(exc)[:200])
+                await asyncio.to_thread(request_session, "close", _browser_room_id(), "reconnect failed; reopening")
+                session = await asyncio.to_thread(request_session, "ensure", _browser_room_id())
+                cdp_port = session["port"]
+                _executor_cdp_port = cdp_port
+                browser = await playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{cdp_port}", timeout=20000,
+                )
             context = browser.contexts[0]
             attached_to_existing_browser = True
             if _pending_cookie_import:

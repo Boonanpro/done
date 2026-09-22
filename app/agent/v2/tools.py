@@ -338,15 +338,21 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     Returns:
         コアツールのリスト
     """
+    from app.services.command_center import TOOL as COMMAND_CENTER_TOOL
     from app.services.browser_plan import TOOL as BROWSER_PLAN_TOOL
     from app.services.browser_flow import TOOL as BROWSER_FLOW_TOOL
     from app.services.jev_browser_budget import enabled as jev_browser_enabled
     from app.services.dan_lookup import LOOKUP_TOOL, WAIT_TOOL
     from app.services.desktop_control import TOOL as DESKTOP_TOOL
+    from app.services.user_location import TOOL as LOCATION_TOOL
+    from app.services.browser_flows import TOOL as FLOW_TOOL
     return [
         LOOKUP_TOOL,
+        LOCATION_TOOL,
+        FLOW_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
+        COMMAND_CENTER_TOOL,
         BROWSER_TOOL,
         BROWSER_PLAN_TOOL,
         *([BROWSER_FLOW_TOOL] if jev_browser_enabled() else []),
@@ -403,7 +409,7 @@ BROWSER_TOOL = {
                 "properties": {"selector": {"type": "string"}, "state": {"type": "string", "enum": ["visible", "hidden"]}, "text": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000}}, "required": ["selector"], "additionalProperties": False},
             "field": {"type": "string", "enum": ["password", "username"], "description": "action=fill_credentialで入れる項目。password=保存済みパスワード, username=保存済みログインID（既定: password）"},
             "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type / fill_credential, デフォルト: false）"},
-            "timeout_seconds": {"type": "integer", "description": "待機のタイムアウト秒数（action=wait_for_otp_from_app は既定30 / wait_for_link_from_app は既定60）"},
+            "timeout_seconds": {"type": "integer", "description": "待機のタイムアウト秒数。wait_for_otp_from_app は既定300（SMSはキャリア遅延で数分かかることがある。コードの有効期限いっぱいまで1回の呼び出しで待つ。30秒で諦めて聞き返さない）/ wait_for_link_from_app は既定60"},
             "service": {"type": "string", "description": "OTPのサービス絞り込み（例: amazon, ex_reservation）"},
             "source": {"type": "string", "enum": ["sms", "email"], "description": "OTP/リンクの受信元（action=wait_for_otp_from_app, wait_for_link_from_app）。SMS(Androidアプリ転送)=sms（既定）、メール=email。emailの場合は email_address を指定"},
             "email_address": {"type": "string", "description": "メールOTP/リンクの受信箱アドレス（source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
@@ -1239,6 +1245,12 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "lookup":
         return ("_lookup", "read")
 
+    if tool_name == "get_location":
+        return ("_location", "read")
+
+    if tool_name == "flow":
+        return ("_flow", "browser")
+
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
 
@@ -1250,6 +1262,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "watch":
         return ("_watch", "manage")
+
+    if tool_name == "command_center":
+        return ("_command_center", "manage")
 
     if tool_name == "split_to_new_room":
         return ("_split_room", "split")
@@ -1323,7 +1338,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow"}:
             return
 
         error_type = result.get("error_type")
@@ -2428,6 +2443,14 @@ async def execute_tool(
         from app.services.dan_lookup import lookup
         return await lookup(params, user_id, session_id)
 
+    if skill_name == "_location":
+        from app.services.user_location import tool as location_tool
+        return await location_tool(user_id)
+
+    if skill_name == "_flow":
+        from app.services.browser_flows import tool as flow_tool
+        return await flow_tool(params)
+
     if skill_name == "_wait_until":
         from app.services.dan_lookup import wait_until
         return await wait_until(params)
@@ -2446,6 +2469,13 @@ async def execute_tool(
         return await _execute_watch(params, session_id, user_id)
 
     # ★★★ 脱線した話題を新しいチャットに切り出す ★★★
+    if skill_name == "_command_center":
+        from app.services.command_center import execute
+        try:
+            return await execute(params, session_id, user_id)
+        except ValueError as exc:
+            return {"error": str(exc)}
+
     if skill_name == "_split_room":
         return await _execute_split_to_new_room(params, session_id, user_id)
 
@@ -2627,6 +2657,10 @@ def format_tool_result(
     Returns:
         FormattedToolResult: テキストメッセージと画像のリスト
     """
+    if skill_name == "_command_center":
+        import json
+        return FormattedToolResult(text=json.dumps(result, ensure_ascii=False, default=str), images=[])
+
     images = []
 
     # ★ ブラウザツール: content blocks形式で画像+テキストを直接返す
@@ -2640,8 +2674,6 @@ def format_tool_result(
         error = result.get("error")
         if error:
             text_parts.insert(0, f"エラー: {error}")
-        # ゾーン判定リマインダー
-        text_parts.append("[Zone] 次の操作前にGreen/Yellow/Red判定を行うこと。個人情報入力・購入確定はRed（確認必須）。ただしUSER.mdに保存済みの情報はそのまま使ってよい。")
         return FormattedToolResult(text="\n".join(text_parts), images=images)
 
     # スクリーンショットがあればVision API形式に変換
@@ -2771,6 +2803,12 @@ def format_tool_result(
         pw = result.get('password', '')
         masked_pw = f"{pw[:2]}{'*' * (len(pw) - 2)}" if pw and len(pw) > 2 else '（なし）'
         lines.append(f"パスワード: {masked_pw}")
+        return FormattedToolResult(text="\n".join(lines), images=images)
+
+    # 個人情報取得結果: 復号した実値を明示的に含める（フォーム入力に使う）
+    if skill_name == "_get_personal_info" and result.get("value") is not None:
+        lines.append(f"項目: {result.get('field_key', '?')}（{result.get('label') or ''}）")
+        lines.append(f"値: {result['value']}")
         return FormattedToolResult(text="\n".join(lines), images=images)
 
     # check_skill: manual フィールドにスキル本文が入っている
@@ -3610,7 +3648,14 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             except Exception:
                 tab_count_before = 1
 
+            opens_new_tab = False
             if ref:
+                try:
+                    opens_new_tab = await page.evaluate(
+                        "ref => {const e = document.querySelector(`[data-dan-ref='${ref}']`); return !!(e && e.closest('a[target=\"_blank\"]'))}",
+                        str(ref).lstrip("@"))
+                except Exception:
+                    opens_new_tab = False
                 # Let Playwright verify visibility, stability and hit target.
                 # A ref identifies an element, but does not prove it is clickable.
                 click_result = await page.guarded_click(ref, timeout=BROWSER_CLICK_TIMEOUT)
@@ -3633,6 +3678,14 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             try:
                 tab_after = await page.get_tab_count()
                 tab_count_after = tab_after.get("count", 1)
+                if tab_count_after <= tab_count_before and opens_new_tab:
+                    # A target=_blank link opens its tab when the site gets to it: on a page still loading that is
+                    # later than 500ms (EX 2026-09-22: the replayed click was judged "same tab" and the login never left).
+                    for _ in range(25):
+                        await page.wait_for_timeout(100)
+                        tab_count_after = (await page.get_tab_count()).get("count", 1)
+                        if tab_count_after > tab_count_before:
+                            break
             except Exception:
                 tab_count_after = tab_count_before
 
@@ -3948,7 +4001,8 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             }
 
         elif action == "wait_for_otp_from_app":
-            timeout_seconds = max(1, min(int(params.get("timeout_seconds", 30)), 120))
+            # The bound is the code's validity (an SMS took 2.5 minutes to arrive on 2026-09-22 while the old 30s wait had given up).
+            timeout_seconds = max(1, min(int(params.get("timeout_seconds", 300)), 600))
             user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
             source = (params.get("source") or "sms").lower()
             email_address = params.get("email_address")

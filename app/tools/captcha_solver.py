@@ -456,7 +456,9 @@ _INJECT_RECAPTCHA_JS = r"""
         let v;
         try { v = o[k]; } catch (e) { continue; }
         if (typeof v === 'function') {
-          if (/callback/i.test(k)) { try { v(token); fired++; } catch (e) {} }
+          // Only the success callback. 'expired-callback' and 'error-callback' also match /callback/: firing them right after
+          // the success one put Lstep's login button (vue-recaptcha) straight back to disabled.
+          if (/callback/i.test(k) && !/expire|error|fail|timeout|close/i.test(k)) { try { v(token); fired++; } catch (e) {} }
         } else if (v && typeof v === 'object') {
           walk(v, depth + 1);
         }
@@ -503,7 +505,9 @@ _INJECT_HCAPTCHA_JS = r"""
       let v;
       try { v = o[k]; } catch (e) { continue; }
       if (typeof v === 'function') {
-        if (/callback/i.test(k)) { try { v(token); fired++; } catch (e) {} }
+        // Only the success callback. 'expired-callback' and 'error-callback' also match /callback/: firing them right after
+          // the success one put Lstep's login button (vue-recaptcha) straight back to disabled.
+          if (/callback/i.test(k) && !/expire|error|fail|timeout|close/i.test(k)) { try { v(token); fired++; } catch (e) {} }
       } else if (v && typeof v === 'object') {
         walk(v, depth + 1);
       }
