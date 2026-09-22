@@ -1,6 +1,6 @@
 ---
 name: brand-asset-kit
-description: Brand and product asset preparation skill for creative production. Use when a task needs logos, app icons, product images, UI screenshots, website/product URLs, brand colors, fonts, reference people, avatars, Soul IDs, exact product placement, brand kits, or rules for keeping generated videos/images faithful to a product, service, app, or person.
+description: "Collect exact brand assets and identity references for a production that needs brand fidelity."
 ---
 
 # Brand Asset Kit

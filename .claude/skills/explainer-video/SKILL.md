@@ -1,6 +1,6 @@
 ---
 name: explainer-video
-description: ナレーション音声＋台本から解説動画・ドキュメンタリー調動画を作るスキル。「解説動画作って」「ドキュメンタリー風に」「この音声から動画に」「教育系YouTube」「体験談動画」「ナレーション動画の編集」で使う。視覚語彙（AI画像ドキュメンタリー/ストック図解解説）・テロップ様式・カット密度の実測値と、制作ルームでの組み立て手順を定義。新規の動画制作はチャット内で完結させず、制作ルーム（エディタ）で組み立てるのが基本。
+description: "Build narration-led explainer or documentary videos in the Dan editor."
 ---
 
 # 解説動画 / ドキュメンタリー調動画の制作

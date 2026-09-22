@@ -1,95 +1,16 @@
 ---
 name: self-dev
-description: >
-  ダン自身のコードベース(バックエンド・フロントエンド・スキル定義)を
-  変更する際に使用。変更後のテスト方法とBlue-Greenデプロイ手順を含む。
-  自分のコードを修正・追加する指示を受けたときにこのスキルを参照する。
+description: "Modify Dan runtime or infrastructure with process ownership and deployment awareness."
 ---
 
-# self-dev（自己開発）スキル
+# Developing Dan
 
-## このスキルの読み手
+Use `D:/done/AGENTS.md` for scope, process ownership and delivery rules. Inspect the affected runtime or service before editing; preserve unrelated work.
 
-このスキルは **ダン自身（port 9000 のコア内で動いている Claude）が、自分のコードを書き換える**ことを前提に書かれている。最重要の安全則「ダンコアを再起動するな（自分が死ぬ）」はこの読み手にだけ当てはまる。
+Dan Core normally runs on 9000 and carries active chats; the sandbox normally runs on 8000. A file's directory alone does not prove which process imports it. Determine whether the change reloads dynamically or needs a restart.
 
-**自宅PCの外部開発CLI（ローカルの開発者）がダンのコードを弄る場合は、このスキルではなく `CLAUDE.md` の「開発ワークフロー（PR方式）」と「Scope規律」に従うこと。** 外部CLIはコアを再起動しても死なないので、`app/core/` や `app/agent/` の変更は自分でコア再起動して反映してよい（むしろ必須）。このスキル内の「2プロセス分離・再起動コマンド・テストアカウント・検証方法の表」は読み手を問わず有用なので、そこは参照してよい。
+Run the checks relevant to the change. For instruction changes, check loading, assembled prompts and resumption. For a UI change, inspect the affected flow. Do not restart a server merely to validate Markdown.
 
-## 大原則
+If a restart is needed, inspect current sessions and the actual restart mechanism. A task running inside Core must preserve its communication path. An external developer CLI can coordinate a restart without killing other work. Report saved, tested and running states separately.
 
-1. **コード変更だけで「完了」と報告してはいけない**
-2. 変更種類に応じた方法で動作確認し、証拠を提示してから報告する
-3. **ダンコア(port 9000)を再起動してはいけない**（自分が死ぬ）
-4. **複数ファイルに影響する変更は、実装前に簡潔な計画を書いてから着手する**（何を変えるか・影響範囲・テスト方法を事前に整理。単一ファイルの軽微な修正は不要）
-
-## アーキテクチャ前提（2プロセス分離）
-
-- **ダンコア (port 9000)**: チャット・認証・ボイス・エージェント。**自分自身。再起動しない。**
-- **アプリサンドボックス (port 8000)**: 業務系ルーター全部。**ここが自分の作業対象。自由に再起動OK。**
-
-## サンドボックスの再起動（コード変更を反映）
-
-```bash
-curl -X POST http://127.0.0.1:9000/api/v1/sandbox/restart
-```
-
-ダンコアは生きたまま、サンドボックスだけが再起動する → ユーザーとのチャットセッションは維持される。
-変更が `app/sandbox/` 配下や `app/api/`, `app/services/`, `app/models/` に及ぶ場合は再起動して反映する。
-変更が `app/core/` や `app/agent/` 配下に及ぶ場合は **ダンコア自体の再起動が必要**。
-
-- 読み手が**ダン自身**なら：再起動すると自分が死ぬので避ける（必要ならユーザーに依頼）。
-- 読み手が**外部開発CLI**なら：自分でコアを再起動して反映してよい（死なない）。安全手順は MEMORY.md の `project_dan_core_restart_by_dev_cli` 参照。
-
-## 変更種類と検証方法
-
-| 変更種類 | 検証方法 |
-|---------|---------|
-| UI変更(フロントエンド) | ブラウザで画面確認 + スクショ |
-| API変更(バックエンド) | sandbox restart後 port 8000 にcurl |
-| ロジック修正 | sandbox restart後 port 8000 にcurlで結果確認 |
-| スキル定義変更 | SKILL.mdの内容確認 + スキル一覧APIで読み込み確認 |
-| リファクタリング | 既存の動作が壊れていないことをAPIまたはブラウザで確認 |
-| DB変更 | SQLファイル作成のみ。動作確認は不要（手動適用のため） |
-
-## デプロイフロー（テスト完了後）
-
-### Scope規律を確認する（commit前・必須）
-
-このプロジェクトは **1 commit = 1 scope** が pre-commit hook と CI で物理強制されている。守らない commit は技術的に作成できない。
-
-- `python scripts/scope_diff.py --working` で変更の scope を確認
-- ダン infra（`app/**`, `.claude/**` 等）と 成果物（`artifacts/<slug>/**`）を**同じ commit に混ぜない**
-- 違う scope が混在していたら、scope ごとに `git add <path>` を分けて別 commit にする
-- 詳細は `CLAUDE.md` の「Scope規律」節を参照
-
-### デプロイ手順
-
-> **読み手で分岐**：ダン自身（リモート）は main へ直接 push する運用。外部開発CLI（ローカル）は `CLAUDE.md` の PR方式（branch → PR → merge）に従う。以下はダン自身向けの直push手順。
-
-1. **他のアクティブセッションを確認する**
-   - `GET /api/v1/chat/dan/sessions/active-list` で全アクティブセッション取得
-   - 自分自身のセッション以外にactive=trueがなければ安全
-2. **アクティブなセッションがある場合**
-   - 最大10分待機（30秒間隔でポーリング）
-   - 10分経っても空かない場合はユーザーに報告して判断を仰ぐ
-3. **全セッションがidleになったら**
-   - `git add → git commit → git push origin main`
-   - auto_deploy.py が約30秒で検知・反映
-   - 「pushしました。約30秒で自動反映されます」と報告
-
-## テスト用アカウント
-
-- メール: `dan-test@example.com`
-- パスワード: `DanTest2026x`
-- ユーザーID: `1f53bb2a-51da-4a2a-be9e-4c5a0f74d5f1`
-- 用途: API動作確認用（curl等でログインしてトークン取得）
-
-## アクション
-
-- [modify-and-test](actions/modify-and-test.md) — コード変更からテスト完了まで
-- [deploy](actions/deploy.md) — テスト完了後のデプロイ手順
-
-## 注意事項
-
-- フロントエンドのみの変更は Next.js HMR で即反映されるので再起動不要
-- バックエンド変更時は `curl -X POST http://127.0.0.1:9000/api/v1/sandbox/restart` で反映
-- ダンコア (port 9000) を再起動してはいけない（自分が死ぬ）
+Commit and publish within existing authorization; use the actual origin and separate scopes. Do not treat old action documents as a mandatory deployment sequence.

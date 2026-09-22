@@ -1,6 +1,6 @@
 ---
 name: email-send
-description: ユーザーに頼まれてメールを送る時に使う。送信と同時に返信照合用の記録を残すので、相手から返信が来たらダンが「この件の返信だ」と気づいて通知タブに返信案を出せる。取引先・クライアント・問い合わせ相手などへのメール送信、アウトリーチ、連絡、依頼メールに使用。NOT for フォーム問い合わせへの返信（それは通知タブの提案を承認するだけで送信される）。
+description: "Send authorized email and record it for reply matching. Form replies use the notification workflow."
 ---
 
 # email-send スキル

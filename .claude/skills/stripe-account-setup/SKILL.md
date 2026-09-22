@@ -1,6 +1,6 @@
 ---
 name: stripe-account-setup
-description: Create a brand-new, dedicated Stripe account for a business/project via the browser, end-to-end (signup, business onboarding, dashboard), AND complete LIVE activation (identity-document upload + the Japanese PCI security-checklist declaration). Use when the user wants a separate Stripe account per business ("1事業=1アカウント"), a new payment account for a project, to activate live/本番 payments, to submit 本人確認書類, to fill the セキュリティ・チェックリスト/セキュリティ対策措置状況申告書, or to stop a new brand's checkout from showing a previous business's name. Covers the non-obvious bits: Stripe's random-password requirement, the Arkose image CAPTCHA handed to a human, self-managed payments to avoid the +3.5% Managed Payments fee, uploading an ID via a side Playwright (no-camera file-upload fallback), and driving the checklist's React `<select>`s that ignore programmatic value-setting.
+description: "Create or activate a Stripe payment account when that account operation is requested."
 ---
 
 # Stripe Account Setup (new account per business)

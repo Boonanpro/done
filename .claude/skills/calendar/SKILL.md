@@ -1,6 +1,6 @@
 ---
 name: calendar
-description: Googleカレンダーの予定確認・空き時間チェック・予定作成に使う。メールやチャットで日程が確定したら予定を登録、相手に日時を提案する前に自分の空きを確認、今日/今週の予定を聞かれたら一覧する。連携先は運用者のGoogleカレンダー(shub6923)。打ち合わせ・アポ・MTG・スケジュール・予定・リマインド・日程調整に使用。
+description: "Read availability and manage Google Calendar events for scheduling requests."
 ---
 
 # calendar スキル

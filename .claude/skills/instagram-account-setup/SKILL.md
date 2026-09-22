@@ -1,6 +1,6 @@
 ---
 name: instagram-account-setup
-description: Create and fully build out an Instagram account for a project — open the account, pass email/SMS verification, set username, bio, profile icon, and convert to a professional (business) account. Use when the user wants a new Instagram account for a brand/project, an IG presence, or "プロジェクトのインスタを作って". Covers the non-obvious tricks: in-browser file-input injection for the icon (no OS dialog), email-OTP signup, and username availability checking via the Accounts Center.
+description: "Create and configure an Instagram account when account setup is requested."
 ---
 
 # Instagram Account Setup
@@ -18,7 +18,7 @@ End-to-end playbook for standing up a brand Instagram account and building the p
 ## Verification method (decide first)
 
 - **Prefer EMAIL signup** over phone. Email OTP is readable via `browser(action="wait_for_otp_from_app", source="email", email_address="<inbox>")` **if that inbox has an app password set** (if not, the tool returns one-time setup guidance to relay). Phone SMS via the Android APK forwarding sometimes fails to forward — email is more reliable.
-- If using phone: `wait_for_otp_from_app` (default sms). If it doesn't arrive in ~60s, ask the user for the code; the SMS challenge screen resets if you wait too long (code dies → resend once).
+- If using phone: `wait_for_otp_from_app` (default sms). SMS can take minutes to arrive; the tool waits up to the code's validity (default 300s) — do not ask the user for the code before that. If the code died, resend once.
 
 ## Workflow
 

@@ -1,17 +1,6 @@
 ---
 name: meta-ads
-description: |
-  Run real Meta (Instagram/Facebook) advertising and Instagram organic posting
-  through the Meta Marketing API / Graph API. Use when the user wants to actually
-  launch/publish/operate ads on Instagram or Facebook (not just plan them):
-  create campaigns/ad sets/ads, publish (start spend), pause, pull performance
-  (spend/CTR/CPA), adjust budgets, or post organically to an Instagram business
-  account. Multi-tenant: one operator-owned Meta App, each client connects their
-  own ad account. Chain with creative-studio / media-gen / higgsfield-generate
-  for the creative, and dry-test-launcher to prepare the campaign before launch.
-  NOT for: Google Ads or TikTok ads (not yet built), generating images/videos
-  (use the creative skills), or pure campaign planning with no intent to publish
-  (use dry-test-launcher).
+description: "Operate Meta ad campaigns or Instagram publishing when those external actions are requested."
 allowed-tools: Bash
 ---
 

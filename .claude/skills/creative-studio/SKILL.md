@@ -1,6 +1,6 @@
 ---
 name: creative-studio
-description: Creative production router for Dan. Use when the user asks for videos, ads, UGC, product/service promos, app demos, film-like shorts, anime-style clips, AI avatar content, story/reel/TikTok/Instagram creatives, aspect-ratio variants, or broad requests like "こういう動画作って" that require choosing between direction, generation, editing, color, LUT, and delivery workflows.
+description: "Choose a production approach for an open-ended creative video brief."
 ---
 
 # Creative Studio

@@ -1,6 +1,6 @@
 ---
 name: supabase-ddl
-description: Supabase の DDL (CREATE TABLE / ALTER TABLE 等) を Management API 経由で自動実行する。マイグレーションファイルをユーザーにコピペさせずに適用したい時に使う。
+description: "Apply Supabase schema migrations through the Management API."
 ---
 
 # supabase-ddl スキル

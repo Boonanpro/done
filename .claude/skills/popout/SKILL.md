@@ -1,15 +1,6 @@
 ---
 name: popout
-description: |
-  Turn a talking-head video into a "frame-break / pop-out" short — the subject's
-  head and shoulders break out over the top edge of a rounded card, floating in 3D
-  over a background. Use when the user says "飛び出し", "枠から飛び出す", "pop out",
-  "frame break", "頭が飛び出す切り抜き", "rourke風/両パターン風の切り抜き", or wants
-  the Higgsfield/IG-style 3D cutout look on real footage. Local-only, NO API credits
-  (human matting runs on the local GPU). This is mode ① of the 両パターン effort.
-  NOT for: changing the shooting environment/lighting on real footage (that is
-  video-to-video edit = fal Kling O1 Edit, see media-gen), photo+audio talking
-  avatars (fal OmniHuman), or full-AI generation (higgsfield-generate).
+description: "Create the specific frame-break cutout effect from talking-head footage."
 argument-hint: "<input-video> [--intensity dramatic|mid|subtle] [--no-shadow] [--bg <image>] [--start S --duration D]"
 allowed-tools: Bash
 ---

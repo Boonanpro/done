@@ -1,6 +1,6 @@
 ---
 name: dry-test-launcher
-description: Plan and prepare small-budget demand-validation campaigns for new services or offers. Use when the user says they want a dry test, demand test, ad test, landing page test, monitor recruitment, waitlist test, Instagram/TikTok/X ads test, or wants DAN/Codex to prepare ad launch materials and an approval checklist before spending money.
+description: "Prepare a small demand-validation campaign when the user requests a market or ad test."
 ---
 
 # Dry Test Launcher

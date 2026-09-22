@@ -1,6 +1,6 @@
 ---
 name: video-direction
-description: Video planning and direction skill. Use for scripting, storyboards, shot lists, creative direction, UGC hooks, product/service ads, operation demos, tutorials, film-like shorts, anime-style clips, avatar scenes, reference-driven motion plans, and deciding what should be real capture, AI-generated, or composited.
+description: "Develop a video script, storyboard or visual direction when creative planning is needed."
 ---
 
 # Video Direction

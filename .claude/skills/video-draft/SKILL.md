@@ -1,6 +1,6 @@
 ---
 name: video-draft
-description: ダンのエディターで新しい動画の意図・参考・試作・仕上げをつなぐ制作ガイド。既存作品への具体的な修正はtimelineツールとeditor_helpで直接実行でき、ヒアリングをやり直さない。
+description: "Create a new video draft in the Dan editor; specific edits use timeline tools directly."
 ---
 
 # 動画の下書きと部分修正（video-draft）

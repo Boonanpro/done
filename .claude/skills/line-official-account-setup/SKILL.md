@@ -1,6 +1,6 @@
 ---
 name: line-official-account-setup
-description: Create and fully configure a LINE Official Account (LINE公式アカウント) for a project — open the account, pass SMS verification, set the greeting (あいさつ) message with a link, and build a rich menu (リッチメニュー). Use when the user wants a LINE official account, a LINE receptacle/funnel for a project, a friend-add link, an auto-reply on friend-add, a rich menu, or "プロジェクトごとにLINEを作る". Covers the non-obvious trick that the rich-menu image must be set via the Messaging API, not the browser uploader.
+description: "Create or configure a LINE Official Account, greeting and rich menu."
 ---
 
 # LINE Official Account Setup
@@ -38,7 +38,7 @@ End-to-end playbook for standing up a LINE Official Account (公式アカウン�
 
 ### 2. SMS verification (電話番号認証)
 1. On 「SMS認証を行う」, enter the user's phone number, send once.
-2. Auto-fill the code with `browser(action="wait_for_otp_from_app", ref=<code field>, press_enter=false, timeout_seconds=30)` — the Android APK forwards the OTP without exposing it. Then click 確認する.
+2. Auto-fill the code with `browser(action="wait_for_otp_from_app", ref=<code field>, press_enter=false)` — the Android APK forwards the OTP without exposing it. Then click 確認する.
 3. If the page reset and the code field is gone, the code is dead — re-send once and wait again. If no OTP arrives, keep the page open and ask the user for the code; never close the browser or spam re-send (Akamai/CAPTCHA risk).
 
 ### 3. Greeting message (あいさつメッセージ)

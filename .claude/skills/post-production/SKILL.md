@@ -1,6 +1,6 @@
 ---
 name: post-production
-description: Video finishing skill for editing, reframing, aspect-ratio conversion, subtitles, audio, color grading, LUT creation/application, compression, exports, privacy blur/redaction (ぼかし・モザイク・個人情報の秘匿), and quality checks. Use when the user asks to edit footage, make vertical/horizontal versions, create social variants, color grade, apply/make LUTs, resize/crop/blur-fill/extend videos, blur or mosaic sensitive information in a video (名前・顔・個人情報を隠す/ぼかす), or finish generated/captured clips.
+description: "Finish existing footage: reframe, captions, audio, grade, redaction or export."
 ---
 
 # Post Production

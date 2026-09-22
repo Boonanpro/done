@@ -1,6 +1,6 @@
 ---
 name: instagram-dm
-description: InstagramのDMを送る。送信後は必ず台帳に記録して、相手の返信を自動検知できるようにする。
+description: "Send authorized Instagram DMs and record delivery for reply tracking."
 ---
 
 # Instagram DM 送受信

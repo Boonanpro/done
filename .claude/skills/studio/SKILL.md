@@ -1,6 +1,6 @@
 ---
 name: studio
-description: Screen capture, browser operation demos, and existing Remotion project editing with Dan studio tools. Use when these capabilities are needed. Ordinary Dan editor clip placement, trimming, captions and audio changes use its timeline tools directly.
+description: "Capture real screens, record browser demos or edit an existing Remotion project."
 ---
 
 # studio
