@@ -22,6 +22,7 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
     queryKey,
     queryFn: () => api.dan.getSessionModel(roomId),
     staleTime: 60_000,
+    refetchOnWindowFocus: 'always',
   });
 
   const mutation = useMutation({
@@ -29,6 +30,12 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
     onSuccess: (res) => {
       queryClient.setQueryData(queryKey, res);
       const label = res.options.find((o) => o.id === res.effective_model)?.label ?? res.effective_model;
+      if (res.selected_model && res.selected_model !== res.effective_model) {
+        toast.error('選択したモデルと実行予定のモデルが一致していません', {
+          description: `実行予定: ${label}。もう一度選択してください`,
+        });
+        return;
+      }
       toast.success(`次の返答から ${label} で動きます`, {
         description: '会話・記憶・人格はそのまま引き継がれます',
       });
@@ -57,7 +64,9 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
     >
       <span className="hidden sm:inline">{isCodex ? 'GPT' : 'Claude'}</span>
       <select
-        value={current}
+        aria-label="チャットのモデル"
+        aria-busy={mutation.isPending}
+        value={mutation.isPending ? mutation.variables : current}
         disabled={!data.can_switch || mutation.isPending}
         onChange={(e) => mutation.mutate(e.target.value)}
         className="max-w-[9.5rem] cursor-pointer bg-transparent text-xs outline-none disabled:cursor-not-allowed"
@@ -73,6 +82,7 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
           </option>
         )}
       </select>
+      {mutation.isPending && <span role="status">切り替え中…</span>}
     </label>
   );
 }

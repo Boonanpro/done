@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
+import { refreshSession, SessionRefreshError } from '@/lib/session-refresh';
 import { api, ApiError, OWNER_USER_ID, recordLogoutReason, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
 
 /** Collect all collab guest tokens from localStorage */
@@ -39,19 +40,9 @@ export function useAuth() {
           return;
         } catch (error) {
           if (error instanceof ApiError && error.status === 401) {
-            // Token expired, try to refresh
-            try {
-              const refreshResponse = await api.auth.refresh();
-              setToken(refreshResponse.access_token);
-              const userData = await api.auth.me();
-              setUser(userData);
-              return;
-            } catch {
-              // Refresh failed, clear auth
-              recordLogoutReason('checkauth-refresh-failed');
-              setUser(null);
-              setToken(null);
-            }
+            // The API client already attempted a shared cookie refresh.
+            setUser(null);
+            setToken(null);
           } else {
             // 401以外の失敗（サーバー再起動中・ネットワーク断・一時的な5xx）では
             // ログアウトしない。トークンが無効な時だけ上の401分岐でクリアされる。
@@ -69,9 +60,18 @@ export function useAuth() {
           setToken(raw);
           return; // token が入ったので次のeffectで通常の検証が走る
         }
-        recordLogoutReason('checkauth-no-token');
-        setUser(null);
-        setLoading(false);
+        // Cookies are shared across localhost ports; localStorage is not.
+        try {
+          await refreshSession(value => {
+            setStoredToken(value);
+            setImmediateToken(value);
+            setToken(value);
+          });
+          setUser(await api.auth.me());
+        } catch (error) {
+          if (error instanceof SessionRefreshError && error.status === 401) setUser(null);
+          setLoading(false);
+        }
       }
     };
 

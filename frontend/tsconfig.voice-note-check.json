@@ -1,0 +1,1 @@
+{"extends": "./tsconfig.json", "include": ["next-env.d.ts", "src/app/artifacts/voice-note/**/*.ts", "src/app/artifacts/voice-note/**/*.tsx", "src/app/api/voice-note/**/*.ts"], "exclude": ["node_modules", ".next", ".next-preview", ".next-prod"], "compilerOptions": {"incremental": false}}

@@ -30,6 +30,7 @@ export function SliderInput({
         <div className="flex items-center gap-0.5">
           <input
             type="number"
+            aria-label={`${label}（数値）`}
             value={value}
             min={min}
             max={max}

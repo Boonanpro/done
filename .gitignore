@@ -191,6 +191,9 @@ tests/**/screenshot_*.png
 # done-artifacts へ commit&push して公開する。infra扱いの layout.tsx/_seo/
 # publish/[slug] は追跡継続（下で除外）。
 /frontend/src/app/artifacts/*/
+!/frontend/src/app/artifacts/editable-lp-lab/
+!/frontend/src/app/artifacts/floor-lp-compare/
+!/frontend/src/app/artifacts/floor-lp-native/
 !/frontend/src/app/artifacts/_seo/
 !/frontend/src/app/artifacts/publish/
 !/frontend/src/app/artifacts/\[slug\]/

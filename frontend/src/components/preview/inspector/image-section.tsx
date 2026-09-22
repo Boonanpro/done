@@ -148,11 +148,35 @@ export function ImageSection() {
               onChange={(e) => setAltDraft(e.target.value)}
               onBlur={applyAlt}
               placeholder="alt 説明"
+              aria-label="画像の説明"
               className="w-full rounded border border-border bg-input/30 px-1.5 py-0.5 text-xs"
             />
           )}
         </div>
       </div>
+
+      <form
+        key={`${key}:${currentSrc}`}
+        className="flex flex-col gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const url = String(new FormData(event.currentTarget).get('imageUrl') || '').trim();
+          if (url) applyUrl(url);
+        }}
+      >
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          画像のURL
+          <input
+            name="imageUrl"
+            defaultValue={currentSrc}
+            required
+            className="w-full rounded border border-input bg-background px-2 py-2 text-xs text-foreground"
+          />
+        </label>
+        <button type="submit" className="rounded-md border border-border px-3 py-2 text-xs font-medium hover:bg-muted">
+          この画像に差し替える
+        </button>
+      </form>
 
       <SelectInput
         label={isBg ? 'background-size' : 'object-fit'}

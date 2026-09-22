@@ -23,7 +23,7 @@ import { useRoomFeed } from '@/hooks/useRoomFeed';
  * だけ。中身（children）は各ページが描く。/chat 配下は MainLayout が
  * selectedProjectId に基づいて ProjectChatPanel を自前で出すので children を渡さない。
  */
-const SHELL_PREFIXES = ['/chat', '/collab', '/friends', '/notes', '/settings', '/today'];
+const SHELL_PREFIXES = ['/command-center', '/chat', '/collab', '/friends', '/notes', '/settings', '/today'];
 
 function shellFor(pathname: string) {
   // /collab/join/<token> は外部の相手（ゲスト）の窓口。オーナーの外枠にも認証ゲートにも

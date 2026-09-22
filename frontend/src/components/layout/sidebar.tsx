@@ -253,7 +253,7 @@ export function Sidebar({
   }, [projectsData, queryClient]);
 
   const filteredProjects = projectsData?.projects?.filter((p) =>
-    p.title.toLowerCase().includes(searchQuery.toLowerCase())
+    p.metadata?.role !== 'command_center' && p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
   // 部屋の切替はストアの selectedProjectId で描画が決まる（MainLayout）。
   // router.push だと Next が /chat/[projectId] の RSC を取りに行き、その往復
@@ -325,22 +325,6 @@ export function Sidebar({
       >
         {/* Header */}
         <div className="flex items-center h-14 px-3 border-b border-sidebar-border">
-          <AnimatePresence mode="wait" initial={false}>
-            {!isCollapsed && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="flex items-center gap-2"
-              >
-                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                  <span className="text-lg font-bold text-primary">D</span>
-                </div>
-                <span className="font-semibold text-sidebar-foreground">Done</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
           <div className={cn("flex items-center gap-1", isCollapsed ? "mx-auto" : "ml-auto")}>
             <Button
               variant="ghost"
@@ -357,6 +341,14 @@ export function Sidebar({
           </div>
         </div>
 
+        {isOwner && (
+          <button title="Done" onClick={() => { router.push('/command-center'); if (isMobile) onToggleCollapse(); }}
+            className={cn('mx-3 my-3 flex min-h-12 items-center gap-3 rounded-xl px-3 text-left font-medium',
+              pathname === '/command-center' ? 'bg-primary/10 text-primary' : 'hover:bg-sidebar-accent')}>
+            <span aria-hidden="true" className="text-xl">◎</span>
+            {!isCollapsed && <span>Done<span className="block text-xs font-normal text-muted-foreground">全体の確認・相談</span></span>}
+          </button>
+        )}
         {/* Search */}
         <AnimatePresence initial={false}>
           {!isCollapsed && (

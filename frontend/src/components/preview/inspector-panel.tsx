@@ -92,16 +92,18 @@ function TypographySection() {
   if (!cs) return null;
 
   const fontSize = parseNumericValue(cs.fontSize) ?? 16;
-  const lineHeight = cs.lineHeight === 'normal' ? 1.4 : parseNumericValue(cs.lineHeight) ?? 1.4;
+  // getComputedStyle returns pixels; the control writes a unitless multiplier.
+  const lineHeight = cs.lineHeight === 'normal' ? 1.4
+    : (parseNumericValue(cs.lineHeight) ?? fontSize * 1.4) / Math.max(1, fontSize);
   const letterSpacing = parseNumericValue(cs.letterSpacing) ?? 0;
   const fontWeight = parseNumericValue(cs.fontWeight) ?? 400;
 
   return (
     <section className="flex flex-col gap-2">
-      <SectionHeader title="Typography" />
+      <SectionHeader title="文字のデザイン" />
       <SliderInput label="font-size" value={fontSize} min={10} max={96} unit="px" onChange={(v) => setLive('font-size', `${v}px`)} />
       <SliderInput label="font-weight" value={fontWeight} min={100} max={900} step={100} onChange={(v) => setLive('font-weight', String(v))} />
-      <SliderInput label="line-height" value={typeof lineHeight === 'number' ? lineHeight : 1.4} min={1} max={3} step={0.05} onChange={(v) => setLive('line-height', String(v))} />
+      <SliderInput label="行間" value={Math.round(lineHeight * 100) / 100} min={0.8} max={3} step={0.05} onChange={(v) => setLive('line-height', String(v))} />
       <SliderInput label="letter-spacing" value={letterSpacing} min={-5} max={20} step={0.5} unit="px" onChange={(v) => setLive('letter-spacing', `${v}px`)} />
       <ColorInput label="color" value={cs.color || ''} onChange={(v) => setLive('color', v)} />
       <ToggleGroup
@@ -156,7 +158,7 @@ function TextContentEditor({ elementKey, initialText }: { elementKey: string; in
 
   return (
     <section className="flex flex-col gap-2">
-      <SectionHeader title="Text" />
+      <SectionHeader title="テキスト" />
       <textarea
         value={value}
         onChange={(event) => {

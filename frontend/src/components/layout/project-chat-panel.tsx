@@ -69,6 +69,7 @@ import { ProductionWorkspace } from '@/components/production/production-workspac
 
 interface ProjectChatPanelProps {
   projectId: string;
+  commandCenter?: boolean;
 }
 
 const INITIAL_CHAT_RENDER_COUNT = 80;
@@ -1941,7 +1942,7 @@ function mergeFreshMessages(
   return { messages: merged };
 }
 
-export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
+export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const isMobile = useIsMobile();
@@ -2043,7 +2044,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => api.projects.get(projectId),
-    enabled: !!projectId && queriesReleased,
+    // On a fresh browser there is no room ID yet. Fetch the project first:
+    // the bundled room request cannot start until this lookup finishes.
+    enabled: !!projectId && (queriesReleased || !queryClient.getQueryData<ProjectResponse>(['project', projectId])?.room_id),
     // サイドバーの一覧キャッシュには room_id を含む同型のプロジェクトが既に
     // あるので、それを種にして即座に立ち上げる。これが無いと「プロジェクト
     // 取得→room_id判明→メッセージ取得」の直列2段になり、1段目の間は
@@ -2060,6 +2063,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   });
 
   // 部屋を開く一式を1往復で取り、各クエリのキャッシュへ一括投入する。
+  useEffect(() => {
+    if (!commandCenter && project?.metadata?.role === 'command_center') {
+      router.replace('/command-center');
+    }
+  }, [commandCenter, project?.metadata?.role, router]);
+
   // 従来は project / messages / artifacts / active / current-run / execution-events を
   // 別々に投げ、実行中の部屋では一番遅い1本（events 500件 ≒1s）が切替時間を決めていた。
   // 束ね応答が届くまで個別クエリは止めておき（二重取得しない）、届いたら解放する。
@@ -2422,7 +2431,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         event: 'room-open-visible',
         ms: performance.now() - start,
         room_id: project?.room_id ?? null,
-        extra: { from_click: roomClickStart(projectId) != null, messages: messagesData?.messages?.length ?? 0, open: openState },
+        extra: { from_click: roomClickStart(projectId) != null, messages: messagesData?.messages?.length ?? 0, open: openState, mount_delay: Math.round(mountAtRef.current - start), render: Math.round(performance.now() - mountAtRef.current) },
       });
     });
   }, [isBooting, projectId, project?.room_id, messagesData?.messages?.length, openState]);
@@ -2675,8 +2684,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       }`}
       style={!isMobile && isPreviewOpenForProject ? { width: chatWidth } : undefined}
     >
-      <div className="flex shrink-0 items-center gap-3 border-b border-border py-3 pl-12 pr-16 md:pl-4 md:pr-16">
-        <FolderKanban className="h-5 w-5 shrink-0 text-primary" />
+      <div className={`flex shrink-0 items-center border-b border-border py-3 ${commandCenter ? 'flex-wrap gap-2 px-4 [&>button]:min-h-11' : 'gap-3 pl-12 pr-16 md:pl-4 md:pr-16'}`}>
+        {!commandCenter && <FolderKanban className="h-5 w-5 shrink-0 text-primary" />}
         {artifacts.length > 0 && (
           <div className="relative shrink-0">
             <button
@@ -2801,7 +2810,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </button>
         )}
         {project?.room_id && <ModelSwitcher roomId={project.room_id} />}
-        <div className="min-w-0 flex-1">
+        <div className={`min-w-0 flex-1 ${commandCenter ? 'hidden' : ''}`}>
           {isLoading ? (
             <div className="flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />

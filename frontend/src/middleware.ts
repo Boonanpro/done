@@ -135,7 +135,7 @@ export async function middleware(request: NextRequest) {
   // ホスト解決: 静的マップ → 納品ホスト → DB 由来の動的マップ の順に確認する。
   // 静的マップ / 納品ホストで決まる場合は外部 fetch を避ける。
   let customDomainSlug: string | null = dedicatedArtifactSlug ?? STATIC_DOMAIN_TO_ARTIFACT.get(host) ?? deliverySlug ?? null;
-  if (!customDomainSlug) {
+  if (!customDomainSlug && isCustomDomainHost(host)) {
     const dynamicMap = await fetchDynamicDomainMap(request.nextUrl.origin);
     customDomainSlug = dynamicMap[host] ?? null;
   }

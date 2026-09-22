@@ -157,6 +157,9 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/.gitignore",
     "frontend/package.json",
     "frontend/tsconfig.json",
+    "frontend/tsconfig.*.json",   # type-check variants (voice-note-check etc.)
+    "frontend/.vercelignore",
+    "frontend/public/*-worklet.js",   # audio worklets of the voice transports (atom / gemini)
     "frontend/tailwind.config.*",
     "frontend/postcss.config.*",
     "frontend/eslint.config.*",

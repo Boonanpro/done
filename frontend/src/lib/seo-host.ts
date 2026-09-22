@@ -19,7 +19,9 @@ const DELIVERY_HOST_SUFFIX = '-done.vercel.app';
 
 /** Host ヘッダからポートを落として小文字化する。 */
 export function normalizeHost(rawHost: string | null | undefined): string {
-  return (rawHost || '').split(':')[0].trim().toLowerCase();
+  const host = (rawHost || '').trim().toLowerCase();
+  if (host.startsWith('[')) return host.slice(1, host.indexOf(']'));
+  return host.split(':')[0];
 }
 
 export function isLocalHost(host: string): boolean {
@@ -43,6 +45,8 @@ export function deliverySlugFromHost(host: string): string | null {
 export function isCustomDomainHost(host: string): boolean {
   if (!host) return false;
   if (isLocalHost(host)) return false;
+  // LAN/Tailscale IPs and IPv6 literals are Dan hosts, not custom domains.
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) return false;
   if (host.endsWith('.vercel.app') || host === 'vercel.app') return false;
   return true;
 }
