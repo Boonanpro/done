@@ -1,4 +1,5 @@
 'use strict';
+const LIVE_VOICE=typeof connectLive==='function'&&new URLSearchParams(location.search).get('voice')!=='realtime';
 const $ = id => document.getElementById(id), base = '/api/v1/editor-assistant';
 let context=null, pc=null, dc=null, mic=null, audio=null, turn=null, connecting=null;
 let busy=false, micOn=false, generation=0, epoch=0, answer=null, active=false;
@@ -11,6 +12,9 @@ const audioTurns=new Map(), pendingTranscripts=new Map();
 const speechItems=new Map();
 const transcriptWaiters=new Map(), completionNotices=[];
 let audioPlaying=false;
+const visibleToolWork=new Map();
+let reasoningProgress=null;
+let workObservedAt=0,workOutcome=null,workOutcomeAt=0;
 let pendingQuestion=null,activeNotice=null,noticeRetryAt=0;
 let lastNoticeBlock='';
 let notificationsPaused=false,waitingForUser=false;
@@ -27,28 +31,31 @@ let contextItems=[],pictureItems=[],retryTimer=null,retryCount=0;
 let renewing=false,connectedAt=0;
 const conversationMemory=[];
 let recoveryId=0;
+function conversationKey(c=context){return 'editor-conversation:'+c.room_id+':'+(c.content_id||'library');}
 function saveConversation(){
   if(!context?.room_id)return;
-  try{localStorage.setItem('editor-conversation:'+context.room_id,JSON.stringify({notificationPolicy:2,trackedJobs:[...jobs.keys()],notices:activeNotice?[activeNotice,...completionNotices]:completionNotices,messages:conversationMemory,content_id:context.content_id,previousTurn,notificationsPaused,waitingForUser}));}catch(e){recordStorageFailure(e);}
+  const owner=typeof liveEditingContext==='function'?liveEditingContext():context;
+  try{localStorage.setItem(conversationKey(owner),JSON.stringify({notificationPolicy:2,trackedJobs:[...jobs.keys()],notices:activeNotice?[activeNotice,...completionNotices]:completionNotices,messages:conversationMemory,content_id:owner.content_id,previousTurn,notificationsPaused,waitingForUser}));}catch(e){recordStorageFailure(e);}
 }
 function recordStorageFailure(e){audit.push({at:new Date().toISOString(),type:'history_storage_error',message:String(e)});}
 function restoreConversation(room){
   try{
-    const saved=JSON.parse(localStorage.getItem('editor-conversation:'+room)||'null');
+    let saved=JSON.parse(localStorage.getItem(conversationKey())||'null');
+    if(!saved){const legacy=JSON.parse(localStorage.getItem('editor-conversation:'+room)||'null');if(legacy?.content_id===context.content_id)saved=legacy;}
     if(saved){conversationMemory.push(...(saved.messages||[]).slice(-200));notificationsPaused=saved.notificationPolicy===2&&!!saved.notificationsPaused;for(const id of saved.trackedJobs||[])jobs.set(id,{room});completionNotices.push(...(saved.notices||[]));for(const n of saved.notices||[])if(n.kind==='question')seenQuestions.add(n.question_id);waitingForUser=!!saved.waitingForUser;
       if(saved.content_id===context.content_id)previousTurn=saved.previousTurn||null;}
   }catch(e){recordStorageFailure(e);}
 }
-function endTone(){
+function endTone(incoming=false){
   try{
     const a=new AudioContext();const o=a.createOscillator(),g=a.createGain();
-    o.connect(g);g.connect(a.destination);o.frequency.setValueAtTime(660,a.currentTime);o.frequency.exponentialRampToValueAtTime(330,a.currentTime+.22);
+    o.connect(g);g.connect(a.destination);o.frequency.setValueAtTime(incoming?440:660,a.currentTime);o.frequency.exponentialRampToValueAtTime(incoming?660:330,a.currentTime+.22);
     g.gain.setValueAtTime(.12,a.currentTime);g.gain.exponentialRampToValueAtTime(.001,a.currentTime+.3);
     o.start();o.stop(a.currentTime+.3);o.onended=()=>a.close();a.resume().catch(()=>{});
   }catch(e){record('end_tone_error',{message:String(e)});}
 }
 function record(type,data={}){
-  audit.push({at:new Date().toISOString(),type,epoch,turn_id:turn?.turn_id,content_id:context?.content_id,...data});
+  audit.push({at:new Date().toISOString(),type,epoch,turn_id:turn?.turn_id,room_id:context?.room_id,content_id:context?.content_id,...data});
   if(type==='assistant_transcript'&&data.text)waitingForUser=false;
   if(['user_transcript','assistant_transcript'].includes(type)&&data.text){
     conversationMemory.push({role:type==='user_transcript'?'user':'assistant',text:data.text});
@@ -91,9 +98,20 @@ function message(text,kind='system'){
   $('log').append(el); $('log').scrollTop=$('log').scrollHeight; return el;
 }
 function state(text){ $('state').textContent=text; }
-let errorToast='';
-function clearResponseError(){if(errorToast&&$('toast').textContent===errorToast)$('toast').textContent='';errorToast='';}
-function error(e){record('error',{message:e.message||String(e)});message(e.message||String(e),'error'); state('操作を完了できませんでした');errorToast=e.message||String(e);$('toast').textContent=errorToast;document.body.dataset.agent='error'; }
+let errorToast='',toastTimer;
+function clearToast(){clearTimeout(toastTimer);$('toast').replaceChildren();errorToast='';}
+function showToast(text){
+ clearToast();$('toast').textContent=text;
+ if(text)toastTimer=setTimeout(clearToast,5000);
+}
+function clearResponseError(){if(errorToast)clearToast();}
+function error(e){
+ const raw=e.message||String(e);record('error',{message:raw});
+ const text=/Permission dismissed/i.test(raw)?'権限の確認が閉じられました。必要な操作をもう一度試せます。':raw;
+ showToast(text);errorToast=text;
+ const close=document.createElement('button');close.textContent='閉じる';close.onclick=()=>{clearToast();state(micOn?'聞いています':'マイクを押して、話しかけてください');};$('toast').append(close);
+ state('操作を完了できませんでした');
+}
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function token(refresh=false){
   const previous=authVersion;
@@ -104,6 +122,12 @@ async function token(refresh=false){
   }
   throw Error('エディターのログイン情報を受け取れませんでした。エディターを開き直してください。');
 }
+async function readApiResponse(r){
+  const raw=await r.text();let value;
+  try{value=JSON.parse(raw);}catch{throw Error(`サーバーから正常な応答がありません (${r.status})。接続し直してください。`);}
+  if(!r.ok)throw Error(r.status===401?'ログイン情報が無効です。アプリからエディターを開き直してください。':typeof value.detail==='string'?value.detail:`接続エラー (${r.status})`);
+  return value;
+}
 async function request(url,body,method='POST'){
   for(let attempt=0;attempt<2;attempt++){
     const key=await token(attempt===1);
@@ -111,9 +135,7 @@ async function request(url,body,method='POST'){
       signal:AbortSignal.timeout(45000),
       ...(method==='GET'?{}:{body:JSON.stringify(body)})});
     if(r.status===401 && attempt===0) continue;
-    const value=await r.json();
-    if(!r.ok) throw Error(r.status===401?'ログイン情報が無効です。アプリからエディターを開き直してください。':typeof value.detail==='string'?value.detail:`接続エラー (${r.status})`);
-    return value;
+    return readApiResponse(r);
   }
 }
 const api=(path,body)=>request(base+path,body);
@@ -130,18 +152,18 @@ window.__updateEditorContext=c=>{
   if(context?.room_id===c.room_id && context.content_id && !c.content_id)
     c={...c,content_id:context.content_id,editor_visible:false,selected:[],visible_targets:[],pointer:{}};
   const roomChanged=context && context.room_id!==c.room_id;
+  const newConversation=context&&context.content_id!==c.content_id&&!(LIVE_VOICE&&(liveConnection?.started||livePausedContext));
   if(context && (context.content_id!==c.content_id || context.room_id!==c.room_id)){
     saveConversation();
-    pendingQuestion=null;
-    presentationId=null;clearProposalPlayers();$('reference-cards').replaceChildren();document.body.classList.remove('has-references');
-    if(roomChanged){disconnect('room_changed');jobs.clear();announcedJobs.clear();seenQuestions.clear();completionNotices.length=0;conversationMemory.length=0;$('log').replaceChildren();notificationsPaused=false;waitingForUser=false;}
-    else if(busy||active)interrupt().catch(error);
+    if(roomChanged||!LIVE_VOICE){pendingQuestion=null;presentationId=null;resetPresentationFeed();document.body.classList.remove('has-references');}
+    if(roomChanged||newConversation){if(roomChanged)disconnect('room_changed');jobs.clear();announcedJobs.clear();seenQuestions.clear();completionNotices.length=0;activeNotice=null;conversationMemory.length=0;$('log').replaceChildren();notificationsPaused=false;waitingForUser=false;previousTurn=null;targetTurn=null;pendingQuestion=null;resetPresentationFeed();}
+    else if(!LIVE_VOICE&&(busy||active))interrupt().catch(error);
     record('editor_context_changed',{from:context.content_id,to:c.content_id,room_changed:!!roomChanged});
-    targetTurn=null; previousTurn=null; $('scope').value=c.content_id===pendingNewId?'whole':'selected'; pendingNewId=null;
-    $('brief').textContent='会話で決めた内容をここに残します。';
+    if(roomChanged||!LIVE_VOICE){targetTurn=null; previousTurn=null; $('scope').value=c.content_id===pendingNewId?'whole':'selected'; pendingNewId=null;
+      $('brief').textContent='会話で決めた内容をここに残します。';}
   }
-  const restore=!context||roomChanged;
-  context=c; if(!busy)target(c);
+  const restore=!context||roomChanged||newConversation;
+  context=c; if(LIVE_VOICE)liveObserve(c); if(!busy)target(c);
   if(restore)restoreConversation(c.room_id);
   $('edit-view').disabled=!c.content_id;
   if(window.__autoStartVoice&&!startingVoice){window.__autoStartVoice=false;startVoiceStage().catch(error);}
@@ -173,7 +195,8 @@ async function interrupt(){
   activeNotice=null;audioPlaying=false;
   const old=turn; turn=null; epoch++; active=false; answer=null;
   if(dc?.readyState==='open'){
-    send({type:'response.cancel'}); send({type:'output_audio_buffer.clear'});
+    if(LIVE_VOICE)liveAppend('instructions','ユーザーから新しい指示が来たので、話を聞いてください。');
+    else{send({type:'response.cancel'});send({type:'output_audio_buffer.clear'});}
   }
   const canceled=await cancelTurn(old);
   if(canceled?.committed_count) nativeCommand('refresh');
@@ -183,6 +206,7 @@ async function begin(c,mode,text='',expected=epoch){
   const pointer=mode==='voice' && c.pointer && Date.now()-c.pointer.at_ms<10000 ? c.pointer : {};
   // Audit upload must never delay the next spoken instruction.
   flushAudit().catch(()=>{});
+  clearResponseError();
   const b=await api('/begin',{...c,pointer,reference_focus:referenceFocus,input_mode:mode,utterance:text,previous_turn:previousTurn,target_turn:mode==='voice'?targetTurn:null,scope_mode:$('scope').value});
   if(expected!==epoch){await cancelTurn(b);return null;}
   turn=b; previousTurn=b.turn_id; saveConversation(); b.mode=mode; target(c,true);
@@ -191,13 +215,14 @@ async function begin(c,mode,text='',expected=epoch){
   return b;
 }
 async function addContext(b,myEpoch){
+  if(LIVE_VOICE){liveAppend('thinking','現在の作品: '+b.context.content_id+'。提示や選択の詳細は制作担当が参照できます。');return;}
   for(const id of contextItems)send({type:'conversation.item.delete',item_id:id,event_id:'drop_'+id});
   contextItems=[];
   const contextId='ctx_'+crypto.randomUUID().replaceAll('-','').slice(0,24);contextItems.push(contextId);
   // UI state is background, never an additional user request or unsolicited image.
   for(const id of pictureItems)send({type:'conversation.item.delete',item_id:id,event_id:'drop_'+id});
   pictureItems=[];
-  send({type:'conversation.item.create',item:{id:contextId,type:'message',role:'system',content:[{type:'input_text',text:(waitingForUser?'今はユーザーが考えたり素材を探したりしている待機中です。独り言や考え途中の発話にはwait_for_userで無言を保ち、あなたへ向けた質問・依頼になった時に答えてください。\n':'')+'アプリの背景情報です。発言ではありません。画面・選択・過去の編集は必要な時にread_editor_contextで参照できます。referencesは候補一覧で通常は選んだ一つだけが表示されます。reference_focusが表示中の候補です。候補名や番号で説明します。説明を求められたことは意味しません。\n'+JSON.stringify({production:b.context.production,pending_question:pendingQuestion,waiting_for_user:waitingForUser,notifications_paused:notificationsPaused,references:b.context.presentation?.items,reference_focus:referenceFocus})}]}});
+  send({type:'conversation.item.create',item:{id:contextId,type:'message',role:'system',content:[{type:'input_text',text:(waitingForUser?'今はユーザーが考えたり素材を探したりしている待機中です。独り言や考え途中の発話にはwait_for_userで無言を保ち、あなたへ向けた質問・依頼になった時に答えてください。\n':'')+'アプリの背景情報です。発言ではありません。画面・選択・過去の編集は必要な時にread_editor_contextで参照できます。referencesは最新の提示です。reference_focusはユーザーが触れている提示で、過去の案の場合もあります。focused_presentation_itemがその実物の情報です。候補名や番号で説明します。説明を求められたことは意味しません。\n'+JSON.stringify({production:b.context.production,pending_question:pendingQuestion,waiting_for_user:waitingForUser,notifications_paused:notificationsPaused,references:b.context.presentation?.items,reference_focus:referenceFocus,focused_presentation_item:b.context.focused_presentation_item})}]}});
 }
 async function addPicture(image,label='合成した映像'){
   const budget=Math.min(pc?.sctp?.maxMessageSize||64000,64000)-4096;
@@ -250,6 +275,7 @@ function speechText(text){
     .replace(/[*`#]/g,'').replace(/^\s*[-+]\s+/gm,'').trim();
 }
 function queueSpeech(text,myEpoch){
+  if(LIVE_VOICE)return;
   text=speechText(text);
   if(!text.trim()||!micOn||myEpoch!==epoch)return;
   record('voice_chunk_queued',{characters:text.length,turn_id:turn?.turn_id});
@@ -270,20 +296,31 @@ async function runReasoning(){
   const controller=new AbortController();reasonController=controller;reasonRunning=true;setBusy(true);answer=null;
   let outputs=[],spokenBuffer='',fullText='';
   try{
-    for(let round=0;round<12;round++){
+    // A Codex dynamic tool yields once per call, including parallel reads.
+    // Counting those yields as reasoning rounds cut off valid edits at call 12.
+    while(myEpoch===epoch){
       state('考えています…');b.astraOutputs=[];
       const key=await token();
+      const requestStarted=Date.now();record('reasoning_request_started',{turn_id:b.turn_id,tool_results:outputs.length});
       const r=await fetch(base+'/reason',{method:'POST',credentials:'omit',signal:controller.signal,
         headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
         body:JSON.stringify({room_id:b.context.room_id,turn_id:b.turn_id,outputs,
-          runtime:{waiting_for_user:waitingForUser,notifications_paused:notificationsPaused,pending_question:pendingQuestion}})});
-      if(!r.ok){const v=await r.json();throw Error(v.detail||'会話に接続できませんでした');}
+          runtime:{voice_model:LIVE_VOICE?'gpt-live-1':null,waiting_for_user:waitingForUser,notifications_paused:notificationsPaused,pending_question:pendingQuestion,live_facts:LIVE_VOICE?liveFacts():null}})});
+      if(!r.ok)await readApiResponse(r);
+      record('reasoning_response_opened',{turn_id:b.turn_id,elapsed_ms:Date.now()-requestStarted});
       const reader=r.body.getReader(),decoder=new TextDecoder();let pending='',done=false,hasTools=false;
       async function consume(line){
         if(!line.trim())return;
         const event=JSON.parse(line);if(myEpoch!==epoch)throw new DOMException('Interrupted','AbortError');
         if(event.type==='error')throw Error(event.message);
-        if(event.type==='text'){
+        if(event.type==='progress'){
+          reasoningProgress={...event,at:Date.now()};record('reasoning_progress',event);
+        }else if(event.type==='message_complete'){
+          if(event.phase==='commentary'&&event.text?.trim()){
+            reasoningProgress={phase:'working',text:event.text.trim().replace(/\s+/g,' '),at:Date.now()};
+          }
+          if(LIVE_VOICE)liveBackendMessage(b,event);
+        }else if(event.type==='text'){
           if(!answer){answer=message('','assistant');record('reasoning_text_started',{turn_id:b.turn_id});}waitingForUser=false;answer.textContent+=event.delta;fullText+=event.delta;spokenBuffer+=event.delta;
           $('log').scrollTop=$('log').scrollHeight;
           const boundary=spokenBuffer.match(/^([\s\S]*?[。！？\n])([\s\S]*)$/);
@@ -291,7 +328,7 @@ async function runReasoning(){
         }else if(event.type==='tool'){
           queueSpeech(spokenBuffer,myEpoch);spokenBuffer='';
           await onEvent({type:'response.function_call_arguments.done',name:event.name,call_id:event.call_id,arguments:event.arguments,astra:true});
-        }else if(event.type==='done'){done=true;hasTools=event.has_tools;record('reasoning_response',{model:'gpt-6-astra',usage:event.usage});}
+        }else if(event.type==='done'){done=true;hasTools=event.has_tools;record('reasoning_response',{model:'gpt-6-astra',usage:event.usage,backend:event.backend,billing:event.billing,thread_id:event.thread_id});}
       }
       while(true){
         const part=await reader.read();pending+=decoder.decode(part.value||new Uint8Array(),{stream:!part.done});
@@ -301,15 +338,15 @@ async function runReasoning(){
       if(!done)throw Error('会話の接続が途中で切れました。指示は記録されています。');
       outputs=b.astraOutputs;
       if(!hasTools||b.silent){b.silent=false;break;}
-      if(round===11)throw Error('処理の確認が続いています。記録した実行結果から続けられます。');
     }
     queueSpeech(spokenBuffer,myEpoch);
   }finally{
-    if(fullText&&context?.room_id===b.context.room_id)record('assistant_transcript',{text:fullText,turn_id:b.turn_id,content_id:b.context.content_id,source:'gpt-6-astra'});
-    if(myEpoch===epoch){reasonRunning=false;reasonController=null;b.hadTools=false;setBusy(false);pumpSpeech();}
+    if((!LIVE_VOICE||b.liveText||!liveConnection?.started)&&fullText&&context?.room_id===b.context.room_id)record('assistant_transcript',{text:fullText,turn_id:b.turn_id,content_id:b.context.content_id,source:'gpt-6-astra'});
+    if(myEpoch===epoch){reasonRunning=false;reasonController=null;reasoningProgress=null;b.hadTools=false;setBusy(false);if(LIVE_VOICE)flushPresentationReports();pumpSpeech();}
   }
 }
 async function connect(){
+  if(LIVE_VOICE)return connectLive();
   if(dc?.readyState==='open')return;
   if(connecting)return connecting;
   const gen=generation;
@@ -359,7 +396,7 @@ async function recoverConnection(reason){
   const wanted=micOn;
   disconnect(reason,true);
   const id=++recoveryId;renewing=true;
-  $('toast').textContent='音声の接続が切れました。再接続しています…';endTone();
+  showToast('音声の接続が切れました。再接続しています…');endTone();
   try{
     for(let attempt=0;attempt<3;attempt++){
       await delay(1000*(attempt+1));if(id!==recoveryId)return;
@@ -367,10 +404,10 @@ async function recoverConnection(reason){
         await connect();if(id!==recoveryId)return;
         if(wanted)await toggleMic();if(id!==recoveryId)return;
         if(wanted&&!micOn)throw Error('マイクを再開できませんでした');
-        record('connection_recovered',{reason,attempt:attempt+1});$('toast').textContent='音声の接続が戻りました';return;
+        record('connection_recovered',{reason,attempt:attempt+1});showToast('音声の接続が戻りました');return;
       }catch(e){record('reconnect_failed',{attempt:attempt+1,message:String(e)});}
     }
-    if(id===recoveryId){disconnect('recovery_exhausted',true);$('toast').textContent='音声の接続が切れています。マイクを押すと会話の続きから再開できます。';endTone();}
+    if(id===recoveryId){disconnect('recovery_exhausted',true);showToast('音声の接続が切れています。マイクを押すと会話の続きから再開できます。');endTone();}
   }finally{renewing=false;}
 }
 async function renewSession(){
@@ -380,10 +417,10 @@ async function renewSession(){
   const renewalGeneration=generation;
   state('会話の接続を更新しています。制作は継続中です。');
   try{await connect();if(generation!==renewalGeneration)return;if(restoreMic)await toggleMic();record('session_renewed');}
-  catch(e){$('toast').textContent='音声の接続を更新できませんでした。マイクを押して再開してください。';endTone();throw e;}
+  catch(e){showToast('音声の接続を更新できませんでした。マイクを押して再開してください。');endTone();throw e;}
   finally{renewing=false;}
 }
-setInterval(()=>{if(connectedAt&&Date.now()-connectedAt>55*60*1000&&dc?.readyState==='open'&&!busy&&!active&&!speech&&!renewing)renewSession().catch(error);},10000);
+setInterval(()=>{if(!LIVE_VOICE&&connectedAt&&Date.now()-connectedAt>55*60*1000&&dc?.readyState==='open'&&!busy&&!active&&!speech&&!renewing)renewSession().catch(error);},10000);
 async function startSpeech(itemId){
   const captured=structuredClone(context), previous=busy||active||audioPlaying||relayActive||relayQueue.length;
   if(itemId&&!speechItems.has(itemId))speechItems.set(itemId,{context:captured,text:null,submitted:false,recorded:false});
@@ -417,7 +454,7 @@ async function stopSpeech(){
   // every completed sentence, including those whose response was interrupted.
   const fragments=[...speechItems.entries()].filter(([id,v])=>!v.submitted&&v.text&&v.context?.room_id===s.captured.room_id&&v.context?.content_id===s.captured.content_id);
   const fullText=fragments.length?fragments.map(([,v])=>v.text).join('\n'):text;
-  const b=await begin(s.captured,'voice',fullText,s.epoch);if(!b)return;
+  const b=await begin({...s.captured,transcript_item_ids:fragments.map(([id])=>id)},'voice',fullText,s.epoch);if(!b)return;
   for(const [,v] of fragments)v.submitted=true;
   if(!speechItems.get(s.itemId)?.recorded)record('user_transcript',{turn_id:b.turn_id,text});
   if(s.itemId){
@@ -453,19 +490,25 @@ async function onEvent(e){
     if(!answer)answer=message('','assistant');answer.textContent+=e.delta||'';$('log').scrollTop=$('log').scrollHeight;return;
   }
   if(e.type==='response.function_call_arguments.done'){
-    const b=turn,myEpoch=epoch;let result;
+    const b=turn,myEpoch=epoch,toolStarted=performance.now();let result;
     try{
       if(!b)throw Error('指示は中止されました');
-      state('確認・編集しています…');
-      record('tool_started',{name:e.name,args:JSON.parse(e.arguments||'{}')});
-      if(['batch_edit','timeline_edit'].includes(e.name)){
+      state(({timeline_frame:'発言で示された場面を確認しています',read_editor_context:'発言と画面の対応を確認しています',list_assets:'使える素材を確認しています',update_work:'修正指示を記録しています',batch_edit:'タイムラインを編集しています',execute_work:'制作担当へ指示を届けています'})[e.name]||'道具を実行しています');
+      record('tool_started',{name:e.name,call_id:e.call_id,turn_id:b.turn_id,args:JSON.parse(e.arguments||'{}')});
+      visibleToolWork.set(e.call_id,{name:e.name,args:JSON.parse(e.arguments||'{}')});
+      if(['batch_edit','timeline_edit','transform_visuals'].includes(e.name)){
         const parsed=JSON.parse(e.arguments||'{}');
         const ops=parsed.operations||[{op:parsed.op,args:parsed.args||{}}];
-        const ids=ops.flatMap(o=>[o.args?.clip_id,...(o.args?.clip_ids||[])]).filter(id=>typeof id==='string');
+        const ids=[...(parsed.clip_ids||[]),...ops.flatMap(o=>[o.args?.clip_id,...(o.args?.clip_ids||[])])].filter(id=>typeof id==='string');
         directOperations.set(e.call_id,{tool:e.name,category:'editing',clip_ids:ids});publishWorkActivity();
       }
       const args=JSON.parse(e.arguments||'{}');
-      if(e.name==='read_editor_context')result={ok:true,...b.context};
+      if(e.name==='read_editor_context')result={ok:true,...b.context,viewed_context:structuredClone(context)};
+      else if(e.name==='set_edit_target'){
+        if(!LIVE_VOICE||!liveConnection?.started)throw Error('音声会話中の編集対象切り替えです');
+        result=await api('/tool',{room_id:b.context.room_id,turn_id:b.turn_id,name:e.name,args});
+        if(result.ok){b.context=result.context;liveConnection.editContext=structuredClone(result.context);}
+      }
       else if(e.name==='wait_for_user'){waitingForUser=true;saveConversation();b.silent=true;result={ok:true};}
       else if(e.name==='resume_conversation'){waitingForUser=false;saveConversation();result={ok:true};}
       else if(e.name==='answer_question'){
@@ -475,22 +518,32 @@ async function onEvent(e){
         if(notificationsPaused){completionNotices.length=0;b.silent=true;}
         result={ok:true,paused:notificationsPaused};
       }else result=await api('/tool',{room_id:b.context.room_id,turn_id:b.turn_id,name:e.name,args});
-      record('tool_finished',{name:e.name,result:{...result,image:result.image?'[image]':undefined}});
+      record('tool_finished',{name:e.name,call_id:e.call_id,turn_id:b.turn_id,elapsed_ms:Math.round(performance.now()-toolStarted),result:{...result,image:result.image?'[image]':undefined}});
       if(myEpoch!==epoch)return;
-      if(result.presentation){renderReferences(result.presentation);record('references_displayed',{search_ms:result.elapsed_ms,first_results_ms:result.first_results_ms,count:result.presentation.items.length});}
+      if(result.presentation){
+        renderReferences(result.presentation);
+        result.display=await presentationReady(result.presentation);
+        if(myEpoch!==epoch)return;
+        record('references_displayed',{search_ms:result.elapsed_ms,first_results_ms:result.first_results_ms,count:result.presentation.items.length,...result.display});
+        if(LIVE_VOICE)livePresented(b,result.presentation,result.display,{name:e.name});
+      }
       if(result.editor_action){
         const displayed=await editorAction(result.editor_action);
         if(myEpoch!==epoch)return;
         if(displayed.ok && result.editor_action.kind==='focus'){targetTurn=b.turn_id;}
         result={...result,...displayed};
       }
-      if(result.committed){nativeCommand('refresh');message('変更を反映しました。');targetTurn=null;}
+      if(result.committed){nativeCommand('refresh');message('変更を反映しました。');targetTurn=null;workOutcome='done';workOutcomeAt=Date.now();}
       if(result.image&&!e.astra){await addPicture(result.image);const {image,...details}=result;result={...details,note:'確認用の画像を添付しました'};}
+      if(e.name==='timeline_frame'&&result.image){
+        $('work-preview').querySelector('img').src=result.image;
+        const t=Number(args.t||b.context.playhead||0);
+        $('work-preview').querySelector('span').textContent=`${Math.floor(t/60)}:${(t%60).toFixed(1).padStart(4,'0')}`;
+      }
       if(result.saved)$('brief').textContent=Object.values(result.saved).join('\n');
-      if(result.presentation)renderReferences(result.presentation);
       if(result.job_id){jobs.set(result.job_id,{room:b.context.room_id});message(result.state==='instruction_pending'?'追加指示を送りました。制作側の受領を待っています。':'制作を依頼しました。進行状況を下に表示します。');}
-    }catch(ex){record('tool_client_error',{name:e.name,message:ex.message});result={ok:false,error:ex.message};}
-    finally{directOperations.delete(e.call_id);publishWorkActivity();}
+    }catch(ex){record('tool_client_error',{name:e.name,message:ex.message});workOutcome='failed';workOutcomeAt=Date.now();result={ok:false,error:ex.message};}
+    finally{visibleToolWork.delete(e.call_id);directOperations.delete(e.call_id);publishWorkActivity();}
     if(myEpoch!==epoch)return;
     if(e.astra){b.astraOutputs.push({call_id:e.call_id,result});return;}
     b.hadTools=true;
@@ -525,6 +578,7 @@ async function onEvent(e){
 }
 async function submit(){
   const text=$('input').value.trim();if(!text)return;clearResponseError();
+  if(LIVE_VOICE){try{await submitLiveText(text);}catch(e){error(e);}return;}
   const captured=structuredClone(context);
   if(busy||active||audioPlaying||relayActive||relayQueue.length)await interrupt();else epoch++;
   const myEpoch=epoch;setBusy(true);message(text,'user');$('input').value='';
@@ -534,7 +588,7 @@ async function submit(){
   }catch(e){error(e);setBusy(false);}
 }
 async function toggleMic(){
-  if(micOn){record('microphone_paused');endTone();micOn=false;mic?.getTracks().forEach(t=>t.enabled=false);$('mic').setAttribute('aria-label','マイクで話す');$('mic').classList.remove('live');state('マイクを停止しました');return;}
+  if(micOn){record('microphone_paused');micOn=false;if(LIVE_VOICE)muteLiveInput();else mic?.getTracks().forEach(t=>t.enabled=false);$('mic').setAttribute('aria-label','マイクをオン');$('mic').classList.remove('live');return;}
   try{
     const gen=generation;
     await connect();
@@ -544,10 +598,13 @@ async function toggleMic(){
       mic=stream;mic.getAudioTracks()[0].onended=()=>{if(gen===generation&&micOn)recoverConnection('microphone_ended');};
       await pc.getSenders().find(s=>!s.track||s.track.kind==='audio').replaceTrack(mic.getAudioTracks()[0]);}
     if(gen!==generation)return;
-    micOn=true;mic.getTracks().forEach(t=>t.enabled=true);$('mic').setAttribute('aria-label','マイクを止める');$('mic').classList.add('live');state('聞いています');$('toast').textContent='';
+    micOn=true;mic.getTracks().forEach(t=>t.enabled=true);$('mic').setAttribute('aria-label','マイクを止める');$('mic').classList.add('live');state('聞いています');showToast('');
+    if(LIVE_VOICE&&liveConnection)liveConnection.muteRequested=false;
+    if(LIVE_VOICE){const owner=liveEditingContext();for(let i=0;i<liveDeferredReports.length;){const report=liveDeferredReports[i];if(report.room_id===owner.room_id&&report.content_id===owner.content_id){liveDeferredReports.splice(i,1);liveAppend('commentary','音声停止中に終わった確認の結果です。'+report.text);}else i++;}}
   }catch(e){mic?.getTracks().forEach(t=>t.stop());mic=null;error(e);}
 }
 function disconnect(reason='user',internal=false){
+  if(LIVE_VOICE){closeLiveTransport();livePausedContext=null;}
   reasonController?.abort();reasonController=null;reasonRunning=false;relayQueue.length=0;relayActive=false;relayResponses.clear();
   if(!internal)recoveryId++;
   record('disconnected',{reason:typeof reason==='string'?reason:'user',mic_on:micOn});saveConversation();
@@ -574,34 +631,60 @@ async function supplyFiles(files){
   if(!files.length)return;
   await ensureStageContent();
   const captured={room_id:context.room_id,content_id:context.content_id};
+  const sameContent=()=>context?.room_id===captured.room_id&&context?.content_id===captured.content_id;
+  const key=captured.room_id+':'+captured.content_id;
+  if(feedKey!==key){resetPresentationFeed();feedKey=key;loadPresentationHistory();}
+  // Show every dropped file immediately, before network transfer starts.
+  const pending=files.map(file=>{
+    const url=URL.createObjectURL(file),id='upload-'+crypto.randomUUID();
+    const kind=file.type.startsWith('image/')?'image':file.type.startsWith('audio/')?'audio':'video';
+    appendPresentation({id,at:Date.now()/1000,author:'user',items:[{id,title:file.name,kind,url,note:'送信中…'}]});
+    const group=$('reference-cards').querySelector('[data-presentation="'+id+'"]');
+    const player=group.querySelector('.proposal-player');
+    const dispose=player.dispose;player.dispose=()=>{dispose?.();URL.revokeObjectURL(url);};
+    const remove=()=>{player.dispose();proposalPlayers=proposalPlayers.filter(p=>p!==player);presentationFeed.delete(id);group.remove();};
+    return {file,group,remove};
+  });
   attachmentButton.disabled=true;
   try{
-    for(const file of files){
-      $('toast').textContent=file.name+' を取り込んでいます';
-      const data=new FormData();data.append('file',file);
-      let asset;
-      for(let attempt=0;attempt<2;attempt++){
-        const auth=await token(attempt===1);
-        const r=await fetch('/api/v1/production-assets/upload?room_id='+encodeURIComponent(captured.room_id),{
-          method:'POST',credentials:'omit',headers:{Authorization:'Bearer '+auth},body:data});
-        if(r.status===401&&attempt===0)continue;
-        asset=await r.json();if(!r.ok)throw Error(typeof asset.detail==='string'?asset.detail:'素材を取り込めませんでした');
-        break;
-      }
-      if(!asset?.id)throw Error('素材の登録結果を確認できませんでした');
-      await api('/reference',{...captured,source:asset.id});
-      if(context?.room_id===captured.room_id&&context?.content_id===captured.content_id){
-        const text='素材を添付しました: '+file.name+' (asset_id: '+asset.id+')。用途は会話の意図に沿って判断してください。';
-        message(file.name+' を追加しました','system');record('material_attached',{asset_id:asset.id,filename:file.name});
-        if(dc?.readyState==='open')send({type:'conversation.item.create',item:{type:'message',role:'user',content:[{type:'input_text',text}]}});
+    for(const {file,group,remove} of pending){
+      try{
+        const data=new FormData();data.append('file',file);
+        let asset;
+        for(let attempt=0;attempt<2;attempt++){
+          const auth=await token(attempt===1);
+          const r=await fetch('/api/v1/production-assets/upload?room_id='+encodeURIComponent(captured.room_id),{
+            method:'POST',credentials:'omit',headers:{Authorization:'Bearer '+auth},body:data});
+          if(r.status===401&&attempt===0)continue;
+          asset=await readApiResponse(r);
+          break;
+        }
+        if(!asset?.id)throw Error('素材の登録結果を確認できませんでした');
+        const result=await api('/reference',{...captured,source:asset.id,present_upload:true});
+        if(!result.presentation)throw Error('提示履歴の更新にはサーバーの更新が必要です');
+        if(sameContent()){
+          renderReferences(result.presentation);remove();
+          const text='素材を添付しました: '+file.name+' (asset_id: '+asset.id+')。用途は会話の意図に沿って判断してください。';
+          record('material_attached',{asset_id:asset.id,filename:file.name});
+          if(dc?.readyState==='open'){if(LIVE_VOICE)liveAppend('thinking',text);else send({type:'conversation.item.create',item:{type:'message',role:'user',content:[{type:'input_text',text}]}});}
+        }else remove();
+      }catch(e){
+        record('material_upload_failed',{filename:file.name,message:String(e)});
+        const note=group.querySelector('.reference-copy p');note.textContent='送信できませんでした';note.title=e.message||String(e);
+        const retry=document.createElement('button');retry.textContent='再試行';retry.onclick=()=>{remove();supplyFiles([file]).catch(error);};
+        const dismiss=document.createElement('button');dismiss.textContent='取り除く';dismiss.onclick=remove;
+        group.querySelector('.reference-copy').append(retry,dismiss);
       }
     }
-    $('toast').textContent='素材を追加しました';setTimeout(()=>{if($('toast').textContent==='素材を追加しました')$('toast').textContent='';},2500);
   }finally{attachmentButton.disabled=false;attachmentInput.value='';}
 }
 attachmentInput.onchange=()=>supplyFiles([...attachmentInput.files]).catch(error);
-document.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files'))e.preventDefault();});
-document.addEventListener('drop',e=>{if(e.dataTransfer.files.length){e.preventDefault();supplyFiles([...e.dataTransfer.files]).catch(error);}});
+let fileDragDepth=0;
+const fileDrag=e=>Array.from(e.dataTransfer?.types||[]).includes('Files');
+document.addEventListener('dragenter',e=>{if(fileDrag(e)){e.preventDefault();fileDragDepth++;document.body.classList.add('file-drag');}});
+document.addEventListener('dragleave',e=>{if(fileDrag(e)&&--fileDragDepth<=0){fileDragDepth=0;document.body.classList.remove('file-drag');}});
+document.addEventListener('dragover',e=>{if(fileDrag(e)){e.preventDefault();e.dataTransfer.dropEffect='copy';}});
+document.addEventListener('drop',e=>{fileDragDepth=0;document.body.classList.remove('file-drag');if(e.dataTransfer.files.length){e.preventDefault();supplyFiles([...e.dataTransfer.files]).catch(error);}});
 document.addEventListener('paste',e=>{const files=[...e.clipboardData.files];if(files.length){e.preventDefault();supplyFiles(files).catch(error);}});
 $('close').onclick=()=>{disconnect();nativeCommand('close');};
 $('pick').onclick=()=>nativeCommand('pick');
@@ -625,7 +708,8 @@ const directOperations=new Map();
 let productionSnapshot={highlights:[],active_count:0,label:null};
 function publishWorkActivity(){
   if(!context?.content_id)return;
-  nativeCommand(JSON.stringify({action:{kind:'production_activity',content_id:context.content_id,
+  const workContext=LIVE_VOICE?liveEditingContext():context;
+  nativeCommand(JSON.stringify({action:{kind:'production_activity',content_id:workContext.content_id,
     ...productionSnapshot,operations:[...productionSnapshot.highlights,...directOperations.values()]}}));
 }
 
@@ -634,10 +718,11 @@ function finishNotice(){
   if(!activeNotice?.generated||!activeNotice.audioStarted||!activeNotice.audioEnded)return;
   const notice=activeNotice;notice.spoken=true;spokenJobs.add(notice.job_id);
   record('completion_spoken',{job_id:notice.job_id,text:notice.transcript});
-  if(notice.transcript)send({type:'conversation.item.create',item:{type:'message',role:'assistant',content:[{type:'output_text',text:notice.transcript}]}});
+  if(!LIVE_VOICE&&notice.transcript)send({type:'conversation.item.create',item:{type:'message',role:'assistant',content:[{type:'output_text',text:notice.transcript}]}});
   activeNotice=null;active=false;saveConversation();setBusy(false);pumpSpeech();
 }
 async function announceCompletion(){
+  if(LIVE_VOICE)return announceLiveCompletion();
   if(activeNotice||relayActive||relayQueue.length||reasonRunning)return;
   if(!completionNotices.length)return;
   const blocked=notificationsPaused?'notifications_paused':!micOn?'microphone_off':dc?.readyState!=='open'?'disconnected':busy?'turn_pending':active?'responding':speech?'user_speaking':audioPlaying?'audio_playing':renewing?'reconnecting':Date.now()<noticeRetryAt?'retry_delay':'';
@@ -663,6 +748,7 @@ async function announceCompletion(){
 }
 setInterval(announceCompletion,500);
 function renderProductionStatus(s,captured){
+  workObservedAt=Date.now();
   if(s.clip_count>0&&draftWaitingCid===captured.content_id){
     draftWaitingCid=null;window.__setStageMode(false);nativeCommand('stage_compact');nativeCommand('refresh');
   }
@@ -672,7 +758,7 @@ function renderProductionStatus(s,captured){
   pendingQuestion=currentQuestion;
   const host=$('work-status');host.replaceChildren();
   const names={Write:'映像の編集元を作成',Edit:'映像の編集元を修正',apply_edits:'変更をまとめて反映',animate_clip:'動きを調整',prepare_motion_project:'編集元を準備',render_motion_project:'動きのある映像を書き出す',generate_video:'映像を生成',generate_image:'画像を生成',generate_speech:'声を生成',watch_render:'通しで検品',render_frame:'画面を確認',validate_draft:'編集結果を検証',auto_captions:'字幕を合わせる',browser:'サービスを操作',get_credentials:'接続を確認',WebSearch:'必要な情報を検索',WebFetch:'サービスの情報を確認',Bash:'素材・サービスを準備',Read:'資料を確認',Glob:'素材を探す',ToolSearch:'使う道具を探す'};
-  const highlights=[];const phases=[];
+  const highlights=[];const phases=[];const currentActivities=[];
   for(const j of (s.jobs||[])){
     const ongoing=['running','queued'].includes(j.status);
     if(!ongoing){
@@ -693,7 +779,9 @@ function renderProductionStatus(s,captured){
           ...(typeof j.result?.committed==='boolean'?{timeline_updated:j.result.committed}:{}),...(j.error?{error:j.error}:{})};
         nativeCommand(JSON.stringify({action:{kind:'work_finished',content_id:captured.content_id,job_id:j.id,status:j.status,committed:j.result?.committed}}));
         record('production_finished',{job_id:j.id,status:j.status,committed:j.result?.committed});
+        workOutcome=j.status==='done'?'done':'failed';workOutcomeAt=Date.now();
         message(j.result?.outcome?.summary||j.result?.summary||(j.status==='done'?'処理が終わりました。':`作業が止まりました：${j.error||j.status}`));
+        if(LIVE_VOICE&&!micOn&&!livePausedContext){showToast(j.status==='done'?'制作が終わりました。':'制作が止まりました。');}
         // A previous preparation result is historical once a later production
         // has started. Do not announce it as the current state minutes later.
         if(!(s.jobs||[]).some(other=>other.id!==j.id&&other.created_at>j.updated_at))completionNotices.push(notice);
@@ -705,13 +793,15 @@ function renderProductionStatus(s,captured){
       pendingQuestion=j.question;
       if(!seenQuestions.has(j.question.id)){
         seenQuestions.add(j.question.id);message(j.question.text,'assistant');
-        if(micOn&&dc?.readyState==='open'&&!notificationsPaused)completionNotices.push({kind:'question',question_id:j.question.id,room_id:captured.room_id,content_id:captured.content_id,job_id:j.id,question:j.question.text});
+        if(!notificationsPaused&&(LIVE_VOICE||(micOn&&dc?.readyState==='open')))completionNotices.push({kind:'question',question_id:j.question.id,room_id:captured.room_id,content_id:captured.content_id,job_id:j.id,question:j.question.text});
+        if(LIVE_VOICE&&!micOn&&!livePausedContext){showToast('ダンから確認があります。');}
       }
     }
     const op=(j.activity||[]).find(a=>a.state==='running')||j.activity?.[0];
     phases.push(j.question?'返答を待っています':op?.category==='review'?'仕上がりを確認中':op?.category==='editing'?'タイムラインを編集中':op?.category==='generation'?'素材を制作中':'作業内容を確認中');
     const title=document.createElement('strong');
     title.textContent=j.question?'あなたの返答を待っています':op?.state==='running'?(names[op.tool]||names[op.tool?.split('__').at(-1)]||'内容を確認・編集'):'次の作業を判断中';
+    currentActivities.push(title.textContent);
     const indicator=document.createElement('span');indicator.className='activity-indicator';
     card.append(indicator,title);
     const detail=document.createElement('div');detail.className='activity-detail';
@@ -736,19 +826,31 @@ function renderProductionStatus(s,captured){
     const job=(s.jobs||[]).find(j=>j.id===notice.job_id);
     if(job&&(s.jobs||[]).some(other=>other.id!==job.id&&other.created_at>job.updated_at))completionNotices.splice(i,1);
   }
+  currentWorkLine=[...new Set(currentActivities)].join(' · ');
+  if(LIVE_VOICE){
+    const snapshot=JSON.stringify({active:(s.jobs||[]).filter(j=>['running','queued'].includes(j.status)).map(j=>({id:j.id,status:j.status,request:workFocus(j),pending_instructions:j.pending_instructions,question:j.question?.text,activity:j.activity?.filter(a=>a.state==='running')}))});
+    const recent=(s.jobs||[]).filter(j=>!['running','queued'].includes(j.status)).slice(0,3).map(j=>({id:j.id,status:j.status,request:workFocus(j)}));
+    const stateKey=JSON.stringify({room:captured.room_id,content:captured.content_id,snapshot,recent});
+    const changed=stateKey!==liveProductionFacts?.state_key;
+    liveProductionFacts={room_id:captured.room_id,content_id:captured.content_id,observed_at_ms:Date.now(),...JSON.parse(snapshot),recent,state_key:stateKey};
+    if(changed)sendExecutionFacts();
+  }
   saveConversation();
-  productionSnapshot={highlights,active_count:(s.jobs||[]).filter(j=>['running','queued'].includes(j.status)).length,label:phases.length?[...new Set(phases)].join(' · '):null};
+  const runningJob=(s.jobs||[]).find(j=>['running','queued'].includes(j.status));
+  const runningOperation=runningJob?.activity?.find(a=>a.state==='running');
+  productionSnapshot={highlights,active_count:(s.jobs||[]).filter(j=>['running','queued'].includes(j.status)).length,operation:runningOperation,progress:runningJob?.events?.filter(e=>e.type==='text').at(-1),request:runningJob?.request,question:runningJob?.question?.text,pending:runningJob?.pending_instructions,selected:runningJob?.selected_clips,phase:runningJob?.question?'waiting':runningOperation?.category==='editing'?'edit':runningOperation?.category==='generation'?'generate':'inspect',label:phases.length?[...new Set(phases)].join(' · '):null};
   publishWorkActivity();
 }
 setInterval(async()=>{
   if(statusPending || !context?.content_id)return;
-  const captured=context;statusPending=true;
+  const captured=LIVE_VOICE?liveEditingContext():context;statusPending=true;
   try{
     const s=await api('/project-status',captured);
-    if(context?.content_id!==captured.content_id || context?.room_id!==captured.room_id)return;
+    if(context?.room_id!==captured.room_id || (!LIVE_VOICE&&context?.content_id!==captured.content_id))return;
     renderProductionStatus(s,captured);
   }catch(e){record('production_status_error',{message:String(e)});}finally{statusPending=false;}
 },3000);
+let currentWorkLine='';
 let startingVoice=false,stageWorking=false,presentationId=null,draftWaitingCid=null,referenceFocus=null;
 let meterContext=null,meterStream=null,meterSource=null,meter=null;
 window.__setStageMode=full=>{
@@ -784,8 +886,10 @@ $('edit-view').onclick=()=>{
 const originalPick=$('pick').onclick;
 $('pick').onclick=()=>{window.__setStageMode(false);nativeCommand('stage_compact');document.body.classList.remove('drawer-open');originalPick();};
 $('hide-references').onclick=()=>{
-  clearProposalPlayers();$('reference-cards').replaceChildren();document.body.classList.remove('has-references');
+  document.body.classList.remove('has-references');
+  $('show-presentations').hidden=false;
 };
+$('show-presentations').onclick=()=>{document.body.classList.add('has-references');$('show-presentations').hidden=true;};
 function referenceEmbed(item){
   const u=new URL(item.url,location.origin);let id=null;
   if(['youtube.com','www.youtube.com','m.youtube.com'].includes(u.hostname))id=u.searchParams.get('v')||u.pathname.match(/^\/(?:shorts|embed)\/([\w-]+)/)?.[1];
@@ -796,40 +900,146 @@ function referenceEmbed(item){
 }
 let proposalPlayers=[];
 function clearProposalPlayers(){proposalPlayers.forEach(p=>p.dispose?.());proposalPlayers=[];}
+const presentationFeed=new Map();
+let feedKey='',historyBefore=null,historyLoading=null;
+function resetPresentationFeed(){
+ clearProposalPlayers();presentationFeed.clear();feedKey='';historyBefore=null;historyLoading=null;referenceFocus=null;$('show-presentations').hidden=true;
+ $('reference-cards').replaceChildren();
+}
+async function loadPresentationHistory(older=false){
+ if(!context?.content_id)return;
+ const key=context.room_id+':'+context.content_id;
+ if(historyLoading===key)return;historyLoading=key;
+ try{
+  const result=await api('/presentations',{room_id:context.room_id,content_id:context.content_id,before:older?historyBefore:null});
+  if(key!==context.room_id+':'+context.content_id)return;
+  historyBefore=result.before;
+  for(const entry of result.presentations)appendPresentation(entry,true);
+  $('earlier-presentations').hidden=!historyBefore;
+ }catch(e){record('presentation_history_error',{message:String(e)});}
+ finally{if(historyLoading===key)historyLoading=null;}
+}
+function appendPresentation(p,history=false){
+ if(!p?.items?.length)return;
+ const prior=presentationFeed.get(p.id);
+ if(prior){
+  if((p.revision||0)<(prior.revision||0))return;
+  if(JSON.stringify(prior.items)===JSON.stringify(p.items)){presentationFeed.set(p.id,p);return;}
+  const ids=new Set(prior.items.map(i=>i.id));
+  proposalPlayers=proposalPlayers.filter(player=>{if(ids.has(player.dataset.proposalItemId)){player.dispose?.();return false;}return true;});
+  $('reference-cards').querySelector('[data-presentation="'+CSS.escape(p.id)+'"]')?.remove();
+  presentationFeed.delete(p.id);
+ }
+ const host=$('reference-cards'),scroll=$('references');
+ const nearBottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<100;
+ const viewport=scroll.getBoundingClientRect(),latest=host.lastElementChild?.getBoundingClientRect();
+ const lookingAtLatest=latest&&latest.top<=viewport.top+viewport.height/2&&latest.bottom>viewport.top+viewport.height/2;
+ const previousHeight=scroll.scrollHeight,previousTop=scroll.scrollTop;
+ const group=document.createElement('div');group.className='visual-entry';group.dataset.presentation=p.id;
+ group.dataset.at=p.at||0;
+ for(const item of p.items){
+  const card=document.createElement('article');card.className='reference-card';card.dataset.itemId=item.id;card.tabIndex=0;
+  card.setAttribute('aria-label',item.title);
+  const focus=()=>{referenceFocus=item.id;host.querySelectorAll('.focused').forEach(e=>e.classList.remove('focused'));card.classList.add('focused');};
+  card.onpointerdown=focus;card.onfocusin=focus;card.onpointerenter=focus;
+  const player=createProposalPlayer(item);proposalPlayers.push(player);
+  const copy=document.createElement('div');copy.className='reference-copy';
+  const sender=document.createElement('span');sender.className='presentation-author';sender.textContent=p.author==='user'?'あなた':'ダン';
+  copy.append(sender);
+  if(item.caption){const caption=document.createElement('span');caption.className='presentation-caption';caption.textContent=item.caption;copy.append(caption);}
+  if(item.revises){const previous=document.createElement('button');previous.textContent='前の案を見る';previous.onclick=()=>{const old=host.querySelector('[data-item-id="'+CSS.escape(item.revises)+'"]');if(old)old.scrollIntoView({block:'center'});else loadPresentationHistory(true);};copy.append(previous);}
+  const sourceUrl=item.source_url||item.url;
+  if(sourceUrl?.startsWith('https:')&&item.kind!=='link'){const source=document.createElement('a');source.textContent='出典 ↗';source.href=sourceUrl;source.target='_blank';source.rel='noopener noreferrer';source.onclick=e=>{if(window.ipc){e.preventDefault();nativeCommand('external:'+sourceUrl);}};copy.append(source);}
+  card.append(player,copy);group.append(card);
+ }
+ const next=[...host.children].find(e=>Number(e.dataset.at)>Number(p.at||0));
+ host.insertBefore(group,next||null);presentationFeed.set(p.id,p);
+ document.body.classList.add('has-references');$('show-presentations').hidden=true;
+ if(history&&next){scroll.scrollTop=previousTop+(scroll.scrollHeight-previousHeight);}
+ else if(nearBottom||(!history&&lookingAtLatest)){showPresentationGroup(group);}
+ else if(!history){$('latest-presentation').hidden=false;}
+}
+function showPresentationGroup(group){
+ if(!group)return;
+ const scroll=$('references');
+ // A comparison may fill several rows. Follow the current conversation while
+ // preserving the scroll position when the user is browsing older proposals.
+ scroll.scrollTop=group.offsetHeight>scroll.clientHeight
+  ?scroll.scrollTop+group.getBoundingClientRect().top-scroll.getBoundingClientRect().top
+  :scroll.scrollHeight;
+ $('latest-presentation').hidden=true;
+}
+async function presentationReady(p){
+ const group=document.querySelector('[data-presentation="'+CSS.escape(p.id)+'"]');
+ if(!group)return {ok:false,error:'提示先が見つかりません'};
+ const media=[...group.querySelectorAll('img,video,audio,model-viewer')];
+ const scenes=[...group.querySelectorAll('.proposal-player')].filter(e=>e.ready);
+ const sceneResults=await Promise.all(scenes.map(e=>e.ready));
+ const outcomes=await Promise.all(media.map(e=>new Promise(resolve=>{
+  const ready=()=>e.tagName==='IMG'?e.complete&&e.naturalWidth>0:e.tagName==='MODEL-VIEWER'?e.loaded:e.readyState>=2;
+  if(ready())return resolve(true);
+  let timer;const finish=value=>{clearTimeout(timer);for(const event of ['load','loadeddata','error'])e.removeEventListener(event,check);resolve(value);};
+  const check=event=>{if(event.type==='error')finish(false);else if(ready())finish(true);};
+  for(const event of ['load','loadeddata','error'])e.addEventListener(event,check);
+  timer=setTimeout(()=>finish(!!ready()),8000);
+ })));
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ const embedded=!!group.querySelector('iframe');
+ const ok=outcomes.every(Boolean)&&sceneResults.every(r=>r.ok);
+ return {ok,embedded_playback_verified:embedded?(scenes.length>0&&sceneResults.every(r=>r.ok)):undefined,error:ok?undefined:sceneResults.find(r=>!r.ok)?.error||'読み込めない素材があります'};
+}
 function renderReferences(p){
-  if(!p?.items?.length||p.id===presentationId)return;
-  presentationId=p.id;clearProposalPlayers();
-  const host=$('reference-cards');host.replaceChildren();
-  const tabs=document.createElement('div');tabs.className='proposal-tabs';tabs.setAttribute('role','tablist');
-  const items=document.createElement('div');items.className='proposal-items';host.append(tabs,items);
-  let selected=0,compare=false;
-  const draw=()=>{
-    clearProposalPlayers();items.replaceChildren();items.classList.toggle('comparing',compare);
-    [...tabs.children].forEach((b,i)=>b.setAttribute('aria-selected',String(i===selected)));
-    for(const index of compare?[...new Set([selected,(selected+1)%p.items.length])]:[selected]){
-      const item=p.items[index];referenceFocus=item.id;
-      const card=document.createElement('article');card.className='reference-card';card.onpointerenter=()=>referenceFocus=item.id;
-      const player=createProposalPlayer(item);proposalPlayers.push(player);
-      const copy=document.createElement('div');copy.className='reference-copy';
-      const title=document.createElement('h2');title.textContent=item.title;
-      const note=document.createElement('p');note.textContent=item.note||'';
-      const actions=document.createElement('div');actions.className='reference-actions';
-      const choose=document.createElement('button');choose.textContent='この方向で下書きを作る';
-      choose.onclick=async()=>{try{await api('/choose',{room_id:context.room_id,content_id:context.content_id,item_id:item.id});referenceFocus=item.id;$('input').value='提案「'+item.title+'」（ID: '+item.id+'）の方向で、元の目的と素材を使って制作を進めてください。';submit();choose.blur();}catch(e){error(e);}};
-      actions.append(choose);
-      const sourceUrl=item.source_url||item.url;
-      if(sourceUrl?.startsWith('https:')){const source=document.createElement('a');source.textContent='出典 ↗';source.href=sourceUrl;source.target='_blank';source.rel='noopener noreferrer';source.onclick=e=>{if(window.ipc){e.preventDefault();nativeCommand('external:'+sourceUrl);}};actions.append(source);}
-      copy.append(title,note,actions);card.append(player,copy);items.append(card);
-    }
-  };
-  p.items.forEach((item,i)=>{const b=document.createElement('button');b.textContent=(i+1)+' · '+item.title;b.setAttribute('role','tab');b.onclick=()=>{selected=i;draw();b.blur();};tabs.append(b);});
-  if(p.items.length>1){const b=document.createElement('button');b.textContent='並べて比べる';b.onclick=()=>{compare=!compare;b.textContent=compare?'１つずつ見る':'並べて比べる';draw();b.blur();};tabs.append(b);}
-  draw();document.body.classList.add('has-references');
+ if(!p?.items?.length)return;
+ const key=context.room_id+':'+context.content_id;
+ if(feedKey!==key){resetPresentationFeed();feedKey=key;loadPresentationHistory();}
+ presentationId=p.id;appendPresentation(p);
+}
+$('earlier-presentations').onclick=()=>loadPresentationHistory(true);
+$('latest-presentation').onclick=()=>showPresentationGroup($('reference-cards').lastElementChild);
+$('references').addEventListener('scroll',()=>{const e=$('references');if(e.scrollHeight-e.scrollTop-e.clientHeight<100)$('latest-presentation').hidden=true;});
+function workFocus(snapshot){
+  const request=String(snapshot.request||'').split('話者付き会話原文:')[0];
+  const brief=request.includes('作業上の補足:')?request.split('作業上の補足:')[1]:request;
+  return brief.trim().replace(/\s+/g,' ').slice(0,160);
+}
+function workDescription(operation,work){
+  if(work==='idle')return '';
+  if(work==='done')return '変更を反映しました';
+  if(work==='failed')return '作業が止まりました';
+  if(work==='unknown')return '状況を再取得しています';
+  if(work==='waiting')return productionSnapshot.question||'あなたの返答を待っています';
+  if(operation?.name==='transform_visuals')return `${operation.args.clip_ids.length}個の文字・背景・映像をまとめて変更しています`;
+  if(operation?.description)return operation.description;
+  if(!operation&&productionSnapshot.progress)return '直近の制作報告：'+productionSnapshot.progress.text;
+  const name=(operation?.name||operation?.tool||'').split('__').at(-1),a=operation?.args||{};
+  const time=Number(a.t??a.start);
+  const place=Number.isFinite(time)?`${Math.floor(time/60)}:${String(Math.floor(time%60)).padStart(2,'0')} の`:'作品の';
+  const labels={timeline_frame:`${place}映像を見ています`,inspect_range:`${place}映像・字幕・音声を調べています`,measure_speech:`${place}音声を聞き取っています`,asset_image:'素材画像を見ています',list_assets:'ライブラリから素材を探しています',read_references:'参考作品を読み込んでいます',read_presentations:'これまでに提示した素材を見ています',project_status:'制作担当の進み具合を取得しています',execute_work:'制作担当へ修正指示を送っています',batch_edit:'タイムラインに変更を反映しています',apply_edits:'タイムラインに変更を反映しています',set_clip_props:'クリップの設定を変更しています',generate_video:'動画の生成結果を待っています',generate_image:'画像を生成しています',watch_render:'書き出した映像を検品しています',validate_draft:'編集後の整合性を検証しています',Bash:'制作の処理を実行しています',Read:'制作に必要なファイルを読んでいます',Write:'編集用のファイルを書いています',Edit:'編集用のファイルを修正しています'};
+  return labels[name]||({edit:'タイムラインを編集しています',generate:'素材を制作しています',inspect:'次に行う操作を考えています'})[work]||'';
 }
 function updatePresence(){
   const connected=dc?.readyState==='open';document.body.classList.toggle('connected',connected);
-  const kind=$('toast').textContent?'error':audioPlaying?'speaking':speech?'listening':(busy||active||stageWorking)?'thinking':micOn?'listening':'offline';
+  let work='idle';
+  if(productionSnapshot.active_count)work=Date.now()-workObservedAt>12000?'unknown':productionSnapshot.phase||'inspect';
+  const tool=[...visibleToolWork.values()].at(-1);
+  if(tool||busy||reasonRunning)work=tool&&/edit|import_media/.test(tool.name)?'edit':tool&&/generat/.test(tool.name)?'generate':'inspect';
+  if(work==='idle'&&workOutcome&&Date.now()-workOutcomeAt<6000)work=workOutcome;
+  document.body.dataset.work=work;
+  const kind=audioPlaying?'speaking':speech?'listening':work!=='idle'?'thinking':micOn?'listening':'offline';
   document.body.dataset.agent=kind;
+  const operation=tool||productionSnapshot.operation;
+  const liveWork=LIVE_VOICE?liveConnection?.work:null;
+  const statusLine=!tool&&reasonRunning&&reasoningProgress?reasoningProgress.text:!tool&&!reasonRunning&&liveWork?.status==='running'&&liveWork.detail?liveWork.detail:workDescription(operation,work);
+  if($('orb-status').textContent!==statusLine){$('orb-status').textContent=statusLine;$('orb-status').title=statusLine;}
+  const focus=workFocus(productionSnapshot);
+  $('work-focus').textContent=focus;
+  $('work-focus').hidden=!focus||work==='idle';
+  $('work-meta').textContent=work==='unknown'?'作業状況の更新が届いていません':productionSnapshot.pending?'追加指示を送信済み · 制作担当の受領待ち':operation?.started_at?`開始から ${Math.max(0,Math.floor(Date.now()/1000-operation.started_at))} 秒`:'';
+  $('work-meta').hidden=!$('work-meta').textContent||work==='idle';
+  $('mic').setAttribute('aria-pressed',String(micOn));$('mic').title=micOn?'あなたのマイクをオフ':'あなたのマイクをオン';
+  // A previously inspected frame is evidence, not a live picture of a different operation.
+  $('work-preview').hidden=true;
+
   $('presence').setAttribute('aria-label',({speaking:'ダンが話しています',listening:'ダンが聞いています',thinking:'ダンが考えています',offline:'ダンは待機中',error:'接続を確認してください'})[kind]);
   const stream=audioPlaying?audio?.srcObject:micOn?mic:null;
   if(stream!==meterStream){

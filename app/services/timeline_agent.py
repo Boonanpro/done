@@ -114,6 +114,7 @@ def run_timeline_agent(
     expected_hash: str | None = None,
     resume_draft_id: str | None = None,
     preparation_only: bool = False,
+    presentation_only: bool = False,
 ) -> dict[str, Any]:
     """Blocking. Returns {ok, committed, conflict, problems, summary, draft_id}."""
     from app.agent.cli_runner import resolve_room_backend, _ALLOWED_CLI_MODELS
@@ -144,7 +145,8 @@ def run_timeline_agent(
         else:
             draft = td.create_draft(room_id, content_id, job_id)
         draft['editor_guarded'] = expected_hash is not None
-        draft['live_updates'] = not preparation_only
+        draft['live_updates'] = not (preparation_only or presentation_only)
+        draft['presentation_only'] = presentation_only
         if expected_hash and draft['base_hash'] != expected_hash:
             return {'ok': False, 'committed': False, 'conflict': True,
                     'problems': ['依頼後に動画が変更されたため、上書きせず停止しました'], 'summary': ''}
@@ -154,12 +156,15 @@ def run_timeline_agent(
         if preparation_only:
             draft['edit_scope']={'clip_ids':[], 'spans':[]}
             instruction+='\n今回は検索・外部サービス操作・接続等の準備です。必要な道具を使って進め、タイムラインは変更しません。本人の操作が必要になった場合は具体的な操作を報告してください。'
+        if presentation_only:
+            draft['edit_scope']={'clip_ids':[], 'spans':[]}
+            instruction+='\n成果はビジュアル履歴へ提示する別の見本です。必要な制作・検品・表示まで実行してください。元のタイムラインは読み取り専用で、変更・置換しません。'
         # 指示クリップ(style=note)は指示の器: 範囲はannotationsとして渡済みなので
         # draftからは除去する（ネイティブ側の消費保存とのレースでも残らない）
         for tr in draft["sequence"].get("tracks") or []:
             allowed = set((draft.get('edit_scope') or {}).get('clip_ids', []))
             tr["clips"] = [c for c in (tr.get("clips") or [])
-                           if preparation_only or c.get("style") != "note" or (selected_clips and c.get('id') not in allowed)]
+                           if preparation_only or presentation_only or c.get("style") != "note" or (selected_clips and c.get('id') not in allowed)]
         # BASELINE: 既存タイムラインが元から抱える問題（過去の分割バグの残骸等）。
         # コミット判定は「新しく増えた問題」だけで行う — 実部屋で、エージェントが
         # 触ってもいない22分割クリップのソース長不整合が無関係な編集を巻き添えに
@@ -173,7 +178,7 @@ def run_timeline_agent(
         td.save_draft(draft)
         from app.services.production_worker import checkpoint
         checkpoint(room_id,job_id,draft["draft_id"])
-        emit({"type": "status", "text": "編集は操作ごとにタイムラインへ反映します。途中でも再生して確認できます。"})
+        emit({"type": "status", "text": "見本を制作して提示します。" if presentation_only else "編集は操作ごとにタイムラインへ反映します。途中でも再生して確認できます。"})
         result = _run_session(room_id, user_id, content_id, job_id, draft, instruction, annotations or [],
                               selected_clips or [], emit, model)
         for attempt in range(2):
@@ -270,7 +275,7 @@ def _run_session(room_id, user_id, content_id, job_id, draft, instruction, annot
     if pending(room_id,job_id):
         return {'ok':False,'committed':False,'conflict':False,'problems':['未読の追加指示があります'],
                 'summary':'追加指示をtimelineツールで受け取って反映してください。','draft_id':draft_id,'retryable':True}
-    if not latest.get("log"):
+    if latest.get('presentation_only') or not latest.get("log"):
         emit({"type": "status", "text": "タイムラインは変更されませんでした。依頼の実行結果を確認しています。"})
         return {"ok": True, "committed": False, "conflict": False,
                 "problems": [],

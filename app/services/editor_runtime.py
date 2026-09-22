@@ -27,6 +27,7 @@ def run(room,user,content,job,prompt,mcp_path,emit,model):
     system+='\n'+EXECUTION_CONTRACT
     system+='\nユーザーは先に細かい演出を指定することが苦手。判断に必要なら、present_referencesのcompositionで元素材と文字・図形から実際に動く短い案を作り見せる。音声やタイミングを判断する段階は、エディターの全レイヤー入りの通し下書きに進む。参考は実際に観察した部分を具体的に採用し、検索結果の名前から中身を推測しない。提案の選択を受けたら追加の演出アンケートを続けず、まずその案を形にする。会社名・固有名詞は元資料や字幕等を確認し、音声文字起こしを正式表記として固定しない。必要な質問は一度に一つ、既に答えたことは保存済み回答から読む。'
     system+='\nエディターの座標・文字サイズ・保存の仕様はeditor_helpで読めます。必要ならコードや資料も調べられます。独立した素材確認と図解作成は音声生成中に進められます。'
+    system+='\n制作中のタイムラインをユーザーが見て指摘します。使える音声や場面ができた段階で配置し、全編の素材準備・字幕・検品が終わるまで最初の反映を待たせないでください。apply_editsは一場面や一まとまりの修正として使えます。追加指示は作業中に原文で届きます。既に反映した部分を引き継ぎ、変更箇所だけ直して続きを作ります。仮素材と本番素材の違いは伝え、存在しない進捗を演出しないでください。'
     prompt+='\n保存した参考素材ID（read_referencesで実物と分析を読める）: '+json.dumps(c.get('reference_ids',[]))
     system+='\n制作手段を選ぶ時はproduction_methodsで検証状態を読める。候補にない表現は検索・公式資料・公開コードで調べて実現方法を組む。この一覧を作品ジャンルの制限にしない。'
     from app.services.editor_creative_direction import PRODUCTION_GUIDANCE
@@ -37,11 +38,8 @@ def run(room,user,content,job,prompt,mcp_path,emit,model):
     async def consume():
         nonlocal result
         operations={}
-        async for event in cli_runner.process_message_cli(
-            room_id=namespace,user_id=user,content=prompt,system_prompt=system,
-            skip_save=True,skip_resume=False,cwd=str(cli_runner.PROJECT_ROOT),
-            model_override=model,mcp_config_override=str(mcp_path)):
-            if event.get('type')=='result':result=event
+        last_hash = [td.sequence_hash(td._content_sequence(c) or {})]
+        def on_event(event):
             if event.get('type')=='tool_progress' and not str(event.get('name','')).startswith('mcp__timeline__'):
                 key=event.get('id')
                 op=operations.get(key)
@@ -51,8 +49,21 @@ def run(room,user,content,job,prompt,mcp_path,emit,model):
                 if event.get('state')!='running':
                     editor_activity.finish(op,failed=event.get('state')=='failed')
             emit(event)
+            if event.get('type') == 'tool_progress' and event.get('state') == 'done' and str(event.get('name','')).startswith('mcp__timeline__'):
+                latest = td._find_content(td._read_contents_raw(room),content) or {}
+                seq = td._content_sequence(latest) or {}
+                digest = td.sequence_hash(seq)
+                if digest != last_hash[0]:
+                    last_hash[0] = digest
+                    count = sum(len(t.get('clips',[])) for t in seq.get('tracks',[]))
+                    emit({'type':'timeline_checkpoint','clip_count':count,'sequence_hash':digest,
+                          'text':f'タイムラインへ反映しました。現在{count}クリップ。途中の状態を再生できます。'})
+        from app.services.editor_production_session import run as run_production
+        result = await run_production(room,content,job,prompt,system,mcp_path,model,on_event)
     asyncio.run(consume())
     return result or {'is_error':True,'text':'制作セッションが結果を返さず終了しました。'}
 
 def cancel(room,content):
+    from app.services.editor_production_session import cancel as cancel_production
+    cancel_production(room,content)
     cli_runner.kill_cli_process(session_room(room,content),allow_arm_pending=False)

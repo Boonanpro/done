@@ -14,4 +14,7 @@ def test_editor_profile_keeps_tools_and_sends_current_instructions_once(tmp_path
     assert 'timeline.py' in profile and 'dan.py' in profile
     assert 'RAW_USER_REQUEST' in turn
     c.build_codex_profile('ordinary_chat',str(config),prompt)
-    assert prompt in c.profile_path('ordinary_chat').read_text(encoding='utf-8')
+    ordinary = c.profile_path('ordinary_chat').read_text(encoding='utf-8')
+    assert prompt not in ordinary
+    assert c.wrap_turn_content(prompt, 'NEXT_REQUEST').count(prompt) == 1
+    assert 'project_doc_fallback_filenames = []' in ordinary

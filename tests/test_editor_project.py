@@ -28,6 +28,23 @@ def test_old_busy_error_is_not_current_work(room):
     assert 'jobs' not in result and 'work' not in result
     assert result['latest_finished_job']['status']=='failed'
 
+
+def test_inspection_reads_animation_detail_only_when_requested(room):
+    from app.services import editor_workflows
+    p,seq=room
+    keys=[{'t':i/30,'x':i*.001} for i in range(90)]
+    seq['tracks'][0]['clips'][0]['transform_keys']=keys
+    rows=json.loads((p/'contents.json').read_text());rows[0]['timeline']['sequence']=seq
+    (p/'contents.json').write_text(json.dumps(rows))
+    compact=project.inspect_range('room','c',0,3)['clips'][0]
+    assert 'transform_keys' not in compact
+    assert compact['transform_key_summary']['count']==90
+    exact=project.inspect_range('room','c',0,3,True)['clips'][0]
+    assert exact['transform_keys']==keys
+    assert editor_workflows.compact_state('room','c')['clips'][0]['transform_key_summary']['last']==keys[-1]
+    assert editor_workflows.compact_state('room','c',include_keyframes=True)['clips'][0]['transform_keys']==keys
+    assert json.loads((p/'contents.json').read_text())[0]['timeline']['sequence']==seq
+
 def test_commit_repairs_missing_outer_format(room):
     p,seq=room
     docs=json.loads((p/'contents.json').read_text());docs[0]['timeline'].pop('format')

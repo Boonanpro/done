@@ -50,7 +50,7 @@ _VISUAL_LANE = {'anyOf': [{'type': 'integer', 'minimum': 0}, {'type': 'string', 
 _calls = 0
 _generations = 0
 _draft_lock = threading.RLock()
-_BACKGROUND_TOOLS = {'generate_speech','generate_image','watch_video','watch_render','measure_speech','render_frame','probe_audio','resolve_reference','analyze_reference','search_web_references','render_motion_project'}
+_BACKGROUND_TOOLS = {'generate_speech','generate_image','watch_video','watch_render','measure_speech','render_frame','probe_audio','resolve_reference','analyze_reference','search_web_references','render_motion_project','present_references','read_presentations','revise_presentation'}
 
 def _run_tool_thread(name,args):
     if name in _BACKGROUND_TOOLS:
@@ -150,12 +150,15 @@ def tool_definitions() -> list[types.Tool]:
         _tool('apply_edits','複数のタイムライン操作をまとめて作業用下書きへ適用する。1操作でも失敗したら全操作を戻す。素材生成や外部操作は含めない。各操作は通常ツールと同じ引数。引数の値に {"$result":0,"path":"clip_id"} を置くと、このバッチの0番目の結果を参照できる（配列はcuts.0.clip_id等）。先行操作だけ参照可。',{'operations':{'type':'array','maxItems':100,'items':{'type':'object','properties':{'name':_STR,'args':{'type':'object'}},'required':['name','args']}}},['operations']),
         _tool('animate_clip','文字・映像・図形を一つのクリップのまま滑らかに動かす。posesは相対秒tとキャンバス比x,y,w,h。文字はデザイン全体への移動・拡大（標準0,0,1,1）、図形は領域そのもの。既存の動きを置換する。',{'clip_id':_STR,'poses':{'type':'array','items':{'type':'object'}},'easing':{'type':'string','enum':['linear','cubic_out','cubic_in_out']}},['clip_id','poses']),
         _tool('production_methods','制作方法の候補・必要素材・下書き方法・検証状態を必要時に読む。一覧外の表現も調査して作れる。',{'method_id':_STR}),
-        _tool('prepare_motion_project','編集可能な映像プロジェクトを別版にコピーする。既存映像のasset_id、任意のproject_dir、または承認済み光学文字見本template=trueを指定。返されたHTMLを通常のファイル操作で編集する。',{'asset_id':_STR,'project_dir':_STR,'template':{'type':'boolean'}}),
+        _tool('prepare_motion_project','引数なしで、テイストを固定しない白紙の映像プロジェクトを準備する。既存映像の再編集はasset_idまたはproject_dirで別版にコピー。光学文字の演出を再利用したい場合だけtemplate=true。返されたHTMLの構図・尺・演出を通常のファイル操作で編集する。',{'asset_id':_STR,'project_dir':_STR,'template':{'type':'boolean'}}),
+        _tool('write_motion_file','準備した作業用映像プロジェクトにHTML/CSS/JS等のテキストをUTF-8でそのまま保存する。シェルの引用符や日本語の文字化けを避けて制作できる。pathはプロジェクト内の相対パス。書き出し・配置は別操作。',{'project_dir':_STR,'path':_STR,'content':_STR},['project_dir','path','content']),
         _tool('render_motion_project','HTML/GSAPプロジェクトを検査・書き出しし、編集元の保存版付きで素材登録する。配置はadd_clip、部分差替えはset_clip_props(asset_id)で明示する。映像内の文字等は保存した元コードから再編集可能。',{'project_dir':_STR,'name':_STR},['project_dir']),
         _tool('search_web_references','Web全体から参考作品・制作資料を出典付きで検索。検索結果から映像を推測しない。',{'queries':{'type':'array','items':_STR}},['queries']),
         _tool('resolve_reference', '参考URL・部屋の素材IDを再生可能なitemと保存IDへ解決。X動画対応。分析前に提示できる。', {'source':_STR}, ['source']),
         _tool('read_references','作品に保存した参考素材と分析を読む。',{'reference_id':_STR}),
         _tool('analyze_reference','保存した参考をGeminiで映像・音声分析。動画はAgentic。同じ質問の結果は再利用。長い分析は提示や他作業と並行する。',{'reference_id':_STR,'question':_STR},['reference_id']),
+        _tool('revise_presentation', __import__('app.services.editor_presentation',fromlist=['REVISE_DESCRIPTION']).REVISE_DESCRIPTION, __import__('app.services.editor_presentation',fromlist=['REVISE_PROPERTIES']).REVISE_PROPERTIES, ['item_id','changes']),
+        _tool('read_presentations','提示した画像・動画・文字・3D等の履歴を読む。beforeで以前の提示を取得。',{'before':{'type':'number'},'limit':{'type':'integer'}}),
         _tool('present_references', __import__('app.services.editor_presentation',fromlist=['DESCRIPTION']).DESCRIPTION, {'items':{'type':'array','items':__import__('app.services.editor_presentation',fromlist=['ITEM_SCHEMA']).ITEM_SCHEMA}}, ['items']),
         _tool('ask_user','作業に必要な質問をエディターの音声・チャットへ届け、返答を待つ。回答後は同じ作業を続ける。',{'question':_STR},['question']),
         _tool('editor_help','エディターの保存・座標・提案仕様を読む。',{'topic':_STR},[]),
@@ -266,9 +269,9 @@ def tool_definitions() -> list[types.Tool]:
               {"text": _STR, "voice": _STR, "readings": {"type": "object"}, "name": _STR}, ["text"]),
         _tool("auto_captions", "全文字幕: segments=[{t0,t1,text}] に『その範囲で話している正確な台本』を渡すと、"
               "発話の単語時刻に合わせて24文字以下に分割した字幕クリップを置く（範囲内の既存字幕は置き換え）。"
-              "台本はテロップに出したい表記そのもの。音声を文字起こしするので1分の範囲で約30〜60秒かかる。",
+              "台本はテロップに出したい表記そのもの。合成音声や既存の計測に単語時刻があればwords=[開始秒,終了秒,文字]の配列で渡すと再文字起こしなしで配置する。時刻はタイムライン基準。文節で区切る。words省略時は音声を文字起こしする。",
               {"segments": {"type": "array", "items": {"type": "object"}}, "style": {"type": "object"},
-               "replace": {"type": "boolean"}}, ["segments"]),
+               "replace": {"type": "boolean"}, "words": {"type":"array","items":{"type":"array"}}}, ["segments"]),
         _tool("watch_render", "指定範囲を『合成後の完成映像として』書き出してGeminiに視聴させる（ぼかし・枠・字幕・重ね全部込み、音声込み）。"
               "watch_videoは素材だけを見るが、こちらは視聴者が見るものそのもの。仕上がり検品に使う。1分の範囲で約1〜2分。",
               {"t0": _NUM, "t1": _NUM, "question": _STR}, ["t0", "t1"]),
@@ -290,14 +293,17 @@ async def call_tool(name: str, arguments: dict) -> list:
     global _calls, _generations
     from app.services import editor_job_updates
     updates=editor_job_updates.receive(ROOM_ID,JOB_ID) if JOB_ID else []
-    if updates:
+    scope_updates=editor_job_updates.scope_updates(ROOM_ID,JOB_ID) if JOB_ID else []
+    if scope_updates:
         with _draft_lock:
             draft=_load()
             if draft.get('edit_scope') is not None:
                 from app.services.timeline_scope import make_scope
-                ids=list(draft['edit_scope']['clip_ids'])+[i for u in updates for i in u.get('clip_ids',[])]
+                ids=list(draft['edit_scope']['clip_ids'])+[i for u in scope_updates for i in u.get('clip_ids',[])]
                 draft['edit_scope']=make_scope(draft['base_sequence'],ids)
                 td.save_draft(draft)
+            editor_job_updates.mark_scope_applied(ROOM_ID,JOB_ID,scope_updates)
+    if updates:
         return _ok({'ok':False,'instruction_updated':True,'updates':updates,
                     'note':'ユーザーから進行中の仕事への訂正です。今回のツールはまだ実行していません。最新の条件に計画を更新してから必要な操作を呼び直してください。指定サービスを勝手に代替しないでください。'})
     _calls += 1
@@ -337,6 +343,9 @@ async def _dispatch(name: str, a: dict) -> list:
             if not source:
                 return _ok({'ok':False,'error':'この素材には編集可能な映像プロジェクトが保存されていません'})
         return _ok(prepare(_room_dir(), source, bool(a.get('template'))))
+    if name == 'write_motion_file':
+        from app.services.editor_motion_project import write_file
+        return _ok(write_file(_room_dir(), a['project_dir'], a['path'], a['content']))
     if name == 'render_motion_project':
         from app.services.editor_motion_project import render
         output, provenance = render(_room_dir(), a['project_dir'], _ffmpeg())
@@ -359,15 +368,14 @@ async def _dispatch(name: str, a: dict) -> list:
             return _ok({'ok':False,'error':'タイムラインの編集操作を1〜100件指定してください。生成・保存・外部操作は含められません。'})
         results=[]
         try:
-            for op in operations:
-                result=await _dispatch(op['name'],_resolve_batch_results(op['args'], results))
-                value=json.loads(result[0].text)
-                if not value.get('ok'):
-                    td.save_draft(draft)
-                    return _ok({'ok':False,'rolled_back':True,'failed_operation':len(results),'error':value.get('error',str(value))})
-                results.append(value)
+            with td.edit_transaction(ROOM_ID, DRAFT_ID):
+                for op in operations:
+                    result=await _dispatch(op['name'],_resolve_batch_results(op['args'], results))
+                    value=json.loads(result[0].text)
+                    if not value.get('ok'):
+                        raise ValueError(value.get('error',str(value)))
+                    results.append(value)
         except Exception as exc:
-            td.save_draft(draft)
             return _ok({'ok':False,'rolled_back':True,'failed_operation':len(results),'error':str(exc)})
         return _ok({'ok':True,'results':results})
     if name=='production_methods':
@@ -393,9 +401,15 @@ async def _dispatch(name: str, a: dict) -> list:
     if name=='editor_help':
         from app.services.editor_help import read
         return _ok(read(a.get('topic','operations')))
+    if name=='read_presentations':
+        from app.services.editor_presentation import history
+        return _ok(history(ROOM_ID,draft['content_id'],before=a.get('before'),limit=a.get('limit',12)))
+    if name=='revise_presentation':
+        from app.services.editor_presentation import revise
+        return _ok(revise(ROOM_ID,draft['content_id'],a['item_id'],a['changes']))
     if name=='present_references':
-        from app.services.editor_presentation import present
-        return _ok(present(ROOM_ID,draft['content_id'],a.get('items')))
+        from app.services.editor_presentation import resolve_and_present
+        return _ok(await resolve_and_present(ROOM_ID,draft['content_id'],a.get('items')))
     if name=='ask_user':
         from app.services import editor_questions
         return _ok(await editor_questions.ask(ROOM_ID,JOB_ID,str(a['question'])))
@@ -560,7 +574,7 @@ async def _dispatch(name: str, a: dict) -> list:
         segs = [s for s in (a.get("segments") or []) if isinstance(s, dict)]
         res = _auto_captions(draft, seq, assets, segs,
                              a.get("style") if isinstance(a.get("style"), dict) else None,
-                             bool(a.get("replace", True)))
+                             bool(a.get("replace", True)), a.get('words'))
         return _ok(res)
 
     # ---- mutating commands on the draft ----
@@ -1101,13 +1115,13 @@ def _generate_speech(draft: dict, text: str, voice: str, readings: dict | None, 
             "note": "add_audio(asset_id, duration, at, volume=1.0, role='narration') で置く"}
 
 
-def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: dict | None, replace: bool) -> dict:
+def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: dict | None, replace: bool, words=None) -> dict:
     from app.services import timeline_captions as cap
 
     if not segments:
         return {"ok": False, "error": "segments=[{t0,t1,text}] が必要"}
     work = _room_dir() / "drafts" / f"cap_{draft['draft_id']}"
-    res = cap.auto_captions(seq, assets, work, segments, style=style, replace=replace)
+    res = cap.auto_captions(seq, assets, work, segments, style=style, replace=replace, words=words)
     if not res.get("ok"):
         return res
     draft.setdefault("log", []).append({"t": time.time(), "tool": "auto_captions", "args": {"segments": len(segments)}})

@@ -52,6 +52,8 @@ impl AssistantPanel {
             match wry::WebViewBuilder::new()
                 .with_url("http://127.0.0.1:8000/api/v1/editor-assistant/page")
                 .with_bounds(bounds.clone())
+                // Keep native file drops available to the HTML upload handler.
+                .with_drag_drop_handler(|_| false)
                 .with_initialization_script(&initial)
                 .with_navigation_handler(|url| url == "about:blank" || url.starts_with("https://www.youtube-nocookie.com/embed/") || url.starts_with("https://player.vimeo.com/video/") || url.trim_end_matches('/') == "http://127.0.0.1:8000/api/v1/editor-assistant/page")
                 .with_ipc_handler(move |request| {

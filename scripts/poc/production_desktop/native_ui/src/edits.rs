@@ -2001,6 +2001,26 @@ fn convert_seq_geometry(seq: &mut Value, old: (f64, f64), new: (f64, f64)) {
         let Some(clips) = tr.get_mut("clips").and_then(|v| v.as_array_mut()) else { continue };
         for cl in clips {
             let Some(o) = cl.as_object_mut() else { continue };
+            // Full-frame media use a canvas-relative camera. The compositor's
+            // contain/cover fit preserves source proportions; converting the
+            // camera as a physical overlay box creates a permanent pillarbox.
+            let full_box = |p: &Value| {
+                let n = |key: &str, default: f64| p.get(key).and_then(Value::as_f64).unwrap_or(default);
+                n("x",0.).abs()<0.03 && n("y",0.).abs()<0.03
+                    && (n("width",1.)-1.).abs()<0.03 && (n("height",1.)-1.).abs()<0.03
+            };
+            let frame_camera = o.get("transform_keys").and_then(Value::as_array)
+                .and_then(|keys| keys.first()).map(|key| {
+                    let n = |k: &str, d: f64| key.get(k).and_then(Value::as_f64).unwrap_or(d);
+                    (n("w",1.)-n("h",1.)).abs()<0.03
+                        && (n("x",0.)+(n("w",1.)-1.)/2.).abs()<0.03
+                        && (n("y",0.)+(n("h",1.)-1.)/2.).abs()<0.03
+                }).unwrap_or(true);
+            let is_full_frame = o.contains_key("asset_id") && !o.contains_key("text")
+                && o.get("position").map(full_box).unwrap_or(true) && frame_camera;
+            if is_full_frame {
+                continue;
+            }
             // 旧 transform (uniform scale/pan) は正方スケールが非可逆になるため position に実体化
             if let Some(t) = o.get("transform").cloned() {
                 let g = |n: &str, d: f64| t.get(n).and_then(|v| v.as_f64()).unwrap_or(d);
@@ -2040,20 +2060,8 @@ fn convert_seq_geometry(seq: &mut Value, old: (f64, f64), new: (f64, f64)) {
                     }
                 }
             }
-            // テロップ: 文字の物理pxは outH * 0.052 * fontSize で決まる（caption-design.ts）。
-            // 高さが変わる形式切替では fontSize を (旧H/新H) 倍して物理サイズを保存（可逆）。
-            if o.contains_key("text") {
-                let kh = old.1 / new.1;
-                if (kh - 1.0).abs() > 1e-9 {
-                    let style = o
-                        .entry("style")
-                        .or_insert_with(|| serde_json::json!({}));
-                    if let Some(so) = style.as_object_mut() {
-                        let fs = so.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                        so.insert("fontSize".into(), serde_json::json!(fs * kh));
-                    }
-                }
-            }
+            // Caption size/position are canvas-relative. Keep their proportions;
+            // the renderer reflows text for the new canvas width.
         }
     }
 }
@@ -2061,13 +2069,13 @@ fn convert_seq_geometry(seq: &mut Value, old: (f64, f64), new: (f64, f64)) {
 /// プレビュー/書き出しキャンバスの形式を変更する（何度でも可）。timeline.format を
 /// 正とし、sequence 側の width/height 上書きは形式追従を妨げるので取り除く。
 /// 書き出しサーバーは sequence.format → timeline.format の順で読むため両方に書く。
-/// 全クリップの明示座標は物理形状保存で変換され、素材の形は変わらない。
+/// 全面映像と字幕は画面に追従し、明示的な小窓は物理形状を保存する。
 pub fn set_canvas_format(root: &mut Value, fmt: &str) {
     let Some(c) = root.get_mut(0) else { return };
     let Some(tl) = c.get_mut("timeline").and_then(|t| t.as_object_mut()) else { return };
     let old_fmt = tl
-        .get("format")
-        .or_else(|| tl.get("sequence").and_then(|s| s.get("format")))
+        .get("sequence").and_then(|s| s.get("format"))
+        .or_else(|| tl.get("format"))
         .and_then(|v| v.as_str())
         .unwrap_or("9:16")
         .to_string();
@@ -2077,7 +2085,7 @@ pub fn set_canvas_format(root: &mut Value, fmt: &str) {
     let old = canvas_px_for_format(&old_fmt);
     let new = canvas_px_for_format(fmt);
     tl.insert("format".into(), Value::String(fmt.to_string()));
-    let mut fix_seq = |s: &mut Value| {
+    let fix_seq = |s: &mut Value| {
         if let Some(o) = s.as_object_mut() {
             o.insert("format".into(), Value::String(fmt.to_string()));
             o.remove("width");
@@ -2093,6 +2101,7 @@ pub fn set_canvas_format(root: &mut Value, fmt: &str) {
             fix_seq(s);
         }
     }
+    c.as_object_mut().unwrap().insert("format".into(), Value::String(fmt.to_string()));
 }
 
 fn tracks_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
@@ -3246,6 +3255,22 @@ mod tests {
         let snap = raw.to_string();
         set_canvas_format(&mut raw, "9:16");
         assert_eq!(snap, raw.to_string());
+    }
+
+    #[test]
+    fn full_frame_camera_and_captions_follow_canvas_without_pillarbox() {
+        let mut raw=serde_json::json!([{"timeline":{"format":"16:9","sequence":{"format":"16:9","tracks":[
+            {"type":"video","clips":[{"id":"avatar","asset_id":"a","fit":"contain",
+             "transform_keys":[{"t":0.,"x":0.,"y":0.,"w":1.,"h":1.},
+                               {"t":4.,"x":-0.0125,"y":-0.0125,"w":1.025,"h":1.025}]}]},
+            {"type":"caption","clips":[{"text":"字幕","style":{"fontSize":0.85,"y":0.06}}]}
+        ]}}}]);
+        let before=raw[0]["timeline"]["sequence"]["tracks"].clone();
+        for format in ["9:16","1:1","4:5","16:9"] {
+            set_canvas_format(&mut raw,format);
+            assert_eq!(raw[0]["timeline"]["sequence"]["tracks"],before);
+            assert_eq!(raw[0]["timeline"]["sequence"]["format"],format);
+        }
     }
 
     #[test]

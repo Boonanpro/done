@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import time
+import threading
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -111,7 +112,8 @@ def resolve(room, content_id, source):
         ext = Path(parsed.path).suffix.lower()
         kind = 'image' if ext in {'.png', '.jpg', '.jpeg', '.webp', '.gif'} else 'video'
         youtube = parsed.hostname in {'youtube.com', 'www.youtube.com', 'youtu.be', 'm.youtube.com'}
-        if not youtube and ext not in {'.mp4', '.webm', '.mov', '.png', '.jpg', '.jpeg', '.webp', '.gif'}:
+        vimeo = parsed.hostname == 'vimeo.com' and re.fullmatch(r'/\d+', parsed.path)
+        if not (youtube or vimeo) and ext not in {'.mp4', '.webm', '.mov', '.png', '.jpg', '.jpeg', '.webp', '.gif'}:
             from html.parser import HTMLParser
             from urllib.parse import urljoin
             class Metadata(HTMLParser):
@@ -173,7 +175,28 @@ def read(room, content_id, reference_id=None):
     return {'ok': True, 'references': refs}
 
 
+_analysis_locks_guard = threading.Lock()
+_analysis_locks = {}
+
+
 def analyze(room, content_id, reference_id, question='表現・構成・音・制作方法を分析してください'):
+    # Concurrent requests for the same observation share the cached result.
+    # Scope includes content so the access check cannot be bypassed by reuse.
+    key = (room, content_id, reference_id, question)
+    with _analysis_locks_guard:
+        entry = _analysis_locks.setdefault(key, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            return _analyze(room, content_id, reference_id, question)
+    finally:
+        with _analysis_locks_guard:
+            entry[1] -= 1
+            if not entry[1]:
+                _analysis_locks.pop(key, None)
+
+
+def _analyze(room, content_id, reference_id, question):
     from google import genai
     from app.config import settings
     ref = read(room, content_id, reference_id)['references'][0]
@@ -184,9 +207,13 @@ def analyze(room, content_id, reference_id, question='表現・構成・音・�
         return {**json.loads(result_path.read_text(encoding='utf-8')), 'cached': True}
     started = time.monotonic()
     item = ref['item']
+    if item.get('kind') not in {'video','image','audio'}:
+        raise ValueError('分析には動画・画像・音声の実ファイルが必要です')
     client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
     uri = item.get('url')
     youtube = uri and urlparse(uri).hostname in {'youtube.com', 'www.youtube.com', 'youtu.be', 'm.youtube.com'}
+    if uri and urlparse(uri).hostname in {'vimeo.com','www.vimeo.com','player.vimeo.com'}:
+        raise ValueError('Vimeoのページは分析用の動画ファイルではありません。公開の実動画URLまたは部屋の動画素材を指定してください。埋め込み表示はそのまま利用できます。')
     if not youtube:
         if item.get('asset_id'):
             assets = json.loads((td._room_dir(room) / 'assets.json').read_text(encoding='utf-8'))
@@ -204,6 +231,9 @@ def analyze(room, content_id, reference_id, question='表現・構成・音・�
                         response.raise_for_status()
                         if response.is_redirect:
                             raise ValueError('素材の配信URLが変わりました。再取得が必要です')
+                        content_type=response.headers.get('content-type','').split(';')[0].strip().lower()
+                        if content_type in {'text/html','application/xhtml+xml','application/json'}:
+                            raise ValueError('参照先はメディアではなくWebページです。動画・画像・音声の実ファイルが必要です。')
                         total = 0
                         with temp.open('wb') as target:
                             for chunk in response.iter_bytes():
@@ -241,7 +271,23 @@ def analyze(room, content_id, reference_id, question='表現・構成・音・�
     response = httpx.post('https://generativelanguage.googleapis.com/v1beta/interactions',
         headers={'x-goog-api-key': settings.GOOGLE_GEMINI_API_KEY},
         json={'model': model, 'input': [media, {'type': 'text', 'text': prompt}]}, timeout=360)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # Keep the actual reason instead of reducing every failure to "400".
+        # Do not save raw responses, headers, signed URLs or request credentials.
+        try:
+            error = response.json().get('error', {})
+            detail = str(error.get('message', '')) if isinstance(error, dict) else ''
+        except (ValueError, AttributeError):
+            detail = ''
+        detail = re.sub(r'https?://\S+', '[URL]', detail)
+        if settings.GOOGLE_GEMINI_API_KEY:
+            detail = detail.replace(settings.GOOGLE_GEMINI_API_KEY, '[redacted]')
+        failure = {'ok':False, 'reference_id':reference_id, 'status':response.status_code,
+                   'seconds':round(time.monotonic()-started, 2), 'error':detail[:1000]}
+        _save(result_path.with_suffix('.error.json'), failure)
+        raise ValueError(f"動画分析に失敗しました（HTTP {response.status_code}、{failure['seconds']}秒）: {failure['error'] or '詳細なし'}") from exc
     data = response.json()
     texts = [p['text'] for step in data.get('steps', []) if step.get('type') == 'model_output'
              for p in step.get('content', []) if p.get('text')]

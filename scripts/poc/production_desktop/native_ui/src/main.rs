@@ -12504,25 +12504,6 @@ impl eframe::App for App {
             self.library_ui(ctx);
             return;
         }
-        // 生成中バナー: ダンの進捗を出しつつ「今は見るだけ」を明示
-        if self.is_generating_open() {
-            egui::TopBottomPanel::top("gen_banner").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
-                    let label = if self.assistant.production_at.map(|t|t.elapsed().as_secs()<10).unwrap_or(false) {
-                        self.assistant.production_label.as_deref().unwrap_or("ダンが作業しています")
-                    } else { "ダンが作業しています" };
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{label}　· 再生・編集できます"
-                        ))
-                        .size(12.5)
-                        .color(egui::Color32::from_rgb(120, 220, 190)),
-                    );
-                });
-            });
-            ctx.request_repaint_after(std::time::Duration::from_millis(400));
-        }
         // Caption text edits stay in memory while typing (the WebView overlay renders
         // those live) — but the GPU compositor needs the cache PNGs to draw captions at
         // their LANE position (z-order across kinds), so keep the background render

@@ -32,6 +32,59 @@ def test_empty_project_can_create_without_selecting_nonexistent_clip(project):
     _,turn=api.read_turn('room',result['turn_id'],'owner')
     assert turn['scope'] is None
 
+
+def test_long_live_transcript_is_not_silently_dropped(project):
+    text='左上を固定して黒い背景も含めて80％に縮小してください'
+    event={'at':1,'type':'user_transcript','content_id':project,'item_id':'live-large',
+           'source':'gpt-live-1','text':text,'observed_views':[{'pointer':'x'*41000}]}
+    asyncio.run(api.events(None,api.EventBatch(room_id='room',session_id='abc',events=[event])))
+    rows=api.project.dialogue('room',project)['messages']
+    assert rows[-1]['text']==text
+    assert rows[-1]['observed_views']==event['observed_views']
+
+
+def test_current_conversation_bypasses_delayed_audit(project):
+    from app.services.editor_reasoning import initial_input
+    full='左上を固定して80％に縮小してください'
+    begun=api.begin(None,api.Context(room_id='room',content_id=project,
+        live_dialogue=[{'role':'user','text':full}]))
+    inputs=initial_input(begun['context'],[{'role':'user','text':'左上を起'}])
+    assert inputs[-1]=={'role':'user','content':full}
+    assert 'live_dialogue' not in json.loads(inputs[0]['content'])['editor_context']
+
+
+def test_update_reaches_running_turn_without_waiting_for_tool_lock(project,monkeypatch):
+    from app.services import editor_codex
+    begun=api.begin(None,api.Context(room_id='room',content_id=project))
+    received=[]
+    monkeypatch.setattr(editor_codex,'steer_active',lambda key,text:received.append((key,text)) or True)
+    async def run():
+        lock=api._turn_lock('room',begun['turn_id'])
+        async with lock:
+            result=await asyncio.wait_for(api.steer(None,api.ToolRequest(room_id='room',turn_id=begun['turn_id'],name='steer',
+                args={'text':'その調査は取り消し。今見ている別の画面について確認して','item_id':'correction','observed_views':[{'at_ms':100,'view':{'content_id':'reference'}}]})),1)
+            assert result['ok']
+    asyncio.run(run())
+    assert '取り消し' in received[0][1] and 'reference' in received[0][1]
+    path,_=api.read_turn('room',begun['turn_id'],'owner')
+    assert json.loads(path.with_suffix('.updates.jsonl').read_text(encoding='utf-8'))['item_id']=='correction'
+
+
+def test_reference_frame_does_not_retarget_edit_and_explicit_switch_does(project, monkeypatch):
+    other=api.new_content(None,api.NewContent(room_id='room'))['content_id']
+    views=[{'at_ms':100,'view':{'content_id':other,'playhead':12}}]
+    begun=api.begin(None,api.Context(room_id='room',content_id=project,observed_views=views,viewed_context={'content_id':other}))
+    assert begun['context']['observed_views']==views
+    monkeypatch.setattr(api.tl,'render_frame_b64',lambda room,cid,t:{'ok':True,'frame_of':cid,'t':t})
+    result=asyncio.run(api.tool(None,api.ToolRequest(room_id='room',turn_id=begun['turn_id'],name='timeline_frame',args={'content_id':other,'t':12})))
+    assert result['frame_of']==other and result['t']==12
+    _,saved=api.read_turn('room',begun['turn_id'],'owner')
+    assert saved['context']['content_id']==project
+    switched=asyncio.run(api.tool(None,api.ToolRequest(room_id='room',turn_id=begun['turn_id'],name='set_edit_target',args={'content_id':other})))
+    assert switched['context']['content_id']==other
+    _,saved=api.read_turn('room',begun['turn_id'],'owner')
+    assert saved['context']['content_id']==other
+
 def test_answer_survives_finished_worker_and_unrelated_null_context(project):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

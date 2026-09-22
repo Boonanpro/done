@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -169,8 +170,15 @@ def transcribe_cloud_words(wav: Path, prompt: str | None = None):
     return words
 
 
+@lru_cache(maxsize=1)
+def _phrase_parser():
+    import budoux
+    return budoux.load_default_japanese_parser()
+
+
 def chunk_text(text: str, maxlen: int = MAX_CHARS) -> list[str]:
-    parts = [p for p in re.split(r"(?<=[。、])", text) if p.strip()]
+    # Prefer a linguistic boundary over slicing a word at a character limit.
+    parts = _phrase_parser().parse(text)
     out: list[str] = []
     cur = ""
     for p in parts:
@@ -179,9 +187,12 @@ def chunk_text(text: str, maxlen: int = MAX_CHARS) -> list[str]:
             cur = p
         else:
             cur += p
+        if cur.endswith(('。', '！', '？', '\n')):
+            out.append(cur)
+            cur = ''
     if cur:
         out.append(cur)
-    return [c.strip("、。 ") for c in out if c.strip("、。 ")]
+    return out
 
 
 def align_segments(words: list[tuple[float, float, str]], segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -260,16 +271,31 @@ DEFAULT_STYLE = {"font": "noto-sans", "fontSize": 0.85, "color": "#ffffff", "out
 
 def auto_captions(sequence: dict[str, Any], assets: dict[str, dict[str, Any]], work_dir: Path,
                   segments: list[dict[str, Any]], style: dict[str, Any] | None = None,
-                  replace: bool = True, whisper_model: str | None = None) -> dict[str, Any]:
+                  replace: bool = True, whisper_model: str | None = None,
+                  words: list | None = None) -> dict[str, Any]:
     """Align `segments` to the timeline's speech and write caption clips into `sequence`.
     replace=True removes existing captions inside the covered ranges first."""
     if not segments:
         return {"ok": False, "error": "segments required: [{t0,t1,text}]"}
     lo = min(_f(s.get("t0")) for s in segments)
     hi = max(_f(s.get("t1")) for s in segments)
-    wav = render_speech_wav(sequence, assets, work_dir, lo - 1.0, hi + 1.0)
-    words = transcribe_words(wav, model=whisper_model) if wav else []
+    supplied = words is not None
+    if supplied:
+        try:
+            words = [(float(w[0]), float(w[1]), str(w[2])) for w in words]
+            import math
+            if any(not math.isfinite(st) or not math.isfinite(en) or en <= st for st,en,_ in words):
+                raise ValueError('Invalid word interval')
+        except (TypeError, ValueError, IndexError):
+            return {'ok':False,'error':'words must contain [timeline_start, timeline_end, text] intervals'}
+    else:
+        wav = render_speech_wav(sequence, assets, work_dir, lo - 1.0, hi + 1.0)
+        words = transcribe_words(wav, model=whisper_model) if wav else []
     specs = align_segments(words, segments)
+    expected = ''.join(_norm(str(s.get('text') or '')) for s in segments)
+    actual = ''.join(_norm(s['text']) for s in specs)
+    if expected != actual:
+        return {'ok':False,'error':'字幕の文字が欠ける時刻配分です。範囲か単語時刻を確認してください。既存字幕は変更していません。'}
     if replace:
         for track in sequence.get("tracks") or []:
             if str(track.get("type") or "") != "caption":
@@ -290,4 +316,4 @@ def auto_captions(sequence: dict[str, Any], assets: dict[str, dict[str, Any]], w
         if r.get("ok"):
             ids.append(r["clip_id"])
     return {"ok": True, "captions": len(ids), "clip_ids": ids, "words": len(words), "style": st,
-            "specs": specs}
+            "specs": specs, "timing_source": "supplied" if supplied else "transcribed"}

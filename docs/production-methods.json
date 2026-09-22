@@ -30,7 +30,7 @@
       ],
       "workflow": [
         "未知の参考はresolve_reference/analyze_referenceと通常の検索で調査する。テンプレートの有無で作れる表現を制限しない。",
-        "新規は独自のHyperFramesプロジェクトを作るかprepare_motion_project(template=true)を起点にする。見本の文章・尺・デザインを作品の意図に合わせる。参考比較用音声は引き継がない。",
+        "新規はprepare_motion_project()で白紙から始め、構図・尺・素材・演出を今回の目的に合わせる。光学文字の演出を再利用する場合だけtemplate=true。過去の依頼書・比較用音声は引き継がない。",
         "既存はprepare_motion_project(asset_id)で編集元を別版にコピー。通常のファイル操作で指示部分を編集し、render_motion_project(project_dir)で検査と素材登録。",
         "add_clipで配置、既存の場面はset_clip_props(asset_id)で更新する。音声が別クリップなら必要時にそちらも更新。キャンバス比率や対象外クリップを変えない。",
         "render_frame/watch_renderで配置結果を確認し、実際に見せる。今回の方法以外も必要なら調べて作る。"

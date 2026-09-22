@@ -20,7 +20,18 @@ def playback_audio_path(room_id,asset):
     return proxy if proxy.is_file() else Path(asset.get('local_path') or '')
 
 
-def compact_state(room_id, content_id, playhead=0, selected=(), full=False):
+def clip_inspection(clip, include_keyframes=False):
+    """Overview by default; exact animation data remains explicitly readable."""
+    result=dict(clip)
+    keys=result.get('transform_keys')
+    if not include_keyframes and isinstance(keys,list) and len(keys)>4:
+        result.pop('transform_keys')
+        result['transform_key_summary']={'count':len(keys),'first':keys[0],'last':keys[-1],
+            'detail':'Exact keys available with include_keyframes=true'}
+    return result
+
+
+def compact_state(room_id, content_id, playhead=0, selected=(), full=False, include_keyframes=False):
     content, seq = tl.live_sequence(room_id, content_id)
     if seq is None:
         return {'ok': False, 'error': '作品が見つかりません'}
@@ -30,10 +41,14 @@ def compact_state(room_id, content_id, playhead=0, selected=(), full=False):
         for c in track.get('clips', []):
             if not full and c['id'] not in ids and not (c['timeline_end'] > playhead-6 and c['timeline_start'] < playhead+6):
                 continue
-            clips.append({**{k:c[k] for k in ('id','text','style','asset_id','timeline_start','timeline_end','source_start','source_end','speed','volume','approved','role',
+            clips.append(clip_inspection({**{k:c[k] for k in ('id','text','style','asset_id','timeline_start','timeline_end','source_start','source_end','speed','volume','approved','role',
                                               'grade','position','fit','crop','opacity','muted','video_enabled','transform_keys','region','locked') if k in c},
-                          'lane':lane,'kind':track.get('type')})
+                          'lane':lane,'kind':track.get('type')},include_keyframes))
+    total=sum(len(t.get('clips',[])) for t in seq.get('tracks',[]))
     return {'content_id':content_id,'title':content.get('title'),'duration':seq.get('duration'),
+            'coverage':{'mode':'full' if full else 'playhead_window_and_selection','total_clips':total,'matching_clips':len(clips),
+                        'outside_window':total-len(clips)},
+            'coverage_note':None if full else 'clipsは再生位置の前後6秒と選択中の部分だけです。全区間の対象を調べる場合はtimeline_state(full=true)で全体を取得できます。',
             'playhead':playhead,'clips':clips[:160 if full else 28], 'has_more':len(clips)>(160 if full else 28)}
 
 
@@ -87,10 +102,48 @@ def draft_for(room_id,content_id,edit_scope,expected_hash):
     return d,baseline
 
 
+def transform_visuals(room_id,content_id,clip_ids,factor,anchor,edit_scope,expected_hash,canceled=None):
+    """One affine scale for a set of static visual clips; no generation or worker."""
+    factor=float(factor);ax=float(anchor['x']);ay=float(anchor['y'])
+    if not all(math.isfinite(v) for v in (factor,ax,ay)) or not .1<=factor<=4:
+        raise ValueError('倍率は0.1〜4、起点は有限の座標で指定してください')
+    if not clip_ids:raise ValueError('変更するクリップを指定してください')
+    _,seq=tl.live_sequence(room_id,content_id);indexed=scope.clips(seq);ops=[]
+    for cid in dict.fromkeys(clip_ids):
+        if cid not in indexed:raise ValueError('対象が見つかりません: '+cid)
+        _,c=indexed[cid]
+        if c.get('transform_keys') or c.get('region_keys'):
+            raise ValueError('動きのあるクリップはキーを含めた編集を使ってください: '+cid)
+        if 'text' in c:
+            st=c.get('style') or {}
+            # Explicit placement is required; renderer defaults vary by format.
+            if not {'x','y','fontSize','maxWidth'}<=st.keys():
+                raise ValueError('字幕の位置と幅を確認してから指定してください: '+cid)
+            out={k:float(st[k])*factor for k in ('fontSize','maxWidth')}
+            if not 0<out['fontSize']<=3 or not .05<=out['maxWidth']<=2:
+                raise ValueError('指定倍率が字幕の表示サイズ範囲を超えます: '+cid)
+            out.update(x=ax+(float(st['x'])-ax)*factor,y=ay+(float(st['y'])-ay)*factor)
+            if 'outlineWidth' in st:out['outlineWidth']=float(st['outlineWidth'])*factor
+            ops.append({'op':'set_clip','args':{'clip_id':cid,'style':out}})
+        else:
+            key='region' if isinstance(c.get('region'),dict) else 'position'
+            box=c.get(key)
+            if not isinstance(box,dict):raise ValueError('表示位置のある映像・効果を指定してください: '+cid)
+            out={'x':ax+(float(box['x'])-ax)*factor,'y':ay+(float(box['y'])-ay)*factor,
+                 'width':float(box['width'])*factor,'height':float(box['height'])*factor}
+            if key=='region' and not (0<=out['x']<=1 and 0<=out['y']<=1 and .0002<=out['width']<=1 and .0002<=out['height']<=1):
+                raise ValueError('指定倍率が領域効果の表示範囲を超えます: '+cid)
+            if key=='position' and min(out['width'],out['height'])<.01:
+                raise ValueError('指定倍率が映像の最小表示サイズを下回ります: '+cid)
+            ops.append({'op':'set_region' if key=='region' else 'set_clip_props','args':
+                {'clip_id':cid,**out} if key=='region' else {'clip_id':cid,'props':{'position':out}}})
+    return batch_edit(room_id,content_id,ops,edit_scope,expected_hash,canceled)
+
+
 def batch_edit(room_id,content_id,operations,edit_scope,expected_hash,canceled=None):
     d,baseline=draft_for(room_id,content_id,edit_scope,expected_hash)
     try:
-        if not 1<=len(operations)<=20:raise ValueError('一括編集は1〜20操作で指定してください')
+        if not 1<=len(operations)<=200:raise ValueError('一括編集は1〜200操作で指定してください')
         from app.services.timeline_operations import resolve_results
         results=[]
         for operation in operations:

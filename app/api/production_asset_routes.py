@@ -254,6 +254,17 @@ def _update_job(room_id: str, job_id: str, patch: dict[str, Any]) -> None:
                 job["updated_at"] = now
                 break
         _write_jobs(room_id, jobs)
+        if patch.get('status') in {'done', 'failed', 'canceled'}:
+            contents = _read_contents(room_id)
+            changed = False
+            for content in contents:
+                for work in content.get('editor_work', []):
+                    if work.get('job_id') == job_id:
+                        work['status'] = {'done': 'done', 'failed': 'blocked', 'canceled': 'canceled'}[patch['status']]
+                        work['updated_at'] = now
+                        changed = True
+            if changed:
+                _write_contents(room_id, contents)
 
 
 def _update_content(room_id: str, content_id: str, patch: dict[str, Any]) -> None:
@@ -4365,6 +4376,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                     expected_hash=instruction.get('editor_expected_hash'),
                     resume_draft_id=instruction.get('resume_draft_id'),
                     preparation_only=bool(instruction.get('preparation_only')),
+                    presentation_only=bool(instruction.get('presentation_only')),
                     on_event=lambda e: _append_job_event(room_id, job_id, e),
                 )
                 _update_job(room_id,job_id,{'result':agent_res})

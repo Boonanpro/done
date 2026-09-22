@@ -34,3 +34,27 @@ def receive(room,job_id):
     for row in rows:
         (td._room_dir(room)/'jobs'/job_id/'instructions'/(row['id']+'.received')).write_text(str(time.time()))
     return rows
+
+
+def scope_updates(room,job_id):
+    """Native steering can acknowledge text before the next timeline call.
+
+    Keep scope expansion independently pending until the timeline transaction
+    applies it. A transport acknowledgement must not silently lose clip IDs.
+    """
+    folder=td._room_dir(room)/'jobs'/job_id/'instructions'
+    rows=[]
+    for p in folder.glob('*.json'):
+        if not p.with_suffix('.received').exists() or p.with_suffix('.scope_applied').exists():
+            continue
+        try:
+            row=json.loads(p.read_text(encoding='utf-8'))
+        except (ValueError,OSError):
+            continue
+        rows.append(row)
+    return rows
+
+
+def mark_scope_applied(room,job_id,rows):
+    for row in rows:
+        (td._room_dir(room)/'jobs'/job_id/'instructions'/(row['id']+'.scope_applied')).write_text(str(time.time()))

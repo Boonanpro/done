@@ -20,8 +20,9 @@ async def search_web(queries):
         response = await client.post('https://generativelanguage.googleapis.com/v1beta/interactions',
             headers={'x-goog-api-key': settings.GOOGLE_GEMINI_API_KEY},
             json={'model':'gemini-3.8-flash', 'tools':[{'type':'google_search'}],
-                  'input':'次の条件に合う実在の映像・画像作品や制作資料をWeb検索してください。X、YouTube、作者サイトなど情報源を限定しない。作品例と手順の解説を区別。各候補の直接URLと選んだ理由を出典付きで簡潔に示す。投稿や検索文から映像を見たふりをしない。検索条件:\n'+'\n'.join(queries)})
+                  'input':'検索担当として、次の検索語に合う実在ページを探してください。最大6件、各候補のタイトル・直接URL・合致点を一言、出典付きで返してください。作品・画像・動画の検索には実物の掲載ページ、制作方法の検索には手順の資料を返します。X、YouTube、作者サイトなど情報源を限定しません。導入、総括、制作案は不要です。検索で分かったことと実物を視聴して確認したことは区別してください。検索語:\n'+'\n'.join(queries)})
     response.raise_for_status()
+    grounded_ms=round((time.perf_counter()-started)*1000)
     data = response.json()
     candidates = []
     texts = []
@@ -53,7 +54,8 @@ async def search_web(queries):
         await asyncio.gather(*(expand(item) for item in candidates))
     return {'ok':bool(candidates), 'candidates':candidates, 'summary':'\n'.join(texts),
             'elapsed_ms':round((time.perf_counter()-started)*1000),
-            'note':'出典付き検索結果。Webページは動画ファイルではありません。resolve_referenceまたはページの確認で実物を取得してから提示できます。'}
+            'timings':{'grounded_search_ms':grounded_ms,'redirect_ms':round((time.perf_counter()-started)*1000)-grounded_ms},
+            'note':'出典付き検索結果。Webページは動画ファイルではありません。present_referencesのsourceで公開URLの取得・表示をまとめて行えます。中身を先に調べたい時はresolve_referenceを使えます。'}
 
 def _text(value):
     if isinstance(value, str): return value

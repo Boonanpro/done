@@ -35,18 +35,35 @@ def dialogue(room, content_id, limit=30, before=None):
             except ValueError:return 0.
     folder=td._room_dir(room)/'assistant'
     turns={p.stem:read_json(p,{}) for p in folder.glob('*.json')}
-    rows=[]; spoken=set(); assistant_turns=set()
+    # A voice turn can join several VAD segments. Keep the canonical utterance
+    # once; segment audit events remain on disk, including interrupted speech.
+    covered_items={item for turn in turns.values()
+                   if turn.get('context',{}).get('content_id')==content_id
+                   for item in turn.get('context',{}).get('transcript_item_ids',[])}
+    rows=[]; spoken=set(); assistant_turns=set(); raw_groups={}; raw_current={}; raw_seen=set()
     for path in (folder/'events').glob('*.jsonl'):
         with path.open(encoding='utf-8') as f:
             for line in f:
                 try:e=json.loads(line)
                 except ValueError:continue
+                if e.get('type')=='live_transcript_delta' and e.get('delta'):
+                    session=e.get('live_session_id');role=e.get('role');start=e.get('start_ms');end=e.get('end_ms')
+                    if session and role in {'user','assistant'} and isinstance(start,(int,float)) and isinstance(end,(int,float)):
+                        identity=(session,role,e.get('event_id') or (start,end,e['delta']))
+                        if identity not in raw_seen:
+                            raw_seen.add(identity);key=(session,role);g=raw_current.get(key)
+                            if not g or start-g['end']>1600:
+                                g={'text':'','end':end};raw_current[key]=g;raw_groups[(session,role,start)]=g
+                            g['text']+=e['delta'];g['end']=end
+                    continue
                 if e.get('type') not in {'user_transcript','assistant_transcript'} or not e.get('text'):continue
+                if e['type']=='user_transcript' and e.get('item_id') in covered_items:continue
                 ctx=turns.get(e.get('turn_id'),{}).get('context',{})
                 if (e.get('content_id') or ctx.get('content_id'))!=content_id:continue
                 role='user' if e['type']=='user_transcript' else 'assistant'
                 rows.append({'at':timestamp(e.get('at')),'role':role,'text':e['text'],
-                             'turn_id':e.get('turn_id'),'playhead':ctx.get('playhead')})
+                             'turn_id':e.get('turn_id'),'playhead':ctx.get('playhead'),'item_id':e.get('item_id'),'source':e.get('source'), 'observed_views':e.get('observed_views',[]),
+                             'session_id':e.get('session_id'),'start_ms':e.get('start_ms')})
                 if role=='user':spoken.add(e.get('turn_id'))
                 else:assistant_turns.add(e.get('turn_id'))
     for tid,turn in turns.items():
@@ -54,11 +71,22 @@ def dialogue(room, content_id, limit=30, before=None):
         if ctx.get('content_id')==content_id and ctx.get('utterance') and tid not in spoken:
             rows.append({'at':timestamp(turn.get('created_at')),'role':'user','text':ctx['utterance'],
                          'turn_id':tid,'playhead':ctx.get('playhead')})
-        if ctx.get('content_id')==content_id and tid not in assistant_turns:
+        if ctx.get('content_id')==content_id and tid not in assistant_turns and turn.get('reasoning',{}).get('voice_model')!='gpt-live-1':
             reply=turn.get('reasoning',{}).get('reply_text')
             if reply:
                 rows.append({'at':turn['reasoning'].get('reply_at',timestamp(turn.get('created_at'))+.001),
                     'role':'assistant','text':reply,'turn_id':tid,'playhead':ctx.get('playhead')})
+    # Live transcript display groups grow; only the latest snapshot is a message.
+    grouped={}
+    for row in rows:
+        if row.get('source')=='gpt-live-1' and row.get('item_id'):grouped[(row['role'],row['item_id'])]=row
+    rows=[r for r in rows if r.get('source')!='gpt-live-1' or not r.get('item_id')]+list(grouped.values())
+    for row in rows:
+        raw=raw_groups.get((row.get('session_id'),row['role'],row.get('start_ms')))
+        # Recover only a verifiable extension of an existing snapshot. Never
+        # synthesize a missing word or merge different speakers/sessions.
+        if raw and raw['text'].startswith(row['text']) and len(raw['text'])>len(row['text']):
+            row['text']=raw['text'];row['recovered_from_deltas']=True
     rows.sort(key=lambda r:r['at'])
     if before is not None:rows=[r for r in rows if r['at']<float(before)]
     size=max(1,min(int(limit),60)); page=rows[-size:]
@@ -135,7 +163,7 @@ def stop_production(room, content_id, job_id=None):
             'note':'停止処理の結果です。既に保存された編集は取り消していません。' if stopped else '進行中の制作はありません。'}
 
 
-def inspect_range(room, content_id, start, end):
+def inspect_range(room, content_id, start, end, include_keyframes=False):
     _, seq = tl.live_sequence(room, content_id)
     start,end = float(start),float(end)
     if not 0 <= start < end <= float(seq.get('duration',0))+.01:
@@ -143,7 +171,8 @@ def inspect_range(room, content_id, start, end):
     assets=tl._assets(room)
     analyses={aid:a.get('metadata',{}).get('audio_analysis') for aid,a in assets.items() if a.get('metadata',{}).get('audio_analysis')}
     rows=tcx.timeline_transcript(seq,analyses,start,end)
-    clips=[dict(c,lane=n,lane_type=t.get('type')) for n,t in enumerate(seq.get('tracks',[])) for c in t.get('clips',[]) if c['timeline_start']<end and c['timeline_end']>start]
+    from app.services.editor_workflows import clip_inspection
+    clips=[clip_inspection(dict(c,lane=n,lane_type=t.get('type')),include_keyframes) for n,t in enumerate(seq.get('tracks',[])) for c in t.get('clips',[]) if c['timeline_start']<end and c['timeline_end']>start]
     ids={c.get('asset_id') for c in clips}
     return {'ok':True,'start':start,'end':end,'clips':clips[:100], 'has_more':len(clips)>100,
             'speech':rows,'speech_available':bool(rows),'note':'speechは元素材の解析です。字幕を発話の証拠として扱わないでください。画像の雰囲気はasset_imageやtimeline_frameで実物を見て判断してください。',

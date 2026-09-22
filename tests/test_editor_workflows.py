@@ -42,6 +42,23 @@ def test_batch_failure_does_not_leave_first_operation_applied(project):
     assert td._content_sequence(td._read_contents_raw('room')[0])==project
 
 
+def test_group_scale_is_one_commit_and_preserves_other_content(project):
+    seq=copy.deepcopy(project)
+    seq['tracks'].append({'id':'group','type':'video','clips':[{
+        'id':'background','timeline_start':0,'timeline_end':4,'style':'solid',
+        'region':{'x':.1,'y':.1,'width':.4,'height':.4}}]})
+    seq['tracks'][0]['clips'][0]['style']={'x':.2,'y':.2,'fontSize':1,'maxWidth':.3}
+    contents=td._read_contents_raw('room');contents[0]['timeline']['sequence']=seq;td._write_contents_raw('room',contents)
+    result=w.transform_visuals('room','test',['a','background'],.8,{'x':.1,'y':.1},scope.make_scope(seq,['a','background']),td.sequence_hash(seq))
+    assert result['committed']
+    after=scope.clips(td._content_sequence(td._read_contents_raw('room')[0]))
+    assert after['a'][1]['style']['x']==pytest.approx(.18)
+    assert after['a'][1]['style']['fontSize']==.8
+    assert after['background'][1]['region']=={'x':.1,'y':.1,'width':.32,'height':.32}
+    assert after['b']==scope.clips(seq)['b']
+    assert len(td.load_draft('room',result['draft_id'])['log'])==2
+
+
 def test_mismatched_audio_is_not_spread_into_fake_timing():
     with pytest.raises(ValueError,match='一致'):
         w.caption_boundaries([(0,3,'別の台詞です')],['写真を','送ってください'],0,4)

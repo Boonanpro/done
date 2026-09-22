@@ -15,10 +15,35 @@ import json
 import os
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "production-assets"
+_transaction = ContextVar('timeline_draft_transaction', default=None)
+
+
+@contextmanager
+def edit_transaction(room_id, draft_id):
+    """Keep sub-operations in memory; persist once, only after success."""
+    if _transaction.get() is not None:
+        raise RuntimeError('Nested draft transaction')
+    draft = load_draft(room_id, draft_id)
+    state = {'key': (room_id, draft_id), 'draft': draft, 'dirty': False}
+    token = _transaction.set(state)
+    try:
+        yield
+    except BaseException:
+        raise
+    else:
+        if state['dirty']:
+            _transaction.reset(token)
+            token = None
+            save_draft(state['draft'])
+    finally:
+        if token is not None:
+            _transaction.reset(token)
 
 
 def _room_dir(room_id: str) -> Path:
@@ -134,6 +159,9 @@ def create_draft(room_id: str, content_id: str, job_id: str = "") -> dict[str, A
 
 
 def load_draft(room_id: str, draft_id: str) -> dict[str, Any]:
+    state = _transaction.get()
+    if state and state['key'] == (room_id, draft_id):
+        return state['draft']
     p = draft_path(room_id, draft_id)
     if not p.exists():
         raise ValueError(f"draft not found: {draft_id}")
@@ -141,6 +169,10 @@ def load_draft(room_id: str, draft_id: str) -> dict[str, Any]:
 
 
 def save_draft(draft: dict[str, Any]) -> None:
+    state = _transaction.get()
+    if state and state['key'] == (draft['room_id'], draft['draft_id']):
+        state.update(draft=draft, dirty=True)
+        return
     p = draft_path(draft["room_id"], draft["draft_id"])
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
@@ -161,6 +193,8 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
     is refused while any problem remains. Returns {ok, conflict, problems}.
     On success the draft file is marked committed (kept for audit/undo)."""
     draft = load_draft(room_id, draft_id)
+    if draft.get('presentation_only'):
+        return {'ok':False,'conflict':False,'problems':['別の見本を提示する作業から元タイムラインは変更できません']}
     problems = validate(draft["sequence"], room_id)
     if draft.get("base_sequence") is not None:
         from app.services.timeline_scope import violations
