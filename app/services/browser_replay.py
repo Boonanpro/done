@@ -217,7 +217,7 @@ async def run(page, recipe, snap):
     # (a flow when logged in; the login by hand when not). Deleting the run here lost every flow after a failed replay.
     try: recipes.start_run(None, recipes.url_key(snap['url']), login_over=reason is None)
     except Exception: pass
-    record_timing('workflow', 'browser_replay', elapsed, 'handoff' if reason else 'verified', {'tool_calls': len(done)})
+    record_timing('workflow', 'browser_replay', elapsed, 'handoff' if reason else 'verified', {'tool_calls': len(done), 'reason': reason or ''})
     final = {}
     if not CancellationRegistry.check_cancelled():  # no further browser work once cancelled
         observation = _browser_observation.set('full')

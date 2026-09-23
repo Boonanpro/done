@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import threading
 import time
 from contextlib import aclosing
@@ -22,6 +23,10 @@ def record_timing(phase, operation, elapsed_ms, status="ok", counts=None):
         if counts:
             event.update({key: value for key, value in counts.items()
                           if key in {"browser_calls", "tool_calls", "error_events"} and isinstance(value, int)})
+            reason = counts.get("reason")
+            if isinstance(reason, str) and reason:
+                # a code like 'unexpected_screen' or 'jev_unavailable' (never page text): why a workflow handed off
+                event["reason"] = re.sub(r"[^A-Za-z0-9_:.-]", "", reason.split(":")[0])[:60]
         with _lock:
             path.parent.mkdir(parents=True, exist_ok=True)
             # Bound per-file growth. This file is diagnostic, not an audit log.

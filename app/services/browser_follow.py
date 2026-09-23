@@ -231,7 +231,7 @@ async def run(page, params):
     walking.reset(walk_token)
     jev_calls = counter.calls if counter is not None else 0
     elapsed = round((time.perf_counter()-started)*1000, 2)
-    record_timing('workflow', 'browser_follow', elapsed, 'handoff' if reason else 'completed', {'tool_calls': len(pressed)})
+    record_timing('workflow', 'browser_follow', elapsed, 'handoff' if reason else 'completed', {'tool_calls': len(pressed), 'reason': reason or ''})
     final = {}
     if not CancellationRegistry.check_cancelled():
         token = _browser_observation.set('full')

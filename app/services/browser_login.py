@@ -141,7 +141,12 @@ async def maybe_login(params, result):
     if not enabled() or params.get('login') is False or running.get() or recipes.replaying.get():
         return result
     if isinstance(result, dict) and result.get('replay'):
-        return result   # a replay ran (or stopped half way): the model decides
+        replay = result['replay']
+        if replay.get('replayed_login') or replay.get('uncertain_step') is not None:
+            return result   # logged in, or stopped where a step's effect is unknown: the model decides
+        # The remembered procedure did not get through (a recorded Enter the site ignores, a changed screen), and every step it
+        # did was a fill: the login by code starts from the form as it is (it refills the fields, it never repeats a submit
+        # that went through, because the page is still the login form).
     from app.tools.browser import get_executor_page
     from app.services.browser_replay import observe
     page = await get_executor_page()
@@ -312,8 +317,11 @@ async def run(page, snap, account):
                         snap = await settle(before)
                     else:
                         snap = await settle(before)   # many sites submit by themselves once the code is complete
-                elif submitted and not snap['password'] and not CODE_PAGE.search(body):
-                    break   # out of the login page
+                elif submitted and not snap['password'] and not (CODE_PAGE.search(body) and inputs(snap)):
+                    # Out of the login page. A code page has a field to type the code into: the words alone are not enough
+                    # (EX's member page lists a notice about 「登録用認証コード」, and a finished login waited 35s and was reported
+                    # as a failure, 17 times in two days).
+                    break
                 elif kind == 'other' and not submitted and chosen < 2 and methods(snap):
                     # The page asks how to sign in before it shows a form.
                     items = methods(snap)
@@ -363,7 +371,7 @@ async def run(page, snap, account):
         except Exception:
             logger.debug('login recording not finalised', exc_info=True)
     elapsed = round((time.perf_counter()-started)*1000, 2)
-    record_timing('workflow', 'browser_login', elapsed, 'handoff' if reason else 'verified', {'tool_calls': len(done)})
+    record_timing('workflow', 'browser_login', elapsed, 'handoff' if reason else 'verified', {'tool_calls': len(done), 'reason': reason or ''})
     final = {}
     if not CancellationRegistry.check_cancelled():
         observation = _browser_observation.set('full')

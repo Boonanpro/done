@@ -285,6 +285,8 @@ async def run(flow, values, page=None):
     finally:
         if token is not None: recipes.replaying.reset(token)
     report(flow, reason is None)
+    from app.tools.browser_metrics import record_timing
+    record_timing('workflow', 'browser_flows', (time.perf_counter()-started)*1000, 'handoff' if reason else 'verified', {'tool_calls': len(done), 'reason': reason or ''})
     return {'replayed': reason is None, 'reason': reason, 'completed_steps': done, 'elapsed_ms': round((time.perf_counter()-started)*1000)}
 
 

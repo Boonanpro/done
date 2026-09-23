@@ -322,7 +322,7 @@ async def run(params, user_id=None):
     if not result or (params.get('final_observation','full')=='full' and not has_image):
         reason = reason or 'final_observation_unavailable'
     elapsed = round((time.perf_counter()-started)*1000, 2)
-    record_timing('workflow', 'browser_plan', elapsed, 'handoff' if reason else 'verified', {'tool_calls':len(completed)})
+    record_timing('workflow', 'browser_plan', elapsed, 'handoff' if reason else 'verified', {'tool_calls':len(completed), 'reason': reason or ''})
     result = dict(result or {})
     result.update(success=reason is None, needs_agent=reason is not None, completed=completed,
                   reason=reason, decision_calls=decision_calls, elapsed_ms=elapsed, action_elapsed_ms=action_elapsed,
