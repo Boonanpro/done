@@ -26,11 +26,24 @@ PCの画面にページやアプリを出してほしいと言われたら、コ
 '''
 
 
+def job_rules():
+    """The job's rules and the local date (the owner's 「明日」「26日」; a job without it spent a step running `date`)."""
+    from app.services.command_center import CONFIRMATION_RULE
+    now = datetime.now(ZoneInfo('Asia/Tokyo'))
+    return CONFIRMATION_RULE + JOB_INSTRUCTIONS + f"現在の日時: {now.isoformat(timespec='minutes')}（{'月火水木金土日'[now.weekday()]}曜日）" + chr(10)
+
+
+def job_instructions(room_title=''):
+    """What a job model is told (also used by the model benchmark, so it measures the real thing)."""
+    head = 'あなたはダン。本人（このアカウントの持ち主）に頼まれた作業を、このパソコンのブラウザや道具で実行する。' + (f'部屋: {room_title}。' if room_title else '')
+    return head + chr(10) + job_rules()
+
+
 async def run(row):
     from app.services.chat_service import ChatService
     from app.services.project_service import ProjectService
     from app.services.run_service import RunService
-    from app.services.command_center import CONFIRMATION_RULE, report_id, execute
+    from app.services.command_center import report_id, execute
     from app.agent.cli_runner import _build_system_prompt
     job_id, spec = row['id'], row['spec']
     chat, projects, runs = ChatService(), ProjectService(), RunService()
@@ -50,14 +63,10 @@ async def run(row):
         if os.environ.get('DAN_API_JOB_FULL_PROMPT') == '1':
             instructions = await asyncio.to_thread(_build_system_prompt, project.get('title', ''), project.get('description') or '',
                                                    project.get('status') or 'in_progress', latest_user_message=spec['task'],
-                                                   room_id=row['room_id'], user_id=row['user_id'], include_room_role=False)
+                                                   room_id=row['room_id'], user_id=row['user_id'], include_room_role=False) + '\n' + job_rules()
         else:
             # A job needs the job's rules, not the whole persona (13k characters resent on every call)
-            instructions = f"あなたはダン。本人（このアカウントの持ち主）に頼まれた作業を、このパソコンのブラウザや道具で実行する。部屋: {project.get('title', '')}。"
-        instructions += '\n' + CONFIRMATION_RULE + JOB_INSTRUCTIONS
-        # the date the owner means by 「明日」「26日」 (a job without it spent a step running `date`, 2026-09-23)
-        now = datetime.now(ZoneInfo('Asia/Tokyo'))
-        instructions += f"現在の日時: {now.isoformat(timespec='minutes')}（{'月火水木金土日'[now.weekday()]}曜日）\n"
+            instructions = job_instructions(project.get('title', ''))
         recent = await chat.get_messages(row['room_id'], row['user_id'], limit=8)
         history = ['部屋の記録（過去の発言）: ' + str(m.get('content', ''))[:6000]
                    for m in sorted(recent, key=lambda m: m.get('created_at') or '') if m.get('id') != message['id']]

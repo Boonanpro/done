@@ -12,6 +12,20 @@ def ref_selector(ref):
     return f'[data-dan-ref="{ref.lstrip("@")}"]'
 
 
+# How long a trial click may wait for "visible, enabled and stable". Stability needs a few painted frames, and a page Chrome
+# paints slowly (17 frames a second in a job's browser) did not make it within 1 s: every such click was refused
+# (2026-09-23 EX; 5 s passed the same click).
+TRIAL_MS = 3000
+
+
+def refusal(exc):
+    """Why Playwright refused a trial click, from its call log (the first line is only 'Timeout exceeded')."""
+    lines = [l.strip(' -') for l in str(exc).splitlines()]
+    telling = [l for l in lines if any(w in l for w in ('not stable', 'intercepts pointer', 'not visible', 'outside of the viewport',
+                                                           'not enabled', 'detached', 'scrolling into view'))]
+    return ' / '.join(dict.fromkeys(telling))[-300:] or (lines[0][:200] if lines and lines[0] else type(exc).__name__)
+
+
 async def guarded_click(page, ref, timeout=10000, cancelled=None):
     """Inspect before dispatch. Never retry after a real click was attempted."""
     target = page.locator(ref_selector(ref))
@@ -34,8 +48,10 @@ async def guarded_click(page, ref, timeout=10000, cancelled=None):
         position = None
         try:
             # Trial checks may scroll, but cannot emit a click or submit a form.
-            await handle.click(trial=True, timeout=min(1000, remaining()))
-        except Exception:
+            # at most half the budget: a covered centre must leave time to find a clear point
+            await handle.click(trial=True, timeout=min(TRIAL_MS, max(500, remaining() // 2)))
+        except Exception as exc:
+            first_refusal = refusal(exc)
             # Styled checkboxes/radios sit under their own <label>. The label is
             # the control a person clicks; it is not a foreign overlay.
             label = None
@@ -51,7 +67,7 @@ async def guarded_click(page, ref, timeout=10000, cancelled=None):
             if label is not None:
                 try:
                     try:
-                        await label.click(trial=True, timeout=min(1000, remaining()))
+                        await label.click(trial=True, timeout=min(TRIAL_MS, remaining()))
                     except Exception:
                         label_clear = False  # the label itself is covered: fall through to the overlay diagnosis
                     else:
@@ -97,14 +113,16 @@ async def guarded_click(page, ref, timeout=10000, cancelled=None):
                 probe = {"reason": "inspection_failed"}
             position = probe.get("position")
             if position is None:
-                return {"success": False, "dispatched": False, **probe,
+                return {"success": False, "dispatched": False, **probe, "first_refusal": first_refusal,
                         "next_action": "Inspect the screenshot for a covering dialog/banner. Dismiss it if appropriate, or wait for it to disappear. Do not force-click through it. Use human_click/coordinates only after visually confirming an unobstructed target."}
             try:
                 # A corner may be clear even when a carousel overlay covers the
                 # center. Check that exact point, with normal actionability.
-                await handle.click(position=position, trial=True, timeout=min(1000, remaining()))
-            except Exception:
-                return {"success": False, "reason": "unstable_or_occluded", "dispatched": False,
+                await handle.click(position=position, trial=True, timeout=min(TRIAL_MS, remaining()))
+            except Exception as exc:
+                # Playwright's own words say which check refused (stable / visible / receives events / timeout)
+                return {"success": False, "reason": "unstable_or_occluded", "dispatched": False, "first_refusal": first_refusal,
+                        "refusal": refusal(exc),
                         "next_action": "The candidate point is not reliably clickable. Inspect the screen or wait; do not blindly repeat."}
         try:
             if cancelled and cancelled.is_set():

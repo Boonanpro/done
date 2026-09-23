@@ -36,6 +36,28 @@ def job_tools(mcp_tools):
     return out
 
 
+_SECRET = ('pass', 'secret', 'token', 'card', 'cvv', 'otp', 'code', 'pin')
+
+
+def trace_step(call, output, images, seconds):
+    """One line per tool call in the job's work folder (steps.jsonl): which steps a model spends and on what. Values of
+    secret-looking keys, and everything typed into credentials, are masked."""
+    folder = os.environ.get('DAN_WORK_DIR')
+    if not folder:
+        return
+    raw = call.get('args') or {}
+    private = call['name'] in ('save_credentials', 'get_credentials', 'get_personal_info')
+    typed = str(raw.get('action')) in ('type', 'fill', 'keys')   # what was typed may be a password
+    args = {k: ('***' if private or any(w in k.lower() for w in _SECRET) or (typed and k in ('text', 'value', 'keys'))
+                else str(v)[:300]) for k, v in raw.items()}
+    try:
+        with open(os.path.join(folder, 'steps.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'name': call['name'], 'args': args, 'output_chars': len(output), 'images': len(images),
+                                'seconds': round(seconds, 2), 'head': '***' if private else output[:200]}, ensure_ascii=False) + '\n')
+    except OSError:
+        pass
+
+
 def function_output(contents):
     """What the model reads back: the texts joined (capped), and images as data URLs."""
     texts, images = [], []
@@ -113,10 +135,12 @@ class Worker:
             results = []
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
+                called = time.monotonic()
                 try: contents = await call_tool(call['name'], call['args'])
                 except Exception as exc:
                     contents = [type('T', (), {'type': 'text', 'text': f'操作は実行していません: {type(exc).__name__}: {str(exc)[:300]}'})()]
                 output, images = function_output(contents)
+                trace_step(call, output, images, time.monotonic() - called)
                 results.append({'id': call['id'], 'output': output, 'images': images})
             if results: provider.tool_results(results)
             extras = self.new_inputs()

@@ -537,10 +537,19 @@ def _spawn_detached_browser(
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
         "--hide-crash-restore-bubble",
+        # Chrome slows pages it thinks nobody watches (a covered window, a background tab, headless): 17 frames a
+        # second on EX, so the click's stability check ran out of time and every refused click was redone in
+        # JavaScript (2026-09-23). Dan is always "watching" its own pages.
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
         "about:blank",
     ]
     creationflags = 0
-    if Path(user_data_dir).name.startswith('browser_data--voice-job-'):
+    # Jobs work without a window. The switch used to be the profile name alone, so DAN_BROWSER_HEADLESS=1 in any other room
+    # (the model benchmark) opened a real window on the owner's desktop; covered by other windows Chrome stops painting it
+    # and clicks fail their stability check (2026-09-23: 6 refused clicks in one run, each worked around with JavaScript).
+    if Path(user_data_dir).name.startswith('browser_data--voice-job-') or os.environ.get('DAN_BROWSER_HEADLESS') == '1':
         args.insert(1, '--headless=new')
     if os.name == "nt":
         # Console detachment only. The caller must be the persistent owner.
@@ -1254,54 +1263,89 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             }
             const refState = window.__danRefState;
 
+            function describe(el, target, rect) {
+                // the reference sits on what is clicked (a styled radio's label when its input is hidden)
+                let ref = refState.nodes.get(target);
+                if (!ref) {
+                    ref = `${refState.prefix}:${(refState.next++).toString(36)}`;
+                    refState.nodes.set(target, ref);
+                }
+                target.setAttribute('data-dan-ref', ref);
+                const tagName = el.tagName.toLowerCase();
+                const type = el.getAttribute('type') || '';
+                const role = el.getAttribute('role') || tagName;
+                let text;
+                if (tagName === 'select') {
+                    // the current choice and the choices: the model otherwise read them with JavaScript
+                    const opts = [...el.options].map(o => o.text.trim()).filter(Boolean);
+                    const cur = el.selectedIndex >= 0 && el.options[el.selectedIndex] ? el.options[el.selectedIndex].text.trim() : '';
+                    text = ('選択中: ' + (cur || 'なし') + ' / 選択肢(' + opts.length + '): ' + opts.slice(0, 40).join(' / ')).slice(0, 400);
+                } else {
+                    // an image link has no words of its own: its image's alt/title says what it is
+                    const img = !(el.innerText || '').trim() && el.querySelector && el.querySelector('img[alt]:not([alt=""]),img[title],svg title');
+                    const pictured = img ? (img.getAttribute('alt') || img.getAttribute('title') || img.textContent || '') : '';
+                    text = ((target !== el ? target.innerText : '') || el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title') || pictured || el.getAttribute('alt') || '').trim().slice(0, 50);
+                }
+                const states = [];
+                if (el.disabled || el.getAttribute('aria-disabled') === 'true') states.push('disabled');
+                if (el.checked === true || el.getAttribute('aria-checked') === 'true') states.push('checked');
+                if (el.getAttribute('aria-expanded') === 'true') states.push('expanded');
+                if (el.getAttribute('aria-expanded') === 'false') states.push('collapsed');
+                if (el.getAttribute('aria-selected') === 'true') states.push('selected');
+                if (el.required || el.getAttribute('aria-required') === 'true') states.push('required');
+                return {ref: '@' + ref, tag: tagName, role: role, type: type, text: text, name: el.getAttribute('name') || '', id: el.id || '',
+                        states: states, rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)}};
+            }
+
             for (const selector of interactiveSelectors) {
                 for (const el of window.__danDeep(selector)) {
                     if (seen.has(el)) continue;
                     seen.add(el);
 
                     // 表示されている要素のみ
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0) continue;
-                    const style = window.getComputedStyle(el);
-                    if (style.display === 'none' || style.visibility === 'hidden') continue;
-
-                    // data-ref属性を付与
-                    let ref = refState.nodes.get(el);
-                    if (!ref) {
-                        ref = `${refState.prefix}:${(refState.next++).toString(36)}`;
-                        refState.nodes.set(el, ref);
+                    let rect = el.getBoundingClientRect();
+                    let style = window.getComputedStyle(el);
+                    const box = el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox');
+                    const hidden = rect.width === 0 || rect.height === 0 || style.display === 'none' || style.visibility === 'hidden' || (box && style.opacity === '0');
+                    let target = el;
+                    if (hidden) {
+                        // A styled radio/checkbox hides its input and shows its label: offer the label (clicking it
+                        // sets the input). Dropping these left the model reading the page with JavaScript (EX ticket type).
+                        const lab = box && el.labels && el.labels[0];
+                        if (!lab || seen.has(lab)) continue;
+                        const lr = lab.getBoundingClientRect();
+                        if (lr.width === 0 || lr.height === 0) continue;
+                        seen.add(lab); target = lab; rect = lr;
                     }
-                    el.setAttribute('data-dan-ref', ref);
 
-                    // 要素情報を収集
-                    const tagName = el.tagName.toLowerCase();
-                    const type = el.getAttribute('type') || '';
-                    const role = el.getAttribute('role') || tagName;
-                    const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 50);
-                    const name = el.getAttribute('name') || '';
-                    const id = el.id || '';
-
-                    // ARIA状態を収集
-                    const states = [];
-                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') states.push('disabled');
-                    if (el.getAttribute('aria-checked') === 'true') states.push('checked');
-                    if (el.getAttribute('aria-expanded') === 'true') states.push('expanded');
-                    if (el.getAttribute('aria-expanded') === 'false') states.push('collapsed');
-                    if (el.getAttribute('aria-selected') === 'true') states.push('selected');
-                    if (el.required || el.getAttribute('aria-required') === 'true') states.push('required');
-
-                    elements.push({
-                        ref: '@' + ref,
-                        tag: tagName,
-                        role: role,
-                        type: type,
-                        text: text,
-                        name: name,
-                        id: id,
-                        states: states,
-                        rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }
-                    });
+                    elements.push(describe(el, target, rect));
                 }
+            }
+
+            // Things people click that carry no role: calendar days, seat cells, styled options (cursor: pointer, few
+            // words, nothing clickable inside). Without them the model read the page with JavaScript (EX date picker
+            // and seat map). Capped so a page of cards does not flood the list.
+            let extra = 0;
+            const inListed = (el) => { for (let p = el; p; p = p.parentElement) if (seen.has(p)) return true; return false; };
+            for (const el of document.body ? document.body.querySelectorAll('div,span,td,li,p,img,svg') : []) {
+                if (extra >= 80) break;
+                if (seen.has(el) || el.children.length > 3) continue;
+                const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('title') || '').trim();
+                if (text.length > 30 || (!text && el.tagName !== 'IMG')) continue;
+                const style = window.getComputedStyle(el);
+                if (style.cursor !== 'pointer' || style.visibility === 'hidden') continue;
+                const parent = el.parentElement && window.getComputedStyle(el.parentElement).cursor === 'pointer' && !seen.has(el.parentElement) && (el.parentElement.innerText || '').trim().length <= 30;
+                if (parent) continue;   // the parent is the clickable unit; it is listed on its own turn
+                if (inListed(el) || el.querySelector('a,button,input,select,textarea,[role],[onclick]')) continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                // a decoration drawn over a listed button (EX: a div 「払戻」 over the submit 「払戻」) is not a second target
+                const cx = rect.x + rect.width / 2, cy = rect.y + rect.height / 2;
+                if (elements.some(e => cx >= e.rect.x && cx <= e.rect.x + e.rect.w && cy >= e.rect.y && cy <= e.rect.y + e.rect.h)) continue;
+                seen.add(el); extra++;
+                const item = describe(el, el, rect);
+                item.states.push('clickable');
+                elements.push(item);
             }
 
             return elements;

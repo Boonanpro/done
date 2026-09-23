@@ -78,7 +78,11 @@ READ = "(args) => {" + PRELUDE + r"""
   if (args.selector) {
     const nodes = deep(args.selector);
     if (!nodes.length) return {error: 'selector_not_found'};
-    root = nodes[0]; scope = 'selector (' + nodes.length + ' match)';
+    // the first match with words: a guessed list like "#main, .main-contents, article" often hits an empty wrapper first
+    // (2026-09-23 EX: 121 characters, then a JavaScript read of the whole page)
+    const worded = nodes.find(n => (n.innerText || '').trim());
+    if (worded) { root = worded; scope = 'selector (' + nodes.length + ' match)'; }
+    else scope = 'page (selector matched only empty elements)';
   } else {
     const main = deep('main,[role="main"],article').filter(vis).sort((a,b)=>b.innerText.length-a.innerText.length)[0];
     if (main && main.innerText.trim().length > 200) { root = main; scope = 'main'; }

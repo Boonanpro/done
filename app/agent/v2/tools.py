@@ -505,7 +505,7 @@ BROWSER_TOOL['input_schema']['properties'].update({
 })
 BROWSER_TOOL['input_schema']['properties']['selector']['description'] += '／read: 読む範囲のCSSセレクタ（任意。未指定は本文全体）'
 BROWSER_TOOL['description'] += (
-    ' 操作後の観測結果には画面の本文（先頭部分）が含まれる。read: 本文の続き・指定範囲(selector/after/offset)・表(tables)を読む。'
+    ' 操作後の観測結果には画面の本文（先頭部分）と要素一覧（select は選択中の値と選択肢、ラジオ/チェックは checked、日付や座席のような押せるセルは clickable）が含まれる。read: 本文の続き・指定範囲(selector/after/offset)・表(tables)を読む。'
     'find(query): 表示文字で要素を探してrefを得る。click(label): 表示文字で押す。'
     'ページを読む・要素を探す・文字で押す用途はこれらで足り、evaluateにJSを書く往復が要らない。'
     ' follow: メニューをたどる・次へ進む等、押す物が2つ以上続く時は1回で任せられる。path=表示文字の並び、または goal=行き先の説明。'
@@ -4270,7 +4270,8 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
             html = await page.content()
             if len(html) > 50000:
                 html = html[:50000] + "\n... (truncated)"
-            return [{"type": "text", "text": html}]
+            # the same result shape as every other action (a bare list broke the job worker: AttributeError, 2026-09-23)
+            return {"success": True, "content": [{"type": "text", "text": html}]}
 
         elif action == "keyboard_press":
             key = params.get("key")

@@ -8,19 +8,12 @@ def test_rejects_uncontrolled_code_before_running(code):
     with pytest.raises((ValueError,SyntaxError)):script.parse(code)
 
 @pytest.mark.asyncio
-async def test_update_stops_remaining_script_and_confirmation_is_not_bypassed(tmp_path,monkeypatch):
+async def test_update_stops_remaining_script(tmp_path,monkeypatch):
+    """A new instruction stops the rest of a script. (Irreversible clicks are no longer held by code: since 2026-09-22 the
+    worker asks the owner in words before committing, like chat Dan; see command_job_tools.guard.)"""
     monkeypatch.setattr(state,'ROOT',tmp_path)
-    job=str(uuid.uuid4());state.create(job,user_id='u',origin_room_id='r',state='running')
     monkeypatch.setattr('app.tools.browser.get_executor_page',AsyncMock())
-    monkeypatch.setattr(script,'resolve',AsyncMock(return_value='@buy'))
-    monkeypatch.setattr(gate,'browser_target',AsyncMock(return_value={'url':'https://example.com','label':'購入を確定','body':'100円'}))
     executed=AsyncMock(return_value={'success':True});monkeypatch.setattr('app.agent.v2.tools._execute_browser_tool',executed)
-    task=asyncio.create_task(script.run(job,'await page.get_by_role("button", name="購入を確定").click()'))
-    await asyncio.sleep(.15)
-    executed.assert_not_called()
-    state.control(job,'u','r','cancel')
-    result=await task
-    assert not result['success'] and not result['completed']
     other=str(uuid.uuid4());state.create(other,user_id='u',origin_room_id='r',state='running')
     async def operation(*args):
         state.control(other,'u','r','update','stop old steps')
