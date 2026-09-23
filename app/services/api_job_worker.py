@@ -15,7 +15,7 @@ import sys
 import time
 
 # Read when used (after .env is loaded), not at import.
-MODEL = lambda: os.environ.get('DAN_API_JOB_MODEL', 'gpt-6-astra')   # gpt-6-astra: the CLI's model; gpt-5.6 flailed on tool arguments (2026-09-23 15:14)
+MODEL = lambda: os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash')   # 2026-09-23 comparison: all three tasks right, fastest and 1/27 of Astra's cost (see docs/current/job-model-comparison-20260923.md)
 REASONING = lambda: os.environ.get('DAN_API_JOB_REASONING', 'low')
 MAX_TURNS = 120
 # The tools a job needs. The MCP list carries 33 tools (56k characters of schema) for the CLI; sending all of them on every
@@ -27,23 +27,22 @@ CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。
                 '条件変更があれば以前の承認は無効です。\n')
 
 
-def openai_tools(mcp_tools):
-    """The MCP tool list as Responses API function tools."""
-    out = [{'type': 'web_search'}]
+def job_tools(mcp_tools):
+    """The MCP tool list as provider-neutral function tools (the job's subset)."""
+    out = []
     for tool in mcp_tools:
         if JOB_TOOLS() != ['all'] and tool.name not in JOB_TOOLS(): continue
-        schema = dict(tool.inputSchema or {'type': 'object', 'properties': {}})
-        out.append({'type': 'function', 'name': tool.name, 'description': (tool.description or '')[:1024], 'parameters': schema})
+        out.append({'name': tool.name, 'description': (tool.description or '')[:1024], 'parameters': dict(tool.inputSchema or {'type': 'object', 'properties': {}})})
     return out
 
 
 def function_output(contents):
-    """What the model reads back: the texts joined (capped); images are returned separately as an input_image message."""
+    """What the model reads back: the texts joined (capped), and images as data URLs."""
     texts, images = [], []
     for c in contents:
         if getattr(c, 'type', '') == 'text': texts.append(c.text)
-        elif getattr(c, 'type', '') == 'image': images.append({'type': 'input_image', 'image_url': f'data:{c.mimeType};base64,{c.data}'})
-    return '\n'.join(texts)[:OUTPUT_CHARS] or '（出力なし）', images
+        elif getattr(c, 'type', '') == 'image': images.append(f'data:{c.mimeType};base64,{c.data}')
+    return chr(10).join(texts)[:OUTPUT_CHARS] or '（出力なし）', images
 
 
 class Worker:
@@ -68,51 +67,41 @@ class Worker:
             self.state.change(self.job_id, applied)
         return fresh
 
-    async def call_model(self, items, instructions, tools, previous):
-        from openai import OpenAI
-        from app.config import settings
-        if self.client is None: self.client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=600)
-        kwargs = {'model': MODEL(), 'instructions': instructions, 'input': items, 'tools': tools, 'tool_choice': 'auto',
-                  'parallel_tool_calls': False, 'reasoning': {'effort': REASONING()}, 'store': True}
-        if previous: kwargs['previous_response_id'] = previous
-        return await asyncio.to_thread(self.client.responses.create, **kwargs)
-
     async def run(self):
         from app.mcp_server import list_tools, call_tool
+        from app.services import api_job_providers
         s = self.read()
-        instructions = s.get('instructions') or ''
-        tools = openai_tools(await list_tools())
-        items = [{'role': 'user', 'content': m} for m in s.get('history', [])] + [{'role': 'user', 'content': s['task']}]
-        previous, result = None, ''
+        model = s.get('model') or MODEL()
+        provider = api_job_providers.make(model)
+        provider.start(s.get('instructions') or '', job_tools(await list_tools()), list(s.get('history', [])) + [s['task']])
+        totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return
             started = time.monotonic()
-            response = await self.call_model(items, instructions, tools, previous)
-            previous = response.id
-            usage = getattr(response, 'usage', None)
-            self.state.publish(self.job_id, 'diagnostic', f'model {time.monotonic()-started:.1f}s'+(f' in={usage.input_tokens} out={usage.output_tokens}' if usage else ''))
-            items = []
-            calls = [o for o in response.output if getattr(o, 'type', '') == 'function_call']
-            texts = [''.join(getattr(c, 'text', '') for c in (o.content or [])) for o in response.output if getattr(o, 'type', '') == 'message']
-            text = '\n'.join(t for t in texts if t).strip()
+            step = await provider.step()
+            u = step['usage']
+            for k in ('input', 'cached', 'output', 'cache_write'): totals[k] += u.get(k, 0) or 0
+            totals['steps'] += 1
+            self.state.change(self.job_id, lambda st: st.update(usage=dict(totals)))
+            self.state.publish(self.job_id, 'diagnostic', f"model {time.monotonic()-started:.1f}s in={u['input']} cached={u['cached']} out={u['output']}")
+            calls, text = step['calls'], step['text']
             if text and calls:
                 self.state.publish(self.job_id, 'progress', text[:3000])
+            results = []
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
-                try: args = json.loads(call.arguments or '{}')
-                except ValueError: args = {}
-                try: contents = await call_tool(call.name, args)
+                try: contents = await call_tool(call['name'], call['args'])
                 except Exception as exc:
                     contents = [type('T', (), {'type': 'text', 'text': f'操作は実行していません: {type(exc).__name__}: {str(exc)[:300]}'})()]
                 output, images = function_output(contents)
-                items.append({'type': 'function_call_output', 'call_id': call.call_id, 'output': output})
-                if images: items.append({'role': 'user', 'content': images[:2]})
-            for extra in self.new_inputs():
-                items.append({'role': 'user', 'content': '追加の指示: ' + extra['text']})
-            if calls or (items and not calls):
+                results.append({'id': call['id'], 'output': output, 'images': images})
+            if results: provider.tool_results(results)
+            extras = self.new_inputs()
+            for extra in extras:
+                provider.user('追加の指示: ' + extra['text'])
+            if calls or extras:
                 continue
             # the model ended its turn with words only
-            result = text
             s = self.read()
             if s['state'] in ('awaiting_confirmation', 'paused') or s.get('approved') or s['revision'] > s['applied_revision']:
                 while s['state'] in ('awaiting_confirmation', 'paused'):
@@ -122,10 +111,10 @@ class Worker:
                                 'new_inputs': [i for i in s['inputs'] if i['revision'] > s['applied_revision']]}
                 top = max([i['revision'] for i in continuation['new_inputs']] + [s['applied_revision']])
                 self.state.change(self.job_id, lambda st: st.update(applied_revision=max(st['applied_revision'], top)))
-                items = [{'role': 'user', 'content': CONTINUATION + json.dumps(continuation, ensure_ascii=False)}]
+                provider.user(CONTINUATION + json.dumps(continuation, ensure_ascii=False))
                 continue
-            if not result: raise RuntimeError('作業結果が空でした')
-            self.state.publish(self.job_id, 'result', result, result=result, state='completed')
+            if not text: raise RuntimeError('作業結果が空でした')
+            self.state.publish(self.job_id, 'result', text, result=text, state='completed')
             return
         raise RuntimeError('作業の手数が上限に達しました')
 
@@ -135,6 +124,12 @@ def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     from app.mcp_server import _ensure_env_from_dotenv
     _ensure_env_from_dotenv()
+    # The model choice and the providers' keys are read from .env at every job: switching the job model is an .env edit,
+    # with no restart of the Core that spawns this worker.
+    from dotenv import dotenv_values
+    fresh = dotenv_values(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.env'))
+    for key in ('DAN_API_JOB_MODEL', 'DAN_API_JOB_REASONING', 'DAN_API_JOB_TOOLS', 'DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY', 'DAN_CHAT_BASE_URL', 'DAN_CHAT_API_KEY'):
+        if fresh.get(key): os.environ[key] = fresh[key]
     from app.services import command_job_state as state
     worker = Worker(job_id)
     try:

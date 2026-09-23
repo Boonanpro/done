@@ -221,7 +221,8 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     job_id = str(uuid4())
     engine = 'api' if str(params.get('engine') or '') == 'api' else 'cli'   # api: Responses API worker; cli: Codex CLI (default)
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
-        origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine)
+        origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine,
+        **({'model':str(params['model'])[:60]} if engine=='api' and params.get('model') else {}))
     try:
         await _wake_job(job_id)
     except Exception:
