@@ -77,7 +77,8 @@ async def list_tools() -> list[types.Tool]:
 
     mcp_tools = []
     for tool in anthropic_tools:
-        if tool["name"] in _CLI_BUILTIN_TOOLS and not os.environ.get('DAN_COMMAND_JOB_ID'):
+        # outside the CLI (a job, the voice call's tool host) there are no CLI built-ins: Dan's own versions are the tools
+        if tool["name"] in _CLI_BUILTIN_TOOLS and not (os.environ.get('DAN_COMMAND_JOB_ID') or os.environ.get('DAN_TOOL_HOST')):
             continue
         description = tool.get("description", "")
         if os.environ.get('DAN_COMMAND_JOB_ID') and tool['name'] == 'bash':

@@ -22,7 +22,7 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 返事はそのまま読み上げられ、声のモデルはもう受け答えの一言を言っている。作業を渡した・指示を届けた・開いただけで新しい事実が無い時は、返事を空にする。
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気や近くの店は get_location の現在地を使う。
-- パソコンでサイトやアプリを開くだけなら open_on_pc。ログイン・確認・送信・登録など複数手順の作業は start_work（作業の結果は後で別に届く）。
+- パソコンでサイトやアプリを開くだけなら open_on_pc。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。長くかかる作業は start_work で作業担当に渡してもよい（結果は後で別に届く）。道具を使っている間も会話は続く。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わず短く答える。
@@ -60,11 +60,25 @@ def tools():
               'parameters': {'type': 'object', 'properties': {'id': {'type': 'string', 'description': '手順の id'}, 'values': {'type': 'object', 'additionalProperties': {'type': 'string'}, 'description': '入力の穴→値'},
                                                           'task': {'type': 'string', 'description': '本人の言葉のままの依頼（再生できなかった時に通常の作業として使う）'}},
                              'required': ['id', 'values', 'task'], 'additionalProperties': False}}
-    return [*TOOLS, listing, replay]
+    from app.services import dan_tools
+    every = [{'type': 'function', **dan_tools.HELP}, {'type': 'function', **dan_tools.USE}]   # the rest of Dan's tools, disclosed in steps
+    return [*TOOLS, listing, replay, *every]
+
+
+_catalog = None
+
+
+def catalog():
+    """Dan's other tools and skills, one line each (read from the definitions once; nothing runs)."""
+    global _catalog
+    if _catalog is None:
+        from app.services import dan_tools
+        _catalog = dan_tools.catalog(dan_tools.definitions())
+    return _catalog
 
 
 def delegation():
-    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS, 'tools': tools(), 'tool_choice': 'auto',
+    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS + chr(10) + catalog(), 'tools': tools(), 'tool_choice': 'auto',
                                               'parallel_tool_calls': True, 'reasoning': {'effort': REASONING}}}
 
 
@@ -140,5 +154,12 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return {'started': True, 'note': '再生を始めた。結果は後で別に届く。本人に今言うことはない。'}
     if name == 'end_call':
         return {'ok': True}
+    if name == 'dan_tool_help':
+        from app.services import dan_tools
+        return {'help': json.loads(dan_tools.help_text(dan_tools.definitions(), str(args.get('name') or '')))}
+    if name == 'dan_tool':
+        from app.services import voice_tools
+        text = await voice_tools.host(user_id, room_id).ask('call', name=str(args.get('name') or ''), arguments=args.get('arguments') or {})
+        return {'result': text}
     return {'error': f'未知の関数 {name}'}
 

@@ -43,7 +43,7 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
   const later = (fn, ms) => {if(ms===5000) deadlines.push(fn); const id = setTimeout(fn, ms); timers.add(id); return id;};
   const React = {createElement: () => ({}), useCallback: fn => fn,
     useEffect: fn => effects.push(fn), useRef: value => ({current: value}),
-    useState: value => [value, () => {}]};
+    useState: value => [value, () => {}], useSyncExternalStore: (_subscribe, get) => get()};
   const Animated = {Value: class {interpolate() {return 0;}}, timing: () => ({start() {}}), loop: () => ({start() {},stop() {}})};
   class PC {
     constructor() {pc = this; this._pcId = 41; this.listeners = {}; this.iceGatheringState = 'complete'; this.connectionState = 'connected';}
@@ -63,6 +63,7 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
   }
   const modules = {
     'expo-updates': {updateId:'test-update'},
+    'expo-secure-store': {getItemAsync: async () => null, setItemAsync: async () => {}},   // ui-language (display language)
     react: {...React, default: React},
     'react-native': {Animated, DeviceEventEmitter:{addListener:()=>({remove(){}})}, Easing: {linear: 0}, Platform: {OS: 'android',Version: 31}, StyleSheet: {create: x => x},
       PermissionsAndroid: {PERMISSIONS: {BLUETOOTH_CONNECT: 'bt'}, check: async () => true}},

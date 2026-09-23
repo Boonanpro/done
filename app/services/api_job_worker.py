@@ -118,7 +118,12 @@ class Worker:
         first = list(s.get('history', [])) + [s['task']]
         if s.get('replay'):
             first.append(await self.replay(s['replay']))
-        provider.start(s.get('instructions') or '', job_tools(await list_tools()), first)
+        # the job's core tools as functions; every other Dan tool and skill through the catalog (dan_tools)
+        from app.services import dan_tools
+        mcp = await list_tools()
+        native = job_tools(mcp)
+        instructions = (s.get('instructions') or '') + chr(10) + dan_tools.catalog(mcp, native=[t['name'] for t in native])
+        provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return
@@ -136,7 +141,13 @@ class Worker:
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
                 called = time.monotonic()
-                try: contents = await call_tool(call['name'], call['args'])
+                try:
+                    if call['name'] == 'dan_tool_help':
+                        contents = [type('T', (), {'type': 'text', 'text': dan_tools.help_text(mcp, str(call['args'].get('name') or ''))})()]
+                    elif call['name'] == 'dan_tool':
+                        contents = await call_tool(str(call['args'].get('name') or ''), call['args'].get('arguments') or {})
+                    else:
+                        contents = await call_tool(call['name'], call['args'])
                 except Exception as exc:
                     contents = [type('T', (), {'type': 'text', 'text': f'操作は実行していません: {type(exc).__name__}: {str(exc)[:300]}'})()]
                 output, images = function_output(contents)

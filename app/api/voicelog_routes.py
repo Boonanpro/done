@@ -160,6 +160,9 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         # The backend model's function calls arrive only on the server's own connection to the call: it always answers them.
         from app.services import voice_sideband
         owned = voice_sideband.attach(data['session']['id'], user.user_id, body.room_id, settings.OPENAI_API_KEY, own=True)
+        # Dan's tools for this call start loading now (a few seconds), not when the backend first needs one
+        from app.services import voice_tools
+        voice_tools.warm(user.user_id, body.room_id)
         return {'session': {'id': data['session']['id']}, 'transport': data['transport'], 'model': MODEL, 'server_delegation': owned}
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, 'Live 1への接続に失敗しました') from exc

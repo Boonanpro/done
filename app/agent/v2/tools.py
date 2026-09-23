@@ -1101,7 +1101,10 @@ EDIT_FILE_TOOL = {
 
 BASH_TOOL = {
     "name": "bash",
-    "description": "シェルコマンドを実行する。git操作、npm、pip install等に使用。\n\n重要: bash で find/grep/cat/head/tail を実行してはいけない。代わりに専用ツールを使うこと:\n- ファイル検索: glob ツール（find や ls ではなく）\n- 内容検索: grep ツール（bash の grep/rg ではなく）\n- ファイル読み取り: read_file ツール（cat/head/tail ではなく）",
+    # The description used to forbid find/grep/cat in favour of glob/grep tools that are not in the tool list outside the
+    # CLI: a model sent to a tool it does not have tried PowerShell quoting, then the desktop GUI (2026-09-24 call).
+    "description": "このWindows PCで、Git Bash のシェルコマンドを実行する（ls・find・grep・wc・python・git・npm など。作業フォルダが既定の場所）。"
+                   "PowerShell が要る時は powershell -NoProfile -Command \"...\"。失敗すると終了コードと出力・エラー文がそのまま返る。",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -2747,8 +2750,15 @@ def format_tool_result(
 
     if not success:
         # エラーメッセージ
-        error_msg = result.get("message") or result.get("error", "不明なエラー")
-        lines.append(f"エラー: {error_msg}")
+        error_msg = result.get("message") or result.get("error")
+        if error_msg:
+            lines.append(f"エラー: {error_msg}")
+        elif "exit_code" in result or "output" in result:
+            # A failed command reports its own words (exit code, stdout, stderr). Replacing them with 「不明なエラー」 left
+            # the model guessing; a voice call then turned to the desktop GUI to count folders (2026-09-24).
+            lines.append(f"失敗（終了コード {result.get('exit_code')}）:\n{str(result.get('output') or '')[:4000]}")
+        else:
+            lines.append("エラー: 不明なエラー")
 
         # 失敗理由（第一原理: なぜ失敗したかを明示）
         if result.get("failure_reason"):
