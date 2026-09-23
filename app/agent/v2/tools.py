@@ -3659,6 +3659,14 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                 # Let Playwright verify visibility, stability and hit target.
                 # A ref identifies an element, but does not prove it is clickable.
                 click_result = await page.guarded_click(ref, timeout=BROWSER_CLICK_TIMEOUT)
+                for _ in range(3):
+                    # A page still settling (a banner sliding in, fonts loading) refuses the click for a moment; the same
+                    # click a second later works. Retried here so no caller has to (2026-09-23: a model gave up after three).
+                    if click_result.get("success") or click_result.get("dispatched") or not any(
+                            t in str(click_result.get("reason") or "") for t in ("unstable_or_occluded", "not_visible", "intercepted")):
+                        break
+                    await page.wait_for_timeout(1000)
+                    click_result = await page.guarded_click(ref, timeout=BROWSER_CLICK_TIMEOUT)
                 if not click_result.get("success"):
                     state = await _get_browser_state(page)
                     state.update(click_result)

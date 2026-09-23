@@ -26,7 +26,7 @@ const OTP_PATTERNS: RegExp[] = [
   /(?:コード|code)[：:\s]*[「\[]?(\d{4,8})[」\]]?/i,
   /(?:コードは|code is)[：:\s]*[「\[]?(\d{4,8})[」\]]?/i,
   /(?:is|：|:)\s*(\d{6})\b/i,
-  /(?<!\d)(\d{6})(?!\d)/,
+  /(?<![0-9A-Za-z@._-])(\d{6})(?![0-9A-Za-z@_-])/,   // digits touching letters/@ are an address or an id, not a code
 ];
 
 const OTP_LINK_URL_PATTERN = /https?:\/\/[^\s<>"'`）」】\]]+/gi;
@@ -54,7 +54,7 @@ const OTP_LINK_CONTEXT_KEYWORDS = [
 const SERVICE_KEYWORDS: Record<string, string[]> = {
   amazon: ['amazon', 'アマゾン'],
   rakuten: ['楽天', 'rakuten'],
-  ex_reservation: ['ex予約', 'smartex', '新幹線', 'jr'],
+  ex_reservation: ['ex予約', 'smartex', 'スマートex', '新幹線', 'jr'],
   google: ['google', 'グーグル'],
   line: ['line', 'ライン'],
   yahoo: ['yahoo', 'ヤフー'],

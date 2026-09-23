@@ -649,7 +649,9 @@ class OTPService:
         ).order("extracted_at", desc=True).limit(1)
 
         if service:
-            query = query.eq("service", service)
+            # A code whose service could not be guessed from the text (service NULL) is still a candidate: the filter used to
+            # drop it, and a forwarded Smart EX SMS (「【スマートEX】…」) sat unused for five minutes (2026-09-23).
+            query = query.or_(f"service.eq.{service},service.is.null")
 
         result = query.execute()
 
@@ -693,7 +695,9 @@ class OTPService:
         ).order("extracted_at", desc=True).limit(1)
 
         if service:
-            query = query.eq("service", service)
+            # A code whose service could not be guessed from the text (service NULL) is still a candidate: the filter used to
+            # drop it, and a forwarded Smart EX SMS (「【スマートEX】…」) sat unused for five minutes (2026-09-23).
+            query = query.or_(f"service.eq.{service},service.is.null")
 
         result = query.execute()
 
@@ -876,7 +880,9 @@ class OTPService:
         ).order("extracted_at", desc=True).limit(1)
 
         if service:
-            query = query.eq("service", service)
+            # A code whose service could not be guessed from the text (service NULL) is still a candidate: the filter used to
+            # drop it, and a forwarded Smart EX SMS (「【スマートEX】…」) sat unused for five minutes (2026-09-23).
+            query = query.or_(f"service.eq.{service},service.is.null")
         if source:
             query = query.eq("source", source)
         if kind == "code":
@@ -933,7 +939,9 @@ class OTPService:
         ).order("extracted_at", desc=True).limit(limit)
         
         if service:
-            query = query.eq("service", service)
+            # A code whose service could not be guessed from the text (service NULL) is still a candidate: the filter used to
+            # drop it, and a forwarded Smart EX SMS (「【スマートEX】…」) sat unused for five minutes (2026-09-23).
+            query = query.or_(f"service.eq.{service},service.is.null")
         
         result = query.execute()
         
@@ -1231,7 +1239,7 @@ class OTPService:
         service_keywords = {
             "amazon": ["amazon", "アマゾン"],
             "rakuten": ["楽天", "rakuten"],
-            "ex_reservation": ["ex予約", "smartex", "新幹線", "jr"],
+            "ex_reservation": ["ex予約", "smartex", "スマートex", "新幹線", "jr"],
             "google": ["google", "グーグル"],
             "line": ["line", "ライン"],
             "yahoo": ["yahoo", "ヤフー"],
