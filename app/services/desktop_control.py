@@ -24,11 +24,20 @@ TOOL = {
         'find(window, query): 表示文字で探す。click(ref または window+label): 押す。type(ref, text): 入力欄に入れる（press_enter可）。'
         'read(window): 画面の文字を読む。screenshot(window): 画面を画像で見る（一覧に何も出ないアプリ用。その後 click(window,x,y) で座標を押せる）。'
         'launch(app): スタートメニューの名前でアプリを起動。focus(window): 前面に出す。'
+        'keys(window, keys): そのウィンドウにキー操作を送る（pywinauto 表記: ^w=Ctrl+W, %{F4}=Alt+F4, ^l=Ctrl+L, {TAB}, {ESC}, ^s 等）。'
+        'タブを閉じる・アプリの画面を切り替える・保存・戻るなど、部品の一覧に無い操作の大半はこれで足りる。'
+        'window(window, op): ウィンドウそのものを close / minimize / maximize / restore。'
+        'act(ref, op): 部品に expand / collapse / scroll_into_view / toggle / select / focus。'
+        'script(code): 上で足りない時だけ、pywinauto を使う Python を1手で実行（Desktop, window(title) が使える。print した内容が返る）。'
+        'ファイルを書いてシェルで動かすより速く、作業場所も汚さない。'
         '送信・投稿・支払い・削除にあたるボタンは confirmed=true が無いと押さない。'
         '外部の相手へのメッセージは、先に compose_message の送信案カードで本人の承認を得てから confirmed=true を付ける。'
     ),
     'input_schema': {'type': 'object', 'properties': {
-        'action': {'type': 'string', 'enum': ['windows', 'observe', 'find', 'click', 'type', 'read', 'screenshot', 'launch', 'focus']},
+        'action': {'type': 'string', 'enum': ['windows', 'observe', 'find', 'click', 'type', 'read', 'screenshot', 'launch', 'focus', 'keys', 'window', 'act', 'script']},
+        'keys': {'type': 'string', 'maxLength': 200, 'description': 'keys: 送るキー（pywinauto 表記）'},
+        'op': {'type': 'string', 'description': 'window: close/minimize/maximize/restore、act: expand/collapse/scroll_into_view/toggle/select/focus'},
+        'code': {'type': 'string', 'maxLength': 8000, 'description': 'script: 実行する Python（pywinauto）'},
         'window': {'type': 'string', 'description': 'ウィンドウのタイトルの一部（windows の一覧にある文字）'},
         'ref': {'type': 'string'}, 'label': {'type': 'string', 'maxLength': 200}, 'query': {'type': 'string', 'maxLength': 200},
         'text': {'type': 'string', 'maxLength': 4000}, 'press_enter': {'type': 'boolean'},
@@ -238,7 +247,61 @@ def _run(params):
         if params.get('press_enter'):
             element.type_keys('{ENTER}')
         return _text(f'[{kind}] {name or "入力欄"} に入力しました（{how}{"・Enter" if params.get("press_enter") else ""}）。値は observe / read で確認できます')
-    return _fail('action は windows / observe / find / click / type / read / screenshot / launch / focus のいずれか')
+    if action == 'keys':
+        title, window = _window(params.get('window'))
+        keys = params.get('keys') or ''
+        if not keys:
+            return _fail('keys が必要です')
+        if '{ENTER}' in keys.upper() and not params.get('confirmed'):
+            return _fail('Enter はメッセージの送信になりうるため confirmed=true が必要です。何も送っていません。')
+        try:
+            window.set_focus()
+        except Exception:
+            pass
+        window.type_keys(keys, with_spaces=True, pause=0.02, set_foreground=True)
+        return _text(f'「{title}」に {keys} を送りました。windows / observe で結果を確認してください')
+    if action == 'window':
+        title, window = _window(params.get('window'))
+        op = params.get('op')
+        calls = {'close': 'close', 'minimize': 'minimize', 'maximize': 'maximize', 'restore': 'restore'}
+        if op not in calls:
+            return _fail('op は close / minimize / maximize / restore')
+        getattr(window, calls[op])()
+        return _text(f'「{title}」を {op} しました')
+    if action == 'act':
+        element = _resolve(params)
+        kind, name = _describe(element)
+        op = params.get('op')
+        if op not in ('expand', 'collapse', 'scroll_into_view', 'toggle', 'select', 'focus'):
+            return _fail('op は expand / collapse / scroll_into_view / toggle / select / focus')
+        if op in ('toggle', 'select') and SENSITIVE.search(name) and not params.get('confirmed'):
+            return _fail(f'「{name}」は送信・支払い・削除にあたる操作です。本人の承認を得てから confirmed=true を付けてください。')
+        {'focus': element.set_focus}.get(op, lambda: getattr(element, op)())()
+        return _text(f'[{kind}] {name} を {op} しました')
+    if action == 'script':
+        return _script(params.get('code') or '')
+    return _fail('action は windows / observe / find / click / type / read / screenshot / launch / focus / keys / window / act / script のいずれか')
+
+
+def _script(code):
+    """pywinauto code in this process, one step: what a job would otherwise write to a file and run through the shell
+    (two steps, a Python start each time, and files left behind). print() output is returned."""
+    import contextlib, io as _io
+    if not code.strip():
+        return _fail('code が必要です')
+    try:
+        from app.agent.v2.tools import _note_fallback
+        _note_fallback('desktop_script', code[:300])
+    except Exception:
+        pass
+    out = _io.StringIO()
+    scope = {'Desktop': lambda: _uia(), 'window': lambda title: _window(title)[1], 'time': time, 're': re}
+    try:
+        with contextlib.redirect_stdout(out):
+            exec(compile(code, '<desktop script>', 'exec'), scope)
+    except Exception as exc:
+        return _fail(f'{type(exc).__name__}: {str(exc)[:400]}' + (chr(10) + '出力: ' + out.getvalue()[:2000] if out.getvalue() else ''))
+    return _text(out.getvalue()[:6000] or '（出力なし）')
 
 
 async def run(params):

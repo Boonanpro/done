@@ -125,7 +125,8 @@ PCの画面にページやアプリを出してほしいと言われたら、コ
                 'tool_timeout_sec':3600, 'default_tools_approval_mode':'approve',
                 'env': {'DAN_USER_ID':row['user_id'], 'DAN_SESSION_ID':row['room_id'],
                     'DAN_BROWSER_ROOM':state.browser_room(job_id), 'DAN_COMMAND_JOB_ID':job_id,
-                    'DAN_BROWSER_HEADLESS':'1', 'DAN_BROWSER_OBSERVATION':'dom', 'DAN_CORE_PORT':'9000'}}
+                    'DAN_BROWSER_HEADLESS':'1', 'DAN_BROWSER_OBSERVATION':'dom', 'DAN_CORE_PORT':'9000',
+                    'DAN_WORK_DIR':f'D:/dan-workspace/jobs/{job_id[:8]}'}}
             owner = CodexTurn()
             owner.receive_timeout = 3600
             recent = await chat.get_messages(row['room_id'],row['user_id'],limit=8)

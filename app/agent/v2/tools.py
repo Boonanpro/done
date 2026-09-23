@@ -20,6 +20,37 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _work_dir():
+    """Where a job's shell commands run and its relative file paths land: DAN_WORK_DIR (a job sets it to a folder in
+    D:/dan-workspace), else the repository as before. A voice job wrote 17 throwaway scripts into D:/done/scripts on
+    2026-09-23 because this was the repository."""
+    work = Path(os.environ.get("DAN_WORK_DIR") or PROJECT_ROOT)
+    work.mkdir(parents=True, exist_ok=True)
+    return work
+
+
+def _work_path(path):
+    p = Path(path)
+    return p if p.is_absolute() else _work_dir() / p
+
+
+def _note_fallback(tool, text):
+    """A job reaching for the shell or a hand-written file instead of Dan's tools: what it tried, kept so the most
+    frequent needs can become tool operations (decided by data, not guessed). Local file only."""
+    job = os.environ.get("DAN_COMMAND_JOB_ID")
+    if not job:
+        return
+    try:
+        import json as _json, time as _time
+        log = PROJECT_ROOT / ".tmp" / "tool-fallbacks.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as out:
+            out.write(_json.dumps({"at": _time.strftime("%Y-%m-%dT%H:%M:%S"), "job": job, "tool": tool, "text": text}, ensure_ascii=False) + chr(10))
+    except Exception:
+        pass
+
 from app.workspace import resolve_cli_workspace
 from app.services.mail_watch import MAILBOX_KEYS as _MAILBOX_KEYS, describe_mailboxes as _describe_mailboxes
 CLI_WORKSPACE = resolve_cli_workspace()
@@ -1923,7 +1954,7 @@ async def execute_tool(
         if not path:
             return {"success": False, "error": "path が必要です"}
         try:
-            p = Path(path)
+            p = _work_path(path)
             if not p.exists():
                 return {"success": False, "error": f"ファイルが存在しません: {path}"}
             content = p.read_text(encoding="utf-8")
@@ -1938,9 +1969,10 @@ async def execute_tool(
         if not path:
             return {"success": False, "error": "path が必要です"}
         try:
-            p = Path(path)
+            p = _work_path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
+            _note_fallback('write_file', f'{p}: ' + content[:300])
             return {"success": True, "path": path, "message": f"書き込み完了 ({len(content)} chars)"}
         except Exception as e:
             return {"success": False, "error": f"書き込みエラー: {e}"}
@@ -1967,7 +1999,7 @@ async def execute_tool(
         except Exception as e:
             return {"success": False, "error": f"編集エラー: {e}"}
 
-    # ★★★ シェルコマンド実行 ★★★
+    # ★★★ シェルコマンド実行 ★★★ (the working directory: _work_dir)
     if skill_name == "_bash":
         command = params.get("command", "")
         if not command:
@@ -1978,10 +2010,11 @@ async def execute_tool(
             # Windows: Git Bash で実行（ls, find, grep 等が使える）
             if _sys.platform == "win32":
                 git_bash = r"C:\Program Files\Git\usr\bin\bash.exe"
+                _note_fallback('bash', command[:300])
                 result = subprocess.run(
                     [git_bash, "-c", command],
                     capture_output=True, timeout=120,
-                    cwd=str(PROJECT_ROOT),
+                    cwd=str(_work_dir()),
                 )
                 # Git Bash は UTF-8 で出力するので明示的にデコード
                 result = subprocess.CompletedProcess(

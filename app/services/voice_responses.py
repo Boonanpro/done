@@ -19,9 +19,10 @@ WORK_ENGINE = os.environ.get('DAN_VOICE_WORK_ENGINE', 'api')   # work started fr
 
 INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手は本人（このアカウントの持ち主）で、返事は声で読み上げられます。
 - 返事は普通の話し言葉で、聞かれたことに答える。道具の名前や内部の状態は書かない。
+- 返事はそのまま読み上げられ、声のモデルはもう受け答えの一言を言っている。作業を渡した・指示を届けた・開いただけで新しい事実が無い時は、返事を空にする。
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気や近くの店は get_location の現在地を使う。
-- パソコンでサイトやアプリを開くだけなら open_on_pc。ログイン・確認・送信・登録など複数手順の作業は start_work（受け付けたことだけを一言で。作業の結果は後で別に届く）。
+- パソコンでサイトやアプリを開くだけなら open_on_pc。ログイン・確認・送信・登録など複数手順の作業は start_work（作業の結果は後で別に届く）。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わず短く答える。
@@ -120,7 +121,8 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         jobs = await asyncio.to_thread(v1.list_owned, user_id, room_id)
         active = [s for s in jobs if s['state'] not in ('completed', 'failed', 'cancelled')]
         if not active: return {'error': '動いている作業はありません。'}
-        return await execute({'action': 'control_job', 'job_id': active[0]['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
+        out = await execute({'action': 'control_job', 'job_id': active[0]['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
+        return {'delivered': bool(out), 'note': '指示は作業に届いた。本人に今言うことはない。'}
     if name == 'list_operations':
         from app.services.browser_flows import all_flows, describe
         flows = all_flows()

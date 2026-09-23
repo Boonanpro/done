@@ -63,7 +63,7 @@ def event(state, kind, text):
     seq = state.get('seq', 0) + 1
     state['seq'] = seq
     state.setdefault('events', []).append({'seq': seq, 'kind': kind, 'text': text[:3000], 'at': now()})
-    state['events'] = state['events'][-40:]
+    state['events'] = state['events'][-300:]   # 40 lost the first minutes of a 75-step job (2026-09-23): the start is where the cause usually is
 
 def publish(job_id, kind, text, **fields):
     def update(s):
