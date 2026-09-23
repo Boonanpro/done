@@ -90,10 +90,6 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
       performance, fetch: async (url, options) => {
         const body = JSON.parse(options.body); requests.push({url,body});
         let data = {};
-        if(url.endsWith('/live/call-control')) {
-          if(holdFastControl) await new Promise(resolve=>{releaseFastControl=resolve;});
-          data={action:'end',elapsed_ms:210};
-        }
         if (url.endsWith('/atom-direct')) data={host:'test.invalid',key:'test'};
         if (url.endsWith('/live/session')) data = failSession ? {detail: 'unavailable'} : {session: {id: 'live-test'},transport: {sdp: 'answer'}};
         if (url.endsWith('/command-center') && body.args?.action==='jobs') data={jobs:activeJob ? [{id:'job',task:'write memo',state:'running',created_at:new Date().toISOString(),seq:0,events:[]}] : []};
@@ -137,47 +133,18 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
     dispose() {for (const cleanup of cleanups) cleanup(); for (const id of timers) clearTimeout(id);}};
 }
 
-test('fast contextual end bypasses worker queue after observed silence', async () => {
+test('an explicit end request is not acted on by the phone: the server decides (end_call) and closes the session', async () => {
  const h=harness({fastControl:true});
  try {
   for(let i=0;i<8;i++)await tick();
   h.tickBackground(0);await tick();
-  h.pc.event({type:'session.input_transcript.delta',delta:'じゃあまた呼ぶね',start_ms:0,end_ms:300});
+  h.pc.event({type:'session.input_transcript.delta',delta:'電話切って',start_ms:0,end_ms:300});
   h.microphone(0);
   for(let i=0;i<4;i++){h.tickBackground(200);await tick();}
-  for(let i=0;i<8;i++)await tick();
-  assert.equal(h.pc.closed,true);
-  assert.equal(h.requests.filter(r=>r.url.endsWith('/live/backend/stream')).length,0);
-  const controls=h.requests.filter(r=>r.url.endsWith('/live/call-control'));
-  assert.equal(controls.length,1);assert.equal(controls[0].body.dialogue.at(-1).text,'じゃあまた呼ぶね');
+  for(let i=0;i<30;i++){h.tickBackground(100);await tick();}   // past the transcript flush
+  assert.ok(!h.pc.closed);
+  assert.equal(h.requests.filter(r=>r.url.endsWith('/live/call-control')).length,0);
  } finally {h.dispose();}
-});
-
-test('speaking during fast review cancels hangup before transcription arrives', async () => {
- const h=harness({fastControl:true,holdFastControl:true});
- try {
-  for(let i=0;i<8;i++)await tick();
-  h.tickBackground(0);await tick();
-  h.pc.event({type:'session.input_transcript.delta',delta:'切って',start_ms:0,end_ms:300});
-  h.microphone(0);
-  for(let i=0;i<4;i++){h.tickBackground(200);await tick();}
-  assert.equal(h.requests.filter(r=>r.url.endsWith('/live/call-control')).length,1);
-  h.microphone(.2);h.tickBackground(200);await tick();
-  h.releaseFastControl();for(let i=0;i<8;i++)await tick();
-  assert.ok(!h.pc.closed);assert.ok(!h.track.stopped);
- } finally {h.dispose();}
-});
-
-test('a new utterance invalidates a delayed contextual hangup decision', async () => {
-  const h=harness({holdControl:true});
-  try {
-    for(let i=0;i<8;i++) await tick();
-    h.pc.event({type:'session.input_transcript.delta',delta:'切って',start_ms:0,end_ms:300});
-    h.tickBackground(2600); for(let i=0;i<4;i++) await tick();
-    h.pc.event({type:'session.input_transcript.delta',delta:'いや、もう一つ聞きたい',start_ms:3000,end_ms:3600});
-    h.releaseControl(); for(let i=0;i<8;i++) await tick();
-    assert.ok(!h.pc.closed); assert.ok(!h.track.stopped);
-  } finally {h.dispose();}
 });
 
 test('Atom setup keeps phone mic closed and greeting waits for the same peer attachment', async () => {
@@ -292,28 +259,6 @@ test('failed Live setup releases microphone and native audio without leaving a p
     for (let i=0;i<8;i++) await tick();
     assert.equal(h.track.stopped,true); assert.equal(h.pc.closed,true); assert.equal(h.pc.dc.closed,true);
     assert.equal(h.audioStopped,1); assert.equal(h.closed,0);
-  } finally {h.dispose();}
-});
-
-test('actual reported hangup words release the call even when Live emits no delegation', async () => {
-  const h = harness();
-  try {
-    for (let i=0;i<8;i++) await tick();
-    h.pc.event({type:'session.input_transcript.delta',delta:'OK、電話切って',start_ms:0,end_ms:1500});
-    assert.equal(h.closed,0, 'must not decide from a partial transcript');
-    await new Promise(resolve => setTimeout(resolve,2700));
-    assert.equal(h.closed,1); assert.equal(h.track.stopped,true); assert.equal(h.pc.closed,true);
-    assert.ok(!h.requests.some(r => r.url.endsWith('/live/backend')));
-  } finally {h.dispose();}
-});
-
-test('native tick ends a spoken call while JavaScript timers are suspended', async () => {
-  const h = harness();
-  try {
-    for(let i=0;i<8;i++) await tick();
-    h.pc.event({type:'session.input_transcript.delta',delta:'会話終わりにしてよ',start_ms:0,end_ms:1500});
-    h.tickBackground(3000); await tick();
-    assert.equal(h.closed,1); assert.equal(h.track.stopped,true);
   } finally {h.dispose();}
 });
 

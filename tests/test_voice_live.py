@@ -45,7 +45,7 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
              patch.object(routes.settings, 'OPENAI_API_KEY', 'test'), \
              patch.object(routes.ChatService, 'get_room', new_callable=AsyncMock, return_value={'id': 'r'}), \
              patch.object(routes.ChatService, 'get_messages', new_callable=AsyncMock, return_value=[{'sender_type': 'ai', 'content': '14号車', 'created_at': '1'}]), \
-             patch.object(routes.httpx, 'AsyncClient', return_value=client), patch.object(live, 'warm'), \
+             patch.object(routes.httpx, 'AsyncClient', return_value=client), \
              patch('app.services.voice_sideband.attach', return_value=True) as attach:
             result = await routes.create_live_session(None, routes.LiveSessionRequest(sdp='offer', room_id='r'))
             self.assertEqual(result['session']['id'], 'live-new')

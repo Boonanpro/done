@@ -81,3 +81,16 @@ async def test_parallel_function_calls_are_answered_together_with_one_response_c
     await S.handle_response_event(send, 's', 'u', 'r', {'type': 'response.event', 'delegation_id': 'd1', 'event': {'type': 'response.completed'}}, d, rec, pending)
     assert [e['type'] for e in sent] == ['response.item.create', 'response.item.create', 'response.create']
     assert {e['item']['call_id'] for e in sent[:2]} == {'c1', 'c2'} and pending == {}
+
+
+@pytest.mark.asyncio
+async def test_end_call_closes_the_session_at_once_without_asking_for_a_farewell(monkeypatch):
+    """The only hang-up path (2026-09-23): the backend chooses end_call and the server closes the call right away."""
+    sent, pending = [], {}
+    async def send(event): sent.append(event)
+    async def fake_run(name, args, user_id, room_id, dialogue, **_): return {'ok': True}
+    monkeypatch.setattr('app.services.voice_responses.run_function', fake_run)
+    d = S.Dialogue(); rec = lambda *a, **k: None
+    await S.handle_response_event(send, 's', 'u', 'r', {'type': 'response.event', 'delegation_id': 'd1', 'event': {'type': 'response.output_item.done', 'item': {'type': 'function_call', 'call_id': 'c1', 'name': 'end_call', 'arguments': '{}'}}}, d, rec, pending)
+    await S.handle_response_event(send, 's', 'u', 'r', {'type': 'response.event', 'delegation_id': 'd1', 'event': {'type': 'response.completed'}}, d, rec, pending)
+    assert [e['type'] for e in sent] == ['session.close']

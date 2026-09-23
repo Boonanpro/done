@@ -72,17 +72,7 @@ def register(session_id, user_id, room_id=None):
 
 
 def _drop(session_id):
-    state = _sessions.pop(session_id, None)
-    if state and state.get('call_control'):
-        state['call_control'].close()
-
-
-def warm(session_id):
-    """The hang-up check's decision client, ready before the first quiet moment of the call."""
-    from app.services.voice_call_control import CallControl
-    state = _sessions[session_id]
-    if not state.get('call_control'): state['call_control'] = CallControl(state['user_id'])
-    state['call_control'].warm()
+    _sessions.pop(session_id, None)
 
 
 def close(session_id, user_id):

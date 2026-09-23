@@ -29,9 +29,7 @@ import { appendLive } from '../frontend/src/components/voice/live-backend';
 import { fetch } from 'expo/fetch';
 import { LiveGreeting } from '../frontend/src/components/voice/live-greeting';
 import { LiveJobs, type LiveJob } from '../frontend/src/components/voice/live-jobs';
-import { explicitCallEnd } from './call-intent';
 import { voiceQuality, voiceTransport } from './voice-quality';
-import { CallEndGate } from './call-end-gate';
 import { startVoiceBackground, stopVoiceBackground, onVoiceEnd, onVoiceTick, markVoiceConnected, playVoiceCue, playAtomVoiceCue, setWorkWaiting, bindRemoteAudio, unbindRemoteAudio, audioEndpointStats, muteExternalAudio, connectAtomAudio } from './voice-background';
 import { WorkWaiting, isWorking } from '../frontend/src/components/voice/work-waiting';
 
@@ -234,34 +232,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     let workingJob = false, metering = false;
     let audioTimer: ReturnType<typeof setInterval> | undefined;
     const waiting = new WorkWaiting(setWorkWaiting);
-    const callEndGate = new CallEndGate();
-    let controlRequest: AbortController | undefined;
-    let controlDeadline: ReturnType<typeof setTimeout> | undefined;
-    const reviewCallControl = () => {
-      if (controlRequest || !sessionId || !live()) return;
-      const candidate = callEndGate.takeReview(Date.now());
-      if (!candidate || candidate.text.length > 2000) return;
-      const controller = new AbortController(); controlRequest = controller;
-      controlDeadline = setTimeout(() => controller.abort(), 1200);
-      const history = [...dialogue];
-      // flush() may already have saved the current utterance. Do not duplicate it.
-      if (buffers.user) history.push({role:'user',text:candidate.text});
-      void fetch(`${apiBase}/api/v1/voicelog/live/call-control`, {
-        method:'POST', headers:authHeaders(), signal:controller.signal,
-        body:JSON.stringify({session_id:sessionId,dialogue:history.slice(-8).map(row=>({...row,text:row.text.slice(0,2000)}))}),
-      }).then(async response => {
-        if (!response.ok) return;
-        const result = await response.json();
-        if (!live() || controller.signal.aborted) return;
-        console.info('DanVoice call_control',JSON.stringify({action:result.action,elapsed_ms:result.elapsed_ms}));
-        if (result.action === 'end' && callEndGate.acceptReview(candidate.revision,Date.now())) finishRef.current();
-      }).catch(() => {
-        // The existing Live/Astra path remains available; no retry or spoken API error.
-      }).finally(() => {
-        clearTimeout(controlDeadline);
-        if (controlRequest === controller) controlRequest = undefined;
-      });
-    };
     const measureWaiting = async () => {
       if (metering || !live()) return;
       metering = true;
@@ -269,14 +239,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         const stats = await pcRef.current?.getStats?.();
         if (!stats || !live()) return;
         const quality = voiceQuality(stats);
-        const observedAt = Date.now();
-        callEndGate.microphone(quality.inputAvailable ? quality.inputLevel : null, observedAt);
-        if (callEndGate.shouldEnd(observedAt)) {
-          console.info('DanVoice call_end', JSON.stringify({source:'microphone_and_explicit_request',at:observedAt}));
-          finishRef.current();
-          return;
-        }
-        reviewCallControl();
         userLevelRef.current = Math.min(1, Math.sqrt(quality.inputLevel) * 1.8);
         aiLevelRef.current = quality.outputLevel < .01 ? 0 : Math.min(1, Math.sqrt(quality.outputLevel) * 1.8);
         const talking = quality.inputLevel > .01 || quality.outputLevel > .01;
@@ -305,14 +267,8 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       dialogue.push({role, text}); if (dialogue.length > 32) dialogue.shift();
       if (role === 'user') latestUserRef.current = text;
       saveTranscript(role, text);
-      if (role === 'user' && live() && explicitCallEnd(text)) {
-        console.info('DanVoice explicit_call_end');
-        finishRef.current();
-        return;
-      }
     };
     cleanupRef.current = () => {
-      clearTimeout(controlDeadline); controlRequest?.abort();
       clearTimeout(atomDeadline); rejectAtom(new Error('通話を終了しました'));
       if (pcRef.current?._pcId != null) unbindRemoteAudio(pcRef.current._pcId);
       clearInterval(audioTimer); waiting.close();
@@ -455,7 +411,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           if (role === 'user') {
           }
           buffers[role] += String(message.delta || ''); ends[role] = Number(message.end_ms) || 0;
-          if (role === 'user') callEndGate.transcript(buffers.user, Date.now());
           if (role === 'user') latestUserRef.current = buffers.user;
           clearTimeout(flushTimers[role]); flushTimers[role] = setTimeout(() => flush(role), 2500);
           flushAt[role] = Date.now() + 2500;

@@ -144,13 +144,15 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         calls = pending.pop(delegation_id, [])
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
+            if any(out['name'] == 'end_call' for out in outputs):
+                # The owner asked to end the call: close now. (Asking for a farewell and waiting a fixed 2.5 s before closing
+                # raced the speech: in both real calls nothing was heard, once the farewell was empty. 2026-09-23)
+                await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
+                return
             # per the guide: every function_call_output of the response, then response.create (no delegation_id field)
             for out in outputs:
                 await send({'type': 'response.item.create', 'event_id': f'dan-{time.time_ns()}', 'item': {k: out[k] for k in ('type', 'call_id', 'output')}})
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
-            if any(out['name'] == 'end_call' for out in outputs):
-                await asyncio.sleep(2.5)
-                await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
 
 
 FEED_SECONDS = 1.0

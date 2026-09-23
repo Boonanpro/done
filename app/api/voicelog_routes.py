@@ -127,7 +127,7 @@ class LiveSessionRequest(BaseModel):
 
 @router.post('/live/session')
 async def create_live_session(request: Request, body: LiveSessionRequest):
-    from app.services.voice_live import MODEL, session_config, register, warm, bind_session, close
+    from app.services.voice_live import MODEL, session_config, register, bind_session, close
     from uuid import uuid4
     user = _get_user(request)
     chat = ChatService()
@@ -144,7 +144,6 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
     history = room_history(messages)
     pending_id = 'pending-' + uuid4().hex
     register(pending_id, user.user_id, room_id=body.room_id)
-    warm(pending_id)
     bound = False
     try:
         async with httpx.AsyncClient(timeout=40) as client:
@@ -171,36 +170,6 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
 
 class LiveCloseRequest(BaseModel):
     session_id: str
-
-class CallControlUtterance(BaseModel):
-    role: Literal['user', 'assistant']
-    text: str = Field(min_length=1, max_length=2000)
-
-
-class LiveCallControlRequest(BaseModel):
-    session_id: str
-    dialogue: list[CallControlUtterance] = Field(min_length=1, max_length=8)
-
-
-@router.post('/live/call-control')
-async def live_call_control(request: Request, body: LiveCallControlRequest):
-    from app.services.voice_live import get_session
-    from app.services.voice_call_control import review, CallControl
-    user = _get_user(request)
-    state = get_session(body.session_id, user.user_id)
-    if not state or state['user_id'] != user.user_id:
-        raise HTTPException(409, '音声の接続が更新されています。再接続してください')
-    # Separate from the worker lock: ending a call must not queue behind a job.
-    if state.get('call_control_pending'):
-        return {'action': 'review', 'reason': 'pending'}
-    state['call_control_pending'] = True
-    try:
-        if not state.get('call_control'):
-            state['call_control'] = CallControl(user.user_id)
-        return await review(user.user_id, [item.model_dump() for item in body.dialogue], state['call_control'])
-    finally:
-        state['call_control_pending'] = False
-
 
 @router.post('/live/backend/close')
 async def close_live_backend(request: Request, body: LiveCloseRequest):
