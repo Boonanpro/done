@@ -73,14 +73,17 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
     `speak(text)` (from the sideband) delivers a later result to the call as spoken commentary: a function must return
     within about a second, because the speech model answers nothing while a delegation is in flight (2026-09-22 18:48:
     a 44s replay inside the delegation left the owner's next words unanswered)."""
-    from app.services import voice_intake2 as v2, voice_intake as v1
+    from app.services import voice_parts as parts
+    from app.services.command_job_state import list_owned
     from app.services.jev_decisions import Decisions
     if name == 'get_saved_information':
         what = str(args.get('what') or '')
         async with Decisions(user_id, timeout=3, max_calls=3) as judge:
-            keys, _, _, _ = await v2.saved_items(judge, user_id, what, [{'role': 'user', 'text': what}])
-        facts = await v2.values(user_id, keys) if keys else []
+            found = await parts.saved_items(judge, user_id, what, [{'role': 'user', 'text': what}])
         source = {'what': '本人がダンに保存した自分の情報'}
+        if not found['available']:   # the decision failed: that is not "not saved" (it used to say so)
+            return {'saved': [], 'note': '保存情報を今は確認できなかった。保存されていないとは言わない。', 'source': source}
+        facts = await parts.values(user_id, found['answer']) if found['answer'] else []
         return {'saved': [{'label': f['label'], 'value': f['value'], 'say': f.get('say')} for f in facts], 'source': source} if facts else {'saved': [], 'note': 'この情報は保存されていません。', 'source': source}
     if name == 'search_records':
         from app.services.voice_past import gather
@@ -92,11 +95,10 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         here = current(user_id)
         return {**await tool(user_id), 'source': {'what': '本人のスマホが知らせた位置', 'at': here['at'] if here else None}}
     if name == 'get_calendar':
-        return await v2.calendar(user_id, int(args.get('days') or 14))
+        return await parts.calendar(user_id, int(args.get('days') or 14))
     if name == 'open_on_pc':
         target = str(args.get('target') or '').strip()
-        from app.services.voice_intake3 import open_target
-        said = open_target(target) or open_target(target.lower())
+        said = await parts.open_target(target, user_id)
         if not said and target.startswith('http'):
             import webbrowser
             try: webbrowser.open(target); said = f'{target}をパソコンで開きました。'
@@ -111,14 +113,14 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         task = '今回のユーザー発言（原文）:\n'+str(args.get('task') or '')[:2000]
         context = json.dumps(dialogue[-8:], ensure_ascii=False)
         if len(context) <= 2600-len(task): task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context
-        out = await execute({'action': 'work', 'task': task+v1.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
+        out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
         return {'accepted': bool(out.get('accepted')), 'note': '作業は始まった。結果は後で別に届く。本人に今言うことはない（確認中・時間がかかる等も言わない）。'}
     if name == 'job_status':
-        jobs = await asyncio.to_thread(v1.list_owned, user_id, room_id)
-        return v1.work_status(jobs)
+        jobs = await asyncio.to_thread(list_owned, user_id, room_id)
+        return parts.work_status(jobs)
     if name == 'steer_job':
         from app.services.command_center import execute
-        jobs = await asyncio.to_thread(v1.list_owned, user_id, room_id)
+        jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         active = [s for s in jobs if s['state'] not in ('completed', 'failed', 'cancelled')]
         if not active: return {'error': '動いている作業はありません。'}
         out = await execute({'action': 'control_job', 'job_id': active[0]['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
@@ -131,34 +133,12 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         from app.services.browser_flows import all_flows
         flow = next((f for f in all_flows() if f['id'] == args.get('id')), None)
         if not flow: return {'error': 'その手順はありません'}
-        asyncio.get_running_loop().create_task(replay_in_background(flow, args.get('values') or {}, str(args.get('task') or ''), user_id, room_id, dialogue, speak))
+        from app.services.command_center import execute
+        task = '今回のユーザー発言（原文）:' + chr(10) + str(args.get('task') or '')[:2000]
+        await execute({'action': 'work', 'task': task + parts.VOICE_TASK, 'engine': 'api',
+                       'replay': {'id': flow['id'], 'values': args.get('values') or {}}}, room_id, user_id)
         return {'started': True, 'note': '再生を始めた。結果は後で別に届く。本人に今言うことはない。'}
     if name == 'end_call':
         return {'ok': True}
     return {'error': f'未知の関数 {name}'}
 
-
-async def replay_in_background(flow, values, task, user_id, room_id, dialogue, speak):
-    """The replay, off the delegation: when it reaches its end page, the page's substance is spoken; when it cannot, the
-    task goes to Dan's job runner as a normal job (its result is spoken by the job feed), with nothing said in between."""
-    from app.services.browser_flows import run
-    from app.services import voice_intake as v1
-    try:
-        outcome = await run(flow, values)
-    except Exception as exc:
-        outcome = {'replayed': False, 'reason': f'{type(exc).__name__}'}
-    if outcome.get('replayed'):
-        try:
-            from app.agent.v2.tools import _execute_browser_tool
-            page = await _execute_browser_tool('read', {'max_chars': 2500})
-            text = ' '.join(b.get('text', '') for b in page.get('content', []) if b.get('type') == 'text')
-            text = text.split('本文:', 1)[-1].strip()[:600]
-        except Exception:
-            text = ''
-        if speak and text:
-            await speak('再生した手順「' + flow.get('name', '')[:40] + '」の結果ページ: ' + text)
-        return
-    if task:
-        from app.services.command_center import execute
-        note = '（記憶した手順の再生は途中で止まった: ' + str(outcome.get('reason') or '')[:80] + '。通常どおり進める）'
-        await execute({'action': 'work', 'task': '今回のユーザー発言（原文）:' + chr(10) + task[:2000] + chr(10) + note + v1.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)

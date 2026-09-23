@@ -87,6 +87,22 @@ def report_id(watch_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, 'dan-command-center:' + watch_id))
 
 
+async def _approves(user_id, room_id, job_id, spoken):
+    """Is the owner's reply an approval of the presented confirmation? A fixed choice for Jev, which reads the proposal
+    and the reply together (the word lists it replaces blocked 「問題ない、買って」 on 「ない」). Unavailable: not approved."""
+    if not spoken: return False
+    from app.services.command_job_state import owned
+    from app.services.jev_decisions import Decisions
+    proposal = ((owned(job_id, user_id, room_id).get('confirmation') or {}).get('summary') or '')[:1500]
+    async with Decisions(user_id, timeout=2, max_calls=1) as judge:
+        decision = await judge.choose({'presented': proposal, 'reply': spoken[:500]}, {'reply': {'type': 'choice', 'criteria': {
+            'approve': '提示した内容をそのまま確定してよいという返事。',
+            'change_or_question': '条件の変更・質問・保留・中止・別の案。',
+            'unclear': 'どちらとも取れない。'}, 'instructions': '本人の返事が、提示した確定内容への承認かを選ぶ。'}})
+    answer = (decision.get('answers') or {}).get('reply') or {}
+    return bool(decision.get('available')) and answer.get('choice') == 'approve' and (answer.get('probabilities') or {}).get('approve', 0) >= .85
+
+
 async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_message_id: str | None = None) -> dict:
     """Never accept user identity from model arguments; validate both room ends."""
     if not user_id or not room_id:
@@ -128,19 +144,10 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     if action == 'control_job':
         from app.services.command_job_state import control, public
         operation = str(params.get('operation') or '')
-        voice_approved = False
-        if operation == 'confirm' and params.get('voice_approval'):
-            from app.services.voice_approval import valid
-            voice_approved = valid(params['voice_approval'],user_id,room_id,str(params.get('job_id') or ''),
-                params.get('confirmation_id'),str(params.get('task') or ''))
-            if not voice_approved:
-                raise ValueError('今回の音声での承認を確認できませんでした。確定操作は行っていません。')
-        if operation == 'confirm' and not voice_approved:
-            import re
+        if operation == 'confirm':
             spoken = str(params.get('approval_text') or '').strip()
-            if (not re.search(r'はい|うん|それで|お願い|確定して|購入して|買って|送って|進めて|いいよ|OK',spoken,re.I)
-                or re.search(r'何|どこ|いくら|待って|やめ|まだ|先に|ない|ません|違う|ダメ|だめ|変更|[?？]',spoken)):
-                raise ValueError('提示した内容への本人の明確な返事が必要です。質問や条件指定では確定しません。')
+            if not await _approves(user_id, room_id, str(params.get('job_id') or ''), spoken):
+                raise ValueError('提示した内容への本人の明確な承認を確認できませんでした。確定操作は行っていません。')
             recent = await chat.get_messages(room_id,user_id,limit=8)
             humans = sorted((m for m in recent if m.get('sender_type') in {'human','user'}),key=lambda m:m.get('created_at') or '',reverse=True)
             if not humans or spoken not in humans[0].get('content',''):
@@ -222,7 +229,9 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     engine = 'api' if str(params.get('engine') or '') == 'api' else 'cli'   # api: Responses API worker; cli: Codex CLI (default)
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
         origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine,
-        **({'model':str(params['model'])[:60]} if engine=='api' and params.get('model') else {}))
+        **({'model':str(params['model'])[:60]} if engine=='api' and params.get('model') else {}),
+        **({'replay':{'id':str(params['replay'].get('id'))[:40],'values':{str(k)[:60]:str(v)[:200] for k,v in (params['replay'].get('values') or {}).items()}}}
+           if engine=='api' and isinstance(params.get('replay'),dict) else {}))
     try:
         await _wake_job(job_id)
     except Exception:

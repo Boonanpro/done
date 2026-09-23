@@ -67,13 +67,36 @@ class Worker:
             self.state.change(self.job_id, applied)
         return fresh
 
+    async def replay(self, spec):
+        """A remembered operation, replayed by code before the model starts (the voice backend chose it): in this job's
+        browser and with the owner's id, so a moved element can be re-found by Jev. Returns the note the model starts from."""
+        from app.services.browser_flows import all_flows, run
+        flow = next((f for f in all_flows() if f['id'] == spec.get('id')), None)
+        if not flow:
+            return '（記憶した手順が見つからなかった。通常どおり作業する）'
+        self.state.publish(self.job_id, 'progress', '記憶した手順を再生しています')
+        try:
+            outcome = await run(flow, spec.get('values') or {})
+        except Exception as exc:
+            outcome = {'replayed': False, 'reason': type(exc).__name__}
+        if not outcome.get('replayed'):
+            return f"（記憶した手順の再生は途中で止まった: {str(outcome.get('reason') or '')[:80]}。今の画面から通常どおり続ける）"
+        from app.agent.v2.tools import _execute_browser_tool
+        page = await _execute_browser_tool('read', {'max_chars': 4000})
+        text = ' '.join(b.get('text', '') for b in page.get('content', []) if b.get('type') == 'text')[:4000]
+        return ('記憶した手順を再生済み（' + str(outcome.get('elapsed_ms')) + 'ms）。今の画面:\n' + text +
+                '\nこの画面で依頼に答えられればそのまま答える。足りなければ続けて操作する。')
+
     async def run(self):
         from app.mcp_server import list_tools, call_tool
         from app.services import api_job_providers
         s = self.read()
         model = s.get('model') or MODEL()
         provider = api_job_providers.make(model)
-        provider.start(s.get('instructions') or '', job_tools(await list_tools()), list(s.get('history', [])) + [s['task']])
+        first = list(s.get('history', [])) + [s['task']]
+        if s.get('replay'):
+            first.append(await self.replay(s['replay']))
+        provider.start(s.get('instructions') or '', job_tools(await list_tools()), first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return

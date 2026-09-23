@@ -5,12 +5,9 @@ Why: every backend step of a call travelled speech model -> PHONE -> this server
 from Wi-Fi to mobile the requests did not arrive for two minutes; and on a good network the phone app still held a finished
 answer for 6.3s before handing it to the speech model (server done 14:23:56.2, appended 14:24:02.5).
 
-Two modes, decided per call:
-  observe  (default)  attach and record event types and timing. Nothing is sent. Proven on a real call: attached in 0.47s,
-                      transcripts and session.delegation.created all arrive here.
-  own                 only when the phone app declared it will NOT answer delegations itself (server_delegation=true in
-                      the session request). This server answers each delegation: intake -> tools run here -> the result is
-                      appended to the call directly. The phone carries audio only.
+The server always answers the call's delegations here: the backend model (Responses delegation, voice_responses) chooses
+Dan's functions, this connection runs them (execute_call) and sends the results back; results of finished work are
+appended as spoken commentary (job_feed). The phone carries audio only.
 
 Switch: DAN_VOICE_SIDEBAND=0 turns everything off. A failure here never touches the call's audio.
 Only metadata is logged (event types, sizes, timing): no audio, no words.
@@ -26,8 +23,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 URL = 'wss://api.openai.com/v1/live/sessions/{session_id}/attach'
 MAX_SECONDS = 3 * 3600
-QUIET_SECONDS = .6      # the owner's words are still arriving when the delegation is created: wait for them to stop
-MAX_WAIT_SECONDS = 2.5
 CHUNK = 300             # an append is limited to 500 tokens; Japanese runs at about a token a character
 _tasks = {}
 LOG = Path(__file__).resolve().parents[2]/'.tmp'/'voice-sideband.jsonl'
@@ -110,82 +105,6 @@ def chunks(text):
         text = text[cut:].lstrip()
 
 
-async def search(query):
-    """The same evidence search the phone app used to request through /voicelog/search."""
-    import httpx
-    key = os.environ.get('TAVILY_API_KEY', '')
-    if not key:
-        try:
-            env = Path(__file__).resolve().parents[2]/'.env'
-            key = next((l.split('=', 1)[1].strip() for l in env.read_text(encoding='utf-8').splitlines() if l.startswith('TAVILY_API_KEY=')), '')
-        except OSError:
-            key = ''
-    if not key: return {'error': '検索の設定がありません'}
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post('https://api.tavily.com/search', json={'api_key': key, 'query': query[:400], 'max_results': 4,
-            'include_answer': False, 'search_depth': 'advanced', 'chunks_per_source': 2})
-    if response.status_code != 200: return {'error': f'検索に失敗しました (HTTP {response.status_code})'}
-    return {'results': [{'title': r.get('title', '')[:120], 'url': r.get('url'), 'content': r.get('content', '')[:900]}
-                        for r in response.json().get('results', [])]}
-
-
-async def run_tool(name, args, user_id, room_id, latest_user_text):
-    """What the phone app did for each tool call, done here."""
-    from app.services.command_center import execute
-    try:
-        if name == 'web_search': return await search(str(args.get('query') or ''))
-        if name == 'delegate_to_dan': return await execute({'action': 'work', 'task': args.get('task')}, room_id, user_id)
-        if name == 'control_dan_task': return await execute({**args, 'action': 'control_job', 'approval_text': latest_user_text}, room_id, user_id)
-        if name == 'command_center': return await execute(args, room_id, user_id)
-        if name == 'enter_voice_standby': return {'ok': True}
-        return {'error': 'この通話では使えない道具です'}
-    except ValueError as exc:
-        return {'error': str(exc)[:300]}
-
-
-async def answer(send, session_id, user_id, room_id, delegation, dialogue, record):
-    """One delegation, start to finish, on this server."""
-    from app.services import voice_live
-    started = time.monotonic()
-    deadline = started+MAX_WAIT_SECONDS
-    while time.monotonic() < deadline and time.monotonic()-dialogue.heard_at < QUIET_SECONDS:
-        await asyncio.sleep(.1)
-    turns = dialogue.recent()
-    latest = next((t['text'] for t in reversed(turns) if t['role'] == 'user'), '')
-    envelope = {'dialogue': turns, 'utterance_final': True}
-    if delegation.get('request'): envelope['request'] = delegation['request']
-    items = [{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': json.dumps(envelope, ensure_ascii=False)}]}]
-    hang_up, tools = False, []
-    text, silent = '', False
-    try:
-        for _ in range(4):
-            result = await voice_live.respond(session_id, user_id, items)
-            calls = [o for o in result.get('output', []) if o.get('type') == 'function_call']
-            if not calls:
-                text = '\n'.join(c.get('text', '') for o in result.get('output', []) if o.get('type') == 'message'
-                                 for c in (o.get('content') or []) if c.get('type') == 'output_text')
-                silent = bool(result.get('silent'))
-                break
-            items = []
-            for call in calls:
-                try: args = json.loads(call.get('arguments') or '{}')
-                except ValueError: args = {}
-                tools.append(call['name'])
-                hang_up = hang_up or call['name'] == 'enter_voice_standby'
-                output = await run_tool(call['name'], args, user_id, room_id, latest)
-                items.append({'type': 'function_call_output', 'call_id': call['call_id'], 'output': json.dumps(output, ensure_ascii=False)})
-    except Exception as exc:
-        record('delegation_failed', delegation_id=delegation.get('id'), error_type=type(exc).__name__)
-        text = 'ダンの裏側で処理に失敗しました。もう一度お願いします。'
-    kind = 'session.thinking.append' if silent else 'session.commentary.append'   # thinking is never spoken (documented)
-    for part in chunks(text):
-        await send({'type': kind, 'event_id': f'dan-{time.time_ns()}', 'delegation_id': delegation.get('id'), 'content': part})
-    record('delegation_answered', delegation_id=delegation.get('id'), elapsed_ms=round((time.monotonic()-started)*1000), tools=tools, answer_chars=len(text), silent=silent)
-    if hang_up:
-        await asyncio.sleep(1.5)   # let the goodbye be heard
-        await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
-
-
 async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, speak=None):
     """One function call of the backend model, run here. Returns the function_call_output item."""
     from app.services.voice_responses import run_function
@@ -236,21 +155,6 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
 
 FEED_SECONDS = 1.0
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
-
-
-def job_note(job):
-    """The running work in one line: what was asked, its state, where it is (from the tool layer, not the model's notes)."""
-    from app.services.voice_intake import STATE_WORDS, where_it_is
-    task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:120]
-    parts = [f"ダンの作業「{task}」は{STATE_WORDS.get(job.get('state'), job.get('state'))}"]
-    if job.get('state') in ('running', 'queued', 'paused', 'awaiting_confirmation'):
-        place = where_it_is(job)
-        if place: parts.append(place)
-        progress = next((e['text'][:160] for e in reversed(job.get('events', [])) if e.get('kind') == 'progress'), '')
-        if progress and progress not in ('依頼内容を確認しています', '実行先を確認しています'): parts.append('作業側のメモ: '+progress)
-    if job.get('state') == 'awaiting_confirmation' and (job.get('confirmation') or {}).get('summary'):
-        parts.append('本人の返事を待っている内容: '+job['confirmation']['summary'][:200])
-    return '（裏側の状態）'+'。'.join(parts)+'。'
 
 
 async def job_feed(send, user_id, room_id, record, connected_at):
@@ -316,9 +220,6 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     # tasks run in creation order: a function call is registered (no await before it) before the
                     # response's completion gathers the outputs; the receive loop itself never waits on a function
                     task = asyncio.create_task(handle_response_event(send, session_id, user_id, room_id, event, dialogue, record, pending))
-                    working.add(task); task.add_done_callback(working.discard)
-                elif own and kind == 'session.delegation.created' and isinstance(event.get('delegation'), dict) and (event['delegation'].get('target') == 'client'):
-                    task = asyncio.create_task(answer(send, session_id, user_id, room_id, event['delegation'], dialogue, record))
                     working.add(task); task.add_done_callback(working.discard)
                 if kind == 'session.closed': break
     except Exception as exc:

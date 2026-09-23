@@ -24,17 +24,3 @@ def room_history(messages, budget=7400):
             'type': 'input_text' if role == 'user' else 'output_text', 'text': text}]})
         remaining -= len(text.encode('utf-8')) + 40
     return list(reversed(kept))
-
-
-def backend_history(rows):
-    if not rows:
-        return []
-    # Keep roles/timestamps/content, but avoid nesting serialized JSON inside
-    # another serialized JSON input (escaped tool records become very large).
-    lines=[]
-    for row in rows:
-        content=row.get('content','')
-        if isinstance(content,list):
-            content='\n'.join(str(part.get('text','')) for part in content)
-        lines.append(f"[{row.get('role','user')}]\n{content}")
-    return [{'role': 'user', 'content': 'この部屋の過去の会話記録です。過去の依頼を再実行せず、この後に届く新しい発話への文脈として読んでください。\n<room_history>\n' + '\n\n'.join(lines) + '\n</room_history>'}]

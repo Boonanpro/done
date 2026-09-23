@@ -4,7 +4,7 @@ const fs = require('node:fs'), vm = require('node:vm');
 const ts = require('../mobile/node_modules/typescript');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-test('call setup and job results do not depend on paused global fetch',async()=>{
+test('call setup and the job poll do not depend on paused global fetch; the phone does not speak job results itself',async()=>{
  const job={id:'background-job',task:'Check hours',state:'completed',created_at:new Date(Date.now()+1000).toISOString(),seq:1,
   events:[{seq:1,kind:'result',text:'Open until 20:00'}]};
  const h=harness({pausedFetch:true,jobPollResults:[{jobs:[job]}]});
@@ -12,10 +12,11 @@ test('call setup and job results do not depend on paused global fetch',async()=>
   for(let i=0;i<10;i++)await tick();
   assert.ok(h.pc,'native session setup completes');
   h.tickBackground(2000);for(let i=0;i<10;i++)await tick();
-  assert.ok(h.sent.some(e=>e.type==='session.commentary.append' && e.content.includes('20:00')));
+  assert.ok(!h.sent.some(e=>e.type==='session.commentary.append' && e.content.includes('20:00')));   // the server's sideband speaks it
+  assert.ok(h.requests.some(r=>r.body && r.body.event==='voice-job-received'));
  }finally{h.dispose();}
 });
-test('completed work is announced during silent background waiting and delivery is recorded',async()=>{
+test('completed work is recorded as activity once and never appended by the phone',async()=>{
  const job={id:'j',task:'営業時間の確認',state:'completed',created_at:new Date(Date.now()+1000).toISOString(),seq:1,
   events:[{seq:1,kind:'result',text:'公式ページで24時間営業を確認しました。'}]};
  const h=harness({jobPollResults:[{jobs:[job]},{jobs:[job]}]});
@@ -23,9 +24,8 @@ test('completed work is announced during silent background waiting and delivery 
   for(let i=0;i<8;i++)await tick();
   h.tickBackground(2000);for(let i=0;i<8;i++)await tick();
   h.tickBackground(2000);for(let i=0;i<8;i++)await tick();
-  assert.equal(h.sent.filter(e=>e.type==='session.commentary.append' && e.content.includes('24時間営業')).length,1);
+  assert.equal(h.sent.filter(e=>e.type==='session.commentary.append' && e.content.includes('24時間営業')).length,0);
   assert.ok(h.requests.some(r=>r.body.event==='voice-job-received' && r.body.extra.job_id==='j'));
-  assert.ok(h.requests.some(r=>r.body.event==='voice-result-sent' && r.body.extra.event_id));
  }finally{h.dispose();}
 });
 
@@ -168,18 +168,6 @@ test('speaking during fast review cancels hangup before transcription arrives', 
  } finally {h.dispose();}
 });
 
-test('missing Live delegation still reviews a completed end request and executes the returned tool', async () => {
-  const h=harness();
-  try {
-    for(let i=0;i<8;i++) await tick();
-    h.pc.event({type:'session.input_transcript.delta',delta:'切って',start_ms:0,end_ms:300});
-    assert.ok(!h.pc.closed);
-    h.tickBackground(2600); for(let i=0;i<8;i++) await tick();
-    assert.equal(h.requests.filter(r=>r.url.endsWith('/live/backend/stream')).length,1);
-    assert.equal(h.pc.closed,true);
-  } finally {h.dispose();}
-});
-
 test('a new utterance invalidates a delayed contextual hangup decision', async () => {
   const h=harness({holdControl:true});
   try {
@@ -189,18 +177,6 @@ test('a new utterance invalidates a delayed contextual hangup decision', async (
     h.pc.event({type:'session.input_transcript.delta',delta:'いや、もう一つ聞きたい',start_ms:3000,end_ms:3600});
     h.releaseControl(); for(let i=0;i<8;i++) await tick();
     assert.ok(!h.pc.closed); assert.ok(!h.track.stopped);
-  } finally {h.dispose();}
-});
-
-test('uncertain transcript keeps call open and delivers clarification without a fabricated Live delegation', async () => {
-  const h=harness({controlClarification:true});
-  try {
-    for(let i=0;i<8;i++) await tick();
-    h.pc.event({type:'session.input_transcript.delta',delta:'あ、ごめん、ちょっと電話きて',start_ms:0,end_ms:600});
-    h.tickBackground(2600); for(let i=0;i<8;i++) await tick();
-    assert.ok(!h.pc.closed);
-    const replies=h.sent.filter(e=>e.type==='session.commentary.append');
-    assert.ok(replies.some(e=>e.content.includes('終了しますか') && e.delegation_id===null));
   } finally {h.dispose();}
 });
 
@@ -299,12 +275,13 @@ test('mobile uses Live with room context; delegated hangup stops microphone, pee
     assert.ok(h.sent.some(e => e.type === 'session.instructions.append'));
     h.pc.event({type: 'session.input_transcript.delta',delta: '電話を切ってください',start_ms: 0,end_ms: 1000});
     h.pc.event({type: 'session.delegation.created',delegation: {id: 'end-request'}});
+    h.pc.event({type: 'session.closed'});   // the server's end_call closes the session; the phone follows
     for (let i=0;i<8;i++) await tick();
     assert.equal(h.closed,1); assert.equal(h.track.stopped,true); assert.equal(h.pc.closed,true); assert.equal(h.pc.dc.closed,true);
     assert.ok(h.requests.some(r => r.url.endsWith('/live/backend/close')));
     assert.ok(h.requests.some(r => r.url.endsWith('/room-test') && r.body.content === '電話を切ってください'));
-    const payload = h.requests.find(r => r.url.endsWith('/live/backend/stream')).body;
-    assert.ok(JSON.stringify(payload).includes('電話を切ってください'));
+    assert.ok(!h.requests.some(r => r.url.endsWith('/live/backend/stream')));   // the phone never answers delegations
+    assert.equal(h.requests.find(r => r.url.endsWith('/live/session')).body.server_delegation, true);
     assert.ok(!h.requests.some(r => /realtime|\/voicelog\/session$/.test(r.url)));
   } finally {h.dispose();}
 });
@@ -349,21 +326,6 @@ test('notification action closes the same microphone and paid connection', async
   } finally {h.dispose();}
 });
 
-test('background speech reaches an active job even without a Live delegation and is not replayed',async()=>{
- const h=harness({activeJob:true});
- try{
-  for(let i=0;i<8;i++)await tick();
-  h.tickBackground(2000);for(let i=0;i<4;i++)await tick();
-  h.pc.event({type:'session.input_transcript.delta',delta:'メモの最後に確認済みって追加して',start_ms:0,end_ms:1600});
-  h.tickBackground(3000);for(let i=0;i<5;i++)await tick();
-  const calls=()=>h.requests.filter(r=>r.url.endsWith('/live/backend/stream'));
-  assert.equal(calls().length,1);assert.match(JSON.stringify(calls()[0].body.input),/確認済み/);
-  h.pc.event({type:'session.delegation.created',delegation:{id:'late'}});
-  for(let i=0;i<4;i++)await tick();assert.equal(calls().length,1);
-  assert.ok(!h.track.stopped);
- }finally{h.dispose();}
-});
-
 test('ending closes paid audio immediately but preserves the route until standby cue completes', async () => {
   const h = harness({holdStandby:true});
   try {
@@ -399,15 +361,3 @@ test('ending closes paid audio immediately but preserves the route until standby
  });
 
 
-test('lost backend session closes media without asking the voice model to reconnect',async()=>{
- const h=harness({missingSession:true});
- try{
-  for(let i=0;i<8;i++)await tick();
-  h.pc.event({type:'session.input_transcript.delta',delta:'今どうなってる',start_ms:0,end_ms:1200});
-  h.pc.event({type:'session.delegation.created',delegation:{id:'lost'}});
-  for(let i=0;i<8;i++)await tick();
-  assert.equal(h.pc.closed,true);assert.equal(h.track.stopped,true);
-  assert.ok(!h.sent.some(e=>String(e.content).includes('session lost')));
-  assert.equal(h.requests.filter(r=>r.url.endsWith('/live/backend/stream')).length,1);
- }finally{h.dispose();}
-});

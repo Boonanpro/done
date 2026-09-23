@@ -4,7 +4,8 @@ from fastapi import HTTPException
 from app.core.api import sandbox_routes
 from app.core.api.sandbox_routes import _recent_voice_sessions
 
-def test_active_closed_and_expired_sessions(tmp_path):
+def test_active_closed_and_expired_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox_routes,'_live_phone_calls',lambda *a,**k:[])   # phone calls come from the real sideband log
     p=tmp_path/'room'/'assistant'/'events'/'session.jsonl';p.parent.mkdir(parents=True)
     p.write_text(json.dumps({'type':'live_usage'})+'\n')
     os.utime(p,(1000,1000))

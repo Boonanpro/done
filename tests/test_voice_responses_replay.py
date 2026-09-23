@@ -1,42 +1,32 @@
-"""replay_operation never holds the delegation: it returns at once, the replay runs behind, and its result (or the
-fallback job) arrives later. A delegation in flight silences the speech model, so a 44-second function was a 44-second hole."""
-import asyncio
-import json
-
+"""replay_operation never holds the delegation: it starts a job that replays the flow first (in the job's browser, with the
+owner's id for Jev) and returns at once; the job's result is spoken when it arrives."""
 import pytest
 
 from app.services import voice_responses as R
 
 
 @pytest.mark.asyncio
-async def test_replay_returns_at_once_and_speaks_the_result_later(monkeypatch):
+async def test_replay_starts_a_job_with_the_flow_and_returns_at_once(monkeypatch):
     flow = {'id': 'f1', 'host': 'x.example', 'name': '便を調べる', 'steps': [], 'slots': {}}
-    spoken, started = [], asyncio.Event()
-    async def run(f, values):
-        started.set(); await asyncio.sleep(.05); return {'replayed': True, 'elapsed_ms': 50}
-    async def read(action, params): return {'content': [{'type': 'text', 'text': 'URL: x タイトル: y 本文: のぞみ10号 10:30発'}]}
-    async def speak(text): spoken.append(text)
+    jobs = []
+    async def execute(params, room_id, user_id): jobs.append(params); return {'accepted': True}
     monkeypatch.setattr('app.services.browser_flows.all_flows', lambda: [flow])
-    monkeypatch.setattr('app.services.browser_flows.run', run)
-    monkeypatch.setattr('app.agent.v2.tools._execute_browser_tool', read)
-    t0 = asyncio.get_event_loop().time()
-    out = await R.run_function('replay_operation', {'id': 'f1', 'values': {}, 'task': '便を調べて'}, 'u', 'r', [], speak=speak)
-    assert out['started'] and asyncio.get_event_loop().time()-t0 < .04 and spoken == []
-    await asyncio.sleep(.15)
-    assert started.is_set() and len(spoken) == 1 and 'のぞみ10号' in spoken[0]
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    out = await R.run_function('replay_operation', {'id': 'f1', 'values': {'時': '10'}, 'task': '26日の便を調べて'}, 'u', 'r', [])
+    assert out['started'] and len(jobs) == 1
+    assert jobs[0]['engine'] == 'api' and jobs[0]['replay'] == {'id': 'f1', 'values': {'時': '10'}} and '26日の便を調べて' in jobs[0]['task']
 
 
 @pytest.mark.asyncio
-async def test_failed_replay_becomes_a_normal_job_without_a_word(monkeypatch):
-    flow = {'id': 'f1', 'host': 'x.example', 'name': '便を調べる', 'steps': [], 'slots': {}}
-    spoken, jobs = [], []
-    async def run(f, values): return {'replayed': False, 'reason': 'unexpected_screen', 'elapsed_ms': 5}
-    async def execute(params, room_id, user_id): jobs.append(params); return {'accepted': True}
-    async def speak(text): spoken.append(text)
-    monkeypatch.setattr('app.services.browser_flows.all_flows', lambda: [flow])
-    monkeypatch.setattr('app.services.browser_flows.run', run)
-    monkeypatch.setattr('app.services.command_center.execute', execute)
-    out = await R.run_function('replay_operation', {'id': 'f1', 'values': {}, 'task': '24日の便を調べて'}, 'u', 'r', [], speak=speak)
-    assert out['started']
-    await asyncio.sleep(.05)
-    assert spoken == [] and len(jobs) == 1 and jobs[0]['action'] == 'work' and '24日の便を調べて' in jobs[0]['task']
+async def test_an_unknown_flow_is_an_error_not_a_job(monkeypatch):
+    monkeypatch.setattr('app.services.browser_flows.all_flows', lambda: [])
+    out = await R.run_function('replay_operation', {'id': 'nope', 'values': {}, 'task': 'x'}, 'u', 'r', [])
+    assert 'error' in out
+
+
+@pytest.mark.asyncio
+async def test_saved_information_that_could_not_be_checked_is_not_reported_as_missing(monkeypatch):
+    async def saved_items(judge, user_id, what, dialogue): return {'available': False, 'answer': []}
+    monkeypatch.setattr('app.services.voice_parts.saved_items', saved_items)
+    out = await R.run_function('get_saved_information', {'what': '郵便番号'}, 'u', 'r', [])
+    assert '確認できなかった' in out['note'] and '保存されていません' not in out['note']

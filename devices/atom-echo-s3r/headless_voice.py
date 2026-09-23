@@ -21,7 +21,6 @@ event_log=event_logger("voice")
 ROOT = Path(__file__).resolve().parents[2]
 PAIR = ROOT / '.tmp/atom-wifi-pairing.json'
 AUTH = ROOT / '.tmp/atom-headless-auth.json'
-VOICE_CONFIG = ROOT / '.tmp/atom-voice-provider.json'
 BASE = 'http://localhost:3000'
 CORE = 'http://127.0.0.1:9000'
 events = deque(maxlen=100)
@@ -101,10 +100,7 @@ async def load_worker(worker, intent):
             device=await device_status()
             if restart.is_set() or not device.get('device_connected') or not device.get('requested') or (device.get('boot'),device.get('revision'))!=intent:return
             await asyncio.sleep(.25)
-    try: provider=json.loads(VOICE_CONFIG.read_text(encoding='utf-8')).get('provider','openai')
-    except (OSError, ValueError): provider='openai'
-    suffix='&voice=gemini' if provider=='gemini' else ''
-    navigation=asyncio.create_task(worker.goto(BASE+'/atom-voice?worker=1'+suffix,wait_until='domcontentloaded',timeout=30000))
+    navigation=asyncio.create_task(worker.goto(BASE+'/atom-voice?worker=1',wait_until='domcontentloaded',timeout=30000))
     guard=asyncio.create_task(intent_ended())
     try:
         done,_=await asyncio.wait([navigation,guard],return_when=asyncio.FIRST_COMPLETED)
@@ -168,7 +164,7 @@ async def browser_loop():
                     if idle.expired():
                         await device_command('stop');event_log('idle_standby');break
                     result=await page.evaluate(INSPECT);state.update(result)
-                    connected=result.get('connection')=='connected' and (result.get('config') or {}).get('model') in ('gpt-live-1','gemini-3.8-live-extended-thinking')
+                    connected=result.get('connection')=='connected' and (result.get('config') or {}).get('model') == 'gpt-live-1'
                     state['state']='connected' if connected else 'connecting'
                     await device_command('session',boot=intent[0],revision=intent[1],active=connected)
                     if connected:
@@ -266,13 +262,6 @@ async def pair(request: Request):
 @app.post('/command')
 async def command(request: Request):
     body = await authenticated(request)
-    if body.get('action') == 'provider':
-        provider=body.get('provider')
-        if provider not in ('openai','gemini'): raise HTTPException(400)
-        device=await device_status()
-        if device.get('requested') or page: raise HTTPException(409, '通話終了後にモデルを切り替えてください')
-        VOICE_CONFIG.write_text(json.dumps({'provider':provider}),encoding='utf-8')
-        return {'ok':True,'provider':provider}
     if body.get('action') == 'diagnostics':
         return {'backend': last_backend_output}
     if body.get('action') == 'reconnect':
@@ -283,8 +272,6 @@ async def command(request: Request):
         restart.set()
         return {'ok': True}
     if body.get('action') == 'test_audio' and page and state.get('connection') == 'connected':
-        if (state.get('config') or {}).get('model') == 'gemini-3.8-live-extended-thinking':
-            raise HTTPException(409, 'この診断はWebRTC専用です。Geminiの録音比較はcompare_atom_voice_modelsのPCM入力を使用してください')
         audio = body.get('wav_base64', '')
         if not isinstance(audio, str) or not 1 <= len(audio) <= 4_000_000: raise HTTPException(400)
         await page.evaluate("""async encoded => {
@@ -299,26 +286,10 @@ async def command(request: Request):
         }""", audio)
         event_log('test_audio')
         return {'ok': True}
-    if body.get('action') == 'test_utterance' and page and state.get('connection') == 'connected':
-        text=body.get('text','')
-        if not isinstance(text,str) or not 1<=len(text)<=500:raise HTTPException(400)
-        # Controlled acceptance input: restore automatically, including after a failed test client.
-        mute_seconds=body.get('mute_input_seconds',0)
-        if not isinstance(mute_seconds,int) or not 0<=mute_seconds<=180:raise HTTPException(400)
-        if mute_seconds and (state.get('config') or {}).get('model') == 'gemini-3.8-live-extended-thinking':
-            raise HTTPException(409, 'GeminiではこのWebRTCマイク差し替え診断を使用できません')
-        if mute_seconds:
-            await page.evaluate("seconds => {const tracks=window.__atomVoice.pc.getSenders().map(s=>s.track).filter(t=>t?.kind==='audio');const previous=tracks.map(t=>t.enabled);tracks.forEach(t=>t.enabled=false);setTimeout(()=>tracks.forEach((t,i)=>t.enabled=previous[i]),seconds*1000);}",mute_seconds)
-        await page.evaluate("text => window.__atomTestText(text)",text)
-        event_log('test_utterance')
-        return {'ok':True}
     if body.get('action') == 'say' and page and state.get('connection') == 'connected':
         text = body.get('text', '')
         if not isinstance(text, str) or not 1 <= len(text) <= 500: raise HTTPException(400)
-        if (state.get('config') or {}).get('model') == 'gemini-3.8-live-extended-thinking':
-            await page.evaluate("text => window.__atomTestText('以下の案内を読み上げてください。外部操作は不要です。\\n' + text)", text)
-        else:
-            await page.evaluate("text => window.__atomVoice.dc.send(JSON.stringify({type:'session.commentary.append',event_id:crypto.randomUUID(),delegation_id:null,content:text}))", text)
+        await page.evaluate("text => window.__atomVoice.dc.send(JSON.stringify({type:'session.commentary.append',event_id:crypto.randomUUID(),delegation_id:null,content:text}))", text)
         return {'ok': True}
     raise HTTPException(409)
 

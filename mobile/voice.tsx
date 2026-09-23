@@ -23,13 +23,13 @@ import { reportLocation } from './location-report';
 import InCallManager from 'react-native-incall-manager';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 
-import { LiveBackend, appendLive, readLiveBackendStream } from '../frontend/src/components/voice/live-backend';
+import { appendLive } from '../frontend/src/components/voice/live-backend';
 // RN's global fetch resolves through a JS timer, which pauses off-screen.
 // All call requests must use the native transport, including tools and polling.
 import { fetch } from 'expo/fetch';
 import { LiveGreeting } from '../frontend/src/components/voice/live-greeting';
-import { LiveJobs, liveJobObservation, type LiveJob } from '../frontend/src/components/voice/live-jobs';
-import { explicitCallEnd, needsCallControlReview } from './call-intent';
+import { LiveJobs, type LiveJob } from '../frontend/src/components/voice/live-jobs';
+import { explicitCallEnd } from './call-intent';
 import { voiceQuality, voiceTransport } from './voice-quality';
 import { CallEndGate } from './call-end-gate';
 import { startVoiceBackground, stopVoiceBackground, onVoiceEnd, onVoiceTick, markVoiceConnected, playVoiceCue, playAtomVoiceCue, setWorkWaiting, bindRemoteAudio, unbindRemoteAudio, audioEndpointStats, muteExternalAudio, connectAtomAudio } from './voice-background';
@@ -38,24 +38,6 @@ import { WorkWaiting, isWorking } from '../frontend/src/components/voice/work-wa
 type RtEvent = { type: string; [key: string]: unknown };
 type Status = 'idle' | 'connecting' | 'connected' | 'ending' | 'error';
 
-const TOOL_LABELS: Record<string, string> = {
-  delegate_to_dan: '作業中',
-  check_dan_status: '進行確認',
-  web_search: 'Web検索',
-  read_room_history: '履歴読込',
-  get_artifact_state: '状態取得',
-  set_text: '文言変更',
-  set_style: 'スタイル変更',
-  list_source_files: 'ファイル一覧',
-  read_source: 'ソース読込',
-  edit_source: 'ソース編集',
-  write_source: 'ソース書換',
-  generate_image: '画像生成',
-  look_at_page: '全体確認',
-  look_at_section: '細部確認',
-  check_contrast: 'コントラスト検査',
-  read_skill: 'スキル参照',
-};
 
 interface VoiceOverlayProps {
   visible: boolean;
@@ -98,10 +80,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
   const backgroundLeaseRef = useRef<string | null>(null);
   const mutedRef = useRef(false);
   const genRef = useRef(0);
-  const backendRef = useRef<LiveBackend | null>(null);
+  const sessionRef = useRef('');
   const cleanupRef = useRef<() => void>(() => {});
   const finishRef = useRef<() => void>(() => {});
-  const roomSlugRef = useRef<string | null>(null);
   const latestUserRef = useRef('');
   // ---- オーブ駆動 ----
   const userLevelRef = useRef(0);
@@ -176,158 +157,10 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
   const append = useCallback((kind: 'commentary' | 'thinking', text: string, id: string | null = null) => {
     appendLive(dcSend, kind, text, id);
   }, [dcSend]);
-  const injectSystemAndRespond = useCallback((text: string) => append('commentary', text), [append]);
-  const injectImages = useCallback((images: string[]) => {
-    backendRef.current?.addInput({type: 'message', role: 'user',
-      content: images.map(image_url => ({type: 'input_image', image_url}))});
-  }, []);
-
-  const needSlug = useCallback((): string | { error: string } => {
-    return (
-      roomSlugRef.current || {
-        error: 'この部屋に紐づく成果物が見つかりません（成果物を作ってから編集を頼んでください）',
-      }
-    );
-  }, []);
-
-  const executeTool = useCallback(
-    async (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
-      if (name === 'look_at_screen') {
-        return { error: 'モバイル版では画面共有に未対応です。見てほしいものは言葉で説明してもらってください。' };
-      }
-      if (name === 'enter_voice_standby') {
-        finishRef.current();
-        return {ok: true};
-      }
-      if (name === 'delegate_to_dan') {
-        return api('command-center', {room_id: roomId, args: {action: 'work', task: args.task}});
-      }
-      if (name === 'control_dan_task') {
-        return api('command-center', {room_id: roomId, args: {...args, action: 'control_job', approval_text: latestUserRef.current}});
-      }
-      if (name === 'command_center') return api('command-center', {room_id: roomId, args});
-      if (name === 'check_dan_status') {
-        return api('command-center', {room_id: roomId, args: {action: 'requests'}});
-      }
-      if (name === 'web_search') {
-        const query = String(args.query ?? '').trim();
-        if (!query) return { error: 'query が空です' };
-        return api('search', { query });
-      }
-      if (name === 'read_room_history') {
-        const limit = Math.min(50, Math.max(1, Number(args.limit) || 30));
-        try {
-          const res = await fetch(`${apiBase}/api/v1/chat/rooms/${encodeURIComponent(roomId)}/messages?limit=${limit}`, {
-            headers: authHeaders(),
-          });
-          if (!res.ok) return { error: `履歴の取得に失敗 (HTTP ${res.status})` };
-          const data = (await res.json()) as { messages?: Array<{ sender_type?: string; content?: string; created_at?: string }> };
-          const msgs = (data.messages || []).map((m) => ({
-            from: m.sender_type === 'ai' ? 'dan' : 'user',
-            at: String(m.created_at || '').slice(5, 16),
-            text: String(m.content || ''),
-          }));
-          return { count: msgs.length, messages: msgs };
-        } catch (e) {
-          return { error: `履歴の取得に失敗: ${String(e).slice(0, 120)}` };
-        }
-      }
-      if (name === 'get_artifact_state' || name === 'check_contrast') {
-        const slug = needSlug();
-        if (typeof slug !== 'string') return slug;
-        return api('capture', { slug, mode: name === 'check_contrast' ? 'contrast' : 'state' });
-      }
-      if (name === 'look_at_page') {
-        const slug = needSlug();
-        if (typeof slug !== 'string') return slug;
-        const data = await api('capture', { slug, mode: 'tiles' });
-        if (data.error) return data;
-        const tiles = (data.tiles as string[]) || [];
-        if (!tiles.length) return { error: 'タイルが取得できませんでした' };
-        injectImages(tiles);
-        return { ok: true, tiles: tiles.length, note: `成果物の全体を${tiles.length}枚の高解像度タイルで添付しました。` };
-      }
-      if (name === 'look_at_section') {
-        const slug = needSlug();
-        if (typeof slug !== 'string') return slug;
-        const data = await api('capture', { slug, mode: 'section', element_id: String(args.id ?? '') });
-        if (data.error) return data;
-        if (!data.image) return { error: '撮影できませんでした' };
-        injectImages([data.image as string]);
-        return { ok: true, note: `要素 ${String(args.id)} の原寸スクリーンショットを添付しました。` };
-      }
-      if (name === 'set_text' || name === 'set_style') {
-        const slug = needSlug();
-        if (typeof slug !== 'string') return slug;
-        const payload: Record<string, unknown> = { slug, element_id: String(args.id ?? '') };
-        if (name === 'set_text') payload.text = String(args.text ?? '');
-        else payload.styles = args.styles ?? {};
-        const data = await api('edit', payload);
-        return data.error ? data : { ok: true, id: args.id, note: 'draftとして保存しました。' };
-      }
-      if (name === 'list_source_files' || name === 'read_source' || name === 'edit_source' || name === 'write_source') {
-        const slug = needSlug();
-        if (typeof slug !== 'string') return slug;
-        const action =
-          name === 'list_source_files' ? 'list' : name === 'read_source' ? 'read' : name === 'edit_source' ? 'edit' : 'write';
-        return api('source', {
-          action,
-          slug,
-          file: args.file,
-          old_string: args.old_string,
-          new_string: args.new_string,
-          content: args.content,
-        });
-      }
-      if (name === 'generate_image') {
-        const prompt = String(args.prompt ?? '').trim();
-        if (!prompt) return { error: 'prompt が空です' };
-        void (async () => {
-          const data = await api('generate-image', { prompt, size: args.size });
-          if (data.error) {
-            injectSystemAndRespond(`[システム通知] 画像生成に失敗しました（${String(data.error).slice(0, 150)}）。`);
-            return;
-          }
-          injectSystemAndRespond(
-            `[システム通知] 画像が完成しました: ${String(data.url)}\nset_style や edit_source でこのURLを自分で適用してください。`,
-          );
-        })();
-        return { status: 'generating', note: '20〜60秒で完成の通知が届きます。' };
-      }
-      if (name === 'read_skill') {
-        return api('skill', { name: args.name });
-      }
-      // 動画エディタ（制作ルーム）: 速い車線＝1操作即時コミット / 目＝合成後フレーム
-      if (name === 'timeline_state') {
-        if (!roomId) return { error: '部屋が特定できません' };
-        return api('timeline', { room_id: roomId, action: 'state', outline: args.outline !== false });
-      }
-      if (name === 'timeline_edit') {
-        if (!roomId) return { error: '部屋が特定できません' };
-        return api('timeline', {
-          room_id: roomId, action: 'edit', op: String(args.op ?? ''), args: (args.args as Record<string, unknown>) ?? {},
-          content_id: args.content_id ? String(args.content_id) : undefined,
-        });
-      }
-      if (name === 'timeline_frame') {
-        if (!roomId) return { error: '部屋が特定できません' };
-        const data = await api('timeline', {
-          room_id: roomId, action: 'frame', t: typeof args.t === 'number' ? args.t : undefined,
-          content_id: args.content_id ? String(args.content_id) : undefined,
-        });
-        if (data.error || !data.image) return data.error ? data : { error: 'フレームを取得できませんでした' };
-        injectImages([data.image as string]);
-        return { ok: true, t: data.t, note: `${Number(data.t).toFixed(1)}秒の合成後フレームを添付しました。` };
-      }
-      return { error: `未知のツール: ${name}` };
-    },
-    [api, apiBase, authHeaders, injectImages, injectSystemAndRespond, needSlug, roomId],
-  );
-
   const disconnect = useCallback(() => {
     genRef.current++;
     cleanupRef.current(); cleanupRef.current = () => {};
-    backendRef.current?.close(); backendRef.current = null;
+    if (sessionRef.current) void api('live/backend/close', {session_id: sessionRef.current}); sessionRef.current = '';
     micRef.current?.getTracks().forEach((track: any) => track.stop()); micRef.current = null;
     dcRef.current?.close(); dcRef.current = null;
     pcRef.current?.close(); pcRef.current = null;
@@ -345,7 +178,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     genRef.current++;
     setStatus('ending');
     cleanupRef.current(); cleanupRef.current = () => {};
-    backendRef.current?.close(); backendRef.current = null;
+    if (sessionRef.current) void api('live/backend/close', {session_id: sessionRef.current}); sessionRef.current = '';
     micRef.current?.getTracks().forEach((track: any) => track.stop());
     dcRef.current?.close(); pcRef.current?.close();
     // Close network/microphone first; retain the headset route for the end cue.
@@ -371,9 +204,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     const live = () => generation === genRef.current;
     setStatus('connecting'); setError(null); setActivity([]);
     let sessionId = '';
-    // The server may answer this call's delegations itself (its own connection to the Live session): then the phone
-    // carries audio only, and a network change no longer loses a request. Decided by the server's reply.
-    let serverDelegation = false;
     // The remote audio is always played. Muting it while the server answered a delegation (to hide the speech model's
     // 「確認します」) removed the real-time feel of the call (2026-09-22); a short, varied acknowledgement is wanted instead.
     let remoteTrack: any = null;
@@ -392,7 +222,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     let timer: ReturnType<typeof setInterval> | undefined;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const dialogue: Array<{role: string; text: string}> = [];
-    const jobDelegations = new Map<string,string>();
     const buffers = {user: '', assistant: ''};
     const ends = {user: 0, assistant: 0};
     const flushTimers: Partial<Record<'user' | 'assistant', ReturnType<typeof setTimeout>>> = {};
@@ -402,8 +231,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     let lastPoll = 0;
     let nextDiagnostic = 0;
     let startDeadline = 0;
-    let hasActiveJobs = false, followupEligible = false, userTurn = 0, userLength = 0;
-    let currentWork: Record<string,unknown> | null = null;
     let workingJob = false, metering = false;
     let audioTimer: ReturnType<typeof setInterval> | undefined;
     const waiting = new WorkWaiting(setWorkWaiting);
@@ -467,13 +294,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             }).finally(() => { endpointReportPending = false; });
           }
         }
-        if (live()) waiting.update(Date.now(), isWorking(currentWork?.state, workingJob), talking, started && !endingRef.current);
+        if (live()) waiting.update(Date.now(), isWorking(undefined, workingJob), talking, started && !endingRef.current);
       } finally { metering = false; }
     };
-    const jobObservations = new Map<string,string>();
-    const conversation = () => [{type:'message',role:'user',content:[{type:'input_text',text:JSON.stringify({
-      current_time:new Date().toISOString(),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,utterance_final:!buffers.user,
-      dialogue:[...dialogue,...Object.entries(buffers).filter(([,text])=>text).map(([role,text])=>({role,text}))]})}]}];
     const flush = (role: 'user' | 'assistant') => {
       clearTimeout(flushTimers[role]);
       flushAt[role] = 0;
@@ -486,15 +309,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         console.info('DanVoice explicit_call_end');
         finishRef.current();
         return;
-      }
-      // When the server owns the delegations it sees the transcript itself (hang-up by the words, follow-ups to the running job);
-      // these two app-side requests then only produce a second, identical answer (the postcode was spoken twice on 2026-09-22).
-      if (role === 'user' && live() && !serverDelegation) {
-        if (needsCallControlReview(text)) {
-          backend.delegateSpeech(`call-control-${userTurn}-${userLength}`,userTurn,userLength,() => [
-            ...conversation(), {role:'user',content:'直近の発言が今の音声通話を終える依頼か、会話の文脈から確認してください。終了の依頼なら enter_voice_standby を実行してください。引用・否定・作業の停止と区別してください。意図が不明な場合だけ短く確認し、それ以外の判定説明や内部の道具名は発話に返さないでください。この確認のために新しい仕事を開始しないでください。'},
-          ]);
-        } else if (followupEligible) backend.followupSpeech(userTurn,userLength,conversation);
       }
     };
     cleanupRef.current = () => {
@@ -510,65 +324,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       if (result.error) throw new Error(String(result.error));
       return result;
     };
-    const backend = new LiveBackend(
-      async (input,onText) => {
-        const startedAt=Date.now();
-        const abort=new AbortController();
-        const timeout=setTimeout(()=>abort.abort(),40000);
-        console.info('DanVoice backend_request',JSON.stringify({at:startedAt,input_chars:JSON.stringify(input).length}));
-        try {
-          const response=await fetch(`${apiBase}/api/v1/voicelog/live/backend/stream`, {
-            method:'POST',headers:authHeaders(),signal:abort.signal,body:JSON.stringify({session_id:sessionId,input}),
-          }) as unknown as Response;
-          console.info('DanVoice backend_headers',JSON.stringify({at:Date.now(),elapsed_ms:Date.now()-startedAt,status:response.status}));
-          if (response.status === 409 && live()) {
-            // A lost backend session cannot be repaired by spoken instructions.
-            // Close the remaining media connection instead of trapping the user
-            // in a call that can talk but cannot perform actions or hang up.
-            disconnect();
-            setError('作業用の接続が失われたため通話を終了しました。もう一度通話を開始してください。');
-            setStatus('error');
-            throw new Error('Voice backend session unavailable');
-          }
-          const result=await readLiveBackendStream(response,onText);
-          console.info('DanVoice backend_completed',JSON.stringify({at:Date.now(),elapsed_ms:Date.now()-startedAt}));
-          return result;
-        } catch(error) {
-          console.info('DanVoice backend_failed',JSON.stringify({at:Date.now(),elapsed_ms:Date.now()-startedAt}));
-          traceDelivery('backend-failed',{elapsed_ms:Date.now()-startedAt,kind:abort.signal.aborted?'timeout':'request_error'});
-          throw error;
-        } finally { clearTimeout(timeout); }
-      },
-      async (name, args, delegationId) => {
-        console.info('DanVoice tool', name);
-        if (!live()) return {error: 'Call ended'};
-        if (name === 'enter_voice_standby' && delegationId.startsWith('call-control-')
-            && delegationId !== `call-control-${userTurn}-${userLength}`)
-          return {error:'終了確認の後に新しい発言がありました。古い依頼では通話を終了しません。'};
-        setCurrentActivity(TOOL_LABELS[name] || null);
-        try {
-          const result=await executeTool(name, args);
-          const receipt=(result as any).receipt;
-          if((result as any).accepted && receipt?.id && !delegationId.startsWith('followup-'))
-            jobDelegations.set(receipt.id,delegationId);
-          return result;
-        }
-        finally { if (live()) setCurrentActivity(null); }
-      },
-      (text, id) => { if (live() && (!id.startsWith('call-control-') || id === `call-control-${userTurn}-${userLength}`)) append('commentary', text,
-        id.startsWith('followup-') || id.startsWith('call-control-') ? null : id); },
-      message => { if (live()) { pushActivity(message); append('commentary', `確認に失敗しました: ${message}`); } },
-      () => { if (sessionId) void api('live/backend/close', {session_id: sessionId}); },
-      async input => await request('live/backend/steer', {session_id: sessionId, input}) as {accepted: boolean},
-      state => {
-        currentWork=state;
-        traceDelivery('work-state',{state:state.state,tool:state.tool,action:state.action});
-        if(live()) setCurrentActivity(state.state==='reasoning' ? '確認中' :
-          state.state==='reading' ? (state.tool==='web_search' ? '検索中' : '読み取り中') :
-          state.state==='executing' ? '作業中' : null);
-      },
-    );
-    backendRef.current = backend;
     const greeting = new LiveGreeting(dcSend, type => console.info('DanVoice greeting',type));
     const jobs = new LiveJobs();
     try {
@@ -698,22 +453,12 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           }
           if (buffers[role] && Number(message.start_ms) - ends[role] > 1600) flush(role);
           if (role === 'user') {
-            if (!buffers.user) {
-              userTurn++;userLength=0;followupEligible=hasActiveJobs;
-              if(currentWork && currentWork.state!=='complete' && (currentWork.state!=='executing' || hasActiveJobs)) append('thinking',JSON.stringify({current_work:currentWork}));
-              for(const observation of jobObservations.values()) append('thinking',observation);
-            }
-            userLength += String(message.delta || '').length;
           }
           buffers[role] += String(message.delta || ''); ends[role] = Number(message.end_ms) || 0;
           if (role === 'user') callEndGate.transcript(buffers.user, Date.now());
           if (role === 'user') latestUserRef.current = buffers.user;
           clearTimeout(flushTimers[role]); flushTimers[role] = setTimeout(() => flush(role), 2500);
           flushAt[role] = Date.now() + 2500;
-        } else if (message.type === 'session.delegation.created') {
-          const id = message.delegation?.id;
-          if (id && !serverDelegation) backend.delegateSpeech(id,userTurn,userLength, () => [{type: 'message', role: 'user', content: [{type: 'input_text',
-            text: JSON.stringify({current_time:new Date().toISOString(),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,utterance_final:!buffers.user,dialogue: [...dialogue, ...Object.entries(buffers).filter(([,text]) => text).map(([role,text]) => ({role,text}))], request: message.request})}]}]);
         }
       });
       pc.addEventListener('connectionstatechange', () => {
@@ -735,7 +480,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       if (!live()) return;
       const session = await request('live/session', {room_id: roomId, sdp: pc.localDescription?.sdp, provider: 'openai', device: true, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, server_delegation: true});
       sessionId = String((session.session as any)?.id || '');
-      serverDelegation = (session as any).server_delegation === true;
+      sessionRef.current = sessionId;
       if (!live()) { if (sessionId) void api('live/backend/close', {session_id: sessionId}); return; }
       const sdp = (session.transport as any)?.sdp;
       if (!sessionId || !sdp) throw new Error('Live接続情報がありません');
@@ -745,7 +490,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         if (live() && !started) { disconnect(); setError('Liveへの接続がタイムアウトしました'); setStatus('error'); }
       }, 30000);
       startDeadline = Date.now() + 30000;
-      void api('room-artifact', {room_id: roomId}).then(data => { if (live()) roomSlugRef.current = (data.slug as string) || null; });
       pollJobs = async () => {
         if (!live() || !started) return;
         greeting.tick();
@@ -758,30 +502,21 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             if (!jobPollUnavailable) {
               jobPollUnavailable = true;
               pushActivity('仕事の状況を取得できません。再接続を試しています');
-              backend.addInput({type: 'message', role: 'user', content: [{type: 'input_text', text: JSON.stringify({type:'job_status_connection',available:false})}]});
               console.info('DanVoice job_poll_unavailable');
             }
             return;
           }
           if (jobPollUnavailable) {
             jobPollUnavailable = false;
-            backend.addInput({type: 'message', role: 'user', content: [{type: 'input_text', text: JSON.stringify({type:'job_status_connection',available:true})}]});
             console.info('DanVoice job_poll_recovered');
           }
-          hasActiveJobs = ((data.jobs || []) as LiveJob[]).some(job => !['completed','failed','cancelled'].includes(job.state));
           workingJob = ((data.jobs || []) as LiveJob[]).some(job => ['queued','running'].includes(job.state));
           if(workingJob) setCurrentActivity('作業中');
-          else if(currentWork?.state==='complete' || currentWork?.state==='executing') setCurrentActivity(null);
+          else setCurrentActivity(null);
           for (const {job,event} of jobs.updates((data.jobs || []) as LiveJob[])) {
             console.info('DanVoice job_event_received',JSON.stringify({job_id:job.id,state:job.state,seq:event.seq,received_at:Date.now()}));
             traceDelivery('job-received',{job_id:job.id,state:job.state,seq:event.seq,kind:event.kind});
-            pushActivity(event.text);
-            if (serverDelegation) continue;   // the server's sideband feeds the call itself (progress silent, results spoken)
-            const text = JSON.stringify({job_id: job.id, task: job.task, state: job.state, confirmation: job.confirmation, event});
-            backend.addInput({type: 'message', role: 'user', content: [{type: 'input_text', text}]});
-              const observation = liveJobObservation(job,event);
-              if(observation.kind==='commentary') {jobObservations.delete(job.id);append('commentary',observation.text,jobDelegations.get(job.id) || null);}
-              else jobObservations.set(job.id,observation.text);
+            pushActivity(event.text);   // the call itself is fed by the server (results spoken); the screen shows the activity
           }
         } finally { polling = false; }
       };
@@ -790,7 +525,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       if (!live()) return;
       disconnect(); setError(cause instanceof Error ? cause.message : String(cause)); setStatus('error');
     }
-  }, [api, append, dcSend, disconnect, executeTool, onClose, pushActivity, roomId, saveTranscript, audioEndpoint]);
+  }, [api, append, dcSend, disconnect, onClose, pushActivity, roomId, saveTranscript, audioEndpoint]);
 
   // ---- 音量ポーリング（getStats の audioLevel）→ オーブ駆動 ----
   useEffect(() => {

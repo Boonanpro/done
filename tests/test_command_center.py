@@ -33,36 +33,41 @@ class CommandCenterTests(unittest.IsolatedAsyncioTestCase):
             await cc.execute({"action": "list"}, "foreign-room", "owner")
         self.projects.list_projects.assert_not_called()
 
-    async def test_voice_confirmation_is_bound_to_job_and_original_speech(self):
-        from app.services.voice_approval import issue
-        token=issue('owner','hub-room','job','proposal','払い戻してください')
-        with patch('app.services.command_job_state.control',return_value={'id':'job','state':'running'}) as control:
-            args={'action':'control_job','operation':'confirm','job_id':'job','confirmation_id':'proposal',
-                  'task':'払い戻してください','voice_approval':token}
-            await cc.execute(args,'hub-room','owner')
-            control.assert_called_once()
-            self.chat.get_messages.assert_not_called()
-            for change in ({'job_id':'other'},{'confirmation_id':'old'},{'task':'まだ払い戻さないで'}):
-                with self.assertRaises(ValueError):await cc.execute({**args,**change},'hub-room','owner')
-            assert control.call_count==1
+    async def test_approval_is_judged_by_jev_against_the_presented_proposal(self):
+        """「問題ない、買って」 was refused by the old word list (on 「ない」); the reply is now judged against the proposal."""
+        asked = []
+        async def choose(self_, state, questions):
+            asked.append(state)
+            ok = state['reply'] == '問題ない、買って'
+            return {'available': True, 'answers': {'reply': {'choice': 'approve' if ok else 'change_or_question',
+                                                            'probabilities': {'approve': .97 if ok else .02}}}}
+        with patch('app.services.command_job_state.owned', return_value={'confirmation': {'summary': 'のぞみ8号 14,320円を購入'}}),              patch('app.services.jev_decisions.Decisions.choose', choose):
+            self.assertTrue(await cc._approves('owner', 'hub-room', 'job', '問題ない、買って'))
+            self.assertFalse(await cc._approves('owner', 'hub-room', 'job', '何号車？'))
+            self.assertFalse(await cc._approves('owner', 'hub-room', 'job', ''))
+        self.assertEqual(asked[0]['presented'], 'のぞみ8号 14,320円を購入')
+
+    async def test_unavailable_judgement_never_approves(self):
+        async def choose(self_, state, questions): return {'available': False, 'reason': 'unavailable'}
+        with patch('app.services.command_job_state.owned', return_value={'confirmation': {'summary': 'x'}}),              patch('app.services.jev_decisions.Decisions.choose', choose):
+            self.assertFalse(await cc._approves('owner', 'hub-room', 'job', 'はい'))
 
     async def test_confirmation_cannot_reuse_reply_before_proposal(self):
         self.chat.get_messages.return_value = [{'sender_type':'human','content':'はい',
             'created_at':'2026-09-15T09:00:00Z'}]
         with patch('app.services.command_job_state.owned',return_value={
             'confirmation':{'created_at':'2026-09-15T09:01:00+00:00'}}), \
-            patch('app.services.command_job_state.control') as control:
+            patch('app.services.command_job_state.control') as control,             patch.object(cc,'_approves',new_callable=AsyncMock,return_value=True):
             with self.assertRaisesRegex(ValueError,'提示した後'):
                 await cc.execute({'action':'control_job','operation':'confirm','job_id':'job',
                     'confirmation_id':'proposal','approval_text':'はい'},'hub-room','owner')
             control.assert_not_called()
 
     async def test_question_is_not_confirmation(self):
-        with patch('app.services.command_job_state.control') as control:
-            for reply in ['何号車？','はい、買わないで','それでお願いするとは言ってない']:
-                with self.assertRaises(ValueError):
-                    await cc.execute({'action':'control_job','operation':'confirm','job_id':'job',
-                        'confirmation_id':'proposal','approval_text':reply},'hub-room','owner')
+        with patch('app.services.command_job_state.control') as control,              patch.object(cc, '_approves', new_callable=AsyncMock, return_value=False):
+            with self.assertRaises(ValueError):
+                await cc.execute({'action':'control_job','operation':'confirm','job_id':'job',
+                    'confirmation_id':'proposal','approval_text':'何号車？'},'hub-room','owner')
             control.assert_not_called()
 
     async def test_target_access_required_before_read_or_write(self):

@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.voicelog_routes import _get_user as _cookie_user, _CHAT_TOOLS, CLIENT_SECRETS_ENDPOINT, REALTIME_MODEL
+from app.api.voicelog_routes import _get_user as _cookie_user, _EDITOR_TOOLS, CLIENT_SECRETS_ENDPOINT, REALTIME_MODEL
 from app.config import settings
 from app.services import timeline_draft as td, timeline_live as tl, timeline_scope as scope
 from app.services import editor_workflows as workflows
@@ -513,7 +513,7 @@ from app.services.editor_presentation import ITEM_SCHEMA, DESCRIPTION as PRESENT
 from app.services import editor_references
 from app.services.editor_direction_library import PLAN_SCHEMA as DIRECTION_PLAN_SCHEMA
 
-EDITOR_TOOLS = [t for t in _CHAT_TOOLS if t['name'] in {'timeline_edit', 'timeline_frame', 'read_skill'}] + [
+EDITOR_TOOLS = list(_EDITOR_TOOLS) + [
     function('read_reference_component','保存済みの動く部品の編集用ソース・調整項目・出典を読む。初回はidのみで一覧、file指定で元コードを取得する。',{'id':{'type':'string'},'file':{'type':'string'}},['id']),
     function('find_direction_patterns','目的・感情・理解に役立つ編集可能な演出部品をJevで推薦する。固定の制作方針や完成品質の保証ではない。',{'request':{'type':'string'}},['request']),
     function('preview_direction_plan','演出部品を会話に合う順序・文言・間で組み、編集可能な動く実物を即時提示する。元タイムラインは変更しない。修正はrevise_presentationの/scene/params/beatsへ。',{'plan':DIRECTION_PLAN_SCHEMA},['plan']),

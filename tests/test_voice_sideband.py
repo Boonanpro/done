@@ -35,46 +35,6 @@ def test_long_answers_are_cut_at_sentence_ends_under_the_append_limit():
 
 
 @pytest.mark.asyncio
-async def test_delegation_is_answered_here_tools_run_here_and_the_result_is_appended_to_the_call(monkeypatch):
-    sent, asked = [], []
-    async def send(event): sent.append(event)
-    replies = [
-        {'output': [{'type': 'function_call', 'call_id': 'c1', 'name': 'web_search', 'arguments': json.dumps({'query': '大阪 天気'})}]},
-        {'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '大阪は晴れです。'}]}]},
-    ]
-    async def respond(session_id, user_id, items, **_):
-        asked.append(items); return replies.pop(0)
-    async def search(query): return {'results': [{'title': query}]}
-    monkeypatch.setattr('app.services.voice_live.respond', respond)
-    monkeypatch.setattr(S, 'search', search)
-    monkeypatch.setattr(S, 'QUIET_SECONDS', 0)
-    d = S.Dialogue(); d.add('user', '大阪の天気は?')
-    notes = []
-    await S.answer(send, 'sess', 'user', 'room', {'id': 'dlg_9', 'request': '天気を調べる'}, d, lambda phase, **f: notes.append((phase, f)))
-    envelope = json.loads(asked[0][0]['content'][0]['text'])
-    assert envelope['dialogue'][-1] == {'role': 'user', 'text': '大阪の天気は?'} and envelope['request'] == '天気を調べる'
-    assert json.loads(asked[1][0]['output'])['results'][0]['title'] == '大阪 天気'   # the search ran on the server
-    assert sent == [{'type': 'session.commentary.append', 'event_id': sent[0]['event_id'], 'delegation_id': 'dlg_9', 'content': '大阪は晴れです。'}]
-    assert notes[-1][0] == 'delegation_answered' and notes[-1][1]['tools'] == ['web_search']
-
-
-@pytest.mark.asyncio
-async def test_hang_up_ends_the_call_from_the_server(monkeypatch):
-    sent = []
-    async def send(event): sent.append(event)
-    replies = [{'output': [{'type': 'function_call', 'call_id': 'c1', 'name': 'enter_voice_standby', 'arguments': '{}'}]},
-               {'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '通話を終了します。'}]}]}]
-    async def respond(*a, **k): return replies.pop(0)
-    async def no_sleep(_): return None
-    monkeypatch.setattr('app.services.voice_live.respond', respond)
-    monkeypatch.setattr(S, 'QUIET_SECONDS', 0)
-    monkeypatch.setattr(S.asyncio, 'sleep', no_sleep)
-    d = S.Dialogue(); d.add('user', '電話切って')
-    await S.answer(send, 'sess', 'user', 'room', {'id': 'dlg_1'}, d, lambda *a, **k: None)
-    assert [e['type'] for e in sent] == ['session.commentary.append', 'session.close']
-
-
-@pytest.mark.asyncio
 async def test_job_feed_speaks_results_at_once_and_pushes_nothing_else(monkeypatch):
     """Results are spoken the moment they appear. The running work's state is never pushed: the backend reads it with
     job_status when the owner asks (pushing it made the speech model say 「もう少し待って」 unprompted)."""
@@ -112,7 +72,7 @@ async def test_job_feed_ignores_work_finished_before_the_call(monkeypatch):
 async def test_parallel_function_calls_are_answered_together_with_one_response_create(monkeypatch):
     sent, pending = [], {}
     async def send(event): sent.append(event)
-    async def fake_run(name, args, user_id, room_id, dialogue): return {'ok': name}
+    async def fake_run(name, args, user_id, room_id, dialogue, **_): return {'ok': name}
     monkeypatch.setattr('app.services.voice_responses.run_function', fake_run)
     d = S.Dialogue(); rec = lambda *a, **k: None
     for call_id, name in (('c1', 'get_calendar'), ('c2', 'get_saved_information')):
