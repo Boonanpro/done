@@ -6,8 +6,8 @@ speech model already understood; the guessing layer produced the wrong turns and
 voice works in the form implemented here: the model that understood the request is the one that chooses the tool.
 
 What lives here: the backend model's instructions, the function definitions, and their execution against Dan's parts.
-The web search is OpenAI's own (tools: web_search). Long work still goes to Dan's job runner (Codex CLI, flat rate).
-Switch: DAN_VOICE_DELEGATION=client falls back to the previous form.
+The web search is OpenAI's own (tools: web_search). Long work goes to Dan's job runner (the API worker, DAN_VOICE_WORK_ENGINE).
+The earlier client delegation (the phone answered through a Jev-based intake) was removed on 2026-09-23.
 """
 import asyncio
 import json

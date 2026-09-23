@@ -11,6 +11,7 @@ provider's own prices (the model comparison of 2026-09-23 needs it).
 """
 import asyncio
 import json
+import re
 import os
 
 
@@ -142,5 +143,25 @@ class ChatCompletions:
 
 
 def _args(raw):
-    try: return json.loads(raw or '{}')
+    try: args = json.loads(raw or '{}')
     except ValueError: return {}
+    return _unleak(args) if isinstance(args, dict) else {}
+
+
+_DSML = re.compile(r'<[｜|]{1,2}DSML[｜|]{1,2}\s*parameter\s+name="([^"]+)"[^>]*>')
+_DSML_END = re.compile(r'</[｜|]{1,2}DSML[｜|]{1,2}.*$', re.S)
+
+
+def _unleak(args):
+    """DeepSeek sometimes writes its own tool markup into a string argument (2026-09-23, EX seat job: action =
+    'evaluate">
+<｜｜DSML｜｜ parameter name="expression" string="true">(() => ...)'), which made the call fail and cost a
+    step. Split such a value back into the parameters it meant."""
+    for key, value in list(args.items()):
+        if not isinstance(value, str) or 'DSML' not in value:
+            continue
+        head, *rest = _DSML.split(value)
+        args[key] = re.sub(r'["\s>]+$', '', head)
+        for name, val in zip(rest[0::2], rest[1::2]):
+            args.setdefault(name, _DSML_END.sub('', val).strip())
+    return args

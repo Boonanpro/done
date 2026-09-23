@@ -11,6 +11,11 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         live._sessions.clear()
         self.addCleanup(live._sessions.clear)
+        import tempfile
+        from pathlib import Path
+        from app.services import voice_sideband
+        log = patch.object(voice_sideband, 'LOG', Path(tempfile.mkdtemp()) / 'sideband.jsonl')   # not the real call log (the restart guard reads it)
+        log.start(); self.addCleanup(log.stop)
 
     def test_history_order_roles_and_budget(self):
         from app.services.voice_history import room_history

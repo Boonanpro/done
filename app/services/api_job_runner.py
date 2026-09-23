@@ -8,7 +8,9 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from app.services import command_job_state as state
 from app.services.command_job_runner import mark_status
@@ -19,7 +21,7 @@ JOB_INSTRUCTIONS = '''
 ブラウザはこの作業専用。通常のDanブラウザ道具を使う。コマンド（bash）も使える（カレンダーは python D:/done/scripts/dan_calendar.py list --days 7 など）。
 PCの画面にページやアプリを出してほしいと言われたら、コマンドで一発で出す（例: python -c "import webbrowser;webbrowser.open('URL')" で普段のブラウザに開く）。
 ブラウザは通常、画面の文字と要素参照を返す。画像が必要なら screenshot を使う。
-同じサイトで同じ種類の作業を頼まれたら、まず flow（action=list）を見て、合う手順があれば replay を使う。
+同じサイトで同じ種類の作業を頼まれたら、まず flow 道具（action=list）を見て、合う手順があれば replay を使う。記憶した手順はこの道具の中にだけある（ファイルやスクリプトを探さない）。
 実行結果と残件を短く報告する。外部APIのクライアントを自作して確認手順を迂回しない。
 '''
 
@@ -53,6 +55,9 @@ async def run(row):
             # A job needs the job's rules, not the whole persona (13k characters resent on every call)
             instructions = f"あなたはダン。本人（このアカウントの持ち主）に頼まれた作業を、このパソコンのブラウザや道具で実行する。部屋: {project.get('title', '')}。"
         instructions += '\n' + CONFIRMATION_RULE + JOB_INSTRUCTIONS
+        # the date the owner means by 「明日」「26日」 (a job without it spent a step running `date`, 2026-09-23)
+        now = datetime.now(ZoneInfo('Asia/Tokyo'))
+        instructions += f"現在の日時: {now.isoformat(timespec='minutes')}（{'月火水木金土日'[now.weekday()]}曜日）\n"
         recent = await chat.get_messages(row['room_id'], row['user_id'], limit=8)
         history = ['部屋の記録（過去の発言）: ' + str(m.get('content', ''))[:6000]
                    for m in sorted(recent, key=lambda m: m.get('created_at') or '') if m.get('id') != message['id']]
