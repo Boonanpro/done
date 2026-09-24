@@ -140,7 +140,11 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         record('backend_message', delegation_id=delegation_id[:40], chars=len(text))
         return
     if kind in ('response.completed', 'response.failed', 'response.incomplete', 'error'):
-        record('backend_'+kind.split('.')[-1], delegation_id=delegation_id[:40], detail=str(inner.get('error') or inner.get('response', {}).get('status') or '')[:200])
+        # the backend's tokens: billed apart from Live's per-minute rate, and half of a call's cost in a measured call (2026-09-24)
+        usage = (inner.get('response') or {}).get('usage') or {}
+        tokens = {'input_tokens': usage.get('input_tokens', 0), 'cached_tokens': (usage.get('input_tokens_details') or {}).get('cached_tokens', 0),
+                  'output_tokens': usage.get('output_tokens', 0), 'model': (inner.get('response') or {}).get('model', '')} if usage else {}
+        record('backend_'+kind.split('.')[-1], delegation_id=delegation_id[:40], detail=str(inner.get('error') or inner.get('response', {}).get('status') or '')[:200], **tokens)
         calls = pending.pop(delegation_id, [])
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
