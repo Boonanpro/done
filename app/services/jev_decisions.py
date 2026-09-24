@@ -51,8 +51,14 @@ def choice_answers(data, questions):
         if type(confidence) not in (float, int) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
             raise ValueError('confidence')
         selected = answer.get('choice')
-        if selected not in options or abs(sum(probs.values()) - 1) > .01:
+        # Probabilities come rounded to 2 decimals: with ~40 options their sum is 0.99 or 1.01, and a fixed 0.01
+        # tolerance (0.99 is 0.01000000001 away in floating point) threw away 1 answer in 3 (2026-09-24: the saved-address
+        # lookup said 「確認できなかった」). Allow the rounding error of this many options, then renormalise.
+        total = sum(probs.values())
+        if selected not in options or abs(total - 1) > min(.05, max(.01, .005 * len(options))) + 1e-9:
             raise ValueError('choice')
+        if total > 0:
+            answer['probabilities'] = probs = {k: v / total for k, v in probs.items()}
         if probs[selected] + 1e-6 < max(probs.values()):
             raise ValueError('choice_not_maximum')
     return answers
