@@ -68,8 +68,12 @@ async def run(row):
             # A job needs the job's rules, not the whole persona (13k characters resent on every call)
             instructions = job_instructions(project.get('title', ''))
         recent = await chat.get_messages(row['room_id'], row['user_id'], limit=8)
+        # The relayed copy of an earlier request (【あなたの依頼・Done経由】…) reads like an instruction: a job did that old
+        # request instead of its own (2026-09-24: asked for a train, answered a Shinkansen search from two jobs before).
+        # Its outcome is in the report that followed it; voice_past leaves these copies out for the same reason.
         history = ['部屋の記録（過去の発言）: ' + str(m.get('content', ''))[:6000]
-                   for m in sorted(recent, key=lambda m: m.get('created_at') or '') if m.get('id') != message['id']]
+                   for m in sorted(recent, key=lambda m: m.get('created_at') or '')
+                   if m.get('id') != message['id'] and not str(m.get('content', '')).startswith('【あなたの依頼・Done経由】')]
         state.change(job_id, lambda s: s.update(instructions=instructions, history=history))
         env = {**os.environ, 'DAN_USER_ID': row['user_id'], 'DAN_SESSION_ID': row['room_id'], 'DAN_BROWSER_ROOM': state.browser_room(job_id),
                'DAN_COMMAND_JOB_ID': job_id, 'DAN_BROWSER_HEADLESS': '1', 'DAN_BROWSER_OBSERVATION': 'dom', 'DAN_CORE_PORT': '9000',

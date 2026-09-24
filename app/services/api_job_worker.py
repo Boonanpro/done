@@ -51,6 +51,7 @@ def trace_step(call, output, images, seconds):
     args = {k: ('***' if private or any(w in k.lower() for w in _SECRET) or (typed and k in ('text', 'value', 'keys'))
                 else str(v)[:300]) for k, v in raw.items()}
     try:
+        os.makedirs(folder, exist_ok=True)   # a job's folder exists only once something wrote to it: the trace was silently lost
         with open(os.path.join(folder, 'steps.jsonl'), 'a', encoding='utf-8') as f:
             f.write(json.dumps({'name': call['name'], 'args': args, 'output_chars': len(output), 'images': len(images),
                                 'seconds': round(seconds, 2), 'head': '***' if private else output[:200]}, ensure_ascii=False) + '\n')
@@ -125,6 +126,7 @@ class Worker:
         instructions = (s.get('instructions') or '') + chr(10) + dan_tools.catalog(mcp, native=[t['name'] for t in native])
         provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
+        used_browser = False
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return
             started = time.monotonic()
@@ -141,6 +143,7 @@ class Worker:
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
                 called = time.monotonic()
+                used_browser = used_browser or call['name'] == 'browser' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'browser')
                 try:
                     if call['name'] == 'dan_tool_help':
                         contents = [type('T', (), {'type': 'text', 'text': dan_tools.help_text(mcp, str(call['args'].get('name') or ''))})()]
@@ -172,6 +175,12 @@ class Worker:
                 provider.user(CONTINUATION + json.dumps(continuation, ensure_ascii=False))
                 continue
             if not text: raise RuntimeError('作業結果が空でした')
+            if used_browser:   # the page it answered from is where its steps led: keep them as a remembered operation
+                try:
+                    from app.services import browser_recipes
+                    await browser_recipes.finish()
+                except Exception:
+                    pass
             self.state.publish(self.job_id, 'result', text, result=text, state='completed')
             return
         raise RuntimeError('作業の手数が上限に達しました')

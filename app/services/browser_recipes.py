@@ -58,7 +58,11 @@ SNAPSHOT = r"""() => {
   const deep = s => window.__danDeep ? window.__danDeep(s) : [...document.querySelectorAll(s)];
   const elements = deep('[data-dan-ref]').filter(vis).slice(0, 1000).map(e => ({
     ref:'@'+e.getAttribute('data-dan-ref'), role:role(e), name:name(e).slice(0,120), tag:e.tagName,
-    type:e.type || '', id:e.id || '', name_attr:e.getAttribute('name') || '', disabled:!!e.disabled}));
+    type:e.type || '', id:e.id || '', name_attr:e.getAttribute('name') || '', disabled:!!e.disabled,
+    // what a text field already holds, and its form: a value the site filled in (the last search's departure) is part of
+    // the procedure when the form is sent, though nobody typed it (2026-09-24, Yahoo!乗換案内)
+    value:(e.tagName==='INPUT' && !['password','hidden','submit','button','image','checkbox','radio','file'].includes(e.type)) || e.tagName==='TEXTAREA' ? (e.value || '').slice(0,200) : '',
+    form:e.form ? [...document.forms].indexOf(e.form) : -1}));
   return {url:location.href, password:deep('input[type="password"]').some(vis), elements};
 }"""
 
@@ -271,6 +275,25 @@ def distrust(url):
 
 
 # ---- recording -----------------------------------------------------------
+
+async def finish():
+    """The work is done (a job gave its answer): the page it answered from is where the steps led, so keep them as a flow.
+    A flow used to be saved only when a separate read followed the steps; since the page view after a click carries the
+    page's text, the model answers from it without reading again, and nothing was learnt (2026-09-24, Yahoo!乗換案内)."""
+    if not enabled():
+        return None
+    path = _run_file()
+    run = _read(path, None)
+    if not run or not run.get('flow_steps'):
+        return None
+    from app.tools.browser import get_executor_page
+    from app.services import browser_flows
+    snap = await snapshot(await get_executor_page())
+    browser_flows.note_observation(run, snap)
+    flow = browser_flows.save_flow(run, _task_words())
+    _write(path, run)
+    return flow
+
 
 async def around(action, params, execute):
     """The browser tool's single entry point passes through here."""

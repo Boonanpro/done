@@ -106,9 +106,15 @@ def slot_name(element):
 
 def record_step(run, action, params, pre, post):
     """Keep a non-login step with its value; returns True when kept."""
+    steps = run.setdefault('flow_steps', [])
+    if enabled() and action == 'back' and steps:
+        # 「戻る」 undoes the step that led away: a detour is not part of the procedure. Kept, it sent every replay to a dead
+        # end (2026-09-24, Yahoo!乗換案内: the site header's web-search button pressed by mistake, then back, then the
+        # right button; the replay pressed the wrong one each time).
+        steps.pop()
+        return True
     if not enabled() or action not in ('type', 'select', 'fill_form', 'click', 'keyboard_press'):
         return False
-    steps = run.setdefault('flow_steps', [])
     if len(steps) >= MAX_STEPS:
         return False
     on_login = recipes.login_like(pre) or recipes.login_like(post)   # values typed while logging in (IDs) are the login recipe's business; clicks there are navigation
@@ -123,6 +129,15 @@ def record_step(run, action, params, pre, post):
         if element: entries.append((action, element, str(params.get('text') if action == 'type' else params.get('value'))))
     elif action == 'click':
         element = by_ref.get('@'+str(params.get('ref', '')).lstrip('@'))
+        if element and element.get('role') == 'button' and element.get('form', -1) >= 0 and not on_login:
+            # Sending a form sends what its fields hold. A field the site filled in itself (the departure from the last
+            # search) was never typed, so the replay in a fresh browser sent it empty and stopped at 「出発地を入力してください」.
+            # id and name together: a site may give two fields one id (Yahoo!乗換案内: from and to are both id=query_input)
+            typed = {((s['targets'].get('ref') or {}).get('id'), (s['targets'].get('ref') or {}).get('name_attr')) for s in steps if s['action'] == 'type'}
+            for field in pre['elements']:
+                if (field.get('form') == element['form'] and field.get('value') and field.get('role') in ('textbox', 'searchbox')
+                        and (field.get('id'), field.get('name_attr')) not in typed and not SECRET_LABEL.search(slot_name(field))):
+                    entries.append(('type', field, field['value']))
         if element: entries.append(('click', element, None))
     elif action == 'keyboard_press':
         entries.append(('keyboard_press', None, params.get('key')))

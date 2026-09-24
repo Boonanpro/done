@@ -83,6 +83,22 @@ def catalog():
     return _catalog
 
 
+def remembered():
+    """The remembered operations, one line each, at the call's start. Asked 「何時の電車？」, the backend searched the web
+    (37-42 s, wrong trains 3 times in 3) though a remembered Yahoo!乗換案内 search answers it in about 10 s: it looked at
+    list_operations only for 「site work」, and a question is not that to it (2026-09-24). Ones learnt during the call are
+    still in list_operations."""
+    try:
+        from app.services.browser_flows import all_flows, describe
+        flows = all_flows()[:15]
+    except Exception:
+        return ''
+    if not flows:
+        return ''
+    return ('記憶している手順（replay_operation で数秒で再生し、結果のページの事実が返る。調べもの（時刻・料金・空席など）でも、'
+            '合う手順があればウェブ検索より速く正確）:' + chr(10) + chr(10).join('- ' + describe(f) for f in flows) + chr(10))
+
+
 def now_line():
     """The backend has no clock of its own: without the date it searched 「10月29日の大阪の天気」 (2026-09-24)."""
     now = datetime.now(ZoneInfo('Asia/Tokyo'))
@@ -90,7 +106,7 @@ def now_line():
 
 
 def delegation():
-    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS + chr(10) + now_line() + chr(10) + catalog(), 'tools': tools(), 'tool_choice': 'auto',
+    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS + chr(10) + now_line() + chr(10) + remembered() + catalog(), 'tools': tools(), 'tool_choice': 'auto',
                                               'parallel_tool_calls': True, 'reasoning': {'effort': REASONING}}}
 
 

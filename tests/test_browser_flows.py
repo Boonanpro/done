@@ -174,3 +174,26 @@ async def test_a_calendar_day_clicked_is_a_slot_and_replays_with_another_day(rai
     result = await flows.run(flow, {'選択1': '26'})
     assert result['replayed'], result
     assert '新大阪→品川 0924 day26' in await page.inner_text('body')
+
+
+def _el(ref, role, name='', tag='INPUT', type_='text', id_='', name_attr='', value='', form=0):
+    return {'ref': ref, 'role': role, 'name': name, 'tag': tag, 'type': type_, 'id': id_, 'name_attr': name_attr,
+            'disabled': False, 'value': value, 'form': form}
+
+
+def test_back_removes_the_detour_and_a_site_filled_field_is_kept_when_the_form_is_sent():
+    """2026-09-24 Yahoo!乗換案内: a wrong 検索 button then 「戻る」 stayed in the memory, and the departure the site had
+    filled in (never typed) was missing, so every replay went to a dead end or sent an empty departure."""
+    from app.services import browser_flows as bf
+    page = {'url': 'https://transit.example/', 'password': False, 'elements': [
+        _el('@a:1', 'textbox', id_='q', name_attr='from', value='尼崎'),
+        _el('@a:2', 'textbox', id_='q', name_attr='to', value=''),
+        _el('@a:3', 'button', name='検索', type_='submit', id_='go'),
+        _el('@a:4', 'button', name='検索', tag='BUTTON', type_='submit', id_='web', form=1)]}
+    run = {'steps': [], 'login_over': True}
+    bf.record_step(run, 'type', {'ref': '@a:2', 'text': '新大阪'}, page, page)
+    bf.record_step(run, 'click', {'ref': '@a:4'}, page, page)           # the wrong button (another form)
+    bf.record_step(run, 'back', {}, page, page)
+    bf.record_step(run, 'click', {'ref': '@a:3'}, page, page)
+    steps = [(s['action'], s.get('slot'), s.get('example')) for s in run['flow_steps']]
+    assert steps == [('type', 'to', '新大阪'), ('type', 'from', '尼崎'), ('click', None, None)]
