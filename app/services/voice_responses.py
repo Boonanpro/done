@@ -6,10 +6,13 @@ speech model already understood; the guessing layer produced the wrong turns and
 voice works in the form implemented here: the model that understood the request is the one that chooses the tool.
 
 What lives here: the backend model's instructions, the function definitions, and their execution against Dan's parts.
-The web search is OpenAI's own (tools: web_search). Long work goes to Dan's job runner (the API worker, DAN_VOICE_WORK_ENGINE).
+The web search is a function: OpenAI's hosted search runs in a separate small call only when asked (search_web; the hosted
+tool's own definition is 4,436 tokens and was sent with every response of a call, half the backend's input, 2026-09-24). Long work goes to Dan's job runner (the API worker, DAN_VOICE_WORK_ENGINE).
 The earlier client delegation (the phone answered through a Jev-based intake) was removed on 2026-09-23.
 """
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import json
 import os
 
@@ -31,7 +34,8 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 取り返しのつかない確定（購入・送信・削除・支払い）の前だけ、内容と金額を言葉で伝えて本人の返事を待つ。それ以外は承認を求めず進める。"""
 
 TOOLS = [
-    {'type': 'web_search'},
+    {'type': 'function', 'name': 'web_search', 'description': 'ウェブで調べる（天気・ニュース・営業時間・値段など一般の情報）。調べた要点と出どころが返る。',
+     'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '調べたいこと（場所や日付を含めて具体的に）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_saved_information', 'description': '本人が登録してある自分の情報（名前・住所・郵便番号・電話・カード・口座・免許・会社など）を読む。',
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を知りたいか（例: 郵便番号、実家の住所、アメックスの有効期限）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。',
@@ -77,9 +81,39 @@ def catalog():
     return _catalog
 
 
+def now_line():
+    """The backend has no clock of its own: without the date it searched 「10月29日の大阪の天気」 (2026-09-24)."""
+    now = datetime.now(ZoneInfo('Asia/Tokyo'))
+    return f"通話を始めた時の日時: {now.strftime('%Y年%m月%d日 %H:%M')}（{'月火水木金土日'[now.weekday()]}曜日、日本時間）。"
+
+
 def delegation():
-    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS + chr(10) + catalog(), 'tools': tools(), 'tool_choice': 'auto',
+    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS + chr(10) + now_line() + chr(10) + catalog(), 'tools': tools(), 'tool_choice': 'auto',
                                               'parallel_tool_calls': True, 'reasoning': {'effort': REASONING}}}
+
+
+SEARCH_MODEL = os.environ.get('DAN_VOICE_SEARCH_MODEL', BACKEND_MODEL)   # Luna picked another day's weather 2 times in 3 (2026-09-24)
+
+
+async def search_web(query):
+    """OpenAI's hosted web search in its own small call (the search model reads the pages and returns the facts)."""
+    import httpx
+    from app.config import settings
+    body = {'model': SEARCH_MODEL, 'tools': [{'type': 'web_search'}], 'tool_choice': 'required', 'reasoning': {'effort': 'low'},
+            # the search model has no clock: without today's date it answered Osaka's weather with another day's figures (2026-09-24)
+            'instructions': '今は ' + datetime.now(ZoneInfo('Asia/Tokyo')).strftime('%Y年%m月%d日 %H:%M（日本時間）') + '。'
+                            '質問に答えるのに必要な事実だけを、日本語で短く書く。数値・日付・時刻はそのまま。最後に出どころのサイト名。',
+            'input': query}
+    try:
+        async with httpx.AsyncClient(timeout=40) as client:
+            r = await client.post('https://api.openai.com/v1/responses', json=body, headers={'Authorization': 'Bearer ' + settings.OPENAI_API_KEY})
+        data = r.json()
+        if r.status_code != 200:
+            return {'error': str((data.get('error') or {}).get('message') or r.status_code)[:200]}
+        text = ' '.join(c.get('text', '') for o in data.get('output', []) if o.get('type') == 'message' for c in o.get('content', []))
+        return {'found': text.strip()[:3000], 'source': {'what': 'ウェブ検索', 'query': query}}
+    except Exception as exc:
+        return {'error': f'検索できなかった: {type(exc).__name__}'}
 
 
 async def run_function(name, args, user_id, room_id, dialogue, speak=None):
@@ -154,6 +188,8 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return {'started': True, 'note': '再生を始めた。結果は後で別に届く。本人に今言うことはない。'}
     if name == 'end_call':
         return {'ok': True}
+    if name == 'web_search':
+        return await search_web(str(args.get('query') or ''))
     if name == 'dan_tool_help':
         from app.services import dan_tools
         return {'help': json.loads(dan_tools.help_text(dan_tools.definitions(), str(args.get('name') or '')))}

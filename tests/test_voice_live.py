@@ -64,7 +64,7 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config['model'], 'gpt-live-1')
         self.assertEqual(config['delegation']['type'], 'responses')
         tools = config['delegation']['responses']['tools']
-        self.assertIn('web_search', [t['type'] for t in tools])
+        self.assertIn('web_search', [t.get('name') for t in tools])
         self.assertIn('get_saved_information', [t.get('name') for t in tools])
         self.assertIn('本人の承認が必要', config['instructions'])
 

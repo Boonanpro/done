@@ -51,10 +51,19 @@ def skills():
     return out
 
 
+def params(schema, limit=10):
+    """The argument names (required ones marked *): enough to call most tools without asking for the full help first
+    (each extra help round trip resends the whole context, 2026-09-24)."""
+    props = list((schema or {}).get('properties') or {})
+    required = set((schema or {}).get('required') or [])
+    shown = [p + ('*' if p in required else '') for p in props[:limit]]
+    return ', '.join(shown) + (', …' if len(props) > limit else '')
+
+
 def catalog(mcp_tools, native=()):
     """The instructions' paragraph: the tools not already given as functions, one line each, and the skills."""
-    rows = [f'- {n}: {first_line(d)}' for n, d, _ in map(_fields, mcp_tools) if n not in set(native)]
-    lines = ['ダンの道具（チャットのダンと同じもの）。使う時は dan_tool_help で詳しい説明と引数を見て、dan_tool で使う:', *rows]
+    rows = [f'- {n}({params(schema)}): {first_line(d)}' for n, d, schema in map(_fields, mcp_tools) if n not in set(native)]
+    lines = ['ダンの道具（チャットのダンと同じもの）。dan_tool で使う（括弧は引数、*は必須。使い方が分からない時は dan_tool_help で詳しい説明を見る）:', *rows]
     listed = skills()
     if listed:
         lines.append('スキル（作業の手順書。check_skill で全文を読む）: ' + ' / '.join(f'{n}（{d}）' if d else n for n, d in listed))
