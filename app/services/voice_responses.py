@@ -40,7 +40,7 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '調べたいこと（場所や日付を含めて具体的に）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_saved_information', 'description': '本人が登録してある自分の情報（名前・住所・郵便番号・電話・カード・口座・免許・会社など）を読む。',
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を知りたいか（例: 郵便番号、実家の住所、アメックスの有効期限）'}}, 'required': ['what'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。',
+    {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。言葉の一致で探す（意味では探さない）ので、話題の言葉をスペースで区切って並べ、言い換えも入れる（例: 見積 請求書 送付 送った）。同じ話の記録が複数あれば新しい方が最新の結論。',
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '探す話題（例: 9月18日の新幹線のキャンセル）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_calendar', 'description': '本人のGoogleカレンダーの今後の予定。接続が切れていれば expired が返る。',

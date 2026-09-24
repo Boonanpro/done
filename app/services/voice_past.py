@@ -5,6 +5,7 @@ speech model ask the owner to repeat what they had already told Dan. The records
 them in about a second across every room of the owner, plus recent job results, and let the reader answer.
 Read-only. Nothing here leaves the machine except to the reader model that already receives the conversation."""
 import asyncio
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,7 +21,9 @@ def keywords(utterance, dialogue, limit=5):
     seen = []
     turns = [utterance]+[r['text'] for r in reversed(dialogue[:-1]) if r.get('role') == 'user'][:2]
     for text in turns:
-        for word in TOKEN.findall(text):
+        # words the caller separated with spaces are kept whole: the pattern alone drops mixed words (「払い戻し」)
+        spaced = [w for w in re.split(r'[\s、,]+', text) if len(w) >= 2 and not re.search(r'[のをにはがでとへもやかっ？?]$', w[-1:])] if ' ' in text.strip() else []
+        for word in spaced + TOKEN.findall(text):
             if word not in STOP and word not in seen: seen.append(word)
     return seen[:limit]
 
@@ -31,9 +34,9 @@ def _search(user_id, word, since):
     rooms = [r['room_id'] for r in db.table('chat_room_members').select('room_id').eq('user_id', user_id).execute().data or []]
     if not rooms: return []
     escaped = word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-    rows = db.table('chat_messages').select('id,room_id,sender_type,content,created_at').in_('room_id', rooms[:400]) \
-        .ilike('content', f'%{escaped}%').gte('created_at', since).order('created_at', desc=True).limit(25).execute().data or []
-    return rows
+    found = db.table('chat_messages').select('id,room_id,sender_type,content,created_at', count='exact').in_('room_id', rooms[:400]) \
+        .ilike('content', f'%{escaped}%').gte('created_at', since).order('created_at', desc=True).limit(40).execute()
+    return found.data or [], found.count or len(found.data or [])
 
 
 async def gather(user_id, utterance, dialogue, jobs=(), days=45, budget=4.0):
@@ -45,15 +48,23 @@ async def gather(user_id, utterance, dialogue, jobs=(), days=45, budget=4.0):
     score = {}; rows = {}
     for word, result in zip(words, found):
         if isinstance(result, BaseException): continue
+        result, matches = result
+        # A word few records contain names the topic (「9月18日」); a word in hundreds (「新幹線」 after a call about trains)
+        # does not. Counting every word alike let today's chatter push out the 9/21 report that held the answer (2026-09-24).
+        weight = 1 / (1 + math.log10(max(matches, 1)))
         for r in result:
             text = r.get('content') or ''
             if text.startswith('【あなたの依頼・Done経由】'): continue   # the relayed copy of a voice request, not a record of what happened
-            rows[r['id']] = r; score[r['id']] = score.get(r['id'], 0)+1
+            rows[r['id']] = r; score[r['id']] = score.get(r['id'], 0)+weight
     # A record that mentions more of the topic words first, the newer one first among equals.
     ranked = list(rows.values())
     ranked.sort(key=lambda r: (score[r['id']], r.get('created_at') or ''), reverse=True)
+    # the chosen records newest first: a later report corrects an earlier one about the same thing (9/21 08:09 「取消済み」
+    # was corrected at 08:14 to 「発車前に取消されず自動払い戻し」, and the reader mixed them up when the older came first)
+    ranked = sorted(ranked[:12], key=lambda r: r.get('created_at') or '', reverse=True)
     records = [{'at': (r.get('created_at') or '')[:16], 'who': {'human': 'user', 'ai': 'dan'}.get(r.get('sender_type'), r.get('sender_type')),
-                'text': (r.get('content') or '')[:700]} for r in ranked[:12]]
+                # a work report carries its conclusion further down than a remark does: keep more of it
+                'text': (r.get('content') or '')[:1500 if (r.get('content') or '').startswith('【Doneからの報告】') else 700]} for r in ranked[:12]]
     recent = [{'task': s.get('task', '').split('参考の直前会話')[0][:300], 'state': s.get('state'), 'result': str(s.get('result') or '')[:900]}
               for s in list(jobs)[:4] if s.get('result') or s.get('state') not in ('completed', 'failed', 'cancelled')]
     return {'keywords': words, 'records': records, 'jobs': recent, 'elapsed_ms': round((time.monotonic()-started)*1000)}
