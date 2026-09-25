@@ -7,6 +7,7 @@ Each provider class, built for one connected account (connected_accounts row + i
         fields: title, start, end (ISO date or datetime), description, location, reminders (minutes before, list)
 and, as class methods, the OAuth steps: auth_url(state, redirect_uri, hint) and exchange(code, redirect_uri) ->
 (account address, token dict). Google is implemented; a new provider is one class added to PROVIDERS."""
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -45,9 +46,17 @@ class GoogleCalendar:
 
     @classmethod
     def exchange(cls, code: str, redirect_uri: str) -> tuple[str, dict]:
+        # An account that already granted this app other permissions (0aw325171: Gmail) gets them back with the calendar ones
+        # (include_granted_scopes), and oauthlib refused the token as "Scope has changed" after a successful consent
+        # (2026-09-25). More than asked is fine; what matters is that the calendar permissions are among them.
+        os.environ.setdefault('OAUTHLIB_RELAX_TOKEN_SCOPE', '1')
         flow = Flow.from_client_config(cls._config(redirect_uri), scopes=cls.SCOPES, redirect_uri=redirect_uri)
         flow.fetch_token(code=code)
         creds = flow.credentials
+        granted = set(creds.scopes or flow.oauth2session.token.get('scope', []) or [])
+        missing = [s for s in cls.SCOPES if granted and s not in granted]
+        if missing:
+            raise ValueError('カレンダーの権限が許可されていません（許可の画面でカレンダーの項目にチェックを入れて、もう一度つなぐ）: ' + ', '.join(missing))
         address = build('calendar', 'v3', credentials=creds).calendarList().get(calendarId='primary').execute().get('id', '')
         return address, {'token': creds.token, 'refresh_token': creds.refresh_token, 'token_uri': creds.token_uri,
                          'client_id': creds.client_id, 'client_secret': creds.client_secret,

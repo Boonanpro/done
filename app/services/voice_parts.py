@@ -51,11 +51,11 @@ def work_status(jobs):
             '道具の名前や「確認待ち」などの内部の言葉はそのまま読まず、普通の言葉に言い換える。作業が無ければ「今は何も作業していません」。'}
 
 
-async def calendar(user_id, days=14):
+async def calendar(user_id, days=14, start=None):
     """The owner's coming events. {'events': [...], 'source'} | {'expired': True} | {} when not connected."""
     from app.services.calendar_service import get_calendar_service
     try:
-        read = await asyncio.wait_for(asyncio.to_thread(get_calendar_service().get_events_with_source, user_id, days), 12)
+        read = await asyncio.wait_for(asyncio.to_thread(get_calendar_service().get_events_with_source, user_id, days, 20, None, start), 12)
     except Exception as exc:
         return {'expired': True} if 'invalid_grant' in str(exc) or 'expired or revoked' in str(exc) else {}
     events = read['events']
@@ -64,7 +64,7 @@ async def calendar(user_id, days=14):
         return {'expired': True, 'not_read': source['failed']} if source.get('failed') else {}
     out = {'events': [{k: e.get(k) for k in ('title', 'summary', 'start', 'end', 'location', 'calendar', 'account', 'id') if e.get(k)} for e in events[:30]],
            'source': {'what': 'つながっているカレンダー（全アカウント）', 'accounts': [a['account'] for a in source.get('accounts', [])],
-                      'calendars': source.get('calendars', []), 'days': days}}
+                      'calendars': source.get('calendars', []), 'from': start or 'today', 'days': days}}
     if source.get('failed'):   # one account's login ran out: say so, the others were still read
         out['not_read'] = source['failed']
     return out

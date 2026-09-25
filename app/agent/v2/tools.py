@@ -2014,10 +2014,15 @@ async def execute_tool(
             if _sys.platform == "win32":
                 git_bash = r"C:\Program Files\Git\usr\bin\bash.exe"
                 _note_fallback('bash', command[:300])
+                # Git's own tools (ls, head, wc, grep...) are found only when their folder is on PATH: a process started
+                # outside a Git shell (Dan Core started from PowerShell) ran jobs where `ls` and `head` were "command not
+                # found" (2026-09-25), and the model spent steps working around it.
+                git_root = Path(git_bash).parents[2]
+                env = {**os.environ, "PATH": os.pathsep.join([str(git_root / "usr" / "bin"), str(git_root / "mingw64" / "bin"), os.environ.get("PATH", "")])}
                 result = subprocess.run(
                     [git_bash, "-c", command],
                     capture_output=True, timeout=120,
-                    cwd=str(_work_dir()),
+                    cwd=str(_work_dir()), env=env,
                 )
                 # Git Bash は UTF-8 で出力するので明示的にデコード
                 result = subprocess.CompletedProcess(

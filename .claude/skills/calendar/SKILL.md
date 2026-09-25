@@ -42,7 +42,19 @@ python D:/done/scripts/dan_calendar.py delete --id <id>
 # つながっているアカウントと既定の書き込み先／既定を変える
 python D:/done/scripts/dan_calendar.py accounts
 python D:/done/scripts/dan_calendar.py default --account 0aw
+
+# アカウントをつなぐ（本人はアドレスを言うだけ。つなぐのはダン）／別のアカウントと入れ替える
+python D:/done/scripts/dan_calendar.py connect --account 0aw325171@gmail.com
+python D:/done/scripts/dan_calendar.py connect --account new@example.com --replace shub
 ```
+
+## アカウントをつなぐ（本人に操作を頼まない）
+
+1. `connect --account <アドレス>` で出た `auth_url` をブラウザで開く。
+2. そのアカウントを選ぶか入力し、保存済みのログイン情報でログインする（`get_credentials` で id がそのアドレスのもの。パスワードは `fill_credential`、2段階認証は `fill_totp_code`。無ければメール・SMS のコードを受け取る道具）。
+3. 許可の画面で、カレンダーの権限にチェックを入れて「続行」「許可」を押す。本人がつなぐよう頼んだ時点で、この許可は本人の意思。
+4. 「カレンダーを連携しました」が出たら `accounts` で並んでいるか確かめて報告する。
+5. Google が確認画面（自動操作の疑い・端末の確認など）を出したら、ログインを繰り返さずに止め、その画面の内容を報告する。
 
 ## パラメータ（add）
 

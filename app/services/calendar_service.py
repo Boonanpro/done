@@ -82,10 +82,11 @@ class CalendarService:
             raise LookupError(f'カレンダーのアカウント「{account or "既定"}」が見つかりません（連携済み: {names}）。')
         return row, self._client(user_id, row)
 
-    def get_events(self, user_id: str, days: int = 7, max_results: int = 20, account: Optional[str] = None) -> List[dict]:
-        return self.get_events_with_source(user_id, days, max_results, account)['events']
+    def get_events(self, user_id: str, days: int = 7, max_results: int = 20, account: Optional[str] = None, start_date: Optional[str] = None) -> List[dict]:
+        return self.get_events_with_source(user_id, days, max_results, account, start_date)['events']
 
-    def get_events_with_source(self, user_id: str, days: int = 7, max_results: int = 20, account: Optional[str] = None) -> dict:
+    def get_events_with_source(self, user_id: str, days: int = 7, max_results: int = 20, account: Optional[str] = None,
+                               start_date: Optional[str] = None) -> dict:
         """Events from today 00:00 (local) for `days` days, across every connected account (or the one named), each with
         its account and calendar; the source says which accounts and calendars were read and which could not be."""
         rows = accounts.list_accounts(user_id, CAPABILITY)
@@ -94,15 +95,23 @@ class CalendarService:
             rows = [one] if one else []
         if not rows:
             return {'events': [{'error': 'カレンダー未連携。設定画面から連携してください。'}], 'source': None}
-        start = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=days + 1)
+        # from start_date (YYYY-MM-DD, past or future: 「24日の予定あった？」 on the 25th is about yesterday), else today 00:00
+        start = (datetime.fromisoformat(start_date).replace(tzinfo=JST) if start_date else datetime.now(JST)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=days + (0 if start_date else 1))
         events, read, failed = [], [], []
-        for row in rows:
+
+        def one(row):
+            client = self._client(user_id, row)
+            return [{**event, 'account': row['account']} for event in client.events(start, end, max_results)], \
+                {'account': row['account'], 'provider': row['provider'], 'calendars': [c['name'] for c in client.calendars()[:15]]}
+        # the accounts are read at the same time: one after another, two accounts took 3.5 s of a spoken answer (2026-09-25)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
+            futures = [(row, pool.submit(one, row)) for row in rows]
+        for row, future in futures:
             try:
-                client = self._client(user_id, row)
-                for event in client.events(start, end, max_results):
-                    events.append({**event, 'account': row['account']})
-                read.append({'account': row['account'], 'provider': row['provider'], 'calendars': [c['name'] for c in client.calendars()[:15]]})
+                got, info = future.result()
+                events.extend(got); read.append(info)
             except Exception as e:
                 logger.warning('calendar read failed for %s: %s', row['account'], e)
                 failed.append({'account': row['account'], 'error': ('expired' if 'invalid_grant' in str(e) or 'expired' in str(e) else type(e).__name__)})

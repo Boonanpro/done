@@ -33,7 +33,8 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 道具の結果の source は出どころ（どのアカウント・どのカレンダー・どの記録を見たか）。「何を見て言った」と聞かれた時にそれで答える。普段は言わない。
 - 取り返しのつかない確定（購入・送信・削除・支払い）の前だけ、内容と金額を言葉で伝えて本人の返事を待つ。それ以外は承認を求めず進める。
 - 「やった」と言う前に結果を読み直して確かめる。本人の画面と食い違う時は、自分が読んだ事実（どこに何が入っているか）を伝え、同期の遅れもあり得ると言う。確かめずに同じ操作を繰り返さない。
-- 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所（経路検索サイトなど）で確かめて答える。検索結果の断片から作らない。"""
+- 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所（経路検索サイトなど）で確かめて答える。検索結果の断片から作らない。
+- ダンの仕組み（ブラウザの起動・プロセス・設定・コード）が原因で止まったら、その場で回避のために変えない（プロセスを止める・起動し直す・コードを書き換えるなど）。どこが原因で止まったかを報告し、直すなら直し方を添える。"""
 
 TOOLS = [
     {'type': 'function', 'name': 'web_search', 'description': 'ウェブで調べる（天気・ニュース・営業時間・値段など一般の情報）。調べた要点と出どころが返る。',
@@ -43,8 +44,8 @@ TOOLS = [
     {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。言葉の一致で探す（意味では探さない）ので、話題の言葉をスペースで区切って並べ、言い換えも入れる（例: 見積 請求書 送付 送った）。同じ話の記録が複数あれば新しい方が最新の結論。',
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '探す話題（例: 9月18日の新幹線のキャンセル）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
-    {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の今日からの予定。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
-     'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の予定。既定は今日から。過去や先の日なら from（YYYY-MM-DD）とその日からの日数 days。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
+     'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}, 'from': {'type': 'string', 'description': 'YYYY-MM-DD（省略時は今日）'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'open_on_pc', 'description': 'このパソコンで、サイトやアプリを開く・起動する（開くだけ）。',
      'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（ログインして確認する、送信する、登録する、予約する、直す、作るなど複数手順のもの）。結果は後で別に届く。',
@@ -161,7 +162,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         here = current(user_id)
         return {**await tool(user_id), 'source': {'what': '本人のスマホが知らせた位置', 'at': here['at'] if here else None}}
     if name == 'get_calendar':
-        return await parts.calendar(user_id, int(args.get('days') or 14))
+        return await parts.calendar(user_id, int(args.get('days') or (1 if args.get('from') else 14)), args.get('from') or None)
     if name == 'open_on_pc':
         target = str(args.get('target') or '').strip()
         said = await parts.open_target(target, user_id)

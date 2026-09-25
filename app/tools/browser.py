@@ -550,7 +550,11 @@ def _spawn_detached_browser(
     # (the model benchmark) opened a real window on the owner's desktop; covered by other windows Chrome stops painting it
     # and clicks fail their stability check (2026-09-23: 6 refused clicks in one run, each worked around with JavaScript).
     if Path(user_data_dir).name.startswith('browser_data--voice-job-') or os.environ.get('DAN_BROWSER_HEADLESS') == '1':
-        args.insert(1, '--headless=new')
+        # A real window placed off the screen, not headless: headless Chrome names itself "HeadlessChrome" and Google refused
+        # to sign in from it (2026-09-25, connecting a calendar account). Off screen, the owner never sees it; painting is
+        # kept going by the --disable-*-backgrounding flags above.
+        args = [a for a in args if not a.startswith('--window-position=')]
+        args.insert(1, '--window-position=-32000,-32000')
     if os.name == "nt":
         # Console detachment only. The caller must be the persistent owner.
         creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
