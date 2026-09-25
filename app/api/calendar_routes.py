@@ -1,10 +1,11 @@
 """
-Google Calendar API Routes - OAuth連携 + 予定CRUD
+Calendar API Routes - connected calendar accounts (any provider, any number per user) and their events.
 """
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
+from pydantic import BaseModel
 
 from app.services.auth_service import decode_access_token, TokenData
 from app.services.calendar_service import get_calendar_service, CalendarService
@@ -30,13 +31,28 @@ async def get_current_user(
     return token_data
 
 
+class ConnectRequest(BaseModel):
+    provider: str = "google"
+    replace_id: Optional[str] = None   # this account takes that one's place (its defaults move over)
+    hint: Optional[str] = None         # the address to preselect at the provider's sign-in
+
+
+class AccountRequest(BaseModel):
+    account_id: Optional[str] = None
+
+
 @router.post("/connect")
 async def calendar_connect(
+    body: Optional[ConnectRequest] = None,
     user: TokenData = Depends(get_current_user),
     service: CalendarService = Depends(get_calendar_service),
 ):
-    """OAuth認証URLを返す"""
-    auth_url = service.get_auth_url(user.user_id)
+    """Where to sign in to add (or replace) a calendar account."""
+    body = body or ConnectRequest()
+    try:
+        auth_url = service.get_auth_url(user.user_id, body.provider, body.replace_id, body.hint)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"auth_url": auth_url}
 
 
@@ -52,7 +68,7 @@ async def calendar_callback(
         return HTMLResponse(content=f"""
         <html><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
         <div style="text-align:center">
-            <h2>Googleカレンダー連携完了</h2>
+            <h2>カレンダーを連携しました</h2>
             <p>{email}</p>
             <p style="color:#888">このウィンドウを閉じてください</p>
         </div>
@@ -72,11 +88,24 @@ async def calendar_status(
 
 @router.post("/disconnect")
 async def calendar_disconnect(
+    body: Optional[AccountRequest] = None,
     user: TokenData = Depends(get_current_user),
     service: CalendarService = Depends(get_calendar_service),
 ):
-    """連携解除"""
-    await service.disconnect(user.user_id)
+    """Remove one account (account_id), or every calendar account."""
+    ok = await service.disconnect(user.user_id, (body or AccountRequest()).account_id)
+    return {"success": ok}
+
+
+@router.post("/default")
+async def calendar_default(
+    body: AccountRequest,
+    user: TokenData = Depends(get_current_user),
+    service: CalendarService = Depends(get_calendar_service),
+):
+    """The account new events go to unless another is named."""
+    if not body.account_id or not service.set_default(user.user_id, body.account_id):
+        raise HTTPException(status_code=404, detail="そのアカウントはありません")
     return {"success": True}
 
 

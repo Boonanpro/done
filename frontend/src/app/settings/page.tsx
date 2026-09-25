@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -527,71 +527,102 @@ export default function SettingsPage() {
   );
 }
 
-function CalendarIntegration() {
-  const [status, setStatus] = useState<{ connected: boolean; email: string | null } | null>(null);
-  const [loading, setLoading] = useState(true);
+type CalendarAccount = { id: string; provider: string; account: string; label: string | null; default: boolean };
 
-  useEffect(() => {
+const CALENDAR_PROVIDERS: { id: string; name: string; ready: boolean }[] = [
+  { id: 'google', name: 'Google', ready: true },
+  { id: 'microsoft', name: 'Microsoft (Outlook)', ready: false },
+  { id: 'icloud', name: 'iCloud', ready: false },
+];
+
+// Every connected calendar account (any provider, any number): Dan reads them all and writes to the default one unless
+// told otherwise. Add, replace (another account takes this one's place), remove, or change the default.
+function CalendarIntegration() {
+  const [accounts, setAccounts] = useState<CalendarAccount[] | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  const call = useCallback(async (path: string, body?: object) => {
     const token = localStorage.getItem('done-token');
-    if (!token) return;
-    fetch('/api/v1/calendar/status', {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((r) => r.json())
-      .then(setStatus)
-      .catch(() => setStatus({ connected: false, email: null }))
-      .finally(() => setLoading(false));
+    if (!token) throw new Error('not signed in');
+    const res = await fetch(`/api/v1/calendar/${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.detail || '失敗しました');
+    return data;
   }, []);
 
-  const handleConnect = async () => {
-    const token = localStorage.getItem('done-token');
-    if (!token) return;
+  const refresh = useCallback(() => {
+    call('status').then((d) => setAccounts(d.accounts || [])).catch(() => setAccounts([]));
+  }, [call]);
+
+  useEffect(() => {
+    refresh();
+    window.addEventListener('focus', refresh);   // back from the sign-in window: show what was connected
+    return () => window.removeEventListener('focus', refresh);
+  }, [refresh]);
+
+  const connect = async (provider: string, replaceId?: string) => {
     try {
-      const res = await fetch('/api/v1/calendar/connect', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (data.auth_url) {
-        window.open(data.auth_url, '_blank', 'width=600,height=700');
-      }
-    } catch {
-      toast.error('連携に失敗しました');
+      const data = await call('connect', { provider, replace_id: replaceId ?? null });
+      if (data.auth_url) window.open(data.auth_url, '_blank', 'width=600,height=700');
+      setAdding(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '連携に失敗しました');
     }
   };
 
-  const handleDisconnect = async () => {
-    const token = localStorage.getItem('done-token');
-    if (!token) return;
-    await fetch('/api/v1/calendar/disconnect', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    setStatus({ connected: false, email: null });
-    toast.success('連携を解除しました');
+  const remove = async (a: CalendarAccount) => {
+    await call('disconnect', { account_id: a.id }).catch(() => undefined);
+    toast.success(`${a.account} を外しました`);
+    refresh();
   };
 
-  if (loading) return <div className="text-sm text-muted-foreground">読み込み中...</div>;
+  const makeDefault = async (a: CalendarAccount) => {
+    await call('default', { account_id: a.id }).catch(() => undefined);
+    refresh();
+  };
+
+  if (accounts === null) return <div className="text-sm text-muted-foreground">読み込み中...</div>;
 
   return (
-    <div className="flex items-center justify-between p-4 rounded-lg border">
+    <div className="space-y-2 rounded-lg border p-4">
       <div className="flex items-center gap-3">
-        <div className="h-10 w-10 rounded-lg flex items-center justify-center overflow-hidden">
-          <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Google_Calendar_icon_%282020%29.svg" alt="Google Calendar" className="h-8 w-8" />
-        </div>
+        <Calendar className="h-5 w-5" />
         <div>
-          <p className="font-medium text-sm">Google カレンダー</p>
-          {status?.connected ? (
-            <p className="text-xs text-muted-foreground">{status.email} と連携中</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">DANがスケジュールを確認・管理できるようになります</p>
-          )}
+          <p className="font-medium text-sm">カレンダー</p>
+          <p className="text-xs text-muted-foreground">つないだアカウントの予定をDANがまとめて読みます。新しい予定は「既定」のアカウントに入ります。</p>
         </div>
       </div>
-      {status?.connected ? (
-        <Button variant="outline" size="sm" onClick={handleDisconnect}>解除</Button>
+      {accounts.map((a) => (
+        <div key={a.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/40 px-3 py-2">
+          <div className="min-w-0">
+            <p className="truncate text-sm">{a.account}</p>
+            <p className="text-xs text-muted-foreground">
+              {CALENDAR_PROVIDERS.find((p) => p.id === a.provider)?.name ?? a.provider}
+              {a.default ? ' ・ 既定' : ''}
+            </p>
+          </div>
+          <div className="flex gap-1">
+            {!a.default && <Button variant="ghost" size="sm" onClick={() => makeDefault(a)}>既定にする</Button>}
+            <Button variant="ghost" size="sm" onClick={() => connect(a.provider, a.id)}>差し替え</Button>
+            <Button variant="outline" size="sm" onClick={() => remove(a)}>外す</Button>
+          </div>
+        </div>
+      ))}
+      {adding ? (
+        <div className="flex flex-wrap gap-2">
+          {CALENDAR_PROVIDERS.map((p) => (
+            <Button key={p.id} size="sm" variant={p.ready ? 'default' : 'outline'} disabled={!p.ready} onClick={() => connect(p.id)}>
+              {p.name}{p.ready ? '' : '（準備中）'}
+            </Button>
+          ))}
+          <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>やめる</Button>
+        </div>
       ) : (
-        <Button size="sm" onClick={handleConnect}>連携する</Button>
+        <Button size="sm" onClick={() => setAdding(true)}>{accounts.length ? 'アカウントを追加' : '連携する'}</Button>
       )}
     </div>
   );

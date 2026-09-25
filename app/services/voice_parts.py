@@ -59,9 +59,15 @@ async def calendar(user_id, days=14):
     except Exception as exc:
         return {'expired': True} if 'invalid_grant' in str(exc) or 'expired or revoked' in str(exc) else {}
     events = read['events']
-    if events and isinstance(events[0], dict) and events[0].get('error'): return {}
-    return {'events': [{k: e.get(k) for k in ('title', 'summary', 'start', 'end', 'location', 'calendar') if e.get(k)} for e in events[:30]],
-            'source': {'what': 'Googleカレンダー', **(read.get('source') or {}), 'days': days}}
+    source = read.get('source') or {}
+    if events and isinstance(events[0], dict) and events[0].get('error'):
+        return {'expired': True, 'not_read': source['failed']} if source.get('failed') else {}
+    out = {'events': [{k: e.get(k) for k in ('title', 'summary', 'start', 'end', 'location', 'calendar', 'account', 'id') if e.get(k)} for e in events[:30]],
+           'source': {'what': 'つながっているカレンダー（全アカウント）', 'accounts': [a['account'] for a in source.get('accounts', [])],
+                      'calendars': source.get('calendars', []), 'days': days}}
+    if source.get('failed'):   # one account's login ran out: say so, the others were still read
+        out['not_read'] = source['failed']
+    return out
 
 
 SITES = {'youtube': 'https://www.youtube.com/', 'ユーチューブ': 'https://www.youtube.com/', 'google': 'https://www.google.com/', 'グーグル': 'https://www.google.com/',

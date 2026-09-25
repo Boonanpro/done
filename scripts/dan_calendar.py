@@ -1,16 +1,22 @@
-"""ダンがGoogleカレンダーを操作するCLI（予定一覧・空き時間・予定作成）。
+"""ダンがカレンダーを操作するCLI。つながっている全アカウント（Google など、複数可）が対象。
 
-接続済みのGoogleカレンダー(calendar_connections, shub6923)に対して操作する。
+読むときは全アカウントの予定を、どのアカウント・どのカレンダーかを添えて返す。書くときは --account で選んだアカウント
+（アドレスの一部で可。例: 0aw）、無ければ既定のアカウントに入れる。予定の変更（メモの追記・時刻・通知）と削除もできる。
 user_id は既定で $DAN_USER_ID（無ければ owner）。Bash ツールから直接呼べる。
 
 使い方:
-  python D:/done/scripts/dan_calendar.py list --days 7
+  python D:/done/scripts/dan_calendar.py accounts
+  python D:/done/scripts/dan_calendar.py list --days 7 [--account 0aw]
   python D:/done/scripts/dan_calendar.py free --days 5
-  python D:/done/scripts/dan_calendar.py add --title "本田様 打ち合わせ(Zoom)" \
-    --start "2026-06-20T15:00:00" --end "2026-06-20T16:00:00" \
-    --description "ホームページ制作の件"
+  python D:/done/scripts/dan_calendar.py add --title "本田様 打ち合わせ(Zoom)" --start "2026-06-20T15:00:00" \
+    --end "2026-06-20T16:00:00" [--description "..."] [--location "..."] [--reminders 10 60] [--account 0aw]
+  python D:/done/scripts/dan_calendar.py update --id <予定id> [--description "..."] [--title ...] [--start ...] [--end ...]
+    [--location ...] [--reminders 10]      （id は list の結果の id。アカウントとカレンダーは自動で探す）
+  python D:/done/scripts/dan_calendar.py delete --id <予定id>
+  python D:/done/scripts/dan_calendar.py default --account 0aw      （新しい予定の既定の書き込み先を変える）
 """
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -18,7 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.services.calendar_service import get_calendar_service
+from app.services import connected_accounts
+from app.services.calendar_service import CAPABILITY, get_calendar_service
 
 
 def _uid(args):
@@ -29,50 +36,66 @@ def _uid(args):
     return uid
 
 
+def _reconnect(svc, uid, failed):
+    """A reconnect link per expired account: open it, sign in as that account, agree; then run the command again."""
+    links = []
+    for f in failed:
+        row = next((a for a in connected_accounts.list_accounts(uid, CAPABILITY) if a["account"] == f["account"]), None)
+        if row:
+            links.append({"account": row["account"], "reconnect_url": svc.get_auth_url(uid, row["provider"], replace_id=row["id"], hint=row["account"])})
+    return links
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-
-    p_list = sub.add_parser("list", help="今後N日の予定")
-    p_list.add_argument("--days", type=int, default=7)
-    p_list.add_argument("--user", default=None)
-
-    p_free = sub.add_parser("free", help="今後N日の空き時間(9-18時)")
-    p_free.add_argument("--days", type=int, default=7)
-    p_free.add_argument("--user", default=None)
-
-    p_add = sub.add_parser("add", help="予定を作成")
-    p_add.add_argument("--title", required=True)
-    p_add.add_argument("--start", required=True, help="ISO8601(例 2026-06-20T15:00:00) or 日付のみ(終日)")
-    p_add.add_argument("--end", required=True)
-    p_add.add_argument("--description", default="")
-    p_add.add_argument("--location", default="")
-    p_add.add_argument("--user", default=None)
+    for name, help_ in (("accounts", "つながっているカレンダーのアカウント"), ("list", "今日からN日の予定"), ("free", "今後N日の空き時間(9-18時)"),
+                        ("add", "予定を作成"), ("update", "予定を変える"), ("delete", "予定を消す"), ("default", "既定の書き込み先を変える")):
+        p = sub.add_parser(name, help=help_)
+        p.add_argument("--user", default=None)
+        p.add_argument("--account", default=None, help="アカウント（アドレスの一部で可）。無ければ list は全部、書き込みは既定")
+        if name in ("list", "free"):
+            p.add_argument("--days", type=int, default=7)
+        if name in ("add", "update"):
+            p.add_argument("--title", required=(name == "add"))
+            p.add_argument("--start", required=(name == "add"), help="ISO8601(例 2026-06-20T15:00:00) or 日付のみ(終日)")
+            p.add_argument("--end", required=(name == "add"))
+            p.add_argument("--description", default=None, help="メモ（update では置き換え。追記は今のメモ＋追記で渡す）")
+            p.add_argument("--location", default=None)
+            p.add_argument("--reminders", type=int, nargs="*", default=None, help="通知（何分前、複数可）")
+        if name in ("update", "delete"):
+            p.add_argument("--id", required=True)
+            p.add_argument("--calendar", default=None)
 
     args = ap.parse_args()
     svc = get_calendar_service()
     uid = _uid(args)
-
     try:
-        if args.cmd == "list":
-            print(json.dumps(svc.get_events(uid, days=args.days), ensure_ascii=False))
+        if args.cmd == "accounts":
+            out = asyncio.run(svc.get_status(uid))
+        elif args.cmd == "list":
+            got = svc.get_events_with_source(uid, days=args.days, max_results=50, account=args.account)
+            out = {"events": got["events"], "source": got["source"]}
+            if got["source"] and got["source"].get("failed"):
+                out["reconnect"] = _reconnect(svc, uid, got["source"]["failed"])
         elif args.cmd == "free":
-            print(json.dumps(svc.find_free_slots(uid, days=args.days), ensure_ascii=False))
+            out = svc.find_free_slots(uid, days=args.days)
         elif args.cmd == "add":
-            r = svc.create_event(uid, title=args.title, start=args.start, end=args.end,
-                                 description=args.description, location=args.location)
-            print(json.dumps(r, ensure_ascii=False))
-    except Exception as e:  # noqa: BLE001
-        out = {"error": str(e)}
-        if "invalid_grant" in str(e) or "expired or revoked" in str(e):
-            # The Google connection has expired: reconnect on the spot instead of reporting "cannot read the calendar".
-            try:
-                out["reconnect_url"] = svc.get_auth_url(uid)
-                out["how_to_reconnect"] = ("Googleカレンダーの接続が失効している。reconnect_url をブラウザで開き、運用者のGoogleアカウントで同意まで進める"
-                                           "（ログインは保存済みの情報、2段階認証はスマホの承認）。同意が終わると自動で保存されるので、同じコマンドをもう一度実行する。")
-            except Exception as inner:  # noqa: BLE001
-                out["reconnect_error"] = str(inner)[:200]
+            out = svc.create_event(uid, title=args.title, start=args.start, end=args.end, description=args.description or "",
+                                   location=args.location or "", account=args.account, reminders=args.reminders)
+        elif args.cmd == "update":
+            fields = {k: getattr(args, k) for k in ("title", "start", "end", "description", "location", "reminders") if getattr(args, k) is not None}
+            out = svc.update_event(uid, args.id, account=args.account, calendar_id=args.calendar, **fields)
+        elif args.cmd == "delete":
+            out = svc.delete_event(uid, args.id, account=args.account, calendar_id=args.calendar)
+        elif args.cmd == "default":
+            row = connected_accounts.find(uid, CAPABILITY, args.account)
+            out = {"default": row["account"]} if row and svc.set_default(uid, row["id"]) else {"error": "そのアカウントはありません"}
         print(json.dumps(out, ensure_ascii=False))
+        if isinstance(out, dict) and out.get("error"):
+            sys.exit(1)
+    except Exception as e:  # noqa: BLE001
+        print(json.dumps({"error": str(e)[:300]}, ensure_ascii=False))
         sys.exit(1)
 
 

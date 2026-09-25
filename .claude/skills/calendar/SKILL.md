@@ -1,11 +1,12 @@
 ---
 name: calendar
-description: "Read availability and manage Google Calendar events for scheduling requests."
+description: "Read availability and manage calendar events across every connected calendar account."
 ---
 
 # calendar スキル
 
-運用者のGoogleカレンダー(connected: shub6923)を操作する。**予定の確認・空き確認・登録は必ずこれを使う**。
+つながっているカレンダーのアカウント（Google など、複数可。`accounts` で一覧）を操作する。**予定の確認・空き確認・登録・変更・削除は必ずこれを使う**。
+読むときは全アカウントの予定が、どのアカウントのどのカレンダーかと一緒に返る。書くときは `--account`（アドレスの一部で可）、無ければ既定のアカウントに入る。
 
 ## いつ使うか
 
@@ -30,6 +31,17 @@ python D:/done/scripts/dan_calendar.py add \
 
 # 終日予定は日付のみ
 python D:/done/scripts/dan_calendar.py add --title "出張" --start "2026-06-25" --end "2026-06-26"
+
+# 通知（何分前、複数可）と書き込み先のアカウント
+python D:/done/scripts/dan_calendar.py add --title "新大阪へ出発" --start "2026-09-24T17:20:00" --end "2026-09-24T17:25:00" --reminders 0 --account 0aw
+
+# 予定を変える（id は list の結果の id。メモは置き換えなので、追記は今のメモ＋追記で渡す）／消す
+python D:/done/scripts/dan_calendar.py update --id <id> --description "今のメモ（そのまま）／追記する文" --reminders 10
+python D:/done/scripts/dan_calendar.py delete --id <id>
+
+# つながっているアカウントと既定の書き込み先／既定を変える
+python D:/done/scripts/dan_calendar.py accounts
+python D:/done/scripts/dan_calendar.py default --account 0aw
 ```
 
 ## パラメータ（add）
@@ -44,8 +56,10 @@ python D:/done/scripts/dan_calendar.py add --title "出張" --start "2026-06-25"
 ## 返り値
 
 JSON。
-- add 成功: `{"id":..., "title":..., "start":..., "link":...}`（link はGoogleカレンダーのURL）
-- 未連携: `{"error":"カレンダー未連携。設定画面から連携してください。"}` → ユーザーに連携を依頼する
+- list: `{"events":[{... "account", "calendar", "id"}], "source":{"accounts":[...], "failed":[...]}, "reconnect":[...]}`。
+  `failed` があれば、そのアカウントはログインが切れていて読めていない（他は読めている）。`reconnect` の URL を開いてそのアカウントで同意すれば直る。
+- add / update 成功: `{"id":..., "account":..., "title":..., "start":..., "link":...}`
+- 未連携: `{"error":"カレンダー未連携。設定画面から連携してください。"}` → 設定画面の「カレンダー」で「アカウントを追加」を頼む
 
 ## メール連携の型（重要）
 

@@ -1,275 +1,188 @@
 """
-Google Calendar Service - OAuth + 予定の読み書き
+Calendar Service - every connected calendar account of a user (any provider, any number), read together, written to one.
+
+Accounts live in connected_accounts (capability 'calendar'); each provider is a class in calendar_providers. Reading goes
+over all of them and says, for each event, which account and calendar it came from (a read that cannot say what it
+looked at is not a read). Writing goes to the named account, or the user's default calendar account. One account that
+fails (an expired login) is reported and does not hide the others.
+
+2026-09-25: one Google account per user before (connecting the owner's 0aw325171 would have overwritten shub6923, and the
+events in 0aw325171 were never seen); no update/delete; reminders not settable; the reading window started at this very
+second, so this morning's events were missing from 「今日の予定」.
 """
-import json
 import logging
-from typing import Optional, List, Tuple
-from datetime import datetime, timezone, timedelta
+import os
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple
 
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-
-from app.config import settings
-from app.services.supabase_client import get_supabase_client
-from app.services.encryption import encrypt_data, decrypt_data
+from app.services import connected_accounts as accounts
+from app.services.calendar_providers import provider_class
 
 logger = logging.getLogger(__name__)
 
-CALENDAR_SCOPES = [
-    'https://www.googleapis.com/auth/calendar.readonly',
-    'https://www.googleapis.com/auth/calendar.events',
-]
-
-CALENDAR_REDIRECT_URI = "http://localhost:8000/api/v1/calendar/callback"
+CAPABILITY = 'calendar'
+JST = timezone(timedelta(hours=9))
+# The OAuth return address. It must also be registered with the provider (Google Cloud console > OAuth client).
+CALENDAR_REDIRECT_URI = os.environ.get('CALENDAR_REDIRECT_URI', 'http://localhost:8000/api/v1/calendar/callback')
+CALENDAR_SCOPES = provider_class('google').SCOPES   # kept for older importers
 
 
 class CalendarService:
-    def __init__(self):
-        self.supabase = get_supabase_client().client
-        self.client_config = {
-            "web": {
-                "client_id": settings.gmail_client_id,
-                "client_secret": settings.gmail_client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [CALENDAR_REDIRECT_URI],
-            }
-        }
+    # ==================== connecting accounts ====================
 
-    def get_auth_url(self, user_id: str) -> str:
-        """OAuth2認証URLを生成"""
-        flow = Flow.from_client_config(
-            self.client_config,
-            scopes=CALENDAR_SCOPES,
-            redirect_uri=CALENDAR_REDIRECT_URI,
-        )
-        auth_url, _ = flow.authorization_url(
-            access_type='offline',
-            include_granted_scopes='true',
-            prompt='consent',
-            state=user_id,
-        )
-        return auth_url
+    def get_auth_url(self, user_id: str, provider: str = 'google', replace_id: Optional[str] = None, hint: Optional[str] = None) -> str:
+        """Where to send the user to connect an account. replace_id: this account takes that one's place."""
+        state = accounts.sign_state({'u': user_id, 'p': provider, **({'r': replace_id} if replace_id else {})})
+        return provider_class(provider).auth_url(state, CALENDAR_REDIRECT_URI, hint)
 
-    async def handle_callback(self, code: str, user_id: str) -> Tuple[bool, str, Optional[str]]:
-        """OAuth2コールバック処理"""
+    async def handle_callback(self, code: str, state: str) -> Tuple[bool, str, Optional[str]]:
+        payload = accounts.read_state(state)
+        if not payload:
+            return False, '連携の有効期限が切れたか、正しくない連携です。もう一度やり直してください。', None
         try:
-            flow = Flow.from_client_config(
-                self.client_config,
-                scopes=CALENDAR_SCOPES,
-                redirect_uri=CALENDAR_REDIRECT_URI,
-            )
-            flow.fetch_token(code=code)
-            credentials = flow.credentials
-
-            # メールアドレス取得
-            service = build('calendar', 'v3', credentials=credentials)
-            cal_list = service.calendarList().get(calendarId='primary').execute()
-            email = cal_list.get('id', '')
-
-            # トークン暗号化保存
-            token_data = {
-                'token': credentials.token,
-                'refresh_token': credentials.refresh_token,
-                'token_uri': credentials.token_uri,
-                'client_id': credentials.client_id,
-                'client_secret': credentials.client_secret,
-                'scopes': list(credentials.scopes) if credentials.scopes else CALENDAR_SCOPES,
-            }
-            encrypted_token = encrypt_data(json.dumps(token_data))
-
-            existing = self.supabase.table("calendar_connections").select("id").eq("user_id", user_id).execute()
-            if existing.data:
-                self.supabase.table("calendar_connections").update({
-                    "email": email,
-                    "encrypted_token": encrypted_token,
-                    "is_active": True,
-                }).eq("user_id", user_id).execute()
-            else:
-                self.supabase.table("calendar_connections").insert({
-                    "user_id": user_id,
-                    "email": email,
-                    "encrypted_token": encrypted_token,
-                    "is_active": True,
-                }).execute()
-
-            logger.info("Calendar connected for user %s: %s", user_id, email)
-            return True, "Google Calendar connected", email
-
+            cls = provider_class(payload.get('p', 'google'))
+            address, token = cls.exchange(code, CALENDAR_REDIRECT_URI)
+            accounts.save(payload['u'], cls.provider, address, [CAPABILITY], token, replace_id=payload.get('r'))
+            logger.info('Calendar account connected: %s %s', cls.provider, address)
+            return True, 'connected', address
         except Exception as e:
-            logger.error("Calendar OAuth failed: %s", e)
+            logger.error('Calendar OAuth failed: %s', e)
             return False, str(e), None
 
-    def _get_credentials(self, user_id: str) -> Optional[Credentials]:
-        """保存済みトークンからCredentialsを復元"""
-        result = self.supabase.table("calendar_connections").select("encrypted_token, is_active").eq("user_id", user_id).execute()
-        if not result.data or not result.data[0].get("is_active"):
-            return None
-
-        try:
-            token_data = json.loads(decrypt_data(result.data[0]["encrypted_token"]))
-            creds = Credentials(
-                token=token_data['token'],
-                refresh_token=token_data.get('refresh_token'),
-                token_uri=token_data.get('token_uri', 'https://oauth2.googleapis.com/token'),
-                client_id=token_data.get('client_id'),
-                client_secret=token_data.get('client_secret'),
-                scopes=token_data.get('scopes', CALENDAR_SCOPES),
-            )
-            if creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                # 更新されたトークンを保存
-                token_data['token'] = creds.token
-                encrypted = encrypt_data(json.dumps(token_data))
-                self.supabase.table("calendar_connections").update({
-                    "encrypted_token": encrypted,
-                }).eq("user_id", user_id).execute()
-            return creds
-        except Exception as e:
-            logger.error("Failed to load calendar credentials: %s", e)
-            return None
-
     async def get_status(self, user_id: str) -> dict:
-        """カレンダー連携状態"""
-        result = self.supabase.table("calendar_connections").select("email, is_active").eq("user_id", user_id).execute()
-        if not result.data:
-            return {"connected": False, "email": None}
-        conn = result.data[0]
-        return {"connected": conn.get("is_active", False), "email": conn.get("email")}
+        rows = accounts.list_accounts(user_id, CAPABILITY)
+        default = accounts.default_account(user_id, CAPABILITY)
+        return {'connected': bool(rows), 'email': default['account'] if default else None,
+                'accounts': [{'id': r['id'], 'provider': r['provider'], 'account': r['account'], 'label': r.get('label'),
+                              'default': CAPABILITY in (r.get('default_for') or [])} for r in rows]}
 
-    async def disconnect(self, user_id: str) -> bool:
-        """連携解除"""
-        self.supabase.table("calendar_connections").update({"is_active": False}).eq("user_id", user_id).execute()
+    async def disconnect(self, user_id: str, account_id: Optional[str] = None) -> bool:
+        """Remove one account, or (no id) every calendar account."""
+        targets = [account_id] if account_id else [r['id'] for r in accounts.list_accounts(user_id, CAPABILITY)]
+        return all(accounts.remove(user_id, t) for t in targets) if targets else False
+
+    def set_default(self, user_id: str, account_id: str) -> bool:
+        if not accounts.get(user_id, account_id):
+            return False
+        accounts.set_default(user_id, account_id, CAPABILITY)
         return True
 
-    # ==================== カレンダー操作 ====================
+    # ==================== reading and writing ====================
 
-    def get_events(self, user_id: str, days: int = 7, max_results: int = 20) -> List[dict]:
-        """今後N日間の予定を取得（連携アカウントが見ている全カレンダー。各予定に calendar 名が付く）"""
-        return self.get_events_with_source(user_id, days, max_results)['events']
+    def _client(self, user_id: str, row: dict):
+        token = accounts.token(user_id, row['id'])
+        if token is None:
+            raise RuntimeError('連携が無効です')
+        return provider_class(row['provider'])(row, token, lambda t: accounts.update_token(user_id, row['id'], t))
 
-    def get_events_with_source(self, user_id: str, days: int = 7, max_results: int = 20) -> dict:
-        """予定と、その出どころ（どのアカウントの、どのカレンダーを見たか）。
-        「何を見て言った」に答えられない読み取りは読み取りではない: 読む道具は必ず source を返す。"""
-        creds = self._get_credentials(user_id)
-        if not creds:
-            return {'events': [{"error": "カレンダー未連携。設定画面から連携してください。"}], 'source': None}
+    def _pick(self, user_id: str, account: Optional[str]):
+        row = accounts.find(user_id, CAPABILITY, account)
+        if not row:
+            names = ', '.join(r['account'] for r in accounts.list_accounts(user_id, CAPABILITY)) or 'なし'
+            raise LookupError(f'カレンダーのアカウント「{account or "既定"}」が見つかりません（連携済み: {names}）。')
+        return row, self._client(user_id, row)
 
-        service = build('calendar', 'v3', credentials=creds)
-        now = datetime.now(timezone.utc)
-        time_max = now + timedelta(days=days)
-        calendars = [c for c in service.calendarList().list(maxResults=20).execute().get('items', []) if c.get('selected', True)]
-        account = next((c['id'] for c in calendars if c.get('primary')), '')
+    def get_events(self, user_id: str, days: int = 7, max_results: int = 20, account: Optional[str] = None) -> List[dict]:
+        return self.get_events_with_source(user_id, days, max_results, account)['events']
 
-        events = []
-        for calendar in calendars[:10]:
-            result = service.events().list(
-                calendarId=calendar['id'],
-                timeMin=now.isoformat(),
-                timeMax=time_max.isoformat(),
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy='startTime',
-            ).execute()
-            for item in result.get('items', []):
-                start = item.get('start', {})
-                end = item.get('end', {})
-                events.append({
-                    'id': item['id'],
-                    'title': item.get('summary', '(タイトルなし)'),
-                    'start': start.get('dateTime', start.get('date', '')),
-                    'end': end.get('dateTime', end.get('date', '')),
-                    'location': item.get('location', ''),
-                    'description': item.get('description', ''),
-                    'calendar': calendar.get('summaryOverride') or calendar.get('summary') or calendar['id'],
-                })
+    def get_events_with_source(self, user_id: str, days: int = 7, max_results: int = 20, account: Optional[str] = None) -> dict:
+        """Events from today 00:00 (local) for `days` days, across every connected account (or the one named), each with
+        its account and calendar; the source says which accounts and calendars were read and which could not be."""
+        rows = accounts.list_accounts(user_id, CAPABILITY)
+        if account:
+            one = accounts.find(user_id, CAPABILITY, account)
+            rows = [one] if one else []
+        if not rows:
+            return {'events': [{'error': 'カレンダー未連携。設定画面から連携してください。'}], 'source': None}
+        start = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=days + 1)
+        events, read, failed = [], [], []
+        for row in rows:
+            try:
+                client = self._client(user_id, row)
+                for event in client.events(start, end, max_results):
+                    events.append({**event, 'account': row['account']})
+                read.append({'account': row['account'], 'provider': row['provider'], 'calendars': [c['name'] for c in client.calendars()[:15]]})
+            except Exception as e:
+                logger.warning('calendar read failed for %s: %s', row['account'], e)
+                failed.append({'account': row['account'], 'error': ('expired' if 'invalid_grant' in str(e) or 'expired' in str(e) else type(e).__name__)})
         events.sort(key=lambda e: e['start'])
-        return {'events': events[:max_results],
-                'source': {'account': account, 'calendars': [c.get('summaryOverride') or c.get('summary') or c['id'] for c in calendars[:10]]}}
+        source = {'account': ', '.join(r['account'] for r in read), 'accounts': read, 'calendars': [c for r in read for c in r['calendars']]}
+        if failed:
+            source['failed'] = failed
+        if failed and not read:
+            return {'events': [{'error': 'カレンダーを読めませんでした（' + ', '.join(f"{f['account']}: {f['error']}" for f in failed) + '）'}], 'source': source}
+        return {'events': events[:max_results * max(1, len(rows))], 'source': source}
 
-    def create_event(self, user_id: str, title: str, start: str, end: str,
-                     description: str = "", location: str = "") -> dict:
-        """予定を作成"""
-        creds = self._get_credentials(user_id)
-        if not creds:
-            return {"error": "カレンダー未連携。設定画面から連携してください。"}
+    def create_event(self, user_id: str, title: str, start: str, end: str, description: str = '', location: str = '',
+                     account: Optional[str] = None, calendar_id: Optional[str] = None, reminders: Optional[list] = None) -> dict:
+        try:
+            row, client = self._pick(user_id, account)
+        except LookupError as e:
+            return {'error': str(e)}
+        made = client.create(calendar_id, {'title': title, 'start': start, 'end': end, 'description': description or None,
+                                           'location': location or None, 'reminders': reminders})
+        return {**made, 'account': row['account']}
 
-        service = build('calendar', 'v3', credentials=creds)
+    def _locate(self, user_id: str, event_id: str, account: Optional[str], calendar_id: Optional[str]):
+        """The account and calendar that hold the event (searched when not given)."""
+        rows = [accounts.find(user_id, CAPABILITY, account)] if account else accounts.list_accounts(user_id, CAPABILITY)
+        for row in [r for r in rows if r]:
+            client = self._client(user_id, row)
+            for cal in ([calendar_id] if calendar_id else [c['id'] for c in client.calendars()]):
+                if client.get(cal, event_id):
+                    return row, client, cal
+        raise LookupError('その予定が見つかりません（どのアカウントのどのカレンダーにもない）。')
 
-        # 日付のみか日時か判定
-        is_all_day = len(start) <= 10
-        event_body = {
-            'summary': title,
-            'start': {'date': start} if is_all_day else {'dateTime': start, 'timeZone': 'Asia/Tokyo'},
-            'end': {'date': end} if is_all_day else {'dateTime': end, 'timeZone': 'Asia/Tokyo'},
-        }
-        if description:
-            event_body['description'] = description
-        if location:
-            event_body['location'] = location
+    def update_event(self, user_id: str, event_id: str, account: Optional[str] = None, calendar_id: Optional[str] = None, **fields) -> dict:
+        """Change an event: title, start, end, description (the memo), location, reminders (minutes before)."""
+        try:
+            row, client, cal = self._locate(user_id, event_id, account, calendar_id)
+        except LookupError as e:
+            return {'error': str(e)}
+        return {**client.update(cal, event_id, fields), 'account': row['account']}
 
-        created = service.events().insert(calendarId='primary', body=event_body).execute()
-        return {
-            'id': created['id'],
-            'title': created.get('summary', ''),
-            'start': created['start'].get('dateTime', created['start'].get('date', '')),
-            'link': created.get('htmlLink', ''),
-        }
+    def delete_event(self, user_id: str, event_id: str, account: Optional[str] = None, calendar_id: Optional[str] = None) -> dict:
+        try:
+            row, client, cal = self._locate(user_id, event_id, account, calendar_id)
+        except LookupError as e:
+            return {'error': str(e)}
+        client.delete(cal, event_id)
+        return {'deleted': event_id, 'account': row['account']}
 
     def find_free_slots(self, user_id: str, days: int = 7) -> List[dict]:
-        """今後N日間の空き時間を取得（9:00-18:00の営業時間内）"""
-        events = self.get_events(user_id, days=days)
-        if events and isinstance(events[0], dict) and "error" in events[0]:
+        """Free time (9:00-18:00 JST) over the next days, busy in ANY connected calendar."""
+        events = self.get_events(user_id, days=days, max_results=100)
+        if events and isinstance(events[0], dict) and 'error' in events[0]:
             return events
-
-        # 日ごとの空き時間を計算
-        now = datetime.now(timezone(timedelta(hours=9)))  # JST
+        now = datetime.now(JST)
         free_slots = []
-
         for day_offset in range(days):
             day = now.date() + timedelta(days=day_offset)
-            day_start = datetime(day.year, day.month, day.day, 9, 0, tzinfo=timezone(timedelta(hours=9)))
-            day_end = datetime(day.year, day.month, day.day, 18, 0, tzinfo=timezone(timedelta(hours=9)))
-
+            day_start = datetime(day.year, day.month, day.day, 9, 0, tzinfo=JST)
+            day_end = datetime(day.year, day.month, day.day, 18, 0, tzinfo=JST)
             if day_start < now:
                 day_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
                 if day_start >= day_end:
                     continue
-
-            # この日の予定を抽出
-            day_events = []
+            busy = []
             for ev in events:
-                if isinstance(ev, dict) and 'start' in ev:
-                    try:
-                        ev_start = datetime.fromisoformat(ev['start'].replace('Z', '+00:00'))
-                        ev_end = datetime.fromisoformat(ev['end'].replace('Z', '+00:00'))
-                        if ev_start.date() == day:
-                            day_events.append((ev_start, ev_end))
-                    except (ValueError, KeyError):
-                        pass
-
-            day_events.sort()
-
-            # 空き時間を計算
+                try:
+                    s = datetime.fromisoformat(ev['start'].replace('Z', '+00:00'))
+                    e = datetime.fromisoformat(ev['end'].replace('Z', '+00:00'))
+                    if s.tzinfo is None:   # an all-day event (a holiday, a note): not counted as busy, as before
+                        continue
+                    if s.astimezone(JST).date() == day:
+                        busy.append((max(s, day_start), min(e, day_end)))
+                except (ValueError, KeyError, TypeError):
+                    pass
             cursor = day_start
-            for ev_start, ev_end in day_events:
-                if cursor < ev_start:
-                    free_slots.append({
-                        'date': day.isoformat(),
-                        'start': cursor.strftime('%H:%M'),
-                        'end': ev_start.strftime('%H:%M'),
-                    })
-                if ev_end > cursor:
-                    cursor = ev_end
+            for s, e in sorted(busy):
+                if cursor < s:
+                    free_slots.append({'date': day.isoformat(), 'start': cursor.strftime('%H:%M'), 'end': s.strftime('%H:%M')})
+                cursor = max(cursor, e)
             if cursor < day_end:
-                free_slots.append({
-                    'date': day.isoformat(),
-                    'start': cursor.strftime('%H:%M'),
-                    'end': day_end.strftime('%H:%M'),
-                })
-
+                free_slots.append({'date': day.isoformat(), 'start': cursor.strftime('%H:%M'), 'end': day_end.strftime('%H:%M')})
         return free_slots
 
 

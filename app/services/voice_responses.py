@@ -43,7 +43,7 @@ TOOLS = [
     {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。言葉の一致で探す（意味では探さない）ので、話題の言葉をスペースで区切って並べ、言い換えも入れる（例: 見積 請求書 送付 送った）。同じ話の記録が複数あれば新しい方が最新の結論。',
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '探す話題（例: 9月18日の新幹線のキャンセル）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
-    {'type': 'function', 'name': 'get_calendar', 'description': '本人のGoogleカレンダーの今後の予定。接続が切れていれば expired が返る。',
+    {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の今日からの予定。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
      'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'open_on_pc', 'description': 'このパソコンで、サイトやアプリを開く・起動する（開くだけ）。',
      'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
