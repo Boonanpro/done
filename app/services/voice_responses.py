@@ -33,6 +33,7 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 道具の結果の source は出どころ（どのアカウント・どのカレンダー・どの記録を見たか）。「何を見て言った」と聞かれた時にそれで答える。普段は言わない。
 - 取り返しのつかない確定（購入・送信・削除・支払い）の前だけ、内容と金額を言葉で伝えて本人の返事を待つ。それ以外は承認を求めず進める。
 - 「やった」と言う前に結果を読み直して確かめる。本人の画面と食い違う時は、自分が読んだ事実（どこに何が入っているか）を伝え、同期の遅れもあり得ると言う。確かめずに同じ操作を繰り返さない。
+- 事実の答え方。この会話で自分が見た・確かめたことはそのまま答える。過去の記録（search_records）は当時の報告で、自分では確かめていない伝聞。「〜した？」「〜どうなってる？」のように確かめた後で変わりうる状態（払い戻し・予約・配送・予定・残高など）は、記録をどこを見ればよいかの手がかりにして、一次情報（メール本文＝lookup の source=mail、カレンダー、そのサイトの履歴）を見て答える。見られなかった時は、記録だけで言っていると添える。
 - 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所（経路検索サイトなど）で確かめて答える。検索結果の断片から作らない。
 - ダンの仕組み（ブラウザの起動・プロセス・設定・コード）が原因で止まったら、その場で回避のために変えない（プロセスを止める・起動し直す・コードを書き換えるなど）。どこが原因で止まったかを報告し、直すなら直し方を添える。"""
 
@@ -41,7 +42,7 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '調べたいこと（場所や日付を含めて具体的に）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_saved_information', 'description': '本人が登録してある自分の情報（名前・住所・郵便番号・電話・カード・口座・免許・会社など）を読む。',
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を知りたいか（例: 郵便番号、実家の住所、アメックスの有効期限）'}}, 'required': ['what'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。言葉の一致で探す（意味では探さない）ので、話題の言葉をスペースで区切って並べ、言い換えも入れる（例: 見積 請求書 送付 送った）。同じ話の記録が複数あれば新しい方が最新の結論。',
+    {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。言葉の一致で探す（意味では探さない）ので、話題の言葉をスペースで区切って並べ、言い換えも入れる（例: 見積 請求書 送付 送った）。記録は当時の報告（伝聞）なので、今の状態の答えにはせず、どこを見ればよいかの手がかりにする。',
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '探す話題（例: 9月18日の新幹線のキャンセル）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の予定。既定は今日から。過去や先の日なら from（YYYY-MM-DD）とその日からの日数 days。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
@@ -155,7 +156,10 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
     if name == 'search_records':
         from app.services.voice_past import gather
         found = await gather(user_id, str(args.get('query') or ''), dialogue, [])
+        # The records are what was said then, not checked now: an answer built from them said 「取消済み」 about a ticket that
+        # was in fact refunded automatically the next day (2026-09-25). The note travels with the records.
         return {'records': found['records'][:8], 'recent_work': found['jobs'][:3],
+                'note': '当時の会話と報告（伝聞）。今の状態・結果を聞かれているなら、これを手がかりに一次情報（メール本文・カレンダー・そのサイトの履歴）を見てから答える。見られない時は「記録ではこうなっている（未確認）」と言う。',
                 'source': {'what': '本人とダンの会話記録と作業の記録（直近45日）', 'searched_words': found['keywords']}}
     if name == 'get_location':
         from app.services.user_location import tool, current

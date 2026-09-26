@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from pathlib import Path
@@ -137,6 +138,29 @@ def _body(message):
     return ''
 
 
+CANDIDATES = 60   # how many server hits are opened and checked, newest first
+
+
+def _norm(text):
+    return unicodedata.normalize('NFKC', text or '').lower()
+
+
+def _mail_row(conn, uid, box):
+    _, fetched = conn.uid('fetch', uid, '(BODY.PEEK[HEADER.FIELDS (FROM TO DATE SUBJECT)] BODY.PEEK[TEXT]<0.1500>)')
+    # Servers return the two requested parts in whatever order they like: tell them apart by their tag.
+    header, preview = email.message_from_bytes(b''), ''
+    for item in fetched:
+        if not isinstance(item, tuple):
+            continue
+        if b'HEADER' in item[0].upper():
+            header = email.message_from_bytes(item[1])
+        else:
+            preview = item[1].decode('utf-8', errors='replace')
+    preview = _clip(re.sub(r'<[^>]+>|=\r?\n', ' ', preview), 300)
+    return (f"mailbox={box} uid={uid.decode()} | {header.get('Date', '')[:31]}\nFrom: {_decode(header.get('From'))} → To: {_decode(header.get('To'))}\n"
+            f"Subject: {_decode(header.get('Subject'))}\n{preview}")
+
+
 def _mail_sync(p):
     from app.services.imap_email_service import PROVIDERS, connect_mailbox
     box = p.get('mailbox') or next(iter(PROVIDERS))
@@ -160,30 +184,42 @@ def _mail_sync(p):
         criteria += ['SINCE', since.strftime('%d-%b-%Y')]
         if p.get('from_'): criteria += ['FROM', f'"{p["from_"]}"']
         if p.get('to'): criteria += ['TO', f'"{p["to"]}"']
-        charset = None
-        if p.get('query'):
-            criteria += ['TEXT', f'"{p["query"]}"']
-            charset = 'UTF-8' if not p['query'].isascii() else None
-        if charset:
-            _, data = conn.uid('search', 'CHARSET', charset, *[c.encode('utf-8') if not c.isascii() else c for c in criteria])
-        else:
+        words = (p.get('query') or '').split()
+        limit = p.get('limit', 15)
+        if not words:
             _, data = conn.uid('search', None, *criteria)
-        uids = (data[0] or b'').split()[-(p.get('limit', 15)):]
+            return [_mail_row(conn, uid, box) for uid in reversed((data[0] or b'').split()[-limit:])], box, folder
+        # The longest word goes to the server as an IMAP literal ({n} CRLF bytes): written inline, non-ASCII words made
+        # Gmail answer "BAD Could not parse command", so every Japanese mail search failed (2026-09-25, 「払戻」).
+        conn.literal = max(words, key=len).encode('utf-8')
+        _, data = conn.uid('search', 'CHARSET', 'UTF-8', *criteria, 'TEXT')
+        # A server's own text search is loose (iCloud matched a made-up word, and 「スマート」 brought back ads): each
+        # candidate is opened and kept only if every word really is in its subject or text.
+        wanted = [_norm(w) for w in words]
         rows = []
-        for uid in reversed(uids):
-            _, fetched = conn.uid('fetch', uid, '(BODY.PEEK[HEADER.FIELDS (FROM TO DATE SUBJECT)] BODY.PEEK[TEXT]<0.1500>)')
-            # Servers return the two requested parts in whatever order they like: tell them apart by their tag.
-            header, preview = email.message_from_bytes(b''), ''
+        candidates = list(reversed((data[0] or b'').split()[-CANDIDATES:]))
+        # fetched 15 at a time in one command: one by one, 60 candidates took 25 s on iCloud
+        for start in range(0, len(candidates), 15):
+            chunk = candidates[start:start + 15]
+            _, fetched = conn.uid('fetch', b','.join(chunk).decode(), '(UID BODY.PEEK[])')
+            by_uid = {}
             for item in fetched:
-                if not isinstance(item, tuple):
+                if isinstance(item, tuple):
+                    found = re.search(rb'UID (\d+)', item[0])
+                    if found:
+                        by_uid[found.group(1)] = email.message_from_bytes(item[1])
+            for uid in chunk:
+                message = by_uid.get(uid)
+                if message is None:
                     continue
-                if b'HEADER' in item[0].upper():
-                    header = email.message_from_bytes(item[1])
-                else:
-                    preview = item[1].decode('utf-8', errors='replace')
-            preview = _clip(re.sub(r'<[^>]+>|=\r?\n', ' ', preview), 300)
-            rows.append(f"uid={uid.decode()} | {header.get('Date', '')[:31]}\nFrom: {_decode(header.get('From'))} → To: {_decode(header.get('To'))}\n"
-                        f"Subject: {_decode(header.get('Subject'))}\n{preview}")
+                subject, text = _decode(message.get('Subject')), re.sub(r'\s+', ' ', _body(message))
+                if not all(w in _norm(subject + ' ' + text) for w in wanted):
+                    continue
+                at = max(0, _norm(text).find(wanted[0]) - 120)
+                rows.append(f"mailbox={box} uid={uid.decode()} | {(message.get('Date') or '')[:31]}\nFrom: {_decode(message.get('From'))} → To: {_decode(message.get('To'))}\n"
+                            f"Subject: {subject}\n{_clip(text[at:], 300)}")
+                if len(rows) >= limit:
+                    return rows, box, folder
         return rows, box, folder
     finally:
         try: conn.logout()
@@ -191,8 +227,22 @@ def _mail_sync(p):
 
 
 async def _mail(p, user_id, room_id):
-    rows, box, folder = await asyncio.to_thread(_mail_sync, p)
-    return _result(f'メール {box}/{folder}', rows, '（既定は直近14日。本文は id=uid で全文）' if not p.get('id') else '')
+    from app.services.imap_email_service import PROVIDERS
+    if p.get('mailbox') or p.get('id'):
+        rows, box, folder = await asyncio.to_thread(_mail_sync, p)
+        return _result(f'メール {box}/{folder}', rows, '（既定は直近14日。本文は mailbox と id=uid で全文）' if not p.get('id') else '')
+    # No mailbox named: every connected mailbox at once. Only the first one was read before, so a mail in iCloud
+    # (every EX reservation notice) was 「該当なし」 (2026-09-25).
+    boxes = list(PROVIDERS)
+    got = await asyncio.gather(*[asyncio.to_thread(_mail_sync, {**p, 'mailbox': b}) for b in boxes], return_exceptions=True)
+    rows, failed = [], []
+    for box, result in zip(boxes, got):
+        if isinstance(result, Exception):
+            failed.append(f'{box}（{str(result)[:80]}）')
+        else:
+            rows.extend(result[0])
+    note = '（既定は直近14日。本文は mailbox と id=uid で全文）' + (f' 読めなかった受信箱: {", ".join(failed)}' if failed else '')
+    return _result(f'メール 全受信箱（{", ".join(boxes)}）', rows, note)
 
 
 async def _message_cards(p, user_id, room_id):
