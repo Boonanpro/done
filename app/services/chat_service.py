@@ -624,6 +624,9 @@ class ChatService:
         sender_name = sender.data[0]["display_name"] if sender.data else "Unknown"
         # 統合後: sender_id = users.id（done_user_idは不要）
 
+        if sender_type not in ("human", "user"):
+            from app.services.message_media import normalize
+            content = normalize(content)   # files Dan names show on the owner's screen (message_media)
         insert_data = {
             "room_id": room_id,
             "sender_id": sender_id,
@@ -1262,6 +1265,8 @@ class ChatService:
                 ai_context["reasoning_full"] = reasoning_full
         
         # AIからのメッセージとして送信
+        from app.services.message_media import normalize
+        content = normalize(content)   # files Dan names show on the owner's screen (message_media)
         insert_data = {
             "room_id": target_room_id,
             "sender_id": None,  # AIなのでsender_idはnull

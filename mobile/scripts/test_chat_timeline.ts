@@ -198,3 +198,21 @@ function ascendingKeys(args: Parameters<typeof buildChatListItems>[0]): string[]
 }
 
 console.log('test_chat_timeline: all assertions passed');
+
+// ── 音声の断片まとめ（2026-09-27）──
+{
+  const { mergeVoiceFragments } = require('../chatTimeline');
+  const t = (s: number) => new Date(Date.UTC(2026, 8, 27, 5, 0, s)).toISOString();
+  const rows = [
+    { id: 'a', sender_type: 'human', content: '🎙 まあこれらを表示して', created_at: t(0) },
+    { id: 'b', sender_type: 'ai', content: '🎙 ん。', created_at: t(2) },
+    { id: 'c', sender_type: 'human', content: '🎙 、あなたのスマホから', created_at: t(5) },
+    { id: 'd', sender_type: 'ai', content: '🎙 わかりました。直します。', created_at: t(9) },
+    { id: 'e', sender_type: 'human', content: '普通のメッセージ', created_at: t(12) },
+  ];
+  const merged = mergeVoiceFragments(rows);
+  const ids = merged.map((m: { id: string }) => m.id).join(',');
+  if (ids !== 'a,d,e') throw new Error('voice merge ids: ' + ids);
+  if (merged[0].content !== '🎙 まあこれらを表示してあなたのスマホから') throw new Error('voice merge text: ' + merged[0].content);
+  console.log('ok voice fragments');
+}

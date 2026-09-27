@@ -26,9 +26,9 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r['role'] for r in rows], ['user', 'assistant'])
         restored = live.session_config(rows)['input'][0]['content'][0]['text']
         self.assertLess(restored.index('窓側を希望'), restored.index('予約は11E'))
-        large = room_history([{'created_at': '3', 'sender_type': 'ai', 'content': 'あ'*10000+'末尾の決定'}])
+        large = room_history([{'created_at': '3', 'sender_type': 'ai', 'content': 'あ'*20000+'末尾の決定'}])
         self.assertIn('末尾の決定', str(large))
-        self.assertLess(sum(len(r['content'][0]['text'].encode())+40 for r in large), 7400)
+        self.assertLess(sum(len(r['content'][0]['text'].encode())+40 for r in large), 30000)
 
     async def test_session_is_created_with_the_room_history_and_the_server_owns_it(self):
         from app.api import voicelog_routes as routes

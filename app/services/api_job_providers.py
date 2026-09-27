@@ -21,6 +21,11 @@ def kind_of(model):
     return 'chat'
 
 
+# One model step. It was 600 s with the client's 2 retries: a stalled DeepSeek connection held a job for 30-37 minutes
+# with nothing on screen (2026-09-27, three jobs). A step that takes this long has failed; the job says so and stops.
+STEP_TIMEOUT = float(os.environ.get('DAN_API_JOB_STEP_TIMEOUT', '240'))
+
+
 def make(model):
     return {'anthropic': Anthropic, 'openai': OpenAIResponses, 'chat': ChatCompletions}[kind_of(model)](model)
 
@@ -29,7 +34,7 @@ class OpenAIResponses:
     def __init__(self, model):
         from openai import OpenAI
         from app.config import settings
-        self.model, self.client = model, OpenAI(api_key=settings.OPENAI_API_KEY, timeout=600)
+        self.model, self.client = model, OpenAI(api_key=settings.OPENAI_API_KEY, timeout=STEP_TIMEOUT, max_retries=1)
         self.previous, self.pending = None, []
 
     def start(self, instructions, tools, messages):
@@ -63,7 +68,7 @@ class OpenAIResponses:
 class Anthropic:
     def __init__(self, model):
         import anthropic
-        self.model, self.client = model, anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'), timeout=600)
+        self.model, self.client = model, anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'), timeout=STEP_TIMEOUT, max_retries=1)
         self.messages, self.pending = [], []
 
     def start(self, instructions, tools, messages):
@@ -110,7 +115,7 @@ class ChatCompletions:
         from openai import OpenAI
         base = os.environ.get('DAN_CHAT_BASE_URL') or ('https://api.deepseek.com' if model.startswith('deepseek') else '')
         key = os.environ.get('DAN_CHAT_API_KEY') or os.environ.get('DEEPSEEK_API_KEY')
-        self.model, self.client = model, OpenAI(api_key=key, base_url=base, timeout=600)
+        self.model, self.client = model, OpenAI(api_key=key, base_url=base, timeout=STEP_TIMEOUT, max_retries=1)
         self.messages = []
 
     def start(self, instructions, tools, messages):

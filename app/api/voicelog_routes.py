@@ -142,6 +142,11 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
     # A failed read must not silently turn an existing room into an empty call.
     messages = await chat.get_messages(body.room_id, user.user_id, limit=96)
     history = room_history(messages)
+    from app.services import room_files
+    try:
+        files = await room_files.listing(body.room_id, user.user_id, limit=15)
+    except Exception:
+        files = []
     pending_id = 'pending-' + uuid4().hex
     register(pending_id, user.user_id, room_id=body.room_id)
     bound = False
@@ -149,7 +154,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         async with httpx.AsyncClient(timeout=40) as client:
             response = await client.post('https://api.openai.com/v1/live/sessions',
                 headers={'Authorization': 'Bearer ' + settings.OPENAI_API_KEY},
-                json={'session': session_config(history, timezone=body.timezone),
+                json={'session': session_config(history, timezone=body.timezone, files=files),
                     'transport': {'type': 'webrtc', 'sdp': body.sdp}})
         data = response.json()
         if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):
@@ -213,6 +218,19 @@ import subprocess
 
 # ------------------------------------------------------------- transcript
 
+_BACKCHANNEL = _re.compile(r'(?:(?:はい|ええ|うん|ん|え|ああ|あー|あ|うんうん|はいはい|なるほど|そうですね|ほう)[。、．,.!！?？…ー〜\s]*)+')
+
+
+def voice_text(content):
+    """One transcribed segment as it should read: the recognizer starts a continuation with the punctuation that ended
+    the previous segment (「、スマホで…」「。で、」)."""
+    return (content or '').strip().lstrip('、。，．,.？?！! 　').strip()
+
+
+def is_backchannel(text):
+    return bool(_BACKCHANNEL.fullmatch(text))
+
+
 class TranscriptRequest(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
     content: str = Field(min_length=1, max_length=8000)
@@ -229,7 +247,12 @@ async def add_voice_transcript(room_id: str, request: Request, body: TranscriptR
     """
     user = _get_user(request)
     sender_type = "human" if body.role == "user" else "ai"
-    content = f"🎙 {body.content.strip()}"
+    text = voice_text(body.content)
+    # Dan's bare backchannels (「はい。」「ん。」) are not kept: 97 of 151 of Dan's lines in one call were those, each its own
+    # bubble between the owner's words (2026-09-27). They are sound, not content.
+    if not text or (sender_type == "ai" and is_backchannel(text)):
+        return {"ok": True, "id": None, "skipped": True}
+    content = f"🎙 {text}"
     svc = ChatService()
     try:
         message = await svc.send_message(room_id, user.user_id, content, sender_type=sender_type,

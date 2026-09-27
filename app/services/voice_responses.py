@@ -25,7 +25,8 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 返事はそのまま読み上げられ、声のモデルはもう受け答えの一言を言っている。作業を渡した・指示を届けた・開いただけで新しい事実が無い時は、返事を空にする。
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気や近くの店は get_location の現在地を使う。
-- パソコンでサイトやアプリを開くだけなら open_on_pc。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
+- ファイル・画像・動画・資料を「出して」「見せて」「貼って」「送って（この画面に）」と言われたら show_in_chat（1秒で本人のチャット画面に出る。画像・動画はその場に表示、資料は押せば開くリンク）。どのファイルか分からなければ room_files でこの部屋のファイル一覧（新しい順・何の資料か）を見て選ぶ。作業に渡したり、パソコンで開いたりしない。出せたら「出しました」とだけ言う。
+- パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わず短く答える。
@@ -47,13 +48,18 @@ TOOLS = [
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の予定。既定は今日から。過去や先の日なら from（YYYY-MM-DD）とその日からの日数 days。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
      'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}, 'from': {'type': 'string', 'description': 'YYYY-MM-DD（省略時は今日）'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'show_in_chat', 'description': 'この部屋のチャット画面に、ファイル・画像・動画・リンクを出す（すぐ終わる）。画像と動画はチャットの中に表示、PDFなどは押すと開くリンクになる。',
+     'parameters': {'type': 'object', 'properties': {'files': {'type': 'array', 'items': {'type': 'string'}, 'description': '出すもの: room_files の name、/api/v1/files/… 、このパソコンのファイルのフルパス、または https のURL'},
+                                                    'text': {'type': 'string', 'description': '添える一言（任意、短く）'}}, 'required': ['files'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'room_files', 'description': 'この部屋でこれまでに出た・作ったファイルの一覧（新しい順。名前・種類・日時・何の資料か）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'open_on_pc', 'description': 'このパソコンで、サイトやアプリを開く・起動する（開くだけ）。',
      'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（ログインして確認する、送信する、登録する、予約する、直す、作るなど複数手順のもの）。結果は後で別に届く。',
      'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'}}, 'required': ['task'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'job_status', 'description': '今動いている作業の様子（どの画面で何をしているか、結果）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
-    {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する。',
-     'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
+     'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'},
+                                                    'job_id': {'type': 'string', 'description': '対象の作業の id（省略時は一番新しい作業）'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'end_call', 'description': '通話を終える。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
 ]
 
@@ -167,8 +173,24 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return {**await tool(user_id), 'source': {'what': '本人のスマホが知らせた位置', 'at': here['at'] if here else None}}
     if name == 'get_calendar':
         return await parts.calendar(user_id, int(args.get('days') or (1 if args.get('from') else 14)), args.get('from') or None)
+    if name == 'show_in_chat':
+        from app.services import room_files
+        if not room_id: return {'error': 'この通話は部屋に結びついていないので、チャットに出せない。'}
+        out = await room_files.show(room_id, user_id, args.get('files') or [], str(args.get('text') or ''))
+        if not out['shown']:
+            return {'shown': [], 'missing': out['missing'], 'note': '見つからなかった。room_files で名前を確かめてから出し直す。出したとは言わない。'}
+        return {**out, 'note': '本人のチャット画面に出した。' + ('見つからなかったもの: ' + '、'.join(out['missing']) if out['missing'] else '')}
+    if name == 'room_files':
+        from app.services import room_files
+        if not room_id: return {'files': [], 'note': 'この通話は部屋に結びついていない。'}
+        return {'files': await room_files.listing(room_id, user_id)}
     if name == 'open_on_pc':
         target = str(args.get('target') or '').strip()
+        if '/api/v1/files/' in target:   # a file Dan served: open it here directly, not through a job (16 minutes, 2026-09-27)
+            import webbrowser
+            path = target[target.index('/api/v1/files/'):].split()[0]
+            webbrowser.open('https://dan.paina.info' + path)
+            return {'result': 'パソコンで開きました。'}
         said = await parts.open_target(target, user_id)
         if not said and target.startswith('http'):
             import webbrowser
@@ -181,11 +203,17 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return {'result': said}
     if name == 'start_work':
         from app.services.command_center import execute
+        running = [s for s in await asyncio.to_thread(list_owned, user_id, room_id) if s['state'] not in ('completed', 'failed', 'cancelled')]
         task = '今回のユーザー発言（原文）:\n'+str(args.get('task') or '')[:2000]
         context = json.dumps(dialogue[-8:], ensure_ascii=False)
         if len(context) <= 2600-len(task): task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context
         out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
-        return {'accepted': bool(out.get('accepted')), 'note': '作業は始まった。結果は後で別に届く。本人に今言うことはない（確認中・時間がかかる等も言わない）。'}
+        others = [{'id': s['id'], '依頼': s.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:160]} for s in running]
+        # Two jobs made the same header from opposite instructions (14:26 phone mock-up, 14:35 forest): the direction changed
+        # and the older job kept going (2026-09-27).
+        return {'accepted': bool(out.get('accepted')), 'job_id': (out.get('receipt') or {}).get('id'), 'other_running_jobs': others,
+                'note': '作業は始まった。結果は後で別に届く。本人に今言うことはない（確認中・時間がかかる等も言わない）。'
+                        + ('ほかに動いている作業がある。今回の依頼で置き換わった・方針が変わった作業は steer_job の cancel（job_id 指定）で止める。関係ない作業はそのまま。' if others else '')}
     if name == 'job_status':
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         return parts.work_status(jobs)
@@ -194,7 +222,9 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         active = [s for s in jobs if s['state'] not in ('completed', 'failed', 'cancelled')]
         if not active: return {'error': '動いている作業はありません。'}
-        out = await execute({'action': 'control_job', 'job_id': active[0]['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
+        chosen = next((s for s in active if s['id'] == args.get('job_id')), None)
+        if args.get('job_id') and not chosen: return {'error': 'その id の作業は動いていません。', 'running': [s['id'] for s in active]}
+        out = await execute({'action': 'control_job', 'job_id': (chosen or active[0])['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
         return {'delivered': bool(out), 'note': '指示は作業に届いた。本人に今言うことはない。'}
     if name == 'list_operations':
         from app.services.browser_flows import all_flows, describe

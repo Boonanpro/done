@@ -1,7 +1,7 @@
 """Saved room messages for reconnects; no model call or synthetic summary."""
 
 
-def room_history(messages, budget=7400):
+def room_history(messages, budget=30000):
     # UTF-8 bytes conservatively bound token count, including message overhead.
     # ChatService returns newest first; models need chronological history.
     kept = []

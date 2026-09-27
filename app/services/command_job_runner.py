@@ -21,6 +21,19 @@ def mark_status(job_id, status):
     from app.services.followups import mark_status as legacy_status
     legacy_status(job_id,status)
 
+async def relay_request(chat, row, spec, job_id):
+    """The copy of the request in the room the work runs in. Asked from another room (the command room), the work's room
+    shows what was asked. Asked in this same room (a call in a project chat), the owner's own words are already there:
+    the copy only showed 「あなたの依頼・Done経由」 and the job's internal rules (2026-09-27). Rules for the job model never
+    reach the room either way."""
+    if spec.get('origin_room_id') == row['room_id']:
+        return None
+    from app.services.voice_parts import VOICE_TASK
+    from app.services.command_center import report_id
+    text = spec['task'].replace(VOICE_TASK, '').split('\n参考の直前会話（')[0].removeprefix('今回のユーザー発言（原文）:\n')
+    return await chat.send_message(row['room_id'], row['user_id'], '【あなたの依頼・Done経由】\n' + text.strip(),
+                                   sender_type='system', message_id=report_id(job_id + ':request'))
+
 async def recover():
     """A restarted owner must not silently resume an uncertain transaction."""
     from app.services.run_service import RunService
@@ -95,10 +108,8 @@ async def run(row):
             state.publish(job_id,'progress','実行先を確認しています')
             project = await projects.get_project_by_room_id(row['room_id'])
             if not project:raise RuntimeError('実行先のプロジェクトが見つかりません')
-            message = await chat.send_message(row['room_id'], row['user_id'],
-                '【あなたの依頼・Done経由】\n' + spec['task'], sender_type='system',
-                message_id=report_id(job_id + ':request'))
-            run_row = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'],
+            message = await relay_request(chat, row, spec, job_id)
+            run_row = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'] if message else None,
                 metadata={'started_by':'command_center', 'watch_id':job_id, 'engine':'steerable_cli',
                           'origin_room_id':spec['origin_room_id']})
             initial_state = state.read(job_id)['state']
@@ -113,6 +124,7 @@ async def run(row):
 ブラウザはこの作業専用。通常のDanブラウザ道具を使う。コマンドも使える（カレンダーは python D:/done/scripts/dan_calendar.py list --days 7 など）。
 PCの画面にページやアプリを出してほしいと言われたら、コマンドで一発で出す（例: python -c "import webbrowser;webbrowser.open('URL')" で普段のブラウザに開く）。
 ブラウザは通常、画面の文字と要素参照を返す。画像が必要なら screenshot を使う。
+作った画像・動画・PDFなどは D:/done/uploads/ に置き、報告には /api/v1/files/<ファイル名> を書く（本人の画面で画像・動画はその場に表示、ほかは押せるリンクになる）。PCのパスや 127.0.0.1 のURLは本人の端末で開けない。
 確認済みの複数操作は browser_script でまとめられる。途中の観測を見て判断する必要があるところで区切る。
 実行結果と残件を短く報告する。外部APIのクライアントを自作して確認手順を迂回しない。
 '''
@@ -131,7 +143,7 @@ PCの画面にページやアプリを出してほしいと言われたら、コ
             owner.receive_timeout = 3600
             recent = await chat.get_messages(row['room_id'],row['user_id'],limit=8)
             history = [{'role':'user','content':'部屋の記録（過去の発言）: '+str(m.get('content',''))[:6000]}
-                for m in sorted(recent,key=lambda m:m.get('created_at') or '') if m.get('id')!=message['id']]
+                for m in sorted(recent,key=lambda m:m.get('created_at') or '') if not message or m.get('id')!=message['id']]
             await owner.start([*history,{'role':'user','content':spec['task']}], [{'type':'web_search'}], instructions,
                 'gpt-6-astra', sandbox='danger-full-access',   # the same reach as chat Dan; the owner's decision 2026-09-22
                 config_overrides={'mcp_servers':mcp})

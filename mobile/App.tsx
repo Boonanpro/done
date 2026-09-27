@@ -1598,8 +1598,8 @@ function AppMain() {
   // 追い連絡は「それまでの作業の下＝最新位置」に出て、読み込まれた後の作業は
   // その下に続く — 完了後に保存される並びと常に同じ時系列になる。
   const chatListItems = useMemo<ChatListItem[]>(
-    () => buildChatListItems({ messages, liveTurnGroups, showLiveTurn }),
-    [messages, liveTurnGroups, showLiveTurn],
+    () => buildChatListItems({ messages, liveTurnGroups, showLiveTurn, projectId: currentProject?.id }),
+    [messages, liveTurnGroups, showLiveTurn, currentProject?.id],
   );
 
   // コラボ窓口の未読（サーバー判定 unread_count の合計）。👥ボタンのバッジと

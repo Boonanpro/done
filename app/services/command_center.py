@@ -217,8 +217,12 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     if not source or source.get("user_id") != user_id:
         raise ValueError("依頼元プロジェクトを確認できません")
     if action == "report":
+        # Work asked in this same room (a call in a project chat) reports as the room's own reply: the 「…からの報告」 heading
+        # and the link to 「作業の部屋」 pointed at the room the owner was already in (2026-09-27).
+        same_room = target_room == room_id
         message = await chat.send_message(target_room, user_id,
-            f"【{source['title']}からの報告】\n{task}\n\n[作業の部屋](/chat/{source['id']})", sender_type="ai", message_id=report_message_id)
+            task if same_room else f"【{source['title']}からの報告】\n{task}\n\n[作業の部屋](/chat/{source['id']})",
+            sender_type="ai", message_id=report_message_id)
         return {"reported": True, "message_id": message["id"], "project": summary(target)}
     if target_room == room_id and action != 'work':
         raise ValueError("今の部屋の作業は自分の作業モードで実行してください")

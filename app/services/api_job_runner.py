@@ -23,6 +23,7 @@ PCの画面にページやアプリを出してほしいと言われたら、コ
 ブラウザは通常、画面の文字と要素参照を返す。画像が必要なら screenshot を使う。
 同じサイトで同じ種類の作業を頼まれたら、まず flow 道具（action=list）を見て、合う手順があれば replay を使う。記憶した手順はこの道具の中にだけある（ファイルやスクリプトを探さない）。
 事実はこの作業で自分が見たものを答える。過去の会話や報告は伝聞なので、確かめた後で変わりうる状態（払い戻し・予約・配送・予定・残高など）は一次情報（メール本文・カレンダー・そのサイトの履歴）を見て確かめる。
+作った画像・動画・PDFなどは D:/done/uploads/ に置き、報告には /api/v1/files/<ファイル名> を書く（本人の画面で画像・動画はその場に表示、ほかは押せるリンクになる）。PCのパスや 127.0.0.1 のURLは本人の端末で開けない。
 実行結果と残件を短く報告する。外部APIのクライアントを自作して確認手順を迂回しない。
 ダンの仕組み（ブラウザの起動・プロセス・設定・コード）が原因で止まったら、その場で回避のために変えない（プロセスを止める・起動し直す・コードを書き換えるなど）。どこが原因で止まったかを報告し、直すなら直し方を添える。
 '''
@@ -56,9 +57,8 @@ async def run(row):
         state.publish(job_id, 'progress', '実行先を確認しています')
         project = await projects.get_project_by_room_id(row['room_id'])
         if not project: raise RuntimeError('実行先のプロジェクトが見つかりません')
-        message = await chat.send_message(row['room_id'], row['user_id'], '【あなたの依頼・Done経由】\n' + spec['task'],
-                                          sender_type='system', message_id=report_id(job_id + ':request'))
-        run_row = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'],
+        message = await relay_request(chat, row, spec, job_id)
+        run_row = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'] if message else None,
                                         metadata={'started_by': 'command_center', 'watch_id': job_id, 'engine': 'api', 'origin_room_id': spec['origin_room_id']})
         initial_state = state.read(job_id)['state']
         state.publish(job_id, 'progress', '依頼内容を確認しています', run_id=run_row['id'], state='running' if initial_state == 'queued' else initial_state)
@@ -75,7 +75,7 @@ async def run(row):
         # Its outcome is in the report that followed it; voice_past leaves these copies out for the same reason.
         history = ['部屋の記録（過去の発言）: ' + str(m.get('content', ''))[:6000]
                    for m in sorted(recent, key=lambda m: m.get('created_at') or '')
-                   if m.get('id') != message['id'] and not str(m.get('content', '')).startswith('【あなたの依頼・Done経由】')]
+                   if (not message or m.get('id') != message['id']) and not str(m.get('content', '')).startswith('【あなたの依頼・Done経由】')]
         state.change(job_id, lambda s: s.update(instructions=instructions, history=history))
         env = {**os.environ, 'DAN_USER_ID': row['user_id'], 'DAN_SESSION_ID': row['room_id'], 'DAN_BROWSER_ROOM': state.browser_room(job_id),
                'DAN_COMMAND_JOB_ID': job_id, 'DAN_BROWSER_HEADLESS': '1', 'DAN_BROWSER_OBSERVATION': 'dom', 'DAN_CORE_PORT': '9000',

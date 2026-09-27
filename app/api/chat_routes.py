@@ -126,12 +126,17 @@ def _get_session_title(room_id: str) -> str:
 
 
 def _fetch_unseen_voice_digest(room_id: str) -> str:
-    """直近のダンのテキスト発言より後に入った音声会話（🎙）をダイジェスト化する。
+    """直近のダン（チャットのターン）の返事より後に部屋へ入った、ダンがまだ読んでいない出来事をまとめる。
+    音声会話（🎙）と、作業の報告（ターン外で部屋に書かれたダンの行）。
 
-    音声モードの会話は DB（chat_messages）に直接保存され、CLI セッションを
+    音声モードの会話と作業の報告は DB（chat_messages）に直接保存され、CLI セッションを
     経由しないため、そのままではテキスト側のダンの記憶に入らない。
     次のターンの冒頭に合流させることで「部屋=共有記憶」を双方向にする
     （音声側は read_room_history / 接続時注入で逆方向を担う）。
+
+    区切りは「チャットのターンが保存した返事」（ai_context に turn_id/blocks がある行）。以前は
+    ダンの行なら何でも区切りにしていたので、作業の報告が1件入るとそれより前の音声が
+    全部捨てられ、90分の音声指示を「正確には覚えていません」と答えた（2026-09-27）。
     """
     try:
         from app.services.supabase_client import get_supabase_client
@@ -139,30 +144,42 @@ def _fetch_unseen_voice_digest(room_id: str) -> str:
         sb = get_supabase_client().client
         result = (
             sb.table("chat_messages")
-            .select("sender_type,content,created_at")
+            .select("sender_type,content,created_at,ai_context")
             .eq("room_id", room_id)
             .order("created_at", desc=True)
-            .limit(60)
+            .limit(300)
             .execute()
         )
         msgs = list(reversed(result.data or []))
-        last_dan_idx = -1
+        last_turn_idx = -1
         for i, m in enumerate(msgs):
-            c = m.get("content") or ""
-            if m.get("sender_type") == "ai" and not c.startswith("🎙"):
-                last_dan_idx = i
-        voice = [m for m in msgs[last_dan_idx + 1 :] if (m.get("content") or "").startswith("🎙")]
-        if not voice:
-            return ""
+            ctx = m.get("ai_context") or {}
+            if m.get("sender_type") == "ai" and isinstance(ctx, dict) and (ctx.get("turn_id") or ctx.get("blocks")):
+                last_turn_idx = i
         lines = []
-        for m in voice[-30:]:
-            who = "ユーザー" if m.get("sender_type") == "human" else "あなた（音声モードの自分）"
-            lines.append(f"{who}: {(m.get('content') or '')[1:].strip()[:160]}")
-        digest = "\n".join(lines)[:2000]
+        for m in msgs[last_turn_idx + 1 :]:
+            c = (m.get("content") or "").strip()
+            if c.startswith("🎙"):
+                from app.api.voicelog_routes import voice_text, is_backchannel
+                who = "ユーザー" if m.get("sender_type") == "human" else "あなた（音声モードの自分）"
+                text = voice_text(c[len("🎙"):])
+                if not text or (who != "ユーザー" and is_backchannel(text)):
+                    continue
+                if lines and lines[-1].startswith(who + ": "):   # one utterance cut into segments
+                    lines[-1] += text[:600]
+                else:
+                    lines.append(f"{who}: {text[:600]}")
+            elif m.get("sender_type") == "ai" and c:
+                lines.append(f"作業の報告（部屋に届いた分）: {c[:1200]}")
+        if not lines:
+            return ""
+        digest = "\n".join(lines)
+        if len(digest) > 16000:
+            digest = "…（前略）\n" + digest[-16000:]
         return (
-            "【音声モードでの会話（この部屋であなた自身が音声で話した、まだ目を通していない分）】\n"
+            "【あなたがまだ目を通していない、この部屋の音声会話と作業の報告（古い順）】\n"
             + digest
-            + "\n【音声の会話ここまで。以下が今回のメッセージ】\n\n"
+            + "\n【ここまで。以下が今回のメッセージ】\n\n"
         )
     except Exception:
         return ""

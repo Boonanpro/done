@@ -1372,6 +1372,8 @@ def _save_ai_message_sync(
     # same payload; if attempt 1 actually landed (response lost), attempt 2
     # now fails with 23505 instead of inserting an identical second row.
     msg_id_local = str(uuid.uuid4())
+    from app.services.message_media import normalize
+    content = normalize(content)   # files Dan names show on the owner's screen (message_media)
     insert_data = {
         "id": msg_id_local,
         "room_id": room_id,

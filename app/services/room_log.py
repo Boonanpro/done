@@ -56,6 +56,9 @@ def append_local(
     from app.services.room_feed import publish_message
 
     sb = get_supabase_client().client
+    if sender_type not in ("human", "user"):
+        from app.services.message_media import normalize
+        content = normalize(content)   # files Dan names show on the owner's screen (message_media)
     msg_id = message_id or str(uuid.uuid4())
     row = {
         "id": msg_id,

@@ -36,19 +36,32 @@ def where_it_is(job):
     return '、'.join(x for x in (f'ブラウザは{page}を開いている' if page else '', doing) if x)
 
 
+def quiet_seconds(s):
+    """Seconds since the job last did anything: a running job quiet for minutes is stuck, and the owner should hear it
+    (three jobs sat 20-37 minutes on 2026-09-27 while the call said they were working)."""
+    from datetime import datetime, timezone
+    try:
+        return int((datetime.now(timezone.utc) - datetime.fromisoformat(str(s.get('updated_at')).replace('Z', '+00:00'))).total_seconds())
+    except Exception:
+        return None
+
+
 def work_status(jobs):
     """What Dan is doing right now, from the job files on this machine, in a few hundred characters."""
     rows = []
     for s in list(jobs)[:3]:
         events = s.get('events', [])
-        rows.append({'依頼': s.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:160],
+        rows.append({'id': s.get('id'),
+                     '依頼': s.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:160],
                      '状態': STATE_WORDS.get(s.get('state'), s.get('state')),
                      '今やっていること': next((e['text'][:200] for e in reversed(events) if e.get('kind') == 'progress'), '') if s.get('state') in ('running', 'queued') else '',
                      '今の画面と操作': where_it_is(s) if s.get('state') in ('running', 'queued', 'awaiting_confirmation', 'paused') else '',
                      '承認を待っている内容': ((s.get('confirmation') or {}).get('summary') or '')[:300],
-                     '結果': str(s.get('result') or '')[:600]})
+                     '結果': str(s.get('result') or '')[:600],
+                     '最後に動いてから(秒)': quiet_seconds(s) if s.get('state') in ('running', 'queued') else None})
     return {'work_status': rows, 'note': 'これがダンの作業の今の状況の全部。聞かれたことに、この中から一言二言で答える。'
-            '道具の名前や「確認待ち」などの内部の言葉はそのまま読まず、普通の言葉に言い換える。作業が無ければ「今は何も作業していません」。'}
+            '道具の名前や「確認待ち」などの内部の言葉はそのまま読まず、普通の言葉に言い換える。作業が無ければ「今は何も作業していません」。'
+            '動いている作業で「最後に動いてから(秒)」が180を超えていれば、止まっている可能性があると本人に伝え、やり直すか聞く。'}
 
 
 async def calendar(user_id, days=14, start=None):
