@@ -496,6 +496,16 @@ def run_codex_process(
 
     stderr_lines: list[str] = []
 
+    def _mid_turn_error(message: str) -> None:
+        """An error while the turn goes on (a tool or a retried request failed) is a line in the process monitor, not the
+        turn's end. Sent as the turn's error, it made the chat mark the run failed and the screen drop its monitor while
+        Codex kept working (2026-09-28 17:41, after an image generation). The turn's outcome is written when it ends
+        (turn.failed / exit code / result, below)."""
+        cr._cli_debug(f"[CODEX] mid-turn error: {message[:300]}")
+        if project_id:
+            cr._save_execution_event_sync(room_id, "error", project_id=project_id, run_id=run_id,
+                                          turn_id=turn_id, content=message[:2000])
+
     def _drain_stderr():
         try:
             for line in process.stderr:
@@ -643,7 +653,7 @@ def run_codex_process(
                         cr._cli_debug(f"[CODEX] notice: {ev['message'][:160]}")
                     else:
                         errors.append(ev["message"])
-                        event_queue.put(ev)
+                        _mid_turn_error(ev["message"])
         elif etype == "turn.completed":
             usage = data.get("usage") or {}
         elif etype == "turn.failed":
@@ -660,7 +670,7 @@ def run_codex_process(
                 cr._cli_debug(f"[CODEX] notice: {msg[:160]}")
             elif msg:
                 errors.append(msg)
-                event_queue.put({"type": "error", "message": msg})
+                _mid_turn_error(msg)
 
     with cr._process_lock:
         if cr._active_processes.get(room_id) is process:

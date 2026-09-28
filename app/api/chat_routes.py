@@ -2658,8 +2658,8 @@ async def send_dan_message_stream(
                             pass
 
                     elif event["type"] == "error":
-                        if run_id:
-                            await run_service.update_run(run_id, state="failed")
+                        # The run's state is written by the runner that owns the turn when the turn ends (a turn whose
+                        # work vanished is closed by run_reconciler). Writing 'failed' here closed live turns (2026-09-28).
                         run_state = "failed"
                         yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
                         # DB保存はCLIスレッドが実行済み（DB-first）
