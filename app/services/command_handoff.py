@@ -86,11 +86,7 @@ async def lineage(run_id):
 async def deliver(row):
     from app.services.command_center import execute, report_id
     spec = row['spec']
-    runs = await lineage(spec['run_id'])
-    for run in runs:
-        if run['state'] == 'running' and RunService._is_run_stale(run):
-            await RunService().update_run(run['id'], state='failed')
-            run['state'] = 'failed'
+    runs = await lineage(spec['run_id'])   # a run whose work died is closed by the Core's run_reconciler
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(spec['started_at'])).total_seconds()
     active = any(r['state'] in ('running', 'paused', 'awaiting_approval', 'awaiting_confirmation') for r in runs)
     if active:

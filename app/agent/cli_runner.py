@@ -1175,16 +1175,15 @@ def _update_run_sync(
 
 
 _RUN_HEARTBEAT_AT: dict[str, float] = {}
-_RUN_HEARTBEAT_INTERVAL = 15.0  # seconds; must stay well under run_service.STALE_RUN_SECONDS
+_RUN_HEARTBEAT_INTERVAL = 15.0  # seconds; updated_at shows the run moving (run_reconciler looks only at quiet runs)
 
 
 def _heartbeat_run_sync(run_id: Optional[str]) -> None:
     """Bump the run's updated_at so an active turn isn't mistaken for a zombie.
 
-    Called on every execution event (throttled). A long, genuinely-active turn
-    keeps updated_at fresh; if the turn dies without writing its final state, the
-    heartbeat stops and run_service.get_current_run sweeps it after
-    STALE_RUN_SECONDS so the mobile live bubble stops spinning. Best-effort.
+    Called on every execution event (throttled). A quiet run is only a candidate:
+    the Core's run_reconciler closes it only when no live work is behind it (a
+    missing heartbeat alone closed live turns, 2026-09-28). Best-effort.
     """
     if not run_id:
         return

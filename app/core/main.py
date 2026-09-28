@@ -156,6 +156,9 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.run_recovery import recover_orphaned_runs
         asyncio.create_task(recover_orphaned_runs())
+        # While this Core runs, it closes the runs whose work is gone (it alone can see that)
+        from app.services import run_reconciler
+        asyncio.create_task(run_reconciler.loop())
     except Exception as e:
         logger.warning("run recovery failed to schedule: %s", e)
 

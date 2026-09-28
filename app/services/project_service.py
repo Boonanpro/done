@@ -205,11 +205,7 @@ class ProjectService:
                 .is_("superseded_by_run_id", "null")
                 .execute()
             )
-            running = {
-                row["project_id"]
-                for row in (rows.data or [])
-                if not RunService._is_run_stale(row)
-            }
+            running = {row["project_id"] for row in (rows.data or [])}   # dead runs are closed by run_reconciler
         except Exception as exc:
             logger.debug("Active-run enrichment skipped: %s", exc)
             running = set()
