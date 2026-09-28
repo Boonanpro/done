@@ -21,15 +21,19 @@ REASONING = os.environ.get('DAN_VOICE_BACKEND_REASONING', 'low')
 WORK_ENGINE = os.environ.get('DAN_VOICE_WORK_ENGINE', 'api')   # work started from a call: 'api' (Responses API worker, 2026-09-23) or 'cli' (Codex CLI)
 
 INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手は本人（このアカウントの持ち主）で、返事は声で読み上げられます。
-- 返事は普通の話し言葉で、聞かれたことに答える。道具の名前や内部の状態は書かない。
-- 返事はそのまま読み上げられ、声のモデルはもう受け答えの一言を言っている。作業を渡した・指示を届けた・開いただけで新しい事実が無い時は、返事を空にする。
+結果の返し方:
+- 返すのは、確かめた事実、終わったかどうか、次に何があるか（まだ確かめていない残りと、それを確かめる方法・かかる時間、次の手）。先に本人に聞くべきことがある時は、その1つだけを聞く。
+- 本人がまだ知らないことだけを伝える。この会話ですでに伝えたことは繰り返さない。声のモデルはもう受け答えの一言を言っているので、作業を渡した・指示を届けた・開いただけで新しい事実が無い時は、返事を空にする。
+- 確かめた値だけを使い、終わっていないことを終わったと言わない。
+- 道具の名前や内部の状態は言わない。
+道具と進め方:
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気や近くの店は get_location の現在地を使う。
 - ファイル・画像・動画・資料を「出して」「見せて」「貼って」「送って（この画面に）」と言われたら show_in_chat（1秒で本人のチャット画面に出る。画像・動画はその場に表示、資料は押せば開くリンク）。どのファイルか分からなければ room_files でこの部屋のファイル一覧（新しい順・何の資料か）を見て選ぶ。作業に渡したり、パソコンで開いたりしない。出せたら「出しました」とだけ言う。
 - パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
-- 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わず短く答える。
+- 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
 - 複数の道具が要る質問（本人の住所と外の情報を比べる等）は続けて呼び、まとめて答える。
 - 道具の結果の source は出どころ（どのアカウント・どのカレンダー・どの記録を見たか）。「何を見て言った」と聞かれた時にそれで答える。普段は言わない。
 - 取り返しのつかない確定（購入・送信・削除・支払い）の前だけ、内容と金額を言葉で伝えて本人の返事を待つ。それ以外は承認を求めず進める。
@@ -208,11 +212,13 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         context = json.dumps(dialogue[-8:], ensure_ascii=False)
         if len(context) <= 2600-len(task): task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context
         out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
+        # It used to say 「本人に今言うことはない」: after reading two mails and handing the EX check over, the call was silent
+        # for 70 s and the owner never heard what was already known or that the rest would take minutes (2026-09-26).
         others = [{'id': s['id'], '依頼': s.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:160]} for s in running]
         # Two jobs made the same header from opposite instructions (14:26 phone mock-up, 14:35 forest): the direction changed
         # and the older job kept going (2026-09-27).
         return {'accepted': bool(out.get('accepted')), 'job_id': (out.get('receipt') or {}).get('id'), 'other_running_jobs': others,
-                'note': '作業は始まった。結果は後で別に届く。本人に今言うことはない（確認中・時間がかかる等も言わない）。'
+                'note': '作業は始まった（何分かかかることが多い。結果は後で別に届く）。ここまでで分かったことと、何を見に行ったかを本人がまだ知らなければ、一言で返す。無ければ空。'
                         + ('ほかに動いている作業がある。今回の依頼で置き換わった・方針が変わった作業は steer_job の cancel（job_id 指定）で止める。関係ない作業はそのまま。' if others else '')}
     if name == 'job_status':
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)

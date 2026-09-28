@@ -371,6 +371,14 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           type:message.type,client_event_id:message.client_event_id,start_ms:message.start_ms,end_ms:message.end_ms,
           error:message.error ? {type:message.error.type,code:message.error.code,event_id:message.error.event_id} : undefined}));
         greeting.observe(message);
+        // The backend chose end_call: hang up here, now. The server's session.close reached OpenAI at once but the call
+        // stayed open another 4-9 s while Dan said only 「少々お待ちください」 (2026-09-26, three real calls).
+        const inner = message.type === 'response.event' ? message.event : null;
+        if (inner?.item?.type === 'function_call' && inner.item.name === 'end_call' && !endingRef.current) {
+          traceDelivery('end-call', {delegation_id: message.delegation_id});
+          finishRef.current();
+          return;
+        }
         // responses delegation: the backend model's final message is what gets spoken; release the hold when it is done
         if(message.type==='session.commentary.appended') { traceDelivery('result-ack',{
           event_id:message.client_event_id,start_ms:message.start_ms,end_ms:message.end_ms}); }
