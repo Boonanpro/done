@@ -685,12 +685,16 @@ async def _executor_worker():
     pages_state = {
         "current": None,  # 現在アクティブなページ
         "all_pages": [],  # 全てのページ
+        "unchecked": [],  # 開いたが、ポップアップかどうかをまだ見ていないページ
+        "openers": {},  # ポップアップ → それを開いた元のページ
+        "notice": None,  # 次の観測で伝える「画面を移った」知らせ
     }
 
     def on_new_page(new_page):
         """新しいタブ/ページが開かれた時のハンドラ"""
         print(f"[EXECUTOR_BROWSER] New tab opened: {new_page.url}")
         pages_state["all_pages"].append(new_page)
+        pages_state["unchecked"].append(new_page)
 
     try:
         print("[EXECUTOR_BROWSER] Starting Playwright...")
@@ -936,9 +940,65 @@ async def _page_evaluate(page, expression: str, arg=None):
         return await _cdp_evaluate(page, expression, arg)
 
 
+async def _follow_windows(pages_state: dict, context) -> None:
+    """サイトが開いたポップアップへ移り、閉じたら開いた元の画面へ戻る。
+
+    Google の本人確認（AdSense の税務フォーム）は accounts.google.com を別の小窓で開く。
+    座標クリックや遅れて開く小窓は click の「タブ数が増えたか」の確認を通らず、操作が
+    元の画面に残ったまま小窓を扱えなかった（2026-09-28）。人が見ているのと同じく、
+    前面に出た小窓を操作対象にする。小窓はログインが済むと自分で閉じるので、閉じた
+    ページを操作して「ブラウザが落ちた」と誤判定しないよう、元の画面へ戻す。
+    """
+    unchecked, pages_state["unchecked"] = pages_state.get("unchecked", []), []
+    openers = pages_state.setdefault("openers", {})
+    for new_page in unchecked:
+        if new_page.is_closed() or new_page is pages_state["current"]:
+            continue
+        try:
+            opener = await new_page.opener()
+        except Exception:
+            opener = None
+        if opener is None:
+            continue  # 本人やダンが開いたタブ。切り替えは click の判断に任せる
+        openers[new_page] = opener
+        pages_state["current"] = new_page
+        pages_state["notice"] = "サイトが別の小窓を開いたので、その小窓に操作対象を移しました。"
+        try:
+            await new_page.bring_to_front()
+            await new_page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        print(f"[EXECUTOR_BROWSER] Followed popup: {new_page.url}")
+
+    current = pages_state["current"]
+    if current is not None and not current.is_closed():
+        return
+    valid_pages = [p for p in pages_state["all_pages"] if not p.is_closed()]
+    pages_state["all_pages"] = valid_pages
+    back = pages_state["openers"].pop(current, None)
+    pages_state["openers"] = {k: v for k, v in pages_state["openers"].items() if not k.is_closed()}
+    if back is None or back.is_closed():
+        back = valid_pages[-1] if valid_pages else None
+    if back is None:
+        back = await context.new_page()
+        pages_state["all_pages"].append(back)
+    pages_state["current"] = back
+    pages_state["notice"] = "小窓が閉じたので、元の画面に操作対象を戻しました。"
+    try:
+        await back.bring_to_front()
+    except Exception:
+        pass
+    print(f"[EXECUTOR_BROWSER] Popup closed; back to: {back.url}")
+
+
 async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
+    await _follow_windows(pages_state, context)
     page = pages_state["current"]
+
+    if cmd == "window_info":
+        notice, pages_state["notice"] = pages_state["notice"], None
+        return {"url": page.url, "popup": page in pages_state["openers"], "notice": notice}
 
     if cmd == "fill_form":
         from app.tools.browser_actions import fill_form
@@ -1778,6 +1838,18 @@ class ExecutorPageProxy:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None, lambda: _send_executor_command("switch_to_latest_tab")
+        )
+
+    async def window_info(self) -> dict:
+        """
+        操作対象の画面がサイトの開いた小窓か、小窓へ移った/戻った知らせがあるか
+
+        Returns:
+            {"url": str, "popup": bool, "notice": str | None}
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("window_info")
         )
 
     async def get_tab_count(self) -> dict:

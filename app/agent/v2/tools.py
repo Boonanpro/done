@@ -3316,6 +3316,14 @@ async def _get_browser_state_impl(page) -> Dict[str, Any]:
 
     # テキスト部分: URL + タイトル + ページ状態 + 要素一覧
     text_parts = [f"URL: {url}", f"タイトル: {title}"]
+    try:
+        window = await page.window_info()
+    except Exception:
+        window = {}
+    if window.get("notice"):
+        text_parts.insert(0, window["notice"])
+    if window.get("popup"):
+        text_parts.append("この画面はサイトが開いた小窓です。ログインや確認が済んで小窓が閉じると、元の画面に自動で戻ります。")
     if visible_text:
         text_parts.append(f'画面の本文{text_note}:\n'+visible_text)
 
@@ -3441,6 +3449,15 @@ async def _get_browser_state_impl(page) -> Dict[str, Any]:
     }
 
 
+async def _on_site_popup(page) -> bool:
+    """操作対象がサイトの開いた小窓か。Google の本人確認のように、サイト自身が
+    ログイン画面を小窓で開くのは正規の手順なので、ログイン画面ガードで戻さない。"""
+    try:
+        return bool((await page.window_info()).get("popup"))
+    except Exception:
+        return False
+
+
 async def _browser_expect_state(page, condition, login_was_authorized=None):
     verified = False
     try:
@@ -3450,7 +3467,7 @@ async def _browser_expect_state(page, condition, login_was_authorized=None):
         # A timeout says nothing about whether the action happened. Return the
         # actual screen; never repeat a click or submit automatically.
         pass
-    if login_was_authorized is False and _looks_like_login_url(page.url):
+    if login_was_authorized is False and _looks_like_login_url(page.url) and not await _on_site_popup(page):
         await page.go_back()
         verified = False
     state = await _get_browser_state(page)
@@ -3759,7 +3776,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                     await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     pass
-            if _looks_like_login_url(page.url) and not login_was_authorized:
+            if _looks_like_login_url(page.url) and not login_was_authorized and not await _on_site_popup(page):
                 try:
                     from app.services import browser_recipes as _memory
                     _memory.distrust(_browser_auth_state.get("target_url") or page.url)
