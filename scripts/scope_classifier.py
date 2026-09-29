@@ -143,6 +143,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "skills-lock.json",
     # ops / tooling
     "scripts/**",
+    "frontend/scripts/**",
     "tests/**",
     "tests_e2e/**",
     "mobile/**",
