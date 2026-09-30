@@ -62,13 +62,12 @@ async def run(row):
                                         metadata={'started_by': 'command_center', 'watch_id': job_id, 'engine': 'api', 'origin_room_id': spec['origin_room_id']})
         initial_state = state.read(job_id)['state']
         state.publish(job_id, 'progress', '依頼内容を確認しています', run_id=run_row['id'], state='running' if initial_state == 'queued' else initial_state)
-        if os.environ.get('DAN_API_JOB_FULL_PROMPT') == '1':
-            instructions = await asyncio.to_thread(_build_system_prompt, project.get('title', ''), project.get('description') or '',
-                                                   project.get('status') or 'in_progress', latest_user_message=spec['task'],
-                                                   room_id=row['room_id'], user_id=row['user_id'], include_room_role=False) + '\n' + job_rules()
-        else:
-            # A job needs the job's rules, not the whole persona (13k characters resent on every call)
-            instructions = job_instructions(project.get('title', ''))
+        # Dan's one core brief (the same as chat Dan's: the owner, the persona, how Dan works, the saved information, the
+        # workspace rules), then this surface's own job rules. Until 2026-09-30 a job read only the 1,300 characters of
+        # job rules, so work asked for by voice was done by a Dan that knew little of the owner or of how chat Dan works.
+        from app.services.dan_core import shared
+        instructions = await asyncio.to_thread(shared, row['room_id'], row['user_id'], project.get('title', ''), project.get('description') or '')
+        instructions += chr(10) * 2 + '# 作業担当としてのきまり' + chr(10) + job_rules()
         recent = await chat.get_messages(row['room_id'], row['user_id'], limit=8)
         # The relayed copy of an earlier request (【あなたの依頼・Done経由】…) reads like an instruction: a job did that old
         # request instead of its own (2026-09-24: asked for a train, answered a Shinkansen search from two jobs before).

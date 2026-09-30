@@ -147,6 +147,9 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         files = await room_files.listing(body.room_id, user.user_id, limit=15)
     except Exception:
         files = []
+    # Dan's one core brief for this room (the same as chat Dan's), built off the loop before the session config needs it
+    from app.services.dan_core import shared
+    await asyncio.to_thread(shared, body.room_id, user.user_id)
     pending_id = 'pending-' + uuid4().hex
     register(pending_id, user.user_id, room_id=body.room_id)
     bound = False
@@ -154,7 +157,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         async with httpx.AsyncClient(timeout=40) as client:
             response = await client.post('https://api.openai.com/v1/live/sessions',
                 headers={'Authorization': 'Bearer ' + settings.OPENAI_API_KEY},
-                json={'session': session_config(history, timezone=body.timezone, files=files),
+                json={'session': session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id),
                     'transport': {'type': 'webrtc', 'sdp': body.sdp}})
         data = response.json()
         if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):

@@ -25,7 +25,7 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 返すのは、確かめた事実、終わったかどうか、次に何があるか（まだ確かめていない残りと、それを確かめる方法・かかる時間、次の手）。先に本人に聞くべきことがある時は、その1つだけを聞く。
 - 本人がまだ知らないことだけを伝える。この会話ですでに伝えたことは繰り返さない。声のモデルはもう受け答えの一言を言っているので、作業を渡した・指示を届けた・開いただけで新しい事実が無い時は、返事を空にする。
 - 確かめた値だけを使い、終わっていないことを終わったと言わない。
-- 道具の名前や内部の状態は言わない。
+- 道具の名前や内部の状態は言わない。返事は読み上げられるので、太字・見出し・箇条書きの記号・表を使わず、ふつうの文で書く。
 道具と進め方:
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気や近くの店は get_location の現在地を使う。
@@ -117,8 +117,14 @@ def now_line():
     return f"通話を始めた時の日時: {now.strftime('%Y年%m月%d日 %H:%M')}（{'月火水木金土日'[now.weekday()]}曜日、日本時間）。"
 
 
-def delegation():
-    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': INSTRUCTIONS + chr(10) + now_line() + chr(10) + remembered() + catalog(), 'tools': tools(), 'tool_choice': 'auto',
+def delegation(room_id=None, user_id=None, title=''):
+    """The Live delegation: the backend model and what it is told. With the room and the owner, the brief is Dan's one
+    core (dan_core.shared: the same as chat Dan's) and the voice rules come after it as this surface's own."""
+    head = ''
+    if room_id and user_id:
+        from app.services.dan_core import shared
+        head = shared(room_id, user_id, title) + chr(10) * 2 + '# 声の裏側としてのきまり' + chr(10)
+    return {'type': 'responses', 'responses': {'model': BACKEND_MODEL, 'instructions': head + INSTRUCTIONS + chr(10) + now_line() + chr(10) + remembered() + catalog(), 'tools': tools(), 'tool_choice': 'auto',
                                               'parallel_tool_calls': True, 'reasoning': {'effort': REASONING}}}
 
 
