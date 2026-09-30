@@ -53,6 +53,12 @@ async def lifespan(app: FastAPI):
     # 内部APIへ転送される（送信案カード等が画面へ即時に届く）。
     from app.services.room_feed import mark_core_process
     mark_core_process()
+    # Work state goes to the same feed the moment its file changes (the call screen's line, live).
+    try:
+        from app.services import job_feed
+        job_feed.start()
+    except Exception as e:
+        logger.warning("job feed failed to start: %s", e)
 
     # Browser processes must belong to Core, not a short-lived Codex MCP job.
     from app.services.browser_lifecycle import initialize_core

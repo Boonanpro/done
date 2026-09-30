@@ -501,7 +501,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       startDeadline = Date.now() + 30000;
       pollJobs = async () => {
         if (!live() || !started) return;
-        greeting.tick();
         if (polling) return;
         polling = true;
         try {
@@ -531,9 +530,24 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           }
         } finally { polling = false; }
       };
-      // Android too, but only while the app is on screen (the phone carries the audio in the background either way).
-      timer = setInterval(() => { if (Platform.OS !== 'android' || AppState.currentState === 'active') void pollJobs?.(); },
-        Platform.OS === 'android' ? 3000 : 1500);
+      // Work state arrives pushed (the app's feed: 'dan-job', the moment a job's file changes on the server). The list is
+      // read once when the call starts and when the app comes back on screen; the timer only drives the greeting.
+      let seeded = false;
+      timer = setInterval(() => {
+        greeting.tick();
+        if (!seeded && started) { seeded = true; void pollJobs?.(); }
+      }, 1500);
+      const lastSeq: Record<string, number> = {};
+      const pushed = DeviceEventEmitter.addListener('dan-job', (d: {room_id?: string; job_id?: string; state?: string; seq?: number; text?: string; line?: string | null}) => {
+        if (!live() || d?.room_id !== roomId) return;
+        workingJob = d.state === 'queued' || d.state === 'running';
+        serverLine = typeof d.line === 'string' ? d.line : null;
+        showActivity();
+        if (d.job_id && d.text && (d.seq || 0) > (lastSeq[d.job_id] || 0)) { lastSeq[d.job_id] = d.seq || 0; pushActivity(d.text); }
+      });
+      const resumed = AppState.addEventListener('change', (next) => { if (next === 'active') void pollJobs?.(); });
+      const priorCleanup = cleanupRef.current;
+      cleanupRef.current = () => { pushed.remove(); resumed.remove(); priorCleanup(); };
     } catch (cause) {
       if (!live()) return;
       disconnect(); setError(cause instanceof Error ? cause.message : String(cause)); setStatus('error');

@@ -35,6 +35,7 @@ import {
   View,
   type StyleProp,
   type ViewStyle,
+  DeviceEventEmitter,
 } from 'react-native';
 import { animateNextLayout, pressedScale } from './motion';
 import { MediaGrid } from './media-grid';
@@ -1948,7 +1949,7 @@ function AppMain() {
   // アプリが前面にある間1本の SSE をつなぎ、全部屋の新着をメモリ/端末内の写しへ差し込む。
   // 復帰時は rooms-delta で「最後に受け取った時刻以降」を1往復で追いつく。
   // 追いついた後は写しが最新なので、部屋を開いても「最新の状態を取得中…」を出さない。
-  const feedRef = useRef<{ es: EventSource<'hello' | 'message'> | null; lastAt: string | null; fresh: boolean; syncing: boolean }>(
+  const feedRef = useRef<{ es: EventSource<'hello' | 'message' | 'job'> | null; lastAt: string | null; fresh: boolean; syncing: boolean }>(
     { es: null, lastAt: null, fresh: false, syncing: false },
   );
   const applyFeedMessage = useCallback((msg: MessageResponse) => {
@@ -2017,7 +2018,7 @@ function AppMain() {
     const f = feedRef.current;
     const connect = () => {
       if (closed || AppState.currentState !== 'active') return;
-      const es = new EventSource<'hello' | 'message'>(`${API_BASE_URL}/api/v1/chat/feed`, {
+      const es = new EventSource<'hello' | 'message' | 'job'>(`${API_BASE_URL}/api/v1/chat/feed`, {
         headers: { Authorization: `Bearer ${token}` },
         pollingInterval: 0,
       });
@@ -2041,6 +2042,14 @@ function AppMain() {
         try {
           const d = JSON.parse((e as { data: string }).data) as { message: MessageResponse };
           if (d?.message) applyFeedMessage(d.message);
+        } catch {
+          /* ignore */
+        }
+      });
+      // A job's state changed (server watches the job files): the call screen shows it at once, no polling.
+      es.addEventListener('job', (e) => {
+        try {
+          DeviceEventEmitter.emit('dan-job', JSON.parse((e as { data: string }).data));
         } catch {
           /* ignore */
         }
