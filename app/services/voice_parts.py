@@ -65,9 +65,10 @@ def work_status(jobs):
 
 
 def status_line(jobs):
-    """One line for the call screen: what the room's work is doing now, or that it stopped. The screen used to show only
-    「作業中」, and on Android nothing at all; on 2026-09-28 two jobs failed the moment they started and the owner, on the
-    phone, could not tell whether anything was happening. None when there is nothing worth showing."""
+    """One short English line for the call screen (the owner's choice, 2026-10-01): what the room's handed-off work is
+    doing now, or that it stopped. The screen used to show only 「作業中」, and on Android nothing at all; on 2026-09-28
+    two jobs failed the moment they started and the owner, on the phone, could not tell whether anything was happening.
+    None when there is nothing worth showing."""
     from datetime import datetime, timezone
     def age(stamp):
         try: return (datetime.now(timezone.utc) - datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))).total_seconds()
@@ -79,17 +80,19 @@ def status_line(jobs):
     state = s.get('state')
     if state in ('queued', 'running'):
         took = int(age(s.get('created_at')))
-        doing = where_it_is(s) or next((e['text'] for e in reversed(s.get('events', [])) if e.get('kind') == 'progress'), '')
-        stuck = '（しばらく動いていません）' if (quiet_seconds(s) or 0) > 180 else ''
-        return f"作業中 {took // 60}:{took % 60:02d}{stuck}" + (f"・{doing}" if doing else '')
+        text = str((s.get('last_observation') or {}).get('text') or '')
+        url = re.search(r'URL:\s*(\S+)', text)
+        site = re.sub(r'^https?://(www\.)?([^/]+).*$', r'\2', url.group(1)) if url else ''
+        stuck = ' (no progress)' if (quiet_seconds(s) or 0) > 180 else ''
+        return f"Working {took // 60}:{took % 60:02d}{stuck}" + (f" · {site}" if site else '')
     if state == 'awaiting_confirmation':
-        return '承認待ち: ' + str((s.get('confirmation') or {}).get('summary') or '確定の前の確認')[:80]
+        return 'Waiting for your OK'
     if state == 'paused':
-        return '一時停止中'
+        return 'Paused'
     if state == 'failed' and age(s.get('updated_at')) < 600:
-        return '作業が止まりました: ' + str(s.get('error') or '理由不明')[:80]
+        return 'Stopped: ' + str(s.get('error') or 'unknown reason').replace('作業を停止しました: ', '')[:70]
     if state == 'completed' and age(s.get('updated_at')) < 60:
-        return '作業が終わりました'
+        return 'Done'
     return None
 
 

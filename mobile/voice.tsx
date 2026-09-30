@@ -34,6 +34,18 @@ import { startVoiceBackground, stopVoiceBackground, onVoiceEnd, onVoiceTick, mar
 import { WorkWaiting, isWorking } from '../frontend/src/components/voice/work-waiting';
 
 type RtEvent = { type: string; [key: string]: unknown };
+
+// The backend's own tools, as the call screen names them (short English, the owner's choice 2026-10-01).
+const TOOL_LINES: Record<string, string> = {
+  web_search: 'Searching the web', get_calendar: 'Checking calendar', search_records: 'Searching records',
+  get_saved_information: 'Checking saved info', get_location: 'Checking location', open_on_pc: 'Opening on PC',
+  list_operations: 'Checking saved steps', replay_operation: 'Replaying steps', start_work: 'Handing off work',
+  job_status: 'Checking work', steer_job: 'Updating work', dan_tool_help: 'Working', dan_tool: 'Working',
+};
+const DAN_TOOL_LINES: Record<string, string> = {
+  lookup: 'Looking it up', browser: 'Using the browser', browser_script: 'Using the browser', desktop: 'Using the PC',
+  read_url: 'Reading a page', compose_message: 'Drafting a message', calendar: 'Checking calendar', watch: 'Setting a reminder',
+};
 type Status = 'idle' | 'connecting' | 'connected' | 'ending' | 'error';
 
 
@@ -230,6 +242,13 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     let nextDiagnostic = 0;
     let startDeadline = 0;
     let workingJob = false, metering = false;
+    // What the call screen shows: the backend's own tool, the moment the voice channel says it chose one (toolLine,
+    // live, no polling), else the server's line about handed-off work (serverLine, polled).
+    let toolLine: string | null = null, serverLine: string | null = null, callsInResponse = 0;
+    const showActivity = () => setCurrentActivity(toolLine || serverLine || (workingJob ? 'Working' : null));
+    // Hang-up: wait for Dan to finish saying 「はい、切ります」 before closing (it was cut off mid-word, 2026-10-01).
+    let lastDanSpeech = 0, hangupAt = 0;
+    let hangupTimer: ReturnType<typeof setInterval> | undefined;
     let audioTimer: ReturnType<typeof setInterval> | undefined;
     const waiting = new WorkWaiting(setWorkWaiting);
     const measureWaiting = async () => {
@@ -273,6 +292,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       if (pcRef.current?._pcId != null) unbindRemoteAudio(pcRef.current._pcId);
       clearInterval(audioTimer); waiting.close();
       clearInterval(timer); clearTimeout(deadline); flush('user'); flush('assistant');
+      clearInterval(hangupTimer);
       nativeTick?.remove();
     };
     const request = async (path: string, payload: Record<string, unknown>) => {
@@ -375,9 +395,34 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         // stayed open another 4-9 s while Dan said only 「少々お待ちください」 (2026-09-26, three real calls).
         const inner = message.type === 'response.event' ? message.event : null;
         if (inner?.item?.type === 'function_call' && inner.item.name === 'end_call' && !endingRef.current) {
-          traceDelivery('end-call', {delegation_id: message.delegation_id});
-          finishRef.current();
+          if (!hangupAt) {
+            traceDelivery('end-call', {delegation_id: message.delegation_id});
+            hangupAt = Date.now();
+            // close once Dan has been quiet for a moment (a spoken 「切ります」 is finished), at most 4 s after
+            hangupTimer = setInterval(() => {
+              const now = Date.now();
+              if ((now - lastDanSpeech > 900 && now - hangupAt > 300) || now - hangupAt > 4000) {
+                clearInterval(hangupTimer); finishRef.current();
+              }
+            }, 150);
+          }
           return;
+        }
+        if (inner) {
+          const kind = String(inner.type || '');
+          if (kind === 'response.created') callsInResponse = 0;
+          if (kind === 'response.output_item.added' && inner.item?.type === 'function_call') {
+            callsInResponse++;
+            toolLine = TOOL_LINES[String(inner.item.name)] || 'Working';
+            showActivity();
+          }
+          if (kind === 'response.output_item.done' && inner.item?.type === 'function_call' && inner.item.name === 'dan_tool') {
+            try { toolLine = DAN_TOOL_LINES[JSON.parse(inner.item.arguments || '{}').name] || toolLine; showActivity(); } catch {}
+          }
+          if ((kind === 'response.output_item.done' && inner.item?.type === 'message') || kind === 'response.failed'
+              || (kind === 'response.completed' && callsInResponse === 0)) {
+            toolLine = null; showActivity();
+          }
         }
         // responses delegation: the backend model's final message is what gets spoken; release the hold when it is done
         if(message.type==='session.commentary.appended') { traceDelivery('result-ack',{
@@ -419,6 +464,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           if (role === 'user') {
           }
           buffers[role] += String(message.delta || ''); ends[role] = Number(message.end_ms) || 0;
+          if (role === 'assistant') lastDanSpeech = Date.now();
           if (role === 'user') latestUserRef.current = buffers.user;
           clearTimeout(flushTimers[role]); flushTimers[role] = setTimeout(() => flush(role), 2500);
           flushAt[role] = Date.now() + 2500;
@@ -476,8 +522,8 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           workingJob = ((data.jobs || []) as LiveJob[]).some(job => ['queued','running'].includes(job.state));
           // One line from the server: what the work is doing now, or that it stopped (2026-09-30: only 「作業中」 before,
           // and on Android nothing, so a job that failed at once looked like work in progress).
-          const line = typeof data.line === 'string' ? data.line : null;
-          setCurrentActivity(line || (workingJob ? '作業中' : null));
+          serverLine = typeof data.line === 'string' ? data.line : null;
+          showActivity();
           for (const {job,event} of jobs.updates((data.jobs || []) as LiveJob[])) {
             console.info('DanVoice job_event_received',JSON.stringify({job_id:job.id,state:job.state,seq:event.seq,received_at:Date.now()}));
             traceDelivery('job-received',{job_id:job.id,state:job.state,seq:event.seq,kind:event.kind});
@@ -584,7 +630,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             <Text style={vstyles.callTitle}>Dan</Text>
             {!!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
             <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
-            {status === 'connected' && !!currentActivity && <Text accessibilityLiveRegion="polite" style={[vstyles.statusText, currentActivity.startsWith('作業が止まりました') && {color: '#e5534b'}]} numberOfLines={2}>{currentActivity}</Text>}
+            {status === 'connected' && !!currentActivity && <Text accessibilityLiveRegion="polite" style={[vstyles.statusText, currentActivity.startsWith('Stopped') && {color: '#e5534b'}]} numberOfLines={2}>{currentActivity}</Text>}
             {status === 'error' && <Text style={vstyles.statusText}>{error}</Text>}
             {status === 'error' && <Pressable accessibilityRole="button" style={vstyles.retryButton} onPress={() => void connect()}><Text style={vstyles.retryText}>再接続</Text></Pressable>}
           </View>
