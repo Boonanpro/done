@@ -19,6 +19,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { RTCPeerConnection, mediaDevices } from 'react-native-webrtc';
 import { withAudioRecovery } from './voice-sdp';
+import { ShimmerLine } from './shimmer-line';
 import { reportLocation } from './location-report';
 import InCallManager from 'react-native-incall-manager';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
@@ -644,7 +645,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             <Text style={vstyles.callTitle}>Dan</Text>
             {!!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
             <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
-            {status === 'connected' && !!currentActivity && <Text accessibilityLiveRegion="polite" style={[vstyles.statusText, currentActivity.startsWith('Stopped') && {color: '#e5534b'}]} numberOfLines={2}>{currentActivity}</Text>}
+            {status === 'connected' && !!currentActivity && <ShimmerLine text={currentActivity.length > 52 ? currentActivity.slice(0, 51) + '…' : currentActivity} color={currentActivity.startsWith('Stopped') ? '#e5534b' : '#a49d92'} />}
             {status === 'error' && <Text style={vstyles.statusText}>{error}</Text>}
             {status === 'error' && <Pressable accessibilityRole="button" style={vstyles.retryButton} onPress={() => void connect()}><Text style={vstyles.retryText}>再接続</Text></Pressable>}
           </View>
