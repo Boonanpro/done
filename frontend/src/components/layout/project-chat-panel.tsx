@@ -1,6 +1,6 @@
 'use client';
 
-import { mergeVoiceFragments, tidyRelayMessage } from '@/lib/voice-fragments';
+import { collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -2298,7 +2298,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
     type TimedItem = { item: DisplayItem; sortKey: number; subKey: number };
     const timedItems: TimedItem[] = [];
     // 音声の断片（同じ話し手の続き）は1つの吹き出しにまとめ、ダンの相づちだけの行は出さない
-    const chronologicalMessages = mergeVoiceFragments([...messages].reverse()).map((m) => tidyRelayMessage(m, projectId));
+    const chronologicalMessages = collapseCalls([...messages].reverse()).map((m) => tidyRelayMessage(m, projectId));
     const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
     const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
     // Anchor the live execution block to the current RUN's start, not the last

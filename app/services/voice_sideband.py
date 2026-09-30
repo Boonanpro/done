@@ -193,10 +193,25 @@ async def job_feed(send, user_id, room_id, record, connected_at):
                 record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(text))
 
 
+async def call_log(room_id, user_id, began, seconds):
+    """The room's record of a call, like a phone's call history: one line with when and how long. The call's words stay
+    in the room's history for Dan (🎙 lines) but the screens show this line instead of them (owner, 2026-09-30: the
+    transcript made the chat unreadable; a call is remembered as a call). Dated at the call's start, so it sits where the
+    call happened among the reports and anything shown during it."""
+    from zoneinfo import ZoneInfo
+    from app.services.chat_service import ChatService
+    local = ZoneInfo('Asia/Tokyo')
+    start = began.astimezone(local)
+    end = datetime.fromtimestamp(began.timestamp() + seconds, local)
+    length = f'{seconds // 60}分{seconds % 60}秒' if seconds >= 60 else f'{seconds}秒'
+    await ChatService().send_message(room_id, user_id, f'📞 ダンと通話 {start:%H:%M}〜{end:%H:%M}（{length}）',
+                                     sender_type='system', created_at=began.isoformat())
+
+
 async def _run(session_id, user_id, room_id, api_key, own):
     import websockets
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
-    started = time.monotonic()
+    started, began = time.monotonic(), datetime.now(timezone.utc)
     counts, dialogue, working = {}, Dialogue(), set()
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
@@ -234,3 +249,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
     finally:
         for task in working: task.cancel()
         record('sideband_closed', seconds=round(time.monotonic()-started), counts=dict(sorted(counts.items(), key=lambda x: -x[1])[:20]))
+        try:
+            await call_log(room_id, user_id, began, round(time.monotonic()-started))
+        except Exception:
+            logger.exception('call log not written room=%s', room_id)

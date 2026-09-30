@@ -140,7 +140,9 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         return {'requests': jobs, 'live_jobs': live_jobs}
     if action == 'jobs':
         from app.services.command_job_state import list_owned, public
-        return {'jobs':[public(s) for s in await asyncio.to_thread(list_owned,user_id,room_id)]}
+        from app.services.voice_parts import status_line
+        owned_jobs = await asyncio.to_thread(list_owned,user_id,room_id)
+        return {'jobs':[public(s) for s in owned_jobs], 'line': status_line(owned_jobs)}
     if action == 'control_job':
         from app.services.command_job_state import control, public
         operation = str(params.get('operation') or '')

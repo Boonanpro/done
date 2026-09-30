@@ -1,6 +1,6 @@
 """Stop dan core + sandbox (listeners on 9000/8000 and their start_dan_core/uvicorn
 process tree), wait for the ports to free. Launching a fresh core is done
-separately so it can run in the background.
+separately so it can run in the background. After it starts, scripts/verify_dan.py checks that real work goes through.
 """
 import sys
 import time
@@ -118,6 +118,7 @@ def main():
         print("WARNING: ports still occupied")
         sys.exit(1)
     print("OK: 9000 and 8000 are free")
+    print("next: start the core, then run  python scripts/verify_dan.py  (a real job through the call entry; health 200 is not enough)")
 
 
 if __name__ == "__main__":

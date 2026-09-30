@@ -474,8 +474,10 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             console.info('DanVoice job_poll_recovered');
           }
           workingJob = ((data.jobs || []) as LiveJob[]).some(job => ['queued','running'].includes(job.state));
-          if(workingJob) setCurrentActivity('作業中');
-          else setCurrentActivity(null);
+          // One line from the server: what the work is doing now, or that it stopped (2026-09-30: only 「作業中」 before,
+          // and on Android nothing, so a job that failed at once looked like work in progress).
+          const line = typeof data.line === 'string' ? data.line : null;
+          setCurrentActivity(line || (workingJob ? '作業中' : null));
           for (const {job,event} of jobs.updates((data.jobs || []) as LiveJob[])) {
             console.info('DanVoice job_event_received',JSON.stringify({job_id:job.id,state:job.state,seq:event.seq,received_at:Date.now()}));
             traceDelivery('job-received',{job_id:job.id,state:job.state,seq:event.seq,kind:event.kind});
@@ -483,7 +485,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           }
         } finally { polling = false; }
       };
-      if (Platform.OS !== 'android') timer = setInterval(() => { void pollJobs?.(); }, 1500);
+      // Android too, but only while the app is on screen (the phone carries the audio in the background either way).
+      timer = setInterval(() => { if (Platform.OS !== 'android' || AppState.currentState === 'active') void pollJobs?.(); },
+        Platform.OS === 'android' ? 3000 : 1500);
     } catch (cause) {
       if (!live()) return;
       disconnect(); setError(cause instanceof Error ? cause.message : String(cause)); setStatus('error');
@@ -580,7 +584,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             <Text style={vstyles.callTitle}>Dan</Text>
             {!!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
             <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
-            {status === 'connected' && !!currentActivity && <Text accessibilityLiveRegion="polite" style={vstyles.statusText} numberOfLines={1}>{currentActivity}</Text>}
+            {status === 'connected' && !!currentActivity && <Text accessibilityLiveRegion="polite" style={[vstyles.statusText, currentActivity.startsWith('作業が止まりました') && {color: '#e5534b'}]} numberOfLines={2}>{currentActivity}</Text>}
             {status === 'error' && <Text style={vstyles.statusText}>{error}</Text>}
             {status === 'error' && <Pressable accessibilityRole="button" style={vstyles.retryButton} onPress={() => void connect()}><Text style={vstyles.retryText}>再接続</Text></Pressable>}
           </View>

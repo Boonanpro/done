@@ -216,3 +216,27 @@ console.log('test_chat_timeline: all assertions passed');
   if (merged[0].content !== '🎙 まあこれらを表示してあなたのスマホから') throw new Error('voice merge text: ' + merged[0].content);
   console.log('ok voice fragments');
 }
+
+// ── 通話は「📞 ダンと通話」の1行だけ（2026-09-30）──
+{
+  const { collapseCalls } = require('../chatTimeline');
+  const t = (m: number, s = 0) => new Date(Date.UTC(2026, 8, 30, 3, m, s)).toISOString();
+  const rows = [
+    // 以前の通話（サーバーの📞行なし）: 🎙 行の連なりが1行になる
+    { id: 'old1', sender_type: 'human', content: '🎙 請求書払って', created_at: t(0) },
+    { id: 'old2', sender_type: 'ai', content: '🎙 確認するね', created_at: t(0, 5) },
+    { id: 'rep', sender_type: 'ai', content: '請求書を確認しました。33,000円です。', created_at: t(1) },
+    { id: 'old3', sender_type: 'human', content: '🎙 うん払って', created_at: t(2) },
+    // 新しい通話: サーバーの📞行があるので 🎙 行は消えるだけ
+    { id: 'call', sender_type: 'system', content: '📞 ダンと通話 12:20〜12:23（3分12秒）', created_at: t(20) },
+    { id: 'new1', sender_type: 'human', content: '🎙 明日の予定は', created_at: t(20, 10) },
+    { id: 'new2', sender_type: 'ai', content: '🎙 10時から打ち合わせ', created_at: t(21) },
+    { id: 'text', sender_type: 'human', content: '普通のメッセージ', created_at: t(30) },
+  ];
+  const out = collapseCalls(rows);
+  const ids = out.map((m: { id: string }) => m.id).join(',');
+  if (ids !== 'old1,rep,call,text') throw new Error('call collapse ids: ' + ids);
+  if (out[0].sender_type !== 'system' || !out[0].content.startsWith('📞 ダンと通話 ')) throw new Error('old call row: ' + JSON.stringify(out[0]));
+  if (out.some((m: { content: string }) => m.content.startsWith('🎙'))) throw new Error('transcript line shown');
+  console.log('ok call collapse');
+}

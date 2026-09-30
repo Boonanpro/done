@@ -106,7 +106,9 @@ def _kill_pid(pid: int) -> None:
 
 
 def _kill_port(port: int) -> None:
-    out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, creationflags=NO_WINDOW).stdout
+    # netstat prints in the console code page (cp932 here): decoded as UTF-8 by text=True it came back None and the
+    # restart died after stopping the old server, leaving 3000 down (2026-09-30).
+    out = subprocess.run(["netstat", "-ano"], capture_output=True, encoding="mbcs", errors="replace", creationflags=NO_WINDOW).stdout or ""
     for line in out.splitlines():
         if f":{port} " in line and "LISTENING" in line:
             pid = line.split()[-1]

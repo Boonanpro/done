@@ -64,6 +64,35 @@ def work_status(jobs):
             '動いている作業で「最後に動いてから(秒)」が180を超えていれば、止まっている可能性があると本人に伝え、やり直すか聞く。'}
 
 
+def status_line(jobs):
+    """One line for the call screen: what the room's work is doing now, or that it stopped. The screen used to show only
+    「作業中」, and on Android nothing at all; on 2026-09-28 two jobs failed the moment they started and the owner, on the
+    phone, could not tell whether anything was happening. None when there is nothing worth showing."""
+    from datetime import datetime, timezone
+    def age(stamp):
+        try: return (datetime.now(timezone.utc) - datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))).total_seconds()
+        except Exception: return 1e9
+    jobs = list(jobs)
+    live = next((s for s in jobs if s.get('state') in ('queued', 'running', 'awaiting_confirmation', 'paused')), None)
+    s = live or (jobs[0] if jobs else None)
+    if not s: return None
+    state = s.get('state')
+    if state in ('queued', 'running'):
+        took = int(age(s.get('created_at')))
+        doing = where_it_is(s) or next((e['text'] for e in reversed(s.get('events', [])) if e.get('kind') == 'progress'), '')
+        stuck = '（しばらく動いていません）' if (quiet_seconds(s) or 0) > 180 else ''
+        return f"作業中 {took // 60}:{took % 60:02d}{stuck}" + (f"・{doing}" if doing else '')
+    if state == 'awaiting_confirmation':
+        return '承認待ち: ' + str((s.get('confirmation') or {}).get('summary') or '確定の前の確認')[:80]
+    if state == 'paused':
+        return '一時停止中'
+    if state == 'failed' and age(s.get('updated_at')) < 600:
+        return '作業が止まりました: ' + str(s.get('error') or '理由不明')[:80]
+    if state == 'completed' and age(s.get('updated_at')) < 60:
+        return '作業が終わりました'
+    return None
+
+
 async def calendar(user_id, days=14, start=None):
     """The owner's coming events. {'events': [...], 'source'} | {'expired': True} | {} when not connected."""
     from app.services.calendar_service import get_calendar_service

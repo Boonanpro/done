@@ -70,3 +70,57 @@ export function tidyRelayMessage<M extends VoiceLike>(msg: M, projectId?: string
   }
   return msg;
 }
+
+// 通話の中身は画面に出さず、通話ごとに「📞 ダンと通話 …」の1行にする（表示だけ。発話の 🎙 行は保存したままで、
+// ダンは読める）。本人の方針（2026-09-30）: 電話の履歴のように「いつ・何分話したか」だけが残ればよい。
+// 2026-09-30 以降の通話はサーバーがその1行を書く（開始時刻と長さ入り）。それより前の通話は 🎙 行の連なりから1行を作る。
+// 作業の報告や通話中に「出して」で出した物は通話の中身ではないので、そのまま残る。
+// mobile/chatTimeline.ts と frontend/src/lib/voice-fragments.ts に同じ関数がある（両方を同じに保つ）。
+const CALL = '📞';
+const CALL_GAP_MS = 5 * 60_000;
+
+function callLengthMs(content: string): number {
+  const m = content.match(/（(?:(\d+)分)?(\d+)秒）/);
+  return m ? (Number(m[1] || 0) * 60 + Number(m[2])) * 1000 : 0;
+}
+
+function clock(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** messages are chronological (oldest first). 🎙 lines are left out; each earlier call without the server's 📞 line
+ * becomes one system row at the call's first line. */
+export function collapseCalls<M extends VoiceLike>(messages: M[]): M[] {
+  const logged: Array<[number, number]> = [];
+  for (const m of messages) {
+    const content = m.content || '';
+    if (m.sender_type === 'system' && content.startsWith(CALL)) {
+      const t = new Date(m.created_at).getTime() || 0;
+      logged.push([t - 60_000, t + callLengthMs(content) + 60_000]);
+    }
+  }
+  const out: M[] = [];
+  let run: { row: M; index: number; first: number; last: number } | null = null;
+  const close = (open: { row: M; index: number; first: number; last: number } | null) => {
+    if (open) out[open.index] = { ...open.row, sender_type: 'system', content: `${CALL} ダンと通話 ${clock(open.first)}〜${clock(open.last)}` };
+  };
+  for (const m of messages) {
+    const content = m.content || '';
+    if (!content.startsWith(VOICE)) {
+      out.push(m);
+      continue;
+    }
+    const t = new Date(m.created_at).getTime() || 0;
+    if (logged.some(([from, to]) => t >= from && t <= to)) continue;
+    if (run && t - run.last <= CALL_GAP_MS) {
+      run.last = t;
+      continue;
+    }
+    close(run);
+    out.push(m);
+    run = { row: m, index: out.length - 1, first: t, last: t };
+  }
+  close(run);
+  return out;
+}

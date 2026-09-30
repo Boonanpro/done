@@ -3975,6 +3975,17 @@ function AppMain() {
                   </View>
                 );
               }
+              // 本人でもダンでもない行（通話の記録「📞 ダンと通話」、委譲の依頼、見張りの通知）は吹き出しにせず、
+              // 中央寄せの控えめな1行にする（Web版 project-chat-panel と同じ規約）。
+              if (msg.sender_type === 'system') {
+                return (
+                  <View style={{ alignItems: 'center', marginVertical: 6, paddingHorizontal: 12 }}>
+                    <View style={{ backgroundColor: 'rgba(127,127,127,0.14)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5, maxWidth: '90%' }}>
+                      <Text style={{ fontSize: 12, lineHeight: 17, color: '#8a8f98' }}>{msg.content}</Text>
+                    </View>
+                  </View>
+                );
+              }
               const mine = msg.sender_type === 'human';
               // ダンが読み込むまでの追い連絡は半透明＋「仮送信」で、読み込まれた
               // 時点（次のターンが始まった時点）で通常表示に固定される。
