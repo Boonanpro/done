@@ -13,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.services import command_job_state as state
-from app.services.command_job_runner import mark_status
+from app.services.command_job_runner import mark_status, relay_request
 
 JOB_INSTRUCTIONS = '''
 この依頼は独立した作業です。利用者との追加会話は同じ実行へ届きます。
