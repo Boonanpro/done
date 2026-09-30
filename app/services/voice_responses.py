@@ -58,8 +58,11 @@ TOOLS = [
     {'type': 'function', 'name': 'room_files', 'description': 'この部屋でこれまでに出た・作ったファイルの一覧（新しい順。名前・種類・日時・何の資料か）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'open_on_pc', 'description': 'このパソコンで、サイトやアプリを開く・起動する（開くだけ）。',
      'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（ログインして確認する、送信する、登録する、予約する、直す、作るなど複数手順のもの）。結果は後で別に届く。',
-     'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'}}, 'required': ['task'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（複数手順のもの）。結果は後で別に届く。kind=operate: ブラウザやサイトの手続き・確認・調べもの（ログインして確認する、送信する、登録する、予約する）。kind=make: ページ・動画・画像・資料・プログラムを作る・直すような重い制作（チャットのダンと同じ器で、部屋の記憶を持って作る）。',
+     'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'},
+                                                     'kind': {'type': 'string', 'enum': ['operate', 'make']},
+                                                     'model': {'type': 'string', 'enum': ['opus', 'fable', 'astra'], 'description': 'kind=make の時だけ。本人がモデルを指定した時だけ入れる（既定は opus）'}},
+                    'required': ['task', 'kind'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'job_status', 'description': '今動いている作業の様子（どの画面で何をしているか、結果）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
      'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'},
@@ -217,7 +220,9 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         task = '今回のユーザー発言（原文）:\n'+str(args.get('task') or '')[:2000]
         context = json.dumps(dialogue[-8:], ensure_ascii=False)
         if len(context) <= 2600-len(task): task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context
-        out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': WORK_ENGINE}, room_id, user_id)
+        making = args.get('kind') == 'make'
+        out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': 'make' if making else WORK_ENGINE,
+                             **({'model': args['model']} if making and args.get('model') else {})}, room_id, user_id)
         # It used to say 「本人に今言うことはない」: after reading two mails and handing the EX check over, the call was silent
         # for 70 s and the owner never heard what was already known or that the rest would take minutes (2026-09-26).
         others = [{'id': s['id'], '依頼': s.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:160]} for s in running]

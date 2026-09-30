@@ -232,10 +232,13 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     # consumed by older notification workers, which cannot execute this job.
     from app.services import command_job_state
     job_id = str(uuid4())
-    engine = 'api' if str(params.get('engine') or '') == 'api' else 'cli'   # api: Responses API worker; cli: Codex CLI (default)
+    requested = str(params.get('engine') or '')
+    # api: Responses API worker (operating: browser, sites, lookups); make: chat Dan's own harness in the room (Claude Code
+    # or Codex) for heavy making; cli: Codex CLI (default)
+    engine = requested if requested in ('api', 'make') else 'cli'
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
         origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine,
-        **({'model':str(params['model'])[:60]} if engine=='api' and params.get('model') else {}),
+        **({'model':str(params['model'])[:60]} if engine in ('api','make') and params.get('model') else {}),
         **({'replay':{'id':str(params['replay'].get('id'))[:40],'values':{str(k)[:60]:str(v)[:200] for k,v in (params['replay'].get('values') or {}).items()}}}
            if engine=='api' and isinstance(params.get('replay'),dict) else {}))
     try:
