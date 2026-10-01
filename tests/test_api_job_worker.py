@@ -70,3 +70,21 @@ async def test_steering_arrives_as_a_message_and_is_marked_applied(job, tools, m
 def test_provider_is_chosen_by_the_model_name():
     from app.services.api_job_providers import kind_of
     assert kind_of('gpt-6-astra') == 'openai' and kind_of('claude-opus-5-5') == 'anthropic' and kind_of('deepseek-v4-pro') == 'chat'
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_job_is_taken_over_by_a_stronger_model_with_what_was_done(job, tools, monkeypatch):
+    """The cheap model makes the same call three times: a stronger model takes over the same job once, told what was done."""
+    same = {'text': '', 'calls': [{'id': 'c', 'name': 'browser', 'args': {'action': 'click', 'ref': '@e3'}}], 'usage': usage()}
+    cheap = Fake([dict(same), dict(same), dict(same), dict(same)])
+    strong = Fake([{'text': '別の入口から開けました。題名は「スマートEX」です。', 'calls': [], 'usage': usage()}])
+    made = []
+    monkeypatch.setattr('app.services.api_job_providers.make', lambda model: made.append(model) or (cheap if len(made) == 1 else strong))
+    monkeypatch.setenv('DAN_API_JOB_ESCALATE_MODEL', 'gpt-strong')
+    await W.Worker(job).run()
+    s = state.read(job)
+    assert made[1:] == ['gpt-strong'] and len(tools) == 3
+    start = strong.seen[0][1][-1]
+    assert '同じ操作を3回くり返した' in start and '"ref": "@e3"' in start
+    assert s['state'] == 'completed' and s['usage']['model'].endswith('→ gpt-strong')
+    assert any('上位のモデル（gpt-strong）に交代' in e['text'] for e in s['events'] if e['kind'] == 'progress')

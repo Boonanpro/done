@@ -17,6 +17,9 @@ import time
 # Read when used (after .env is loaded), not at import.
 MODEL = lambda: os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash')   # 2026-09-23 comparison: all three tasks right, fastest and 1/27 of Astra's cost (see docs/current/job-model-comparison-20260923.md)
 REASONING = lambda: os.environ.get('DAN_API_JOB_REASONING', 'low')
+# Escalation: the cheap model does the job; when it is stuck, a stronger one takes over the same job (same browser, same
+# approvals) once. DAN_API_JOB_ESCALATE_MODEL=off turns it off.
+ESCALATE_MODEL = lambda: os.environ.get('DAN_API_JOB_ESCALATE_MODEL', 'gpt-5.6-terra')
 MAX_TURNS = 120
 # The tools a job needs. The MCP list carries 33 tools (56k characters of schema) for the CLI; sending all of them on every
 # call made a step 6-8s (2026-09-23 15:11). DAN_API_JOB_TOOLS=all sends the whole list.
@@ -66,6 +69,41 @@ def function_output(contents):
         if getattr(c, 'type', '') == 'text': texts.append(c.text)
         elif getattr(c, 'type', '') == 'image': images.append(f'data:{c.mimeType};base64,{c.data}')
     return chr(10).join(texts)[:OUTPUT_CHARS] or '（出力なし）', images
+
+
+class Stuck:
+    """Is the job going nowhere? Judged by what happened, not by the model's words:
+    the same call made 3 times among the last 8, 6 calls in a row that showed nothing new, or 40 model steps unfinished."""
+    def __init__(self):
+        self.calls, self.seen, self.stale, self.steps = [], set(), 0, 0
+
+    def step(self):
+        self.steps += 1
+
+    def call(self, name, args, output):
+        self.calls.append(name + json.dumps(args, ensure_ascii=False, sort_keys=True))
+        key = output[:400]
+        self.stale = self.stale + 1 if key in self.seen else 0
+        self.seen.add(key)
+
+    def why(self):
+        recent = self.calls[-8:]
+        if recent and recent.count(recent[-1]) >= 3:
+            return '同じ操作を3回くり返した'
+        if self.stale >= 6:
+            return '6手続けて画面に新しいことが出なかった'
+        if self.steps >= 40:
+            return '40手たっても終わらない'
+        return ''
+
+
+def handoff(task_messages, trail, reason):
+    """What the stronger model starts from: the request, what was done (each call and the start of what it showed), and why
+    it is taking over. The browser and apps are where the last step left them."""
+    lines = chr(10).join(trail[-30:])
+    return (f'（交代）前の担当が「{reason}」ので、ここからあなたが引き継ぐ。ブラウザやアプリは前の担当の最後の操作のままの画面にある。'
+            f'まず今の画面を見て、同じ手をくり返さずに別の道で依頼を終わらせる。終われない時は、どこで止まったかと本人に何をしてほしいかを具体的に書いて終える。{chr(10)}'
+            f'これまでの操作（新しい順は下）:{chr(10)}{lines}')
 
 
 class Worker:
@@ -132,10 +170,21 @@ class Worker:
         provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         used_browser = used_desktop = False
+        stuck, trail, escalated = Stuck(), [], False
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return
+            reason = stuck.why()
+            stronger = ESCALATE_MODEL()
+            if reason and not escalated and stronger not in ('', 'off') and stronger != model:
+                escalated, model = True, stronger
+                self.state.publish(self.job_id, 'progress', f'{reason}ので、上位のモデル（{stronger}）に交代して続けます')
+                provider = api_job_providers.make(stronger)
+                provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first + [handoff(first, trail, reason)])
+                totals['model'] = totals['model'] + ' → ' + stronger
+                stuck = Stuck()
             started = time.monotonic()
             step = await provider.step()
+            stuck.step()
             u = step['usage']
             for k in ('input', 'cached', 'output', 'cache_write'): totals[k] += u.get(k, 0) or 0
             totals['steps'] += 1
@@ -161,6 +210,8 @@ class Worker:
                     contents = [type('T', (), {'type': 'text', 'text': f'操作は実行していません: {type(exc).__name__}: {str(exc)[:300]}'})()]
                 output, images = function_output(contents)
                 trace_step(call, output, images, time.monotonic() - called)
+                stuck.call(call['name'], call['args'], output)
+                trail.append(f"- {call['name']} {json.dumps(call['args'], ensure_ascii=False)[:200]} → {' '.join(output.split())[:200]}")
                 results.append({'id': call['id'], 'output': output, 'images': images})
             if results: provider.tool_results(results)
             extras = self.new_inputs()
