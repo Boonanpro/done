@@ -247,8 +247,8 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     // live, no polling), else the server's line about handed-off work (serverLine, polled).
     let toolLine: string | null = null, serverLine: string | null = null, callsInResponse = 0;
     const showActivity = () => setCurrentActivity(toolLine || serverLine || (workingJob ? 'Working' : null));
-    // Hang-up: wait for Dan to finish saying 「はい、切ります」 before closing (it was cut off mid-word, 2026-10-01).
-    let lastDanSpeech = 0, hangupAt = 0;
+    // Hang-up: close a fixed time after end_call so Dan can finish 「はい、切ります」 (it was cut off mid-word, 2026-10-01).
+    let hangupAt = 0;
     let hangupTimer: ReturnType<typeof setInterval> | undefined;
     let audioTimer: ReturnType<typeof setInterval> | undefined;
     const waiting = new WorkWaiting(setWorkWaiting);
@@ -399,13 +399,12 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           if (!hangupAt) {
             traceDelivery('end-call', {delegation_id: message.delegation_id});
             hangupAt = Date.now();
-            // close once Dan has been quiet for a moment (a spoken 「切ります」 is finished), at most 4 s after
+            // A fixed 4 s after end_call: enough for 「はい、切ります」 to be said in full. Waiting for the speech to go quiet
+            // cut it off: right after end_call Dan often had not started yet, and the transcript runs ahead of the
+            // audio (2026-10-01, the owner).
             hangupTimer = setInterval(() => {
-              const now = Date.now();
-              if ((now - lastDanSpeech > 900 && now - hangupAt > 300) || now - hangupAt > 4000) {
-                clearInterval(hangupTimer); finishRef.current();
-              }
-            }, 150);
+              if (Date.now() - hangupAt >= 4000) { clearInterval(hangupTimer); finishRef.current(); }
+            }, 100);
           }
           return;
         }
@@ -465,7 +464,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           if (role === 'user') {
           }
           buffers[role] += String(message.delta || ''); ends[role] = Number(message.end_ms) || 0;
-          if (role === 'assistant') lastDanSpeech = Date.now();
           if (role === 'user') latestUserRef.current = buffers.user;
           clearTimeout(flushTimers[role]); flushTimers[role] = setTimeout(() => flush(role), 2500);
           flushAt[role] = Date.now() + 2500;
