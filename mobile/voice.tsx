@@ -399,11 +399,11 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           if (!hangupAt) {
             traceDelivery('end-call', {delegation_id: message.delegation_id});
             hangupAt = Date.now();
-            // A fixed 4 s after end_call: enough for 「はい、切ります」 to be said in full. Waiting for the speech to go quiet
+            // A fixed 3.5 s after end_call (the owner's setting): enough for 「はい、切ります」 to be said in full. Waiting for the speech to go quiet
             // cut it off: right after end_call Dan often had not started yet, and the transcript runs ahead of the
             // audio (2026-10-01, the owner).
             hangupTimer = setInterval(() => {
-              if (Date.now() - hangupAt >= 4000) { clearInterval(hangupTimer); finishRef.current(); }
+              if (Date.now() - hangupAt >= 3500) { clearInterval(hangupTimer); finishRef.current(); }
             }, 100);
           }
           return;

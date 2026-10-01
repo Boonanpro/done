@@ -166,7 +166,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
 
 
-HANGUP_FALLBACK_S = 6.0   # the phone closes 4 s after end_call; the server closes later only for clients that don't
+HANGUP_FALLBACK_S = 6.0   # the phone closes 3.5 s after end_call; the server closes later only for clients that don't
 FEED_SECONDS = 1.0
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
 
