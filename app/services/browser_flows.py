@@ -101,13 +101,14 @@ def pick_group(element, elements):
 
 
 ITEM_ROLES = {'link', 'listitem', 'option', 'row', 'gridcell', 'treeitem', 'menuitem', 'tab', 'radio',
-              'Hyperlink', 'ListItem', 'TreeItem', 'DataItem', 'MenuItem', 'TabItem', 'RadioButton'}   # page roles, then UIA kinds
+              'Hyperlink', 'ListItem', 'TreeItem', 'DataItem', 'MenuItem', 'TabItem', 'RadioButton',   # page roles, then UIA kinds
+              'Text'}   # a line read off an app's screen (OCR): its role is unknown, so only a long name counts (see generalize)
 CHOICE_MIN_SIBLINGS = 3   # one item out of a list: a lone button the request happens to mention (「検索」) is not a choice
 
 
 def _norm(text):
     import unicodedata
-    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', text or ''))
+    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', text or '')).casefold()
 
 
 def shape(value):
@@ -145,7 +146,9 @@ def generalize(steps, task):
         part = asked(target.get('name'), task) if step['action'] == 'click' and not step.get('pick') else ''
         # one item out of a list, or the item a search just narrowed the list to (typed 「X顧問」, clicked 「【X顧問】…」)
         searched = any(len(_norm(t)) >= 2 and _norm(t) in _norm(target.get('name')) for t in typed)
-        if part and target.get('role') in ITEM_ROLES and (step.get('siblings', 0) >= CHOICE_MIN_SIBLINGS or searched):
+        if target.get('role') == 'Text' and len(part) < 4:
+            part = ''   # 「検索」 read off the screen may be a button: too short to tell an item from a control
+        if part and target.get('role') in ITEM_ROLES and (step.get('siblings', 0) >= CHOICE_MIN_SIBLINGS or searched or target.get('role') == 'Text'):
             picks += 1
             step.update(slot=f'選ぶ項目{picks}', pick=True, named=True, example=part, said=part)
             step['targets'] = {'ref': {**target, 'name': ''}}   # found by the name the next request gives
@@ -161,11 +164,13 @@ def generalize(steps, task):
 def masked(name, steps):
     """The request's words with each value that became a slot replaced by the slot's name: 「〈選ぶ項目1〉を開いて」.
     Takes generalize()'s steps and removes what they still say."""
+    import unicodedata
     said = sorted({(s.pop('said'), s['slot']) for s in steps if s.get('said')}, key=lambda x: -len(x[0]))
-    text = _norm(name) if any(v not in name and _norm(v) in _norm(name) for v, _ in said) else name
+    text = unicodedata.normalize('NFKC', name or '')
     for value, slot in said:
-        if len(_norm(value)) >= 2:
-            text = text.replace(value, f'〈{slot}〉').replace(_norm(value), f'〈{slot}〉')
+        chars = _norm(value)
+        if len(chars) >= 2:   # the value as the request wrote it: any width, case or spacing
+            text = re.sub(r'\s*'.join(re.escape(c) for c in chars), f'〈{slot}〉', text, flags=re.I)
     return text
 
 

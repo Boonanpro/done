@@ -15,7 +15,11 @@ are recorded with each element's kind and name, and kept as a flow when the work
 observe, find) or the job ends. The next time, `flow replay` runs them by code: each element is found again by kind and
 name (an item the request named, by the new name), through the same _run as a model's call, so every confirmation gate
 holds. A step that cannot be found stops the replay; the model carries on from there, and its fresh recording replaces
-the flow. A click by coordinates or a script is not a step code can repeat: such a run is not kept.
+the flow. A script, or a click by coordinates on no readable text, is not a step code can repeat: such a run is not kept.
+
+Apps that expose nothing to UI Automation (games, canvas-drawn apps) are read with Windows' own OCR: observe/find list the
+window's text lines as refs (@t…), click(ref | window+label) presses the text's centre, and a click by coordinates on a
+text is recorded as that text. A replay finds the text again by reading the window.
 """
 import asyncio
 import base64
@@ -159,6 +163,60 @@ def _press(element, use_mouse=False):
     return 'mouse'
 
 
+class TextTarget:
+    """A line of text read off a window (OCR): what a click on an app with no UI Automation parts presses."""
+    def __init__(self, window, text, box):
+        self.window, self.text, self.box = window, text, box
+        self.center = (int((box[0]+box[2])/2), int((box[1]+box[3])/2))
+
+
+def _ocr(window):
+    """The window's text lines with their boxes (window coordinates, real pixels), read by Windows' OCR."""
+    import asyncio as _asyncio
+    image = window.capture_as_image()
+
+    async def read():
+        from winrt.windows.media.ocr import OcrEngine
+        from winrt.windows.globalization import Language
+        from winrt.windows.graphics.imaging import BitmapDecoder
+        from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
+        buf = io.BytesIO(); image.save(buf, format='PNG')
+        stream = InMemoryRandomAccessStream(); writer = DataWriter(stream)
+        writer.write_bytes(buf.getvalue()); await writer.store_async(); writer.detach_stream(); stream.seek(0)
+        bitmap = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
+        engine = OcrEngine.try_create_from_language(Language('ja')) or OcrEngine.try_create_from_user_profile_languages()
+        return await engine.recognize_async(bitmap)
+
+    result = _asyncio.run(read())
+    lines = []
+    for line in result.lines:
+        rects = [w.bounding_rect for w in line.words]
+        if not rects:
+            continue
+        text = re.sub(r'(?<=[^\x00-\x7f]) | (?=[^\x00-\x7f])', '', line.text).strip()   # the OCR spaces Japanese characters apart
+        box = (min(r.x for r in rects), min(r.y for r in rects), max(r.x+r.width for r in rects), max(r.y+r.height for r in rects))
+        if text:
+            lines.append(TextTarget(window, text, box))
+    return lines
+
+
+def _text_refs(targets):
+    rows = []
+    for target in targets:
+        _counter[0] += 1
+        ref = f'@t{_counter[0]}'
+        _refs[ref] = target
+        rows.append(f'  {ref}: [文字] {target.text}')
+    return rows
+
+
+def _text_named(window, want, names=None):
+    from app.services.browser_flows import matches
+    lines = _ocr(window)
+    index = matches([t.text for t in lines], want)
+    return None if index is None else lines[index]
+
+
 def _resolve(params):
     if params.get('ref'):
         element = _refs.get(params['ref'])
@@ -171,6 +229,10 @@ def _resolve(params):
         raise ValueError('ref か、window と label が必要です')
     items, _ = _elements(window, 400)
     hits = [i for i in items if i['name'] == want] or [i for i in items if want.lower() in i['name'].lower()]
+    if not hits:
+        target = _text_named(window, want)   # no part of that name: the text on the screen
+        if target is not None:
+            return target
     if len(hits) != 1:
         listing = '\n'.join(f"  {i['ref']}: [{i['kind']}] {i['name']}" for i in hits[:12])
         raise ValueError((f'「{want}」に当たる物が {len(hits)} 個あります。何も押していません。ref で指定してください:\n{listing}') if hits
@@ -208,7 +270,10 @@ def _note(action, element=None, window=None, **extra):
     if _replaying[0]:
         return
     step = {'action': action, **extra}
-    if element is not None:
+    if isinstance(element, TextTarget):
+        step['targets'], step['siblings'] = {'ref': {'role': 'Text', 'name': element.text, 'auto_id': ''}}, 0
+        step['window'] = {'title': (element.window.window_text() or '').strip(), 'exe': _exe(element.window)}
+    elif element is not None:
         step['targets'], step['siblings'] = _identity(element)
         step['window'] = _window_of(element)
     elif window is not None:
@@ -230,7 +295,7 @@ def _commit(params, result):
     action = params.get('action')
     if not result.get('success'):
         return
-    if action == 'script' or (action == 'click' and params.get('x') is not None):
+    if action == 'script' or (action == 'click' and params.get('x') is not None and not steps):
         _record['unrecordable'] = True   # what code cannot repeat by itself: this run teaches nothing
     elif steps:
         _record['steps'].extend(steps); _record['updated'] = now
@@ -304,7 +369,14 @@ def _run(params):
         if action == 'click':
             if not params.get('confirmed'):
                 return _fail('座標クリックは何を押すか確認できないため confirmed=true が必要です（本人の承認済みの操作だけ）')
-            window.click_input(coords=(int(params['x']), int(params['y'])))
+            x, y = int(params['x']), int(params['y'])
+            try:   # the text under the point, so the step can be found again by reading the screen
+                hit = next((t for t in _ocr(window) if t.box[0] <= x <= t.box[2] and t.box[1] <= y <= t.box[3]), None)
+            except Exception:
+                hit = None
+            if hit is not None:
+                _note('click', hit)
+            window.click_input(coords=(x, y))
             return _text(f'「{title}」の ({params["x"]},{params["y"]}) を押しました。observe か screenshot で結果を確認してください')
         items, ms = _elements(window, params.get('limit', 150))
         if action == 'find':
@@ -314,11 +386,31 @@ def _run(params):
             items = [i for i in items if query in i['name'].lower()]
         lines = [f'ウィンドウ「{title}」: {len(items)} 個（取得 {ms}ms）'] + [
             f"  {i['ref']}: [{i['kind']}]{'' if i['enabled'] else ' (無効)'} {i['name']}" for i in items]
-        if not items and action == 'observe':
-            lines.append('このアプリは部品の一覧を公開していません。screenshot で画面を見て、click(window, x, y) を使ってください。')
+        if len(items) <= 4:
+            # Only the title bar's buttons, or nothing: the app draws its own screen. Its text, read off the screen, is pressable.
+            try:
+                texts = _ocr(window)
+            except Exception:
+                texts = []
+            if action == 'find':
+                from app.services.browser_flows import _norm
+                texts = [t for t in texts if _norm(params.get('query')) in _norm(t.text)]
+            if texts:
+                lines.append('画面の文字（このアプリは部品を公開していないので画面から読んだ。click(ref) でその文字を押せる）:')
+                lines.extend(_text_refs(texts[:150]))
+            elif action == 'observe' and not items:
+                lines.append('このアプリは部品の一覧を公開していません。screenshot で画面を見て、click(window, x, y) を使ってください。')
         return _text('\n'.join(lines), count=len(items))
     if action in ('click', 'type'):
         element = _resolve(params)
+        if isinstance(element, TextTarget):
+            if action == 'type':
+                return _fail('画面の文字は入力欄ではありません。入力欄を click してから keys で文字を送ってください。')
+            if SENSITIVE.search(element.text) and not params.get('confirmed'):
+                return _fail(f'「{element.text}」は送信・投稿・支払い・削除にあたる操作です。本人の承認を得てから confirmed=true を付けてください。何も押していません。')
+            _note('click', element)
+            element.window.click_input(coords=element.center)
+            return _text(f'画面の文字「{element.text}」を押しました。observe で結果を確認してください')
         kind, name = _describe(element)
         if not element.is_enabled():
             return _fail(f'[{kind}] {name} は無効になっていて操作できません')
@@ -452,6 +544,9 @@ def _find_window(spec, values):
 def _find_element(window, step, values):
     from app.services.browser_flows import matches
     want = step['targets']['ref']
+    if want.get('role') == 'Text':   # recorded off the screen: read it again
+        name = str(values.get(step['slot']) or step.get('example') or '') if step.get('pick') else want['name']
+        return _text_named(window, name)
     items = []
     for element in window.descendants(control_type=want['role']) if want.get('role') else []:
         try:

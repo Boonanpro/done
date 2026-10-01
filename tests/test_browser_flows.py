@@ -214,3 +214,14 @@ def test_an_item_the_request_named_becomes_a_slot_and_its_name_is_not_kept():
     assert 'X顧問' not in json.dumps(out, ensure_ascii=False)
     assert flows.matches(['X顧問 雑談', '【X顧問】株式会社パイナ本田様（4人）'], '【X顧問】株式会社パイナ本田様') == 1
     assert flows.matches(['A社（3）', 'A社（5）'], 'A社') is None   # two candidates: not guessed
+
+
+def test_text_read_off_a_screen_is_a_choice_only_when_long_and_names_are_matched_loosely():
+    """OCR gives no role: a short text the request mentions (「検索」) stays a fixed click; a long named one is a choice.
+    OCR also changes case and spacing (「【 x 顧問】」), which matching and the masked name tolerate."""
+    steps = [{'action': 'click', 'targets': {'ref': {'role': 'Text', 'name': '検索'}}, 'siblings': 0},
+             {'action': 'click', 'targets': {'ref': {'role': 'Text', 'name': '【x顧問】株式会社テスト本田様( 4人)'}}, 'siblings': 0}]
+    out = flows.generalize(steps, '検索して「【X顧問】株式会社テスト本田様」を開いて')
+    assert [s.get('slot') for s in out] == [None, '選ぶ項目1']
+    assert flows.masked('検索して「【X顧問】株式会社テスト本田様」を開いて', out) == '検索して「〈選ぶ項目1〉」を開いて'
+    assert flows.matches(['家族グループ( 3人)', '【x顧問】株式会社テスト本田様( 4人)'], '【X顧問】株式会社テスト本田様') == 1
