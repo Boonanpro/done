@@ -195,7 +195,9 @@ def _mail_watches(user_id):
     return out
 
 
-def _recent_rooms(user_id, limit=15):
+def _recent_rooms(user_id, limit=300):
+    """All of the user's rooms, newest first (a project quiet for a month is still where its mail belongs; the old router
+    saw only the newest 15)."""
     try:
         from app.services.supabase_client import get_supabase_client
         sb = get_supabase_client().client
@@ -206,15 +208,43 @@ def _recent_rooms(user_id, limit=15):
         return []
 
 
-JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から届いたメールを1通ずつ見て、どう扱うかを決める。
-- ignore: 本人にも記録にも要らない（広告・お知らせ・本人に関係ない自動通知）。
-- log: 知らせるほどではないが、後で見返すかもしれない（領収書・明細・発送通知など）。
-- tell: 本人が知っておくべき（人からの連絡・期限・お金・予定・待っていた返事）。本人に一言で知らせる。
-- act: ダンが動くべき（返事を書く・調べる・準備する）。送信や支払いは本人の承認後なので、準備と提案まで。
-迷ったら、人からの連絡で質問・依頼・期限・お金を含むものは tell 以上、それ以外は log。
-待っている目印（ダンが返事を待っているもの）に当たるメールは、その目印の部屋で act。
-部屋は、話の続きなら最近の部屋から選ぶ。どれでもなければ空。
-JSONだけを返す: {"decision": "ignore|log|tell|act", "room_id": "", "watch_id": "", "line": "本人への一言（tell/act。日本語で短く、差出人と要点）", "why": "短く"}"""
+def _rooms_that_know(sender, rooms):
+    """Rooms whose conversation has mentioned this sender's address: the likeliest homes of their mail."""
+    if not sender or not rooms:
+        return []
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        ids = [r['room_id'] for r in rooms]
+        found = []
+        for start in range(0, len(ids), 100):
+            rows = (sb.table('chat_messages').select('room_id').in_('room_id', ids[start:start+100])
+                    .ilike('content', f'%{sender}%').limit(50).execute().data or [])
+            found += [r['room_id'] for r in rows if r['room_id'] not in found]
+        return found[:5]
+    except Exception:
+        return []
+
+
+def watch_hit(item, watches):
+    """A mail watch matched by its own condition (sender, and subject when given), as the old watch did: certain, no model."""
+    sender = ((item.get('sender_info') or {}).get('from') or '').lower()
+    subject = (item.get('subject') or '').lower()
+    for watch in watches:
+        want = (watch.get('from') or '').strip().lower()
+        if want and want in sender and (not watch.get('subject') or watch['subject'].lower() in subject):
+            return watch
+    return None
+
+
+JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から届いたメールを1通ずつ見て、無視するか、対応するかを決める。
+届いたものは全部残るので（後で探せる）、本人に関係ないもの（広告・お知らせ・本人に用のない自動通知）は無視でよい。
+対応するなら、その大きさも自分で決める:
+- tell: 一言で足りる（本人が知っておけばよい。人からの連絡・期限・お金・予定・待っていた返事など）。
+- act: 作業が要る（返事を書く・調べる・準備する。本人の記憶にその使い道があるもの、例: 経費の領収書）。送信や支払いは本人の承認後なので準備と提案まで。
+待っている目印（ダンが待っているもの）に当たるメールは、言い回しが違っても、その目印の部屋で対応する。
+部屋は、話の続きなら部屋の一覧から選ぶ（「差出人が出てきた部屋」があればまずそこ）。どれでもなければ空。
+JSONだけを返す: {"decision": "ignore|tell|act", "room_id": "", "watch_id": "", "line": "本人への一言（対応する時。日本語で短く、差出人と要点）", "why": "短く"}"""
 
 
 def _env():
@@ -225,14 +255,15 @@ def _env():
         if fresh.get(key) and not os.environ.get(key): os.environ[key] = fresh[key]
 
 
-async def judge(user_id, item, watches, rooms, hint=None):
+async def judge(user_id, item, watches, rooms, hint=None, known=()):
     """Dan's decision for one item."""
     from app.services import api_job_providers
     mail = item.get('sender_info') or {}
     body = (item.get('content') or '').strip()[:3000]
     facts = {'from': mail.get('from'), 'to': mail.get('to'), 'subject': item.get('subject'), 'date': mail.get('date'),
              'attachments': [a.get('filename') for a in ((item.get('metadata') or {}).get('attachments') or []) if isinstance(a, dict)][:5]}
-    context = (f'待っている目印: {json.dumps(watches, ensure_ascii=False)}\n最近の部屋: {json.dumps(rooms, ensure_ascii=False)}\n'
+    context = (f'待っている目印: {json.dumps(watches, ensure_ascii=False)}\n部屋の一覧（新しい順）: {json.dumps(rooms, ensure_ascii=False)}\n'
+               + (f'差出人が出てきた部屋: {json.dumps(list(known))}\n' if known else '')
                + (f'送った連絡への返事として照合できた部屋: {hint}\n' if hint else '')
                + f'メール: {json.dumps(facts, ensure_ascii=False)}\n本文:\n{body}')
     _env()
@@ -244,7 +275,9 @@ async def judge(user_id, item, watches, rooms, hint=None):
         decision = json.loads(re.search(r'\{.*\}', text, re.S).group(0))
     except Exception:
         decision = {'decision': 'tell', 'line': f'メールが届きました: {facts["from"]}「{facts["subject"]}」', 'why': 'judge_unreadable'}
-    if decision.get('decision') not in ('ignore', 'log', 'tell', 'act'):
+    if decision.get('decision') == 'log':
+        decision['decision'] = 'ignore'
+    if decision.get('decision') not in ('ignore', 'tell', 'act'):
         decision['decision'] = 'tell'
     return decision
 
@@ -258,7 +291,7 @@ _ACT_PROMPT = ('[受け口 / メールの自動処理]\nこれは本人の発言
 async def deliver(user_id, item, decision, watches):
     """The outcome, said in chat (and pushed). Returns the room it went to."""
     from app.services.chat_service import ChatService
-    known = {r['room_id'] for r in _recent_rooms(user_id, 50)}
+    known = {r['room_id'] for r in _recent_rooms(user_id)}
     watch = next((w for w in watches if w['id'] == decision.get('watch_id')), None)
     room = (watch or {}).get('room_id') or (decision.get('room_id') if decision.get('room_id') in known else '') or await home_room(user_id)
     line = (decision.get('line') or '').strip()
@@ -328,6 +361,12 @@ async def handle(user_id, item, own):
         _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': reason, 'at': time.time()})
         return 'ignore'
     watches = await asyncio.to_thread(_mail_watches, user_id)
+    hit = watch_hit(item, watches)
+    if hit:   # what Dan was waiting for, by the watch's own condition: certain, handled in the watch's room
+        decision = {'decision': 'act', 'watch_id': hit['id'], 'room_id': hit['room_id'], 'line': '', 'why': 'watch_condition'}
+        room = await deliver(user_id, item, decision, watches)
+        _mark(item['id'], {**decision, 'room': room, 'by': 'rule', 'at': time.time()})
+        return 'act'
     rooms = await asyncio.to_thread(_recent_rooms, user_id)
     hint = None
     try:   # a reply to something Dan sent: the ledger knows the room
@@ -335,11 +374,12 @@ async def handle(user_id, item, own):
         from app.services.external_message_routing import STRONG_REASONS
         match = get_external_message_routing_service().find_route(item)
         if match and match.reason in STRONG_REASONS:
-            hint = (match.route or {}).get('room_id')
+            hint = (match.route or {}).get('origin_room_id')
     except Exception:
         pass
-    decision = await judge(user_id, item, watches, rooms, hint)
-    if hint and decision['decision'] in ('ignore', 'log'):
+    known = await asyncio.to_thread(_rooms_that_know, _address((item.get('sender_info') or {}).get('from')), rooms)
+    decision = await judge(user_id, item, watches, rooms, hint, known)
+    if hint and decision['decision'] == 'ignore':
         decision['decision'] = 'tell'   # a reply to Dan's own message is never silently dropped
     if hint and not decision.get('room_id'):
         decision['room_id'] = hint

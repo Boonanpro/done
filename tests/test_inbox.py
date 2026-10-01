@@ -61,15 +61,31 @@ async def test_a_judged_item_is_said_in_its_room_or_the_home_room_and_a_watch_wa
 async def test_a_reply_to_what_dan_sent_is_never_dropped(home, monkeypatch):
     marked = {}
     monkeypatch.setattr(inbox, '_mail_watches', lambda user: [])
-    monkeypatch.setattr(inbox, '_recent_rooms', lambda user, limit=15: [])
+    monkeypatch.setattr(inbox, '_recent_rooms', lambda user, limit=300: [])
+    monkeypatch.setattr(inbox, '_rooms_that_know', lambda sender, rooms: [])
     async def judge(*a, **k): return {'decision': 'ignore'}
     monkeypatch.setattr(inbox, 'judge', judge)
     async def deliver(user, item, decision, watches): return decision.get('room_id')
     monkeypatch.setattr(inbox, 'deliver', deliver)
     monkeypatch.setattr(inbox, '_mark', lambda item_id, result: marked.update(result))
     class Match:
-        reason, route = 'in_reply_to_message_id', {'room_id': 'room-sent'}
+        reason, route = 'in_reply_to_message_id', {'origin_room_id': 'room-sent'}
     class Routing:
         def find_route(self, item): return Match()
     monkeypatch.setattr('app.services.external_message_routing.get_external_message_routing_service', lambda: Routing())
     assert await inbox.handle('u', mail(), set()) == 'tell' and marked['room'] == 'room-sent'
+
+
+@pytest.mark.asyncio
+async def test_a_watch_is_matched_by_its_own_condition_without_the_model(home, monkeypatch):
+    watch = {'id': 'w1', 'room_id': 'room-watch', 'from': 'openai.com', 'subject': '', 'note': 'OpenAI の返事'}
+    monkeypatch.setattr(inbox, '_mail_watches', lambda user: [watch])
+    async def judge(*a, **k): raise AssertionError('the model is not asked')
+    monkeypatch.setattr(inbox, 'judge', judge)
+    sent = []
+    async def deliver(user, item, decision, watches): sent.append(decision); return decision['room_id']
+    monkeypatch.setattr(inbox, 'deliver', deliver)
+    monkeypatch.setattr(inbox, '_mark', lambda item_id, result: None)
+    assert await inbox.handle('u', mail('OpenAI <noreply@openai.com>'), set()) == 'act'
+    assert sent[0]['watch_id'] == 'w1' and sent[0]['room_id'] == 'room-watch'
+    assert inbox.watch_hit(mail('田中 <tanaka@example.co.jp>'), [watch]) is None
