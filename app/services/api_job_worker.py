@@ -21,7 +21,7 @@ MAX_TURNS = 120
 # The tools a job needs. The MCP list carries 33 tools (56k characters of schema) for the CLI; sending all of them on every
 # call made a step 6-8s (2026-09-23 15:11). DAN_API_JOB_TOOLS=all sends the whole list.
 JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'browser,browser_script,flow,desktop,lookup,get_credentials,save_credentials,get_personal_info,'
-                                   'get_location,read_url,bash,read_file,write_file,wait_until,job_confirmation,job_progress,command_center').split(',')
+                                   'get_location,read_url,bash,read_file,write_file,wait_until,watch,job_confirmation,job_progress,command_center').split(',')
 OUTPUT_CHARS = 12000
 CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。確定操作はまだ実行していません。画面を読み取り、承認済みの具体的な操作だけを再開してください。'
                 '条件変更があれば以前の承認は無効です。\n')
