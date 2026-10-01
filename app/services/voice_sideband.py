@@ -149,9 +149,16 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
             if any(out['name'] == 'end_call' for out in outputs):
-                # The owner asked to end the call: close now. (Asking for a farewell and waiting a fixed 2.5 s before closing
-                # raced the speech: in both real calls nothing was heard, once the farewell was empty. 2026-09-23)
-                await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
+                # The owner asked to end the call. The phone hangs up itself 4 s after it sees end_call, so Dan can finish
+                # 「はい、切ります」. Closing here at once stopped Dan mid-word (2026-10-01: 「少々お待ちくだ…」, then
+                # silence until the phone hung up). The server closes only as a fallback for clients that do not.
+                async def fallback_close():
+                    await asyncio.sleep(HANGUP_FALLBACK_S)
+                    try:
+                        await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
+                    except Exception:
+                        pass   # already closed by the phone
+                asyncio.ensure_future(fallback_close())
                 return
             # per the guide: every function_call_output of the response, then response.create (no delegation_id field)
             for out in outputs:
@@ -159,6 +166,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
 
 
+HANGUP_FALLBACK_S = 6.0   # the phone closes 4 s after end_call; the server closes later only for clients that don't
 FEED_SECONDS = 1.0
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
 

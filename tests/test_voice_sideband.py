@@ -84,8 +84,10 @@ async def test_parallel_function_calls_are_answered_together_with_one_response_c
 
 
 @pytest.mark.asyncio
-async def test_end_call_closes_the_session_at_once_without_asking_for_a_farewell(monkeypatch):
-    """The only hang-up path (2026-09-23): the backend chooses end_call and the server closes the call right away."""
+async def test_end_call_leaves_the_hang_up_to_the_phone_and_closes_later_only_as_a_fallback(monkeypatch):
+    """The backend chooses end_call; the phone hangs up 4 s later so Dan can finish speaking. The server must not close
+    at once (that stopped Dan mid-word, 2026-10-01); it closes after HANGUP_FALLBACK_S for clients that don't."""
+    monkeypatch.setattr(S, 'HANGUP_FALLBACK_S', 0.05)
     sent, pending = [], {}
     async def send(event): sent.append(event)
     async def fake_run(name, args, user_id, room_id, dialogue, **_): return {'ok': True}
@@ -93,4 +95,6 @@ async def test_end_call_closes_the_session_at_once_without_asking_for_a_farewell
     d = S.Dialogue(); rec = lambda *a, **k: None
     await S.handle_response_event(send, 's', 'u', 'r', {'type': 'response.event', 'delegation_id': 'd1', 'event': {'type': 'response.output_item.done', 'item': {'type': 'function_call', 'call_id': 'c1', 'name': 'end_call', 'arguments': '{}'}}}, d, rec, pending)
     await S.handle_response_event(send, 's', 'u', 'r', {'type': 'response.event', 'delegation_id': 'd1', 'event': {'type': 'response.completed'}}, d, rec, pending)
+    assert sent == []
+    await asyncio.sleep(0.1)
     assert [e['type'] for e in sent] == ['session.close']
