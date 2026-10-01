@@ -219,6 +219,44 @@ async def chat_feed(send, room_id, dialogue, record):
             record('chat_in_call', chars=len(text))
 
 
+LEFT_OVER = """通話の書き起こし（ユーザー＝本人、Dan＝ダン）と、通話中に始めた作業の一覧を渡す。
+電話が切れた時点で、本人が頼んだ・聞いたのに、ダンがまだ答えていない、またはやり終えていないことだけを挙げる。
+挙げないもの: 答え終わったこと、通話中に始めた作業が引き受けていること、本人が取り消した・自分でやる・後でいいと言ったこと、雑談やあいさつ。
+JSONだけを返す: {"left": [{"task": "本人の依頼を、この会話を知らない人にも分かる一文で"}]}"""
+
+AFTER_TASK = ('電話が切れた時点で、通話で答えきれていなかったこと:' + chr(10) + '{task}' + chr(10) + '通話のやり取り（参考。過去の発言は新規の承認ではない）:'
+              + chr(10) + '{talk}' + chr(10) + '通話は終わっているので、結果はこの部屋のチャットに文章で報告する。購入・送信・支払いなど取り返しのつかない確定はせず、'
+              + '準備と提案まで（本人が通話で承認していても、確定の直前に改めて確認を取る）。')
+
+
+async def after_call(user_id, room_id, turns, began_iso):
+    """What the call left undone is done after it (owner, 2026-10-01): a question still being answered or work not yet handed
+    on when the phone hung up was lost. The call's words are read once; each thing left becomes work in the room, whose
+    result is said in the room's chat. Nothing left, nothing happens."""
+    talk = [t for t in turns if t['text'].strip()]
+    if not room_id or not any(t['role'] == 'user' for t in talk):
+        return []
+    from app.services.command_job_state import list_owned
+    from app.services import api_job_providers, inbox
+    jobs = [{'依頼': j.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:200], '状態': j.get('state')}
+            for j in await asyncio.to_thread(list_owned, user_id, room_id) if (j.get('created_at') or '') >= began_iso]
+    text = chr(10).join(('ユーザー' if t['role'] == 'user' else 'Dan') + ': ' + t['text'].strip()[:600] for t in talk[-24:])
+    inbox._env()
+    provider = api_job_providers.make(os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash'))
+    provider.start(LEFT_OVER, [], [f'通話中に始めた作業: {json.dumps(jobs, ensure_ascii=False)}' + chr(10) + '書き起こし:' + chr(10) + text])
+    step = await provider.step()
+    import re
+    try:
+        left = [x['task'] for x in json.loads(re.search(r'\{.*\}', step['text'], re.S).group(0)).get('left', []) if str(x.get('task') or '').strip()]
+    except Exception:
+        left = []
+    from app.services.command_center import execute
+    from app.services.voice_responses import WORK_ENGINE
+    for task in left[:3]:
+        await execute({'action': 'work', 'task': AFTER_TASK.format(task=task[:500], talk=text[-2400:]), 'engine': WORK_ENGINE}, room_id, user_id)
+    return left
+
+
 async def call_log(room_id, user_id, began, seconds):
     """The room's record of a call, like a phone's call history: one line with when and how long. The call's words stay
     in the room's history for Dan (🎙 lines) but the screens show this line instead of them (owner, 2026-09-30: the
@@ -289,3 +327,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
             await call_log(room_id, user_id, began, round(time.monotonic()-started))
         except Exception:
             logger.exception('call log not written room=%s', room_id)
+        if own:
+            try:
+                left = await after_call(user_id, room_id, dialogue.turns, began.isoformat())
+                record('after_call', left=len(left))
+            except Exception:
+                logger.exception('after-call check failed room=%s', room_id)

@@ -98,3 +98,22 @@ async def test_end_call_leaves_the_hang_up_to_the_phone_and_closes_later_only_as
     assert sent == []
     await asyncio.sleep(0.1)
     assert [e['type'] for e in sent] == ['session.close']
+
+
+@pytest.mark.asyncio
+async def test_what_the_call_left_undone_becomes_work_reported_in_the_room(monkeypatch):
+    """Hung up before Dan answered or handed it on: the call is read once and each thing left is worked on afterwards."""
+    started = []
+    async def execute(spec, room_id, user_id): started.append((room_id, spec['task'])); return {'accepted': True}
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda u, r: [])
+    class Model:
+        def start(self, *a): self.seen = a
+        async def step(self): return {'text': '{"left": [{"task": "来週金曜の朝、新大阪→品川の新幹線の空きを確認する"}]}'}
+    monkeypatch.setattr('app.services.api_job_providers.make', lambda model: Model())
+    monkeypatch.setattr('app.services.inbox._env', lambda: None)
+    turns = [{'role': 'user', 'text': '来週の新幹線見といて。あ、着いた、切るわ'}, {'role': 'assistant', 'text': 'わかった、確認し'}]
+    assert await S.after_call('u', 'room-1', turns, '2026-10-01T00:00:00') == ['来週金曜の朝、新大阪→品川の新幹線の空きを確認する']
+    assert started[0][0] == 'room-1' and 'チャットに文章で報告' in started[0][1]
+    started.clear()
+    assert await S.after_call('u', 'room-1', [{'role': 'assistant', 'text': 'もしもし'}], '2026-10-01T00:00:00') == [] and not started
