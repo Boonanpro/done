@@ -90,7 +90,12 @@ def main() -> None:
     clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
     log_path = PROJECT_ROOT / "dan_core.log"
-    log_file = open(log_path, "w", encoding="utf-8")
+    # Appended, one older generation kept: opened with "w", every restart erased what happened before it, and a cancel
+    # the owner saw fail could not be traced (2026-10-01).
+    if log_path.exists() and log_path.stat().st_size > 20 * 1024 * 1024:
+        log_path.replace(log_path.with_suffix(".previous.log"))
+    log_file = open(log_path, "a", encoding="utf-8")
+    log_file.write(chr(10) + '===== dan-core start ' + time.strftime('%Y-%m-%d %H:%M:%S') + ' =====' + chr(10)); log_file.flush()
     process = subprocess.Popen(
         cmd, cwd=str(PROJECT_ROOT), stdout=log_file, stderr=subprocess.STDOUT, env=clean_env,
         creationflags=_NO_WINDOW,

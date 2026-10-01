@@ -231,7 +231,11 @@ class SandboxManager:
         for k, v in self._extra_env.items():
             env[k] = v
 
-        log_file = open(self.log_path, "w", encoding="utf-8")
+        # Appended, one older generation kept (restarts used to erase the record of what went wrong before them).
+        log_path = Path(self.log_path)
+        if log_path.exists() and log_path.stat().st_size > 20 * 1024 * 1024:
+            log_path.replace(log_path.with_suffix(".previous.log"))
+        log_file = open(log_path, "a", encoding="utf-8")
         return subprocess.Popen(
             cmd,
             cwd=str(self.cwd),

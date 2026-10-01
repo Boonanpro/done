@@ -3444,6 +3444,10 @@ async def cancel_dan_session(
 
     # ブラウザセッションも停止
     abort_executor_session()
+    # What each cancel did, to trace a cancel that left the message and let the turn run (2026-10-01).
+    logger.info("[CANCEL] room=%s message_id=%s registry=%s cli_killed=%s paused_runs=%s deleted_message=%s",
+                request.session_id[:8], (request.cancelled_user_message_id or "-")[:8], success, cli_killed,
+                paused_runs, deleted_user_message)
 
     return {
         "success": success or cli_killed or paused_runs > 0 or deleted_user_message,
