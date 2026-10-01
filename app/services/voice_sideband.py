@@ -202,9 +202,10 @@ async def job_feed(send, user_id, room_id, record, connected_at):
 
 
 async def chat_feed(send, room_id, dialogue, record):
-    """What the owner sends to this room's chat during the call reaches the Dan on the call (voice_calls): as silent
-    context for the speech model (it is not read out; the owner says what to do with it, or it is used when relevant),
-    and as the owner's turn for the work handed on from the call."""
+    """What the owner sends to this room's chat during the call reaches the Dan on the call (voice_calls), as if said on the
+    call: the speech model takes it up itself, in its own words. It went in as silent context first, and Dan said nothing
+    about a link until the owner asked whether it had been seen (2026-10-01 21:17 -> 21:20). How to react is not prescribed.
+    Also the owner's turn for the work handed on from the call."""
     from app.services import voice_calls
     done = 0
     while True:
@@ -213,9 +214,10 @@ async def chat_feed(send, room_id, dialogue, record):
         except Exception: continue
         for text in texts:
             dialogue.add('user', '（チャットに送った）' + text + chr(10))
-            note = '本人が通話中にこの部屋のチャットへ送ってきたもの（読み上げない。本人の話や依頼に関係すれば使う）:' + chr(10) + text
-            for part in chunks(note):
-                await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+            parts = list(chunks('本人が通話中にこの部屋のチャットへ送ってきたもの:' + chr(10) + text))
+            for i, part in enumerate(parts):   # context first, one invitation to speak at the end (each part spoken repeated itself)
+                kind = 'session.commentary.append' if i == len(parts) - 1 else 'session.thinking.append'
+                await send({'type': kind, 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
             record('chat_in_call', chars=len(text))
 
 
@@ -276,7 +278,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
     import websockets
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
-    counts, dialogue, working = {}, Dialogue(), set()
+    counts, dialogue, working, spoke = {}, Dialogue(), set(), {}
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
                                       max_size=8*1024*1024, open_timeout=10) as socket:
@@ -298,6 +300,13 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 except (TypeError, ValueError): continue
                 kind = str(event.get('type') or '')
                 counts[kind] = counts.get(kind, 0)+1
+                # When each side starts speaking, as times only (no words, no audio): a first delta after 1.5 s of quiet.
+                # Without it, why Dan was silent for some seconds after an answer reached it could not be told (2026-10-01).
+                if kind in ('session.output_audio.delta', 'session.input_transcript.delta'):
+                    side = 'dan' if kind == 'session.output_audio.delta' else 'owner'
+                    now = time.monotonic()
+                    if now - spoke.get(side, 0) > 1.5: record('speech_start', side=side, at_s=round(now - started, 2))
+                    spoke[side] = now
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
                 if kind == 'session.input_transcript.delta': dialogue.add('user', event.get('delta') or '')
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')

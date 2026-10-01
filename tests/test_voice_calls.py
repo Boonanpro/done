@@ -27,7 +27,7 @@ def test_a_call_is_active_while_its_process_lives_and_ends_with_it(calls, monkey
 
 
 @pytest.mark.asyncio
-async def test_what_the_owner_sends_reaches_the_call_silently_and_the_work_handed_on(calls, monkeypatch):
+async def test_what_the_owner_sends_reaches_the_call_as_if_said_and_the_work_handed_on(calls, monkeypatch):
     voice_calls.begin('room-1', 'sess-1')
     sent, d = [], S.Dialogue()
     async def send(event): sent.append(event)
@@ -37,7 +37,7 @@ async def test_what_the_owner_sends_reaches_the_call_silently_and_the_work_hande
         await asyncio.sleep(.8)
     finally:
         feed.cancel()
-    assert [e['type'] for e in sent] == ['session.thinking.append'] and 'https://x.com/someone/status/1' in sent[0]['content']
+    assert [e['type'] for e in sent] == ['session.commentary.append'] and 'https://x.com/someone/status/1' in sent[0]['content']
     assert d.recent()[-1]['role'] == 'user' and 'x.com/someone' in d.recent()[-1]['text']
 
 
