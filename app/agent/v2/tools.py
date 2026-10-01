@@ -377,10 +377,12 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.desktop_control import TOOL as DESKTOP_TOOL
     from app.services.user_location import TOOL as LOCATION_TOOL
     from app.services.browser_flows import TOOL as FLOW_TOOL
+    from app.services.chrome_signin import TOOL as CHROME_SIGNIN_TOOL
     return [
         LOOKUP_TOOL,
         LOCATION_TOOL,
         FLOW_TOOL,
+        CHROME_SIGNIN_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
         COMMAND_CENTER_TOOL,
@@ -1284,6 +1286,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "flow":
         return ("_flow", "browser")
+    if tool_name == "chrome_signin":
+        return ("_chrome_signin", "browser")
 
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
@@ -1372,7 +1376,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin"}:
             return
 
         error_type = result.get("error_type")
@@ -2491,6 +2495,10 @@ async def execute_tool(
     if skill_name == "_flow":
         from app.services.browser_flows import tool as flow_tool
         return await flow_tool(params)
+
+    if skill_name == "_chrome_signin":
+        from app.services.chrome_signin import tool as chrome_signin_tool
+        return await chrome_signin_tool(params)
 
     if skill_name == "_wait_until":
         from app.services.dan_lookup import wait_until

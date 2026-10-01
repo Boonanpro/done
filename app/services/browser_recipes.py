@@ -330,6 +330,13 @@ async def around(action, params, execute):
             # Nothing remembered for this page: a first login has the same shape everywhere, so code does it too.
             from app.services.browser_login import maybe_login
             result = await maybe_login(params, result)
+            if action == 'open_target' and isinstance(result, dict) and isinstance(result.get('content'), list):
+                # A Chrome not signed in to the user's Google account: Dan asks the user once, or signs in if approved.
+                from app.services import chrome_signin
+                from app.tools.browser import _executor_profile_dir
+                hint = await chrome_signin.note(os.environ.get('DAN_USER_ID', ''), _executor_profile_dir())
+                if hint:
+                    result['content'].append({'type': 'text', 'text': hint})
         except Exception:
             logger.warning('browser replay unavailable', exc_info=True)
     return result

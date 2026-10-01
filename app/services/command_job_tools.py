@@ -71,7 +71,7 @@ async def browser_target(arguments):
 
 READ_TOOLS = {'read_file','read_url','check_skill','get_personal_info','remember_personal_info',
               'get_credentials','save_credentials','get_current_time','command_center','write_file','edit_file',
-              'save_totp_secret','attach_image','schedule_followup','watch','split_to_new_room',
+              'save_totp_secret','attach_image','schedule_followup','watch','split_to_new_room','chrome_signin',
               'studio_record','studio_encode','studio_probe','studio_extract_frame','studio_evaluate',
               'lookup','wait_until','get_location'}
 READ_ACTIONS = {'open','open_target','screenshot','scroll','get_state','get_tabs','switch_tab','wait_for',
