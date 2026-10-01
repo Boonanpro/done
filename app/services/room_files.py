@@ -76,7 +76,7 @@ async def show(room_id, user_id, files, text=''):
             continue
         name = served_name(item)
         (shown if name else missing).append(name or str(item))
-    if not shown and not links:
+    if not shown and not links and not str(text or '').strip():
         return {'shown': [], 'missing': missing}
     body = '\n'.join(filter(None, [str(text or '').strip(), *links, *[markup(n) for n in shown]]))
     message = await ChatService().send_message(room_id, user_id, body, sender_type='ai')

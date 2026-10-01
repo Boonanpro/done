@@ -201,6 +201,24 @@ async def job_feed(send, user_id, room_id, record, connected_at):
                 record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(text))
 
 
+async def chat_feed(send, room_id, dialogue, record):
+    """What the owner sends to this room's chat during the call reaches the Dan on the call (voice_calls): as silent
+    context for the speech model (it is not read out; the owner says what to do with it, or it is used when relevant),
+    and as the owner's turn for the work handed on from the call."""
+    from app.services import voice_calls
+    done = 0
+    while True:
+        await asyncio.sleep(.5)
+        try: texts, done = await asyncio.to_thread(voice_calls.take, room_id, done)
+        except Exception: continue
+        for text in texts:
+            dialogue.add('user', '（チャットに送った）' + text + chr(10))
+            note = '本人が通話中にこの部屋のチャットへ送ってきたもの（読み上げない。本人の話や依頼に関係すれば使う）:' + chr(10) + text
+            for part in chunks(note):
+                await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+            record('chat_in_call', chars=len(text))
+
+
 async def call_log(room_id, user_id, began, seconds):
     """The room's record of a call, like a phone's call history: one line with when and how long. The call's words stay
     in the room's history for Dan (🎙 lines) but the screens show this line instead of them (owner, 2026-09-30: the
@@ -232,6 +250,11 @@ async def _run(session_id, user_id, room_id, api_key, own):
             if own:
                 feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat()))
                 working.add(feed); feed.add_done_callback(working.discard)
+                if room_id:   # from now on the room's chat goes to this call, not to a chat Dan
+                    from app.services import voice_calls
+                    voice_calls.begin(room_id, session_id)
+                    inbox = asyncio.create_task(chat_feed(send, room_id, dialogue, record))
+                    working.add(inbox); inbox.add_done_callback(working.discard)
             while time.monotonic()-started < MAX_SECONDS:
                 try: event = json.loads(await socket.recv())
                 except (TypeError, ValueError): continue
@@ -256,6 +279,11 @@ async def _run(session_id, user_id, room_id, api_key, own):
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
         for task in working: task.cancel()
+        try:
+            from app.services import voice_calls
+            voice_calls.end(room_id, session_id)
+        except Exception:
+            pass
         record('sideband_closed', seconds=round(time.monotonic()-started), counts=dict(sorted(counts.items(), key=lambda x: -x[1])[:20]))
         try:
             await call_log(room_id, user_id, began, round(time.monotonic()-started))

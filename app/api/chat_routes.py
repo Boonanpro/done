@@ -2128,11 +2128,21 @@ async def send_dan_message_stream(
                 _streaming_on = _streaming_enabled()
             except Exception:
                 _streaming_on = False
+            # Dan is one person: while the owner is on a call with Dan in this room, what they send here goes to the Dan on
+            # the call (voice_calls), and no chat Dan starts beside it (owner, 2026-10-01).
+            _voice_call = None
+            if request.session_id:
+                try:
+                    from app.services import voice_calls
+                    _voice_call = voice_calls.active(request.session_id)
+                except Exception:
+                    _voice_call = None
             _parallel_save = (
                 _parallel_send_enabled
                 and bool(request.session_id)
                 and not request.replace_message_id
                 and not _streaming_on
+                and not _voice_call
             )
             if request.replace_message_id:
                 # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）
@@ -2204,7 +2214,7 @@ async def send_dan_message_stream(
                 _followup_session = None
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める（追い連絡経路では止めない）
-            if (replan_requested or should_supersede_existing_run) and _followup_session is None:
+            if (replan_requested or should_supersede_existing_run) and _followup_session is None and not _voice_call:
                 try:
                     CancellationRegistry.cancel(room_id)
                     from app.agent.cli_runner import kill_cli_process
@@ -2247,6 +2257,19 @@ async def send_dan_message_stream(
                 # ユーザーメッセージを送信（session_id付き）
                 yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
                 mark_latency("user_sse_sent")
+
+            if _voice_call and message is not None:
+                try:
+                    from app.services import voice_calls
+                    voice_calls.deliver(room_id, _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or []))
+                    logger.info("[VOICE] chat message handed to the call in room=%s msg=%s", room_id, message["id"])
+                    yield f"data: {json.dumps({'type': 'voice_call_routed', 'session_id': room_id, 'message_id': message['id']})}\n\n"
+                except Exception as e:
+                    logger.warning("voice call hand-off failed (room=%s): %s", room_id, e)
+                result_saved = True
+                done_sent = True
+                yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                return
 
             # 追い連絡を常駐セッションへ注入し、即ackして本リクエストは終了する。
             # 本ターンの回答（次の境界以降）は、継続中の最初のSSEストリームが描画する。
