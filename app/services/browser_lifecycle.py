@@ -68,7 +68,8 @@ def request_session(operation: str, room_id: str, reason: str = "") -> dict:
         port = int(os.environ.get("DAN_CORE_PORT", "9000"))
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/internal/browser/session",
-            data=json.dumps({"operation": operation, "room_id": room_id, "reason": reason}).encode(),
+            data=json.dumps({"operation": operation, "room_id": room_id, "reason": reason,
+                             "user_id": os.environ.get("DAN_USER_ID", "")}).encode(),
             headers={"Content-Type": "application/json", "X-Dan-Browser-Token": token},
             method="POST",
         )
@@ -217,7 +218,7 @@ def _close_profile(profile: Path, port: int) -> tuple[bool, bool]:
     return ok, graceful
 
 
-def manage_session(operation: str, room_id: str, reason: str = "") -> dict:
+def manage_session(operation: str, room_id: str, reason: str = "", user_id: str = "") -> dict:
     """Called in a Core worker thread. Never set process-global room env vars."""
     if _core_token is None:
         raise RuntimeError("Browser manager must be initialized in the owning process")
@@ -225,8 +226,13 @@ def manage_session(operation: str, room_id: str, reason: str = "") -> dict:
     with profile_lock(profile):
         state = read_state(profile)
         holds = state.setdefault("holds", {})
+        if user_id:
+            state["user_id"] = user_id
         if operation == "ensure":
             port = _ensure_browser(room_id, profile)
+            # the user's shared logins: this browser's into the jar, then the jar into this browser (login_jar)
+            from app.services import login_jar
+            login_jar.sync(port, state.get("user_id"), reason="ensure")
         elif operation in {"hold", "hold_auth"}:
             port = _saved_port(profile)
             if not (_cdp_ready(port) and _owns_port(profile, port)):
@@ -240,6 +246,10 @@ def manage_session(operation: str, room_id: str, reason: str = "") -> dict:
             port = _saved_port(profile)
         elif operation == "close":
             port = _saved_port(profile)
+            if port and _cdp_ready(port) and _owns_port(profile, port) and state.get("user_id"):
+                from app.services import login_jar
+                try: login_jar.absorb(port, state["user_id"])   # keep what this browser logged into
+                except Exception: pass
             if port and not _close_profile(profile, port)[0]:
                 raise RuntimeError("Browser could not be closed; its hold state was preserved")
             holds.clear()
@@ -278,6 +288,11 @@ def reap_idle(idle_seconds: int, held_profiles: set[str]) -> list[dict]:
             idle = time.time() - last_use
             if idle < idle_seconds:
                 continue
+            owner = read_state(profile).get("user_id")
+            if owner:
+                from app.services import login_jar
+                try: login_jar.absorb(port, owner)   # keep what this idle browser logged into before closing it
+                except Exception: pass
             ok, graceful = _close_profile(profile, port)
             if not ok:
                 continue

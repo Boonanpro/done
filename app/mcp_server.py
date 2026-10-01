@@ -93,6 +93,21 @@ async def list_tools() -> list[types.Tool]:
     return mcp_tools
 
 
+# Every tool call gets an upper limit, so the model gets its turn back when a tool never returns. On 2026-09-30 one
+# browser call (an image puzzle at a login) did not return for 22 minutes; the model could not decide anything until
+# the owner asked. Long by nature: commands (their own timeout), making media, research; an explicit wait has none.
+TOOL_TIME_LIMITS = {'bash': 660, 'wait_until': None, 'deep_research': 1800}
+LONG_TOOL_WORDS = ('media', 'higgsfield', 'generate', 'video', 'image')
+
+
+def tool_time_limit(name: str):
+    if name in TOOL_TIME_LIMITS:
+        return TOOL_TIME_LIMITS[name]
+    if any(word in name for word in LONG_TOOL_WORDS):
+        return 900
+    return 240
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent | types.ImageContent]:
     """ツールを実行し、結果を MCP コンテンツとして返す"""
@@ -134,13 +149,26 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         tool_started = time.perf_counter()
         job_state.change(job_id, lambda s:s.update(current_tool={'name':name,
             'action':arguments.get('action') if name=='browser' else None,'started_at':job_state.now()}))
+    limit = tool_time_limit(name)
     try:
-        result = await execute_tool(
-            tool_call=tool_call,
-            user_id=USER_ID,
-            credentials=CREDENTIALS,
-            session_id=SESSION_ID,
-        )
+        try:
+            result = await asyncio.wait_for(execute_tool(
+                tool_call=tool_call,
+                user_id=USER_ID,
+                credentials=CREDENTIALS,
+                session_id=SESSION_ID,
+            ), timeout=limit)
+        except asyncio.TimeoutError:
+            if name.startswith('browser'):
+                try:
+                    from app.tools.browser import abort_executor_session
+                    abort_executor_session()
+                except Exception:
+                    pass
+            return [types.TextContent(type="text", text=(
+                f"この道具（{name}）が{int(limit)}秒たっても返ってこなかったので、待つのをやめました。"
+                "同じ手をそのまま繰り返さない。別の道を選ぶ: ログイン済みの状態で入れる入口を試す、別の画面から入る。"
+                "それでも進めない時は、どこで止まったかと、本人に何をしてほしいかを具体的に伝えて止まる。"))]
     finally:
         if job_id:
             def observed(s):
