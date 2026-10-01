@@ -2101,7 +2101,7 @@ async def send_dan_message_stream(
                     if proj_result.data:
                         project_info = proj_result.data[0]
                         current_project_run = await RunService().get_current_run(
-                            project_info["id"]
+                            project_info["id"], chat_only=True   # work in the background is not this chat's turn: never superseded by a message
                         )
                         should_supersede_existing_run = bool(
                             current_project_run
@@ -2324,7 +2324,7 @@ async def send_dan_message_stream(
                 run_state = None
                 if current_project_run is None and should_supersede_existing_run:
                     try:
-                        current_project_run = await run_service.get_current_run(project_info["id"])
+                        current_project_run = await run_service.get_current_run(project_info["id"], chat_only=True)
                     except Exception:
                         current_project_run = None
                 try:
@@ -3261,7 +3261,7 @@ async def open_room(
     async def _current_run():
         if not project_id:
             return None
-        return await RunService().get_current_run(project_id)
+        return await RunService().get_current_run(project_id, chat_only=True)
 
     timings: dict[str, int] = {}
 
@@ -3320,7 +3320,7 @@ async def _active_session_status(session_id: str) -> dict:
     from app.agent.cli_runner import is_cli_active
 
     from app.services.run_service import RunService
-    active_run = await RunService().get_current_run_for_room(session_id)
+    active_run = await RunService().get_current_run_for_room(session_id, chat_only=True)
     origin_message_id = active_run.get("origin_message_id") if active_run else None
     info = CancellationRegistry.get_active_info(session_id)
     if info:

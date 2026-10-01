@@ -175,7 +175,25 @@ def sieve(item, own):
         return 'automatic'
     if re.match(r'(mailer-daemon|postmaster)@', sender or ''):
         return 'bounce'
+    if CODE.search(item.get('subject') or ''):
+        return 'code'   # a one-time code: Dan reads it itself when it is the one logging in; told, it is already used up
     return ''
+
+
+CODE = re.compile(r'(verification|security|login|sign.?in|one.?time)\s*code|OTP|passcode|認証コード|確認コード|ワンタイム|セキュリティコード|'
+                  r'^\s*\d{4,8}\s*(is your|は)', re.I)
+REPEAT_HOURS = 24
+
+
+def repeat_key(item):
+    """The same notice again: same sender, same subject once its numbers, hashes and parentheses are taken out."""
+    subject = re.sub(r'\(.*?\)|（.*?）|#?[0-9a-f]{7,}|\d+', '', (item.get('subject') or '').lower())
+    return _address((item.get('sender_info') or {}).get('from')) + '|' + re.sub(r'\s+', ' ', subject).strip()
+
+
+def repeated(told, key, now):
+    """Told within the last REPEAT_HOURS: say it once, not each time it comes again."""
+    return now - told.get(key, 0) < REPEAT_HOURS*3600
 
 
 def _mail_watches(user_id):
@@ -239,6 +257,7 @@ def watch_hit(item, watches):
 
 JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から届いたメールを1通ずつ見て、無視するか、対応するかを決める。
 届いたものは全部残るので（後で探せる）、本人に関係ないもの（広告・お知らせ・本人に用のない自動通知）は無視でよい。
+本人やダンが自分でした操作の確認（予約完了・予約確認・注文受付・登録完了・本人のログインの通知など）も、問題が書かれていなければ無視。
 対応するなら、その大きさも自分で決める:
 - tell: 一言で足りる（本人が知っておけばよい。人からの連絡・期限・お金・予定・待っていた返事など）。
 - act: 作業が要る（返事を書く・調べる・準備する。本人の記憶にその使い道があるもの、例: 経費の領収書）。送信や支払いは本人の承認後なので準備と提案まで。
@@ -381,6 +400,15 @@ async def handle(user_id, item, own):
     decision = await judge(user_id, item, watches, rooms, hint, known)
     if hint and decision['decision'] == 'ignore':
         decision['decision'] = 'tell'   # a reply to Dan's own message is never silently dropped
+    if not hint and decision['decision'] in ('tell', 'act'):
+        key, now = repeat_key(item), time.time()
+        with _lock:
+            data = settings(user_id); told = data.get('told') or {}
+            if repeated(told, key, now):
+                decision = {**decision, 'decision': 'ignore', 'why': 'repeat: ' + (decision.get('why') or '')}
+            else:
+                told[key] = now
+                data['told'] = {k: t for k, t in told.items() if now - t < REPEAT_HOURS*3600*2}; save(user_id, data)
     if hint and not decision.get('room_id'):
         decision['room_id'] = hint
     room = None

@@ -14,6 +14,11 @@ from app.services.supabase_client import get_supabase_client
 logger = logging.getLogger(__name__)
 
 
+def background(row) -> bool:
+    """Work handed to a job (command_center), not a turn of the chat itself."""
+    return (row.get("metadata") or {}).get("started_by") == "command_center"
+
+
 ACTIVE_RUN_STATES = {
     AgentRunState.RUNNING.value,
     AgentRunState.AWAITING_APPROVAL.value,
@@ -62,7 +67,10 @@ class RunService:
         result = await asyncio.to_thread(query.execute)
         return result.data[0] if result.data else None
 
-    async def get_current_run(self, project_id: str) -> Optional[dict]:
+    async def get_current_run(self, project_id: str, chat_only: bool = False) -> Optional[dict]:
+        """chat_only: the chat's own turn, leaving out work running in the background (a job started from a call or by
+        command_center). Such work showed as the chat 「thinking」 and made what the owner sent a follow-up held until the
+        next step of a turn that was not running (2026-10-01)."""
         query = (
             self.supabase.table("agent_runs")
             .select("*")
@@ -72,6 +80,8 @@ class RunService:
         )
         result = await asyncio.to_thread(query.execute)
         rows = result.data or []
+        if chat_only:
+            rows = [row for row in rows if not background(row)]
         if not rows:
             return None
 
@@ -83,13 +93,15 @@ class RunService:
                 return row
         return rows[0]
 
-    async def get_current_run_for_room(self, room_id: str) -> Optional[dict]:
+    async def get_current_run_for_room(self, room_id: str, chat_only: bool = False) -> Optional[dict]:
         query = (
             self.supabase.table("agent_runs").select("*").eq("room_id", room_id)
             .order("created_at", desc=True).limit(20)
         )
         result = await asyncio.to_thread(query.execute)
         for row in result.data or []:
+            if chat_only and background(row):
+                continue
             if row.get("state") in ACTIVE_RUN_STATES and not row.get("superseded_by_run_id"):
                 return row
         return None

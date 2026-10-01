@@ -89,3 +89,13 @@ async def test_a_watch_is_matched_by_its_own_condition_without_the_model(home, m
     assert await inbox.handle('u', mail('OpenAI <noreply@openai.com>'), set()) == 'act'
     assert sent[0]['watch_id'] == 'w1' and sent[0]['room_id'] == 'room-watch'
     assert inbox.watch_hit(mail('田中 <tanaka@example.co.jp>'), [watch]) is None
+
+
+def test_codes_are_dropped_and_the_same_notice_is_said_once_a_day():
+    assert inbox.sieve({'subject': '839647 is your verification code', 'sender_info': {'from': 'a@x.com'}, 'metadata': {}}, set()) == 'code'
+    assert inbox.sieve({'subject': 'Xの認証コードは274627です', 'sender_info': {'from': 'a@x.com'}, 'metadata': {}}, set()) == 'code'
+    one = {'subject': '[Boonanpro/done] Run failed: scope-check - main (9031a2b)', 'sender_info': {'from': 'GitHub <notifications@github.com>'}}
+    two = {'subject': '[Boonanpro/done] Run failed: scope-check - main (5ab12cd)', 'sender_info': {'from': 'GitHub <notifications@github.com>'}}
+    assert inbox.repeat_key(one) == inbox.repeat_key(two)
+    told = {inbox.repeat_key(one): 1000.0}
+    assert inbox.repeated(told, inbox.repeat_key(two), 1000.0 + 3600) and not inbox.repeated(told, inbox.repeat_key(two), 1000.0 + 25*3600)

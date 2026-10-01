@@ -219,6 +219,12 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     if not source or source.get("user_id") != user_id:
         raise ValueError("依頼元プロジェクトを確認できません")
     if action == "report":
+        if report_message_id and target_room == room_id:
+            from app.services import voice_calls
+            if voice_calls.active(target_room):
+                # The owner is on a call in this room: the result is spoken there (sideband job_feed). Writing it into the
+                # chat as well put a second Dan's text beside the call (2026-10-01). After the call it is written as usual.
+                return {"reported": False, "spoken_in_call": True}
         # Work asked in this same room (a call in a project chat) reports as the room's own reply: the 「…からの報告」 heading
         # and the link to 「作業の部屋」 pointed at the room the owner was already in (2026-09-27).
         same_room = target_room == room_id

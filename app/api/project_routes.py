@@ -437,7 +437,7 @@ async def get_current_run(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    run = await run_service.get_current_run(project_id)
+    run = await run_service.get_current_run(project_id, chat_only=True)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
