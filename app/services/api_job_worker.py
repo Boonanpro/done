@@ -104,9 +104,14 @@ class Worker:
             outcome = {'replayed': False, 'reason': type(exc).__name__}
         if not outcome.get('replayed'):
             return f"（記憶した手順の再生は途中で止まった: {str(outcome.get('reason') or '')[:80]}。今の画面から通常どおり続ける）"
-        from app.agent.v2.tools import _execute_browser_tool
-        page = await _execute_browser_tool('read', {'max_chars': 4000})
-        text = ' '.join(b.get('text', '') for b in page.get('content', []) if b.get('type') == 'text')[:4000]
+        if flow.get('kind') == 'desktop':
+            from app.services.desktop_control import run as desktop
+            page = await desktop({'action': 'read', 'window': outcome.get('window') or ''})
+            text = str(page.get('output') or page.get('error') or '')[:4000]
+        else:
+            from app.agent.v2.tools import _execute_browser_tool
+            page = await _execute_browser_tool('read', {'max_chars': 4000})
+            text = ' '.join(b.get('text', '') for b in page.get('content', []) if b.get('type') == 'text')[:4000]
         return ('記憶した手順を再生済み（' + str(outcome.get('elapsed_ms')) + 'ms）。今の画面:\n' + text +
                 '\nこの画面で依頼に答えられればそのまま答える。足りなければ続けて操作する。')
 
@@ -126,7 +131,7 @@ class Worker:
         instructions = (s.get('instructions') or '') + chr(10) + dan_tools.catalog(mcp, native=[t['name'] for t in native])
         provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
-        used_browser = False
+        used_browser = used_desktop = False
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return
             started = time.monotonic()
@@ -144,6 +149,7 @@ class Worker:
                 if self.read().get('state') == 'cancelled': return
                 called = time.monotonic()
                 used_browser = used_browser or call['name'] == 'browser' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'browser')
+                used_desktop = used_desktop or call['name'] == 'desktop' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'desktop')
                 try:
                     if call['name'] == 'dan_tool_help':
                         contents = [type('T', (), {'type': 'text', 'text': dan_tools.help_text(mcp, str(call['args'].get('name') or ''))})()]
@@ -179,6 +185,12 @@ class Worker:
                 try:
                     from app.services import browser_recipes
                     await browser_recipes.finish()
+                except Exception:
+                    pass
+            if used_desktop:   # likewise for the steps it took in apps
+                try:
+                    from app.services import desktop_control
+                    await asyncio.to_thread(desktop_control.finish)
                 except Exception:
                     pass
             self.state.publish(self.job_id, 'result', text, result=text, state='completed')

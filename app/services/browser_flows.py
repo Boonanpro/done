@@ -6,12 +6,17 @@ model call at all (a Jev choice at most, when an element moved).
 Recording piggybacks on browser_recipes (every tool call already passes through it): here the run's non-login steps are
 kept with their values, and a run that ended in reading a page (read/find/content/read_url) is saved as a flow.
 
-    flow = {'id', 'host', 'start': url_key, 'name': task words, 'steps': [...], 'slots': {slot: example},
+    flow = {'id', 'host', 'start': url_key, 'name': task words, 'steps': [...], 'slots': {slot: shape},
             'end': {'key', 'landmarks'}, 'successes', 'failures', 'created', 'used'}
     step = {'action': 'click'|'type'|'select'|'keyboard_press'|'fill_credential'..., 'params': {...}, 'targets': {...},
-            'slot': 'label of the field' (type/select), 'pre': url_key, 'post': {...}}
+            'slot': 'label of the field' (type/select/pick), 'shape': the value's form, 'pre': url_key, 'post': {...}}
 
+A flow is the procedure only, never the values that went through it (2026-10-01): a slot keeps its form (「0000/00/00」,
+「あああ」), not what was typed, and an item picked from a list because the request named it (a LINE group, an invoice)
+is a slot too, not a fixed click. So a flow holds nothing of the person who recorded it and can serve anyone; the replay
+gets every value from the request. Flows recorded before then still carry their example values and replay with them.
 Values of password fields, credential steps and one-time codes are never stored (the login machinery handles those).
+The same store and the same `flow` tool hold desktop apps' flows (host 'desktop:<exe>', see desktop_control).
 Kill switch: DAN_BROWSER_FLOWS=0.
 """
 import hashlib
@@ -95,6 +100,75 @@ def pick_group(element, elements):
     return group if len(group) >= PICK_GROUP_MIN else []
 
 
+ITEM_ROLES = {'link', 'listitem', 'option', 'row', 'gridcell', 'treeitem', 'menuitem', 'tab', 'radio',
+              'Hyperlink', 'ListItem', 'TreeItem', 'DataItem', 'MenuItem', 'TabItem', 'RadioButton'}   # page roles, then UIA kinds
+CHOICE_MIN_SIBLINGS = 3   # one item out of a list: a lone button the request happens to mention (「検索」) is not a choice
+
+
+def _norm(text):
+    import unicodedata
+    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', text or ''))
+
+
+def shape(value):
+    """The form of a value without the value: digits become 0, Latin letters a, anything else あ."""
+    value = re.sub(r'[a-zA-Z]', 'a', re.sub(r'[0-9]', '0', str(value)))
+    return re.sub(r'[^0a\s\-/:.,@()]', 'あ', value)[:40]
+
+
+def asked(name, task):
+    """The part of a clicked item's name that the request itself said ('' when the request did not name it).
+    「【X顧問】株式会社パイナ本田様（4人）」 clicked for 「【X顧問】株式会社パイナ本田様を開いて」 gives the group's name."""
+    n, t = _norm(name), _norm(task)
+    if len(n) < 2 or not t:
+        return ''
+    if n in t:
+        return n
+    best = ''
+    for i in range(len(n)):   # the longest stretch of the name found in the request
+        for j in range(len(n), i+len(best), -1):
+            if n[i:j] in t:
+                best = n[i:j]
+                break
+    return best if len(best) >= 4 and len(best)*2 >= len(n) else ''
+
+
+def generalize(steps, task):
+    """The recorded steps as a procedure: values become their shapes, and a click on a list item the request named becomes
+    a pick slot (replayed by the name the next request gives)."""
+    out, picks, typed = [], sum(1 for s in steps if s.get('pick')), []
+    for step in steps:
+        step = dict(step)
+        if step['action'] in ('type', 'keys') and step.get('example'):
+            typed.append(str(step['example']))
+        target = (step.get('targets') or {}).get('ref') or {}
+        part = asked(target.get('name'), task) if step['action'] == 'click' and not step.get('pick') else ''
+        # one item out of a list, or the item a search just narrowed the list to (typed 「X顧問」, clicked 「【X顧問】…」)
+        searched = any(len(_norm(t)) >= 2 and _norm(t) in _norm(target.get('name')) for t in typed)
+        if part and target.get('role') in ITEM_ROLES and (step.get('siblings', 0) >= CHOICE_MIN_SIBLINGS or searched):
+            picks += 1
+            step.update(slot=f'選ぶ項目{picks}', pick=True, named=True, example=part, said=part)
+            step['targets'] = {'ref': {**target, 'name': ''}}   # found by the name the next request gives
+        if step.get('slot') and 'example' in step:
+            step['said'] = step.get('said') or str(step['example'])
+            step['shape'] = shape(step.pop('example'))
+        if step.get('options') and not all(str(o).isdigit() for o in step['options']):
+            step.pop('options')   # numbers (a calendar's days) say nothing about anyone; names might
+        out.append(step)
+    return out
+
+
+def masked(name, steps):
+    """The request's words with each value that became a slot replaced by the slot's name: 「〈選ぶ項目1〉を開いて」.
+    Takes generalize()'s steps and removes what they still say."""
+    said = sorted({(s.pop('said'), s['slot']) for s in steps if s.get('said')}, key=lambda x: -len(x[0]))
+    text = _norm(name) if any(v not in name and _norm(v) in _norm(name) for v, _ in said) else name
+    for value, slot in said:
+        if len(_norm(value)) >= 2:
+            text = text.replace(value, f'〈{slot}〉').replace(_norm(value), f'〈{slot}〉')
+    return text
+
+
 def slot_name(element):
     """What the field is called on the page: the slot's name and the model's hint for the value."""
     if element.get('tag') == 'SELECT':   # a select's accessible name is its option text ("6時 7時 8時…"): the field's own name says what it is
@@ -151,6 +225,7 @@ def record_step(run, action, params, pre, post):
                 'post': {'key': recipes.url_key(post['url']), 'landmarks': recipes.landmarks(post)}}
         if kind in ('type', 'select'): step['slot'], step['example'] = slot_name(element), value[:200]
         if kind == 'click':
+            step['siblings'] = sum(1 for e in pre['elements'] if e.get('role') == element.get('role') and e.get('name') and not e.get('disabled'))
             group = pick_group(element, pre['elements'])
             if group:   # the value is the name that was clicked; replay clicks the name asked for
                 picks = sum(1 for x in steps if x.get('pick'))+1
@@ -175,11 +250,13 @@ def save_flow(run, name=''):
     if run.get('saved') is not None:   # a login recipe was saved up to this index: those steps (and the OTP page after them) are the login, not the task
         steps = [s for s in steps if s.get('recipe_index') is None or s['recipe_index'] > run['saved']]
     end = run.get('flow_end')
-    if not enabled() or len(steps) < MIN_STEPS or not end:
+    if not enabled() or len(steps) < MIN_STEPS or not end or run.get('unrecordable'):
         return None
     host = (steps[0]['pre'].split('/')[0] if steps else '') or ''
     if not host: return None
-    slots = {s['slot']: s['example'] for s in steps if s.get('slot')}
+    steps = generalize(steps, name)
+    name = masked(name, steps)
+    slots = {s['slot']: s.get('shape', '') for s in steps if s.get('slot')}
     signature = hashlib.sha1(json.dumps([(s['action'], s.get('slot'), s.get('targets')) for s in steps], sort_keys=True).encode()).hexdigest()[:12]
     flows = flows_for(host)
     previous = run.get('flow_saved')
@@ -195,7 +272,7 @@ def save_flow(run, name=''):
             if name and not flow.get('name'): flow['name'] = name[:200]
             _write_flows(_host_file(host), flows); run['flow_saved'] = signature
             return flow
-    flow = {'id': signature, 'host': host, 'start': run.get('landing') or steps[0]['pre'], 'name': name[:200],
+    flow = {'id': signature, 'host': host, 'start': run.get('landing') or steps[0]['pre'], 'name': name[:200], **({'kind': run['kind']} if run.get('kind') else {}),
             'steps': steps, 'slots': slots, 'end': {'key': end['key'], 'landmarks': end['landmarks']},
             'successes': 1, 'failures': 0, 'created': time.time(), 'used': time.time()}
     for old in flows:
@@ -224,7 +301,10 @@ def describe(flow):
     (the task's first sentence, the pages' titles), the inputs it takes, and how it ended. Short: the model chose a fresh
     job over a fitting flow when this was the whole task text (2026-09-22 18:34)."""
     options = {s['slot']: s.get('options') or [] for s in flow['steps'] if s.get('pick')}
-    slots = ', '.join(f'{k}（例: {v}' + (f'。候補: {"/".join(options[k][:12])}…' if options.get(k) else '') + '）' for k, v in flow.get('slots', {}).items()) or '入力なし'
+    shaped = {s['slot'] for s in flow['steps'] if s.get('slot') and 'shape' in s}
+    named = {s['slot'] for s in flow['steps'] if s.get('named')}
+    slots = ', '.join(f'{k}（' + ('依頼で名指しされた一覧の項目名' if k in named else f'形: {v}' if k in shaped else f'例: {v}')
+                      + (f'。候補: {"/".join(options[k][:12])}…' if options.get(k) else '') + '）' for k, v in flow.get('slots', {}).items()) or '入力なし'
     name = re.split(r'[。\n]', flow.get('name') or '')[0][:60] or '（名前なし）'
     clicks = [((s['targets'].get('ref') or {}).get('name') or '')[:12] for s in flow['steps'] if s['action'] == 'click' and not s.get('pick') and s.get('targets')]
     path = '→'.join(c for c in clicks if c)[:80]
@@ -237,6 +317,14 @@ def describe(flow):
 async def run(flow, values, page=None):
     """Replay a flow with new values; returns {'replayed': bool, 'reason', 'completed_steps', 'elapsed_ms'} and leaves the
     browser on the end page (the caller reads it). Values missing for a slot keep the recorded example."""
+    missing = sorted({s['slot'] for s in flow['steps'] if s.get('slot') and 'example' not in s and values.get(s['slot']) in (None, '')})
+    if missing:   # a flow keeps no values: every slot's value comes from the request
+        return {'replayed': False, 'reason': 'missing_values: ' + ', '.join(missing), 'completed_steps': [], 'elapsed_ms': 0}
+    if flow.get('kind') == 'desktop':
+        from app.services.desktop_control import replay
+        result = await replay(flow, values)
+        report(flow, result['replayed'])
+        return result
     from app.agent.v2.tools import _execute_browser_tool
     from app.services.browser_replay import observe, resolve, rematch, attempt, STEP_WAIT_SECONDS, POLL_SECONDS
     from app.services.jev_decisions import Decisions
@@ -258,9 +346,10 @@ async def run(flow, values, page=None):
                 if step.get('pick') and values.get(step['slot']) not in (None, step.get('example')):
                     # a pick with a new value: the same kind of element, named by the value asked for
                     step = {**step, 'targets': {'ref': {**step['targets']['ref'], 'name': str(values[step['slot']])}}}
-                refs, deadline = (resolve(step, snap) if step.get('targets') else {}), time.perf_counter()+STEP_WAIT_SECONDS
+                find = (lambda s, st=step: pick_resolve(st, s)) if step.get('pick') else (lambda s, st=step: resolve(st, s))
+                refs, deadline = (find(snap) if step.get('targets') else {}), time.perf_counter()+STEP_WAIT_SECONDS
                 while refs is None and time.perf_counter() < deadline:
-                    await page.wait_for_timeout(int(POLL_SECONDS*1000)); snap = await observe(page); refs = resolve(step, snap)
+                    await page.wait_for_timeout(int(POLL_SECONDS*1000)); snap = await observe(page); refs = find(snap)
                 if refs is None and index+1 < len(flow['steps']) and flow['steps'][index+1].get('targets') and resolve(flow['steps'][index+1], snap):
                     done.append('skipped '+step['action']); continue   # a step the site did not need today (a login click when the session was still alive)
                 if refs is None:
@@ -275,10 +364,10 @@ async def run(flow, values, page=None):
                         raise RuntimeError('sensitive_action_needs_agent: '+(target.get('label') or '')[:40])
                     outcome = await attempt(_execute_browser_tool, 'click', {**refs, 'observation': 'dom', 'login': False, 'replay': False}, page)
                 elif step['action'] == 'type':
-                    value = values.get(step['slot'], step.get('example', ''))
+                    value = values.get(step['slot']) or step.get('example', '')
                     outcome = await _execute_browser_tool('type', {**refs, 'text': str(value), 'press_enter': bool(step.get('press_enter')), 'observation': 'dom'})
                 elif step['action'] == 'select':
-                    value = values.get(step['slot'], step.get('example', ''))
+                    value = values.get(step['slot']) or step.get('example', '')
                     outcome = await _execute_browser_tool('select', {**refs, 'value': str(value), 'observation': 'dom'})
                 elif step['action'] == 'keyboard_press':
                     outcome = await _execute_browser_tool('keyboard_press', {'key': step.get('key') or 'Enter', 'observation': 'dom'})
@@ -305,10 +394,31 @@ async def run(flow, values, page=None):
     return {'replayed': reason is None, 'reason': reason, 'completed_steps': done, 'elapsed_ms': round((time.perf_counter()-started)*1000)}
 
 
+def matches(names, want):
+    """Which of these names is the item asked for: the same name, else the one name that contains it (a list shows
+    「本田様（4人）」 for 「本田様」). Returns the index or None."""
+    want = _norm(want)
+    if not want:
+        return None
+    exact = [i for i, n in enumerate(names) if _norm(n) == want]
+    if len(exact) == 1:
+        return exact[0]
+    inside = [i for i, n in enumerate(names) if want in _norm(n)]
+    return inside[0] if len(inside) == 1 else None
+
+
+def pick_resolve(step, snap):
+    """A pick: among elements of the recorded kind, the one named by the value asked for."""
+    want = step['targets']['ref']
+    items = [e for e in snap['elements'] if not e['disabled'] and e['role'] == want['role'] and e.get('tag') == want.get('tag')]
+    index = matches([e['name'] for e in items], want['name'])
+    return None if index is None else {'ref': items[index]['ref']}
+
+
 TOOL = {
     'name': 'flow',
-    'description': ('一度やったブラウザの手順の記憶。action=list: 知っている手順（入力の穴つき）を一覧する／action=replay: id と values（穴→値）で、'
-                    '大きいモデルなしに手順を再生してその結果のページで止める（続けて browser read で読む）。'
+    'description': ('一度やったブラウザやデスクトップアプリ（host が desktop: のもの）の手順の記憶。action=list: 知っている手順（入力の穴つき）を一覧する／action=replay: id と values（穴→値）で、'
+                    '大きいモデルなしに手順を再生してその結果の画面で止める（続けて browser read / desktop read で読む）。記憶に値は残っていないので、穴の値は全部依頼から渡す。'
                     '同じサイトで同じ種類の作業を頼まれたら、まず list を見て、合う手順があれば replay を使う。合わなければ通常どおり操作する（成功すれば自動で記憶される）。'),
     'input_schema': {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': ['list', 'replay']},

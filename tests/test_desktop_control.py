@@ -95,3 +95,25 @@ def test_sensitive_labels_need_confirmation():
     blocked = run({'action': 'click', 'ref': '@dsend'})
     assert blocked['success'] is False and not type(element).pressed and 'confirmed' in blocked['error']
     assert run({'action': 'click', 'ref': '@dsend', 'confirmed': True})['success'] and type(element).pressed
+
+
+def test_desktop_steps_are_kept_as_a_flow_without_their_values(monkeypatch, tmp_path):
+    """Steps that succeed are recorded; a look at the result saves them as a flow in the shared store, with the typed
+    text kept only as its form. A click by coordinates makes the run unrepeatable: nothing is kept."""
+    from app.services import desktop_control as D, browser_flows
+    import json
+    monkeypatch.setenv('DAN_BROWSER_FLOWS_DIR', str(tmp_path))
+    monkeypatch.setattr('app.services.browser_recipes._task_words', lambda: 'LINEで「【X顧問】本田様」を開いて')
+    D._record.clear(); D._record.update(steps=[], updated=0.0)
+    win = {'title': 'LINE', 'exe': 'LINE.exe'}
+    for step, params in (({'action': 'type', 'slot': '検索', 'example': 'X顧問', 'window': win, 'siblings': 1,
+                           'targets': {'ref': {'role': 'Edit', 'name': '検索', 'auto_id': ''}}}, {'action': 'type'}),
+                         ({'action': 'click', 'window': win, 'siblings': 9,
+                           'targets': {'ref': {'role': 'ListItem', 'name': '【X顧問】本田様（4人）', 'auto_id': ''}}}, {'action': 'click'})):
+        D._pending.append(step); D._commit(params, {'success': True})
+    D._commit({'action': 'read'}, {'success': True})
+    flow = browser_flows.all_flows()[0]
+    assert flow['host'] == 'desktop:LINE.exe' and flow['kind'] == 'desktop'
+    assert flow['slots'] == {'検索': 'aああ', '選ぶ項目1': browser_flows.shape('【X顧問】本田様')} and '本田' not in json.dumps(flow, ensure_ascii=False)
+    D._commit({'action': 'click', 'x': 3, 'y': 4}, {'success': True})
+    assert D.save() is None

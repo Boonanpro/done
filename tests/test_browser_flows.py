@@ -59,13 +59,15 @@ async def test_search_done_once_is_replayed_with_new_values_and_no_model(rail):
     assert len(saved) == 1
     flow = saved[0]
     assert [s['action'] for s in flow['steps']] == ['type', 'type', 'select', 'click']
-    assert flow['slots'] == {'出発駅': '新大阪', '到着駅': '品川', 'date': '0924'} and flow['name'] == '新大阪から品川の便を調べて'
+    assert flow['slots'] == {'出発駅': 'あああ', '到着駅': 'ああ', 'date': '0000'} and flow['name'] == '〈出発駅〉から〈到着駅〉の便を調べて'
+    assert '新大阪' not in json.dumps(flow, ensure_ascii=False)   # the procedure only, never the values
+    assert (await flows.run(flow, {'出発駅': '東京'}))['reason'].startswith('missing_values')   # every value comes from the request
     # the second time: code, new values
     result = await flows.run(flow, {'出発駅': '東京', '到着駅': '博多', 'date': '0925'})
     assert result['replayed'], result
     assert '東京→博多 0925' in await page.inner_text('body')
     listed = (await flows.tool({'action': 'list'}))['output']
-    assert '出発駅（例: 新大阪）' in listed and flow['id'] in listed
+    assert '出発駅（形: あああ）' in listed and flow['id'] in listed
 
 
 @pytest.mark.asyncio
@@ -105,7 +107,7 @@ async def test_after_a_replayed_login_the_task_that_follows_is_still_recorded(ra
     await _execute_browser_tool('click', {'ref': await ref(page, '#go')})
     await _execute_browser_tool('read', {})
     saved = flows.flows_for('bank.example.test')
-    assert [s['action'] for s in saved[0]['steps']] == ['type', 'type', 'click'] and saved[0]['slots'] == {'出発駅': '新大阪', '到着駅': '品川'}
+    assert [s['action'] for s in saved[0]['steps']] == ['type', 'type', 'click'] and saved[0]['slots'] == {'出発駅': 'あああ', '到着駅': 'ああ'}
 
 
 @pytest.mark.asyncio
@@ -155,7 +157,7 @@ async def test_a_failed_flow_is_superseded_by_the_next_recording_of_the_same_tas
     await _execute_browser_tool('read', {})
     await _execute_browser_tool('release', {})
     listed = flows.all_flows()
-    assert len(listed) == 1 and listed[0]['id'] != first['id'] and listed[0]['slots'] == {'出発駅': '新大阪', '到着駅': '品川', 'date': '0925'}
+    assert len(listed) == 1 and listed[0]['id'] != first['id'] and listed[0]['slots'] == {'出発駅': 'あああ', '到着駅': 'ああ', 'date': '0000'}
 
 
 @pytest.mark.asyncio
@@ -170,8 +172,8 @@ async def test_a_calendar_day_clicked_is_a_slot_and_replays_with_another_day(rai
     await _execute_browser_tool('click', {'ref': await ref(page, '#go')})
     await _execute_browser_tool('read', {})
     flow = flows.flows_for('bank.example.test')[0]
-    assert flow['slots'] == {'出発駅': '新大阪', '到着駅': '品川', '選択1': '25'} and '候補: 1/2/3' in flows.describe(flow)
-    result = await flows.run(flow, {'選択1': '26'})
+    assert flow['slots'] == {'出発駅': 'あああ', '到着駅': 'ああ', '選択1': '00'} and '候補: 1/2/3' in flows.describe(flow)
+    result = await flows.run(flow, {'出発駅': '新大阪', '到着駅': '品川', '選択1': '26'})
     assert result['replayed'], result
     assert '新大阪→品川 0924 day26' in await page.inner_text('body')
 
@@ -197,3 +199,18 @@ def test_back_removes_the_detour_and_a_site_filled_field_is_kept_when_the_form_i
     bf.record_step(run, 'click', {'ref': '@a:3'}, page, page)
     steps = [(s['action'], s.get('slot'), s.get('example')) for s in run['flow_steps']]
     assert steps == [('type', 'to', '新大阪'), ('type', 'from', '尼崎'), ('click', None, None)]
+
+
+def test_an_item_the_request_named_becomes_a_slot_and_its_name_is_not_kept():
+    """Clicking 「【X顧問】株式会社パイナ本田様（4人）」 in a list because the request named the group: the next request names
+    another group. A lone button the request mentions (「検索」) stays a fixed click."""
+    item = {'role': 'ListItem', 'name': '【X顧問】株式会社パイナ本田様（4人）', 'auto_id': ''}
+    steps = [{'action': 'type', 'slot': '検索', 'example': 'X顧問', 'targets': {'ref': {'role': 'Edit', 'name': '検索'}}},
+             {'action': 'click', 'targets': {'ref': {'role': 'Button', 'name': '検索'}}, 'siblings': 5},
+             {'action': 'click', 'targets': {'ref': item}, 'siblings': 12}]
+    out = flows.generalize(steps, 'LINEで「【X顧問】株式会社パイナ本田様」を検索して開いて')
+    assert [s.get('slot') for s in out] == ['検索', None, '選ぶ項目1'] and out[2]['pick'] and out[2]['named']
+    assert out[0]['shape'] == 'aああ' and flows.masked('LINEで「【X顧問】株式会社パイナ本田様」を検索して開いて', out) == 'LINEで「〈選ぶ項目1〉」を検索して開いて'
+    assert 'X顧問' not in json.dumps(out, ensure_ascii=False)
+    assert flows.matches(['X顧問 雑談', '【X顧問】株式会社パイナ本田様（4人）'], '【X顧問】株式会社パイナ本田様') == 1
+    assert flows.matches(['A社（3）', 'A社（5）'], 'A社') is None   # two candidates: not guessed

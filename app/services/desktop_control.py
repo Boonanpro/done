@@ -9,6 +9,13 @@ Elements come from Windows UI Automation at call time; nothing is prepared per a
 patterns (Invoke / Toggle / Select / SetValue) first, which do not move the owner's mouse or need focus;
 the mouse is used only when asked for. Anything that sends, posts, pays or deletes needs confirmed=true:
 the caller must already have the owner's approval (for messages: the compose_message card).
+
+Operation memory, as for the browser (browser_flows): the steps a job takes in an app (launch, focus, click, type, keys)
+are recorded with each element's kind and name, and kept as a flow when the work reaches a look at the result (read,
+observe, find) or the job ends. The next time, `flow replay` runs them by code: each element is found again by kind and
+name (an item the request named, by the new name), through the same _run as a model's call, so every confirmation gate
+holds. A step that cannot be found stops the replay; the model carries on from there, and its fresh recording replaces
+the flow. A click by coordinates or a script is not a step code can repeat: such a run is not kept.
 """
 import asyncio
 import base64
@@ -53,6 +60,11 @@ PRESSABLE = {'Button', 'Hyperlink', 'MenuItem', 'TabItem', 'ListItem', 'CheckBox
 INPUTS = {'Edit', 'Document', 'ComboBox'}
 _refs = {}          # ref -> element wrapper (valid while this MCP process lives and the element exists)
 _counter = [0]
+RECORD_IDLE_SECONDS = 900
+STEP_WAIT_SECONDS = 8
+_record = {'steps': [], 'updated': 0.0}   # this process's recording (a job runs in its own process)
+_pending = []       # the step _run is taking; kept only when the call succeeds
+_replaying = [False]
 
 
 def _uia():
@@ -166,6 +178,95 @@ def _resolve(params):
     return _refs[hits[0]['ref']]
 
 
+def _exe(element):
+    try:
+        import psutil
+        return psutil.Process(element.element_info.process_id).name()
+    except Exception:
+        return ''
+
+
+def _window_of(element):
+    try:
+        top = element.top_level_parent()
+        return {'title': (top.window_text() or '').strip(), 'exe': _exe(top)}
+    except Exception:
+        return {'title': '', 'exe': ''}
+
+
+def _identity(element):
+    kind, name = _describe(element)
+    try: auto_id = element.element_info.automation_id or ''
+    except Exception: auto_id = ''
+    try: siblings = sum(1 for e in element.parent().children() if e.element_info.control_type == kind)
+    except Exception: siblings = 0
+    return {'ref': {'role': kind, 'name': name, 'auto_id': auto_id}}, siblings
+
+
+def _note(action, element=None, window=None, **extra):
+    """The step this call is taking, for the recording (kept only if the call succeeds)."""
+    if _replaying[0]:
+        return
+    step = {'action': action, **extra}
+    if element is not None:
+        step['targets'], step['siblings'] = _identity(element)
+        step['window'] = _window_of(element)
+    elif window is not None:
+        step['window'] = {'title': (window.window_text() or '').strip(), 'exe': _exe(window)}
+    _pending.append(step)
+
+
+FIXED_KEYS = re.compile(r'(?:[\^%+]+(?:\{[A-Za-z0-9_ ]+\}|.)|\{[A-Za-z0-9_ ]+\})+')
+
+
+def _commit(params, result):
+    """After a call: keep its step, mark the recording as not repeatable, or save it at a look at the result."""
+    if _replaying[0]:
+        return
+    steps = list(_pending); _pending.clear()
+    now = time.time()
+    if now-_record['updated'] > RECORD_IDLE_SECONDS:
+        _record.clear(); _record.update(steps=[], updated=now)
+    action = params.get('action')
+    if not result.get('success'):
+        return
+    if action == 'script' or (action == 'click' and params.get('x') is not None):
+        _record['unrecordable'] = True   # what code cannot repeat by itself: this run teaches nothing
+    elif steps:
+        _record['steps'].extend(steps); _record['updated'] = now
+    elif action in ('read', 'observe', 'find'):
+        save()
+
+
+def save(task=None):
+    """The recording as a flow (browser_flows' store), when it has steps code can repeat."""
+    steps = [dict(s) for s in _record.get('steps') or []]
+    if len(steps) < 2 or _record.get('unrecordable'):
+        return None
+    try:
+        from app.services import browser_flows, browser_recipes
+        task = browser_recipes._task_words() if task is None else task
+        exe = next((s['window']['exe'] for s in steps if (s.get('window') or {}).get('exe')), '') or 'app'
+        host = 'desktop:' + exe
+        for step in steps:
+            step['pre'] = host
+            window = step.get('window')
+            if window and browser_flows.asked(window.get('title'), task):
+                step['window'] = {**window, 'title': ''}   # a window named for what the request opened: found by the new name
+        run = {'flow_steps': steps, 'flow_end': {'key': host, 'landmarks': []}, 'landing': host, 'kind': 'desktop',
+               'saved': None, 'flow_saved': _record.get('flow_saved')}
+        flow = browser_flows.save_flow(run, task)
+        _record['flow_saved'] = run.get('flow_saved')
+        return flow
+    except Exception:
+        return None
+
+
+def finish():
+    """The job is done: keep what it did in apps."""
+    return save()
+
+
 def _run(params):
     action = params.get('action')
     if action == 'windows':
@@ -182,11 +283,12 @@ def _run(params):
         if not found:
             return _fail(f'スタートメニューに「{app}」という名前のアプリがありません')
         subprocess.Popen(['explorer.exe', 'shell:AppsFolder\\'+found], creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        _note('launch', app=app)
         return _text(f'{app} を起動しました。数秒後に windows で確認してください。')
     if action in ('observe', 'find', 'read', 'screenshot', 'focus') or (action == 'click' and params.get('x') is not None):
         title, window = _window(params.get('window'))
         if action == 'focus':
-            window.set_focus(); return _text(f'「{title}」を前面に出しました')
+            window.set_focus(); _note('focus', window=window); return _text(f'「{title}」を前面に出しました')
         if action == 'read':
             return _text(f'ウィンドウ「{title}」の文字:\n'+_window_text(window))
         if action == 'screenshot':
@@ -223,6 +325,7 @@ def _run(params):
         if action == 'click':
             if SENSITIVE.search(name) and not params.get('confirmed'):
                 return _fail(f'「{name}」は送信・投稿・支払い・削除にあたる操作です。本人の承認を得てから confirmed=true を付けてください。何も押していません。')
+            _note('click', element)
             how = _press(element)
             return _text(f'[{kind}] {name} を押しました（{how}）。observe で結果を確認してください')
         text = params.get('text')
@@ -240,6 +343,8 @@ def _run(params):
                          '置き換えてよい時だけ replace=true を付けてください。何も入力していません。')
         if params.get('press_enter') and not params.get('confirmed'):
             return _fail('入力後のEnterはメッセージの送信になりうるため confirmed=true が必要です。Enterなしで入力だけ行うか、承認を得てください。')
+        _note('type', element, slot=(name or kind or '入力')[:40], example=text,
+              **({'replace': True} if params.get('replace') else {}), **({'press_enter': True} if params.get('press_enter') else {}))
         try:
             element.iface_value.SetValue(text); how = 'value'
         except Exception:
@@ -254,6 +359,7 @@ def _run(params):
             return _fail('keys が必要です')
         if '{ENTER}' in keys.upper() and not params.get('confirmed'):
             return _fail('Enter はメッセージの送信になりうるため confirmed=true が必要です。何も送っていません。')
+        _note('keys', window=window, **({'keys': keys} if FIXED_KEYS.fullmatch(keys) else {'slot': 'キー入力', 'example': keys}))
         try:
             window.set_focus()
         except Exception:
@@ -266,6 +372,7 @@ def _run(params):
         calls = {'close': 'close', 'minimize': 'minimize', 'maximize': 'maximize', 'restore': 'restore'}
         if op not in calls:
             return _fail('op は close / minimize / maximize / restore')
+        _note('window', window=window, op=op)
         getattr(window, calls[op])()
         return _text(f'「{title}」を {op} しました')
     if action == 'act':
@@ -276,6 +383,7 @@ def _run(params):
             return _fail('op は expand / collapse / scroll_into_view / toggle / select / focus')
         if op in ('toggle', 'select') and SENSITIVE.search(name) and not params.get('confirmed'):
             return _fail(f'「{name}」は送信・支払い・削除にあたる操作です。本人の承認を得てから confirmed=true を付けてください。')
+        _note('act', element, op=op)
         {'focus': element.set_focus}.get(op, lambda: getattr(element, op)())()
         return _text(f'[{kind}] {name} を {op} しました')
     if action == 'script':
@@ -304,10 +412,122 @@ def _script(code):
     return _text(out.getvalue()[:6000] or '（出力なし）')
 
 
-async def run(params):
+def _call(params):
+    _pending.clear()
     try:
-        return await asyncio.to_thread(_run, params)
+        result = _run(params)
     except ValueError as exc:
-        return _fail(str(exc))
+        result = _fail(str(exc))
     except Exception as exc:
-        return _fail(f'デスクトップ操作に失敗しました: {type(exc).__name__}: {str(exc)[:200]}')
+        result = _fail(f'デスクトップ操作に失敗しました: {type(exc).__name__}: {str(exc)[:200]}')
+    try:
+        _commit(params, result)
+    except Exception:
+        pass
+    return result
+
+
+async def run(params):
+    return await asyncio.to_thread(_call, params)
+
+
+# ---- replay -------------------------------------------------------------------
+
+def _find_window(spec, values):
+    """The step's window: the same title, else the app's window named by a value of this request, else the app's only window."""
+    from app.services.browser_flows import matches
+    windows = _windows()
+    if spec.get('title'):
+        same = [w for t, w in windows if t == spec['title']]
+        if same:
+            return same[0]
+    mine = [(t, w) for t, w in windows if spec.get('exe') and _exe(w) == spec['exe']]
+    for value in values.values():
+        index = matches([t for t, _ in mine], str(value))
+        if index is not None:
+            return mine[index][1]
+    return mine[0][1] if len(mine) == 1 else None
+
+
+def _find_element(window, step, values):
+    from app.services.browser_flows import matches
+    want = step['targets']['ref']
+    items = []
+    for element in window.descendants(control_type=want['role']) if want.get('role') else []:
+        try:
+            if element.is_visible() and element.is_enabled():
+                items.append((_describe(element)[1], element))
+        except Exception:
+            continue
+    if step.get('pick'):
+        index = matches([n for n, _ in items], str(values.get(step['slot']) or step.get('example') or ''))
+        return None if index is None else items[index][1]
+    found = [e for n, e in items if n == want['name']]
+    if len(found) > 1 and want.get('auto_id'):
+        found = [e for e in found if (e.element_info.automation_id or '') == want['auto_id']] or found
+    return found[0] if len(found) == 1 else None
+
+
+def _wait(find, seconds=STEP_WAIT_SECONDS):
+    deadline = time.perf_counter()+seconds
+    while True:
+        try:
+            found = find()
+        except Exception:
+            found = None
+        if found is not None or time.perf_counter() >= deadline:
+            return found
+        time.sleep(.3)
+
+
+def _replay(flow, values):
+    started, done, reason, title = time.perf_counter(), [], None, ''
+    _replaying[0] = True
+    try:
+        for step in flow['steps']:
+            action = step['action']
+            if action == 'launch':
+                result = _run({'action': 'launch', 'app': step['app']})
+            else:
+                window = _wait(lambda: _find_window(step.get('window') or {}, values), 15 if done and done[-1] == 'launch' else STEP_WAIT_SECONDS)
+                if window is None:
+                    raise RuntimeError('window_not_found: ' + ((step.get('window') or {}).get('exe') or ''))
+                title = (window.window_text() or '').strip()
+                if action in ('click', 'type', 'act'):
+                    element = _wait(lambda: _find_element(window, step, values))
+                    if element is None:
+                        raise RuntimeError('element_not_found: ' + (step['targets']['ref'].get('role') or ''))
+                    _counter[0] += 1
+                    ref = f'@d{_counter[0]}'
+                    _refs[ref] = element
+                    params = {'action': action, 'ref': ref}
+                    if action == 'type':
+                        try: existing = element.iface_value.CurrentValue or ''
+                        except Exception: existing = ''
+                        # a search box still holding the last search is the procedure's own field; a document never is
+                        short = step['targets']['ref'].get('role') == 'Edit' and chr(10) not in existing and len(existing) <= 200
+                        params.update(text=str(values.get(step['slot']) or step.get('example') or ''),
+                                      replace=bool(step.get('replace')) or short, press_enter=bool(step.get('press_enter')))
+                    if action == 'act':
+                        params['op'] = step['op']
+                    result = _run(params)   # the same gates as a model's call: nothing is sent, paid or deleted unconfirmed
+                elif action == 'keys':
+                    result = _run({'action': 'keys', 'window': title, 'keys': step.get('keys') or str(values.get(step.get('slot')) or step.get('example') or '')})
+                elif action in ('focus', 'window'):
+                    result = _run({'action': action, 'window': title, **({'op': step['op']} if action == 'window' else {})})
+                else:
+                    raise RuntimeError('unknown_step: ' + action)
+            if not result.get('success'):
+                raise RuntimeError('step_failed: ' + str(result.get('error') or '')[:120])
+            done.append(action)
+    except Exception as exc:
+        reason = str(exc)[:160]
+    finally:
+        _replaying[0] = False
+    return {'replayed': reason is None, 'reason': reason, 'completed_steps': done, 'window': title,
+            'elapsed_ms': round((time.perf_counter()-started)*1000)}
+
+
+async def replay(flow, values):
+    """Run a desktop flow by code; the caller reads the window it ends on (result['window'])."""
+    return await asyncio.to_thread(_replay, flow, values)
