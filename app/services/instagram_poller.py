@@ -148,6 +148,8 @@ def _create_proposal(user_id: str, account: str, thread: Dict[str, Any], detecte
         f"相手: @{handle}\n"
         f"内容: {preview[:500] or '(本文なし)'}"
     )
+    from app.services import inbox   # said in the user's home room (there is no bell any more); the card stays as a record
+    inbox.say_soon(user_id, None, content)
     sb.table("dan_proposals").insert({
         "user_id": user_id,
         "type": "action",
@@ -178,6 +180,9 @@ def _notify_login_failed(user_id: str, account: str) -> None:
     )
     if existing:
         return  # 同じ依頼を溜めない
+    from app.services import inbox
+    inbox.say_soon(user_id, None, f"Instagram（{account}）に自動でログインできず、DMの見張りを止めています。認証の確認・パスワード変更・"
+                   f"アカウント制限のどれかの可能性があります。手で入り直す場合: python scripts/ig_login_once.py {account}")
     sb.table("dan_proposals").insert({
         "user_id": user_id,
         "type": "action",

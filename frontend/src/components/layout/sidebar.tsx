@@ -34,7 +34,6 @@ import { useUnreadStore } from '@/stores/unread-store';
 import { useProjectStore } from '@/stores/project-store';
 import { usePreviewStore } from '@/stores/preview-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
-import { NotificationPanel } from '@/components/notification/notification-panel';
 
 function useHasToken() {
   return useSyncExternalStore(
@@ -691,12 +690,6 @@ export function Sidebar({
           </nav>
         </ScrollArea>
 
-        {/* Notifications (mobile only, inline in sidebar) */}
-        {showNotifications && !isCollapsed && (
-          <div className="px-3 py-2">
-            <NotificationPanel inline />
-          </div>
-        )}
 
         <Separator className="bg-sidebar-border" />
 

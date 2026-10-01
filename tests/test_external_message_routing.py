@@ -186,3 +186,9 @@ async def test_unmatched_detected_message_does_not_create_proposal():
     assert result is None
     assert fake.tables["dan_proposals"] == []
 
+
+
+@pytest.fixture(autouse=True)
+def _no_chat(monkeypatch):
+    async def say(*a, **k): return None
+    monkeypatch.setattr('app.services.inbox.say', say)

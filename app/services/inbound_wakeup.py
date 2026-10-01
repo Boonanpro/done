@@ -138,6 +138,8 @@ def _compose_hint(detected_message: Dict[str, Any]) -> str:
 
 
 def _build_prompt(detected_message: Dict[str, Any], reason: str) -> str:
+    if detected_message.get("_inbox_prompt"):   # the inbox (inbox.py) words its own wake
+        return detected_message["_inbox_prompt"]
     sender_info = detected_message.get("sender_info") or {}
     body = (detected_message.get("content") or "").strip()
     if len(body) > 2000:
@@ -176,6 +178,8 @@ def _fallback_proposal(detected_message: Dict[str, Any], room_id: str, reason: s
         f"このチャットの案件に関係する連絡を検知しましたが、ルームが混雑していたため通知でお知らせします。\n\n"
         f"送信者: {sender}\n件名: {subject}\n\n--- 本文 ---\n{body}"
     )
+    from app.services import inbox   # said in the room (there is no bell any more); the card below stays as a record only
+    inbox.say_soon(detected_message["user_id"], room_id, f"連絡が届きました: {sender}「{subject}」" + chr(10) * 2 + body)
     get_supabase_client().client.table("dan_proposals").insert({
         "user_id": detected_message["user_id"],
         "type": "action",

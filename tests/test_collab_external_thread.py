@@ -168,3 +168,9 @@ async def test_owner_message_does_not_create_origin_chat_proposal():
 
     assert proposal is None
     assert fake.tables["dan_proposals"] == []
+
+
+@pytest.fixture(autouse=True)
+def _no_chat(monkeypatch):
+    async def say(*a, **k): return None
+    monkeypatch.setattr('app.services.inbox.say', say)

@@ -151,6 +151,8 @@ class CollabService:
             f"コラボチャット「{room.get('title') or ''}」で {sender} さんからメッセージが届きました。\n\n"
             f"--- 本文 ---\n{body[:1200]}"
         )
+        from app.services import inbox   # said in the origin room (there is no bell any more); the card stays as a record
+        await inbox.say(room["owner_id"], room["origin_chat_room_id"], content)
         result = await self._retry("notify_origin_chat",
             lambda: self.supabase.table("dan_proposals").insert({
                 "user_id": room["owner_id"],

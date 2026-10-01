@@ -5,7 +5,6 @@ import { Menu, FolderOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Sidebar } from './sidebar';
 import { ProjectChatPanel } from './project-chat-panel';
-import { NotificationPanel } from '@/components/notification/notification-panel';
 import { useProjectStore } from '@/stores/project-store';
 import { usePreviewStore } from '@/stores/preview-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
@@ -197,7 +196,7 @@ export function MainLayout({
             <p className="text-sm">プロジェクトを選択してください</p>
           </div>
         )}
-        {showNotifications && !previewIsOpen && <NotificationPanel />}
+        {/* No notification bell (2026-10-01): what reaches the user from outside is said by Dan in chat (app/services/inbox.py). */}
       </main>
     </div>
   );

@@ -238,6 +238,8 @@ class InquiryService:
                 }).execute()
 
             await asyncio.to_thread(_insert_proposal)
+            from app.services import inbox   # said in the owner's home room (there is no bell any more); the card stays as a record
+            await inbox.say(owner_id, None, f"サイトから問い合わせが届きました（{title}）" + chr(10) * 2 + content)
             logger.info("inquiry proposal created scope=%s type=%s", scope, ptype)
         except Exception:
             logger.exception("inquiry draft/propose failed")

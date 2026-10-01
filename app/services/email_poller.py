@@ -141,6 +141,11 @@ async def _route_new(owner_id: str) -> None:
 
 
 async def _tick() -> None:
+    from app.services import inbox
+    if inbox.enabled() and inbox.users():
+        # The inbox (inbox.py): every user's own mailboxes, one queue, Dan's judgement, the outcome in chat.
+        await inbox.cycle_all()
+        return
     from app.services.owner import resolve_owner_user_id
     owner_id = resolve_owner_user_id()
     if not owner_id:

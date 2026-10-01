@@ -245,6 +245,14 @@ async def _fire_mail(row: Dict[str, Any]) -> None:
     interval = int(spec.get("interval_seconds") or 600)
     now = datetime.now(timezone.utc)
 
+    from app.services import inbox
+    if inbox.enabled() and (row.get("user_id") or "") in inbox.users():
+        # The user's mail comes through the inbox, which checks every mail against this watch (what Dan waits for).
+        # The watch stays as that mark; it no longer opens a mailbox of its own.
+        await asyncio.to_thread(
+            reschedule_watch, row["id"], "mail", note, spec, now + timedelta(days=1))
+        return
+
     try:
         new_spec, mails = await asyncio.to_thread(check_mail_watch, spec)
         new_spec.pop("consecutive_errors", None)

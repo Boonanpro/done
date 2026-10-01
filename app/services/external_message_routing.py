@@ -336,6 +336,11 @@ class ExternalMessageRoutingService:
         body = (detected_message.get("content") or "").strip()
         body_trunc = body[:1200] + "\n..." if len(body) > 1200 else body
 
+        # Said in the room that sent the original (there is no bell any more); the card below stays as a record only.
+        from app.services import inbox
+        await inbox.say(detected_message["user_id"], match.route.get("origin_room_id"),
+                        f"返事が届きました: {sender}「{subject}」" + chr(10) * 2 + body_trunc)
+
         # メール返信なら、ダンが返信草案を作って「要対応の返信案(reply)」として提案する。
         # 承認すると chat_service._execute_reply_proposal が SMTP で送信する。
         if channel in ("gmail", "email", "icloud") and sender_email:

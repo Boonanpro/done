@@ -1,0 +1,397 @@
+"""The inbox: what reaches a user from outside comes in at one place, Dan judges each item, and the outcome is said in chat.
+
+Design (owner, 2026-10-01; https://claude.ai/artifact/CDjeQo1x1uSGNqLJGHFYxd): per user, the channels the user connected
+feed one queue; a sieve of rules drops what is plainly not for a person (lists, automatic mail, the user's own mail); Dan
+judges the rest with the user's memory, what Dan is waiting for (mail watches) and the recent rooms: ignore / log / tell /
+act. A told item is Dan's line in the room it belongs to (else the user's home room) with a push; an acted item wakes Dan
+in that room to handle it (reply drafts come as send cards; nothing is sent without approval). No notification bell.
+
+Stage 1 is mail. Each user's mailboxes are that user's own (any provider over IMAP); nothing about one user reaches
+another. Kept per user, encrypted: ~/.dan/inbox/<user>.json = {mailboxes: [{address, host, port, password}], home_room,
+uids: {address: last uid}, pending: [detected ids not judged yet]}.
+
+Switch: DAN_INBOX=0 (the old email poller routing runs instead).
+"""
+import asyncio
+import email
+import imaplib
+import json
+import logging
+import os
+import re
+import threading
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+ROOT = Path.home()/'.dan'/'inbox'
+FETCH_MAX = 30
+HOSTS = {'gmail.com': 'imap.gmail.com', 'googlemail.com': 'imap.gmail.com', 'icloud.com': 'imap.mail.me.com',
+         'me.com': 'imap.mail.me.com', 'mac.com': 'imap.mail.me.com', 'outlook.com': 'outlook.office365.com',
+         'hotmail.com': 'outlook.office365.com', 'live.com': 'outlook.office365.com', 'yahoo.co.jp': 'imap.mail.yahoo.co.jp',
+         'yahoo.com': 'imap.mail.yahoo.com'}
+_lock = threading.Lock()
+
+
+def enabled():
+    return os.environ.get('DAN_INBOX', '1') != '0'
+
+
+# ---- per-user settings ------------------------------------------------------------------------------------
+
+def _file(user_id):
+    return ROOT/f'{user_id}.json'
+
+
+def settings(user_id):
+    path = _file(user_id)
+    if not path.exists():
+        return {}
+    from app.services.encryption import decrypt_data
+    try:
+        return json.loads(decrypt_data(path.read_text(encoding='utf-8').strip()))
+    except Exception:
+        logger.exception('inbox settings unreadable for %s', user_id)
+        return {}
+
+
+def save(user_id, data):
+    from app.services.encryption import encrypt_data
+    ROOT.mkdir(parents=True, exist_ok=True)
+    temp = _file(user_id).with_suffix('.tmp')
+    temp.write_text(encrypt_data(json.dumps(data, ensure_ascii=False)), encoding='utf-8')
+    os.replace(temp, _file(user_id))
+
+
+def users():
+    return [p.stem for p in ROOT.glob('*.json')] if ROOT.exists() else []
+
+
+def connect_mailbox(user_id, address, password, host='', port=993):
+    """Add (or replace) one of the user's mailboxes. The login is tried first; nothing is kept if it fails."""
+    address = address.strip().lower()
+    host = host or HOSTS.get(address.split('@')[-1], 'imap.' + address.split('@')[-1])
+    box = {'address': address, 'host': host, 'port': int(port), 'password': password}
+    _login(box).logout()
+    with _lock:
+        data = settings(user_id)
+        data['mailboxes'] = [b for b in data.get('mailboxes', []) if b['address'] != address] + [box]
+        save(user_id, data)
+    return {'address': address, 'host': host}
+
+
+def set_home_room(user_id, room_id):
+    with _lock:
+        data = settings(user_id); data['home_room'] = room_id; save(user_id, data)
+
+
+async def home_room(user_id):
+    room = settings(user_id).get('home_room')
+    if room:
+        return room
+    from app.services.chat_service import ChatService
+    return (await ChatService().get_or_create_dan_room(user_id))['id']
+
+
+# ---- fetching -------------------------------------------------------------------------------------------
+
+def _login(box):
+    M = imaplib.IMAP4_SSL(box['host'], box.get('port', 993))
+    try:
+        try: M.login(box['address'], box['password'])
+        except imaplib.IMAP4.error: M.login(box['address'], box['password'].replace(' ', '').replace('-', ''))
+    except imaplib.IMAP4.error as exc:
+        try: M.logout()
+        except Exception: pass
+        raise RuntimeError(f'{box["address"]}: login failed: {exc}') from exc
+    return M
+
+
+def _fetch(box, last_uid):
+    """New mails above last_uid (PEEK: they stay unread). The first time only the newest UID is noted: an inbox connected
+    today starts from today, its history is not news. Returns (mails, new last uid)."""
+    from app.services.imap_email_service import _decode_mime_header, _extract_body, _extract_and_save_attachments
+    M = _login(box)
+    try:
+        M.select('INBOX', readonly=True)
+        typ, data = M.uid('SEARCH', None, f'UID {last_uid + 1}:*' if last_uid else 'ALL')
+        uids = [int(u) for u in (data[0].split() if typ == 'OK' and data and data[0] else [])]
+        uids = [u for u in uids if u > last_uid]
+        if not last_uid:
+            return [], max(uids or [0])
+        mails = []
+        for uid in uids[:FETCH_MAX]:
+            typ, msg_data = M.uid('FETCH', str(uid).encode(), '(BODY.PEEK[])')
+            if typ != 'OK' or not msg_data or not isinstance(msg_data[0], tuple):
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            message_id = (msg.get('Message-ID') or f'{box["address"]}-uid-{uid}').strip()
+            mails.append({
+                'uid': uid, 'message_id': message_id, 'subject': _decode_mime_header(msg.get('Subject')),
+                'from': _decode_mime_header(msg.get('From')), 'to': _decode_mime_header(msg.get('To')),
+                'date': msg.get('Date') or '', 'body': _extract_body(msg),
+                'attachments': _extract_and_save_attachments(msg, re.sub(r'[<>/]', '', message_id)[:80]),
+                'headers': {k: (msg.get(k) or '').strip()[:300] for k in ('List-Unsubscribe', 'List-Id', 'Precedence', 'Auto-Submitted',
+                                                                           'In-Reply-To', 'References', 'X-Dan-Ref')}})
+        return mails, max([last_uid] + uids[:FETCH_MAX])
+    finally:
+        try: M.logout()
+        except Exception: pass
+
+
+async def _store(user_id, box, mail):
+    """Into the queue (detected_messages, one row per Message-ID across all of the user's mailboxes). Returns the row when
+    it is new, None when the same mail was already queued (it reached two of the user's addresses)."""
+    from app.services.message_detection import get_detection_service
+    from app.models.detection_schemas import MessageSource
+    row = await get_detection_service().detect_message(
+        user_id=user_id, source=MessageSource.GMAIL, content=mail['body'], source_id=mail['message_id'], subject=mail['subject'],
+        sender_info={'from': mail['from'], 'to': mail['to'], 'date': mail['date'], 'provider': box['address']},
+        metadata={'attachments': mail['attachments'], 'uid': mail['uid'], 'provider': box['address'], 'message_id': mail['message_id'],
+                  'in_reply_to': mail['headers'].get('In-Reply-To') or None, 'references': mail['headers'].get('References') or None,
+                  'routing_key': mail['headers'].get('X-Dan-Ref') or None, 'headers': mail['headers'], 'inbox': 'pending'})
+    return row if row and row.get('content') is not None else None
+
+
+# ---- judging --------------------------------------------------------------------------------------------
+
+def _address(text):
+    found = re.findall(r'[\w.+-]+@[\w.-]+', text or '')
+    return found[0].lower() if found else ''
+
+
+def sieve(item, own):
+    """Rules before any model: '' to go on, or the reason it stops here."""
+    meta = item.get('metadata') or {}
+    headers = meta.get('headers') or {}
+    sender = _address((item.get('sender_info') or {}).get('from'))
+    if sender and sender in own:
+        return 'own'                       # the user's own mail, seen from another of their addresses
+    if headers.get('List-Unsubscribe') or headers.get('List-Id'):
+        return 'list'
+    if headers.get('Precedence', '').lower() in ('bulk', 'list', 'junk'):
+        return 'bulk'
+    if headers.get('Auto-Submitted', 'no').lower() not in ('', 'no'):
+        return 'automatic'
+    if re.match(r'(mailer-daemon|postmaster)@', sender or ''):
+        return 'bounce'
+    return ''
+
+
+def _mail_watches(user_id):
+    """What Dan is waiting for by mail: the user's active mail watches."""
+    try:
+        from app.services.followups import TABLE, decode_watch_row
+        from app.services.supabase_client import get_supabase_client
+        rows = (get_supabase_client().client.table(TABLE).select('*').eq('user_id', user_id).eq('status', 'pending').execute().data or [])
+    except Exception:
+        return []
+    out = []
+    for row in rows:
+        d = decode_watch_row(row)
+        if d.get('kind') == 'mail':
+            out.append({'id': row['id'], 'room_id': row['room_id'], 'from': (d.get('spec') or {}).get('from', ''),
+                        'subject': (d.get('spec') or {}).get('subject_contains', ''), 'note': d.get('plain_note') or ''})
+    return out
+
+
+def _recent_rooms(user_id, limit=15):
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        rows = (sb.table('projects').select('room_id,title,updated_at').eq('user_id', user_id)
+                .order('updated_at', desc=True).limit(limit).execute().data or [])
+        return [{'room_id': r['room_id'], 'title': r.get('title') or ''} for r in rows if r.get('room_id')]
+    except Exception:
+        return []
+
+
+JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から届いたメールを1通ずつ見て、どう扱うかを決める。
+- ignore: 本人にも記録にも要らない（広告・お知らせ・本人に関係ない自動通知）。
+- log: 知らせるほどではないが、後で見返すかもしれない（領収書・明細・発送通知など）。
+- tell: 本人が知っておくべき（人からの連絡・期限・お金・予定・待っていた返事）。本人に一言で知らせる。
+- act: ダンが動くべき（返事を書く・調べる・準備する）。送信や支払いは本人の承認後なので、準備と提案まで。
+迷ったら、人からの連絡で質問・依頼・期限・お金を含むものは tell 以上、それ以外は log。
+待っている目印（ダンが返事を待っているもの）に当たるメールは、その目印の部屋で act。
+部屋は、話の続きなら最近の部屋から選ぶ。どれでもなければ空。
+JSONだけを返す: {"decision": "ignore|log|tell|act", "room_id": "", "watch_id": "", "line": "本人への一言（tell/act。日本語で短く、差出人と要点）", "why": "短く"}"""
+
+
+def _env():
+    """The model's keys, read from .env as the job worker does (the core's environment does not carry them)."""
+    from dotenv import dotenv_values
+    fresh = dotenv_values(Path(__file__).resolve().parents[2]/'.env')
+    for key in ('DAN_INBOX_MODEL', 'DAN_API_JOB_MODEL', 'DEEPSEEK_API_KEY', 'DAN_CHAT_BASE_URL', 'DAN_CHAT_API_KEY', 'ANTHROPIC_API_KEY'):
+        if fresh.get(key) and not os.environ.get(key): os.environ[key] = fresh[key]
+
+
+async def judge(user_id, item, watches, rooms, hint=None):
+    """Dan's decision for one item."""
+    from app.services import api_job_providers
+    mail = item.get('sender_info') or {}
+    body = (item.get('content') or '').strip()[:3000]
+    facts = {'from': mail.get('from'), 'to': mail.get('to'), 'subject': item.get('subject'), 'date': mail.get('date'),
+             'attachments': [a.get('filename') for a in ((item.get('metadata') or {}).get('attachments') or []) if isinstance(a, dict)][:5]}
+    context = (f'待っている目印: {json.dumps(watches, ensure_ascii=False)}\n最近の部屋: {json.dumps(rooms, ensure_ascii=False)}\n'
+               + (f'送った連絡への返事として照合できた部屋: {hint}\n' if hint else '')
+               + f'メール: {json.dumps(facts, ensure_ascii=False)}\n本文:\n{body}')
+    _env()
+    provider = api_job_providers.make(os.environ.get('DAN_INBOX_MODEL') or os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash'))
+    provider.start(JUDGE, [], [context])
+    step = await provider.step()
+    text = step['text']
+    try:
+        decision = json.loads(re.search(r'\{.*\}', text, re.S).group(0))
+    except Exception:
+        decision = {'decision': 'tell', 'line': f'メールが届きました: {facts["from"]}「{facts["subject"]}」', 'why': 'judge_unreadable'}
+    if decision.get('decision') not in ('ignore', 'log', 'tell', 'act'):
+        decision['decision'] = 'tell'
+    return decision
+
+
+_ACT_PROMPT = ('[受け口 / メールの自動処理]\nこれは本人の発言ではない。本人あてに届いたメールを、ダンが「動くべき」と判断した。\n'
+               '判断の理由: {why}\n{watch}\n--- 受信したメール ---\n差出人: {sender}\n件名: {subject}\n受信日時: {date}\n本文:\n{body}\n--- ここまで ---\n\n'
+               'この部屋の経緯を踏まえて、要点を本人に短く報告し、次の行動を具体的に提案する。返事が要るなら返信文を compose_message の送信案カードで出す'
+               '（本文をチャットに書かない）。本人の承認なしに送信・支払い・外部への働きかけをしない。')
+
+
+async def deliver(user_id, item, decision, watches):
+    """The outcome, said in chat (and pushed). Returns the room it went to."""
+    from app.services.chat_service import ChatService
+    known = {r['room_id'] for r in _recent_rooms(user_id, 50)}
+    watch = next((w for w in watches if w['id'] == decision.get('watch_id')), None)
+    room = (watch or {}).get('room_id') or (decision.get('room_id') if decision.get('room_id') in known else '') or await home_room(user_id)
+    line = (decision.get('line') or '').strip()
+    mail = item.get('sender_info') or {}
+    if decision['decision'] == 'act':
+        from app.services.inbound_wakeup import schedule_room_wakeup
+        prompt = _ACT_PROMPT.format(why=decision.get('why') or '', watch=(f'待っていた目印: 「{watch["note"]}」\n' if watch else ''),
+                                    sender=mail.get('from') or '', subject=item.get('subject') or '', date=mail.get('date') or '',
+                                    body=(item.get('content') or '')[:2500])
+        wake_item = {**item, '_inbox_prompt': prompt}
+        if not schedule_room_wakeup(wake_item, room, reason='inbox'):
+            await ChatService().send_message(room, user_id, line or prompt[:400], sender_type='ai')
+    elif decision['decision'] == 'tell' and line:
+        await ChatService().send_message(room, user_id, line, sender_type='ai')
+    if decision['decision'] in ('tell', 'act') and line:
+        try:
+            from app.services.push_service import get_push_service
+            await get_push_service().notify_room(room_id=f'user:{user_id}', exclude_type='ai', title='Dan', body=line[:120], url='/chat')
+        except Exception:
+            pass
+    return room
+
+
+async def say(user_id, room_id, text, push=True):
+    """Dan's line in a room (the user's home room when none), pushed. Everything the bell used to hold is said here."""
+    from app.services.chat_service import ChatService
+    try:
+        room = room_id or await home_room(user_id)
+        message = await ChatService().send_message(room, user_id, text, sender_type='ai')
+    except Exception:
+        logger.exception('inbox: could not say in %s', room_id)   # never breaks the caller; the record stays where it was
+        return None
+    if push:
+        try:
+            from app.services.push_service import get_push_service
+            await get_push_service().notify_room(room_id=f'user:{user_id}', exclude_type='ai', title='Dan', body=text[:120], url='/chat')
+        except Exception:
+            pass
+    return message
+
+
+def say_soon(user_id, room_id, text):
+    """say() from code that is not async: on the running loop when there is one, else here and now."""
+    try:
+        asyncio.get_running_loop().create_task(say(user_id, room_id, text))
+    except RuntimeError:
+        try: asyncio.run(say(user_id, room_id, text))
+        except Exception: logger.exception('inbox: could not say in %s', room_id)
+
+
+def _mark(item_id, result):
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        row = sb.table('detected_messages').select('metadata').eq('id', item_id).limit(1).execute().data
+        meta = (row[0].get('metadata') if row else None) or {}
+        meta['inbox'] = result
+        sb.table('detected_messages').update({'metadata': meta}).eq('id', item_id).execute()
+    except Exception:
+        logger.warning('inbox: could not mark %s', item_id)
+
+
+async def handle(user_id, item, own):
+    """One item through the sieve, Dan's judgement and the outlet."""
+    reason = sieve(item, own)
+    if reason:
+        _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': reason, 'at': time.time()})
+        return 'ignore'
+    watches = await asyncio.to_thread(_mail_watches, user_id)
+    rooms = await asyncio.to_thread(_recent_rooms, user_id)
+    hint = None
+    try:   # a reply to something Dan sent: the ledger knows the room
+        from app.services.external_message_routing import get_external_message_routing_service
+        from app.services.external_message_routing import STRONG_REASONS
+        match = get_external_message_routing_service().find_route(item)
+        if match and match.reason in STRONG_REASONS:
+            hint = (match.route or {}).get('room_id')
+    except Exception:
+        pass
+    decision = await judge(user_id, item, watches, rooms, hint)
+    if hint and decision['decision'] in ('ignore', 'log'):
+        decision['decision'] = 'tell'   # a reply to Dan's own message is never silently dropped
+    if hint and not decision.get('room_id'):
+        decision['room_id'] = hint
+    room = None
+    if decision['decision'] in ('tell', 'act'):
+        room = await deliver(user_id, item, decision, watches)
+    _mark(item['id'], {**decision, 'room': room, 'by': 'dan', 'at': time.time()})
+    return decision['decision']
+
+
+async def cycle(user_id):
+    """Fetch every mailbox of the user, queue what is new, judge it."""
+    data = await asyncio.to_thread(settings, user_id)
+    boxes = data.get('mailboxes') or []
+    own = {b['address'] for b in boxes}
+    uids = dict(data.get('uids') or {})
+    pending = list(data.get('pending') or [])
+    for box in boxes:
+        try:
+            mails, last = await asyncio.to_thread(_fetch, box, int(uids.get(box['address']) or 0))
+        except Exception as exc:
+            logger.warning('inbox %s: %s', box['address'], exc)
+            continue
+        for mail in mails:
+            try:
+                row = await _store(user_id, box, mail)
+                if row: pending.append(row['id'])
+            except Exception:
+                logger.exception('inbox: store failed %s', box['address'])
+        uids[box['address']] = last
+    with _lock:
+        fresh = settings(user_id); fresh['uids'] = uids; fresh['pending'] = pending; save(user_id, fresh)
+    if not pending:
+        return 0
+    from app.services.supabase_client import get_supabase_client
+    sb = get_supabase_client().client
+    left = []
+    for item_id in pending:
+        try:
+            rows = sb.table('detected_messages').select('*').eq('id', item_id).limit(1).execute().data
+            if rows: await handle(user_id, rows[0], own)
+        except Exception:
+            logger.exception('inbox: judging %s failed; kept for the next round', item_id)
+            left.append(item_id)
+    with _lock:
+        fresh = settings(user_id); fresh['pending'] = left; save(user_id, fresh)
+    return len(pending) - len(left)
+
+
+async def cycle_all():
+    for user_id in users():
+        try:
+            await cycle(user_id)
+        except Exception:
+            logger.exception('inbox cycle failed for %s', user_id)
