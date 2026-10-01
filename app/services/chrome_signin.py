@@ -53,7 +53,7 @@ async def known_accounts(user_id):
             continue
         try: login = ((await service.get_credential(user_id, row.get('service'))) or {}).get('id') or ''
         except Exception: login = ''
-        if '@' in login and login.lower() not in found:
+        if '@' in login and 'gserviceaccount' not in login and login.lower() not in found:   # a machine identity cannot sign in to Chrome
             found.append(login.lower())
     return found
 
