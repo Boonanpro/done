@@ -75,7 +75,7 @@ export type TimelineMessageLike = {
 // merged into ONE chronologically sorted timeline.
 export type ChatListItem<M extends TimelineMessageLike = TimelineMessageLike> =
   | { kind: 'message'; key: string; sortMs: number; msg: M }
-  | { kind: 'live'; key: string; sortMs: number; blocks: TurnBlock[] }
+  | { kind: 'live'; key: string; sortMs: number; blocks: TurnBlock[]; typing?: boolean }
   | { kind: 'typing'; key: string; sortMs: number };
 
 // すでに保存済み ai_message として届いたターン。ライブ側で二重表示しないために使う。
@@ -201,8 +201,12 @@ export function buildChatListItems<M extends TimelineMessageLike>(args: {
     sortMs: g.anchorMs * 10 + 2,
     blocks: g.blocks,
   }));
-  const typing: ChatListItem<M>[] = showLiveTurn ? [{ kind: 'typing', key: '__typing__', sortMs: BOTTOM }] : [];
-  return [...items, ...liveItems, ...typing].sort((a, b) => b.sortMs - a.sortMs);
+  const sorted = [...items, ...liveItems].sort((a, b) => b.sortMs - a.sortMs);
+  if (!showLiveTurn) return sorted;
+  // 3つの点は一番下。一番下が作業ログの吹き出しなら、その吹き出しの中の一番下に入れる（吹き出しを2つにしない）。
+  const bottom = sorted[0];
+  if (bottom && bottom.kind === 'live') return [{ ...bottom, typing: true }, ...sorted.slice(1)];
+  return [{ kind: 'typing', key: '__typing__', sortMs: BOTTOM }, ...sorted];
 }
 
 // 音声会話の断片を1つの吹き出しにまとめる（表示だけ。保存行はそのまま）。

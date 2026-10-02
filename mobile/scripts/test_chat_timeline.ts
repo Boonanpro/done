@@ -52,7 +52,10 @@ const live = (messages: TimelineMessageLike[], events: ExecutionEvent[]) =>
   const groups = live(messages, [ev('e1', 3000), ev('e2', 10000), ev('e3', 20000), ev('e4', 25000)]);
   assert.deepStrictEqual(groups.map((g) => g.blocks.length), [2, 2]);
   assert.deepStrictEqual(topToBottom({ messages, liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', '__live__:tx', 'msg2', '__live__:tx#1', '__typing__']);
+    ['msg1', '__live__:tx', 'msg2', '__live__:tx#1']);
+  // 3つの点は一番下の作業ログの吹き出しの中（吹き出しを2つにしない）
+  const items = buildChatListItems({ messages, liveTurnGroups: groups, showLiveTurn: true });
+  assert.deepStrictEqual(items.filter((i) => i.kind === 'live' && i.typing).map((i) => i.key), ['__live__:tx#1']);
 }
 
 // --- ターンの区別が無いイベントも、追い連絡をまたがない --------------------------------------
@@ -60,7 +63,7 @@ const live = (messages: TimelineMessageLike[], events: ExecutionEvent[]) =>
   const messages = [msg1, msg2];
   const groups = live(messages, [ev('e1', 3000, null), ev('e2', 20000, null)]);
   assert.deepStrictEqual(topToBottom({ messages, liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', '__live__:run:r1', 'msg2', '__live__:run:r1#1', '__typing__']);
+    ['msg1', '__live__:run:r1', 'msg2', '__live__:run:r1#1']);
 }
 
 // --- 返事は書き終えた時刻に置かれ、ライブ表示と入れ替わる（追い連絡より下） ---------------------

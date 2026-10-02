@@ -1302,6 +1302,9 @@ function AppMain() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   // 押し込み同期で写しが最新と分かっている時は「最新の状態を取得中…」を出さない
   const [quietSync, setQuietSync] = useState(false);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
+  // 最近の部屋の中身を裏で先に取っておく（初めて開く部屋でも待たない）。部屋 → 取った時の last_message_at。
+  const prefetchedRoomsRef = useRef(new Map<string, string>());
   const [loadingProjects, setLoadingProjects] = useState(false);
   // この端末発のストリームが生きているプロジェクトの集合（部屋別）。
   // 以前は sending + streamingProjectId のグローバル単一ストリームで、
@@ -1629,6 +1632,36 @@ function AppMain() {
       }),
     [messages, liveTurnGroups, showLiveTurn, currentProject?.id],
   );
+  useEffect(() => {
+    if (!token || projects.length === 0) return;
+    const recent = [...projects]
+      .filter((p) => p.room_id)
+      .sort((a, b) => (b.last_message_at || '').localeCompare(a.last_message_at || ''))
+      .slice(0, 8)
+      .filter((p) => prefetchedRoomsRef.current.get(p.room_id!) !== (p.last_message_at || ''));
+    if (recent.length === 0) return;
+    let stopped = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        for (const p of recent) {
+          if (stopped) return;
+          const roomId = p.room_id!;
+          if (currentProjectIdRef.current === p.id) continue;   // 開いている部屋は部屋側が取る
+          try {
+            const data = await apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=${CHAT_INITIAL_FETCH_LIMIT}`, {}, token);
+            const rows = data.messages ?? [];
+            messagesCacheRef.current[roomId] = rows;
+            deviceCache.write(`room-${roomId}`, rows);
+            prefetchedRoomsRef.current.set(roomId, p.last_message_at || '');
+          } catch {
+            /* 取れなければ開いた時に取る */
+          }
+        }
+      })();
+    }, 1500);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [token, projects]);
+
   // 3つの点の横に出す「いまダンがしていること」（宣言・作業の一歩）。送ったこの端末ではストリームの最新、
   // それ以外は記録の最新の一歩。
   const typingLabel = useMemo(() => {
@@ -3322,20 +3355,49 @@ function AppMain() {
     // サーバーが答えるまで、この部屋の run のポーリング結果は使わない。止めた run は以後も動いていない扱い。
     settledByStopRef.current.stoppingRoom = pid;
     if (currentRun?.id) settledByStopRef.current.runs.add(currentRun.id);
-    // 走っている run の取得結果は、この停止より前のものなので捨てる（止めた直後に作業中へ戻らない）。
     pollRunSeqRef.current.applied = ++pollRunSeqRef.current.issued;
     const roomId = actives[0]?.roomId || currentProject?.room_id;
-    // まだサーバーに届いていない（エコー前の）送信: そのIDと文面も渡す（保存の直後でも取り消され、答えも残らない）。
     const unsent = actives.find((stream) => messages.some((m) => m.id === stream.clientMessageId && m.pending));
     for (const stream of actives) {
       activeStreamsRef.current.delete(stream.clientMessageId);
       stream.close();
     }
     dropStreamingProject(pid);
+
+    // 押した瞬間に画面を確定する（サーバーの答えを待つ1〜2秒に、古い表示と新しい表示が入れ替わっていた）。
+    // サーバーと同じ決まりで予想する: ダンの最後の動き（作業の一歩・返事）より後の自分のメッセージ＝まだ読まれていない。
+    const t = (iso: string) => new Date(iso).getTime() || 0;
+    const lastDanMs = Math.max(
+      0,
+      ...runEvents.filter((e) => e.run_id === currentRun?.id).map((e) => t(e.created_at)),
+      ...messages.filter((m) => m.sender_type === 'ai' && m.ai_context?.turn_id).map((m) => t(m.created_at)),
+    );
+    const predicted = messages.filter(
+      (m) => m.sender_type === 'human' && !(m.content || '').startsWith('🎙') && (m.pending || t(m.created_at) > lastDanMs),
+    );
+    const restoreOf = (id: string, content: string | null | undefined) => {
+      const sentHere = sentInputsRef.current.get(id);
+      return sentHere ? { text: sentHere.draft, attachments: sentHere.attachments } : splitMediaTags(content ?? '');
+    };
+    const draftBefore = draft;
+    const attachmentsBefore = attachments;
+    const withdrawLocally = (rows: Array<{ id: string; content?: string | null }>, baseDraft: string, baseAttachments: PendingAttachment[]) => {
+      const restored = rows.map((r) => restoreOf(r.id, r.content));
+      const nextDraft = [baseDraft, ...restored.map((r) => r.text)].filter((x) => x && x.trim()).join('\n');
+      const nextAttachments = [...baseAttachments, ...restored.flatMap((r) => r.attachments)];
+      for (const r of rows) settledByStopRef.current.messages.add(r.id);
+      const ids = new Set(rows.map((r) => r.id));
+      setMessages((current) => current.filter((m) => !ids.has(m.id)));
+      setDraft(nextDraft);
+      setAttachments(nextAttachments);
+      return { nextDraft, nextAttachments };
+    };
     setCurrentRun(null);
     setRunEvents([]);
+    const shown = predicted.length > 0 ? withdrawLocally(predicted, draftBefore, attachmentsBefore) : null;
+
     if (!roomId) return;
-    let withdrawn: Array<{ id: string; content: string | null }> = [];
+    let withdrawn: Array<{ id: string; content: string | null }> | null = null;
     try {
       const res = await apiRequest<{ withdrawn?: Array<{ id: string; content: string | null }> }>(
         '/chat/dan/cancel',
@@ -3351,24 +3413,31 @@ function AppMain() {
       );
       withdrawn = res?.withdrawn ?? [];
     } catch {
-      // 届かなかった: 何も消さない（サーバーの状態は次の読み込みで反映される）
+      withdrawn = null;   // 届かなかった: 予想のまま（次の読み込みでサーバーの状態に合わせる）
     }
     settledByStopRef.current.stoppingRoom = '';
-    for (const w of withdrawn) settledByStopRef.current.messages.add(w.id);
-    if (withdrawn.length > 0) {
-      // 取り消された分を、文も添付もそのまま入力欄へ戻す（この端末で送ったものは送った時の内容、
-      // それ以外はサーバーの本文から添付を取り出す）。
-      const ids = new Set(withdrawn.map((w) => w.id));
-      const restored = withdrawn.map((w) => {
-        const sentHere = sentInputsRef.current.get(w.id);
-        sentInputsRef.current.delete(w.id);
-        return sentHere ? { text: sentHere.draft, attachments: sentHere.attachments } : splitMediaTags(w.content ?? '');
-      });
-      const texts = restored.map((r) => r.text).filter((t) => t.trim());
-      const files = restored.flatMap((r) => r.attachments);
-      setMessages((current) => current.filter((m) => !ids.has(m.id)));
-      if (texts.length > 0) setDraft((d) => [d, ...texts].filter((t) => t && t.trim()).join('\n'));
-      if (files.length > 0) setAttachments((current) => [...current, ...files]);
+    if (withdrawn) {
+      // サーバーの答えが予想と違った時だけ直す（まれ: ダンが実は読んでいた／ほかにも未読があった）
+      const server = new Set(withdrawn.map((w) => w.id));
+      const keptByServer = predicted.filter((m) => !server.has(m.id));
+      const extra = withdrawn.filter((w) => !predicted.some((m) => m.id === w.id));
+      if (keptByServer.length > 0) {
+        for (const m of keptByServer) settledByStopRef.current.messages.delete(m.id);
+        setMessages((current) => [...current, ...keptByServer.filter((m) => !m.pending)]);
+        const rest = predicted.filter((m) => server.has(m.id));
+        // 入力欄が戻したままなら、サーバーが取り消した分だけに直す（その後に打った文字は触らない）
+        setDraft((d) => (shown && d === shown.nextDraft ? [draftBefore, ...rest.map((m) => restoreOf(m.id, m.content).text)].filter((x) => x && x.trim()).join('\n') : d));
+        setAttachments((a) => (shown && a === shown.nextAttachments ? [...attachmentsBefore, ...rest.flatMap((m) => restoreOf(m.id, m.content).attachments)] : a));
+      }
+      if (extra.length > 0) {
+        for (const w of extra) settledByStopRef.current.messages.add(w.id);
+        const ids = new Set(extra.map((w) => w.id));
+        setMessages((current) => current.filter((m) => !ids.has(m.id)));
+        const more = extra.map((w) => restoreOf(w.id, w.content));
+        setDraft((d) => [d, ...more.map((r) => r.text)].filter((x) => x && x.trim()).join('\n'));
+        setAttachments((a) => [...a, ...more.flatMap((r) => r.attachments)]);
+      }
+      for (const w of withdrawn) sentInputsRef.current.delete(w.id);
     }
     // 「停止しました」など、サーバーが置いたものを取り込む
     void loadProjectMessages(token, pid);
@@ -3401,10 +3470,12 @@ function AppMain() {
 
   async function handleRefreshProjectList() {
     if (!token) return;
+    // 更新中の丸い表示は、本人が一覧を引っぱった時だけ（裏の更新では出さない）
+    setPullRefreshing(true);
     await refreshProjects(token).catch((error) => {
       if (isAuthError(error)) return;
       Alert.alert('Refresh failed', String((error as Error).message));
-    });
+    }).finally(() => setPullRefreshing(false));
   }
 
   function artifactUrl(artifact: ChatArtifactResponse): string | null {
@@ -3562,7 +3633,7 @@ function AppMain() {
           keyExtractor={(item) => item.id}
           refreshControl={
             <RefreshControl
-              refreshing={loadingProjects}
+              refreshing={pullRefreshing}
               onRefresh={handleRefreshProjectList}
               tintColor="#d9d2c8"
               colors={['#d9d2c8']}
@@ -3908,12 +3979,7 @@ function AppMain() {
 
         {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
             これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
-        {loadingMessages && messages.length > 0 && !quietSync ? (
-          <View style={styles.messagesRefreshBar}>
-            <ActivityIndicator color="#7fd1c7" size="small" />
-            <Text style={styles.messagesRefreshText}>最新の状態を取得中…</Text>
-          </View>
-        ) : null}
+        {/* 取得中の表示は出さない（LINE と同じ）: 手元の写しを出したまま、最新は届いたら差し替えるだけ。 */}
 
         {loadingMessages && messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
@@ -3969,6 +4035,17 @@ function AppMain() {
                     </View>
                     {item.blocks.length > 0 ? (
                       <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
+                    ) : null}
+                    {item.typing ? (
+                      // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
+                      <View style={styles.typingInline}>
+                        <TypingDots color="#7a8f86" />
+                        {typingLabel ? (
+                          <Text style={styles.typingLabel} numberOfLines={1}>
+                            {typingLabel.split('\n')[0]}
+                          </Text>
+                        ) : null}
+                      </View>
                     ) : null}
                   </View>
                 );
@@ -5069,6 +5146,7 @@ const styles = StyleSheet.create({
   },
   typingBubble: { paddingVertical: 10, paddingHorizontal: 14, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', maxWidth: '88%' },
   typingLabel: { marginLeft: 10, fontSize: 13, color: '#7a8f86', flexShrink: 1 },
+  typingInline: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
   liveStatusRow: {
     alignItems: 'center',
     flexDirection: 'row',
