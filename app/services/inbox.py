@@ -161,18 +161,14 @@ def _address(text):
 
 
 def sieve(item, own):
-    """Rules before any model: '' to go on, or the reason it stops here."""
+    """Rules before any model: '' to go on, or the reason it stops here. Only what is certainly not for the user stops
+    here; a newsletter header is not that (an important bank notice or account notice comes the same way), so lists,
+    bulk and automatic mail go to the judge, which follows the user's wishes (user_prefs) about them (owner, 2026-10-02)."""
     meta = item.get('metadata') or {}
     headers = meta.get('headers') or {}
     sender = _address((item.get('sender_info') or {}).get('from'))
     if sender and sender in own:
         return 'own'                       # the user's own mail, seen from another of their addresses
-    if headers.get('List-Unsubscribe') or headers.get('List-Id'):
-        return 'list'
-    if headers.get('Precedence', '').lower() in ('bulk', 'list', 'junk'):
-        return 'bulk'
-    if headers.get('Auto-Submitted', 'no').lower() not in ('', 'no'):
-        return 'automatic'
     if re.match(r'(mailer-daemon|postmaster)@', sender or ''):
         return 'bounce'
     if CODE.search(item.get('subject') or ''):
@@ -262,6 +258,7 @@ JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から�
 対応するなら、その大きさも自分で決める:
 - tell: 一言で足りる（本人が知っておけばよい。人からの連絡・期限・お金・予定・待っていた返事など）。
 - act: 作業が要る（返事を書く・調べる・準備する。本人の記憶にその使い道があるもの、例: 経費の領収書）。送信や支払いは本人の承認後なので準備と提案まで。
+「本人の希望」が渡されたら、何よりそれに従う（いらないと言われた種類は無視、知らせてと言われた種類は知らせる）。
 待っている目印（ダンが待っているもの）に当たるメールは、言い回しが違っても、その目印の部屋で対応する。
 部屋は、話の続きなら部屋の一覧から選ぶ（「差出人が出てきた部屋」があればまずそこ）。どれでもなければ空。
 JSONだけを返す: {"decision": "ignore|tell|act", "room_id": "", "watch_id": "", "line": "本人への一言（対応する時。日本語で短く、差出人と要点）", "why": "短く"}"""
@@ -282,7 +279,10 @@ async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None
     body = (item.get('content') or '').strip()[:3000]
     facts = {'from': mail.get('from'), 'to': mail.get('to'), 'subject': item.get('subject'), 'date': mail.get('date'),
              'attachments': [a.get('filename') for a in ((item.get('metadata') or {}).get('attachments') or []) if isinstance(a, dict)][:5]}
-    context = (f'待っている目印: {json.dumps(watches, ensure_ascii=False)}\n部屋の一覧（新しい順）: {json.dumps(rooms, ensure_ascii=False)}\n'
+    from app.services import user_prefs
+    wishes = [r['text'] for r in user_prefs.items(user_id, ('連絡', '全般'))]
+    context = ((f'本人の希望: {json.dumps(wishes, ensure_ascii=False)}\n' if wishes else '')
+               + f'待っている目印: {json.dumps(watches, ensure_ascii=False)}\n部屋の一覧（新しい順）: {json.dumps(rooms, ensure_ascii=False)}\n'
                + (f'差出人が出てきた部屋: {json.dumps(list(known))}\n' if known else '')
                + (f'送った連絡への返事として照合できた部屋: {hint}\n' if hint else '')
                + (f'このメールが条件（差出人など）に合った目印: {json.dumps(matched, ensure_ascii=False)}\n'

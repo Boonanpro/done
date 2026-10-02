@@ -94,7 +94,7 @@ class Stuck:
 
 
 
-NUDGE = ('（作業の様子）{reason}。同じ手を続けない。いったん止まって、ここまでで分かったこと・まだ分からないこと・それを確かめられる場所を整理し、一番確かめやすい仮説から別の道で進める。進めない時は、どこで止まったかと本人に何をしてほしいかを書いて終える。')
+NUDGE = ('（作業の様子）{reason}。同じ手を続けない。いったん止まって、ここまでで分かったこと・まだ分からないこと・それを確かめられる場所を整理し、一番当たっていそうな仮説から別の道で進める（見込みが同じくらいなら確かめやすい方から）。進めない時は、どこで止まったかと本人に何をしてほしいかを書いて終える。')
 
 
 class Worker:
@@ -168,6 +168,7 @@ class Worker:
             if reason:
                 # Stuck: the same model is told so and steps back (no other model takes over; owner, 2026-10-02).
                 provider.user(NUDGE.format(reason=reason))
+                self.state.publish(self.job_id, 'diagnostic', f'stuck: {reason} -> told to step back')
                 stuck = Stuck()
             started = time.monotonic()
             step = await provider.step()
