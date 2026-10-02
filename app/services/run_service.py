@@ -164,6 +164,8 @@ class RunService:
         for row in rows:
             if row.get("superseded_by_run_id"):
                 continue
+            if background(row):
+                continue   # a job's run is not what the chat's stop button stops (it was paused instead of the chat's own turn)
             if row.get("state") not in ACTIVE_RUN_STATES:
                 continue
             if row.get("state") != AgentRunState.PAUSED.value:

@@ -1617,9 +1617,23 @@ function AppMain() {
   // 追い連絡は「それまでの作業の下＝最新位置」に出て、読み込まれた後の作業は
   // その下に続く — 完了後に保存される並びと常に同じ時系列になる。
   const chatListItems = useMemo<ChatListItem[]>(
-    () => buildChatListItems({ messages, liveTurnGroups, showLiveTurn, projectId: currentProject?.id }),
+    () =>
+      buildChatListItems({
+        messages: messages.filter((m) => !settledByStopRef.current.messages.has(m.id)),
+        liveTurnGroups,
+        showLiveTurn,
+        projectId: currentProject?.id,
+      }),
     [messages, liveTurnGroups, showLiveTurn, currentProject?.id],
   );
+  // 3つの点の横に出す「いまダンがしていること」（宣言・作業の一歩）。送ったこの端末ではストリームの最新、
+  // それ以外は記録の最新の一歩。
+  const typingLabel = useMemo(() => {
+    if (activity && activity !== 'Thinking...') return activity;
+    const last = liveTurnGroups[liveTurnGroups.length - 1]?.blocks.slice(-1)[0];
+    if (!last) return '';
+    return last.type === 'tool' ? last.label || '' : (last as { text?: string }).text || '';
+  }, [activity, liveTurnGroups]);
 
   // コラボ窓口の未読（サーバー判定 unread_count の合計）。👥ボタンのバッジと
   // アプリアイコンのバッジに合算する。開いている窓口は既読扱い。
@@ -1761,12 +1775,16 @@ function AppMain() {
   // 対策: 後から開始したリクエストが結果を適用済みなら、古いリクエストの
   // 結果は捨てる（applied = 適用済みリクエストの開始順）。
   const pollRunSeqRef = useRef({ issued: 0, applied: 0, running: false });
+  // 停止の結果は戻らない: 取り消されたメッセージと止めた run は、停止の前に出たポーリングやフィードが遅れて届いても
+  // 二度と出さない（以前は 停止→入力欄に戻る→数秒後に止める前の画面に戻る→また止まる、とちらついた, 2026-10-02）。
+  const settledByStopRef = useRef({ messages: new Set<string>(), runs: new Set<string>(), stoppingRoom: '' });
   const pollRun = useCallback(async (activeToken: string, projectId: string) => {
     const guard = pollRunSeqRef.current;
     const seq = ++guard.issued;
     // 開いているチャットが変わっていたら、前のチャット宛の結果は適用しない
     // （プロジェクト切替時の setCurrentRun(null) リセットを上書きしないため）。
-    const stale = () => seq < guard.applied || currentProjectIdRef.current !== projectId;
+    const stale = () =>
+      seq < guard.applied || currentProjectIdRef.current !== projectId || settledByStopRef.current.stoppingRoom === projectId;
     try {
       // 実行中と分かっている（直前ポーリング or 一覧の has_active_run）なら
       // current-run と execution-events を並列に取り、作業ログの表示を
@@ -1785,6 +1803,13 @@ function AppMain() {
       const run = await apiRequest<AgentRun>(`/projects/${projectId}/current-run`, {}, activeToken);
       if (stale()) return;
       guard.applied = seq;
+      if (run && settledByStopRef.current.runs.has(run.id) && run.state === 'running') {
+        // 止めた run が、止まり切る前の状態で返ってきた: 動いていない扱い（停止は本人の操作が正）
+        guard.running = false;
+        setCurrentRun(null);
+        setRunEvents([]);
+        return;
+      }
       guard.running = !!run && run.state === 'running';
       setCurrentRun(run);
       if (run && run.state === 'running') {
@@ -3294,6 +3319,9 @@ function AppMain() {
     const actives = Array.from(activeStreamsRef.current.values()).filter((stream) => stream.projectId === pid);
     // この部屋の世代を進める＝この部屋の各送信フローに「キャンセルが後始末を引き取った」と伝える。
     cancelGenRef.current.set(pid, genOf(pid) + 1);
+    // サーバーが答えるまで、この部屋の run のポーリング結果は使わない。止めた run は以後も動いていない扱い。
+    settledByStopRef.current.stoppingRoom = pid;
+    if (currentRun?.id) settledByStopRef.current.runs.add(currentRun.id);
     // 走っている run の取得結果は、この停止より前のものなので捨てる（止めた直後に作業中へ戻らない）。
     pollRunSeqRef.current.applied = ++pollRunSeqRef.current.issued;
     const roomId = actives[0]?.roomId || currentProject?.room_id;
@@ -3325,6 +3353,8 @@ function AppMain() {
     } catch {
       // 届かなかった: 何も消さない（サーバーの状態は次の読み込みで反映される）
     }
+    settledByStopRef.current.stoppingRoom = '';
+    for (const w of withdrawn) settledByStopRef.current.messages.add(w.id);
     if (withdrawn.length > 0) {
       // 取り消された分を、文も添付もそのまま入力欄へ戻す（この端末で送ったものは送った時の内容、
       // それ以外はサーバーの本文から添付を取り出す）。
@@ -3923,6 +3953,11 @@ function AppMain() {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.typingBubble]}>
                     <TypingDots color="#7a8f86" />
+                    {typingLabel ? (
+                      <Text style={styles.typingLabel} numberOfLines={1}>
+                        {typingLabel.split('\n')[0]}
+                      </Text>
+                    ) : null}
                   </View>
                 );
               }
@@ -5032,7 +5067,8 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 18,
   },
-  typingBubble: { paddingVertical: 10, paddingHorizontal: 14, alignSelf: 'flex-start' },
+  typingBubble: { paddingVertical: 10, paddingHorizontal: 14, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', maxWidth: '88%' },
+  typingLabel: { marginLeft: 10, fontSize: 13, color: '#7a8f86', flexShrink: 1 },
   liveStatusRow: {
     alignItems: 'center',
     flexDirection: 'row',
