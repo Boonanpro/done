@@ -182,8 +182,17 @@ class Worker:
             if text and calls:
                 self.state.publish(self.job_id, 'progress', text[:3000])
             results = []
+            extras = []
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
+                # A new instruction from the owner is read before any further action. Tools wait at their gate until
+                # it is applied, and it is applied here, before the call: a tool that waited for it while the worker
+                # waited for the tool stood 5 minutes (2026-10-02). The step's remaining calls are not run; the model
+                # sees the instruction first and decides again.
+                extras = extras or self.new_inputs()
+                if extras:
+                    results.append({'id': call['id'], 'output': '操作は実行していません: 本人から追加の指示が届いたので、先にそれを読んでから決め直す。', 'images': []})
+                    continue
                 called = time.monotonic()
                 used_browser = used_browser or call['name'] == 'browser' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'browser')
                 used_desktop = used_desktop or call['name'] == 'desktop' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'desktop')
@@ -201,7 +210,7 @@ class Worker:
                 stuck.call(call['name'], call['args'], output)
                 results.append({'id': call['id'], 'output': output, 'images': images})
             if results: provider.tool_results(results)
-            extras = self.new_inputs()
+            extras = extras + self.new_inputs()
             for extra in extras:
                 provider.user('追加の指示: ' + extra['text'])
             if calls or extras:

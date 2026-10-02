@@ -1225,12 +1225,19 @@ class OTPService:
             "last_received_at": now,
             "updated_at": now,
         }).eq("id", device["id"]).execute()
-        return await self.save_sms_otp(
+        otp = await self.save_sms_otp(
             from_number=sender,
             body=body,
             message_sid=message_id,
             user_id=device["user_id"],
         )
+        if otp is None and (body or "").strip():
+            # Not a code: an SMS the user let Dan read in full (the phone sends these only with that switch on).
+            # It goes into the inbox like mail: judged, and told only when worth it (owner, 2026-10-02).
+            from app.services import inbox
+            key = hashlib.sha256(f"{sender}|{message_id}|{body}".encode("utf-8")).hexdigest()[:16]
+            inbox.soon(inbox.receive(device["user_id"], "sms", sender, body, subject=f"SMS: {sender}", source_id=f"sms:{key}"))
+        return otp
 
     def _guess_service_from_sms(self, from_number: str, body: str) -> Optional[str]:
         """SMSの内容からサービスを推測"""

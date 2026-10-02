@@ -149,6 +149,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
             if any(out['name'] == 'end_call' for out in outputs):
+                ENDING.add(session_id)   # from here on nothing new is pushed into the call (job_feed)
                 # The owner asked to end the call. The phone hangs up itself 4 s after it sees end_call, so Dan can finish
                 # 「はい、切ります」. Closing here at once stopped Dan mid-word (2026-10-01: 「少々お待ちくだ…」, then
                 # silence until the phone hung up). The server closes only as a fallback for clients that do not.
@@ -166,12 +167,13 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
 
 
+ENDING = set()   # calls whose end was chosen (end_call); kept small: a closed call's id is dropped in _run's finally
 HANGUP_FALLBACK_S = 6.0   # the phone closes 3.5 s after end_call; the server closes later only for clients that don't
 FEED_SECONDS = 1.0
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
 
 
-async def job_feed(send, user_id, room_id, record, connected_at):
+async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
     """The room's jobs, from this server (own mode): results, errors and questions to the owner go into the call as
     commentary (spoken) the moment they appear. Nothing else is pushed. The running work's STATE is read on demand by
     the backend model (job_status) when the owner's words concern it; pushing it as thinking, on a timer or at each
@@ -194,11 +196,19 @@ async def job_feed(send, user_id, room_id, record, connected_at):
             if not fresh: continue
             said = [e for e in fresh if e.get('kind') in SPOKEN]
             for e in said:
-                text = {'result': '作業「%s」の結果: %s', 'error': '作業「%s」で問題: %s', 'confirmation': '作業「%s」から本人への確認: %s'}[e['kind']] % (
-                    job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80], e['text'][:1500])
-                for part in chunks(text):
-                    await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-                record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(text))
+                if session_id in ENDING: return   # the call is being hung up: nothing more is said in it (the report stays in chat)
+                # The report is written for the chat (headings, bullets, every detail). Given as the words to say, it was
+                # read out like a script (2026-10-02). It goes in as material; what to say is Dan's own, in conversation.
+                task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
+                material = {'result': '作業「%s」の結果（チャットにも出ている）:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
+                            'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
+                for part in chunks(material):
+                    await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+                cue = {'result': '今の作業が終わった。結果の要点を、本人に会話として一言二言で伝える（全部は読まない。詳しくはチャットにある）。',
+                       'error': '今の作業で問題が起きた。何が起きて、どうするかを、本人に会話として短く伝える。',
+                       'confirmation': '今の作業から本人に確認したいことがある。何を確かめたいかを、会話として短く聞く。'}[e['kind']]
+                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': cue})
+                record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material))
 
 
 async def chat_feed(send, room_id, dialogue, record):
@@ -290,7 +300,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
             if own:
-                feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat()))
+                feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat(), session_id))
                 working.add(feed); feed.add_done_callback(working.discard)
                 if room_id:   # from now on the room's chat goes to this call, not to a chat Dan
                     from app.services import voice_calls
@@ -328,6 +338,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
         for task in working: task.cancel()
+        ENDING.discard(session_id)
         try:
             from app.services import voice_calls
             voice_calls.end(room_id, session_id)

@@ -35,6 +35,18 @@ class DanSmsForwarderModule(private val context: ReactApplicationContext) :
     promise.resolve(true)
   }
 
+  // Every SMS, not only codes and links, goes to Dan (the user's own choice; off unless turned on).
+  @ReactMethod
+  fun setAllSms(on: Boolean, promise: Promise) {
+    context.getSharedPreferences(DanSmsForwarderReceiver.PREFS, 0).edit().putBoolean("allSms", on).apply()
+    promise.resolve(on)
+  }
+
+  @ReactMethod
+  fun isAllSms(promise: Promise) {
+    promise.resolve(context.getSharedPreferences(DanSmsForwarderReceiver.PREFS, 0).getBoolean("allSms", false))
+  }
+
   @ReactMethod
   fun isEnabled(promise: Promise) {
     val enabled = context.getSharedPreferences(DanSmsForwarderReceiver.PREFS, 0)
@@ -197,7 +209,8 @@ class DanSmsForwarderReceiver : BroadcastReceiver() {
     // magic sign-in links). The server decides which links are auth links.
     val hasCode = Regex("""\\b\\d{4,8}\\b""").containsMatchIn(body)
     val hasLink = Regex("""https?://\\S+""", RegexOption.IGNORE_CASE).containsMatchIn(body)
-    if (!hasCode && !hasLink) return
+    // With "allSms" on, every SMS goes (the server puts the ones without a code into Dan's inbox).
+    if (!hasCode && !hasLink && !prefs.getBoolean("allSms", false)) return
 
     val messageId = messages.firstOrNull()?.timestampMillis?.toString() ?: ""
 

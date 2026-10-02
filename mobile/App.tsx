@@ -162,6 +162,8 @@ const DanSmsForwarder = NativeModules.DanSmsForwarder as
       configure(apiBaseUrl: string, deviceToken: string): Promise<boolean>;
       disable(): Promise<boolean>;
       isEnabled(): Promise<boolean>;
+      setAllSms?(on: boolean): Promise<boolean>;
+      isAllSms?(): Promise<boolean>;
     }
   | undefined;
 
@@ -1420,6 +1422,8 @@ function AppMain() {
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
   const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
+  // SMS も全部ダンに読ませるか（本人が選ぶ。オフが既定）
+  const [allSms, setAllSms] = useState(false);
   // In-chat keyword search (find past messages across full history).
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -1550,6 +1554,10 @@ function AppMain() {
       onAuthFailure = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'android' && DanSmsForwarder?.isAllSms) void DanSmsForwarder.isAllSms().then(setAllSms).catch(() => undefined);
+  }, [smsForwardingStatus]);
 
   useEffect(() => {
     if (!token || Platform.OS !== 'android' || !DanSmsForwarder) {
@@ -2818,6 +2826,21 @@ function AppMain() {
     }
   }
 
+  async function handleToggleAllSms() {
+    if (Platform.OS !== 'android' || !DanSmsForwarder?.setAllSms) return;
+    if (smsForwardingStatus !== 'On') {
+      Alert.alert('SMSの転送がオフです', '先に「SMS認証コードの転送」をオンにしてください。');
+      return;
+    }
+    const next = !allSms;
+    setAllSms(next);
+    try {
+      await DanSmsForwarder.setAllSms(next);
+    } catch {
+      setAllSms(!next);
+    }
+  }
+
   async function handleToggleNotifications() {
     if (!token) return;
     if (!Device.isDevice) {
@@ -3814,6 +3837,22 @@ function AppMain() {
                 color={smsForwardingStatus === 'On' ? '#7fd1c7' : '#77736b'}
               />
             </Pressable>
+            <View style={styles.settingsRowDivider} />
+            <Pressable
+              onPress={handleToggleAllSms}
+              style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
+            >
+              <View style={styles.settingsRowMain}>
+                <Text style={styles.settingsRowLabel}>SMSを全部ダンに読ませる</Text>
+                <Text style={styles.settingsRowValue}>{allSms ? 'オン' : 'オフ'}</Text>
+              </View>
+              <Ionicons name={allSms ? 'mail-open' : 'mail-outline'} size={20} color={allSms ? '#245e49' : '#59685f'} />
+            </Pressable>
+            <View style={styles.settingsRowHint}>
+              <Text style={styles.settingsHintText}>
+                オンにすると、認証コード以外のSMSもダンが読み、知らせた方がいいものだけをチャットで伝えます。
+              </Text>
+            </View>
             <View style={styles.settingsRowDivider} />
             <View style={styles.settingsRowHint}>
               <Text style={styles.settingsHintText}>

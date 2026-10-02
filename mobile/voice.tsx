@@ -361,6 +361,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       nativeTick = onVoiceTick(() => {
         if (!live()) return;
         const now = Date.now();
+        // Hang up on this clock too: it keeps running with the app in the background, where the JS timer below stood
+        // still and the call stayed open 16 s after end_call (2026-10-02).
+        if (hangupAt && now - hangupAt >= 3500) { clearInterval(hangupTimer); finishRef.current(); return; }
         void measureWaiting().catch(() => waiting.close());
         if (connectedAtRef.current) setElapsed(Math.floor((now - connectedAtRef.current) / 1000));
         if (now >= nextDiagnostic) {

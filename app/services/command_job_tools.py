@@ -21,6 +21,8 @@ def fingerprint(name, arguments, page=''):
     return hashlib.sha256(json.dumps([name,arguments,page],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
 async def available(job_id):
+    """Wait while the job is paused or a new instruction is not yet applied (the worker applies it before each tool)."""
+    waited = 0.0
     while True:
         s = state.read(job_id)
         if not s or s['state'] in state.TERMINAL: raise RuntimeError('作業は停止済みです')
@@ -28,7 +30,10 @@ async def available(job_id):
             raise ConfirmationPending('本人への確認待ちです。操作は未実行です。確認内容は保存済みなので、このターンを終えて返事を待ってください。状況の読み取りはできます。')
         if s['state'] not in {'paused','awaiting_confirmation'} and s['applied_revision'] >= s['revision']:
             return s
-        await asyncio.sleep(.1)
+        await asyncio.sleep(.1); waited += .1
+        if waited >= 60 and s['state'] not in {'paused', 'awaiting_confirmation'}:
+            # never silently forever: say why nothing happens (the worker should have applied it already)
+            raise RuntimeError('追加の指示の反映を待っています。いったんこのターンを終えて、届いた指示を読んでください。')
 
 async def propose(job_id, summary, digest):
     initial = await available(job_id)
