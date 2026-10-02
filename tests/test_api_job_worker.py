@@ -73,18 +73,15 @@ def test_provider_is_chosen_by_the_model_name():
 
 
 @pytest.mark.asyncio
-async def test_a_stuck_job_is_taken_over_by_a_stronger_model_with_what_was_done(job, tools, monkeypatch):
-    """The cheap model makes the same call three times: a stronger model takes over the same job once, told what was done."""
+async def test_a_stuck_job_is_told_so_and_continues_on_the_same_model(job, tools, monkeypatch):
+    """The same call three times: the same model is told to step back (no other model takes over), and finishes."""
     same = {'text': '', 'calls': [{'id': 'c', 'name': 'browser', 'args': {'action': 'click', 'ref': '@e3'}}], 'usage': usage()}
-    cheap = Fake([dict(same), dict(same), dict(same), dict(same)])
-    strong = Fake([{'text': '別の入口から開けました。題名は「スマートEX」です。', 'calls': [], 'usage': usage()}])
+    model = Fake([dict(same), dict(same), dict(same), {'text': '別の入口から開けました。', 'calls': [], 'usage': usage()}])
     made = []
-    monkeypatch.setattr('app.services.api_job_providers.make', lambda model: made.append(model) or (cheap if len(made) == 1 else strong))
-    monkeypatch.setenv('DAN_API_JOB_ESCALATE_MODEL', 'gpt-strong')
+    monkeypatch.setattr('app.services.api_job_providers.make', lambda name: made.append(name) or model)
     await W.Worker(job).run()
     s = state.read(job)
-    assert made[1:] == ['gpt-strong'] and len(tools) == 3
-    start = strong.seen[0][1][-1]
-    assert '同じ操作を3回くり返した' in start and '"ref": "@e3"' in start
-    assert s['state'] == 'completed' and s['usage']['model'].endswith('→ gpt-strong')
-    assert any('上位のモデル（gpt-strong）に交代' in e['text'] for e in s['events'] if e['kind'] == 'progress')
+    assert len(made) == 1 and len(tools) == 3
+    nudges = [text for kind, text in model.seen if kind == 'user']
+    assert len(nudges) == 1 and '同じ操作を3回くり返した' in nudges[0] and '仮説' in nudges[0]
+    assert s['state'] == 'completed' and s['result'] == '別の入口から開けました。'

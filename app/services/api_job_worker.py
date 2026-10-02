@@ -17,9 +17,6 @@ import time
 # Read when used (after .env is loaded), not at import.
 MODEL = lambda: os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash')   # 2026-09-23 comparison: all three tasks right, fastest and 1/27 of Astra's cost (see docs/current/job-model-comparison-20260923.md)
 REASONING = lambda: os.environ.get('DAN_API_JOB_REASONING', 'low')
-# Escalation: the cheap model does the job; when it is stuck, a stronger one takes over the same job (same browser, same
-# approvals) once. DAN_API_JOB_ESCALATE_MODEL=off turns it off.
-ESCALATE_MODEL = lambda: os.environ.get('DAN_API_JOB_ESCALATE_MODEL', 'gpt-5.6-terra')
 MAX_TURNS = 120
 # The tools a job needs. The MCP list carries 33 tools (56k characters of schema) for the CLI; sending all of them on every
 # call made a step 6-8s (2026-09-23 15:11). DAN_API_JOB_TOOLS=all sends the whole list.
@@ -72,8 +69,9 @@ def function_output(contents):
 
 
 class Stuck:
-    """Is the job going nowhere? Judged by what happened, not by the model's words:
-    the same call made 3 times among the last 8, 6 calls in a row that showed nothing new, or 40 model steps unfinished."""
+    """Is the job going nowhere? Judged by what happened, not by the model's words: the same call made 3 times among the
+    last 8, or 6 calls in a row that showed nothing new. Many steps alone are not being stuck: a broad investigation that
+    kept finding new things was taken for stuck at 40 steps and handed to another model (2026-10-02)."""
     def __init__(self):
         self.calls, self.seen, self.stale, self.steps = [], set(), 0, 0
 
@@ -92,18 +90,11 @@ class Stuck:
             return '同じ操作を3回くり返した'
         if self.stale >= 6:
             return '6手続けて画面に新しいことが出なかった'
-        if self.steps >= 40:
-            return '40手たっても終わらない'
         return ''
 
 
-def handoff(task_messages, trail, reason):
-    """What the stronger model starts from: the request, what was done (each call and the start of what it showed), and why
-    it is taking over. The browser and apps are where the last step left them."""
-    lines = chr(10).join(trail[-30:])
-    return (f'（交代）前の担当が「{reason}」ので、ここからあなたが引き継ぐ。ブラウザやアプリは前の担当の最後の操作のままの画面にある。'
-            f'まず今の画面を見て、同じ手をくり返さずに別の道で依頼を終わらせる。終われない時は、どこで止まったかと本人に何をしてほしいかを具体的に書いて終える。{chr(10)}'
-            f'これまでの操作（新しい順は下）:{chr(10)}{lines}')
+
+NUDGE = ('（作業の様子）{reason}。同じ手を続けない。いったん止まって、ここまでで分かったこと・まだ分からないこと・それを確かめられる場所を整理し、一番確かめやすい仮説から別の道で進める。進めない時は、どこで止まったかと本人に何をしてほしいかを書いて終える。')
 
 
 class Worker:
@@ -170,17 +161,13 @@ class Worker:
         provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         used_browser = used_desktop = False
-        stuck, trail, escalated = Stuck(), [], False
+        stuck = Stuck()
         for turn in range(MAX_TURNS):
             if self.read().get('state') == 'cancelled': return
             reason = stuck.why()
-            stronger = ESCALATE_MODEL()
-            if reason and not escalated and stronger not in ('', 'off') and stronger != model:
-                escalated, model = True, stronger
-                self.state.publish(self.job_id, 'progress', f'{reason}ので、上位のモデル（{stronger}）に交代して続けます')
-                provider = api_job_providers.make(stronger)
-                provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first + [handoff(first, trail, reason)])
-                totals['model'] = totals['model'] + ' → ' + stronger
+            if reason:
+                # Stuck: the same model is told so and steps back (no other model takes over; owner, 2026-10-02).
+                provider.user(NUDGE.format(reason=reason))
                 stuck = Stuck()
             started = time.monotonic()
             step = await provider.step()
@@ -211,7 +198,6 @@ class Worker:
                 output, images = function_output(contents)
                 trace_step(call, output, images, time.monotonic() - called)
                 stuck.call(call['name'], call['args'], output)
-                trail.append(f"- {call['name']} {json.dumps(call['args'], ensure_ascii=False)[:200]} → {' '.join(output.split())[:200]}")
                 results.append({'id': call['id'], 'output': output, 'images': images})
             if results: provider.tool_results(results)
             extras = self.new_inputs()
