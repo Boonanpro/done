@@ -3526,6 +3526,25 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
         record_timing("tool", action if action in BROWSER_TOOL["input_schema"]["properties"]["action"]["enum"] else "unknown", (time.perf_counter() - started) * 1000, status)
 
 
+_SETTLED_JS = """() => {
+  if (!window.__danMut) {
+    window.__danMut = performance.now();
+    try { new MutationObserver(() => { window.__danMut = performance.now(); })
+            .observe(document, {subtree: true, childList: true, characterData: true}); } catch (e) {}
+    return false;
+  }
+  return document.readyState === 'complete' && performance.now() - window.__danMut > 800;
+}"""
+
+
+async def _page_settled(page) -> bool:
+    """Loaded, and its content (nodes and text; not attributes, which animations change all the time) has not changed for 0.8 s (a MutationObserver installed on the first look)."""
+    try:
+        return bool(await page.evaluate(_SETTLED_JS))
+    except Exception:
+        return False
+
+
 async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
     ブラウザツールを実行
@@ -3627,6 +3646,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                 # 遅延リダイレクトの実績が無いと分かっているホストは待ちを縮める（操作の記憶）。
                 from app.services import browser_recipes as _memory
                 settle_limit = _memory.settle_polls(url)
+                stable_url = ''
                 for _ in range(100):  # 最大20秒
                     current_url = page.url or ""
                     if not current_url or current_url.startswith("about:"):
@@ -3635,7 +3655,13 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
                     if _looks_like_login_url(current_url):
                         _memory.record_settle(url, settled_polls, bounced_late=settled_polls > 0)
                         break
-                    settled_polls += 1
+                    settled_polls = settled_polls + 1 if current_url == stable_url else 1
+                    stable_url = current_url
+                    # ページが落ち着いたら待ちを終える（読み込み完了・画面の中身が0.8秒変化なし・URLが0.4秒以上同じ）。
+                    # 遅延リダイレクトは読み込みの最中に起きる。落ち着いた後に飛ばされても、クリック時のログイン検知が拾う
+                    # （遅くなるだけで誤操作にはならない）。固定6秒をやめた（2026-10-03）。
+                    if settled_polls >= 2 and await _page_settled(page):
+                        break
                     if settled_polls >= settle_limit:  # URL確定後の遅延リダイレクト待ち（既定6秒）
                         _memory.record_settle(url, settled_polls, bounced_late=False)
                         break
