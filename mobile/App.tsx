@@ -312,6 +312,10 @@ function uploadAttachment(
 ): Promise<{ kind: PendingAttachment['kind']; name: string; url: string }> {
   // XMLHttpRequest を使うのは upload.onprogress で進捗が取れるため（fetch では不可）。
   // これで LINE 風の円形プログレスを駆動する。
+  // すでにサーバーにある添付（取り消して入力欄に戻したもの）はアップロードし直さない。
+  if (/^https?:\/\//.test(att.uri) || att.uri.startsWith('/api/v1/files/')) {
+    return Promise.resolve({ kind: att.kind, name: att.name, url: att.uri });
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE_URL}/api/v1/files/upload`);
@@ -374,6 +378,27 @@ function uploadAttachment(
     form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
     xhr.send(form);
   });
+}
+
+// 保存済みの本文から、添付の行（mediaTag の形）と残りの文を分ける。取り消されたメッセージを入力欄へ戻す時に使う
+// （アップロード済みの添付は URL のまま添付に戻し、送り直しで再アップロードしない）。
+function splitMediaTags(content: string): { text: string; attachments: PendingAttachment[] } {
+  const attachments: PendingAttachment[] = [];
+  const rest: string[] = [];
+  for (const line of (content || '').split('\n')) {
+    const image = line.match(/^\[添付画像: (\S+)\]$/);
+    const other = line.match(/^\[添付(動画|ファイル): (.+) \((\S+)\)\]$/);
+    if (image || other) {
+      const found = image ? image[1] : other![3];
+      const url = found.startsWith('/') ? `${API_BASE_URL}${found}` : found;   // shown in the input's preview, so absolute
+      const kind: PendingAttachment['kind'] = image ? 'image' : other![1] === '動画' ? 'video' : 'file';
+      const name = image ? url.split('/').pop() || 'image' : other![2];
+      attachments.push({ key: `${url}-${attachments.length}`, uri: url, name, mime: kind === 'image' ? 'image/*' : kind === 'video' ? 'video/*' : 'application/octet-stream', kind });
+    } else {
+      rest.push(line);
+    }
+  }
+  return { text: rest.join('\n').trim(), attachments };
 }
 
 function mediaTag(kind: PendingAttachment['kind'], name: string, url: string): string {
@@ -1295,6 +1320,9 @@ function AppMain() {
   // 追い連絡で同時に複数のストリームが生きるため、clientMessageId をキーに
   // 全部持つ（単一スロットだと追い連絡が最初のストリームのハンドルを潰し、
   // 停止ボタンで最初のSSEが閉じられなくなる）。挿入順＝送信順。
+  // 最近送ったメッセージの文と添付（送信ID → 内容）。キャンセルで取り消された時に、そのまま入力欄へ戻すため。
+  // ストリームが終わった追い連絡も、後のキャンセルで取り消されうるので、ストリームとは別に1時間覚えておく。
+  const sentInputsRef = useRef(new Map<string, { draft: string; attachments: PendingAttachment[]; at: number }>());
   const activeStreamsRef = useRef(
     new Map<
       string,
@@ -2998,6 +3026,9 @@ function AppMain() {
     // エコーでも部屋のフィードでも同じ行が置き換わるだけ（二重に出ない）。
     const clientMessageId = uuidv4();
     const optimisticId = clientMessageId;
+    const sentAt = Date.now();
+    for (const [id, entry] of sentInputsRef.current) if (sentAt - entry.at > 3_600_000) sentInputsRef.current.delete(id);
+    sentInputsRef.current.set(clientMessageId, { draft: content, attachments: pending, at: sentAt });
     const localTags = pending.map((a) => mediaTag(a.kind, a.name, a.uri)).join('\n');
     const localContent = pending.length > 0 ? (content ? `${localTags}\n\n${content}` : localTags) : content;
     const optimistic: MessageResponse = {
@@ -3295,11 +3326,19 @@ function AppMain() {
       // 届かなかった: 何も消さない（サーバーの状態は次の読み込みで反映される）
     }
     if (withdrawn.length > 0) {
+      // 取り消された分を、文も添付もそのまま入力欄へ戻す（この端末で送ったものは送った時の内容、
+      // それ以外はサーバーの本文から添付を取り出す）。
       const ids = new Set(withdrawn.map((w) => w.id));
-      const local = new Map(actives.map((stream) => [stream.clientMessageId, stream.draft]));
-      const texts = withdrawn.map((w) => local.get(w.id) ?? w.content ?? '').filter((t) => t.trim());
+      const restored = withdrawn.map((w) => {
+        const sentHere = sentInputsRef.current.get(w.id);
+        sentInputsRef.current.delete(w.id);
+        return sentHere ? { text: sentHere.draft, attachments: sentHere.attachments } : splitMediaTags(w.content ?? '');
+      });
+      const texts = restored.map((r) => r.text).filter((t) => t.trim());
+      const files = restored.flatMap((r) => r.attachments);
       setMessages((current) => current.filter((m) => !ids.has(m.id)));
       if (texts.length > 0) setDraft((d) => [d, ...texts].filter((t) => t && t.trim()).join('\n'));
+      if (files.length > 0) setAttachments((current) => [...current, ...files]);
     }
     // 「停止しました」など、サーバーが置いたものを取り込む
     void loadProjectMessages(token, pid);
