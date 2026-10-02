@@ -1,9 +1,24 @@
 """Saved room messages for reconnects; no model call or synthetic summary."""
 
+# The Live session takes at most 8192 tokens of initial items (2026-10-02: a room whose newest messages were long reports
+# with tables went over and every call failed with 400 "Initial items must not exceed 8192 tokens"). UTF-8 bytes were
+# assumed to bound tokens; they do not for digits, symbols and table pipes. Counted with the model family's tokenizer,
+# with room left for the wrapper text and the room's file list.
+BUDGET_TOKENS = 6000
 
-def room_history(messages, budget=30000):
-    # UTF-8 bytes conservatively bound token count, including message overhead.
+
+def _counter():
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding('o200k_base')
+        return lambda text: len(encoding.encode(text))
+    except Exception:
+        return lambda text: len(text.encode('utf-8'))   # no tokenizer: bytes, an over-count for Japanese
+
+
+def room_history(messages, budget=BUDGET_TOKENS):
     # ChatService returns newest first; models need chronological history.
+    count = _counter()
     kept = []
     remaining = budget
     for message in sorted(messages, key=lambda m: m.get('created_at') or '', reverse=True)[:96]:
@@ -12,15 +27,22 @@ def room_history(messages, budget=30000):
             continue
         role = 'user' if message.get('sender_type') in ('human', 'user') else 'assistant'
         text = f"[{message.get('created_at', '')}] {text}"
-        cost = len(text.encode('utf-8')) + 40
+        cost = count(text) + 10
         if cost > remaining:
             if not kept and remaining > 200:
-                raw = text.encode('utf-8')
-                half = (remaining - 120) // 2
-                text = raw[:half].decode('utf-8', errors='ignore') + '\n[…中略。全文は部屋の履歴に保存されています…]\n' + raw[-half:].decode('utf-8', errors='ignore')
+                # the newest message alone is too long: its head and tail, shortened until they fit
+                keep = len(text) // 2
+                while keep > 50:
+                    short = text[:keep] + '\n[…中略。全文は部屋の履歴に保存されています…]\n' + text[-keep:]
+                    if count(short) + 10 <= remaining:
+                        text, cost = short, count(short) + 10
+                        break
+                    keep = keep * 3 // 4
+                else:
+                    break
             else:
                 break
         kept.append({'type': 'message', 'role': role, 'content': [{
             'type': 'input_text' if role == 'user' else 'output_text', 'text': text}]})
-        remaining -= len(text.encode('utf-8')) + 40
+        remaining -= cost
     return list(reversed(kept))
