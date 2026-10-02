@@ -1323,6 +1323,9 @@ function AppMain() {
   // 最近送ったメッセージの文と添付（送信ID → 内容）。キャンセルで取り消された時に、そのまま入力欄へ戻すため。
   // ストリームが終わった追い連絡も、後のキャンセルで取り消されうるので、ストリームとは別に1時間覚えておく。
   const sentInputsRef = useRef(new Map<string, { draft: string; attachments: PendingAttachment[]; at: number }>());
+  // 停止の結果は戻らない: 取り消されたメッセージと止めた run は、停止の前に出たポーリングやフィードが遅れて届いても
+  // 二度と出さない（以前は 停止→入力欄に戻る→数秒後に止める前の画面に戻る→また止まる、とちらついた, 2026-10-02）。
+  const settledByStopRef = useRef({ messages: new Set<string>(), runs: new Set<string>(), stoppingRoom: '' });
   const activeStreamsRef = useRef(
     new Map<
       string,
@@ -1775,9 +1778,6 @@ function AppMain() {
   // 対策: 後から開始したリクエストが結果を適用済みなら、古いリクエストの
   // 結果は捨てる（applied = 適用済みリクエストの開始順）。
   const pollRunSeqRef = useRef({ issued: 0, applied: 0, running: false });
-  // 停止の結果は戻らない: 取り消されたメッセージと止めた run は、停止の前に出たポーリングやフィードが遅れて届いても
-  // 二度と出さない（以前は 停止→入力欄に戻る→数秒後に止める前の画面に戻る→また止まる、とちらついた, 2026-10-02）。
-  const settledByStopRef = useRef({ messages: new Set<string>(), runs: new Set<string>(), stoppingRoom: '' });
   const pollRun = useCallback(async (activeToken: string, projectId: string) => {
     const guard = pollRunSeqRef.current;
     const seq = ++guard.issued;
