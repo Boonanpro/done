@@ -149,7 +149,14 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
             if any(out['name'] == 'end_call' for out in outputs):
-                ENDING.add(session_id)   # from here on nothing new is pushed into the call (job_feed)
+                # From here on nothing new is pushed into the call, and the room's chat is where results go again
+                # (command_center reports while no call is active): a result finishing in these seconds is written there.
+                ENDING[session_id] = datetime.now(timezone.utc).isoformat()
+                try:
+                    from app.services import voice_calls
+                    voice_calls.end(room_id, session_id)
+                except Exception:
+                    pass
                 # The owner asked to end the call. The phone hangs up itself 4 s after it sees end_call, so Dan can finish
                 # 「はい、切ります」. Closing here at once stopped Dan mid-word (2026-10-01: 「少々お待ちくだ…」, then
                 # silence until the phone hung up). The server closes only as a fallback for clients that do not.
@@ -167,7 +174,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
 
 
-ENDING = set()   # calls whose end was chosen (end_call); kept small: a closed call's id is dropped in _run's finally
+ENDING = {}   # calls whose end was chosen (end_call) -> when; a closed call's id is dropped in _run's finally
 HANGUP_FALLBACK_S = 6.0   # the phone closes 3.5 s after end_call; the server closes later only for clients that don't
 FEED_SECONDS = 1.0
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
@@ -196,15 +203,24 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
             if not fresh: continue
             said = [e for e in fresh if e.get('kind') in SPOKEN]
             for e in said:
-                if session_id in ENDING: return   # the call is being hung up: nothing more is said in it (the report stays in chat)
+                if session_id in ENDING:
+                    # Being hung up: not said. A result that arrived before the end was chosen was kept out of the chat
+                    # for the call (command_center), so it is written there now; later ones the chat gets as usual.
+                    if e['kind'] == 'result' and str(e.get('at') or '') < ENDING[session_id]:
+                        try:
+                            from app.services.chat_service import ChatService
+                            await ChatService().send_message(room_id, user_id, e['text'], sender_type='ai')
+                        except Exception:
+                            logger.exception('call ending: result not written room=%s', room_id)
+                    continue
                 # The report is written for the chat (headings, bullets, every detail). Given as the words to say, it was
                 # read out like a script (2026-10-02). It goes in as material; what to say is Dan's own, in conversation.
                 task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
-                material = {'result': '作業「%s」の結果（チャットにも出ている）:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
+                material = {'result': '作業「%s」の結果:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
                             'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
                 for part in chunks(material):
                     await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-                cue = {'result': '今の作業が終わった。結果の要点を、本人に会話として一言二言で伝える（全部は読まない。詳しくはチャットにある）。',
+                cue = {'result': '今の作業が終わった。結果を、本人に会話として自分の言葉で伝える（書かれた文を読み上げない。細かい番号などは聞かれたら答える）。',
                        'error': '今の作業で問題が起きた。何が起きて、どうするかを、本人に会話として短く伝える。',
                        'confirmation': '今の作業から本人に確認したいことがある。何を確かめたいかを、会話として短く聞く。'}[e['kind']]
                 await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': cue})
@@ -338,7 +354,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
         for task in working: task.cancel()
-        ENDING.discard(session_id)
+        ENDING.pop(session_id, None)
         try:
             from app.services import voice_calls
             voice_calls.end(room_id, session_id)
