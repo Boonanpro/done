@@ -51,6 +51,58 @@ class CancelRequest(BaseModel):
     """キャンセルリクエスト"""
     session_id: str
     cancelled_user_message_id: Optional[str] = None
+    # The server decides which of the user's messages Dan has not read yet, withdraws them and returns them
+    # (docs/current/chat-timeline-definition.md). Clients that send this never guess from their own clock.
+    withdraw_unread: bool = False
+    # The words of the message being withdrawn while it may not be saved yet: the turn answering it keeps nothing.
+    cancelled_user_message_text: Optional[str] = None
+
+
+WITHDRAW_WINDOW_SECONDS = 1800
+
+
+def _withdraw_unread(room_id: str, user_id: str, pending_texts=None, turn_started: bool = True) -> tuple[list, bool]:
+    """The user's recent messages in this room that Dan has not read, deleted here and returned oldest first:
+    - follow-ups still waiting in the resident session (pending_texts): Dan reads a follow-up only when it is handed over;
+    - when the running turn has not done a single step yet, the messages after the last thing Dan did as the chat.
+    Also says whether Dan had done anything since the first of the user's recent messages."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from app.services.run_service import background
+    sb = ChatService().supabase
+    since = (_dt.now(_tz.utc) - _td(seconds=WITHDRAW_WINDOW_SECONDS)).isoformat()
+    mine = (sb.table("chat_messages").select("id,content,created_at").eq("room_id", room_id).eq("sender_id", user_id)
+            .eq("sender_type", "human").gte("created_at", since).order("created_at").execute().data or [])
+    mine = [m for m in mine if not (m.get("content") or "").startswith("🎙")]   # what was said on a call is not withdrawn
+    if not mine:
+        return [], False
+    first = mine[0]["created_at"]
+    runs = (sb.table("agent_runs").select("id,metadata").eq("room_id", room_id).gte("created_at", since)
+            .execute().data or [])
+    chat_runs = [r["id"] for r in runs if not background(r)]
+    times = []
+    if chat_runs:
+        events = (sb.table("execution_events").select("created_at").eq("room_id", room_id).in_("run_id", chat_runs)
+                  .gte("created_at", first).execute().data or [])
+        times += [e["created_at"] for e in events]
+    replies = (sb.table("chat_messages").select("created_at,ai_context").eq("room_id", room_id).eq("sender_type", "ai")
+               .gte("created_at", first).execute().data or [])
+    times += [r["created_at"] for r in replies if (r.get("ai_context") or {}).get("turn_id")]
+    import re as _re
+    # Python 3.10 reads only 3 or 6 fraction digits; the database writes any number (.9884 failed on 2026-10-02)
+    parse = lambda t: _dt.fromisoformat(_re.sub(r"\.(\d+)", lambda f: "." + (f.group(1) + "000000")[:6], str(t).replace("Z", "+00:00")))
+    last = max((parse(t) for t in times), default=None)
+    unread = [m for m in mine if last is None or parse(m["created_at"]) > last] if not turn_started else []
+    waiting = list(pending_texts or [])
+    for m in reversed(mine):   # each waiting follow-up is the newest message with its words
+        if (m.get("content") or "") in waiting and m not in unread:
+            waiting.remove(m["content"]); unread.append(m)
+    unread.sort(key=lambda m: m["created_at"])
+    for m in unread:
+        sb.table("chat_messages").delete().eq("id", m["id"]).eq("sender_type", "human").execute()
+    if unread:
+        from app.services.chat_service import refresh_room_preview_sync
+        refresh_room_preview_sync(sb, room_id)
+    return [{"id": m["id"], "content": m.get("content") or "", "created_at": m["created_at"]} for m in unread], last is not None
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 security = HTTPBearer(auto_error=False)
@@ -3383,6 +3435,32 @@ async def cancel_dan_session(
     from app.agent.cli_runner import kill_cli_process
     from app.services.run_service import RunService
 
+    was_running = False
+    _sess, _active_turn, _pending_texts = None, None, []
+    _deleted_text = request.cancelled_user_message_text
+    # Has the turn running now done anything yet (a step recorded for its run)? If not, the message it answers is unread.
+    turn_started = False
+    try:
+        _run_now = await RunService().get_current_run_for_room(request.session_id, chat_only=True)
+        if _run_now:
+            _steps = await asyncio.to_thread(lambda: ChatService().supabase.table("execution_events").select("id")
+                                             .eq("run_id", _run_now["id"]).neq("event_type", "done").limit(1).execute().data or [])
+            turn_started = bool(_steps)
+    except Exception:
+        pass
+    try:
+        from app.agent.cli_runner import is_cli_active
+        from app.agent.streaming_session import streaming_enabled, get_session
+        was_running = CancellationRegistry.is_active(request.session_id) or is_cli_active(request.session_id)
+        _sess = get_session(request.session_id) if streaming_enabled() else None
+        if _sess is not None:
+            was_running = was_running or _sess.is_turn_active()
+            if request.withdraw_unread:
+                _pending_texts = list(getattr(_sess._pending, "queue", []))
+                _sess.clear_pending()   # withdrawn follow-ups must not reach Dan at the next step
+                _active_turn = getattr(_sess, "_turn", None) if _sess.is_turn_active() else None
+    except Exception:
+        pass
     success = CancellationRegistry.cancel(request.session_id)
     # 「次に始まるターンを殺す予約」は、実際に送信を取り消している場合
     # （取消対象メッセージIDあり）のみ許可。空撃ちキャンセルでの武装は
@@ -3419,6 +3497,7 @@ async def cancel_dan_session(
                 .execute()
             )
             deleted_user_message = bool(delete_result.data)
+            _deleted_text = (delete_result.data[0].get("content") if delete_result.data else None) or request.cancelled_user_message_text
             logger.warning(
                 "user-cancel delete: room=%s id=%s deleted=%s",
                 request.session_id[:8], _mid[:8], deleted_user_message,
@@ -3442,6 +3521,30 @@ async def cancel_dan_session(
                 exc_info=True,
             )
 
+    withdrawn: list = []
+    if request.withdraw_unread:
+        try:
+            withdrawn, dan_worked = await asyncio.to_thread(_withdraw_unread, request.session_id, current_user.user_id,
+                                                            _pending_texts, turn_started)
+            if request.cancelled_user_message_id and not any(w["id"] == request.cancelled_user_message_id for w in withdrawn):
+                withdrawn.append({"id": request.cancelled_user_message_id, "content": _deleted_text, "created_at": None})   # deleted above, or not saved yet (the tombstone takes it)
+            if withdrawn and not turn_started:
+                # Whatever path the turn answering these takes (a resident session not made yet, a fresh process), its
+                # reply is not saved (cli_runner checks at the save).
+                from app.agent.cli_runner import note_withdrawn
+                note_withdrawn(request.session_id, [w.get("content") for w in withdrawn])
+            if _sess is not None and withdrawn and not turn_started:
+                # The turn answering a withdrawn message (running, or about to start) keeps nothing it produces (cli_runner).
+                if _active_turn is not None:
+                    _sess._discard_turn = _active_turn
+                else:
+                    _sess.discard_next_turn()
+            if was_running and turn_started:
+                # The work Dan had begun stops here; the room says so at this moment.
+                await ChatService().send_message(request.session_id, current_user.user_id, "停止しました", sender_type="system")
+        except Exception:
+            logger.warning("withdraw on cancel failed room=%s", request.session_id, exc_info=True)
+
     # ブラウザセッションも停止
     abort_executor_session()
     # What each cancel did, to trace a cancel that left the message and let the turn run (2026-10-01).
@@ -3454,6 +3557,7 @@ async def cancel_dan_session(
         "session_id": request.session_id,
         "paused_runs": paused_runs,
         "deleted_user_message": deleted_user_message,
+        "withdrawn": withdrawn,
     }
 
 

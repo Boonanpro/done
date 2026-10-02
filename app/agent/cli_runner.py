@@ -1323,6 +1323,30 @@ def _check_unregistered_declaration(sb, room_id: str, content: str, blocks: list
         _cli_debug(f"decl-check failed (non-fatal): {e}")
 
 
+# A reply to a message the user withdrew by cancelling (Dan had not read it) is not kept, whichever path the turn took.
+# The turn's input is noted when it starts; a cancel notes the withdrawn words; the save checks both.
+_turn_inputs: Dict[str, tuple] = {}     # room -> (the turn's user input, when it started)
+_withdrawn_words: Dict[str, list] = {}  # room -> [(words, when withdrawn)]
+
+
+def note_turn_input(room_id: str, content: str) -> None:
+    _turn_inputs[room_id] = (content or "", time.time())
+
+
+def note_withdrawn(room_id: str, texts) -> None:
+    now = time.time()
+    kept = [(w, t) for w, t in _withdrawn_words.get(room_id, []) if now - t < 600]
+    def words(text):   # the first line of what was written (attachment markers are worded differently in the turn's input)
+        lines = [l.strip() for l in (text or "").splitlines() if l.strip() and not l.strip().startswith("[添付")]
+        return lines[0][:60] if lines else ""
+    _withdrawn_words[room_id] = kept + [(words(x), now) for x in texts if words(x)]
+
+
+def _answers_withdrawn(room_id: str) -> bool:
+    content, started = _turn_inputs.get(room_id, ("", 0.0))
+    return any(words and words in content and at >= started for words, at in _withdrawn_words.get(room_id, []))
+
+
 def _save_ai_message_sync(
     room_id: str,
     content: str,
@@ -1346,6 +1370,9 @@ def _save_ai_message_sync(
     from app.services.chat_service import record_message_delivery_sync
     from app.services.artifact_url_guard import sanitize_artifact_public_urls
 
+    if _answers_withdrawn(room_id):
+        _cli_debug(f"[CANCEL] reply not saved: the message it answers was withdrawn (room {room_id[:8]})")
+        return False
     content = sanitize_artifact_public_urls(content)
     if blocks:
         blocks = [
@@ -2878,7 +2905,7 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
                         state["reasoning_steps_acc"],
                         state["reasoning_full_acc"],
                         blocks=state["turn_blocks"],
-                        created_at=state["turn_start"] or datetime.now(timezone.utc).isoformat(),
+                        created_at=datetime.now(timezone.utc).isoformat(),   # placed when finished (docs/current/chat-timeline-definition.md)
                         turn_id=state["turn_id"] or str(uuid.uuid4()),
                     )
                 if project_id and state["run_id"]:
@@ -3237,6 +3264,16 @@ async def _process_via_streaming_session(
                         session._user_cancelled = False
                     except Exception:
                         pass
+                # The message this turn answers was withdrawn by the cancel (Dan had not read it): nothing it produced is kept,
+                # as if the message had never been sent (docs/current/chat-timeline-definition.md).
+                withdrawn_turn = getattr(session, "_discard_turn", None)
+                if withdrawn_turn is not None and withdrawn_turn is getattr(session, "_turn", None):
+                    try:
+                        session._discard_turn = None
+                    except Exception:
+                        pass
+                    user_cancelled, text = True, ""
+                    state["turn_blocks"] = []
                 # 追い連絡の割り込みで畳んだ中間ターンが無言だった場合は失敗ではない。
                 # テンプレ文言（応答テキストが空でした）を入れず、作業ログ(blocks)が
                 # あれば空本文＋ログだけ保存、何も無ければ保存自体スキップする
@@ -3264,6 +3301,8 @@ async def _process_via_streaming_session(
                     # （実測 2026-08-31）。continuation ならエラー扱いにしない。
                     if continuation and not state.get("loop_detected"):
                         empty_continuation = True
+                    elif user_cancelled:
+                        text = ""   # stopped by the user with work done but no words: the room's 「停止しました」 says it
                     else:
                         text = "（応答テキストが空でした。もう一度お試しください。）"
                 # Replace the CLI's cryptic parse-error result with a friendly
@@ -3280,7 +3319,9 @@ async def _process_via_streaming_session(
                     # 割り込みによるターン終了は失敗ではない。下流（SSE/モバイル）が
                     # エラー表示しないよう正規化する。
                     is_error = False
-                turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
+                # The reply is placed when it was finished, not when the turn began: placed at the start, a reply that came
+                # after a follow-up sorted above it (docs/current/chat-timeline-definition.md, 2026-10-02).
+                turn_start = datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
                 if not skip_save and not (empty_continuation and not state["turn_blocks"]):
@@ -3326,7 +3367,7 @@ async def _process_via_streaming_session(
                 partial = "\n".join(state["final_text_parts"]).strip()
                 note = _recovery_message("idle_hang", _detect_user_lang(content))
                 text = (partial + "\n\n" + note) if partial else note
-                t_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
+                t_start = datetime.now(timezone.utc).isoformat()   # placed when finished (see above)
                 t_id = state["turn_id"] or str(uuid.uuid4())
                 hang_saved = False
                 if not skip_save:
@@ -3551,6 +3592,7 @@ async def process_message_cli(
         system_prompt: カスタムシステムプロンプト。指定時は _build_system_prompt() をスキップ。
         user_messages: ユーザーの依頼文原文（planning プロンプト用）。
     """
+    note_turn_input(room_id, content)
     setup_start = time.perf_counter()
     system_prompt, mcp_config_path = await _prepare_cli_inputs(
         room_id, user_id, credentials, system_prompt, mcp_config_override,

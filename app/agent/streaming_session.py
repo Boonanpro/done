@@ -279,6 +279,7 @@ class StreamingSession:
         try:
             turn = _Turn(sink=sink)
             self._turn = turn
+            self._take_discard_next(turn)
             self._interrupt_sent = False
             self._last_activity = time.time()
             # 送信直前の再確認: キャンセルが「入口チェック通過後〜ここまで」の
@@ -360,6 +361,24 @@ class StreamingSession:
             return self.is_alive()
         except Exception:
             return False
+
+    def discard_next_turn(self, ttl: float = 5.0) -> None:
+        """The message the next turn will answer was withdrawn: whatever that turn produces is not kept."""
+        self._discard_next_until = time.time() + ttl
+
+    def _take_discard_next(self, turn) -> None:
+        until = getattr(self, "_discard_next_until", 0.0)
+        if until and time.time() < until:
+            self._discard_next_until = 0.0
+            self._discard_turn = turn
+
+    def clear_pending(self) -> None:
+        """Drop follow-ups not yet given to the CLI (the user withdrew them by cancelling)."""
+        while True:
+            try:
+                self._pending.get_nowait()
+            except queue.Empty:
+                return
 
     # --- user cancel (Escキー相当) --------------------------------------
     def interrupt(self) -> bool:
