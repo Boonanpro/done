@@ -18,10 +18,10 @@ import time
 MODEL = lambda: os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash')   # 2026-09-23 comparison: all three tasks right, fastest and 1/27 of Astra's cost (see docs/current/job-model-comparison-20260923.md)
 REASONING = lambda: os.environ.get('DAN_API_JOB_REASONING', 'low')
 MAX_TURNS = 120
-# The tools a job needs. The MCP list carries 33 tools (56k characters of schema) for the CLI; sending all of them on every
-# call made a step 6-8s (2026-09-23 15:11). DAN_API_JOB_TOOLS=all sends the whole list.
-JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'browser,browser_script,flow,desktop,lookup,get_credentials,save_credentials,get_personal_info,'
-                                   'get_location,web_search,read_url,bash,read_file,write_file,wait_until,watch,job_confirmation,job_progress,command_center').split(',')
+# Every Dan tool, as the other parts of Dan have them (owner, 2026-10-03): a shortened list hid a missing ability (no web
+# search; jobs drove a browser to a search site) and nobody knew. Measured 2026-10-03: 35 tools (40k characters) cost
+# 0.2-0.4 s a step over 16 (6-8 s on 2026-09-23 has not held since the prompt cache). DAN_API_JOB_TOOLS=a,b,c narrows it.
+JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'all').split(',')
 OUTPUT_CHARS = 12000
 PARALLEL_READS = {'web_search', 'read_url', 'lookup'}
 CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。確定操作はまだ実行していません。画面を読み取り、承認済みの具体的な操作だけを再開してください。'
