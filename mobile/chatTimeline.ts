@@ -264,6 +264,14 @@ export function mergeVoiceFragments<M extends VoiceLike>(messages: M[]): M[] {
 const CALL = '📞';
 const CALL_GAP_MS = 5 * 60_000;
 
+/** 本人とダンの通話の記録の行なら、かけた側（本人＝右、ダン＝左。電話の発着信の履歴と同じ置き方）。それ以外は null。
+ * 「📞 ダンからの通話」はダンがかけた通話、「📞 ダンと通話」は本人がかけた通話（それより前の記録はすべて本人から）。 */
+export function callSide(m: VoiceLike): 'owner' | 'dan' | null {
+  const content = m.content || '';
+  if (m.sender_type !== 'system' || !content.startsWith(`${CALL} ダン`)) return null;
+  return content.startsWith(`${CALL} ダンから`) ? 'dan' : 'owner';
+}
+
 function callLengthMs(content: string): number {
   const m = content.match(/（(?:(\d+)分)?(\d+)秒）/);
   return m ? (Number(m[1] || 0) * 60 + Number(m[2])) * 1000 : 0;

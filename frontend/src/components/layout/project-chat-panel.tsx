@@ -1,6 +1,6 @@
 'use client';
 
-import { collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
+import { callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -436,6 +436,18 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
 
   // 本人でもダンでもない行（Doneルームからの委譲依頼、見張りの通知など）は
   // 吹き出しにせず、中央寄せの控えめな案内として描く。
+  // 通話の記録だけは、かけた側に置く（本人がかけた通話＝右、ダンからの通話＝左）。
+  const callBy = callSide(msg);
+  if (callBy) {
+    return (
+      <div className={`flex px-2 ${callBy === 'owner' ? 'justify-end' : 'justify-start'}`}>
+        <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${callBy === 'owner' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground'}`}>
+          {msg.content}
+        </div>
+      </div>
+    );
+  }
+
   if (msg.sender_type === 'system') {
     return (
       <div className="flex justify-center px-2">

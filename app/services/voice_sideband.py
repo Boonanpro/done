@@ -259,18 +259,20 @@ async def after_call(user_id, room_id, turns, began_iso):
     return left
 
 
-async def call_log(room_id, user_id, began, seconds):
+async def call_log(room_id, user_id, began, seconds, by='owner'):
     """The room's record of a call, like a phone's call history: one line with when and how long. The call's words stay
     in the room's history for Dan (🎙 lines) but the screens show this line instead of them (owner, 2026-09-30: the
     transcript made the chat unreadable; a call is remembered as a call). Dated at the call's start, so it sits where the
-    call happened among the reports and anything shown during it."""
+    call happened among the reports and anything shown during it. `by` is who placed the call: the screens put the line
+    on that side (owner's calls "📞 ダンと通話" on the right, Dan's calls "📞 ダンからの通話" on the left)."""
     from zoneinfo import ZoneInfo
     from app.services.chat_service import ChatService
     local = ZoneInfo('Asia/Tokyo')
     start = began.astimezone(local)
     end = datetime.fromtimestamp(began.timestamp() + seconds, local)
     length = f'{seconds // 60}分{seconds % 60}秒' if seconds >= 60 else f'{seconds}秒'
-    await ChatService().send_message(room_id, user_id, f'📞 ダンと通話 {start:%H:%M}〜{end:%H:%M}（{length}）',
+    head = '📞 ダンからの通話' if by == 'dan' else '📞 ダンと通話'
+    await ChatService().send_message(room_id, user_id, f'{head} {start:%H:%M}〜{end:%H:%M}（{length}）',
                                      sender_type='system', created_at=began.isoformat())
 
 

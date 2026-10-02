@@ -44,6 +44,7 @@ import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
 import {
   buildChatListItems,
+  callSide,
   collectSavedTurnIds,
   groupLiveTurns,
   mergeRunEvents,
@@ -4072,6 +4073,16 @@ function AppMain() {
               }
               // 本人でもダンでもない行（通話の記録「📞 ダンと通話」、委譲の依頼、見張りの通知）は吹き出しにせず、
               // 中央寄せの控えめな1行にする（Web版 project-chat-panel と同じ規約）。
+              // 通話の記録だけは、かけた側に置く（本人がかけた通話＝右、ダンからの通話＝左）。
+              const callBy = callSide(msg);
+              if (callBy) {
+                const ownerSide = callBy === 'owner';
+                return (
+                  <View style={[styles.messageBubble, ownerSide ? styles.myBubble : styles.aiBubble, { paddingVertical: 8 }]}>
+                    <Text style={{ fontSize: 14, lineHeight: 20, color: ownerSide ? '#1f1d19' : '#f4f0e8' }}>{msg.content}</Text>
+                  </View>
+                );
+              }
               if (msg.sender_type === 'system') {
                 return (
                   <View style={{ alignItems: 'center', marginVertical: 6, paddingHorizontal: 12 }}>
