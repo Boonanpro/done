@@ -245,7 +245,8 @@ def _rooms_that_know(sender, rooms):
 
 
 def watch_hit(item, watches):
-    """A mail watch matched by its own condition (sender, and subject when given), as the old watch did: certain, no model."""
+    """A mail watch whose condition (sender, and subject when given) the mail meets. The condition is often only the sender,
+    so a hit is a strong lead, not the answer: judge() looks at the mail with the watch in hand."""
     sender = ((item.get('sender_info') or {}).get('from') or '').lower()
     subject = (item.get('subject') or '').lower()
     for watch in watches:
@@ -274,7 +275,7 @@ def _env():
         if fresh.get(key) and not os.environ.get(key): os.environ[key] = fresh[key]
 
 
-async def judge(user_id, item, watches, rooms, hint=None, known=()):
+async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None):
     """Dan's decision for one item."""
     from app.services import api_job_providers
     mail = item.get('sender_info') or {}
@@ -284,6 +285,10 @@ async def judge(user_id, item, watches, rooms, hint=None, known=()):
     context = (f'待っている目印: {json.dumps(watches, ensure_ascii=False)}\n部屋の一覧（新しい順）: {json.dumps(rooms, ensure_ascii=False)}\n'
                + (f'差出人が出てきた部屋: {json.dumps(list(known))}\n' if known else '')
                + (f'送った連絡への返事として照合できた部屋: {hint}\n' if hint else '')
+               + (f'このメールが条件（差出人など）に合った目印: {json.dumps(matched, ensure_ascii=False)}\n'
+                  '条件は差出人だけのことが多い。中身がその目印で待っているもの（返事・結果・届いた物）なら、その watch_id で対応する。'
+                  'そうでなければ（同じ相手からの別の連絡、ダン自身の操作の確認など）目印とは関係なく、ほかのメールと同じに判断する。\n'
+                  if matched else '')
                + f'メール: {json.dumps(facts, ensure_ascii=False)}\n本文:\n{body}')
     _env()
     provider = api_job_providers.make(os.environ.get('DAN_INBOX_MODEL') or os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash'))
@@ -381,11 +386,6 @@ async def handle(user_id, item, own):
         return 'ignore'
     watches = await asyncio.to_thread(_mail_watches, user_id)
     hit = watch_hit(item, watches)
-    if hit:   # what Dan was waiting for, by the watch's own condition: certain, handled in the watch's room
-        decision = {'decision': 'act', 'watch_id': hit['id'], 'room_id': hit['room_id'], 'line': '', 'why': 'watch_condition'}
-        room = await deliver(user_id, item, decision, watches)
-        _mark(item['id'], {**decision, 'room': room, 'by': 'rule', 'at': time.time()})
-        return 'act'
     rooms = await asyncio.to_thread(_recent_rooms, user_id)
     hint = None
     try:   # a reply to something Dan sent: the ledger knows the room
@@ -397,10 +397,13 @@ async def handle(user_id, item, own):
     except Exception:
         pass
     known = await asyncio.to_thread(_rooms_that_know, _address((item.get('sender_info') or {}).get('from')), rooms)
-    decision = await judge(user_id, item, watches, rooms, hint, known)
+    decision = await judge(user_id, item, watches, rooms, hint, known, matched=hit)
+    awaited = bool(hit) and decision['decision'] in ('tell', 'act') and decision.get('watch_id') in (None, '', hit['id'])
+    if awaited:   # the awaited thing: handled in the watch's room
+        decision['watch_id'], decision['room_id'] = hit['id'], hit['room_id']
     if hint and decision['decision'] == 'ignore':
         decision['decision'] = 'tell'   # a reply to Dan's own message is never silently dropped
-    if not hint and decision['decision'] in ('tell', 'act'):
+    if not hint and not awaited and decision['decision'] in ('tell', 'act'):
         key, now = repeat_key(item), time.time()
         with _lock:
             data = settings(user_id); told = data.get('told') or {}
