@@ -148,8 +148,6 @@ def _create_proposal(user_id: str, account: str, thread: Dict[str, Any], detecte
         f"相手: @{handle}\n"
         f"内容: {preview[:500] or '(本文なし)'}"
     )
-    from app.services import inbox   # said in the user's home room (there is no bell any more); the card stays as a record
-    inbox.say_soon(user_id, None, content)
     sb.table("dan_proposals").insert({
         "user_id": user_id,
         "type": "action",
@@ -284,8 +282,10 @@ async def _poll_account(user_id: str, account: str) -> None:
                 logger.info("[ig] %s: @%s の返信 → room=%s を起動", account, handle,
                             route["origin_room_id"][:8])
                 continue
-        await asyncio.to_thread(_create_proposal, user_id, account, thread, detected.get("id"))
-        logger.info("[ig] %s: @%s からの新規DM → 通知タブ", account, handle)
+        await asyncio.to_thread(_create_proposal, user_id, account, thread, detected.get("id"))   # a record only
+        from app.services import inbox   # judged like mail: the user's wishes, tell or act, said in chat (stage 2)
+        await inbox.judge_row(user_id, detected)
+        logger.info("[ig] %s: @%s からの新規DM → 受け口", account, handle)
 
 
 async def _tick() -> None:

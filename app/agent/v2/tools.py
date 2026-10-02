@@ -379,12 +379,14 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.browser_flows import TOOL as FLOW_TOOL
     from app.services.chrome_signin import TOOL as CHROME_SIGNIN_TOOL
     from app.services.user_prefs import TOOL as PREFERENCE_TOOL
+    from app.services.feeds import TOOL as FEED_TOOL
     return [
         LOOKUP_TOOL,
         LOCATION_TOOL,
         FLOW_TOOL,
         CHROME_SIGNIN_TOOL,
         PREFERENCE_TOOL,
+        FEED_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
         COMMAND_CENTER_TOOL,
@@ -1292,6 +1294,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_chrome_signin", "browser")
     if tool_name == "preference":
         return ("_preference", "read")
+    if tool_name == "feed":
+        return ("_feed", "browser")
 
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
@@ -1380,7 +1384,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed"}:
             return
 
         error_type = result.get("error_type")
@@ -2507,6 +2511,10 @@ async def execute_tool(
     if skill_name == "_preference":
         from app.services.user_prefs import tool as preference_tool
         return await preference_tool(params)
+
+    if skill_name == "_feed":
+        from app.services.feeds import tool as feed_tool
+        return await feed_tool(params)
 
     if skill_name == "_wait_until":
         from app.services.dan_lookup import wait_until

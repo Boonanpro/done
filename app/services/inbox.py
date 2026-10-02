@@ -252,7 +252,7 @@ def watch_hit(item, watches):
     return None
 
 
-JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から届いたメールを1通ずつ見て、無視するか、対応するかを決める。
+JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から届いたもの（メール、SNS の DM や通知、サイトの問い合わせ、外部窓口のチャットなど。channel に書いてある）を1件ずつ見て、無視するか、対応するかを決める。
 届いたものは全部残るので（後で探せる）、本人に関係ないもの（広告・お知らせ・本人に用のない自動通知）は無視でよい。
 本人やダンが自分でした操作の確認（予約完了・予約確認・注文受付・登録完了・本人のログインの通知など）も、問題が書かれていなければ無視。
 対応するなら、その大きさも自分で決める:
@@ -272,12 +272,12 @@ def _env():
         if fresh.get(key) and not os.environ.get(key): os.environ[key] = fresh[key]
 
 
-async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None):
+async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None, belongs=None):
     """Dan's decision for one item."""
     from app.services import api_job_providers
     mail = item.get('sender_info') or {}
     body = (item.get('content') or '').strip()[:3000]
-    facts = {'from': mail.get('from'), 'to': mail.get('to'), 'subject': item.get('subject'), 'date': mail.get('date'),
+    facts = {'channel': item.get('source') or 'gmail', 'from': mail.get('from'), 'to': mail.get('to'), 'subject': item.get('subject'), 'date': mail.get('date'),
              'attachments': [a.get('filename') for a in ((item.get('metadata') or {}).get('attachments') or []) if isinstance(a, dict)][:5]}
     from app.services import user_prefs
     wishes = [r['text'] for r in user_prefs.items(user_id, ('連絡', '全般'))]
@@ -289,7 +289,8 @@ async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None
                   '条件は差出人だけのことが多い。中身がその目印で待っているもの（返事・結果・届いた物）なら、その watch_id で対応する。'
                   'そうでなければ（同じ相手からの別の連絡、ダン自身の操作の確認など）目印とは関係なく、ほかのメールと同じに判断する。\n'
                   if matched else '')
-               + f'メール: {json.dumps(facts, ensure_ascii=False)}\n本文:\n{body}')
+               + (f'これが届いた部屋（外部窓口など）: {belongs}\n' if belongs else '')
+               + f'届いたもの: {json.dumps(facts, ensure_ascii=False)}\n本文:\n{body}')
     _env()
     provider = api_job_providers.make(os.environ.get('DAN_INBOX_MODEL') or os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash'))
     provider.start(JUDGE, [], [context])
@@ -306,8 +307,8 @@ async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None
     return decision
 
 
-_ACT_PROMPT = ('[受け口 / メールの自動処理]\nこれは本人の発言ではない。本人あてに届いたメールを、ダンが「動くべき」と判断した。\n'
-               '判断の理由: {why}\n{watch}\n--- 受信したメール ---\n差出人: {sender}\n件名: {subject}\n受信日時: {date}\n本文:\n{body}\n--- ここまで ---\n\n'
+_ACT_PROMPT = ('[受け口 / 届いた連絡の自動処理]\nこれは本人の発言ではない。本人あてに届いた連絡（{channel}）を、ダンが「動くべき」と判断した。\n'
+               '判断の理由: {why}\n{watch}\n--- 届いた連絡 ---\n差出人: {sender}\n件名: {subject}\n受信日時: {date}\n本文:\n{body}\n--- ここまで ---\n\n'
                'この部屋の経緯を踏まえて、要点を本人に短く報告し、次の行動を具体的に提案する。返事が要るなら返信文を compose_message の送信案カードで出す'
                '（本文をチャットに書かない）。本人の承認なしに送信・支払い・外部への働きかけをしない。')
 
@@ -322,7 +323,7 @@ async def deliver(user_id, item, decision, watches):
     mail = item.get('sender_info') or {}
     if decision['decision'] == 'act':
         from app.services.inbound_wakeup import schedule_room_wakeup
-        prompt = _ACT_PROMPT.format(why=decision.get('why') or '', watch=(f'待っていた目印: 「{watch["note"]}」\n' if watch else ''),
+        prompt = _ACT_PROMPT.format(channel=item.get('source') or 'gmail', why=decision.get('why') or '', watch=(f'待っていた目印: 「{watch["note"]}」\n' if watch else ''),
                                     sender=mail.get('from') or '', subject=item.get('subject') or '', date=mail.get('date') or '',
                                     body=(item.get('content') or '')[:2500])
         wake_item = {**item, '_inbox_prompt': prompt}
@@ -367,6 +368,8 @@ def say_soon(user_id, room_id, text):
 
 
 def _mark(item_id, result):
+    if not item_id:
+        return
     try:
         from app.services.supabase_client import get_supabase_client
         sb = get_supabase_client().client
@@ -385,7 +388,9 @@ async def handle(user_id, item, own):
         _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': reason, 'at': time.time()})
         return 'ignore'
     watches = await asyncio.to_thread(_mail_watches, user_id)
-    hit = watch_hit(item, watches)
+    mail = (item.get('source') or 'gmail') == 'gmail'
+    hit = watch_hit(item, watches) if mail else None   # mail watches name a sender address
+    belongs = (item.get('metadata') or {}).get('room_hint')   # where a non-mail item plainly belongs (a collab window's room)
     rooms = await asyncio.to_thread(_recent_rooms, user_id)
     hint = None
     try:   # a reply to something Dan sent: the ledger knows the room
@@ -397,13 +402,13 @@ async def handle(user_id, item, own):
     except Exception:
         pass
     known = await asyncio.to_thread(_rooms_that_know, _address((item.get('sender_info') or {}).get('from')), rooms)
-    decision = await judge(user_id, item, watches, rooms, hint, known, matched=hit)
+    decision = await judge(user_id, item, watches, rooms, hint, known, matched=hit, belongs=belongs)
     awaited = bool(hit) and decision['decision'] in ('tell', 'act') and decision.get('watch_id') in (None, '', hit['id'])
     if awaited:   # the awaited thing: handled in the watch's room
         decision['watch_id'], decision['room_id'] = hit['id'], hit['room_id']
     if hint and decision['decision'] == 'ignore':
         decision['decision'] = 'tell'   # a reply to Dan's own message is never silently dropped
-    if not hint and not awaited and decision['decision'] in ('tell', 'act'):
+    if mail and not hint and not awaited and decision['decision'] in ('tell', 'act'):   # repeats are a mail habit (the same notice again)
         key, now = repeat_key(item), time.time()
         with _lock:
             data = settings(user_id); told = data.get('told') or {}
@@ -412,8 +417,8 @@ async def handle(user_id, item, own):
             else:
                 told[key] = now
                 data['told'] = {k: t for k, t in told.items() if now - t < REPEAT_HOURS*3600*2}; save(user_id, data)
-    if hint and not decision.get('room_id'):
-        decision['room_id'] = hint
+    if (hint or belongs) and not decision.get('room_id'):
+        decision['room_id'] = hint or belongs
     room = None
     if decision['decision'] in ('tell', 'act'):
         room = await deliver(user_id, item, decision, watches)
@@ -466,3 +471,41 @@ async def cycle_all():
             await cycle(user_id)
         except Exception:
             logger.exception('inbox cycle failed for %s', user_id)
+    try:   # the SNS pages the users asked Dan to watch (feeds.py), those that are due
+        from app.services import feeds
+        asyncio.get_running_loop().create_task(feeds.cycle_all())
+    except Exception:
+        logger.exception('feeds cycle not started')
+
+
+# ---- stage 2: what reaches the user by other ways than mail ----------------------------------------------------------
+
+async def receive(user_id, source, sender, body, subject='', source_id='', room_id=None, metadata=None):
+    """Something that reached the user from outside by another way than mail (an Instagram DM, a guest in a collab
+    window, a site inquiry, a watched SNS page): kept in the same queue and judged the same way. room_id: the room it
+    plainly belongs to (a collab window's origin room). Returns the decision, or None when it was already received."""
+    from app.services.supabase_client import get_supabase_client
+    sb = get_supabase_client().client
+    if source_id:
+        found = await asyncio.to_thread(lambda: sb.table('detected_messages').select('id').eq('user_id', user_id)
+                                        .eq('source_id', source_id).limit(1).execute().data)
+        if found:
+            return None
+    row = {'user_id': user_id, 'source': source, 'source_id': source_id or None, 'content': body or '', 'subject': subject or '',
+           'sender_info': {'from': sender}, 'metadata': {**(metadata or {}), 'room_hint': room_id, 'inbox': 'pending'}, 'status': 'pending'}
+    stored = await asyncio.to_thread(lambda: sb.table('detected_messages').insert(row).execute().data)
+    return await handle(user_id, stored[0] if stored else {**row, 'id': None}, set())
+
+
+async def judge_row(user_id, row):
+    """A non-mail item already in the queue (the Instagram poller stores its own rows)."""
+    return await handle(user_id, row, set())
+
+
+def soon(coro):
+    """Run one of the above from code that is not async: on the running loop when there is one, else here and now."""
+    try:
+        asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        try: asyncio.run(coro)
+        except Exception: logger.exception('inbox: could not receive')

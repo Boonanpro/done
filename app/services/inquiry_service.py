@@ -238,8 +238,11 @@ class InquiryService:
                 }).execute()
 
             await asyncio.to_thread(_insert_proposal)
-            from app.services import inbox   # said in the owner's home room (there is no bell any more); the card stays as a record
-            await inbox.say(owner_id, None, f"サイトから問い合わせが届きました（{title}）" + chr(10) * 2 + content)
+            from app.services import inbox   # judged like mail (stage 2); the card stays as a record
+            asked = (f"{label}\n会社名: {inquiry.get('company') or '-'}\nメール: {sender_email or '-'}\n電話: {inquiry.get('phone') or '-'}\n\n"
+                     f"{inquiry.get('message') or '(本文なし)'}" + ("\n\n（ダンが返信案を用意済み）" if has_email and draft else ""))
+            await inbox.receive(owner_id, "inquiry", name, asked, subject=f"サイトの問い合わせ（{label}）",
+                                source_id=f"inquiry:{inquiry.get('id')}" if inquiry.get("id") else "", metadata={"inquiry_id": inquiry.get("id")})
             logger.info("inquiry proposal created scope=%s type=%s", scope, ptype)
         except Exception:
             logger.exception("inquiry draft/propose failed")
