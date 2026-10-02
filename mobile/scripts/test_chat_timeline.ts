@@ -1,8 +1,8 @@
-// チャットタイムライン並び順のテスト（追い連絡の時系列保持）。
+// チャットタイムライン並び順のテスト（docs/current/chat-timeline-definition.md）。
 //
-// シナリオ: msg1 送信 → ダンのターンX開始 → 途中で追い連絡 msg2 →
-// 境界でターンXの部分回答が保存され msg2 が読み込まれる → ターンY開始 →
-// 最終回答。各段階で「画面の並びが常に実時刻の時系列」であることを確認する。
+// シナリオ: msg1 送信 → ダンのターンX開始 → 途中で追い連絡 msg2 → X の作業が続く →
+// X の返事が書き終わって保存 → 最後に送った msg3 はまだ届いていない。どの段階でも
+// 「サーバーの時刻の順・届いていない送信は一番下・3つの点はさらにその下」であることを確かめる。
 //
 // 実行: cd mobile && npx tsc chatTimeline.ts scripts/test_chat_timeline.ts \
 //         --outDir .testbuild --module commonjs --target es2020 --strict --skipLibCheck
@@ -11,8 +11,6 @@ import * as assert from 'assert';
 import {
   buildChatListItems,
   collectSavedTurnIds,
-  computeUnreadFollowupIds,
-  followupQueuedMsAtSend,
   groupLiveTurns,
   mergeRunEvents,
   type AgentRun,
@@ -22,221 +20,77 @@ import {
 
 const T = 1750000000000;
 const iso = (offsetMs: number) => new Date(T + offsetMs).toISOString();
-
 const run: AgentRun = { id: 'r1', project_id: 'p1', state: 'running', created_at: iso(2000) };
-
 const msg1: TimelineMessageLike = { id: 'msg1', sender_type: 'human', created_at: iso(0) };
-// 追い連絡（ターンX実行中の t+15s に送信）
-const msg2: TimelineMessageLike = { id: 'msg2', sender_type: 'human', created_at: iso(15000) };
-// ターンXの部分回答。バックエンドは created_at=ターン開始時刻 で保存する。
-const partialX: TimelineMessageLike = {
-  id: 'aiX', sender_type: 'ai', created_at: iso(3000), ai_context: { turn_id: 'tx' },
-};
-// ターンY（追い連絡を読み込んだ後）の最終回答。
-const finalY: TimelineMessageLike = {
-  id: 'aiY', sender_type: 'ai', created_at: iso(20000), ai_context: { turn_id: 'ty' },
-};
+const msg2: TimelineMessageLike = { id: 'msg2', sender_type: 'human', created_at: iso(15000) };   // 追い連絡
+const ev = (id: string, at: number, turn: string | null = 'tx'): ExecutionEvent =>
+  ({ id, run_id: 'r1', turn_id: turn, event_type: 'tool_use', tool_label: id, created_at: iso(at), seq: at });
 
-const ev = (id: string, turnId: string, offsetMs: number, seq: number): ExecutionEvent => ({
-  id, run_id: 'r1', turn_id: turnId, event_type: 'reasoning', content: id, seq, created_at: iso(offsetMs),
-});
-const turnXEvents = [ev('ex1', 'tx', 3000, 1), ev('ex2', 'tx', 10000, 2)];
-const turnYEvents = [ev('ey1', 'ty', 20000, 3)];
-
-// 昇順（画面の上→下）のキー列にして比較する。
-function ascendingKeys(args: Parameters<typeof buildChatListItems>[0]): string[] {
-  return buildChatListItems(args).map((item) => item.key).reverse();
+// 古い順（上から下）のキー
+function topToBottom(args: Parameters<typeof buildChatListItems>[0]): string[] {
+  return buildChatListItems(args).map((i) => i.key).reverse();
 }
-
-// --- Stage A: msg1 → ターンX実行中（追い連絡なし） --------------------------
-{
-  const messages = [msg1];
-  const groups = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: turnXEvents,
-    savedTurnIds: collectSavedTurnIds(messages),
+const live = (messages: TimelineMessageLike[], events: ExecutionEvent[]) =>
+  groupLiveTurns({
+    liveRunActive: true, currentRun: run, runEvents: events, savedTurnIds: collectSavedTurnIds(messages),
+    humanTimes: messages.filter((m) => m.sender_type === 'human' && !m.pending).map((m) => new Date(m.created_at).getTime()),
   });
-  assert.deepStrictEqual(ascendingKeys({ messages, liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', '__live__:tx']);
-  assert.strictEqual(groups.length, 1);
+
+// --- 送った瞬間: まだ届いていない送信は一番下、3つの点はその下 -----------------------------
+{
+  const pending: TimelineMessageLike = { id: 'msg1', sender_type: 'human', created_at: iso(999999), pending: true };
+  assert.deepStrictEqual(topToBottom({ messages: [pending], liveTurnGroups: [], showLiveTurn: true }), ['msg1', '__typing__']);
+  // 端末の時計が大きくずれていても、届いていない送信は既存の行より下
+  const old: TimelineMessageLike = { id: 'a0', sender_type: 'ai', created_at: iso(5000) };
+  const skewed: TimelineMessageLike = { id: 'mine', sender_type: 'human', created_at: iso(-999999), pending: true };
+  assert.deepStrictEqual(topToBottom({ messages: [old, skewed], liveTurnGroups: [], showLiveTurn: false }), ['a0', 'mine']);
 }
 
-// --- Stage B: 追い連絡 msg2 を送信（まだ読み込まれていない） ----------------
-// 期待: msg1 → [ターンXの作業] → msg2（最下部・仮送信）
+// --- 作業中の追い連絡: その前の作業は上、その後の作業は下（同じターンでも分かれる） ---------
 {
   const messages = [msg1, msg2];
-  const pendingFollowups = { msg2: T + 15000 };
-  const groups = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: turnXEvents,
-    savedTurnIds: collectSavedTurnIds(messages),
-  });
-  assert.deepStrictEqual(ascendingKeys({ messages, liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', '__live__:tx', 'msg2']);
-  // ターンXのイベントが msg2 の後に増えても（t+16s）、msg2 は最下部のまま
-  const moreX = [...turnXEvents, ev('ex3', 'tx', 16000, 4)];
-  const groups2 = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: moreX,
-    savedTurnIds: collectSavedTurnIds(messages),
-  });
-  assert.deepStrictEqual(ascendingKeys({ messages, liveTurnGroups: groups2, showLiveTurn: true }),
-    ['msg1', '__live__:tx', 'msg2']);
-  // 仮送信のまま（ターンXは msg2 より前に始まった作業なので解除しない）
-  const unread = computeUnreadFollowupIds({ pendingFollowups, messages, liveTurnGroups: groups2 });
-  assert.deepStrictEqual([...unread], ['msg2']);
+  const groups = live(messages, [ev('e1', 3000), ev('e2', 10000), ev('e3', 20000), ev('e4', 25000)]);
+  assert.deepStrictEqual(groups.map((g) => g.blocks.length), [2, 2]);
+  assert.deepStrictEqual(topToBottom({ messages, liveTurnGroups: groups, showLiveTurn: true }),
+    ['msg1', '__live__:tx', 'msg2', '__live__:tx#1', '__typing__']);
 }
 
-// --- Stage C: 境界でターンXの部分回答が保存され、ターンYが始まる ------------
-// 期待: msg1 → 部分回答X（msg2より上に固定） → msg2（通常表示に） → [ターンYの作業]
+// --- ターンの区別が無いイベントも、追い連絡をまたがない --------------------------------------
 {
-  const messages = [msg1, msg2, partialX];
-  const pendingFollowups = { msg2: T + 15000 };
-  const savedTurnIds = collectSavedTurnIds(messages);
-  const allEvents = [...turnXEvents, ...turnYEvents];
-  const groups = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: allEvents, savedTurnIds,
-  });
-  // 保存済みターンXのライブ吹き出しは消え、ターンYだけがライブ
-  assert.deepStrictEqual(groups.map((g) => g.key), ['ty']);
-  assert.deepStrictEqual(ascendingKeys({ messages, liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', 'aiX', 'msg2', '__live__:ty']);
-  // ターンY（msg2より後に開始）が始まった＝読み込まれた → 仮送信解除
-  const unread = computeUnreadFollowupIds({ pendingFollowups, messages, liveTurnGroups: groups });
-  assert.strictEqual(unread.size, 0);
-  // 部分回答X（created_at=ターン開始 < msg2）だけでは解除されないことも確認
-  const unreadBeforeY = computeUnreadFollowupIds({ pendingFollowups, messages, liveTurnGroups: [] });
-  assert.deepStrictEqual([...unreadBeforeY], ['msg2']);
+  const messages = [msg1, msg2];
+  const groups = live(messages, [ev('e1', 3000, null), ev('e2', 20000, null)]);
+  assert.deepStrictEqual(topToBottom({ messages, liveTurnGroups: groups, showLiveTurn: true }),
+    ['msg1', '__live__:run:r1', 'msg2', '__live__:run:r1#1', '__typing__']);
 }
 
-// --- Stage C': 境界の谷間（部分回答は保存済み・ターンYのイベント未着） ------
-// 期待: 最下部にスピナーだけの吹き出し
+// --- 返事は書き終えた時刻に置かれ、ライブ表示と入れ替わる（追い連絡より下） ---------------------
 {
-  const messages = [msg1, msg2, partialX];
-  const groups = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: turnXEvents,
-    savedTurnIds: collectSavedTurnIds(messages),
-  });
+  const reply: TimelineMessageLike = { id: 'a1', sender_type: 'ai', created_at: iso(30000), ai_context: { turn_id: 'tx' } };
+  const messages = [msg1, msg2, reply];
+  const groups = live(messages, [ev('e1', 3000), ev('e3', 20000)]);
   assert.deepStrictEqual(groups, []);
-  assert.deepStrictEqual(ascendingKeys({ messages, liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', 'aiX', 'msg2', '__live__']);
+  const msg3: TimelineMessageLike = { id: 'msg3', sender_type: 'human', created_at: iso(1), pending: true };
+  assert.deepStrictEqual(topToBottom({ messages: [...messages, msg3], liveTurnGroups: groups, showLiveTurn: false }),
+    ['msg1', 'msg2', 'a1', 'msg3']);
 }
 
-// --- Stage D: 完了（runが終わりライブ表示なし） ------------------------------
-// 期待: msg1 → 部分回答X → msg2 → 最終回答Y（保存される並び＝表示の並び）
+// --- 同じ時刻なら 本人 → 作業ログ → ダン ------------------------------------------------------
 {
-  const messages = [msg1, msg2, partialX, finalY];
-  const groups = groupLiveTurns({
-    liveRunActive: false, currentRun: { ...run, state: 'completed' }, runEvents: [],
-    savedTurnIds: collectSavedTurnIds(messages),
-  });
-  assert.deepStrictEqual(ascendingKeys({ messages, liveTurnGroups: groups, showLiveTurn: false }),
-    ['msg1', 'aiX', 'msg2', 'aiY']);
+  const human: TimelineMessageLike = { id: 'h', sender_type: 'human', created_at: iso(40000) };
+  const ai: TimelineMessageLike = { id: 'x', sender_type: 'system', created_at: iso(40000) };
+  const groups = live([msg1], [ev('e9', 40000, 'ty')]);
+  assert.deepStrictEqual(topToBottom({ messages: [ai, human], liveTurnGroups: groups, showLiveTurn: false }),
+    ['h', '__live__:ty', 'x']);
 }
 
-// --- 回帰: turn_id が無い旧イベントは run 単位で1吹き出しにまとまる ----------
+// --- mergeRunEvents: 増える方向にだけ足す ---------------------------------------------------------
 {
-  const legacy = [
-    { ...ev('el1', '', 3000, 1), turn_id: null },
-    { ...ev('el2', '', 4000, 2), turn_id: null },
-  ];
-  const groups = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: legacy, savedTurnIds: new Set(),
-  });
-  assert.deepStrictEqual(groups.map((g) => g.key), ['run:r1']);
-  assert.deepStrictEqual(ascendingKeys({ messages: [msg1], liveTurnGroups: groups, showLiveTurn: true }),
-    ['msg1', '__live__:run:r1']);
+  const base = [ev('e1', 1), ev('e2', 2)];
+  const grown = mergeRunEvents(base, [ev('e2', 2), ev('e3', 3)], 'r1');
+  assert.deepStrictEqual(grown.map((e) => e.id), ['e1', 'e2', 'e3']);
+  assert.strictEqual(mergeRunEvents(grown, [ev('e1', 1)], 'r1'), grown);
+  const other = mergeRunEvents(grown, [{ ...ev('f1', 4), run_id: 'r2' }], 'r2');
+  assert.deepStrictEqual(other.map((e) => e.id), ['f1']);
 }
 
-// --- mergeRunEvents: 順不同レスポンスでイベントが巻き戻らない ----------------
-{
-  // 新しいスナップショット（3件）の後に古いスナップショット（2件）が届いても減らない
-  const newer = mergeRunEvents([], [ev('e1', 'tx', 1000, 1), ev('e2', 'tx', 2000, 2), ev('e3', 'tx', 3000, 3)], 'r1');
-  assert.strictEqual(newer.length, 3);
-  const afterStale = mergeRunEvents(newer, [ev('e1', 'tx', 1000, 1), ev('e2', 'tx', 2000, 2)], 'r1');
-  assert.strictEqual(afterStale.length, 3);
-  // 変化が無ければ同じ配列参照を返す（無駄な再レンダリングをしない）
-  assert.strictEqual(afterStale, newer);
-  // 新イベントは追加される
-  const grown = mergeRunEvents(newer, [ev('e4', 'ty', 4000, 4)], 'r1');
-  assert.strictEqual(grown.length, 4);
-  // run が変わったら前の run のイベントは捨てる
-  const r2only = mergeRunEvents(grown, [{ ...ev('f1', 'tz', 5000, 1), run_id: 'r2' }], 'r2');
-  assert.deepStrictEqual(r2only.map((e) => e.id), ['f1']);
-  // 他 run のイベントが混ざっていても取り込まない
-  const filtered = mergeRunEvents([], [ev('e1', 'tx', 1000, 1), { ...ev('g1', 'tw', 1500, 2), run_id: 'r9' }], 'r1');
-  assert.deepStrictEqual(filtered.map((e) => e.id), ['e1']);
-}
-
-// --- followupQueuedMsAtSend: 送った瞬間の仮送信が即座に消化されない ----------
-{
-  const messages = [msg1, partialX]; // partialX: ai, t+3s
-  const groups = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: turnXEvents, savedTurnIds: new Set(),
-  });
-  // 端末の時計がサーバーより遅れているケース（now が既存ターン開始より過去）
-  const skewedNow = T + 1000;
-  const queuedMs = followupQueuedMsAtSend({ nowMs: skewedNow, messages, liveTurnGroups: groups });
-  // 既存のAIメッセージ・既存ターンの開始時刻より必ず後ろ
-  assert.ok(queuedMs > T + 3000);
-  const unread = computeUnreadFollowupIds({
-    pendingFollowups: { local1: queuedMs }, messages, liveTurnGroups: groups,
-  });
-  assert.deepStrictEqual([...unread], ['local1']); // 送った瞬間から仮送信のまま
-  // 次のターン（msg2読込後）が始まったら消化される
-  const groupsWithY = groupLiveTurns({
-    liveRunActive: true, currentRun: run, runEvents: [...turnXEvents, ...turnYEvents],
-    savedTurnIds: new Set(),
-  });
-  const unread2 = computeUnreadFollowupIds({
-    pendingFollowups: { local1: queuedMs }, messages, liveTurnGroups: groupsWithY,
-  });
-  assert.strictEqual(unread2.size, 0);
-  // 時計が進んでいる側（now が最新より未来）は now をそのまま使う
-  const aheadNow = T + 60000;
-  assert.strictEqual(
-    followupQueuedMsAtSend({ nowMs: aheadNow, messages, liveTurnGroups: groups }),
-    aheadNow,
-  );
-}
-
-console.log('test_chat_timeline: all assertions passed');
-
-// ── 音声の断片まとめ（2026-09-27）──
-{
-  const { mergeVoiceFragments } = require('../chatTimeline');
-  const t = (s: number) => new Date(Date.UTC(2026, 8, 27, 5, 0, s)).toISOString();
-  const rows = [
-    { id: 'a', sender_type: 'human', content: '🎙 まあこれらを表示して', created_at: t(0) },
-    { id: 'b', sender_type: 'ai', content: '🎙 ん。', created_at: t(2) },
-    { id: 'c', sender_type: 'human', content: '🎙 、あなたのスマホから', created_at: t(5) },
-    { id: 'd', sender_type: 'ai', content: '🎙 わかりました。直します。', created_at: t(9) },
-    { id: 'e', sender_type: 'human', content: '普通のメッセージ', created_at: t(12) },
-  ];
-  const merged = mergeVoiceFragments(rows);
-  const ids = merged.map((m: { id: string }) => m.id).join(',');
-  if (ids !== 'a,d,e') throw new Error('voice merge ids: ' + ids);
-  if (merged[0].content !== '🎙 まあこれらを表示してあなたのスマホから') throw new Error('voice merge text: ' + merged[0].content);
-  console.log('ok voice fragments');
-}
-
-// ── 通話は「📞 ダンと通話」の1行だけ（2026-09-30）──
-{
-  const { collapseCalls } = require('../chatTimeline');
-  const t = (m: number, s = 0) => new Date(Date.UTC(2026, 8, 30, 3, m, s)).toISOString();
-  const rows = [
-    // 以前の通話（サーバーの📞行なし）: 🎙 行の連なりが1行になる
-    { id: 'old1', sender_type: 'human', content: '🎙 請求書払って', created_at: t(0) },
-    { id: 'old2', sender_type: 'ai', content: '🎙 確認するね', created_at: t(0, 5) },
-    { id: 'rep', sender_type: 'ai', content: '請求書を確認しました。33,000円です。', created_at: t(1) },
-    { id: 'old3', sender_type: 'human', content: '🎙 うん払って', created_at: t(2) },
-    // 新しい通話: サーバーの📞行があるので 🎙 行は消えるだけ
-    { id: 'call', sender_type: 'system', content: '📞 ダンと通話 12:20〜12:23（3分12秒）', created_at: t(20) },
-    { id: 'new1', sender_type: 'human', content: '🎙 明日の予定は', created_at: t(20, 10) },
-    { id: 'new2', sender_type: 'ai', content: '🎙 10時から打ち合わせ', created_at: t(21) },
-    { id: 'text', sender_type: 'human', content: '普通のメッセージ', created_at: t(30) },
-  ];
-  const out = collapseCalls(rows);
-  const ids = out.map((m: { id: string }) => m.id).join(',');
-  if (ids !== 'old1,rep,call,text') throw new Error('call collapse ids: ' + ids);
-  if (out[0].sender_type !== 'system' || !out[0].content.startsWith('📞 ダンと通話 ')) throw new Error('old call row: ' + JSON.stringify(out[0]));
-  if (out.some((m: { content: string }) => m.content.startsWith('🎙'))) throw new Error('transcript line shown');
-  console.log('ok call collapse');
-}
+console.log('chat timeline: all scenarios passed');

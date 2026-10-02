@@ -45,8 +45,6 @@ import { WebView } from 'react-native-webview';
 import {
   buildChatListItems,
   collectSavedTurnIds,
-  computeUnreadFollowupIds,
-  followupQueuedMsAtSend,
   groupLiveTurns,
   mergeRunEvents,
   type AgentRun,
@@ -54,6 +52,7 @@ import {
   type ExecutionEvent,
   type TurnBlock,
 } from './chatTimeline';
+import { TypingDots } from './typing-dots';
 import { VoiceHost, useVoice } from './voice-host';
 import { AtomRelayControl } from './atom-relay-control';
 import { reportLocation, watchLocation } from './location-report';
@@ -138,17 +137,17 @@ function keepLocalOptimistic(
   current: MessageResponse[],
   roomId: string,
 ): MessageResponse[] {
-  const locals = current.filter((m) => m.id.startsWith('local-') && m.room_id === roomId);
   // 遡り読み込みで足した行はサーバーの取得窓（最新N件）より古いので server に
   // 含まれないが、削除された訳ではない。窓の下端より古い行はそのまま残す。
   const serverIds = new Set(server.map((m) => m.id));
+  const locals = current.filter((m) => m.pending && m.room_id === roomId && !serverIds.has(m.id));
   const oldestServer = server.length
     ? Math.min(...server.map((m) => new Date(m.created_at).getTime() || 0))
     : Infinity;
   const olderKept = current.filter(
     (m) =>
       m.room_id === roomId
-      && !m.id.startsWith('local-')
+      && !m.pending
       && !serverIds.has(m.id)
       && (new Date(m.created_at).getTime() || 0) < oldestServer,
   );
@@ -192,6 +191,9 @@ type MessageResponse = {
     blocks?: TurnBlock[];
     turn_id?: string;
   } | null;
+  // 送った瞬間の、まだサーバーに届いていない自分のメッセージ。id は送信時に発行した本物のID（届けば同じ id の
+  // 保存行に置き換わる）。並びは「一番下」（端末の時計は使わない。docs/current/chat-timeline-definition.md）。
+  pending?: boolean;
 };
 
 // チャット FlatList の1行（保存済みメッセージ or ライブのターン吹き出し）。
@@ -1284,10 +1286,6 @@ function AppMain() {
   const [streamingProjects, setStreamingProjects] = useState<string[]>([]);
   // 作業ラベルもプロジェクト別（部屋を切り替えても他室のラベルが混ざらない）。
   const [activityMap, setActivityMap] = useState<Record<string, string>>({});
-  // 追い連絡（ダンのターン実行中に送ったメッセージ）の仮送信状態。
-  // message id → 送信時刻(ms)。ダンが次の区切りで読み込むと、それ以降の作業
-  // （新しいターン）がこのメッセージより後に始まるので、それを検知して解除する。
-  const [pendingFollowups, setPendingFollowups] = useState<Record<string, number>>({});
   // 送信の連打ガード。以前は `sending` が兼ねていたが、追い連絡（ターン実行中の
   // 送信）を許可するために sending では弾けなくなった。
   const lastSendAtRef = useRef(0);
@@ -1565,9 +1563,14 @@ function AppMain() {
     !!currentRun &&
     currentRun.state === 'running' &&
     currentRun.project_id === currentProject?.id;
+  // 本人のメッセージ（届いたもの）の時刻: 作業ログはこれをまたいで1つの吹き出しにしない。
+  const humanTimes = useMemo(
+    () => messages.filter((m) => m.sender_type === 'human' && !m.pending).map((m) => new Date(m.created_at).getTime() || 0),
+    [messages],
+  );
   const liveTurnGroups = useMemo(
-    () => groupLiveTurns({ liveRunActive, currentRun, runEvents, savedTurnIds }),
-    [liveRunActive, currentRun, runEvents, savedTurnIds],
+    () => groupLiveTurns({ liveRunActive, currentRun, runEvents, savedTurnIds, humanTimes }),
+    [liveRunActive, currentRun, runEvents, savedTurnIds, humanTimes],
   );
   // Show the live bubble when the server says this chat's run is active, OR
   // (for instant feedback) right after sending here before the first poll lands.
@@ -1580,19 +1583,6 @@ function AppMain() {
     // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。streamingHere は
     // この部屋の送信フローの決着で false になる＝ターン完了でこの経路は自然に閉じる。
     (streamingHere && !uploadProgress);
-
-  // まだダンに読み込まれていない追い連絡。読み込まれるまで半透明＋「仮送信」表示。
-  const activePendingIds = useMemo(
-    () => computeUnreadFollowupIds({ pendingFollowups, messages, liveTurnGroups }),
-    [pendingFollowups, messages, liveTurnGroups],
-  );
-
-  // run が終わった（完了・停止・中断）のに残った仮送信フラグは意味を失うので捨てる。
-  useEffect(() => {
-    if (Object.keys(pendingFollowups).length === 0) return;
-    if (liveRunActive || streamingHere) return;
-    setPendingFollowups({});
-  }, [liveRunActive, streamingHere, pendingFollowups]);
 
   // チャットの行リスト。保存済みメッセージとライブのターン吹き出しを「実際に
   // 起きた時刻」で1本のタイムラインに混ぜる。これにより、ダン作業中に送った
@@ -1806,7 +1796,7 @@ function AppMain() {
     const roomId = currentProject?.room_id;
     if (!roomId || !token || !hasMoreOlderRef.current || isLoadingOlderRef.current) return;
     const oldest = messages
-      .filter((m) => !m.id.startsWith('local-') && m.room_id === roomId)
+      .filter((m) => !m.pending && m.room_id === roomId)
       .reduce<MessageResponse | null>((a, b) => (!a || b.created_at < a.created_at ? b : a), null);
     if (!oldest) return;
     isLoadingOlderRef.current = true;
@@ -2413,10 +2403,8 @@ function AppMain() {
     // 見ている間の実態は pollRun が所有する）。
   }, [screen, currentProject?.id]);
 
-  // 仮送信フラグと同期カーソルは部屋の切替時のみリセット（同じ部屋の
-  // 開き直しで消すと、ダン未読の追い連絡の半透明表示が失われる）。
+  // 同期カーソルは部屋の切替時のみリセット。
   useEffect(() => {
-    setPendingFollowups({});
     lastSyncedMsgIdRef.current = null;
   }, [currentProject?.id]);
 
@@ -2922,9 +2910,6 @@ function AppMain() {
     const tappedAt = Date.now();
     if (tappedAt - lastSendAtRef.current < 700) return;
     lastSendAtRef.current = tappedAt;
-    // ストリームは部屋ごとに独立。この部屋のストリーム中の送信＝追い連絡
-    // （仮送信表示用）。他の部屋のストリームはこの送信を一切妨げない。
-    const isFollowup = !!currentProject && streamingProjects.includes(currentProject.id);
     // このフローが属する部屋と、開始時点のその部屋のキャンセル世代。
     // 以降で世代がずれていたらこの部屋の停止ボタン（または復帰ウォッチ
     // ドッグ）がリセット済みなので、このフローは送信状態に触らず静かに退場。
@@ -3009,7 +2994,10 @@ function AppMain() {
     // LINE風: 送信した瞬間に動画/画像入りのメッセージを画面に出し、アップロードは
     // その動画の上の円形リングが満ちていく形で進める。完了したらローカルURIを
     // サーバーURLへ差し替えて Dan に送信する。失敗時は楽観メッセージを取り消す。
-    const optimisticId = `local-${Date.now()}`;
+    // 送信の瞬間に発行する本物のメッセージID（サーバーはこれを行IDにする）。画面の仮の行も同じ id にするので、
+    // エコーでも部屋のフィードでも同じ行が置き換わるだけ（二重に出ない）。
+    const clientMessageId = uuidv4();
+    const optimisticId = clientMessageId;
     const localTags = pending.map((a) => mediaTag(a.kind, a.name, a.uri)).join('\n');
     const localContent = pending.length > 0 ? (content ? `${localTags}\n\n${content}` : localTags) : content;
     const optimistic: MessageResponse = {
@@ -3019,24 +3007,10 @@ function AppMain() {
       sender_type: 'human',
       content: localContent,
       created_at: new Date().toISOString(),
+      pending: true,
     };
     animateNextLayout();
     setMessages((current) => [...current, optimistic]);
-
-    // このチャットの run が動いている最中の送信＝追い連絡。サーバーの
-    // followup_queued を待つと半透明になるまで数秒空くので、送った瞬間から
-    // 仮送信表示にする（エコーが届いたら実IDへ引き継ぐ。万一 run がその間に
-    // 終わって普通の送信として扱われても、次ターン開始の検知で自然に解除）。
-    const expectFollowup =
-      project.id === currentProject?.id && (liveRunActive || isFollowup);
-    if (expectFollowup) {
-      const queuedMs = followupQueuedMsAtSend({
-        nowMs: Date.now(),
-        messages,
-        liveTurnGroups,
-      });
-      setPendingFollowups((current) => ({ ...current, [optimisticId]: queuedMs }));
-    }
 
     let finalContent = content;
     if (pending.length > 0) {
@@ -3069,12 +3043,6 @@ function AppMain() {
         setUploadProgress(null);
         releaseSendSlot();
         setMessages((current) => current.filter((m) => m.id !== optimisticId));
-        setPendingFollowups((current) => {
-          if (!(optimisticId in current)) return current;
-          const next = { ...current };
-          delete next[optimisticId];
-          return next;
-        });
         setDraft(content);
         setAttachments(pending);
         setTimelineRefs(sentTimelineRefs);
@@ -3097,9 +3065,6 @@ function AppMain() {
     // サーバーがエコーしてきた自分のメッセージ。followup_queued（追い連絡として
     // 受理）が来たときに、仮送信の基準時刻を取るのに使う。
     let echoedUserMsg: MessageResponse | null = null;
-    // 送信の瞬間に発行する本物のメッセージID（サーバーはこれを行IDにする）。
-    // 停止ボタンはこのIDで「送ったメッセージごと取消」ができる。
-    const clientMessageId = uuidv4();
 
     // 送信のSSEはBearerだけで認証される（受信系と違いCookieに救われない）ので、
     // 失効済み/失効間近のトークンはここで先に更新してから送る。
@@ -3160,31 +3125,10 @@ function AppMain() {
                 incoming,
               ),
             );
-            // 楽観メッセージに付けた仮送信フラグを実IDへ引き継ぐ。基準時刻は
-            // サーバーの created_at が正（端末の時計に依存しない）。
-            setPendingFollowups((current) => {
-              if (!(optimisticId in current)) return current;
-              const carried = current[optimisticId];
-              const next = { ...current };
-              delete next[optimisticId];
-              next[incoming.id] = new Date(incoming.created_at).getTime() || carried;
-              return next;
-            });
           }
-        } else if (event.type === 'followup_queued') {
-          // ダン作業中の追い連絡として受理された（このストリームはすぐ done で
-          // 終わり、回答は実行中のターンの続きとして届く）。読み込まれるまで
-          // このメッセージを「仮送信」表示にする。
+        } else if (event.type === 'followup_queued' || event.type === 'voice_call_routed') {
+          // 作業中の追い連絡として、または通話中のダンへ渡された。どちらも届いている（並びは届いた時刻のまま）。
           sent = true;
-          const messageId =
-            typeof (event as { message_id?: unknown }).message_id === 'string'
-              ? ((event as { message_id?: string }).message_id as string)
-              : null;
-          if (messageId && viewing) {
-            const queuedMs =
-              (echoedUserMsg ? new Date(echoedUserMsg.created_at).getTime() : 0) || Date.now();
-            setPendingFollowups((current) => ({ ...current, [messageId]: queuedMs }));
-          }
         } else if (event.type === 'ai_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
@@ -3307,65 +3251,58 @@ function AppMain() {
     }
   }
 
-  // 停止ボタン（Web版のキャンセル・ターミナルのEsc相当）。
-  // ① SSE接続を閉じる ② 画面から楽観行を消して入力欄へ復元 ③ サーバーへ
-  // 取消依頼（実行中ターンの中断＋送信メッセージのID削除）。返事が始まる前なら
-  // メッセージごと取り消され、作業中なら作業がその場で止まる。
+  // 停止ボタン（Web版のキャンセル・ターミナルのEsc相当）。定義: docs/current/chat-timeline-definition.md
+  // ① この部屋の送信ストリームを閉じる ② サーバーに「止めて、ダンがまだ読んでいない自分のメッセージは取り消して」と
+  // 頼む ③ サーバーが返した取り消し分だけを画面から消して入力欄に戻す。読んだかどうかを端末の時計や表示で推測しない
+  // （以前は推測で、作業中の元メッセージを消したり、一瞬で止めたのに残ったりした）。
   async function handleCancelTurn() {
     if (!token) return;
-    // 停止は「いま開いている部屋」のターンだけに効く。他の部屋で生きている
-    // ストリームには一切触れない（部屋Bの停止で部屋Aの作業を巻き添えにしない）。
+    // 停止は「いま開いている部屋」のターンだけに効く。他の部屋で生きているストリームには触れない。
     const pid = currentProject?.id;
     if (!pid) return;
-    // この部屋の生きているストリームを全部止める（追い連絡があると複数本ある）。
-    // 挿入順＝送信順なので、先頭がこのターンの最初の送信。
-    const actives = Array.from(activeStreamsRef.current.values()).filter(
-      (stream) => stream.projectId === pid,
-    );
-    const active = actives[0] ?? null;
-    // この部屋の世代を進める＝この部屋の各送信フローに「キャンセルが後始末を
-    // 引き取った。お前たちは送信状態に触るな」と伝える（reconcile もスキップ）。
+    const actives = Array.from(activeStreamsRef.current.values()).filter((stream) => stream.projectId === pid);
+    // この部屋の世代を進める＝この部屋の各送信フローに「キャンセルが後始末を引き取った」と伝える。
     cancelGenRef.current.set(pid, genOf(pid) + 1);
-    const roomId = active?.roomId || currentProject?.room_id;
-    // Web版と同じ判定: ダンの応答（返信 or 作業ステップ）がまだ無ければ
-    // 「送信の取り消し」＝メッセージごと消して入力欄へ復元。すでに動き出して
-    // いたら「作業の停止」＝メッセージと途中経過は残す。
-    const replied =
-      messages.some(
-        (m) => m.sender_type === 'ai' && new Date(m.created_at).getTime() > lastSendAtRef.current,
-      ) ||
-      (activity !== '' && activity !== 'Thinking...');
-    const beforeReply = !!active && !replied;
-    if (actives.length > 0) {
-      for (const stream of actives) {
-        activeStreamsRef.current.delete(stream.clientMessageId);
-        stream.close();
-      }
-      if (beforeReply && active) {
-        setMessages((current) =>
-          current.filter((m) => m.id !== active.optimisticId && m.id !== active.clientMessageId),
-        );
-        setDraft((d) => (d ? d : active.draft));
-      }
+    // 走っている run の取得結果は、この停止より前のものなので捨てる（止めた直後に作業中へ戻らない）。
+    pollRunSeqRef.current.applied = ++pollRunSeqRef.current.issued;
+    const roomId = actives[0]?.roomId || currentProject?.room_id;
+    // まだサーバーに届いていない（エコー前の）送信: そのIDと文面も渡す（保存の直後でも取り消され、答えも残らない）。
+    const unsent = actives.find((stream) => messages.some((m) => m.id === stream.clientMessageId && m.pending));
+    for (const stream of actives) {
+      activeStreamsRef.current.delete(stream.clientMessageId);
+      stream.close();
     }
     dropStreamingProject(pid);
     setCurrentRun(null);
+    setRunEvents([]);
     if (!roomId) return;
+    let withdrawn: Array<{ id: string; content: string | null }> = [];
     try {
-      await apiRequest(
+      const res = await apiRequest<{ withdrawn?: Array<{ id: string; content: string | null }> }>(
         '/chat/dan/cancel',
         {
           method: 'POST',
           body: JSON.stringify({
             session_id: roomId,
-            ...(beforeReply && active ? { cancelled_user_message_id: active.clientMessageId } : {}),
+            withdraw_unread: true,
+            ...(unsent ? { cancelled_user_message_id: unsent.clientMessageId, cancelled_user_message_text: unsent.draft } : {}),
           }),
         },
         token,
       );
+      withdrawn = res?.withdrawn ?? [];
     } catch {
-      // best-effort: サーバー側は run の掃除で自然回復する
+      // 届かなかった: 何も消さない（サーバーの状態は次の読み込みで反映される）
     }
+    if (withdrawn.length > 0) {
+      const ids = new Set(withdrawn.map((w) => w.id));
+      const local = new Map(actives.map((stream) => [stream.clientMessageId, stream.draft]));
+      const texts = withdrawn.map((w) => local.get(w.id) ?? w.content ?? '').filter((t) => t.trim());
+      setMessages((current) => current.filter((m) => !ids.has(m.id)));
+      if (texts.length > 0) setDraft((d) => [d, ...texts].filter((t) => t && t.trim()).join('\n'));
+    }
+    // 「停止しました」など、サーバーが置いたものを取り込む
+    void loadProjectMessages(token, pid);
   }
 
   // タイムライン一覧（その部屋の制作エディタのコンテンツ）を開く。
@@ -3942,6 +3879,14 @@ function AppMain() {
               // COLLAPSED even while live（「〇件の作業」タップで開ける — Webと
               // 同じ挙動）. Anchored chronologically — a follow-up message sent
               // mid-run stays BELOW the work that happened before it.
+              if (item.kind === 'typing') {
+                // 考え中・作業中は状態なので、常に一番下に3つの点だけ（定義 2）。
+                return (
+                  <View style={[styles.messageBubble, styles.aiBubble, styles.typingBubble]}>
+                    <TypingDots color="#7a8f86" />
+                  </View>
+                );
+              }
               if (item.kind === 'live') {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.wideBubble]}>
@@ -3950,16 +3895,6 @@ function AppMain() {
                     </View>
                     {item.blocks.length > 0 ? (
                       <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
-                    ) : null}
-                    {/* The "running now" spinner sits at the bottom next to the
-                        latest log line, so it's obvious which step is live. */}
-                    {item.showSpinner ? (
-                      <View style={styles.liveStatusRow}>
-                        <ActivityIndicator color="#7fd1c7" size="small" />
-                        <Text style={styles.liveStatusText} numberOfLines={1}>
-                          {activity || 'Thinking...'}
-                        </Text>
-                      </View>
                     ) : null}
                   </View>
                 );
@@ -3996,9 +3931,6 @@ function AppMain() {
                 );
               }
               const mine = msg.sender_type === 'human';
-              // ダンが読み込むまでの追い連絡は半透明＋「仮送信」で、読み込まれた
-              // 時点（次のターンが始まった時点）で通常表示に固定される。
-              const pendingFollowup = activePendingIds.has(msg.id);
               // Render the full timeline (text + "N件の作業") when the AI message
               // carries blocks with tool steps or multiple text segments — same
               // rule as the web chat. Otherwise just render the final content.
@@ -4017,7 +3949,6 @@ function AppMain() {
                     // 短いツール行だけの瞬間に吹き出しが異常に細く縮んで
                     // 縦長になるのを防ぐ（プロセスログ表示の幅バグ対策）。
                     useBlocks && !mine && styles.wideBubble,
-                    pendingFollowup && styles.pendingFollowupBubble,
                     highlightId === msg.id && styles.messageBubbleHighlight,
                   ]}
                 >
@@ -4036,9 +3967,6 @@ function AppMain() {
                       videoProgress={uploadProgress?.id === msg.id ? uploadProgress.value : undefined}
                     />
                   )}
-                  {pendingFollowup ? (
-                    <Text style={styles.pendingFollowupLabel}>仮送信・次の区切りで反映</Text>
-                  ) : null}
                 </View>
               );
             }}
@@ -5065,6 +4993,7 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 18,
   },
+  typingBubble: { paddingVertical: 10, paddingHorizontal: 14, alignSelf: 'flex-start' },
   liveStatusRow: {
     alignItems: 'center',
     flexDirection: 'row',

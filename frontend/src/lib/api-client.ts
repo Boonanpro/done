@@ -104,6 +104,9 @@ export interface MessageResponse {
   // ダン作業中の追い連絡で、まだ「読まれて反映」されていない仮送信状態（半透明表示）。
   // クライアント側のみで付与し、ダンの応答到着でクリアする（DB列ではない）。
   pendingFollowup?: boolean;
+  // 送った瞬間の、まだサーバーに届いていない自分のメッセージ（届けば同じ id の保存行に置き換わる）。
+  // 並びは一番下（端末の時計は使わない。docs/current/chat-timeline-definition.md）。
+  pending?: boolean;
 }
 
 export interface RoomOpenResponse {
@@ -1451,12 +1454,17 @@ export const api = {
      * セッションをキャンセル
      * バックエンドのツール実行を停止する
      */
-    cancelSession: (sessionId: string, options?: { cancelledUserMessageId?: string | null }) =>
-      request<{ success: boolean; session_id: string }>('/chat/dan/cancel', {
+    cancelSession: (
+      sessionId: string,
+      options?: { cancelledUserMessageId?: string | null; cancelledUserMessageText?: string | null; withdrawUnread?: boolean },
+    ) =>
+      request<{ success: boolean; session_id: string; withdrawn?: Array<{ id: string; content: string | null }> }>('/chat/dan/cancel', {
         method: 'POST',
         body: JSON.stringify({
           session_id: sessionId,
           cancelled_user_message_id: options?.cancelledUserMessageId || undefined,
+          cancelled_user_message_text: options?.cancelledUserMessageText || undefined,
+          withdraw_unread: options?.withdrawUnread || undefined,
         }),
       }),
 

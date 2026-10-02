@@ -1,13 +1,11 @@
 // チャット画面のタイムライン構築ロジック（純粋関数）。
 //
-// 保存済みメッセージと「実行中ターンのライブ表示」を、実際に起きた時刻で
-// 1本のタイムラインに混ぜる。ポイントは追い連絡（ダンの作業中に送った
-// メッセージ）の扱い:
-//   - 追い連絡より前に始まったターンの作業は、追い連絡の上に出る
-//   - 追い連絡はダンが読み込むまで一番下（最新位置）に「仮送信」で出る
-//   - 読み込まれた後の作業（新しいターン）は追い連絡の下に続く
-// バックエンドは各ターンの ai_message を「ターン開始時刻」の created_at で
-// 保存するので、この並びは完了後に保存される並びと常に一致する。
+// 定義: docs/current/chat-timeline-definition.md（2026-10-02）
+//   - 部屋の中のものは、サーバーが受け取った／起きた時刻の順に並ぶ。端末の時計は使わない。
+//     本人のメッセージ＝受け取った時刻、ダンの作業の一歩＝起きた時刻、ダンの返事＝書き終えた時刻。
+//   - まだサーバーに届いていない送信（pending）は、届くまで一番下（送った順）。
+//   - 「考え中・作業中」は出来事ではなく状態: 3つの点が常に一番下。ライブの作業ログは時刻の位置に出る。
+//   - 作業ログの途中に本人のメッセージが入ったら、ログはそこで分かれる（後の一歩がメッセージより上に出ない）。
 //
 // App.tsx から切り出してあるのは、UI 抜きでこの並び順をテストするため
 // （scripts/test_chat_timeline.ts）。
@@ -69,13 +67,16 @@ export type TimelineMessageLike = {
   created_at: string;
   content?: string | null;
   ai_context?: { turn_id?: string } | null;
+  // 送った瞬間の、まだサーバーに届いていない自分のメッセージ（届けば同じ id の保存行に置き換わる）。
+  pending?: boolean;
 };
 
 // Row model for the chat FlatList: saved messages and live turn bubbles are
 // merged into ONE chronologically sorted timeline.
 export type ChatListItem<M extends TimelineMessageLike = TimelineMessageLike> =
   | { kind: 'message'; key: string; sortMs: number; msg: M }
-  | { kind: 'live'; key: string; sortMs: number; blocks: TurnBlock[]; showSpinner: boolean };
+  | { kind: 'live'; key: string; sortMs: number; blocks: TurnBlock[] }
+  | { kind: 'typing'; key: string; sortMs: number };
 
 // すでに保存済み ai_message として届いたターン。ライブ側で二重表示しないために使う。
 export function collectSavedTurnIds(messages: TimelineMessageLike[]): Set<string> {
@@ -93,8 +94,11 @@ export function groupLiveTurns(args: {
   currentRun: AgentRun | null;
   runEvents: ExecutionEvent[];
   savedTurnIds: Set<string>;
+  // 本人のメッセージ（保存済み）の時刻。作業ログはこの時刻をまたいで1つの吹き出しにしない。
+  humanTimes?: number[];
 }): LiveTurnGroup[] {
   const { liveRunActive, currentRun, runEvents, savedTurnIds } = args;
+  const humanTimes = [...(args.humanTimes ?? [])].sort((a, b) => a - b);
   if (!liveRunActive || !currentRun) return [];
   const sorted = runEvents
     .filter(
@@ -117,11 +121,31 @@ export function groupLiveTurns(args: {
     else groups.set(key, [event]);
   }
   const runStartMs = new Date(currentRun.created_at).getTime() || 0;
-  return [...groups.entries()].map(([key, events]) => ({
-    key,
-    blocks: events.map(eventToStep),
-    anchorMs: new Date(events[0]?.created_at).getTime() || runStartMs,
-  }));
+  const out: LiveTurnGroup[] = [];
+  for (const [key, events] of groups.entries()) {
+    // 本人のメッセージをまたぐところで分ける: その後の一歩はメッセージより下に出る。
+    let segment: ExecutionEvent[] = [];
+    let part = 0;
+    const flush = () => {
+      if (segment.length === 0) return;
+      out.push({
+        key: part === 0 ? key : `${key}#${part}`,
+        blocks: segment.map(eventToStep),
+        anchorMs: new Date(segment[0].created_at).getTime() || runStartMs,
+      });
+      part += 1;
+      segment = [];
+    };
+    let prevMs = -Infinity;
+    for (const event of events) {
+      const ms = new Date(event.created_at).getTime() || prevMs;
+      if (segment.length > 0 && humanTimes.some((h) => h > prevMs && h <= ms)) flush();
+      segment.push(event);
+      prevMs = ms;
+    }
+    flush();
+  }
+  return out;
 }
 
 // pollRun のレスポンスを runEvents へ反映するときのマージ。レスポンスは並行・
@@ -147,50 +171,6 @@ export function mergeRunEvents(
   return changed ? next : prev;
 }
 
-// 追い連絡を送った「瞬間」に仮送信表示を出すための基準時刻。サーバーの
-// followup_queued を待つと数秒遅れるので、送信時にローカルで先に立てる。
-// computeUnreadFollowupIds の消化判定（この時刻より後に始まったターンが
-// あるか）が既存のターン/保存済みAIメッセージで即座に成立してしまわない
-// よう、いま画面が知っている最新の時刻より必ず後ろに置く（端末とサーバーの
-// 時計ズレ対策）。
-export function followupQueuedMsAtSend(args: {
-  nowMs: number;
-  messages: TimelineMessageLike[];
-  liveTurnGroups: LiveTurnGroup[];
-}): number {
-  const { nowMs, messages, liveTurnGroups } = args;
-  let ms = nowMs;
-  for (const m of messages) {
-    if (m.sender_type !== 'ai') continue;
-    const t = new Date(m.created_at).getTime() || 0;
-    if (t >= ms) ms = t + 1;
-  }
-  for (const g of liveTurnGroups) {
-    if (g.anchorMs >= ms) ms = g.anchorMs + 1;
-  }
-  return ms;
-}
-
-// まだダンに読み込まれていない追い連絡の id。読み込まれた＝そのメッセージより
-// 後に AI のターンが始まった（ライブのイベント or 保存済み ai_message。どちらも
-// created_at がターン開始時刻）こと。
-export function computeUnreadFollowupIds(args: {
-  pendingFollowups: Record<string, number>;
-  messages: TimelineMessageLike[];
-  liveTurnGroups: LiveTurnGroup[];
-}): Set<string> {
-  const { pendingFollowups, messages, liveTurnGroups } = args;
-  const ids = new Set<string>();
-  for (const [id, queuedMs] of Object.entries(pendingFollowups)) {
-    const consumed =
-      messages.some(
-        (m) => m.sender_type === 'ai' && new Date(m.created_at).getTime() > queuedMs,
-      ) || liveTurnGroups.some((g) => g.anchorMs > queuedMs);
-    if (!consumed) ids.add(id);
-  }
-  return ids;
-}
-
 // チャットの行リスト（inverted FlatList 用に降順 = 新しいものが index 0）。
 export function buildChatListItems<M extends TimelineMessageLike>(args: {
   messages: M[];
@@ -203,34 +183,26 @@ export function buildChatListItems<M extends TimelineMessageLike>(args: {
   const messages = collapseCalls(
     [...args.messages].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()),
   ).map((m) => tidyRelayMessage(m, args.projectId));
+  // 並びはサーバーの時刻だけ。届いていない送信は時刻を持たないので一番下（送った順）、
+  // 3つの点はさらにその下。同時刻なら 本人 → 作業ログ → ダン・その他 の順。
+  const BOTTOM = Number.MAX_SAFE_INTEGER;
+  let pendingIndex = 0;
   const items: ChatListItem<M>[] = messages.map((m) => ({
     kind: 'message',
     key: m.id,
-    // 同時刻のときは 人間 → AI の順（AIメッセージのターン開始は必ず人間の
-    // メッセージより後なので、msだけ同じになった場合の安定化）。
-    sortMs: (new Date(m.created_at).getTime() || 0) * 10 + (m.sender_type === 'human' ? 1 : 2),
+    sortMs: m.pending
+      ? BOTTOM - 1000 + pendingIndex++
+      : (new Date(m.created_at).getTime() || 0) * 10 + (m.sender_type === 'human' ? 1 : 3),
     msg: m,
   }));
-  const liveItems: ChatListItem<M>[] = liveTurnGroups.map((g, i) => ({
+  const liveItems: ChatListItem<M>[] = liveTurnGroups.map((g) => ({
     kind: 'live',
     key: `__live__:${g.key}`,
     sortMs: g.anchorMs * 10 + 2,
     blocks: g.blocks,
-    // スピナーは「いま動いている」最新ターンの吹き出しにだけ付ける。
-    showSpinner: i === liveTurnGroups.length - 1,
   }));
-  // ライブ表示すべきなのにイベントがまだ無い（送信直後、またはターンの境界で
-  // 前ターン保存→次ターン開始の谷間）→ 最下部にスピナーだけの吹き出しを出す。
-  if (showLiveTurn && liveItems.length === 0) {
-    liveItems.push({
-      kind: 'live',
-      key: '__live__',
-      sortMs: Number.MAX_SAFE_INTEGER,
-      blocks: [],
-      showSpinner: true,
-    });
-  }
-  return [...items, ...liveItems].sort((a, b) => b.sortMs - a.sortMs);
+  const typing: ChatListItem<M>[] = showLiveTurn ? [{ kind: 'typing', key: '__typing__', sortMs: BOTTOM }] : [];
+  return [...items, ...liveItems, ...typing].sort((a, b) => b.sortMs - a.sortMs);
 }
 
 // 音声会話の断片を1つの吹き出しにまとめる（表示だけ。保存行はそのまま）。

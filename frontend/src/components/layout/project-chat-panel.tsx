@@ -978,6 +978,7 @@ function ChatInput({
       sender_type: 'human',
       content: optimisticContent,
       created_at: new Date().toISOString(),
+      pending: true,
       ...(replyToMsg ? {
         reply_to_id: replyToMsg.id,
         reply_to_message: {
@@ -1211,7 +1212,11 @@ function ChatInput({
     const mediaParts = [imagePrefix, filePrefix].filter(Boolean).join('\n');
     const optimisticContent = mediaParts ? (content ? `${mediaParts}\n\n${content}` : mediaParts) : content;
 
-    const tempId = `temp-followup-${Date.now()}`;
+    // 本物のID（サーバーはこれを行IDにする）: エコーでもフィードでも同じ行が置き換わるだけ。キャンセルもこのIDで分かる。
+    const tempId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const queryKey = ['project-messages', roomId];
     const optimistic: MessageResponse = {
       id: tempId,
@@ -1221,7 +1226,7 @@ function ChatInput({
       sender_type: 'human',
       content: optimisticContent,
       created_at: new Date().toISOString(),
-      pendingFollowup: true,
+      pending: true,
       ...(replyToMsg ? {
         reply_to_id: replyToMsg.id,
         reply_to_message: {
@@ -1240,15 +1245,17 @@ function ChatInput({
     const controller = new AbortController();
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) },
+        { message: content, session_id: roomId, client_message_id: tempId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) },
         {
           onUserMessage: (msg) => {
-            // temp をサーバ版で置換しつつ、読まれるまでは仮送信フラグを保持する。
-            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-              messages: (old?.messages || []).map((m: MessageResponse) => (m.id === tempId ? { ...msg, pendingFollowup: true } : m)),
-            }));
+            // 届いた: サーバーの行（届いた時刻）に置き換える。フィードが先に入れていたら重ねない。
+            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => {
+              const rows = old?.messages || [];
+              return { messages: rows.some((m) => m.id === msg.id && !m.pending)
+                ? rows.filter((m) => m.id !== tempId || m.id === msg.id).map((m) => (m.id === msg.id ? { ...msg } : m))
+                : rows.map((m: MessageResponse) => (m.id === tempId ? { ...msg } : m)) };
+            });
           },
-          // 受領確認。ダンの応答が届くまで「仮送信」（半透明）のまま。
           onFollowupQueued: () => {},
           // 本リクエストは即終了する。メインストリームのスピナー等には触れない。
           onComplete: () => {},
@@ -1327,24 +1334,18 @@ function ChatInput({
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
   }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, projectId, replyTo, onClearReply, timelineRefs, pendingComments, clearPendingComments, previewArtifactForComments]);
 
+  // 停止: 定義は docs/current/chat-timeline-definition.md。止めて、ダンがまだ読んでいない自分のメッセージは
+  // サーバーが取り消して返す。画面はその答えどおりに消して入力欄へ戻す（推測では消さない）。
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
-    const restoredMessage = !pending && activeOriginMessageId
-      ? queryClient.getQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId])?.messages
-        .find((m) => m.id === activeOriginMessageId && m.sender_type === 'human')
-      : null;
-    const wasBeforeAI = !aiRespondedRef.current && (!!pending || !!restoredMessage);
-    const userMessageIdToRemove = serverMessageIdRef.current || optimisticMessageIdRef.current || activeOriginMessageId || null;
+    // まだサーバーに届いていない（エコー前の）送信だけは、IDと文面をこちらから渡す（保存直後でも確実に取り消せる）。
+    const unsentId = pending && !serverMessageIdRef.current ? optimisticMessageIdRef.current : null;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
-
-    // 自分の操作は自分が真実（ターミナルのEscと同じ）: サーバーへの取消依頼を
-    // 待たず、押した瞬間に thinking/ライブ表示を消す。従来はサーバー往復後に
-    // 消灯し、さらに run 状態キャッシュが次のポーリング(2s)まで running のままで
-    // 「キャンセルしたのにthinkingが数秒流れる」見た目になっていた。
+    // 押した瞬間に考え中を消す（自分の操作は自分が真実）。
     syncActiveStatus(false);
     setWarmupMode(projectId, null);
     queryClient.setQueryData(
@@ -1352,32 +1353,34 @@ function ChatInput({
       (old: { state?: string } | null | undefined) =>
         old && old.state === 'running' ? { ...old, state: 'paused' } : old
     );
-
-    // AI未応答キャンセル → テキストを入力欄に復元 + 次回送信でUPDATEするIDを記録
-    if (wasBeforeAI) {
-      setMessage(pending?.text ?? restoredMessage?.content ?? '');
-      setAttachedFiles(pending?.files ?? []);
-      replaceMessageIdRef.current = null;
-      if (userMessageIdToRemove) {
-        queryClient.setQueryData(
-          ['project-messages', roomId],
-          (old: { messages: MessageResponse[] } | undefined) =>
-            old
-              ? { messages: old.messages.filter((m) => m.id !== userMessageIdToRemove) }
-              : old
-        );
-      }
-    }
     pendingMessageRef.current = null;
     serverMessageIdRef.current = null;
     optimisticMessageIdRef.current = null;
+    replaceMessageIdRef.current = null;
 
+    let withdrawn: Array<{ id: string; content: string | null }> = [];
     try {
-      await api.sm.cancelSession(roomId, {
-        cancelledUserMessageId: wasBeforeAI ? userMessageIdToRemove : null,
+      const res = await api.sm.cancelSession(roomId, {
+        withdrawUnread: true,
+        cancelledUserMessageId: unsentId,
+        cancelledUserMessageText: unsentId ? pending?.text ?? null : null,
       });
+      withdrawn = res?.withdrawn ?? [];
     } catch (error) {
       console.error('Failed to cancel session:', error);
+    }
+    if (withdrawn.length > 0) {
+      const ids = new Set(withdrawn.map((w) => w.id));
+      const texts = withdrawn
+        .map((w) => (w.id === unsentId ? pending?.text ?? w.content : w.content) ?? '')
+        .filter((t) => t.trim());
+      queryClient.setQueryData(
+        ['project-messages', roomId],
+        (old: { messages: MessageResponse[] } | undefined) =>
+          old ? { messages: old.messages.filter((m) => !ids.has(m.id)) } : old
+      );
+      if (texts.length > 0) setMessage((m) => [m, ...texts].filter((t) => t && t.trim()).join('\n'));
+      if (unsentId && ids.has(unsentId)) setAttachedFiles(pending?.files ?? []);
     }
 
     syncActiveStatus(false);
@@ -1387,10 +1390,7 @@ function ChatInput({
     invalidateProjectQueries();
     // 取消完了 → サイドバーの「ダンが作業中…」も次ポーリングを待たず消灯
     queryClient.invalidateQueries({ queryKey: ['projects'] });
-    if (!wasBeforeAI) {
-      toast.info('処理を中断しました');
-    }
-  }, [activeOriginMessageId, invalidateProjectQueries, onSseStateChange, projectId, queryClient, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
+  }, [invalidateProjectQueries, onSseStateChange, projectId, queryClient, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -1933,6 +1933,7 @@ function mergeFreshMessages(
     : Infinity;
   const localOnly = old.messages.filter((m) => {
     if (freshIds.has(m.id)) return false;
+    if (m.pending) return true;   // not on the server yet: kept until it is (its device time is not compared)
     const t = new Date(m.created_at).getTime();
     return t >= cutoff || t < oldestFresh;
   });
@@ -2315,6 +2316,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
     const runIsLiveNow = !!currentRun && isActiveExecution && currentRun.state === 'running';
     const liveBlockSortKey = runIsLiveNow && runStart ? new Date(runStart).getTime() : liveAnchorTime;
 
+    let pendingSeq = 0;
     for (const msg of chronologicalMessages) {
       const content = msg.content || '';
       if (
@@ -2329,7 +2331,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
       // 永久に見えなくなった（2026-09-11）。同じターンの重複は savedTurnIds で除く。
       timedItems.push({
         item: { kind: 'message', msg },
-        sortKey: new Date(msg.created_at).getTime(),
+        // まだ届いていない送信は時刻を持たないので一番下（送った順）。届いた行はサーバーの時刻。
+        sortKey: msg.pending ? Number.MAX_SAFE_INTEGER - 1000 + (pendingSeq++) : new Date(msg.created_at).getTime(),
         subKey: 1,
       });
     }

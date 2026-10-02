@@ -199,13 +199,16 @@ class ProjectService:
         try:
             rows = (
                 self.supabase.table("agent_runs")
-                .select("project_id,state,updated_at,created_at")
+                .select("project_id,state,updated_at,created_at,metadata")
                 .in_("project_id", ids)
                 .eq("state", AgentRunState.RUNNING.value)
                 .is_("superseded_by_run_id", "null")
                 .execute()
             )
-            running = {row["project_id"] for row in (rows.data or [])}   # dead runs are closed by run_reconciler
+            from app.services.run_service import background
+            # dead runs are closed by run_reconciler; work in the background is not the chat working
+            # (docs/current/chat-timeline-definition.md)
+            running = {row["project_id"] for row in (rows.data or []) if not background(row)}
         except Exception as exc:
             logger.debug("Active-run enrichment skipped: %s", exc)
             running = set()
