@@ -1,6 +1,6 @@
 'use client';
 
-import { callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
+import { callDuration, callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -18,6 +18,7 @@ import {
   MessageSquarePlus,
   Mic,
   Paperclip,
+  Phone,
   Plus,
   Reply,
   Search,
@@ -440,10 +441,15 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
   const callBy = callSide(msg);
   if (callBy) {
     return (
-      <div className={`flex px-2 ${callBy === 'owner' ? 'justify-end' : 'justify-start'}`}>
-        <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${callBy === 'owner' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground'}`}>
-          {msg.content}
+      // LINE の通話履歴と同じ形: 受話器の丸＋「通話時間 3:05」の四角、時刻は外側に。
+      <div className={`flex items-end gap-1.5 px-2 ${callBy === 'owner' ? 'flex-row-reverse' : ''}`}>
+        <div className={`flex items-center gap-2.5 rounded-lg py-2 pl-2.5 pr-4 ${callBy === 'owner' ? 'bg-primary text-primary-foreground' : 'border border-border bg-muted text-foreground'}`}>
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-700 text-white">
+            <Phone className="h-4 w-4" />
+          </span>
+          <span className="text-sm font-semibold">{callDuration(msg.content || '') ? `通話時間 ${callDuration(msg.content || '')}` : '通話'}</span>
         </div>
+        {timeLabel && <span className="mb-0.5 text-[10px] leading-none text-muted-foreground">{timeLabel}</span>}
       </div>
     );
   }

@@ -87,6 +87,16 @@ export function callSide(m: VoiceLike): 'owner' | 'dan' | null {
   return content.startsWith(`${CALL} ダンから`) ? 'dan' : 'owner';
 }
 
+/** 通話の記録の長さを LINE と同じ「分:秒」で（例 3:05）。長さが書かれていない昔の行は開始〜終了の時刻から分だけ出す。 */
+export function callDuration(content: string): string {
+  const m = content.match(/（(?:(\d+)分)?(\d+)秒）/);
+  if (m) return `${Number(m[1] || 0)}:${String(Number(m[2])).padStart(2, '0')}`;
+  const r = content.match(/(\d{1,2}):(\d{2})〜(\d{1,2}):(\d{2})/);
+  if (!r) return '';
+  const minutes = (Number(r[3]) * 60 + Number(r[4]) - Number(r[1]) * 60 - Number(r[2]) + 1440) % 1440;
+  return `${minutes}:00`;
+}
+
 function callLengthMs(content: string): number {
   const m = content.match(/（(?:(\d+)分)?(\d+)秒）/);
   return m ? (Number(m[1] || 0) * 60 + Number(m[2])) * 1000 : 0;

@@ -6,6 +6,7 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
+import { ChatMarkdown, splitLinks } from './chat-markdown';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
@@ -44,6 +45,7 @@ import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
 import {
   buildChatListItems,
+  callDuration,
   callSide,
   collectSavedTurnIds,
   groupLiveTurns,
@@ -889,24 +891,29 @@ function RichMessageContent({
       ))}
 
       {parsed.parts.length > 0 ? (
+        // 段落・見出し・表に分けて描く（表は横にずらして読める表に）。文中の太字・リンクはこれまでどおり。
         // 直接なぞり選択。初回長押しで複数メッセージへ選択が飛び散る暴発は
         // リスト側の removeClippedSubviews を無効化して抑えている（選択状態が
         // クリップ済み行の TextView に残って再利用されるのが原因）。
-        <Text selectable style={[styles.messageText, mine && styles.myMessageText]}>
-          {parsed.parts.map((part, index) =>
-            part.kind === 'link' ? (
-              <Text
-                key={`${part.url}-${index}`}
-                onPress={() => onOpenUrl(part.url)}
-                style={[styles.messageLink, mine && styles.myMessageLink]}
-              >
-                {part.label}
-              </Text>
-            ) : (
-              <Text key={`text-${index}`}>{renderInlineMarkdown(part.value, `md-${index}`)}</Text>
-            ),
-          )}
-        </Text>
+        <ChatMarkdown
+          text={parsed.parts.map((part) => (part.kind === 'link' ? `[${part.label}](${part.url})` : part.value)).join('')}
+          textStyle={[styles.messageText, mine && styles.myMessageText]}
+          renderText={(text, key) =>
+            splitLinks(text).map((part, index) =>
+              part.kind === 'link' ? (
+                <Text
+                  key={`${key}-${index}`}
+                  onPress={() => onOpenUrl(part.url)}
+                  style={[styles.messageLink, mine && styles.myMessageLink]}
+                >
+                  {part.label}
+                </Text>
+              ) : (
+                <Text key={`${key}-${index}`}>{renderInlineMarkdown(part.value, `${key}-md-${index}`)}</Text>
+              ),
+            )
+          }
+        />
       ) : null}
     </View>
   );
@@ -4077,9 +4084,19 @@ function AppMain() {
               const callBy = callSide(msg);
               if (callBy) {
                 const ownerSide = callBy === 'owner';
+                const length = callDuration(msg.content || '');
+                // LINE の通話履歴と同じ形: 受話器の丸＋「通話時間 3:05」の四角、時刻は外側に。
                 return (
-                  <View style={[styles.messageBubble, ownerSide ? styles.myBubble : styles.aiBubble, { paddingVertical: 8 }]}>
-                    <Text style={{ fontSize: 14, lineHeight: 20, color: ownerSide ? '#1f1d19' : '#f4f0e8' }}>{msg.content}</Text>
+                  <View style={[styles.callRow, { flexDirection: ownerSide ? 'row-reverse' : 'row' }]}>
+                    <View style={[styles.messageBubble, ownerSide ? styles.myBubble : styles.aiBubble, styles.callCard]}>
+                      <View style={styles.callIcon}>
+                        <Ionicons name="call" size={18} color="#ffffff" />
+                      </View>
+                      <Text style={[styles.messageText, ownerSide && styles.myMessageText, styles.callLabel]}>
+                        {length ? `通話時間 ${length}` : '通話'}
+                      </Text>
+                    </View>
+                    <Text style={[styles.messageTime, styles.callTime]}>{formatTime(msg.created_at)}</Text>
                   </View>
                 );
               }
@@ -5274,6 +5291,11 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
+  callRow: { alignItems: 'flex-end', gap: 6 },
+  callCard: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, paddingRight: 18, maxWidth: undefined, alignSelf: 'auto' },
+  callIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#245e49', alignItems: 'center', justifyContent: 'center' },
+  callLabel: { fontWeight: '700' },
+  callTime: { marginBottom: 2 },
   messageContentWrap: {
     gap: 8,
   },
