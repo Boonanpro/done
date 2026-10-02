@@ -21,8 +21,9 @@ MAX_TURNS = 120
 # The tools a job needs. The MCP list carries 33 tools (56k characters of schema) for the CLI; sending all of them on every
 # call made a step 6-8s (2026-09-23 15:11). DAN_API_JOB_TOOLS=all sends the whole list.
 JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'browser,browser_script,flow,desktop,lookup,get_credentials,save_credentials,get_personal_info,'
-                                   'get_location,read_url,bash,read_file,write_file,wait_until,watch,job_confirmation,job_progress,command_center').split(',')
+                                   'get_location,web_search,read_url,bash,read_file,write_file,wait_until,watch,job_confirmation,job_progress,command_center').split(',')
 OUTPUT_CHARS = 12000
+PARALLEL_READS = {'web_search', 'read_url', 'lookup'}
 CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。確定操作はまだ実行していません。画面を読み取り、承認済みの具体的な操作だけを再開してください。'
                 '条件変更があれば以前の承認は無効です。\n')
 
@@ -183,6 +184,14 @@ class Worker:
                 self.state.publish(self.job_id, 'progress', text[:3000])
             results = []
             extras = []
+            # Calls that only read (searches, pages, Dan's records) run together when a step asks for several: three
+            # searches took three times one search, one after another.
+            name_of = lambda c: str(c['args'].get('name') or '') if c['name'] == 'dan_tool' else c['name']
+            args_of = lambda c: (c['args'].get('arguments') or {}) if c['name'] == 'dan_tool' else c['args']
+            ahead = {}
+            s_now = self.read()
+            if len(calls) > 1 and all(name_of(c) in PARALLEL_READS for c in calls) and s_now['revision'] <= s_now.get('applied_revision', 0):
+                ahead = {c['id']: asyncio.ensure_future(call_tool(name_of(c), args_of(c))) for c in calls}
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
                 # A new instruction from the owner is read before any further action. Tools wait at their gate until
@@ -197,7 +206,9 @@ class Worker:
                 used_browser = used_browser or call['name'] == 'browser' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'browser')
                 used_desktop = used_desktop or call['name'] == 'desktop' or (call['name'] == 'dan_tool' and call['args'].get('name') == 'desktop')
                 try:
-                    if call['name'] == 'dan_tool_help':
+                    if call['id'] in ahead:
+                        contents = await ahead[call['id']]
+                    elif call['name'] == 'dan_tool_help':
                         contents = [type('T', (), {'type': 'text', 'text': dan_tools.help_text(mcp, str(call['args'].get('name') or ''))})()]
                     elif call['name'] == 'dan_tool':
                         contents = await call_tool(str(call['args'].get('name') or ''), call['args'].get('arguments') or {})
