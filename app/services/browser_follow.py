@@ -233,6 +233,9 @@ async def run(page, params):
     elapsed = round((time.perf_counter()-started)*1000, 2)
     record_timing('workflow', 'browser_follow', elapsed, 'handoff' if reason else 'completed', {'tool_calls': len(pressed), 'reason': reason or ''})
     final = {}
+    if params.get('quiet_if_unmoved') and not pressed:
+        return {'success': False, 'follow': {'pressed': [], 'reason': reason, 'jev_calls': jev_calls, 'elapsed_ms': elapsed},
+                'content': [{'type': 'text', 'text': json.dumps({'pressed': [], 'reason': reason}, ensure_ascii=False)}]}
     if not CancellationRegistry.check_cancelled():
         token = _browser_observation.set('full')
         try:

@@ -23,7 +23,7 @@ MAX_TURNS = 120
 # 0.2-0.4 s a step over 16 (6-8 s on 2026-09-23 has not held since the prompt cache). DAN_API_JOB_TOOLS=a,b,c narrows it.
 JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'all').split(',')
 OUTPUT_CHARS = 12000
-PARALLEL_READS = {'web_search', 'read_url', 'lookup'}
+PARALLEL_READS = {'web_search', 'read_url', 'lookup', 'places'}
 CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。確定操作はまだ実行していません。画面を読み取り、承認済みの具体的な操作だけを再開してください。'
                 '条件変更があれば以前の承認は無効です。\n')
 
@@ -107,6 +107,31 @@ class Worker:
 
     def read(self):
         return self.state.read(self.job_id) or {}
+
+    async def advance(self, call, result, intent, call_tool):
+        """The job model pressed or opened something and said what it is doing: Jev keeps pressing toward the job's goal
+        (the follow walk: a strict bar, never input, login, payment or sending; any doubt stops it) before the model is
+        asked again. Each press saves a model round trip (2-4 s for ~0.5 s). What Jev pressed and the screen it reached
+        replace the press's result, so the model continues from where the page really is."""
+        if os.environ.get('DAN_JOB_JEV_ADVANCE', '1') == '0':
+            return
+        args = (call['args'].get('arguments') or {}) if call['name'] == 'dan_tool' else call['args']
+        name = str(call['args'].get('name') or '') if call['name'] == 'dan_tool' else call['name']
+        if name != 'browser' or args.get('action') not in ('click', 'open_target', 'open') or not result['output'] or \
+                result['output'].startswith('操作は実行していません') or '"success": false' in result['output'][:400]:
+            return
+        task = self.read().get('task', '').replace('今回のユーザー発言（原文）:', '').split('参考の直前会話')[0].strip()
+        goal = ('作業: ' + task[:200] + (' / 今していること: ' + intent.strip()[:150] if intent.strip() else ''))[:300]
+        try:
+            contents = await call_tool('browser', {'action': 'follow', 'goal': goal, 'max_steps': 4, 'observation': 'dom', 'quiet_if_unmoved': True})
+        except Exception:
+            return
+        output, images = function_output(contents)
+        if not output.strip() or '"pressed": []' in output or '"pressed":[]' in output:
+            return   # Jev pressed nothing: the model's own result stands (no second copy of the page)
+        self.state.publish(self.job_id, 'tool', 'browser:follow(jev)')
+        result['output'] = (result['output'][:1500] + '\n\n（続けて Jev が目的に向けて押した。下が今の画面）\n' + output)[:OUTPUT_CHARS]
+        result['images'] = images
 
     def new_inputs(self):
         """Steering that arrived (steer_job update): applied here by feeding it to the model, and marked applied."""
@@ -220,6 +245,8 @@ class Worker:
                 trace_step(call, output, images, time.monotonic() - called)
                 stuck.call(call['name'], call['args'], output)
                 results.append({'id': call['id'], 'output': output, 'images': images})
+            if results and not extras and len(calls) == 1:
+                await self.advance(calls[0], results[0], text or '', call_tool)
             if results: provider.tool_results(results)
             extras = extras + self.new_inputs()
             for extra in extras:

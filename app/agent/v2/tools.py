@@ -381,6 +381,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.user_prefs import TOOL as PREFERENCE_TOOL
     from app.services.feeds import TOOL as FEED_TOOL
     from app.services.web_search import TOOL as WEB_SEARCH_TOOL
+    from app.services.places import TOOL as PLACES_TOOL
     return [
         LOOKUP_TOOL,
         LOCATION_TOOL,
@@ -389,6 +390,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         PREFERENCE_TOOL,
         FEED_TOOL,
         WEB_SEARCH_TOOL,
+        PLACES_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
         COMMAND_CENTER_TOOL,
@@ -505,6 +507,8 @@ BROWSER_TOOL['input_schema']['properties'].update({
     'after': {'type': 'string', 'description': 'read: この文字列が現れる位置から読む'},
     'offset': {'type': 'integer', 'minimum': 0, 'description': 'read: 本文の何文字目から読むか（続きを読む時）'},
     'max_chars': {'type': 'integer', 'minimum': 100, 'maximum': 12000, 'description': 'read: 読む文字数（既定4000）'},
+    'question': {'type': 'string', 'description': 'read: 知りたいこと（例: 「配送予定日」「〇〇の料金」）。ページを区切って関係する箇所だけを返す（速く、短い）。'
+                 'ページから情報を取り出す時は、evaluate でプログラムを書く前にまずこれ'},
     'tables': {'type': 'boolean', 'description': 'read: 範囲内の表を行ごとに「セル | セル」で返す'},
     'path': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {'type': 'string', 'maxLength': 120},
              'description': 'follow: 続けて押したい物の表示文字を順に並べる（例: ["口座情報", "入出金明細"]）。多少の表記ゆれは吸収される'},
@@ -1300,6 +1304,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_feed", "browser")
     if tool_name == "web_search":
         return ("_web_search", "read")
+    if tool_name == "places":
+        return ("_places", "read")
 
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
@@ -1388,7 +1394,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places"}:
             return
 
         error_type = result.get("error_type")
@@ -2523,6 +2529,10 @@ async def execute_tool(
     if skill_name == "_web_search":
         from app.services.web_search import tool as web_search_tool
         return await web_search_tool(params)
+
+    if skill_name == "_places":
+        from app.services.places import tool as places_tool
+        return await places_tool(params)
 
     if skill_name == "_wait_until":
         from app.services.dan_lookup import wait_until
