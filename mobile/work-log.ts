@@ -26,7 +26,7 @@ const TOOL_KIND: Array<[RegExp, StepKind]> = [
   [/^(Read|Grep|Glob)$|WebFetch|read_url|lookup|check_skill|get_location|get_personal_info|get_credentials/, 'read'],
   [/^(Edit|Write|NotebookEdit)$|write_file|edit_file/, 'edit'],
   [/desktop|phone/, 'desktop'],
-  [/compose_message|collab_thread|email/, 'message'],
+  [/compose_message|collab_thread|email|confirm_card/, 'message'],
   [/attach_image|image|media/, 'image'],
   [/watch|save_|remember|preference|feed|schedule/, 'memory'],
 ];
@@ -36,7 +36,7 @@ const FRIENDLY: Record<string, string> = {
   command_center: '別の部屋の作業', get_credentials: 'ログイン情報を取得', save_credentials: 'ログイン情報を保存',
   wait_until: '準備ができるのを待つ', watch: '見張りを設定', wait_for: '表示を待つ', flow: '記憶した手順', desktop: 'PC操作',
   save_totp_secret: '認証アプリの鍵を保存', check_skill: '手順書を確認', WebSearch: 'ウェブ検索', web_search: 'ウェブ検索',
-  ToolSearch: '道具を探す', places: '近くの施設を検索', phone: 'スマホ操作', PowerShell: 'コマンド実行',
+  ToolSearch: '道具を探す', places: '近くの施設を検索', phone: 'スマホ操作', confirm_card: '確認カード', PowerShell: 'コマンド実行',
 };
 
 function shortName(name: string) {

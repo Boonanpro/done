@@ -383,6 +383,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.web_search import TOOL as WEB_SEARCH_TOOL
     from app.services.places import TOOL as PLACES_TOOL
     from app.services.phone_control import TOOL as PHONE_TOOL
+    from app.services.confirm_cards import TOOL as CONFIRM_CARD_TOOL
     return [
         LOOKUP_TOOL,
         LOCATION_TOOL,
@@ -393,6 +394,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WEB_SEARCH_TOOL,
         PLACES_TOOL,
         PHONE_TOOL,
+        CONFIRM_CARD_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
         COMMAND_CENTER_TOOL,
@@ -1310,6 +1312,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_places", "read")
     if tool_name == "phone":
         return ("_phone", "desktop")
+    if tool_name == "confirm_card":
+        return ("_confirm_card", "read")
 
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
@@ -1398,7 +1402,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_phone"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_phone", "_confirm_card"}:
             return
 
         error_type = result.get("error_type")
@@ -2541,6 +2545,10 @@ async def execute_tool(
     if skill_name == "_phone":
         from app.services.phone_control import tool as phone_tool
         return await phone_tool(params)
+
+    if skill_name == "_confirm_card":
+        from app.services.confirm_cards import tool as confirm_card_tool
+        return await confirm_card_tool(params)
 
     if skill_name == "_wait_until":
         from app.services.dan_lookup import wait_until

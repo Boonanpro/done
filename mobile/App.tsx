@@ -7,8 +7,10 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { ChatMarkdown, splitLinks } from './chat-markdown';
-import { SEND_CARD, SendCard } from './send-card';
+import { CONFIRM_CARD, ConfirmCard, SEND_CARD, SendCard } from './send-card';
 import { describe as describeStep, elapsedLabel, KIND as STEP_KIND, summarize as summarizeSteps } from './work-log';
+import { Breathe, StepIn } from './motion-bits';
+import { ShimmerLine } from './shimmer-line';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
@@ -975,9 +977,10 @@ function TurnToolGroup({ items, defaultOpen = false, live = false, startedMs }: 
         {live && startedMs ? <Text style={styles.toolGroupTime}>{elapsedLabel(now - startedMs)}</Text> : null}
       </Pressable>
       {live && current && !open ? (
-        <Text style={styles.toolGroupNow} numberOfLines={1}>
-          {current.title}{current.detail ? ` — ${current.detail}` : ''}
-        </Text>
+        // 今している1手: 文字の上を淡い光が流れる（通話画面の一行と同じ動き）
+        <View style={styles.toolGroupNow}>
+          <ShimmerLine text={`${current.title}${current.detail ? ` — ${current.detail}` : ''}`} color="#59685f" fontSize={12} height={18} />
+        </View>
       ) : null}
       {open ? (
         <View style={styles.toolGroupBody}>
@@ -986,13 +989,16 @@ function TurnToolGroup({ items, defaultOpen = false, live = false, startedMs }: 
             const isNow = live && i === steps.length - 1;
             const isOpen = expanded === i;
             return (
-              <Pressable key={i} onPress={() => (st.detail || st.title.length > 60) && setExpanded(isOpen ? null : i)} style={styles.toolRow}>
-                <Ionicons
-                  name={STEP_KIND[st.kind].icon as any}
-                  size={14}
-                  color={isErr ? '#c0442e' : isNow ? '#245e49' : '#7a8f86'}
-                  style={styles.toolRowIcon}
-                />
+              <StepIn key={i} animate={live}>
+              <Pressable onPress={() => (st.detail || st.title.length > 60) && setExpanded(isOpen ? null : i)} style={styles.toolRow}>
+                <Breathe active={isNow}>
+                  <Ionicons
+                    name={STEP_KIND[st.kind].icon as any}
+                    size={14}
+                    color={isErr ? '#c0442e' : isNow ? '#245e49' : '#7a8f86'}
+                    style={styles.toolRowIcon}
+                  />
+                </Breathe>
                 <View style={styles.toolRowMain}>
                   <Text style={[styles.toolRowText, isErr && styles.toolRowErr, st.kind === 'think' && styles.toolRowThink]} numberOfLines={isOpen ? undefined : 2}>
                     {st.title}
@@ -1004,6 +1010,7 @@ function TurnToolGroup({ items, defaultOpen = false, live = false, startedMs }: 
                   ) : null}
                 </View>
               </Pressable>
+              </StepIn>
             );
           })}
         </View>
@@ -3100,7 +3107,8 @@ function AppMain() {
     [token, projects, currentProject, refreshProjects],
   );
 
-  async function handleSend() {
+  // text: 入力欄の代わりに送る文（確認カードの答えなど）。入力欄の下書き・添付には触らない。
+  async function handleSend(text?: string) {
     if (!token) return;
     // 連打ガード（以前は sending が兼ねていたが、追い連絡を許可するため時刻で弾く）。
     const tappedAt = Date.now();
@@ -3129,8 +3137,8 @@ function AppMain() {
         inFlightSendsRef.current.set(pid, left);
       }
     };
-    const content = draft.trim();
-    const pending = attachments;
+    const content = (text ?? draft).trim();
+    const pending = text === undefined ? attachments : [];
     if (!content && pending.length === 0) return;
 
     // 送信前にサイズ超過を弾く。ここで return すれば入力欄・添付はそのまま残る
@@ -3179,8 +3187,10 @@ function AppMain() {
     }
 
     const sentTimelineRefs = timelineRefs;
-    setDraft('');
-    setAttachments([]);
+    if (text === undefined) {
+      setDraft('');
+      setAttachments([]);
+    }
     setTimelineRefs([]);
     // この部屋の送信フローを1本確保（追い連絡でも1本として数える）。
     slotPid = project.id;
@@ -3242,8 +3252,10 @@ function AppMain() {
         setUploadProgress(null);
         releaseSendSlot();
         setMessages((current) => current.filter((m) => m.id !== optimisticId));
-        setDraft(content);
-        setAttachments(pending);
+        if (text === undefined) {
+          setDraft(content);
+          setAttachments(pending);
+        }
         setTimelineRefs(sentTimelineRefs);
         if (isAuthError(error)) return;
         Alert.alert('アップロード失敗', String((error as Error).message));
@@ -4223,6 +4235,14 @@ function AppMain() {
               }
               // ダンが書いた外部宛ての下書き（送信案）は、行の文字ではなくカードで出す（直して送る・破棄する）
               const card = msg.sender_type === 'ai' ? (msg.content || '').match(SEND_CARD) : null;
+              const confirm = msg.sender_type === 'ai' ? (msg.content || '').match(CONFIRM_CARD) : null;
+              if (confirm && token) {
+                return (
+                  <View style={{ marginVertical: 6, maxWidth: '92%', alignSelf: 'flex-start', width: '92%' }}>
+                    <ConfirmCard id={confirm[1]} request={(path, init) => apiRequest(path, init ?? {}, token)} onAnswer={(answer) => void handleSend(answer)} />
+                  </View>
+                );
+              }
               if (card && token) {
                 return (
                   <View style={{ marginVertical: 6, maxWidth: '92%', alignSelf: 'flex-start', width: '92%' }}>
@@ -4402,7 +4422,7 @@ function AppMain() {
           ) : (
             <Pressable
               disabled={!draft.trim() && attachments.length === 0}
-              onPress={handleSend}
+              onPress={() => handleSend()}
               style={({ pressed }) => [
                 styles.sendButton,
                 (pressed || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
@@ -5275,7 +5295,7 @@ const styles = StyleSheet.create({
   kindChip: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: '#eef4f0', borderRadius: 999, paddingHorizontal: 6, paddingVertical: 1 },
   kindChipText: { color: '#3d5a4c', fontSize: 11, fontVariant: ['tabular-nums'] },
   toolGroupTime: { color: '#7a8f86', fontSize: 11.5, marginLeft: 'auto', fontVariant: ['tabular-nums'] },
-  toolGroupNow: { color: '#59685f', fontSize: 12, marginTop: 4, marginLeft: 18 },
+  toolGroupNow: { marginTop: 4, marginLeft: 18, marginRight: 4 },
   toolRowThink: { color: '#7a8f86', fontStyle: 'italic' },
   toolGroupLabel: {
     color: '#a7a19a',

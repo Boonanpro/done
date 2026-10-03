@@ -21,6 +21,73 @@ const CHANNEL: Record<string, string> = {
   web_form: 'Webフォーム', chatwork: 'Chatwork', slack: 'Slack', x_dm: 'X DM', collab: '外部窓口', other: 'メッセージ',
 };
 export const SEND_CARD = /^\s*\[送信案: ([0-9a-fA-F-]{8,})\]\s*$/;
+export const CONFIRM_CARD = /^\s*\[確認: ([0-9a-fA-F-]{8,})\]\s*$/;
+
+/** 確認カード: 取り返しのつかない確定の前に、何がどうなるかを並べてボタン1つで答える（答えは本人の発言として部屋に届く）。 */
+export function ConfirmCard({ id, request, onAnswer }: { id: string; request: Request; onAnswer: (text: string) => void }) {
+  const [p, setP] = useState<(Proposal & { title?: string }) | null>(null);
+  const [choice, setChoice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    request<Proposal & { title?: string }>(`/chat/proposals/${id}`).then(setP).catch(() => setError('確認カードを読み込めませんでした'));
+  }, [id]);   // eslint-disable-line react-hooks/exhaustive-deps
+  if (!p) return error ? <Text style={st.muted}>{error}</Text> : <View style={[st.card, { height: 120 }]} />;
+  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; choices?: string[]; confirm_label?: string };
+  const choices = ad.choices || [];
+  const pending = p.status === 'pending';
+  const answer = async (approve: boolean) => {
+    if (approve && choices.length > 0 && !choice) { setError('どれにするか選んでください'); return; }
+    setBusy(true); setError('');
+    try {
+      const next = await request<Proposal>(`/chat/proposals/${id}/respond`, { method: 'POST', body: JSON.stringify({ action: approve ? 'approve' : 'reject' }) });
+      setP({ ...p, status: next.status });
+      onAnswer(approve ? `承認: ${p.title}${choice ? `（${choice}）` : ''}` : `やめる: ${p.title}`);
+    } catch {
+      setError('答えを送れませんでした。もう一度押すか、チャットで伝えてください');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View style={[st.card, !pending && st.cardDone]}>
+      <View style={st.head}>
+        <Ionicons name={pending ? 'shield-checkmark-outline' : p.status === 'approved' ? 'checkmark-circle-outline' : 'close-circle-outline'} size={15} color="#245e49" />
+        <Text style={st.title} numberOfLines={2}>{p.title}</Text>
+        {!pending ? <Text style={st.state}>{p.status === 'approved' ? '承認しました' : 'やめました'}</Text> : null}
+      </View>
+      <View style={st.rows}>
+        {(ad.items || []).map((it, i) => (
+          <View key={i} style={st.row}>
+            <Text style={st.rowLabel}>{it.label}</Text>
+            <Text style={st.rowValue} selectable>{it.value}</Text>
+          </View>
+        ))}
+      </View>
+      {choices.length > 0 ? (
+        <View style={{ gap: 6 }}>
+          {choices.map((c) => (
+            <Pressable key={c} disabled={!pending || busy} onPress={() => setChoice(c)} style={[st.choice, choice === c && st.choiceOn]}>
+              <Ionicons name={choice === c ? 'radio-button-on' : 'radio-button-off'} size={15} color="#245e49" />
+              <Text style={st.choiceText}>{c}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+      {error ? <Text style={st.error}>{error}</Text> : null}
+      {pending ? (
+        <View style={st.buttons}>
+          <Pressable style={({ pressed }) => [st.btn, st.ghost, pressed && st.pressed]} disabled={busy} onPress={() => answer(false)}>
+            <Text style={st.ghostText}>やめる</Text>
+          </Pressable>
+          <Pressable style={({ pressed }) => [st.btn, st.primary, (pressed || busy) && st.pressed]} disabled={busy} onPress={() => answer(true)}>
+            <Text style={st.primaryText}>{busy ? '送っています…' : ad.confirm_label || '承認する'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 export function SendCard({ id, request }: { id: string; request: Request }) {
   const [p, setP] = useState<Proposal | null>(null);
@@ -124,4 +191,11 @@ const st = StyleSheet.create({
   pressed: { opacity: 0.6 },
   muted: { fontSize: 12, color: '#59685f' },
   error: { fontSize: 12, color: '#a2413b' },
+  rows: { gap: 4 },
+  row: { flexDirection: 'row', gap: 10 },
+  rowLabel: { width: 84, fontSize: 13, color: '#59685f' },
+  rowValue: { flex: 1, fontSize: 14, color: '#162e27', fontWeight: '600' },
+  choice: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: '#dfe7e2', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
+  choiceOn: { borderColor: '#245e49', backgroundColor: '#eef4f0' },
+  choiceText: { flex: 1, fontSize: 14, color: '#162e27' },
 });

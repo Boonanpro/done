@@ -7,6 +7,13 @@ import { splitMarkdownBlocks } from './markdown-blocks';
 
 export { splitLinks } from './markdown-blocks';
 
+function isDiff(block: { lang: string; text: string }) {
+  if (/^(diff|patch)$/i.test(block.lang)) return true;
+  const lines = block.text.split('\n').filter((l) => l.trim());
+  const marked = lines.filter((l) => /^[+-](?![+-]{2})|^@@/.test(l)).length;
+  return lines.length >= 2 && marked / lines.length >= 0.5;
+}
+
 function columnWidth(texts: string[]): number {
   const longest = Math.max(...texts.map((t) => Array.from(t).reduce((n, ch) => n + (ch.charCodeAt(0) > 0xff ? 2 : 1), 0)));
   return Math.max(56, Math.min(220, longest * 7.5 + 20));
@@ -30,6 +37,26 @@ export function ChatMarkdown({
             <Text key={index} selectable style={[textStyle, styles.heading]}>
               {renderText(block.text, `h${index}`)}
             </Text>
+          );
+        }
+        if (block.kind === 'code' && isDiff(block)) {
+          // 変更の差分: 足した行は緑、消した行は赤（Beautiful UI の Code Block の差分表示を見本に）
+          return (
+            <View key={index} style={styles.code}>
+              {block.lang ? <Text style={styles.codeLang}>{block.lang}</Text> : null}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                <View>
+                  {block.text.split('\n').map((line, i) => {
+                    const kind = line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : line.startsWith('@@') ? 'hunk' : '';
+                    return (
+                      <Text key={i} selectable style={[styles.codeText, kind === 'add' && styles.diffAdd, kind === 'del' && styles.diffDel, kind === 'hunk' && styles.diffHunk]}>
+                        {line || ' '}
+                      </Text>
+                    );
+                  })}
+                </View>
+              </ScrollView>
+            </View>
           );
         }
         if (block.kind === 'code') {
@@ -90,5 +117,8 @@ const styles = StyleSheet.create({
   headerText: { fontWeight: '700' },
   code: { backgroundColor: '#1f2724', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, gap: 4 },
   codeLang: { color: '#8fa69b', fontSize: 11, letterSpacing: 0.4 },
+  diffAdd: { backgroundColor: 'rgba(76,175,110,0.22)', color: '#bdf0cc' },
+  diffDel: { backgroundColor: 'rgba(220,90,80,0.22)', color: '#ffc9c2' },
+  diffHunk: { color: '#8fb3d9' },
   codeText: { color: '#e4ece8', fontSize: 12.5, lineHeight: 19, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
 });
