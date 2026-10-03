@@ -330,6 +330,11 @@ async def run(flow, values, page=None):
         result = await replay(flow, values)
         report(flow, result['replayed'])
         return result
+    if flow.get('kind') == 'phone':
+        from app.services.phone_control import replay
+        result = await replay(flow, values)
+        report(flow, result['replayed'])
+        return result
     from app.agent.v2.tools import _execute_browser_tool
     from app.services.browser_replay import observe, resolve, rematch, attempt, STEP_WAIT_SECONDS, POLL_SECONDS
     from app.services.jev_decisions import Decisions
@@ -422,7 +427,7 @@ def pick_resolve(step, snap):
 
 TOOL = {
     'name': 'flow',
-    'description': ('一度やったブラウザやデスクトップアプリ（host が desktop: のもの）の手順の記憶。action=list: 知っている手順（入力の穴つき）を一覧する／action=replay: id と values（穴→値）で、'
+    'description': ('一度やったブラウザ・デスクトップアプリ（host が desktop: のもの）・スマホ（host が phone: のもの）の手順の記憶。action=list: 知っている手順（入力の穴つき）を一覧する／action=replay: id と values（穴→値）で、'
                     '大きいモデルなしに手順を再生してその結果の画面で止める（続けて browser read / desktop read で読む）。記憶に値は残っていないので、穴の値は全部依頼から渡す。'
                     '同じサイトで同じ種類の作業を頼まれたら、まず list を見て、合う手順があれば replay を使う。合わなければ通常どおり操作する（成功すれば自動で記憶される）。'),
     'input_schema': {'type': 'object', 'properties': {

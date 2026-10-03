@@ -117,16 +117,22 @@ class Worker:
             return
         args = (call['args'].get('arguments') or {}) if call['name'] == 'dan_tool' else call['args']
         name = str(call['args'].get('name') or '') if call['name'] == 'dan_tool' else call['name']
-        if name != 'browser' or args.get('action') not in ('click', 'open_target', 'open') or not result['output'] or \
+        phone = name == 'phone' and args.get('action') in ('tap', 'open')
+        if (name != 'browser' and not phone) or (not phone and args.get('action') not in ('click', 'open_target', 'open')) or not result['output'] or \
                 result['output'].startswith('操作は実行していません') or '"success": false' in result['output'][:400]:
             return
         task = self.read().get('task', '').replace('今回のユーザー発言（原文）:', '').split('参考の直前会話')[0].strip()
         goal = ('作業: ' + task[:200] + (' / 今していること: ' + intent.strip()[:150] if intent.strip() else ''))[:300]
         try:
-            contents = await call_tool('browser', {'action': 'follow', 'goal': goal, 'max_steps': 4, 'observation': 'dom', 'quiet_if_unmoved': True})
+            if phone:
+                contents = await call_tool('phone', {'action': 'follow', 'goal': goal, 'max_steps': 4})
+            else:
+                contents = await call_tool('browser', {'action': 'follow', 'goal': goal, 'max_steps': 4, 'observation': 'dom', 'quiet_if_unmoved': True})
         except Exception:
             return
         output, images = function_output(contents)
+        if phone and 'Jev が押した: なし' in output:
+            return
         if not output.strip() or '"pressed": []' in output or '"pressed":[]' in output:
             return   # Jev pressed nothing: the model's own result stands (no second copy of the page)
         self.state.publish(self.job_id, 'tool', 'browser:follow(jev)')
