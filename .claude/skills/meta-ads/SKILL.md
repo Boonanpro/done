@@ -48,7 +48,7 @@ allowed-tools: Bash
 2. **キャンペーン**: `campaign --name "..." --objective OUTCOME_TRAFFIC`（PAUSED で作成、`campaign_id` を得る）。
 3. **広告セット**: `adset --campaign-id <ID> --name "..." --daily-budget 1000 --countries JP --optimization-goal LINK_CLICKS`
    （予算はアカウント通貨の単位。JPY なら円。詳細は [references/campaign-fields.md](references/campaign-fields.md)）。
-4. **広告**: `ad --adset-id <ID> --name "..." --link <URL> --message "本文" --headline "見出し" --image <path> --cta LEARN_MORE`。
+4. **広告**: `ad --adset-id <ID> --name "..." --link <URL> --message "本文" --headline "見出し" --image <path> --cta LEARN_MORE`。本文と見出しは `D:/done/.claude/skills/build/references/copywriting.md` の考え方で書く（AI っぽい言い回しを避ける）。
 5. **承認 → 出稿**: 予算・期間を提示して承認を得る → `publish --campaign-id <ID> --confirm`。
 6. **運用**: `insights --campaign-id <ID> --date-preset last_7d` で spend/CTR/CPA を取得 →
    改善 or `pause --campaign-id <ID>`（キルスイッチ）。

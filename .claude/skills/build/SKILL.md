@@ -16,6 +16,8 @@ Read [integration.md](references/integration.md) when creating a slug or changin
 - Use `ArtifactLink` for internal navigation. Preserve artifact identity and preview authentication behavior.
 - Use the current registration/publish service. A successful file edit or registration does not prove publication.
 
+Japanese copy (introductions, catchphrases, articles) follows [copywriting.md](references/copywriting.md): the owner judged Dan's copy too AI-like and preferred its rewrites.
+
 Choose the implementation order and design appropriate to the task. [design-options.md](references/design-options.md) lists optional components and approaches. Read a recipe only for the selected approach. HTML proposals use `actions/proposal_html.md` only when requested.
 
 Verify affected behavior and appearance. A new responsive site needs relevant viewport, interaction, editing and delivery checks; a narrow fix needs checks for that fix and plausible regressions. Inspect screenshots yourself, but attach extra screenshots only when requested. Report the actual artifact URL and observed state.
