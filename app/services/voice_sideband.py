@@ -114,6 +114,11 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     try: output = await run_function(item.get('name'), args, user_id, room_id, dialogue.recent(), speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
+    try:   # place names the speech model would misread get their reading (voice_furigana)
+        from app.services.voice_furigana import annotate_all
+        output = annotate_all(output)
+    except Exception:
+        pass
     detail = {k: str(output.get(k))[:120] for k in ('reason', 'error', 'replayed', 'accepted') if isinstance(output, dict) and output.get(k) is not None}   # outcome codes only, never content
     record('function_done', delegation_id=str(delegation_id)[:40], name=item.get('name'), elapsed_ms=round((time.monotonic()-started)*1000), output_chars=len(json.dumps(output, ensure_ascii=False)), **({'detail': detail} if detail else {}))
     return {'type': 'function_call_output', 'call_id': item.get('call_id'), 'output': json.dumps(output, ensure_ascii=False)[:12000], 'name': item.get('name')}
@@ -218,6 +223,11 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                 task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
                 material = {'result': '作業「%s」の結果:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
                             'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
+                try:
+                    from app.services.voice_furigana import annotate
+                    material = annotate(material)
+                except Exception:
+                    pass
                 for part in chunks(material):
                     await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
                 cue = {'result': '今の作業が終わった。結果を、本人に会話として自分の言葉で伝える（書かれた文を読み上げない。細かい番号などは聞かれたら答える）。',
