@@ -527,6 +527,13 @@ def schedule_dedicated_deploy(artifact_id: str, user_id: str) -> None:
                 user_id,
             )
             logger.info("[artifact-deploy] %s: live at %s", artifact_id[:8], release.get("shared_url"))
+            # what was published is also kept in Git (done-artifacts); never holds up or fails the deploy
+            try:
+                from app.services.artifact_archive import record_soon
+                if artifact.get("slug"):
+                    record_soon(str(artifact["slug"]))
+            except Exception:  # noqa: BLE001
+                logger.warning("[artifact-deploy] %s: archive not started", artifact_id[:8])
         except Exception as exc:  # The ledger records the exact deployment failure.
             logger.warning("[artifact-deploy] %s: failed: %s", artifact_id[:8], exc)
             try:
