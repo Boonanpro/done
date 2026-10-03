@@ -90,9 +90,25 @@ if ($cf.Count -lt 2) {
         -WindowStyle Hidden
 }
 
-# The fixed connector is independent of the two legacy quick tunnels. Its
-# launcher is idempotent and cloudflared reconnects itself on network changes.
+# The fixed connector is independent of the two legacy quick tunnels. A running process is not proof: after a short
+# network drop (2026-10-03 18:19) cloudflared gave up retrying and stayed up with 0 connections, and dan.paina.info
+# answered Error 1033. Its own readiness (metrics port) decides: not ready for 2 minutes after start -> restart it.
 try {
+    $named = @(Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains('dan-paina.token') })
+    if ($named.Count -gt 0) {
+        $ready = $false
+        try {
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:20246/ready' -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            $ready = $r.Content -match '"readyConnections":[1-9]'
+        } catch {}
+        $age = (Get-Date) - $named[0].CreationDate
+        if (-not $ready -and $age.TotalMinutes -ge 2) {
+            Write-WatchdogLog "named tunnel not ready (0 connections, up $([int]$age.TotalMinutes) min) -> restart"
+            $named | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 2
+        }
+    }
     & "$Root\scripts\start_named_tunnel.ps1" | ForEach-Object { Write-WatchdogLog $_ }
 } catch {
     Write-WatchdogLog "named tunnel start failed: $($_.Exception.Message)"
