@@ -8,12 +8,13 @@ import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { ChatMarkdown, splitLinks } from './chat-markdown';
 import { SEND_CARD, SendCard } from './send-card';
+import { describe as describeStep, elapsedLabel, KIND as STEP_KIND, summarize as summarizeSteps } from './work-log';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Svg, { Circle } from 'react-native-svg';
-import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -926,52 +927,83 @@ function RichMessageContent({
 // the same inline-timeline treatment the web chat gives ai_context.blocks.
 // 畳んだ物を開け閉めしても、押した見出しを画面の同じ位置に留める（チャットの一覧は下から積む作りなので、
 // 開くと上へ伸びて見出しが画面の外へ逃げていた）。一覧の側が、開け閉めの前後で見出しの位置を測ってずれを戻す。
-const KeepInPlace = createContext<((anchor: View | null, toggle: () => void) => void) | null>(null);
+const KeepInPlace = createContext<((moved: number) => void) | null>(null);
 
-function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; defaultOpen?: boolean }) {
+function TurnToolGroup({ items, defaultOpen = false, live = false, startedMs }: { items: TurnBlock[]; defaultOpen?: boolean; live?: boolean; startedMs?: number }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [expanded, setExpanded] = useState<number | null>(null);
   const keep = useContext(KeepInPlace);
   const header = useRef<View>(null);
-  const toggle = () => setOpen((o) => !o);
+  const before = useRef<number | null>(null);
+  // 押した瞬間の見出しの位置を測ってから開け閉めし、描画の前（同じフレーム）にずれた分だけ一覧を戻す。
+  // 測る・戻すを少し後でやると、伸びた画面が一瞬見えてちらついた。
+  const toggle = () => {
+    if (keep && header.current) {
+      header.current.measureInWindow((_x, y) => { before.current = y; setOpen((o) => !o); });
+    } else {
+      setOpen((o) => !o);
+    }
+  };
+  useLayoutEffect(() => {
+    if (before.current === null || !header.current || !keep) return;
+    const was = before.current;
+    before.current = null;
+    header.current.measureInWindow((_x, y) => { if (Math.abs(y - was) > 1) keep(y - was); });
+  }, [open, keep]);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!live || !startedMs) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [live, startedMs]);
+  const steps = items.map(describeStep);
+  const kinds = summarizeSteps(items);
+  const current = live ? [...steps].reverse().find((st) => st.kind !== 'think') : undefined;
   return (
     <View style={styles.toolGroup}>
-      <Pressable ref={header} onPress={() => (keep ? keep(header.current, toggle) : toggle())} style={styles.toolGroupHeader} hitSlop={6}>
-        <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={13} color="#a7a19a" />
-        <Ionicons name="terminal-outline" size={13} color="#7fd1c7" />
-        <Text style={styles.toolGroupLabel}>
-          {items.length}件の作業{open ? '' : ' を表示'}
-        </Text>
+      <Pressable ref={header} onPress={toggle} style={styles.toolGroupHeader} hitSlop={6}>
+        <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={13} color="#59685f" />
+        <Text style={styles.toolGroupLabel}>{live ? '作業中' : `${items.length}件の作業`}</Text>
+        <View style={styles.kindChips}>
+          {kinds.slice(0, 4).map((k) => (
+            <View key={k.kind} style={styles.kindChip}>
+              <Ionicons name={STEP_KIND[k.kind].icon as any} size={11} color="#245e49" />
+              <Text style={styles.kindChipText}>{k.n}</Text>
+            </View>
+          ))}
+        </View>
+        {live && startedMs ? <Text style={styles.toolGroupTime}>{elapsedLabel(now - startedMs)}</Text> : null}
       </Pressable>
+      {live && current && !open ? (
+        <Text style={styles.toolGroupNow} numberOfLines={1}>
+          {current.title}{current.detail ? ` — ${current.detail}` : ''}
+        </Text>
+      ) : null}
       {open ? (
         <View style={styles.toolGroupBody}>
-          {items.map((it, i) => {
-            const isErr = it.type === 'error';
-            const label =
-              it.type === 'tool'
-                ? it.label || 'ツール実行'
-                : it.type === 'error'
-                  ? it.text || 'エラー'
-                  : it.type === 'reasoning'
-                    ? it.text || '思考'
-                    : 'ツール実行';
-            const detail = it.type === 'tool' ? it.detail || '' : '';
+          {steps.map((st, i) => {
+            const isErr = st.kind === 'error';
+            const isNow = live && i === steps.length - 1;
+            const isOpen = expanded === i;
             return (
-              <View key={i} style={styles.toolRow}>
+              <Pressable key={i} onPress={() => (st.detail || st.title.length > 60) && setExpanded(isOpen ? null : i)} style={styles.toolRow}>
                 <Ionicons
-                  name={isErr ? 'alert-circle' : 'checkmark-circle'}
-                  size={13}
-                  color={isErr ? '#ff5a3d' : '#6ec98a'}
+                  name={STEP_KIND[st.kind].icon as any}
+                  size={14}
+                  color={isErr ? '#c0442e' : isNow ? '#245e49' : '#7a8f86'}
                   style={styles.toolRowIcon}
                 />
                 <View style={styles.toolRowMain}>
-                  <Text style={[styles.toolRowText, isErr && styles.toolRowErr]}>{label}</Text>
-                  {detail && detail !== label ? (
-                    <Text style={styles.toolRowDetail} numberOfLines={4}>
-                      {detail}
+                  <Text style={[styles.toolRowText, isErr && styles.toolRowErr, st.kind === 'think' && styles.toolRowThink]} numberOfLines={isOpen ? undefined : 2}>
+                    {st.title}
+                  </Text>
+                  {st.detail ? (
+                    <Text style={styles.toolRowDetail} numberOfLines={isOpen ? undefined : 1} selectable={isOpen}>
+                      {st.detail}
                     </Text>
                   ) : null}
                 </View>
-              </View>
+              </Pressable>
             );
           })}
         </View>
@@ -1023,10 +1055,14 @@ function AiTurnBlocks({
   onPlayVideo,
   defaultOpen = false,
   settled = false,
+  live = false,
+  startedMs,
 }: {
   blocks: TurnBlock[];
   mine: boolean;
   settled?: boolean;
+  live?: boolean;
+  startedMs?: number;
   onOpenUrl: (url: string) => void;
   onPlayVideo?: (url: string) => void;
   defaultOpen?: boolean;
@@ -1044,6 +1080,7 @@ function AiTurnBlocks({
     }
   }
   const lastTextIndex = grouped.reduce((acc, g, i) => (g.kind === 'text' ? i : acc), -1);
+  const lastToolsIndex = grouped.reduce((acc, g, i) => (g.kind === 'tools' ? i : acc), -1);
   if (settled && lastTextIndex >= 0) {
     // 回答が出て止まった後: 途中の宣言は作業ログに畳み、見えるのは最後の文章と、途中で出したファイル・画像・動画だけ。
     const log: TurnBlock[] = [];
@@ -1073,7 +1110,8 @@ function AiTurnBlocks({
             <RichMessageContent content={g.text} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
           </View>
         ) : (
-          <TurnToolGroup key={i} items={g.items} defaultOpen={defaultOpen} />
+          <TurnToolGroup key={i} items={g.items} defaultOpen={defaultOpen}
+            live={live && i === lastToolsIndex} startedMs={live ? startedMs : undefined} />
         ),
       )}
     </View>
@@ -1477,18 +1515,11 @@ function AppMain() {
   // 選択させる（吹き出し内の直接選択はAndroidで初回長押しが暴発するため）。
   const listRef = useRef<FlatList<ChatListItem>>(null);
   const listOffsetRef = useRef(0);
-  const keepInPlace = useCallback((anchor: View | null, toggle: () => void) => {
-    if (!anchor) { toggle(); return; }
-    anchor.measureInWindow((_x, before) => {
-      toggle();
-      setTimeout(() => {
-        anchor.measureInWindow((_x2, after) => {
-          const moved = after - before;   // 上へ逃げたら負
-          // 下から積む一覧では、位置を増やすと中身が下へ動く: 逃げた分だけ戻す
-          if (Math.abs(moved) > 1) listRef.current?.scrollToOffset({ offset: Math.max(0, listOffsetRef.current - moved), animated: false });
-        });
-      }, 60);
-    });
+  const keepInPlace = useCallback((moved: number) => {
+    // moved: 見出しが動いた量（上へ逃げたら負）。下から積む一覧では位置を増やすと中身が下へ動くので、その分戻す。
+    const offset = Math.max(0, listOffsetRef.current - moved);
+    listOffsetRef.current = offset;
+    listRef.current?.scrollToOffset({ offset, animated: false });
   }, []);
   // Live-tracking ref for the notification listener (which we don't want to
   // re-subscribe on every project switch).
@@ -4132,7 +4163,7 @@ function AppMain() {
                       <Text style={styles.messageSender}>DAN</Text>
                     </View>
                     {item.blocks.length > 0 ? (
-                      <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
+                      <AiTurnBlocks blocks={item.blocks} mine={false} live startedMs={item.sortMs} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                     ) : null}
                     {item.typing ? (
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
@@ -5240,6 +5271,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 5,
   },
+  kindChips: { flexDirection: 'row', gap: 4, flexShrink: 1 },
+  kindChip: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: '#eef4f0', borderRadius: 999, paddingHorizontal: 6, paddingVertical: 1 },
+  kindChipText: { color: '#3d5a4c', fontSize: 11, fontVariant: ['tabular-nums'] },
+  toolGroupTime: { color: '#7a8f86', fontSize: 11.5, marginLeft: 'auto', fontVariant: ['tabular-nums'] },
+  toolGroupNow: { color: '#59685f', fontSize: 12, marginTop: 4, marginLeft: 18 },
+  toolRowThink: { color: '#7a8f86', fontStyle: 'italic' },
   toolGroupLabel: {
     color: '#a7a19a',
     fontSize: 12.5,
@@ -5267,7 +5304,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   toolRowText: {
-    color: '#c8c2b8',
+    color: '#2f3d36',
     flexShrink: 1,
     fontSize: 12.5,
     lineHeight: 18,
