@@ -1234,6 +1234,13 @@ def _tool_detail(inp, limit: int = 4000) -> str:
         return ""
     if not isinstance(inp, dict):
         return str(inp)[:limit]
+    if isinstance(inp.get("old_string"), str) and isinstance(inp.get("new_string"), str):
+        # an edit: what changed, as diff lines (the app colours - red and + green)
+        import difflib
+        lines = [l for l in difflib.unified_diff(inp["old_string"].splitlines(), inp["new_string"].splitlines(), lineterm="", n=1)
+                 if not l.startswith(("---", "+++"))]
+        if lines:
+            return "\n".join(lines)[:limit]
     for key in ("command", "content", "new_string", "code", "query", "prompt", "pattern"):
         v = inp.get(key)
         if isinstance(v, str) and v.strip():

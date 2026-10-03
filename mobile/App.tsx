@@ -1003,7 +1003,10 @@ function TurnToolGroup({ items, defaultOpen = false, live = false, startedMs }: 
                   <Text style={[styles.toolRowText, isErr && styles.toolRowErr, st.kind === 'think' && styles.toolRowThink]} numberOfLines={isOpen ? undefined : 2}>
                     {st.title}
                   </Text>
-                  {st.detail ? (
+                  {st.detail && isOpen && /^[+-]|^@@/m.test(st.detail) && st.kind === 'edit' ? (
+                    // ファイルの編集は、変わった所を赤（消した行）と緑（足した行）で
+                    <ChatMarkdown text={'```diff\n' + st.detail + '\n```'} textStyle={styles.toolRowDetail} renderText={(t) => t} />
+                  ) : st.detail ? (
                     <Text style={styles.toolRowDetail} numberOfLines={isOpen ? undefined : 1} selectable={isOpen}>
                       {st.detail}
                     </Text>
@@ -4181,7 +4184,7 @@ function AppMain() {
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
                       <View style={styles.typingInline}>
                         <TypingDots color="#7a8f86" />
-                        {typingLabel ? (
+                        {typingLabel && !item.blocks.some((b) => b.type === 'tool') ? (
                           <Text style={styles.typingLabel} numberOfLines={1}>
                             {typingLabel.split('\n')[0]}
                           </Text>
