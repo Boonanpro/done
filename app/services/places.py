@@ -18,9 +18,9 @@ TOOL = {
     'description': ('近くの店・施設や、ある地域の店・会社の一覧を、ブラウザなしで一瞬で出す（世界中。日本は OpenPOI、海外は OpenStreetMap）。'
                     '「近くの〇〇」「〇〇駅の周りの〇〇」「〇〇市の工務店を全部」など。距離順に、名前・種類・距離・住所（あれば）・座標を返す。'
                     '中心は lat/lng、なければ near（地名）、どちらもなければ本人の現在地。営業時間・評判・電話は載っていないことが多いので、'
-                    '絞った数件だけ web_search で確かめる。海外は query を英語で（cafe, ramen など）。名前に出ない種類（金物店・薬局など）は osm_tag も付ける。結果を本人に見せる時は出典を添える。'),
+                    '絞った数件だけ web_search で確かめる。海外は query を英語で（cafe, ramen など）。名前に出ない種類（百均・金物店・薬局など）は osm_tag も付ける（日本でも効く。百均なら shop:variety_store）。結果を本人に見せる時は出典を添える。'),
     'input_schema': {'type': 'object', 'properties': {
-        'query': {'type': 'string', 'description': '探す物（例: ラーメン、工務店、薬局、cafe）'},
+        'query': {'type': 'string', 'description': '探す物。空白で区切った語のどれかに当たれば出る。一般名だけでは名前に出ないことが多いので店名・チェーン名も並べる（例: 「百均」なら「ダイソー セリア キャンドゥ ワッツ」、ラーメン、工務店、cafe）'},
         'near': {'type': 'string', 'description': '中心にする地名（例: 小倉駅、北九州市、Shibuya、Paris 11e）'},
         'lat': {'type': 'number'}, 'lng': {'type': 'number'},
         'osm_tag': {'type': 'string', 'description': '海外で種類で探す時の OpenStreetMap のタグ（例: shop:hardware, amenity:cafe, amenity:pharmacy, tourism:hotel）。名前に含まれない種類はこれで見つかる'},
@@ -65,7 +65,7 @@ async def photon(client, query, lat, lng, radius, limit, osm_tag=''):
     d_lat = radius/111000
     d_lng = radius/(111000*max(.1, math.cos(math.radians(lat))))
     bbox = f'{lng-d_lng},{lat-d_lat},{lng+d_lng},{lat+d_lat}'
-    params = {'q': (osm_tag.split(':')[-1] if osm_tag else query), 'lat': lat, 'lon': lng, 'bbox': bbox, 'limit': min(50, limit*2)}
+    params = {'q': query, 'lat': lat, 'lon': lng, 'bbox': bbox, 'limit': min(50, limit*2)}
     if osm_tag:
         params['osm_tag'] = osm_tag
     r = await client.get(PHOTON, params=params, headers=UA)
@@ -96,26 +96,37 @@ async def find(query, lat=None, lng=None, near='', radius_m=1000, limit=20, user
                 if not here or here.get('lat') is None:
                     return {'success': False, 'error': '中心が分からない（lat/lng か near を渡す。本人の現在地もまだ届いていない）'}
                 lat, lng, where = here['lat'], here['lng'], f"本人の現在地（{here.get('area') or ''}、{here.get('minutes_ago')}分前）"
-        rows = []
+        # Japan: both sources at once (2026-10-03 call: OpenPOI had no DAISO in Amings Shioe 356 m away; OSM had it).
+        import asyncio
+        async def safe(coro):
+            try:
+                return await coro
+            except Exception:
+                return []
+        # Photon matches a query as one phrase: each word on its own (up to 4), and the kind (osm_tag) with the first word
+        words = query.split()[:4] or [query]
+        jobs = [safe(photon(client, w, lat, lng, radius_m, limit)) for w in words]
+        if osm_tag:
+            jobs.append(safe(photon(client, words[0], lat, lng, radius_m, limit, osm_tag)))
         if in_japan(lat, lng):
-            try:
-                rows = await openpoi(client, query, lat, lng, radius_m, limit)
-            except Exception:
-                rows = []
-        if len(rows) < 3:
-            try:
-                rows += await photon(client, query, lat, lng, radius_m, limit, osm_tag)
-            except Exception:
-                pass
-    seen, out = set(), []
+            jobs.insert(0, safe(openpoi(client, query, lat, lng, radius_m, limit)))
+        rows = [x for part in await asyncio.gather(*jobs) for x in part]
+    out = []
+    squash = lambda t: ''.join(t.lower().split())
     for x in rows:
         if x['lat'] is None or not x['name']:
             continue
         x['distance_m'] = distance_m(lat, lng, x['lat'], x['lng'])
-        key = (x['name'], round(x['lat'], 4), round(x['lng'], 4))
-        if x['distance_m'] > radius_m * 1.2 or key in seen:
+        if x['distance_m'] > radius_m * 1.2:
             continue
-        seen.add(key)
+        # the same place from both sources: names that contain one another, within 80 m
+        twin = next((y for y in out if distance_m(x['lat'], x['lng'], y['lat'], y['lng']) <= 80
+                     and (squash(x['name']) in squash(y['name']) or squash(y['name']) in squash(x['name']))), None)
+        if twin:
+            if len(x['name']) > len(twin['name']):
+                twin['name'] = x['name']
+            twin['address'] = twin['address'] or x['address']
+            continue
         out.append(x)
     out.sort(key=lambda x: x['distance_m'])
     out = out[:limit]
