@@ -1005,15 +1005,20 @@ function renderSearchSnippet(content: string, query: string) {
   );
 }
 
+// 文章の中の、ファイル・画像・動画の印（RichMessageContent が表示に変えるもの）
+const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
+
 function AiTurnBlocks({
   blocks,
   mine,
   onOpenUrl,
   onPlayVideo,
   defaultOpen = false,
+  settled = false,
 }: {
   blocks: TurnBlock[];
   mine: boolean;
+  settled?: boolean;
   onOpenUrl: (url: string) => void;
   onPlayVideo?: (url: string) => void;
   defaultOpen?: boolean;
@@ -1031,6 +1036,27 @@ function AiTurnBlocks({
     }
   }
   const lastTextIndex = grouped.reduce((acc, g, i) => (g.kind === 'text' ? i : acc), -1);
+  if (settled && lastTextIndex >= 0) {
+    // 回答が出て止まった後: 途中の宣言は作業ログに畳み、見えるのは最後の文章と、途中で出したファイル・画像・動画だけ。
+    const log: TurnBlock[] = [];
+    const media: string[] = [];
+    grouped.forEach((g, i) => {
+      if (i === lastTextIndex) return;
+      if (g.kind === 'tools') { log.push(...g.items); return; }
+      log.push({ type: 'reasoning', text: g.text } as TurnBlock);
+      media.push(...(g.text.match(MEDIA_TAG) || []));
+    });
+    const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
+    return (
+      <View>
+        {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={false} /> : null}
+        {media.length > 0 ? (
+          <RichMessageContent content={media.join('\n')} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
+        ) : null}
+        <RichMessageContent content={final} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
+      </View>
+    );
+  }
   return (
     <View>
       {grouped.map((g, i) =>
@@ -4175,7 +4201,7 @@ function AppMain() {
                     <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
                   </View>
                   {useBlocks ? (
-                    <AiTurnBlocks blocks={blocks!} mine={mine} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
+                    <AiTurnBlocks blocks={blocks!} mine={mine} settled onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                   ) : (
                     <RichMessageContent
                       content={msg.content}
