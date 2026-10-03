@@ -154,8 +154,11 @@ def read(serial):
         try:
             xml = dev.dump_hierarchy(compressed=True)
             # which app: the package of the screen's nodes (app_current() took 10 s)
-            pkg = re.search(r'package="([^"]+)"', xml[xml.find('<node', xml.find('<node') + 1):] or xml)
-            focus = re.match(r'(.*)', pkg.group(1)) if pkg else None
+            # which app: the package most of the screen's parts belong to (overlays such as the edge panel or the status
+            # bar are a few nodes; the first node's package named the launcher while X was open, 2026-10-03)
+            from collections import Counter
+            counts = Counter(p for p in re.findall(r'package="([^"]+)"', xml) if p != 'com.android.systemui')
+            focus = re.match(r'(.*)', counts.most_common(1)[0][0]) if counts else None
         except Exception:
             xml = ''
     if not xml:
@@ -226,8 +229,8 @@ def _tap(serial, x, y):
     _adb(serial, 'shell', 'input', 'tap', str(x), str(y))
 
 
-def _after(serial, wait=.6):
-    time.sleep(wait / 2 if _u2.get(serial) is not None else wait)   # the app redraws after the touch
+def _after(serial, wait=.6, full=False):
+    time.sleep(wait if full or _u2.get(serial) is None else wait / 2)   # the app redraws after the touch
     return read(serial)
 
 
@@ -294,7 +297,7 @@ def run(params):
         if not _replaying[0]:
             _record.clear(); _record.update(steps=[], updated=time.time(), package=package)   # opening an app starts a procedure
         _remember({'action': 'launch', 'app': package}, package)
-        return f'{package} を開いた\n' + _after(serial, 1.5)
+        return f'{package} を開いた\n' + _after(serial, 1.8, full=True)   # an app takes longer to come up than a tap
     if action == 'follow':
         return follow(serial, str(params.get('goal') or ''), int(params.get('max_steps') or 5))
     return f'未知の action: {action}'
