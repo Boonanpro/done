@@ -3,7 +3,8 @@
 export type MdBlock =
   | { kind: 'text'; text: string }
   | { kind: 'heading'; text: string }
-  | { kind: 'table'; header: string[]; rows: string[][] };
+  | { kind: 'table'; header: string[]; rows: string[][] }
+  | { kind: 'code'; lang: string; text: string };
 
 const TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 
@@ -25,11 +26,23 @@ export function splitMarkdownBlocks(text: string): MdBlock[] {
     para = [];
   };
   let inCode = false;
+  let code: string[] = [];
+  let lang = '';
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.trim().startsWith('```')) {
+      if (!inCode) {
+        flush();
+        lang = line.trim().slice(3).trim();
+        code = [];
+      } else {
+        blocks.push({ kind: 'code', lang, text: code.join('\n') });
+      }
       inCode = !inCode;
-      para.push(line);
+      continue;
+    }
+    if (inCode) {
+      code.push(line);
       continue;
     }
     if (!inCode && line.trim().startsWith('|') && i + 1 < lines.length && TABLE_RULE.test(lines[i + 1])) {
@@ -53,6 +66,7 @@ export function splitMarkdownBlocks(text: string): MdBlock[] {
     }
     para.push(line);
   }
+  if (inCode) blocks.push({ kind: 'code', lang, text: code.join('\n') });   // an unclosed fence (still streaming)
   flush();
   return blocks;
 }

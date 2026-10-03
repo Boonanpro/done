@@ -1,7 +1,7 @@
 // チャットの本文を「段落・見出し・表」に分けて描く（スマホでも表が表として読めるように）。
 // 文中の太字・リンクなどは呼び出し側の renderText に任せる（これまでと同じ描き方）。
 import { Fragment, type ReactNode } from 'react';
-import { ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
 
 import { splitMarkdownBlocks } from './markdown-blocks';
 
@@ -30,6 +30,17 @@ export function ChatMarkdown({
             <Text key={index} selectable style={[textStyle, styles.heading]}>
               {renderText(block.text, `h${index}`)}
             </Text>
+          );
+        }
+        if (block.kind === 'code') {
+          // コードは等幅・折り返さず横にずらして読む。長押しで選んでコピーできる。
+          return (
+            <View key={index} style={styles.code}>
+              {block.lang ? <Text style={styles.codeLang}>{block.lang}</Text> : null}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                <Text selectable style={styles.codeText}>{block.text}</Text>
+              </ScrollView>
+            </View>
           );
         }
         if (block.kind === 'table') {
@@ -77,4 +88,7 @@ const styles = StyleSheet.create({
   cellDivider: { borderLeftWidth: StyleSheet.hairlineWidth * 2, borderLeftColor: 'rgba(110,120,115,0.25)' },
   cellText: { fontSize: 13, lineHeight: 19 },
   headerText: { fontWeight: '700' },
+  code: { backgroundColor: '#1f2724', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, gap: 4 },
+  codeLang: { color: '#8fa69b', fontSize: 11, letterSpacing: 0.4 },
+  codeText: { color: '#e4ece8', fontSize: 12.5, lineHeight: 19, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
 });

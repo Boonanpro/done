@@ -7,12 +7,13 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { ChatMarkdown, splitLinks } from './chat-markdown';
+import { SEND_CARD, SendCard } from './send-card';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import Svg, { Circle } from 'react-native-svg';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -923,11 +924,18 @@ function RichMessageContent({
 
 // A run of tool/reasoning/error steps, collapsed under "N件の作業 を表示" —
 // the same inline-timeline treatment the web chat gives ai_context.blocks.
+// 畳んだ物を開け閉めしても、押した見出しを画面の同じ位置に留める（チャットの一覧は下から積む作りなので、
+// 開くと上へ伸びて見出しが画面の外へ逃げていた）。一覧の側が、開け閉めの前後で見出しの位置を測ってずれを戻す。
+const KeepInPlace = createContext<((anchor: View | null, toggle: () => void) => void) | null>(null);
+
 function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  const keep = useContext(KeepInPlace);
+  const header = useRef<View>(null);
+  const toggle = () => setOpen((o) => !o);
   return (
     <View style={styles.toolGroup}>
-      <Pressable onPress={() => setOpen((o) => !o)} style={styles.toolGroupHeader} hitSlop={6}>
+      <Pressable ref={header} onPress={() => (keep ? keep(header.current, toggle) : toggle())} style={styles.toolGroupHeader} hitSlop={6}>
         <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={13} color="#a7a19a" />
         <Ionicons name="terminal-outline" size={13} color="#7fd1c7" />
         <Text style={styles.toolGroupLabel}>
@@ -1468,6 +1476,20 @@ function AppMain() {
   // メッセージ長押し→「テキストを選択」モーダルの本文。反転FlatListの外で
   // 選択させる（吹き出し内の直接選択はAndroidで初回長押しが暴発するため）。
   const listRef = useRef<FlatList<ChatListItem>>(null);
+  const listOffsetRef = useRef(0);
+  const keepInPlace = useCallback((anchor: View | null, toggle: () => void) => {
+    if (!anchor) { toggle(); return; }
+    anchor.measureInWindow((_x, before) => {
+      toggle();
+      setTimeout(() => {
+        anchor.measureInWindow((_x2, after) => {
+          const moved = after - before;   // 上へ逃げたら負
+          // 下から積む一覧では、位置を増やすと中身が下へ動く: 逃げた分だけ戻す
+          if (Math.abs(moved) > 1) listRef.current?.scrollToOffset({ offset: Math.max(0, listOffsetRef.current - moved), animated: false });
+        });
+      }, 60);
+    });
+  }, []);
   // Live-tracking ref for the notification listener (which we don't want to
   // re-subscribe on every project switch).
   const currentProjectIdRef = useRef<string | null>(null);
@@ -4065,9 +4087,12 @@ function AppMain() {
             <Text style={styles.mutedText}>メッセージを入力してください</Text>
           </View>
         ) : (
+          <KeepInPlace.Provider value={keepInPlace}>
           <FlatList
             contentContainerStyle={styles.messageList}
             data={chatListItems}
+            onScroll={(e) => { listOffsetRef.current = e.nativeEvent.contentOffset.y; }}
+            scrollEventThrottle={32}
             initialNumToRender={14}
             inverted
             keyExtractor={(item) => item.key}
@@ -4165,6 +4190,15 @@ function AppMain() {
                   </View>
                 );
               }
+              // ダンが書いた外部宛ての下書き（送信案）は、行の文字ではなくカードで出す（直して送る・破棄する）
+              const card = msg.sender_type === 'ai' ? (msg.content || '').match(SEND_CARD) : null;
+              if (card && token) {
+                return (
+                  <View style={{ marginVertical: 6, maxWidth: '92%', alignSelf: 'flex-start', width: '92%' }}>
+                    <SendCard id={card[1]} request={(path, init) => apiRequest(path, init ?? {}, token)} />
+                  </View>
+                );
+              }
               if (msg.sender_type === 'system') {
                 return (
                   <View style={{ alignItems: 'center', marginVertical: 6, paddingHorizontal: 12 }}>
@@ -4235,6 +4269,7 @@ function AppMain() {
               }, 320);
             }}
           />
+          </KeepInPlace.Provider>
         )}
 
         {/* The live in-progress status now lives inside the __live__ bubble
