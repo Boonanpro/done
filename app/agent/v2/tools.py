@@ -642,7 +642,8 @@ COMPOSE_MESSAGE_TOOL = {
 - discard: 送信案を取り下げる。
 - list: この部屋の送信案（未送信/送信済み）を確認する。
 
-【規律】ユーザーが「送っておいて」と先に言っていた場合も、propose → 同じターン内で send の順で呼ぶ（本文をカードとして残すため）。外部宛の送信は必ずこのツールを通すこと。カードを無視して記憶の本文を browser で送ってはいけない（ユーザーの編集が反映されず、カードも未送信のまま残って二重送信の原因になる）。相手の返事を待つなら送信後に watch を登録する。""",
+【カードを出すか】カードはユーザーがまだ文面か送ること自体を確かめていない時のためのもの。ユーザーが会話で既に送ってよいと言っていて（「送っておいて」「投稿し直していいよ」「固定ポストも調整して」等）、文面がその話の通りか作り方を任されているなら、approved=true で propose し、同じターン内で send する。カードは出ず、記録だけ残る。報告は自分の言葉で一言とリンク程度にし、本文を繰り返さない。迷う時（初めての相手・言い方が大事な連絡・話していない内容を足した）はカードを出す。
+【規律】外部宛の送信は必ずこのツールを通すこと。カードを無視して記憶の本文を browser で送ってはいけない（ユーザーの編集が反映されず、カードも未送信のまま残って二重送信の原因になる）。相手の返事を待つなら送信後に watch を登録する。""",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -666,6 +667,7 @@ COMPOSE_MESSAGE_TOOL = {
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
             "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
+            "approved": {"type": "boolean", "description": "propose用: ユーザーが会話で既に送ってよいと言っている時 true。カードを出さず、続けて send する"},
             "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
         },
         "required": ["action"],
@@ -4806,6 +4808,7 @@ async def _execute_compose_message(
                 reply_to=reply_to, target=target,
                 from_account=params.get("from_account"),
                 attachments=atts or None, sender=params.get("sender"),
+                show_card=not bool(params.get("approved")),
             )
             channel = (row.get("action_data") or {}).get("channel") or channel
             sendable = channel in SERVER_SENDABLE
@@ -4826,6 +4829,16 @@ async def _execute_compose_message(
                         "この窓口の下書きはユーザーが手で編集中だったので、上書きせず新版を「更新あり」として"
                         "カードの横に置きました（ユーザーが1タップで採用できます）。新しいカードは作っていません。"
                     ),
+                }
+            if params.get("approved"):
+                how = (
+                    'compose_message(action="send", proposal_id) で送ること。' if sendable else
+                    'compose_message(action="send", proposal_id) で送る本文を受け取り、browser で送って action="mark_sent" で確定すること。'
+                )
+                return {
+                    "success": True, "proposal_id": row["id"],
+                    "message": "承認済みなのでカードは出していません。このターンのうちに " + how
+                               + " 送った後の報告は一言とリンク程度で、本文は繰り返さないこと。",
                 }
             tail = (
                 'ユーザーから「送って」と言われたら compose_message(action="send", proposal_id) で送れます。'

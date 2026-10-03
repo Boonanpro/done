@@ -523,7 +523,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
     return <OutboundMessageCard proposalId={outboundCardId} foldCollab />;
   }
   if (isOutboundEventContent(msg.content)) {
-    return <OutboundEventLine content={msg.content || ''} />;
+    return null;   // 送信済み/破棄の記録行は画面に出さない（2026-10-03。状態はカード自身が見せる）
   }
   // 外部窓口対応の作業ログ（「窓口ログ:」で始まるai発言）も折り畳みの控えめな行にする。
   if (msg.sender_type === 'ai' && isCollabLogContent(msg.content)) {

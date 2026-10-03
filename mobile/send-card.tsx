@@ -123,7 +123,9 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
   const ad = p.action_data || {};
   const channel = CHANNEL[ad.channel || 'other'] || ad.channel || 'メッセージ';
   const pending = p.status === 'pending';
-  const state = p.status === 'sent' ? '送信済み' : p.status === 'sending' ? '送信中' : p.status === 'rejected' ? '破棄しました' : '';
+  // 取り下げた案は画面から消す。送った案は印（チェック）と淡い色だけで見せ、文字の札は付けない（2026-10-03）
+  if (p.status === 'rejected') return null;
+  const state = p.status === 'sending' ? '送信中' : '';
 
   const act = async (kind: 'send' | 'discard') => {
     setBusy(kind); setError('');

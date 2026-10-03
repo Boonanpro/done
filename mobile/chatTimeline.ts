@@ -182,7 +182,9 @@ export function buildChatListItems<M extends TimelineMessageLike>(args: {
   // 通話の中身（🎙 行）は出さず、通話ごとに「📞 ダンと通話」の1行にする（順序は時刻で並べ直すので入力順は問わない）
   const messages = collapseCalls(
     [...args.messages].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()),
-  ).map((m) => tidyRelayMessage(m, args.projectId));
+  )
+    .filter((m) => !isSendRecord(m))
+    .map((m) => tidyRelayMessage(m, args.projectId));
   // 並びはサーバーの時刻だけ。届いていない送信は時刻を持たないので一番下（送った順）、
   // 3つの点はさらにその下。同時刻なら 本人 → 作業ログ → ダン・その他 の順。
   const BOTTOM = Number.MAX_SAFE_INTEGER;
@@ -207,6 +209,13 @@ export function buildChatListItems<M extends TimelineMessageLike>(args: {
   const bottom = sorted[0];
   if (bottom && bottom.kind === 'live') return [{ ...bottom, typing: true }, ...sorted.slice(1)];
   return [{ kind: 'typing', key: '__typing__', sortMs: BOTTOM }, ...sorted];
+}
+
+// 送信案の「📤 …を送信済み」「🗑 送信案を破棄」の行は会話の記録としてだけ残し、画面には出さない
+// （2026-10-03: 同じ本文がもう一度出て邪魔。送ったかどうかはカード自身が見せる）。
+function isSendRecord(m: TimelineMessageLike): boolean {
+  const c = m.sender_type === 'ai' ? m.content || '' : '';
+  return /^📤 \S+を送信済み（/.test(c) || c.startsWith('🗑 送信案を破棄');
 }
 
 // 音声会話の断片を1つの吹き出しにまとめる（表示だけ。保存行はそのまま）。

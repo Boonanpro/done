@@ -8,8 +8,10 @@
 - ユーザーが「送信」を押す / ダンが `compose_message(action="send")` を呼ぶ
 - 破棄する / 放置する
 
-のどれでもよい。送信・破棄の事実は同じ部屋に `📤` / `🗑` のイベント行として保存され、
-次のターンの冒頭ダイジェスト（`digest_for_turn`）でダンの記憶に合流する。
+のどれでもよい。送信・破棄の事実は同じ部屋に `📤` / `🗑` のイベント行として保存され
+（画面には出さない。会話の記録としてだけ残す）、次のターンの冒頭ダイジェスト（`digest_for_turn`）で
+ダンの記憶に合流する。ユーザーが会話で既に送ってよいと言った文面は show_card=False で作り、
+カードを出さずに送る（記録は同じ dan_proposals に残る）。
 ダンが送る時も本文は渡さず `proposal_id` だけ指定するので、ユーザーの手動編集が
 必ず反映される（編集前の文を覚えていても送られるのは DB の現在本文）。
 
@@ -128,6 +130,7 @@ class OutboundMessageService:
         target: Optional[dict] = None,
         from_account: Optional[str] = None,
         attachments: Optional[list] = None,
+        show_card: bool = True,
         sender: Optional[str] = None,
     ) -> dict:
         """reply_to: 既存スレッドへの返信なら {message_id, references, subject, detected_message_id}。
@@ -208,7 +211,8 @@ class OutboundMessageService:
         row = r.data[0]
         # collab（外部窓口）のカードはコミュニケーションタブ側に表示されるため、
         # 本体チャットにはカード行を出さない（ダンの記憶は digest_for_turn が届ける）。
-        if channel != "collab":
+        # 会話で既に承認された送信（show_card=False）は、確認のカードを出さない（2026-10-03）。
+        if channel != "collab" and show_card:
             self._post_room_message(room_id, card_marker(row["id"]))
         return row
 
