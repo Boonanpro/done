@@ -5,6 +5,10 @@ Dan built adb commands by hand each time and found where to tap from screenshots
 One call returns the screen after the action (no separate look). Reading a screen takes about 2 s (uiautomator's dump);
 a screenshot (0.4 s) is only for what the parts list cannot show.
 
+With uiautomator2 installed on this PC (pip; it starts its own server on the phone over adb, no app to install), a screen
+reads in about 0.1 s and text in any language goes straight into the field. The server is stopped after IDLE_STOP minutes
+unused (while it runs, apps on the phone could talk to it). Without it, plain adb is used.
+
 Irreversible presses (pay, order, send, delete, confirm…) need `confirmed: true`, given only after the owner approved
 that exact action. Text other than ASCII cannot be typed through adb's input without an input app on the phone."""
 import os
@@ -18,6 +22,40 @@ from pathlib import Path
 ADB = os.environ.get('DAN_ADB') or shutil.which('adb') or str(Path.home()/'AppData'/'Local'/'Android'/'Sdk'/'platform-tools'/'adb.exe')
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 _screens = {}   # serial -> {ref: item} of the last screen read
+_u2 = {}        # serial -> uiautomator2 device
+_idle = {}      # serial -> timer that stops the phone-side server when unused
+IDLE_STOP = 10
+
+
+def _fast(serial):
+    """The uiautomator2 device for this serial, or None (not installed / not reachable: plain adb is used)."""
+    import threading
+    try:
+        import uiautomator2 as u2
+    except ImportError:
+        return None
+    dev = _u2.get(serial)
+    if dev is None:
+        try:
+            os.environ['PATH'] = os.environ.get('PATH', '') + os.pathsep + str(Path(ADB).parent)
+            dev = u2.connect(serial)
+            _u2[serial] = dev
+        except Exception:
+            return None
+    old = _idle.pop(serial, None)
+    if old:
+        old.cancel()
+    def stop():
+        try:
+            dev.stop_uiautomator()
+        except Exception:
+            pass
+        _u2.pop(serial, None)
+    timer = threading.Timer(IDLE_STOP * 60, stop)
+    timer.daemon = True
+    timer.start()
+    _idle[serial] = timer
+    return dev
 SENSITIVE = re.compile(r'購入|支払|決済|注文|送信|削除|確定|申し込|申込|契約|振込|送金|退会|解約|Pay|Buy|Order|Purchase|Send|Delete|Confirm|Subscribe', re.I)
 KEYS = {'back': 'KEYCODE_BACK', 'home': 'KEYCODE_HOME', 'enter': 'KEYCODE_ENTER', 'recents': 'KEYCODE_APP_SWITCH',
         'delete': 'KEYCODE_DEL', 'tab': 'KEYCODE_TAB', 'search': 'KEYCODE_SEARCH'}
@@ -76,9 +114,20 @@ def _bounds(text):
 
 def read(serial):
     """The current screen as parts with refs; remembered for tap/type by ref."""
-    raw = _adb(serial, 'exec-out', 'uiautomator', 'dump', '--compressed', '/dev/tty', timeout=30)
-    xml = raw[raw.find('<?xml'):raw.rfind('</hierarchy>') + len('</hierarchy>')] if '<hierarchy' in raw else ''
-    focus = re.search(r'mCurrentFocus=Window\{[^ ]+ [^ ]+ ([^}]+)\}', _adb(serial, 'shell', 'dumpsys', 'window', timeout=10))
+    dev = _fast(serial)
+    xml, focus = '', None
+    if dev is not None:
+        try:
+            xml = dev.dump_hierarchy(compressed=True)
+            # which app: the package of the screen's nodes (app_current() took 10 s)
+            pkg = re.search(r'package="([^"]+)"', xml[xml.find('<node', xml.find('<node') + 1):] or xml)
+            focus = re.match(r'(.*)', pkg.group(1)) if pkg else None
+        except Exception:
+            xml = ''
+    if not xml:
+        raw = _adb(serial, 'exec-out', 'uiautomator', 'dump', '--compressed', '/dev/tty', timeout=30)
+        xml = raw[raw.find('<?xml'):raw.rfind('</hierarchy>') + len('</hierarchy>')] if '<hierarchy' in raw else ''
+        focus = re.search(r'mCurrentFocus=Window\{[^ ]+ [^ ]+ ([^}]+)\}', _adb(serial, 'shell', 'dumpsys', 'window', timeout=10))
     items, lines = {}, []
     if xml:
         root = ET.fromstring(xml)
@@ -130,8 +179,19 @@ def _target(serial, ref, label):
     return hits[0]
 
 
+def _tap(serial, x, y):
+    dev = _fast(serial)
+    if dev is not None:
+        try:
+            dev.click(x, y)
+            return
+        except Exception:
+            pass
+    _adb(serial, 'shell', 'input', 'tap', str(x), str(y))
+
+
 def _after(serial, wait=.6):
-    time.sleep(wait)   # the app redraws after the touch
+    time.sleep(wait / 2 if _u2.get(serial) is not None else wait)   # the app redraws after the touch
     return read(serial)
 
 
