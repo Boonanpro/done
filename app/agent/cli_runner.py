@@ -1491,6 +1491,17 @@ def _build_runtime_contract_section() -> str:
     )
 
 
+def _build_language_alignment_section(latest_user_message: str = "", user_messages: str = "") -> str:
+    """Reply in the user's language, judged by Dan from the conversation. A character count used to decide it: a kanji-only
+    message such as 「今作業中？」 was taken for Chinese and the whole turn came out in Chinese (2026-10-04)."""
+    return (
+        "## Language\n\n"
+        "Write everything the user sees (progress notes between tool calls and the final answer) in the language the user "
+        "normally speaks with you. If a message is clearly written in a different language, answer that message in its "
+        "language. A short message (kanji only, \"OK\", a URL) is not a change of language."
+    )
+
+
 def _build_system_prompt(
     title: str,
     description: str,
@@ -1544,6 +1555,7 @@ def _build_system_prompt(
 
     # Runtime contract: tool/skill visibility and behavior policy.
     parts.append(_build_runtime_contract_section())
+    parts.append(_build_language_alignment_section(latest_user_message, user_messages))
     parts.append(
         "## Room State Rule\n\n"
         "- Treat `<room_state>` and `<conversation_so_far>` as DAN's authoritative "
