@@ -1491,38 +1491,14 @@ def _build_runtime_contract_section() -> str:
     )
 
 
-def _detect_user_language(text: str) -> str:
-    """Detect the dominant user language for visible reasoning/response guidance."""
-    counts = {"ja": 0, "zh": 0, "ko": 0}
-    for ch in text:
-        try:
-            name = unicodedata.name(ch, "")
-        except ValueError:
-            continue
-        if "HIRAGANA" in name or "KATAKANA" in name:
-            counts["ja"] += 3
-        elif "CJK" in name:
-            counts["zh"] += 1
-        elif "HANGUL" in name:
-            counts["ko"] += 1
-    if counts["ja"] > 0:
-        return "Japanese"
-    if counts["ko"] > 0:
-        return "Korean"
-    if counts["zh"] > 0:
-        return "Chinese"
-    return "English"
-
-
-def _build_language_alignment_section(latest_user_message: str, user_messages: str = "") -> str:
-    """Keep Claude's visible reasoning and answer in the user's language."""
-    language = _detect_user_language(latest_user_message or user_messages or "")
+def _build_language_alignment_section(latest_user_message: str = "", user_messages: str = "") -> str:
+    """Reply in the user's language, judged by Dan from the conversation. A character count used to decide it: a kanji-only
+    message such as 「今作業中？」 was taken for Chinese and the whole turn came out in Chinese (2026-10-04)."""
     return (
-        "## Language Rule (CRITICAL)\n\n"
-        f"The user's language is **{language}**. "
-        "ALL output — including intermediate reasoning between tool calls, "
-        "thinking text, status updates, and the final response — "
-        f"MUST be in {language}. Never use English for any visible output."
+        "## Language\n\n"
+        "Write everything the user sees (progress notes between tool calls and the final answer) in the language the user "
+        "normally speaks with you. If a message is clearly written in a different language, answer that message in its "
+        "language. A short message (kanji only, \"OK\", a URL) is not a change of language."
     )
 
 
