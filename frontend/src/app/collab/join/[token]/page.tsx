@@ -526,7 +526,7 @@ export default function GuestJoinPage() {
 
   // Joined - show chat
   return (
-    <div className="flex flex-col h-dvh bg-background overflow-hidden relative">
+    <div data-media-gallery-scope className="flex flex-col h-dvh bg-background overflow-hidden relative">
       <OpenInBrowserPrompt />
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b shrink-0">

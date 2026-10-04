@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
-import { Play, X } from 'lucide-react';
+import { useState, useRef, type ReactNode } from 'react';
+import { Play } from 'lucide-react';
+import {MediaViewer, collectChatMedia, mediaKind, type GalleryItem} from './media-viewer';
 
 /**
  * 複数の画像・動画を LINE 式にまとめて表示する共通部品。
@@ -19,39 +20,22 @@ const MAX_TILES = 6;
 
 export function MediaGrid({
   items,
-  onImageClick,
   className = '',
 }: {
   items: MediaItem[];
-  /** 画像タップ時（ライトボックス等）。未指定なら新しいタブで開く */
+  /** Legacy prop; media now always opens in the shared in-page viewer. */
   onImageClick?: (url: string) => void;
   className?: string;
 }) {
-  const [playing, setPlaying] = useState<string | null>(null);
+  const root=useRef<HTMLDivElement>(null);
+  const trigger=useRef<HTMLElement|null>(null);
+  const [viewing,setViewing]=useState<{items:GalleryItem[];url:string}|null>(null);
   const [expanded, setExpanded] = useState(false);
   if (items.length === 0) return null;
 
-  const openImage = (url: string) => {
-    if (onImageClick) onImageClick(url);
-    else window.open(url, '_blank', 'noopener,noreferrer');
-  };
-
-  // 1枚: 自然なサイズ（動画はインライン再生）
-  if (items.length === 1) {
-    const it = items[0];
-    return (
-      <div className={`my-1 ${className}`}>
-        {it.kind === 'video' ? (
-          <video src={it.url} controls playsInline preload="metadata"
-            className="rounded-xl max-w-full border border-border/50" style={{ maxHeight: 300 }} />
-        ) : (
-          <img src={it.url} alt={it.name || '添付画像'}
-            className="rounded-xl max-w-full max-h-64 object-contain border border-border/50 cursor-zoom-in"
-            onClick={() => openImage(it.url)} />
-        )}
-      </div>
-    );
-  }
+  const open=(item:MediaItem)=>{trigger.current=document.activeElement as HTMLElement;setViewing({items:collectChatMedia(root.current,items),url:item.url})};
+  const viewer=viewing?<MediaViewer items={viewing.items} initialUrl={viewing.url} onClose={()=>setViewing(null)} returnFocus={trigger.current}/>:null;
+  if(items.length===1){const it=items[0];return <div ref={root} data-media-items={JSON.stringify(items)} className={`my-1 ${className}`}><button type="button" aria-label={it.name||(it.kind==='video'?'動画を再生':'画像を開く')} className="relative block max-w-full overflow-hidden rounded-xl border border-border/50" onClick={()=>open(it)}>{it.kind==='video'?<><video src={it.url} muted playsInline preload="metadata" className="max-h-[300px] max-w-full"/><span className="absolute inset-0 flex items-center justify-center"><span className="rounded-full bg-black/55 p-3"><Play className="h-6 w-6 fill-white text-white"/></span></span></>:<img src={it.url} alt={it.name||'添付画像'} className="max-h-64 max-w-full object-contain"/>}</button>{viewer}</div>}
 
   const visible = expanded ? items : items.slice(0, MAX_TILES);
   const hidden = items.length - visible.length;
@@ -62,7 +46,7 @@ export function MediaGrid({
       <button
         key={`${it.url}-${i}`}
         type="button"
-        onClick={() => (isLast ? setExpanded(true) : it.kind === 'video' ? setPlaying(it.url) : openImage(it.url))}
+        onClick={() => (isLast ? setExpanded(true) : open(it))}
         className={`relative overflow-hidden bg-muted rounded-lg ${extraClass}`}
         aria-label={it.kind === 'video' ? '動画を再生' : '画像を開く'}
       >
@@ -102,16 +86,9 @@ export function MediaGrid({
   }
 
   return (
-    <div className={`my-1 w-full max-w-[320px] overflow-hidden rounded-xl border border-border/50 ${className}`}>
+    <div ref={root} data-media-items={JSON.stringify(items)} className={`my-1 w-full max-w-[320px] overflow-hidden rounded-xl border border-border/50 ${className}`}>
       {grid}
-      {playing && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 p-4" onClick={() => setPlaying(null)}>
-          <video src={playing} controls autoPlay playsInline className="max-h-full max-w-full rounded-lg" onClick={(e) => e.stopPropagation()} />
-          <button type="button" className="absolute right-4 top-4 rounded-full bg-black/60 p-2 text-white" onClick={() => setPlaying(null)} aria-label="閉じる">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-      )}
+      {viewer}
     </div>
   );
 }
@@ -125,8 +102,8 @@ export function collabMediaItems(metadata: Record<string, unknown> | null | unde
   for (const f of raw) {
     if (!f?.url) continue;
     const t = f.type || '';
-    if (t.startsWith('image/')) media.push({ url: f.url, kind: 'image', name: f.name });
-    else if (t.startsWith('video/')) media.push({ url: f.url, kind: 'video', name: f.name });
+    const kind=t.startsWith('image/')?'image':t.startsWith('video/')?'video':mediaKind(f.url)||mediaKind(f.name||'');
+    if (kind) media.push({ url: f.url, kind, name: f.name });
     else others.push({ name: f.name || 'ファイル', url: f.url, size: f.size });
   }
   return { media, others };

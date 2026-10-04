@@ -66,6 +66,7 @@ import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
 import { RoomBoard } from '@/components/chat/room-board';
 import { MediaGrid } from '@/components/chat/media-grid';
+import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -285,8 +286,8 @@ const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false 
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
-          img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; },
+          a({ href, children }) { const kind=href?mediaKind(href):null; return kind&&href?<button type="button" data-media-items={JSON.stringify([{url:href,kind}])} className="underline" onClick={()=>onImageClick?.(href)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
+          img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <button type="button" data-media-items={JSON.stringify([{url:imgSrc,kind:'image',name:alt}])} onClick={() => onImageClick?.(imgSrc)}><img src={imgSrc} alt={alt || '画像'} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" /></button>; },
         }}
       >{text}</ReactMarkdown>
     </div>
@@ -2691,7 +2692,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   }, [visibleDisplayItems, highlightAndScroll]);
 
   return (
-    <div className="relative flex h-full w-full overflow-hidden">
+    <div data-media-gallery-scope className="relative flex h-full w-full overflow-hidden">
     {voiceOpen && project?.room_id && (
       <div className="fixed bottom-4 right-4 z-50 w-[360px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
         <VoiceSession
@@ -3050,25 +3051,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
         />
       ) : null}
 
-      {lightboxImage && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
-          onClick={() => setLightboxImage(null)}
-        >
-          <div
-            className="overflow-auto max-h-screen max-w-screen-xl p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <img
-              src={lightboxImage}
-              alt="拡大表示"
-              className="max-w-full max-h-[90vh] object-contain rounded-lg cursor-zoom-out"
-              style={{ touchAction: 'pan-x pan-y pinch-zoom' }}
-              onClick={() => setLightboxImage(null)}
-            />
-          </div>
-        </div>
-      )}
+      {lightboxImage&&<MediaViewer key={lightboxImage} initialUrl={lightboxImage} items={collectChatMedia(messagesContentRef.current,[{url:lightboxImage,kind:mediaKind(lightboxImage)||'image'}])} onClose={()=>setLightboxImage(null)} returnFocus={document.activeElement as HTMLElement}/>}
+
     </div>
     {isPreviewOpenForProject && isMobile && (
       <div className="h-full w-full min-w-0">
