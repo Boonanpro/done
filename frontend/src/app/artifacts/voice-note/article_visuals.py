@@ -42,6 +42,7 @@ def insert_visuals(article, session, base, directory):
         caption=visual.get('caption','本文の内容を整理した図').replace('[','').replace(']','').replace('\n',' ')
         article[key]=article[key].replace(after,after+f'\n\n![{caption}]({url})\n\n',1)
         inserted+=1
-    if article.get('free') and inserted==0:
+    if article.get('free') and article.get('visuals') and inserted==0:
         raise RuntimeError('図解の挿入位置を確認できませんでした。前の原稿を残しています。再試行してください。')
-    article['editorialNotes']+='\n\n図解 '+str(inserted)+' 枚を作成し本文へ挿入済み。本文の整理図であり、実画面や実測結果ではありません。'
+    if inserted:
+        article['editorialNotes']+='\n\n図解 '+str(inserted)+' 枚を作成し本文へ挿入済み。本文の整理図であり、実画面や実測結果ではありません。'

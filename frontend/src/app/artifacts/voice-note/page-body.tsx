@@ -194,6 +194,10 @@ export function PageBody() {
  {draft.editorial&&<div role="status" aria-live="polite" style={{padding:12,background:'#eef7f4',borderRadius:8}}>{draft.editorial.state==='running'&&!editing?'処理の応答が途切れました。再試行してください。':draft.editorial.message}{editing&&<progress aria-label="記事を作成中" style={{display:'block',width:'100%',marginTop:8}}/>}</div>}<div className={styles.editorTop}><span>{draft.status}</span><span role="status" aria-label="保存状況">{recording?'録音中':audioBlob?'録音の保存待ち':saveError?'保存できませんでした':typing?'入力中…':saving||dirty?'保存中…':'保存済み'}</span><button disabled={busy||editing||syncing||saving||!dirty} onClick={()=>void run(async()=>{await save();setMessage('保存しました。');})}>{saveError?'保存を再試行':'保存'}</button></div>
  {saveError&&<p role="alert">{saveError}</p>}
  <label className={styles.field}>タイトル<input value={draft.title} onChange={e=>update({title:e.target.value})}/></label>
+ {(draft.free||draft.paid)&&<div style={{marginBottom:16}}>
+ <EditableText as="button" editId="voice-note-regenerate-audio" type="button" className={styles.primary} disabled={busy||editing||syncing||recording||(!audioBlob&&!draft.transcript.trim()&&!draft.audio.length)} onClick={()=>void send('edit')}><RefreshCw size={17}/>音声から新ルールで作り直す</EditableText>
+ <EditableText as="p" editId="voice-note-regenerate-audio-help" style={{fontSize:13,color:'#586860',marginTop:8}}>保存済みの音声・文字起こしから、タイトルと本文を再生成します。今の原稿は「前の原稿」に残ります。</EditableText>
+ </div>}
  <EditableText as="button" editId="voice-note-regenerate-title" disabled={busy||editing||syncing||recording||Boolean(audioBlob)||!draft.title.trim()||(!draft.transcript.trim()&&!draft.audio.length)} onClick={()=>void send('edit','title')} title="このタイトルで本文を作り直す" aria-label="このタイトルで本文を作り直す"><RefreshCw size={17}/></EditableText>
  <div role="group" aria-label="録音に使う入力" style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:16}}>
  <EditableText as="button" editId="voice-note-input-default" type="button" aria-pressed={!inputId} disabled={recording} onClick={()=>{chooseInput('');setInputRetry(v=>v+1);}} style={{background:!inputId?'#07856d':undefined,color:!inputId?'white':undefined}}>端末の標準入力</EditableText>
