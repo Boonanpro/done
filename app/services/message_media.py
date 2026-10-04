@@ -18,6 +18,8 @@ _MD_LINK = re.compile(r'!?\[[^\]\n]*\]\([^)\s]*\)')
 _FILE = re.compile(r'`?(?:https?://(?:127\.0\.0\.1|localhost)(?::\d+)?)?/api/v1/files/([^\s)\]`\'"<>（）、。]+)`?'
                    r'|`?[A-Za-z]:[\\/]done[\\/]uploads[\\/]([^\s)\]`\'"<>（）、。\\/]+)`?')
 _LOCAL_LINK = re.compile(r'\((?:https?://(?:127\.0\.0\.1|localhost)(?::\d+)?)(/api/v1/files/[^)\s]+)\)')
+_LOCAL_HOST = re.compile(r'https?://(?:127\.0\.0\.1|localhost)(?::\d+)?(?=/api/v1/files/)')
+_FENCE_SPLIT = re.compile(r'(```[\s\S]*?```)')
 
 
 def markup(name):
@@ -28,6 +30,17 @@ def markup(name):
     if ext in VIDEO:
         return f'[添付動画: {name} ({url})]'
     return f'[添付ファイル: {name} ({url})]'
+
+
+def portable(text):
+    """A served file's PC-only address (http://localhost:8000/api/v1/files/…) made relative; code blocks kept as written.
+
+    Why (2026-10-04): the phone draws a reply from its turn blocks, not from content. A block still said
+    `[添付動画: … (http://localhost:8000/api/v1/files/….mp4)]`; the PC opened it at once, the phone waited on a port
+    that is closed from outside. Applied to every text block that is saved."""
+    if not text or '/api/v1/files/' not in text:
+        return text
+    return ''.join(p if p.startswith('```') else _LOCAL_HOST.sub('', p) for p in _FENCE_SPLIT.split(text))
 
 
 def normalize(content):
@@ -44,6 +57,7 @@ def normalize(content):
 
     text = _FENCE.sub(hold, content)
     text = _LOCAL_LINK.sub(lambda m: '(' + m.group(1) + ')', text)
+    text = _MARKUP.sub(lambda m: _LOCAL_HOST.sub('', m.group(0)), text)
     attached = set(re.findall(r'/api/v1/files/([^\s)\]]+)', ' '.join(_MARKUP.findall(text))))
     text = _MARKUP.sub(hold, text)
     text = _MD_LINK.sub(hold, text)

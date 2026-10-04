@@ -573,13 +573,10 @@ function normalizeUrl(raw: string) {
   let value = raw.trim().replace(/\s+(?=\/)/g, '');
   value = value.replace(/[)\],.;"'`]+$/, '');
 
-  if (/^https?:\/\/localhost(?::3000)?/i.test(value)) {
-    value = value.replace(/^https?:\/\/localhost(?::3000)?/i, API_BASE_URL);
-  }
-
-  if (/^https?:\/\/127\.0\.0\.1(?::3000)?/i.test(value)) {
-    value = value.replace(/^https?:\/\/127\.0\.0\.1(?::3000)?/i, API_BASE_URL);
-  }
+  // PC内だけで通じる住所（localhost / 127.0.0.1、ポートは何番でも）は公開の入口へ読み替える。
+  // :3000 だけを外していた頃は http://localhost:8000/api/v1/files/x.mp4 が dan.paina.info:8000 になり、
+  // 外から閉じたポートを待ち続けて動画が開かなかった（2026-10-04）。
+  value = value.replace(/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?=[/?#]|$)/i, API_BASE_URL);
 
   if (value.toLowerCase().startsWith(LEGACY_BASE_URL.toLowerCase())) {
     value = API_BASE_URL + value.slice(LEGACY_BASE_URL.length);

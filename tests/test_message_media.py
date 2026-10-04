@@ -26,6 +26,16 @@ class NormalizeTests(unittest.TestCase):
         out = normalize('ファイルは `/api/v1/files/x.pdf` です\n[添付ファイル: シート.pdf (/api/v1/files/x.pdf)]')
         self.assertEqual(out.count('/api/v1/files/x.pdf'), 1)
 
+    def test_pc_only_address_inside_an_attachment(self):   # 2026-10-04: the phone waited on dan.paina.info:8000
+        from app.services.message_media import portable
+        block = '[添付動画: a.mp4 (http://localhost:8000/api/v1/files/a.mp4)]\n[添付画像: http://127.0.0.1:8000/api/v1/files/b.png]'
+        want = '[添付動画: a.mp4 (/api/v1/files/a.mp4)]\n[添付画像: /api/v1/files/b.png]'
+        self.assertEqual(portable(block), want)
+        self.assertEqual(normalize(block), want)
+        code = '```\ncurl http://localhost:8000/api/v1/files/z.png\n```'
+        self.assertEqual(portable(code), code)
+        self.assertEqual(portable('https://example.com/api/v1/files/a.mp4'), 'https://example.com/api/v1/files/a.mp4')
+
     def test_plain_text_untouched(self):
         self.assertEqual(normalize('普通の文 https://example.com/a.png'), '普通の文 https://example.com/a.png')
 

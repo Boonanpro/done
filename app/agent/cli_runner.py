@@ -1382,8 +1382,9 @@ def _save_ai_message_sync(
         return False
     content = sanitize_artifact_public_urls(content)
     if blocks:
+        from app.services.message_media import portable   # the phone draws from blocks, not from content
         blocks = [
-            {**b, "text": sanitize_artifact_public_urls(b.get("text", ""))}
+            {**b, "text": portable(sanitize_artifact_public_urls(b.get("text", "")))}
             if isinstance(b, dict) and b.get("type") == "text"
             else b
             for b in blocks
