@@ -1316,6 +1316,13 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
         return None
+    if any(c.get('scene') for tr in sequence.get('tracks',[]) for c in tr.get('clips',[])):
+        if os.environ.get('DAN_EXPORT_DISABLE_NATIVE') or not _native_export_exe():
+            raise RuntimeError('編集可能な場面の書き出しにはネイティブ合成器が必要です')
+        from app.services.editor_scene_export import materialize
+        fmt=str(sequence.get('format') or timeline.get('format') or '16:9')
+        sequence=materialize(room_id,sequence,_native_export_canvas(fmt),_sequence_frame_rate(sequence),_ffmpeg())
+        timeline={**timeline,'sequence':sequence}
     tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
     if not any(t.get("clips") for t in tracks):
         return None

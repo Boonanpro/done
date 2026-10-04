@@ -8,7 +8,7 @@
 // For ANIMATED captions the screenshotter loads the page ONCE then drives the playhead via
 // window.__renderCaptionAt(t) per frame (much faster than navigating per frame).
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { CaptionLayer, type RenderCaption } from '@/components/video-review/caption-layer';
 import { CAPTION_FONT_FILES } from '@/components/video-review/caption-design';
@@ -19,11 +19,46 @@ type Payload = {
   time: number;
   fps?: number;
   hiddenCaptionIds?: string[];
-  captions: RenderCaption[];
+  captions: (RenderCaption & {scene?: Record<string, unknown>})[];
 };
+
+type SceneHost = HTMLDivElement & {ready?: Promise<{ok:boolean}>;seek?: (t:number)=>void;dispose?:()=>void};
+let sceneScript: Promise<void> | undefined;
+function loadSceneScript(){
+  return sceneScript ||= new Promise<void>((resolve,reject)=>{
+    const s=document.createElement('script');s.src='/api/v1/editor-assistant/native-scene-script';
+    s.onload=()=>resolve();s.onerror=()=>{sceneScript=undefined;reject(Error('Scene renderer unavailable'));};document.head.append(s);
+  });
+}
+function EditableScene({clip,time}:{clip:RenderCaption & {scene?:Record<string,unknown>};time:number}){
+  const ref=useRef<HTMLDivElement>(null),host=useRef<SceneHost|null>(null),latest=useRef(time);
+  latest.current=time;
+  useEffect(()=>{
+    let canceled=false;
+    const target=ref.current;
+    loadSceneScript().then(()=>{
+      if(canceled||!target)return;
+      const h=document.createElement('div') as SceneHost;h.style.cssText='position:absolute;inset:0';target.append(h);host.current=h;
+      window.createScenePreview?.({id:clip.id,title:'動画コンテ',scene:clip.scene},h);
+      const frame=h.querySelector('iframe');if(frame)frame.style.cssText='width:100%;height:100%;border:0;display:block';
+      const controls=h.querySelector<HTMLElement>('.proposal-controls');if(controls)controls.style.display='none';
+      h.seek?.(latest.current-clip.start);
+      h.ready?.then(result=>{if(!canceled){target.dataset.sceneReady=String(result.ok);h.seek?.(latest.current-clip.start);window.__nativeSceneTime=latest.current;}});
+    }).catch(()=>{if(target)target.dataset.sceneReady='false';});
+    return ()=>{canceled=true;host.current?.dispose?.();host.current=null;target?.replaceChildren();};
+  },[clip.id,clip.scene,clip.start]);
+  useEffect(()=>{
+    host.current?.seek?.(time-clip.start);
+    const handle=requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__nativeSceneTime=time;}));
+    return ()=>cancelAnimationFrame(handle);
+  },[time,clip.start]);
+  return <div ref={ref} style={{position:'absolute',inset:0,zIndex:-1}}/>;
+}
 
 declare global {
   interface Window {
+    createScenePreview?: (item:unknown,host:SceneHost)=>SceneHost;
+    __nativeSceneTime?:number;
     __renderCaptionAt?: (t: number, hiddenCaptionIds?: string[]) => Promise<void>;
     __setCaptionPayload?: (payload: Payload) => Promise<void>;
     __nativeCaptionPayload?: Payload;
@@ -134,15 +169,16 @@ function Inner() {
   const top = (viewport.h - payload.outH * scale) / 2;
   return (
     <div style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative', pointerEvents: 'none' }} data-ready={ready ? '1' : '0'}>
-      <div style={{ width: payload.outW, height: payload.outH, position: 'absolute', left, top, transform: `scale(${scale})`, transformOrigin: 'top left' }}>
+      <div style={{ width: payload.outW, height: payload.outH, position: 'absolute', left, top, transform: `scale(${scale})`, transformOrigin: 'top left',isolation:'isolate' }}>
         <CaptionLayer
           outW={payload.outW}
           outH={payload.outH}
-          captions={payload.captions}
+          captions={payload.captions.filter(c=>!c.scene)}
           time={payload.time}
           fps={payload.fps}
           hiddenCaptionIds={payload.hiddenCaptionIds}
         />
+        {payload.captions.filter(c=>c.scene && payload.time>=c.start && payload.time<c.end).map(c=><EditableScene key={c.id} clip={c} time={payload.time}/>)}
       </div>
     </div>
   );

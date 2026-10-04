@@ -50,7 +50,7 @@ _VISUAL_LANE = {'anyOf': [{'type': 'integer', 'minimum': 0}, {'type': 'string', 
 _calls = 0
 _generations = 0
 _draft_lock = threading.RLock()
-_BACKGROUND_TOOLS = {'generate_speech','generate_image','watch_video','watch_render','measure_speech','render_frame','probe_audio','resolve_reference','analyze_reference','search_web_references','render_motion_project','present_references','read_presentations','revise_presentation'}
+_BACKGROUND_TOOLS = {'generate_speech','generate_image','generate_look_frame','watch_video','watch_render','measure_speech','render_frame','probe_audio','resolve_reference','analyze_reference','search_web_references','render_motion_project','present_references','read_presentations','revise_presentation'}
 
 def _run_tool_thread(name,args):
     if name in _BACKGROUND_TOOLS:
@@ -201,14 +201,19 @@ def tool_definitions() -> list[types.Tool]:
               {"clip_id": _STR, "text": _STR, "style": _CAPTION_STYLE}, ["clip_id"]),
         _tool("measure_speech", "実際の再生音声から単語とタイムライン時刻を計測する。字幕に合わせて推測せず台詞の境界を確かめる。",{'start':_NUM,'end':_NUM},['start','end']),
         _tool("match_source_audio", "編集済み素材と別の収録素材で同じ発話を探す。reference側の時刻に対応するcandidate側の実測時刻と相関を返す。ずれが変化する場合は区間を細かく調べる。映像の確認も必要。",{'reference_asset_id':_STR,'candidate_asset_id':_STR,'times':{'type':'array','items':_NUM},'window':_NUM},['reference_asset_id','candidate_asset_id','times']),
-        _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す。既存テイストはreference_asset_idsに静止画素材IDを指定して参照できる。model省略はgpt_image_2。aspect_ratio省略は作品の比率。",
+        _tool("generate_look_frame", "この作品の完成見た目をGPT Imageで1枚生成しビジュアル履歴へ提示・保存する。既存画像の修正はrevisesに以前の提示item IDを渡す。元画像と他の参考画像を入力し履歴を保持。新規は2.5 Flare、修正は2.5 Sunburst。タイムラインや本番動画は変更しない。", {
+            'prompt':_STR,'title':_STR,'aspect_ratio':_STR,'revises':_STR,
+            'reference_asset_ids':{'type':'array','items':_STR,'maxItems':4},
+            'model':{'type':'string','enum':['gpt-image-2','gpt-image-2.5-flare','gpt-image-2.5-sunburst']}}, ['prompt']),
+        _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す。既存テイストはreference_asset_idsに静止画素材IDを指定して参照できる。model省略はgpt_image_2。aspect_ratio省略は作品の比率。完成イメージの相談・修正にはgenerate_look_frameを使う。",
               {"prompt": _STR, "aspect_ratio": _STR, "model": _STR,
                "reference_asset_ids":{"type":"array","items":_STR}}, ["prompt"]),
         _tool("generate_video", "許可済みの制作予算で動画を生成し、素材として登録する。provider省略はGoogle API直結でHiggsfieldクレジット不使用。Google modelはgemini-omni-1.1-flash。reference_mode=styleは参考のテイストから別内容を制作（参照動画3秒まで）、editは元動画の修正（10秒まで）。durationは希望尺で実際の尺は結果を読む。Higgsfieldは明示指定した場合のみ。結果は配置されないのでadd_clip等でタイムラインに置く。既存成果があればimport_mediaで再利用する。",
               {"prompt": _STR, "aspect_ratio": _STR, "duration": _NUM, "model": _STR,
                "provider": {"type":"string","enum":["google","higgsfield"]},
                "reference_mode":{"type":"string","enum":["style","edit"]},
-               "reference_path": _STR, "resolution": _STR}, ["prompt"]),
+               "reference_path": _STR, "resolution": _STR,
+               "appearance_reference_path": {"type":"string","description":"Google edit用。reference_pathの3D動画を動き・構図の指定に使い、この画像を完成時の人物・背景・質感の指定に使う。"}}, ["prompt"]),
         _tool("import_image", "実在の画像を部屋の素材として取り込み asset_id を返す。url にはWeb上の画像URL"
               "（WebSearch/WebFetchで見つけた本物のロゴ等）またはローカルファイルパスを指定。生成ではなく本物が必要な時はこちらを使う。",
               {"url": _STR, "name": _STR}, ["url"]),
@@ -512,6 +517,15 @@ async def _dispatch(name: str, a: dict) -> list:
         _generations += 1
         return _ok(_generate_image(draft, str(a.get("prompt") or ""), str(a.get("aspect_ratio") or seq.get('format') or "16:9"), a.get('reference_asset_ids') or [], 'gpt_image_2'))
 
+    if name == "generate_look_frame":
+        if MAX_GENERATIONS and _generations >= MAX_GENERATIONS:
+            return _ok({'ok':False,'error':'Generation limit reached for this job'})
+        from app.services.editor_look_frame import generate
+        _generations += 1
+        result=generate(ROOM_ID,draft['content_id'],str(a['prompt']),str(a.get('title') or '完成イメージ'),
+            a.get('reference_asset_ids'),a.get('model'),str(a.get('aspect_ratio') or '16:9'),a.get('revises'))
+        return _ok(result)
+
     if name == "generate_video":
         if MAX_GENERATIONS and _generations >= MAX_GENERATIONS:
             return _ok({"ok": False, "error": "Generation limit reached for this job"})
@@ -526,7 +540,8 @@ async def _dispatch(name: str, a: dict) -> list:
             _generations += 1
             result = google_video.generate(_room_dir(), str(a['prompt']), aspect,
                 float(a.get('duration',5)), str(a.get('reference_path','')),
-                str(a.get('reference_mode','style')), str(a.get('resolution','720p')))
+                str(a.get('reference_mode','style')), str(a.get('resolution','720p')),
+                appearance_reference_path=str(a.get('appearance_reference_path','')))
             aid = uuid.uuid4().hex[:12]
             # Draft cleanup owns only its asset copy, never the durable provider
             # output shared by later retries or other drafts. No re-encoding.
@@ -539,6 +554,8 @@ async def _dispatch(name: str, a: dict) -> list:
                 'note':'Place this asset in the timeline; generation alone does not update the editor.'})
         if provider != 'higgsfield':
             return _ok({'ok':False,'error':'Unknown video provider'})
+        if a.get('appearance_reference_path'):
+            return _ok({'ok':False,'error':'Separate motion and appearance inputs currently require provider=google'})
         _generations += 1
         return _ok(_generate_video(draft, str(a['prompt']), aspect, float(a.get('duration',5)),
             str(a.get('model','gemini_omni_flash_1_1')),str(a.get('reference_path','')),

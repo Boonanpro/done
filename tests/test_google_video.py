@@ -45,3 +45,24 @@ def test_long_style_reference_fails_before_spend(tmp_path,provider,monkeypatch):
     with pytest.raises(ValueError,match='3s'):
         gv.generate(tmp_path,'test',reference_path=str(source))
     assert not provider
+
+
+def test_motion_and_appearance_are_separate_and_both_affect_cache(tmp_path,provider):
+    source=tmp_path/'motion.mp4';source.write_bytes(b'motion')
+    look=tmp_path/'look.png';look.write_bytes(b'appearance one')
+    args=dict(reference_path=str(source),reference_mode='edit',appearance_reference_path=str(look))
+    first=gv.generate(tmp_path,'Finish scene',**args)
+    inputs=provider[0][1]['json']['input']
+    assert [x['type'] for x in inputs]==['video','image','text']
+    assert '<VIDEO_0>@Video1' in inputs[-1]['text'] and '<IMAGE_REF_0>@Image1' in inputs[-1]['text']
+    assert gv.generate(tmp_path,'Finish scene',**args)['reused']
+    look.write_bytes(b'appearance two')
+    assert gv.generate(tmp_path,'Finish scene',**args)['path']!=first['path']
+    assert len(provider)==2
+
+
+def test_appearance_requires_video_before_spend(tmp_path,provider):
+    look=tmp_path/'look.png';look.write_bytes(b'appearance')
+    with pytest.raises(ValueError,match='edit source video'):
+        gv.generate(tmp_path,'test',appearance_reference_path=str(look))
+    assert not provider

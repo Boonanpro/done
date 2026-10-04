@@ -25,6 +25,11 @@ router = APIRouter(prefix='/editor-assistant', tags=['editor-assistant'])
 PAGE = Path(__file__).parents[1] / 'static' / 'editor-assistant.html'
 
 
+@router.get('/native-scene-script')
+def native_scene_script():
+    return Response(PAGE.with_name('editor-scene.js').read_text(encoding='utf-8-sig'),media_type='application/javascript')
+
+
 @router.get('/reference-library/media/{ident}')
 def reference_library_media(ident: str):
     # Only the explicitly curated public reference corpus is served here.
@@ -107,10 +112,11 @@ class ConsultationUpdateRequest(BaseModel):
 
 
 @router.post('/consultation/update')
-def update_consultation(request: Request, body: ConsultationUpdateRequest):
-    _get_user(request)
+async def update_consultation(request: Request, body: ConsultationUpdateRequest):
+    user = _get_user(request)
     from app.services.editor_consultation_sheet import update
-    try:return update(body.previous,body.changes,body.reference_agreed)
+    from app.services.editor_production_handoff import select
+    try:return await select(update(body.previous,body.changes,body.reference_agreed),body.previous,user.user_id)
     except ValueError as exc:raise HTTPException(422,str(exc))
 
 
@@ -119,6 +125,84 @@ class LiveReferenceSearchRequest(BaseModel):
     scope: str = 'work'
     dialogue: list[dict] = Field(default_factory=list,max_length=40)
     items: list[dict] = Field(default_factory=list,max_length=60)
+    refinement: dict = Field(default_factory=dict)
+
+
+class FilmPlanRequest(BaseModel):
+    room_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,100}$')
+    content_id: str = Field(min_length=1,max_length=100)
+    base_revision: int | None = None
+    changes: list[dict] | None = None
+    evidence: str = ''
+
+
+@router.post('/film-plan')
+def film_plan(request: Request, body: FilmPlanRequest):
+    _get_user(request)
+    from app.services import editor_film_plan as film
+    try:
+        plan = (film.read(body.room_id,body.content_id) if body.changes is None else
+                film.update(body.room_id,body.content_id,body.base_revision,body.changes,body.evidence))
+        content = td._find_content(td._read_contents_raw(body.room_id),body.content_id) or {}
+        ids = {i for s in plan['scenes'] for i in s.get('visual_ids',[])}
+        visuals = {i['id']:i for p in content.get('proposal_history',[]) + [content.get('presentation',{})]
+                   for i in p.get('items',[]) if i['id'] in ids}
+        return {'film_plan':plan,'visuals':visuals}
+    except ValueError as exc:
+        raise HTTPException(422,str(exc))
+
+
+class ConsultationRevisionRequest(BaseModel):
+    room_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,100}$')
+    content_id: str = Field(min_length=1,max_length=100)
+    item_id: str
+    changes: list[dict] = Field(min_length=1,max_length=80)
+
+
+class FilmSceneRequest(BaseModel):
+    room_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,100}$')
+    content_id: str = Field(min_length=1,max_length=100)
+    scene_id: str
+    item_id: str
+    start: float | None = None
+
+
+@router.post('/film-plan/place-scene')
+def place_film_scene(request:Request,body:FilmSceneRequest):
+    _get_user(request)
+    from app.services.editor_film_plan import place_scene
+    try:return place_scene(body.room_id,body.content_id,body.scene_id,body.item_id,body.start)
+    except ValueError as exc:raise HTTPException(422,str(exc))
+
+
+@router.post('/consultation/revise-visual')
+def revise_consultation_visual(request: Request, body: ConsultationRevisionRequest):
+    _get_user(request)
+    from app.services.editor_presentation import revise
+    try:
+        result=revise(body.room_id,body.content_id,body.item_id,body.changes)
+        from app.services.editor_film_plan import link_visual_revision
+        result['film_plan']=link_visual_revision(body.room_id,body.content_id,body.item_id,result['presentation']['items'][0]['id'])
+        return result
+    except ValueError as exc:
+        raise HTTPException(422,str(exc))
+
+
+class ConsultationVisualRequest(BaseModel):
+    room_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,100}$')
+    content_id: str = Field(min_length=1,max_length=100)
+    items: list[dict] = Field(min_length=1,max_length=4)
+    comparison_key: str = Field(min_length=1,max_length=160)
+
+
+@router.post('/consultation/visual')
+def consultation_visual(request: Request, body: ConsultationVisualRequest):
+    _get_user(request)
+    from app.services.editor_presentation import present
+    try:
+        return present(body.room_id,body.content_id,body.items,comparison_key=body.comparison_key)
+    except ValueError as exc:
+        raise HTTPException(422,str(exc))
 
 
 @router.post('/live/reference-search')
@@ -127,6 +211,7 @@ async def live_reference_search(request: Request, body: LiveReferenceSearchReque
     if body.scope=='work':
         from app.services.reference_url_index import search
         result=await search(user.user_id,body.query,dialogue=body.dialogue,displayed=body.items,
+                            discovery=body.refinement or None,
                             embedded=True,routing='genres',verify_matches=True,limit=3)
         return {'available':result['available'],'ids':[r['id'] for r in result['results']],
                 'elapsed_ms':result['elapsed_ms'],'failure':result.get('failure')}
@@ -244,7 +329,7 @@ def page():
 @router.get('/script')
 def script():
     import hashlib
-    version=hashlib.sha256(b''.join(PAGE.with_name(name).read_bytes() for name in ('editor-assistant.js','editor-live.js','editor-proposals.js','editor-scene.js'))).hexdigest()[:16]
+    version=hashlib.sha256(b''.join(PAGE.with_name(name).read_bytes() for name in ('editor-assistant.js','editor-live.js','editor-proposals.js','editor-scene.js','editor-film-plan.js'))).hexdigest()[:16]
     return Response('window.__danEditorBuild='+json.dumps(version)+';\n'+PAGE.with_suffix('.js').read_text(encoding='utf-8'), media_type='application/javascript',
                     headers={'Cache-Control': 'no-store'})
 
@@ -342,7 +427,7 @@ def begin(request: Request, body: Context):
 
 @router.get('/proposal-script')
 def proposal_script():
-    source=PAGE.with_name('editor-scene.js').read_text(encoding='utf-8-sig')+'\n'+PAGE.with_name('editor-proposals.js').read_text(encoding='utf-8-sig')
+    source=PAGE.with_name('editor-scene.js').read_text(encoding='utf-8-sig')+'\n'+PAGE.with_name('editor-proposals.js').read_text(encoding='utf-8-sig')+'\n'+PAGE.with_name('editor-film-plan.js').read_text(encoding='utf-8-sig')
     return Response(source,media_type='application/javascript',headers={'Cache-Control':'no-store'})
 
 

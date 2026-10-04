@@ -919,14 +919,46 @@ async function ensureStageContent(){
       if(context?.content_id!==v.content_id)throw Error('新しい作品を開けませんでした');
     }
 }
-$('show-chat').onclick=()=>{document.body.classList.add('drawer-open');$('input').focus();};
-$('hide-chat').onclick=()=>document.body.classList.remove('drawer-open');
+function setChatDrawer(open,restoreFocus=true){
+  // Both panels occupy the same edge: keep the active task's controls reachable.
+  if(open&&$('consultation-inspector')&&!$('consultation-inspector').hidden)$('show-consultation')?.click();
+  document.body.classList.toggle('drawer-open',open);
+  $('show-chat').setAttribute('aria-expanded',String(open));
+  if(open)$('input').focus();
+  else if(restoreFocus)$('show-chat').focus();
+}
+$('show-chat').setAttribute('aria-controls','drawer');
+$('show-chat').setAttribute('aria-expanded','false');
+$('show-chat').onclick=()=>setChatDrawer(!document.body.classList.contains('drawer-open'));
+$('hide-chat').onclick=()=>setChatDrawer(false);
+// The memo button is installed at DOMContentLoaded, after this script executes.
+document.addEventListener('click',event=>{
+  if(event.target.closest?.('#show-consultation')&&!$('consultation-inspector')?.hidden)setChatDrawer(false,false);
+});
+$('drawer').addEventListener('keydown',event=>{
+  if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();event.stopPropagation();setChatDrawer(false);}
+});
+// Microphone state is already owned by the voice transport. Mirror its label,
+// never introduce a second connection state for the toolbar.
+function updateDockLabels(){
+  const labels={attach:'素材', 'show-chat':'文字で伝える',disconnect:'終了'};
+  for(const [id,label] of Object.entries(labels))if($(id))$(id).dataset.label=label;
+  const micLabel=$('mic').getAttribute('aria-label');
+  $('mic').dataset.label=micLabel==='マイクを止める'?'ミュート':micLabel==='マイクをオン'?'再開':'話す';
+  $('mic').title=micLabel;
+}
+updateDockLabels();
+new MutationObserver(updateDockLabels).observe($('mic'),{attributes:true,attributeFilter:['aria-label']});
 $('edit-view').onclick=()=>{
   const full=document.body.classList.contains('compact');
   window.__setStageMode(full);nativeCommand(full?'stage_full':'stage_compact');
 };
+window.addEventListener('dan-vconte-started',e=>{
+ if(e.detail?.room_id!==context?.room_id||e.detail?.content_id!==context?.content_id)return;
+ window.__setStageMode(false);nativeCommand('stage_compact');
+});
 const originalPick=$('pick').onclick;
-$('pick').onclick=()=>{window.__setStageMode(false);nativeCommand('stage_compact');document.body.classList.remove('drawer-open');originalPick();};
+$('pick').onclick=()=>{window.__setStageMode(false);nativeCommand('stage_compact');setChatDrawer(false,false);originalPick();};
 $('hide-references').onclick=()=>{
   document.body.classList.remove('has-references');
   $('show-presentations').hidden=false;
@@ -1051,7 +1083,6 @@ function workDescription(operation,work){
   if(work==='unknown')return '状況を再取得しています';
   if(work==='waiting')return productionSnapshot.question||'あなたの返答を待っています';
   if(operation?.name==='transform_visuals')return `${operation.args.clip_ids.length}個の文字・背景・映像をまとめて変更しています`;
-  if(operation?.description)return operation.description;
   if(!operation&&productionSnapshot.progress)return '直近の制作報告：'+productionSnapshot.progress.text;
   const name=(operation?.name||operation?.tool||'').split('__').at(-1),a=operation?.args||{};
   const time=Number(a.t??a.start);
@@ -1073,7 +1104,7 @@ function updatePresence(){
   const liveWork=LIVE_VOICE?liveConnection?.work:null;
   const statusLine=!tool&&reasonRunning&&reasoningProgress?reasoningProgress.text:!tool&&!reasonRunning&&liveWork?.status==='running'&&liveWork.detail?liveWork.detail:workDescription(operation,work);
   if($('orb-status').textContent!==statusLine){$('orb-status').textContent=statusLine;$('orb-status').title=statusLine;}
-  const focus=workFocus(productionSnapshot);
+  const focus=''; // The request is not a live operation; do not repeat it as progress.
   $('work-focus').textContent=focus;
   $('work-focus').hidden=!focus||work==='idle';
   $('work-meta').textContent=work==='unknown'?'作業状況の更新が届いていません':productionSnapshot.pending?'追加指示を送信済み · 制作担当の受領待ち':operation?.started_at?`開始から ${Math.max(0,Math.floor(Date.now()/1000-operation.started_at))} 秒`:'';

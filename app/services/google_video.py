@@ -38,7 +38,7 @@ def _metadata(value):
 
 
 def generate(folder, prompt, aspect='16:9', duration=5, reference_path='',
-             reference_mode='style', resolution='720p'):
+             reference_mode='style', resolution='720p', appearance_reference_path=''):
     from app.config import settings
     if not prompt.strip():
         raise ValueError('prompt required')
@@ -67,10 +67,29 @@ def generate(folder, prompt, aspect='16:9', duration=5, reference_path='',
         label = kind.upper()
         prefix = (f'[# References <{label}_REF_0>@Reference1] Use Reference1 as a style reference for the new subject. '
                   if reference_mode == 'style' else f'[# Sources <{label}_0>@Source1] Edit Source1 as requested. ')
+    appearance_hash = None
+    if appearance_reference_path:
+        if not reference_path or reference_mode != 'edit' or kind != 'video':
+            raise ValueError('Appearance reference requires an edit source video')
+        appearance = Path(appearance_reference_path).resolve(strict=True)
+        appearance_mime = mimetypes.guess_type(appearance.name)[0] or ''
+        if not appearance_mime.startswith('image/'):
+            raise ValueError('Appearance reference must be an image')
+        if appearance.stat().st_size > 20 * 1024 * 1024:
+            raise ValueError('Appearance image exceeds 20 MB')
+        raw = appearance.read_bytes()
+        appearance_hash = hashlib.sha256(raw).hexdigest()
+        inputs.append({'type':'image','mime_type':appearance_mime,'data':base64.b64encode(raw).decode()})
+        prefix = ('[# Sources <VIDEO_0>@Video1] [# References <IMAGE_REF_0>@Image1] '
+                  'Use Video1 only for the scene blocking, action timing and camera. '
+                  'Use Image1 for finished character, materials, environment and lighting. '
+                  'Replace the proxy geometry appearance completely; do not blend its model style into the result. ')
     text = prefix + f'Requested length: {duration:g} seconds. ' + prompt
     spec = {'provider': 'google', 'model': MODEL, 'prompt': text, 'source_sha256': source_hash,
             'reference_mode': reference_mode, 'aspect_ratio': aspect, 'resolution': resolution,
             'requested_duration': duration}
+    if appearance_hash:
+        spec['appearance_sha256'] = appearance_hash
     key = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:24]
     target = Path(folder) / 'google-video' / key
     target.mkdir(parents=True, exist_ok=True)
@@ -98,6 +117,10 @@ def generate(folder, prompt, aspect='16:9', duration=5, reference_path='',
         saved['response'] = _metadata(data)
         blocks = [c for s in data.get('steps', []) if s.get('type') == 'model_output'
                   for c in s.get('content', []) if c.get('type') == 'video']
+        if not blocks:
+            blocks = [c for c in data.get('outputs', []) if c.get('type') == 'video']
+        if not blocks and isinstance(data.get('output_video'), dict):
+            blocks = [data['output_video']]
         if len(blocks) != 1:
             raise ValueError('Google did not return exactly one video; inspect receipt before retrying')
         media = blocks[0]
@@ -114,6 +137,7 @@ def generate(folder, prompt, aspect='16:9', duration=5, reference_path='',
         output.write_bytes(raw)
         meta = {**spec, **probe(output), 'generator': 'google', 'usage': data.get('usage', {}),
                 'reference_path': str(Path(reference_path).resolve()) if reference_path else None,
+                'appearance_reference_path': str(appearance) if appearance_hash else None,
                 'elapsed_seconds': round(time.monotonic() - started, 2), 'receipt': str(receipt)}
         saved.update(state='completed', metadata=meta)
         return {'path': str(output), 'metadata': meta, 'reused': False}

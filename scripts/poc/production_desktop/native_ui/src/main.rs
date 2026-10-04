@@ -5006,7 +5006,7 @@ out[acts[i].id||String(i)]=[(b.left-cr.left)/cr.width,(b.top-cr.top)/cr.height,b
 window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 }catch(e){}};";
         let built = wry::WebViewBuilder::new()
-            .with_url("http://127.0.0.1:3000/caption-frame")
+            .with_url(&format!("{}/caption-frame",std::env::var("DAN_CAPTION_ORIGIN").unwrap_or_else(|_| "http://127.0.0.1:3000".into())))
             .with_transparent(true)
             .with_focused(false)
             .with_bounds(bounds)
@@ -5057,6 +5057,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 continue;
             }
             for c in &tr.clips {
+                if let Some(scene) = &c.scene {
+                    out.push(serde_json::json!({"id":c.id,"text":"","start":c.timeline_start,
+                        "end":c.timeline_end,"scene":scene}));
+                    continue;
+                }
                 if c.text.is_none() || c.asset_id.is_some() || c.region.is_some() {
                     continue;
                 }
@@ -5107,6 +5112,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // document payload stays cached, while this small ID set is refreshed at cuts
         // and when a caption cache PNG becomes available.
         let mut hidden_caption_ids: Vec<String> = native_caption_ids(&self.doc, t).into_iter().collect();
+        if self.doc.seq.tracks.iter().filter(|tr| !tr.hidden).any(|tr| tr.clips.iter().any(|c| c.scene.is_some() && self.doc.clip_active_at(c,t))) {
+            hidden_caption_ids.clear();
+        }
         hidden_caption_ids.sort();
         use std::hash::{Hash, Hasher};
         let mut hidden_hasher = std::collections::hash_map::DefaultHasher::new();

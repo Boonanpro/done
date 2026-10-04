@@ -2,6 +2,17 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
+test('repeated library result does not publish a duplicate and forwards refinement',async()=>{
+ const r=runtime();const requests=[];
+ r.box.presentationFeed=new Map([['p',{id:'p',at:1,items:[{id:'shown',library_id:'yt-4PwDFddpo4c',url:'https://www.youtube.com/watch?v=4PwDFddpo4c'}]}]]);
+ r.box.api=async(path,body)=>{requests.push({path,body});return {available:true,ids:['yt-4PwDFddpo4c']};};
+ r.box.item={name:'search_reference_library',arguments:JSON.stringify({query:'more cinematic',scope:'work',refinement:{keep:['documentary'],change:['camera'],next_axis:'camera'}})};
+ const result=await r.run('executeLiveConsultationTool(item,liveConnection,context)');
+ assert.equal(result.already_displayed,true);
+ assert.equal(requests.length,1);
+ assert.equal(requests[0].body.refinement.next_axis,'camera');
+ assert.equal(result.shown,false);
+});
 function runtime(){
  const events=[],sent=[],calls=[],elements={};let now=100000;
  const box={structuredClone,performance,TextEncoder,crypto:require('node:crypto').webcrypto,Date:class extends Date{static now(){return now;}},setTimeout,clearTimeout,

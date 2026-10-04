@@ -34,6 +34,9 @@ def test_live_uses_responses_tools_and_original_history():
     assert config['delegation']['type'] == 'responses'
     backend=config['delegation']['responses']
     assert backend['model']=='gpt-6-astra'
+    from app.services.editor_first_artifact import GUIDANCE, CONSULTATION_GUIDANCE
+    assert GUIDANCE in backend['instructions']
+    assert CONSULTATION_GUIDANCE in backend['instructions']
     assert {'get_consultation_state','update_consultation_sheet','search_reference_library','run_editor_task'} <= {t.get('name') for t in backend['tools']}
     import json
     assert config['input'][0]['role']=='developer'

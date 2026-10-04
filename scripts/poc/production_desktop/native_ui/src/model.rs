@@ -112,6 +112,9 @@ pub struct Track {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct Clip {
+    /// Editable browser scene. It follows the native playhead without a video bake.
+    #[serde(default)]
+    pub scene: Option<serde_json::Value>,
     #[serde(default)]
     pub crop: Option<serde_json::Value>,
     #[serde(default)]

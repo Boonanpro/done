@@ -23,6 +23,7 @@ window.createScenePreview=function(item,host){
  const observer=new IntersectionObserver(entries=>{visible=entries[0].isIntersecting;last=0;schedule();});observer.observe(host);
  play.onclick=()=>{running=!running;last=0;send();schedule();play.blur();};seek.oninput=()=>{t=Number(seek.value);last=0;send();};
  host.control=async action=>{if(!ready||!['play','pause'].includes(action))return false;running=action==='play';last=0;send();schedule();return true;};
+ host.seek=value=>{running=false;cancelAnimationFrame(timer);t=Math.max(0,Math.min(c.duration,Number(value)||0));last=0;send();};
  host.dispose=()=>{disposed=true;cancelAnimationFrame(timer);clearTimeout(timeout);observer.disconnect();window.removeEventListener('message',message);if(!settled)complete(false,'closed');frame.srcdoc='';};
  // Own CSP restricts even generated fetch/import code to these public modules.
  const vendor=location.origin+'/api/v1/editor-assistant/scene-vendor/';

@@ -59,7 +59,7 @@ function liveBackendMessage(b,event){
  record('live_backend_message_delivered',{message_id:event.id,phase:event.phase,turn_id:b.turn_id});
 }
 function livePresentationItem(i){
- const item={id:i.id,title:i.title,kind:i.kind,note:i.note,url:i.source_url||i.url,start:i.start,end:i.end,library_id:i.library_id,observation_basis:i.observation_basis};
+ const item={id:i.id,title:i.title,kind:i.kind,note:i.note,url:i.source_url||i.url,start:i.start,end:i.end,library_id:i.library_id,observation_basis:i.observation_basis,asset_id:i.asset_id,revises:i.revises};
  if(i.scene)item.appearance={duration:i.scene.duration,description:i.scene.description,params:i.scene.params};
  if(i.composition){
   const c=i.composition,text=c.layers.filter(l=>l.type==='text');
@@ -347,6 +347,7 @@ function installConsultationInspector(){
  const footer=document.createElement('footer'),next=document.createElement('strong'),pending=document.createElement('p'),updated=document.createElement('p');footer.append(next,pending,updated);panel.append(footer);document.body.append(panel);
  let open=true;try{open=localStorage.getItem('dan-consultation-inspector')!=='closed';}catch{}
  function show(){panel.hidden=!open;toggle.setAttribute('aria-expanded',String(open));}show();
+ window.addEventListener('dan-vconte-started',e=>{if(e.detail?.content_id===context?.content_id&&e.detail?.room_id===context?.room_id){open=false;show();}});
  toggle.onclick=()=>{open=!open;show();toggle.blur();try{localStorage.setItem('dan-consultation-inspector',open?'open':'closed');}catch{}};
  const labels={ask:'必要なことを確認する',compare:'参考を探して見せる',propose:'次の具体化を提案する',conversation:'質問や会話に答える',select:'参考の好みを記録する',reveal:'参考を再表示する',play:'参考を再生する',pause:'参考を一時停止する',listen:'話を聞く',execute:'制作・調査などを実行する'};
  let signature='';
@@ -358,7 +359,25 @@ function installConsultationInspector(){
   let count=0;for(const key of Object.keys(fields)){const item=memo?.version===3?memo.fields?.[key]:null;const known=item&&item.status!=='unknown';if(known)count++;
    values[key].textContent=known?(item.status==='undecided'?'未定で進める：':'')+item.value:'未確認';values[key].dataset.known=String(!!known);}
   next.textContent=memo?.ready_for_draft?'下書きへ進む相談ができます':`確認済み ${count} / 8`;
-  pending.textContent=memo?.reference_agreed?'参考の方向：合意済み':'参考の方向：まだ合意していません';
+  pending.textContent='';
+  const refs=memo?.reference_items||[];
+  if(refs.length){
+   const row=values.references;row.replaceChildren();
+   for(const ref of refs){
+    let url;try{url=new URL(ref.source_url||ref.url,location.href);}catch{continue;}
+    if(!['https:','http:'].includes(url.protocol))continue;
+    const link=document.createElement('a');link.textContent=ref.title||'参考を開く';
+    link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+    link.style.cssText='display:block;color:inherit;text-decoration:none;margin:8px 0';
+    let thumb=ref.thumbnail_url;
+    const yt=url.hostname==='youtu.be'?url.pathname.slice(1):/(^|\.)youtube\.com$/.test(url.hostname)?url.searchParams.get('v'):null;
+    if(yt&&/^[\w-]{11}$/.test(yt))thumb='https://i.ytimg.com/vi/'+yt+'/hqdefault.jpg';
+    if(thumb){try{const u=new URL(thumb,location.href);if(['http:','https:'].includes(u.protocol)){
+     const img=document.createElement('img');img.src=u.href;img.alt=ref.title||'参考';img.style.cssText='width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;display:block';link.prepend(img);
+    }}catch{}}
+    row.append(link);
+   }
+  }
   updated.textContent=memo?.version===2?'旧形式の記録は引き継がず、会話の内容から整理し直します。':'未確認と、相談の結果「未定で進める」は区別します。';
  }
  render();const timer=setInterval(render,500);window.addEventListener('pagehide',()=>clearInterval(timer),{once:true});
@@ -370,11 +389,64 @@ async function executeLiveConsultationTool(item,session,captured){
  const args=JSON.parse(item.arguments||'{}');
  const owner={editContext:captured};
  const sheet=()=>{const memo=readConsultationMemo(owner);return memo?.version===3?memo:null;};
- if(item.name==='get_consultation_state')return {context:captured, sheet:sheet(),
-  displayed:context?.room_id===captured.room_id&&context?.content_id===captured.content_id?referenceDecisionItems():[],production:liveFacts().production};
+ if(item.name==='show_consultation_visual'){
+  const current=()=>!deletedConversationOwners.has(conversationKey(captured))&&context?.room_id===captured.room_id&&context?.content_id===captured.content_id;
+  if(!current())return {shown:false,reason:'view_changed'};
+  liveWorkState('running','構成や構図を描いています',session);
+  try{
+   const shown=await api('/consultation/visual',{...captured,items:args.items,comparison_key:session.id+':'+item.call_id});
+   if(!current())return {shown:false,saved:true,reason:'view_changed'};
+   renderReferences(shown.presentation);const display=await presentationReady(shown.presentation);
+   record('consultation_visual_displayed',{room_id:captured.room_id,content_id:captured.content_id,...display});
+   return {shown:display.ok,items:shown.presentation.items.map(livePresentationItem)};
+  }finally{liveWorkState('idle','',session);}
+ }
+ if(item.name==='get_consultation_state'){
+  const result=await api('/film-plan',{room_id:captured.room_id,content_id:captured.content_id});
+  if(sheet()?.ready_for_draft&&!sheet()?.production_handoff){
+   await executeLiveConsultationTool({name:'update_consultation_sheet',arguments:'{"changes":[]}'},session,captured);
+  }
+  const current=context?.room_id===captured.room_id&&context?.content_id===captured.content_id;
+  if(current)window.renderFilmPlan?.(result,captured);
+  return {context:captured,sheet:sheet(),...result,selected_scene:current?window.danFilmSelection?.id:null,
+   displayed:current?referenceDecisionItems():[],production:liveFacts().production};
+ }
+ if(item.name==='update_film_plan'){
+  const result=await api('/film-plan',{room_id:captured.room_id,content_id:captured.content_id,...args});
+  record('film_plan_updated',{room_id:captured.room_id,content_id:captured.content_id,...result});
+  if(context?.room_id===captured.room_id&&context?.content_id===captured.content_id)window.renderFilmPlan?.(result,captured);
+  return {saved:true,...result};
+ }
+ if(item.name==='place_film_scene'){
+  liveWorkState('running','場面をタイムラインに配置しています',session);
+  try{
+   const result=await api('/film-plan/place-scene',{room_id:captured.room_id,content_id:captured.content_id,...args});
+   if(result.ok&&context?.room_id===captured.room_id&&context?.content_id===captured.content_id)window.dispatchEvent(new CustomEvent('dan-vconte-started',{detail:captured}));
+   return result;
+  }finally{liveWorkState('idle','',session);}
+ }
+ if(item.name==='revise_consultation_visual'){
+  liveWorkState('running','場面を調整しています',session);
+  try{
+   const result=await api('/consultation/revise-visual',{room_id:captured.room_id,content_id:captured.content_id,...args});
+   if(context?.room_id!==captured.room_id||context?.content_id!==captured.content_id)return {saved:true,shown:false,reason:'view_changed',...result};
+   renderReferences(result.presentation);const display=await presentationReady(result.presentation);
+   window.renderFilmPlan?.({...result,visuals:Object.fromEntries(result.presentation.items.map(i=>[i.id,i]))},captured);
+   return {...result,shown:display.ok};
+  }finally{liveWorkState('idle','',session);}
+ }
  if(item.name==='update_consultation_sheet'){
-  const updated=await api('/consultation/update',{previous:sheet(),changes:args.changes,reference_agreed:args.reference_agreed});
+  liveWorkState('running','制作メモと次の進め方を確認しています',session);
+  let updated;
+  try{updated=await api('/consultation/update',{previous:sheet(),changes:args.changes,reference_agreed:args.reference_agreed});}
+  finally{liveWorkState('idle','',session);}
   if(deletedConversationOwners.has(conversationKey(captured)))return {saved:false,reason:'content_deleted'};
+  const ids=updated.fields?.references?.reference_ids||[];
+  const previousRefs=sheet()?.reference_items||[];
+  const visible=context?.room_id===captured.room_id&&context?.content_id===captured.content_id;
+  const candidates=visible&&typeof presentationFeed!=='undefined'?[...presentationFeed.values()].flatMap(p=>p.items):[];
+  updated.reference_items=ids.map(id=>candidates.find(i=>i.id===id)||previousRefs.find(i=>i.id===id)).filter(Boolean)
+   .map(i=>({id:i.id,title:i.title,url:i.url,source_url:i.source_url,thumbnail_url:i.thumbnail_url||i.thumbnail||i.poster}));
   localStorage.setItem(consultationMemoKey(owner),JSON.stringify(updated));
   record('consultation_sheet_updated',{room_id:captured.room_id,content_id:captured.content_id,sheet:updated,source:'live_responses_tool'});
   if(session===liveConnection)liveAppend('thinking',JSON.stringify({kind:'consultation_sheet',sheet:updated,read_silently:true}));
@@ -387,7 +459,12 @@ async function executeLiveConsultationTool(item,session,captured){
    const result=await api('/live/reference-search',{...args,dialogue:conversationMemory.slice(-40),items:current()?referenceDecisionItems():[]});
    if(!result.available||!result.ids?.length)return {shown:false,...result};
    if(!current())return {shown:false,reason:'view_changed',ids:result.ids};
-   const shown=await api('/reference-library/present',{room_id:captured.room_id,content_id:captured.content_id,ids:result.ids,comparison_key:session.id+':'+item.call_id});
+   const existing=referenceDecisionItems();
+   const newIds=result.ids.filter(id=>!existing.some(i=>i.library_id===id||i.id===id||
+    (id.startsWith('yt-')&&[i.url,i.source_url].some(u=>u&&(u.includes('watch?v='+id.slice(3))||u.includes('youtu.be/'+id.slice(3)))))));
+   if(!newIds.length)return {shown:false,already_displayed:true,items:existing,
+    instruction:'These references are already visible, not new alternatives. Use control_reference to revisit them; do not claim narrowing or a new example.'};
+   const shown=await api('/reference-library/present',{room_id:captured.room_id,content_id:captured.content_id,ids:newIds,comparison_key:session.id+':'+item.call_id});
    if(!current())return {shown:false,reason:'view_changed'};
    renderReferences(shown.presentation);const display=await presentationReady(shown.presentation);
    record('live_reference_tool_displayed',{room_id:captured.room_id,content_id:captured.content_id,ids:result.ids,...display});
@@ -404,8 +481,12 @@ async function executeLiveConsultationTool(item,session,captured){
   if(!args.task?.trim())throw Error('制作依頼が空です');
   if(reasonRunning)return {accepted:false,reason:'work_in_progress',production:liveFacts().production};
   const c={...captured,consultation_memo:sheet(),live_dialogue:conversationMemory.slice(-200),live_facts:liveFacts()};
-  const b=await begin(c,'voice',args.task,epoch);if(!b)return {accepted:false};
+  const plan=await api('/film-plan',{room_id:captured.room_id,content_id:captured.content_id});
+  const {decisions,...currentPlan}=plan.film_plan;
+  const task=(args.artifact==='look_frame'?args.task+'\nCreate or revise one finished-look image with generate_look_frame (GPT Image), and show it in this project visual history. For revisions pass the original item ID as revises and preserve unspecified appearance. This request does not authorize video generation or timeline changes.':args.task)+'\nCurrent work-specific story/scene decisions (proposed is not agreed): '+JSON.stringify(currentPlan);
+  const b=await begin(c,'voice',task,epoch);if(!b)return {accepted:false};
   b.liveSession=session;b.liveDelegation=null;
+  if(args.artifact==='vconte')window.dispatchEvent(new CustomEvent('dan-vconte-started',{detail:captured}));
   runReasoning().catch(error);
   return {accepted:true,turn_id:b.turn_id,completed:false};
  }

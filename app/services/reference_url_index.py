@@ -65,6 +65,12 @@ def observation_search_text(record, observation_index=None):
  for technique in record.get('techniques',[]):
   if observation_index is None or technique.get('observation_index')==observation_index:
    parts.append('Observed technique: '+technique.get('name',''))
+ if observation_index is None:
+  review=record.get('quality_review',{})
+  if review:
+   parts.insert(0,'Model review (not human approval): '+str(review.get('verdict','uncertain'))+
+                '; suitable: '+', '.join(review.get('suitable_for',[])[:3])+
+                '; limitations: '+', '.join(review.get('not_suitable_for',[])[:3]))
  return ' | '.join(parts)[:1400]
 
 def candidates(scope='work'):
@@ -169,6 +175,8 @@ async def search(user_id,query,*,scope='work',limit=3,timeout=8,dialogue=(),embe
    'Retain liked properties and reject properties the user wants to change; do not re-offer an unchanged rejected look as an improvement. '
    'When discovery is provided, retrieve evidence for its next unresolved axis, rather than copies of the closest match. '
    'Different values of the unresolved axis are useful alternatives; preserve other settled preferences. '
+   'Discovery keep lists accepted traits; change lists remaining mismatches; next_axis is the difference to illustrate now. '
+   'Use observed facets as evidence for these differences. A metadata-only topical match does not establish a camera, audio, or visual-style match. '
    'A changed direction supersedes conflicting old preferences and rejected traits; a hypothetical does not. '
    'Work metadata comes from title/publisher/description, so do not imagine camera, color or audio details. '
    'Detailed video observations are available only where explicitly included. Return none when required evidence is missing.',
@@ -215,6 +223,7 @@ async def search(user_id,query,*,scope='work',limit=3,timeout=8,dialogue=(),embe
       'Reject contradicted medium/format: live-action behind-the-scenes is not a 2D anime reference, '
       'a filmmaking tutorial is not a narrative film, a travel ad is not an architect presenting a home. '
       'Allow analogous subjects if format and desired experience fit. Latest genuine pivot overrides old constraints. '
+      'If discovery specifies keep/change/next_axis, verify the remaining requested difference as well as the overall format. '
       'Use uncertain when metadata cannot establish fit; never invent visual evidence.',
      'criteria':{'supported':'Supported relevant reference','contradicted':'Conflicts with explicit current requirements','uncertain':'Insufficient evidence'}} for r in finalists},timeout=timeout)
    # Content fit and URL availability read the same shortlist independently.

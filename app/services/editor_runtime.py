@@ -32,6 +32,13 @@ def run(room,user,content,job,prompt,mcp_path,emit,model):
     system+='\n制作手段を選ぶ時はproduction_methodsで検証状態を読める。候補にない表現は検索・公式資料・公開コードで調べて実現方法を組む。この一覧を作品ジャンルの制限にしない。'
     from app.services.editor_creative_direction import PRODUCTION_GUIDANCE
     system+='\n'+PRODUCTION_GUIDANCE
+    from app.services.editor_first_artifact import GUIDANCE
+    system+='\n'+GUIDANCE
+    from app.services.editor_film_plan import INSTRUCTIONS as FILM_INSTRUCTIONS
+    system+='\n'+FILM_INSTRUCTIONS.replace('get_consultation_state','保存された制作案').replace('update_film_planで','会話担当が')
+    prompt+='\n最新の作品別制作案（proposedは未採用の提案）: '+json.dumps({k:v for k,v in c.get('film_plan',{}).items() if k!='decisions'},ensure_ascii=False)
+    prompt+='\nこの作品の完成イメージ画像（採用は会話原文で判断。生成しただけで採用ではない）: '+json.dumps(c.get('look_frames',[]),ensure_ascii=False)
+    system+='\n人物・背景・光・質感など完成時の見た目を確認する依頼はgenerate_look_frameでGPT Imageの画像を作り、ビジュアル履歴へ提示する。修正ではrevisesに元の提示IDを渡し、変える点と保持する点をpromptに書く。参考作品から採用する特徴とこの作品の新しい内容を区別する。生成された画像・モデル・元画像のIDは作品に保存される。採用した画像を動画生成やVコンテへ引き継ぐ。画像の相談だけならタイムラインや本番動画を変更しない。'
     result=None
     system+='\n参考URLや添付素材はresolve_referenceで実物へ解決し、返されたitemをpresent_referencesで提示できる。詳細はanalyze_referenceで調べ、read_referencesで保存済み参考を読む。動画の良さはまず自分で読み取り提案し、ユーザーへ理由説明を必須にしない。参考の分析・既存制作手段の調査と、実物の提示を分離する。制作方法は参考に合わせて選び、既存のcomposition形式だけに表現を限定しない。'
     system+='\n参考探しや表現の提案では、ユーザーが見て判断できる候補を早く出します。検索で関連する候補が見つかったらpresent_referencesでエディターに提示し、候補一覧の文章だけで終了しません。全候補の詳細確認が終わるまで最初の提示を待たせず、追加の候補は同じ提示に加えられます。検索結果しか確認していない場合は映像の細部や正確な区間を断定せず、確認できた情報で提案します。詳しい視聴や制作方法の分析はユーザーが関心を示した候補や判断に必要な箇所に絞ります。参考を探すためにユーザーのデスクトップで複数の動画を同時に再生しないでください。'

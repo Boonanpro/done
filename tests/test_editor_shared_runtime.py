@@ -25,6 +25,8 @@ def test_shared_runtime_uses_normal_prompt_tools_but_not_chat_history(monkeypatc
     assert r['text']=='done'
     c=calls[0]
     assert c['system'].startswith('normal-prompt')
+    from app.services.editor_first_artifact import GUIDANCE
+    assert GUIDANCE in c['system']
     assert c['path']=='mcp.json' and c['content']=='content'
     assert 'chat-session' not in c['prompt']
 

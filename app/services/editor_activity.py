@@ -14,6 +14,9 @@ def start(room,job,tool,args):
          'provider':args.get('provider','google') if tool=='generate_video' else None,
          'clip_ids':[args['clip_id']] if args.get('clip_id') else args.get('clip_ids',[])}
     # Use the operation's own explanation; never expose shell commands or tokens.
+    if tool=='generate_look_frame':
+        row.update(model=args.get('model') or ('gpt-image-2.5-sunburst' if args.get('revises') else 'gpt-image-2.5-flare'),
+                   provider='openai',description='完成イメージを修正しています' if args.get('revises') else '完成イメージの画像を作っています')
     if isinstance(args.get('description'),str):
         row['description']=args['description'][:240]
     folder=td._room_dir(room)/'jobs'/job/'activity'
