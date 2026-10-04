@@ -12,6 +12,7 @@ import { LiveJobs, type LiveJob } from './live-jobs';
 import { LiveGreeting } from './live-greeting';
 import { WorkWaiting, isWorking } from './work-waiting';
 import { WaitingAudio } from './waiting-audio';
+import { QUIET_SPEECH_MIC, liftQuietSpeech } from './quiet-speech';
 
 type Status = 'idle' | 'connecting' | 'connected' | 'error';
 type RtEvent = { type: string; [key: string]: unknown };
@@ -351,7 +352,7 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       };
 
       try {
-        mic = atomWifi?.stream ?? await navigator.mediaDevices.getUserMedia({ audio: true });
+        mic = atomWifi?.stream ?? await navigator.mediaDevices.getUserMedia({ audio: QUIET_SPEECH_MIC });
       } catch {
         throw new Error('マイクの使用が許可されませんでした');
       }
@@ -359,7 +360,9 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
         cleanupLocal();
         return;
       }
-      for (const track of mic.getAudioTracks()) pc.addTrack(track, mic);
+      // What Live hears. Muting and stopping still act on the raw mic tracks.
+      const uplink = atomWifi ? mic : await liftQuietSpeech(audioCtx, mic);
+      for (const track of uplink.getAudioTracks()) pc.addTrack(track, uplink);
       // マイク音量 → オーブ全体の揺れ
       try {
         const src = audioCtx.createMediaStreamSource(mic);
