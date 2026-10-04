@@ -4050,13 +4050,6 @@ function AppMain() {
             style={({ pressed }) => [styles.appBarBackButton, pressed && styles.buttonPressed]}
           >
             <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
-            {/* LINE-style unread count from OTHER chats, shown next to the back
-                button (neutral color, not an alarming red badge). */}
-            {unreadTotal > 0 ? (
-              <View style={styles.backBadge}>
-                <Text style={styles.backBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
-              </View>
-            ) : null}
           </Pressable>
           <View style={styles.appBarTitleBlockCenter}>
             <Text style={styles.appBarTitleSingle} numberOfLines={1}>
