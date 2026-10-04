@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_ROOT = PROJECT_ROOT / "frontend"
 VERCEL = shutil.which("vercel") or shutil.which("vercel.cmd") or "vercel"
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 DEPLOYMENT_URL_RE = re.compile(r"https://[^\s]+\.vercel\.app")
 
 
@@ -65,6 +66,7 @@ def current_source_revision() -> str:
             text=True,
             timeout=5,
             check=True,
+            creationflags=_NO_WINDOW,
         )
         revision = result.stdout.strip()
         if revision:
@@ -331,6 +333,7 @@ class ArtifactPublicationService:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=1800,
+            creationflags=_NO_WINDOW,
         )
         output = proc.stdout or ""
         if proc.returncode != 0:
@@ -354,6 +357,7 @@ class ArtifactPublicationService:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=240,
+            creationflags=_NO_WINDOW,
         )
         if promote.returncode != 0:
             self.mark_failed(artifact_id, f"Vercel promotion failed: {(promote.stdout or '')[-1500:]}")
