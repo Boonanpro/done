@@ -128,13 +128,14 @@ class Worker:
                 contents = await call_tool('phone', {'action': 'follow', 'goal': goal, 'max_steps': 4})
             else:
                 contents = await call_tool('browser', {'action': 'follow', 'goal': goal, 'max_steps': 4, 'observation': 'dom', 'quiet_if_unmoved': True})
-        except Exception:
+        except Exception as exc:
+            self.state.publish(self.job_id, 'diagnostic', f'jev: follow failed — {type(exc).__name__}: {str(exc)[:160]}')
             return
         output, images = function_output(contents)
-        if phone and 'Jev が押した: なし' in output:
+        if (phone and 'Jev が押した: なし' in output) or not output.strip() or '"pressed": []' in output or '"pressed":[]' in output:
+            # Jev pressed nothing: the model's own result stands (no second copy of the page). Why, for the record.
+            self.state.publish(self.job_id, 'diagnostic', 'jev: pressed nothing — ' + ' '.join(output.split())[:220])
             return
-        if not output.strip() or '"pressed": []' in output or '"pressed":[]' in output:
-            return   # Jev pressed nothing: the model's own result stands (no second copy of the page)
         self.state.publish(self.job_id, 'tool', 'browser:follow(jev)')
         result['output'] = (result['output'][:1500] + '\n\n（続けて Jev が目的に向けて押した。下が今の画面）\n' + output)[:OUTPUT_CHARS]
         result['images'] = images
