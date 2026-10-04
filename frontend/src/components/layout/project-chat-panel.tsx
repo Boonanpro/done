@@ -353,7 +353,10 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
   );
 }
 
-const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean }) {
+// 文章の中の、ファイル・画像・動画の印（TurnTextSegment が表示に変えるもの）
+const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
+
+const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -369,6 +372,25 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
   // text segments are mid-work narration ("○○を調べます") → render them muted
   // so the real answer stands out.
   const lastTextIndex = grouped.reduce((acc, g, i) => (g.kind === 'text' ? i : acc), -1);
+  if (settled && lastTextIndex >= 0) {
+    // 回答が出て止まった後: 途中の宣言は作業ログに畳み、見えるのは最後の文章と、途中で出したファイル・画像・動画だけ（APK と同じ）。
+    const log: TurnBlock[] = [];
+    const media: string[] = [];
+    grouped.forEach((g, i) => {
+      if (i === lastTextIndex) return;
+      if (g.kind === 'tools') { log.push(...g.items); return; }
+      log.push({ type: 'reasoning', text: g.text } as TurnBlock);
+      media.push(...(g.text.match(MEDIA_TAG) || []));
+    });
+    const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
+    return (
+      <div className="flex flex-col">
+        {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
+        {media.length > 0 ? <TurnTextSegment text={media.join('\n')} onImageClick={onImageClick} /> : null}
+        <TurnTextSegment text={final} onImageClick={onImageClick} />
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col">
       {grouped.map((g, i) => (g.kind === 'text'
@@ -566,7 +588,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
         </button>
       )}
       {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} />}
+      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled />}
       {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
           <MediaGrid items={[...aiImages.map((url) => ({ url, kind: 'image' as const })), ...aiVideos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
