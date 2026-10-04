@@ -224,7 +224,43 @@ export async function POST(request: NextRequest) {
   const linkUrl = otpCode ? null : extractLink(body);
 
   if (!otpCode && !linkUrl) {
-    // Nothing actionable in this SMS. 200 so the worker stops retrying.
+    // Not a code: the phone sends these only when the user turned on 「SMSを全部ダンに読ませる」. Kept in the inbox queue
+    // (detected_messages, pending) like mail, here on the always-up side; the home PC's inbox round judges it
+    // (app/services/inbox.py pending_sms). Until 2026-10-04 these were answered "accepted" and dropped.
+    if (body.trim()) {
+      const sourceId = 'sms:' + createHash('sha256').update(`${sender}|${messageId}|${body}`, 'utf8').digest('hex').slice(0, 16);
+      const known = await supabaseFetch(
+        `/rest/v1/detected_messages?select=id&user_id=eq.${device.user_id}&source_id=eq.${encodeURIComponent(sourceId)}&limit=1`,
+        { method: 'GET' },
+        url,
+        key,
+      );
+      if (!(Array.isArray(known.body) && known.body.length > 0)) {
+        const kept = await supabaseFetch(
+          '/rest/v1/detected_messages',
+          {
+            method: 'POST',
+            headers: { Prefer: 'return=minimal' },
+            body: JSON.stringify({
+              user_id: device.user_id,
+              source: 'sms',
+              source_id: sourceId,
+              content: body,
+              subject: `SMS: ${sender}`,
+              sender_info: { from: sender },
+              metadata: { inbox: 'pending' },
+              status: 'pending',
+            }),
+          },
+          url,
+          key,
+        );
+        if (!kept.ok) {
+          // 500 -> the phone retries; the message is not lost to a transient DB error.
+          return NextResponse.json({ detail: 'Failed to keep SMS' }, { status: 500 });
+        }
+      }
+    }
     return NextResponse.json({ accepted: true, otp_detected: false });
   }
 

@@ -426,8 +426,29 @@ async def handle(user_id, item, own):
     return decision['decision']
 
 
+async def pending_sms(user_id):
+    """SMS the phone forwarded while Dan was elsewhere: the always-up landing (Vercel) keeps them as pending rows; judged
+    here like any other item. Marked 'judging' first so the next round does not take the same one."""
+    from app.services.supabase_client import get_supabase_client
+    sb = get_supabase_client().client
+    rows = await asyncio.to_thread(lambda: sb.table('detected_messages').select('*').eq('user_id', user_id).eq('source', 'sms')
+                                   .eq('status', 'pending').eq('metadata->>inbox', 'pending').limit(20).execute().data or [])
+    for row in rows:
+        _mark(row['id'], 'judging')
+        try:
+            await judge_row(user_id, row)
+        except Exception:
+            logger.exception('inbox: judging sms %s failed', row['id'])
+            _mark(row['id'], 'pending')
+    return len(rows)
+
+
 async def cycle(user_id):
     """Fetch every mailbox of the user, queue what is new, judge it."""
+    try:
+        await pending_sms(user_id)
+    except Exception:
+        logger.exception('inbox: forwarded SMS not read')
     data = await asyncio.to_thread(settings, user_id)
     boxes = data.get('mailboxes') or []
     own = {b['address'] for b in boxes}
