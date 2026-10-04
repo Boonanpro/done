@@ -244,3 +244,20 @@ nul
 /frontend/public/*.mp4
 # 今日やったことページの挿絵 (生成物・ローカル専用)
 data/today_illust/
+
+# 試験の残骸・書き出し・別プロジェクト・ビルド出力（2026-10-04 整理。消さずに git の対象から外す）
+/scratch/
+/exports/
+/videos/
+/outputs/
+/frontend/.next-*/
+/venv_tts/
+/mobile/dist-voice-quality/
+/app/data/component-library/
+/app/data/production-assets/
+/frontend/public/media/
+/safeguard-hyperframes/
+/safeguard-commercial/
+/safeguard-commercial-hyperframes/
+/Safeguard-HyperFrames.mp4
+/scratch-set-aside/
