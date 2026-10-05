@@ -13,9 +13,31 @@ type ArtifactLinkProps = LinkProps &
     href: LinkProps["href"];
   };
 
+const DedicatedArtifactSlugContext = React.createContext<string | null>(null);
+
+/**
+ * 専用配信プロジェクトが配信している成果物の slug を、サーバー描画の時点からリンクへ伝える。
+ * ホスト名はブラウザに届くまで分からないので、これが無いと最初の HTML のリンクだけ
+ * `/preview/<slug>/...` になる（artifacts/layout.tsx が ARTIFACT_ONLY_SLUG を渡す）。
+ */
+export function DedicatedArtifactProvider({
+  slug,
+  children,
+}: {
+  slug: string | null;
+  children: React.ReactNode;
+}) {
+  return (
+    <DedicatedArtifactSlugContext.Provider value={slug}>
+      {children}
+    </DedicatedArtifactSlugContext.Provider>
+  );
+}
+
 export const ArtifactLink = React.forwardRef<HTMLAnchorElement, ArtifactLinkProps>(
   function ArtifactLink({ href, ...props }, ref) {
     const pathname = usePathname() || "";
+    const dedicatedSlug = React.useContext(DedicatedArtifactSlugContext);
     const [hostname, setHostname] = React.useState("");
 
     React.useEffect(() => {
@@ -31,8 +53,9 @@ export const ArtifactLink = React.forwardRef<HTMLAnchorElement, ArtifactLinkProp
         rest: parsed.rest,
         pathname,
         hostname,
+        dedicatedSlug,
       });
-    }, [href, hostname, pathname]);
+    }, [dedicatedSlug, href, hostname, pathname]);
 
     return <Link ref={ref} href={resolvedHref} {...props} />;
   },

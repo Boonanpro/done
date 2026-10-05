@@ -93,12 +93,22 @@ export function artifactVisiblePath({
   rest = '',
   pathname = '',
   hostname = '',
+  dedicatedSlug = null,
 }: {
   slug: string;
   rest?: string;
   pathname?: string;
   hostname?: string;
+  dedicatedSlug?: string | null;
 }): string {
+  // 専用配信プロジェクト（1 プロジェクト = 1 成果物）では、成果物は常にドメイン直下で
+  // 配信される。ホスト名が分からないサーバー描画の時点でもクリーンURLを出す。ここで
+  // `/preview/<slug>/...` を出すと、検索エンジンが最初に受け取る HTML の内部リンクが
+  // robots.txt で塞いだ URL になり、JavaScript を動かさない巡回にはリンクが届かない。
+  if (dedicatedSlug && dedicatedSlug === slug) {
+    return cleanPath(rest);
+  }
+
   const customDomains = KNOWN_CUSTOM_DOMAINS[slug] || [];
   // 独自ドメイン上では常にクリーンURL（/business 等）を出す。静的リスト(KNOWN_CUSTOM_DOMAINS)
   // に無い動的接続ドメインでも、localhost / *.vercel.app 以外＝独自ドメインなら成果物は
@@ -185,11 +195,13 @@ export function resolveArtifactHref({
   rest = '',
   pathname = '',
   hostname = '',
+  dedicatedSlug = null,
 }: {
   slug: string;
   rest?: string;
   pathname?: string;
   hostname?: string;
+  dedicatedSlug?: string | null;
 }): string {
-  return artifactVisiblePath({ slug, rest, pathname, hostname });
+  return artifactVisiblePath({ slug, rest, pathname, hostname, dedicatedSlug });
 }
