@@ -687,6 +687,56 @@ def drop_flagged(page: dict, issues: list[dict]) -> dict | None:
 
 
 # ---------------------------------------------------------------- エンジン1: 言葉を選ぶ
+# ページ単位で「検索に出ている」と数える表示回数（28日）。Search Console は検索語の大半を伏せるので
+# （2026-10 実測: 表示953回のうち検索語が見えるのは132回）、検索語ごとの数字だけでは判断材料が足りない。
+PAGE_MIN_IMPRESSIONS = 30
+# 「狙った語」のうち、どの分野にも付く言葉。分野の近さを測る時は数えない
+GENERIC_TERMS = {"高圧", "低圧", "受電", "点検", "使い方", "方法", "測定方法", "原因", "周期", "基準値", "低い", "高い", "違い", "とは"}
+
+
+def _guide_page_stats(days: int = 28) -> dict[str, dict]:
+    """解説ページごとの検索成績（slug → 表示・クリック・順位）。Search Console が使えない時は空。"""
+    try:
+        svc = _service()
+        end = date.today() - timedelta(days=3)
+        rows = _query(svc, end - timedelta(days=days - 1), end, ["page"], row_limit=500)
+    except Exception as e:  # noqa: BLE001
+        log(f"gsc page query failed: {e}")
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        m = re.match(rf"^{re.escape(ORIGIN)}/guides/([a-z0-9-]+)$", r["keys"][0])
+        if m:
+            out[m.group(1)] = {"impressions": r.get("impressions", 0), "clicks": r.get("clicks", 0), "position": r.get("position", 0), "ctr": r.get("ctr", 0)}
+    return out
+
+
+def _near_hot_pages(items: list[dict], hot: list[dict], limit: int = 24, per_term: int = 6) -> dict[str, str]:
+    """検索で表示が出ているページと同じ分野の候補を選ぶ（候補の語 → 分野の言葉）。
+
+    分野は「狙った語」を空白で分けた言葉で見る。1つの分野に偏らないよう、分野ごとに per_term 件まで。
+    """
+    weight: dict[str, int] = {}
+    for g in hot:
+        for t in set(_norm_kw(g["keyword"]).split()) - GENERIC_TERMS:
+            weight[t] = weight.get(t, 0) + g["impressions"]
+    scored = []
+    for i in items:
+        terms = [t for t in weight if t in i["keyword"]]
+        if terms:
+            scored.append((sum(weight[t] for t in terms), i, max(terms, key=lambda t: weight[t])))
+    picked: dict[str, str] = {}
+    used: dict[str, int] = {}
+    for _, i, term in sorted(scored, key=lambda x: (-x[0], -x[1]["docs"])):
+        if used.get(term, 0) >= per_term:
+            continue
+        used[term] = used.get(term, 0) + 1
+        picked[i["keyword"]] = term
+        if len(picked) >= limit:
+            break
+    return picked
+
+
 def pick_keyword(pool: dict, guides: list[dict], exclude: set[str]) -> dict | None:
     items = [
         i for i in pool["items"].values()
@@ -697,9 +747,20 @@ def pick_keyword(pool: dict, guides: list[dict], exclude: set[str]) -> dict | No
     cands = items[:60]
     if not cands:
         return None
+    # 検索で表示が出ているページと同じ分野の語は、資料の本数が少なめでも候補に入れる
+    stats = _guide_page_stats()
+    hot = sorted(
+        ({**g, **stats[g["slug"]]} for g in STATIC_GUIDES + guides if stats.get(g["slug"], {}).get("impressions", 0) >= PAGE_MIN_IMPRESSIONS),
+        key=lambda g: -g["impressions"],
+    )
+    near = _near_hot_pages(items, hot)
+    shown = {c["keyword"] for c in cands}
+    cands += [i for i in items if i["keyword"] in near and i["keyword"] not in shown]
     existing = [f"- {g['title']}（狙った語: {g['keyword']}）" for g in STATIC_GUIDES + guides]
+    hot_lines = [f"- {g['title']}（狙った語: {g['keyword']}）表示{g['impressions']}回" for g in hot]
     lines = [
         f"- {c['keyword']} | 出どころ: {'Search Consoleで表示あり' if c['origin'] == 'search_console' else 'Googleの検索候補'} | 関連記事 {c['docs']}本 | 近い記事: {' / '.join(c['top_titles'])}"
+        + (f" | 表示が出ている分野: {near[c['keyword']]}" if c["keyword"] in near else "")
         for c in cands
     ]
     prompt = f"""あなたは「電気主任技術者応援サイト」(denkiouen.com) の編集長です。
@@ -715,9 +776,13 @@ def pick_keyword(pool: dict, guides: list[dict], exclude: set[str]) -> dict | No
 3. 既存ページと内容が重ならない
 4. 避ける: 試験問題の解き方、求人・転職、特定の会社や製品の評判、最新の法改正の正確さが命の話題、意味が曖昧な語
 5. 同じ候補が表記違いで並んでいたら、より検索されそうな自然な表記を選ぶ
+6. 「検索で表示が出ている既存ページ」と同じ設備・作業について、まだ答えていない別の疑問に当たる語があれば優先する（3 のとおり内容の重なりは避ける）
 
 # 既存のページ
 {chr(10).join(existing)}
+
+# 検索で表示が出ている既存ページ（直近28日）
+{chr(10).join(hot_lines) or "（まだ無い）"}
 
 # 候補
 {chr(10).join(lines)}
@@ -832,22 +897,12 @@ def cmd_new_page(args) -> dict | None:
 
 
 # ---------------------------------------------------------------- エンジン2: 順位を磨く
-def _query_stats(svc, page_url: str, query: str, start: date, end: date) -> dict:
-    rows = _query(
-        svc,
-        start,
-        end,
-        [],
-        row_limit=1,
-        dimensionFilterGroups=[
-            {
-                "filters": [
-                    {"dimension": "page", "operator": "equals", "expression": page_url},
-                    {"dimension": "query", "operator": "equals", "expression": query},
-                ]
-            }
-        ],
-    )
+def _query_stats(svc, page_url: str, query: str | None, start: date, end: date) -> dict:
+    """ページ×検索語の成績。query が None ならページ全体（検索語が伏せられた表示も含む）。"""
+    filters = [{"dimension": "page", "operator": "equals", "expression": page_url}]
+    if query is not None:
+        filters.append({"dimension": "query", "operator": "equals", "expression": query})
+    rows = _query(svc, start, end, [], row_limit=1, dimensionFilterGroups=[{"filters": filters}])
     r = rows[0] if rows else {}
     days = (end - start).days + 1
     return {
@@ -876,19 +931,23 @@ def cmd_evaluate(args=None) -> list[dict]:
     results = []
     for ex in due:
         started = date.fromisoformat(ex["started_on"])
-        after = _query_stats(svc, ex["page_url"], ex["query"], started + timedelta(days=1), started + timedelta(days=7))
         base = ex["baseline"]
+        # ページ単位で選んだ磨きは、ページ全体の数字で判定する（検索語ごとの数字は伏せられて出ない）
+        page_scope = base.get("scope") == "page"
+        after = _query_stats(svc, ex["page_url"], None if page_scope else ex["query"], started + timedelta(days=1), started + timedelta(days=7))
         bpos, apos = base.get("position"), after.get("position")
         per_day = lambda s: (s["impressions"] / s["days"]) if s["days"] else 0  # noqa: E731
+        clicks_up = after["clicks"] > base["clicks"] * after["days"] / max(base["days"], 1)
         verdict = "neutral"
         if bpos is None and apos is not None:
             verdict = "won"  # 変更前は出ていなかった語で表示され始めた
         elif apos is None and bpos is not None:
             verdict = "lost" if per_day(base) >= 1 else "neutral"  # 表示が消えた
         elif bpos is not None and apos is not None:
-            if apos <= bpos - 1.0 or (after["clicks"] > base["clicks"] * after["days"] / max(base["days"], 1) and apos <= bpos):
+            if apos <= bpos - 1.0 or (clicks_up and apos <= bpos):
                 verdict = "won"
-            elif apos >= bpos + 2.0:
+            elif apos >= bpos + 2.0 and not (page_scope and clicks_up):
+                # ページ全体の平均順位は、新しい検索語で表示が増えるだけでも下がる。クリックが増えていれば戻さない
                 verdict = "lost"
         reverted = False
         if verdict == "lost":
@@ -952,17 +1011,43 @@ def cmd_polish(args=None) -> dict | None:
             others.append({"page": page, "query": query, "position": round(pos, 1), "impressions": impr})
     if others:
         activity("polish_manual_candidates", items=sorted(others, key=lambda x: -x["impressions"])[:10])
+    # ページ単位: 検索語が伏せられていても、表示が多いのに上位に届いていないページを拾う。
+    # 狙う語は、そのページで見えている検索語があればそれ、無ければページを作った時の語。
+    seen_query = {c["slug"]: c["query"] for c in sorted(cands, key=lambda x: x["score"])}
+    for r in _query(svc, start, end, ["page"], row_limit=500):
+        pos, impr = r.get("position", 0), r.get("impressions", 0)
+        m = re.match(rf"^{re.escape(ORIGIN)}/guides/([a-z0-9-]+)$", r["keys"][0])
+        slug = m.group(1) if m else None
+        if not (slug and slug in guides and slug not in locked and parse_ts(guides[slug]["updated_at"]) < week_ago):
+            continue
+        if not (3.0 < pos <= 20 and impr >= PAGE_MIN_IMPRESSIONS):
+            continue
+        # 表示が多く、順位が上に近く、クリックされていないページほど優先
+        cands.append({
+            "slug": slug, "page": r["keys"][0], "query": seen_query.get(slug) or guides[slug]["keyword"],
+            "position": pos, "impressions": impr, "clicks": r.get("clicks", 0), "scope": "page",
+            "score": impr / pos * (1 - min(r.get("ctr", 0), 1)),
+        })
     if getattr(args, "force_slug", None):
         # 動作確認用: 実データが無くても、指定したページ・検索語で改善の流れを通す
         fs = args.force_slug
         cands = [{"slug": fs, "page": f"{ORIGIN}/guides/{fs}", "query": args.force_query or guides[fs]["keyword"], "position": 8.0, "impressions": 0, "score": 1}]
         locked.discard(fs)
     if not cands:
-        log(f"polish: 対象なし（自動で直せるページで、表示{min_impr}回以上・2〜20位の言葉がまだ無い）")
+        log(f"polish: 対象なし（自動で直せるページで、表示{min_impr}回以上・2〜20位の言葉も、表示{PAGE_MIN_IMPRESSIONS}回以上・3〜20位のページもまだ無い）")
         return None
     c = max(cands, key=lambda x: x["score"])
+    page_scope = c.get("scope") == "page"
     g = get_guide(c["slug"])
-    log(f"polish: {c['slug']} 「{c['query']}」 {c['position']:.1f}位 表示{c['impressions']}")
+    log(f"polish: {c['slug']} 「{c['query']}」 {c['position']:.1f}位 表示{c['impressions']}{'（ページ単位）' if page_scope else ''}")
+    if page_scope:
+        situation = (
+            f"検索語「{c['query']}」を狙った解説ページを、1位を狙って改善します。\n"
+            f"このページは直近28日間に検索結果へ{c['impressions']}回表示され、平均 {c['position']:.1f} 位、クリックは{c['clicks']}回です。\n"
+            "表示されてもクリックされていないので、題名と説明文は、検索した人が知りたいことの答えがあると分かる具体的な言い方に見直してください（誇張や煽りは入れない）。"
+        )
+    else:
+        situation = f"検索語「{c['query']}」で現在 {c['position']:.1f} 位の解説ページを、1位を狙って改善します。"
 
     current = {k: g.get(k) for k in PAGE_FIELDS}
     gap = claude_json(
@@ -991,7 +1076,7 @@ def cmd_polish(args=None) -> dict | None:
     current = _map_text(current, lambda t: CITE_RE.sub(lambda m: f"[{cite_map.get(int(m.group(1)))}]" if cite_map.get(int(m.group(1))) else "", t))
 
     improved = claude_json(
-        f"""検索語「{c['query']}」で現在 {c['position']:.1f} 位の解説ページを、1位を狙って改善します。
+        f"""{situation}
 上位ページの調査で、うちのページに足りない論点が分かりました。資料で裏付けられる論点だけを足してください。
 資料で裏付けられない論点は足さないでください（足さないことは失敗ではありません）。
 題名と説明文は、検索語「{c['query']}」がそのまま、または自然に含まれるように見直してください。
@@ -1026,8 +1111,10 @@ def cmd_polish(args=None) -> dict | None:
         out.write_text(json.dumps({"gap": gap, "page": page, "citations": cites, "check": check}, ensure_ascii=False, indent=1), encoding="utf-8")
         log(f"polish dry-run: {out}")
         return None
-    before = _query_stats(svc, c["page"], c["query"], end - timedelta(days=13), end)
-    snap = {k: g.get(k) for k in PAGE_FIELDS + ("citations",)}
+    before = _query_stats(svc, c["page"], None if page_scope else c["query"], end - timedelta(days=13), end)
+    if page_scope:
+        before["scope"] = "page"
+    snap ={k: g.get(k) for k in PAGE_FIELDS + ("citations",)}
     snap["revision"] = g["revision"]
     added = [m.get("topic") for m in gap.get("missing", []) if isinstance(m, dict)]
     meta = dict(g.get("meta") or {})
