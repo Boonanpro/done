@@ -1,3 +1,4 @@
+import { DedicatedArtifactProvider } from '@/components/artifacts/artifact-link';
 import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loader';
 import type { Metadata } from 'next';
 
@@ -141,7 +142,7 @@ export default function ArtifactsLayout({ children }: { children: React.ReactNod
       <script dangerouslySetInnerHTML={{ __html: prePaintScript(dedicatedArtifactSlug) }} />
       <ArtifactStructuredData />
       <ArtifactAnalytics />
-      {children}
+      <DedicatedArtifactProvider slug={dedicatedArtifactSlug}>{children}</DedicatedArtifactProvider>
       <InspectorRuntimeLoader fallbackSlug={dedicatedArtifactSlug} />
     </>
   );

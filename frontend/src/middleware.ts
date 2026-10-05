@@ -177,7 +177,9 @@ export async function middleware(request: NextRequest) {
       }
       const url = request.nextUrl.clone();
       url.pathname = rest ? `/${rest}` : '/';
-      return NextResponse.redirect(url);
+      // 恒久転送（308）。既定の一時転送（307）だと、検索エンジンが転送元の
+      // /artifacts/<slug>/... を別ページとして持ち続け、評価が正規URLへ移らない。
+      return NextResponse.redirect(url, 308);
     }
 
     // ここから先は外部公開ホスト（<slug>-done.vercel.app / 独自ドメイン）で
