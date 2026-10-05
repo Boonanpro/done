@@ -49,10 +49,16 @@ function Test-Responding([string]$Url) {
 if (-not (Test-Responding 'http://127.0.0.1:3000')) {
     Write-WatchdogLog 'frontend (3000, production build) down -> start_frontend.bat'
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "$Root\scripts\start_frontend.bat" -WindowStyle Hidden
-} elseif (-not (Test-Responding 'http://127.0.0.1:3001')) {
+} else {
     # 成果物プレビュー用の開発サーバー(HMR)。ダッシュボード(3000)とは別プロセス。
-    Write-WatchdogLog 'preview dev server (3001) down -> start_preview_dev.bat'
-    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "$Root\scripts\start_preview_dev.bat" -WindowStyle Hidden
+    # 「ポートが応答するか」だけでは、500 を返し続ける故障も、同じポートで別のアプリが
+    # 答えている状態も直せなかった（2026-09-24〜10-05）。判定と復旧は専用スクリプトに任せる。
+    # ここで失敗しても、後ろの Core / Sandbox の見張りは止めない。
+    try {
+        & "$Root\scripts\ensure_preview_dev.ps1" | ForEach-Object { Write-WatchdogLog $_ }
+    } catch {
+        Write-WatchdogLog "preview dev server check failed: $($_.Exception.Message)"
+    }
 }
 
 # 2) Dan Core / Sandbox --------------------------------------------------
