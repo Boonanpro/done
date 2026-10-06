@@ -2034,7 +2034,6 @@ def _build_cli_cmd(
         "--verbose",
         "--dangerously-skip-permissions",
         "--model", model,
-        "--max-turns", "200",
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,
         # headless subprocess では interactive UI が無いので以下2つは機能しない
@@ -2965,7 +2964,6 @@ async def _process_via_streaming_session(
             "--verbose",
             "--dangerously-skip-permissions",
             "--model", cli_model,
-            "--max-turns", "200",
             "--mcp-config", mcp_config_path,
             "--append-system-prompt", launch_system_prompt,
             "--disallowedTools", "ExitPlanMode,AskUserQuestion",
