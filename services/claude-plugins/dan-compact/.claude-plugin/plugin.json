@@ -1,0 +1,9 @@
+{
+  "name": "dan-compact",
+  "version": "0.1.0",
+  "description": "Dan: replace Claude Code's compaction summary with the original conversation minus the tool calls Jev says are no longer needed (fast-jev-compaction), under a monthly yen cap with a ledger.",
+  "license": "MIT",
+  "author": {
+    "name": "Dan (Paina Inc.)"
+  }
+}
