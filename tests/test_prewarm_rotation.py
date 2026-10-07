@@ -13,6 +13,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.agent import cli_runner as cr
+from app.agent import streaming_session as ss
+
+ROOM = "room-abcd1234"
 
 
 @pytest.fixture(autouse=True)
@@ -47,34 +50,27 @@ def _fake_replacement(alive=True):
 
 def _patch_env(monkeypatch, replacement, reseed="<conversation_so_far>x</conversation_so_far>"):
     monkeypatch.setattr(cr, "_build_reseed_context", lambda room_id, project_id=None: reseed)
-    made = {}
 
     def _ctor(room_id, build_cmd, env, cwd):
-        made["session"] = replacement
         return replacement
 
     monkeypatch.setattr("app.agent.streaming_session.StreamingSession", _ctor)
-    installed = {}
-
-    def _install(room_id, session):
-        installed["room_id"] = room_id
-        installed["session"] = session
-        return installed.get("old")
-
-    monkeypatch.setattr("app.agent.streaming_session.install_session", _install)
-    monkeypatch.setattr(cr, "_save_session", lambda room_id, sid: installed.setdefault("saved", (room_id, sid)))
-    return installed
+    # The swap itself is real (swap_idle_session) against an empty registry.
+    monkeypatch.setattr(ss, "_sessions", {})
+    saved = {}
+    monkeypatch.setattr(cr, "_save_session", lambda room_id, sid: saved.setdefault("saved", (room_id, sid)))
+    return saved
 
 
-def _run(old_session=None, installed=None):
+def _run(old_session=None):
     old = old_session or MagicMock()
     if old_session is None:
         old.is_turn_active.return_value = False
-    # install_session returns the previously-registered session (the old one).
-    if installed is not None:
-        installed["old"] = old
+    old.is_alive.return_value = True
+    # The room holds the old session when rotation is scheduled.
+    ss._sessions.setdefault(ROOM, old)
     cr._schedule_prewarm_rotation(
-        "room-abcd1234", "proj", old, build_cmd=lambda: ["claude"],
+        ROOM, "proj", old, build_cmd=lambda: ["claude"],
         env={}, run_cwd=".", model="fable",
     )
     return old
@@ -100,41 +96,61 @@ def test_successful_prewarm_swaps_and_saves(monkeypatch):
         sink({"type": "result"})
         return True
     repl.prewarm.side_effect = _prewarm
-    installed = _patch_env(monkeypatch, repl)
-    old = _run(installed=installed)
-    assert installed["session"] is repl
-    assert installed["room_id"] == "room-abcd1234"
-    assert installed["saved"] == ("room-abcd1234", "new-sid-123")
+    saved = _patch_env(monkeypatch, repl)
+    old = _run()
+    assert ss._sessions[ROOM] is repl
+    assert saved["saved"] == (ROOM, "new-sid-123")
     old.stop.assert_called_once()
     repl.stop.assert_not_called()
 
 
 def test_busy_old_session_aborts_swap(monkeypatch):
     repl = _fake_replacement(alive=True)
-    installed = _patch_env(monkeypatch, repl)
+    _patch_env(monkeypatch, repl)
     old = MagicMock()
     old.is_turn_active.return_value = True  # a new user turn started during prewarm
     _run(old_session=old)
-    assert "session" not in installed  # never installed
+    assert ss._sessions[ROOM] is old    # never installed
     repl.stop.assert_called_once()      # replacement discarded
     old.stop.assert_not_called()        # the in-use session survives
+
+
+def test_session_recycled_during_prewarm_aborts_swap(monkeypatch):
+    """A new turn recycled the old session and started on a fresh one while the
+    replacement was priming. Swapping would stop the session that turn runs on
+    (2026-09-25: a monthly watch's turn ended with nothing done)."""
+    repl = _fake_replacement(alive=True)
+    fresh = MagicMock()
+    fresh.is_alive.return_value = True
+    fresh.is_turn_active.return_value = True
+
+    def _prewarm(priming, sink, timeout=0):
+        ss._sessions[ROOM] = fresh
+        return True
+    repl.prewarm.side_effect = _prewarm
+    saved = _patch_env(monkeypatch, repl)
+    _run()
+    assert ss._sessions[ROOM] is fresh
+    assert "saved" not in saved
+    repl.stop.assert_called_once()
+    fresh.stop.assert_not_called()
 
 
 def test_prewarm_failure_leaves_old_session(monkeypatch):
     repl = _fake_replacement(alive=False)
     repl.prewarm.return_value = False
-    installed = _patch_env(monkeypatch, repl)
+    _patch_env(monkeypatch, repl)
     old = _run()
-    assert "session" not in installed
+    assert ss._sessions[ROOM] is old
     repl.stop.assert_called_once()
     old.stop.assert_not_called()
 
 
 def test_empty_reseed_is_noop(monkeypatch):
     repl = _fake_replacement()
-    installed = _patch_env(monkeypatch, repl, reseed="")
-    _run()
-    assert "session" not in installed
+    _patch_env(monkeypatch, repl, reseed="")
+    old = _run()
+    assert ss._sessions[ROOM] is old
     repl.prewarm.assert_not_called()
 
 
@@ -145,7 +161,7 @@ def test_inflight_guard_blocks_double(monkeypatch):
     def _prewarm(priming, sink, timeout=0):
         calls["n"] += 1
         # while we are "priming", a second schedule must be ignored
-        cr._schedule_prewarm_rotation("room-abcd1234", "proj", MagicMock(), lambda: [], {}, ".", "fable")
+        cr._schedule_prewarm_rotation(ROOM, "proj", MagicMock(), lambda: [], {}, ".", "fable")
         sink({"type": "result"})
         return True
     repl.prewarm.side_effect = _prewarm
@@ -157,7 +173,7 @@ def test_inflight_guard_blocks_double(monkeypatch):
 def test_disabled_flag_is_noop(monkeypatch):
     monkeypatch.setattr(cr, "_PREWARM_ROTATE", False)
     repl = _fake_replacement()
-    installed = _patch_env(monkeypatch, repl)
-    _run()
-    assert "session" not in installed
+    _patch_env(monkeypatch, repl)
+    old = _run()
+    assert ss._sessions[ROOM] is old
     repl.prewarm.assert_not_called()

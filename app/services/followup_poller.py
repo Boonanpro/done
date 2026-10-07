@@ -19,13 +19,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 20          # seconds between poll cycles
 MAX_PER_CYCLE = 5           # cap fires per cycle so one busy cycle can't pile up
 MAIL_ERROR_LIMIT = 30       # consecutive check failures before a mail watch gives up
+EMPTY_WAKE_RETRY_SECONDS = 300  # a wake that never ran is tried again this much later
+EMPTY_WAKE_LIMIT = 3        # wakes in a row that never ran before the room is told instead
 
 _started = False
 _task: Optional["asyncio.Task"] = None
@@ -47,6 +49,19 @@ _SYNTH_PROMPT = (
 )
 
 _NO_CHANGE_SENTINEL = "WATCH_NO_CHANGE"
+
+_RETRY_NOTE = (
+    "\n\n（注: この起動は、前回の起動で作業が始まらないまま終わったための再実行です。"
+    "この部屋の直近の会話でこの回の作業がすでに済んでいる場合は、繰り返さず、"
+    "本文を正確に「WATCH_NO_CHANGE」とだけ書くこと。）"
+)
+
+_EMPTY_WAKE_NOTICE = (
+    "予約していた作業を{count}回起こしましたが、作業が始まらないまま終わりました。"
+    "この回は実行されていません。\n\n"
+    "予約の内容:\n「{note}」\n\n"
+    "必要なら「今やって」と送ってください。"
+)
 
 _HANDOFF_PROMPT = (
     "[システム自動再開 / 別チャットからの引き継ぎ]\n"
@@ -122,12 +137,18 @@ def _room_busy(room_id: str) -> bool:
     return False
 
 
-async def _wake(room_id: str, user_id: str, content: str) -> str:
-    """Drive one full Dan turn in the room with a synthetic system message."""
+async def _wake_turn(room_id: str, user_id: str, content: str) -> Tuple[str, bool]:
+    """Drive one full Dan turn in the room with a synthetic system message.
+
+    Returns (text, landed). `landed` is False when the turn ended without a
+    result — its session was stopped under it, or it errored before answering —
+    so the work the wake was for did not run. (2026-09-25: a monthly watch's
+    turn ended 2 seconds in with nothing done and the watch moved on a month.)"""
     from app.agent.cli_runner import process_message_cli
 
     project_id = _resolve_project_id(room_id)
     result = ""
+    landed = False
     async for _ev in process_message_cli(
         room_id=room_id,
         user_id=user_id,
@@ -137,9 +158,43 @@ async def _wake(room_id: str, user_id: str, content: str) -> str:
     ):
         if _ev.get("type") == "result":
             result = _ev.get("text") or result
+            landed = True
+        elif _ev.get("type") == "cancelled":
+            landed = True   # stopped by the user: their decision, not a lost wake
         elif _ev.get("type") == "error":
             result = "作業中にエラーが発生しました: " + str(_ev.get("message") or "詳細不明")
-    return result
+    return result, landed
+
+
+async def _wake(room_id: str, user_id: str, content: str) -> str:
+    return (await _wake_turn(room_id, user_id, content))[0]
+
+
+async def _defer_empty_wake(row: Dict[str, Any], kind: str, note: str, spec: Dict[str, Any]) -> bool:
+    """The wake did not run. Keep the watch due again shortly rather than
+    counting it as fired; after EMPTY_WAKE_LIMIT in a row, say so in the room
+    and let the caller move on. Returns True when a retry was scheduled (the
+    caller must not advance the watch)."""
+    from app.services.followups import reschedule_watch
+
+    count = int(spec.get("empty_wakes") or 0) + 1
+    if count < EMPTY_WAKE_LIMIT:
+        logger.warning("[watch] %s wake did not run room=%s (%d/%d); retrying",
+                       kind, row["room_id"][:8], count, EMPTY_WAKE_LIMIT)
+        await asyncio.to_thread(
+            reschedule_watch, row["id"], kind, note, {**spec, "empty_wakes": count},
+            datetime.now(timezone.utc) + timedelta(seconds=EMPTY_WAKE_RETRY_SECONDS))
+        return True
+    logger.error("[watch] %s wake did not run room=%s %d times; telling the room",
+                 kind, row["room_id"][:8], count)
+    try:
+        from app.agent.cli_runner import _save_ai_message_sync
+        await asyncio.to_thread(
+            _save_ai_message_sync, row["room_id"],
+            _EMPTY_WAKE_NOTICE.format(count=count, note=note[:300]))
+    except Exception as e:  # noqa: BLE001
+        logger.error("[watch] empty-wake notice failed room=%s: %s", row["room_id"][:8], e)
+    return False
 
 
 async def _fire_at(row: Dict[str, Any]) -> None:
@@ -147,15 +202,21 @@ async def _fire_at(row: Dict[str, Any]) -> None:
     from app.services.followups import mark_status
 
     note = row.get("plain_note") or ""
+    spec = dict(row.get("spec") or {})
     logger.info("[watch] at fires room=%s note=%r", row["room_id"][:8], note[:40])
     wake_start_iso = datetime.now(timezone.utc).isoformat()
+    prompt = _SYNTH_PROMPT.format(note=note) + (_RETRY_NOTE if spec.get("empty_wakes") else "")
+    landed = False
     try:
-        await _wake(row["room_id"], row.get("user_id") or "", _SYNTH_PROMPT.format(note=note))
+        _, landed = await _wake_turn(row["room_id"], row.get("user_id") or "", prompt)
         if await _discard_no_change_report(row["room_id"], wake_start_iso):
             logger.info("[watch] at no-change (silent) room=%s", row["room_id"][:8])
     except Exception as e:  # noqa: BLE001
         logger.error("[watch] at fire failed room=%s: %s", row["room_id"], e)
-    # Done either way rather than risk an endless retry loop on a hard error.
+    # A wake that never ran gets a bounded number of retries, then the room is
+    # told; a hard error therefore cannot loop forever.
+    if not landed and await _defer_empty_wake(row, "at", note, spec):
+        return
     await asyncio.to_thread(mark_status, row["id"], "done")
 
 
@@ -215,12 +276,17 @@ async def _fire_every(row: Dict[str, Any]) -> None:
 
     logger.info("[watch] every fires room=%s note=%r", row["room_id"][:8], note[:40])
     wake_start_iso = now.isoformat()
+    prompt = _EVERY_PROMPT.format(note=note) + (_RETRY_NOTE if spec.get("empty_wakes") else "")
+    landed = False
     try:
-        await _wake(row["room_id"], row.get("user_id") or "", _EVERY_PROMPT.format(note=note))
+        _, landed = await _wake_turn(row["room_id"], row.get("user_id") or "", prompt)
         if await _discard_no_change_report(row["room_id"], wake_start_iso):
             logger.info("[watch] every no-change (silent) room=%s", row["room_id"][:8])
     except Exception as e:  # noqa: BLE001
         logger.error("[watch] every fire failed room=%s: %s", row["room_id"], e)
+    if not landed and await _defer_empty_wake(row, "every", note, spec):
+        return
+    spec.pop("empty_wakes", None)
 
     until = spec.get("until")
     if until:
@@ -281,12 +347,17 @@ async def _fire_mail(row: Dict[str, Any]) -> None:
     if mails:
         logger.info("[watch] mail hit room=%s count=%d", row["room_id"][:8], len(mails))
         new_spec["fire_count"] = int(new_spec.get("fire_count") or 0) + len(mails)
+        landed = False
         try:
-            await _wake(
+            _, landed = await _wake_turn(
                 row["room_id"], row.get("user_id") or "",
                 _MAIL_PROMPT.format(note=note, mails=format_mails(mails)))
         except Exception as e:  # noqa: BLE001
             logger.error("[watch] mail wake failed room=%s: %s", row["room_id"], e)
+        # Retrying with the spec from before the check finds the same mail again.
+        if not landed and await _defer_empty_wake(row, "mail", note, spec):
+            return
+        new_spec.pop("empty_wakes", None)
     await asyncio.to_thread(
         reschedule_watch, row["id"], "mail", note, new_spec, now + timedelta(seconds=interval))
 
