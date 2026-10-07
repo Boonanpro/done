@@ -2048,22 +2048,25 @@ def _typesafe_api_key_sync(user_id: Optional[str]) -> Optional[str]:
     return key
 
 
-def _dan_compact_launch(user_id: Optional[str]) -> tuple[list[str], dict[str, str]]:
+def _dan_compact_launch(user_id: Optional[str], *, log: bool = True) -> tuple[list[str], dict[str, str]]:
     """Jev 短縮プラグインを付ける時の追加 argv と env。付けない時は ([], {})。
 
     他の起動オプション・環境変数は変えない（追加だけ）。鍵は env にだけ入れ、ログに出さない。
+    log=False は、新しいプロセスを起こさないターンで build_cmd / env を揃えるためだけに呼ぶ時
+    （ストリーミング経路の再利用ターン）。判定は同じで、デバッグログだけ出さない。
     """
+    debug = _cli_debug if log else (lambda _msg: None)
     if not _dan_compact_enabled():
-        _cli_debug("[COMPACT] jev plugin off (DAN_COMPACT_JEV=0)")
+        debug("[COMPACT] jev plugin off (DAN_COMPACT_JEV=0)")
         return [], {}
     manifest = _DAN_COMPACT_PLUGIN_DIR / ".claude-plugin" / "plugin.json"
     library = _DAN_COMPACT_PLUGIN_DIR / "node_modules" / "fast-jev-compaction" / "dist" / "compact.js"
     if not manifest.exists() or not library.exists():
-        _cli_debug(f"[COMPACT] jev plugin not attached: plugin files missing under {_DAN_COMPACT_PLUGIN_DIR}")
+        debug(f"[COMPACT] jev plugin not attached: plugin files missing under {_DAN_COMPACT_PLUGIN_DIR}")
         return [], {}
     key = _typesafe_api_key_sync(user_id)
     if not key:
-        _cli_debug("[COMPACT] jev plugin not attached: no TypeSafe key for this user")
+        debug("[COMPACT] jev plugin not attached: no TypeSafe key for this user")
         return [], {}
     extra_env: dict[str, str] = {
         "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
@@ -2080,8 +2083,45 @@ def _dan_compact_launch(user_id: Optional[str]) -> tuple[list[str], dict[str, st
             Path.home() / ".dan" / "workspace" / "memory" / ".compact_jev_ledger.json"
         )
     shown = {k: v for k, v in extra_env.items() if k != "TYPESAFE_API_KEY"}
-    _cli_debug(f"[COMPACT] jev plugin attached: --plugin-dir {_DAN_COMPACT_PLUGIN_DIR} env={shown}")
+    debug(f"[COMPACT] jev plugin attached: --plugin-dir {_DAN_COMPACT_PLUGIN_DIR} env={shown}")
     return ["--plugin-dir", str(_DAN_COMPACT_PLUGIN_DIR)], extra_env
+
+
+def _streaming_session_is_fresh(existing, cli_model: Optional[str]) -> bool:
+    """このターンが新しい CLI プロセスを起こすことになるか。
+
+    無い／死んでいる、に加えて「生きているがモデルが違う」も True。get_or_create_session は
+    モデルが違えば生きているセッションでも stop → 新プロセスを起こすので、その起き直しにも
+    起動時だけ決める引数（dan-compact の --plugin-dir と env）と DB reseed が付くようにする。
+    """
+    if existing is None or not existing.is_alive():
+        return True
+    return getattr(existing, "model", None) != cli_model
+
+
+def _sync_compaction_for_session(session_id: Optional[str], room_id: str = "") -> int:
+    """ターンが閉じた後に、今のセッションの transcript 1 ファイルだけから短縮の記録
+    （組み込み要約 / Jev 短縮）を memory に写す。
+
+    ~/.claude/projects の全走査（実測 5,545 ファイルで約 15 秒）はここでは決して呼ばない。
+    失敗しても握って 0 を返す（呼び出し元は sentinel 送出後なので、ターンの締めも結果も壊れない）。
+    """
+    try:
+        path = _session_transcript_path(session_id) if session_id else None
+        if path is None:
+            return 0
+        from app.services.compaction_sync import sync_compaction_summaries
+        t0 = time.perf_counter()
+        synced = sync_compaction_summaries(paths=[path])
+        if synced:
+            _cli_debug(
+                f"[STREAMING] compaction sync: mirrored {synced} from {path.name} "
+                f"in {(time.perf_counter() - t0) * 1000:.0f}ms (room {room_id[:8]})"
+            )
+        return synced
+    except Exception as e:  # noqa: BLE001
+        _cli_debug(f"[STREAMING] compaction sync skipped (non-fatal): {type(e).__name__}: {e}")
+        return 0
 
 
 def _apply_fable_quota_guard(model: str) -> str:
@@ -3180,12 +3220,17 @@ async def _process_via_streaming_session(
             )
             _clear_cli_session(room_id)
             resume_session_id = None
-    session_is_fresh = existing is None or not existing.is_alive()
-    if session_is_fresh:
-        # 新規セッションを起こす時だけ鍵を引く（同期の DB 呼び出しなのでループを塞がない）。
-        _compact_args, _compact_env = await asyncio.to_thread(_dan_compact_launch, user_id)
-        compact_args[:] = _compact_args
-        env.update(_compact_env)
+    # 無い／死んでいる／モデルが違う（上で stop 済み）→ 新しいプロセスを起こす。
+    session_is_fresh = _streaming_session_is_fresh(existing, cli_model)
+    # 起動時だけ決まる引数（dan-compact の --plugin-dir と env）は、この呼び出しの build_cmd /
+    # env から新しいプロセスが起きうる時に必ず付いているようにする。新規・死活・モデル切替
+    # （session_is_fresh）だけでなく、ターン後の予熱ローテーション（_schedule_prewarm_rotation）
+    # と stale-resume の作り直し（下の run()）も同じ build_cmd / env で替えを起こすので、
+    # 再利用ターンでも解決しておく（鍵は 10 分キャッシュ＝約 2ms。DB 呼び出しは同期なので
+    # 別スレッドでループを塞がない。ログは実際にプロセスを起こすターンだけ）。
+    _compact_args, _compact_env = await asyncio.to_thread(_dan_compact_launch, user_id, log=session_is_fresh)
+    compact_args[:] = _compact_args
+    env.update(_compact_env)
     session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
     # (Re)install the autonomous-turn receiver with this call's freshest
     # project/user context. Cheap to refresh on every turn.
@@ -3662,6 +3707,10 @@ async def _process_via_streaming_session(
             except Exception as _rot_e:  # noqa: BLE001
                 _cli_debug(f"[STREAMING] rotation schedule skipped: {_rot_e}")
             _emit(_SENTINEL)
+            # ターンを閉じた後（sentinel の後＝締めを遅らせない）に、今のセッションの transcript
+            # 1 ファイルだけから短縮の記録（組み込み要約 / Jev 短縮）を memory に写す。
+            # 全走査はしない。失敗は中で握る。
+            _sync_compaction_for_session(state.get("session_id") or resume_session_id, room_id)
 
     threading.Thread(target=run, daemon=True).start()
 
