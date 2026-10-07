@@ -1,3 +1,5 @@
 node_modules/
 *.log
 .claude-plugin/types/
+# Claude Code lays this beside the plugin at every load (extends .claude-plugin/types/tsconfig.json)
+tsconfig.json
