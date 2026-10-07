@@ -320,14 +320,18 @@ def reschedule_watch(
     next_fire_at: datetime,
 ) -> None:
     """Advance a recurring watch (every/mail) to its next due time, persisting
-    updated spec (last_uid, fire_count, ...) back into the note envelope."""
+    updated spec (last_uid, fire_count, ...) back into the note envelope.
+
+    Only a live watch is advanced. The wake turn may cancel its own watch; this
+    write lands after that turn, and writing unconditionally put the cancelled
+    row back to 'pending' (a watch cancelled 8 times kept firing, 2026-10-03)."""
     try:
         _sb().table(TABLE).update({
             "note": encode_watch_note(kind, note, spec),
             "fire_at": next_fire_at.isoformat(),
             "status": "pending",
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", row_id).execute()
+        }).eq("id", row_id).in_("status", ["pending", "firing"]).execute()
     except Exception as e:
         logger.error("reschedule_watch(%s) failed: %s", row_id, e)
 

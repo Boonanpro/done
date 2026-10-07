@@ -719,7 +719,7 @@ def _schedule_prewarm_rotation(
     fail-safe: any error leaves the existing session in place."""
     if not _PREWARM_ROTATE:
         return
-    from app.agent.streaming_session import StreamingSession, install_session
+    from app.agent.streaming_session import StreamingSession, swap_idle_session
 
     with _prewarm_lock:
         if room_id in _prewarm_inflight:
@@ -757,17 +757,20 @@ def _schedule_prewarm_rotation(
                     pass
                 return
 
-            # Only swap if the old session is idle. If a new user turn started
-            # while we primed, keep the old (in-use) session and discard ours —
-            # rotating a busy session would desync a live stream.
-            if old_session is not None and old_session.is_turn_active():
+            # Only swap if the room still holds the session we were scheduled
+            # for and it is idle. If a new turn started while we primed — on the
+            # old session, or on a fresh one after recycling it — keep that
+            # (in-use) session and discard ours: swapping would stop the session
+            # the turn is running on.
+            swapped, prev = swap_idle_session(room_id, replacement, old_session)
+            if not swapped:
                 try:
                     replacement.stop()
                 except Exception:
                     pass
+                _cli_debug(f"[STREAMING] prewarm rotation skipped; room {room_id[:8]} session is in use")
                 return
 
-            prev = install_session(room_id, replacement)
             if captured.get("session_id"):
                 _save_session(room_id, captured["session_id"])
             if prev is not None and prev is not replacement:

@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 
 _DOTENV_FLAG_CACHE: Optional[bool] = None
@@ -585,3 +585,23 @@ def install_session(room_id: str, session: "StreamingSession") -> Optional["Stre
         old = _sessions.get(room_id)
         _sessions[room_id] = session
     return old
+
+
+def swap_idle_session(
+    room_id: str, session: "StreamingSession", expected: Optional["StreamingSession"],
+) -> Tuple[bool, Optional["StreamingSession"]]:
+    """install_session, but only while the room still holds `expected` (or no
+    live session) with no turn running on it. Returns (swapped, replaced).
+
+    The room's session can change while a replacement is being primed: a new
+    turn may recycle it and start on a fresh one. Swapping then stops the
+    session that turn is running on, and the turn ends with nothing done
+    (2026-09-25: a monthly watch's turn was lost this way)."""
+    with _registry_lock:
+        current = _sessions.get(room_id)
+        if current is not None and current.is_alive() and (
+            current is not expected or current.is_turn_active()
+        ):
+            return False, None
+        _sessions[room_id] = session
+    return True, current
