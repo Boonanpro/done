@@ -17,11 +17,16 @@ Claude Code の .jsonl ファイルから compact_boundary を検出し、
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Union
 
 logger = logging.getLogger(__name__)
+
+# 同期済み台帳（.compaction_sync_state.json）の読み→書きを直列化する。ストリーミング経路は
+# ターンごと・部屋ごとに呼ぶので、同時に終わった2部屋が互いの uuid を書き潰さないように。
+_SYNC_LOCK = threading.Lock()
 
 WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 COMPACTION_SYNC_STATE_PATH = WORKSPACE_DIR / "memory" / ".compaction_sync_state.json"
@@ -35,14 +40,37 @@ BACKFILL_WINDOW = timedelta(days=3)
 LEDGER_MATCH_WINDOW = timedelta(minutes=5)
 
 
-def sync_compaction_summaries() -> int:
+def sync_compaction_summaries(paths: Optional[Iterable[Union[str, Path]]] = None) -> int:
     """
     Claude Code の .jsonl ファイルからコンパクションを読み取り、
     .dan/workspace/memory/YYYY-MM-DD.md にミラーリングする。
 
+    Args:
+        paths: 走査する transcript ファイル。渡せばそのファイルだけを見る（存在しないものは
+            飛ばす）。省略すると ~/.claude/projects 配下の全 .jsonl を走査する（一発経路の
+            従来の呼び方。実測 5,545 ファイル・2.2GB で約 15 秒かかるので、ターンごとに呼ぶ
+            経路からは必ず今のセッションの 1 ファイルを渡すこと）。
+
     Returns:
         新たに同期した件数（書いた件数。古くて書かなかった分は含まない）
     """
+    try:
+        if paths is None:
+            # すべての .jsonl ファイルを走査（従来）
+            jsonl_files = list(CLAUDE_PROJECTS_DIR.rglob("*.jsonl")) if CLAUDE_PROJECTS_DIR.exists() else []
+        else:
+            jsonl_files = [p for p in (Path(x) for x in paths if x) if p.is_file()]
+        if not jsonl_files:
+            return 0
+        with _SYNC_LOCK:
+            return _sync_files_locked(jsonl_files)
+    except Exception as e:
+        logger.warning(f"[compaction_sync] failed: {e}")
+        return 0
+
+
+def _sync_files_locked(jsonl_files: list[Path]) -> int:
+    """同期済み台帳を読み、渡されたファイルを順に写し、台帳を書き戻す（_SYNC_LOCK の中で呼ぶ）。"""
     try:
         # 同期済みUUIDを読み込む
         synced_uuids: set[str] = set()
@@ -57,8 +85,6 @@ def sync_compaction_summaries() -> int:
         written: list[str] = []
         ledger_last = _read_ledger_last()
 
-        # すべての .jsonl ファイルを走査
-        jsonl_files = list(CLAUDE_PROJECTS_DIR.rglob("*.jsonl")) if CLAUDE_PROJECTS_DIR.exists() else []
         for jsonl_path in jsonl_files:
             try:
                 _sync_file(jsonl_path, synced_uuids, new_uuids, written, ledger_last)
@@ -113,8 +139,15 @@ def _parse_ts(raw: str) -> Optional[datetime]:
         return None
 
 
-def _find_summary(segment: list[dict], boundary_uuid: str) -> Optional[str]:
-    """boundary の後ろ（次の boundary まで）から要約メッセージの本文を探す。無ければ None。"""
+def _find_summary(segment: list[dict], boundary_uuid: str, *, legacy: bool) -> Optional[str]:
+    """boundary の後ろ（次の boundary まで）から要約メッセージの本文を探す。無ければ None。
+
+    legacy=True（boundary に compactMetadata が無い＝2026-06 より前の旧形式）の時だけ、
+    「boundary の直接の子の user 発言で summary に触れている」も要約とみなす。現行形式の
+    boundary は必ず compactMetadata を持ち、要約は isCompactSummary で印が付く。Jev 短縮の
+    後は boundary の直接の子が元の最初の発言なので、そこに英語の "summary" が含まれていても
+    要約と取り違えない（旧判定だと発言全文が要約として memory に写っていた）。
+    """
     for entry in segment:
         msg = entry.get("message", {})
         if not isinstance(msg, dict) or msg.get("role") != "user":
@@ -124,7 +157,7 @@ def _find_summary(segment: list[dict], boundary_uuid: str) -> Optional[str]:
             continue
         if entry.get("isCompactSummary"):
             return content
-        if entry.get("parentUuid") == boundary_uuid and (
+        if legacy and entry.get("parentUuid") == boundary_uuid and (
             "This session is being continued" in content or "summary" in content.lower()
         ):
             return content
@@ -210,8 +243,8 @@ def _sync_file(
         display_ts = (ts or now).strftime("%Y-%m-%d %H:%M:%S")
         date_str = (ts or now).strftime("%Y-%m-%d")
 
-        summary = _find_summary(segment, boundary_uuid)
         meta = boundary.get("compactMetadata") or {}
+        summary = _find_summary(segment, boundary_uuid, legacy=not meta)
         if summary is not None:
             kind = "compaction"
             body = summary.strip()

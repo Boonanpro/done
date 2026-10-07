@@ -178,3 +178,84 @@ def test_real_hook_compaction_transcript(ws):
     meta = boundary["compactMetadata"]
     assert f"{meta['preTokens']:,}→{meta['postTokens']:,} tokens" in text
     assert not any(e.get("isCompactSummary") for e in entries), "the hook replaced the summary: no summary message in the transcript"
+
+
+# --- 2回目の修正（確かめる役の指摘） -------------------------------------------------
+
+def test_jev_first_message_mentioning_summary_is_not_mistaken_for_a_summary(ws):
+    """Jev 短縮後は boundary の直接の子が元の最初の発言。そこに英語の "summary" が入っていても
+    要約と取り違えず（旧判定では発言全文が [compaction] として写った）、[compaction/jev] になる。"""
+    ts = NOW - timedelta(minutes=10)
+    first = "Read these files and give me a summary of each one. The code word is secret-01-abc."
+    path = ws / "projects" / "p" / "h.jsonl"
+    _write_jsonl(path, [
+        _user(first, "u0", None),
+        _boundary("b-jev3", ts, {"trigger": "auto", "preTokens": 68870, "postTokens": 19483}),
+        _user(first, "u0b", "b-jev3"),   # 残した元の会話がそのまま続く（要約なし）
+        {"type": "assistant", "uuid": "a1", "parentUuid": "u0b", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+    ])
+    synced, new, written = set(), [], []
+    cs._sync_file(path, synced, new, written, None, now=NOW)
+    assert written == ["b-jev3"]
+    text = (ws / "ws" / "memory" / f"{ts:%Y-%m-%d}.md").read_text(encoding="utf-8")
+    assert "[compaction/jev] session=sess-1 trigger=auto" in text
+    assert "[compaction] " not in text
+    assert "secret-01-abc" not in text, "発言全文を要約として写してはいけない"
+    assert "68,870→19,483 tokens" in text
+
+
+def test_legacy_boundary_without_metadata_keeps_the_old_summary_rule(ws):
+    """compactMetadata の無い旧形式（2026-06 より前）だけは、直接の子の summary 発言を要約として扱う。"""
+    ts = NOW - timedelta(hours=1)
+    path = ws / "projects" / "p" / "i.jsonl"
+    _write_jsonl(path, [
+        _boundary("b-legacy", ts),
+        _user("Here is a summary of the earlier conversation: did Y.", "u1", "b-legacy"),
+    ])
+    synced, new, written = set(), [], []
+    cs._sync_file(path, synced, new, written, None, now=NOW)
+    assert written == ["b-legacy"]
+    text = (ws / "ws" / "memory" / f"{ts:%Y-%m-%d}.md").read_text(encoding="utf-8")
+    assert "[compaction] session=sess-1" in text
+    assert "did Y." in text
+
+
+def test_sync_limited_to_given_paths_leaves_other_transcripts_untouched(ws):
+    """paths を渡したらそのファイルだけ。他の transcript（試験用など）は読まれも書かれもしない。
+    省略すれば従来どおり全走査。存在しないパス・空は 0 で何も触らない。"""
+    ts = datetime.now(timezone.utc) - timedelta(minutes=1)
+    a = ws / "projects" / "p" / "a.jsonl"
+    b = ws / "projects" / "p" / "b.jsonl"
+    _write_jsonl(a, [_boundary("b-a", ts, {"trigger": "auto"}), _user("Summary: from A", "ua", "b-a", isCompactSummary=True)])
+    _write_jsonl(b, [_boundary("b-b", ts, {"trigger": "auto"}), _user("Summary: from B", "ub", "b-b", isCompactSummary=True)])
+    state_path = ws / "ws" / "memory" / ".compaction_sync_state.json"
+
+    assert cs.sync_compaction_summaries(paths=[str(a)]) == 1, "str でも Path でも渡せる"
+    assert json.loads(state_path.read_text(encoding="utf-8"))["synced_uuids"] == ["b-a"]
+    text = (ws / "ws" / "memory" / f"{ts:%Y-%m-%d}.md").read_text(encoding="utf-8")
+    assert "from A" in text and "from B" not in text
+
+    assert cs.sync_compaction_summaries(paths=[ws / "projects" / "p" / "nope.jsonl"]) == 0
+    assert cs.sync_compaction_summaries(paths=[]) == 0
+    assert cs.sync_compaction_summaries(paths=[a]) == 0, "同じファイルを再度渡しても二重に書かない"
+    assert json.loads(state_path.read_text(encoding="utf-8"))["synced_uuids"] == ["b-a"]
+
+    assert cs.sync_compaction_summaries() == 1, "省略時は従来どおり全走査で b を拾う"
+    assert set(json.loads(state_path.read_text(encoding="utf-8"))["synced_uuids"]) == {"b-a", "b-b"}
+
+
+def test_sync_with_paths_does_not_scan_the_projects_dir(ws, monkeypatch):
+    """paths 指定時に CLAUDE_PROJECTS_DIR の rglob（全走査）が呼ばれないことを直接確かめる。"""
+    ts = datetime.now(timezone.utc) - timedelta(minutes=1)
+    a = ws / "projects" / "p" / "a.jsonl"
+    _write_jsonl(a, [_boundary("b-a", ts, {"trigger": "auto"}), _user("Summary: A", "ua", "b-a", isCompactSummary=True)])
+
+    class NoScan:
+        def exists(self):
+            return True
+
+        def rglob(self, pattern):
+            raise AssertionError("paths 指定時に全走査してはいけない")
+
+    monkeypatch.setattr(cs, "CLAUDE_PROJECTS_DIR", NoScan())
+    assert cs.sync_compaction_summaries(paths=[a]) == 1
