@@ -31,6 +31,7 @@ from app.api.content_routes import router as content_router
 from app.api.bank_account_routes import router as bank_account_router
 from app.api.otp_routes import router as otp_router
 from app.api.project_routes import router as project_router
+from app.api.parallel_job_routes import router as parallel_job_router
 from app.api.note_routes import router as note_router
 from app.api.artifact_documents_routes import router as artifact_documents_router
 from app.api.file_routes import router as file_router
@@ -168,6 +169,7 @@ app.include_router(content_router, prefix="/api/v1")
 app.include_router(bank_account_router, prefix="/api/v1")
 app.include_router(otp_router, prefix="/api/v1")
 app.include_router(project_router, prefix="/api/v1")
+app.include_router(parallel_job_router, prefix="/api/v1")
 app.include_router(note_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1/files")
 app.include_router(studio_router, prefix="/api/v1")

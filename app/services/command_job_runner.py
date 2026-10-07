@@ -41,6 +41,13 @@ async def recover():
     for path in state.ROOT.glob('*.json'):
         s = state.read(path.stem)
         if not s or s['state'] in state.TERMINAL: continue
+        if s.get('engine') in ('parallel', 'make') and s['state'] != 'queued':
+            # Its CLI died with the Core; what it already did is not repeated. A new instruction continues it.
+            from app.services import work_locks
+            state.publish(s['id'], 'error', 'ダンの再起動で作業が中断しました。続けるには指示を足してください。',
+                          state='failed', error='ダンの再起動で中断しました', current_tool=None, waiting_for=None)
+            work_locks.release_owner('job:' + s['id'])
+            continue
         if s.get('run_id'):
             state.publish(s['id'],'error','実行接続が切れたため停止しました。実行済み操作の確認が必要です。',state='failed',error='Core restarted')
             await RunService().update_run(s['run_id'],state='failed')
@@ -78,10 +85,15 @@ async def run(row):
     s = state.create(job_id, user_id=row['user_id'], room_id=row['room_id'],
         origin_room_id=spec['origin_room_id'], origin_project_id=spec['origin_project_id'],
         task=spec['task'], report_message_id=report_id(job_id))
-    if s.get('engine') == 'make' and not s.get('run_id'):
-        # Heavy making: chat Dan's own harness in the room (Opus by default), followed like any other job.
+    parallel = s.get('engine') in ('parallel', 'make')
+    if s.get('engine') == 'make' and not s.get('voice_noted'):
+        # Heavy making asked by voice: the owner's words go in the room first, then it runs as a parallel job.
         from app.services import make_job_runner
-        return await make_job_runner.run(row)
+        s = await make_job_runner.note_request(row)
+    if parallel and s.get('model') != 'astra':
+        # Opus / Fable: a Claude Code session branched off the room's conversation (parallel_job_runner).
+        from app.services import parallel_job_runner
+        return await parallel_job_runner.run(row)
     if s.get('engine') == 'api' and not s.get('run_id'):
         # The API job (Responses API in a small worker) shares everything here except the model loop.
         from app.services import api_job_runner
@@ -105,6 +117,8 @@ async def run(row):
     owner = None
     monitor = None
     receiving = None
+    run_row = None
+    lock_owner = 'job:' + job_id
     try:
         async with _slots:
             if state.read(job_id)['state'] in state.TERMINAL:
@@ -113,15 +127,21 @@ async def run(row):
             project = await projects.get_project_by_room_id(row['room_id'])
             if not project:raise RuntimeError('実行先のプロジェクトが見つかりません')
             message = await relay_request(chat, row, spec, job_id)
-            run_row = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'] if message else None,
-                metadata={'started_by':'command_center', 'watch_id':job_id, 'engine':'steerable_cli',
-                          'origin_room_id':spec['origin_room_id']})
+            if not parallel:
+                # A parallel job is listed in the room's work list, not as the room's own live turn.
+                run_row = await runs.create_run(project['id'], row['room_id'], origin_message_id=message['id'] if message else None,
+                    metadata={'started_by':'command_center', 'watch_id':job_id, 'engine':'steerable_cli',
+                              'origin_room_id':spec['origin_room_id']})
             initial_state = state.read(job_id)['state']
-            state.publish(job_id, 'progress', '依頼内容を確認しています', run_id=run_row['id'],
+            state.publish(job_id, 'progress', '依頼内容を確認しています', **({'run_id':run_row['id']} if run_row else {}),
                           state='running' if initial_state=='queued' else initial_state)
             instructions = await asyncio.to_thread(_build_system_prompt, project.get('title',''),
                 project.get('description') or '', project.get('status') or 'in_progress',
                 latest_user_message=spec['task'], room_id=row['room_id'], user_id=row['user_id'], include_room_role=False)
+            if parallel:
+                from app.services.parallel_job_runner import JOB_RULES
+                instructions += '\n' + JOB_RULES + (s.get('origin_note') or '') + \
+                    '\n共有のファイル（自分の作業フォルダ以外）を書き換える時は dan_job の write_file / edit_file を使う。ほかの作業との順番待ちがそこで自動で行われる。'
             instructions += '\n' + CONFIRMATION_RULE + '''
 この依頼は独立した作業です。利用者との追加会話は同じ実行へ届きます。
 購入・送信・削除・支払いなど取り返しのつかない確定の直前だけ、具体的な内容と金額を言葉で伝えて本人の返事を待つ（そこでターンを終える。返事は追加の発言として届く）。それ以外の操作は承認を求めずに最後まで進める。承認や追加指示が届くと同じ作業が再開する。
@@ -142,19 +162,23 @@ async def run(row):
                 'env': {'DAN_USER_ID':row['user_id'], 'DAN_SESSION_ID':row['room_id'],
                     'DAN_BROWSER_ROOM':state.browser_room(job_id), 'DAN_COMMAND_JOB_ID':job_id,
                     'DAN_BROWSER_HEADLESS':'1', 'DAN_BROWSER_OBSERVATION':'dom', 'DAN_CORE_PORT':'9000',
-                    'DAN_WORK_DIR':f'D:/dan-workspace/jobs/{job_id[:8]}'}}
+                    'DAN_WORK_DIR':f'D:/dan-workspace/jobs/{job_id[:8]}', **({'DAN_PARALLEL_JOB':'1'} if parallel else {})}}
             owner = CodexTurn()
             owner.receive_timeout = 3600
-            recent = await chat.get_messages(row['room_id'],row['user_id'],limit=8)
-            history = [{'role':'user','content':'部屋の記録（過去の発言）: '+str(m.get('content',''))[:6000]}
-                for m in sorted(recent,key=lambda m:m.get('created_at') or '') if not message or m.get('id')!=message['id']]
-            await owner.start([*history,{'role':'user','content':spec['task']}], [{'type':'web_search'}], instructions,
-                'gpt-6-astra', sandbox='danger-full-access',   # the same reach as chat Dan; the owner's decision 2026-09-22
-                config_overrides={'mcp_servers':mcp})
-            state.change(job_id, lambda s:s.update(thread_id=owner.thread_id))
+            sent = 0
+            if parallel:
+                await _start_parallel_codex(owner, job_id, row, project, instructions, mcp)
+                sent = state.read(job_id)['applied_revision']
+            else:
+                recent = await chat.get_messages(row['room_id'],row['user_id'],limit=8)
+                history = [{'role':'user','content':'部屋の記録（過去の発言）: '+str(m.get('content',''))[:6000]}
+                    for m in sorted(recent,key=lambda m:m.get('created_at') or '') if not message or m.get('id')!=message['id']]
+                await owner.start([*history,{'role':'user','content':spec['task']}], [{'type':'web_search'}], instructions,
+                    'gpt-6-astra', sandbox='danger-full-access',   # the same reach as chat Dan; the owner's decision 2026-09-22
+                    config_overrides={'mcp_servers':mcp})
+                state.change(job_id, lambda s:s.update(thread_id=owner.thread_id))
             pending = {}
             turn_active = True
-            sent = 0
             async def controls():
                 nonlocal sent
                 heartbeat = 0
@@ -174,7 +198,7 @@ async def run(row):
                                 'threadId':owner.thread_id, 'expectedTurnId':owner.turn_id,
                                 'input':[{'type':'text','text':item['text']}]}})
                             sent = item['revision']
-                    if time.monotonic() - heartbeat > 10:
+                    if run_row and time.monotonic() - heartbeat > 10:
                         await runs.update_run(run_row['id'], state=s['state'] if s['state'] in {'paused','awaiting_confirmation'} else 'running',only_if_active=True)
                         heartbeat = time.monotonic()
             monitor = asyncio.create_task(controls())
@@ -197,15 +221,18 @@ async def run(row):
                     result = params['item']['text']
                     if params['item'].get('phase') != 'final_answer':
                         state.publish(job_id, 'progress', result)
-                    await projects.save_execution_event(project['id'], row['room_id'], 'reasoning',
-                        content=result, run_id=run_row['id'])
+                    if run_row:
+                        await projects.save_execution_event(project['id'], row['room_id'], 'reasoning',
+                            content=result, run_id=run_row['id'])
+                elif parallel and method == 'item/started' and params.get('item',{}).get('type') == 'fileChange':
+                    _note_file_changes(job_id, owner, params['item'])
                 elif method == 'turn/completed':
                     turn_active = False
                     s = state.read(job_id)
                     if s['state'] == 'cancelled': break
                     if params['turn']['status'] != 'completed': raise RuntimeError(str(params['turn'].get('error') or params['turn']['status']))
                     if s['state'] in {'awaiting_confirmation','paused'} or s.get('approved') or s['revision'] > s['applied_revision']:
-                        if s['state'] in {'awaiting_confirmation','paused'}:
+                        if run_row and s['state'] in {'awaiting_confirmation','paused'}:
                             await runs.update_run(run_row['id'],state=s['state'],only_if_active=True)
                         while s['state'] in {'awaiting_confirmation','paused'}:
                             await asyncio.sleep(.15)
@@ -220,12 +247,19 @@ async def run(row):
                         revision=s['revision']
                         sent=max(sent,revision)
                         state.change(job_id,lambda current:current.update(applied_revision=max(current['applied_revision'],revision)))
-                        await runs.update_run(run_row['id'],state='running',only_if_active=True)
+                        if run_row:
+                            await runs.update_run(run_row['id'],state='running',only_if_active=True)
                         result=''
                         turn_active=True
                         continue
                     if not result: raise RuntimeError('作業結果が空でした')
-                    state.publish(job_id, 'result', result, result=result, state='completed')
+                    state.publish(job_id, 'result', result[:3000] if parallel else result, result=result, state='completed',
+                                  **({'current_tool':None,'waiting_for':None} if parallel else {}))
+                    if parallel:
+                        from app.services.parallel_job_runner import deliver
+                        await deliver(job_id, result)
+                        await asyncio.to_thread(mark_status, job_id, 'done')
+                        return
                     await runs.update_run(run_row['id'], state='completed')
                     await execute({'action':'report','project_id':spec['origin_project_id'],'task':result[:2800]},
                         row['room_id'], row['user_id'], report_message_id=report_id(job_id))
@@ -236,7 +270,8 @@ async def run(row):
                     raise RuntimeError('実行接続が終了しました')
                 elif method and 'id' in event:
                     owner.send({'id':event['id'],'error':{'code':-32601,'message':'Use the job-scoped Dan tools.'}})
-            await runs.update_run(run_row['id'], state='superseded')
+            if run_row:
+                await runs.update_run(run_row['id'], state='superseded')
             await asyncio.to_thread(mark_status, job_id, 'cancelled')
     except Exception as exc:
         saved = state.read(job_id)
@@ -247,9 +282,79 @@ async def run(row):
         text = '作業を停止しました: ' + str(exc)[:600]
         s = state.publish(job_id, 'error', text, state='failed', error=text)
         if s.get('run_id'): await runs.update_run(s['run_id'], state='failed')
+        if parallel:
+            from app.services.parallel_job_runner import deliver
+            try:
+                await deliver(job_id, text)
+            except Exception:
+                pass
         await asyncio.to_thread(mark_status, job_id, 'failed')
     finally:
         if monitor:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
         if owner: owner.close()
+        from app.services import work_locks   # what this job took (a file, the screen, the phone) is free again
+        work_locks.release_owner(lock_owner)
+
+
+def _note_file_changes(job_id, owner, item):
+    """GPT-6's own file edits cannot be held before they happen (only Dan's write_file/edit_file can). When one touches
+    a file another piece of work holds, tell the job at once to undo that change and come back to it later."""
+    from app.services import work_locks
+    import os
+    work_dir = f'D:/dan-workspace/jobs/{job_id[:8]}'
+    title = (state.read(job_id) or {}).get('title') or ''
+    for change in item.get('changes') or []:
+        key = work_locks.file_key(change.get('path'), work_dir)
+        other = work_locks.try_acquire(key, 'job:' + job_id, title) if key else None
+        if other:
+            state.publish(job_id, 'waiting', work_locks.waiting_text(other))
+            owner.steer(f"{os.path.basename(change.get('path',''))} は{work_locks.waiting_text(other)}で、ほかの作業が使っています。"
+                        'いまの変更は元に戻し、この部分はあとで（相手が終わってから）やり直してください。ほかの部分は先に進めてかまいません。')
+
+
+async def _start_parallel_codex(owner, job_id, row, project, instructions, mcp):
+    """GPT-6 parallel job: continue the room's own Codex thread as a fork when the room is on GPT-6 (it knows everything
+    the room knows), continue the job's own thread when a finished job gets new words, otherwise start from the room's
+    record rebuilt from the database."""
+    import logging
+    from app.agent.cli_runner import _load_session, _build_reseed_context
+    from app.agent.codex_runner import thread_id_from_session
+    from app.services.parallel_job_runner import room_model
+    log = logging.getLogger(__name__)
+    s = state.read(job_id)
+    await owner.rpc('initialize', {'clientInfo': {'name': 'dan_parallel_job', 'version': '1.0'}, 'capabilities': {'experimentalApi': True}})
+    owner.send({'method': 'initialized'})
+    account = await owner.rpc('account/read', {})
+    if (account.get('account') or {}).get('type') not in ('chatgpt', 'chatgptAuthTokens'):
+        raise RuntimeError('CodexをChatGPT契約でログインしてください。APIキー課金では実行しません。')
+    common = {'model': 'gpt-6-astra', 'cwd': str(Path(__file__).resolve().parents[2]), 'approvalPolicy': 'never',
+              'sandbox': 'danger-full-access', 'developerInstructions': instructions,
+              'config': {'model_reasoning_effort': 'high', 'web_search': 'live', 'mcp_servers': mcp}}
+    fresh = [i['text'] for i in s['inputs'] if i['revision'] > s['applied_revision']]
+    thread, text = None, s['task']
+    if s.get('thread_id') and s.get('persistent_thread'):
+        try:
+            thread = (await owner.rpc('thread/resume', {'threadId': s['thread_id'], **common}))['thread']['id']
+            text = '\n'.join(fresh) or s['task']
+        except Exception as exc:
+            log.warning('parallel job %s: resume failed: %s', job_id[:8], exc)
+    if not thread and room_model(row['room_id']) == 'astra':
+        room_thread = thread_id_from_session(_load_session(row['room_id']))
+        if room_thread:
+            try:
+                thread = (await owner.rpc('thread/fork', {'threadId': room_thread, 'ephemeral': False, **common}))['thread']['id']
+                text = '（ここから並行作業）\n' + s['task']
+            except Exception as exc:
+                log.warning('parallel job %s: fork failed: %s', job_id[:8], exc)
+    persistent = bool(thread)
+    if not thread:
+        context = await asyncio.to_thread(_build_reseed_context, row['room_id'], project_id=project.get('id'), max_chars=12000)
+        thread = (await owner.rpc('thread/start', {**common, 'ephemeral': True}))['thread']['id']
+        text = f"{context}\n\n（ここから並行作業）\n{s['task']}" if context else s['task']
+    owner.thread_id = thread
+    owner.turn_id = (await owner.rpc('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': text}]}))['turn']['id']
+    revision = s['revision']
+    state.change(job_id, lambda x: x.update(thread_id=thread, persistent_thread=persistent,
+                                            applied_revision=max(x['applied_revision'], revision)))

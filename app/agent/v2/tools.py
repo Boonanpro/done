@@ -384,7 +384,9 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.places import TOOL as PLACES_TOOL
     from app.services.phone_control import TOOL as PHONE_TOOL
     from app.services.confirm_cards import TOOL as CONFIRM_CARD_TOOL
+    from app.services.parallel_work_tool import TOOL as PARALLEL_WORK_TOOL
     return [
+        PARALLEL_WORK_TOOL,
         LOOKUP_TOOL,
         LOCATION_TOOL,
         FLOW_TOOL,
@@ -1331,6 +1333,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "command_center":
         return ("_command_center", "manage")
+
+    if tool_name == "parallel_work":
+        return ("_parallel_work", "manage")
 
     if tool_name == "split_to_new_room":
         return ("_split_room", "split")
@@ -2580,6 +2585,11 @@ async def execute_tool(
     if skill_name == "_split_room":
         return await _execute_split_to_new_room(params, session_id, user_id)
 
+    # ★★★ 同じ部屋の中で並行作業を走らせる ★★★
+    if skill_name == "_parallel_work":
+        from app.services.parallel_work_tool import execute as _parallel_work
+        return await _parallel_work(params, session_id, user_id)
+
     # ★★★ 外部宛メッセージの文面カード（送信案）★★★
     if skill_name == "_compose_message":
         return await _execute_compose_message(params, session_id, user_id)
@@ -2758,7 +2768,7 @@ def format_tool_result(
     Returns:
         FormattedToolResult: テキストメッセージと画像のリスト
     """
-    if skill_name == "_command_center":
+    if skill_name in ("_command_center", "_parallel_work"):
         import json
         return FormattedToolResult(text=json.dumps(result, ensure_ascii=False, default=str), images=[])
 

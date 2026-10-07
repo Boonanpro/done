@@ -27,6 +27,7 @@ from typing import AsyncIterator, List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 from app.tools.browser_metrics import measure_browser_request
+from app.services import work_locks as _work_locks
 
 # セッション管理: インメモリキャッシュ + DB永続化
 _cli_sessions: Dict[str, str] = {}
@@ -2042,6 +2043,8 @@ def _build_cli_cmd(
         # headless subprocess では interactive UI が無いので以下2つは機能しない
         # → モデルが呼ばないよう無効化。質問はテキストで、計画はメッセージ本文に書く運用に寄せる。
         "--disallowedTools", "ExitPlanMode,AskUserQuestion",
+        # parallel work in one room: a file is written by one piece of work at a time (work_locks)
+        "--settings", _work_locks.hook_settings(),
     ])
 
     if resume_session_id:
@@ -2530,6 +2533,7 @@ def _run_cli_in_thread(
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["DAN_SESSION_ID"] = room_id
     env["DAN_ROOM_ID"] = room_id
+    env["DAN_LOCK_OWNER"] = "room:" + room_id
     env["CLAUDE_CODE_ENABLE_TASKS"] = "true"
     if project_id:
         env["DAN_PROJECT_ID"] = project_id
@@ -2970,6 +2974,7 @@ async def _process_via_streaming_session(
             "--mcp-config", mcp_config_path,
             "--append-system-prompt", launch_system_prompt,
             "--disallowedTools", "ExitPlanMode,AskUserQuestion",
+            "--settings", _work_locks.hook_settings(),
         ]
         # Resume the saved conversation so context survives a process restart.
         # Only applied at session creation (a live session is reused as-is).
@@ -2980,6 +2985,7 @@ async def _process_via_streaming_session(
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["NO_COLOR"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["DAN_LOCK_OWNER"] = "room:" + room_id
     run_cwd = cwd or str(CLI_WORKSPACE)
 
     from app.agent.streaming_session import get_session
@@ -3857,6 +3863,10 @@ async def process_message_cli(
             if event.get("type") == "result" and not event.get("is_error"):
                 timeline_turn_succeeded = True
         yield event
+    try:   # what this turn took for parallel work (a file, the screen, the phone) is free again
+        _work_locks.release_owner("room:" + room_id)
+    except Exception as _lock_exc:  # noqa: BLE001
+        _cli_debug(f"work lock release failed: {_lock_exc}")
     timeline_status = _commit_mentioned_timeline_draft(room_id, timeline_draft) if timeline_turn_succeeded else None
     if timeline_status:
         yield {"type": "text", "text": timeline_status}

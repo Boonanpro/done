@@ -73,12 +73,14 @@ async def list_tools() -> list[types.Tool]:
     if os.environ.get('DAN_COMMAND_JOB_ID'):
         from app.services.command_job_tools import TOOLS
         from app.services.browser_script import TOOL as SCRIPT_TOOL
-        anthropic_tools = [*anthropic_tools, *TOOLS,SCRIPT_TOOL]
+        # a parallel job asks the owner in words (its answer reaches the room); the voice-job confirmation card is not its
+        anthropic_tools = [*anthropic_tools, *([] if os.environ.get('DAN_PARALLEL_JOB') else TOOLS), SCRIPT_TOOL]
+    claude_harness = os.environ.get('DAN_JOB_HARNESS') == 'claude'
 
     mcp_tools = []
     for tool in anthropic_tools:
         # outside the CLI (a job, the voice call's tool host) there are no CLI built-ins: Dan's own versions are the tools
-        if tool["name"] in _CLI_BUILTIN_TOOLS and not (os.environ.get('DAN_COMMAND_JOB_ID') or os.environ.get('DAN_TOOL_HOST')):
+        if tool["name"] in _CLI_BUILTIN_TOOLS and (claude_harness or not (os.environ.get('DAN_COMMAND_JOB_ID') or os.environ.get('DAN_TOOL_HOST'))):
             continue
         description = tool.get("description", "")
         if os.environ.get('DAN_COMMAND_JOB_ID') and tool['name'] == 'bash':
@@ -128,6 +130,28 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
             approval_notice = await guard(job_id,name,arguments)
         except Exception as exc:
             return [types.TextContent(type='text',text='操作は実行していません: '+str(exc))]
+
+    # Parallel work in one room: the same file, the PC screen or the phone is used by one piece of work at a time
+    # (work_locks). Waiting here is shown in the room's work list; still taken after the limit → this call is not made.
+    if not os.environ.get('DAN_TOOL_HOST'):
+        from app.services import work_locks
+        lock_key = work_locks.tool_key(name, arguments)
+        lock_owner = work_locks.current_owner()
+        if lock_key and lock_owner:
+            waited = []
+
+            def on_wait(record):
+                waited.append(record)
+                work_locks.note_waiting(lock_owner, record)
+            other = await asyncio.to_thread(work_locks.acquire, lock_key, lock_owner, work_locks.current_title(),
+                                            on_wait, work_locks.wait_limit(lock_owner))
+            work_locks.clear_waiting(lock_owner)
+            if other:
+                return [types.TextContent(type='text', text=(
+                    f'操作は実行していません: {work_locks.label(lock_key)} は{work_locks.waiting_text(other)}で、まだ使われています。'
+                    'ほかの部分を先に進めてから、あとでもう一度試してください。'))]
+            if waited:   # it changed while this call waited: look again first (it is this work's turn now)
+                return [types.TextContent(type='text', text=work_locks.changed_while_waiting(lock_key, waited[0]))]
 
     # ツール名をパース
     parsed = parse_tool_name(name)

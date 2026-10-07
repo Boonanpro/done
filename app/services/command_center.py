@@ -213,8 +213,9 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         result['outbound'] = await outbound_cards(target_room)
         return result
     task = str(params.get("task") or "").strip()
-    if not task or len(task) > 2800:
-        raise ValueError("作業・報告の本文は1〜2800文字で指定してください")
+    limit = 12000 if action == 'work' and params.get('engine') == 'parallel' else 2800
+    if not task or len(task) > limit:
+        raise ValueError(f"作業・報告の本文は1〜{limit}文字で指定してください")
     source = await projects.get_project_by_room_id(room_id)
     if not source or source.get("user_id") != user_id:
         raise ValueError("依頼元プロジェクトを確認できません")
@@ -239,12 +240,19 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     from app.services import command_job_state
     job_id = str(uuid4())
     requested = str(params.get('engine') or '')
-    # api: Responses API worker (operating: browser, sites, lookups); make: chat Dan's own harness in the room (Claude Code
-    # or Codex) for heavy making; cli: Codex CLI (default)
-    engine = requested if requested in ('api', 'make') else 'cli'
+    # api: Responses API worker (operating: browser, sites, lookups); make: heavy making asked by voice; parallel: a job
+    # branched off this room's conversation (parallel_job_runner) on the chosen model; cli: Codex CLI (default)
+    engine = requested if requested in ('api', 'make', 'parallel') else 'cli'
+    extra = {}
+    if engine in ('make', 'parallel'):
+        from app.services.parallel_job_runner import model_key, room_model, title_of
+        extra = {'model': model_key(params.get('model')) or (room_model(target_room) if engine == 'parallel' else 'opus'),
+                 'title': title_of(params.get('title') or task)}
+    elif engine == 'api' and params.get('model'):
+        extra = {'model': str(params['model'])[:60]}
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
         origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine,
-        **({'model':str(params['model'])[:60]} if engine in ('api','make') and params.get('model') else {}),
+        **extra,
         **({'replay':{'id':str(params['replay'].get('id'))[:40],'values':{str(k)[:60]:str(v)[:200] for k,v in (params['replay'].get('values') or {}).items()}}}
            if engine=='api' and isinstance(params.get('replay'),dict) else {}))
     try:

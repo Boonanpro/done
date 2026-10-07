@@ -65,6 +65,7 @@ import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
 import { RoomBoard } from '@/components/chat/room-board';
+import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
 import { VoiceSession } from '@/components/voice/voice-session';
@@ -2964,6 +2965,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
         </div>
       ) : (
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
+        {projectId && !isBooting ? <ParallelJobsBar projectId={projectId} onShowMessage={highlightAndScroll} /> : null}
         {/* 新着が無くても、上へスクロール中は常に「最新へ」ジャンプを出す */}
         {(hasNewMessages || isAwayFromBottom) && (
           <button
