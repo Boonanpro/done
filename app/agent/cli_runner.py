@@ -1947,6 +1947,143 @@ def _dotenv_cli_model() -> str:
     return ""
 
 
+def _dotenv_value(name: str) -> str:
+    """プロジェクト .env の任意のキーを読む（_dotenv_cli_model と同じ理由で毎回読む）。無ければ ""。"""
+    try:
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith(f"{name}="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# 長い会話を要約せずに短くする（services/claude-plugins/dan-compact）
+#
+# Claude Code の compact（要約）を、Jev が「もう要らない」と判断した道具の呼び出しと
+# 結果だけを捨てた元の会話で置き換える function-hook プラグイン。発言の文章は変えない。
+# `--plugin-dir` で起動ごとに渡すだけ（claude plugin install / settings.json は触らない）。
+# 付けるのは DAN_COMPACT_JEV が "0" でなく、資格情報サービスから TypeSafe の鍵が取れた時だけ。
+# 取れなければ何も付けない＝今までどおり組み込み要約。
+# ---------------------------------------------------------------------------
+_DAN_COMPACT_PLUGIN_DIR = PROJECT_ROOT / "services" / "claude-plugins" / "dan-compact"
+_DAN_COMPACT_ENV_PASSTHROUGH = (
+    "DAN_COMPACT_KEEP_THRESHOLD",
+    "DAN_COMPACT_MONTHLY_CAP_JPY",
+    "DAN_COMPACT_LEDGER_PATH",
+    "DAN_COMPACT_AT_PERCENT",
+    "DAN_COMPACT_MIN_REDUCTION",
+    "DAN_COMPACT_PRESERVE_RECENT",
+    "DAN_COMPACT_JPY_PER_MTOKEN",
+)
+_TYPESAFE_KEY_CACHE_OK_SECONDS = 600.0
+_TYPESAFE_KEY_CACHE_MISS_SECONDS = 60.0
+_typesafe_key_cache: dict[str, tuple[float, Optional[str]]] = {}
+_typesafe_key_cache_lock = threading.Lock()
+
+
+def _dan_compact_enabled() -> bool:
+    """DAN_COMPACT_JEV（既定 "1"）。プロセス環境 → .env の順。"0"/"false"/"no"/"off" で無効。"""
+    raw = os.environ.get("DAN_COMPACT_JEV")
+    if raw is None or raw.strip() == "":
+        raw = _dotenv_value("DAN_COMPACT_JEV")
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _typesafe_api_key_sync(user_id: Optional[str]) -> Optional[str]:
+    """資格情報サービスから TypeSafe の鍵を同期的に取る（jev_decisions.py と同じ名前・同じ判定）。
+
+    同期スレッド（_run_cli_in_thread）からも、イベントループ上の経路からも呼べるように、
+    ループが動いているスレッドでは別スレッドで asyncio.run する。値はプロセス内で短時間
+    キャッシュし、ログ・ファイルには出さない。取れなければ None。
+    """
+    if not user_id:
+        return None
+    now = time.monotonic()
+    with _typesafe_key_cache_lock:
+        cached = _typesafe_key_cache.get(user_id)
+        if cached and now < cached[0]:
+            return cached[1]
+
+    def read() -> Optional[str]:
+        async def lookup() -> Optional[str]:
+            from app.services.credentials_service import get_credentials_service
+            service = get_credentials_service()
+            for name in ("typesafe", "typesafe_jev"):
+                value = await service.get_credential(user_id, name)
+                if value and value.get("credential_type") == "api_key" and value.get("password"):
+                    return value["password"]
+            return None
+        try:
+            return asyncio.run(lookup())
+        except Exception as e:  # noqa: BLE001
+            _cli_debug(f"[COMPACT] TypeSafe key lookup failed: {type(e).__name__}")
+            return None
+
+    key: Optional[str] = None
+    try:
+        asyncio.get_running_loop()
+        loop_here = True
+    except RuntimeError:
+        loop_here = False
+    if loop_here:
+        holder: dict[str, Optional[str]] = {}
+        t = threading.Thread(target=lambda: holder.__setitem__("key", read()), daemon=True)
+        t.start()
+        t.join(timeout=15)
+        key = holder.get("key")
+    else:
+        key = read()
+
+    ttl = _TYPESAFE_KEY_CACHE_OK_SECONDS if key else _TYPESAFE_KEY_CACHE_MISS_SECONDS
+    with _typesafe_key_cache_lock:
+        if len(_typesafe_key_cache) >= 128:
+            _typesafe_key_cache.pop(next(iter(_typesafe_key_cache)))
+        _typesafe_key_cache[user_id] = (time.monotonic() + ttl, key)
+    return key
+
+
+def _dan_compact_launch(user_id: Optional[str]) -> tuple[list[str], dict[str, str]]:
+    """Jev 短縮プラグインを付ける時の追加 argv と env。付けない時は ([], {})。
+
+    他の起動オプション・環境変数は変えない（追加だけ）。鍵は env にだけ入れ、ログに出さない。
+    """
+    if not _dan_compact_enabled():
+        _cli_debug("[COMPACT] jev plugin off (DAN_COMPACT_JEV=0)")
+        return [], {}
+    manifest = _DAN_COMPACT_PLUGIN_DIR / ".claude-plugin" / "plugin.json"
+    library = _DAN_COMPACT_PLUGIN_DIR / "node_modules" / "fast-jev-compaction" / "dist" / "compact.js"
+    if not manifest.exists() or not library.exists():
+        _cli_debug(f"[COMPACT] jev plugin not attached: plugin files missing under {_DAN_COMPACT_PLUGIN_DIR}")
+        return [], {}
+    key = _typesafe_api_key_sync(user_id)
+    if not key:
+        _cli_debug("[COMPACT] jev plugin not attached: no TypeSafe key for this user")
+        return [], {}
+    extra_env: dict[str, str] = {
+        "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1",
+        "TYPESAFE_API_KEY": key,
+    }
+    for name in _DAN_COMPACT_ENV_PASSTHROUGH:
+        if name in os.environ and os.environ[name].strip():
+            continue  # 子プロセスは os.environ のコピーを受け取るので、そのまま届く
+        val = _dotenv_value(name)
+        if val:
+            extra_env[name] = val
+    if not (os.environ.get("DAN_COMPACT_LEDGER_PATH") or extra_env.get("DAN_COMPACT_LEDGER_PATH")):
+        extra_env["DAN_COMPACT_LEDGER_PATH"] = str(
+            Path.home() / ".dan" / "workspace" / "memory" / ".compact_jev_ledger.json"
+        )
+    shown = {k: v for k, v in extra_env.items() if k != "TYPESAFE_API_KEY"}
+    _cli_debug(f"[COMPACT] jev plugin attached: --plugin-dir {_DAN_COMPACT_PLUGIN_DIR} env={shown}")
+    return ["--plugin-dir", str(_DAN_COMPACT_PLUGIN_DIR)], extra_env
+
+
 def _apply_fable_quota_guard(model: str) -> str:
     """Fable 専用週次枠が閾値超なら opus に退避する (usage_guard 参照)。"""
     if model != "fable":
@@ -2024,8 +2161,9 @@ def _build_cli_cmd(
     resume_session_id: Optional[str] = None,
     fork_session: bool = False,
     model: str = "opus",
+    extra_args: Optional[list[str]] = None,
 ) -> list[str]:
-    """CLIコマンドライン引数を組み立てる"""
+    """CLIコマンドライン引数を組み立てる（extra_args は末尾に足すだけ。例: --plugin-dir）"""
     if cli_js:
         cmd = [claude_cmd, cli_js]
     else:
@@ -2051,6 +2189,9 @@ def _build_cli_cmd(
         cmd.extend(["--resume", resume_session_id])
         if fork_session:
             cmd.append("--fork-session")
+
+    if extra_args:
+        cmd.extend(extra_args)
 
     return cmd
 
@@ -2600,7 +2741,10 @@ def _run_cli_in_thread(
             _interrupted_rooms.discard(room_id)
         cli_model = _resolve_cli_model(room_id)
         launch_system_prompt, launch_content = _prepare_cli_launch_payload(system_prompt, content)
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model)
+        # 長い会話を要約せずに短くする Jev プラグイン（鍵が取れた時だけ付く。他の引数・env は不変）
+        compact_args, compact_env = _dan_compact_launch(user_id)
+        env.update(compact_env)
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model, extra_args=compact_args)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, fork={need_fork}, prompt len={len(content)})")
 
         result_data = _run_cli_process(
@@ -2637,7 +2781,7 @@ def _run_cli_in_thread(
                 if reseed:
                     retry_content = _wrap_latest_user_message(reseed, content)
             retry_system_prompt, retry_launch_content = _prepare_cli_launch_payload(system_prompt, retry_content)
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model, extra_args=compact_args)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(retry_content)})")
 
             result_data = _run_cli_process(
@@ -2962,6 +3106,11 @@ async def _process_via_streaming_session(
         else system_prompt
     )
 
+    # 長い会話を要約せずに短くする Jev プラグインの追加 argv（新規セッションを起こす時に
+    # 決める。鍵が取れた時だけ中身が入る。他の引数は不変）。build_cmd が後から呼ばれても
+    # 同じリストを見るよう、中身を差し替える形にする。
+    compact_args: list[str] = []
+
     def build_cmd() -> list:
         c = [claude_cmd, cli_js] if cli_js else [claude_cmd]
         c += [
@@ -2980,6 +3129,7 @@ async def _process_via_streaming_session(
         # Only applied at session creation (a live session is reused as-is).
         if resume_session_id:
             c += ["--resume", resume_session_id]
+        c += compact_args
         return c
 
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
@@ -3031,6 +3181,11 @@ async def _process_via_streaming_session(
             _clear_cli_session(room_id)
             resume_session_id = None
     session_is_fresh = existing is None or not existing.is_alive()
+    if session_is_fresh:
+        # 新規セッションを起こす時だけ鍵を引く（同期の DB 呼び出しなのでループを塞がない）。
+        _compact_args, _compact_env = await asyncio.to_thread(_dan_compact_launch, user_id)
+        compact_args[:] = _compact_args
+        env.update(_compact_env)
     session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
     # (Re)install the autonomous-turn receiver with this call's freshest
     # project/user context. Cheap to refresh on every turn.
