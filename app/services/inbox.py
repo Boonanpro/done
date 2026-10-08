@@ -193,7 +193,7 @@ def repeated(told, key, now):
 
 
 def _mail_watches(user_id):
-    """What Dan is waiting for by mail: the user's active mail watches."""
+    """What Dan is waiting for: the user's active mail watches and reply watches (a reply on any channel)."""
     try:
         from app.services.followups import TABLE, decode_watch_row
         from app.services.supabase_client import get_supabase_client
@@ -203,9 +203,13 @@ def _mail_watches(user_id):
     out = []
     for row in rows:
         d = decode_watch_row(row)
+        spec = d.get('spec') or {}
         if d.get('kind') == 'mail':
-            out.append({'id': row['id'], 'room_id': row['room_id'], 'from': (d.get('spec') or {}).get('from', ''),
-                        'subject': (d.get('spec') or {}).get('subject_contains', ''), 'note': d.get('plain_note') or ''})
+            out.append({'id': row['id'], 'room_id': row['room_id'], 'from': spec.get('from', ''),
+                        'subject': spec.get('subject_contains', ''), 'note': d.get('plain_note') or ''})
+        elif d.get('kind') == 'reply':
+            out.append({'id': row['id'], 'room_id': row['room_id'], 'from': spec.get('from', ''), 'channel': spec.get('channel') or 'any',
+                        'until': spec.get('until', ''), 'once': True, 'note': d.get('plain_note') or ''})
     return out
 
 
@@ -240,14 +244,27 @@ def _rooms_that_know(sender, rooms):
         return []
 
 
+_CHANNELS = {'gmail': 'email', 'email': 'email', 'mail': 'email', 'instagram': 'instagram', 'sms': 'sms', 'collab': 'collab'}
+
+
 def watch_hit(item, watches):
-    """A mail watch whose condition (sender, and subject when given) the mail meets. The condition is often only the sender,
-    so a hit is a strong lead, not the answer: judge() looks at the mail with the watch in hand."""
-    sender = ((item.get('sender_info') or {}).get('from') or '').lower()
+    """A watch whose condition (sender, and subject when given) the item meets: a mail watch for mail, a reply watch for
+    its channel (or any). The condition is often only the sender, so a hit is a strong lead, not the answer: judge() looks
+    at the item with the watch in hand."""
+    info = item.get('sender_info') or {}
+    sender = ' '.join(str(info.get(k) or '') for k in ('from', 'handle')).lower().replace('@', ' ')
     subject = (item.get('subject') or '').lower()
+    channel = _CHANNELS.get(str(item.get('source') or 'gmail').lower(), str(item.get('source') or '').lower())
     for watch in watches:
-        want = (watch.get('from') or '').strip().lower()
-        if want and want in sender and (not watch.get('subject') or watch['subject'].lower() in subject):
+        want = (watch.get('from') or '').strip().lower().lstrip('@')
+        if not want or want not in sender:
+            continue
+        if 'channel' in watch:   # a reply watch
+            if watch['channel'] not in ('any', '', channel):
+                continue
+        elif channel != 'email':   # a mail watch is about mail
+            continue
+        if not watch.get('subject') or watch['subject'].lower() in subject:
             return watch
     return None
 
@@ -391,7 +408,7 @@ async def handle(user_id, item, own):
         return 'ignore'
     watches = await asyncio.to_thread(_mail_watches, user_id)
     mail = (item.get('source') or 'gmail') == 'gmail'
-    hit = watch_hit(item, watches) if mail else None   # mail watches name a sender address
+    hit = watch_hit(item, watches)   # mail watches for mail, reply watches for their channel
     belongs = (item.get('metadata') or {}).get('room_hint')   # where a non-mail item plainly belongs (a collab window's room)
     rooms = await asyncio.to_thread(_recent_rooms, user_id)
     hint = None
@@ -424,6 +441,12 @@ async def handle(user_id, item, own):
     room = None
     if decision['decision'] in ('tell', 'act'):
         room = await deliver(user_id, item, decision, watches)
+        if awaited and hit.get('once'):   # the reply that was waited for: told once, the watch is done
+            try:
+                from app.services.followups import mark_status
+                await asyncio.to_thread(mark_status, hit['id'], 'done')
+            except Exception:
+                logger.exception('inbox: could not end reply watch %s', hit['id'])
     _mark(item['id'], {**decision, 'room': room, 'by': 'dan', 'at': time.time()})
     return decision['decision']
 

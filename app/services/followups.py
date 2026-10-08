@@ -133,7 +133,8 @@ def schedule_followup(
     }
 
 
-_VALID_KINDS = ("at", "every", "mail", "handoff")
+_VALID_KINDS = ("at", "every", "mail", "handoff", "reply")
+REPLY_DAYS = 7   # a reply watch ends by itself after this when no `until` is given
 
 JST = timezone(timedelta(hours=9))
 
@@ -232,6 +233,19 @@ def create_watch(
             spec["interval_seconds"] = DEFAULT_MAIL_INTERVAL
         # First check runs soon; it baselines last_uid without waking anyone.
         first = now + timedelta(seconds=MIN_DELAY_SECONDS)
+    elif kind == "reply":
+        # 「この相手から返事が来たら」（メール・インスタDM・SMS・外部窓口のどれでも）。照合は受け口（inbox）が届いた
+        # ものごとにする。ここの fire_at は期限: 来ないまま期限になったら見張りを終える。
+        if not (spec.get("from") or "").strip():
+            return {"scheduled": False, "id": None, "fire_at": None,
+                    "message": "reply には from（相手のアドレス・ID・名前）が必要です。"}
+        spec["from"] = spec["from"].strip()
+        spec["channel"] = (spec.get("channel") or "any").strip().lower()
+        until = fire_at or (now + timedelta(days=REPLY_DAYS))
+        if until <= now:
+            return {"scheduled": False, "id": None, "fire_at": None, "message": "期限が過去です。"}
+        spec["until"] = until.isoformat()
+        first = until
     elif kind == "handoff":
         # 「この話は新しいチャットで」の引き継ぎ。新ルームでダンが一言目を話す
         # ためのワンショット起動。待つ理由が無いので次のポーラー周期で即発火。
@@ -277,7 +291,7 @@ def create_watch(
         return {"scheduled": False, "id": None, "fire_at": None,
                 "message": f"見張りの登録に失敗しました: {e}"}
 
-    label = {"at": "予約", "every": "定期見張り", "mail": "メール見張り", "handoff": "引き継ぎ起動"}[kind]
+    label = {"at": "予約", "every": "定期見張り", "mail": "メール見張り", "handoff": "引き継ぎ起動", "reply": "返事待ち"}[kind]
     return {"scheduled": True, "id": watch_id, "fire_at": first.isoformat(),
             "message": f"{label}を登録しました（id={watch_id}, 次回={first.isoformat()}）。"}
 

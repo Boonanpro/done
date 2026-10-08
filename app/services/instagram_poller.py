@@ -36,9 +36,21 @@ def _enabled() -> bool:
     return os.getenv("DAN_IG_POLLER_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 
 
+REPLY_WAIT_INTERVAL = 900   # while a reply is awaited on Instagram (a reply watch), every 15 minutes
+
+
+def _awaiting_reply() -> bool:
+    try:
+        from app.services.followups import list_watches
+        return any(w.get('kind') == 'reply' and (w.get('spec') or {}).get('channel') in ('instagram', 'any') for w in list_watches())
+    except Exception:
+        return False
+
+
 def _next_delay() -> float:
-    jitter = POLL_INTERVAL * JITTER_RATIO
-    return max(60.0, POLL_INTERVAL + random.uniform(-jitter, jitter))
+    base = min(POLL_INTERVAL, REPLY_WAIT_INTERVAL) if _awaiting_reply() else POLL_INTERVAL
+    jitter = base * JITTER_RATIO
+    return max(60.0, base + random.uniform(-jitter, jitter))
 
 
 # --------------------------------------------------------------------------

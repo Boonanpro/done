@@ -411,8 +411,24 @@ async def _fire(row: Dict[str, Any]) -> None:
         await _fire_every(d)
     elif kind == "handoff":
         await _fire_handoff(d)
+    elif kind == "reply":
+        await _fire_reply(d)
     else:
         await _fire_at(d)
+
+
+async def _fire_reply(row: Dict[str, Any]) -> None:
+    """A reply watch reached its end without the reply (the inbox ends it when the reply comes): one quiet line, done."""
+    from app.services.followups import mark_status
+    spec = row.get("spec") or {}
+    await asyncio.to_thread(mark_status, row["id"], "done")
+    try:
+        from app.services import inbox
+        await inbox.say(row.get("user_id") or "", row["room_id"],
+                        f"{spec.get('from') or '相手'}からの返事は期限までに来なかったので、返事待ちを終えました（{row.get('plain_note') or ''}）"[:300],
+                        push=False)
+    except Exception:  # noqa: BLE001
+        logger.exception("[watch] reply end note failed")
 
 
 async def _tick() -> None:

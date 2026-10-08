@@ -181,7 +181,8 @@ TOOL = {
                     'https://www.facebook.com/notifications ）。ダンのブラウザで保存済みのログインを使って15分おきに読み、新しく届いたものは'
                     'メールと同じ受け口（判断・本人の希望・チャットへの出し方）に入る。add するとその場で1回読み、今ある分は既読扱いにする'
                     '（結果にログインが要ると出たら、そのサイトのログイン情報を本人に聞いて save_credentials してから、もう一度 add する）。'
-                    'list で見張り中の一覧、remove で止める。'),
+                    'list で見張り中の一覧、remove で止める。'
+                    '特定の相手からの返事待ち（「◯◯さんから返信が来たら教えて」）には使わない。それは watch の reply_from（届いたら1回知らせて終わる）。'),
     'input_schema': {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': ['add', 'list', 'remove']},
         'service': {'type': 'string', 'description': 'add: サービス名（例: X、Facebook、LinkedIn）'},

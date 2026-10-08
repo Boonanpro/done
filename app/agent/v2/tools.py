@@ -709,10 +709,11 @@ WATCH_TOOL = {
 【3種類】
 - at: 一回きりの時刻予約（「明日10時に確認」）。at か delay_seconds を指定。
 - every: 定期実行。①秒間隔（interval_seconds、300以上）②毎月N日（monthly_day + time_of_day。31は月末に丸まる）③毎週X曜（weekly_day 0=月〜6=日 + time_of_day）。毎月の資料作成・送付、毎月の振込準備などの定期業務はこれで登録する。
-- mail: 特定の差出人からのメール着信で起こす（「税理士からメールが来たら」）。mail_from に差出人アドレスまたはドメイン（例 "taxdr-kim.com"）。mailbox で見る受信箱を選ぶ（{mailboxes}。既定 icloud）。複数の受信箱を見張るなら受信箱ごとに1件ずつ登録する。登録時点より前の既読メールでは起きない。
+- reply: 特定の相手からの返事待ち（「みひろさんから返信が来たら教えて」）。メール・インスタDM・SMS・外部窓口のどれでも。reply_from に相手（メールアドレス・インスタのID・電話番号・名前）、reply_channel に経路（instagram / email / sms / collab / any）。届いたら1回知らせて終わる。期限は at（省略時7日）で、来なければ黙って終える。追いの連絡はしない。
+- mail: 特定の差出人からのメール着信で起こす（「税理士からメールが来たら」、来るたびに）。mail_from に差出人アドレスまたはドメイン（例 "taxdr-kim.com"）。mailbox で見る受信箱を選ぶ（{mailboxes}。既定 icloud）。複数の受信箱を見張るなら受信箱ごとに1件ずつ登録する。登録時点より前の既読メールでは起きない。
 
 【使い方】
-- 登録: watch(action="create", note="起こされた時に何を確認・報告するか", ...)。kind は指定パラメータから自動判定される（mail_from があれば mail、interval_seconds のみなら every、それ以外は at）。
+- 登録: watch(action="create", note="起こされた時に何を確認・報告するか", ...)。kind は指定パラメータから自動判定される（reply_from があれば reply、mail_from があれば mail、interval_seconds のみなら every、それ以外は at）。
 - 一覧: watch(action="list") — この部屋の有効な見張りを返す。「今何を見張ってる？」に答える時に使う。
 - 取消: watch(action="cancel", watch_id="...")。
 - 見張りの間ブラウザ画面を保持する場合は hold_browser=true。ユーザー操作待ちは browser(action="hold", reason=...) で保持し、不要な見張りを作らない。保持解除は browser(action="release")。
@@ -731,6 +732,8 @@ WATCH_TOOL = {
             "monthly_day": {"type": "integer", "description": "every用: 毎月の実行日（1〜31。31は月末に丸まる）"},
             "weekly_day": {"type": "integer", "description": "every用: 毎週の実行曜日（0=月〜6=日）"},
             "time_of_day": {"type": "string", "description": "monthly_day/weekly_day用: 実行時刻 HH:MM（JST、既定09:00）"},
+            "reply_from": {"type": "string", "description": "reply用: 返事を待つ相手（メールアドレス・インスタのID・電話番号・名前）"},
+            "reply_channel": {"type": "string", "description": "reply用: 返事が来る経路（instagram / email / sms / collab / any）。既定 any"},
             "mail_from": {"type": "string", "description": "mail用: 差出人アドレスまたはドメイン"},
             "mail_subject_contains": {"type": "string", "description": "mail用: 件名に含まれるべき文字列（任意）"},
             "mailbox": {"type": "string", "enum": list(_MAILBOX_KEYS), "description": "mail用: 見張る受信箱（既定 icloud）"},
@@ -5078,7 +5081,12 @@ async def _execute_watch(
 
     monthly_day = params.get("monthly_day")
     weekly_day = params.get("weekly_day")
-    if mail_from:
+    reply_from = (params.get("reply_from") or "").strip()
+    if reply_from:
+        kind = "reply"
+        spec["from"] = reply_from
+        spec["channel"] = (params.get("reply_channel") or "any").strip().lower()
+    elif mail_from:
         kind = "mail"
         spec["from"] = mail_from
         if (params.get("mail_subject_contains") or "").strip():
