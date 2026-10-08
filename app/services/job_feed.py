@@ -42,6 +42,11 @@ def start():
     from app.services.room_feed import publish
     state.ROOT.mkdir(parents=True, exist_ok=True)
     pending, lock = {}, threading.Lock()
+    # Only a file whose content changed is published. The OS also reports a file that was merely read: NTFS rewrites a
+    # file's last-access time once an hour, the core reads every job file every 20 s, so once an hour every file was
+    # reported in the same sweep; each report read all the files again (439 x 439 on 2026-10-08) and the core answered
+    # nothing for 2-4 minutes, every hour, since this watcher was added.
+    written = {p.stem: p.stat().st_mtime_ns for p in state.ROOT.glob('*.json')}
 
     def flush(job_id):
         with lock:
@@ -59,7 +64,11 @@ def start():
             name = Path(getattr(event, 'dest_path', '') or event.src_path).name
             if not name.endswith('.json'): return
             job_id = name[:-5]
+            try: at = (state.ROOT / name).stat().st_mtime_ns
+            except OSError: return   # removed, or not there yet (the temp file is renamed onto it)
             with lock:
+                if written.get(job_id) == at: return
+                written[job_id] = at
                 if job_id in pending: return
                 timer = threading.Timer(DEBOUNCE_S, flush, (job_id,))
                 pending[job_id] = timer

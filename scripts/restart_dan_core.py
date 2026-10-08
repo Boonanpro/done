@@ -51,7 +51,48 @@ def busy():
     jobs = [p.pid for p in psutil.process_iter(['cmdline']) if 'api_job_worker' in ' '.join(p.info.get('cmdline') or [])]
     if jobs:
         reasons.append(f'API jobs are running (pids {jobs})')
+    reasons.extend(work_in_progress())
     return '; '.join(reasons) or None
+
+
+WAITING_FOR_OWNER = {'paused', 'awaiting_confirmation', 'awaiting_approval'}
+
+
+def work_in_progress():
+    """Chat turns and parallel work that a restart would cut off. On 2026-10-08 11:50 a restart made after this check
+    passed (it looked only at calls and API jobs) ended two turns in the middle; one was moving the owner's camera files.
+    Read from the records every backend writes the same way (agent_runs, the job state files), so a Codex turn counts
+    like a Claude turn. Work waiting for the owner's answer is not running: it is printed and does not stop the restart
+    (the owner's decision, 2026-10-08; one such run had been waiting since the night before)."""
+    reasons = []
+    try:
+        from app.services.run_service import ACTIVE_RUN_STATES
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        runs = sb.table('agent_runs').select('room_id,state').in_('state', list(ACTIVE_RUN_STATES)).execute().data or []
+        ids = list({r['room_id'] for r in runs if r.get('room_id')})
+        names = {r['id']: r.get('name') for r in (sb.table('chat_rooms').select('id,name').in_('id', ids).execute().data or [])} if ids else {}
+        label = lambda r: names.get(r.get('room_id')) or str(r.get('room_id'))[:8]
+        waiting = sorted({label(r) for r in runs if r['state'] in WAITING_FOR_OWNER})
+        running = sorted({label(r) for r in runs if r['state'] not in WAITING_FOR_OWNER})
+        if waiting:
+            print('note: waiting for the owner (not stopping the restart):', ', '.join(waiting))
+        if running:
+            reasons.append('Dan is working in: ' + ', '.join(running))
+    except Exception as exc:
+        reasons.append(f'cannot check chat turns ({type(exc).__name__})')
+    try:
+        from app.services import command_job_state as state
+        active = []
+        for p in state.ROOT.glob('*.json'):
+            s = state.read(p.stem)
+            if s and s.get('state') == 'running':
+                active.append(str(s.get('task') or s['id'])[:30])
+        if active:
+            reasons.append('parallel work is running: ' + ' / '.join(active))
+    except Exception as exc:
+        reasons.append(f'cannot check parallel work ({type(exc).__name__})')
+    return reasons
 
 
 QUIET = 120
