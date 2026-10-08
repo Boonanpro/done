@@ -2542,7 +2542,7 @@ async def execute_tool(
 
     if skill_name == "_feed":
         from app.services.feeds import tool as feed_tool
-        return await feed_tool(params)
+        return await feed_tool(params, room_id=session_id)
 
     if skill_name == "_web_search":
         from app.services.web_search import tool as web_search_tool

@@ -133,7 +133,8 @@ def schedule_followup(
     }
 
 
-_VALID_KINDS = ("at", "every", "mail", "handoff", "reply")
+_VALID_KINDS = ("at", "every", "mail", "handoff", "reply", "page")
+PAGE_DAYS = 30   # a page watch (feeds: 「X も見といて」) ends by itself after this when no `until` is given
 REPLY_DAYS = 7   # a reply watch ends by itself after this when no `until` is given
 
 JST = timezone(timedelta(hours=9))
@@ -246,6 +247,15 @@ def create_watch(
             return {"scheduled": False, "id": None, "fire_at": None, "message": "期限が過去です。"}
         spec["until"] = until.isoformat()
         first = until
+    elif kind == "page":
+        # SNS などのページの見回り（feeds）。fire_at は次に見る時刻、期限は spec.until。
+        if not str(spec.get("url") or "").startswith("http"):
+            return {"scheduled": False, "id": None, "fire_at": None, "message": "page には url が必要です。"}
+        until = fire_at or (now + timedelta(days=PAGE_DAYS))
+        if until <= now:
+            return {"scheduled": False, "id": None, "fire_at": None, "message": "期限が過去です。"}
+        spec["until"] = until.isoformat()
+        first = now + timedelta(minutes=15)
     elif kind == "handoff":
         # 「この話は新しいチャットで」の引き継ぎ。新ルームでダンが一言目を話す
         # ためのワンショット起動。待つ理由が無いので次のポーラー周期で即発火。
@@ -291,7 +301,7 @@ def create_watch(
         return {"scheduled": False, "id": None, "fire_at": None,
                 "message": f"見張りの登録に失敗しました: {e}"}
 
-    label = {"at": "予約", "every": "定期見張り", "mail": "メール見張り", "handoff": "引き継ぎ起動", "reply": "返事待ち"}[kind]
+    label = {"at": "予約", "every": "定期見張り", "mail": "メール見張り", "handoff": "引き継ぎ起動", "reply": "返事待ち", "page": "ページの見回り"}[kind]
     return {"scheduled": True, "id": watch_id, "fire_at": first.isoformat(),
             "message": f"{label}を登録しました（id={watch_id}, 次回={first.isoformat()}）。"}
 

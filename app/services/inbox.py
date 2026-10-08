@@ -517,11 +517,7 @@ async def cycle_all():
             await cycle(user_id)
         except Exception:
             logger.exception('inbox cycle failed for %s', user_id)
-    try:   # the SNS pages the users asked Dan to watch (feeds.py), those that are due
-        from app.services import feeds
-        asyncio.get_running_loop().create_task(feeds.cycle_all())
-    except Exception:
-        logger.exception('feeds cycle not started')
+    # the SNS pages the users asked Dan to watch (feeds.py) are watches in the ledger since 2026-10-08: its poller looks
 
 
 # ---- stage 2: what reaches the user by other ways than mail ----------------------------------------------------------

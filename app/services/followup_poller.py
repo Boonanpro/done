@@ -413,6 +413,9 @@ async def _fire(row: Dict[str, Any]) -> None:
         await _fire_handoff(d)
     elif kind == "reply":
         await _fire_reply(d)
+    elif kind == "page":
+        from app.services import feeds
+        await feeds.fire(d)
     else:
         await _fire_at(d)
 
