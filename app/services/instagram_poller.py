@@ -103,13 +103,55 @@ def _find_route_for_handle(user_id: str, account: str, handle: str) -> Optional[
 def _already_seen(user_id: str, thread_id: str, last_ts: int) -> bool:
     from app.services.supabase_client import get_supabase_client
     sb = get_supabase_client().client
-    source_id = f"ig:{thread_id}:{last_ts}"
+    # by the millisecond: the old endpoint gave microseconds, the page's own data milliseconds (same message, same prefix)
+    prefix = f"ig:{thread_id}:{int(last_ts) // 1000}"
     rows = (
         sb.table("detected_messages").select("id")
-        .eq("user_id", user_id).eq("source", "instagram").eq("source_id", source_id)
+        .eq("user_id", user_id).eq("source", "instagram").like("source_id", prefix + "%")
         .limit(1).execute().data or []
     )
     return bool(rows)
+
+
+def _reply_watches(handle: str) -> List[Dict[str, Any]]:
+    """Active reply watches waiting for this Instagram account."""
+    if not handle:
+        return []
+    try:
+        from app.services.followups import list_watches
+        want = handle.lower().lstrip("@")
+        return [w for w in list_watches() if w.get("kind") == "reply"
+                and (w.get("spec") or {}).get("channel") in ("instagram", "any")
+                and str((w.get("spec") or {}).get("from") or "").lower().lstrip("@") == want]
+    except Exception:
+        logger.exception("[ig] reply watches not read")
+        return []
+
+
+def _end_watch(watch: Dict[str, Any], line: str = "") -> None:
+    from app.services.followups import mark_status
+    mark_status(watch["id"], "done")
+    if line:
+        from app.services import inbox
+        inbox.say_soon(watch.get("user_id") or "", watch["room_id"], line)
+
+
+def _settle_reply_watches(thread: Dict[str, Any], handle: str) -> None:
+    """「あ、終わらせてんな」: the awaited reply came after the watch began, and the user has already answered it or read it
+    in the Instagram app. Nothing to tell; the watch ends with one quiet line."""
+    for watch in _reply_watches(handle):
+        try:
+            since = int(datetime.fromisoformat(str(watch.get("created_at")).replace("Z", "+00:00")).timestamp() * 1000)
+        except Exception:
+            continue
+        msgs = thread.get("messages") or []
+        theirs = [m for m in msgs if not m.get("is_from_me") and m.get("ts", 0) > since]
+        if not theirs:
+            continue
+        answered = any(m.get("is_from_me") and m.get("ts", 0) > theirs[0]["ts"] for m in msgs)
+        if answered or thread.get("read_by_me"):
+            _end_watch(watch, f"@{handle} からの返事は、もう{'返信済み' if answered else 'インスタで既読'}なので、返事待ちを終えました。")
+            logger.info("[ig] @%s: reply watch %s ended (already handled by the user)", handle, str(watch["id"])[:8])
 
 
 def _record_detected(user_id: str, account: str, thread: Dict[str, Any],
@@ -137,6 +179,16 @@ def _record_detected(user_id: str, account: str, thread: Dict[str, Any],
     }
     result = sb.table("detected_messages").insert(row).execute()
     return result.data[0] if result.data else row
+
+
+def _record_seen(user_id: str, account: str, thread: Dict[str, Any]) -> None:
+    """A DM the user already read in the app: kept (so it is not taken for new again), judged as nothing to tell."""
+    row = _record_detected(user_id, account, thread)
+    try:
+        from app.services import inbox
+        inbox._mark(row.get("id"), {"decision": "ignore", "by": "rule", "why": "本人がインスタで既読", "at": __import__("time").time()})
+    except Exception:
+        logger.exception("[ig] could not mark as seen")
 
 
 def _counterpart(thread: Dict[str, Any]) -> Optional[str]:
@@ -224,6 +276,10 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+_login_blocked_until: Dict[str, float] = {}
+LOGIN_RETRY_HOURS = 24   # a failed login is not retried every hour (one notice, then a day's pause)
+
+
 async def _poll_account(user_id: str, account: str) -> None:
     from app.services.instagram_inbox import (
         ensure_logged_in, fetch_inbox_json, fetch_thread_json, open_session,
@@ -233,6 +289,9 @@ async def _poll_account(user_id: str, account: str) -> None:
     from playwright.async_api import async_playwright
 
     new_items: List[Dict[str, Any]] = []
+    import time as _time
+    if _login_blocked_until.get(account, 0) > _time.time():
+        return
 
     from app.services.instagram_send import account_lock
 
@@ -242,7 +301,8 @@ async def _poll_account(user_id: str, account: str) -> None:
             context, page = await open_session(account, pw)
             # ログインはダンが自力でやる（認証情報 + captcha + OTP）
             if not await ensure_logged_in(page, account, user_id):
-                logger.warning("[ig] %s: 自力ログインに失敗", account)
+                logger.warning("[ig] %s: 自力ログインに失敗（%d時間は試さない）", account, LOGIN_RETRY_HOURS)
+                _login_blocked_until[account] = _time.time() + LOGIN_RETRY_HOURS * 3600
                 await asyncio.to_thread(_notify_login_failed, user_id, account)
                 return
 
@@ -255,6 +315,9 @@ async def _poll_account(user_id: str, account: str) -> None:
                 if len(new_items) >= MAX_THREADS_PER_CYCLE:
                     logger.info("[ig] %s: 上限%d件。残りは次回", account, MAX_THREADS_PER_CYCLE)
                     break
+                handle = _counterpart(thread)
+                if thread.get("messages") is not None:
+                    await asyncio.to_thread(_settle_reply_watches, thread, handle or "")
                 if thread.get("is_from_me") or not thread.get("last_ts"):
                     continue  # 自分の送信が最後＝相手からの新着ではない
                 if await asyncio.to_thread(
@@ -262,7 +325,10 @@ async def _poll_account(user_id: str, account: str) -> None:
                 ):
                     continue
 
-                handle = _counterpart(thread)
+                if thread.get("read_by_me"):
+                    # already read in the Instagram app: kept as seen, not told (the user knows)
+                    await asyncio.to_thread(_record_seen, user_id, account, thread)
+                    continue
                 route = (
                     await asyncio.to_thread(_find_route_for_handle, user_id, account, handle)
                     if handle else None
@@ -270,9 +336,12 @@ async def _poll_account(user_id: str, account: str) -> None:
                 # 案件が特定できた相手なら、会話の流れも読んでダンに渡す
                 conversation = ""
                 if route:
-                    detail = await fetch_thread_json(page, thread["thread_id"])
-                    if detail:
-                        conversation = _format_conversation(parse_thread_messages(detail))
+                    if thread.get("messages"):
+                        conversation = _format_conversation(thread["messages"])
+                    else:
+                        detail = await fetch_thread_json(page, thread["thread_id"])
+                        if detail:
+                            conversation = _format_conversation(parse_thread_messages(detail))
                 new_items.append({"thread": thread, "route": route, "handle": handle,
                                   "conversation": conversation})
         finally:
@@ -288,6 +357,8 @@ async def _poll_account(user_id: str, account: str) -> None:
         detected = await asyncio.to_thread(
             _record_detected, user_id, account, thread, item["conversation"]
         )
+        for watch in await asyncio.to_thread(_reply_watches, handle or ""):
+            await asyncio.to_thread(_end_watch, watch)   # the awaited reply is here: its room hears of it below
         if route and route.get("origin_room_id"):
             from app.services.inbound_wakeup import schedule_room_wakeup
             if schedule_room_wakeup(detected, route["origin_room_id"], reason="instagram_thread"):

@@ -84,8 +84,52 @@ def profile_exists(account: str) -> bool:
     return profile_dir_for(account).exists()
 
 
+async def read_mailbox(page, wait_ms: int = 12000) -> Optional[Dict[str, Any]]:
+    """The DM list as the page itself receives it: open /direct/inbox/ and keep the GraphQL answer that carries the
+    mailbox (threads with their last messages and read marks). None when the page lands on the login form or no mailbox
+    came (2026-10-08: the old /api/v1/direct_v2/inbox/ answers 404)."""
+    import asyncio
+    found: Dict[str, str] = {}
+
+    async def keep(resp):
+        try:
+            if "graphql" in resp.url:
+                body = await resp.text()
+                if "get_slide_mailbox_for_iris_subscription" in body and len(body) > len(found.get("body", "")):
+                    found["body"] = body
+        except Exception:
+            pass
+
+    def on_response(resp):
+        asyncio.ensure_future(keep(resp))
+
+    page.on("response", on_response)
+    try:
+        await page.goto("https://www.instagram.com/direct/inbox/", wait_until="domcontentloaded", timeout=60000)
+        for _ in range(wait_ms // 500):
+            await page.wait_for_timeout(500)
+            if "/accounts/login" in page.url:
+                return None
+            if found.get("body") and len(found["body"]) > 20000:
+                break
+    finally:
+        page.remove_listener("response", on_response)
+    if not found.get("body"):
+        return None
+    try:
+        return json.loads(found["body"])
+    except Exception:
+        logger.warning("[ig] mailbox answer was not JSON")
+        return None
+
+
 async def fetch_inbox_json(page, limit: int = 20) -> Optional[Dict[str, Any]]:
-    """受信箱JSONを取得。未ログイン(HTMLが返る)なら None。"""
+    """受信箱JSONを取得。未ログインなら None。（2026-10-08 から画面が受け取る GraphQL を読む）"""
+    return await read_mailbox(page)
+
+
+async def _fetch_inbox_json_v1(page, limit: int = 20) -> Optional[Dict[str, Any]]:
+    """旧: /api/v1/direct_v2/inbox/（2026-10-08 に 404 になった）。"""
     result = await page.evaluate(_INBOX_JS, limit)
     if result.get("status") != 200:
         return None
@@ -106,6 +150,9 @@ def parse_threads(data: Dict[str, Any]) -> List[Dict[str, Any]]:
       last_ts(int マイクロ秒), last_from(str), last_text(str),
       item_type(str), is_from_me(bool)
     """
+    mailbox = ((data.get("data") or {}).get("get_slide_mailbox_for_iris_subscription")) if isinstance(data.get("data"), dict) else None
+    if mailbox is not None:
+        return _parse_mailbox(mailbox)
     viewer_pk = str(((data.get("viewer") or {}).get("pk")) or "")
     out: List[Dict[str, Any]] = []
     for thread in ((data.get("inbox") or {}).get("threads") or []):
@@ -125,6 +172,39 @@ def parse_threads(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "last_text": (last.get("text") or ""),
             "item_type": last.get("item_type") or "",
             "is_from_me": bool(viewer_pk and sender == viewer_pk),
+        })
+    return out
+
+
+def _parse_mailbox(mailbox: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The GraphQL mailbox as the same thread summaries, plus `messages` (its last few, oldest first) and `read_by_me`
+    (the user already read the last message in the Instagram app)."""
+    out: List[Dict[str, Any]] = []
+    for edge in ((mailbox.get("threads_by_folder") or {}).get("edges") or []):
+        thread = (edge.get("node") or {}).get("as_ig_direct_thread") or {}
+        me = str(((thread.get("viewer") or {}).get("interop_messaging_user_fbid")) or "")
+        users = [u.get("username") for u in (thread.get("users") or []) if u.get("username")]
+        messages = []
+        for m in reversed([e.get("node") or {} for e in ((thread.get("slide_messages") or {}).get("edges") or [])]):
+            text = m.get("text_body") or ((m.get("content") or {}).get("text_body")) or ""
+            mine = bool(me and str(m.get("sender_fbid") or "") == me)
+            messages.append({"from": "自分" if mine else (users[0] if users else ""), "is_from_me": mine,
+                             "ts": int(m.get("timestamp_ms") or 0), "text": text,
+                             "item_type": "" if text else str(m.get("content_type") or "").lower()})
+        last = messages[-1] if messages else {}
+        mark = max([int(r.get("watermark_timestamp_ms") or 0) for r in (thread.get("slide_read_receipts") or [])
+                    if str(r.get("participant_fbid") or "") == me] or [0])
+        out.append({
+            "thread_id": str(thread.get("thread_id") or ""),
+            "participants": users,
+            "read_state": None,
+            "last_ts": int(last.get("ts") or 0) * 1000,   # microseconds, as the old endpoint gave
+            "last_from": "" if not last else ("me" if last.get("is_from_me") else (users[0] if users else "")),
+            "last_text": last.get("text") or "",
+            "item_type": last.get("item_type") or "",
+            "is_from_me": bool(last.get("is_from_me")),
+            "read_by_me": bool(last) and not thread.get("marked_as_unread") and mark >= int(last.get("ts") or 0),
+            "messages": messages,
         })
     return out
 
