@@ -216,6 +216,8 @@ class SandboxManager:
             "127.0.0.1",
             "--port",
             str(self.port),
+            "--loop",
+            "app.core.event_loop:new_loop",   # keeps the port when a caller gives up before it is accepted
         ]
         # --reload is opt-in. On Windows the uvicorn reloader hits an asyncio
         # AssertionError in ProactorEventLoop._attach during teardown and the

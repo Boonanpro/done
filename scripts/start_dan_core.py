@@ -44,6 +44,38 @@ def check_health(port: int, timeout: int = 3) -> bool:
         return False
 
 
+STARTING_S = 90   # a core this young may not have opened its port yet (it starts the sandbox first)
+
+
+def running_cores(port: int = DAN_CORE_PORT, starting_s: float = STARTING_S):
+    """Core processes that exist, found by what they are and not by the port: (still starting, without their port).
+    Called when nothing listens on the port. "Port free" used to be read as "no core": on 2026-10-06 and 10-07 a core
+    that had lost its port kept running (its scheduled work, the phone relay port 8443) and a second one was started
+    beside it. A core cannot get its port back, so one that is past starting is ended before the new one starts."""
+    import psutil
+    young, stuck = [], []
+    for p in psutil.process_iter(["cmdline", "create_time"]):
+        cl = p.info.get("cmdline") or []
+        if "uvicorn" in cl and "app.core.main:app" in cl and "--port" in cl[:-1] and cl[cl.index("--port") + 1] == str(port):
+            (young if time.time() - p.info["create_time"] < starting_s else stuck).append(p)
+    return young, stuck
+
+
+def end_tree(proc) -> None:
+    import psutil
+    procs = proc.children(recursive=True) + [proc]
+    for p in procs:
+        try:
+            p.terminate()
+        except psutil.Error:
+            pass
+    for p in psutil.wait_procs(procs, timeout=8)[1]:
+        try:
+            p.kill()
+        except psutil.Error:
+            pass
+
+
 def _ensure_git_hooks_installed() -> None:
     """Activate .githooks/ for this clone (mixed-scope guard etc.). Idempotent."""
     try:
@@ -71,6 +103,14 @@ def main() -> None:
         print(f"[dan-core] Run: netstat -ano | findstr :{DAN_CORE_PORT}")
         sys.exit(1)
 
+    young, stuck = running_cores()
+    if young:
+        print(f"[dan-core] a core is still starting (PID {[p.pid for p in young]}); not starting another.")
+        sys.exit(1)
+    for p in stuck:
+        print(f"[dan-core] {time.strftime('%Y-%m-%d %H:%M:%S')} core PID {p.pid} is running without port {DAN_CORE_PORT}; ending it before starting a new one.")
+        end_tree(p)
+
     cmd = [
         sys.executable,
         "-m",
@@ -80,6 +120,8 @@ def main() -> None:
         "127.0.0.1",
         "--port",
         str(DAN_CORE_PORT),
+        "--loop",
+        "app.core.event_loop:new_loop",   # keeps the port when a caller gives up before it is accepted
         # --reload は使わない。ダンコアは「不変・再起動しない」プロセス。
         # --reload はリポジトリ全体を監視するため、auto_deploy の git pull
         # (サンドボックス系ファイル含む) で reload 連鎖が発生し、Windows の
