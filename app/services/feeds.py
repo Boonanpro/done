@@ -20,6 +20,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 FEED_MINUTES = 15
 SEEN_KEEP = 300
+KEY_VERSION = 2   # 2026-10-08: the seen-key is made by code (who + text), no longer by the model
 _running = asyncio.Lock()
 
 
@@ -74,7 +75,8 @@ async def _read(user_id, url):
 EXTRACT = """ページの文字から、本人あてに届いたもの（メッセージ・DM・コメント・返信・メンション・フォロー・いいね などの通知）を、見えている順に最大30件取り出す。
 広告・おすすめ・ナビゲーションの文字・本人自身の投稿は含めない。
 ログイン画面や「ログインしてください」の画面なら login_needed を true にする。
-JSONだけを返す: {"login_needed": false, "items": [{"who": "相手の名前やID", "kind": "DM|コメント|返信|メンション|通知", "text": "中身（短く）", "key": "相手と中身の頭から作る、同じものなら毎回同じになる短い文字列"}]}"""
+一覧に本人自身が送った最後のメッセージが出ている（「あなた:」「You:」など）なら mine を true にする。
+JSONだけを返す: {"login_needed": false, "items": [{"who": "相手の名前やID", "kind": "DM|コメント|返信|メンション|通知", "text": "中身（ページの文字のまま短く）", "mine": false}]}"""
 
 
 async def _extract(service, text):
@@ -91,9 +93,20 @@ async def _extract(service, text):
     return {'login_needed': bool(data.get('login_needed')), 'items': items}
 
 
+_AGO = re.compile(r'\d+\s*(分|時間|秒|日|週間)前?|\d+\s*[smhdw]\b|・')
+
+
 def _key(feed, item):
-    raw = str(item.get('key') or '') or (str(item.get('who') or '') + '|' + str(item.get('text') or '')[:40])
-    return hashlib.sha1((feed['id'] + '|' + re.sub(r'\s+', ' ', raw).strip().lower()).encode('utf-8')).hexdigest()[:16]
+    """Same item, same key on every look: made here from who + text (a key the model wrote changed each time)."""
+    raw = str(item.get('who') or '') + '|' + str(item.get('text') or '')[:60]
+    raw = re.sub(r'\s+', ' ', _AGO.sub('', raw)).strip().lower()
+    return hashlib.sha1((feed['id'] + '|' + raw).encode('utf-8')).hexdigest()[:16]
+
+
+def _mine(item):
+    """The user's own last message shown in a list, not something that reached them."""
+    text = str(item.get('text') or '').lstrip()
+    return bool(item.get('mine')) or text.startswith(('あなた:', 'あなた：', 'You:', 'You sent', '自分:'))
 
 
 async def poll(user_id, feed):
@@ -107,7 +120,7 @@ async def poll(user_id, feed):
         _put(user_id, feed)
         return f'読めなかった（{page.get("error") or (page.get("open") or {}).get("error") or "空"}）'
     digest = hashlib.sha1(re.sub(r'\d+\s*(分|時間|秒|日)前?|\d+[smhd]\b', '', text).encode('utf-8')).hexdigest()
-    if digest == feed.get('digest'):
+    if digest == feed.get('digest') and feed.get('key_version') == KEY_VERSION:   # an old-key feed learns on this look
         feed['failures'] = 0
         _put(user_id, feed)
         return '変化なし'
@@ -123,10 +136,12 @@ async def poll(user_id, feed):
                                            f'ログイン情報を教えてもらえればダンが入って、見張りを続けます。')
         _put(user_id, feed)
         return 'ログインが要る'
-    first = not feed.get('seen') and not feed.get('digest')
-    seen = list(feed.get('seen') or [])
+    first = (not feed.get('seen') and not feed.get('digest')) or feed.get('key_version') != KEY_VERSION
+    seen = [] if feed.get('key_version') != KEY_VERSION else list(feed.get('seen') or [])
     fresh = [i for i in found['items'] if _key(feed, i) not in seen]
-    feed.update(digest=digest, failures=0, told_login=False, seen=(seen + [_key(feed, i) for i in fresh])[-SEEN_KEEP:])
+    feed.update(digest=digest, failures=0, told_login=False, key_version=KEY_VERSION,
+                seen=(seen + [_key(feed, i) for i in fresh])[-SEEN_KEEP:])
+    fresh = [i for i in fresh if not _mine(i)]
     _put(user_id, feed)
     if first:
         return f'最初の1回: 今ある{len(found["items"])}件を見たことにした'
@@ -134,7 +149,8 @@ async def poll(user_id, feed):
         who, body = str(item.get('who') or '(不明)'), str(item.get('text') or '')
         try:
             await inbox.receive(user_id, feed['service'], who, body, subject=f'{feed["service"]} {item.get("kind") or ""}: {who}'.strip(),
-                                source_id=f'feed:{feed["id"]}:{_key(feed, item)}', metadata={'feed': feed['id'], 'url': feed['url'], 'kind': item.get('kind')})
+                                source_id=f'feed:{feed["id"]}:{_key(feed, item)}', metadata={'feed': feed['id'], 'url': feed['url'], 'kind': item.get('kind'),
+                                                                                       'watch_note': feed.get('note') or ''})
         except Exception:
             logger.exception('feeds: receive failed %s', feed['service'])
     return f'新しく{len(fresh)}件'

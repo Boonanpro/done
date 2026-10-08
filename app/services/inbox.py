@@ -260,6 +260,7 @@ JUDGE = """あなたはダン（本人の秘書AI）。本人あてに外から�
 - act: 作業が要る（返事を書く・調べる・準備する。本人の記憶にその使い道があるもの、例: 経費の領収書）。送信や支払いは本人の承認後なので準備と提案まで。
 「本人の希望」が渡されたら、何よりそれに従う（いらないと言われた種類は無視、知らせてと言われた種類は知らせる）。
 待っている目印（ダンが待っているもの）に当たるメールは、言い回しが違っても、その目印の部屋で対応する。
+「これを拾った見張りの目的」が渡されたら、その目的に当たるもの（その相手からの、その件の連絡）だけ対応し、当たらないものは無視する（同じページにある関係ない連絡は、その見張りの用ではない）。
 部屋は、話の続きなら部屋の一覧から選ぶ（「差出人が出てきた部屋」があればまずそこ）。どれでもなければ空。
 JSONだけを返す: {"decision": "ignore|tell|act", "room_id": "", "watch_id": "", "line": "本人への一言（対応する時。日本語で短く、差出人と要点）", "why": "短く"}"""
 
@@ -290,6 +291,7 @@ async def judge(user_id, item, watches, rooms, hint=None, known=(), matched=None
                   'そうでなければ（同じ相手からの別の連絡、ダン自身の操作の確認など）目印とは関係なく、ほかのメールと同じに判断する。\n'
                   if matched else '')
                + (f'これが届いた部屋（外部窓口など）: {belongs}\n' if belongs else '')
+               + (f'これを拾った見張りの目的: {(item.get("metadata") or {}).get("watch_note")}\n' if (item.get('metadata') or {}).get('watch_note') else '')
                + f'届いたもの: {json.dumps(facts, ensure_ascii=False)}\n本文:\n{body}')
     _env()
     provider = api_job_providers.make(os.environ.get('DAN_INBOX_MODEL') or os.environ.get('DAN_API_JOB_MODEL', 'deepseek-flash'))
