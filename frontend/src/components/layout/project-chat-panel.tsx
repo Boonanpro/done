@@ -63,7 +63,7 @@ import {
 } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
-import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent } from '@/components/chat/outbound-message-card';
+import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -436,7 +436,7 @@ function formatDateSeparator(d: Date): string {
   return d.getFullYear() === now.getFullYear() ? base : `${d.getFullYear()}年${base}`;
 }
 
-const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
+const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, onAnswer }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void; onAnswer?: (text: string) => void }) {
 
   // 追い連絡の仮送信状態（クライアント側フラグ）。半透明＋バッジで表示。
   const pending = !!msg.pendingFollowup;
@@ -542,6 +542,11 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
   // 送信案カード（compose_message）: `[送信案: <id>]` はカードとして描画する。
   // 送信済み/破棄イベント（📤/🗑）は折り畳みの控えめな行にする。
   // collab（外部窓口）のカードは本体チャットでは薄い1行に折り畳む（主戦場はコミュニケーションタブ）。
+  // 確認カード（confirm_card）: `[確認: <id>]` はカードとして描画する。答えは本人の発言としてこの部屋に送る。
+  const confirmCardId = msg.sender_type === 'ai' ? parseConfirmCardMarker(msg.content) : null;
+  if (confirmCardId) {
+    return <ConfirmCard proposalId={confirmCardId} onAnswer={onAnswer} />;
+  }
   const outboundCardId = parseOutboundCardMarker(msg.content);
   if (outboundCardId) {
     return <OutboundMessageCard proposalId={outboundCardId} foldCollab />;
@@ -1996,6 +2001,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
+  // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
+  const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   // 遡り読み込み（APK と同じ方式）。上端まで来たら before=最古の created_at で
@@ -3044,7 +3051,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
                 }
 
                 nodes.push(
-                  <div key={item.msg.id} data-message-id={item.msg.id} className="animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>
+                  <div key={item.msg.id} data-message-id={item.msg.id} className="animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} onAnswer={answerInRoom} /></div>
                 );
               });
               return nodes;

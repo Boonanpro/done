@@ -495,6 +495,85 @@ export function OutboundMessageCard({ proposalId, foldCollab = false }: { propos
 }
 
 const CARD_RE = /^\s*\[送信案: ([0-9a-fA-F-]{36})\]\s*$/;
+const CONFIRM_RE = /^\s*\[確認: ([0-9a-fA-F-]{8,})\]\s*$/;
+
+/** `[確認: <id>]`（confirm_card が部屋に置く行）なら id。 */
+export function parseConfirmCardMarker(content: string | null | undefined): string | null {
+  const m = (content || '').match(CONFIRM_RE);
+  return m ? m[1] : null;
+}
+
+/** 確認カード: 取り返しのつかない確定の前に、何がどうなるかを並べてボタン1つで答える（答えは本人の発言として部屋に届く）。
+ * mobile/send-card.tsx の ConfirmCard と同じ動き。 */
+export function ConfirmCard({ proposalId, onAnswer }: { proposalId: string; onAnswer?: (text: string) => void }) {
+  const queryClient = useQueryClient();
+  const queryKey = ['confirm-proposal', proposalId];
+  const { data: p, isError } = useQuery({ queryKey, queryFn: () => api.proposals.get(proposalId), staleTime: 15_000 });
+  const [choice, setChoice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  if (!p) {
+    return isError
+      ? <div className="my-2 text-xs text-muted-foreground">確認カードを読み込めませんでした</div>
+      : <div className="my-2 h-28 max-w-[560px] animate-pulse rounded-xl border border-border bg-muted/40" />;
+  }
+  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; choices?: string[]; confirm_label?: string };
+  const choices = ad.choices || [];
+  const pending = p.status === 'pending';
+  const answer = async (approve: boolean) => {
+    if (approve && choices.length > 0 && !choice) { setError('どれにするか選んでください'); return; }
+    setBusy(true); setError('');
+    try {
+      const next = await api.proposals.respond(proposalId, approve ? 'approve' : 'reject');
+      queryClient.setQueryData(queryKey, { ...p, status: next.status });
+      onAnswer?.(approve ? `承認: ${p.title}${choice ? `（${choice}）` : ''}` : `やめる: ${p.title}`);
+    } catch {
+      setError('答えを送れませんでした。もう一度押すか、チャットで伝えてください');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={`my-2 max-w-[560px] rounded-xl border border-border bg-card p-3 shadow-sm ${pending ? '' : 'opacity-70'}`}>
+      <div className="flex items-start gap-2">
+        {pending ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> : <Check className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />}
+        <div className="flex-1 text-sm font-semibold leading-snug">{p.title}</div>
+        {!pending ? <span className="shrink-0 text-xs text-muted-foreground">{p.status === 'approved' ? '承認しました' : 'やめました'}</span> : null}
+      </div>
+      {(ad.items || []).length > 0 && (
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+          {(ad.items || []).map((it, i) => (
+            <div key={i} className="contents">
+              <dt className="whitespace-nowrap text-muted-foreground">{it.label}</dt>
+              <dd className="select-text break-words">{it.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {choices.length > 0 && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          {choices.map((c) => (
+            <button key={c} type="button" disabled={!pending || busy} onClick={() => setChoice(c)}
+              className={`rounded-lg border px-3 py-1.5 text-left text-sm transition-colors ${choice === c ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted'}`}>
+              {c}
+            </button>
+          ))}
+        </div>
+      )}
+      {error ? <div className="mt-2 text-xs text-red-600">{error}</div> : null}
+      {pending && (
+        <div className="mt-3 flex justify-end gap-2">
+          <button type="button" disabled={busy} onClick={() => answer(false)}
+            className="rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted">やめる</button>
+          <button type="button" disabled={busy} onClick={() => answer(true)}
+            className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60">
+            {busy ? '送っています…' : ad.confirm_label || '承認する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** チャット履歴のメッセージが送信案カードなら proposal_id を返す。 */
 export function parseOutboundCardMarker(content: string | null | undefined): string | null {
