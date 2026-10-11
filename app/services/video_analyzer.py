@@ -49,32 +49,135 @@ ANALYSIS_PROMPT = (
 )
 
 # URL patterns
-_YOUTUBE_RE = re.compile(
-    r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([\w-]+)'
-)
+_YOUTUBE_RE = re.compile(r'https?://(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/\S+')
 _LOOM_RE = re.compile(
     r'https?://(?:www\.)?loom\.com/share/([\w-]+)'
 )
 
+UPLOADS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads"))
 
-def extract_video_urls(text: str) -> list[dict]:
-    """Extract YouTube and Loom URLs from text.
+# Dan looks at a video when the work needs it, as much as it needs (owner, 2026-10-11). Before: every message with a
+# YouTube/Loom URL or a video attachment was analysed here before Dan started, with one fixed summary prompt cut at
+# 5,000 characters. Two 11-14 minute videos took longer than the relay keeps a silent connection (about 2 minutes), the
+# request was cancelled and Dan never started (2026-10-09, twice, no error anywhere).
+TOOL = {
+    'name': 'video',
+    'description': ('動画の中身を知る。action で2つのやり方を選ぶ。どちらを・何回・どの順で使うかは自由。\n'
+                    'captions: YouTube が保存している字幕を全文そのまま返す（約30秒ごとの時刻つき）。動画は見ないので数秒で、何分の動画でも同じ。無料。'
+                    '投稿者が付けた字幕か、YouTube が音声から自動で作った字幕かは結果に書く。自動の字幕は所々聞き取りを間違える。'
+                    '字幕を持っているのは YouTube だけで、無い動画もある。\n'
+                    'ask: Gemini が映像と音声を実際に見て question に答える。YouTube / Loom の URL と動画ファイルに使える。'
+                    '1回ごとに料金がかかり、同じ質問でも毎回ばらつく（14分の動画の30秒の区間を4回聞いて22〜91秒・1〜12円）。'
+                    '字幕からは分からないこと（画面の操作・表情・テロップ・編集）、字幕の無い動画、字幕の言葉を確かめたい時に。'),
+    'input_schema': {'type': 'object', 'properties': {
+        'action': {'type': 'string', 'enum': ['captions', 'ask']},
+        'source': {'type': 'string', 'description': 'YouTube / Loom の URL、または動画ファイル（絶対パス、添付動画の名前や /api/v1/files/… の URL）'},
+        'question': {'type': 'string', 'description': 'ask の時: 動画について知りたいこと。時刻や場面を絞って具体的に書くほど答えも具体的になる'},
+    }, 'required': ['action', 'source'], 'additionalProperties': False},
+}
 
-    Returns list of {"platform": "youtube"|"loom", "url": str, "video_id": str}.
-    """
-    results = []
-    seen = set()
-    for m in _YOUTUBE_RE.finditer(text):
-        vid = m.group(1)
-        if vid not in seen:
-            seen.add(vid)
-            results.append({"platform": "youtube", "url": m.group(0), "video_id": vid})
-    for m in _LOOM_RE.finditer(text):
-        vid = m.group(1)
-        if vid not in seen:
-            seen.add(vid)
-            results.append({"platform": "loom", "url": m.group(0), "video_id": vid})
-    return results
+# Gemini's agentic video mode writes its working notes into the output and, with no mark to aim for, runs the answer on
+# straight after them; one call in two ended with no answer at all (two calls with the same question, 2026-10-11).
+# With these marks the answer could be told from the notes in both calls that had them. Kept here, not in
+# _run_interaction: other callers send their own prompts.
+ANSWER_MARKS = '\n\n最終的な答えは必ず <answer> と </answer> で囲んで出力してください。考えている途中のメモは囲みの外に書いてください。'
+
+
+def _final_answer(text: Optional[str]) -> str:
+    """What Gemini wrote after its last <answer> mark, up to the closing one; everything it wrote when it used none.
+    It opens the mark more than once and does not always close it (seen 2026-10-11)."""
+    return (text or "").rsplit("<answer>", 1)[-1].split("</answer>")[0].strip()
+
+
+def _youtube_captions_sync(url: str) -> Optional[str]:
+    """The captions YouTube already holds for the video (the uploader's, else the automatic ones in the spoken
+    language), with a time mark about every 30 seconds. None when it has none. The video itself is not fetched."""
+    import json
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "socket_timeout": 20}) as ydl:
+        info = ydl.extract_info(url, download=False)
+        manual, auto = info.get("subtitles") or {}, info.get("automatic_captions") or {}
+        spoken = next((k for k in auto if k.endswith("-orig")), None)   # the automatic track that is not a translation
+        lang = info.get("language") or (spoken[:-5] if spoken else None)
+        by_uploader = next((manual[k] for k in manual if lang and k.split("-")[0] == lang.split("-")[0]), None)
+        tracks = by_uploader or auto.get(spoken or "") or auto.get(lang or "") or []
+        track = next((t for t in tracks if t.get("ext") == "json3"), None)
+        if not track:
+            return None
+        events = json.loads(ydl.urlopen(track["url"]).read()).get("events") or []
+
+    lines, start, parts = [], None, []
+    for event in events:
+        text = "".join(seg.get("utf8", "") for seg in event.get("segs") or [])
+        if not text.strip():
+            continue
+        at = int(event.get("tStartMs") or 0) // 1000
+        if start is None or at - start >= 30:
+            if parts:
+                lines.append(f"[{start // 60}:{start % 60:02d}] " + " ".join("".join(parts).split()))
+            start, parts = at, []
+        parts.append(text)
+    if parts:
+        lines.append(f"[{start // 60}:{start % 60:02d}] " + " ".join("".join(parts).split()))
+    if not lines:
+        return None
+    seconds = int(info.get("duration") or 0)
+    kind = "投稿者が付けた字幕" if by_uploader else "自動生成の字幕（聞き取り間違いを含む）"
+    return f"{info.get('title') or url}（{seconds // 60}分{seconds % 60:02d}秒）\n{kind}\n\n" + "\n".join(lines)
+
+
+def _local_video(source: str) -> Optional[str]:
+    """A video on this PC: a path, or an attachment given by its name or its /api/v1/files/… URL."""
+    if os.path.isfile(source):
+        return source
+    path = os.path.join(UPLOADS_DIR, source.split("?")[0].rstrip("/").replace("\\", "/").split("/")[-1])
+    return path if os.path.isfile(path) else None
+
+
+async def tool(params: dict) -> dict:
+    action = str(params.get("action") or "").strip()
+    source = str(params.get("source") or "").strip()
+    question = str(params.get("question") or "").strip()
+    if not source:
+        return {"success": False, "error": "source が空"}
+    youtube, loom = _YOUTUBE_RE.search(source), _LOOM_RE.search(source)
+
+    if action == "captions":
+        if not youtube:
+            return {"success": False, "error": "字幕を持っているのは YouTube だけ。この動画は ask で Gemini に見てもらう"}
+        try:
+            captions = await asyncio.to_thread(_youtube_captions_sync, youtube.group(0))
+        except Exception as e:
+            return {"success": False, "error": f"字幕を取れなかった: {e}"}
+        if not captions:
+            return {"success": False, "error": "この動画に字幕は無い"}
+        return {"success": True, "output": captions}
+
+    if action != "ask":
+        return {"success": False, "error": "action は captions か ask"}
+    if not question:
+        return {"success": False, "error": "ask には question が要る"}
+    if not settings.GOOGLE_GEMINI_API_KEY:
+        return {"success": False, "error": "GOOGLE_GEMINI_API_KEY が設定されていない"}
+    if youtube:
+        look = (_analyze_youtube_sync, youtube.group(0))
+    elif loom:
+        look = (_analyze_loom_sync, loom.group(1))
+    else:
+        path = _local_video(source)
+        if not path:
+            return {"success": False, "error": f"動画が見つからない: {source}（YouTube / Loom の URL か、この PC 上の動画ファイルを渡す）"}
+        look = (_analyze_file_sync, path)
+    answer = ""
+    for _ in range(2):   # an empty answer is asked once more; a second empty one is reported, not hidden
+        try:
+            answer = _final_answer(await asyncio.to_thread(*look, question + ANSWER_MARKS))
+        except Exception as e:
+            return {"success": False, "error": f"Gemini が動画を見られなかった: {e}"}
+        if answer:
+            return {"success": True, "output": answer}
+    return {"success": False, "error": "Gemini が2回とも答えを返さなかった"}
 
 
 def _download_loom_video(video_id: str) -> str:

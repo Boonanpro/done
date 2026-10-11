@@ -385,6 +385,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.phone_control import TOOL as PHONE_TOOL
     from app.services.confirm_cards import TOOL as CONFIRM_CARD_TOOL
     from app.services.parallel_work_tool import TOOL as PARALLEL_WORK_TOOL
+    from app.services.video_analyzer import TOOL as VIDEO_TOOL
     return [
         PARALLEL_WORK_TOOL,
         LOOKUP_TOOL,
@@ -395,6 +396,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         FEED_TOOL,
         WEB_SEARCH_TOOL,
         PLACES_TOOL,
+        VIDEO_TOOL,
         PHONE_TOOL,
         CONFIRM_CARD_TOOL,
         WAIT_TOOL,
@@ -1317,6 +1319,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_web_search", "read")
     if tool_name == "places":
         return ("_places", "read")
+    if tool_name == "video":
+        return ("_video", "read")
     if tool_name == "phone":
         return ("_phone", "desktop")
     if tool_name == "confirm_card":
@@ -1412,7 +1416,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_phone", "_confirm_card"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_video", "_phone", "_confirm_card"}:
             return
 
         error_type = result.get("error_type")
@@ -2551,6 +2555,10 @@ async def execute_tool(
     if skill_name == "_places":
         from app.services.places import tool as places_tool
         return await places_tool(params)
+
+    if skill_name == "_video":
+        from app.services.video_analyzer import tool as video_tool
+        return await video_tool(params)
 
     if skill_name == "_phone":
         from app.services.phone_control import tool as phone_tool

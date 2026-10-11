@@ -8,7 +8,7 @@ Dan can reference these across CLI sessions via system prompt injection.
 Supports:
 - HTML artifacts (proposal, dashboard, HP) — screenshot + source analysis
 - User-uploaded images — direct image analysis
-- User-uploaded videos — via video_analyzer integration
+- Videos Dan wrote — via video_analyzer integration (a video the user sends is not analysed here: Dan uses the video tool)
 """
 
 import asyncio
@@ -287,7 +287,7 @@ async def extract_and_save_image(
 ) -> Optional[Path]:
     """Extract description from an image file and save as artifact.
 
-    Called by: chat_routes.py before CLI invocation.
+    Called by: chat_routes.py, in the background while Dan starts.
     Returns the saved file path, or None on failure.
     """
     if not settings.GOOGLE_GEMINI_API_KEY:
@@ -344,7 +344,7 @@ async def extract_and_save_video(
     If analysis_text is provided (from video_analyzer), saves it directly.
     Otherwise, runs video analysis first.
 
-    Called by: chat_routes.py before CLI invocation.
+    Called by: chat_routes.py after the turn, for a video Dan wrote.
     """
     if not analysis_text:
         # Run video analysis via existing service

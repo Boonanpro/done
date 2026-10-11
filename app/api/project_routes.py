@@ -503,6 +503,8 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
     if "check_skill" in name:
         skill_name = tool_input.get("skill_name") or tool_input.get("name", "")
         return f"スキル確認: {skill_name}" if skill_name else "スキル確認"
+    if name == "video" or name.endswith("__video"):
+        return "動画を見て答える（Gemini）" if tool_input.get("action") == "ask" else "動画の字幕を取得"
 
     # Claude Code SDK 内部ツール
     if name == "Read":

@@ -563,107 +563,6 @@ def _build_content_with_media(content: str, image_urls: list, file_urls: list | 
     return f"{prefix}\n\n{content}" if content.strip() else prefix
 
 
-async def _enrich_content_with_video_analysis(
-    content: str, file_urls: list | None = None
-) -> tuple[str, dict[str, str]]:
-    """動画ファイル・動画URLがあればGemini分析を実行し、結果をコンテンツに追加する。
-
-    対応:
-    - ファイルアップロード: .mp4/.avi/.mov/.mkv/.webm
-    - URL: YouTube, Loom (メッセージ本文から自動検出)
-
-    Returns:
-        (enriched_content, video_analyses) — video_analysesは {local_path: analysis_text}
-        のdict。_save_media_artifactsで再利用して二重実行を防ぐ。
-    """
-    import os
-    from app.services.video_analyzer import analyze_video, analyze_video_url, extract_video_urls
-
-    analyses = []
-    skipped = []
-    video_analyses: dict[str, str] = {}  # {path: analysis_text}
-    max_analysis_chars = 5000
-    max_total_chars = 24000
-
-    def _append_analysis(label: str, analysis: str | None) -> None:
-        if not analysis:
-            return
-        used = sum(len(a) for a in analyses)
-        remaining = max_total_chars - used
-        if remaining <= 0:
-            return
-        text = analysis.strip()
-        if len(text) > max_analysis_chars:
-            text = text[:max_analysis_chars] + "\n...(analysis truncated; full video was processed)"
-        if len(text) > remaining:
-            text = text[:remaining] + "\n...(video analysis budget reached)"
-        analyses.append(f"[{label}:\n{text}\n]")
-
-    # 1. アップロードされた動画ファイル
-    if file_urls:
-        upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
-        upload_dir = os.path.normpath(upload_dir)
-        VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-        for f in file_urls:
-            name = f.get("name", "file")
-            url = f.get("url", "")
-            ext = os.path.splitext(name)[1].lower()
-            if ext in VIDEO_EXTS:
-                filename = url.split("/")[-1]
-                local_path = os.path.join(upload_dir, filename)
-                if not os.path.exists(local_path):
-                    logger.warning("Uploaded video path missing: %s (%s)", local_path, name)
-                    skipped.append(f"{name}: local file not found")
-                    continue
-                try:
-                    analysis = await analyze_video(local_path)
-                except Exception as e:
-                    logger.warning("Video analysis failed for %s: %s", local_path, e, exc_info=True)
-                    skipped.append(f"{name}: analysis failed")
-                    continue
-                if analysis:
-                    used = sum(len(a) for a in analyses)
-                    remaining = max_total_chars - used
-                    if remaining <= 0:
-                        analysis = None
-                    elif len(analysis) > max_analysis_chars:
-                        analysis = analysis[:max_analysis_chars] + "\n...(analysis truncated; full video was processed)"
-                    if analysis and len(analysis) > remaining:
-                        analysis = analysis[:remaining] + "\n...(video analysis budget reached)"
-                if analysis:
-                    analyses.append(f"[動画分析結果(Gemini):\n{analysis}\n]")
-                    video_analyses[local_path] = analysis
-                else:
-                    skipped.append(f"{name}: analysis unavailable")
-
-    # 2. メッセージ本文中の動画URL (YouTube, Loom)
-    video_urls = extract_video_urls(content)
-    logger.warning("Video URL detection: found %d URLs in message: %s", len(video_urls), video_urls)
-    for v in video_urls:
-        try:
-            analysis = await analyze_video_url(v["platform"], v["video_id"], v["url"])
-        except Exception as e:
-            logger.warning("Video URL analysis failed for %s: %s", v["url"], e, exc_info=True)
-            skipped.append(f"{v['url']}: analysis failed")
-            continue
-        if analysis and len(analysis) > max_analysis_chars:
-            analysis = analysis[:max_analysis_chars] + "\n...(analysis truncated; full video was processed)"
-        if analysis:
-            analyses.append(f"[{v['platform']}動画分析結果(Gemini) {v['url']}:\n{analysis}\n]")
-
-    if skipped:
-        analyses.append(
-            "[video analysis notes:\n"
-            + "\n".join(f"- {item}" for item in skipped[:20])
-            + ("\n- additional videos omitted from notes" if len(skipped) > 20 else "")
-            + "\n]"
-        )
-
-    if not analyses:
-        return content, video_analyses
-    return content + "\n" + "\n".join(analyses), video_analyses
-
-
 _PROPOSALS_DIR = "D:/dan-workspace/proposals"
 _UPLOADS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads")) if 'os' in dir() else None
 
@@ -686,13 +585,11 @@ async def _save_media_artifacts(
     file_urls: list | None,
     message_content: str,
     room_id: str,
-    video_analyses: dict[str, str] | None = None,
 ) -> None:
-    """ユーザーが送った画像/動画/HTMLをGeminiで抽出し、永続アーティファクトとして保存する。
+    """ユーザーが送った画像/HTMLをGeminiで抽出し、永続アーティファクトとして保存する。
 
-    CLI起動前に実行されるため、system prompt注入に間に合う。
-    video_analysesを受け取ることで、_enrich_content_with_video_analysisで
-    既に実行済みの動画分析を再利用し、二重実行を防ぐ。
+    ダンの起動を待たせず裏で走る（_save_media_artifacts_in_background）。このターンのダンは添付そのものを
+    読めるので、記述は次のターン以降の一覧に載れば足りる。動画はここで解析しない: ダンが要る時に video ツールで見る。
 
     検知対象:
     - image_urls: フロントエンドから添付された画像
@@ -702,14 +599,13 @@ async def _save_media_artifacts(
     import os
     from app.services.artifact_vision import (
         extract_and_save_media_batch,
-        IMAGE_EXTS, VIDEO_EXTS, HTML_EXTS,
+        IMAGE_EXTS, HTML_EXTS,
     )
 
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
     upload_dir = os.path.normpath(upload_dir)
 
     image_paths = []
-    video_paths = []
     html_paths = []
 
     # 1. 添付画像（image_urls）
@@ -730,13 +626,11 @@ async def _save_media_artifacts(
             continue
         if ext in IMAGE_EXTS:
             image_paths.append(local_path)
-        elif ext in VIDEO_EXTS:
-            video_paths.append(local_path)
         elif ext in HTML_EXTS:
             html_paths.append(local_path)
 
     # 3. メッセージテキスト中のURL・ファイルパスを検知
-    seen_paths = set(image_paths + video_paths + html_paths)
+    seen_paths = set(image_paths + html_paths)
     for pattern, resolver in _URL_TO_LOCAL_PATTERNS:
         for match in pattern.finditer(message_content or ""):
             local_path = os.path.normpath(resolver(match))
@@ -746,21 +640,37 @@ async def _save_media_artifacts(
             ext = os.path.splitext(local_path)[1].lower()
             if ext in IMAGE_EXTS:
                 image_paths.append(local_path)
-            elif ext in VIDEO_EXTS:
-                video_paths.append(local_path)
             elif ext in HTML_EXTS:
                 html_paths.append(local_path)
 
-    if not image_paths and not video_paths and not html_paths:
+    if not image_paths and not html_paths:
         return
 
     await extract_and_save_media_batch(
         image_paths=image_paths,
-        video_paths=video_paths,
+        video_paths=[],
         html_paths=html_paths,
-        video_analyses=video_analyses or {},
+        video_analyses={},
         room_id=room_id,
     )
+
+
+_media_artifact_tasks: set = set()
+
+
+def _save_media_artifacts_in_background(**kwargs) -> None:
+    """Nothing slow stands between a saved message and Dan starting: until Dan has started, the turn lives only in this
+    request, and a request that waits in silence is cut by the relay after about two minutes (2026-10-09: two sends
+    were lost this way with no error)."""
+    async def run():
+        try:
+            await _save_media_artifacts(**kwargs)
+        except Exception as media_err:
+            logger.warning("Media artifact extraction failed (non-blocking): %s", media_err)
+
+    task = asyncio.create_task(run())
+    _media_artifact_tasks.add(task)
+    task.add_done_callback(_media_artifact_tasks.discard)
 
 
 async def _save_written_artifacts(written_file_paths: list[str], room_id: str) -> None:
@@ -2485,7 +2395,6 @@ async def send_dan_message_stream(
                         pass
 
                 cli_content = _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or [])
-                cli_content, video_analyses = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
                 # 音声モードの未読会話を記憶へ合流（部屋=共有記憶の双方向化）
@@ -2502,20 +2411,12 @@ async def send_dan_message_stream(
                     logger.warning("outbound digest failed room=%s", room_id, exc_info=True)
                 mark_latency("content_enriched")
 
-                # ── メディア永続化: CLI起動前に画像/動画をGeminiで抽出・保存 ──
-                # system promptに注入されるため、ダンは最初のターンから参照可能
-                # video_analysesを渡すことで動画分析の二重実行を防ぐ
-                try:
-                    await _save_media_artifacts(
-                        image_urls=request.image_urls or [],
-                        file_urls=request.file_urls or [],
-                        message_content=effective_content,
-                        room_id=room_id,
-                        video_analyses=video_analyses,
-                    )
-                except Exception as media_err:
-                    logger.warning("Media artifact extraction failed (non-blocking): %s", media_err)
-                mark_latency("media_artifacts_saved")
+                _save_media_artifacts_in_background(
+                    image_urls=request.image_urls or [],
+                    file_urls=request.file_urls or [],
+                    message_content=effective_content,
+                    room_id=room_id,
+                )
 
                 _cli_agen = process_message_cli(
                     room_id=room_id,
