@@ -4,11 +4,18 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import androidx.core.content.ContextCompat
 
-/** Pin speaker self-test without a voice session (developer use over adb). Logs under DanPinBle. */
+/**
+ * Developer hooks over adb (pin speaker self-test, and the phone recording's test input). Logs under DanPinBle.
+ *
+ * Not exported (2026-10-12): the hooks can point the recording's uploads at another server, set the sign-in token and
+ * feed audio in, so no other app on the phone may send this broadcast. Only the app itself, root and the system reach
+ * it: over adb that means `adb root` first (a userdebug emulator); on the owner's phone, which has no root, the
+ * receiver answers nobody. A plain `adb shell am broadcast` is a different user (shell) and is dropped before onReceive.
+ */
 object DanPinSelfTest {
   private var registered = false
   @Volatile private var running: DanPinBle? = null
@@ -31,12 +38,12 @@ object DanPinSelfTest {
       }
     }
     val filter = IntentFilter("app.done.dan.PIN_SELFTEST")
-    if (Build.VERSION.SDK_INT >= 33) context.applicationContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-    else context.applicationContext.registerReceiver(receiver, filter)
+    // Android 13+: the system drops other apps' broadcasts; before 13 ContextCompat guards it with a signature permission.
+    ContextCompat.registerReceiver(context.applicationContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
   }
 
   /**
-   * The phone's own recording (DanPhoneLifelog), over adb without the screen:
+   * The phone's own recording (DanPhoneLifelog), over adb without the screen (`adb root` first, see above):
    *   --es lifelog_api <base>     where segments go (a test server instead of Dan's)
    *   --es lifelog_token <jwt>    the sign-in used for uploads
    *   --ez phone_record true      the owner's switch
