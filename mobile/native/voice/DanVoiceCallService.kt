@@ -83,7 +83,7 @@ class DanVoiceCallService : HeadlessJsTaskService() {
         setSound(null, null)
         enableVibration(false)
       })
-      foregroundForPin()
+      if (!foregroundForPin()) { pinMode = false; stopSelfResult(startId); return START_NOT_STICKY }
       running = true
       startTask(HeadlessJsTaskConfig("DanVoiceCall", Arguments.createMap(), 0, true))
       handler.post(tick)
@@ -129,18 +129,30 @@ class DanVoiceCallService : HeadlessJsTaskService() {
   /**
    * Started by Android when the pin appears (app killed, screen off), the microphone type is refused: the pin's
    * own microphone needs none, so run as a connected device then, and add the microphone type the next time the
-   * screen asks (startPinLink), which Android allows while it is visible.
+   * screen asks (startPinLink / the phone recording's switch), which Android allows while it is visible.
+   * The connected-device type needs a Bluetooth permission; without one (the phone recording alone, 2026-10-12) the
+   * microphone type by itself is tried, and when Android allows neither the service steps back instead of crashing.
+   * Returns false when it could not become a foreground service.
    */
-  private fun foregroundForPin() {
-    if (withMicrophone) return
-    if (Build.VERSION.SDK_INT < 30) { startForeground(710, notification()); withMicrophone = true; return }
-    try {
-      startForeground(710, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-      withMicrophone = true
-    } catch (e: Exception) {
-      android.util.Log.i("DanPinBle", "pin service without microphone type for now: $e")
-      startForeground(710, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+  private fun foregroundForPin(): Boolean {
+    if (withMicrophone) return true
+    if (Build.VERSION.SDK_INT < 30) { startForeground(710, notification()); withMicrophone = true; return true }
+    val attempts = listOf(
+      ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+      ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,        // no Bluetooth permission: the phone recording alone
+      ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)  // from the background (the companion pin appeared): no microphone yet
+    for (type in attempts) {
+      try {
+        startForeground(710, notification(), type)
+        withMicrophone = (type and ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE) != 0
+        if (!withMicrophone) android.util.Log.i("DanPinBle", "pin service without microphone type for now")
+        return true
+      } catch (e: Exception) {
+        android.util.Log.i("DanPinBle", "pin service type $type refused: ${e.message?.take(140)}")
+      }
     }
+    android.util.Log.w("DanPinBle", "pin service cannot run in the foreground now")
+    return false
   }
   private fun notification(): Notification {
     val open = PendingIntent.getActivity(this, 710, packageManager.getLaunchIntentForPackage(packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
