@@ -32,6 +32,11 @@ export async function playAtomVoiceCue(kind: 'ready' | 'standby', pcId: number |
     await playVoiceCue(kind);
   }
 }
+/** Ready/standby cue on the pin during a pin call; falls back to the phone when the pin cannot play it. */
+export async function playPinVoiceCue(kind: 'ready' | 'standby', pcId: number | undefined) {
+  if (Platform.OS === 'android' && pcId != null && await NativeModules.DanVoiceCall?.pinCue?.(pcId, kind).catch(() => false)) return;
+  await playVoiceCue(kind);
+}
 export function setWorkWaiting(active: boolean) {
   if (Platform.OS === 'android') NativeModules.DanVoiceCall?.waiting?.(active);
 }
@@ -39,6 +44,11 @@ export function setWorkWaiting(active: boolean) {
 export async function bindRemoteAudio(pcId: number, trackId: string) {
   if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.bindRemoteAudio) return false;
   return NativeModules.DanVoiceCall.bindRemoteAudio(pcId, trackId);
+}
+/** True when the call will capture from Bluetooth earbuds; such calls skip noise suppression so whispers survive. */
+export async function quietSpeechInput(): Promise<boolean> {
+  if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.quietSpeechInput) return false;
+  return NativeModules.DanVoiceCall.quietSpeechInput();
 }
 export function unbindRemoteAudio(pcId: number) {
   if (Platform.OS === 'android') NativeModules.DanVoiceCall?.unbindRemoteAudio?.(pcId);
@@ -50,6 +60,12 @@ export async function audioEndpointStats(pcId: number) {
 export function muteExternalAudio(pcId: number, value: boolean) {
   if (Platform.OS === 'android') NativeModules.DanVoiceCall?.muteExternalAudio?.(pcId, value);
 }
+/** Attach the Dan pin (BLE) microphone to this phone-owned call. Dan keeps answering from the phone. */
+export async function connectPinAudio(pcId: number) {
+  if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.connectPinAudio) throw new Error('アプリの更新が必要です');
+  return NativeModules.DanVoiceCall.connectPinAudio(pcId);
+}
+
 export async function connectAtomAudio(pcId: number, host: string, key: string) {
   if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.connectAtomAudio) throw new Error('アプリの更新が必要です');
   return NativeModules.DanVoiceCall.connectAtomAudio(pcId, host, key);

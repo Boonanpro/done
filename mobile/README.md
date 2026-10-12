@@ -1,6 +1,44 @@
 # DAN Mobile
 
+### Doneホーム再設計（1.0.28 / versionCode 27）
+
+上部に音声・チャットのアイコン、下部に固定カード1枚を置き、左右スワイプで作業中の部屋の内容だけを切り替えます。履歴はProjects、制作物はLibraryへ集約。英語が既定で、Settingsから日本語へ切替可能です。UI言語は保存され、会話本文は変更しません。
+
+Galaxy SM-S931Qへ上書き導入。実機でホーム、日英切替、チャットとキーボード、Projects、Libraryの0件表示を確認。詳細と未検証範囲は [実装記録](../docs/current/done-mobile-redesign-20260923.md)。APKは `../scratch/done-native-redesign/Done-1.0.28.apk`。
+
+### UI操作改善（1.0.27 / versionCode 26）
+
+チャットのアプリバー・添付ボタンを48dpへ拡大し、戻る・検索・添付・制作物追加・送信などにアクセシビリティ用の操作名を追加しました。同じruntimeの旧配信更新との混在を避けるため、appVersionとAndroidのruntimeVersionを1.0.27へそろえています。
+
+2026-09-23にarm64-v8a / x86_64のReleaseビルドが成功し、USB接続のGalaxy SM-S931Qへ上書きインストール、起動とログイン保持を確認しました。実機のチャット画面で48dpの操作領域、操作名、空入力時の送信無効、Samsung日本語IME表示時の入力欄、検索・添付メニューの開閉、ホームへ戻る操作を確認済みです。この版で音声通話・Bluetooth・TalkBack読み上げ・文字倍率変更の再検証は行っていません。
+
+APK: `../scratch/dan-ui-implementation-20260923/dan-ui-1.0.27.apk`
+
 Expo/React Native版のDANアプリです。
+
+### スマホで記録（1.0.70 / versionCode 69）
+
+ピンを毎日付けられるようになるまでの間、スマホのマイクで「一日の記録」（声のある所だけを残してダンが文字にする仕組み。
+`native/voice/DanPinLifelog.java`）を始められる。設定の「記録 › スマホで記録」をオンにすると、
+`native/voice/DanPhoneLifelog.java` がマイクの音をピンと同じ形（16 kHz・片耳・10 ms の Opus フレーム）にして
+`DanPinLifelog.offer()` に渡す。切り方・保存・送信・PC 側は変えていない。
+
+- ピンがつながった瞬間（`DanPinLink` の link ready）に止まり、切れると戻る。通話（スマホ・Atom 中継）が音を取る間も止まる。
+- マイクの許可が外れた瞬間に止まり（通知「記録は止まっています / マイクの許可が外れています。許可を戻すと再開します」）、戻した瞬間に再開する
+  （`AppOpsManager.startWatchingMode` で RECORD_AUDIO の変化をその場で受ける。設定アプリの許可、プライバシーのマイク切替、appops のどれも同じ）。
+- ピン用の前面サービス（`DanVoiceCallService` の PIN、microphone 種別）の中で動くので、画面を消しても続く。
+  端末の再起動後は、アプリを一度開くと再開する（Android はマイク種別の前面サービスを裏から始めさせない）。
+- アプリが落ちた後は Android が常駐サービスを立て直す（常駐サービスへの返事はどれも `START_STICKY`。通話だけの時は違う）。
+  立て直された時にマイクの種別が得られれば（仮想端末 API 35 ではそうなった）記録もそのまま自動で戻る。
+  得られなければ、通知が「記録は止まっています / アプリを開くと再開します」になる（アプリを開けば再開）。
+  端末の再起動の後は常駐サービス自体が立たないので通知は出ない（アプリを開けば再開）。
+- adb での確認（画面なし。root は要らない）:
+  `adb shell am broadcast -a app.done.dan.PIN_SELFTEST --ez phone_record true` ほか
+  `--es lifelog_api`・`--es lifelog_token`・`--ez fake_pin`・`--ez fake_call`・`--es phone_wav <16kHz mono wav> --ei speed N`・
+  `--ez status true`（`DanPinSelfTest.kt` の phoneLifelogHook）。記録は `adb logcat -s DanPinBle`。
+  この受け口に届くのは、送り手が `android.permission.DUMP` を持つ時だけ（受け口の登録にその権限を付けてあり、OS が送り手を確かめて捨てる）。
+  adb の shell はこの権限を持っている。スマホの中の他のアプリは manifest に書いても与えられない（signature|privileged|development の権限）ので、
+  送信先やトークンを他のアプリに変えられない。持ち主の端末でもピンの道具（`D:\dan-hw\tools\pin_phone_ctrl.py`・`pin_phone_selftest.py`）がそのまま使える。
 
 ## 開発中にスマホで開く
 
