@@ -53,7 +53,11 @@ class DanVoiceCallService : HeadlessJsTaskService() {
   }
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     // Restarted by Android after the process died (START_STICKY, no intent): keep the standing service while the
-    // phone recording is wanted; the microphone type comes back the next time the screen asks (startPinLink / the switch).
+    // phone recording is wanted. The recording itself resumes below when Android gives the service the microphone
+    // type again (the allowance of the original, on-screen start stays with Android's record of the service; seen on
+    // API 35); otherwise the notification says it is stopped, and the next time the screen asks (startPinLink / the
+    // switch) brings the type and the recording back.
+    val restarted = intent == null
     val intent = intent ?: if (!running && DanPhoneLifelog.isEnabled(this)) Intent(this, DanVoiceCallService::class.java).setAction("PIN") else null
     live = this
     val incoming = intent?.getStringExtra("audioLease")
@@ -93,6 +97,9 @@ class DanVoiceCallService : HeadlessJsTaskService() {
       running = true
       startTask(HeadlessJsTaskConfig("DanVoiceCall", Arguments.createMap(), 0, true))
       handler.post(tick)
+      // Brought back after a crash with the microphone type: nothing else would start the recording again (the screen
+      // does so only at sign-in). Without the type the microphone would deliver silence, so the recording then waits.
+      if (restarted && withMicrophone) DanPhoneLifelog.get(this).refresh("service restarted")
       return START_STICKY
     }
     if (intent?.action == "CLOSE") {
