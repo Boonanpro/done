@@ -94,7 +94,7 @@ allprojects {
     require('../scripts/patch-webrtc-audio-processing.cjs').patch(root);
     const dest = path.join(root, 'android/app/src/main/java/app/done/dan/voice');
     fs.mkdirSync(dest, {recursive: true});
-    for (const file of ['DanVoiceCallModule.kt','DanVoiceCallService.kt','DanAtomRelay.kt','DanPcmQueue.java','DanExternalAudio.java','DanWebRtcAudio.kt','DanAtomSocket.java','DanAudioLease.java','DanQuietSpeechLift.java','DanQuietSpeechProcessing.java','DanPinBle.java','DanPinSelfTest.kt','DanPinLink.kt','DanPinWake.java','DanPinPresenceService.kt','DanPinLifelog.java']) fs.copyFileSync(path.join(root,'native/voice',file),path.join(dest,file));
+    for (const file of ['DanVoiceCallModule.kt','DanVoiceCallService.kt','DanAtomRelay.kt','DanPcmQueue.java','DanExternalAudio.java','DanWebRtcAudio.kt','DanAtomSocket.java','DanAudioLease.java','DanQuietSpeechLift.java','DanQuietSpeechProcessing.java','DanPinBle.java','DanPinSelfTest.kt','DanPinLink.kt','DanPinWake.java','DanPinPresenceService.kt','DanPinLifelog.java','DanPhoneLifelog.java']) fs.copyFileSync(path.join(root,'native/voice',file),path.join(dest,file));
     const rtcDest = path.join(root, 'android/app/src/main/java/com/oney/WebRTCModule');
     fs.mkdirSync(rtcDest, {recursive: true});
     fs.copyFileSync(path.join(root,'native/voice/DanWebRtcAccess.java'),path.join(rtcDest,'DanWebRtcAccess.java'));

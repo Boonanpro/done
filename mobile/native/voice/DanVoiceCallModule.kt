@@ -30,6 +30,14 @@ class DanVoiceCallModule(private val context: ReactApplicationContext) : ReactCo
   @ReactMethod fun pinToken(token: String?) {
     if (!token.isNullOrEmpty()) DanPinLifelog.setToken(context, token)
   }
+  /** 設定「スマホで記録」: until the pin is worn, the phone microphone feeds the always-on recording (DanPhoneLifelog). */
+  @ReactMethod fun phoneRecording(enabled: Boolean, apiBase: String?, promise: Promise) {
+    try { DanPhoneLifelog.setEnabled(context, enabled, apiBase); promise.resolve(enabled) }
+    catch (e: Exception) { promise.reject("PHONE_RECORDING", e) }
+  }
+  @ReactMethod fun isPhoneRecording(promise: Promise) { promise.resolve(DanPhoneLifelog.isEnabled(context)) }
+  /** At sign-in: carry the phone recording on if its switch is on (the service and the microphone type come back). */
+  @ReactMethod fun resumePhoneRecording(apiBase: String?) { DanPhoneLifelog.resume(context, apiBase) }
   private fun startStandingLink() {
     UiThreadUtil.runOnUiThread { DanPinPresenceService.startStanding(context) }
   }

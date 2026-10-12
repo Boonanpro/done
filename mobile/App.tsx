@@ -1313,6 +1313,8 @@ function AppMain() {
   }, []);
   useEffect(() => {
     if (Platform.OS !== 'android' || auth.status !== 'signed_in' || !NativeModules.DanVoiceCall?.startPinLink) return;
+    // The phone's own recording carries on after a restart when its switch is on (needs no Bluetooth permission).
+    NativeModules.DanVoiceCall.resumePhoneRecording?.(API_BASE_URL);
     void (async () => {
       if (Number(Platform.Version) >= 31) {
         const granted = await PermissionsAndroid.requestMultiple([
@@ -1461,6 +1463,7 @@ function AppMain() {
   const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
   // SMS も全部ダンに読ませるか（本人が選ぶ。オフが既定）
   const [allSms, setAllSms] = useState(false);
+  const [phoneRecord, setPhoneRecord] = useState(false);   // 設定「スマホで記録」(DanPhoneLifelog)
   // In-chat keyword search (find past messages across full history).
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -1605,6 +1608,9 @@ function AppMain() {
   useEffect(() => {
     if (Platform.OS === 'android' && DanSmsForwarder?.isAllSms) void DanSmsForwarder.isAllSms().then(setAllSms).catch(() => undefined);
   }, [smsForwardingStatus]);
+  useEffect(() => {
+    if (Platform.OS === 'android' && NativeModules.DanVoiceCall?.isPhoneRecording) void NativeModules.DanVoiceCall.isPhoneRecording().then(setPhoneRecord).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (!token || Platform.OS !== 'android' || !DanSmsForwarder) {
@@ -2895,6 +2901,26 @@ function AppMain() {
     }
   }
 
+  // 設定「スマホで記録」: until the pin is worn, this phone's microphone feeds the always-on recording (DanPhoneLifelog).
+  async function handleTogglePhoneRecord() {
+    if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.phoneRecording) return;
+    const next = !phoneRecord;
+    if (next) {
+      const mic = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+      if (mic !== PermissionsAndroid.RESULTS.GRANTED) {
+        Alert.alert(ui('Microphone permission required','マイクの許可が必要です'), ui('Allow the microphone for Done in your device settings.','設定アプリで Done にマイクの使用を許可してください。'));
+        return;
+      }
+      if (Number(Platform.Version) >= 33) await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => undefined);
+    }
+    setPhoneRecord(next);
+    try {
+      await NativeModules.DanVoiceCall.phoneRecording(next, API_BASE_URL);
+    } catch {
+      setPhoneRecord(!next);
+    }
+  }
+
   async function handleToggleNotifications() {
     if (!token) return;
     if (!Device.isDevice) {
@@ -3743,6 +3769,24 @@ function AppMain() {
           <View style={styles.settingsCard}>{(['en','ja'] as const).map(value=><Pressable key={value} accessibilityRole="radio" accessibilityState={{checked:language===value}} onPress={()=>void setUiLanguage(value).catch(()=>Alert.alert(ui('Could not save language','表示言語を保存できませんでした')))} style={styles.settingsRow}><Text style={[styles.settingsRowLabel,{flex:1}]}>{value==='en'?'English':'日本語'}</Text>{language===value&&<Ionicons name="checkmark" size={22} color="#245e49"/>}</Pressable>)}</View>
           <Text style={styles.settingsSectionLabel}>{ui('AUDIO DEVICE','音声機器')}</Text>
           {token&&<View style={{marginHorizontal:16,padding:16,borderRadius:16,backgroundColor:'#203b31'}}><AtomRelayControl apiBase={API_BASE_URL} token={token} callActive={!!voice.roomId} onStartDirect={hub?.room_id?()=>{if(hub.room_id)voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token,audioEndpoint:'atom'})}:undefined}/></View>}
+
+          <Text style={styles.settingsSectionLabel}>{ui('RECORDING','記録')}</Text>
+          <View style={styles.settingsCard}>
+            <Pressable
+              onPress={handleTogglePhoneRecord}
+              style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
+            >
+              <View style={styles.settingsRowMain}>
+                <Text style={styles.settingsRowLabel}>{ui("Record with this phone","スマホで記録")}</Text>
+                <Text style={styles.settingsRowValue}>{phoneRecord ? ui('On','オン') : ui('Off','オフ')}</Text>
+              </View>
+              <Ionicons name={phoneRecord ? 'mic' : 'mic-off-outline'} size={20} color={phoneRecord ? '#245e49' : '#59685f'} />
+            </Pressable>
+            <View style={styles.settingsRowHint}>
+              <Text style={styles.settingsHintText}>
+                {ui("Until the pin is worn: this phone's microphone keeps the parts of the day where someone speaks, and Dan writes them down. It pauses while the pin is linked and during calls.","ピンを付けるまでの間、スマホのマイクで声のある所だけを記録し、ダンが文字にします。ピンがつながっている間と通話中は止まります。")}</Text>
+            </View>
+          </View>
 
           <Text style={styles.settingsSectionLabel}>{ui("ACCOUNT","アカウント")}</Text>
           <View style={styles.settingsCard}>

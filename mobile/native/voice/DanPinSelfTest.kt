@@ -18,6 +18,7 @@ object DanPinSelfTest {
     registered = true
     val receiver = object : BroadcastReceiver() {
       override fun onReceive(ctx: Context, intent: Intent) {
+        if (phoneLifelogHook(ctx.applicationContext, intent)) return
         if (intent.getBooleanExtra("tap", false)) { DanPinLink.simulateTap(); return }
         val record = intent.getIntExtra("record", 0)
         if (record > 0) { record(ctx.applicationContext, record); return }
@@ -32,6 +33,37 @@ object DanPinSelfTest {
     val filter = IntentFilter("app.done.dan.PIN_SELFTEST")
     if (Build.VERSION.SDK_INT >= 33) context.applicationContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
     else context.applicationContext.registerReceiver(receiver, filter)
+  }
+
+  /**
+   * The phone's own recording (DanPhoneLifelog), over adb without the screen:
+   *   --es lifelog_api <base>     where segments go (a test server instead of Dan's)
+   *   --es lifelog_token <jwt>    the sign-in used for uploads
+   *   --ez phone_record true      the owner's switch
+   *   --ez fake_pin true          as if the pin's link became ready (false: dropped)
+   *   --ez fake_call true         as if a call took the audio (DanAudioLease; false: gave it back)
+   *   --es phone_wav <path> [--ei speed N]   a 16 kHz mono WAV in place of the microphone
+   *   --ez status true            the state, in the log
+   */
+  @Volatile private var fakeLease: String? = null
+  private fun phoneLifelogHook(context: Context, intent: Intent): Boolean {
+    var handled = false
+    intent.getStringExtra("lifelog_api")?.let { DanPinLink.rememberApi(context, it); android.util.Log.i("DanPinBle", "selftest: lifelog api $it"); handled = true }
+    intent.getStringExtra("lifelog_token")?.let { DanPinLifelog.setToken(context, it); android.util.Log.i("DanPinBle", "selftest: lifelog token set"); handled = true }
+    if (intent.hasExtra("phone_record")) { DanPhoneLifelog.setEnabled(context, intent.getBooleanExtra("phone_record", false), null); handled = true }
+    if (intent.hasExtra("fake_pin")) { DanPhoneLifelog.get(context); DanPhoneLifelog.pinChanged(intent.getBooleanExtra("fake_pin", false)); handled = true }
+    if (intent.hasExtra("fake_call")) {
+      DanPhoneLifelog.get(context)
+      if (intent.getBooleanExtra("fake_call", false)) { if (fakeLease == null) fakeLease = try { DanAudioLease.acquire("phone") } catch (e: Exception) { android.util.Log.w("DanPinBle", "selftest: fake call refused: $e"); null } }
+      else { fakeLease?.let { DanAudioLease.release(it) }; fakeLease = null }
+      handled = true
+    }
+    intent.getStringExtra("phone_wav")?.let { DanPhoneLifelog.get(context).inject(it, intent.getIntExtra("speed", 1)); handled = true }
+    if (intent.getBooleanExtra("status", false)) {
+      android.util.Log.i("DanPinBle", "selftest: phone lifelog state=${DanPhoneLifelog.status()} capturing=${DanPhoneLifelog.capturing()} frames=${DanPhoneLifelog.framesHanded()} pinMode=${DanVoiceCallService.pinMode}")
+      handled = true
+    }
+    return handled
   }
 
   private fun start(context: Context, path: String, gain: Int) {

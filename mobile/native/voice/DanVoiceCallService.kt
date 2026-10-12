@@ -17,6 +17,12 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     /** True while the service runs for the Dan pin. Calls then reuse it instead of starting a new foreground
      *  service, which Android 14+ refuses for the microphone type when the app is not on screen (2026-10-05). */
     @Volatile @JvmStatic var pinMode = false
+    @Volatile private var live: DanVoiceCallService? = null
+    /** Redraws the standing notification (the phone recording's state is part of it). Any thread. */
+    @JvmStatic fun refreshNotification() {
+      val s = live ?: return
+      s.handler.post { if (s.running) s.getSystemService(NotificationManager::class.java).notify(710, s.notification()) }
+    }
   }
   private var running = false
   private var relayMode = false
@@ -46,6 +52,10 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     reactContext?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)?.emit(name, null)
   }
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    // Restarted by Android after the process died (START_STICKY, no intent): keep the standing service while the
+    // phone recording is wanted; the microphone type comes back the next time the screen asks (startPinLink / the switch).
+    val intent = intent ?: if (!running && DanPhoneLifelog.isEnabled(this)) Intent(this, DanVoiceCallService::class.java).setAction("PIN") else null
+    live = this
     val incoming = intent?.getStringExtra("audioLease")
     if (pinMode && running) {
       // The standing pin service: a call borrows it and gives it back; the service itself keeps running.
@@ -137,8 +147,8 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     val end = PendingIntent.getService(this, 711, Intent(this, DanVoiceCallService::class.java).setAction("END_CALL").putExtra("audioLease",audioLease), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val builder = Notification.Builder(this, "dan_voice_calls")
       .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-      .setContentTitle(if(audioPaused) "Danの音声は一時停止中" else if(connectedAt > 0) "Danと通話中" else if(relayMode) "Atomとイヤホンを接続中" else if(pinMode && audioLease == null) "ダンのピンと接続中" else "Danに接続中")
-      .setContentText(if(audioPaused) "ほかのアプリが音声を使用しています。アプリで再開できます" else if(relayMode) "イヤホンを接続すると音声を切り替えます" else if(pinMode && audioLease == null) "ピンを1回押すとダンと話せます" else "ほかのアプリや画面オフでも話せます")
+      .setContentTitle(if(audioPaused) "Danの音声は一時停止中" else if(connectedAt > 0) "Danと通話中" else if(relayMode) "Atomとイヤホンを接続中" else if(pinMode && audioLease == null) (if (DanPhoneLifelog.capturing()) "スマホで記録中" else "ダンのピンと接続中") else "Danに接続中")
+      .setContentText(if(audioPaused) "ほかのアプリが音声を使用しています。アプリで再開できます" else if(relayMode) "イヤホンを接続すると音声を切り替えます" else if(pinMode && audioLease == null) (if (DanPhoneLifelog.capturing()) "声のある所だけを記録しています。設定「スマホで記録」で止められます" else "ピンを1回押すとダンと話せます") else "ほかのアプリや画面オフでも話せます")
       .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
       .setCategory(Notification.CATEGORY_CALL)
       .setWhen(connectedAt).setShowWhen(connectedAt > 0 && !audioPaused).setUsesChronometer(connectedAt > 0 && !audioPaused)
@@ -154,6 +164,7 @@ class DanVoiceCallService : HeadlessJsTaskService() {
   override fun onTaskRemoved(rootIntent: Intent?) { emit("DanVoiceEnd"); if (!pinMode) stopSelf() }
   override fun onDestroy() {
     pinMode = false
+    live = null
     if(relayMode) DanAtomRelay.stop()
     running = false
     handler.removeCallbacks(tick)

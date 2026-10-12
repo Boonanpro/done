@@ -113,6 +113,7 @@ object DanPinLink {
           fastFailures = 0
           candidate.address()?.let { remember(ctx, it) }
           android.util.Log.i("DanPinBle", "link ready")
+          DanPhoneLifelog.pinChanged(true)   // the phone's own recording yields to the pin
           if (wake == null) wake = DanPinWake.create(ctx) { main.post { if (pin != null) wakeWord() } }
           // every microphone packet: 「ヘイダン」 and the always-on recording (DanPinLifelog)
           val w = wake
@@ -133,6 +134,7 @@ object DanPinLink {
           ready = false
           closedListeners.toList().forEach { it() }
           closedListeners.clear()
+          if (wasReady) DanPhoneLifelog.pinChanged(false)
           if (!wasReady) fastFailures++
           android.util.Log.i("DanPinBle", "link closed $reason")
           if (!wanted) return@post

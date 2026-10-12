@@ -16,6 +16,20 @@ APK: `../scratch/dan-ui-implementation-20260923/dan-ui-1.0.27.apk`
 
 Expo/React Native版のDANアプリです。
 
+### スマホで記録（1.0.70 / versionCode 69）
+
+ピンを毎日付けられるようになるまでの間、スマホのマイクで「一日の記録」（声のある所だけを残してダンが文字にする仕組み。
+`native/voice/DanPinLifelog.java`）を始められる。設定の「記録 › スマホで記録」をオンにすると、
+`native/voice/DanPhoneLifelog.java` がマイクの音をピンと同じ形（16 kHz・片耳・10 ms の Opus フレーム）にして
+`DanPinLifelog.offer()` に渡す。切り方・保存・送信・PC 側は変えていない。
+
+- ピンがつながった瞬間（`DanPinLink` の link ready）に止まり、切れると戻る。通話（スマホ・Atom 中継）が音を取る間も止まる。
+- ピン用の前面サービス（`DanVoiceCallService` の PIN、microphone 種別）の中で動くので、画面を消しても続く。
+  端末の再起動後は、アプリを一度開くと再開する（Android はマイク種別の前面サービスを裏から始めさせない）。
+- adb での確認（画面なし）: `adb shell am broadcast -a app.done.dan.PIN_SELFTEST --ez phone_record true` ほか
+  `--es lifelog_api`・`--es lifelog_token`・`--ez fake_pin`・`--ez fake_call`・`--es phone_wav <16kHz mono wav> --ei speed N`・
+  `--ez status true`（`DanPinSelfTest.kt` の phoneLifelogHook）。記録は `adb logcat -s DanPinBle`。
+
 ## 開発中にスマホで開く
 
 ```powershell
