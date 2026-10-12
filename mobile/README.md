@@ -27,11 +27,13 @@ Expo/React Native版のDANアプリです。
 - ピン用の前面サービス（`DanVoiceCallService` の PIN、microphone 種別）の中で動くので、画面を消しても続く。
   端末の再起動後は、アプリを一度開くと再開する（Android はマイク種別の前面サービスを裏から始めさせない）。
 - 端末の再起動やアプリの落ちた後は、通知が「記録は止まっています / アプリを開くと再開します」になる（アプリを開けば再開）。
-- adb での確認（画面なし・**root の取れる仮想端末だけ**）: `adb root` の後で
+- adb での確認（画面なし。root は要らない）:
   `adb shell am broadcast -a app.done.dan.PIN_SELFTEST --ez phone_record true` ほか
   `--es lifelog_api`・`--es lifelog_token`・`--ez fake_pin`・`--ez fake_call`・`--es phone_wav <16kHz mono wav> --ei speed N`・
   `--ez status true`（`DanPinSelfTest.kt` の phoneLifelogHook）。記録は `adb logcat -s DanPinBle`。
-  この受け口は外のアプリや root でない adb shell からは届かない（`RECEIVER_NOT_EXPORTED`。送信先やトークンを他のアプリに変えられないため）。
+  この受け口に届くのは、送り手が `android.permission.DUMP` を持つ時だけ（受け口の登録にその権限を付けてあり、OS が送り手を確かめて捨てる）。
+  adb の shell はこの権限を持っている。スマホの中の他のアプリは manifest に書いても与えられない（signature|privileged|development の権限）ので、
+  送信先やトークンを他のアプリに変えられない。持ち主の端末でもピンの道具（`D:\dan-hw\tools\pin_phone_ctrl.py`・`pin_phone_selftest.py`）がそのまま使える。
 
 ## 開発中にスマホで開く
 

@@ -1,5 +1,6 @@
 package app.done.dan.voice
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -11,10 +12,14 @@ import androidx.core.content.ContextCompat
 /**
  * Developer hooks over adb (pin speaker self-test, and the phone recording's test input). Logs under DanPinBle.
  *
- * Not exported (2026-10-12): the hooks can point the recording's uploads at another server, set the sign-in token and
- * feed audio in, so no other app on the phone may send this broadcast. Only the app itself, root and the system reach
- * it: over adb that means `adb root` first (a userdebug emulator); on the owner's phone, which has no root, the
- * receiver answers nobody. A plain `adb shell am broadcast` is a different user (shell) and is dropped before onReceive.
+ * Who may send (2026-10-12): only a sender holding android.permission.DUMP. The hooks can point the recording's
+ * uploads at another server, set the sign-in token, feed audio in and drive the pin, so no other app on the phone may
+ * reach them. DUMP is a platform permission of level signature|privileged|development: adb's shell (uid 2000) holds
+ * it, an ordinary app cannot obtain it by declaring it (only `adb shell pm grant` could hand it out). So a plain
+ * `adb shell am broadcast -a app.done.dan.PIN_SELFTEST …` keeps working without root — on the owner's phone too
+ * (D:\dan-hw\tools\pin_phone_ctrl.py, pin_phone_selftest.py) — while the OS drops every other app's broadcast before
+ * onReceive: the receiver is registered with that permission as its broadcastPermission, and the broadcast queue
+ * checks the sender against it on every Android version (BroadcastSkipPolicy, "requires … due to registered receiver").
  */
 object DanPinSelfTest {
   private var registered = false
@@ -38,12 +43,13 @@ object DanPinSelfTest {
       }
     }
     val filter = IntentFilter("app.done.dan.PIN_SELFTEST")
-    // Android 13+: the system drops other apps' broadcasts; before 13 ContextCompat guards it with a signature permission.
-    ContextCompat.registerReceiver(context.applicationContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+    // Exported — the shell is another uid — but only to senders holding DUMP (see above). ContextCompat hands the
+    // permission to Context.registerReceiver(receiver, filter, broadcastPermission, scheduler[, flags]) as it is.
+    ContextCompat.registerReceiver(context.applicationContext, receiver, filter, Manifest.permission.DUMP, null, ContextCompat.RECEIVER_EXPORTED)
   }
 
   /**
-   * The phone's own recording (DanPhoneLifelog), over adb without the screen (`adb root` first, see above):
+   * The phone's own recording (DanPhoneLifelog), over adb without the screen (no root needed: adb's shell holds DUMP):
    *   --es lifelog_api <base>     where segments go (a test server instead of Dan's)
    *   --es lifelog_token <jwt>    the sign-in used for uploads
    *   --ez phone_record true      the owner's switch
