@@ -172,7 +172,7 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     if (!DanPhoneLifelog.isEnabled(this)) return null
     return when (DanPhoneLifelog.status()) {
       "pin", "call", "test_input" -> null
-      "no_permission" -> "記録は止まっています" to "マイクの許可が外れています。設定「スマホで記録」をオンにし直してください"
+      "no_permission" -> "記録は止まっています" to "マイクの許可が外れています。許可を戻すと再開します"
       else -> "記録は止まっています" to "アプリを開くと再開します"
     }
   }

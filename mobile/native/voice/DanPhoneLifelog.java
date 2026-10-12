@@ -1,6 +1,7 @@
 package app.done.dan.voice;
 
 import android.Manifest;
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -8,9 +9,11 @@ import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.Process;
 import androidx.core.content.ContextCompat;
 import io.github.jaredmdobson.concentus.OpusApplication;
 import io.github.jaredmdobson.concentus.OpusEncoder;
@@ -41,11 +44,35 @@ public final class DanPhoneLifelog {
   private volatile String state = "off";
   private volatile long frames;   // frames handed over since the app started (diagnostics)
   private int index;              // packet index, counted as the pin counts
+  /** Told the moment the microphone's permission changes (kept as a field: AppOpsManager holds it by identity). */
+  private final AppOpsManager.OnOpChangedListener permissionWatch = (op, pkg) -> refresh("permission changed");
 
   private DanPhoneLifelog(Context ctx) {
     context = ctx.getApplicationContext();
     pinReady = DanPinLink.INSTANCE.current() != null;
     callActive = DanAudioLease.active();
+    // The microphone's permission is known the moment it changes (taken away or given back in Settings, the privacy
+    // toggle, an adb/appops change), not at the next event: the RECORD_AUDIO app op is what every such change moves,
+    // and AppOpsManager calls back on each move (API 19+). Until 2026-10-12 a revoke went unnoticed: the microphone
+    // kept delivering silence, the notification kept saying 記録中.
+    AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+    ops.startWatchingMode(AppOpsManager.OPSTR_RECORD_AUDIO, context.getPackageName(), permissionWatch);
+  }
+
+  /**
+   * The microphone's permission as it is set now: the runtime permission, and the RECORD_AUDIO app op's own mode
+   * (allow / foreground / ignore). The privacy toggle and an appops change show up in the op, not in the permission.
+   * The RAW mode is the setting itself; the evaluated one would also say "ignored" merely because the app is in the
+   * background, which is not a permission matter (the foreground service's microphone type settles that).
+   */
+  @SuppressWarnings("deprecation")
+  private boolean micAllowed() {
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false;
+    AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+    int mode = Build.VERSION.SDK_INT >= 29
+        ? ops.unsafeCheckOpRawNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), context.getPackageName())
+        : ops.checkOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), context.getPackageName());
+    return mode == AppOpsManager.MODE_ALLOWED || mode == AppOpsManager.MODE_FOREGROUND || mode == AppOpsManager.MODE_DEFAULT;
   }
 
   public static DanPhoneLifelog get(Context ctx) {
@@ -106,7 +133,7 @@ public final class DanPhoneLifelog {
   /** Decides from the switch, the pin, the calls and the permission; starts or stops the capture. Any thread. */
   public synchronized void refresh(String why) {
     boolean enabled = isEnabled(context);
-    boolean permitted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    boolean permitted = micAllowed();
     boolean want = enabled && !pinReady && !callActive && !injecting && permitted;
     String next = !enabled ? "off" : !permitted ? "no_permission" : pinReady ? "pin" : callActive ? "call" : injecting ? "test_input" : "recording";
     if (want && worker.get() == null) start();
@@ -185,7 +212,10 @@ public final class DanPhoneLifelog {
       }
     } catch (Exception e) {
       android.util.Log.w(TAG, "phone lifelog: stopped: " + e);
-      main.postDelayed(() -> refresh("retry"), 30_000);
+      // A failure with no visible cause (the microphone busy or not available) can only be tried again after a while.
+      // A permission taken away is seen by the watcher the moment it happens; if the failure was that, settle the
+      // state now, not in 30 s.
+      main.postDelayed(() -> refresh("retry"), micAllowed() ? 30_000 : 0);
     } finally {
       if (record != null) { try { record.stop(); } catch (Exception ignored) {} record.release(); }
       if (lock != null && lock.isHeld()) lock.release();

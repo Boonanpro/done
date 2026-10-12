@@ -24,6 +24,8 @@ Expo/React Native版のDANアプリです。
 `DanPinLifelog.offer()` に渡す。切り方・保存・送信・PC 側は変えていない。
 
 - ピンがつながった瞬間（`DanPinLink` の link ready）に止まり、切れると戻る。通話（スマホ・Atom 中継）が音を取る間も止まる。
+- マイクの許可が外れた瞬間に止まり（通知「記録は止まっています / マイクの許可が外れています。許可を戻すと再開します」）、戻した瞬間に再開する
+  （`AppOpsManager.startWatchingMode` で RECORD_AUDIO の変化をその場で受ける。設定アプリの許可、プライバシーのマイク切替、appops のどれも同じ）。
 - ピン用の前面サービス（`DanVoiceCallService` の PIN、microphone 種別）の中で動くので、画面を消しても続く。
   端末の再起動後は、アプリを一度開くと再開する（Android はマイク種別の前面サービスを裏から始めさせない）。
 - アプリが落ちた後は Android が常駐サービスを立て直す（常駐サービスへの返事はどれも `START_STICKY`。通話だけの時は違う）。
