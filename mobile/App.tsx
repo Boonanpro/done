@@ -1,3 +1,6 @@
+import {uploadMedia, uploadError} from './resumable-upload';
+import {isXOperation, privateArtifactUrl} from './private-artifact';
+import {AttachmentCard} from './attachment-card';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Updates from 'expo-updates';
 import { StatusBar } from 'expo-status-bar';
@@ -14,7 +17,6 @@ import { ShimmerLine } from './shimmer-line';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import { useVideoPlayer, VideoView } from 'expo-video';
 import Svg, { Circle } from 'react-native-svg';
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -44,6 +46,7 @@ import {
 } from 'react-native';
 import { animateNextLayout, pressedScale } from './motion';
 import { MediaGrid } from './media-grid';
+import {MediaViewer, mediaKind, uniqueMedia, type GalleryItem} from './media-viewer';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
@@ -61,9 +64,12 @@ import {
 } from './chatTimeline';
 import { TypingDots } from './typing-dots';
 import { VoiceHost, useVoice } from './voice-host';
+import {DoneDashboard} from './done-dashboard';
+import {ui, useUiLanguage, setUiLanguage} from './ui-language';
 import { AtomRelayControl } from './atom-relay-control';
 import { reportLocation, watchLocation } from './location-report';
 import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
+import { ParallelJobsBar } from './parallel-jobs';
 
 const DEFAULT_API_BASE_URL = 'https://dan.paina.info';
 const API_BASE_URL =
@@ -76,6 +82,16 @@ const LEGACY_VERCEL_HOST_PATTERN = /^https?:\/\/frontend-[^.]*mikis-projects-866
 const TOKEN_KEY = 'done_mobile_access_token';
 const REFRESH_TOKEN_KEY = 'done_mobile_refresh_token';
 const PROJECT_KEY = 'done_mobile_project_id';
+const HUB_KEY = 'done_mobile_command_center_room';
+
+/** The saved access token is good for a call for a while yet (its JWT expiry, read locally). */
+function tokenFresh(token: string) {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const exp = Number(JSON.parse(atob(part + '='.repeat((4 - part.length % 4) % 4))).exp);
+    return exp * 1000 - Date.now() > 10 * 60 * 1000;
+  } catch { return false; }
+}
 const PUSH_KEY = 'done_mobile_push_enabled';
 // チャットごとの入力下書き（Web版 dan-chat-draft:<projectId> と同等）
 // 部屋を開く一式（/chat/rooms/{id}/open）。欠けた項目は null。
@@ -309,7 +325,7 @@ type PendingAttachment = {
 };
 
 // サーバー (app/api/file_routes.py) の MAX_FILE_SIZE と一致させること。
-const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500MB
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB, resumable transfer
 
 // Upload one local file to the chat upload endpoint and return its hosted URL.
 // React Native FormData takes {uri,name,type}; we must NOT set Content-Type
@@ -325,68 +341,7 @@ function uploadAttachment(
   if (/^https?:\/\//.test(att.uri) || att.uri.startsWith('/api/v1/files/')) {
     return Promise.resolve({ kind: att.kind, name: att.name, url: att.uri });
   }
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE_URL}/api/v1/files/upload`);
-    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-    // タイムアウトは2段構え（どちらも無いと、ストールしたアップロードの上で
-    // 送信フローが永久に待ち続ける＝Send固着の一因になる）:
-    // - xhr.timeout: 総時間の上限30分（500MB動画の正常な長時間送信は殺さない）
-    // - 無進捗タイマー: 進捗イベントが2分止まったら中断（実質の死活判定）
-    xhr.timeout = 30 * 60 * 1000;
-    let stallTimer: ReturnType<typeof setTimeout> | null = null;
-    const armStallTimer = () => {
-      if (stallTimer) clearTimeout(stallTimer);
-      stallTimer = setTimeout(() => xhr.abort(), 120_000);
-    };
-    const clearStallTimer = () => {
-      if (stallTimer) clearTimeout(stallTimer);
-      stallTimer = null;
-    };
-    armStallTimer();
-    xhr.upload.onprogress = (e) => {
-      armStallTimer();
-      if (onProgress && e.lengthComputable && e.total > 0) {
-        onProgress(e.loaded / e.total);
-      }
-    };
-    xhr.onload = () => {
-      clearStallTimer();
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText) as { url: string };
-          onProgress?.(1);
-          resolve({ kind: att.kind, name: att.name, url: data.url });
-        } catch {
-          reject(new Error('Upload response was not valid JSON'));
-        }
-      } else {
-        let detail = '';
-        try {
-          const body = JSON.parse(xhr.responseText);
-          detail = body?.detail?.message || body?.detail || xhr.responseText;
-        } catch {
-          detail = xhr.responseText;
-        }
-        reject(new Error(detail || `Upload failed: ${xhr.status}`));
-      }
-    };
-    xhr.onerror = () => {
-      clearStallTimer();
-      reject(new Error('Network error during upload'));
-    };
-    xhr.ontimeout = () => {
-      clearStallTimer();
-      reject(new Error('Upload timed out'));
-    };
-    xhr.onabort = () => {
-      clearStallTimer();
-      reject(new Error('Upload stalled (no progress for 2 minutes)'));
-    };
-    const form = new FormData();
-    form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
-    xhr.send(form);
-  });
+  return ensureFreshAccessToken(token).then(fresh => uploadMedia(API_BASE_URL, fresh, att, onProgress)).then(data => ({kind:att.kind,name:att.name,url:data.url}));
 }
 
 // 保存済みの本文から、添付の行（mediaTag の形）と残りの文を分ける。取り消されたメッセージを入力欄へ戻す時に使う
@@ -625,6 +580,7 @@ function parseRichContent(content: string): ParsedMediaContent {
   const files: { name: string; url: string }[] = [];
 
   let text = content
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, _name:string, url:string)=>{images.push(normalizeUrl(url));return '';})
     .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
     .replace(/\[添付画像: ([^\]]+)\]/g, (_, raw: string) => {
       images.push(normalizeUrl(raw));
@@ -767,12 +723,12 @@ function VideoThumb({
       ) : thumb ? (
         // 再生バッジ。添付チップ(small)では小さく半透明にして後ろの動画が見えるようにする。
         <View style={small ? styles.videoPlayBadgeSmall : styles.videoPlayBadge} pointerEvents="none">
-          <Ionicons name="play" size={small ? 11 : 18} color={small ? '#f4f0e8' : '#12110f'} />
+          <Ionicons name="play" size={small ? 11 : 18} color={small ? '#162e27' : '#f6f7f3'} />
         </View>
       ) : failed ? (
-        <Ionicons name="videocam" size={small ? 18 : 24} color="#d9d2c8" />
+        <Ionicons name="videocam" size={small ? 18 : 24} color="#304d40" />
       ) : (
-        <ActivityIndicator color="#7fd1c7" size="small" />
+        <ActivityIndicator color="#245e49" size="small" />
       )}
     </View>
   );
@@ -816,29 +772,6 @@ function CircularProgress({
 
 // アプリ内・全画面の動画プレイヤー（expo-video のネイティブプレイヤー）。
 // 外部ブラウザを開かず、音だけ問題も解消、ネイティブコントロールで全画面再生できる。
-function VideoPlayerModal({ uri, onClose }: { uri: string; onClose: () => void }) {
-  const player = useVideoPlayer(uri, (p) => {
-    p.loop = false;
-    p.play();
-  });
-  return (
-    <Modal visible animationType="fade" statusBarTranslucent onRequestClose={onClose}>
-      <View style={styles.videoPlayerBackdrop}>
-        <VideoView
-          style={styles.videoPlayerView}
-          player={player}
-          contentFit="contain"
-          nativeControls
-          allowsFullscreen
-        />
-        <Pressable style={styles.videoPlayerClose} onPress={onClose} hitSlop={12}>
-          <Ionicons name="close" size={28} color="#fff" />
-        </Pressable>
-      </View>
-    </Modal>
-  );
-}
-
 function RichMessageContent({
   content,
   mine,
@@ -849,7 +782,7 @@ function RichMessageContent({
   content: string;
   mine: boolean;
   onOpenUrl: (url: string) => void;
-  onPlayVideo?: (url: string) => void;
+  onPlayVideo?: (url: string,kind?:GalleryItem['kind']) => void;
   videoProgress?: number;
 }) {
   const parsed = useMemo(() => parseRichContent(content), [content]);
@@ -857,26 +790,8 @@ function RichMessageContent({
 
   return (
     <View style={styles.messageContentWrap}>
-      {/* 複数画像は LINE 式にまとめて表示（1枚は従来どおり）。動画は進捗リング付きの既存表示 */}
-      {parsed.images.length >= 2 ? (
-        <MediaGrid items={parsed.images.map((url) => ({ url, kind: 'image' as const }))} width={240} onOpenImage={onOpenUrl} />
-      ) : parsed.images.map((url, index) => (
-        <Pressable key={`${url}-${index}`} onPress={() => onOpenUrl(url)}>
-          <Image resizeMode="contain" source={{ uri: url }} style={styles.messageImage} />
-        </Pressable>
-      ))}
-
-      {parsed.videos.map((video, index) => (
-        <VideoThumb
-          key={`${video.url}-${index}`}
-          uri={video.url}
-          style={styles.messageVideoThumb}
-          progress={isUploading ? videoProgress : undefined}
-          onPress={
-            isUploading ? undefined : () => (onPlayVideo ? onPlayVideo(video.url) : onOpenUrl(video.url))
-          }
-        />
-      ))}
+      <MediaGrid items={[...parsed.images.map(url=>({url,kind:'image' as const})),...(isUploading?[]:parsed.videos.map(v=>({url:v.url,name:v.name,kind:'video' as const})))]} width={240} onOpenMedia={onPlayVideo}/>
+      {isUploading&&parsed.videos.map((v,i)=><VideoThumb key={`${v.url}-${i}`} uri={v.url} style={styles.messageVideoThumb} progress={videoProgress}/>)}
 
       {parsed.files.map((file, index) => (
         <Pressable
@@ -884,9 +799,9 @@ function RichMessageContent({
           onPress={() => onOpenUrl(file.url)}
           style={[styles.mediaCard, mine && styles.myMediaCard]}
         >
+          <Ionicons name={/\.(mp3|wav|m4a|aac|ogg|flac|opus)(\?|$)/i.test(file.name||file.url)?'musical-notes-outline':'document-text-outline'} size={28} color={mine?'#fff':'#315c4c'}/>
           <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
-            ファイルを開く
-          </Text>
+            {/\.(mp3|wav|m4a|aac|ogg|flac|opus)(\?|$)/i.test(file.name||file.url)?ui('Audio','音声'):ui('File','ファイル')}</Text>
           <Text style={[styles.mediaCardUrl, mine && styles.myMediaCardUrl]} numberOfLines={2}>
             {file.name || file.url}
           </Text>
@@ -1071,7 +986,7 @@ function AiTurnBlocks({
   live?: boolean;
   startedMs?: number;
   onOpenUrl: (url: string) => void;
-  onPlayVideo?: (url: string) => void;
+  onPlayVideo?: (url: string,kind?:GalleryItem['kind']) => void;
   defaultOpen?: boolean;
 }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
@@ -1296,9 +1211,9 @@ function ProjectActionSheet({
                 onPress={() => onPin(project)}
                 style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
               >
-                <Ionicons name={pinned ? 'pin-outline' : 'pin'} size={22} color="#f4f0e8" />
+                <Ionicons name={pinned ? 'pin-outline' : 'pin'} size={22} color="#162e27" />
                 <Text style={styles.sheetActionText}>
-                  {pinned ? 'ピン留めを外す' : 'ピン留めして上部に固定'}
+                  {pinned ? ui("Unpin","ピン留めを外す") : ui("Pin to top","ピン留めして上部に固定")}
                 </Text>
               </Pressable>
               <View style={styles.sheetDivider} />
@@ -1307,20 +1222,19 @@ function ProjectActionSheet({
                 style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
               >
                 <Ionicons name="trash-outline" size={22} color="#ff5a3d" />
-                <Text style={[styles.sheetActionText, styles.sheetActionTextDanger]}>削除</Text>
+                <Text style={[styles.sheetActionText, styles.sheetActionTextDanger]}>{ui("Delete","削除")}</Text>
               </Pressable>
             </>
           ) : (
             <>
               <Text style={styles.sheetConfirmBody}>
-                このチャットを削除します。{'\n'}この操作は取り消せません。
-              </Text>
+                {ui("Delete this chat.","このチャットを削除します。")}{'\n'}{ui("This cannot be undone.","この操作は取り消せません。")}</Text>
               <Pressable
                 onPress={() => onConfirmDelete(project)}
                 style={({ pressed }) => [styles.sheetPrimaryDanger, pressed && styles.buttonPressed]}
               >
                 <Ionicons name="trash" size={18} color="#fff" />
-                <Text style={styles.sheetPrimaryDangerText}>削除する</Text>
+                <Text style={styles.sheetPrimaryDangerText}>{ui("Delete chat","削除する")}</Text>
               </Pressable>
             </>
           )}
@@ -1329,7 +1243,7 @@ function ProjectActionSheet({
             onPress={onClose}
             style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
           >
-            <Text style={styles.sheetCancelText}>キャンセル</Text>
+            <Text style={styles.sheetCancelText}>{ui("Cancel","キャンセル")}</Text>
           </Pressable>
         </View>
       </View>
@@ -1369,12 +1283,52 @@ export default function App() {
 }
 
 function AppMain() {
+  const language = useUiLanguage();
   const voice = useVoice();
   const [projectQuery, setProjectQuery] = useState('');
   const safeInsets = useSafeAreaInsets();
   const insets = {...safeInsets, top: voice.minimized ? 0 : safeInsets.top};
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
   useEffect(() => { if (auth.status === 'signed_out') voice.stop(); }, [auth.status]);
+  // Dan pin: keep the phone connected to it while the app runs; a single tap on the pin starts a conversation with
+  // the command-center Dan (a tap during a call ends it natively via DanVoiceEnd).
+  const pinTapRef = useRef<() => void>(() => {});
+  const pinTapPendingRef = useRef(false);
+  const hubSavedRef = useRef<string | null>(null);
+  // The pin opened this screen to start a call. Start it at once with what this phone already holds (the saved token
+  // and the command-center room), not after the session check and the room list: after the app sat in the
+  // background, the first request took 11 s and the screen sat on 「読み込み中」 (2026-10-06).
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.takePinTap) return;
+    void (async () => {
+      const tapped = await NativeModules.DanVoiceCall.takePinTap();
+      console.info('DanStart pin tap at launch', tapped);
+      if (!tapped) return;
+      const [saved, hubRoom] = await Promise.all([SecureStore.getItemAsync(TOKEN_KEY), SecureStore.getItemAsync(HUB_KEY)]);
+      if (saved && hubRoom && tokenFresh(saved)) {
+        console.info('DanStart pin call from saved session');
+        voice.start({roomId:hubRoom,chatTitle:'Done',apiBase:API_BASE_URL,token:saved,audioEndpoint:'pin'});
+      } else pinTapPendingRef.current = true;   // started once signed in (below)
+    })().catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (Platform.OS !== 'android' || auth.status !== 'signed_in' || !NativeModules.DanVoiceCall?.startPinLink) return;
+    void (async () => {
+      if (Number(Platform.Version) >= 31) {
+        const granted = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN, PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT]);
+        if (Object.values(granted).some(value => value !== PermissionsAndroid.RESULTS.GRANTED)) return;
+      }
+      NativeModules.DanVoiceCall.startPinLink(API_BASE_URL);
+      // Once: Android's 「Done で ピン を管理」 dialog. Afterwards Android revives the link with the app killed.
+      await NativeModules.DanVoiceCall.associatePin?.().catch(() => {});
+    })().catch(() => {});
+    const sub = DeviceEventEmitter.addListener('DanPinTap', () => pinTapRef.current());
+    NativeModules.DanVoiceCall.pinScreen?.(true);
+    // The pin opened this screen to start a call (tap or 「ヘイダン」 while the app was not running).
+    void NativeModules.DanVoiceCall.takePinTap?.().then((tapped: boolean) => { console.info('DanStart pin tap taken', tapped); if (tapped) pinTapPendingRef.current = true; }).catch(() => {});
+    return () => { sub.remove(); NativeModules.DanVoiceCall.pinScreen?.(false); };
+  }, [auth.status]);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
@@ -1484,7 +1438,10 @@ function AppMain() {
   // （「アップロード中...」スピナー）を出して「固まった/失敗した」と誤解させない。
   // アプリ内で再生中の動画URL（expo-video のネイティブプレイヤーで全画面再生）。
   const [playingVideo, setPlayingVideo] = useState<string | null>(null);
+  const [selectedMediaKind,setSelectedMediaKind]=useState<GalleryItem['kind']>('video');
+  const openChatMedia=useCallback((url:string,kind:GalleryItem['kind']='video')=>{setSelectedMediaKind(kind);setPlayingVideo(url)},[]);
   // アップロード中の楽観メッセージと進捗（0..1）。動画の上に円形リングで表示する。
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<{ id: string; value: number } | null>(null);
   // Live in-progress turn, reconstructed FROM THE SERVER (current-run +
   // execution-events) so it survives navigating away/back and SSE drops — like
@@ -1495,6 +1452,7 @@ function AppMain() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings' | 'collab' | 'collabChat'>('projects');
   // コラボ（外部クライアント窓口）: 開いている部屋
+  const [dashboardTab, setDashboardTab] = useState<'home'|'projects'|'collab'>('home');
   const [collabRoom, setCollabRoom] = useState<{ id: string; title?: string } | null>(null);
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
@@ -1620,7 +1578,10 @@ function AppMain() {
   const lastSyncedMsgIdRef = useRef<string | null>(null);
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
+  const collabRequest = useCallback((endpoint: string, options?: RequestInit) => apiRequest<any>(endpoint, options ?? {}, token), [token]);
   const user = auth.status === 'signed_in' ? auth.user : undefined;
+  // The pin's always-on recording uploads with the signed-in session (DanPinLifelog); hand over each fresh token.
+  useEffect(() => { if (token && Platform.OS === 'android') NativeModules.DanVoiceCall?.pinToken?.(token); }, [token]);
 
   // apiRequest のセッションハンドラ登録。リフレッシュ成功時は新トークンを
   // 状態へ反映し、失敗時（=本当のセッション切れ）はエラーアラート無しで
@@ -2281,7 +2242,7 @@ function AppMain() {
         setSearchResults(data.messages ?? []);
       } catch (error) {
         if (isAuthError(error)) return;
-        Alert.alert('検索失敗', String((error as Error).message));
+        Alert.alert(ui("Search failed","検索失敗"), String((error as Error).message));
         setSearchResults([]);
       } finally {
         setSearchLoading(false);
@@ -2318,7 +2279,7 @@ function AppMain() {
         });
         setPendingJumpId(msg.id);
       } catch {
-        Alert.alert('移動できません', 'メッセージへ移動できませんでした');
+        Alert.alert(ui("Could not open message","移動できません"), ui("Could not jump to this message.","メッセージへ移動できませんでした"));
       }
     },
     [messages, currentProject?.room_id, token],
@@ -2663,7 +2624,9 @@ function AppMain() {
   useEffect(() => {
     let alive = true;
     async function restoreSession() {
+      console.info('DanStart restore begin');
       const storedToken = await SecureStore.getItemAsync(TOKEN_KEY);
+      console.info('DanStart token', !!storedToken);
       if (!storedToken) {
         if (alive) setAuth({ status: 'signed_out' });
         return;
@@ -2683,13 +2646,16 @@ function AppMain() {
         // best-effort — fall back to the projects list
       }
 
+      console.info('DanStart notification checked');
       // Cold-starting from a notification tap, the network is often not ready
       // for a moment. Only a real 401 means the token is invalid — for any
       // transient failure we retry and, crucially, never discard the saved
       // token (discarding it was what logged the user out).
       for (let attempt = 0; attempt < 4 && alive; attempt++) {
         try {
+          console.info('DanStart me request', attempt);
           const restoredUser = await apiRequest<UserResponse>('/chat/me', {}, storedToken);
+          console.info('DanStart me ok', alive);
           if (!alive) return;
           // apiRequest 内部の自動リフレッシュでトークンが更新されている場合が
           // あるので、保存済みの最新トークンで状態を作る（期限切れ間近の
@@ -2699,6 +2665,7 @@ function AppMain() {
           // navigateHome=false: don't force the projects list on cold start, so a
           // notification-tap launch isn't bounced out of its chat (see loadInitialData).
           await loadInitialData(activeToken, false);
+          console.info('DanStart initial data loaded');
           return;
         } catch (error) {
           if ((error as { status?: number }).status === 401) {
@@ -2735,6 +2702,7 @@ function AppMain() {
         setScreen('projects');
         return true;
       }
+      if (screen === 'settings') { setScreen('projects'); return true; }
       if (screen !== 'chat') return false;
       setScreen('projects');
       setDrawerOpen(false);
@@ -2746,7 +2714,7 @@ function AppMain() {
   async function handleLogin() {
     const cleanEmail = email.trim();
     if (!cleanEmail || !password) {
-      Alert.alert('Missing input', 'Email and password are required.');
+      Alert.alert(ui("Missing input","入力が必要です"), ui("Email and password are required.","メールアドレスとパスワードを入力してください。"));
       return;
     }
 
@@ -2765,7 +2733,7 @@ function AppMain() {
       setPassword('');
       await loadInitialData(result.access_token);
     } catch (error) {
-      Alert.alert('Login failed', String((error as Error).message));
+      Alert.alert(ui("Login failed","ログインできませんでした"), String((error as Error).message));
     } finally {
       setLoginBusy(false);
     }
@@ -2857,7 +2825,7 @@ function AppMain() {
       await refreshProjects(token).catch(() => null);
     } catch (error) {
       if (isAuthError(error)) return;
-      Alert.alert('Delete failed', String((error as Error).message));
+      Alert.alert(ui("Delete failed","削除できませんでした"), String((error as Error).message));
     }
   }
 
@@ -2885,7 +2853,7 @@ function AppMain() {
       const permission = await PermissionsAndroid.request(
         PermissionsAndroid.PERMISSIONS.RECEIVE_SMS,
         {
-          title: 'SMS OTP forwarding',
+          title: ui("SMS OTP forwarding","SMS認証コードの転送"),
           message: 'Done uses received SMS messages only to forward one-time authentication codes to your browser session.',
           buttonPositive: 'Allow',
           buttonNegative: 'Cancel',
@@ -2969,7 +2937,7 @@ function AppMain() {
           name: 'Done',
           importance: Notifications.AndroidImportance.MAX,
           vibrationPattern: [0, 250, 250, 250],
-          lightColor: '#f4f0e8',
+          lightColor: '#162e27',
         });
       }
 
@@ -3008,7 +2976,7 @@ function AppMain() {
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert('権限が必要です', '設定アプリから写真へのアクセスを許可してください。');
+        Alert.alert(ui("Permission required","権限が必要です"), ui("Allow photo access in your device settings.","設定アプリから写真へのアクセスを許可してください。"));
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -3032,7 +3000,7 @@ function AppMain() {
       });
       setAttachments((cur) => [...cur, ...picked]);
     } catch (error) {
-      Alert.alert('選択に失敗しました', String((error as Error).message));
+      Alert.alert(ui("Selection failed","選択に失敗しました"), String((error as Error).message));
     }
   }
 
@@ -3062,7 +3030,7 @@ function AppMain() {
       });
       setAttachments((cur) => [...cur, ...picked]);
     } catch (error) {
-      Alert.alert('選択に失敗しました', String((error as Error).message));
+      Alert.alert(ui("Selection failed","選択に失敗しました"), String((error as Error).message));
     }
   }
 
@@ -3145,13 +3113,7 @@ function AppMain() {
     // ので「押した瞬間に全部消えて理由も分からない」状態にならない。
     const tooBig = pending.filter((a) => typeof a.size === 'number' && a.size > MAX_UPLOAD_BYTES);
     if (tooBig.length > 0) {
-      const names = tooBig
-        .map((a) => `・${a.name}（${(a.size! / 1024 / 1024).toFixed(0)}MB）`)
-        .join('\n');
-      Alert.alert(
-        'ファイルが大きすぎます',
-        `次のファイルは上限 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB を超えています。外して送るか、短く撮り直してください:\n\n${names}`,
-      );
+      setAttachmentError(ui('This file is too large. You can send files up to 2 GB.','このファイルは大きすぎます。2GBまで送信できます。'));
       return;
     }
 
@@ -3170,7 +3132,7 @@ function AppMain() {
         // ここは送信フラグ確保前なので固着はしないが、失敗を握りつぶすと
         // 「押しても無反応」になる（unhandled rejection）。
         if (!isAuthError(error)) {
-          Alert.alert('Send failed', String((error as Error).message));
+          Alert.alert(ui("Send failed","送信できませんでした"), String((error as Error).message));
         }
         return;
       }
@@ -3182,10 +3144,11 @@ function AppMain() {
     }
 
     if (!project.room_id) {
-      Alert.alert('Send failed', 'This project does not have a room yet.');
+      Alert.alert(ui("Send failed","送信できませんでした"), 'This project does not have a room yet.');
       return;
     }
 
+    setAttachmentError(null);
     const sentTimelineRefs = timelineRefs;
     if (text === undefined) {
       setDraft('');
@@ -3237,7 +3200,7 @@ function AppMain() {
             );
           } catch (e) {
             // どのファイルで失敗したか分かるよう名前を付けて投げ直す
-            throw new Error(`「${cur.name}」のアップロードに失敗しました: ${(e as Error).message}`);
+            throw e;
           }
         }
         const tags = uploaded.map((u) => mediaTag(u.kind, u.name, u.url)).join('\n');
@@ -3258,7 +3221,7 @@ function AppMain() {
         }
         setTimelineRefs(sentTimelineRefs);
         if (isAuthError(error)) return;
-        Alert.alert('アップロード失敗', String((error as Error).message));
+        setAttachmentError(uploadError(error));
         return;
       }
     }
@@ -3440,12 +3403,12 @@ function AppMain() {
             // 再送を促し、できなければ本当のセッション切れ＝ログイン画面へ。
             const renewed = await tryRefreshSession();
             if (renewed) {
-              Alert.alert('Send failed', 'セッションを更新しました。もう一度送信してください。');
+              Alert.alert(ui("Send failed","送信できませんでした"), ui("Session refreshed. Please send again.","セッションを更新しました。もう一度送信してください。"));
             } else {
               onAuthFailure?.();
             }
           } else {
-            Alert.alert('Send failed', streamFailure.message);
+            Alert.alert(ui("Send failed","送信できませんでした"), streamFailure.message);
           }
         }
       } else if (viewing && nextProject?.id) {
@@ -3579,7 +3542,7 @@ function AppMain() {
       setTimelineChoices(
         (Array.isArray(rows) ? rows : []).map((row) => ({
           content_id: String(row.id),
-          title: String(row.title || 'Untitled timeline'),
+          title: String(row.title || ui("Untitled timeline","無題のタイムライン")),
           updated_at: row.updated_at,
         })),
       );
@@ -3596,12 +3559,18 @@ function AppMain() {
     setPullRefreshing(true);
     await refreshProjects(token).catch((error) => {
       if (isAuthError(error)) return;
-      Alert.alert('Refresh failed', String((error as Error).message));
+      Alert.alert(ui("Refresh failed","更新できませんでした"), String((error as Error).message));
     }).finally(() => setPullRefreshing(false));
   }
 
   function artifactUrl(artifact: ChatArtifactResponse): string | null {
     return cleanArtifactUrl(artifact);
+  }
+
+  async function openPrivateArtifact() {
+    if (!token) return;
+    try { openUrl(await privateArtifactUrl(API_BASE_URL, await ensureFreshAccessToken(token))); }
+    catch (error) { Alert.alert('運用室を開けませんでした', (error as Error).message); }
   }
 
   function handleOpenArtifact(artifact: ChatArtifactResponse) {
@@ -3610,9 +3579,10 @@ function AppMain() {
       // A tab may appear a moment before the background deployment has been
       // promoted. Refresh the factual state, but never open a guessed URL.
       if (token && currentProjectId) void refreshArtifacts(token, currentProjectId);
-      Alert.alert('公開準備中', 'この成果物は公開先を準備しています。少し待ってからもう一度開いてください。');
+      Alert.alert(ui("Preparing preview","公開準備中"), ui("This file is not ready to open. Please try again shortly.","この成果物は公開先を準備しています。少し待ってからもう一度開いてください。"));
       return;
     }
+    if (isXOperation(url)) { void openPrivateArtifact(); return; }
     setArtifactView({
       title: artifact.label || artifact.slug || 'Artifact',
       url,
@@ -3620,8 +3590,17 @@ function AppMain() {
     setScreen('artifact');
   }
 
+  const chatMedia = useMemo(()=>uniqueMedia([...messages].sort((a,b)=>a.created_at.localeCompare(b.created_at)).flatMap(message=>{
+    const parsed=parseRichContent(message.content||'');
+    const items:GalleryItem[]=[...parsed.images.map(url=>({url,kind:'image' as const})),...parsed.videos.map(v=>({url:v.url,name:v.name,kind:'video' as const}))];
+    for(const part of parsed.parts){if(part.kind==='link'){const kind=mediaKind(part.url);if(kind)items.push({url:part.url,kind,name:part.label})}}
+    return items;
+  })),[messages]);
+
   const handleOpenMessageUrl = useCallback((url: string) => {
     const normalized = normalizeUrl(url);
+    if (isXOperation(normalized)) { void openPrivateArtifact(); return; }
+    if(mediaKind(normalized)||chatMedia.some(x=>x.url===normalized)){openChatMedia(normalized,mediaKind(normalized)||chatMedia.find(x=>x.url===normalized)?.kind||'image');return;}
     if (isArtifactUrl(normalized)) {
       setArtifactView({
         title: artifactTitleFromUrl(normalized),
@@ -3631,7 +3610,7 @@ function AppMain() {
       return;
     }
     openUrl(normalized);
-  }, []);
+  }, [chatMedia, token]);
 
   function handleBackToProjects() {
     setScreen('projects');
@@ -3641,9 +3620,9 @@ function AppMain() {
   if (auth.status === 'checking') {
     return (
       <SafeAreaView style={styles.centerScreen}>
-        <StatusBar style="light" />
-        <ActivityIndicator color="#f4f0e8" />
-        <Text style={styles.mutedText}>Loading Done</Text>
+        <StatusBar style="dark" />
+        <ActivityIndicator color="#162e27" />
+        <Text style={styles.mutedText}>{ui("Loading Done","Doneを読み込み中")}</Text>
       </SafeAreaView>
     );
   }
@@ -3651,7 +3630,7 @@ function AppMain() {
   if (auth.status === 'signed_out') {
     return (
       <SafeAreaView style={styles.screen}>
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.loginWrap}
@@ -3660,7 +3639,7 @@ function AppMain() {
             <Text style={styles.brandMarkText}>D</Text>
           </View>
           <Text style={styles.title}>Done</Text>
-          <Text style={styles.subtitle}>相談から実行まで、いつものDanと。</Text>
+          <Text style={styles.subtitle}>{ui("From conversation to action, with Done.","相談から実行まで、いつものDanと。")}</Text>
 
           <View style={styles.form}>
             <TextInput
@@ -3668,16 +3647,16 @@ function AppMain() {
               autoCorrect={false}
               keyboardType="email-address"
               onChangeText={setEmail}
-              placeholder="Email"
-              placeholderTextColor="#77736b"
+              placeholder={ui("Email","メールアドレス")}
+              placeholderTextColor="#59685f"
               style={styles.input}
               textContentType="emailAddress"
               value={email}
             />
             <TextInput
               onChangeText={setPassword}
-              placeholder="Password"
-              placeholderTextColor="#77736b"
+              placeholder={ui("Password","パスワード")}
+              placeholderTextColor="#59685f"
               secureTextEntry
               style={styles.input}
               textContentType="password"
@@ -3694,7 +3673,7 @@ function AppMain() {
               {loginBusy ? (
                 <ActivityIndicator color="#111" />
               ) : (
-                <Text style={styles.primaryButtonText}>ログイン</Text>
+                <Text style={styles.primaryButtonText}>{ui("Log in","ログイン")}</Text>
               )}
             </Pressable>
           </View>
@@ -3705,161 +3684,29 @@ function AppMain() {
 
   const hub = projects.find(project => project.metadata?.role === 'command_center');
   const startHubVoice = () => { if (hub?.room_id && token) voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token}); };
+  pinTapRef.current = () => { if (hub?.room_id && token && !voice.roomId) voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token,audioEndpoint:'pin'}); };
+  if (hub?.room_id && hubSavedRef.current !== hub.room_id) { hubSavedRef.current = hub.room_id; void SecureStore.setItemAsync(HUB_KEY, hub.room_id).catch(() => {}); }
+  if (pinTapPendingRef.current) console.info('DanStart pin tap waiting', !!hub?.room_id, !!token);
+  if (pinTapPendingRef.current && hub?.room_id && token) { pinTapPendingRef.current = false; setTimeout(() => pinTapRef.current(), 0); }
 
-  if (screen === 'projects') {
-    return (
-      <View style={styles.screen}>
-        <StatusBar style="light" />
-        <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
-          <View style={styles.appBarTitleBlock}>
-            <Text style={styles.appBarTitle}>ホーム</Text>
-          </View>
-          <Pressable
-            onPress={() => setScreen('collab')}
-            hitSlop={10}
-            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
-          >
-            <Ionicons name="people-outline" size={22} color="#f4f0e8" />
-            {collabUnreadTotal > 0 ? (
-              <View style={styles.iconBadge}>
-                <Text style={styles.iconBadgeText}>{collabUnreadTotal > 99 ? '99+' : collabUnreadTotal}</Text>
-              </View>
-            ) : null}
-          </Pressable>
-          <Pressable
-            onPress={() => setScreen('settings')}
-            hitSlop={10}
-            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
-          >
-            <Ionicons name="settings-outline" size={22} color="#f4f0e8" />
-          </Pressable>
-        </View>
-
-        <FlatList
-          contentContainerStyle={[styles.projectListContent, { paddingBottom: insets.bottom + 96 }]}
-          data={projects.filter(p => p.metadata?.role !== 'command_center' && `${p.title} ${p.last_message_preview || ''}`.toLowerCase().includes(projectQuery.toLowerCase()))}
-          ListHeaderComponent={<View style={styles.homeHeader}>
-            {hub && <View style={styles.hubCard}>
-              <Text style={styles.hubTitle}>Done</Text>
-              <Text style={styles.hubDescription}>あの件の続きも、ちょっとした頼みごとも。</Text>
-              <View style={styles.hubActions}>
-                <Pressable accessibilityRole="button" onPress={startHubVoice} style={styles.hubSpeak}><Ionicons name="mic" size={20} color="#102b20"/><Text style={styles.hubSpeakText}>話しかける</Text></Pressable>
-                <Pressable accessibilityRole="button" onPress={() => handleSelectProject(hub.id)} style={styles.hubChat}><Text style={styles.hubChatText}>チャットを開く</Text><Ionicons name="arrow-forward" size={16} color="#e1ece5"/></Pressable>
-              </View>
-              {token && <AtomRelayControl apiBase={API_BASE_URL} token={token} callActive={!!voice.roomId}
-                onStartDirect={hub?.room_id ? () => {if(hub.room_id) voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token,audioEndpoint:'atom'});} : undefined} />}
-            </View>}
-            <View style={styles.projectSection}><Text style={styles.projectSectionTitle}>プロジェクト</Text><Pressable accessibilityRole="button" onPress={handleNewProject} style={styles.newProjectAction}><Ionicons name="add" size={18} color="#c0cebf"/><Text style={styles.homeNewProjectText}>新規</Text></Pressable></View>
-            <View style={styles.projectSearch}><Ionicons name="search" size={18} color="#969c96"/><TextInput accessibilityLabel="プロジェクトを検索" placeholder="プロジェクト・最近の会話を検索" placeholderTextColor="#969c96" value={projectQuery} onChangeText={setProjectQuery} style={styles.projectSearchInput}/></View>
-          </View>}
-          keyExtractor={(item) => item.id}
-          refreshControl={
-            <RefreshControl
-              refreshing={pullRefreshing}
-              onRefresh={handleRefreshProjectList}
-              tintColor="#d9d2c8"
-              colors={['#d9d2c8']}
-            />
-          }
-          ListEmptyComponent={
-            !loadingProjects ? (
-              <View style={styles.emptyState}>
-                <Ionicons name="chatbubbles-outline" size={48} color="#5a5550" />
-                <Text style={styles.emptyTitle}>{projectQuery ? '一致するプロジェクトがありません' : 'プロジェクトはまだありません'}</Text>
-                <Text style={styles.emptyHint}>{projectQuery ? '別の言葉で検索してください' : 'Doneで相談するか、新しいプロジェクトを作成できます'}</Text>
-              </View>
-            ) : null
-          }
-          renderItem={({ item }) => {
-            // サーバーの has_active_run は一覧ポーリング(20s)で更新されるので、
-            // この端末から送った直後は streamingProjects で即時に点灯させる。
-            const running = !!item.has_active_run || streamingProjects.includes(item.id);
-            return (
-            <Pressable
-              onPress={() => handleSelectProject(item.id)}
-              onLongPress={() => handleProjectLongPress(item)}
-              delayLongPress={350}
-              style={({ pressed }) => [
-                styles.chatListItem,
-                pressed && styles.chatListItemPressed,
-              ]}
-            >
-              <View style={styles.chatAvatar}>
-                <Text style={styles.chatAvatarText}>{item.icon || 'D'}</Text>
-                {running ? <RunningDot /> : null}
-              </View>
-              <View style={styles.chatListBody}>
-                <View style={styles.chatListTopRow}>
-                  <View style={styles.chatListTitleRow}>
-                    {item.pinned_at ? (
-                      <Ionicons name="pin" size={13} color="#a7a19a" style={styles.chatListPinIcon} />
-                    ) : null}
-                    <Text style={styles.chatListTitle} numberOfLines={1}>
-                      {item.title || 'Untitled'}
-                    </Text>
-                  </View>
-                  <Text style={styles.chatListTime}>{formatTime(projectTime(item))}</Text>
-                </View>
-                <Text
-                  style={[styles.chatListPreview, running && styles.chatListPreviewRunning]}
-                  numberOfLines={1}
-                >
-                  {running ? 'ダンが作業中…' : item.last_message_preview || 'メッセージはまだありません'}
-                </Text>
-              </View>
-              {(item.unread_count || 0) > 0 ? (
-                <View style={styles.unreadBadge}>
-                  <Text style={styles.unreadBadgeText}>
-                    {(item.unread_count || 0) > 99 ? '99+' : item.unread_count}
-                  </Text>
-                </View>
-              ) : null}
-            </Pressable>
-            );
-          }}
-        />
-
-        <ProjectActionSheet
-          sheet={actionSheet}
-          insetsBottom={insets.bottom}
-          onClose={() => setActionSheet(null)}
-          onPin={(project) => {
-            setActionSheet(null);
-            void handleTogglePin(project);
-          }}
-          onRequestDelete={(project) => setActionSheet({ project, mode: 'confirm-delete' })}
-          onConfirmDelete={(project) => {
-            setActionSheet(null);
-            void handleDeleteProject(project);
-          }}
-        />
-      </View>
-    );
-  }
-
-  if (screen === 'collab') {
-    return (
-      <View style={styles.screen}>
-        <StatusBar style="light" />
-        <CollabRoomsScreen
-          request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
-          topInset={insets.top + 8}
-          onBack={() => setScreen('projects')}
-          onOpenRoom={(room: CollabRoomSummary) => {
-            setCollabRoom({ id: room.id, title: room.title });
-            setScreen('collabChat');
-          }}
-        />
-      </View>
-    );
+  if (screen === 'projects' || screen === 'collab') {
+    return <View style={{flex:1}}><DoneDashboard projects={projects} running={streamingProjects} loading={pullRefreshing || (loadingProjects && projects.length === 0)}
+      top={insets.top} bottom={insets.bottom} onVoice={startHubVoice} onProject={id=>void handleSelectProject(id)}
+      onNew={()=>void handleNewProject()} onSettings={()=>setScreen('settings')} tab={screen==='collab'?'collab':dashboardTab} onTab={tab=>{setDashboardTab(tab);setScreen('projects')}} collab={<CollabRoomsScreen request={collabRequest} topInset={0} onOpenRoom={room=>{setCollabRoom({id:room.id,title:room.title});setScreen('collabChat')}}/>}
+      onMenu={item=>{const project=projects.find(x=>x.id===item.id);if(project)handleProjectLongPress(project)}}
+      onRefresh={handleRefreshProjectList}
+    /><ProjectActionSheet sheet={actionSheet} insetsBottom={insets.bottom} onClose={()=>setActionSheet(null)}
+      onPin={project=>{setActionSheet(null);void handleTogglePin(project)}}
+      onRequestDelete={project=>setActionSheet({project,mode:'confirm-delete'})}
+      onConfirmDelete={project=>{setActionSheet(null);void handleDeleteProject(project)}}/></View>;
   }
 
   if (screen === 'collabChat' && collabRoom) {
     return (
       <View style={styles.screen}>
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
         <CollabChatScreen
-          request={(endpoint: string, options?: RequestInit) => apiRequest(endpoint, options ?? {}, token)}
+          request={collabRequest}
           apiBase={API_BASE_URL}
           token={token ?? null}
           roomId={collabRoom.id}
@@ -3875,27 +3722,33 @@ function AppMain() {
   if (screen === 'settings') {
     return (
       <View style={styles.screen}>
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <Pressable
             onPress={() => setScreen('projects')}
+            accessibilityRole="button" accessibilityLabel={ui('Back','戻る')}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
-            <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
+            <Ionicons name="chevron-back" size={26} color="#162e27" />
           </Pressable>
           <View style={styles.appBarTitleBlockCenter}>
-            <Text style={styles.appBarTitleSingle}>Settings</Text>
+            <Text style={styles.appBarTitleSingle}>{ui("Settings","設定")}</Text>
           </View>
           <View style={styles.appBarIconButton} />
         </View>
 
         <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}>
-          <Text style={styles.settingsSectionLabel}>ACCOUNT</Text>
+          <Text style={styles.settingsSectionLabel}>{ui('LANGUAGE','表示言語')}</Text>
+          <View style={styles.settingsCard}>{(['en','ja'] as const).map(value=><Pressable key={value} accessibilityRole="radio" accessibilityState={{checked:language===value}} onPress={()=>void setUiLanguage(value).catch(()=>Alert.alert(ui('Could not save language','表示言語を保存できませんでした')))} style={styles.settingsRow}><Text style={[styles.settingsRowLabel,{flex:1}]}>{value==='en'?'English':'日本語'}</Text>{language===value&&<Ionicons name="checkmark" size={22} color="#245e49"/>}</Pressable>)}</View>
+          <Text style={styles.settingsSectionLabel}>{ui('AUDIO DEVICE','音声機器')}</Text>
+          {token&&<View style={{marginHorizontal:16,padding:16,borderRadius:16,backgroundColor:'#203b31'}}><AtomRelayControl apiBase={API_BASE_URL} token={token} callActive={!!voice.roomId} onStartDirect={hub?.room_id?()=>{if(hub.room_id)voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token,audioEndpoint:'atom'})}:undefined}/></View>}
+
+          <Text style={styles.settingsSectionLabel}>{ui("ACCOUNT","アカウント")}</Text>
           <View style={styles.settingsCard}>
             <View style={styles.settingsRow}>
               <View style={styles.settingsRowMain}>
-                <Text style={styles.settingsRowLabel}>Name</Text>
+                <Text style={styles.settingsRowLabel}>{ui("Name","名前")}</Text>
                 <Text style={styles.settingsRowValue} numberOfLines={1}>
                   {user?.display_name || '—'}
                 </Text>
@@ -3904,7 +3757,7 @@ function AppMain() {
             <View style={styles.settingsRowDivider} />
             <View style={styles.settingsRow}>
               <View style={styles.settingsRowMain}>
-                <Text style={styles.settingsRowLabel}>Email</Text>
+                <Text style={styles.settingsRowLabel}>{ui("Email","メールアドレス")}</Text>
                 <Text style={styles.settingsRowValue} numberOfLines={1}>
                   {user?.email || '—'}
                 </Text>
@@ -3912,20 +3765,20 @@ function AppMain() {
             </View>
           </View>
 
-          <Text style={styles.settingsSectionLabel}>AUTHENTICATION</Text>
+          <Text style={styles.settingsSectionLabel}>{ui("AUTHENTICATION","認証")}</Text>
           <View style={styles.settingsCard}>
             <Pressable
               onPress={handleToggleSmsForwarding}
               style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
             >
               <View style={styles.settingsRowMain}>
-                <Text style={styles.settingsRowLabel}>SMS OTP forwarding</Text>
-                <Text style={styles.settingsRowValue}>{smsForwardingStatus}</Text>
+                <Text style={styles.settingsRowLabel}>{ui("SMS OTP forwarding","SMS認証コードの転送")}</Text>
+                <Text style={styles.settingsRowValue}>{smsForwardingStatus === 'On' ? ui('On','オン') : ui('Off','オフ')}</Text>
               </View>
               <Ionicons
                 name={smsForwardingStatus === 'On' ? 'shield-checkmark' : 'shield-outline'}
                 size={20}
-                color={smsForwardingStatus === 'On' ? '#7fd1c7' : '#77736b'}
+                color={smsForwardingStatus === 'On' ? '#245e49' : '#59685f'}
               />
             </Pressable>
             <View style={styles.settingsRowDivider} />
@@ -3947,47 +3800,45 @@ function AppMain() {
             <View style={styles.settingsRowDivider} />
             <View style={styles.settingsRowHint}>
               <Text style={styles.settingsHintText}>
-                Android APK only. If forwarding fails, Dan keeps the browser open and asks you for the code.
-              </Text>
+                {ui("Android APK only. If forwarding fails, Dan keeps the browser open and asks you for the code.","転送に失敗した場合は、Doneが認証コードの入力を求めます。")}</Text>
             </View>
           </View>
 
-          <Text style={styles.settingsSectionLabel}>NOTIFICATIONS</Text>
+          <Text style={styles.settingsSectionLabel}>{ui("NOTIFICATIONS","通知")}</Text>
           <View style={styles.settingsCard}>
             <Pressable
               onPress={handleToggleNotifications}
               style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
             >
               <View style={styles.settingsRowMain}>
-                <Text style={styles.settingsRowLabel}>Push notifications</Text>
-                <Text style={styles.settingsRowValue}>{notificationStatus}</Text>
+                <Text style={styles.settingsRowLabel}>{ui("Push notifications","プッシュ通知")}</Text>
+                <Text style={styles.settingsRowValue}>{notificationStatus === 'On' ? ui('On','オン') : ui('Off','オフ')}</Text>
               </View>
               <Ionicons
                 name={notificationStatus === 'On' ? 'notifications' : 'notifications-off-outline'}
                 size={20}
-                color={notificationStatus === 'On' ? '#7fd1c7' : '#77736b'}
+                color={notificationStatus === 'On' ? '#245e49' : '#59685f'}
               />
             </Pressable>
             <View style={styles.settingsRowDivider} />
             <View style={styles.settingsRowHint}>
               <Text style={styles.settingsHintText}>
-                Tap to toggle. iOS/Android system permission is requested on first enable.
-              </Text>
+                {ui("Tap to toggle. iOS/Android system permission is requested on first enable.","初回はOSの通知許可を求めます。")}</Text>
             </View>
           </View>
 
-          <Text style={styles.settingsSectionLabel}>SESSION</Text>
+          <Text style={styles.settingsSectionLabel}>{ui("SESSION","セッション")}</Text>
           <View style={styles.settingsCard}>
             <Pressable
               onPress={handleLogout}
               style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
             >
-              <Text style={styles.settingsDangerLabel}>Log out</Text>
+              <Text style={styles.settingsDangerLabel}>{ui("Log out","ログアウト")}</Text>
               <Ionicons name="log-out-outline" size={20} color="#ff5a3d" />
             </Pressable>
           </View>
 
-          <Text style={styles.settingsFootnote}>Done mobile · v1.0.0</Text>
+          <Text style={styles.settingsFootnote}>Done · v1.0.28</Text>
         </ScrollView>
       </View>
     );
@@ -3996,14 +3847,14 @@ function AppMain() {
   if (screen === 'artifact' && artifactView) {
     return (
       <View style={styles.screen}>
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <Pressable
             onPress={() => setScreen(currentProject ? 'chat' : 'projects')}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
-            <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
+            <Ionicons name="chevron-back" size={26} color="#162e27" />
           </Pressable>
           <View style={styles.appBarTitleBlockCenter}>
             <Text style={styles.appBarTitleSingle} numberOfLines={1}>
@@ -4018,7 +3869,7 @@ function AppMain() {
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
-            <Ionicons name="open-outline" size={22} color="#f4f0e8" />
+            <Ionicons name="open-outline" size={22} color="#162e27" />
           </Pressable>
         </View>
         <WebView
@@ -4027,7 +3878,7 @@ function AppMain() {
           style={styles.webView}
           renderLoading={() => (
             <View style={styles.webViewLoading}>
-              <ActivityIndicator color="#f4f0e8" />
+              <ActivityIndicator color="#162e27" />
             </View>
           )}
         />
@@ -4037,7 +3888,7 @@ function AppMain() {
 
   return (
     <View style={styles.screen}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
@@ -4046,10 +3897,12 @@ function AppMain() {
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <Pressable
             onPress={handleBackToProjects}
+            accessibilityRole="button"
+            accessibilityLabel={ui("Back to projects","プロジェクト一覧に戻る")}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarBackButton, pressed && styles.buttonPressed]}
           >
-            <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
+            <Ionicons name="chevron-back" size={26} color="#162e27" />
           </Pressable>
           <View style={styles.appBarTitleBlockCenter}>
             <Text style={styles.appBarTitleSingle} numberOfLines={1}>
@@ -4062,25 +3915,28 @@ function AppMain() {
               onLongPress={() => {
                 if (!currentProject?.room_id || !token) return;
                 const call = {roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token};
-                Alert.alert('音声機器を選ぶ', 'この部屋で会話を始めます。', [
-                  {text:'スマホ・イヤホン',onPress:()=>voice.start(call)},
+                Alert.alert(ui("Audio device","音声機器を選ぶ"), ui("Start a voice conversation in this room.","この部屋で会話を始めます。"), [
+                  {text:ui("Phone / headphones","スマホ・イヤホン"),onPress:()=>voice.start(call)},
                   {text:'Atom',onPress:()=>voice.start({...call,audioEndpoint:'atom'})},
-                  {text:'キャンセル',style:'cancel'},
-                ]);
+                  // Android shows at most three buttons; tapping outside the dialog cancels.
+                  {text:ui("Pin","ピン"),onPress:()=>voice.start({...call,audioEndpoint:'pin'})},
+                ], {cancelable: true});
               }}
-              accessibilityLabel="音声で話す" accessibilityRole="button"
-              accessibilityHint="長押しすると音声機器を選べます"
+              accessibilityLabel={ui("Start voice conversation","音声で話す")} accessibilityRole="button"
+              accessibilityHint={ui("Hold to choose an audio device","長押しすると音声機器を選べます")}
               hitSlop={10}
               style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
             >
-              <Ionicons name="mic-outline" size={22} color="#f4f0e8" />
+              <Ionicons name="mic-outline" size={22} color="#162e27" />
             </Pressable>
             <Pressable
               onPress={() => setSearchOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={ui("Search this chat","この会話を検索")}
               hitSlop={10}
               style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
             >
-              <Ionicons name="search" size={22} color="#f4f0e8" />
+              <Ionicons name="search" size={22} color="#162e27" />
             </Pressable>
           </View>
         </View>
@@ -4088,7 +3944,7 @@ function AppMain() {
         {artifacts.length > 0 || loadingArtifacts ? (
           <View style={styles.artifactTabs}>
             {loadingArtifacts ? (
-              <ActivityIndicator color="#d9d2c8" size="small" />
+              <ActivityIndicator color="#304d40" size="small" />
             ) : (
               artifacts.map((artifact) => (
                 <Pressable
@@ -4108,19 +3964,32 @@ function AppMain() {
           </View>
         ) : null}
 
+        {currentProject?.id && token ? (
+          <ParallelJobsBar
+            projectId={currentProject.id}
+            request={(path, init) => apiRequest(path, init, token)}
+            onShowMessage={(id) => {
+              if (!messages.some((m) => m.id === id)) return false;
+              setHighlightId(id);
+              setPendingJumpId(id);
+              return true;
+            }}
+          />
+        ) : null}
+
         {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
             これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
         {/* 取得中の表示は出さない（LINE と同じ）: 手元の写しを出したまま、最新は届いたら差し替えるだけ。 */}
 
         {loadingMessages && messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
-            <ActivityIndicator color="#f4f0e8" />
-            <Text style={styles.mutedText}>Loading history</Text>
+            <ActivityIndicator color="#162e27" />
+            <Text style={styles.mutedText}>{ui("Loading history","履歴を読み込み中")}</Text>
           </View>
         ) : messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <Text style={styles.emptyTitle}>Done</Text>
-            <Text style={styles.mutedText}>メッセージを入力してください</Text>
+            <Text style={styles.mutedText}>{ui("Write a message","メッセージを入力してください")}</Text>
           </View>
         ) : (
           <KeepInPlace.Provider value={keepInPlace}>
@@ -4165,10 +4034,10 @@ function AppMain() {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.wideBubble]}>
                     <View style={styles.messageMetaRow}>
-                      <Text style={styles.messageSender}>DAN</Text>
+                      <Text style={styles.messageSender}>Done</Text>
                     </View>
                     {item.blocks.length > 0 ? (
-                      <AiTurnBlocks blocks={item.blocks} mine={false} live startedMs={item.sortMs} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
+                      <AiTurnBlocks blocks={item.blocks} mine={false} live startedMs={item.sortMs} onOpenUrl={handleOpenMessageUrl} onPlayVideo={openChatMedia} />
                     ) : null}
                     {item.typing ? (
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
@@ -4275,17 +4144,17 @@ function AppMain() {
                   ]}
                 >
                   <View style={styles.messageMetaRow}>
-                    <Text style={styles.messageSender}>{mine ? 'You' : msg.sender_name || 'DAN'}</Text>
+                    <Text style={styles.messageSender}>{mine ? ui('You','あなた') : msg.sender_type === 'ai' ? 'Done' : msg.sender_name || 'Done'}</Text>
                     <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
                   </View>
                   {useBlocks ? (
-                    <AiTurnBlocks blocks={blocks!} mine={mine} settled onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
+                    <AiTurnBlocks blocks={blocks!} mine={mine} settled onOpenUrl={handleOpenMessageUrl} onPlayVideo={openChatMedia} />
                   ) : (
                     <RichMessageContent
                       content={msg.content}
                       mine={mine}
                       onOpenUrl={handleOpenMessageUrl}
-                      onPlayVideo={setPlayingVideo}
+                      onPlayVideo={openChatMedia}
                       videoProgress={uploadProgress?.id === msg.id ? uploadProgress.value : undefined}
                     />
                   )}
@@ -4319,6 +4188,7 @@ function AppMain() {
         {/* The live in-progress status now lives inside the __live__ bubble
             (server-driven timeline), so no separate activity bar is needed. */}
 
+        {attachmentError && <View accessibilityRole="alert" style={{marginHorizontal:14,marginVertical:8,padding:12,borderRadius:12,backgroundColor:'#fff1eb',flexDirection:'row',gap:9}}><Ionicons name="alert-circle-outline" size={22} color="#a44125"/><Text style={{flex:1,color:'#80351f',fontSize:13}}>{attachmentError}</Text><Pressable accessibilityLabel={ui('Dismiss','閉じる')} onPress={()=>setAttachmentError(null)}><Ionicons name="close" size={22} color="#80351f"/></Pressable></View>}
         {attachments.length > 0 ? (
           <ScrollView
             horizontal
@@ -4327,29 +4197,7 @@ function AppMain() {
             contentContainerStyle={styles.attachmentBarContent}
           >
             {attachments.map((att) => (
-              <View key={att.key} style={styles.attachmentChip}>
-                {att.kind === 'image' ? (
-                  <Image source={{ uri: att.uri }} style={styles.attachmentThumb} />
-                ) : att.kind === 'video' ? (
-                  <VideoThumb uri={att.uri} style={styles.attachmentThumb} small />
-                ) : (
-                  <View style={[styles.attachmentThumb, styles.attachmentThumbIcon]}>
-                    <Ionicons name="document" size={20} color="#d9d2c8" />
-                  </View>
-                )}
-                {att.kind === 'file' ? (
-                  <Text style={styles.attachmentName} numberOfLines={1}>
-                    {att.name}
-                  </Text>
-                ) : null}
-                <Pressable
-                  onPress={() => removeAttachment(att.key)}
-                  hitSlop={8}
-                  style={styles.attachmentRemove}
-                >
-                  <Ionicons name="close-circle" size={18} color="#111" />
-                </Pressable>
-              </View>
+              <AttachmentCard {...att} key={att.key} onRemove={() => removeAttachment(att.key)} />
             ))}
           </ScrollView>
         ) : null}
@@ -4358,7 +4206,7 @@ function AppMain() {
           <View style={styles.timelineChipsRow}>
             {timelineRefs.map((ref) => (
               <View key={ref.content_id} style={styles.timelineChip}>
-                <Ionicons name="film-outline" size={13} color="#7fd1c7" />
+                <Ionicons name="film-outline" size={13} color="#245e49" />
                 <Text style={styles.timelineChipText} numberOfLines={1}>
                   {ref.title}
                 </Text>
@@ -4368,7 +4216,7 @@ function AppMain() {
                     setTimelineRefs((current) => current.filter((r) => r.content_id !== ref.content_id))
                   }
                 >
-                  <Ionicons name="close-circle" size={15} color="#77736b" />
+                  <Ionicons name="close-circle" size={15} color="#59685f" />
                 </Pressable>
               </View>
             ))}
@@ -4376,45 +4224,56 @@ function AppMain() {
         ) : null}
 
         <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
+          <TextInput
+            multiline
+            onChangeText={setDraft}
+            accessibilityLabel={ui("Message Done","ダンへのメッセージ")}
+            placeholder={ui("Message Done…","Danに話しかける…")}
+            placeholderTextColor="#59685f"
+            style={styles.composerInput}
+            value={draft}
+          />
+          <View style={styles.composerTools}>
           <Pressable
             onPress={() => setAttachSheetOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel={ui("Attach photos or files","写真・ファイルを添付")}
             hitSlop={6}
             style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
           >
-            <Ionicons name="add-circle-outline" size={28} color="#a7a19a" />
+            <Ionicons name="add-circle-outline" size={28} color="#59685f" />
           </Pressable>
           <Pressable
             onPress={openTimelineSheet}
+            accessibilityRole="button"
+            accessibilityLabel={ui("Add a production reference","制作物を会話に追加")}
             hitSlop={6}
             style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
           >
             <Ionicons
               name="film-outline"
               size={24}
-              color={timelineRefs.length > 0 ? '#7fd1c7' : '#a7a19a'}
+              color={timelineRefs.length > 0 ? '#245e49' : '#59685f'}
             />
           </Pressable>
-          <TextInput
-            multiline
-            onChangeText={setDraft}
-            placeholder="Danに話しかける…"
-            placeholderTextColor="#77736b"
-            style={styles.composerInput}
-            value={draft}
-          />
           {/* Web版と同じ切替: 入力が空でダンが動いている間は停止ボタン。
               文字を打ち始めたら Send に戻る（＝追い連絡）。 */}
           {!draft.trim() && attachments.length === 0 && (streamingHere || liveRunActive) ? (
             <Pressable
               onPress={handleCancelTurn}
+              accessibilityRole="button"
+              accessibilityLabel={ui("Stop work","ダンの作業を停止")}
               style={({ pressed }) => [styles.stopButton, pressed && styles.buttonPressed]}
             >
-              <Ionicons name="square" size={14} color="#1b1a17" />
-              <Text style={styles.stopButtonText}>停止</Text>
+              <Ionicons name="square" size={14} color="#ffffff" />
+              
             </Pressable>
           ) : (
             <Pressable
               disabled={!draft.trim() && attachments.length === 0}
+              accessibilityRole="button"
+              accessibilityLabel={ui("Send message","メッセージを送信")}
+              accessibilityState={{ disabled: !draft.trim() && attachments.length === 0 }}
               onPress={() => handleSend()}
               style={({ pressed }) => [
                 styles.sendButton,
@@ -4424,9 +4283,10 @@ function AppMain() {
             >
               {/* No spinner here — the live "working" indicator already shows in
                   Dan's chat bubble; a second one on the send button is redundant. */}
-              <Text style={styles.sendButtonText}>送信</Text>
+              <Ionicons name="arrow-up" size={24} color="#fff" />
             </Pressable>
           )}
+          </View>
         </View>
       </KeyboardAvoidingView>
 
@@ -4440,20 +4300,20 @@ function AppMain() {
       >
         <View style={[styles.searchModalRoot, { paddingTop: insets.top + 8 }]}>
           <View style={styles.searchBar}>
-            <Ionicons name="search" size={20} color="#a7a19a" />
+            <Ionicons name="search" size={20} color="#59685f" />
             <TextInput
               autoFocus
               value={searchQuery}
               onChangeText={setSearchQuery}
               onSubmitEditing={() => runSearch(searchQuery)}
               returnKeyType="search"
-              placeholder="チャット内をワード検索…"
-              placeholderTextColor="#77736b"
+              placeholder={ui("Search this chat…","チャット内をワード検索…")}
+              placeholderTextColor="#59685f"
               style={styles.searchInput}
             />
-            {searchLoading ? <ActivityIndicator color="#7fd1c7" size="small" /> : null}
+            {searchLoading ? <ActivityIndicator color="#245e49" size="small" /> : null}
             <Pressable onPress={() => setSearchOpen(false)} hitSlop={8}>
-              <Text style={styles.searchCancel}>閉じる</Text>
+              <Text style={styles.searchCancel}>{ui("Close","閉じる")}</Text>
             </Pressable>
           </View>
           <FlatList
@@ -4467,7 +4327,7 @@ function AppMain() {
                 style={({ pressed }) => [styles.searchHit, pressed && styles.buttonPressed]}
               >
                 <Text style={styles.searchHitMeta}>
-                  {(item.sender_type === 'ai' ? 'ダン' : item.sender_name || 'You') +
+                  {(item.sender_type === 'ai' ? "Done" : item.sender_name || 'You') +
                     ' ・ ' +
                     new Date(item.created_at).toLocaleString('ja-JP')}
                 </Text>
@@ -4477,15 +4337,15 @@ function AppMain() {
             ListEmptyComponent={
               searchResults ? (
                 <Text style={styles.searchEmpty}>
-                  {searchLoading ? '検索中…' : '一致するメッセージはありません'}
+                  {searchLoading ? ui("Searching…","検索中…") : ui("No matching messages","一致するメッセージはありません")}
                 </Text>
               ) : (
-                <Text style={styles.searchEmpty}>ワードを入力して検索してください</Text>
+                <Text style={styles.searchEmpty}>{ui("Enter a word to search","ワードを入力して検索してください")}</Text>
               )
             }
             ListHeaderComponent={
               searchResults && searchResults.length > 0 ? (
-                <Text style={styles.searchCount}>{searchResults.length}件ヒット（新しい順）</Text>
+                <Text style={styles.searchCount}>{ui(`${searchResults.length} results · newest first`, `${searchResults.length}件ヒット（新しい順）`)}</Text>
               ) : null
             }
           />
@@ -4503,16 +4363,15 @@ function AppMain() {
           <Pressable style={styles.sheetBackdrop} onPress={() => setTimelineSheetOpen(false)} />
           <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
             <View style={styles.sheetGrabber} />
-            <Text style={styles.sheetHeading}>タイムラインを指示の対象にする</Text>
+            <Text style={styles.sheetHeading}>{ui("Add a timeline reference","タイムラインを指示の対象にする")}</Text>
             {timelineLoading ? (
               <View style={styles.timelineSheetStatus}>
-                <ActivityIndicator color="#7fd1c7" size="small" />
-                <Text style={styles.mutedText}>読み込み中…</Text>
+                <ActivityIndicator color="#245e49" size="small" />
+                <Text style={styles.mutedText}>{ui("Loading…","読み込み中…")}</Text>
               </View>
             ) : !timelineChoices || timelineChoices.length === 0 ? (
               <Text style={[styles.mutedText, styles.timelineSheetEmpty]}>
-                この部屋に制作タイムラインはありません
-              </Text>
+                {ui("No production timelines in this room","この部屋に制作タイムラインはありません")}</Text>
             ) : (
               timelineChoices.map((choice) => {
                 const selected = timelineRefs.some((r) => r.content_id === choice.content_id);
@@ -4531,7 +4390,7 @@ function AppMain() {
                     <Ionicons
                       name={selected ? 'checkbox' : 'square-outline'}
                       size={20}
-                      color={selected ? '#7fd1c7' : '#a7a19a'}
+                      color={selected ? '#245e49' : '#59685f'}
                     />
                     <View style={styles.timelineChoiceMain}>
                       <Text style={styles.sheetActionText} numberOfLines={1}>
@@ -4552,7 +4411,7 @@ function AppMain() {
               style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
             >
               <Text style={styles.sheetCancelText}>
-                {timelineRefs.length > 0 ? `決定（${timelineRefs.length}件選択中）` : '閉じる'}
+                {timelineRefs.length > 0 ? ui(`Add ${timelineRefs.length} selected`, `決定（${timelineRefs.length}件選択中）`) : ui("Close","閉じる")}
               </Text>
             </Pressable>
           </View>
@@ -4570,27 +4429,27 @@ function AppMain() {
           <Pressable style={styles.sheetBackdrop} onPress={() => setAttachSheetOpen(false)} />
           <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
             <View style={styles.sheetGrabber} />
-            <Text style={styles.sheetHeading}>添付する</Text>
+            <Text style={styles.sheetHeading}>{ui("Attach","添付する")}</Text>
             <Pressable
               onPress={() => void pickMedia()}
               style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
             >
-              <Ionicons name="image" size={22} color="#f4f0e8" />
-              <Text style={styles.sheetActionText}>写真・動画</Text>
+              <Ionicons name="image" size={22} color="#162e27" />
+              <Text style={styles.sheetActionText}>{ui("Photos & videos","写真・動画")}</Text>
             </Pressable>
             <View style={styles.sheetDivider} />
             <Pressable
               onPress={() => void pickDocument()}
               style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
             >
-              <Ionicons name="document" size={22} color="#f4f0e8" />
-              <Text style={styles.sheetActionText}>ファイル</Text>
+              <Ionicons name="document" size={22} color="#162e27" />
+              <Text style={styles.sheetActionText}>{ui("Files","ファイル")}</Text>
             </Pressable>
             <Pressable
               onPress={() => setAttachSheetOpen(false)}
               style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
             >
-              <Text style={styles.sheetCancelText}>キャンセル</Text>
+              <Text style={styles.sheetCancelText}>{ui("Cancel","キャンセル")}</Text>
             </Pressable>
           </View>
         </View>
@@ -4598,26 +4457,27 @@ function AppMain() {
 
       {/* アプリ内・全画面の動画プレイヤー（expo-video のネイティブプレイヤー）。 */}
       {playingVideo ? (
-        <VideoPlayerModal uri={playingVideo} onClose={() => setPlayingVideo(null)} />
+        <MediaViewer key={playingVideo} items={uniqueMedia([...chatMedia,{url:playingVideo,kind:selectedMediaKind}])} initialUrl={playingVideo} onClose={() => setPlayingVideo(null)} />
       ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  composerTools:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:6},
   homeHeader:{paddingHorizontal:10,paddingBottom:8},
   hubCard:{padding:24,borderRadius:24,backgroundColor:'#203b31',marginTop:8,marginBottom:24},
   hubEyebrow:{color:'#afc6b8',fontSize:13,fontWeight:'500'},hubTitle:{color:'#f0f5ed',fontSize:36,fontWeight:'600',marginTop:8},
   hubDescription:{color:'#c2d0c6',fontSize:15,lineHeight:23,marginTop:8},hubActions:{flexDirection:'row',gap:12,marginTop:24,alignItems:'center',flexWrap:'wrap'},
   hubSpeak:{flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#cbe9cd',paddingHorizontal:18,minHeight:48,borderRadius:24},hubSpeakText:{fontSize:16,fontWeight:'600',color:'#102b20'},
   hubChat:{minHeight:48,flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:4},hubChatText:{color:'#e1ece5',fontSize:15},
-  projectSection:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginBottom:12},projectSectionTitle:{fontSize:22,color:'#f4f0e8',fontWeight:'600'},
+  projectSection:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginBottom:12},projectSectionTitle:{fontSize:22,color:'#162e27',fontWeight:'600'},
   newProjectAction:{flexDirection:'row',alignItems:'center',gap:4,minHeight:44,paddingHorizontal:12},homeNewProjectText:{color:'#c0cebf',fontSize:15},
-  projectSearch:{flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#232521',borderRadius:14,paddingHorizontal:14,marginBottom:8},projectSearchInput:{flex:1,minHeight:48,color:'#f4f0e8',fontSize:15},
+  projectSearch:{flexDirection:'row',alignItems:'center',gap:8,backgroundColor:'#232521',borderRadius:14,paddingHorizontal:14,marginBottom:8},projectSearchInput:{flex:1,minHeight:48,color:'#162e27',fontSize:15},
 
   screen: {
     flex: 1,
-    backgroundColor: '#12110f',
+    backgroundColor: '#f6f7f3',
   },
   mdBold: {
     fontWeight: '800',
@@ -4628,7 +4488,7 @@ const styles = StyleSheet.create({
   mdCode: {
     backgroundColor: 'rgba(244, 240, 232, 0.08)',
     borderRadius: 4,
-    color: '#f4f0e8',
+    color: '#162e27',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 13,
     paddingHorizontal: 4,
@@ -4646,7 +4506,7 @@ const styles = StyleSheet.create({
     top: 0,
   },
   sheet: {
-    backgroundColor: '#1d1b18',
+    backgroundColor: '#ffffff',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 12,
@@ -4654,14 +4514,14 @@ const styles = StyleSheet.create({
   },
   sheetGrabber: {
     alignSelf: 'center',
-    backgroundColor: '#3a3631',
+    backgroundColor: '#dbe2da',
     borderRadius: 2,
     height: 4,
     marginBottom: 12,
     width: 40,
   },
   sheetHeading: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 13,
     fontWeight: '600',
     paddingHorizontal: 8,
@@ -4680,7 +4540,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(244, 240, 232, 0.06)',
   },
   sheetActionText: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 16,
     fontWeight: '600',
   },
@@ -4693,7 +4553,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 14,
   },
   sheetConfirmBody: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 14,
     lineHeight: 22,
     paddingHorizontal: 18,
@@ -4723,14 +4583,14 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   sheetCancelText: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 15,
     fontWeight: '600',
   },
   appBar: {
     alignItems: 'center',
-    backgroundColor: '#12110f',
-    borderBottomColor: '#1f1d1a',
+    backgroundColor: '#f6f7f3',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 4,
@@ -4739,9 +4599,9 @@ const styles = StyleSheet.create({
   },
   appBarIconButton: {
     alignItems: 'center',
-    height: 40,
+    height: 48,
     justifyContent: 'center',
-    width: 40,
+    width: 48,
   },
   appBarRight: {
     alignItems: 'center',
@@ -4751,7 +4611,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: 3,
-    height: 40,
+    minHeight: 48,
+    minWidth: 48,
     justifyContent: 'center',
     paddingLeft: 2,
     paddingRight: 6,
@@ -4784,7 +4645,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   backBadgeText: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 11,
     fontWeight: '800',
   },
@@ -4801,20 +4662,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   appBarTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 28,
     fontWeight: '800',
     letterSpacing: -0.5,
   },
   appBarTitleSingle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 17,
     fontWeight: '700',
     letterSpacing: -0.2,
     maxWidth: '85%',
   },
   appBarSubtitle: {
-    color: '#77736b',
+    color: '#59685f',
     fontSize: 11,
     marginTop: 2,
     maxWidth: '85%',
@@ -4828,7 +4689,7 @@ const styles = StyleSheet.create({
     paddingTop: 80,
   },
   emptyHint: {
-    color: '#77736b',
+    color: '#59685f',
     fontSize: 14,
     textAlign: 'center',
   },
@@ -4837,7 +4698,7 @@ const styles = StyleSheet.create({
   },
   fab: {
     alignItems: 'center',
-    backgroundColor: '#f4f0e8',
+    backgroundColor: '#162e27',
     borderRadius: 30,
     elevation: 6,
     height: 60,
@@ -4855,7 +4716,7 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.96 }],
   },
   settingsSectionLabel: {
-    color: '#77736b',
+    color: '#59685f',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
@@ -4864,8 +4725,8 @@ const styles = StyleSheet.create({
     marginTop: 24,
   },
   settingsCard: {
-    backgroundColor: '#1d1b18',
-    borderColor: '#282520',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 14,
     borderWidth: 1,
     marginHorizontal: 12,
@@ -4880,7 +4741,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   settingsRowDivider: {
-    backgroundColor: '#282520',
+    backgroundColor: '#dbe2da',
     height: 1,
     marginLeft: 16,
   },
@@ -4888,12 +4749,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   settingsRowLabel: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 15,
     fontWeight: '600',
   },
   settingsRowValue: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 13,
     marginTop: 2,
   },
@@ -4902,7 +4763,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   settingsHintText: {
-    color: '#77736b',
+    color: '#59685f',
     fontSize: 12,
     lineHeight: 17,
   },
@@ -4920,7 +4781,7 @@ const styles = StyleSheet.create({
   },
   centerScreen: {
     alignItems: 'center',
-    backgroundColor: '#12110f',
+    backgroundColor: '#f6f7f3',
     flex: 1,
     gap: 14,
     justifyContent: 'center',
@@ -4933,7 +4794,7 @@ const styles = StyleSheet.create({
   brandMark: {
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: '#f4f0e8',
+    backgroundColor: '#162e27',
     borderRadius: 18,
     height: 72,
     justifyContent: 'center',
@@ -4941,18 +4802,18 @@ const styles = StyleSheet.create({
     width: 72,
   },
   brandMarkText: {
-    color: '#12110f',
+    color: '#f6f7f3',
     fontSize: 38,
     fontWeight: '800',
   },
   title: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 34,
     fontWeight: '800',
     textAlign: 'center',
   },
   subtitle: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 14,
     marginBottom: 34,
     marginTop: 6,
@@ -4962,25 +4823,25 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   input: {
-    backgroundColor: '#1d1b18',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 14,
     borderWidth: 1,
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 16,
     minHeight: 54,
     paddingHorizontal: 16,
   },
   primaryButton: {
     alignItems: 'center',
-    backgroundColor: '#f4f0e8',
+    backgroundColor: '#162e27',
     borderRadius: 14,
     height: 54,
     justifyContent: 'center',
     marginTop: 6,
   },
   primaryButtonText: {
-    color: '#12110f',
+    color: '#f6f7f3',
     fontSize: 16,
     fontWeight: '800',
   },
@@ -4989,7 +4850,7 @@ const styles = StyleSheet.create({
   },
   listHeader: {
     alignItems: 'center',
-    borderBottomColor: '#282520',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 12,
@@ -4998,7 +4859,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   listTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 26,
     fontWeight: '800',
   },
@@ -5008,7 +4869,7 @@ const styles = StyleSheet.create({
   },
   chatListItem: {
     alignItems: 'center',
-    borderBottomColor: '#282520',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 12,
@@ -5018,14 +4879,14 @@ const styles = StyleSheet.create({
   },
   chatAvatar: {
     alignItems: 'center',
-    backgroundColor: '#f4f0e8',
+    backgroundColor: '#162e27',
     borderRadius: 24,
     height: 48,
     justifyContent: 'center',
     width: 48,
   },
   chatAvatarText: {
-    color: '#12110f',
+    color: '#f6f7f3',
     fontSize: 20,
     fontWeight: '800',
   },
@@ -5074,31 +4935,31 @@ const styles = StyleSheet.create({
     transform: [{ rotate: '45deg' }],
   },
   chatListTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     flex: 1,
     fontSize: 16,
     fontWeight: '800',
   },
   chatListTime: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 11,
   },
   chatListPreview: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 13,
     lineHeight: 18,
     marginTop: 4,
   },
   listFooter: {
-    borderTopColor: '#282520',
+    borderTopColor: '#dbe2da',
     borderTopWidth: 1,
     gap: 8,
     padding: 12,
   },
   secondaryFooterButton: {
     alignItems: 'center',
-    backgroundColor: '#22201c',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     minHeight: 42,
@@ -5106,7 +4967,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   secondaryFooterButtonText: {
-    color: '#d9d2c8',
+    color: '#304d40',
     fontSize: 13,
     fontWeight: '700',
   },
@@ -5115,7 +4976,7 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: 'center',
-    borderBottomColor: '#282520',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 10,
@@ -5128,7 +4989,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   headerTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 17,
     fontWeight: '800',
   },
@@ -5139,8 +5000,8 @@ const styles = StyleSheet.create({
   },
   iconButton: {
     alignItems: 'center',
-    backgroundColor: '#22201c',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     height: 42,
@@ -5149,7 +5010,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   iconButtonText: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 14,
     fontWeight: '800',
   },
@@ -5183,7 +5044,7 @@ const styles = StyleSheet.create({
   },
   artifactTabs: {
     alignItems: 'center',
-    borderBottomColor: '#282520',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 8,
@@ -5192,8 +5053,8 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
   },
   artifactTab: {
-    backgroundColor: '#2c261b',
-    borderColor: '#5a4930',
+    backgroundColor: '#f5eedc',
+    borderColor: '#d8c9a1',
     borderRadius: 12,
     borderWidth: 1,
     maxWidth: 220,
@@ -5202,18 +5063,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   artifactTabText: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 13,
     fontWeight: '800',
   },
   webView: {
-    backgroundColor: '#12110f',
+    backgroundColor: '#f6f7f3',
     flex: 1,
   },
   webViewLoading: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    backgroundColor: '#12110f',
+    backgroundColor: '#f6f7f3',
     justifyContent: 'center',
   },
   centerPanel: {
@@ -5225,8 +5086,8 @@ const styles = StyleSheet.create({
   },
   messagesRefreshBar: {
     alignItems: 'center',
-    backgroundColor: '#211f1b',
-    borderBottomColor: '#282520',
+    backgroundColor: '#ffffff',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 8,
@@ -5234,16 +5095,16 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   messagesRefreshText: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 12,
   },
   emptyTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 22,
     fontWeight: '800',
   },
   mutedText: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 14,
   },
   messageList: {
@@ -5258,16 +5119,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  myBubble: {
-    alignSelf: 'flex-end',
-    backgroundColor: '#f4f0e8',
-  },
-  aiBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#1f1d19',
-    borderColor: '#34302a',
-    borderWidth: 1,
-  },
+  myBubble: {alignSelf:'flex-end',backgroundColor:'#e2eddf',borderColor:'#dbe2da',borderWidth:1},
+  aiBubble: {alignSelf:'flex-start',backgroundColor:'#ffffff',borderColor:'#dbe2da',borderWidth:1},
   mutedSegment: {
     opacity: 0.55,
   },
@@ -5291,11 +5144,11 @@ const styles = StyleSheet.create({
   toolGroupNow: { marginTop: 4, marginLeft: 18, marginRight: 4 },
   toolRowThink: { color: '#7a8f86', fontStyle: 'italic' },
   toolGroupLabel: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 12.5,
   },
   toolGroupBody: {
-    borderLeftColor: '#3a352e',
+    borderLeftColor: '#dbe2da',
     borderLeftWidth: 2,
     gap: 6,
     marginLeft: 6,
@@ -5332,13 +5185,13 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   liveStatusText: {
-    color: '#7fd1c7',
+    color: '#245e49',
     flexShrink: 1,
     fontSize: 12.5,
     lineHeight: 18,
   },
   messageBubbleHighlight: {
-    borderColor: '#7fd1c7',
+    borderColor: '#245e49',
     borderWidth: 2,
   },
   // ダンがまだ読み込んでいない追い連絡（仮送信）。読み込まれると通常表示に戻る。
@@ -5346,18 +5199,18 @@ const styles = StyleSheet.create({
     opacity: 0.55,
   },
   pendingFollowupLabel: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 11,
     marginTop: 4,
     textAlign: 'right',
   },
   searchModalRoot: {
-    backgroundColor: '#12110f',
+    backgroundColor: '#f6f7f3',
     flex: 1,
   },
   searchBar: {
     alignItems: 'center',
-    borderBottomColor: '#282520',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     flexDirection: 'row',
     gap: 8,
@@ -5365,13 +5218,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   searchInput: {
-    color: '#f4f0e8',
+    color: '#162e27',
     flex: 1,
     fontSize: 15,
     paddingVertical: 4,
   },
   searchCancel: {
-    color: '#7fd1c7',
+    color: '#245e49',
     fontSize: 14,
     fontWeight: '600',
   },
@@ -5379,20 +5232,20 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   searchCount: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 12,
     paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 4,
   },
   searchHit: {
-    borderBottomColor: '#1f1d1a',
+    borderBottomColor: '#dbe2da',
     borderBottomWidth: 1,
     paddingHorizontal: 16,
     paddingVertical: 11,
   },
   searchHitMeta: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 11.5,
     marginBottom: 3,
   },
@@ -5406,7 +5259,7 @@ const styles = StyleSheet.create({
     color: '#111',
   },
   searchEmpty: {
-    color: '#77736b',
+    color: '#59685f',
     fontSize: 14,
     paddingHorizontal: 16,
     paddingVertical: 28,
@@ -5416,7 +5269,7 @@ const styles = StyleSheet.create({
     color: '#ff8a73',
   },
   toolRowDetail: {
-    color: '#8a847b',
+    color: '#59685f',
     fontSize: 11.5,
     lineHeight: 16,
     marginTop: 2,
@@ -5428,16 +5281,16 @@ const styles = StyleSheet.create({
     marginBottom: 5,
   },
   messageSender: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 11,
     fontWeight: '800',
   },
   messageTime: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 11,
   },
   messageText: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 15,
     lineHeight: 22,
   },
@@ -5450,19 +5303,19 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   messageLink: {
-    color: '#8db8ff',
+    color: '#245e49',
     fontWeight: '800',
     textDecorationLine: 'underline',
   },
   myMessageText: {
-    color: '#12110f',
+    color: '#162e27',
   },
   myMessageLink: {
     color: '#0b4aa0',
   },
   messageImage: {
-    backgroundColor: '#12110f',
-    borderColor: '#34302a',
+    backgroundColor: '#f6f7f3',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     height: 220,
@@ -5476,7 +5329,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   messageVideoThumb: {
-    borderColor: '#34302a',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     height: 220,
@@ -5524,8 +5377,8 @@ const styles = StyleSheet.create({
     width: 40,
   },
   mediaCard: {
-    backgroundColor: '#15130f',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     gap: 3,
@@ -5541,12 +5394,12 @@ const styles = StyleSheet.create({
     borderColor: '#d2c8b8',
   },
   mediaCardTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 13,
     fontWeight: '800',
   },
   mediaCardUrl: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 12,
     lineHeight: 17,
   },
@@ -5555,7 +5408,7 @@ const styles = StyleSheet.create({
   },
   activityBar: {
     alignItems: 'center',
-    borderTopColor: '#282520',
+    borderTopColor: '#dbe2da',
     borderTopWidth: 1,
     flexDirection: 'row',
     gap: 8,
@@ -5563,30 +5416,21 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   activityText: {
-    color: '#d9d2c8',
+    color: '#304d40',
     flex: 1,
     fontSize: 12,
   },
-  composer: {
-    alignItems: 'flex-end',
-    borderTopColor: '#282520',
-    borderTopWidth: 1,
-    flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingBottom: Platform.OS === 'android' ? 8 : 12,
-    paddingTop: 10,
-  },
+  composer: {paddingHorizontal:16,paddingTop:10,borderTopWidth:1,borderTopColor:'#dbe2da',backgroundColor:'#f6f7f3',gap:5},
   attachButton: {
     alignItems: 'center',
-    height: 44,
+    height: 48,
     justifyContent: 'center',
-    width: 32,
+    width: 48,
   },
   attachmentBar: {
-    borderTopColor: '#282520',
+    borderTopColor: '#dbe2da',
     borderTopWidth: 1,
-    maxHeight: 84,
+    maxHeight: 156,
   },
   attachmentBarContent: {
     gap: 8,
@@ -5594,8 +5438,8 @@ const styles = StyleSheet.create({
   },
   attachmentChip: {
     alignItems: 'center',
-    backgroundColor: '#1d1b18',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     flexDirection: 'row',
@@ -5606,7 +5450,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   attachmentThumb: {
-    backgroundColor: '#2a2620',
+    backgroundColor: '#ffffff',
     borderRadius: 8,
     height: 56,
     width: 56,
@@ -5616,13 +5460,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   attachmentName: {
-    color: '#d9d2c8',
+    color: '#304d40',
     flexShrink: 1,
     fontSize: 12,
   },
   attachmentRemove: {
     alignItems: 'center',
-    backgroundColor: '#d9d2c8',
+    backgroundColor: '#304d40',
     borderRadius: 9,
     height: 18,
     justifyContent: 'center',
@@ -5631,45 +5475,17 @@ const styles = StyleSheet.create({
     top: 4,
     width: 18,
   },
-  composerInput: {
-    backgroundColor: '#1d1b18',
-    borderColor: '#34302a',
-    borderRadius: 16,
-    borderWidth: 1,
-    color: '#f4f0e8',
-    flex: 1,
-    fontSize: 16,
-    maxHeight: 128,
-    minHeight: 48,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  sendButton: {
-    alignItems: 'center',
-    backgroundColor: '#f4f0e8',
-    borderRadius: 15,
-    height: 48,
-    justifyContent: 'center',
-    width: 68,
-  },
+  composerInput: {minHeight:52,maxHeight:150,borderRadius:16,borderWidth:1,borderColor:'#dbe2da',backgroundColor:'#fff',color:'#162e27',fontSize:16,lineHeight:23,paddingHorizontal:16,paddingVertical:12,textAlignVertical:'top'},
+  sendButton: {width:48,height:48,borderRadius:24,backgroundColor:'#245e49',alignItems:'center',justifyContent:'center',marginLeft:'auto'},
   sendButtonText: {
-    color: '#12110f',
+    color: '#f6f7f3',
     fontSize: 14,
     fontWeight: '800',
   },
   // 停止ボタン（実行中・入力欄が空のときだけ Send と入れ替わる）
-  stopButton: {
-    alignItems: 'center',
-    backgroundColor: '#e8a9a0',
-    borderRadius: 15,
-    flexDirection: 'row',
-    gap: 5,
-    height: 48,
-    justifyContent: 'center',
-    width: 68,
-  },
+  stopButton: {width:48,height:48,borderRadius:24,backgroundColor:'#245e49',alignItems:'center',justifyContent:'center',marginLeft:'auto'},
   stopButtonText: {
-    color: '#1b1a17',
+    color: '#ffffff',
     fontSize: 14,
     fontWeight: '800',
   },
@@ -5683,8 +5499,8 @@ const styles = StyleSheet.create({
   },
   timelineChip: {
     alignItems: 'center',
-    backgroundColor: '#1f2b29',
-    borderColor: '#2e4642',
+    backgroundColor: '#e2eddf',
+    borderColor: '#dbe2da',
     borderRadius: 14,
     borderWidth: 1,
     flexDirection: 'row',
@@ -5694,7 +5510,7 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
   },
   timelineChipText: {
-    color: '#7fd1c7',
+    color: '#245e49',
     flexShrink: 1,
     fontSize: 12.5,
   },
@@ -5712,7 +5528,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   timelineChoiceMeta: {
-    color: '#77736b',
+    color: '#59685f',
     fontSize: 11.5,
     marginTop: 1,
   },
@@ -5726,8 +5542,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.45)',
   },
   drawer: {
-    backgroundColor: '#171511',
-    borderRightColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderRightColor: '#dbe2da',
     borderRightWidth: 1,
     height: '100%',
     padding: 14,
@@ -5740,7 +5556,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   drawerTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 20,
     fontWeight: '800',
   },
@@ -5751,19 +5567,19 @@ const styles = StyleSheet.create({
     width: 36,
   },
   closeButtonText: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 28,
   },
   newProjectButton: {
     alignItems: 'center',
-    backgroundColor: '#f4f0e8',
+    backgroundColor: '#162e27',
     borderRadius: 12,
     height: 44,
     justifyContent: 'center',
     marginBottom: 12,
   },
   newProjectText: {
-    color: '#12110f',
+    color: '#f6f7f3',
     fontSize: 14,
     fontWeight: '800',
   },
@@ -5771,8 +5587,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   projectItem: {
-    backgroundColor: '#201e1a',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     marginBottom: 8,
@@ -5780,21 +5596,21 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   projectItemActive: {
-    borderColor: '#f4f0e8',
+    borderColor: '#162e27',
   },
   projectTitle: {
-    color: '#f4f0e8',
+    color: '#162e27',
     fontSize: 14,
     fontWeight: '800',
   },
   projectMeta: {
-    color: '#a7a19a',
+    color: '#59685f',
     fontSize: 12,
     lineHeight: 17,
     marginTop: 5,
   },
   projectTime: {
-    color: '#7c766f',
+    color: '#59685f',
     fontSize: 11,
     marginTop: 7,
   },
@@ -5811,20 +5627,20 @@ const styles = StyleSheet.create({
     top: 10,
   },
   drawerFooter: {
-    borderTopColor: '#282520',
+    borderTopColor: '#dbe2da',
     borderTopWidth: 1,
     gap: 8,
     paddingTop: 12,
   },
   drawerAction: {
-    backgroundColor: '#22201c',
-    borderColor: '#34302a',
+    backgroundColor: '#ffffff',
+    borderColor: '#dbe2da',
     borderRadius: 12,
     borderWidth: 1,
     padding: 12,
   },
   drawerActionText: {
-    color: '#d9d2c8',
+    color: '#304d40',
     fontSize: 13,
     fontWeight: '700',
   },

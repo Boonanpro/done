@@ -1,5 +1,19 @@
 # DAN Mobile
 
+### Doneホーム再設計（1.0.28 / versionCode 27）
+
+上部に音声・チャットのアイコン、下部に固定カード1枚を置き、左右スワイプで作業中の部屋の内容だけを切り替えます。履歴はProjects、制作物はLibraryへ集約。英語が既定で、Settingsから日本語へ切替可能です。UI言語は保存され、会話本文は変更しません。
+
+Galaxy SM-S931Qへ上書き導入。実機でホーム、日英切替、チャットとキーボード、Projects、Libraryの0件表示を確認。詳細と未検証範囲は [実装記録](../docs/current/done-mobile-redesign-20260923.md)。APKは `../scratch/done-native-redesign/Done-1.0.28.apk`。
+
+### UI操作改善（1.0.27 / versionCode 26）
+
+チャットのアプリバー・添付ボタンを48dpへ拡大し、戻る・検索・添付・制作物追加・送信などにアクセシビリティ用の操作名を追加しました。同じruntimeの旧配信更新との混在を避けるため、appVersionとAndroidのruntimeVersionを1.0.27へそろえています。
+
+2026-09-23にarm64-v8a / x86_64のReleaseビルドが成功し、USB接続のGalaxy SM-S931Qへ上書きインストール、起動とログイン保持を確認しました。実機のチャット画面で48dpの操作領域、操作名、空入力時の送信無効、Samsung日本語IME表示時の入力欄、検索・添付メニューの開閉、ホームへ戻る操作を確認済みです。この版で音声通話・Bluetooth・TalkBack読み上げ・文字倍率変更の再検証は行っていません。
+
+APK: `../scratch/dan-ui-implementation-20260923/dan-ui-1.0.27.apk`
+
 Expo/React Native版のDANアプリです。
 
 ## 開発中にスマホで開く

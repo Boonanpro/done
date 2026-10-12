@@ -3,10 +3,10 @@
 // （4=2列、5枚以上=3列、7枚以上は「+N」で畳む）。Web の components/chat/media-grid.tsx と同じ規則。
 // プロジェクトチャットの吹き出しとコラボチャットで同じものを使う。
 import React, { useEffect, useState } from 'react';
-import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import {MediaViewer, useMediaGallery} from './media-viewer';
 
 export type MediaGridItem = { url: string; kind: 'image' | 'video'; name?: string };
 
@@ -16,27 +16,28 @@ const GAP = 2;
 export function MediaGrid({
   items,
   width = 240,
-  onOpenImage,
+  onOpenMedia,
   onLongPress,
 }: {
   items: MediaGridItem[];
   /** グリッド全体の幅（吹き出しの内側に収める） */
   width?: number;
-  /** 画像タップ。未指定なら内蔵ビューアで開く */
-  onOpenImage?: (url: string) => void;
+  onOpenMedia?: (url:string,kind?:MediaGridItem['kind'])=>void;
   /** 長押し（チャットの返信/スタンプメニュー）。指定すると長押しでは開かない */
   onLongPress?: () => void;
 }) {
+  const gallery=useMediaGallery();
   const [expanded, setExpanded] = useState(false);
   const [viewing, setViewing] = useState<MediaGridItem | null>(null);
   if (items.length === 0) return null;
 
   const open = (it: MediaGridItem) => {
-    if (it.kind === 'image' && onOpenImage) onOpenImage(it.url);
+    if(gallery)gallery(it);
+    else if(onOpenMedia)onOpenMedia(it.url,it.kind);
     else setViewing(it);
   };
 
-  const viewer = viewing ? <MediaViewer item={viewing} onClose={() => setViewing(null)} /> : null;
+  const viewer = viewing ? <MediaViewer items={items} initialUrl={viewing.url} onClose={() => setViewing(null)} /> : null;
 
   if (items.length === 1) {
     const it = items[0];
@@ -144,27 +145,6 @@ function VideoTile({ url, hidePlay }: { url: string; hidePlay?: boolean }) {
       )}
     </View>
   );
-}
-
-// 内蔵ビューア（画像は原寸フィット、動画は再生）
-function MediaViewer({ item, onClose }: { item: MediaGridItem; onClose: () => void }) {
-  return (
-    <Modal visible animationType="fade" transparent onRequestClose={onClose}>
-      <View style={st.viewer}>
-        {item.kind === 'video' ? <ViewerVideo url={item.url} /> : (
-          <Image source={{ uri: item.url }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-        )}
-        <Pressable style={st.viewerClose} onPress={onClose} hitSlop={12}>
-          <Ionicons name="close" size={28} color="#fff" />
-        </Pressable>
-      </View>
-    </Modal>
-  );
-}
-
-function ViewerVideo({ url }: { url: string }) {
-  const player = useVideoPlayer(url, (p) => { p.loop = false; p.play(); });
-  return <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" allowsFullscreen nativeControls />;
 }
 
 const st = StyleSheet.create({

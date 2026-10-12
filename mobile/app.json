@@ -2,7 +2,7 @@
   "expo": {
     "name": "Done",
     "slug": "dan-mobile",
-    "version": "1.0.26",
+    "version": "1.0.69",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -25,7 +25,7 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION"
       ],
-      "versionCode": 25,
+      "versionCode": 68,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",

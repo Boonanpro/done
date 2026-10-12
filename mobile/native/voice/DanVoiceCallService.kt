@@ -13,6 +13,11 @@ import com.facebook.react.jstasks.HeadlessJsTaskConfig
 import com.facebook.react.modules.core.DeviceEventManagerModule
 
 class DanVoiceCallService : HeadlessJsTaskService() {
+  companion object {
+    /** True while the service runs for the Dan pin. Calls then reuse it instead of starting a new foreground
+     *  service, which Android 14+ refuses for the microphone type when the app is not on screen (2026-10-05). */
+    @Volatile @JvmStatic var pinMode = false
+  }
   private var running = false
   private var relayMode = false
   private var audioLease: String? = null
@@ -31,7 +36,7 @@ class DanVoiceCallService : HeadlessJsTaskService() {
           getSystemService(NotificationManager::class.java).notify(710,notification())
         }
       }
-      emit("DanVoiceTick")
+      if (!pinMode || audioLease != null) emit("DanVoiceTick") // idle pin link: no call clock needed
       // Call control needs consecutive microphone observations <=400ms apart.
       // Keep the same cadence with the Activity asleep; JS timers are not its clock.
       handler.postDelayed(this, if (relayMode) 1000 else 200)
@@ -42,6 +47,38 @@ class DanVoiceCallService : HeadlessJsTaskService() {
   }
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val incoming = intent?.getStringExtra("audioLease")
+    if (pinMode && running) {
+      // The standing pin service: a call borrows it and gives it back; the service itself keeps running.
+      when {
+        intent?.action == null && DanAudioLease.owns(incoming) -> {
+          audioLease = incoming; connectedAt = 0L
+          getSystemService(NotificationManager::class.java).notify(710, notification())
+          return START_NOT_STICKY
+        }
+        intent?.action == "CLOSE" -> {
+          if (audioLease != null && audioLease == incoming) {
+            DanAudioLease.release(audioLease); audioLease = null; connectedAt = 0L
+            // No DanVoiceStopped here: it would end the headless task that keeps JS running for the next tap.
+            getSystemService(NotificationManager::class.java).notify(710, notification())
+          }
+          return START_NOT_STICKY
+        }
+        intent?.action == "PIN" -> { foregroundForPin(); return START_NOT_STICKY }
+      }
+    }
+    if (intent?.action == "PIN" && !running) {
+      pinMode = true
+      val manager = getSystemService(NotificationManager::class.java)
+      manager.createNotificationChannel(NotificationChannel("dan_voice_calls", "Danとの通話", NotificationManager.IMPORTANCE_DEFAULT).apply {
+        setSound(null, null)
+        enableVibration(false)
+      })
+      foregroundForPin()
+      running = true
+      startTask(HeadlessJsTaskConfig("DanVoiceCall", Arguments.createMap(), 0, true))
+      handler.post(tick)
+      return START_STICKY
+    }
     if (intent?.action == "CLOSE") {
       if (DanAudioLease.owns(incoming) && (audioLease == null || audioLease == incoming)) {
         audioLease = incoming
@@ -78,13 +115,30 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     handler.post(tick)
     return START_NOT_STICKY
   }
+  private var withMicrophone = false
+  /**
+   * Started by Android when the pin appears (app killed, screen off), the microphone type is refused: the pin's
+   * own microphone needs none, so run as a connected device then, and add the microphone type the next time the
+   * screen asks (startPinLink), which Android allows while it is visible.
+   */
+  private fun foregroundForPin() {
+    if (withMicrophone) return
+    if (Build.VERSION.SDK_INT < 30) { startForeground(710, notification()); withMicrophone = true; return }
+    try {
+      startForeground(710, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+      withMicrophone = true
+    } catch (e: Exception) {
+      android.util.Log.i("DanPinBle", "pin service without microphone type for now: $e")
+      startForeground(710, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+    }
+  }
   private fun notification(): Notification {
     val open = PendingIntent.getActivity(this, 710, packageManager.getLaunchIntentForPackage(packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val end = PendingIntent.getService(this, 711, Intent(this, DanVoiceCallService::class.java).setAction("END_CALL").putExtra("audioLease",audioLease), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val builder = Notification.Builder(this, "dan_voice_calls")
       .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-      .setContentTitle(if(audioPaused) "Danの音声は一時停止中" else if(connectedAt > 0) "Danと通話中" else if(relayMode) "Atomとイヤホンを接続中" else "Danに接続中")
-      .setContentText(if(audioPaused) "ほかのアプリが音声を使用しています。アプリで再開できます" else if(relayMode) "イヤホンを接続すると音声を切り替えます" else "ほかのアプリや画面オフでも話せます")
+      .setContentTitle(if(audioPaused) "Danの音声は一時停止中" else if(connectedAt > 0) "Danと通話中" else if(relayMode) "Atomとイヤホンを接続中" else if(pinMode && audioLease == null) "ダンのピンと接続中" else "Danに接続中")
+      .setContentText(if(audioPaused) "ほかのアプリが音声を使用しています。アプリで再開できます" else if(relayMode) "イヤホンを接続すると音声を切り替えます" else if(pinMode && audioLease == null) "ピンを1回押すとダンと話せます" else "ほかのアプリや画面オフでも話せます")
       .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
       .setCategory(Notification.CATEGORY_CALL)
       .setWhen(connectedAt).setShowWhen(connectedAt > 0 && !audioPaused).setUsesChronometer(connectedAt > 0 && !audioPaused)
@@ -97,8 +151,9 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     if (Build.VERSION.SDK_INT >= 36) builder.addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", connectedAt > 0 && !audioPaused) })
     return builder.build()
   }
-  override fun onTaskRemoved(rootIntent: Intent?) { emit("DanVoiceEnd"); stopSelf() }
+  override fun onTaskRemoved(rootIntent: Intent?) { emit("DanVoiceEnd"); if (!pinMode) stopSelf() }
   override fun onDestroy() {
+    pinMode = false
     if(relayMode) DanAtomRelay.stop()
     running = false
     handler.removeCallbacks(tick)

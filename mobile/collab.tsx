@@ -1,16 +1,20 @@
+import {uploadMedia, uploadError} from './resumable-upload';
+import {AttachmentCard} from './attachment-card';
+import {ui, useUiLanguage} from './ui-language';
 // コラボチャット（外部クライアント窓口）のネイティブ画面。
 // voice.tsx と同じ流儀: App.tsx からは import と画面分岐だけで使える自己完結モジュール。
 // 通信は REST ポーリングのみ（Web 版の Vercel フォールバックと同一経路＝確実に動く）。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Linking, Platform, Pressable,
-  StyleSheet, Text, TextInput, View,
+  StyleSheet, Text, TextInput, View, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { animateNextLayout, pressedScale } from './motion';
 import { MediaGrid, type MediaGridItem } from './media-grid';
+import {MediaGalleryScope, fileMediaKind, type GalleryItem} from './media-viewer';
 
 const REACTION_CHOICES = ['🙏', '👍', '❤️', '😂', '🎉'];
 
@@ -97,7 +101,7 @@ function fmtListTime(dateStr?: string | null): string {
     return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
   }
   const y = new Date(now); y.setDate(now.getDate() - 1);
-  if (d.toDateString() === y.toDateString()) return '昨日';
+  if (d.toDateString() === y.toDateString()) return ui("Yesterday","昨日");
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -112,118 +116,8 @@ const isStamp = (content: string) =>
 // ============================================================
 // ルーム一覧
 // ============================================================
-export function CollabRoomsScreen({ request, onOpenRoom, onBack, topInset }: {
-  request: RequestFn;
-  onOpenRoom: (room: CollabRoomSummary) => void;
-  onBack: () => void;
-  topInset: number;
-}) {
-  const [rooms, setRooms] = useState<CollabRoomSummary[] | null>(null);
-  const [myName, setMyName] = useState('');
-  const [editingProfile, setEditingProfile] = useState(false);
-  const [nameInput, setNameInput] = useState('');
+export { CollabRoomsScreen } from './collab-rooms';
 
-  const load = useCallback(() => {
-    request<{ rooms: CollabRoomSummary[] }>('/collab/rooms')
-      .then((d) => setRooms(d.rooms))
-      .catch(() => {});
-  }, [request]);
-
-  useEffect(() => {
-    load();
-    request<{ display_name?: string; email?: string }>('/chat/me')
-      .then((u) => setMyName(u.display_name || (u.email || '').split('@')[0] || ''))
-      .catch(() => {});
-    const t = setInterval(load, 20_000);
-    return () => clearInterval(t);
-  }, [load, request]);
-
-  const saveProfile = async () => {
-    const v = nameInput.trim();
-    setEditingProfile(false);
-    if (!v || v === myName) return;
-    try {
-      await request('/chat/profile', { method: 'POST', body: JSON.stringify({ display_name: v }) });
-      setMyName(v);
-    } catch { /* keep old name */ }
-  };
-
-  return (
-    <View style={[s.screen, { paddingTop: topInset }]}>
-      <View style={s.appBar}>
-        <Pressable onPress={onBack} hitSlop={12}>
-          <Ionicons name="chevron-back" size={24} color={C.text} />
-        </Pressable>
-        <Text style={[s.appBarTitle, { flex: 1 }]}>コミュニケーション</Text>
-        {/* 自分のプロフィール（タップで名前編集） */}
-        <Pressable style={s.profileChip} onPress={() => { setNameInput(myName); setEditingProfile(true); }}>
-          <View style={s.profileAvatar}>
-            <Ionicons name="person" size={14} color="#0c1513" />
-          </View>
-          {!!myName && <Text style={s.profileName} numberOfLines={1}>{myName}</Text>}
-        </Pressable>
-      </View>
-
-      {editingProfile && (
-        <View style={s.profileEditRow}>
-          <TextInput
-            style={s.profileEditInput}
-            value={nameInput}
-            onChangeText={setNameInput}
-            autoFocus
-            placeholder="表示名"
-            placeholderTextColor={C.muted2}
-            onSubmitEditing={saveProfile}
-          />
-          <Pressable style={s.profileEditSave} onPress={saveProfile}>
-            <Text style={{ color: '#0c1513', fontWeight: '600', fontSize: 13 }}>保存</Text>
-          </Pressable>
-          <Pressable hitSlop={8} onPress={() => setEditingProfile(false)}>
-            <Ionicons name="close" size={18} color={C.muted} />
-          </Pressable>
-        </View>
-      )}
-      {rooms === null ? (
-        <ActivityIndicator style={{ marginTop: 40 }} color={C.accent} />
-      ) : rooms.length === 0 ? (
-        <Text style={s.emptyText}>まだ窓口がありません。PCの「新しいルーム」またはダンへの依頼で作成できます。</Text>
-      ) : (
-        <FlatList
-          data={rooms}
-          keyExtractor={(r) => r.id}
-          renderItem={({ item }) => (
-            <Pressable style={s.roomRow} onPress={() => onOpenRoom(item)}>
-              <View style={[s.avatar, { backgroundColor: avatarColor(item.id) }]}>
-                <Ionicons name="person" size={22} color="#ffffffcc" />
-              </View>
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <View style={s.roomTop}>
-                  <Text style={s.roomTitle} numberOfLines={1}>{item.title}</Text>
-                  <Text style={s.roomTime}>{fmtListTime(item.last_message_at || item.updated_at)}</Text>
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Text style={[s.roomPreview, { flex: 1 }, item.unread && { color: C.text, fontWeight: '600' }]} numberOfLines={1}>
-                    {item.last_message || 'まだメッセージはありません'}
-                  </Text>
-                  {(item.unread_count ?? 0) > 0 ? (
-                    <View style={s.unreadBadge}>
-                      <Text style={s.unreadBadgeText}>{(item.unread_count ?? 0) > 99 ? '99+' : item.unread_count}</Text>
-                    </View>
-                  ) : item.unread ? <View style={s.unreadDot} /> : null}
-                </View>
-              </View>
-            </Pressable>
-          )}
-          ItemSeparatorComponent={() => <View style={s.sep} />}
-        />
-      )}
-    </View>
-  );
-}
-
-// ============================================================
-// チャット画面
-// ============================================================
 export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, onBack, topInset, bottomInset }: {
   request: RequestFn;
   apiBase: string;
@@ -241,6 +135,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   const [danThinking, setDanThinking] = useState(false);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [attachmentError,setAttachmentError] = useState<string | null>(null);
+  const [transferProgress,setTransferProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
   const [pending, setPending] = useState<PendingFile[]>([]);
@@ -399,7 +295,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
     const metadata: Record<string, unknown> = { ...(extraMeta || {}), client_msg_id: tempId };
     const optimistic: CollabMessage = {
       id: tempId, room_id: roomId, sender_type: 'owner',
-      sender_name: participants?.owner.name || 'あなた',
+      sender_name: participants?.owner.name || ui("You","あなた"),
       content: text, metadata: metadata as CollabMessage['metadata'],
       created_at: new Date().toISOString(),
     };
@@ -426,7 +322,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
       const reactions = { ...(m.metadata?.reactions || {}) };
       const names = [...(reactions[emoji] || [])];
       const idx = myName ? names.indexOf(myName) : -1;
-      if (idx >= 0) names.splice(idx, 1); else names.push(myName || 'あなた');
+      if (idx >= 0) names.splice(idx, 1); else names.push(myName || ui("You","あなた"));
       if (names.length) reactions[emoji] = names; else delete reactions[emoji];
       return { ...m, metadata: { ...(m.metadata || {}), reactions } };
     }));
@@ -443,15 +339,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
 
   // 添付: 写真・動画（複数）またはファイル → 全部アップロード → 1メッセージ（LINE式グリッド）
   const uploadOne = useCallback(async (uri: string, name: string, mime: string): Promise<CollabFile> => {
-    const form = new FormData();
-    form.append('file', { uri, name, type: mime } as unknown as Blob);
-    const res = await fetch(`${apiBase}/api/v1/collab/rooms/${roomId}/files`, {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      body: form,
-    });
-    if (!res.ok) throw new Error(`upload ${res.status}`);
-    const d = await res.json();
+    const d = await uploadMedia(apiBase, token || '', {uri,name,mime}, setTransferProgress, roomId);
     return { id: d.id, name: d.file_name, url: d.file_path, type: d.file_type || mime, size: d.file_size };
   }, [apiBase, roomId, token]);
 
@@ -473,6 +361,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
       setReplyTo(null);
     }
     if (filesToSend.length > 0) {
+      setAttachmentError(null);
+      setTransferProgress(0);
       setUploading(true);
       try {
         const files: CollabFile[] = [];
@@ -480,7 +370,8 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         extra = { ...(extra || {}), files, file: files[0] };
         setPending([]);
       } catch (e) {
-        Alert.alert('アップロードに失敗しました', String((e as Error).message));
+        setAttachmentError(uploadError(e));
+        if(savedReplyTo)setReplyTo(savedReplyTo);
         setUploading(false);
         return;
       }
@@ -509,7 +400,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
 
   const pickMedia = useCallback(async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) { Alert.alert('権限が必要です', '設定アプリから写真へのアクセスを許可してください。'); return; }
+    if (!perm.granted) { Alert.alert(ui("Permission required","権限が必要です"), ui("Allow photo access in your device settings.","設定アプリから写真へのアクセスを許可してください。")); return; }
     const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], allowsMultipleSelection: true, quality: 0.9 });
     if (r.canceled) return;
     await sendFiles(r.assets.map((a, i) => {
@@ -529,10 +420,10 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   }, [sendFiles]);
 
   const openAttach = useCallback(() => {
-    Alert.alert('添付', undefined, [
-      { text: '写真・動画', onPress: () => { pickMedia().catch(() => {}); } },
-      { text: 'ファイル', onPress: () => { pickDocument().catch(() => {}); } },
-      { text: 'キャンセル', style: 'cancel' },
+    Alert.alert(ui("Attach","添付"), undefined, [
+      { text: ui("Photos & videos","写真・動画"), onPress: () => { pickMedia().catch(() => {}); } },
+      { text: ui("Files","ファイル"), onPress: () => { pickDocument().catch(() => {}); } },
+      { text: ui("Cancel","キャンセル"), style: 'cancel' },
     ]);
   }, [pickMedia, pickDocument]);
 
@@ -592,11 +483,12 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
   }, [listData]);
 
   const names = participants
-    ? `${1 + participants.guests.length}人: ${[participants.owner.name, ...participants.guests.map((g) => g.name)].join('、')}`
+    ? `${1 + participants.guests.length} ${ui("people","人")}: ${[participants.owner.name, ...participants.guests.map((g) => g.name)].join(', ')}`
     : '';
 
+  const galleryItems:GalleryItem[]=messages.flatMap(m=>(m.metadata?.files||(m.metadata?.file?[m.metadata.file]:[])).filter(f=>fileMediaKind(f)).map(f=>({url:f.url.startsWith('http')?f.url:`${apiBase}${f.url}`,kind:fileMediaKind(f)!,name:f.name})));
   return (
-    <KeyboardAvoidingView
+    <MediaGalleryScope key={roomId} items={galleryItems}><KeyboardAvoidingView
       style={[s.screen, { paddingTop: topInset }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       // メニューが開いている時は、画面のどこを触っても閉じる（メニュー自身は stopPropagation で除外）
@@ -653,7 +545,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
             {danThinking && (
               <View style={s.thinkingRow}>
                 <ActivityIndicator size="small" color={C.violet} />
-                <Text style={s.thinkingText}>考え中...</Text>
+                <Text style={s.thinkingText}>{ui("Thinking…","考え中...")}</Text>
               </View>
             )}
             {proposals.map((p) => (
@@ -668,7 +560,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
           <Ionicons name="arrow-undo" size={14} color={C.accent} />
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={s.replyBarName} numberOfLines={1}>
-              {replyTo.sender_type.startsWith('dan_') ? 'ダン' : replyTo.sender_name}に返信
+              {ui("Reply to ","")}{replyTo.sender_type.startsWith('dan_') ? "Done" : replyTo.sender_name}{ui("","に返信")}
             </Text>
             <Text style={s.replyBarText} numberOfLines={1}>{previewOf(replyTo)}</Text>
           </View>
@@ -677,24 +569,14 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
           </Pressable>
         </View>
       )}
+      {attachmentError&&<View accessibilityRole="alert" style={{margin:12,padding:12,borderRadius:12,backgroundColor:'#fff1eb'}}><Text style={{color:'#80351f'}}>{attachmentError}</Text></View>}
+      {uploading&&<View style={{marginHorizontal:16,marginVertical:6}}><Text style={{color:C.muted,fontSize:12}}>{ui('Sending','送信中')} {Math.round(transferProgress*100)}%</Text><View style={{height:3,backgroundColor:'#dce5df',marginTop:5}}><View style={{height:3,width:`${transferProgress*100}%`,backgroundColor:C.accent}}/></View></View>}
       {pending.length > 0 && (
-        <View style={s.pendingStrip}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{maxHeight:156,flexGrow:0}} contentContainerStyle={[s.pendingStrip,{flexWrap:'nowrap',paddingBottom:8}]}>
           {pending.map((p, i) => (
-            <View key={`${p.uri}-${i}`} style={s.pendingItem}>
-              {p.mime.startsWith('image/') ? (
-                <Image source={{ uri: p.uri }} style={s.pendingThumb} />
-              ) : (
-                <View style={[s.pendingThumb, s.pendingFileBox]}>
-                  <Ionicons name={p.mime.startsWith('video/') ? 'videocam' : 'document-text'} size={20} color={C.muted} />
-                  <Text style={s.pendingName} numberOfLines={1}>{p.name}</Text>
-                </View>
-              )}
-              <Pressable style={s.pendingRemove} hitSlop={6} onPress={() => setPending((prev) => prev.filter((_, j) => j !== i))}>
-                <Ionicons name="close" size={12} color={C.bg} />
-              </Pressable>
-            </View>
+            <AttachmentCard key={`${p.uri}-${i}`} {...p} onRemove={() => setPending(prev=>prev.filter((_,j)=>j!==i))} />
           ))}
-        </View>
+        </ScrollView>
       )}
       <View style={[s.composer, { paddingBottom: Math.max(bottomInset, 8) }]}>
         <Pressable
@@ -707,7 +589,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
         </Pressable>
         <TextInput
           style={s.input}
-          placeholder="メッセージを入力..."
+          placeholder={ui("Message…","メッセージを入力...")}
           placeholderTextColor={C.muted2}
           value={input}
           onChangeText={setInput}
@@ -721,7 +603,7 @@ export function CollabChatScreen({ request, apiBase, token, roomId, roomTitle, o
           {uploading ? <ActivityIndicator size="small" color="#0c1513" /> : <Ionicons name="send" size={18} color="#0c1513" />}
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </KeyboardAvoidingView></MediaGalleryScope>
   );
 }
 
@@ -745,8 +627,8 @@ function previewOf(m: CollabMessage): string {
   if (body && !files.some((f) => f.name === body)) return body.slice(0, 100);
   if (files.length === 0) return '';
   const kinds = files.map((f) => f.type || '');
-  if (kinds.every((k) => k.startsWith('image/'))) return files.length > 1 ? `📷 画像 ${files.length}枚` : '📷 画像';
-  if (kinds.every((k) => k.startsWith('video/'))) return files.length > 1 ? `🎬 動画 ${files.length}本` : '🎬 動画';
+  if (kinds.every((k) => k.startsWith('image/'))) return files.length > 1 ? ui(`${files.length} photos`, `画像 ${files.length}枚`) : ui("Photo","📷 画像");
+  if (kinds.every((k) => k.startsWith('video/'))) return files.length > 1 ? ui(`${files.length} videos`, `動画 ${files.length}本`) : ui("Video","🎬 動画");
   return `📎 ${files[0].name}`;
 }
 
@@ -771,9 +653,9 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   const reactions = msg.metadata?.reactions;
   const rawFiles: CollabFile[] = msg.metadata?.files || (msg.metadata?.file ? [msg.metadata.file] : []);
   const mediaItems: MediaGridItem[] = rawFiles
-    .filter((f) => (f.type || '').startsWith('image/') || (f.type || '').startsWith('video/'))
-    .map((f) => ({ url: f.url.startsWith('http') ? f.url : `${apiBase}${f.url}`, kind: (f.type || '').startsWith('video/') ? 'video' : 'image', name: f.name }));
-  const otherFiles = rawFiles.filter((f) => !((f.type || '').startsWith('image/') || (f.type || '').startsWith('video/')));
+    .filter((f) => fileMediaKind(f))
+    .map((f) => ({ url: f.url.startsWith('http') ? f.url : `${apiBase}${f.url}`, kind: fileMediaKind(f)!, name: f.name }));
+  const otherFiles = rawFiles.filter((f) => !fileMediaKind(f));
   const hasFiles = rawFiles.length > 0;
   // 添付だけのメッセージは本文が空かファイル名（旧形式）なので本文行を出さない
   const bodyText = hasFiles && (!msg.content || rawFiles.some((f) => f.name === msg.content)) ? '' : msg.content;
@@ -789,8 +671,8 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
         <View style={[s.bubble, s.bubblePrivate]}>
           <View style={s.msgHead}>
             <Ionicons name="hardware-chip-outline" size={12} color={C.violet} />
-            <Text style={[s.msgName, { color: C.violet }]}>ダン</Text>
-            <Text style={s.privateTag}>非公開</Text>
+            <Text style={[s.msgName, { color: C.violet }]}>{"Done"}</Text>
+            <Text style={s.privateTag}>{ui("Private","非公開")}</Text>
             <Text style={s.msgTime}>{fmtTime(msg.created_at)}</Text>
           </View>
           <Text style={s.msgText}>{msg.content}</Text>
@@ -798,7 +680,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
             {(threadReplies || []).map((r) => (
               <View key={r.id} style={[s.threadItem, r.sender_type === 'dan_owner' && { backgroundColor: '#332b47' }]}>
                 <Text style={s.threadName}>
-                  {r.sender_type === 'dan_owner' ? 'ダン' : 'あなた → ダン'}
+                  {r.sender_type === 'dan_owner' ? "Done" : ui("You → Done","あなた → ダン")}
                 </Text>
                 <Text style={s.msgText}>{r.content}</Text>
               </View>
@@ -806,7 +688,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
             <View style={s.threadInputRow}>
               <TextInput
                 style={s.threadInput}
-                placeholder="ダンに返事…（相手には見えません）"
+                placeholder={ui("Reply to Done (private)…","ダンに返事…（相手には見えません）")}
                 placeholderTextColor={C.muted2}
                 value={replyText}
                 onChangeText={setReplyText}
@@ -836,8 +718,8 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   const rt = msg.metadata?.reply_to;
   const quote = rt?.id && !isPrivate ? (
     <Pressable onPress={() => onJump(rt.id!)} style={[s.quote, isOwnSide ? s.quoteOwn : s.quoteOther]}>
-      <Text style={[s.quoteName, { color: isOwnSide ? '#0c1513aa' : C.accent }]} numberOfLines={1}>{(rt.sender_type || '').startsWith('dan_') ? 'ダン' : rt.sender_name}</Text>
-      <Text style={[s.quoteText, { color: isOwnSide ? '#0c1513aa' : C.muted }]} numberOfLines={2}>{(rt.content || '').replace(/\[添付[^\]]*\]/g, '').trim() || '(添付)'}</Text>
+      <Text style={[s.quoteName, { color: isOwnSide ? '#0c1513aa' : C.accent }]} numberOfLines={1}>{(rt.sender_type || '').startsWith('dan_') ? "Done" : rt.sender_name}</Text>
+      <Text style={[s.quoteText, { color: isOwnSide ? '#0c1513aa' : C.muted }]} numberOfLines={2}>{(rt.content || '').replace(/\[添付[^\]]*\]/g, '').trim() || ui("(Attachment)","(添付)")}</Text>
     </Pressable>
   ) : null;
 
@@ -924,7 +806,7 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
         style={({ pressed }) => [s.reactionPickItem, { flexDirection: 'row', alignItems: 'center', gap: 4 }, pressedScale({ pressed })]}
       >
         <Ionicons name="arrow-undo" size={16} color={C.text} />
-        <Text style={{ color: C.text, fontSize: 13 }}>返信</Text>
+        <Text style={{ color: C.text, fontSize: 13 }}>{ui("Reply","返信")}</Text>
       </Pressable>
     </View>
   ) : null;
@@ -933,10 +815,10 @@ function MessageRow({ msg, threadReplies, showRead, apiBase, myName, onReact, on
   return (
     <View style={[s.msgWrap, isOwnSide ? s.msgRight : s.msgLeft]}>
       {!isOwnSide && <Text style={s.senderName}>{msg.sender_name}</Text>}
-      {isOwnSide && isDan && <Text style={[s.senderName, { textAlign: 'right' }]}>ダン</Text>}
+      {isOwnSide && isDan && <Text style={[s.senderName, { textAlign: 'right' }]}>{"Done"}</Text>}
       <View style={[s.msgLine, { flexDirection: isOwnSide ? 'row' : 'row-reverse' }]}>
         <View style={s.metaCol}>
-          {showRead && <Text style={s.metaRead}>既読</Text>}
+          {showRead && <Text style={s.metaRead}>{ui("Read","既読")}</Text>}
           <Text style={s.metaTime}>{fmtTime(msg.created_at)}</Text>
         </View>
         {bubbleBody}
@@ -960,7 +842,7 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
       await request(`/collab/rooms/${roomId}/messages`, { method: 'POST',
         body: JSON.stringify({ content: text, metadata: { visibility: 'owner_only', about_proposal: proposal.id } }) });
       setAsk('');
-    } catch (e) { Alert.alert('送れませんでした', String((e as Error).message)); } finally { setAsking(false); }
+    } catch (e) { Alert.alert(ui("Could not send","送れませんでした"), String((e as Error).message)); } finally { setAsking(false); }
   };
   const [body, setBody] = useState(proposal.content || '');
   const [dirty, setDirty] = useState(false);
@@ -986,9 +868,9 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
 
   const pendingUpdate = ad.pending_update && ad.pending_update.at !== dismissedAt ? ad.pending_update : null;
   const attItems: MediaGridItem[] = (ad.attachments || [])
-    .filter((f) => (f.type || '').startsWith('image/') || (f.type || '').startsWith('video/'))
-    .map((f) => ({ url: f.url.startsWith('http') ? f.url : `${apiBase}${f.url}`, kind: (f.type || '').startsWith('video/') ? 'video' : 'image', name: f.name }));
-  const attOthers = (ad.attachments || []).filter((f) => !((f.type || '').startsWith('image/') || (f.type || '').startsWith('video/')));
+    .filter((f) => fileMediaKind(f))
+    .map((f) => ({ url: f.url.startsWith('http') ? f.url : `${apiBase}${f.url}`, kind: fileMediaKind(f)!, name: f.name }));
+  const attOthers = (ad.attachments || []).filter((f) => !fileMediaKind(f));
 
   const act = async (kind: 'send' | 'discard') => {
     setBusy(kind);
@@ -1032,18 +914,18 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
       <View style={s.cardHead}>
         <Ionicons name="paper-plane-outline" size={14} color={C.accent} />
         <Text style={s.cardTitle} numberOfLines={1}>
-          返信案 → {ad.to_name || ad.to || '相手'}{ad.intent ? ` — ${ad.intent}` : ''}
+          {ui("Reply draft → ","返信案 → ")}{ad.to_name || ad.to || ui("Recipient","相手")}{ad.intent ? ` — ${ad.intent}` : ''}
         </Text>
         {(ad.revision || 1) > 1 && !!ad.dan_updated_at && (
-          <Text style={s.cardMeta}>更新 {fmtTime(ad.dan_updated_at)}</Text>
+          <Text style={s.cardMeta}>{ui("Updated ","更新 ")}{fmtTime(ad.dan_updated_at)}</Text>
         )}
       </View>
       {pendingUpdate && (
         <View style={s.cardUpdate}>
           <Ionicons name="refresh" size={14} color={C.accent} />
-          <Text style={[s.cardUpdateText, { flex: 1 }]}>ダンが新しい版を用意しました（{fmtTime(pendingUpdate.at)}）</Text>
+          <Text style={[s.cardUpdateText, { flex: 1 }]}>{ui("Done prepared a new version","Doneが新しい版を用意しました")} ({fmtTime(pendingUpdate.at)})</Text>
           <Pressable style={[s.cardBtn, s.cardBtnPrimary, { paddingVertical: 5, paddingHorizontal: 10 }]} disabled={!!busy} onPress={applyUpdate}>
-            {busy === 'apply' ? <ActivityIndicator size="small" color="#0c1513" /> : <Text style={{ color: '#0c1513', fontSize: 12, fontWeight: '600' }}>新しい版にする</Text>}
+            {busy === 'apply' ? <ActivityIndicator size="small" color="#0c1513" /> : <Text style={{ color: '#0c1513', fontSize: 12, fontWeight: '600' }}>{ui("Use new version","新しい版にする")}</Text>}
           </Pressable>
           <Pressable hitSlop={8} onPress={() => setDismissedAt(pendingUpdate.at)}>
             <Ionicons name="close" size={16} color={C.muted} />
@@ -1051,19 +933,19 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
         </View>
       )}
       <View style={s.cardSenderRow}>
-        <Text style={s.cardMeta}>名義:</Text>
+        <Text style={s.cardMeta}>{ui("Send as:","名義:")}</Text>
         {(['dan', 'owner'] as const).map((k) => (
           <Pressable key={k} onPress={() => changeSender(k)} style={[s.cardSenderBtn, sender === k && s.cardSenderBtnOn]}>
-            <Text style={[s.cardSenderText, sender === k && { color: '#0c1513', fontWeight: '600' }]}>{k === 'dan' ? 'ダン' : 'あなた'}</Text>
+            <Text style={[s.cardSenderText, sender === k && { color: '#0c1513', fontWeight: '600' }]}>{k === 'dan' ? "Done" : ui("You","あなた")}</Text>
           </Pressable>
         ))}
         <Text style={[s.cardMeta, { flex: 1 }]} numberOfLines={1}>
-          {sender === 'owner' ? '本人の発言として届く' : 'ダンの発言として届く'}
+          {sender === 'owner' ? ui("Sent as you","本人の発言として届く") : ui("Sent as Done","ダンの発言として届く")}
         </Text>
       </View>
       {(attItems.length > 0 || attOthers.length > 0) && (
         <View style={{ gap: 4, marginBottom: 6 }}>
-          <Text style={s.cardMeta}>添付（一緒に届きます）</Text>
+          <Text style={s.cardMeta}>{ui("Attachments included","添付（一緒に届きます）")}</Text>
           {attItems.length > 0 && <MediaGrid items={attItems} width={220} />}
           {attOthers.map((f) => (
             <Text key={f.url} style={s.fileLink}>📎 {f.name}</Text>
@@ -1078,13 +960,13 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
       />
       <View style={s.cardBtns}>
         <Pressable style={[s.cardBtn, s.cardBtnGhost]} disabled={!!busy} onPress={() => act('discard')}>
-          {busy === 'discard' ? <ActivityIndicator size="small" color={C.muted} /> : <Text style={{ color: C.muted, fontSize: 13 }}>破棄</Text>}
+          {busy === 'discard' ? <ActivityIndicator size="small" color={C.muted} /> : <Text style={{ color: C.muted, fontSize: 13 }}>{ui("Discard","破棄")}</Text>}
         </Pressable>
         <Pressable style={[s.cardBtn, s.cardBtnPrimary]} disabled={!!busy} onPress={() => act('send')}>
           {busy === 'send' ? <ActivityIndicator size="small" color="#0c1513" /> : (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <Ionicons name="send" size={14} color="#0c1513" />
-              <Text style={{ color: '#0c1513', fontWeight: '600', fontSize: 13 }}>送信</Text>
+              <Text style={{ color: '#0c1513', fontWeight: '600', fontSize: 13 }}>{ui("Send","送信")}</Text>
             </View>
           )}
         </Pressable>
@@ -1092,7 +974,7 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
       <View style={s.cardAskRow}>
         <TextInput
           style={s.cardAskInput}
-          placeholder="ダンへ（相手には見えません）"
+          placeholder={ui("Message Done (private)…","ダンへ（相手には見えません）")}
           placeholderTextColor={C.muted2}
           value={ask}
           onChangeText={setAsk}

@@ -1,0 +1,12 @@
+const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict'),ts=require('typescript');
+const source=fs.readFileSync(require('path').join(__dirname,'../dashboard-state.ts'),'utf8');
+const context={exports:{}};vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,context);
+const {activeRooms,selectedRoomIndex,stepRoomId,roomSwipe}=context.exports;
+const rooms=[{id:'a',has_active_run:true},{id:'b',unread_count:4},{id:'c'}];
+const active=activeRooms(rooms,['c']);
+assert.equal(active.map(x=>x.id).join(','),'a,c');
+assert.equal(selectedRoomIndex([...active].reverse(),'a'),1);
+assert.equal(selectedRoomIndex(active,'deleted'),0);
+assert.equal(stepRoomId(active,0,-1),'a');assert.equal(stepRoomId(active,0,1),'c');assert.equal(stepRoomId(active,1,1),'c');assert.equal(stepRoomId([],0,1),null);
+assert.equal(roomSwipe(-80,4),1);assert.equal(roomSwipe(80,4),-1);assert.equal(roomSwipe(4,80),0);assert.equal(roomSwipe(-20,2),0);assert.equal(roomSwipe(45,60),0);
+console.log('PASS: server/local activity, unread exclusion, selected-room identity, removal, boundaries, gesture direction and threshold');
