@@ -191,6 +191,7 @@ public final class DanPhoneLifelog {
       if (lock != null && lock.isHeld()) lock.release();
       worker.compareAndSet(me, null);
       android.util.Log.i(TAG, "phone lifelog: microphone closed after " + (frames - handed) + " frames");
+      DanVoiceCallService.refreshNotification();   // the capture ended (also on its own): the notification must not say 記録中
     }
   }
 

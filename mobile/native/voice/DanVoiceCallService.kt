@@ -154,13 +154,29 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     android.util.Log.w("DanPinBle", "pin service cannot run in the foreground now")
     return false
   }
+  /**
+   * The standing notification's words for the phone recording (設定「スマホで記録」): recording; or stopped although the
+   * switch is on — after Android brought the service back without the microphone type (process died, phone restarted),
+   * when the microphone could not be opened, or when its permission went away — so the owner can see it is not
+   * recording and knows what brings it back. Null when the pin or a call has the audio: the pin's own words then.
+   */
+  private fun phoneRecordingWords(): Pair<String, String>? {
+    if (DanPhoneLifelog.capturing()) return "スマホで記録中" to "声のある所だけを記録しています。設定「スマホで記録」で止められます"
+    if (!DanPhoneLifelog.isEnabled(this)) return null
+    return when (DanPhoneLifelog.status()) {
+      "pin", "call", "test_input" -> null
+      "no_permission" -> "記録は止まっています" to "マイクの許可が外れています。設定「スマホで記録」をオンにし直してください"
+      else -> "記録は止まっています" to "アプリを開くと再開します"
+    }
+  }
   private fun notification(): Notification {
+    val phone = if (pinMode && audioLease == null) phoneRecordingWords() else null
     val open = PendingIntent.getActivity(this, 710, packageManager.getLaunchIntentForPackage(packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val end = PendingIntent.getService(this, 711, Intent(this, DanVoiceCallService::class.java).setAction("END_CALL").putExtra("audioLease",audioLease), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     val builder = Notification.Builder(this, "dan_voice_calls")
       .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-      .setContentTitle(if(audioPaused) "Danの音声は一時停止中" else if(connectedAt > 0) "Danと通話中" else if(relayMode) "Atomとイヤホンを接続中" else if(pinMode && audioLease == null) (if (DanPhoneLifelog.capturing()) "スマホで記録中" else "ダンのピンと接続中") else "Danに接続中")
-      .setContentText(if(audioPaused) "ほかのアプリが音声を使用しています。アプリで再開できます" else if(relayMode) "イヤホンを接続すると音声を切り替えます" else if(pinMode && audioLease == null) (if (DanPhoneLifelog.capturing()) "声のある所だけを記録しています。設定「スマホで記録」で止められます" else "ピンを1回押すとダンと話せます") else "ほかのアプリや画面オフでも話せます")
+      .setContentTitle(if(audioPaused) "Danの音声は一時停止中" else if(connectedAt > 0) "Danと通話中" else if(relayMode) "Atomとイヤホンを接続中" else if(phone != null) phone.first else if(pinMode && audioLease == null) "ダンのピンと接続中" else "Danに接続中")
+      .setContentText(if(audioPaused) "ほかのアプリが音声を使用しています。アプリで再開できます" else if(relayMode) "イヤホンを接続すると音声を切り替えます" else if(phone != null) phone.second else if(pinMode && audioLease == null) "ピンを1回押すとダンと話せます" else "ほかのアプリや画面オフでも話せます")
       .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
       .setCategory(Notification.CATEGORY_CALL)
       .setWhen(connectedAt).setShowWhen(connectedAt > 0 && !audioPaused).setUsesChronometer(connectedAt > 0 && !audioPaused)
