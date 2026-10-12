@@ -58,12 +58,18 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     live = this
     val incoming = intent?.getStringExtra("audioLease")
     if (pinMode && running) {
-      // The standing pin service: a call borrows it and gives it back; the service itself keeps running.
+      // The standing pin service: a call borrows it and gives it back; the service itself keeps running — so every
+      // answer here is START_STICKY. Android keeps only the LAST onStartCommand's answer (ServiceRecord.stopIfKilled)
+      // to decide whether to bring a service back after its process dies; START_NOT_STICKY here (until 2026-10-12)
+      // meant that once a PIN had reached the running service (opening the app, the switch) a crash ended the standing
+      // service, its notification and the phone recording for good. The service reaches this branch only as the
+      // pin's standing service, never for a call alone (those paths below stay START_NOT_STICKY: a call cannot be
+      // resumed after a crash), so sticky is the right answer for all three.
       when {
         intent?.action == null && DanAudioLease.owns(incoming) -> {
           audioLease = incoming; connectedAt = 0L
           getSystemService(NotificationManager::class.java).notify(710, notification())
-          return START_NOT_STICKY
+          return START_STICKY
         }
         intent?.action == "CLOSE" -> {
           if (audioLease != null && audioLease == incoming) {
@@ -71,9 +77,9 @@ class DanVoiceCallService : HeadlessJsTaskService() {
             // No DanVoiceStopped here: it would end the headless task that keeps JS running for the next tap.
             getSystemService(NotificationManager::class.java).notify(710, notification())
           }
-          return START_NOT_STICKY
+          return START_STICKY
         }
-        intent?.action == "PIN" -> { foregroundForPin(); return START_NOT_STICKY }
+        intent?.action == "PIN" -> { foregroundForPin(); return START_STICKY }
       }
     }
     if (intent?.action == "PIN" && !running) {
@@ -156,9 +162,10 @@ class DanVoiceCallService : HeadlessJsTaskService() {
   }
   /**
    * The standing notification's words for the phone recording (設定「スマホで記録」): recording; or stopped although the
-   * switch is on — after Android brought the service back without the microphone type (process died, phone restarted),
-   * when the microphone could not be opened, or when its permission went away — so the owner can see it is not
-   * recording and knows what brings it back. Null when the pin or a call has the audio: the pin's own words then.
+   * switch is on — after Android brought the service back without the microphone type (the process died; after a phone
+   * restart the service does not stand at all, so there is no notification then), when the microphone could not be
+   * opened, or when its permission went away — so the owner can see it is not recording and knows what brings it
+   * back. Null when the pin or a call has the audio: the pin's own words then.
    */
   private fun phoneRecordingWords(): Pair<String, String>? {
     if (DanPhoneLifelog.capturing()) return "スマホで記録中" to "声のある所だけを記録しています。設定「スマホで記録」で止められます"

@@ -26,7 +26,9 @@ Expo/React Native版のDANアプリです。
 - ピンがつながった瞬間（`DanPinLink` の link ready）に止まり、切れると戻る。通話（スマホ・Atom 中継）が音を取る間も止まる。
 - ピン用の前面サービス（`DanVoiceCallService` の PIN、microphone 種別）の中で動くので、画面を消しても続く。
   端末の再起動後は、アプリを一度開くと再開する（Android はマイク種別の前面サービスを裏から始めさせない）。
-- 端末の再起動やアプリの落ちた後は、通知が「記録は止まっています / アプリを開くと再開します」になる（アプリを開けば再開）。
+- アプリが落ちた後は Android が常駐サービスを立て直す（常駐サービスへの返事はどれも `START_STICKY`。通話だけの時は違う）。
+  立て直された後にマイクの種別が得られなければ、通知が「記録は止まっています / アプリを開くと再開します」になる（アプリを開けば再開）。
+  端末の再起動の後は常駐サービス自体が立たないので通知は出ない（アプリを開けば再開）。
 - adb での確認（画面なし。root は要らない）:
   `adb shell am broadcast -a app.done.dan.PIN_SELFTEST --ez phone_record true` ほか
   `--es lifelog_api`・`--es lifelog_token`・`--ez fake_pin`・`--ez fake_call`・`--es phone_wav <16kHz mono wav> --ei speed N`・
