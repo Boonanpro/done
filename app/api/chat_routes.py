@@ -4066,6 +4066,32 @@ def _require_loopback(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Internal only")
 
 
+_STARTED = time.time()
+
+
+@router.post("/internal/restarting")
+async def internal_restarting(request: Request) -> dict:
+    """scripts/restart_dan_core.py is about to stop this process: tell every open screen. They show "restarting" from
+    this moment until /alive answers from a newer process, instead of looking broken for a minute (2026-10-13)."""
+    _require_loopback(request)
+    from app.services.room_feed import publish_all
+    return {"ok": True, "delivered": publish_all({"type": "restarting", "started": _STARTED})}
+
+
+@router.get("/alive")
+async def alive() -> dict:
+    """What a screen showing "restarting" asks once a second. The core answers by answering; `started` tells a new
+    process from the one that announced; `sandbox` is whether room lists and room info answer yet. No database."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            port = os.environ.get("DAN_SANDBOX_PORT", "8000")
+            sandbox = (await client.get(f"http://127.0.0.1:{port}/health")).status_code == 200
+    except Exception:  # noqa: BLE001
+        sandbox = False
+    return {"core": True, "sandbox": sandbox, "started": _STARTED}
+
+
 @router.post("/internal/rooms/{room_id}/messages")
 async def internal_room_message(room_id: str, request: Request) -> dict:
     """部屋ログへの追記／配信の内部入口（loopback 限定）。

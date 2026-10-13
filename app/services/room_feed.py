@@ -147,6 +147,13 @@ def publish(user_ids: list[str], event: dict) -> int:
     return delivered
 
 
+def publish_all(event: dict) -> int:
+    """Every open screen, whoever it belongs to (the core is about to restart)."""
+    with _lock:
+        users = list(_subs)
+    return publish(users, event)
+
+
 def publish_message(room_id: str, msg: dict) -> int:
     """メッセージ保存直後に呼ぶ。core 外なら core へ転送。購読者がいなければ即 return（DB照会もしない）。"""
     if not room_id:

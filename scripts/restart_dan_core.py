@@ -260,8 +260,19 @@ def main():
     print("next: start the core, then run  python scripts/verify_dan.py  (a real job through the call entry; health 200 is not enough)")
 
 
+def announce():
+    """Tell every open screen that the core is about to stop: they show "restarting" until it answers again."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:9000/api/v1/chat/internal/restarting', data=b'{}', method='POST'), timeout=3)
+        time.sleep(0.5)   # the event leaves the core before the core is killed
+    except Exception:
+        pass   # an older core, or one that no longer answers: the screens notice when their line drops
+
+
 def stop():
     """End the core and sandbox with their process trees. True when both ports are free."""
+    announce()
     me = psutil.Process().pid
     l = listeners()
     print("listeners before:", {pid: sorted(ports) for pid, ports in l.items()})

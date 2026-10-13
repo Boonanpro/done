@@ -15,6 +15,7 @@ import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 
 import type { MessageResponse, ProjectListResponse } from '@/lib/api-client';
 import { perfLog } from '@/lib/perf-log';
+import { coverIfDown, useRestartStore } from '@/stores/restart-store';
 
 const LAST_KEY = 'done-feed-last-at';
 
@@ -141,10 +142,20 @@ export function useRoomFeed(enabled: boolean): void {
           /* ignore */
         }
       });
+      // 本体が再起動のために止まる直前の知らせ。戻るまで画面にかぶせを出す（RestartCover）
+      es.addEventListener('restarting', (ev) => {
+        try {
+          const d = JSON.parse((ev as MessageEvent).data) as { started?: number };
+          useRestartStore.getState().begin({ announced: true, started: d.started });
+        } catch {
+          /* ignore */
+        }
+      });
       es.onerror = () => {
         es?.close();
         es = null;
         if (closed) return;
+        void coverIfDown(); // 知らせ無しで切れた: 本体が止まっているのか、こちらの回線なのかを確かめる
         retryTimer = window.setTimeout(connect, retry);
         retry = Math.min(retry * 2, 30_000);
       };
@@ -161,10 +172,20 @@ export function useRoomFeed(enabled: boolean): void {
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onOnline);
+    // 再起動から戻った: 次の再試行（最長30秒先）を待たずにつなぎ直す
+    const unsubscribeBack = useRestartStore.subscribe((s, prev) => {
+      if (s.backs === prev.backs || closed) return;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      retryTimer = null;
+      es?.close();
+      retry = 1000;
+      connect();
+    });
     connect();
 
     return () => {
       closed = true;
+      unsubscribeBack();
       if (retryTimer) window.clearTimeout(retryTimer);
       es?.close();
       document.removeEventListener('visibilitychange', onVisible);
