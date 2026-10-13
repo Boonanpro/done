@@ -2259,7 +2259,13 @@ async def send_dan_message_stream(
                     followup_content = _build_content_with_media(
                         effective_content, request.image_urls or [], request.file_urls or []
                     )
-                    _followup_session.submit_followup(followup_content)
+                    _followup_created = message.get("created_at") if message else None
+                    _followup_session.submit_followup(
+                        followup_content,
+                        # 追い連絡のサーバー受信時刻。割り込まれたターンの作業記録を
+                        # この直前に置くための目印（docs/current/chat-timeline-definition.md）。
+                        received_at=(_followup_created.isoformat() if hasattr(_followup_created, "isoformat") else _followup_created),
+                    )
                     logger.info("[STREAMING] follow-up queued for room=%s msg=%s", room_id, message["id"])
                     yield f"data: {json.dumps({'type': 'followup_queued', 'session_id': room_id, 'message_id': message['id']})}\n\n"
                 except Exception as e:

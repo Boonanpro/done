@@ -1358,6 +1358,26 @@ def _answers_withdrawn(room_id: str) -> bool:
     return any(words and words in content and at >= started for words, at in _withdrawn_words.get(room_id, []))
 
 
+def _just_before_iso(iso: str) -> Optional[str]:
+    """ISO 時刻の 1 ミリ秒前を返す（並び順で「その直前」に置くため）。読めなければ None。"""
+    import re
+    from datetime import timedelta
+    try:
+        raw = (iso or "").strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        # DB（PostgREST）は秒の小数の末尾の 0 を省いて返す（例 16.1801）。Python 3.10 の fromisoformat は
+        # 小数が 3 桁か 6 桁でないと読めないので 6 桁にそろえる（2026-10-13: ここで読めず、追い連絡の
+        # 直前に置く目印が効かずに予備の置き方へ落ちていた）。
+        raw = re.sub(r"\.(\d{1,6})(?=[+\-]|$)", lambda m: "." + m.group(1).ljust(6, "0"), raw, count=1)
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (dt - timedelta(milliseconds=1)).isoformat()
+    except Exception:
+        return None
+
+
 def _save_ai_message_sync(
     room_id: str,
     content: str,
@@ -3274,6 +3294,9 @@ async def _process_via_streaming_session(
         # created_at に使い、追い連絡で割り込まれたターンの回答が時系列で正しく並ぶ
         # ようにする（保存=ターン終了時刻だと追い連絡より後ろにずれる）。
         "turn_start": None,
+        # このターンで最後に作業の一歩（本文・道具）を積んだ時刻。追い連絡で割り込まれた
+        # ターンを「その一歩が起きた時刻」に置くための予備（追い連絡の受信時刻が無い時）。
+        "last_block_at": None,
         # True once any `result` was seen this call. Used to tell a normal turn
         # apart from a session that died on start (e.g. a stale --resume id).
         "any_result": False,
@@ -3341,6 +3364,7 @@ async def _process_via_streaming_session(
                         if txt.strip():
                             state["final_text_parts"].append(txt)
                             state["turn_blocks"].append({"type": "text", "text": txt})
+                            state["last_block_at"] = datetime.now(timezone.utc).isoformat()
                         _emit(ev)
                         # テキスト反復崩壊の検知。同一出力行が連続 N 回出たら割り込み、
                         # 後段の result / run() が loop_detected を見て friendly result +
@@ -3393,6 +3417,7 @@ async def _process_via_streaming_session(
                             _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
                             state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                             state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
+                            state["last_block_at"] = datetime.now(timezone.utc).isoformat()
                         # 振る舞いループ検知: 同一ツール呼び出しが連続したら割り込んで
                         # ターンを畳む。is_error が立たないループは error 駆動の復旧では
                         # 捕まらず数分回り続けるので、ここで能動的に止める。後段の result /
@@ -3465,6 +3490,7 @@ async def _process_via_streaming_session(
                         pass
                     user_cancelled, text = True, ""
                     state["turn_blocks"] = []
+                    state["last_block_at"] = None
                 # 追い連絡の割り込みで畳んだ中間ターンが無言だった場合は失敗ではない。
                 # テンプレ文言（応答テキストが空でした）を入れず、作業ログ(blocks)が
                 # あれば空本文＋ログだけ保存、何も無ければ保存自体スキップする
@@ -3481,6 +3507,7 @@ async def _process_via_streaming_session(
                             _update_run_sync(run_id, state="completed")
                         _emit({"type": "cancelled", "session_id": state["session_id"]})
                         state["turn_blocks"] = []
+                        state["last_block_at"] = None
                         state["final_text_parts"] = []
                         state["reasoning_steps_acc"] = []
                         state["reasoning_full_acc"] = []
@@ -3513,6 +3540,17 @@ async def _process_via_streaming_session(
                 # The reply is placed when it was finished, not when the turn began: placed at the start, a reply that came
                 # after a follow-up sorted above it (docs/current/chat-timeline-definition.md, 2026-10-02).
                 turn_start = datetime.now(timezone.utc).isoformat()
+                if continuation:
+                    # 追い連絡で割り込まれたターン（2026-10-13）: 書き終えたのは追い連絡の後でも、
+                    # 中身は追い連絡の前にした作業なので、追い連絡の直前（元のメッセージの下）に置く。
+                    # 終了時刻で置くと、追い連絡の下に落ちて「本人が2通続けて送った」ように見えた。
+                    anchor = None
+                    try:
+                        anchor = session.take_followup_anchor()
+                    except Exception:
+                        anchor = None
+                    placed = _just_before_iso(anchor) if anchor else None
+                    turn_start = placed or state.get("last_block_at") or turn_start
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
                 if not skip_save and not (empty_continuation and not state["turn_blocks"]):
@@ -3525,6 +3563,7 @@ async def _process_via_streaming_session(
                 _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": bool(cli_saved), "saved_message_id": cli_saved if isinstance(cli_saved, str) else None, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
+                state["last_block_at"] = None
                 state["final_text_parts"] = []
                 state["reasoning_steps_acc"] = []
                 state["reasoning_full_acc"] = []

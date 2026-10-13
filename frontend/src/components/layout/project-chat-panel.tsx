@@ -2005,6 +2005,10 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
+  // 送った直後、まだサーバーの時刻が無いメッセージ（pending）が画面にある間に始まった作業の一歩を、
+  // そのメッセージの上に出さないための床。pending が無い間は「見えている作業の一歩のいちばん新しい
+  // サーバー時刻」を覚え、pending が現れたら凍結する（端末の時計は使わない）。
+  const liveEventFloorRef = useRef(0);
   // 遡り読み込み（APK と同じ方式）。上端まで来たら before=最古の created_at で
   // 追加取得し、キャッシュの末尾に足す。取得中の二重発火と、無い時の再要求を防ぐ。
   const hasMoreOlderRef = useRef(true);
@@ -2364,6 +2368,15 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
     const runStart = (currentRun as { created_at?: string } | null)?.created_at;
     const runIsLiveNow = !!currentRun && isActiveExecution && currentRun.state === 'running';
     const liveBlockSortKey = runIsLiveNow && runStart ? new Date(runStart).getTime() : liveAnchorTime;
+    // 送った直後（pending がある間）に始まった作業の一歩は、メッセージの下に置く（2026-10-13）。
+    // サーバーはメッセージを受け取ってから動くので、受け取った時刻が付けば §1 の決まりで自然にその順になる。
+    // それまでの約1秒、作業の一歩はサーバーの時刻を持ち pending は持たないので、何もしないと上に出ていた。
+    const hasPendingMessage = chronologicalMessages.some((m) => m.pending);
+    const newestEventTime = allExecutionEvents.reduce(
+      (acc, e) => Math.max(acc, new Date(e.created_at).getTime() || 0), 0,
+    );
+    if (!hasPendingMessage) liveEventFloorRef.current = newestEventTime;
+    const liveEventFloor = liveEventFloorRef.current;
 
     let pendingSeq = 0;
     for (const msg of chronologicalMessages) {
@@ -2427,6 +2440,9 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
         const steps = group.events.map(eventToStep);
         if (steps.length === 0) return;
         liveBlockRendered = true;
+        const groupTime = new Date(group.events[0]?.created_at || '').getTime() || liveBlockSortKey;
+        // 送信後に始まった一歩は pending（MAX-1000 番台）の下、「考え中」の枠（MAX）の上。
+        const startedAfterSend = hasPendingMessage && groupTime > liveEventFloor;
         timedItems.push({
           item: {
             kind: 'execution-block',
@@ -2434,7 +2450,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             steps,
             isLive: index === liveGroups.length - 1,
           },
-          sortKey: new Date(group.events[0]?.created_at || '').getTime() || liveBlockSortKey,
+          sortKey: startedAfterSend ? Number.MAX_SAFE_INTEGER - 500 + index : groupTime,
           subKey: 2,
         });
       });
@@ -2451,7 +2467,10 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
           }],
           isLive: true,
         },
-        sortKey: showWarmupBlock ? liveBlockSortKey : liveAnchorTime,
+        // 「考え中」は出来事ではなく状態なので、いつも一番下（docs/current/chat-timeline-definition.md §2）。
+        // 送った直後のメッセージ（pending、サーバーの時刻がまだ無い）は MAX-1000 番台に置かれるので、
+        // メッセージの時刻に括り付けると、その一瞬だけ「考え中」がメッセージの上に出ていた（2026-10-13）。
+        sortKey: Number.MAX_SAFE_INTEGER,
         subKey: 2,
       });
     }
