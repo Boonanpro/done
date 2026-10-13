@@ -37,7 +37,7 @@ class ProjectCreateRequest(BaseModel):
     # 新チャットで使う Claude モデル（"opus" / "fable" 等）。未指定なら既定(opus)。
     # サーバー側で許可リスト照合し、projects.metadata.model に保存する。
     model: Optional[str] = None
-    # True なら部屋の一覧に出さない（projects.metadata.hidden）。開発の参謀のボードが、付箋や枝ごとの会話の部屋を作る時に使う。
+    # True なら部屋の一覧に出さない（projects.metadata.hidden）。ダン開発室のボードが、付箋や枝ごとの会話の部屋を作る時に使う。
     # 2026-10-13 本人「『参謀: …』みたいなチャットがダンで立ちあがるのやめてほしい」。部屋は id で開けば今まで通り使える。
     hidden: Optional[bool] = None
 

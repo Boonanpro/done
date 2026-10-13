@@ -341,7 +341,7 @@ class ProjectService:
         # 未読/最終メッセージ(2本)と実行中run(1本)は互いに独立なので同時に取る。
         # 直列だと 1本150ms(DBがシンガポール)×3 が起動直後の一覧表示にそのまま乗る。
         from concurrent.futures import ThreadPoolExecutor
-        # metadata.hidden の部屋（開発の参謀のボードの会話の部屋）は一覧に出さない。未読の合計にも入らない。
+        # metadata.hidden の部屋（ダン開発室のボードの会話の部屋）は一覧に出さない。未読の合計にも入らない。
         rows = [r for r in (result.data or []) if not ((r.get("metadata") or {}).get("hidden"))]
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_read = ex.submit(self._enrich_projects_read_state, rows, user_id)

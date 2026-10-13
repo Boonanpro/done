@@ -471,7 +471,7 @@ async def _notify_dan_completion(
             body = "Danの作業が完了しました"
         url = f"/chat/{project_id}" if project_id else "/chat"
         title = "Dan"
-        # 一覧に出さない部屋（開発の参謀のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（参謀）を開く。
+        # 一覧に出さない部屋（ダン開発室のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（参謀）を開く。
         def _hidden_origin(pid):   # 同期の DB 呼び出しはスレッドで（イベントループを止めない）
             from app.services.project_service import ProjectService
             ps = ProjectService()
