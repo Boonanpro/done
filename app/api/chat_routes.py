@@ -2033,6 +2033,7 @@ async def send_dan_message_stream(
         room_id_for_cancel = None  # 後で設定
         done_sent = False  # done イベント送信済みフラグ
         result_saved = False  # AI回答DB保存済みフラグ
+        _early_turn_claim = None  # (room_id, token) 準備中の印（2026-10-14 追補）。finally で外す
         cli_saved_ai_message = False  # CLIスレッドがAI応答をDB保存済みか
         replan_requested = _is_replan_request(request.content)
         # スラッシュコマンド検出: /skill-name でスキルを明示起動
@@ -2193,6 +2194,18 @@ async def send_dan_message_stream(
                     _route_as_followup = is_turn_active_or_preparing(room_id)
             except Exception:
                 _route_as_followup = False
+
+            # 準備中の印はここで立てる（2026-10-14 追補）。process_message_cli の中で立てるのでは、
+            # そこへ着くまでの文脈の組み立てに約2秒かかり、1秒後に届いた追い連絡が「方針変更」に
+            # なっていた（01:01 の実測: 発言の保存 32.6s → 印 34.5s、追い連絡の判定 34.0s）。
+            # 新しいターンと決めた瞬間に立て、run_turn が最初の本文を書いた時に外れる。
+            # 配信が終わる時（例外・切断を含む）にも念のため外す。
+            if _streaming_on and not _route_as_followup and not _voice_call:
+                try:
+                    from app.agent.streaming_session import claim_turn as _claim_turn_early
+                    _early_turn_claim = (room_id, _claim_turn_early(room_id))
+                except Exception:
+                    _early_turn_claim = None
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める（追い連絡経路では止めない）
             if (replan_requested or should_supersede_existing_run) and not _route_as_followup and not _voice_call:
@@ -2698,6 +2711,14 @@ async def send_dan_message_stream(
             logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         finally:
+            # 準備中の印の取り残し防止（run_turn が外しているのが普通。二度外しても壊れない）
+            if _early_turn_claim is not None:
+                try:
+                    from app.agent.streaming_session import release_turn_claim as _release_claim_early
+                    _release_claim_early(_early_turn_claim[0], _early_turn_claim[1])
+                except Exception:
+                    pass
+
             # CLI Runner 方式ではプロセスは別スレッドで完結しており、
             # SSE切断時には async for ループが自然に終了して result_saved が
             # 正常パスで設定される。ここでは UI の確実な停止だけ保証する。
