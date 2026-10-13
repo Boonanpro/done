@@ -1,12 +1,25 @@
 """Stop dan core + sandbox (listeners on 9000/8000 and their start_dan_core/uvicorn
 process tree), wait for the ports to free. Launching a fresh core is done
 separately so it can run in the background. After it starts, scripts/verify_dan.py checks that real work goes through.
+
+  (no option)    stop now; refuses while a call, a turn or parallel work is running
+  --force        stop even then (only when the owner agreed)
+  --when-idle --then "<what to check afterwards>"    for Dan itself (2026-10-13). Dan's turn runs inside the core, so
+      stopping the core ends the turn that asked. This hands the whole restart to a process outside the core: it waits
+      until nothing is running (the asking turn included), checks that the code on disk loads, stops, has the watchdog
+      start the core, runs verify_dan.py, and wakes Dan in the asking room with the outcome.
 """
+import os
+import subprocess
 import sys
 import time
+from pathlib import Path
+
 import psutil
 
 PORTS = {8000, 9000}
+ROOT = Path(__file__).resolve().parents[1]
+NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def listeners():
@@ -98,11 +111,157 @@ def work_in_progress():
 QUIET = 120
 
 
+WAIT = 30 * 60        # a restart Dan asked for waits this long for everyone to finish
+BACK_UP = 5 * 60      # and this long for the core and sandbox to answer again
+WATCHDOG = r'\DanStackWatchdog'
+
+
+def loads():
+    """Why the code on disk would not start, or None. Asked before stopping: a core that cannot start cannot wake Dan
+    to say what went wrong."""
+    p = subprocess.run([sys.executable, '-c', 'import app.core.main, app.sandbox.main'], cwd=str(ROOT),
+                       capture_output=True, encoding='utf-8', errors='replace', creationflags=NO_WINDOW)
+    return None if p.returncode == 0 else (p.stderr or '').strip()[-1500:]
+
+
+def core_started_at():
+    return max((psutil.Process(pid).create_time() for pid, ports in listeners().items() if 9000 in ports), default=0)
+
+
+def healthy():
+    import urllib.request
+    try:
+        return all(urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=5).status == 200 for port in sorted(PORTS))
+    except Exception:
+        return False
+
+
+def start():
+    """True once the core and sandbox answer. The watchdog task starts them, as it does after a crash: started from
+    here they would inherit the environment of the Dan turn that asked (its room, its locks)."""
+    deadline = time.time() + BACK_UP
+    subprocess.run(['schtasks', '/Run', '/TN', WATCHDOG], capture_output=True, creationflags=NO_WINDOW)
+    while time.time() < deadline:
+        if healthy():
+            return True
+        time.sleep(3)
+    return False
+
+
+def verify():
+    p = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'verify_dan.py')], cwd=str(ROOT), capture_output=True,
+                       encoding='utf-8', errors='replace', creationflags=NO_WINDOW)
+    return ((p.stdout or '').strip().splitlines() or ['verify_dan.py printed nothing'])[-1][:500]
+
+
+def wake(room, note):
+    """Have Dan start a turn in the room with the note. The row is in the database, so it waits for a core that is
+    still coming up."""
+    from app.services.followups import schedule_followup
+    from app.services.supabase_client import get_supabase_client
+    with open(ROOT / 'logs' / 'restart_dan_core.log', 'a', encoding='utf-8') as f:
+        f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + room[:8] + ' ' + note + chr(10))
+    owner = (get_supabase_client().client.table('chat_room_members').select('user_id')
+             .eq('room_id', room).eq('role', 'owner').limit(1).execute().data or [{}])[0].get('user_id')
+    schedule_followup(room, note, 15, owner)
+
+
+def earlier_restart():
+    """Another restart that was handed over before this one and has not finished, or None. Two that both saw "nothing
+    is running" would have the second stop the core the first had just started; the later one waits and then finds the
+    core already new."""
+    me = psutil.Process()
+    for p in psutil.process_iter(['cmdline', 'create_time']):
+        cl = p.info.get('cmdline') or []
+        if '--outside' in cl and any(a.endswith('restart_dan_core.py') for a in cl) and (p.info['create_time'], p.pid) < (me.create_time(), me.pid):
+            return f'an earlier restart is under way (pid {p.pid})'
+    return None
+
+
+def asking_room():
+    """The room of the Dan turn running this. A Codex turn has DAN_ROOM_ID; a Claude room's long-lived session has only
+    its lock owner, "room:<id>" (seen 2026-10-13: Dan had to pass --room by hand)."""
+    owner = os.environ.get('DAN_LOCK_OWNER', '')
+    return os.environ.get('DAN_ROOM_ID') or (owner[5:] if owner.startswith('room:') else '')
+
+
+def restart_when_idle(room, then, asked):
+    """The part that runs outside the core."""
+    after = '続けて確かめること: ' + then if then else ''
+    deadline = time.time() + WAIT
+    while True:
+        reason = busy() or earlier_restart()
+        if not reason:
+            break
+        if time.time() > deadline:
+            return wake(room, f'本体の再起動を{WAIT // 60}分待ったが、使用中が続いたので再起動していない（{reason}）。')
+        time.sleep(10)
+    if core_started_at() > asked:   # someone restarted it while this waited
+        return wake(room, '本体は頼んだ後に別の再起動で新しくなっていたので、もう一度は止めていない。動作確認: ' + verify() + '。' + after)
+    problem = loads()
+    if problem:
+        return wake(room, '本体を再起動していない。いまのコードが読み込めないため、止めると起き上がれない:' + chr(10) + problem)
+    if not stop():
+        return wake(room, '本体を止めきれなかった（9000 / 8000 番が空かない）。再起動は終わっていない。')
+    at = time.strftime('%H:%M')
+    if not start():
+        return wake(room, f'本体を {at} に止めたが、{BACK_UP // 60}分たっても起き上がらなかった。dan_core.log の末尾を見る。')
+    wake(room, f'本体を {at} に再起動した。動作確認: ' + verify() + '。' + after)
+
+
+def hand_over(room, then):
+    """The part Dan runs: start the outside process and return."""
+    problem = loads()
+    if problem:
+        print('NOT restarting: the code on disk does not load' + chr(10) + problem)
+        sys.exit(2)
+    cmd = [sys.executable, str(Path(__file__).resolve()), '--when-idle', '--outside', '--room', room, '--then', then,
+           '--asked', str(time.time())]
+    mine = ('DAN_SESSION_ID', 'DAN_ROOM_ID', 'DAN_LOCK_OWNER', 'DAN_PROJECT_ID', 'CLAUDECODE')   # the asking turn's, not the check's
+    quiet = dict(cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                 env={k: v for k, v in os.environ.items() if k not in mine})
+    apart = NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+    try:   # out of any job the asking CLI holds its children in, when the job allows leaving
+        p = subprocess.Popen(cmd, creationflags=apart | getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0), **quiet)
+    except OSError:
+        p = subprocess.Popen(cmd, creationflags=apart, **quiet)
+    print(f'handed over (pid {p.pid}). The core restarts once no call, turn or parallel work is running; your own turn '
+          f'counts, so finish it. You are woken in this room with the outcome (up to {WAIT // 60} min if others are working).')
+
+
+def option(name, default=''):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv[:-1] else default
+
+
 def main():
+    valued = ('--room', '--then', '--asked')
+    unknown = [a for i, a in enumerate(sys.argv) if i and a.startswith('-') and sys.argv[i - 1] not in valued
+               and a not in ('--force', '--when-idle', '--outside') + valued]
+    if unknown:   # `--help` used to fall through to a restart (Dan tried it first, 2026-10-13)
+        print(__doc__)
+        sys.exit(2)
+    if '--when-idle' in sys.argv:
+        room = option('--room', asking_room())
+        if not room:
+            print('NOT restarting: no room to report back to (pass --room <room id>)')
+            sys.exit(2)
+        if '--outside' in sys.argv:
+            sys.path.insert(0, str(ROOT))
+            return restart_when_idle(room, option('--then'), float(option('--asked', '0')))
+        return hand_over(room, option('--then'))
     reason = None if '--force' in sys.argv else busy()
     if reason:
         print('NOT restarting:', reason, '(pass --force only when the owner agreed)')
         sys.exit(3)
+    if not stop():
+        print("WARNING: ports still occupied")
+        sys.exit(1)
+    print("OK: 9000 and 8000 are free")
+    print("next: start the core, then run  python scripts/verify_dan.py  (a real job through the call entry; health 200 is not enough)")
+
+
+def stop():
+    """End the core and sandbox with their process trees. True when both ports are free."""
     me = psutil.Process().pid
     l = listeners()
     print("listeners before:", {pid: sorted(ports) for pid, ports in l.items()})
@@ -155,11 +314,7 @@ def main():
     time.sleep(2)
     after = listeners()
     print("listeners after:", {pid: sorted(ports) for pid, ports in after.items()})
-    if after:
-        print("WARNING: ports still occupied")
-        sys.exit(1)
-    print("OK: 9000 and 8000 are free")
-    print("next: start the core, then run  python scripts/verify_dan.py  (a real job through the call entry; health 200 is not enough)")
+    return not after
 
 
 if __name__ == "__main__":
