@@ -539,9 +539,10 @@ BROWSER_TOOL['description'] += (
 
 ATTACH_IMAGE_TOOL = {
     "name": "attach_image",
-    "description": """画像をチャットに添付するための正規マーカーを取得する。
+    "description": """画像・動画・ファイル（報告書の .md、PDF、表の CSV など）をチャットに貼るための正規マーカーを取得する。
 
-**画像をユーザーに見せたい時は、必ずこのツールを使うこと。** 自分で `[添付画像: ...]` を書いてはいけない（フォーマットを間違えると404になる）。
+**画像・動画・ファイルをユーザーに見せたい時は、必ずこのツールを使うこと。** パスだけを書いても、持ち主には文字しか見えない。自分で `[添付画像: ...]` などを書いてはいけない（フォーマットを間違えると404になる）。
+画像は `[添付画像: URL]`、動画は `[添付動画: 名前 (URL)]`、それ以外は `[添付ファイル: 名前 (URL)]` が返る。表を見せたい時は、ファイルを貼らずに本文に Markdown の表で書いてもよい。
 
 使い方:
 1. このツールを呼ぶ → `marker` フィールド（例: `[添付画像: /api/v1/files/xxx.png]`）が返る
@@ -4464,7 +4465,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
 
 async def _execute_attach_image(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    画像をチャットに添付するための正規マーカーを生成する。
+    画像・動画・ファイルをチャットに添付するための正規マーカーを生成する（2026-10-13 本人「画像や表や動画など何でも自由に出せるように」。以前は画像だけだった）。
 
     source は以下のいずれか:
     - /api/v1/files/<filename> 形式の URL（絶対/相対）
@@ -4483,7 +4484,9 @@ async def _execute_attach_image(params: Dict[str, Any]) -> Dict[str, Any]:
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+    video_exts = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
     filename: Optional[str] = None
+    shown_name: Optional[str] = None
 
     api_match = _re.search(r"/api/v1/files/([^/?#\s)\"']+)", source)
     if api_match:
@@ -4503,11 +4506,9 @@ async def _execute_attach_image(params: Dict[str, Any]) -> Dict[str, Any]:
                     "success": False,
                     "error": f"ファイルが存在しません: {source}",
                 }
-            if src_path.suffix.lower() not in image_exts:
-                return {
-                    "success": False,
-                    "error": f"画像ファイルではありません（拡張子: {src_path.suffix}）",
-                }
+            if src_path.is_dir():
+                return {"success": False, "error": f"フォルダは貼れません。中のファイルを指定してください: {source}"}
+            shown_name = src_path.name
             try:
                 same_dir = src_path.resolve().parent == upload_dir.resolve()
             except Exception:
@@ -4528,7 +4529,14 @@ async def _execute_attach_image(params: Dict[str, Any]) -> Dict[str, Any]:
                 }
 
     url = f"/api/v1/files/{filename}"
-    marker = f"[添付画像: {url}]"
+    suffix = Path(filename).suffix.lower()
+    name = (shown_name or filename).replace("(", "（").replace(")", "）").replace("]", "」")
+    if suffix in image_exts:
+        marker = f"[添付画像: {url}]"
+    elif suffix in video_exts:
+        marker = f"[添付動画: {name} ({url})]"
+    else:
+        marker = f"[添付ファイル: {name} ({url})]"
     logger.info(f"[ATTACH_IMAGE] marker={marker}")
     return {
         "success": True,
