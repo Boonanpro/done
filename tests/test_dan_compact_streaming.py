@@ -13,6 +13,7 @@ import threading
 import pytest
 
 from app.agent import cli_runner as cr
+from app.services import work_locks as _work_locks
 from tests.test_dan_compact_launch import KEY, isolate  # noqa: F401  (fixture を共有)
 
 
@@ -120,7 +121,9 @@ _TURN = [{"type": "system", "session_id": "sid-1"}, {"type": "result", "result":
 _BASE_STREAMING_CMD = [
     "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
     "--dangerously-skip-permissions", "--model", "fable", "--mcp-config", "mcp.json",
-    "--append-system-prompt", "SYS", "--disallowedTools", "ExitPlanMode,AskUserQuestion", "--resume", "sid-1",
+    "--append-system-prompt", "SYS", "--disallowedTools", "ExitPlanMode,AskUserQuestion",
+    "--settings", _work_locks.hook_settings(),   # main の並行作業（ファイルの順番待ちフック）
+    "--resume", "sid-1",
 ]
 
 
@@ -225,4 +228,5 @@ async def test_streaming_without_plugin_leaves_cmd_and_env_exactly_as_before(mon
     assert "TYPESAFE_API_KEY" not in captured["env"]
     assert "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS" not in captured["env"]
     assert captured["env"]["NO_COLOR"] == "1" and captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert captured["env"]["DAN_LOCK_OWNER"] == "room:room-1", "main の並行作業の持ち主の印もそのまま"
     assert not sync_done.wait(0.5), "transcript が見つからなければ同期は呼ばれない"

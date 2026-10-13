@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent import cli_runner as cr
+from app.services import work_locks as _work_locks
 
 KEY = "tsk_UNIT_TEST_KEY_123456"
 
@@ -109,6 +110,7 @@ def test_build_cli_cmd_unchanged_without_extra_args_and_appends_with():
         "claude", "-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
         "--dangerously-skip-permissions", "--model", "fable", "--mcp-config", "mcp.json",
         "--append-system-prompt", "SYS", "--disallowedTools", "ExitPlanMode,AskUserQuestion",
+        "--settings", _work_locks.hook_settings(),   # main の並行作業（ファイルの順番待ちフック）
         "--resume", "sid", "--fork-session",
     ]
     with_plugin = cr._build_cli_cmd("claude", None, "mcp.json", "SYS", "sid", fork_session=True, model="fable",
