@@ -19,6 +19,15 @@ def background(row) -> bool:
     return (row.get("metadata") or {}).get("started_by") == "command_center"
 
 
+def announce(row) -> None:
+    """The run's state as just written goes to the room's screens (room_feed.publish_run). Never breaks the writer."""
+    try:
+        from app.services.room_feed import publish_run
+        publish_run(row)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Run state not announced: %s", exc)
+
+
 ACTIVE_RUN_STATES = {
     AgentRunState.RUNNING.value,
     AgentRunState.AWAITING_APPROVAL.value,
@@ -60,6 +69,7 @@ class RunService:
         result = await asyncio.to_thread(query.execute)
         if not result.data:
             raise ValueError("Failed to create agent run")
+        await asyncio.to_thread(announce, result.data[0])
         return result.data[0]
 
     async def get_run(self, run_id: str) -> Optional[dict]:
@@ -135,6 +145,8 @@ class RunService:
         if only_if_active:
             query = query.in_("state", list(ACTIVE_RUN_STATES))
         result = await asyncio.to_thread(query.execute)
+        if state is not None and result.data:
+            await asyncio.to_thread(announce, result.data[0])
         return result.data[0] if result.data else None
 
     async def attach_claude_session(self, run_id: str, claude_session_id: str) -> Optional[dict]:

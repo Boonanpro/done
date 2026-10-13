@@ -14,6 +14,7 @@ import { useEffect, useRef } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 
 import type { MessageResponse, ProjectListResponse } from '@/lib/api-client';
+import { oneLine } from '@/lib/one-line';
 import { perfLog } from '@/lib/perf-log';
 import { coverIfDown, useRestartStore } from '@/stores/restart-store';
 
@@ -72,10 +73,6 @@ export function useRoomFeed(enabled: boolean): void {
 
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
-    let es: EventSource | null = null;
-    let closed = false;
-    let retry = 1000;
-    let retryTimer: number | null = null;
     lastAtRef.current = readLastAt();
 
     const catchUp = async (reason: string) => {
@@ -111,11 +108,11 @@ export function useRoomFeed(enabled: boolean): void {
       }
     };
 
-    const connect = () => {
-      if (closed) return;
-      es = new EventSource('/api/v1/chat/feed', { withCredentials: true });
+    // 線は必ず1本（one-line.ts）。切れたら、本体が止まっているのか、こちらの回線なのかを確かめる
+    const feed = oneLine(({ up, dropped }) => {
+      const es = new EventSource('/api/v1/chat/feed', { withCredentials: true });
       es.addEventListener('hello', (ev) => {
-        retry = 1000;
+        up();
         try {
           const d = JSON.parse((ev as MessageEvent).data) as { server_time: string };
           // つながった時点で、切れていた間の分を追いつく
@@ -142,6 +139,24 @@ export function useRoomFeed(enabled: boolean): void {
           /* ignore */
         }
       });
+      // ダンの作業が始まった・終わった。一覧の「ダンが作業中」を次の定期取得（10秒ごと）を待たずに合わせる。
+      // 始まりはその場で点け、終わりは一覧を取り直す（同じ部屋に続きの作業があるかはサーバーが知っている）
+      es.addEventListener('run', (ev) => {
+        try {
+          const d = JSON.parse((ev as MessageEvent).data) as { project_id?: string; running?: boolean };
+          if (d.running) {
+            queryClient.setQueryData<ProjectListResponse>(['projects'], (cur) =>
+              cur?.projects
+                ? { ...cur, projects: cur.projects.map((p) => (p.id === d.project_id ? { ...p, has_active_run: true } : p)) }
+                : cur,
+            );
+          } else {
+            void queryClient.invalidateQueries({ queryKey: ['projects'] });
+          }
+        } catch {
+          /* ignore */
+        }
+      });
       // 本体が再起動のために止まる直前の知らせ。戻るまで画面にかぶせを出す（RestartCover）
       es.addEventListener('restarting', (ev) => {
         try {
@@ -151,43 +166,30 @@ export function useRoomFeed(enabled: boolean): void {
           /* ignore */
         }
       });
-      es.onerror = () => {
-        es?.close();
-        es = null;
-        if (closed) return;
-        void coverIfDown(); // 知らせ無しで切れた: 本体が止まっているのか、こちらの回線なのかを確かめる
-        retryTimer = window.setTimeout(connect, retry);
-        retry = Math.min(retry * 2, 30_000);
-      };
-    };
+      es.onerror = dropped;
+      return es;
+    }, () => void coverIfDown());
 
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return;
       void catchUp('visible');
-      if (!es) connect();
+      feed.connectIfClosed();
     };
     const onOnline = () => {
       void catchUp('online');
-      if (!es) connect();
+      feed.connectIfClosed();
     };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onOnline);
     // 再起動から戻った: 次の再試行（最長30秒先）を待たずにつなぎ直す
     const unsubscribeBack = useRestartStore.subscribe((s, prev) => {
-      if (s.backs === prev.backs || closed) return;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      retryTimer = null;
-      es?.close();
-      retry = 1000;
-      connect();
+      if (s.backs !== prev.backs) feed.connect();
     });
-    connect();
+    feed.connect();
 
     return () => {
-      closed = true;
       unsubscribeBack();
-      if (retryTimer) window.clearTimeout(retryTimer);
-      es?.close();
+      feed.stop();
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', onOnline);
     };

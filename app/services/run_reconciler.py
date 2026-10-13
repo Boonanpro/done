@@ -86,7 +86,7 @@ def alive(run, newest_turn_run_by_room):
 def reconcile_once(dry_run=False):
     """Close the quiet active runs with no live work in this Core. dry_run lists them without closing (only this Core can
     judge liveness: run elsewhere, every chat turn looks dead)."""
-    from app.services.run_service import ACTIVE_RUN_STATES
+    from app.services.run_service import ACTIVE_RUN_STATES, announce
     from app.services.supabase_client import get_supabase_client
     sb = get_supabase_client().client
     before = (datetime.now(timezone.utc) - timedelta(seconds=QUIET_SECONDS)).isoformat()
@@ -109,8 +109,10 @@ def reconcile_once(dry_run=False):
             print('would close', run['id'][:8], (run.get('room_id') or '?')[:8], run.get('state'), run.get('updated_at'))
             closed += 1
             continue
-        sb.table('agent_runs').update({'state': 'failed', 'updated_at': datetime.now(timezone.utc).isoformat()}) \
-            .eq('id', run['id']).in_('state', list(ACTIVE_RUN_STATES)).execute()
+        written = sb.table('agent_runs').update({'state': 'failed', 'updated_at': datetime.now(timezone.utc).isoformat()}) \
+            .eq('id', run['id']).in_('state', list(ACTIVE_RUN_STATES)).execute().data or []
+        for row in written:
+            announce(row)   # the room's screens clear "Dan is working" now
         closed += 1
         logger.warning("[run-reconciler] closed run %s (room=%s, was %s): no live work in this Core",
                        run['id'][:8], (run.get('room_id') or '?')[:8], run.get('state'))

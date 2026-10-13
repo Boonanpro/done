@@ -4066,6 +4066,14 @@ def _require_loopback(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Internal only")
 
 
+@router.post("/internal/runs")
+async def internal_run_changed(request: Request) -> dict:
+    """A run's state was written outside this process (the sandbox, a poller): tell the room's screens."""
+    _require_loopback(request)
+    from app.services.room_feed import publish_run
+    return {"ok": True, "delivered": await asyncio.to_thread(publish_run, await request.json())}
+
+
 _STARTED = time.time()
 
 

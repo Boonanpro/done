@@ -1376,6 +1376,16 @@ function ChatInput({
     setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
     }, 2000);
+    // 点けたのは画面の見込み。本体が受け取った印（自分のメッセージがサーバー版で返る・ダンが動き出す）が
+    // 来ないままなら、通信が出ていかない時でも画面だけで消す（2026-10-13: 届いていない送信で点いたままだった）。
+    setTimeout(() => {
+      if (serverMessageIdRef.current || aiRespondedRef.current) return;
+      queryClient.setQueryData(['projects'], (old: ProjectListResponse | undefined) =>
+        old
+          ? { ...old, projects: old.projects.map((p) => (p.id === projectId ? { ...p, has_active_run: false } : p)) }
+          : old
+      );
+    }, 8000);
     const refs = timelineRefs;
     setTimelineRefs([]);
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);

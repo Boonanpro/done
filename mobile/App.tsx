@@ -71,6 +71,7 @@ import { reportLocation, watchLocation } from './location-report';
 import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
 import { ParallelJobsBar } from './parallel-jobs';
 import { BACK, RESTARTING, RestartCover, coverIfDown } from './restart-cover';
+import { oneLine } from './one-line';
 
 const DEFAULT_API_BASE_URL = 'https://dan.paina.info';
 const API_BASE_URL =
@@ -2096,9 +2097,7 @@ function AppMain() {
   // アプリが前面にある間1本の SSE をつなぎ、全部屋の新着をメモリ/端末内の写しへ差し込む。
   // 復帰時は rooms-delta で「最後に受け取った時刻以降」を1往復で追いつく。
   // 追いついた後は写しが最新なので、部屋を開いても「最新の状態を取得中…」を出さない。
-  const feedRef = useRef<{ es: EventSource<'hello' | 'message' | 'job' | 'restarting'> | null; lastAt: string | null; fresh: boolean; syncing: boolean }>(
-    { es: null, lastAt: null, fresh: false, syncing: false },
-  );
+  const feedRef = useRef<{ lastAt: string | null; fresh: boolean; syncing: boolean }>({ lastAt: null, fresh: false, syncing: false });
   const applyFeedMessage = useCallback((msg: MessageResponse) => {
     const roomId = msg.room_id;
     if (!roomId || !msg.id) return;
@@ -2159,19 +2158,15 @@ function AppMain() {
   }, [applyFeedMessage]);
   useEffect(() => {
     if (!token) return;
-    let closed = false;
-    let retry = 1000;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const f = feedRef.current;
-    const connect = () => {
-      if (closed || AppState.currentState !== 'active') return;
-      const es = new EventSource<'hello' | 'message' | 'job' | 'restarting'>(`${API_BASE_URL}/api/v1/chat/feed`, {
+    // Exactly one line (one-line.ts). When it drops without an announcement: is the core down, or this phone's network?
+    const line = oneLine(({ up, dropped }) => {
+      const es = new EventSource<'hello' | 'message' | 'job' | 'run' | 'restarting'>(`${API_BASE_URL}/api/v1/chat/feed`, {
         headers: { Authorization: `Bearer ${token}` },
         pollingInterval: 0,
       });
-      f.es = es;
       es.addEventListener('hello', (e) => {
-        retry = 1000;
+        up();
         try {
           const d = JSON.parse((e as { data: string }).data) as { server_time: string };
           void feedCatchUp(token, 'connect').then(() => {
@@ -2201,6 +2196,17 @@ function AppMain() {
           /* ignore */
         }
       });
+      // Dan's work in a room started or ended: the list's "working" mark follows at once instead of at its next reload.
+      // A start lights it here; an end reloads the list (the server knows whether more work follows in that room).
+      es.addEventListener('run', (e) => {
+        try {
+          const d = JSON.parse((e as { data: string }).data) as { project_id?: string; running?: boolean };
+          if (d.running) setProjects((current) => current.map((p) => (p.id === d.project_id ? { ...p, has_active_run: true } : p)));
+          else refreshProjects(token).catch(() => null);
+        } catch {
+          /* ignore */
+        }
+      });
       // The core is about to stop for a restart: cover the app until it answers again (restart-cover.tsx).
       es.addEventListener('restarting', (e) => {
         try {
@@ -2209,43 +2215,30 @@ function AppMain() {
           /* ignore */
         }
       });
-      es.addEventListener('error', () => {
-        es.close();
-        if (f.es === es) f.es = null;
-        f.fresh = false;
-        if (closed) return;
-        void coverIfDown(API_BASE_URL);   // dropped without an announcement: is the core down, or this phone's network?
-        retryTimer = setTimeout(connect, retry);
-        retry = Math.min(retry * 2, 30_000);
-      });
-    };
+      es.addEventListener('error', dropped);
+      return es;
+    }, () => {
+      f.fresh = false;
+      void coverIfDown(API_BASE_URL);
+    });
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         void feedCatchUp(token, 'resume');
-        if (!f.es) connect();
+        line.connectIfClosed();
       } else {
         // 背面では切る（バッテリー/接続数）。復帰時に delta で追いつく
-        f.es?.close();
-        f.es = null;
+        line.close();
         f.fresh = false;
       }
     });
     // Back from a restart: reconnect now instead of at the next retry (up to 30 s away); its hello catches up.
     const back = DeviceEventEmitter.addListener(BACK, () => {
-      if (closed) return;
-      if (retryTimer) clearTimeout(retryTimer);
-      f.es?.close();
-      f.es = null;
-      retry = 1000;
-      connect();
+      line.connect();
       refreshProjects(token).catch(() => null);
     });
-    connect();
+    if (AppState.currentState === 'active') line.connect();
     return () => {
-      closed = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      f.es?.close();
-      f.es = null;
+      line.stop();
       f.fresh = false;
       sub.remove();
       back.remove();

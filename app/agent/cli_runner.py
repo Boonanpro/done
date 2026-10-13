@@ -1180,7 +1180,11 @@ def _update_run_sync(
 
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         sb = get_supabase_client().client
-        sb.table("agent_runs").update(updates).eq("id", run_id).execute()
+        written = sb.table("agent_runs").update(updates).eq("id", run_id).execute().data or []
+        if state is not None:
+            from app.services.run_service import announce
+            for row in written:
+                announce(row)   # the room's screens clear "Dan is working" now, not at their next reload
     except Exception as e:
         _cli_debug(f"_update_run_sync failed: {e}")
 

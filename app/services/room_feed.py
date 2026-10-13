@@ -46,15 +46,12 @@ def _core_base_url() -> str:
     return f"http://127.0.0.1:{os.environ.get('DAN_CORE_PORT', '9000')}"
 
 
-def _forward_to_core(room_id: str, msg: dict) -> int:
-    """core 外から: 保存済みの行を core に渡して配信してもらう。届かなくても例外にしない。"""
+def _post_to_core(path: str, payload: dict) -> int:
+    """core 外から: core の内部APIに渡して配信してもらう。届かなくても例外にしない。"""
     try:
-        body = json.dumps(
-            {"already_saved": True, "message": msg}, ensure_ascii=False, default=str
-        ).encode("utf-8")
         req = urllib.request.Request(
-            f"{_core_base_url()}/api/v1/chat/internal/rooms/{room_id}/messages",
-            data=body,
+            f"{_core_base_url()}/api/v1/chat/internal/{path}",
+            data=json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -62,8 +59,13 @@ def _forward_to_core(room_id: str, msg: dict) -> int:
             data = json.loads(resp.read().decode("utf-8") or "{}")
         return int(data.get("delivered") or 0)
     except Exception as e:  # noqa: BLE001
-        logger.debug("room_feed: forward to core failed room=%s: %s", room_id[:8], e)
+        logger.debug("room_feed: forward to core failed (%s): %s", path, e)
         return 0
+
+
+def _forward_to_core(room_id: str, msg: dict) -> int:
+    """core 外から: 保存済みの行を core に渡して配信してもらう。"""
+    return _post_to_core(f"rooms/{room_id}/messages", {"already_saved": True, "message": msg})
 
 
 _lock = threading.Lock()
@@ -145,6 +147,26 @@ def publish(user_ids: list[str], event: dict) -> int:
         except Exception:  # noqa: BLE001
             pass
     return delivered
+
+
+def publish_run(run: dict) -> int:
+    """実行記録（agent_runs）の状態を書いた直後に、書いた行を渡して呼ぶ。その部屋の画面は一覧の「ダンが作業中」を
+    次の定期取得（10秒ごと）を待たずに合わせる。裏で進む作業（ジョブ）はチャットの作業中ではないので知らせない。
+    core 外なら core へ転送。購読者がいなければ何もしない。"""
+    room_id, project_id = run.get("room_id"), run.get("project_id")
+    if not room_id or not project_id:
+        return 0
+    from app.services.run_service import background
+
+    if background(run):
+        return 0
+    if not _IN_CORE:
+        return _post_to_core("runs", {k: run.get(k) for k in ("room_id", "project_id", "state", "metadata")})
+    if subscriber_count() == 0:
+        return 0
+    event = {"type": "run", "project_id": project_id, "room_id": room_id,
+             "running": run.get("state") == "running", "at": time.time()}
+    return publish(_room_members(room_id), event)
 
 
 def publish_all(event: dict) -> int:
