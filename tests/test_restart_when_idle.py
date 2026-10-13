@@ -29,7 +29,7 @@ def world(monkeypatch):
 
 def test_it_waits_for_everyone_then_restarts_checks_and_wakes_the_room_that_asked(world):
     state, did, woke = world
-    state['busy'] = ['Dan is working in: 開発の参謀', 'Dan is working in: 開発の参謀']   # the asking turn itself, still ending
+    state['busy'] = ['Dan is working in: ダン開発室', 'Dan is working in: ダン開発室']   # the asking turn itself, still ending
     restart.restart_when_idle('room-1', '追い連絡の並びを確かめる', asked=100)
     assert did == ['wait', 'wait', 'stop', 'start', 'verify']
     (room, note), = woke

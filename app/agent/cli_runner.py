@@ -3696,6 +3696,13 @@ async def _process_via_streaming_session(
                 except Exception:
                     pass
                 _cli_debug(f"[STREAMING] thinking-desync session cleared for room {room_id[:8]}")
+            elif res and res.get("subtype") == "routed_as_followup":
+                # 同じ部屋で別のターンがすでに CLI を動かしていたので、この本文はそちらの
+                # 待ち行列に入った（2026-10-14）。返事は動いている方の流れが描く。ここで
+                # セッションを止め直してはいけない（下の「復元に失敗」の網に落とさない）。
+                if project_id and run_id and not skip_save:
+                    _update_run_sync(run_id, state="completed")
+                _cli_debug(f"[STREAMING] content routed as follow-up to the running turn (room {room_id[:8]})")
             elif resume_session_id and not state["any_result"] and elapsed < 15:
                 # We asked the process to --resume <id> and it produced nothing
                 # and exited almost immediately → the saved transcript was
@@ -3909,6 +3916,45 @@ async def process_message_cli(
         backend='codex' if _codex.is_codex_model(cli_model) else 'claude'
     else:
         cli_model, backend = resolve_room_backend(room_id)
+    # 準備中の印（2026-10-14）: ここから run_turn が最初の本文を書くまで（文脈の組み立て・
+    # プロセス起動・再注入で数秒）、chat_routes は新しい発言を追い連絡として待たせる。
+    # 印は run_turn が外す。常駐経路に入らなかった時・例外の時は下の finally で外す。
+    _turn_claim = None
+    if backend == "claude" and not skip_save:
+        try:
+            from app.agent.streaming_session import claim_turn as _claim_turn, streaming_enabled as _se
+            if _se():
+                _turn_claim = _claim_turn(room_id)
+        except Exception:
+            _turn_claim = None
+    try:
+        async for _ev in _process_message_cli_body(
+            room_id, user_id, content, project_id, run_id, skip_save, skip_resume, cwd,
+            system_prompt, mcp_config_path, setup_start, cli_model, backend,
+            resume_session_id, timeline_draft, credentials, model_override,
+            mcp_config_override, user_messages, project_title, project_description,
+            project_status, timeline_refs,
+        ):
+            yield _ev
+    finally:
+        if _turn_claim is not None:
+            try:
+                from app.agent.streaming_session import release_turn_claim as _release
+                _release(room_id, _turn_claim)
+            except Exception:
+                pass
+
+
+async def _process_message_cli_body(
+    room_id, user_id, content, project_id, run_id, skip_save, skip_resume, cwd,
+    system_prompt, mcp_config_path, setup_start, cli_model, backend,
+    resume_session_id, timeline_draft, credentials, model_override,
+    mcp_config_override, user_messages, project_title, project_description,
+    project_status, timeline_refs,
+) -> AsyncIterator[Dict[str, Any]]:
+    """process_message_cli の後半（文脈の組み立て〜常駐/one-shot 経路）。準備中の印を
+    finally で確実に外すために分けた（2026-10-14）。"""
+    timeline_turn_succeeded = False
     if resume_session_id and _codex.backend_for_session(resume_session_id) != backend:
         _cli_debug(
             f"backend switch → {backend} (model={cli_model}); dropping saved "

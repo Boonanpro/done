@@ -471,7 +471,7 @@ async def _notify_dan_completion(
             body = "Danの作業が完了しました"
         url = f"/chat/{project_id}" if project_id else "/chat"
         title = "Dan"
-        # 一覧に出さない部屋（開発の参謀のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（参謀）を開く。
+        # 一覧に出さない部屋（ダン開発室のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（参謀）を開く。
         def _hidden_origin(pid):   # 同期の DB 呼び出しはスレッドで（イベントループを止めない）
             from app.services.project_service import ProjectService
             ps = ProjectService()
@@ -2184,18 +2184,18 @@ async def send_dan_message_stream(
             # 追い連絡（DAN_STREAMING_INPUT）: すでに常駐セッションでターン実行中なら、
             # この新規メッセージは「割り込んで止める」のではなく、次のステップ境界で
             # 反映する追い連絡として扱う。→ supersede(kill) はスキップする。
-            _followup_session = None
+            # 準備中（1通目の文脈組み立て・CLI 起動待ち。数秒）も実行中と同じに扱う（2026-10-14）。
+            # 以前はその間に届いた発言が「方針変更」になって前のターンを止めていた。
+            _route_as_followup = False
             try:
-                from app.agent.streaming_session import streaming_enabled, get_session
+                from app.agent.streaming_session import streaming_enabled, is_turn_active_or_preparing
                 if streaming_enabled():
-                    _sess = get_session(room_id)
-                    if _sess is not None and _sess.is_turn_active():
-                        _followup_session = _sess
+                    _route_as_followup = is_turn_active_or_preparing(room_id)
             except Exception:
-                _followup_session = None
+                _route_as_followup = False
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める（追い連絡経路では止めない）
-            if (replan_requested or should_supersede_existing_run) and _followup_session is None and not _voice_call:
+            if (replan_requested or should_supersede_existing_run) and not _route_as_followup and not _voice_call:
                 try:
                     CancellationRegistry.cancel(room_id)
                     from app.agent.cli_runner import kill_cli_process
@@ -2254,19 +2254,21 @@ async def send_dan_message_stream(
 
             # 追い連絡を常駐セッションへ注入し、即ackして本リクエストは終了する。
             # 本ターンの回答（次の境界以降）は、継続中の最初のSSEストリームが描画する。
-            if _followup_session is not None:
+            if _route_as_followup:
                 try:
+                    from app.agent.streaming_session import submit_room_followup
                     followup_content = _build_content_with_media(
                         effective_content, request.image_urls or [], request.file_urls or []
                     )
                     _followup_created = message.get("created_at") if message else None
-                    _followup_session.submit_followup(
+                    _where = submit_room_followup(
+                        room_id,
                         followup_content,
                         # 追い連絡のサーバー受信時刻。割り込まれたターンの作業記録を
                         # この直前に置くための目印（docs/current/chat-timeline-definition.md）。
                         received_at=(_followup_created.isoformat() if hasattr(_followup_created, "isoformat") else _followup_created),
                     )
-                    logger.info("[STREAMING] follow-up queued for room=%s msg=%s", room_id, message["id"])
+                    logger.info("[STREAMING] follow-up queued (%s) for room=%s msg=%s", _where, room_id, message["id"])
                     yield f"data: {json.dumps({'type': 'followup_queued', 'session_id': room_id, 'message_id': message['id']})}\n\n"
                 except Exception as e:
                     logger.warning("submit_followup failed (room=%s): %s", room_id, e)

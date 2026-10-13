@@ -143,6 +143,10 @@ class StreamingSession:
         # such a call must NOT start a parallel loop (that double-processes the
         # CLI output and double-saves) — it is routed as a follow-up instead.
         self._running = False
+        # run_turn がこの回の最初の本文を CLI に書いた後 True（finally で戻す）。
+        # それより前に届いた追い連絡は submit_room_followup が部屋の仮置きに入れ、
+        # 本文を書いた直後に待ち行列へ移す（_send_user が目印を消した後に入れるため）。
+        self._turn_sent = False
 
     # --- lifecycle ------------------------------------------------------
     def is_alive(self) -> bool:
@@ -267,9 +271,13 @@ class StreamingSession:
                 # mid-autonomous-turn. Submitting another user message now would
                 # desynchronise the stream — route as a follow-up instead; the
                 # boundary-interrupt logic applies it cleanly.
+                # 戻り値は None にしない（2026-10-14）: None は「無音で終わった」の意味で、
+                # 呼び出し側が「復元に失敗した」と見てセッションを止め直していた（動いている
+                # 方のターンまで道連れになる）。
                 self._pending.put(content)
                 self._last_activity = time.time()
-                return None
+                release_all_turn_claims(self.room_id)
+                return {"type": "result", "subtype": "routed_as_followup", "is_error": False}
             self._running = True
 
         self._last_turn_hung = False
@@ -306,6 +314,17 @@ class StreamingSession:
                     self._send_interrupt()
                 except Exception:
                     pass
+            # 最初の本文を書いた = 準備は終わり。準備中（起動待ち）に届いていた追い連絡を
+            # ここで待ち行列へ移す（_send_user が目印を消した後なので、受信時刻の目印も
+            # ここで立てる）。以後の追い連絡は submit_room_followup が直接待ち行列へ入れる。
+            with _prep_lock:
+                self._turn_sent = True
+                _prep_claims.pop(self.room_id, None)
+                waiting = _pre_queue.pop(self.room_id, [])
+            for w_content, w_received in waiting:
+                if w_received and self._followup_anchor is None:
+                    self._followup_anchor = w_received
+                self._pending.put(w_content)
 
             # Keep running follow-up turns until nothing is pending.
             last_result: Optional[TurnEvent] = None
@@ -335,6 +354,7 @@ class StreamingSession:
         finally:
             self._turn = None
             self._running = False
+            self._turn_sent = False
             self._last_turn_hung = hung
             if hung:
                 # Drop the poisoned/half-finished process; the next turn will
@@ -565,6 +585,86 @@ def get_session(room_id: str) -> Optional[StreamingSession]:
             _sessions.pop(room_id, None)
             return None
         return s
+
+
+# --- 起動待ちの間に届いた追い連絡（2026-10-14） -----------------------------
+# 1通目の送信から run_turn が最初の本文を CLI に書くまでには、文脈の組み立て（DB）・
+# プロセスの起動・再注入があり、数秒かかる（DB が遅いと 4〜5 秒）。その間は
+# is_turn_active() が False なので、追い連絡は「方針変更」扱いで前のターンを止めて
+# いた（画面に streaming session not started が出て、作業の記録が全部追い連絡の下に
+# 付く。2026-10-13 実測）。ここでは「準備中」も実行中と同じに扱い、その間の発言は
+# 追い連絡として待たせる。待たせた分は run_turn が最初の本文を書いた直後に待ち行列へ
+# 移し、いつもの区切りの割り込みで反映する。
+_prep_lock = threading.Lock()
+_prep_claims: Dict[str, Dict[object, float]] = {}   # room -> {token: いつ取ったか}
+_pre_queue: Dict[str, list] = {}                     # room -> [(本文, 受信時刻)]
+_CLAIM_TTL = 120.0   # 準備が例外などで終わらなかった時の保険。これより古い印は無視する
+
+
+def claim_turn(room_id: str) -> object:
+    """ターンの準備を始めた印を立てる。run_turn が本文を書いた時点で外れる
+    （release_all_turn_claims）。呼び出し側は念のため finally で release_turn_claim する。"""
+    token = object()
+    with _prep_lock:
+        _prep_claims.setdefault(room_id, {})[token] = time.time()
+    return token
+
+
+def release_turn_claim(room_id: str, token: object) -> None:
+    with _prep_lock:
+        claims = _prep_claims.get(room_id)
+        if claims:
+            claims.pop(token, None)
+            if not claims:
+                _prep_claims.pop(room_id, None)
+
+
+def release_all_turn_claims(room_id: str) -> None:
+    with _prep_lock:
+        _prep_claims.pop(room_id, None)
+
+
+def _has_live_claim(room_id: str) -> bool:
+    """_prep_lock を持って呼ぶ。古い印は捨てる。"""
+    claims = _prep_claims.get(room_id)
+    if not claims:
+        return False
+    now = time.time()
+    for token, at in list(claims.items()):
+        if now - at > _CLAIM_TTL:
+            claims.pop(token, None)
+    if not claims:
+        _prep_claims.pop(room_id, None)
+        return False
+    return True
+
+
+def is_turn_active_or_preparing(room_id: str) -> bool:
+    """ターンが実行中、または準備中（claim_turn 済みで run_turn がまだ本文を書いていない）。
+    chat_routes はこれが True の時、新しい発言を追い連絡として待たせる。"""
+    s = get_session(room_id)
+    if s is not None and s.is_turn_active():
+        return True
+    with _prep_lock:
+        return _has_live_claim(room_id)
+
+
+def submit_room_followup(room_id: str, content: str, received_at: Optional[str] = None) -> str:
+    """追い連絡を部屋へ渡す。ターンが本文を書いた後なら、そのセッションの待ち行列へ
+    （submit_followup）。まだ準備中なら部屋の仮置きへ入れ、run_turn が最初の本文を書いた
+    直後に待ち行列へ移す（目印の受信時刻も一緒に運ぶ）。戻り値はどちらに入れたか。"""
+    with _prep_lock:
+        s = get_session(room_id)
+        if s is not None and s.is_turn_active() and (s._turn_sent or s._auto_active):
+            s.submit_followup(content, received_at)
+            return "session"
+        _pre_queue.setdefault(room_id, []).append((content, received_at))
+        return "pre_queue"
+
+
+def pending_pre_queue(room_id: str) -> int:
+    with _prep_lock:
+        return len(_pre_queue.get(room_id) or [])
 
 
 def get_or_create_session(
