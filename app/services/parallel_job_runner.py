@@ -139,13 +139,17 @@ async def _launch(job_id, s):
     claude_cmd, cli_js = cr._resolve_claude_cli()
     if not claude_cmd:
         raise RuntimeError('claude CLI が見つかりません')
+    # Long conversations shortened without summarising (dan-compact): the same rule as the room's own sessions —
+    # attached only when DAN_COMPACT_JEV is not 0 and the TypeSafe key is available, else ([], {}) and nothing changes.
+    compact_args, compact_env = await asyncio.to_thread(cr._dan_compact_launch, user)
     cmd = cr._build_cli_cmd(claude_cmd, cli_js, str(job_mcp), launch_prompt, resume_session_id=resume,
-                            fork_session=fork, model=MODELS[s['model']])
+                            fork_session=fork, model=MODELS[s['model']], extra_args=compact_args)
     cmd += ['--input-format', 'stream-json']   # --settings (the file hook) comes with _build_cli_cmd
     env = {k: v for k, v in os.environ.items() if k not in ('CLAUDECODE', 'ANTHROPIC_API_KEY')}
     env.update({'DAN_SESSION_ID': room, 'DAN_ROOM_ID': room, 'DAN_COMMAND_JOB_ID': job_id, 'DAN_WORK_DIR': work_dir,
                 'CLAUDE_CODE_ENABLE_TASKS': 'true', 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'Never',
                 'GH_PROMPT_DISABLED': '1', 'CI': '1', 'NO_COLOR': '1'})
+    env.update(compact_env)
     if project.get('id'):
         env['DAN_PROJECT_ID'] = project['id']
     from app.config import settings

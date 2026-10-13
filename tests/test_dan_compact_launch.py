@@ -159,3 +159,62 @@ def test_real_plugin_folder_is_complete():
     assert (plugin / "hooks" / "hooks.json").exists()
     assert (plugin / "hooks" / "dan-compact.mjs").exists()
     assert (plugin / "hooks" / "core.mjs").exists()
+
+
+def _wire_parallel_job(monkeypatch, tmp_path, compact):
+    """parallel_job_runner._launch を DB・プロセス無しで組み立てだけ回す（並行作業も Claude Code を起こす経路）。"""
+    from app.services import parallel_job_runner as runner
+    from app.services import project_service
+
+    async def no_project(self, room_id):
+        return {}
+
+    monkeypatch.setattr(project_service.ProjectService, "__init__", lambda self: None)
+    monkeypatch.setattr(project_service.ProjectService, "get_project_by_room_id", no_project)
+    monkeypatch.setattr(cr, "_load_session", lambda room_id: None)
+    monkeypatch.setattr(cr, "_build_reseed_context", lambda room_id, project_id=None, max_chars=None: "")
+    room_mcp = tmp_path / "mcp_room.json"
+    room_mcp.write_text('{"mcpServers": {"dan-tools": {}}}', encoding="utf-8")
+
+    async def inputs(*a, **k):
+        return "SYS", str(room_mcp)
+
+    monkeypatch.setattr(cr, "_prepare_cli_inputs", inputs)
+    monkeypatch.setattr(cr, "_resolve_claude_cli", lambda: ("claude", None))
+    monkeypatch.setattr(runner.state, "browser_room", lambda job_id: "browser-room")
+    real_path = runner.Path
+
+    def path(p, *rest):   # 作業フォルダ（D:/dan-workspace/jobs/…）は一時フォルダへ
+        text = str(p)
+        if text.startswith("D:/dan-workspace/jobs/"):
+            return real_path(tmp_path) / "jobs" / text.rsplit("/", 1)[1]
+        return real_path(p, *rest)
+
+    monkeypatch.setattr(runner, "Path", path)
+    calls: list = []
+
+    def launch(user_id, *, log=True):
+        calls.append(user_id)
+        return compact
+
+    monkeypatch.setattr(cr, "_dan_compact_launch", launch)
+    return runner, calls
+
+
+@pytest.mark.asyncio
+async def test_parallel_job_launch_gets_plugin_only_with_key(monkeypatch, tmp_path):
+    job = {"room_id": "R", "user_id": "U", "task": "調べて", "model": "opus"}
+    runner, calls = _wire_parallel_job(monkeypatch, tmp_path, ([], {}))
+    plain_cmd, plain_env, _, _ = await runner._launch("job-0000-aaaa", job)
+    assert "--plugin-dir" not in plain_cmd
+    assert "TYPESAFE_API_KEY" not in plain_env and "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS" not in plain_env
+    assert "--settings" in plain_cmd and plain_cmd[-2:] == ["--input-format", "stream-json"]
+
+    runner, calls = _wire_parallel_job(monkeypatch, tmp_path, (
+        ["--plugin-dir", "P"], {"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1", "TYPESAFE_API_KEY": KEY}))
+    cmd, env, _, _ = await runner._launch("job-0000-aaaa", job)
+    assert calls == ["U"], "部屋の利用者の鍵で判定する"
+    assert cmd == plain_cmd[:-2] + ["--plugin-dir", "P", "--input-format", "stream-json"], "他の引数は不変、足すだけ"
+    assert env["TYPESAFE_API_KEY"] == KEY and env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] == "1"
+    assert env["DAN_COMMAND_JOB_ID"] == "job-0000-aaaa"
+    assert {k: v for k, v in env.items() if k not in ("TYPESAFE_API_KEY", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS")} == plain_env
