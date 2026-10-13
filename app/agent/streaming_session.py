@@ -121,6 +121,10 @@ class StreamingSession:
         self._turn: Optional[_Turn] = None
         self._pending: "queue.Queue[str]" = queue.Queue()
         self._interrupt_sent = False
+        # 追い連絡で割り込まれたターンの置き場所。ターン実行中に届いた最初の追い連絡の
+        # サーバー受信時刻（DBの created_at）。割り込まれたターンの作業記録は、
+        # この時刻の直前（= 追い連絡の上、元のメッセージの下）に置く。
+        self._followup_anchor: Optional[str] = None
         # Receiver for CLI-INITIATED turns: the CLI fires a new model turn on its
         # own when a background task finishes while the session is idle (measured
         # and confirmed 2026-07-24 — same native wake as interactive Claude Code).
@@ -206,6 +210,9 @@ class StreamingSession:
         proc.stdin.flush()
 
     def _send_user(self, text: str) -> None:
+        # 新しいターンが始まる = 待っていた追い連絡はここで送られる。前のターンの
+        # 境界用の置き場所をこのターンへ持ち越さない。
+        self._followup_anchor = None
         self._write({"type": "user", "message": {"role": "user", "content": text}})
 
     def _send_interrupt(self) -> None:
@@ -334,12 +341,23 @@ class StreamingSession:
                 # start a fresh CLI via start() in run_turn/get_or_create_session.
                 self.stop()
 
-    def submit_followup(self, content: str) -> None:
+    def submit_followup(self, content: str, received_at: Optional[str] = None) -> None:
         """Queue a follow-up. If a turn is in flight it will be applied at the
         next step boundary (interrupt → next turn); otherwise it is picked up
-        as the next turn."""
+        as the next turn.
+
+        received_at: この追い連絡のサーバー受信時刻（DB の created_at、ISO 文字列）。
+        ターン実行中に届いた最初のものだけ覚え、割り込まれたターンの作業記録を
+        その直前に置くために使う（take_followup_anchor）。"""
+        if received_at and self._followup_anchor is None and self.is_turn_active():
+            self._followup_anchor = received_at
         self._pending.put(content)
         self._last_activity = time.time()
+
+    def take_followup_anchor(self) -> Optional[str]:
+        """割り込まれたターンの終わりに1回だけ読む。読んだら消える。"""
+        anchor, self._followup_anchor = self._followup_anchor, None
+        return anchor
 
     # --- prewarm (proactive rotation) ----------------------------------
     def prewarm(self, priming_text: str, sink: EventSink, timeout: float = 180.0) -> bool:
