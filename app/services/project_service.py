@@ -279,17 +279,41 @@ class ProjectService:
         # していた（8本同時で 3s、単独 0.3s）。処理内容・戻り値は不変。
         return await asyncio.to_thread(self._get_project_sync, project_id, user_id)
 
+    # The project with its read state (the room's last message, this user's unread count) in one request.
+    _WITH_READ_STATE = ("*, room_state:chat_rooms!projects_room_id_fkey("
+                        "last_message_at,updated_at,last_message_preview,chat_room_members(unread_count))")
+
     def _get_project_sync(self, project_id: str, user_id: str) -> Optional[dict]:
-        result = (
-            self.supabase.table("projects")
-            .select("*")
-            .eq("id", project_id)
-            .eq("user_id", user_id)
-            .execute()
-        )
+        """An open chat re-reads this every 3 seconds (it is how a message that arrives while the room is on screen gets
+        marked read). It used to be three requests each time; the answer is the same in one (2026-10-13)."""
+        try:
+            result = (
+                self.supabase.table("projects")
+                .select(self._WITH_READ_STATE)
+                .eq("id", project_id)
+                .eq("user_id", user_id)
+                .eq("room_state.chat_room_members.user_id", user_id)
+                .execute()
+            )
+        except Exception as exc:
+            logger.debug("Project with read state failed, reading it in steps (project=%s): %s", project_id, exc)
+            result = (
+                self.supabase.table("projects")
+                .select("*")
+                .eq("id", project_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            return self._enrich_project_read_state(result.data[0], user_id) if result.data else None
         if not result.data:
             return None
-        return self._enrich_project_read_state(result.data[0], user_id)
+        project = result.data[0]
+        room = project.pop("room_state", None) or {}
+        members = room.get("chat_room_members") or []
+        project["unread_count"] = (members[0].get("unread_count") or 0) if members else 0
+        project["last_message_at"] = (room.get("last_message_at") or room.get("updated_at")) if room else None
+        project["last_message_preview"] = room.get("last_message_preview") if room else None
+        return project
 
     async def list_projects(
         self,

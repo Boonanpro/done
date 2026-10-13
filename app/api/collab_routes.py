@@ -156,7 +156,7 @@ async def list_rooms(
 
     # Owner's rooms + rooms where user is a guest（同時に取る）
     rooms, guest_rooms = await asyncio.gather(
-        service.list_rooms(user.user_id), service.list_guest_rooms(user.user_id)
+        service.list_rooms_with_summary(user.user_id), service.list_guest_rooms(user.user_id)
     )
 
     unique: list[dict] = []
@@ -167,15 +167,19 @@ async def list_rooms(
         seen_ids.add(r["id"])
         unique.append(r)
 
-    # 部屋ごとの付加情報（参加者数・最終メッセージ・未読）は互いに独立なので全部同時に取る。
-    # 以前は部屋ごとに3本を直列に待っていて、5部屋で約17往復(=DBがシンガポールで1往復150ms)
-    # → 2〜4秒かかっていた。これがコミュニケーション一覧が開かない主因。
+    # 部屋ごとの付加情報（参加者数・最終メッセージ・未読）は、部屋と一緒に1回で取ってある。
+    # ゲストとして入っている部屋だけは別の問い合わせで来るので、その分をまとめて1回で足す。
+    without = [r["id"] for r in unique if "last" not in r]
+    if without:
+        summaries = await service.summaries_of(without)
+        for r in unique:
+            if r["id"] in summaries:
+                r.update({k: summaries[r["id"]][k] for k in ("collab_invites", "last", "last_guest")})
+
     async def _enrich(r: dict) -> CollabRoomResponse:
-        invites, messages, unread_count = await asyncio.gather(
-            service.list_invites(r["id"]),
-            service.get_messages(r["id"], limit=1),
-            service.unread_count_for_owner(r),
-        )
+        unread_count = await service.unread_count_from_summary(r)
+        invites, messages = r.pop("collab_invites", []), r.pop("last", [])
+        r.pop("last_guest", None)
         guest_count = sum(1 for i in invites if i["status"] == "joined")
         last_msg = messages[-1] if messages else None
         return CollabRoomResponse(

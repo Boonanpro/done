@@ -31,6 +31,7 @@ from app.services import work_locks as _work_locks
 
 # セッション管理: インメモリキャッシュ + DB永続化
 _cli_sessions: Dict[str, str] = {}
+_sessions_in_db: Dict[str, str] = {}   # what cli_sessions already holds, as far as this process wrote it
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
 
@@ -175,6 +176,10 @@ def _load_session(room_id: str) -> Optional[str]:
 def _save_session(room_id: str, session_id: str):
     """CLIセッションIDをDBに永続化"""
     _cli_sessions[room_id] = session_id
+    if _sessions_in_db.get(room_id) == session_id:
+        # The CLI repeats its session id on every system event; each one used to be written again (2026-10-13: a
+        # write every 15 s per working room, to a database that was short of memory).
+        return
     if room_id.startswith('editor_'):
         p=_editor_session_path(room_id);p.parent.mkdir(parents=True,exist_ok=True)
         tmp=p.with_suffix('.tmp');tmp.write_text(session_id,encoding='utf-8');tmp.replace(p)
@@ -188,6 +193,7 @@ def _save_session(room_id: str, session_id: str):
             "cli_session_id": session_id,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
+        _sessions_in_db[room_id] = session_id
     except Exception as e:
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
 
@@ -197,6 +203,7 @@ def _clear_cli_session(room_id: str) -> None:
     next turn starts a fresh conversation instead of resuming a stale or
     poisoned transcript."""
     _cli_sessions.pop(room_id, None)
+    _sessions_in_db.pop(room_id, None)
     if room_id.startswith('editor_'):
         _editor_session_path(room_id).unlink(missing_ok=True)
         return
@@ -2827,6 +2834,7 @@ def _run_cli_in_thread(
 
             # 古いセッションIDをクリア
             _cli_sessions.pop(room_id, None)
+            _sessions_in_db.pop(room_id, None)
             try:
                 from app.services.supabase_client import get_supabase_client
                 sb = get_supabase_client().client
@@ -3451,7 +3459,7 @@ async def _process_via_streaming_session(
 
             elif rtype == "system":
                 sid = raw_ev.get("session_id")
-                if sid:
+                if sid and sid != state["session_id"]:   # repeated on every system event; the run records it once
                     state["session_id"] = sid
                     _save_session(room_id, sid)
                     _update_run_sync(run_id, claude_session_id=sid)

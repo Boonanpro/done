@@ -14,6 +14,14 @@ def generate_invite_token(length: int = 32) -> str:
     return secrets.token_urlsafe(length)
 
 
+def _db_time(value: str) -> datetime:
+    """A timestamp as the database returns it. It drops the trailing zeros of the fraction ("…16.18+00:00"), which
+    fromisoformat refuses before Python 3.11."""
+    import re
+    raw = value[:-1] + "+00:00" if value.endswith("Z") else value
+    return datetime.fromisoformat(re.sub(r"\.(\d{1,6})(?=[+\-]|$)", lambda m: "." + m.group(1).ljust(6, "0"), raw, count=1))
+
+
 class CollabService:
     def __init__(self):
         self.supabase = get_supabase_client().client
@@ -79,6 +87,45 @@ class CollabService:
                 .order("updated_at", desc=True)
                 .execute())
         return result.data
+
+    # What the list shows about a room, read with the room: its invites' statuses, its last message, and when a guest
+    # last wrote. The list used to ask three questions per room (17 requests for 5 rooms) and the phone app re-reads it
+    # every 30 seconds; that alone was most of what the database was asked at rest (2026-10-13).
+    _SUMMARY = "*, collab_invites(status), last:collab_messages(*), last_guest:collab_messages(created_at)"
+
+    def _with_summary(self, rooms):
+        return (rooms.select(self._SUMMARY)
+                .order("created_at", desc=True, foreign_table="last").limit(1, foreign_table="last")
+                .eq("last_guest.sender_type", "guest")
+                .order("created_at", desc=True, foreign_table="last_guest").limit(1, foreign_table="last_guest"))
+
+    async def list_rooms_with_summary(self, owner_id: str) -> List[dict]:
+        result = await self._retry("list_rooms_with_summary",
+            lambda: self._with_summary(self.supabase.table("collab_rooms"))
+                .eq("owner_id", owner_id)
+                .order("updated_at", desc=True)
+                .execute())
+        return result.data
+
+    async def summaries_of(self, room_ids: List[str]) -> dict:
+        result = await self._retry("summaries_of",
+            lambda: self._with_summary(self.supabase.table("collab_rooms")).in_("id", room_ids).execute())
+        return {r["id"]: r for r in result.data}
+
+    async def unread_count_from_summary(self, room: dict) -> int:
+        """The owner's unread count for a room read with its summary. When no guest wrote after owner_last_read_at it
+        is zero without asking; otherwise the count is asked for as before."""
+        last_guest = room.get("last_guest") or []
+        if not last_guest:
+            return 0
+        read_at = room.get("owner_last_read_at")
+        if read_at:
+            try:
+                if _db_time(last_guest[0]["created_at"]) <= _db_time(read_at):
+                    return 0
+            except ValueError:
+                pass
+        return await self.unread_count_for_owner(room)
 
     async def update_room(self, room_id: str, owner_id: str, updates: dict) -> dict:
         # Only owner can update
