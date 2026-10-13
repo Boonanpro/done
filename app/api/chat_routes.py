@@ -470,18 +470,37 @@ async def _notify_dan_completion(
         if not body:
             body = "Danの作業が完了しました"
         url = f"/chat/{project_id}" if project_id else "/chat"
+        title = "Dan"
+        # 一覧に出さない部屋（開発の参謀のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（参謀）を開く。
+        def _hidden_origin(pid):   # 同期の DB 呼び出しはスレッドで（イベントループを止めない）
+            from app.services.project_service import ProjectService
+            ps = ProjectService()
+            row = (ps.supabase.table("projects").select("metadata,origin_room_id,title").eq("id", pid).limit(1).execute().data or [{}])[0]
+            if not ((row.get("metadata") or {}).get("hidden") and row.get("origin_room_id")):
+                return None
+            origin = (ps.supabase.table("projects").select("id,title").eq("room_id", row["origin_room_id"]).limit(1).execute().data or [{}])[0]
+            return (origin, row) if origin.get("id") else None
+        try:
+            found = await asyncio.to_thread(_hidden_origin, project_id) if project_id else None
+            if found:
+                origin, row = found
+                url = f"/chat/{origin['id']}"
+                title = (origin.get("title") or "Dan")[:40]
+                body = _compact_text(f"{(row.get('title') or '').removeprefix('参謀: ')}: {body}", 120)
+        except Exception as e:
+            logger.debug("hidden-room push redirect skipped (room=%s): %s", room_id, e)
         svc = get_push_service()
         await svc.notify_room(
             room_id=room_id,
             exclude_type="ai",
-            title="Dan",
+            title=title,
             body=body,
             url=url,
         )
         await svc.notify_room(
             room_id=f"user:{user_id}",
             exclude_type="ai",
-            title="Dan",
+            title=title,
             body=body,
             url=url,
         )

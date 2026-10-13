@@ -232,6 +232,8 @@ async def create_project(
     metadata = None
     if request.model:
         metadata = {"model": request.model.strip().lower()}
+    if request.hidden:
+        metadata = {**(metadata or {}), "hidden": True}   # 一覧に出さない（開発の参謀のボードの会話の部屋）
     project = await service.create_project(
         user_id=current_user.user_id,
         title=request.title,
