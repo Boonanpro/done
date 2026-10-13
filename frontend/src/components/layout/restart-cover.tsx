@@ -66,7 +66,7 @@ export function RestartCover() {
       className="fixed inset-0 z-[10000] flex flex-col items-center justify-center gap-5 bg-background/90 backdrop-blur-sm"
     >
       <p className="text-base font-medium text-foreground">
-        {cover.announced ? 'ダンを再起動中です' : 'ダンの本体につながりません'}
+        {cover.announced ? 'Restarting Dan' : "Can't reach Dan"}
       </p>
       <div className="h-1.5 w-[min(320px,70vw)] overflow-hidden rounded-full bg-muted">
         <div

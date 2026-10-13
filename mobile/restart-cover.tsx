@@ -3,7 +3,6 @@
 // (owner, 2026-10-13: a restart looked like a broken app for a minute). Same behaviour as the web's RestartCover.
 import { useEffect, useRef, useState } from 'react';
 import { Animated, DeviceEventEmitter, Easing, Modal, StyleSheet, Text, View } from 'react-native';
-import { ui, useUiLanguage } from './ui-language';
 
 const USUAL_MS = 20_000;          // from the stop until both answer, usually
 const NEVER_STOPPED_MS = 20_000;  // announced, but the core never went away: the restart was called off
@@ -43,7 +42,6 @@ export async function coverIfDown(apiBase: string): Promise<void> {
 }
 
 export function RestartCover({ apiBase }: { apiBase: string }) {
-  useUiLanguage();
   const [cover, setCover] = useState<Cover | null>(null);
   const filled = useRef(new Animated.Value(0)).current;
 
@@ -98,7 +96,7 @@ export function RestartCover({ apiBase }: { apiBase: string }) {
     <Modal visible={!!cover} transparent statusBarTranslucent animationType="fade" onRequestClose={() => undefined}>
       <View style={styles.cover} accessibilityRole="progressbar" accessibilityLiveRegion="polite">
         <Text style={styles.text}>
-          {cover?.announced === false ? ui("Can't reach Dan", 'ダンの本体につながりません') : ui('Restarting Dan', 'ダンを再起動中です')}
+          {cover?.announced === false ? "Can't reach Dan" : 'Restarting Dan'}
         </Text>
         <View style={styles.track}>
           <Animated.View style={[styles.bar, { width: filled.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
