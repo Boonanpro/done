@@ -357,6 +357,23 @@ async def wait_for_human_auth_completion(
     )
 
 
+async def prefill_login_form(page: Page, creds: dict[str, str]) -> str:
+    """Open the login page and fill ID/password; the human presses the button.
+
+    Nothing is submitted, so this does not count as a login attempt.
+    """
+    if await is_logged_in(page):
+        return "already_logged_in"
+    if not await _is_login_form_visible(page):
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1500)
+    if not await _is_login_form_visible(page):
+        return "login_form_not_found"
+    await page.locator('input[type="text"]').first.fill(creds["login_id"])
+    await page.locator('input[type="password"]').first.fill(creds["password"])
+    return "prefilled"
+
+
 async def login_once(
     page: Page,
     creds: dict[str, str],
