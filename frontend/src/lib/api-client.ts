@@ -6,6 +6,7 @@
 import { useAuthStore } from '@/stores/auth-store';
 import { refreshSession, SessionRefreshError } from './session-refresh';
 import { isTransientNetworkError } from './transient-network';
+import { settleActive, settleRun } from './turn-end';
 
 // API Base URL - env 値に trailing whitespace / 改行が混入すると URL が壊れるので trim
 const API_BASE_URL = '';
@@ -1457,7 +1458,7 @@ export const api = {
      * ページ読み込み時やタブ復帰時に呼び出す
      */
     getActiveStatus: (sessionId: string) =>
-      request<ActiveSessionStatus>(`/chat/dan/sessions/${sessionId}/active`),
+      request<ActiveSessionStatus>(`/chat/dan/sessions/${sessionId}/active`).then(settleActive),
 
     /**
      * セッションの実行イベントを取得（差分取得対応）
@@ -1506,7 +1507,7 @@ export const api = {
       }),
 
     currentRun: (projectId: string) =>
-      request<AgentRunResponse>(`/projects/${projectId}/current-run`),
+      request<AgentRunResponse>(`/projects/${projectId}/current-run`).then(settleRun),
 
     getBoard: (projectId: string) =>
       request<RoomBoardResponse>(`/projects/${projectId}/board`),

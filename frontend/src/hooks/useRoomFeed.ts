@@ -17,10 +17,38 @@ import type { MessageResponse, ProjectListResponse } from '@/lib/api-client';
 import { oneLine } from '@/lib/one-line';
 import { perfLog } from '@/lib/perf-log';
 import { coverIfDown, useRestartStore } from '@/stores/restart-store';
+import { useProjectStore } from '@/stores/project-store';
+import { noteTurnEnd, settleRun, useTurnEndStore, type TurnEnd } from '@/lib/turn-end';
 
 const LAST_KEY = 'done-feed-last-at';
 
-type FeedMessageEvent = { type: 'message'; room_id: string; message: MessageResponse; at?: number };
+type FeedMessageEvent = { type: 'message'; room_id: string; message: MessageResponse; at?: number; turn_end?: TurnEnd };
+
+/**
+ * この答えでダンのターンが終わった: 答えを出すのと同時に、この部屋の作業中の表示（考え中・実行中・停止ボタン・
+ * 一覧の「ダンが作業中」）を止める。終わる前に出した問い合わせが遅れて届いても点け直さない（lib/turn-end）。
+ */
+function endTurn(queryClient: QueryClient, roomId: string, end: TurnEnd) {
+  noteTurnEnd(roomId, end);
+  queryClient.setQueryData(['session-active', roomId], { active: false, session_id: roomId, started_at: null });
+  const listed = queryClient.getQueryData<ProjectListResponse>(['projects'])?.projects?.find((p) => p.room_id === roomId)?.id;
+  const opened = queryClient
+    .getQueriesData<{ id?: string; room_id?: string }>({ queryKey: ['project'] })
+    .map(([, p]) => p)
+    .find((p) => p?.room_id === roomId)?.id;
+  const projectId = listed || opened;
+  if (projectId) {
+    queryClient.setQueryData(['current-run', projectId], (cur: { id?: string; state?: string } | undefined) =>
+      cur && cur.state === 'running' && (!end.run_id || cur.id === end.run_id) ? { ...cur, state: 'completed' } : settleRun(cur),
+    );
+    queryClient.setQueryData<ProjectListResponse>(['projects'], (cur) =>
+      cur?.projects ? { ...cur, projects: cur.projects.map((p) => (p.id === projectId ? { ...p, has_active_run: false } : p)) } : cur,
+    );
+    useProjectStore.getState().setInterrupted(projectId, false);
+    useProjectStore.getState().setWarmupMode(projectId, null);
+  }
+  useTurnEndStore.getState().end(roomId);
+}
 
 function readLastAt(): string | null {
   try {
@@ -131,6 +159,7 @@ export function useRoomFeed(enabled: boolean): void {
           const d = JSON.parse((ev as MessageEvent).data) as FeedMessageEvent;
           applyFeedMessage(queryClient, d.message);
           applyToProjectList(queryClient, d.message);
+          if (d.turn_end) endTurn(queryClient, d.room_id, d.turn_end);
           if (d.message.created_at > (lastAtRef.current || '')) {
             lastAtRef.current = d.message.created_at;
             writeLastAt(d.message.created_at);

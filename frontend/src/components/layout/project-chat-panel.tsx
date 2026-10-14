@@ -52,6 +52,7 @@ import {
 } from '@/lib/api-client';
 import { useRouter } from 'next/navigation';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
+import { useTurnEndStore } from '@/lib/turn-end';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
@@ -850,6 +851,14 @@ function ChatInput({
     },
     [queryClient, roomId]
   );
+
+  // ターンが答えで終わった（新着の線の知らせ）: 返事の通信の「終わり」を待たずに手元の「作業中」を外す（lib/turn-end）。
+  const turnEnds = useTurnEndStore((s) => s.ends[roomId] ?? 0);
+  useEffect(() => {
+    if (!turnEnds) return;
+    sseConnectedRef.current = false;
+    setLocalActive(false);
+  }, [turnEnds]);
 
   // ローカル状態を優先。ローカルがfalseならpropsに関係なくfalse
   const isBusy = isInterrupted || localActive || isSessionActive;

@@ -176,8 +176,10 @@ def publish_all(event: dict) -> int:
     return publish(users, event)
 
 
-def publish_message(room_id: str, msg: dict) -> int:
-    """メッセージ保存直後に呼ぶ。core 外なら core へ転送。購読者がいなければ即 return（DB照会もしない）。"""
+def publish_message(room_id: str, msg: dict, turn_end: Optional[dict] = None) -> int:
+    """メッセージ保存直後に呼ぶ。core 外なら core へ転送。購読者がいなければ即 return（DB照会もしない）。
+
+    turn_end: この答えでダンのターンが終わる時 {"run_id", "at"}。画面は答えを出すのと同時に作業中の表示を止める。"""
     if not room_id:
         return 0
     if not _IN_CORE:
@@ -188,6 +190,8 @@ def publish_message(room_id: str, msg: dict) -> int:
     if not users:
         return 0
     event = {"type": "message", "room_id": room_id, "message": _slim_message(msg), "at": time.time()}
+    if turn_end:
+        event["turn_end"] = turn_end
     return publish(users, event)
 
 

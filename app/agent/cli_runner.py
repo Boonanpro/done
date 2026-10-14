@@ -1397,6 +1397,8 @@ def _save_ai_message_sync(
     blocks: Optional[list] = None,
     created_at: Optional[str] = None,
     turn_id: Optional[str] = None,
+    ends_turn: bool = False,
+    run_id: Optional[str] = None,
 ) -> Any:
     """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。disconnect時は1度だけリトライ。
 
@@ -1424,6 +1426,10 @@ def _save_ai_message_sync(
             else b
             for b in blocks
         ]
+
+    # この保存がターンの最後の答えなら、保存の前に部屋を「作業していない」にし、答えと同じ知らせで画面に
+    # 伝える。画面は答えを出すのと同時に作業中の表示を止める（2026-10-14: 答えの後に1〜4秒残っていた）。
+    turn_end = {"run_id": run_id, "at": turn_flow.turn_answered(room_id)} if ends_turn else None
 
     ai_context: Optional[dict] = None
     if reasoning_steps:
@@ -1468,7 +1474,7 @@ def _save_ai_message_sync(
                 # 押し込み同期（ワーカースレッドから呼ぶ。購読者のループへ threadsafe に渡る）
                 try:
                     from app.services.room_feed import publish_message
-                    publish_message(room_id, {**result.data[0], "sender_name": "ダン"})
+                    publish_message(room_id, {**result.data[0], "sender_name": "ダン"}, turn_end=turn_end)
                 except Exception:  # noqa: BLE001
                     pass
                 record_message_delivery_sync(sb, room_id, msg_id, content=content)
@@ -2921,7 +2927,7 @@ def _run_cli_in_thread(
                 blocks = result_data.get("turn_blocks", [])
                 cli_saved = _save_ai_message_sync(
                     room_id, text, reasoning, reasoning_full_list, blocks=blocks,
-                    created_at=turn_flow.record_time(run_id), turn_id=turn_id,
+                    turn_id=turn_id, **turn_flow.turn_end(run_id),
                 )
                 _cli_debug(f"AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
 
@@ -2981,8 +2987,7 @@ def _run_cli_in_thread(
             _save_ai_message_sync(
                 room_id,
                 f"処理中にエラーが発生しました。もう一度お試しください。\n（{type(e).__name__}）",
-                created_at=turn_flow.record_time(run_id),
-                turn_id=turn_id,
+                turn_id=turn_id, **turn_flow.turn_end(run_id),
             )
             _save_execution_event_sync(
                 room_id,
@@ -3009,8 +3014,7 @@ def _run_cli_in_thread(
                 _save_ai_message_sync(
                     room_id,
                     "処理が中断されました。もう一度お試しください。",
-                    created_at=turn_flow.record_time(run_id),
-                    turn_id=turn_id,
+                    turn_id=turn_id, **turn_flow.turn_end(run_id),
                 )
             done_content = "cancelled" if was_cancelled else "interrupted"
             _save_execution_event_sync(
@@ -3117,6 +3121,7 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
                         blocks=state["turn_blocks"],
                         created_at=datetime.now(timezone.utc).isoformat(),   # placed when finished (docs/current/chat-timeline-definition.md)
                         turn_id=state["turn_id"] or str(uuid.uuid4()),
+                        ends_turn=False,   # work in the background, not the chat's turn
                     )
                 if project_id and state["run_id"]:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], content="completed")
@@ -3571,7 +3576,8 @@ async def _process_via_streaming_session(
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
                 if not skip_save and not (empty_continuation and not state["turn_blocks"]):
-                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id)
+                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id,
+                                                      ends_turn=not continuation and placed is None, run_id=run_id)
                 _register_streaming_artifacts()
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
@@ -3620,7 +3626,7 @@ async def _process_via_streaming_session(
                 if not skip_save:
                     hang_saved = _save_ai_message_sync(
                         room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"],
-                        blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id,
+                        blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id, ends_turn=True, run_id=run_id,
                     )
                 _register_streaming_artifacts()
                 if project_id:
@@ -3737,7 +3743,7 @@ async def _process_via_streaming_session(
                 )
                 recreate_saved = False
                 if not skip_save:
-                    recreate_saved = _save_ai_message_sync(room_id, text, created_at=turn_flow.record_time(run_id), turn_id=str(uuid.uuid4()))
+                    recreate_saved = _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()), **turn_flow.turn_end(run_id))
                 _emit({
                     "type": "result", "text": text, "session_id": None,
                     "is_error": True, "cli_saved": bool(recreate_saved),
@@ -3926,6 +3932,7 @@ async def process_message_cli(
     # 印は run_turn が外す。常駐経路に入らなかった時・例外の時は下の finally で外す。
     _turn_claim = None
     if not skip_save:
+        turn_flow.turn_started(room_id)
         try:
             _turn_claim = turn_flow.claim_new_turn(room_id, backend)
         except Exception:

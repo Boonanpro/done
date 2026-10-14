@@ -164,6 +164,7 @@ def test_the_record_of_a_turn_a_message_stopped_goes_just_before_that_message(en
     saved = END_A_TURN[engine](monkeypatch, RESULT)
     assert [s["created_at"] for s in saved] == [JUST_BEFORE]
     assert saved[0]["blocks"] == RESULT["turn_blocks"]            # the work log is kept whole
+    assert saved[0]["ends_turn"] is False                         # the turn for the message that stopped it runs on
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -171,6 +172,7 @@ def test_a_turn_nothing_cut_into_is_placed_when_it_is_saved(engine, monkeypatch)
     turn_flow.stopped_by_message("another-run", FOLLOW_UP)
     saved = END_A_TURN[engine](monkeypatch, RESULT)
     assert [s["created_at"] for s in saved] == [None]             # None = the database's clock at the save
+    assert saved[0]["ends_turn"] is True and saved[0]["run_id"] == RUN   # the answer ends the turn: the screens stop at once
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -204,11 +206,15 @@ def calls(path, name):
     return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", getattr(n.func, "id", None)) == name]
 
 
-def test_every_save_of_a_turns_record_states_its_time():
-    """A save without created_at is placed by the database's clock, which is how the record fell below the follow-up."""
+def test_every_save_of_a_turns_record_states_its_time_and_whether_it_ends_the_turn():
+    """A save without created_at is placed by the database's clock, which is how the record fell below the follow-up.
+    A save that does not say whether it ends the turn leaves the screens showing Dan at work after the answer."""
     for path in sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "app" / "agent").glob("*.py")):
         for call in calls(path, "_save_ai_message_sync"):
-            assert "created_at" in [k.arg for k in call.keywords], f"{path}:{call.lineno}"
+            named = [k.arg for k in call.keywords]
+            spread = any(k.arg is None and isinstance(k.value, ast.Call) and getattr(k.value.func, 'attr', '') == 'turn_end'
+                         for k in call.keywords)
+            assert spread or {"created_at", "ends_turn"} <= set(named), f"{path}:{call.lineno}"
 
 
 def test_each_engines_turn_end_asks_the_one_place_for_the_time():
@@ -217,7 +223,7 @@ def test_each_engines_turn_end_asks_the_one_place_for_the_time():
         tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
         for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
             asked[fn.name] = any(
-                isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "record_time" for n in ast.walk(fn))
+                isinstance(n, ast.Call) and getattr(n.func, "attr", None) in ("record_time", "turn_end") for n in ast.walk(fn))
     for turn_end in ("_run_cli_in_thread", "_process_via_streaming_session", "run_codex_turn_in_thread"):
         assert asked[turn_end], turn_end
 
@@ -227,3 +233,48 @@ def test_the_send_entrance_decides_through_the_one_place():
     assert "turn_flow.waits_for_running_turn(" in source and "turn_flow.stopped_by_message(" in source
     assert "is_turn_active_or_preparing" not in source      # asked without the engine, a GPT room waited on nothing
     assert "claim_turn" not in source.replace("turn_flow.claim_new_turn", "")
+
+
+# --- the answer ends the turn: no screen keeps showing Dan at work -------------------------------------------------
+
+def test_after_the_final_answer_the_room_is_not_working_until_the_next_message(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api import chat_routes
+    from app.services.cancellation import CancellationRegistry
+    CancellationRegistry.register(ROOM)                 # the send request that asked is still tidying up
+    try:
+        status = lambda: __import__('asyncio').run(chat_routes._active_session_status(ROOM))
+        monkeypatch.setattr('app.services.run_service.RunService.get_current_run_for_room',
+                            lambda self, room, chat_only=False: __import__('asyncio').sleep(0, result=None))
+        assert status()["active"] is True
+        turn_flow.turn_answered(ROOM)
+        assert status()["active"] is False
+        turn_flow.turn_started(ROOM)                    # the next message
+        assert status()["active"] is True
+    finally:
+        CancellationRegistry.unregister(ROOM)
+        turn_flow.turn_started(ROOM)
+
+
+def test_the_answer_and_the_end_of_the_turn_reach_the_screens_together(monkeypatch):
+    import asyncio
+    from app.services import room_feed
+
+    async def scenario():
+        queue = asyncio.Queue()
+        room_feed._subs['member'][queue] = asyncio.get_running_loop()
+        monkeypatch.setattr(room_feed, '_IN_CORE', True)
+        monkeypatch.setattr(room_feed, '_room_members', lambda room: ['member'])
+        try:
+            room_feed.publish_message(ROOM, {'id': 'm1', 'room_id': ROOM, 'sender_type': 'ai', 'content': 'done'},
+                                      turn_end={'run_id': RUN, 'at': 1.0})
+            room_feed.publish_message(ROOM, {'id': 'm2', 'room_id': ROOM, 'sender_type': 'ai', 'content': 'mid-turn'})
+            await asyncio.sleep(0.05)
+            return [queue.get_nowait() for _ in range(queue.qsize())]
+        finally:
+            room_feed._subs.pop('member', None)
+
+    first, second = asyncio.run(scenario())
+    assert first['message']['id'] == 'm1' and first['turn_end'] == {'run_id': RUN, 'at': 1.0}
+    assert 'turn_end' not in second

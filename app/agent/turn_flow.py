@@ -78,6 +78,37 @@ def stopped_by_message(run_id: Optional[str], received_at: Optional[str]) -> Non
         _stopped.setdefault(run_id, (str(received_at), now))
 
 
+def turn_end(run_id: Optional[str]) -> dict:
+    """What a turn's own thread passes when it saves the turn's record (one-process-per-turn engines): where it goes, and
+    whether it ends the turn. A turn a message stopped does not end the room's work: the turn for that message runs."""
+    placed = record_time(run_id)
+    return {"created_at": placed, "ends_turn": placed is None, "run_id": run_id}
+
+
+_answered: Dict[str, float] = {}   # room -> when its turn's final answer was saved (server clock)
+
+
+def turn_started(room_id: Optional[str]) -> None:
+    """A message starts (or joins) a turn in the room: the room is working again."""
+    if room_id:
+        with _lock:
+            _answered.pop(room_id, None)
+
+
+def turn_answered(room_id: str) -> float:
+    """The turn's final answer is being saved: from now on the room is not working, though the request that asked may
+    still be tidying up for a second. Returns the moment, sent to the screens with the answer."""
+    at = time.time()
+    with _lock:
+        _answered[room_id] = at
+    return at
+
+
+def is_answered(room_id: str) -> bool:
+    with _lock:
+        return room_id in _answered
+
+
 def record_time(run_id: Optional[str], handed_over_at: Optional[str] = None) -> Optional[str]:
     """The created_at for the record of a turn that has just ended, on any engine.
 

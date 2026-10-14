@@ -2098,6 +2098,23 @@ function AppMain() {
   // 復帰時は rooms-delta で「最後に受け取った時刻以降」を1往復で追いつく。
   // 追いついた後は写しが最新なので、部屋を開いても「最新の状態を取得中…」を出さない。
   const feedRef = useRef<{ lastAt: string | null; fresh: boolean; syncing: boolean }>({ lastAt: null, fresh: false, syncing: false });
+  // この答えでダンのターンが終わった（新着の線の message の turn_end, 2026-10-14）: 答えを出すのと同時に、
+  // この部屋の作業中の表示（吹き出しの「考え中」・停止ボタン・一覧の印）を止める。終わる前に出したポーリングが
+  // 遅れて「実行中」と返っても点け直さない（止めた run と同じ扱い: settledByStopRef.runs）。
+  const endTurn = useCallback(
+    (roomId: string | undefined, end: { run_id?: string | null }) => {
+      if (!roomId) return;
+      if (end.run_id) settledByStopRef.current.runs.add(end.run_id);
+      const project = projectsRef.current.find((p) => p.room_id === roomId);
+      if (!project) return;
+      pollRunSeqRef.current.running = false;
+      setCurrentRun((cur) => (cur && cur.project_id === project.id && cur.state === 'running' ? { ...cur, state: 'completed' } : cur));
+      dropStreamingProject(project.id);
+      setProjects((cur) => cur.map((p) => (p.id === project.id && p.has_active_run ? { ...p, has_active_run: false } : p)));
+    },
+    [dropStreamingProject],
+  );
+
   const applyFeedMessage = useCallback((msg: MessageResponse) => {
     const roomId = msg.room_id;
     if (!roomId || !msg.id) return;
@@ -2182,8 +2199,13 @@ function AppMain() {
       });
       es.addEventListener('message', (e) => {
         try {
-          const d = JSON.parse((e as { data: string }).data) as { message: MessageResponse };
+          const d = JSON.parse((e as { data: string }).data) as {
+            room_id?: string;
+            message: MessageResponse;
+            turn_end?: { run_id?: string | null };
+          };
           if (d?.message) applyFeedMessage(d.message);
+          if (d?.turn_end) endTurn(d.room_id || d.message?.room_id, d.turn_end);
         } catch {
           /* ignore */
         }
@@ -2243,7 +2265,7 @@ function AppMain() {
       sub.remove();
       back.remove();
     };
-  }, [token, applyFeedMessage, feedCatchUp, refreshProjects]);
+  }, [token, applyFeedMessage, feedCatchUp, refreshProjects, endTurn]);
 
   const runSearch = useCallback(
     async (q: string) => {

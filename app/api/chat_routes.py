@@ -2242,6 +2242,7 @@ async def send_dan_message_stream(
             # キャンセルフラグを登録（room_idが確定してから）
             room_id_for_cancel = room_id
             CancellationRegistry.register(room_id)
+            turn_flow.turn_started(room_id)   # 前のターンの「答えた」の印を外す（/active がまた作業中と答える）
 
             # ユーザーメッセージのエコー（即時保存パスのみ即送出。並列保存は cold start 起動後に送出）
             if message is not None:
@@ -3338,6 +3339,12 @@ async def _active_session_status(session_id: str) -> dict:
 
     from app.services.cancellation import CancellationRegistry
     from app.agent.cli_runner import is_cli_active
+
+    # ターンの最後の答えを保存した後は、送信の後片付けが残っていても作業中ではない（2026-10-14）。
+    # 次の送信・次のターンの始まりで印は外れる（turn_flow.turn_started）。
+    from app.agent import turn_flow
+    if turn_flow.is_answered(session_id):
+        return {"active": False, "session_id": session_id, "started_at": None, "origin_message_id": None}
 
     from app.services.run_service import RunService
     active_run = await RunService().get_current_run_for_room(session_id, chat_only=True)
