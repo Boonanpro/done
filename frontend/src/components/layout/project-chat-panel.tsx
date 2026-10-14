@@ -1207,6 +1207,13 @@ function ChatInput({
             onSseStateChange?.(false);
             // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
             queryClient.invalidateQueries({ queryKey: ['projects'] });
+            // サーバーが受け取らなかった送信は「送信中」のまま残さず、文を入力欄に戻す（キャンセルと同じ扱い）
+            if (!serverMessageIdRef.current) {
+              queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
+                old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
+              );
+              setMessage((cur) => (cur.trim() ? cur : content));
+            }
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -2006,7 +2013,10 @@ function mergeFreshMessages(
     : Infinity;
   const localOnly = old.messages.filter((m) => {
     if (freshIds.has(m.id)) return false;
-    if (m.pending) return true;   // not on the server yet: kept until it is (its device time is not compared)
+    // 送信中（まだサーバーに無い）: 送ってから2分までは待つ。それを過ぎてもサーバーに無いのは、届かなかった送信
+    // （2026-10-14: データベースが止まっていた間に送った2通が、画面の一番下に「送信中」のまま残り続け、
+    // ブラウザに保存されるので読み直しても消えなかった）。比べるのは同じ端末の時計どうし。
+    if (m.pending) return Date.now() - new Date(m.created_at).getTime() < 120_000;
     const t = new Date(m.created_at).getTime();
     return t >= cutoff || t < oldestFresh;
   });
