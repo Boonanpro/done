@@ -1131,7 +1131,14 @@ function ChatInput({
           },
           onInterrupted: () => {
             if (streamRequestRef.current !== requestId) return;
-            syncActiveStatus(true);
+            // 返事の通信が切れた。ダンの作業はサーバーで続くので「作業中」の表示は保つが、手元の印
+            // （localActive）は立てない。立てると、作業が終わっても誰も外さず停止ボタンのまま残った（2026-10-14）。
+            // 切れている間は isInterrupted が、戻った後はサーバーの答え（useProjectRecovery）が表示を決める。
+            sseConnectedRef.current = false;
+            setLocalActive(false);
+            queryClient.setQueryData<ActiveSessionStatus>(['session-active', roomId], {
+              active: true, session_id: roomId, started_at: Date.now(),
+            });
             setInterrupted(projectId, true);
             setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });

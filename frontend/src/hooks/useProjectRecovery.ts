@@ -55,6 +55,28 @@ export function useProjectRecovery({ projectId, roomId }: UseProjectRecoveryOpti
   const checkAndRecover = useCallback(async () => {
     if (!roomId) return;
 
+    // 2秒ごとに聞き直し、ダンの作業が終わったと分かった時点で表示を戻す。
+    const startPolling = () => {
+      if (pollingRef.current) return;
+      pollingRef.current = setInterval(async () => {
+        if (isPollingRef.current) return;
+        isPollingRef.current = true;
+        try {
+          const nextStatus = await api.sm.getActiveStatus(roomId);
+          syncActiveStatus(nextStatus.active);
+          if (!nextStatus.active) {
+            stopPolling();
+            setInterrupted(projectId, false);
+            invalidateRecoveryQueries();
+          }
+        } catch (err) {
+          console.warn('[ProjectRecovery] Poll error:', err);
+        } finally {
+          isPollingRef.current = false;
+        }
+      }, 2000);
+    };
+
     try {
       const status = await api.sm.getActiveStatus(roomId);
       syncActiveStatus(status.active);
@@ -62,26 +84,7 @@ export function useProjectRecovery({ projectId, roomId }: UseProjectRecoveryOpti
       if (status.active) {
         setInterrupted(projectId, false);
         invalidateRecoveryQueries();
-
-        if (!pollingRef.current) {
-          pollingRef.current = setInterval(async () => {
-            if (isPollingRef.current) return;
-            isPollingRef.current = true;
-            try {
-              const nextStatus = await api.sm.getActiveStatus(roomId);
-              syncActiveStatus(nextStatus.active);
-              if (!nextStatus.active) {
-                stopPolling();
-                setInterrupted(projectId, false);
-                invalidateRecoveryQueries();
-              }
-            } catch (err) {
-              console.warn('[ProjectRecovery] Poll error:', err);
-            } finally {
-              isPollingRef.current = false;
-            }
-          }, 2000);
-        }
+        startPolling();
         return;
       }
 
@@ -91,7 +94,10 @@ export function useProjectRecovery({ projectId, roomId }: UseProjectRecoveryOpti
       }
       invalidateRecoveryQueries();
     } catch (err) {
+      // 通信が切れた直後（画面のサーバーや本体の再起動中）は、聞いても答えが返らない。ここで諦めると
+      // 「作業中」のまま止まって見えていた（2026-10-14）。戻るまで聞き直す。
       console.warn('[ProjectRecovery] Failed to check active status:', err);
+      startPolling();
     }
   }, [
     invalidateRecoveryQueries,

@@ -2746,13 +2746,9 @@ async def send_dan_message_stream(
                     room_id_for_cancel,
                 )
 
-            # done 未送信の場合のみ送信（フロントエンドのスピナー停止保証）
-            if not done_sent:
-                try:
-                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id_for_cancel or ''})}\n\n"
-                except Exception:
-                    pass
-            # クリーンアップ: リクエストIDとコールバックを解除
+            # クリーンアップは「終わり」の合図より先に済ませる（2026-10-14）。返事の通信が途中で切れると、
+            # サーバーはこの関数を合図の yield で止めたまま二度と戻さない（中断は待ちのたびに起き直す）。
+            # 合図を先に置いていたため、この部屋は作業が終わっても「作業中」と答え続け、画面の停止ボタンも残った。
             ProgressCallbackRegistry.unregister(request_id)
             set_current_request_id(None)
             # キャンセルフラグを解除（CLIがまだ動いていたらスキップ → cli_runner.pyのfinally任せ）
@@ -2760,6 +2756,12 @@ async def send_dan_message_stream(
                 from app.agent.cli_runner import is_cli_active
                 if not is_cli_active(room_id_for_cancel):
                     CancellationRegistry.unregister(room_id_for_cancel)
+            # done 未送信の場合のみ送信（フロントエンドのスピナー停止保証）。必ず最後に置く。
+            if not done_sent:
+                try:
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id_for_cancel or ''})}\n\n"
+                except Exception:
+                    pass
     
     return StreamingResponse(
         generate_stream(),

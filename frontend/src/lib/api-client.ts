@@ -5,6 +5,7 @@
 
 import { useAuthStore } from '@/stores/auth-store';
 import { refreshSession, SessionRefreshError } from './session-refresh';
+import { isTransientNetworkError } from './transient-network';
 
 // API Base URL - env 値に trailing whitespace / 改行が混入すると URL が壊れるので trim
 const API_BASE_URL = '';
@@ -828,24 +829,7 @@ async function request<T>(
 
 // ==================== Helpers ====================
 
-/**
- * 一時的なネットワークエラーかどうかを判定
- * モバイルでのタブ切り替え等で発生する接続断を検出する
- */
-function isTransientNetworkError(message?: string): boolean {
-  if (!message) return false;
-  const m = message.toLowerCase();
-  return (
-    m.includes('networkerror') ||
-    m.includes('failed to fetch') ||
-    m.includes('network request failed') ||
-    m.includes('load failed') ||               // iOS Safari
-    m.includes('the operation was aborted') ||  // Chrome Android
-    m.includes('connection was lost') ||        // Safari generic
-    m.includes('network connection') ||         // Android WebView
-    m.includes('aborted')                       // fetch abort by OS
-  );
-}
+// 一時的なネットワークエラーかどうかの判定は ./transient-network（ブラウザごとの文言の一覧）。
 
 // ==================== API Methods ====================
 
