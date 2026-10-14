@@ -1,0 +1,41 @@
+# Older cases of one site's code inside Dan, recorded 2026-10-15 when scripts/artifact_boundary.py was added.
+# The hourly sweep reports only cases not listed here. Remove a line when its code moves to artifacts/<slug>/.
+app/api/aix_dashboard_routes.py | Dan file named after site aix-dashboard
+app/api/bookings_routes.py | Dan file named after site bookings
+app/api/pornblocker_guard_beacon_routes.py | Dan file named after site pornblocker-guard-beacon
+app/api/salonboard_styleup_routes.py | Dan file named after site salonboard-styleup
+app/models/aix_dashboard_schemas.py | Dan file named after site aix-dashboard
+app/models/bookings_schemas.py | Dan file named after site bookings
+app/models/pornblocker_guard_beacon_schemas.py | Dan file named after site pornblocker-guard-beacon
+app/models/publish_schemas.py | path into site kittoku
+app/services/aix_dashboard_service.py | Dan file named after site aix-dashboard
+app/services/bookings_service.py | Dan file named after site bookings
+app/services/chat_artifact_registration.py | path into site paina
+app/services/pornblocker_guard_beacon_service.py | Dan file named after site pornblocker-guard-beacon
+app/tools/publish_site/seo_generator.py | path into site kittoku
+frontend/next.config.ts | path into site kittoku
+frontend/src/app/api/denki-ai/answer/route.ts | site API under frontend/src/app/api/denki-ai/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-ai/lib.ts | site API under frontend/src/app/api/denki-ai/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/lib.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/login/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/logout/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/mail.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/me/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/password/request/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/password/reset/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/profile/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/resend/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/signup/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-auth/verify/route.ts | site API under frontend/src/app/api/denki-auth/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/answers/route.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/claim/route.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/lib.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/mail.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/mine/route.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/notifications/route.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/notify.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/denki-qa/questions/route.ts | site API under frontend/src/app/api/denki-qa/ (put it in artifacts/<slug>/)
+frontend/src/app/api/kittoku/contact/route.ts | site API under frontend/src/app/api/kittoku/ (put it in artifacts/<slug>/)
+frontend/src/app/api/voice-note/editorial/route.ts | site API under frontend/src/app/api/voice-note/ (put it in artifacts/<slug>/)
+frontend/src/app/api/voice-note/workspace/route.ts | site API under frontend/src/app/api/voice-note/ (put it in artifacts/<slug>/)
+frontend/src/stores/edit-history-store.ts | path into site kittoku

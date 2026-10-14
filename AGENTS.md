@@ -12,7 +12,7 @@ Use only the documents and skills needed for the current operation. A skill supp
 - `app/api/` and `app/services/`: check route ownership before deciding which process needs a restart. Sandbox normally uses port 8000.
 - `frontend/`: dashboard production server on 3000; artifact preview development server on 3001. Production changes require a build; editing a file does not prove deployment.
 - `~/.dan/workspace/`: user preferences, operational rules and memory. Read topic details when needed; do not load all memories.
-- User websites belong under `frontend/src/app/artifacts/<slug>/`; preserve an existing project's source of truth. Read `.claude/skills/build/SKILL.md` when creating or changing an editable website. Other deliverables do not require this skill.
+- User websites belong under `frontend/src/app/artifacts/<slug>/`, their server code included (`<slug>/_server/` for Python routes); Dan keeps only generic code. The folder is recorded in done-artifacts on publish and hourly; preserve an existing project's source of truth. Read `.claude/skills/build/SKILL.md` when creating or changing an editable website. Other deliverables do not require this skill.
 
 ## Changes and verification
 

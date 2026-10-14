@@ -66,7 +66,7 @@ async def list_root_pages(user: TokenData = Depends(get_current_user)):
 
 
 @router.get("/blocks/{block_id}", response_model=BlockResponse)
-async def get_block(block_id: str, user: TokenData = Depends(get_current_user)):
+def get_block(block_id: str, user: TokenData = Depends(get_current_user)):
     block = _svc().get_block(user.user_id, block_id)
     if not block:
         raise HTTPException(status_code=404, detail="ブロックが見つかりません")
@@ -92,7 +92,7 @@ async def create_block(data: BlockCreate, user: TokenData = Depends(get_current_
 
 
 @router.patch("/blocks/{block_id}", response_model=BlockResponse)
-async def update_block(
+def update_block(
     block_id: str, data: BlockUpdate, user: TokenData = Depends(get_current_user)
 ):
     result = _svc().update_block(user.user_id, block_id, data.model_dump(exclude_unset=True))

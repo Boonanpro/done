@@ -130,6 +130,11 @@ async def lifespan(app: FastAPI):
         start_alert_watcher()
     except Exception:
         logger.exception("pornblocker alert watcher start failed")
+    try:
+        from app.services.artifact_archive import start_sweeper
+        start_sweeper()
+    except Exception:
+        logger.exception("artifact archive sweeper start failed")
     yield
 
 
@@ -178,6 +183,10 @@ app.include_router(collab_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
 app.include_router(dan_notion_router, prefix="/api/v1")
+# 成果物ごとの裏側の処理は成果物フォルダ（artifacts/<slug>/_server）に置き、ここでは載せるだけにする
+from app.services.artifact_backends import routers as artifact_routers
+for _slug, _artifact_router in artifact_routers():
+    app.include_router(_artifact_router, prefix="/api/v1")
 app.include_router(chat_artifact_router, prefix="/api/v1")
 app.include_router(image_generation_router, prefix="/api/v1")
 app.include_router(video_generation_router, prefix="/api/v1")

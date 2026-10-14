@@ -17,11 +17,12 @@ const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || '.next',
   typescript: { tsconfigPath: process.env.NEXT_TSCONFIG || 'tsconfig.json' },
   reactStrictMode: true,
-  // /api/voice-note/editorial は process.cwd() で python ワーカーを spawn する
+  // 成果物の editorial（/api/voice-note/editorial・artifacts/<slug>/editorial）は process.cwd() で python ワーカーを spawn する
   // ローカル専用ルート。Next のファイルトレースが process.cwd() を見て frontend/ を
   // まるごと同梱し、関数が 1.16GB になって Vercel のビルドが落ちるため除外する。
   outputFileTracingExcludes: {
-    '/api/voice-note/editorial': ['**/*'],
+    '/api/*/editorial': ['**/*'],
+    '/artifacts/*/editorial': ['**/*'],
   },
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,
@@ -136,6 +137,12 @@ const nextConfig: NextConfig = {
       {
         source: '/api/v1/story/:path*',
         destination: `${coreBackendUrl}/api/v1/story/:path*`,
+      },
+      // 成果物アプリを外から開く入口（例: スマホアプリが叩く /api/x-operation/open）。
+      // 処理は成果物自身の artifacts/<slug>/open/route.ts にあり、ダン本体には置かない。
+      {
+        source: '/api/:slug((?!v1$)[a-z0-9-]+)/open',
+        destination: '/artifacts/:slug/open',
       },
       // 上記以外の /api/* は業務系サンドボックスへ
       {

@@ -15,6 +15,7 @@ Read [integration.md](references/integration.md) when creating a slug or changin
 - Keep stable edit IDs and native editable text/media. Existing release overrides can supersede JSX; inspect them before changing published content.
 - Use `ArtifactLink` for internal navigation. Preserve artifact identity and preview authentication behavior.
 - Use the current registration/publish service. A successful file edit or registration does not prove publication.
+- A site's own server code stays in the site: Next routes in `artifacts/<slug>/<route>/route.ts`, Python API in `artifacts/<slug>/_server/routes.py` (a `router`, mounted by `app/services/artifact_backends.py`). Never in `app/` or `frontend/src/app/api/`; the commit hook and the hourly archive sweep (`scripts/artifact_boundary.py`) catch it.
 
 Japanese copy (introductions, catchphrases, articles) follows [copywriting.md](references/copywriting.md): the owner judged Dan's copy too AI-like and preferred its rewrites.
 
