@@ -1926,6 +1926,7 @@ def run_oneshot_cli(
 
 
 from app.agent import codex_runner as _codex
+from app.agent import turn_flow
 
 # Claude CLI models + Codex CLI (ChatGPT sign-in) models. The model decides the
 # backend: ``gpt-*`` → codex_runner, everything else → this file's Claude path.
@@ -2919,7 +2920,8 @@ def _run_cli_in_thread(
                 reasoning_full_list = result_data.get("reasoning_full", [])
                 blocks = result_data.get("turn_blocks", [])
                 cli_saved = _save_ai_message_sync(
-                    room_id, text, reasoning, reasoning_full_list, blocks=blocks, turn_id=turn_id
+                    room_id, text, reasoning, reasoning_full_list, blocks=blocks,
+                    created_at=turn_flow.record_time(run_id), turn_id=turn_id,
                 )
                 _cli_debug(f"AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
 
@@ -2979,6 +2981,7 @@ def _run_cli_in_thread(
             _save_ai_message_sync(
                 room_id,
                 f"処理中にエラーが発生しました。もう一度お試しください。\n（{type(e).__name__}）",
+                created_at=turn_flow.record_time(run_id),
                 turn_id=turn_id,
             )
             _save_execution_event_sync(
@@ -3006,6 +3009,7 @@ def _run_cli_in_thread(
                 _save_ai_message_sync(
                     room_id,
                     "処理が中断されました。もう一度お試しください。",
+                    created_at=turn_flow.record_time(run_id),
                     turn_id=turn_id,
                 )
             done_content = "cancelled" if was_cancelled else "interrupted"
@@ -3552,17 +3556,18 @@ async def _process_via_streaming_session(
                 # The reply is placed when it was finished, not when the turn began: placed at the start, a reply that came
                 # after a follow-up sorted above it (docs/current/chat-timeline-definition.md, 2026-10-02).
                 turn_start = datetime.now(timezone.utc).isoformat()
+                # 追い連絡で割り込まれたターン（2026-10-13）: 書き終えたのは追い連絡の後でも、
+                # 中身は追い連絡の前にした作業なので、追い連絡の直前（元のメッセージの下）に置く。
+                # 終了時刻で置くと、追い連絡の下に落ちて「本人が2通続けて送った」ように見えた。
+                # 置く時刻は、どのモデルの経路も turn_flow.record_time で決める（2026-10-14）。
+                anchor = None
                 if continuation:
-                    # 追い連絡で割り込まれたターン（2026-10-13）: 書き終えたのは追い連絡の後でも、
-                    # 中身は追い連絡の前にした作業なので、追い連絡の直前（元のメッセージの下）に置く。
-                    # 終了時刻で置くと、追い連絡の下に落ちて「本人が2通続けて送った」ように見えた。
-                    anchor = None
                     try:
                         anchor = session.take_followup_anchor()
                     except Exception:
                         anchor = None
-                    placed = _just_before_iso(anchor) if anchor else None
-                    turn_start = placed or state.get("last_block_at") or turn_start
+                placed = turn_flow.record_time(run_id, handed_over_at=anchor)
+                turn_start = placed or (state.get("last_block_at") if continuation else None) or turn_start
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
                 if not skip_save and not (empty_continuation and not state["turn_blocks"]):
@@ -3732,7 +3737,7 @@ async def _process_via_streaming_session(
                 )
                 recreate_saved = False
                 if not skip_save:
-                    recreate_saved = _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()))
+                    recreate_saved = _save_ai_message_sync(room_id, text, created_at=turn_flow.record_time(run_id), turn_id=str(uuid.uuid4()))
                 _emit({
                     "type": "result", "text": text, "session_id": None,
                     "is_error": True, "cli_saved": bool(recreate_saved),
@@ -3920,11 +3925,9 @@ async def process_message_cli(
     # プロセス起動・再注入で数秒）、chat_routes は新しい発言を追い連絡として待たせる。
     # 印は run_turn が外す。常駐経路に入らなかった時・例外の時は下の finally で外す。
     _turn_claim = None
-    if backend == "claude" and not skip_save:
+    if not skip_save:
         try:
-            from app.agent.streaming_session import claim_turn as _claim_turn, streaming_enabled as _se
-            if _se():
-                _turn_claim = _claim_turn(room_id)
+            _turn_claim = turn_flow.claim_new_turn(room_id, backend)
         except Exception:
             _turn_claim = None
     try:
@@ -4042,7 +4045,7 @@ async def _process_message_cli_body(
         _use_streaming = streaming_enabled()
     except Exception:
         _use_streaming = False
-    if _use_streaming and backend == "claude":
+    if _use_streaming and turn_flow.reads_mid_turn(backend):
         _cli_debug(f"[STREAMING] routing room={room_id} via persistent session")
         from app.services.artifact_url_guard import sanitize_artifact_public_urls
         async for ev in _process_via_streaming_session(

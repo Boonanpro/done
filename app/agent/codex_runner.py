@@ -759,7 +759,7 @@ def run_codex_turn_in_thread(
     """Run one Dan turn through ``codex exec``. Same contract as
     ``cli_runner._run_cli_in_thread`` (events on ``event_queue``, sentinel at
     the end) so ``process_message_cli`` can drive either backend."""
-    from app.agent import cli_runner as cr
+    from app.agent import cli_runner as cr, turn_flow
 
     cr._thread_local.room_id = room_id
     turn_id = str(uuid.uuid4())
@@ -884,6 +884,7 @@ def run_codex_turn_in_thread(
                     result_data.get("reasoning_steps", []),
                     result_data.get("reasoning_full", []),
                     blocks=result_data.get("turn_blocks", []),
+                    created_at=turn_flow.record_time(run_id),
                     turn_id=turn_id,
                 )
                 cr._cli_debug(f"[CODEX] AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
@@ -929,6 +930,7 @@ def run_codex_turn_in_thread(
             cr._save_ai_message_sync(
                 room_id,
                 f"処理中にエラーが発生しました。もう一度お試しください。\n（{type(e).__name__}）",
+                created_at=turn_flow.record_time(run_id),
                 turn_id=turn_id,
             )
             cr._save_execution_event_sync(
@@ -942,7 +944,10 @@ def run_codex_turn_in_thread(
             was_cancelled = CancellationRegistry.is_cancelled(room_id)
             cr._cli_debug(f"[CODEX] safety net: exited without result (cancelled={was_cancelled})")
             if not was_cancelled:
-                cr._save_ai_message_sync(room_id, "処理が中断されました。もう一度お試しください。", turn_id=turn_id)
+                cr._save_ai_message_sync(
+                    room_id, "処理が中断されました。もう一度お試しください。",
+                    created_at=turn_flow.record_time(run_id), turn_id=turn_id,
+                )
             cr._save_execution_event_sync(
                 room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id,
                 content="cancelled" if was_cancelled else "interrupted",

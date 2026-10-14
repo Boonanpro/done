@@ -2068,6 +2068,7 @@ async def send_dan_message_stream(
             project_info = {}
             current_project_run = None
             should_supersede_existing_run = False
+            _saved_model = None   # the model saved for this room (none = the default): decides the engine below
             if request.session_id:
                 try:
                     from app.services.project_service import ProjectService
@@ -2076,12 +2077,14 @@ async def send_dan_message_stream(
                     preload_project_service = ProjectService()
                     proj_result = (
                         preload_project_service.supabase.table("projects")
-                        .select("id, title, description, status, room_id")
+                        .select("id, title, description, status, room_id, metadata")
                         .eq("room_id", request.session_id)
                         .execute()
                     )
                     if proj_result.data:
                         project_info = proj_result.data[0]
+                        _meta = project_info.pop("metadata", None)
+                        _saved_model = _meta.get("model") if isinstance(_meta, dict) else None
                         current_project_run = await RunService().get_current_run(
                             project_info["id"], chat_only=True   # work in the background is not this chat's turn: never superseded by a message
                         )
@@ -2187,12 +2190,16 @@ async def send_dan_message_stream(
             # 反映する追い連絡として扱う。→ supersede(kill) はスキップする。
             # 準備中（1通目の文脈組み立て・CLI 起動待ち。数秒）も実行中と同じに扱う（2026-10-14）。
             # 以前はその間に届いた発言が「方針変更」になって前のターンを止めていた。
+            # 待たせるか・止めて始め直すかは、部屋のモデルの経路が「作業の途中で受け取れるか」で決まる
+            # （app/agent/turn_flow.py。2026-10-14: ここがモデルを見ずに待たせていて、GPT の部屋では
+            # 送ってから2分以内の追い連絡が誰も読まない置き場に入り、ダンに届かなかった）。
+            from app.agent import turn_flow
             _route_as_followup = False
             try:
-                from app.agent.streaming_session import streaming_enabled, is_turn_active_or_preparing
-                if streaming_enabled():
-                    _route_as_followup = is_turn_active_or_preparing(room_id)
+                _engine = turn_flow.engine_of(_saved_model)
+                _route_as_followup = turn_flow.waits_for_running_turn(room_id, _engine)
             except Exception:
+                _engine = "claude"
                 _route_as_followup = False
 
             # 準備中の印はここで立てる（2026-10-14 追補）。process_message_cli の中で立てるのでは、
@@ -2200,15 +2207,25 @@ async def send_dan_message_stream(
             # なっていた（01:01 の実測: 発言の保存 32.6s → 印 34.5s、追い連絡の判定 34.0s）。
             # 新しいターンと決めた瞬間に立て、run_turn が最初の本文を書いた時に外れる。
             # 配信が終わる時（例外・切断を含む）にも念のため外す。
-            if _streaming_on and not _route_as_followup and not _voice_call:
+            if not _route_as_followup and not _voice_call:
                 try:
-                    from app.agent.streaming_session import claim_turn as _claim_turn_early
-                    _early_turn_claim = (room_id, _claim_turn_early(room_id))
+                    _claim = turn_flow.claim_new_turn(room_id, _engine)
+                    _early_turn_claim = (room_id, _claim) if _claim is not None else None
                 except Exception:
                     _early_turn_claim = None
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める（追い連絡経路では止めない）
             if (replan_requested or should_supersede_existing_run) and not _route_as_followup and not _voice_call:
+                # 止められるターンの作業の記録は、この発言の直前に置く（止められた側が保存する時に
+                # turn_flow.record_time で読む）。保存時刻のままだと発言の下に落ち、2通続けて送ったように見える。
+                try:
+                    _received = message.get("created_at") if message else None
+                    turn_flow.stopped_by_message(
+                        (current_project_run or {}).get("id"),
+                        _received.isoformat() if hasattr(_received, "isoformat") else _received,
+                    )
+                except Exception:
+                    pass
                 try:
                     CancellationRegistry.cancel(room_id)
                     from app.agent.cli_runner import kill_cli_process
