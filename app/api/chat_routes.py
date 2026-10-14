@@ -471,7 +471,7 @@ async def _notify_dan_completion(
             body = "Danの作業が完了しました"
         url = f"/chat/{project_id}" if project_id else "/chat"
         title = "Dan"
-        # 一覧に出さない部屋（ダン開発室のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（参謀）を開く。
+        # 一覧に出さない部屋（ダン開発室のボードの会話の部屋）の通知は、その部屋ではなく元の部屋（ダン開発室）を開く。
         def _hidden_origin(pid):   # 同期の DB 呼び出しはスレッドで（イベントループを止めない）
             from app.services.project_service import ProjectService
             ps = ProjectService()
@@ -486,7 +486,7 @@ async def _notify_dan_completion(
                 origin, row = found
                 url = f"/chat/{origin['id']}"
                 title = (origin.get("title") or "Dan")[:40]
-                body = _compact_text(f"{(row.get('title') or '').removeprefix('参謀: ')}: {body}", 120)
+                body = _compact_text(f"{(row.get('title') or '').removeprefix('ダン開発室: ').removeprefix('参謀: ')}: {body}", 120)
         except Exception as e:
             logger.debug("hidden-room push redirect skipped (room=%s): %s", room_id, e)
         svc = get_push_service()
