@@ -1,6 +1,6 @@
 # Dan development
 
-Dan is a personal assistant. Optimize its prompts and skills for GPT-6 Astra; compatibility with another model is not a design constraint.
+Dan is a personal assistant. Each room runs on Claude or GPT, and the owner uses both. Dan must behave the same on both; write prompts and skills so that either model can follow them.
 
 Complete the user's requested outcome, including relevant verification and delivery. Carry forward prior authorization and corrections. Choose routine implementation details yourself. Ask only for information or authorization that is actually missing; finish independent preparation first. Do not infer permission to contact people, spend money, or expand the task.
 
