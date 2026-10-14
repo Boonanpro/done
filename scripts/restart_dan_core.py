@@ -2,12 +2,16 @@
 process tree), wait for the ports to free. Launching a fresh core is done
 separately so it can run in the background. After it starts, scripts/verify_dan.py checks that real work goes through.
 
-  (no option)    stop now; refuses while a call, a turn or parallel work is running
+Before stopping, the folder is brought up to GitHub main (scripts/follow_github.py), so a restart loads what was
+pushed and not only what happens to be in the folder. A folder that cannot follow is left as it is and said so.
+
+  (no option)    stop now; refuses while a call, a turn or parallel work is running, or when the code does not load
   --force        stop even then (only when the owner agreed)
   --when-idle --then "<what to check afterwards>"    for Dan itself (2026-10-13). Dan's turn runs inside the core, so
       stopping the core ends the turn that asked. This hands the whole restart to a process outside the core: it waits
-      until nothing is running (the asking turn included), checks that the code on disk loads, stops, has the watchdog
-      start the core, runs verify_dan.py, and wakes Dan in the asking room with the outcome.
+      until nothing is running (the asking turn included), brings the folder up to GitHub main, checks that the code on
+      disk loads, stops, has the watchdog start the core, runs verify_dan.py, and wakes Dan in the asking room with the
+      outcome.
 """
 import os
 import subprocess
@@ -124,6 +128,13 @@ def loads():
     return None if p.returncode == 0 else (p.stderr or '').strip()[-1500:]
 
 
+def follow_github():
+    """(True, what happened) once the folder is on GitHub main; (False, why) when it was left as it is."""
+    p = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'follow_github.py')], cwd=str(ROOT), capture_output=True,
+                       encoding='utf-8', errors='replace', creationflags=NO_WINDOW)
+    return p.returncode == 0, (p.stdout or p.stderr or 'follow_github.py printed nothing').strip()[:1200]
+
+
 def core_started_at():
     return max((psutil.Process(pid).create_time() for pid, ports in listeners().items() if 9000 in ports), default=0)
 
@@ -198,15 +209,17 @@ def restart_when_idle(room, then, asked):
         time.sleep(10)
     if core_started_at() > asked:   # someone restarted it while this waited
         return wake(room, '本体は頼んだ後に別の再起動で新しくなっていたので、もう一度は止めていない。動作確認: ' + verify() + '。' + after)
+    followed, github = follow_github()
+    folder = chr(10) + ('フォルダと GitHub: ' if followed else 'フォルダを GitHub に追いつかせられなかった（フォルダは変えていない）: ') + github
     problem = loads()
     if problem:
-        return wake(room, '本体を再起動していない。いまのコードが読み込めないため、止めると起き上がれない:' + chr(10) + problem)
+        return wake(room, '本体を再起動していない。いまのコードが読み込めないため、止めると起き上がれない:' + chr(10) + problem + folder)
     if not stop():
         return wake(room, '本体を止めきれなかった（9000 / 8000 番が空かない）。再起動は終わっていない。')
     at = time.strftime('%H:%M')
     if not start():
         return wake(room, f'本体を {at} に止めたが、{BACK_UP // 60}分たっても起き上がらなかった。dan_core.log の末尾を見る。')
-    wake(room, f'本体を {at} に再起動した。動作確認: ' + verify() + '。' + after)
+    wake(room, f'本体を {at} に再起動した。動作確認: ' + verify() + '。' + after + folder)
 
 
 def hand_over(room, then):
@@ -253,6 +266,12 @@ def main():
     if reason:
         print('NOT restarting:', reason, '(pass --force only when the owner agreed)')
         sys.exit(3)
+    followed, github = follow_github()
+    print('folder and GitHub:' if followed else 'WARNING, the folder was NOT brought up to GitHub (left as it is):', github)
+    problem = loads()
+    if problem:
+        print('NOT restarting: the code on disk does not load' + chr(10) + problem)
+        sys.exit(2)
     if not stop():
         print("WARNING: ports still occupied")
         sys.exit(1)

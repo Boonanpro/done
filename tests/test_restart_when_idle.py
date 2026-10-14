@@ -14,10 +14,12 @@ spec.loader.exec_module(restart)
 def world(monkeypatch):
     """Everything the outside process touches, recorded in order."""
     did, woke = [], []
-    state = {'busy': [], 'loads': None, 'stops': True, 'starts': True, 'core_started_at': 0}
+    state = {'busy': [], 'loads': None, 'stops': True, 'starts': True, 'core_started_at': 0,
+             'follows': (True, 'already on GitHub main (536ee4e7)')}
     monkeypatch.setattr(restart, 'busy', lambda: state['busy'].pop(0) if state['busy'] else None)
     monkeypatch.setattr(restart, 'earlier_restart', lambda: None)
-    monkeypatch.setattr(restart, 'loads', lambda: state['loads'])
+    monkeypatch.setattr(restart, 'loads', lambda: did.append('load check') or state['loads'])
+    monkeypatch.setattr(restart, 'follow_github', lambda: did.append('follow GitHub') or state['follows'])
     monkeypatch.setattr(restart, 'core_started_at', lambda: state['core_started_at'])
     monkeypatch.setattr(restart, 'stop', lambda: did.append('stop') or state['stops'])
     monkeypatch.setattr(restart, 'start', lambda: did.append('start') or state['starts'])
@@ -31,7 +33,7 @@ def test_it_waits_for_everyone_then_restarts_checks_and_wakes_the_room_that_aske
     state, did, woke = world
     state['busy'] = ['Dan is working in: ダン開発室', 'Dan is working in: ダン開発室']   # the asking turn itself, still ending
     restart.restart_when_idle('room-1', '追い連絡の並びを確かめる', asked=100)
-    assert did == ['wait', 'wait', 'stop', 'start', 'verify']
+    assert did == ['wait', 'wait', 'follow GitHub', 'load check', 'stop', 'start', 'verify']
     (room, note), = woke
     assert room == 'room-1' and '再起動した' in note and 'PASSED' in note and '追い連絡の並びを確かめる' in note
 
@@ -40,7 +42,7 @@ def test_code_that_does_not_load_is_never_stopped_for(world):
     state, did, woke = world
     state['loads'] = 'ImportError: cannot import name x'
     restart.restart_when_idle('room-1', '', asked=100)
-    assert did == [] and '再起動していない' in woke[0][1] and 'ImportError' in woke[0][1]
+    assert 'stop' not in did and '再起動していない' in woke[0][1] and 'ImportError' in woke[0][1]
 
 
 def test_work_that_never_ends_is_not_cut_off(world, monkeypatch):
@@ -63,7 +65,7 @@ def test_a_core_that_does_not_come_back_is_said_so(world):
     state, did, woke = world
     state['starts'] = False
     restart.restart_when_idle('room-1', '', asked=100)
-    assert did == ['stop', 'start'] and '起き上がらなかった' in woke[0][1]
+    assert did[-2:] == ['stop', 'start'] and '起き上がらなかった' in woke[0][1]
 
 
 def test_a_restart_handed_over_later_waits_for_the_earlier_one(world, monkeypatch):
@@ -74,6 +76,36 @@ def test_a_restart_handed_over_later_waits_for_the_earlier_one(world, monkeypatc
     monkeypatch.setattr(restart, 'core_started_at', lambda: 0 if earlier else 200)   # new once the earlier one is done
     restart.restart_when_idle('room-2', '', asked=100)
     assert did == ['wait', 'verify'] and 'もう一度は止めていない' in woke[0][1]
+
+
+def test_the_folder_follows_github_before_its_code_is_checked_and_loaded(world):
+    """A fix pushed from another place is in the folder by the time the core starts (2026-10-14)."""
+    state, did, woke = world
+    state['follows'] = (True, 'now on GitHub main (1269a7c9) — 1 commits, 3 files GitHub changed: 2 already held here, 1 brought in from GitHub: app/x.py')
+    restart.restart_when_idle('room-1', '', asked=100)
+    assert did == ['follow GitHub', 'load check', 'stop', 'start', 'verify']
+    assert 'フォルダと GitHub' in woke[0][1] and 'app/x.py' in woke[0][1]
+
+
+def test_a_folder_that_cannot_follow_is_restarted_as_it_is_and_said_so(world):
+    """One file holding both uncommitted work and a change it lacks must not keep Dan from restarting."""
+    state, did, woke = world
+    state['follows'] = (False, "NOT brought up to GitHub main (2 commits behind); nothing was changed.\n  app/y.py: lacks GitHub's change and has uncommitted work in the same file")
+    restart.restart_when_idle('room-1', '', asked=100)
+    assert did == ['follow GitHub', 'load check', 'stop', 'start', 'verify']
+    assert '再起動した' in woke[0][1] and '追いつかせられなかった' in woke[0][1] and 'app/y.py' in woke[0][1]
+
+
+def test_from_outside_dan_it_follows_checks_then_stops_and_never_stops_for_code_that_does_not_load(world, monkeypatch, capsys):
+    state, did, woke = world
+    monkeypatch.setattr(restart.sys, 'argv', ['restart_dan_core.py'])
+    restart.main()
+    assert did == ['follow GitHub', 'load check', 'stop'] and 'folder and GitHub' in capsys.readouterr().out
+    del did[:]
+    state['loads'] = 'ImportError: cannot import name x'
+    with pytest.raises(SystemExit):
+        restart.main()
+    assert did == ['follow GitHub', 'load check'] and 'does not load' in capsys.readouterr().out
 
 
 def test_the_asking_room_is_known_without_being_passed(monkeypatch):
