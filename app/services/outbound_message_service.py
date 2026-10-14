@@ -254,7 +254,10 @@ class OutboundMessageService:
             ad["revision"] = int(ad.get("revision") or 1) + 1
             ad["pending_update"] = None
         upd["action_data"] = ad
-        r = self.sb.table("dan_proposals").update(upd).eq("id", proposal_id).execute()
+        r = (self.sb.table("dan_proposals").update(upd).eq("id", proposal_id)
+             .eq("user_id", user_id).eq("status", "pending").eq("updated_at", row["updated_at"]).execute())
+        if not r.data:
+            raise ValueError("原稿が更新されたか送信中です。再読み込みしてください。")
         return r.data[0]
 
     # ------------------------------------------------------------------
@@ -556,6 +559,8 @@ class OutboundMessageService:
         if row["status"] != "sending":
             raise ValueError(f"この送信案は sending ではなく {row['status']} です")
         ad = dict(row.get("action_data") or {})
+        if ad.get("x_delivery"):
+            raise ValueError("X APIの送信結果が未確定です。運用室で公開投稿を照合してください。再送のための解除はできません。")
         ad.pop("claimed_at", None)
         r = self.sb.table("dan_proposals").update({
             "status": "pending", "action_data": ad,

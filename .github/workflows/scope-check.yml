@@ -119,6 +119,16 @@ jobs:
           sys.exit(1)
           PY
 
+      - name: Keep site code out of Dan (scripts/artifact_boundary.py)
+        if: steps.changed.outputs.skip != '1'
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python scripts/artifact_boundary.py --diff "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+          else
+            python scripts/artifact_boundary.py --diff "${{ github.event.before }}" "${{ github.sha }}"
+          fi
+
       - name: Enforce Salonboard browser session policy
         shell: bash
         run: python scripts/check_salonboard_browser_policy.py

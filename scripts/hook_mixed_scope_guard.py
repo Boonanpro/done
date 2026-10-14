@@ -1,4 +1,5 @@
-"""Pre-commit guard: block commits that mix Dan infra with artifact code.
+"""Pre-commit guard: block commits that mix Dan infra with artifact code, or that put one site's code into Dan
+(scripts/artifact_boundary.py).
 
 Run from a git pre-commit hook (or any other layer that wants the same
 check; the CI workflow imports detect_mix() directly).
@@ -61,6 +62,16 @@ def main() -> int:
     paths = _staged_paths()
     if not paths:
         return 0
+
+    # One site's code must stay in its artifact folder, never in Dan (2026-10-15).
+    if os.environ.get("OVERRIDE_ARTIFACT_BOUNDARY") != "1":
+        import artifact_boundary  # noqa: E402
+
+        leaks = artifact_boundary.diff_findings(["--cached"], artifact_boundary.site_slugs())
+        if leaks:
+            artifact_boundary.report(leaks, sys.stderr)
+            sys.stderr.write("  本当に必要な特例の時のみ: OVERRIDE_ARTIFACT_BOUNDARY=1 git commit ...\n\n")
+            return 1
 
     verdict = detect_mix(paths)
     if verdict.ok:
