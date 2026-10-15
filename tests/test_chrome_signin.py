@@ -38,3 +38,26 @@ async def test_approved_means_dan_signs_in_without_asking_and_declined_means_nev
     sign(setup)
     await C.tool({'action': 'decline'})
     assert await C.note('u', setup) == ''
+
+
+@pytest.mark.asyncio
+async def test_approved_signs_in_before_working_on_the_page_and_a_failure_waits_a_day(setup, monkeypatch):
+    sign(setup)
+    monkeypatch.setenv('DAN_USER_ID', 'u')
+    await C.tool({'action': 'approve', 'account': 'a@gmail.com'})
+    told = await C.note('u', setup, 'https://example.com/')
+    assert 'このページを操作する前に' in told and '区切り' not in told
+    assert await C.note('u', setup, 'chrome://settings/people') == ''              # the sign-in itself
+    assert await C.note('u', setup, 'https://accounts.google.com/signin') == ''
+    await C.tool({'action': 'failed'})
+    assert await C.note('u', setup, 'https://example.com/') == ''                  # not retried for a day
+    monkeypatch.setattr(C.time, 'time', lambda: C.state('u')['failed_at'] + C.RETRY_AFTER_FAILED + 1)
+    assert 'このページを操作する前に' in await C.note('u', setup, 'https://example.com/')
+    await C.tool({'action': 'approve', 'account': 'a@gmail.com'})                  # approving again clears the failure
+    assert C.state('u')['failed_at'] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_question_recommends_signing_in(setup):
+    sign(setup)
+    assert 'おすすめ' in await C.note('u', setup)
