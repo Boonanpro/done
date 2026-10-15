@@ -222,7 +222,9 @@ async def _session(job_id, s, first):
                     elif block.get('type') == 'tool_use':
                         name = str(block.get('name') or 'tool').removeprefix('mcp__dan-tools__')
                         state.change(job_id, lambda x, n=name: x.update(current_tool={'name': n, 'started_at': state.now()}))
-                        state.publish(job_id, 'tool', name)
+                        # The same words the room's own work log shows for a tool (「ファイル読み取り: x.md」), so a job seen elsewhere reads alike.
+                        from app.api.project_routes import _format_tool_label
+                        state.publish(job_id, 'tool', name, _format_tool_label(name, block.get('input') or {}))
             elif kind == 'result':
                 if event.get('session_id'):
                     state.change(job_id, lambda x: x.update(session_id=event['session_id']))
