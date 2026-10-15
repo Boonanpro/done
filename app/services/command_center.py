@@ -248,6 +248,8 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         from app.services.parallel_job_runner import model_key, room_model, title_of
         extra = {'model': model_key(params.get('model')) or (room_model(target_room) if engine == 'parallel' else 'opus'),
                  'title': title_of(params.get('title') or task)}
+        if engine == 'parallel' and params.get('quiet'):
+            extra['quiet'] = True   # asked from a site (X運用室): its result is not posted in the room's chat
     elif engine == 'api' and params.get('model'):
         extra = {'model': str(params['model'])[:60]}
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
