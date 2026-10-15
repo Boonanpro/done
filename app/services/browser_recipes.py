@@ -334,9 +334,9 @@ async def around(action, params, execute):
                 # A Chrome not signed in to the user's Google account: Dan asks the user once, or signs in if approved.
                 from app.services import chrome_signin
                 from app.tools.browser import _executor_profile_dir
-                hint = await chrome_signin.note(os.environ.get('DAN_USER_ID', ''), _executor_profile_dir())
-                if hint:
-                    result['content'].append({'type': 'text', 'text': hint})
+                hint = await chrome_signin.note(os.environ.get('DAN_USER_ID', ''), _executor_profile_dir(), params.get('url') or '')
+                if hint:   # first, so it is read before the page: approved means sign in before working on it
+                    result['content'].insert(0, {'type': 'text', 'text': hint})
         except Exception:
             logger.warning('browser replay unavailable', exc_info=True)
     return result
