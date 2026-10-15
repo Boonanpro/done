@@ -4543,6 +4543,9 @@ async def _execute_attach_image(params: Dict[str, Any]) -> Dict[str, Any]:
         "filename": filename,
         "url": url,
         "marker": marker,
+        # The shared formatter shows only message/output, so a marker kept in its own field never reached the model and the
+        # tool answered just 「完了」 (2026-10-15: screenshots could not be shown in chat and were left as paths).
+        "message": f"marker: {marker}",
         "instruction": (
             "次のアシスタント返答の本文に、上記 marker 文字列をそのまま貼り付けてください。"
             "改変・括弧追加・URL置換は一切しないこと。複数枚なら改行区切りで列挙。"
