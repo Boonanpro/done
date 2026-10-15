@@ -177,6 +177,35 @@ def _get_session_title(room_id: str) -> str:
     return room_id[:8]
 
 
+def _quiet_job_reports(room_id: str, since) -> list:
+    """Results of work asked from a site (X運用室) since the last turn. They answer on the site and are not posted
+    in the room's chat (parallel_job_runner.deliver), so this is how the room's Dan learns what was done there."""
+    from app.services import command_job_state as state
+    if not state.ROOT.exists():
+        return []
+    try:
+        floor = parse_datetime(since).timestamp() if since else time.time() - 86400
+    except ValueError:
+        floor = time.time() - 86400
+    found = []
+    for p in state.ROOT.glob("*.json"):
+        try:
+            if p.stat().st_mtime < floor:
+                continue
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        at = s.get("quiet_delivered_at")
+        if not (s.get("quiet") and s.get("room_id") == room_id and at):
+            continue
+        if parse_datetime(at).timestamp() < floor:
+            continue
+        text = (s.get("result") or s.get("error") or "").strip()
+        if text:
+            found.append((at, f"運用室での作業（チャットには出していない）・{s.get('title') or ''}: {text[:1200]}"))
+    return [line for _, line in sorted(found)]
+
+
 def _fetch_unseen_voice_digest(room_id: str) -> str:
     """直近のダン（チャットのターン）の返事より後に部屋へ入った、ダンがまだ読んでいない出来事をまとめる。
     音声会話（🎙）と、作業の報告（ターン外で部屋に書かれたダンの行）。
@@ -223,6 +252,8 @@ def _fetch_unseen_voice_digest(room_id: str) -> str:
                     lines.append(f"{who}: {text[:600]}")
             elif m.get("sender_type") == "ai" and c:
                 lines.append(f"作業の報告（部屋に届いた分）: {c[:1200]}")
+        since = msgs[last_turn_idx].get("created_at") if last_turn_idx >= 0 else None
+        lines += _quiet_job_reports(room_id, since)
         if not lines:
             return ""
         digest = "\n".join(lines)

@@ -76,6 +76,12 @@ async def deliver(job_id, text):
     from app.services.command_center import report_id
     from app.services import voice_calls
     s = state.read(job_id)
+    if s.get('quiet'):
+        # Work asked from a site (X運用室) answers there. The room keeps the result in the job's state, and the room's
+        # Dan reads it on his next turn (chat_routes._fetch_unseen_voice_digest); nothing is posted in the chat.
+        revision = s.get('delivered_revision', -1) + 1
+        state.change(job_id, lambda x: x.update(delivered_revision=revision, quiet_delivered_at=state.now()))
+        return None
     if voice_calls.active(s['room_id']):
         return None
     body = f"**【並行作業：{s.get('title') or title_of(s['task'])}】**\n\n{text.strip()}"
@@ -311,8 +317,9 @@ def public(s):
             'active': s.get('state') not in state.TERMINAL, 'created_at': s.get('created_at'), 'updated_at': s.get('updated_at')}
 
 
-def room_jobs(user_id, room_id, hours=24):
-    """This room's parallel jobs: all active ones and those of the last `hours`, newest first."""
+def room_jobs(user_id, room_id, hours=24, include_quiet=True):
+    """This room's parallel jobs: all active ones and those of the last `hours`, newest first.
+    Quiet jobs (asked from a site) are left out of the room's work list on screen (include_quiet=False)."""
     from datetime import datetime, timedelta, timezone
     if not state.ROOT.exists():
         return []
@@ -321,6 +328,7 @@ def room_jobs(user_id, room_id, hours=24):
     for p in state.ROOT.glob('*.json'):
         s = state.read(p.stem)
         if (s and s.get('user_id') == user_id and s.get('room_id') == room_id and s.get('engine') in ('parallel', 'make')
+                and (include_quiet or not s.get('quiet'))
                 and (s['state'] not in state.TERMINAL or (s.get('updated_at') or '') >= since)):
             rows.append(s)
     rows.sort(key=lambda s: (s['state'] in state.TERMINAL, s.get('created_at') or ''), reverse=False)
@@ -330,11 +338,12 @@ def room_jobs(user_id, room_id, hours=24):
             + sorted(done, key=lambda s: s.get('updated_at') or '', reverse=True))[:20]
 
 
-async def start(room_id, user_id, task, model='', title=''):
-    """Start a parallel job in this room (from chat Dan's tool or the room's work list)."""
+async def start(room_id, user_id, task, model='', title='', quiet=False):
+    """Start a parallel job in this room (from chat Dan's tool or the room's work list).
+    quiet: asked from a site; the result is not posted in the room's chat (see deliver)."""
     from app.services.command_center import execute
     model = model_key(model) or room_model(room_id)
-    out = await execute({'action': 'work', 'engine': 'parallel', 'model': model, 'task': task, 'title': title},
+    out = await execute({'action': 'work', 'engine': 'parallel', 'model': model, 'task': task, 'title': title, 'quiet': quiet},
                         room_id, user_id)
     if not out.get('accepted'):
         raise ValueError(out.get('error') or '作業を始められませんでした')
