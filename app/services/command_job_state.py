@@ -59,15 +59,17 @@ def change(job_id, fn):
                 time.sleep(.01)
         return state
 
-def event(state, kind, text):
+def event(state, kind, text, label=None):
     seq = state.get('seq', 0) + 1
     state['seq'] = seq
-    state.setdefault('events', []).append({'seq': seq, 'kind': kind, 'text': text[:3000], 'at': now()})
+    item = {'seq': seq, 'kind': kind, 'text': text[:3000], 'at': now()}
+    if label: item['label'] = label[:300]
+    state.setdefault('events', []).append(item)
     state['events'] = state['events'][-300:]   # 40 lost the first minutes of a 75-step job (2026-09-23): the start is where the cause usually is
 
-def publish(job_id, kind, text, **fields):
+def publish(job_id, kind, text, label=None, **fields):
     def update(s):
-        s.update(fields); event(s, kind, text)
+        s.update(fields); event(s, kind, text, label)
     return change(job_id, update)
 
 def create(job_id, **fields):
