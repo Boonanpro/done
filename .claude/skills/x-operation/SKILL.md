@@ -16,10 +16,10 @@ updated: 2026-10-16
 | 記事を書く・直す | [article-writing.md](article-writing.md) | v2（2026-10-16、合格記事10本＋本人の記事から作り直し、画像の下は1行・動きは短い動画を追加。動画の切り出しは scripts/clip_scene.py） |
 | タイトル・表紙・札に出る冒頭3行を作る | [title-cover.md](title-cover.md) | v3（2026-10-16、物差しは保存の割合。9人172本を同じ著者の中で比べ、本人が合格とした組み合わせと、表紙の説明の文字をロゴ・数字に置き換える技を入れた。札の見本は scripts/card_preview.py） |
 | スキルを変えた理由 | [sources/generalization-log.md](sources/generalization-log.md) | 本人の指摘を汎化した記録。スキルを変える前にここへ書く |
-| 引用・セルフ引用を書く・直す | [quote-writing.md](quote-writing.md) | v1（2026-10-16、合格記事の著者6人のセルフ引用8本（examples/quotes/）と本人の指摘から。中身が動く場面の動画＋反応1〜3行・答えは書かない。下の「引用」の項より優先） |
+| 引用・セルフ引用を書く・直す | [quote-writing.md](quote-writing.md) | v2（2026-10-16、記事を引用したポストの合格例10本（examples/quotes/）と本人の指摘から。テキストのみは答えを伏せて札をタップさせ、画像・動画付きは添付で要点を言い切って保存させる） |
 | テーマ決め・リサーチ | theme-research.md | 未作成 |
 | 数字の振り返り | （未定） | 未作成 |
-| 実例（数字付き） | [examples/articles/](examples/articles/index.md) | 合格ラインを超えた記事10本＋本人の5000万円記事。新しく書く時だけ、題材が近い2本を開く。引用の実例は未作成 |
+| 実例（数字付き） | [examples/articles/](examples/articles/index.md) | 合格ラインを超えた記事10本＋本人の5000万円記事。新しく書く時だけ、題材が近い2本を開く。引用の実例は [examples/quotes/](examples/quotes/index.md)（テキストのみ・画像動画付きの2表） |
 
 ## アカウントと読者
 
@@ -42,11 +42,6 @@ updated: 2026-10-16
 - 一人称は「僕」。話し言葉を混ぜてよい（「めちゃニッチ」「〜してます」）。
 - **素材は私が取りに行く。** 画像・スクショ・動画のURLは、本人に送ってもらう前に自分で探して撮る。見つからない時だけ、何をどこまで探したかを添えて聞く。ふくろうPの記事なら、動画のサムネ・再生数のスクショ・特典動画・LINEの増加グラフを、本人のYouTube（0aw325171@gmail.com のアカウントの YouTube Studio。限定公開の動画もここ）、固定投稿の画像、LINE公式の分析画面から取る。
 - 日本語は SOUL.md の「日本語の書き方」に従う。
-
-## 引用（quote-writing.md ができるまで）
-
-- 引用元の答えを書かない。誰向けか、読むと何が分かるかだけ書いて、中身は開かないと分からないようにする。引用元の中だけの言葉（例：「当たり期」）は使わない（記憶 feedback-x-quote-tease-not-answer）。
-- X顧問 Notion 第6章：伸びやすさは「通常ポスト < 引用 < 記事への引用 < 記事への動画付き引用」。短文型（1〜2行）は記事への遷移率が勝負。メモは `D:\dan-workspace\x_komon_videos\notes_roadmap_ch6_quote.md`。
 
 ## 実例を集める時の合格ライン
 
