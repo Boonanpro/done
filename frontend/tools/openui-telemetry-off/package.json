@@ -1,0 +1,8 @@
+{
+  "name": "openui-telemetry-off",
+  "version": "1.0.0",
+  "private": true,
+  "description": "npm が走らせる全てのスクリプト（依存の postinstall を含む）で OPENUI_TELEMETRY_DISABLED=1 にする。frontend/.npmrc の node-options から --require で読み込まれる",
+  "main": "index.js",
+  "license": "MIT"
+}

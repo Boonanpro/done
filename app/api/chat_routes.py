@@ -116,6 +116,26 @@ COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
 
 
+def _answer_to_context(answer_to) -> Optional[dict]:
+    """The link from the owner's answer (a pressed Choice / a submitted Input of chat_shapes) to the part
+    it answers, as the human message's ai_context: ``{"answer_to": {message_id, part, kind, value}}``.
+    Unknown keys are dropped, values bounded; anything malformed → None (the message is still saved,
+    just without the link; the screen then shows it as an ordinary message)."""
+    if not isinstance(answer_to, dict):
+        return None
+    message_id = str(answer_to.get("message_id") or "").strip()[:64]
+    part = str(answer_to.get("part") or "").strip()[:64]
+    kind = str(answer_to.get("kind") or "").strip()
+    if not message_id or not part or kind not in ("choice", "input"):
+        return None
+    link = {"message_id": message_id, "part": part, "kind": kind,
+            "value": str(answer_to.get("value") or "")[:300]}
+    question = str(answer_to.get("question") or "").strip()
+    if question:
+        link["question"] = question[:200]
+    return {"answer_to": link}
+
+
 def _message_responses(rows) -> list[MessageResponse]:
     """保存済みメッセージ行を応答型に詰める。検証に失敗した行だけ落とす。
 
@@ -2160,19 +2180,21 @@ async def send_dan_message_stream(
                 and not _streaming_on
                 and not _voice_call
             )
+            # the owner's answer to a part of Dan's reply (chat_shapes): saved with the message as ai_context.answer_to
+            _answer_ctx = _answer_to_context(request.answer_to)
             if request.replace_message_id:
                 # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）
                 room_id = request.session_id
                 try:
                     service.supabase.table("chat_messages").update(
-                        {"content": media_content}
+                        {"content": media_content, **({"ai_context": _answer_ctx} if _answer_ctx else {})}
                     ).eq("id", request.replace_message_id).eq("sender_type", "human").execute()
                     # 更新後のメッセージを取得
                     updated = service.supabase.table("chat_messages").select("*").eq("id", request.replace_message_id).execute()
                     message = updated.data[0] if updated.data else {"id": request.replace_message_id, "sender_id": current_user.user_id, "sender_type": "human", "room_id": room_id, "content": media_content}
                 except Exception as e:
                     logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
-                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id)
+                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, ai_context=_answer_ctx)
             elif _parallel_save:
                 # 並列保存パス: ここでは保存せず room_id だけ確定する。実際の send_message は
                 # process_message_cli の cold start を起動した直後（裏で並走）に実行する。
@@ -2180,7 +2202,7 @@ async def send_dan_message_stream(
                 message = None
             elif request.session_id:
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id)
+                message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
                 _check_cancel_tombstone(room_id, message["id"], service)
             else:
                 message = await service.send_dan_message(current_user.user_id, media_content)
@@ -2296,6 +2318,8 @@ async def send_dan_message_stream(
                             "content": _reply_msg_data["content"][:200],
                             "created_at": _reply_msg_data["created_at"],
                         }
+                if _answer_ctx:
+                    user_message["ai_context"] = _answer_ctx   # the screen marks the part answered only from this saved echo
 
                 # ユーザーメッセージを送信（session_id付き）
                 yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
@@ -2519,6 +2543,7 @@ async def send_dan_message_stream(
                     run_id=run_id,
                     skill_injection=skill_injection,
                     timeline_refs=_auto_timeline_refs(room_id, request.timeline_refs),
+                    answer_shapes=True,   # the reply is drawn by this room's chat screen (web; the APK shows parts as text)
                 )
                 if message is None:
                     # 並列保存パス: 先に cold start を起動し（最初の __anext__ でCLIスレッド開始）、
@@ -2531,6 +2556,7 @@ async def send_dan_message_stream(
                             sender_type="human", reply_to_id=request.reply_to_id,
                             created_at=request_arrival_iso,
                             message_id=request.client_message_id,
+                            ai_context=_answer_ctx,
                         )
                         _check_cancel_tombstone(room_id, message["id"], service)
                     except Exception:
@@ -2563,6 +2589,8 @@ async def send_dan_message_stream(
                                 "content": _reply_msg_data["content"][:200],
                                 "created_at": _reply_msg_data["created_at"],
                             }
+                    if _answer_ctx:
+                        user_message["ai_context"] = _answer_ctx
                     yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
                     mark_latency("user_sse_sent")
                     _cli_iter = _prepend_first_event(_gen_first, _cli_agen)

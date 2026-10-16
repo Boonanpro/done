@@ -155,6 +155,7 @@ async def _wake_turn(room_id: str, user_id: str, content: str) -> Tuple[str, boo
         content=content,
         project_id=project_id,
         run_id=None,
+        answer_shapes=True,   # the report lands in the room's chat screen
     ):
         if _ev.get("type") == "result":
             result = _ev.get("text") or result

@@ -4,15 +4,31 @@
  *
  * 答えは確認カードと同じく本人のチャット発言として部屋に送る。文面は
  *   「<問い> → <答え>」
- * で固定し、画面はその部品より後の本人の発言にこの文面があれば「答えた」と判定する。
- * 別の保存先を持たず、部屋の記録だけを見る（画面は推測せず記録を映す）。
+ * で固定（ダンはこれを読む）。それに加えて、どの返事のどの部品への答えかを
+ *   ai_context.answer_to = { message_id, part, kind, value }
+ * として同じ発言に保存する（app/api/chat_routes.py の _answer_to_context）。
+ * 画面はこの照合情報だけで「答えた」と判定する。文面が同じでも照合情報の無い発言
+ * （本人が手で打った物、別の返事への答え）は答えと数えない。
+ *
+ * part は部品の中身（コード）から作る短い鍵。同じ返事に同じコードの部品が2つあれば
+ * 2つ目に -1 が付く（ordinal）。返事の描き方（通常／作業つき）が違っても同じ鍵になる。
  *
  * 依存なし（node:test から直接読み込んで試験する）。
  */
 
 export const ANSWER_ARROW = ' → ';
 
-export type UserUtterance = { text: string; at: number };
+export type AnswerKind = 'choice' | 'input';
+
+export type AnswerTo = {
+  message_id: string;
+  part: string;
+  kind: AnswerKind;
+  value: string;
+  question?: string;
+};
+
+export type UserUtterance = { text: string; at: number; answerTo?: AnswerTo | null };
 
 function norm(s: string): string {
   return (s || '').replace(/\s+/g, ' ').trim();
@@ -30,36 +46,85 @@ export function inputAnswerText(label: string, value: string, unit?: string): st
   return `${norm(label)}${ANSWER_ARROW}${v}${u && !v.endsWith(u) ? u : ''}`;
 }
 
+/** 入力欄の答えの値（単位つき）: 文面の矢印より後ろ。 */
+export function inputAnswerValue(label: string, value: string, unit?: string): string {
+  const t = inputAnswerText(label, value, unit);
+  return t.slice(t.indexOf(ANSWER_ARROW) + ANSWER_ARROW.length);
+}
+
+/** 部品の鍵: コードの FNV-1a（32bit）の16進 + 同じコードの何個目か。 */
+export function partKey(code: string, ordinal = 0): string {
+  const s = norm(code);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `p${h.toString(16).padStart(8, '0')}${ordinal ? `-${ordinal}` : ''}`;
+}
+
+/** 返事の中の部品のコード列から、各部品の鍵を順に作る（同じコードは ordinal で区別）。 */
+export function partKeys(codes: readonly string[]): string[] {
+  const seen = new Map<string, number>();
+  return codes.map((c) => {
+    const base = partKey(c);
+    const n = seen.get(base) || 0;
+    seen.set(base, n + 1);
+    return n ? `${base}-${n}` : base;
+  });
+}
+
+/** 本人の発言が「その返事のその部品」への答えなら照合情報、違えば null。 */
+export function answerFor(u: UserUtterance, messageId: string, part: string, kind: AnswerKind): AnswerTo | null {
+  const a = u.answerTo;
+  if (!a || a.kind !== kind) return null;
+  if (a.message_id !== messageId || a.part !== part) return null;
+  return a;
+}
+
 /**
- * その部品（AI の発言時刻 askedAt 以降）に対する選択の答えを本人の発言から探す。
- * 見つかれば選んだ選択肢、無ければ null。
+ * その部品（返事 messageId の部品 part）に対する選択の答えを本人の発言から探す。
+ * 見つかれば選んだ選択肢、無ければ null。選択肢に無い値（古い版の部品への答えなど）も
+ * 値として返すので、画面は「選択肢と一致した時だけ強調」する。
  */
 export function findChoiceAnswer(
-  utterances: UserUtterance[],
-  question: string,
-  options: string[],
-  askedAt: number,
+  utterances: readonly UserUtterance[],
+  messageId: string,
+  part: string,
 ): string | null {
-  const candidates = new Map(options.map((o) => [choiceAnswerText(question, o), o] as const));
   for (const u of utterances) {
-    if (u.at < askedAt) continue;
-    const hit = candidates.get(norm(u.text));
-    if (hit !== undefined) return hit;
+    const a = answerFor(u, messageId, part, 'choice');
+    if (a && a.value) return a.value;
   }
   return null;
 }
 
-/** 入力欄の答え（「<label> → 」で始まる本人の発言）を探す。見つかれば値の部分。 */
+/** 入力欄の答え（単位つきの値）を探す。見つかれば値、無ければ null。 */
 export function findInputAnswer(
-  utterances: UserUtterance[],
-  label: string,
-  askedAt: number,
+  utterances: readonly UserUtterance[],
+  messageId: string,
+  part: string,
 ): string | null {
-  const prefix = `${norm(label)}${ANSWER_ARROW}`;
   for (const u of utterances) {
-    if (u.at < askedAt) continue;
-    const t = norm(u.text);
-    if (t.startsWith(prefix) && t.length > prefix.length) return t.slice(prefix.length);
+    const a = answerFor(u, messageId, part, 'input');
+    if (a && a.value) return a.value;
   }
   return null;
+}
+
+/** 部屋の記録（MessageResponse 相当）から照合情報を読む。無ければ null。 */
+export function readAnswerTo(aiContext: unknown): AnswerTo | null {
+  if (!aiContext || typeof aiContext !== 'object') return null;
+  const a = (aiContext as { answer_to?: unknown }).answer_to;
+  if (!a || typeof a !== 'object') return null;
+  const o = a as Record<string, unknown>;
+  if (typeof o.message_id !== 'string' || typeof o.part !== 'string') return null;
+  if (o.kind !== 'choice' && o.kind !== 'input') return null;
+  return {
+    message_id: o.message_id,
+    part: o.part,
+    kind: o.kind,
+    value: typeof o.value === 'string' ? o.value : '',
+    ...(typeof o.question === 'string' ? { question: o.question } : {}),
+  };
 }

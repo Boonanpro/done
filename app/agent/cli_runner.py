@@ -1568,9 +1568,15 @@ def _build_system_prompt(
     room_id: str = "",
     user_id: str = "",
     include_room_role: bool = True,
+    answer_shapes: bool = False,
 ) -> str:
     """
     Build CLI system prompt.
+
+    answer_shapes: add the answer-shapes section (```openui-lang parts) — only for turns whose reply is
+    drawn by the room's chat screen (process_message_cli callers that pass answer_shapes=True). Voice
+    (dan_core.shared), the editor (editor_runtime), the external window (collab) and every other caller
+    leave it off: those surfaces cannot draw a part or answer one.
 
     Base identity is minimal — domain-specific behavior is loaded via
     check_skill (e.g. project skill) at runtime.
@@ -1664,8 +1670,9 @@ def _build_system_prompt(
     )
     parts.append(_ABSOLUTE_RULES)
     # Answer shapes (table / choice buttons / input / steps / chart as ```openui-lang blocks).
-    # Generated from the frontend part definitions; the same text on every backend.
-    shapes = _chat_shapes.chat_shapes_section()
+    # Generated from the frontend part definitions; the same text on every backend (Claude / Codex),
+    # the same condition (answer_shapes) for both.
+    shapes = _chat_shapes.chat_shapes_section() if answer_shapes else ""
     if shapes:
         parts.append(shapes)
     parts.append(_BROWSER_AUTH_RULES)
@@ -3859,6 +3866,7 @@ async def process_message_cli(
     timeline_refs: Optional[List[Dict[str, Any]]] = None,
     model_override: Optional[str] = None,
     mcp_config_override: Optional[str] = None,
+    answer_shapes: bool = False,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -3876,13 +3884,15 @@ async def process_message_cli(
     Args:
         system_prompt: カスタムシステムプロンプト。指定時は _build_system_prompt() をスキップ。
         user_messages: ユーザーの依頼文原文（planning プロンプト用）。
+        answer_shapes: この返事が部屋のチャット画面に描かれる時だけ True（部品の節を指示に足す）。
     """
     note_turn_input(room_id, content)
     setup_start = time.perf_counter()
     system_prompt, mcp_config_path = await _prepare_cli_inputs(
         room_id, user_id, credentials, system_prompt, mcp_config_override,
         dict(title=project_title, description=project_description, status=project_status,
-             user_messages=user_messages, latest_user_message=content, room_id=room_id, user_id=user_id),
+             user_messages=user_messages, latest_user_message=content, room_id=room_id, user_id=user_id,
+             answer_shapes=answer_shapes),
     )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"

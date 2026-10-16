@@ -595,8 +595,12 @@ class ChatService:
         except Exception as exc:
             self.logger.warning("Unread counter update failed: %s", exc)
     
-    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None, message_id: str = None) -> dict:
+    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None, message_id: str = None, ai_context: dict = None) -> dict:
         """Send a message to a room
+
+        ai_context: for a human message, the link from the owner's answer to the part it answers
+        (``{"answer_to": {"message_id", "part", "kind", "value"}}``; chat_shapes). The text stays the
+        owner's ordinary message「<問い> → <答え>」, the link is what the screen matches on.
 
         created_at: 明示指定時はその時刻で保存（既定はDBの now()）。並列保存パス
         （DAN_PARALLEL_SEND）は run 作成や CLI 起動の後に insert するため、DB任せだと
@@ -646,6 +650,8 @@ class ChatService:
             insert_data["reply_to"] = reply_to_id
         if created_at:
             insert_data["created_at"] = created_at
+        if ai_context:
+            insert_data["ai_context"] = ai_context
 
         def _insert_idempotent():
             try:
@@ -1870,7 +1876,7 @@ class ChatService:
                 from app.agent.cli_runner import process_message_cli
                 async for _ev in process_message_cli(
                     room_id=room_id, user_id=user_id, content=content,
-                    project_id=None, run_id=None,
+                    project_id=None, run_id=None, answer_shapes=True,   # drawn by the room's chat screen
                 ):
                     pass
             except Exception:

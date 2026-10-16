@@ -223,6 +223,7 @@ async def _wake_task(detected_message: Dict[str, Any], room_id: str, reason: str
             content=prompt,
             project_id=project_id,
             run_id=None,
+            answer_shapes=True,   # the report lands in the room's chat screen
         ):
             pass  # sink が報告を保存する。ここではターン完走を駆動するだけ
     except Exception:

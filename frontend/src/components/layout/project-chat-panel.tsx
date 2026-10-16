@@ -65,8 +65,9 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
-import { ShapeAnswerProvider, ShapeBlock } from '@/components/chat/chat-shapes';
+import { ShapeAnswerProvider, ShapeBlock, type ShapeSubmit } from '@/components/chat/chat-shapes';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
+import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -96,6 +97,10 @@ type StepInfo = {
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
   | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
+
+// 部品（選択・入力）の答えを送る時の追加情報: 照合情報と、保存された／受け取られなかったの知らせ
+type SendExtra = { answerTo?: AnswerTo; onSaved?: (msg: MessageResponse) => void; onFailed?: (why: string) => void };
+type SendMessageHandle = (content: string, extra?: SendExtra) => void;
 
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
 // a finished turn (text segments + a collapsible tool group), so there's no
@@ -300,11 +305,13 @@ const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false 
 
 // 返事の文章と、その中の部品（```openui-lang ブロック）を順に描く。部品が無ければ
 // AiMarkdown そのもの（文章だけの返事の見た目と動きは変わらない）。
-// live: 生成の途中（保存前）。閉じていないブロックも届いた分から部品として描き、その間は押せない。
-// createdAt: この返事の時刻。選択・入力の答え（本人の発言）はこれより後の物だけを数える。
-const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = false, live = false, createdAt }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; createdAt?: string }) {
+// live: 生成の途中（ライブ枠、保存前）。閉じていないブロックも届いた分から部品として描き、
+//       閉じが届いても保存されるまでは押せない。
+// messageId: 保存された返事の id。選択・入力の答え（本人の発言）は「この id のこの部品への答え」
+//       という照合情報（answer_to）で結ぶ。無ければ（ライブ枠）答えられない。
+const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = false, live = false, messageId }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; messageId?: string }) {
   const segments = useMemo(() => splitShapeSegments(text, { streaming: live }), [text, live]);
-  const askedAt = createdAt ? (Date.parse(createdAt) || 0) : 0;
+  const keys = useMemo(() => partKeys(segments.filter((s) => s.kind === 'shape').map((s) => (s.kind === 'shape' ? s.code : ''))), [segments]);
   const renderFallback = useCallback((code: string) => <AiMarkdown text={'```\n' + code + '\n```'} muted={muted} />, [muted]);
   if (segments.length === 1 && segments[0].kind === 'markdown') {
     return <AiMarkdown text={segments[0].text} onImageClick={onImageClick} muted={muted} />;
@@ -313,12 +320,12 @@ const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = fa
     <>
       {segments.map((s, i) => (s.kind === 'markdown'
         ? <AiMarkdown key={`md-${i}`} text={s.text} onImageClick={onImageClick} muted={muted} />
-        : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} askedAt={askedAt} renderFallback={renderFallback} />))}
+        : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} live={live} messageId={live ? null : (messageId || null)} part={keys[s.index] || `i${s.index}`} renderFallback={renderFallback} />))}
     </>
   );
 });
 
-const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false, live = false, createdAt }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; createdAt?: string }) {
+const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false, live = false, messageId }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; messageId?: string }) {
   const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
@@ -328,7 +335,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
-      {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} createdAt={createdAt} />}
+      {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} messageId={messageId} />}
     </>
   );
 });
@@ -380,7 +387,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
 // 文章の中の、ファイル・画像・動画の印（TurnTextSegment が表示に変えるもの）
 const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
 
-const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, createdAt }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; createdAt?: string }) {
+const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, messageId }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; messageId?: string }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -411,14 +418,14 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
       <div className="flex flex-col">
         {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} onImageClick={onImageClick} /> : null}
-        <TurnTextSegment text={final} onImageClick={onImageClick} createdAt={createdAt} />
+        <TurnTextSegment text={final} onImageClick={onImageClick} messageId={messageId} />
       </div>
     );
   }
   return (
     <div className="flex flex-col">
       {grouped.map((g, i) => (g.kind === 'text'
-        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} live={live} createdAt={createdAt} />
+        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} live={live} messageId={messageId} />
         : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
@@ -617,7 +624,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
         </button>
       )}
       {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled createdAt={msg.created_at} />}
+      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled messageId={msg.id} />}
       {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
           <MediaGrid items={[...aiImages.map((url) => ({ url, kind: 'image' as const })), ...aiVideos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
@@ -635,7 +642,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
           ))}
         </div>
       )}
-      {!useTimeline && aiText && <AiShapedText text={aiText} onImageClick={onImageClick} createdAt={msg.created_at} />}
+      {!useTimeline && aiText && <AiShapedText text={aiText} onImageClick={onImageClick} messageId={msg.id} />}
       {proposals.length > 0 && (
         <div className="flex flex-wrap gap-3 mt-2">
           {proposals.map((p, i) => (
@@ -695,7 +702,7 @@ function ChatInput({
   roomId: string;
   isSessionActive: boolean;
   activeOriginMessageId?: string | null;
-  sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
+  sendMessageRef?: React.MutableRefObject<SendMessageHandle | null>;
   onSseStateChange?: (connected: boolean) => void;
   replyTo?: MessageResponse | null;
   onClearReply?: () => void;
@@ -1019,8 +1026,12 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = []) => {
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = [], extra?: SendExtra) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
+    // 部品（選択・入力）の答え: 保存されたら onSaved、サーバーが受け取らなかったら onFailed（1回だけ）
+    let settled = false;
+    const reportSaved = (m: MessageResponse) => { if (!settled) { settled = true; extra?.onSaved?.(m); } };
+    const reportFailed = (why: string) => { if (!settled) { settled = true; extra?.onFailed?.(why); } };
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
     const filePrefix = fileUrls.map(f => `[添付ファイル: ${f.name} (${f.url})]`).join('\n');
@@ -1092,12 +1103,13 @@ function ChatInput({
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}) },
+        { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}), ...(extra?.answerTo ? { answer_to: extra.answerTo } : {}) },
         {
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
             serverMessageIdRef.current = msg.id;
             optimisticMessageIdRef.current = msg.id;
+            reportSaved(msg);
             if (currentReplaceId) {
               // replace: 既存メッセージの内容をサーバー版で上書き
               queryClient.setQueryData(
@@ -1234,7 +1246,9 @@ function ChatInput({
               queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
                 old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
               );
-              setMessage((cur) => (cur.trim() ? cur : content));
+              // 部品の答えは部品の側で選び直せる（入力欄に戻さない）
+              if (extra?.answerTo) reportFailed(error || 'send failed');
+              else setMessage((cur) => (cur.trim() ? cur : content));
             }
             toast.error(error || 'メッセージの送信に失敗しました');
           },
@@ -1258,6 +1272,13 @@ function ChatInput({
         // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
         queryClient.invalidateQueries({ queryKey: ['projects'] });
         toast.error('メッセージ送信中に問題が発生しました');
+        // 部品の答え: サーバーに届かなかった送信（HTTP エラーなど）は失敗として部品に返し、仮の発言は消す
+        if (extra?.answerTo && !serverMessageIdRef.current) {
+          queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
+            old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
+          );
+          reportFailed(error.message);
+        }
       }
     } finally {
       // ストリームが終わったら必ず ref を破棄する（残骸が「ダン作業中」と
@@ -1284,7 +1305,7 @@ function ChatInput({
   // 親コンポーネントから sendMessageCore を呼べるようにする
   useEffect(() => {
     if (sendMessageRef) {
-      sendMessageRef.current = (content: string) => { sendMessageCore(content); };
+      sendMessageRef.current = (content: string, extra?: SendExtra) => { sendMessageCore(content, [], [], undefined, [], extra); };
       return () => { sendMessageRef.current = null; };
     }
   }, [sendMessageRef, sendMessageCore]);
@@ -2058,9 +2079,16 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const sendMessageRef = useRef<((content: string) => void) | null>(null);
+  const sendMessageRef = useRef<SendMessageHandle | null>(null);
   // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
+  // 部品（選択・入力）の答え: 同じ経路で本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
+  // 一緒に保存する。サーバーに保存されたら resolve、受け取られなかったら reject（部品が選び直しを出す）
+  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo) => new Promise<void>((resolve, reject) => {
+    const send = sendMessageRef.current;
+    if (!send) { reject(new Error('送信できません')); return; }
+    send(text, { answerTo, onSaved: () => resolve(), onFailed: (why) => reject(new Error(why)) });
+  }), []);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   // 送った直後、まだサーバーの時刻が無いメッセージ（pending）が画面にある間に始まった作業の一歩を、
@@ -3086,7 +3114,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
-          <ShapeAnswerProvider messages={messages} submit={answerInRoom}>
+          <ShapeAnswerProvider messages={messages} submit={answerShapeInRoom}>
           <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(

@@ -160,6 +160,8 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/tsconfig.json",
     "frontend/tsconfig.*.json",   # type-check variants (voice-note-check etc.)
     "frontend/.vercelignore",
+    "frontend/.npmrc",                # npm settings (stops @openuidev/lang-core's install-time telemetry)
+    "frontend/tools/**",              # local file: packages npm preloads (tools/openui-telemetry-off)
     "frontend/public/*-worklet.js",   # audio worklets of the voice transports (atom / gemini)
     "frontend/tailwind.config.*",
     "frontend/postcss.config.*",

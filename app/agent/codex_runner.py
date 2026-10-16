@@ -104,11 +104,14 @@ def compute_static_hash(system_prompt: str) -> str:
         from app.agent.backend_parity import parity_static, static_fingerprint
         from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
         from app.agent.chat_shapes import chat_shapes_section
+        # the answer-shapes section is in the prompt only for turns drawn by the chat screen
+        # (cli_runner._build_system_prompt answer_shapes); fingerprint what this prompt actually carries
+        shapes = chat_shapes_section()
         return static_fingerprint(
             get_core_prompt(), load_all_bootstrap_files(),
             cr._build_runtime_contract_section(), parity_static("codex"),
             cr._ABSOLUTE_RULES, cr._BROWSER_AUTH_RULES, cr._CLI_PROJECT_TEMPLATE,
-            chat_shapes_section(),
+            shapes if shapes and shapes in (system_prompt or "") else "",
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("codex static hash failed: %s", e)

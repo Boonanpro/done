@@ -212,6 +212,7 @@ class MessageSendRequest(BaseModel):
     replace_message_id: Optional[str] = Field(None, description="ID of existing user message to update instead of creating new")
     client_message_id: Optional[str] = Field(None, description="Client-side optimistic message id — lets an early cancel delete the row before the client learns the real id")
     timeline_refs: Optional[List[dict]] = Field(default=[], description="Explicit production timeline references [{content_id, title}]")
+    answer_to: Optional[dict] = Field(None, description="When this message answers a part of Dan's reply (Choice / Input): {message_id, part, kind, value}; saved as ai_context.answer_to so the screen can match the answer to that part")
 
 
 class ReplyToMessage(BaseModel):
