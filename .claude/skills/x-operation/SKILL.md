@@ -13,8 +13,9 @@ updated: 2026-10-16
 
 | 作業 | 資料 | 状態 |
 |---|---|---|
-| 記事を書く・直す | [article-writing.md](article-writing.md) | v1（2026-10-16、合格記事10本＋本人の記事から作り直し。テスト記事で本人の確認待ち） |
-| タイトル・表紙・札に出る冒頭3行を作る | [title-cover.md](title-cover.md) | v2（2026-10-16、物差しは保存の割合。9人172本を同じ著者の中で比べ、本人が合格とした組み合わせを入れた。札の見本は scripts/card_preview.py） |
+| 記事を書く・直す | [article-writing.md](article-writing.md) | v2（2026-10-16、合格記事10本＋本人の記事から作り直し、画像の下は1行・動きは短い動画を追加。動画の切り出しは scripts/clip_scene.py） |
+| タイトル・表紙・札に出る冒頭3行を作る | [title-cover.md](title-cover.md) | v3（2026-10-16、物差しは保存の割合。9人172本を同じ著者の中で比べ、本人が合格とした組み合わせと、表紙の説明の文字をロゴ・数字に置き換える技を入れた。札の見本は scripts/card_preview.py） |
+| スキルを変えた理由 | [sources/generalization-log.md](sources/generalization-log.md) | 本人の指摘を汎化した記録。スキルを変える前にここへ書く |
 | 引用を書く・直す | quote-writing.md | 未作成。それまでは下の「引用」の項 |
 | テーマ決め・リサーチ | theme-research.md | 未作成 |
 | 数字の振り返り | （未定） | 未作成 |
