@@ -8,6 +8,8 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
+import android.media.AudioManager;
+import android.media.AudioRecordingConfiguration;
 import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
@@ -40,6 +42,19 @@ public final class DanPhoneLifelog {
   private final Context context;
   private final Handler main = new Handler(Looper.getMainLooper());
   private final AtomicReference<Thread> worker = new AtomicReference<>();
+  private final Object captureLock = new Object();
+  private AudioRecord activeRecord; // guarded by captureLock, including start/release
+  private final AudioManager audioManager;
+  private volatile boolean externalCapture;
+  private final Runnable checkCapture = this::checkExternalCapture;
+  private final AudioManager.AudioRecordingCallback captureWatch = new AudioManager.AudioRecordingCallback() {
+    @Override public void onRecordingConfigChanged(java.util.List<AudioRecordingConfiguration> ignored) {
+      // Re-query after the audio server's start/stop transaction settles. Never
+      // retain an old callback snapshot across our own recorder's release.
+      main.removeCallbacks(checkCapture);
+      main.postDelayed(checkCapture, 80);
+    }
+  };
   private volatile boolean pinReady, callActive, injecting;
   private volatile String state = "off";
   private volatile long frames;   // frames handed over since the app started (diagnostics)
@@ -49,6 +64,9 @@ public final class DanPhoneLifelog {
 
   private DanPhoneLifelog(Context ctx) {
     context = ctx.getApplicationContext();
+    audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+    audioManager.registerAudioRecordingCallback(captureWatch, main);
+    main.post(checkCapture);
     pinReady = DanPinLink.INSTANCE.current() != null;
     callActive = DanAudioLease.active();
     // The microphone's permission is known the moment it changes (taken away or given back in Settings, the privacy
@@ -57,6 +75,31 @@ public final class DanPhoneLifelog {
     // kept delivering silence, the notification kept saying 記録中.
     AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
     ops.startWatchingMode(AppOpsManager.OPSTR_RECORD_AUDIO, context.getPackageName(), permissionWatch);
+  }
+
+  private void checkExternalCapture() {
+    boolean other;
+    try {
+      synchronized (captureLock) {
+        int ownSession = activeRecord == null ? -1 : activeRecord.getAudioSessionId();
+        other = false;
+        for (AudioRecordingConfiguration config : audioManager.getActiveRecordingConfigurations()) {
+          int source = config.getClientAudioSource();
+          // Remote playback and hardware hotword listeners are not a user's
+          // microphone operation. Package names are anonymized, but session IDs
+          // remain available so our own recorder can be excluded exactly.
+          if (source != MediaRecorder.AudioSource.REMOTE_SUBMIX && source < 1999
+              && config.getClientAudioSessionId() != ownSession) { other = true; break; }
+        }
+      }
+    } catch (RuntimeException e) {
+      android.util.Log.w(TAG, "phone lifelog: cannot check other microphone users", e);
+      return;
+    }
+    if (other != externalCapture) {
+      externalCapture = other;
+      refresh(other ? "another microphone user" : "other microphone released");
+    }
   }
 
   /**
@@ -134,8 +177,8 @@ public final class DanPhoneLifelog {
   public synchronized void refresh(String why) {
     boolean enabled = isEnabled(context);
     boolean permitted = micAllowed();
-    boolean want = enabled && !pinReady && !callActive && !injecting && permitted;
-    String next = !enabled ? "off" : !permitted ? "no_permission" : pinReady ? "pin" : callActive ? "call" : injecting ? "test_input" : "recording";
+    boolean want = enabled && !pinReady && !callActive && !injecting && permitted && !externalCapture;
+    String next = !enabled ? "off" : !permitted ? "no_permission" : pinReady ? "pin" : callActive ? "call" : injecting ? "test_input" : externalCapture ? "external_audio" : "recording";
     if (want && worker.get() == null) start();
     else if (!want) stop();
     if (!next.equals(state)) {
@@ -153,7 +196,9 @@ public final class DanPhoneLifelog {
   }
 
   private void stop() {
-    Thread t = worker.getAndSet(null);
+    // Keep ownership until release completes: a rapid stop/start must not open a
+    // second recorder while the first one still owns the microphone.
+    Thread t = worker.get();
     if (t != null) t.interrupt();
   }
 
@@ -196,7 +241,10 @@ public final class DanPhoneLifelog {
       PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
       lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Dan:PhoneLifelog");
       lock.acquire();
-      record.startRecording();
+      synchronized (captureLock) {
+        record.startRecording();
+        activeRecord = record;
+      }
       if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) throw new IllegalStateException("microphone did not start");
       android.util.Log.i(TAG, "phone lifelog: microphone open");
       short[] pcm = new short[FRAME];
@@ -217,9 +265,13 @@ public final class DanPhoneLifelog {
       // state now, not in 30 s.
       main.postDelayed(() -> refresh("retry"), micAllowed() ? 30_000 : 0);
     } finally {
-      if (record != null) { try { record.stop(); } catch (Exception ignored) {} record.release(); }
+      synchronized (captureLock) {
+        if (record != null) { try { record.stop(); } catch (Exception ignored) {} record.release(); }
+        if (activeRecord == record) activeRecord = null;
+      }
       if (lock != null && lock.isHeld()) lock.release();
       worker.compareAndSet(me, null);
+      if (me.isInterrupted()) main.post(() -> refresh("capture released"));
       android.util.Log.i(TAG, "phone lifelog: microphone closed after " + (frames - handed) + " frames");
       DanVoiceCallService.refreshNotification();   // the capture ended (also on its own): the notification must not say 記録中
     }

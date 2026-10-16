@@ -178,6 +178,7 @@ class DanVoiceCallService : HeadlessJsTaskService() {
     if (DanPhoneLifelog.capturing()) return "スマホで記録中" to "声のある所だけを記録しています。設定「スマホで記録」で止められます"
     if (!DanPhoneLifelog.isEnabled(this)) return null
     return when (DanPhoneLifelog.status()) {
+      "external_audio" -> "ほかの音声入力を優先中" to "音声入力や録音が終わると、自動で記録を再開します"
       "pin", "call", "test_input" -> null
       "no_permission" -> "記録は止まっています" to "マイクの許可が外れています。許可を戻すと再開します"
       else -> "記録は止まっています" to "アプリを開くと再開します"

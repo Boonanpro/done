@@ -1,5 +1,17 @@
 # DAN Mobile
 
+### 標準音声入力へのマイク引き渡し（1.0.71 / versionCode 70）
+
+Galaxy S25で、他アプリのGboard音声入力は正常だが、Dan自身の入力欄ではDanの常時録音が優先され、Gboardが `silenced:true` になることを再現した。Voice Inputは待機中でマイクを使っていなかった。
+
+`DanPhoneLifelog` はAudioManagerの録音構成変更を監視し、自分以外のマイク録音が始まるとAudioRecordを解放する。終了後は設定「スマホで記録」がオンなら自動で再開する。単に無音化を待つ方法では、Danが前面にある場合に他方を無音にするため不十分。パッケージ名や他アプリの音声は収集せず、公開APIのセッション番号で自分の録音を除外する。ホットワード待受・再生キャプチャは除外。通知に「ほかの音声入力を優先中」と表示する。
+
+短時間で開始・停止を繰り返しても、古いAudioRecordの解放前に次を開かないよう、ワーカースレッドの所有権を解放完了まで保持する。通話・ピン・マイク権限・手動オフの条件は引き続き優先される。ほかの音声入力中は常時録音に空白が生じる。
+
+検証手順: DanのProjects検索欄でGboard音声入力を開始し、`dumpsys audio` でGboardが無音化されず、Danの録音セッションが解放されることを確認。停止後は `PIN_SELFTEST --ez status true` で記録再開とフレーム増加を確認する。別アプリ、Voice Inputへの切替、画面オフ後の再開も検査する。Androidの仕様は [Sharing audio input](https://developer.android.com/media/platform/sharing-audio-input)、変更通知は [AudioRecordingCallback](https://developer.android.com/reference/android/media/AudioManager.AudioRecordingCallback) を参照。
+
+実機結果（2026-10-16、Galaxy S25 / Android 16）: Releaseビルドと1.0.71への上書き更新に成功。Dan前面の検索欄でGboard開始・停止を5回繰り返し、全回Gboardのみが `silenced:false` で取得し、停止後はDanのみが `silenced:false` で再開した。画面消灯中の約13秒でもフレーム数が21,359から22,639へ増加した。これはマイク競合と短時間のスリープ継続の検証であり、発話の認識精度や長時間の省電力動作の保証ではない。Voice Input 0.4.2も端末へ更新し待機アイコンを確認したが、この更新後のVoice Input録音との切替は、画面ロックのため未検証。
+
 ### Doneホーム再設計（1.0.28 / versionCode 27）
 
 上部に音声・チャットのアイコン、下部に固定カード1枚を置き、左右スワイプで作業中の部屋の内容だけを切り替えます。履歴はProjects、制作物はLibraryへ集約。英語が既定で、Settingsから日本語へ切替可能です。UI言語は保存され、会話本文は変更しません。
