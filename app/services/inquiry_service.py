@@ -1,11 +1,12 @@
 """
 inquiry のビジネスロジック
 クライアントHPの問い合わせフォームを保存する。
-保存後、バックグラウンドでダンが返信草案を生成し、通知タブ(dan_proposals)に
-「要対応の返信案」として提案する（承認するとメール送信）。
+保存後、届いたことをダンの受け口（inbox）で判断し、知らせる部屋に返信案の送信案カードを出す
+（カードの送信ボタンでメール送信）。機械的ないたずら投稿は保存だけして、知らせも返信もしない。
 """
 import asyncio
 import logging
+import re
 from typing import List, Optional
 
 from app.services.supabase_client import get_supabase_client
@@ -53,6 +54,35 @@ SCOPE_CLIENT_NAME = {
 }
 
 
+_RANDOM_WORD = re.compile(r"[A-Za-z]{12,}")
+
+
+def _random_letters(text: Optional[str]) -> bool:
+    """「IXpRheOqzjZWmTRhI」のような、空白のない英字の大小ごちゃ混ぜ（人の名前や文には出ない）。"""
+    t = (text or "").strip()
+    if not _RANDOM_WORD.fullmatch(t):
+        return False
+    swaps = sum(1 for a, b in zip(t, t[1:]) if a.isupper() != b.isupper())
+    return swaps >= 5
+
+
+def _dotted_gmail(email: Optional[str]) -> bool:
+    """「w.atso.ndan.ie.l.le843@gmail.com」: Gmail は点を無視するので、1つの受信箱を使い回す投稿で多い形。"""
+    local, _, domain = (email or "").strip().lower().partition("@")
+    return domain in ("gmail.com", "googlemail.com") and local.count(".") >= 3
+
+
+def looks_like_bot(inquiry: dict) -> bool:
+    """機械的ないたずら投稿か。印が2つ以上そろった時だけ（本物の人を落とさないため）。"""
+    signs = [
+        _random_letters(inquiry.get("name")),
+        _random_letters(inquiry.get("message")),
+        _random_letters((inquiry.get("company") or "").removesuffix(" LLC")),
+        _dotted_gmail(inquiry.get("email")),
+    ]
+    return sum(signs) >= 2
+
+
 class InquiryService:
     def __init__(self):
         self.supabase = get_supabase_client().client
@@ -89,7 +119,17 @@ class InquiryService:
         created = result.data[0] if result.data else row
         logger.info("inquiry created scope=%s name=%s", scope, name)
 
-        # ダンの返信草案生成＋提案作成はバックグラウンドで（フォーム応答をブロックしない）
+        if looks_like_bot(created):
+            # いたずら投稿: 記録だけ残す。自動返信・返信案・知らせ・転送はしない（相手に届けても得るものがない）
+            logger.info("inquiry looks like a bot scope=%s name=%s email=%s", scope, name, email)
+            if created.get("id"):
+                try:
+                    await self.update_status(created["id"], "spam")
+                except Exception:
+                    logger.warning("inquiry spam mark failed id=%s", created.get("id"), exc_info=True)
+            return created
+
+        # 返信草案の生成と知らせはバックグラウンドで（フォーム応答をブロックしない）
         try:
             asyncio.create_task(self._auto_reply(created))
             asyncio.create_task(self._draft_and_propose(created))
@@ -172,7 +212,11 @@ class InquiryService:
             logger.exception("inquiry forward failed scope=%s", scope)
 
     async def _draft_and_propose(self, inquiry: dict) -> None:
-        """問い合わせ内容からダンが返信草案を作り、通知タブに reply 提案を出す（ベストエフォート）。"""
+        """届いたことをダンの受け口で判断し、知らせる部屋に返信案の送信案カードを出す（ベストエフォート）。
+
+        カードは知らせと同じ部屋に、その部屋の送信案（outbound）として作る。そうすれば部屋に表示され、
+        部屋から送信・破棄できる（以前は廃止済みの通知欄用に部屋なしで作り、どこにも出なかった。2026-10-16）。
+        受け口が無視と判断した時は、カードも作らない。"""
         try:
             from app.services.owner import resolve_owner_user_id
 
@@ -183,67 +227,36 @@ class InquiryService:
 
             scope = inquiry.get("scope") or ""
             name = inquiry.get("name") or "お客様"
-            sender_email = inquiry.get("email")
+            sender_email = (inquiry.get("email") or "").strip()
             company = SCOPE_SENDER.get(scope, "弊社")
             label = SCOPE_LABEL.get(scope, "お問い合わせ")
             subject = f"Re: {label}ありがとうございます（{company}）"
 
-            summary, draft = await self._generate_draft(inquiry, company, label)
+            async def prepare(room_id: str) -> Optional[str]:
+                if not sender_email:
+                    return "（返信先のメールが未記入なので、メールでは返信できない）"
+                summary, draft = await self._generate_draft(inquiry, company, label)
+                if not draft:
+                    return "（返信案の自動作成に失敗した。返事が要るなら compose_message で作る）"
+                from app.services.outbound_message_service import get_outbound_message_service
 
-            has_email = bool(sender_email)
-            if has_email and draft:
-                ptype = "reply"
-                title = "返信しますか？"
-                content = draft
-                action_data = {
-                    "action": "send_inquiry_reply",
-                    "channel": "email",
-                    "inquiry_id": inquiry.get("id"),
-                    "to": sender_email,
-                    "subject": subject,
-                    "scope": scope,
-                    "reply_from_name": company,
-                    "summary": summary,
-                    "from_sender": f"{name}（{inquiry.get('company') or '個人'}）",
-                    "original_body": (inquiry.get("message") or "")[:2000],
-                }
-            else:
-                # 返信先メール無し or 草案生成失敗 → 通知のみ(action)。承認=確認済み扱い。
-                ptype = "action"
-                title = "対応してください"
-                body = inquiry.get("message") or "(本文なし)"
-                reason = "返信先メールが未記入のため自動送信不可" if not has_email else "返信草案の生成に失敗"
-                content = (
-                    f"{label}が届きました（{reason}）。\n\n"
-                    f"お名前: {name}\n"
-                    f"会社名: {inquiry.get('company') or '-'}\n"
-                    f"メール: {sender_email or '-'}\n"
-                    f"電話: {inquiry.get('phone') or '-'}\n\n"
-                    f"--- 内容 ---\n{body}"
+                card = await asyncio.to_thread(
+                    get_outbound_message_service().create_draft,
+                    user_id=owner_id, room_id=room_id, channel="email", to=sender_email,
+                    to_name=f"{name} 様", subject=subject, body=draft, from_name=company,
+                    intent=f"サイトの{label}への返信" + (f"（{summary}）" if summary else ""),
                 )
-                action_data = {
-                    "action": "inquiry_no_reply_channel",
-                    "inquiry_id": inquiry.get("id"),
-                    "scope": scope,
-                }
+                logger.info("inquiry reply card created scope=%s room=%s card=%s", scope, room_id, card.get("id"))
+                return (f"（この部屋に返信案の送信案カード {card.get('id')} を出し済み。重ねて作らない。"
+                        "直すなら compose_message で、要らなければ discard）")
 
-            def _insert_proposal():
-                return self.supabase.table("dan_proposals").insert({
-                    "user_id": owner_id,
-                    "type": ptype,
-                    "title": title,
-                    "content": content,
-                    "status": "pending",
-                    "action_data": action_data,
-                }).execute()
-
-            await asyncio.to_thread(_insert_proposal)
-            from app.services import inbox   # judged like mail (stage 2); the card stays as a record
+            from app.services import inbox   # judged like mail (stage 2)
             asked = (f"{label}\n会社名: {inquiry.get('company') or '-'}\nメール: {sender_email or '-'}\n電話: {inquiry.get('phone') or '-'}\n\n"
-                     f"{inquiry.get('message') or '(本文なし)'}" + ("\n\n（ダンが返信案を用意済み）" if has_email and draft else ""))
+                     f"{inquiry.get('message') or '(本文なし)'}")
             await inbox.receive(owner_id, "inquiry", name, asked, subject=f"サイトの問い合わせ（{label}）",
-                                source_id=f"inquiry:{inquiry.get('id')}" if inquiry.get("id") else "", metadata={"inquiry_id": inquiry.get("id")})
-            logger.info("inquiry proposal created scope=%s type=%s", scope, ptype)
+                                source_id=f"inquiry:{inquiry.get('id')}" if inquiry.get("id") else "",
+                                metadata={"inquiry_id": inquiry.get("id")}, prepare=prepare)
+            logger.info("inquiry received scope=%s", scope)
         except Exception:
             logger.exception("inquiry draft/propose failed")
 

@@ -332,12 +332,18 @@ _ACT_PROMPT = ('[受け口 / 届いた連絡の自動処理]\nこれは本人の
                '（本文をチャットに書かない）。本人の承認なしに送信・支払い・外部への働きかけをしない。')
 
 
-async def deliver(user_id, item, decision, watches):
-    """The outcome, said in chat (and pushed). Returns the room it went to."""
-    from app.services.chat_service import ChatService
+async def _room_for(user_id, decision, watches):
+    """The room an item that is told or acted on goes to: the watch's, the judged one when it exists, else home."""
     known = {r['room_id'] for r in _recent_rooms(user_id)}
     watch = next((w for w in watches if w['id'] == decision.get('watch_id')), None)
-    room = (watch or {}).get('room_id') or (decision.get('room_id') if decision.get('room_id') in known else '') or await home_room(user_id)
+    return (watch or {}).get('room_id') or (decision.get('room_id') if decision.get('room_id') in known else '') or await home_room(user_id)
+
+
+async def deliver(user_id, item, decision, watches, room=None):
+    """The outcome, said in chat (and pushed). Returns the room it went to."""
+    from app.services.chat_service import ChatService
+    watch = next((w for w in watches if w['id'] == decision.get('watch_id')), None)
+    room = room or await _room_for(user_id, decision, watches)
     line = (decision.get('line') or '').strip()
     mail = item.get('sender_info') or {}
     if decision['decision'] == 'act':
@@ -400,8 +406,9 @@ def _mark(item_id, result):
         logger.warning('inbox: could not mark %s', item_id)
 
 
-async def handle(user_id, item, own):
-    """One item through the sieve, Dan's judgement and the outlet."""
+async def handle(user_id, item, own, prepare=None):
+    """One item through the sieve, Dan's judgement and the outlet. prepare(room): what the caller makes in the room the
+    item goes to before it is said there (a site inquiry's reply card); it may return a line added to the item."""
     reason = sieve(item, own)
     if reason:
         _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': reason, 'at': time.time()})
@@ -440,7 +447,15 @@ async def handle(user_id, item, own):
         decision['room_id'] = hint or belongs
     room = None
     if decision['decision'] in ('tell', 'act'):
-        room = await deliver(user_id, item, decision, watches)
+        room = await _room_for(user_id, decision, watches)
+        if prepare:
+            try:
+                note = await prepare(room)
+                if note:
+                    item = {**item, 'content': f"{item.get('content') or ''}\n\n{note}"}
+            except Exception:
+                logger.exception('inbox: could not prepare %s in %s', item.get('id'), room)
+        room = await deliver(user_id, item, decision, watches, room=room)
         if awaited and hit.get('once'):   # the reply that was waited for: told once, the watch is done
             try:
                 from app.services.followups import mark_status
@@ -522,10 +537,11 @@ async def cycle_all():
 
 # ---- stage 2: what reaches the user by other ways than mail ----------------------------------------------------------
 
-async def receive(user_id, source, sender, body, subject='', source_id='', room_id=None, metadata=None):
+async def receive(user_id, source, sender, body, subject='', source_id='', room_id=None, metadata=None, prepare=None):
     """Something that reached the user from outside by another way than mail (an Instagram DM, a guest in a collab
     window, a site inquiry, a watched SNS page): kept in the same queue and judged the same way. room_id: the room it
-    plainly belongs to (a collab window's origin room). Returns the decision, or None when it was already received."""
+    plainly belongs to (a collab window's origin room). prepare: see handle. Returns the decision, or None when it was
+    already received."""
     from app.services.supabase_client import get_supabase_client
     sb = get_supabase_client().client
     if source_id:
@@ -536,7 +552,7 @@ async def receive(user_id, source, sender, body, subject='', source_id='', room_
     row = {'user_id': user_id, 'source': source, 'source_id': source_id or None, 'content': body or '', 'subject': subject or '',
            'sender_info': {'from': sender}, 'metadata': {**(metadata or {}), 'room_hint': room_id, 'inbox': 'pending'}, 'status': 'pending'}
     stored = await asyncio.to_thread(lambda: sb.table('detected_messages').insert(row).execute().data)
-    return await handle(user_id, stored[0] if stored else {**row, 'id': None}, set())
+    return await handle(user_id, stored[0] if stored else {**row, 'id': None}, set(), prepare=prepare)
 
 
 async def judge_row(user_id, row):
