@@ -16,6 +16,11 @@ import urllib.request
 import uuid
 
 STATE_FILE = "dan_browser_state.json"
+# The tab Dan is working on, written by the page-operating process (browser.py). The tidy after a turn keeps it.
+CURRENT_TAB_FILE = "dan_current_tab.txt"
+# Dan's windows live off the screen; a window comes onto the screen only while it is handed to the owner (hold).
+# Off screen, Chrome keeps painting (the --disable-*-backgrounding flags) and Google still signs in (2026-09-25).
+OFF_SCREEN = (-32000, -32000)
 _locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
 _launch_lock = threading.Lock()
@@ -185,8 +190,7 @@ def _ensure_browser_locked(room_id: str, profile: Path) -> int:
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         executable = browser._chrome_executable_path(pw)
-    x, y = browser._executor_window_position(room_id)
-    browser._spawn_detached_browser(executable, str(profile), port, x, y)
+    browser._spawn_detached_browser(executable, str(profile), port)
     deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
         if _cdp_ready(port):
@@ -195,6 +199,123 @@ def _ensure_browser_locked(room_id: str, profile: Path) -> int:
             return port
         time.sleep(0.1)
     raise RuntimeError("Core-owned browser did not expose CDP; no CLI fallback was used")
+
+
+def _with_cdp(port: int, work):
+    """One raw CDP connection to the browser (not Playwright: attaching to every page hangs on a busy browser)."""
+    import itertools
+    import websockets
+
+    async def run():
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/json/version", timeout=2) as response:
+            ws_url = json.load(response)["webSocketDebuggerUrl"]
+        async with websockets.connect(ws_url, max_size=16 * 1024 * 1024, open_timeout=5, close_timeout=2) as ws:
+            ids = itertools.count(1)
+
+            async def call(method, **params):
+                call_id = next(ids)
+                await ws.send(json.dumps({"id": call_id, "method": method, "params": params}))
+                while True:
+                    message = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                    if message.get("id") == call_id:
+                        if "error" in message:
+                            raise RuntimeError(message["error"].get("message", "CDP error"))
+                        return message.get("result", {})
+
+            return await work(call)
+
+    return asyncio.run(run())
+
+
+async def _pages(call) -> list[dict]:
+    return [t for t in (await call("Target.getTargets"))["targetInfos"] if t.get("type") == "page"]
+
+
+async def _place(call, left: int, top: int, front: str | None = None) -> None:
+    windows = set()
+    for page in await _pages(call):
+        try:
+            windows.add((await call("Browser.getWindowForTarget", targetId=page["targetId"]))["windowId"])
+        except RuntimeError:
+            continue   # closed meanwhile
+    for window in windows:
+        # Bounds can be set only on a normal (not minimized/maximized) window.
+        await call("Browser.setWindowBounds", windowId=window, bounds={"windowState": "normal"})
+        await call("Browser.setWindowBounds", windowId=window, bounds={"left": left, "top": top})
+    if front:
+        await call("Target.activateTarget", targetId=front)
+
+
+def _current_tab(profile: Path) -> str:
+    try:
+        return (profile / CURRENT_TAB_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _show(room_id: str, profile: Path, port: int) -> None:
+    """Handed to the owner: the window comes onto the screen, Dan's tab in front."""
+    from app.tools.browser import _executor_window_position
+    x, y = _executor_window_position(room_id)
+
+    async def work(call):
+        ids = {p["targetId"] for p in await _pages(call)}
+        tab = _current_tab(profile)
+        await _place(call, x, y, front=tab if tab in ids else None)
+
+    _place_safely(port, work, "show")
+
+
+def _hide(port: int) -> None:
+    async def work(call):
+        await _place(call, *OFF_SCREEN)
+
+    _place_safely(port, work, "hide")
+
+
+def _place_safely(port: int, work, what: str) -> None:
+    # Where the window sits never decides whether a hold or release happened.
+    try:
+        _with_cdp(port, work)
+    except Exception as exc:
+        from app.tools import browser
+        browser._write_browser_recovery_log("browser_window_place_failed", port=port, what=what, error=str(exc)[:200])
+
+
+def tidy_after_turn(room_id: str) -> dict:
+    """Dan answered: keep only the tab it was working on, and take the window off the screen.
+
+    Not while the browser is handed to the owner or waiting on a sign-in (holds): that screen is the point.
+    Sign-ins live in the profile's cookies, not in tabs, so closing tabs signs nothing out.
+    When the working tab is not known, no tab is closed (only the window is moved).
+    """
+    profile = profile_for_room(room_id)
+    with profile_lock(profile):
+        if is_held(profile):
+            return {"room_id": room_id, "skipped": "held"}
+        port = _saved_port(profile)
+        if not (_cdp_ready(port) and _owns_port(profile, port)):
+            return {"room_id": room_id, "skipped": "closed"}
+        keep = _current_tab(profile)
+
+        async def work(call):
+            # The window first: a just-closed tab stays listed for a moment and has no window to ask about.
+            await _place(call, *OFF_SCREEN)
+            ids = [p["targetId"] for p in await _pages(call)]
+            closed = []
+            if keep in ids:
+                for target in ids:
+                    if target != keep:
+                        await call("Target.closeTarget", targetId=target)
+                        closed.append(target)
+            return closed
+
+        closed = _with_cdp(port, work)
+        from app.tools import browser
+        row = {"profile": profile.name, "port": port, "tabs_closed": len(closed), "kept": bool(keep)}
+        browser._write_browser_recovery_log("browser_tidied_after_turn", **row)
+        return {"room_id": room_id, **row}
 
 
 def _close_profile(profile: Path, port: int) -> tuple[bool, bool]:
@@ -238,12 +359,17 @@ def manage_session(operation: str, room_id: str, reason: str = "", user_id: str 
             if not (_cdp_ready(port) and _owns_port(profile, port)):
                 raise RuntimeError("No live browser to hold; open it before handing it to the user")
             holds["user" if operation == "hold" else "authentication"] = reason or "Waiting for user/authentication"
+            if operation == "hold":
+                # Dan signs in by itself (hold_auth); only a screen handed to the owner needs to be seen.
+                _show(room_id, profile, port)
         elif operation in {"release", "release_auth"}:
             if operation == "release":
                 holds.clear()
             else:
                 holds.pop("authentication", None)
             port = _saved_port(profile)
+            if "user" not in holds and _cdp_ready(port) and _owns_port(profile, port):
+                _hide(port)
         elif operation == "close":
             port = _saved_port(profile)
             if port and _cdp_ready(port) and _owns_port(profile, port) and state.get("user_id"):
@@ -273,11 +399,14 @@ def reap_idle(idle_seconds: int, held_profiles: set[str]) -> list[dict]:
     if idle_seconds <= 0:
         return []
     closed = []
-    for profile in sorted((Path.home() / ".ai_secretary").glob("browser_data--*")):
+    master = browser._master_profile_dir()
+    # The browser without a room (scripts, tests: fixed port) is cleaned up the same way. It was left out, and one stayed
+    # open on the owner's screen from 2026-09-24 to 10-16 with 15 tabs, about 1.5 cores of CPU.
+    for profile in sorted((Path.home() / ".ai_secretary").glob("browser_data--*")) + [master]:
         with profile_lock(profile):
             if profile.name in held_profiles or is_held(profile):
                 continue
-            port = _saved_port(profile)
+            port = browser._LEGACY_CDP_PORT if profile == master else _saved_port(profile)
             if not port or not browser._port_listening(port) or not _owns_port(profile, port):
                 continue
             try:

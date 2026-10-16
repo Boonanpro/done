@@ -508,13 +508,7 @@ def _chrome_executable_path(playwright) -> str:
     return playwright.chromium.executable_path
 
 
-def _spawn_detached_browser(
-    executable: str,
-    user_data_dir: str,
-    cdp_port: int,
-    window_x: int,
-    window_y: int,
-) -> None:
+def _spawn_detached_browser(executable: str, user_data_dir: str, cdp_port: int) -> None:
     """
     所有プロセスからブラウザをコンソール非依存で起動する。
 
@@ -524,14 +518,20 @@ def _spawn_detached_browser(
     ページやOTP入力欄ごとブラウザが消え、ユーザーが渡したコードが無駄になって
     いた。DETACHED_PROCESS は Windows Job Object からは分離しない。
     部屋付きブラウザは必ず Dan Core がこの関数を呼び、CLI は CDP 接続だけ行う。
+
+    窓は画面の外に開く。本人に渡す時（hold）だけ画面に出す（browser_lifecycle._show）。
+    2026-10-16: ダンの窓が本人の画面に出たままで邪魔だった。headless にしないのは、Chrome が
+    "HeadlessChrome" を名乗り Google がサインインを断るため（2026-09-25、カレンダーの接続）。
+    画面の外でも描画が止まらないのは下の --disable-*-backgrounding のおかげ。
     """
+    from app.services.browser_lifecycle import OFF_SCREEN
     args = [
         executable,
         f"--remote-debugging-port={cdp_port}",
         "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={user_data_dir}",
         "--disable-blink-features=AutomationControlled",
-        f"--window-position={window_x},{window_y}",
+        f"--window-position={OFF_SCREEN[0]},{OFF_SCREEN[1]}",
         "--window-size=1440,900",
         "--no-first-run",
         "--no-default-browser-check",
@@ -546,15 +546,6 @@ def _spawn_detached_browser(
         "about:blank",
     ]
     creationflags = 0
-    # Jobs work without a window. The switch used to be the profile name alone, so DAN_BROWSER_HEADLESS=1 in any other room
-    # (the model benchmark) opened a real window on the owner's desktop; covered by other windows Chrome stops painting it
-    # and clicks fail their stability check (2026-09-23: 6 refused clicks in one run, each worked around with JavaScript).
-    if Path(user_data_dir).name.startswith('browser_data--voice-job-') or os.environ.get('DAN_BROWSER_HEADLESS') == '1':
-        # A real window placed off the screen, not headless: headless Chrome names itself "HeadlessChrome" and Google refused
-        # to sign in from it (2026-09-25, connecting a calendar account). Off screen, the owner never sees it; painting is
-        # kept going by the --disable-*-backgrounding flags above.
-        args = [a for a in args if not a.startswith('--window-position=')]
-        args.insert(1, '--window-position=-32000,-32000')
     if os.name == "nt":
         # Console detachment only. The caller must be the persistent owner.
         creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -761,8 +752,6 @@ async def _executor_worker():
                 cdp_port = _reassign_executor_cdp_port()
                 _write_browser_recovery_log("cdp_port_reassigned", port=cdp_port, error=str(connect_exc))
 
-            window_x, window_y = _executor_window_position()
-
             # ブラウザは detached で起動して CDP で「外から」繋ぐ。Playwright に
             # 起動させるとこのプロセス（部屋ごとのMCPサーバ）の子になり、常駐
             # セッションが畳まれるたびにブラウザごと道連れで死ぬ。ログイン途中の
@@ -770,9 +759,7 @@ async def _executor_worker():
             executable = _chrome_executable_path(playwright)
 
             async def launch_detached_and_connect():
-                _spawn_detached_browser(
-                    executable, user_data_dir, cdp_port, window_x, window_y
-                )
+                _spawn_detached_browser(executable, user_data_dir, cdp_port)
                 return await _connect_detached_browser(playwright, cdp_port)
 
             try:
@@ -991,9 +978,37 @@ async def _follow_windows(pages_state: dict, context) -> None:
     print(f"[EXECUTOR_BROWSER] Popup closed; back to: {back.url}")
 
 
+async def _note_current_tab(pages_state: dict, context) -> None:
+    """操作しているタブをプロファイルに書く。ターンの後の片付け（browser_lifecycle.tidy_after_turn）はこれだけ残す。"""
+    page = pages_state["current"]
+    if page is None or pages_state.get("noted") is page:
+        return
+    try:
+        session = await context.new_cdp_session(page)
+        try:
+            target = (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+        finally:
+            await session.detach()
+        from app.services.browser_lifecycle import CURRENT_TAB_FILE
+        (_executor_profile_dir() / CURRENT_TAB_FILE).write_text(target, encoding="utf-8")
+        pages_state["noted"] = page
+    except Exception:
+        # 書けなければ片付けはタブを閉じない（窓を画面の外へ動かすだけ）。
+        pass
+
+
 async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
+    try:
+        return await _run_page_command(pages_state, context, cmd, args)
+    finally:
+        # タブを切り替える・閉じるコマンドの後の「今のタブ」も書く。
+        await _note_current_tab(pages_state, context)
+
+
+async def _run_page_command(pages_state: dict, context, cmd: str, args: dict):
     await _follow_windows(pages_state, context)
+    await _note_current_tab(pages_state, context)
     page = pages_state["current"]
 
     if cmd == "window_info":

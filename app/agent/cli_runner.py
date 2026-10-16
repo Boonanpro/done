@@ -1389,6 +1389,19 @@ def _just_before_iso(iso: str) -> Optional[str]:
         return None
 
 
+def _tidy_room_browser(room_id: str) -> None:
+    """ターンが答えで終わった: 部屋のブラウザは操作していたタブだけ残し、窓を画面の外へ戻す（browser_lifecycle）。
+    2026-10-16: 使い終わったタブと窓が本人の画面に残り続け、見ていない動画のタブが CPU を使っていた。"""
+    def run():
+        try:
+            from app.services.browser_lifecycle import tidy_after_turn
+            tidy_after_turn(room_id)
+        except Exception as exc:
+            _cli_debug(f"[BROWSER] tidy after the turn failed (room {room_id[:8]}): {exc}")
+
+    threading.Thread(target=run, daemon=True, name=f"browser-tidy-{room_id[:8]}").start()
+
+
 def _save_ai_message_sync(
     room_id: str,
     content: str,
@@ -1430,6 +1443,8 @@ def _save_ai_message_sync(
     # この保存がターンの最後の答えなら、保存の前に部屋を「作業していない」にし、答えと同じ知らせで画面に
     # 伝える。画面は答えを出すのと同時に作業中の表示を止める（2026-10-14: 答えの後に1〜4秒残っていた）。
     turn_end = {"run_id": run_id, "at": turn_flow.turn_answered(room_id)} if ends_turn else None
+    if ends_turn:
+        _tidy_room_browser(room_id)
 
     ai_context: Optional[dict] = None
     if reasoning_steps:
