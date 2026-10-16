@@ -100,7 +100,8 @@ type DisplayItem =
 
 // 部品（選択・入力）の答えを送る時の追加情報: 照合情報、部品が決めた送信 ID（保存されたと分かるまで同じ ID で送る）、
 // 保存された／保存されていない（not saved）／分からない（unknown）の知らせ
-type SendExtra = { answerTo?: AnswerTo; clientMessageId?: string; onSaved?: (msg: MessageResponse) => void; onFailed?: (why: string) => void };
+// onSaved の started: echo が無く「保存されたか」の口で確かめた時の、ダンの処理が始まったか（false＝保存済みだが始まっていない）
+type SendExtra = { answerTo?: AnswerTo; clientMessageId?: string; onSaved?: (msg: MessageResponse, started?: boolean | null) => void; onFailed?: (why: string) => void };
 type SendMessageHandle = (content: string, extra?: SendExtra) => void;
 
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
@@ -1035,7 +1036,7 @@ function ChatInput({
     // 部品（選択・入力）の答え: 保存されたら onSaved、保存されなかったら onFailed、分からなければ onFailed('unknown')（1回だけ）
     let settled = false;
     let checking = false;
-    const reportSaved = (m: MessageResponse) => { if (!settled) { settled = true; extra?.onSaved?.(m); } };
+    const reportSaved = (m: MessageResponse, started?: boolean | null) => { if (!settled) { settled = true; extra?.onSaved?.(m, started); } };
     const reportFailed = (why: string) => { if (!settled) { settled = true; extra?.onFailed?.(why); } };
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
@@ -1100,10 +1101,12 @@ function ChatInput({
       }));
       replaceMessageIdRef.current = null;
     } else {
-      // 新規送信: 楽観的メッセージを追加
-      queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-        messages: [optimisticUserMessage, ...(old?.messages || [])],
-      }));
+      // 新規送信: 楽観的メッセージを追加（同じ ID の行がもう記録にある＝保存済みの答えを同じ ID で送り直す時は足さない）
+      queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => (
+        old?.messages?.some((m) => m.id === tempUserMessageId)
+          ? old
+          : { messages: [optimisticUserMessage, ...(old?.messages || [])] }
+      ));
     }
 
     const controller = new AbortController();
@@ -1123,9 +1126,10 @@ function ChatInput({
       );
       let verdict: 'saved' | 'not saved' | 'unknown' = 'unknown';
       let found: MessageResponse | undefined;
+      let started: boolean | null | undefined;
       try {
         const r = await api.rooms.messageSaved(roomId, tempUserMessageId);
-        if (r && r.saved === true && r.message) { verdict = 'saved'; found = r.message; } else if (r && r.saved === false) verdict = 'not saved';
+        if (r && r.saved === true && r.message) { verdict = 'saved'; found = r.message; started = r.started; } else if (r && r.saved === false) verdict = 'not saved';
       } catch {
         verdict = 'unknown';
       }
@@ -1138,7 +1142,7 @@ function ChatInput({
             ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
             : { messages: [row, ...old.messages] };
         });
-        reportSaved(row);
+        reportSaved(row, started);   // started: false なら部品が同じ ID で送り直してダンの処理を始めさせる
         return;
       }
       dropTemp();
@@ -2136,10 +2140,10 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 一緒に保存する。送信 ID は部品が決めた物（送り直しも同じ ID）。サーバーに保存されたら保存された行の id で resolve、
   // 保存されていないとサーバーが答えたら reject（部品が選び直しを出す）、保存できたか確かめられなかったら
   // reject(SEND_UNKNOWN)（部品が「確かめる」を出す）
-  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo, clientMessageId) => new Promise<{ id: string }>((resolve, reject) => {
+  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo, clientMessageId) => new Promise<{ id: string; started?: boolean | null }>((resolve, reject) => {
     const send = sendMessageRef.current;
     if (!send) { reject(new Error('送信できません')); return; }
-    send(text, { answerTo, clientMessageId, onSaved: (msg) => resolve({ id: msg.id }), onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)) });
+    send(text, { answerTo, clientMessageId, onSaved: (msg, started) => resolve({ id: msg.id, started }), onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)) });
   }), []);
   // 今ログインしている本人。部品の「答えました」はこの人の保存済みの発言だけで決める
   const ownerId = useAuthStore((state) => state.user?.id);
@@ -2282,7 +2286,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
           ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
           : { messages: [row, ...old.messages] };
       });
-      return { saved: true };
+      return { saved: true, started: r.started };
     }
     if (r && r.saved === false) return { saved: false };
     throw new Error('保存されたか分かりません');
@@ -3186,7 +3190,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
-          <ShapeAnswerProvider messages={messages} ownerId={ownerId} submit={answerShapeInRoom} recheck={recheckAnswer}>
+          <ShapeAnswerProvider messages={messages} ownerId={ownerId} roomId={initialRoomId} submit={answerShapeInRoom} recheck={recheckAnswer}>
           <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(

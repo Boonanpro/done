@@ -418,7 +418,9 @@ def test_send_stream_route_builds_every_echo_from_the_saved_row() -> None:
     src = (ROOT / "app/api/chat_routes.py").read_text(encoding="utf-8")
     gen = src[src.index("async def send_dan_message_stream"):src.index('@router.post("/dan/read"')]
     assert gen.index("_check_answer_link,") < gen.index("_saved_send,") < gen.index("if request.replace_message_id:") < gen.index("_replace_user_message,")
-    assert gen.count("_user_message_echo(") == 4 and gen.count("_reply_for(service") == 4
+    # echo sites: the echo-only replies (already saved / another request of the same send starts it / saved before this
+    # request) share _echo_only; the saved echo of the sequential branch; the saved echo of the parallel branch
+    assert gen.count("_user_message_echo(") == 3 and gen.count("_reply_for(service") == 3 and gen.count("yield _echo_only(") == 3
     assert "request.reply_to_id, message_id" not in gen and "reply_to_id=request.reply_to_id" not in gen
     assert '"sender_name": sender_display_name or "You"' not in gen
     assert "except PermissionError" in gen and "except LookupError" in gen and "except MessageIdTaken" in gen

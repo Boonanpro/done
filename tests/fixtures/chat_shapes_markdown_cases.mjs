@@ -87,6 +87,27 @@ export function targetedCases() {
     defBadSetext: '[a]: /b x\n===\n<span>\n' + F(), defDashOne: '[a]: /b\n-\n  ' + F().replaceAll('\n', '\n  '),
     defMultiLineLabel: '[a\nb]: /c\n===\n<span>\n' + F(), defAngle: '[a]: <b c>\n===\n<span>\n' + F(),
     setextLazy: '> a\n---\n' + F(), setextAfterList: '- a\n===\n<span>\n' + F(),
+    // GFM の表（Web の描画は remark-gfm）: 表は段落を切れる。表の後の行は始まれる物が無ければ表の行。表の後では
+    // 単独タグ（種類7）も HTML を始め（空行まで）、空の項目や 2. の箇条書きも始まる。遅延継続の行は表の行にならない
+    tableSpan: '| a |\n| - |\n<span>\n' + F() + '\n</span>', tableThenFence: '| a |\n| - |\n' + F(),
+    tableBlankFence: '| a |\n| - |\n\n' + F(), paraThenTable: 'text\n| a |\n| - |\n<span>\n' + F(),
+    tableOrdered2: '| a |\n| - |\n2. x\n\n   ' + F().replaceAll('\n', '\n   '), tableEmptyItem: '| a |\n| - |\n-\n  ' + F().replaceAll('\n', '\n  '),
+    tableEmptyStar: '| a |\n| - |\n*\n  ' + F().replaceAll('\n', '\n  '), tableEmptyOrdered: '| a |\n| - |\n1.\n   ' + F().replaceAll('\n', '\n   '),
+    tableIndented: '| a |\n| - |\n    code\n' + F(), tableTab: '| a |\n| - |\n\tx\n' + F(), tableEq: '| a |\n| - |\n===\n<span>\n' + F(),
+    tableDash: '| a |\n| - |\n---\n<span>\n' + F(), tableQuote: '| a |\n| - |\n> q\n' + F(), tableRowNoPipe: '| a |\n| - |\nrow\n<span>\n' + F(),
+    tableNote: '| a |\n| - |\n| b |\n※税込\n' + F(), tableHtmlLater: '| a |\n| - |\n<span>\n# h\n' + F(),
+    tableLazyRow: '> | a |\n> | - |\nrow\n<span>\n' + F(), tableLazyDelim: '> | a |\n| - |\n<span>\n' + F(),
+    tableInQuote: '> | a |\n> | - |\n> <span>\n' + F(), tableInList: '- | a |\n  | - |\n  <span>\n' + F(),
+    tableInListLazy: '- | a |\n  | - |\n<span>\n' + F(), tableInListLazyRow: '- | a |\n  | - |\nrow\n<span>\n' + F(),
+    tableColonOnly: 'a\n:-\n<span>\n' + F(), tableOneCell: 'a\n|-\n<span>\n' + F(), tableCountMismatch: '| a | b |\n| - |\n<span>\n' + F(),
+    tableDefHead: '[a]: b\n| - |\n<span>\n' + F(), tableHeadingHead: '# a | b\n| - | - |\n<span>\n' + F(),
+    tableDelim4: '| a |\n    | - |\n<span>\n' + F(), tableDelim3: '| a |\n   | - |\n<span>\n' + F(), tableEscape: '| a \\| b |\n| - |\n<span>\n' + F(),
+    tableDashList: '| a | b |\n- | -\n<span>\n' + F(), tableDashNoSpace: '| a | b |\n-|-\n<span>\n' + F(), tableQuoteDelim: '| a |\n> | - |\n<span>\n' + F(),
+    tableTagHead: 'x\n<span>\n| - |\n<i>\n' + F(), tableTwo: '| a |\n| - |\n| b |\n| - |\n<span>\n' + F(),
+    tableAfterTable: '| a |\n| - |\n\n| b |\n| - |\n<span>\n' + F(), tableSetextRows: '| a |\n| - |\nb\n---\n<span>\n' + F(),
+    tableOrderedHead: 'x\n2. a | b\n- | -\n<span>\n' + F(), tableCrlf: ('| a |\n| - |\n<span>\n' + F()).replaceAll('\n', '\r\n'),
+    footnoteIndented: '[^1]: note\n    ' + F().replaceAll('\n', '\n    '), footnote2: '[^1]: note\n  ' + F().replaceAll('\n', '\n  '),
+    footnoteLazySpan: '[^1]: note\n<span>\n' + F(),
   };
   return Object.entries(T).map(([name, text]) => ({ name: 'targeted:' + name, text }));
 }
@@ -104,6 +125,7 @@ const LINES = [
   '    code', '\tcode', '  text', '      deep', '[a]: /b',
   '[a]: /b "t"', '[a]:', '[b]: <c d>', '"t"', "'t'", '[x]: /y (z)', '[x]: a(b', '[]: /u', '[a\\]]: /u', '- [a]: /b',
   '| a | b |', '|---|---|', '| c | d |', 'a | b', '- | x |',
+  '| a |', '| - |', '|-', '-|-', ':-', '| :-: | -: |', '- | -', 'x | y', '|', 'a \\| b', '[^1]: note', '<span> | x',
 ];
 
 function mulberry32(seed) {

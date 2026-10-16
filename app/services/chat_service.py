@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import re
 import asyncio
+import threading
 import time
 import random
 import logging
@@ -194,6 +195,123 @@ def reply_target_sync(sb, room_id: Optional[str], reply_to_id: Optional[str]) ->
         "full_content": r.get("content") or "",
         "created_at": r.get("created_at"),
     }
+
+
+# --- What one send does only once (the second rule every path below goes through) -----------------------------
+# The same send (the same client_message_id) can arrive more than once: a retry inside send_message after a lost
+# insert response, the screen sending an answer again with the same id, two requests racing. Saving is once by the
+# id being the row's primary key. What follows a save — the counting / feed / detection of a new message ("saved"),
+# and starting Dan's processing of it ("start") — is NOT decided by which request saved the row: an insert that met
+# the id cannot tell whether its own earlier attempt landed or another request saved first. Instead each send id has
+# one right per kind, taken atomically in this process (the chat routes run only in Core). Only the request that
+# holds the right does that thing; the others answer with the saved row.
+#
+# The start right has three steps: take (this request will start it) → begin (it starts now; only one token can ever
+# begin) or give back (the request ended before it started anything, so a later request with the same id may start
+# it: the recovery for "saved, but nothing ever started"). A right taken and neither begun nor given back for
+# SEND_RIGHT_ABANDONED seconds counts as given back (a request stopped where its clean-up does not run); if its
+# holder then tries to begin after someone else took the right, it does not start.
+#
+# The rights are about the send whose row exists. When a request CREATES the row (no row had that id: an earlier one
+# was deleted, e.g. withdrawn), the rights an earlier send of that id finished with no longer apply
+# (forget_finished_send_rights); a right a live request of the same send still holds is never dropped. A row that was
+# already there when a request came (a send tried again) is started by it only if a request in this process took its
+# start right and gave it back; if this process never saw it (saved before a restart), it is not started again.
+
+SEND_RIGHT_ABANDONED = 60.0
+_SEND_RIGHT_TTL = 6 * 3600.0
+_send_rights_lock = threading.Lock()
+_send_rights: dict = {}   # (kind, room_id, message_id) -> {"token", "state": taken|begun|returned, "at"}
+
+
+def _send_right_key(kind: str, room_id: Optional[str], message_id: Optional[str]):
+    return (kind, str(room_id or ""), str(message_id or ""))
+
+
+def take_send_right(kind: str, room_id: Optional[str], message_id: Optional[str]) -> Optional[dict]:
+    """Take the right to do `kind` for this send. {"token", "returned": bool} — returned is True when someone held it
+    in this process and gave it back without doing it (or abandoned it) — or None (someone holds it, or did it)."""
+    import uuid as _uuid
+    if not room_id or not message_id:
+        return None
+    now = time.time()
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        for k in [k for k, v in _send_rights.items() if now - v["at"] > _SEND_RIGHT_TTL]:
+            _send_rights.pop(k, None)
+        cur = _send_rights.get(key)
+        returned = False
+        if cur is not None:
+            if cur["state"] == "begun":
+                return None
+            if cur["state"] == "taken" and now - cur["at"] <= SEND_RIGHT_ABANDONED:
+                return None
+            returned = True   # given back, or taken and abandoned
+        token = _uuid.uuid4().hex
+        _send_rights[key] = {"token": token, "state": "taken", "at": now}
+        return {"token": token, "returned": returned}
+
+
+def begin_send_right(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> bool:
+    """The holder starts doing it now. True only for the current holder (once); False if the right moved on."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if not token or cur is None or cur["token"] != token or cur["state"] != "taken":
+            return False
+        cur["state"], cur["at"] = "begun", time.time()
+        return True
+
+
+def give_back_send_right(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder ended without doing it: a later request with the same id may take the right."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token and cur["state"] == "taken":
+            cur["state"], cur["at"] = "returned", time.time()
+
+
+def note_send_right_row_saved(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder's row is saved (the parallel branch begins before it saves: until this, its row may not exist yet)."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token:
+            cur["row_saved"] = True
+
+
+def forget_finished_send_rights(room_id: Optional[str], message_id: Optional[str]) -> None:
+    """A request just CREATED the row with this id (its insert succeeded), so any earlier row with this id is gone: what
+    an earlier send of it finished with belongs to that row and no longer applies — the "saved" right once done, the
+    "start" right once given back, or begun by a holder whose row was saved (and is now gone). A right a request still
+    holds ("taken"), or began before saving its row (the parallel branch), is kept: that request is the same send."""
+    with _send_rights_lock:
+        cur = _send_rights.get(_send_right_key("saved", room_id, message_id))
+        if cur is not None and cur["state"] != "taken":
+            _send_rights.pop(_send_right_key("saved", room_id, message_id), None)
+        cur = _send_rights.get(_send_right_key("start", room_id, message_id))
+        if cur is not None and (cur["state"] == "returned" or (cur["state"] == "begun" and cur.get("row_saved"))):
+            _send_rights.pop(_send_right_key("start", room_id, message_id), None)
+
+
+def clear_send_rights() -> None:
+    """Forget every right (tests start each scenario from a fresh process state)."""
+    with _send_rights_lock:
+        _send_rights.clear()
+
+
+def send_right_state(kind: str, room_id: Optional[str], message_id: Optional[str]) -> Optional[str]:
+    """'begun', 'taken' (a request holds it and may still start), 'returned' (given back or abandoned: nothing started
+    it in this process), or None (this process has never seen it: no knowledge)."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if cur is None:
+            return None
+        if cur["state"] == "taken" and time.time() - cur["at"] > SEND_RIGHT_ABANDONED:
+            return "returned"
+        return cur["state"]
 
 
 class ChatService:
@@ -655,8 +773,11 @@ class ChatService:
         UUID形式でない値は無視して従来通りDB採番。
 
         同じ id の行がもうある時（届いていた送信のやり直し）は、その行がこの部屋の・この送り主の・この種類の
-        発言（is_own_message）の時だけその行を返し（"_existed": True。数え直し・通知・検知はもう済んでいるので
-        しない）、ほかの行なら MessageIdTaken（他人の行を返さない・書き換えない）。
+        発言（is_own_message）の時だけその行を返し、ほかの行なら MessageIdTaken（他人の行を返さない・書き換えない）。
+        "_existed": True は「この呼び出しの最初の挿入が、もうある行に当たった」＝この呼び出しの前に保存されていた、という
+        確かな事実の印（数え直し・知らせ・検知はしない）。2回目以降の挿入が当たった時は付けない: 前の試行が届いて応答だけ
+        失われたのか、同じ送信の別の要求が先に保存したのか分からない。その時の数え直し・新着の知らせ・検知は、この送信 ID の
+        "saved" の権利（take_send_right）を取れた呼び出しだけが1回する。
         """
         # Verify membership
         if not await self._execute_with_retry(
@@ -700,22 +821,24 @@ class ChatService:
         if ai_context:
             insert_data["ai_context"] = ai_context
 
-        attempts = {"n": 0, "existed": False}
+        insert = {"attempts": 0, "before": False, "created": False}
 
         def _insert_idempotent():
-            attempts["n"] += 1
+            insert["attempts"] += 1
             try:
-                return self.supabase.table("chat_messages").insert(insert_data).execute()
+                done = self.supabase.table("chat_messages").insert(insert_data).execute()
+                insert["created"] = True   # this call created the row (no row had this id)
+                return done
             except Exception as exc:
-                # 23505 = the id already exists: a previous attempt landed but its response was lost (a retry
-                # inside this call, or the client's retry of the same send). Read the row back instead of
-                # failing, but only if it is this sender's own message in this room.
+                # 23505 = the id already exists: an earlier attempt landed but its response was lost (a retry
+                # inside this call), or another request of the same send saved it first. Read the row back instead
+                # of failing, but only if it is this sender's own message in this room.
                 if "23505" in str(exc) or "duplicate key" in str(exc).lower():
                     back = self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
                     row = (back.data or [None])[0]
                     if not is_own_message(row, room_id, sender_id, sender_type):
                         raise MessageIdTaken("この発言の ID はほかの発言が使っています")
-                    attempts["existed"] = attempts["n"] == 1   # saved before this call (not by this call's lost insert)
+                    insert["before"] = insert["attempts"] == 1   # the first insert of this call met it: saved before this call
                     return back
                 raise
 
@@ -727,9 +850,19 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
-            if attempts["existed"]:
+            if insert["before"]:
                 msg["_existed"] = True
                 return msg
+            if insert["created"]:
+                # a new row: what an earlier, since deleted row with this id finished with does not apply to it
+                msg["_created"] = True
+                forget_finished_send_rights(room_id, msg["id"])
+            # 保存の後の知らせは、この送信 ID で1回だけ（権利を取れた呼び出しが行う。行を保存したのがこの呼び出しの
+            # 前の試行でも、同じ送信の別の要求でも同じ）
+            right = take_send_right("saved", room_id, msg["id"])
+            if right is None:
+                return msg
+            begin_send_right("saved", room_id, msg["id"], right["token"])
             # 押し込み同期: この部屋のメンバーの新着ストリームへ流す（購読者が無ければ即return）
             try:
                 from app.services.room_feed import publish_message

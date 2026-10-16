@@ -13,16 +13,20 @@
  * - 画面の切り出し（split.ts）: どこからどこまでが部品のコードブロックかをここから借りる。
  * - サーバー（app/agent/chat_shapes.py）は同じ手順の Python の写しで部品の鍵を作り直す（答えの照合）。
  *
- * 部品は「文書の一番外側（引用・箇条書きの中ではない）にある、言語名が openui-lang か openui のコードブロック
- * （``` か ~~~）」。どこからどこまでがそれかは、Web の文章の描画（react-markdown）が使う Markdown の読み手
- * remark-parse（micromark）と同じ手順で決める。CommonMark の仕様書の文面ではなく micromark の実際の手順を写した
- * （仕様書と違う所がある: 遅延継続の行の単独タグ、<pre/>、字下げコードと空行の後の「2)」など。
- * tests/chat_shapes_markdown.test.mjs が remark-parse の構文木と突き合わせる）。決まりは:
+ * 部品は「文書の一番外側（引用・箇条書き・脚注の定義の中ではない）にある、言語名が openui-lang か openui のコード
+ * ブロック（``` か ~~~）」。どこからどこまでがそれかは、Web の文章の描画（react-markdown＋remark-gfm）が使う Markdown の
+ * 読み手 remark-parse（micromark）＋ GFM と同じ手順で決める。CommonMark の仕様書の文面ではなく micromark の実際の手順を
+ * 写した（仕様書と違う所がある: 遅延継続の行の単独タグ、<pre/>、字下げコードと空行の後の「2)」など）。GFM のうち
+ * コードブロックの位置を変えるのは表と脚注の定義（どちらも micromark-extension-gfm-* の手順を写した）。
+ * tests/chat_shapes_markdown.test.mjs が remark-parse＋remark-gfm の構文木と突き合わせる。決まりは:
  * - 行の区切りは \n・\r\n・\r。文書の先頭の BOM は読まない。NUL は U+FFFD として読む
  * - 空白は半角スペースとタブだけ。NBSP・全角空白・NEL・BOM・U+2028 などは空白ではなく、ふつうの文字。
  *   タブは次の4の倍数の列まで進む（字下げは列で数える）。空行は空白だけの行
- * - 入れ物（引用 > と、箇条書き - + * と 1. 1)）の中のコードブロックは一番外側ではない。入れ物の続きの行
- *   （> や字下げの無い行）は、段落の続きの時だけ入れ物の中に残る（遅延継続）
+ * - 入れ物（引用 > と、箇条書き - + * と 1. 1)、GFM の脚注の定義 [^ラベル]:）の中のコードブロックは一番外側では
+ *   ない。入れ物の続きの行（> や字下げの無い行）は、段落の続きの時だけ入れ物の中に残る（遅延継続）。脚注の定義は
+ *   段落の途中でも始まり、空行か4列の字下げの行で続く
+ * - GFM の表（見出しの行＋区切りの行）は段落を切れる。表の後の行は、空行・遅延継続の行で終わり、その行で始まれる物
+ *   （HTML は種類7も、箇条書きは空の項目や 2. も）があればそれ、無ければ表の行。見出しの行が単独タグなら HTML が勝つ
  * - 段落の途中で始まれる物: 見出し #、区切り線、Setext の下線（=== ---。遅延継続の行では始まれない）、
  *   HTML ブロックの種類1〜6、フェンス。始まれない物: 字下げコード（4列以上）、HTML の種類7（単独の完全な
  *   タグ）。ただし種類7は遅延継続の行では段落を切る（micromark の手順。その HTML は入れ物の中に残る）
@@ -296,10 +300,39 @@ function htmlAt(L: MdLine, q: number, interrupt: boolean, lazy: boolean): number
   return completeTag(L, i, closing) ? 7 : 0;
 }
 
-// 入れ物（micromark-core-commonmark block-quote.js / list.js の手順）
+// 入れ物（micromark-core-commonmark block-quote.js / list.js と、GFM の脚注の定義 micromark-extension-gfm-footnote の手順）
 type Quote = { kind: 'quote' };
 type List = { kind: 'list'; ordered: boolean; marker: number; size: number; initialBlankLine: boolean; furtherBlankLines: boolean; closeFlow: boolean };
-type Container = Quote | List;
+type Footnote = { kind: 'footnote' };
+type Container = Quote | List | Footnote;
+
+/**
+ * GFM の脚注の定義の印（前に空白3列まで、[^ラベル]: 。ラベルは空でなく、空白・[・行末を含まない（\ の後の [ \ ] は
+ * ラベルの文字）。: の後の空白は印に含める）。段落の途中でも始まる。合えば次の位置、合わなければ -1
+ */
+function footnoteAt(L: MdLine, p: number): number {
+  const c = L.codes;
+  let i = p + spaces(L, p, 3);
+  if (c[i] !== 91 || c[i + 1] !== 94) return -1;
+  i += 2;
+  let size = 0;
+  for (;;) {
+    const ch = c[i];
+    if (size > 999 || (ch === 93 && size === 0) || ch === undefined || ch === 91 || isSpace(ch)) return -1;
+    if (ch === 93) { i++; break; }
+    size++; i++;
+    if (ch === 92 && (c[i] === 91 || c[i] === 92 || c[i] === 93)) { size++; i++; }
+  }
+  if (c[i] !== 58) return -1;
+  i++;
+  return i + spaces(L, i);
+}
+
+/** 脚注の定義の続き（空行、またはちょうど4列の字下げ。4列を印に含める）。合わなければ -1 */
+function footnoteContinue(L: MdLine, p: number): number {
+  if (blankFrom(L, p)) return p;
+  return spaces(L, p, 4) === 4 ? p + 4 : -1;
+}
 
 /** 引用の印（前に空白3列まで、> の後ろの空白1つは印に含める）。合えば次の位置、合わなければ -1 */
 function quoteAt(L: MdLine, p: number): number {
@@ -373,6 +406,10 @@ function containerAt(L: MdLine, p: number, interrupt: boolean): [number, Contain
   const c = L.codes[p + spaces(L, p, 3)];
   if (c === 62) return [quoteAt(L, p), { kind: 'quote' }];
   if (c === 42 || c === 43 || c === 45 || isDigit(c)) return listAt(L, p, null, interrupt);
+  if (c === 91) {
+    const q = footnoteAt(L, p);
+    return q < 0 ? null : [q, { kind: 'footnote' }];
+  }
   return null;
 }
 
@@ -462,7 +499,72 @@ function definitionsOnly(c: number[]): boolean {
   }
 }
 
-type Current = null | { t: 'content'; codes: number[] } | { t: 'indented' } | { t: 'html'; kind: number } | Fence;
+// GFM の表（micromark-extension-gfm-table の syntax.js の手順。Web の描画は remark-gfm を使う）。
+// 表は「見出しの行」と次の「区切りの行」（- と : と | だけ。| か : が1つ以上。列の数が見出しと同じ）で始まり、段落を
+// 切れる。区切りの行は遅延継続の行ではいけない。表の後の行は、空行・遅延継続の行で終わり、その行で始まれる物
+// （見出し・区切り線・HTML（種類7も）・フェンス・字下げコード・入れ物（空の項目や 2. も））があればそれ、無ければ表の行。
+
+/** 表の見出しの行（q は字下げの後）。見出しの列の数、見出しでなければ 0 */
+function tableHeadAt(L: MdLine, q: number): number {
+  const c = L.codes;
+  let i = q;
+  let size = 0;
+  let sizeB = 0;
+  let seen = false;
+  if (c[i] !== 124) { seen = true; sizeB += 1; }   // 最初の | でない文字は2回数える
+  for (;;) {
+    const ch = c[i];
+    if (ch === undefined) return sizeB > 1 ? size : 0;   // 行末（文書の終わりなら区切りの行が無いので表にならない）
+    if (isSpace(ch)) { i++; continue; }
+    sizeB += 1;
+    if (seen) { seen = false; size += 1; }
+    if (ch === 124) { seen = true; i++; continue; }
+    // 中身: | ・空白・行末まで。\ の後の \ と | は中身
+    for (;;) {
+      const d = c[i];
+      if (d === undefined || d === 124 || isSpace(d)) break;
+      i++;
+      if (d === 92 && (c[i] === 92 || c[i] === 124)) i++;
+    }
+  }
+}
+
+/** 表の区切りの行（p は入れ物の印の後）の列の数。区切りの行でなければ -1 */
+function tableDelimiterAt(L: MdLine, p: number): number {
+  const c = L.codes;
+  let i = p + spaces(L, p, 3);
+  let sizeB = 0;
+  let seen = false;
+  // headDelimiterBefore
+  if (c[i] === 124) { seen = true; i++; i += spaces(L, i); } else if (c[i] !== 45 && c[i] !== 58) return -1;
+  for (;;) {
+    // headDelimiterValueBefore
+    const ch = c[i];
+    if (ch === 58 || ch === 45) {
+      sizeB += 1;
+      if (ch === 58) { seen = true; i++; if (c[i] !== 45) return -1; }
+      while (c[i] === 45) i++;
+      if (c[i] === 58) { seen = true; i++; }
+      i += spaces(L, i);
+    } else if (ch !== undefined) return -1;
+    // headDelimiterCellAfter
+    if (c[i] === 124) {
+      seen = true; i++;
+      i += spaces(L, i);
+      if (c[i] === undefined) break;
+      if (c[i] !== 45 && c[i] !== 58) return -1;
+      continue;
+    }
+    if (c[i] === undefined) break;
+    return -1;
+  }
+  return seen ? sizeB : -1;
+}
+
+// 段落の中身。head は最後の行を表の見出しの行と見た時の列の数（見出しにならなければ 0）。headHtml は最後の行が
+// 段落の外でなら HTML の種類7を始める行か（表が段落を切っても、その行は表より先に HTML として始まる）
+type Content = { t: 'content'; codes: number[]; head: number; headHtml: boolean };
+type Current = null | Content | { t: 'indented' } | { t: 'html'; kind: number } | { t: 'table' } | Fence;
 
 /**
  * 一番外側のコードブロックを順に返す（言語を問わない。閉じの無い物は文書の終わりまで）。
@@ -512,8 +614,11 @@ export function topLevelFences(text: string): TopFence[] {
     return null;
   };
 
-  // 何も続いていない行の始まり（flow の initial）
-  const fresh = (li: number, L: MdLine, p: number, lazy: boolean, afterParagraph: boolean) => {
+  // 段落の行を表の見出しの行として見た時（字下げ4列以上は見出しにならない）
+  const headOf = (L: MdLine, q: number, pre: number): [number, boolean] => (pre >= 4 ? [0, false] : [tableHeadAt(L, q), htmlAt(L, q, false, false) === 7]);
+
+  // 何も続いていない行の始まり（flow の initial）。inTable: 表の次の行（始まれる物が無ければ表の行）
+  const fresh = (li: number, L: MdLine, p: number, lazy: boolean, afterParagraph: boolean, inTable = false) => {
     if (blankFrom(L, p)) { cur = null; return; }
     // 字下げコード。遅延継続の行で始まった物はその行で終わる（micromark は続きの確かめを、その行の改行の位置で
     // 「この行は遅延継続か」と見るため）
@@ -533,7 +638,9 @@ export function topLevelFences(text: string): TopFence[] {
       const f = fenceAt(L, q, pre, li);
       if (f) { cur = f; return; }
     }
-    cur = { t: 'content', codes: L.codes.slice(q) };
+    if (inTable) { cur = { t: 'table' }; return; }
+    const [head, headHtml] = headOf(L, q, 0);
+    cur = { t: 'content', codes: L.codes.slice(q), head, headHtml };
   };
 
   // 1行を中身（flow）に渡す。遅延継続の行で、前からの物がこの行をまたいで続くなら true（入れ物を閉じない）
@@ -543,12 +650,18 @@ export function topLevelFences(text: string): TopFence[] {
     if (now) {
       if (now.t === 'content') {
         if (blankFrom(L, p)) cur = null;
-        else {
+        else if (!lazy && now.head > 0 && tableDelimiterAt(L, p) === now.head) {
+          // GFM の表: 段落の最後の行が見出し、この行が区切り。段落はその前で終わる。見出しの行が HTML の種類7を
+          // 始める行なら、そこから HTML（空行まで。この行も中）、そうでなければ表
+          cur = now.headHtml ? { t: 'html', kind: 7 } : { t: 'table' };
+          return false;
+        } else {
           const pre = spaces(L, p);
           const r = pre >= 4 ? null : interrupts(L, p + pre, lazy);
           if (!r) {
             now.codes.push(EOLC);
             for (let k = p; k < L.codes.length; k++) now.codes.push(L.codes[k]);
+            [now.head, now.headHtml] = headOf(L, p + pre, pre);
             return true;
           }
           cur = null;
@@ -561,6 +674,10 @@ export function topLevelFences(text: string): TopFence[] {
       } else if (now.t === 'indented') {
         if (!lazy && (blankFrom(L, p) || spaces(L, p, 4) >= 4)) return false;
         cur = null;
+      } else if (now.t === 'table') {
+        // 表は空行で終わる。遅延継続の行は表の行にならない。ほかの行は、その行で始まれる物が無ければ表の行
+        if (blankFrom(L, p) || lazy) cur = null;
+        else { fresh(li, L, p, false, false, true); return false; }
       } else if (now.t === 'fence') {
         if (lazy) { finishFence(now, null); cur = null; }
         else if (closesFence(L, p, now)) { finishFence(now, li); cur = null; return false; }
@@ -594,7 +711,7 @@ export function topLevelFences(text: string): TopFence[] {
     let continued = 0;
     while (continued < stack.length) {
       const c = stack[continued];
-      const q = c.kind === 'quote' ? quoteAt(L, p) : listContinue(c, L, p);
+      const q = c.kind === 'quote' ? quoteAt(L, p) : c.kind === 'footnote' ? footnoteContinue(L, p) : listContinue(c, L, p);
       if (q < 0) break;
       p = q;
       continued++;
@@ -610,7 +727,7 @@ export function topLevelFences(text: string): TopFence[] {
       if (!hasFlow) { flowLine(li, L, openContainers(L, p, false), false, continued); continue; }
       const now = cur as Current;
       if (now && (now.t === 'fence' || now.t === 'html')) { flowLine(li, L, p, false, continued); continue; }
-      interrupt = now !== null;
+      interrupt = now !== null && now.t !== 'table';   // 表の後の行では、空の項目や 2. の箇条書きも始まれる
     }
     if (containerAt(L, p, interrupt)) {
       closeFlow();

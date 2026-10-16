@@ -1,5 +1,6 @@
-// 期待値: remark-parse（Web の文章の描画 react-markdown と同じ micromark）の構文木の、文書の一番外側の
-// フェンスのコードブロック（``` / ~~~。字下げコードは除く）。比べる形は plain.ts topLevelFences に合わせる:
+// 期待値: Web の文章の描画（react-markdown＋remark-gfm）と同じ remark-parse＋remark-gfm（micromark）の構文木の、
+// 文書の一番外側のフェンスのコードブロック（``` / ~~~。字下げコードは除く）。{ gfm: false } で CommonMark だけ
+// （remark-parse だけ）の答えも出せる。比べる形は plain.ts topLevelFences に合わせる:
 // { line: 開きの行（0始まり）, closed: 閉じのフェンスまであるか, shape: 部品の言語名か, code: 中身, lang: 言語名 }
 // lang は plain.ts の言語名に名前の文字参照（&amp; など）が残っている時だけ比べない（plain.ts は名前の文字参照を
 // 解かない。解いても openui-lang / openui にはならないので shape は同じ。shape は必ず比べる）。
@@ -29,7 +30,7 @@ function sourceLine(text, starts, line) {
   return text.slice(s, e).replace(/\r\n$|\r$|\n$/, '');
 }
 
-export function remarkFences(text, { gfm = false } = {}) {
+export function remarkFences(text, { gfm = true } = {}) {
   const proc = gfm ? unified().use(remarkParse).use(remarkGfm) : unified().use(remarkParse);
   const tree = proc.parse(text);
   const starts = lineStarts(text);

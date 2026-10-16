@@ -1,9 +1,9 @@
 """The server's reader of the parts of a reply (app.agent.chat_shapes.top_level_fences / shape_codes / part_keys)
-gives the same answers as remark-parse (the screen's Markdown reader) and the screen's own code, on the corpus
-tests/fixtures/chat_shapes_markdown_corpus.json (written from remark-parse's syntax tree by
+gives the same answers as remark-parse + remark-gfm (the screen's Markdown reader) and the screen's own code, on the
+corpus tests/fixtures/chat_shapes_markdown_corpus.json (written from remark-parse + remark-gfm's syntax tree by
 make_chat_shapes_markdown_corpus.mjs, which first checks that plain.ts agrees). The corpus holds the verifier's
 27 inputs (HTML block edges, whitespace), boundary cases (paragraphs, containers, HTML kinds 1-7, tabs, line
-endings, language names, link reference definitions) and generated documents."""
+endings, language names, link reference definitions, GFM tables and footnote definitions) and generated documents."""
 import json
 from pathlib import Path
 
@@ -53,3 +53,17 @@ def test_markdown_whitespace_is_space_and_tab_only() -> None:
     assert chat_shapes.shape_codes(f"<span\tx>\n{fence}\n</span>") == []                     # a tab separates attributes
     assert chat_shapes.shape_codes(f"<div>\n\u3000\n{fence}") == []      # an ideographic space line is not blank
     assert len(chat_shapes.shape_codes(f"<div>\n \t\n{fence}")) == 1     # spaces and tabs only: blank, the block ends
+
+
+def test_gfm_tables_and_footnotes_like_the_screen() -> None:
+    """VERIFY4 P2-5: the screen draws with remark-gfm. A lone tag right after a table starts an HTML block there (the
+    fence inside is not a part, so an answer to it is refused like on the screen); a table can interrupt a paragraph;
+    a footnote definition is a container (a 4-column indented fence is inside it)."""
+    fence = '```openui-lang\nroot = Choice("Q", ["A", "B"])\n```'
+    assert chat_shapes.shape_codes(f"| a |\n| - |\n<span>\n{fence}\n</span>") == []          # the verifier's input
+    assert not chat_shapes.part_in_reply(f"| a |\n| - |\n<span>\n{fence}\n</span>", chat_shapes.part_key('root = Choice("Q", ["A", "B"])'))
+    assert chat_shapes.shape_codes(f"text\n| a |\n| - |\n<span>\n{fence}") == []
+    for t in (f"| a |\n| - |\n\n{fence}", f"| a |\n| - |\n{fence}", f"| a |\n| - |\n| b |\n\u203b\u7a0e\u8fbc\n{fence}"):
+        assert len(chat_shapes.shape_codes(t)) == 1, t
+    four = "    " + fence.replace("\n", "\n    ")
+    assert chat_shapes.shape_codes(f"[^1]: note\n{four}") == [] and chat_shapes.shape_codes(f"text\n[^1]: note\n{four}") == []

@@ -57,9 +57,10 @@ SHAPE_FENCE_LANGS = frozenset({"openui-lang", "openui"})
 
 # ---------------------------------------------------------------------------------------------------
 # Where the parts of a reply are: a line-for-line mirror of frontend/src/lib/chat-shapes/plain.ts
-# topLevelFences, which copies the steps of the screen's Markdown reader remark-parse (micromark): a part is
-# a fenced code block at the top level of the document (not inside a block quote or a list item) whose
-# language is exactly openui-lang / openui. The rules are written out in plain.ts's header; in short:
+# topLevelFences, which copies the steps of the screen's Markdown reader remark-parse + remark-gfm (micromark): a
+# part is a fenced code block at the top level of the document (not inside a block quote, a list item or a GFM
+# footnote definition) whose language is exactly openui-lang / openui. The rules are written out in plain.ts's
+# header; in short:
 # - lines end at \n, \r\n or \r; a BOM at the very start is skipped; NUL reads as U+FFFD
 # - whitespace is the space and the tab only (NBSP, ideographic space, NEL, BOM, U+2028... are ordinary
 #   characters). A tab advances to the next multiple of 4 columns; indentation is counted in columns.
@@ -67,8 +68,10 @@ SHAPE_FENCE_LANGS = frozenset({"openui-lang", "openui"})
 # - containers (> and list items) with lazy continuation; what may interrupt a paragraph (headings, thematic
 #   breaks, setext underlines, HTML kinds 1-6, fences; HTML kind 7 only on a lazy line); indented code;
 #   link reference definitions (a setext underline after definitions only is a new paragraph)
-# tests/fixtures/chat_shapes_markdown_corpus.json (written from remark-parse's own syntax tree) pins this file,
-# plain.ts, its mobile copy and remark-parse to the same answers.
+# - GFM: tables (a head row + delimiter row interrupts a paragraph; what may follow a table) and footnote
+#   definitions (a container that may interrupt a paragraph, continued by blank or 4-column indented lines)
+# tests/fixtures/chat_shapes_markdown_corpus.json (written from remark-parse + remark-gfm's own syntax tree) pins
+# this file, plain.ts, its mobile copy and remark-parse + remark-gfm to the same answers.
 # ---------------------------------------------------------------------------------------------------
 
 _HT = -2   # a tab: HT, then VS up to the next tab stop (micromark's preprocessing)
@@ -449,13 +452,132 @@ def _list_continue(st: _List, c: list[int], p: int) -> int:
     return q
 
 
+def _footnote_at(c: list[int], p: int) -> int:
+    """GFM footnote definition marker (micromark-extension-gfm-footnote): up to 3 spaces, [^label]: with a non-empty
+    label without space, tab, [ or line end (\\ before [ \\ ] keeps them in the label); the whitespace after : is part
+    of the marker. It can interrupt a paragraph. The position after it, or -1."""
+    i = p + _spaces(c, p, 3)
+    if _at(c, i) != 91 or _at(c, i + 1) != 94:
+        return -1
+    i += 2
+    size = 0
+    while True:
+        ch = _at(c, i)
+        if size > 999 or (ch == 93 and size == 0) or ch is None or ch == 91 or _is_space(ch):
+            return -1
+        if ch == 93:
+            i += 1
+            break
+        size += 1
+        i += 1
+        if ch == 92 and _at(c, i) in (91, 92, 93):
+            size += 1
+            i += 1
+    if _at(c, i) != 58:
+        return -1
+    i += 1
+    return i + _spaces(c, i)
+
+
+def _footnote_continue(c: list[int], p: int) -> int:
+    """A footnote definition goes on over a blank line, or a line indented exactly 4 columns (taken as its marker)."""
+    if _blank_from(c, p):
+        return p
+    return p + 4 if _spaces(c, p, 4) == 4 else -1
+
+
 def _container_at(c: list[int], p: int, interrupt: bool):
     ch = _at(c, p + _spaces(c, p, 3))
     if ch == 62:
         return _quote_at(c, p), "quote"
     if ch in (42, 43, 45) or _is_digit(ch):
         return _list_at(c, p, None, interrupt)
+    if ch == 91:
+        q = _footnote_at(c, p)
+        return None if q < 0 else (q, "footnote")
     return None
+
+
+# GFM tables (micromark-extension-gfm-table syntax.js; the screen draws with remark-gfm). A table starts with a head
+# row and the next line, a delimiter row (- : | only, at least one | or :, as many cells as the head), and can
+# interrupt a paragraph. The delimiter row may not be a lazy line. After it, a line ends the table if it is blank or
+# lazy; otherwise it is whatever can start there (heading, thematic break, HTML of any kind, fence, indented code,
+# containers including empty items and 2.) or else a row of the table.
+
+def _table_head_at(c: list[int], q: int) -> int:
+    """The number of cells of a head row starting at q (after its indent), or 0 if it is not one."""
+    i = q
+    size = 0
+    size_b = 0
+    seen = False
+    if _at(c, i) != 124:
+        seen = True   # the first character that is not | counts twice
+        size_b += 1
+    while True:
+        ch = _at(c, i)
+        if ch is None:
+            return size if size_b > 1 else 0
+        if _is_space(ch):
+            i += 1
+            continue
+        size_b += 1
+        if seen:
+            seen = False
+            size += 1
+        if ch == 124:
+            seen = True
+            i += 1
+            continue
+        while True:   # cell data up to | / space / end; \ before \ or | keeps it in the data
+            d = _at(c, i)
+            if d is None or d == 124 or _is_space(d):
+                break
+            i += 1
+            if d == 92 and _at(c, i) in (92, 124):
+                i += 1
+
+
+def _table_delimiter_at(c: list[int], p: int) -> int:
+    """The number of cells of a delimiter row at p (after the container markers), or -1 if it is not one."""
+    i = p + _spaces(c, p, 3)
+    size_b = 0
+    seen = False
+    if _at(c, i) == 124:
+        seen = True
+        i += 1
+        i += _spaces(c, i)
+    elif _at(c, i) not in (45, 58):
+        return -1
+    while True:
+        ch = _at(c, i)
+        if ch in (58, 45):
+            size_b += 1
+            if ch == 58:
+                seen = True
+                i += 1
+                if _at(c, i) != 45:
+                    return -1
+            while _at(c, i) == 45:
+                i += 1
+            if _at(c, i) == 58:
+                seen = True
+                i += 1
+            i += _spaces(c, i)
+        elif ch is not None:
+            return -1
+        if _at(c, i) == 124:
+            seen = True
+            i += 1
+            i += _spaces(c, i)
+            if _at(c, i) is None:
+                break
+            if _at(c, i) not in (45, 58):
+                return -1
+            continue
+        if _at(c, i) is None:
+            break
+        return -1
+    return size_b if seen else -1
 
 
 def _is_control(c) -> bool:
@@ -624,7 +746,15 @@ def top_level_fences(text: str) -> list[dict]:
             return "other" if _fence_at(L, q, 0, -1) else None
         return None
 
-    def fresh(li, L, p, lazy, after_paragraph):
+    def head_of(L, q, pre):
+        # a paragraph line seen as a table head row: its number of cells (0: not one), and whether outside a
+        # paragraph it would start an HTML block of kind 7 (then that block wins over the table)
+        if pre >= 4:
+            return 0, False
+        return _table_head_at(L.codes, q), _html_at(L, q, False, False) == 7
+
+    def fresh(li, L, p, lazy, after_paragraph, in_table=False):
+        # in_table: the line after a table (a row of it unless something else starts there)
         c = L.codes
         if _blank_from(c, p):
             st["cur"] = None
@@ -659,7 +789,11 @@ def top_level_fences(text: str) -> list[dict]:
             if f:
                 st["cur"] = f
                 return
-        st["cur"] = ("content", c[q:])
+        if in_table:
+            st["cur"] = ("table",)
+            return
+        # a paragraph: ["content", codes, head cells of its last line, that line starts HTML kind 7]
+        st["cur"] = ["content", c[q:], *head_of(L, q, 0)]
 
     def feed(li, L, p, lazy) -> bool:
         c = L.codes
@@ -683,12 +817,19 @@ def top_level_fences(text: str) -> list[dict]:
             elif now[0] == "content":
                 if _blank_from(c, p):
                     st["cur"] = None
+                elif not lazy and now[2] > 0 and _table_delimiter_at(c, p) == now[2]:
+                    # a GFM table: the paragraph's last line is its head, this line its delimiter row; the paragraph
+                    # ends before the head. If the head line starts HTML of kind 7, that HTML block starts there
+                    # instead (up to a blank line, this line included)
+                    st["cur"] = ("html", 7) if now[3] else ("table",)
+                    return False
                 else:
                     pre = _spaces(c, p)
                     r = None if pre >= 4 else interrupts(L, p + pre, lazy)
                     if not r:
                         now[1].append(_EOLC)
                         now[1].extend(c[p:])
+                        now[2], now[3] = head_of(L, p + pre, pre)
                         return True
                     st["cur"] = None
                     if r == "html7":
@@ -699,6 +840,14 @@ def top_level_fences(text: str) -> list[dict]:
                 if not lazy and (_blank_from(c, p) or _spaces(c, p, 4) >= 4):
                     return False
                 st["cur"] = None
+            elif now[0] == "table":
+                # a table ends at a blank line; a lazy line is never a row; another line is a row unless
+                # something else starts there
+                if _blank_from(c, p) or lazy:
+                    st["cur"] = None
+                else:
+                    fresh(li, L, p, False, False, True)
+                    return False
             elif now[1] in (6, 7) and _blank_from(c, p):
                 st["cur"] = None
             elif lazy:
@@ -725,12 +874,12 @@ def top_level_fences(text: str) -> list[dict]:
         continued = 0
         while continued < len(stack):
             k = stack[continued]
-            q = _quote_at(c, p) if k == "quote" else _list_continue(k, c, p)
+            q = _quote_at(c, p) if k == "quote" else _footnote_continue(c, p) if k == "footnote" else _list_continue(k, c, p)
             if q < 0:
                 break
             p = q
             continued += 1
-            if k != "quote" and k.close_flow:   # the next item of the same list: close the previous item's flow
+            if isinstance(k, _List) and k.close_flow:   # the next item of the same list: close the previous item's flow
                 k.close_flow = False
                 close_flow()
                 del stack[continued:]
@@ -744,7 +893,7 @@ def top_level_fences(text: str) -> list[dict]:
             if isinstance(now, _Fence) or (now is not None and now[0] == "html"):
                 flow_line(li, L, p, False, continued)
                 continue
-            interrupt = now is not None
+            interrupt = now is not None and now[0] != "table"   # after a table, empty items and 2. lists may start
         if _container_at(c, p, interrupt):
             close_flow()
             del stack[continued:]

@@ -21,11 +21,16 @@
  *   分かるまで、送り直しはいつも同じ ID（サーバーは同じ ID の2回目を保存し直さず、保存済みの行を返す）。
  *   失敗（failed: サーバーが「その ID は保存されていない」と答えた）は選び直せる（同じ ID で送る）。保存できたか
  *   分からない時（unknown）は押せず、「確かめる」でその ID の保存を聞き直す。聞けなければ unknown のまま。
+ * - 送信 ID と状態は部品の中ではなく lib/chat-shapes/answer-sends.ts の置き場に、本人＋部屋＋AI の発言＋部品ごとに
+ *   持つ（部屋を離れて戻る・ページを読み直す、をまたいで同じ送信を続ける）。作り直された部品は、決着していない
+ *   送信（分からない・失敗・前のページの送信中）があれば、押せるようにする前にその ID の保存をサーバーに確かめる。
+ * - 保存済みなのにダンの処理が始まっていなかった（サーバーが started: false と答えた）答えは、同じ ID でもう一度
+ *   送る（1回だけ）。サーバーはその送信でダンの処理を始める（保存し直さない）。
  * - 答えの長さの契約は schema.ts の ANSWER_VALUE_MAX（サーバーと同じ数）。入力欄は長い値を受け付けない。
  * - 描画で例外が起きても、その部品だけを元のコードブロック（文章）に戻し、画面全体は落とさない。
  */
 import {
-  Component, createContext, memo, useCallback, useContext, useId, useMemo, useState, type ReactNode,
+  Component, createContext, memo, useCallback, useContext, useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode,
 } from 'react';
 import {
   Renderer, createLibrary, defineComponent, useIsStreaming, type ComponentRenderer, type ParseResult,
@@ -43,19 +48,23 @@ import {
   choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, readAnswerTo,
   type AnswerTo, type UserUtterance,
 } from '@/lib/chat-shapes/answers';
+import {
+  PAGE, answerSendKey, getAnswerSend, needsCheck, setAnswerSend, subscribeAnswerSends,
+} from '@/lib/chat-shapes/answer-sends';
 import { parseShapeCall } from '@/lib/chat-shapes/plain';
 
 // --- 答えの経路（部屋の本人の発言と、発言を送る関数） -------------------------------------
 
 /**
  * 本人の発言として部屋へ送る。clientMessageId は部品が決めた送信 ID（保存される行の id）。
- * サーバーに保存されたら保存された行の id で resolve。保存されていないとサーバーが答えたら reject。
+ * サーバーに保存されたら保存された行の id で resolve（echo が無く確かめて分かった時は、ダンの処理が始まったかの
+ * started も。false＝保存済みだが始まっていない）。保存されていないとサーバーが答えたら reject。
  * 保存できたか分からない（確かめにも失敗した）時は reject(Error(SEND_UNKNOWN))。
  */
-export type ShapeSubmit = (text: string, answerTo: AnswerTo, clientMessageId: string) => Promise<{ id: string }>;
+export type ShapeSubmit = (text: string, answerTo: AnswerTo, clientMessageId: string) => Promise<{ id: string; started?: boolean | null }>;
 
 /** その送信 ID の発言が保存されたかをサーバーに聞く（「確かめる」）。聞けなければ reject */
-export type ShapeRecheck = (clientMessageId: string) => Promise<{ saved: boolean }>;
+export type ShapeRecheck = (clientMessageId: string) => Promise<{ saved: boolean; started?: boolean | null }>;
 
 /** submit が「保存できたか分からない」で reject する時の message */
 export const SEND_UNKNOWN = 'unknown';
@@ -67,9 +76,12 @@ type ShapeAnswerContextValue = {
   submit: ShapeSubmit | null;
   /** 保存できたか分からない時に押す「確かめる」 */
   recheck: ShapeRecheck | null;
+  /** 送信の置き場の鍵の一部（本人・部屋）。どちらか無ければ答えられない */
+  ownerId: string | null;
+  roomId: string | null;
 };
 
-const ShapeAnswerContext = createContext<ShapeAnswerContextValue>({ utterances: [], submit: null, recheck: null });
+const ShapeAnswerContext = createContext<ShapeAnswerContextValue>({ utterances: [], submit: null, recheck: null, ownerId: null, roomId: null });
 
 type UtteranceSource = {
   id: string; sender_id?: string | null; sender_type: string; content: string | null; created_at: string; ai_context?: unknown; pending?: boolean;
@@ -78,10 +90,11 @@ type UtteranceSource = {
 /**
  * ownerId: 今ログインしている本人の利用者 ID。「答えました」の根拠にするのは、その人の保存済みの発言だけ
  * （同じ部屋の別の人が同じ部品に答えても、本人の部品は答えたことにならない）。無ければ何も数えない。
+ * roomId: この部屋。送信の置き場（answer-sends.ts）の鍵は本人＋部屋＋AI の発言＋部品。
  */
 export function ShapeAnswerProvider({
-  messages, ownerId, submit, recheck = null, children,
-}: { messages: UtteranceSource[]; ownerId: string | null | undefined; submit: ShapeSubmit | null; recheck?: ShapeRecheck | null; children: ReactNode }) {
+  messages, ownerId, roomId = null, submit, recheck = null, children,
+}: { messages: UtteranceSource[]; ownerId: string | null | undefined; roomId?: string | null; submit: ShapeSubmit | null; recheck?: ShapeRecheck | null; children: ReactNode }) {
   const utterances = useMemo<UserUtterance[]>(
     () => (ownerId ? messages : [])
       // 保存前（pending）の発言は数えない: 「答えました」はサーバーに残ってから
@@ -89,7 +102,10 @@ export function ShapeAnswerProvider({
       .map((m) => ({ id: m.id, text: m.content || '', at: Date.parse(m.created_at) || 0, answerTo: readAnswerTo(m.ai_context) })),
     [messages, ownerId],
   );
-  const value = useMemo(() => ({ utterances, submit, recheck }), [utterances, submit, recheck]);
+  const value = useMemo(
+    () => ({ utterances, submit, recheck, ownerId: ownerId || null, roomId: roomId || null }),
+    [utterances, submit, recheck, ownerId, roomId],
+  );
   return <ShapeAnswerContext.Provider value={value}>{children}</ShapeAnswerContext.Provider>;
 }
 
@@ -111,6 +127,7 @@ const CHOICE_BTN = 'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5
 const SEND_FAILED = '送れませんでした。もう一度押してください';
 const SEND_UNKNOWN_TEXT = '送れたか確かめられませんでした';
 const SEND_UNKNOWN_AGAIN = 'まだ確かめられません。通信が戻ってからもう一度押してください';
+const SEND_VERIFYING = '前に送った答えが届いたか確かめています…';
 const TOO_LONG = `長すぎます（単位を含めて${ANSWER_VALUE_MAX}文字まで）`;
 
 function Answered({ text }: { text: string }) {
@@ -130,66 +147,119 @@ function Failed({ text, children }: { text: string; children?: ReactNode }) {
 }
 
 /**
- * 送信の状態: 押していない / 送信中 / 保存された（echo の行 id。その行が画面の記録に載るまでの一時状態） /
- * 失敗（保存されていない。選び直せる。送り直しも同じ id） / 保存できたか分からない（その id の保存を聞き直す）。
- * id はこの答えの送信 ID（保存されたと分かるまで変えない）。長すぎて送らなかった失敗には無い
+ * 送信の状態（画面に出す形）: 押していない / 送信中 / 保存された（その行が画面の記録に載るまでの一時状態） /
+ * 失敗（保存されていない。選び直せる。送り直しも同じ id） / 保存できたか分からない（その id の保存を聞き直す。
+ * verifying は作り直された部品が押せるようにする前の確かめ）。
+ * id はこの答えの送信 ID（保存されたと分かるまで変えない）。長すぎて送らなかった失敗は前の送信の id を持つ
  */
 type SendState =
   | { status: 'idle' }
   | { status: 'sending'; value: string; id: string }
   | { status: 'saved'; value: string; id: string }
   | { status: 'failed'; value: string; id?: string; reason?: string }
-  | { status: 'unknown'; value: string; id: string; checking?: boolean; again?: boolean };
+  | { status: 'unknown'; value: string; id: string; checking?: boolean; again?: boolean; verifying?: boolean };
 
-/** 答えられる条件: 送る先がある・保存された返事・閉じまで届いた・ライブ枠でない・まだ答えていない */
+/** 答えられる条件: 送る先がある・本人と部屋が分かる・保存された返事・閉じまで届いた・ライブ枠でない・まだ答えていない */
 function useCanAnswer(answered: boolean) {
-  const { submit } = useContext(ShapeAnswerContext);
+  const { submit, ownerId, roomId } = useContext(ShapeAnswerContext);
   const { messageId, complete, live } = useContext(ShapeMetaContext);
   const streaming = useIsStreaming();
-  return !!submit && !!messageId && complete && !live && !streaming && !answered;
+  return !!submit && !!ownerId && !!roomId && !!messageId && complete && !live && !streaming && !answered;
+}
+
+/** 保存済みなのにダンの処理が始まっていなかった答えを、同じ ID でもう一度送る（1回だけ。サーバーはそれで始める） */
+function sendAgainToStart(key: string, submit: ShapeSubmit | null) {
+  const e = getAnswerSend(key);
+  if (!e || e.kicked || !submit) return;
+  setAnswerSend(key, { ...e, kicked: true });
+  submit(e.text, e.answerTo, e.id).catch(() => { /* 答えはもう保存済み（記録が根拠）。始まらなければ次に確かめた時にまた分かる */ });
+}
+
+/**
+ * その送信 ID の保存をサーバーに聞いて、置き場の状態を決める: 保存済み（ダンの処理が始まっていなければ同じ ID で
+ * 送って始める）／保存されていない＝失敗（同じ ID で送り直せる）／聞けない＝分からない（押せない）。
+ * by はこの確かめをした部品の表示の印（その表示ではもう確かめた）。
+ */
+function checkAnswerSend(key: string, askSaved: ShapeRecheck | null, submit: ShapeSubmit | null, by: string) {
+  const e = getAnswerSend(key);
+  if (!e || e.checking) return;
+  if (!askSaved) { setAnswerSend(key, { ...e, status: 'unknown', again: true, seenBy: by }); return; }
+  setAnswerSend(key, { ...e, checking: true, again: false });
+  askSaved(e.id)
+    .then((r) => {
+      const cur = getAnswerSend(key);
+      if (!cur || cur.id !== e.id) return;
+      setAnswerSend(key, { ...cur, status: r.saved ? 'saved' : 'failed', checking: false, seenBy: by });
+      if (r.saved && r.started === false) sendAgainToStart(key, submit);
+    })
+    .catch(() => {
+      const cur = getAnswerSend(key);
+      if (cur && cur.id === e.id) setAnswerSend(key, { ...cur, status: 'unknown', checking: false, again: true, seenBy: by });
+    });
 }
 
 /**
  * 答えの送信と「答えた」の判定。
  * - recorded: 部屋の記録（照合情報つきの保存済み発言）にあるこの部品への答え。これが根拠
- * - saved は、保存の echo が返ってからその行が記録（utterances）に現れるまでの一時状態。行が一度記録に現れたら
- *   （seenSaved）以後は記録だけを見る。取り消しで記録から消えれば answered は false に戻り、押し直せる
- *   （「現れた」の印は描画中に合わせる: React の「prop の変化で state を直す」手順。effect で setState しない）
+ * - 送信の状態は置き場（answer-sends.ts）にある。saved は、保存されてからその行が記録（utterances）に載るまでの
+ *   一時状態。載ったら印（seen）を付け、以後は記録だけを見る（取り消しで記録から消えれば、押し直せる。新しい ID）
+ * - 作り直された部品（この表示がまだ確かめていない、決着していない送信がある）は、押せるようにする前にその ID の
+ *   保存をサーバーに確かめる。確かめが済むまでと、分からない間は押せない
  */
 function useAnswerSend(recorded: string | null) {
-  const { utterances, submit, recheck: askSaved } = useContext(ShapeAnswerContext);
-  const [send, setSend] = useState<SendState>({ status: 'idle' });
-  const [seenSaved, setSeenSaved] = useState<string | null>(null);
-  const savedInRecord = send.status === 'saved' && utterances.some((u) => u.id === send.id);
-  if (savedInRecord && seenSaved !== send.id) setSeenSaved(send.id);
-  const seen = send.status === 'saved' && seenSaved === send.id;
-  const answer = recorded ?? (send.status === 'saved' && !seen ? send.value : null);
-  // 記録に現れた後で記録から消えた（取り消し）: 送信の状態としては何もしていないのと同じ
-  const shown: SendState = seen && !savedInRecord ? { status: 'idle' } : send;
-  const run = (text: string, answerTo: AnswerTo, value: string) => {
-    if (!submit) return;
-    // 保存されたと分かっていない送信の続きは同じ送信 ID（二重に保存されない）。保存済み・初めては新しい ID
-    const id = (send.status === 'failed' || send.status === 'unknown') && send.id ? send.id : newSendId();
-    setSend({ status: 'sending', value, id });
+  const { utterances, submit, recheck: askSaved, ownerId, roomId } = useContext(ShapeAnswerContext);
+  const { messageId, part } = useContext(ShapeMetaContext);
+  const key = ownerId && roomId && messageId ? answerSendKey(ownerId, roomId, messageId, part) : null;
+  const entry = useSyncExternalStore(subscribeAnswerSends, () => getAnswerSend(key), () => null);
+  // この表示の印。置き場の seenBy がこれと同じなら、この表示が送った・確かめた送信（もう確かめなくてよい）
+  const [by] = useState(newSendId);
+  // 長すぎて送らなかった値（送っていないので置き場は変えない）
+  const [tooLong, setTooLong] = useState<string | null>(null);
+  const inRecord = !!entry && entry.status === 'saved' && utterances.some((u) => u.id === entry.id);
+  // 記録に一度載った後で記録から消えた（取り消し）: 送信としては何もしていないのと同じ（押し直しは新しい ID）
+  const withdrawn = !!entry && entry.status === 'saved' && !!entry.seen && !inRecord;
+  const mustCheck = !!entry && !entry.checking && needsCheck(entry) && entry.seenBy !== by;
+  useEffect(() => {
+    if (key && entry && inRecord && !entry.seen) setAnswerSend(key, { ...entry, seen: true });   // 記録に載った: 以後は記録が根拠
+  }, [key, entry, inRecord]);
+  useEffect(() => {
+    if (key && mustCheck) checkAnswerSend(key, askSaved, submit, by);
+  }, [key, mustCheck, askSaved, submit, by]);
+  const answer = recorded ?? (entry && entry.status === 'saved' && !entry.seen && !inRecord ? entry.value : null);
+  let send: SendState;
+  if (tooLong !== null) send = { status: 'failed', value: tooLong, reason: 'too long', id: entry?.id };
+  else if (!entry || withdrawn) send = { status: 'idle' };
+  else if (entry.checking || mustCheck) send = { status: 'unknown', value: entry.value, id: entry.id, checking: true, verifying: entry.seenBy !== by };
+  else if (entry.status === 'unknown') send = { status: 'unknown', value: entry.value, id: entry.id, again: entry.again };
+  else send = { status: entry.status, value: entry.value, id: entry.id };
+  const run = (text: string, answerTo: AnswerTo, value: string, raw?: string) => {
+    if (!submit || !key) return;
+    const prev = getAnswerSend(key);
+    // 保存されたと分かっていない送信の続きは同じ送信 ID（二重に保存されない）。初めて（置き場に無い）は新しい ID
+    const id = prev && prev.status !== 'saved' ? prev.id : newSendId();
+    setTooLong(null);
+    const base = { id, value, text, answerTo, raw, page: PAGE, at: 0, seenBy: by };
+    setAnswerSend(key, { ...base, status: 'sending' });
+    // 結果は置き場に書く（部品が作り直されていても、この送信の結果は残る）
     submit(text, answerTo, id)
-      .then((saved) => setSend({ status: 'saved', value, id: saved.id }))
-      .catch((e: unknown) => setSend(e instanceof Error && e.message === SEND_UNKNOWN ? { status: 'unknown', value, id } : { status: 'failed', value, id }));
+      .then((saved) => {
+        setAnswerSend(key, { ...base, id: saved.id, status: 'saved' });
+        if (saved.started === false) sendAgainToStart(key, submit);
+      })
+      .catch((e: unknown) => setAnswerSend(key, { ...base, status: e instanceof Error && e.message === SEND_UNKNOWN ? 'unknown' : 'failed' }));
   };
-  // 保存できたか分からない時: その送信 ID の保存をサーバーに聞き直す。保存済みなら答えた、保存されていなければ
-  // 失敗（同じ ID で送り直せる）、聞けなければ分からないまま（押せないまま）
+  // 保存できたか分からない時の「確かめる」
   const recheck = () => {
-    if (send.status !== 'unknown' || send.checking || !askSaved) return;
-    const { value, id } = send;
-    setSend({ status: 'unknown', value, id, checking: true });
-    askSaved(id)
-      .then((r) => setSend(r.saved ? { status: 'saved', value, id } : { status: 'failed', value, id }))
-      .catch(() => setSend({ status: 'unknown', value, id, again: true }));
+    if (key && entry && entry.status === 'unknown' && !entry.checking) checkAnswerSend(key, askSaved, submit, by);
   };
-  return { send: shown, setSend, answer, run, recheck };
+  return { send, setTooLong, answer, run, recheck, raw: entry?.raw };
 }
 
 function SendProblem({ send, answered, recheck, id }: { send: SendState; answered: boolean; recheck: () => void; id?: string }) {
   if (answered) return null;
+  if (send.status === 'unknown' && send.verifying) {
+    return <div id={id} className="mt-2 flex items-center gap-2 text-xs text-muted-foreground" role="status"><Loader2 className="h-3.5 w-3.5 animate-spin" />{SEND_VERIFYING}</div>;
+  }
   if (send.status === 'unknown') {
     return (
       <div id={id}>
@@ -256,9 +326,10 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   const { utterances } = useContext(ShapeAnswerContext);
   const { messageId, part } = useContext(ShapeMetaContext);
   const inputId = useId();
-  const [value, setValue] = useState('');
   const recorded = messageId ? findInputAnswer(utterances, messageId, part) : null;
-  const { send, setSend, answer, run, recheck } = useAnswerSend(recorded);
+  const { send, setTooLong, answer, run, recheck, raw } = useAnswerSend(recorded);
+  // 作り直された部品は、決着していない送信で打った値を入力欄に戻す
+  const [value, setValue] = useState(() => raw ?? '');
   const canAnswer = useCanAnswer(!!answer);
   const disabled = !canAnswer || send.status === 'sending' || send.status === 'unknown';
   // 入力欄が受け付ける長さ: 答えの値（単位つき）が契約の上限に収まる分だけ
@@ -267,9 +338,9 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
     const v = value.trim();
     if (disabled || !v || !messageId) return;
     const shown = inputAnswerValue(label, v, isNumber ? unit : undefined);
-    // 黙って切らない。送らないので、前の送信の ID（保存されていないと分かった物）はそのまま持ち続ける
-    if (shown.length > ANSWER_VALUE_MAX) { setSend({ status: 'failed', value: shown, reason: 'too long', id: send.status === 'failed' ? send.id : undefined }); return; }
-    run(inputAnswerText(label, v, isNumber ? unit : undefined), { message_id: messageId, part, kind: 'input', value: shown, question: label }, shown);
+    // 黙って切らない。送らないので、前の送信（保存されていないと分かった物）の ID は置き場にそのまま残る
+    if (shown.length > ANSWER_VALUE_MAX) { setTooLong(shown); return; }
+    run(inputAnswerText(label, v, isNumber ? unit : undefined), { message_id: messageId, part, kind: 'input', value: shown, question: label }, shown, v);
     // 入力した値は失敗しても残す（value はそのまま）
   };
   const problem = send.status === 'failed' || send.status === 'unknown';
