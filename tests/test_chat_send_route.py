@@ -392,6 +392,26 @@ def test_rights_a_live_request_holds_are_never_forgotten() -> None:
     clear_send_rights()
 
 
+def test_a_right_held_too_long_is_handed_over_once() -> None:
+    """A request that took the start right and neither began nor gave it back for SEND_RIGHT_ABANDONED seconds (stopped
+    where its clean-up does not run) counts as having given it back: "was it saved?" says started: false, the next
+    request of the same send takes it, and the old holder can no longer begin (only one token ever begins)."""
+    from app.services import chat_service as cs
+    clear_send_rights()
+    now = [1000.0]
+    with patch.object(cs.time, "time", lambda: now[0]):
+        old = cs.take_send_right("start", ROOM, NEW)
+        assert cs.take_send_right("start", ROOM, NEW) is None and cs.send_right_state("start", ROOM, NEW) == "taken"
+        now[0] += cs.SEND_RIGHT_ABANDONED + 1
+        assert cs.send_right_state("start", ROOM, NEW) == "returned"
+        new = cs.take_send_right("start", ROOM, NEW)
+        assert new is not None and new["returned"] is True
+        assert cs.begin_send_right("start", ROOM, NEW, old["token"]) is False
+        assert cs.begin_send_right("start", ROOM, NEW, new["token"]) is True
+        assert cs.take_send_right("start", ROOM, NEW) is None and cs.send_right_state("start", ROOM, NEW) == "begun"
+    clear_send_rights()
+
+
 def test_the_parallel_save_branch_takes_the_right_before_starting(env) -> None:
     """VERIFY4 P2-4: with streaming input off and DAN_PARALLEL_SEND on, an ordinary send starts the model before its row
     is saved. The same send twice must still start it once: the right is taken before the start (and before the
