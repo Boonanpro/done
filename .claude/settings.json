@@ -9,6 +9,16 @@
             "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_destructive_guard.py"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python D:/done/scripts/hook_skill_gate.py",
+            "timeout": 150
+          }
+        ]
       }
     ]
   }

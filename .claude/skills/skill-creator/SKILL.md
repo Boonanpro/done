@@ -1,16 +1,74 @@
 ---
 name: skill-creator
-description: "Create or revise a skill with precise triggers and task-specific references."
+description: "Create or revise a skill with precise triggers and task-specific references. Use when turning a workflow, user corrections or successful examples into a reusable skill."
 ---
 
-# Skill creation
+# スキルを作る・直す
 
-Write only the knowledge and operational constraints that improve this workflow. Assume the model can plan, code and test.
+スキルは、次に別の案件で同じ種類の仕事をする私が、読んだだけで手を動かせる資料にする。1回の作業の経緯や、本人の指摘を並べた記録ではない。
 
-Keep YAML `name` and `description`; describe one capability and its actual trigger concisely. Avoid keyword catalogs and claims that every nearby task needs the skill. Preserve supported metadata and action interfaces.
+## 1. まず種類を見分ける
 
-Keep the root small. Put substantial operation-specific details in linked references and say when to read them. Preserve relative links when moving content. Keep deterministic scripts and fragile API requirements; generic advice and mandatory itineraries usually add little.
+| 種類 | 例 | 中身の大部分 | 材料 |
+|---|---|---|---|
+| 操作のスキル | API・サイト操作・公開手順 | 壊れやすい仕様、正確なコマンド、確かめ方 | 実際に動かした手順と失敗 |
+| 腕のスキル | 記事・台本・LP・デザイン・判断 | 結果を出す技（何を、どこに、どういう形で） | 合格した実例と、本人の指摘 |
 
-Treat prior user authorization as valid for its scope. Define actual external-action boundaries; do not add a new approval gate simply because the workflow has several steps.
+操作のスキルは正確さが価値なので、手順とコマンドをそのまま書く。腕のスキルで本人の指摘をそのまま書くと、その1本でしか効かない記録になる。腕のスキルは必ず「2. 汎化」を通す。
 
-Check frontmatter, links and the real loader. Exercise changed scripts and consequential routing with representative requests. Benchmarking, repeated model runs and description optimization are optional tasks, not required for every wording edit.
+## 2. 腕のスキルの作り方
+
+1. **合格を決める**: 何ができたら合格か。数字（例：表示数と保存率）か、本人の判定か。誰が読み、読んだ後に何をしてほしいか。
+2. **材料を2つに分けて集める**:
+   - **技の出どころ**: 合格ラインを超えた実例（本人の物に限らない）、本人の完成物、信頼できる資料。
+   - **外す所の記録**: 本人の指摘、修正の前後、私の失敗。私がどこでずれるかを知るために使う。
+   本人の指摘だけで書かない。指摘は私がずれた所を示すが、うまくいく技はほとんど含まない。
+3. **スキルなしで1回やらせる**（新しく作る時）。出来と失敗を残し、あとで比べる基準にする。
+4. **汎化する**: [references/generalization.md](references/generalization.md) を読んで、その手順どおりに行う。
+5. **書く**: 本文は次の3層にする。
+   - 前提：目標と、なぜそれが効くか（数行）
+   - 技：汎化で残ったもの。1つずつ「何を・どこに・どういう形で」と、良い例と悪い例
+   - 確認表：書き終えた物で、技を使えたかを目で確かめられる項目
+   目標だけを書いた行（「最後まで読ませる」など）は、技に分けるまで残さない。
+6. **試す**: 材料と違うテーマで、スキルありとスキルなしの両方を作り、比べる。本人の過去の指摘は「同じことをまた言われないか」のテストにする。本人に見せる時は、2つを並べる。
+7. **直す**: 新しい指摘も、そのまま足さずに汎化してから入れる。既にある技の書き方が悪かったのか、技が足りなかったのかを先に見分ける。
+
+## 3. 共通の形
+
+- YAML の `name` と `description` を残す。description には、何ができるかと、読むべき場面を短く書く。近い作業すべてに使うかのような書き方や、キーワードの羅列はしない。
+- 入口の1枚は短くし、作業ごとの詳しい中身は別の資料に分け、いつ読むかを書く。資料を移す時は相対リンクを保つ。
+- 決まった計算や検査は、文章で守らせるより scripts に置く。
+- 本人がすでに許した範囲は有効として扱う。外部に出る操作の境目だけを書き、段階が多いという理由で承認の関門を増やさない。
+
+## 4. 変更の記録（書く前に必ず）
+
+スキルの文章（`.claude/skills/` の下の .md と、どこにあっても `SKILL.md`。examples/ は除く）は、`scripts/hook_skill_gate.py` が Write/Edit の直前に検査し、次を満たさないと書けない。シェルで書いて避けない。
+
+1. この作業の中で、この SKILL.md と [references/generalization.md](references/generalization.md) を全部読んでいる。シェルで読むなら `Get-Content -Encoding UTF8`（付けないと文字化けして読んだことにならない）。
+2. 変更するスキルの `sources/generalization-log.md` に、この作業で項目を書いてある。項目の「変更するファイル」に、これから書くファイルの名前が入っている。
+3. その項目が、別の AI の判定（generalization.md の C の基準）に通る。通らなければ、返ってきた理由のとおりに項目を直してから書き直す。同じ文の項目は一度だけ判定される。
+
+項目の形式。種類ごとに欄を全部書く。
+
+```
+## 2026-10-16 〈技の名前、または直したことを短く〉
+- 種類: 指摘 / 実例 / 操作
+- 変更するファイル: 〈スキルのフォルダからのファイル名。複数なら読点で並べる〉
+- （指摘）具体の指摘 / 受け手に起きていなかったこと / 一般則 / 技 / 別テーマでの例   … generalization.md の A
+- （実例）実例と区切り / 次へ進む理由 / 出どころ / 技 / 別テーマでの例               … generalization.md の B。出どころは2本以上
+- （操作）何を直したか / 確かめたこと                                                … 操作のスキルの仕様・手順。確かめたことは実際に動かした結果
+```
+
+記録そのものは、1を満たせば書ける。
+
+## 5. 仕上げの確認
+
+- [ ] 固有名詞・テーマ・数字を別の案件のものに入れ替えても、各行が成り立つか（成り立たない行は実例として examples に移す）
+- [ ] 目標だけで、手の動かし方が書かれていない行がないか
+- [ ] 技に「何を・どこに・どういう形で」と、良い例と悪い例があるか
+- [ ] 同じ仕組みの技が、別の言い方で重複していないか
+- [ ] 技の出どころ（どの実例・資料から来たか）が書いてあるか
+- [ ] frontmatter・リンクが正しく、実際の読み込みで一覧に出るか
+- [ ] スクリプトを変えたなら動かしたか。読む場面の判定に関わる変更は、代表的な依頼で確かめたか
+
+評価の自動化・複数回の比較実行・description の最適化（scripts/）は、必要な時だけ使う。言い回しの小さな修正に毎回は要らない。

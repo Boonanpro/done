@@ -145,7 +145,7 @@ def main() -> int:
                             "permissionDecision": "deny",
                             "permissionDecisionReason": reason,
                         }
-                    }, ensure_ascii=False))
+                    }))  # ASCII escapes: stdout is cp932 on Windows, Codex reads UTF-8
                     return 0
             else:
                 text = out.strip()
@@ -159,7 +159,7 @@ def main() -> int:
                 "hookEventName": "PostToolUse",
                 "additionalContext": "\n".join(contexts)[:4000],
             }
-        }, ensure_ascii=False))
+        }))
     return 0
 
 
