@@ -139,7 +139,7 @@
     "name": "indented 4 is not a fence; indented 3 is",
     "text": "    ```openui-lang\n    root = Choice(\"予算\", [\"5万円\", \"10万円\"])\n    ```\n\n   ```openui-lang\n   root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n   ```",
     "codes": [
-      "   root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
     ],
     "keys": [
       "p65db0c2b"

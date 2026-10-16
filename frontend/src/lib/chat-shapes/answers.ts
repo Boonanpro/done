@@ -31,8 +31,13 @@ export type AnswerTo = {
 /** 部屋にある本人の発言。id は保存された行の id（送った答えが記録に現れたかを見る） */
 export type UserUtterance = { id?: string; text: string; at: number; answerTo?: AnswerTo | null };
 
+// 文面と部品の鍵で空白とみなす文字（JavaScript の \s と同じ一覧を明示。サーバー chat_shapes.py KEY_SPACE_CHARS と同じ）。
+// Markdown の構文の空白（半角スペースとタブだけ。plain.ts）とは別の物
+const KEY_SPACE_RUN = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g;
+const KEY_SPACE_EDGE = /^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+|[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+$/g;
+
 function norm(s: string): string {
-  return (s || '').replace(/\s+/g, ' ').trim();
+  return (s || '').replace(KEY_SPACE_RUN, ' ').replace(KEY_SPACE_EDGE, '');
 }
 
 /** 選択ボタンを押した時に部屋へ送る文面。 */

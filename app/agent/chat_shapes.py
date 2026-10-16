@@ -9,6 +9,7 @@ cli_runner._build_system_prompt; Codex also folds it into its per-thread static 
 from __future__ import annotations
 
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -54,139 +55,731 @@ ANSWER_QUESTION_MAX = 200    # a Choice question / an Input label (answer_to.que
 PART_KEY_RE = re.compile(r"^p[0-9a-f]{8}(?:-[1-9][0-9]*)?$")
 SHAPE_FENCE_LANGS = frozenset({"openui-lang", "openui"})
 
-# --- mirror of frontend/src/lib/chat-shapes/plain.ts scanBlocks (CommonMark fences + HTML blocks) ---
-# The screen computes a part's key from the code of each closed ```openui-lang block of the reply, in
-# order (split.ts → answers.ts partKeys). The server re-derives the same keys to check that an answer
-# points at a part that really is in that reply. Whitespace rules follow JavaScript (\s / trim),
-# the hash runs over UTF-16 code units (charCodeAt). tests/fixtures/chat_shapes_part_keys.json pins both.
+# ---------------------------------------------------------------------------------------------------
+# Where the parts of a reply are: a line-for-line mirror of frontend/src/lib/chat-shapes/plain.ts
+# topLevelFences, which copies the steps of the screen's Markdown reader remark-parse (micromark): a part is
+# a fenced code block at the top level of the document (not inside a block quote or a list item) whose
+# language is exactly openui-lang / openui. The rules are written out in plain.ts's header; in short:
+# - lines end at \n, \r\n or \r; a BOM at the very start is skipped; NUL reads as U+FFFD
+# - whitespace is the space and the tab only (NBSP, ideographic space, NEL, BOM, U+2028... are ordinary
+#   characters). A tab advances to the next multiple of 4 columns; indentation is counted in columns.
+#   Python's str.strip / \s are never used for Markdown syntax
+# - containers (> and list items) with lazy continuation; what may interrupt a paragraph (headings, thematic
+#   breaks, setext underlines, HTML kinds 1-6, fences; HTML kind 7 only on a lazy line); indented code;
+#   link reference definitions (a setext underline after definitions only is a new paragraph)
+# tests/fixtures/chat_shapes_markdown_corpus.json (written from remark-parse's own syntax tree) pins this file,
+# plain.ts, its mobile copy and remark-parse to the same answers.
+# ---------------------------------------------------------------------------------------------------
 
-_JS_WS_CHARS = "\t\n\x0b\x0c\r " + "".join(map(chr, [0x00A0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF]))
-_JS_WS_RUN = re.compile("[" + re.escape(_JS_WS_CHARS) + "]+")
-_HAS_SHAPE_FENCE = re.compile(r"(^|\n) {0,3}(`{3,}|~{3,})[ \t]*(openui-lang|openui)(?=[ \t\r\n]|$)", re.I)
-_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
-_HTML_RAW_START = re.compile(r"^<(script|pre|style|textarea)(?=[\s>]|$)", re.I)
-_HTML_RAW_END = re.compile(r"</(script|pre|style|textarea)>", re.I)
-_HTML_BLOCK_TAGS = frozenset("""address article aside base basefont blockquote body caption center col colgroup dd
+_HT = -2   # a tab: HT, then VS up to the next tab stop (micromark's preprocessing)
+_VS = -1
+_EOLC = -4  # line break inside a paragraph's content (link reference definitions)
+
+
+class _Line:
+    __slots__ = ("codes", "chars", "start", "end", "next", "eol")
+
+    def __init__(self, codes, chars, start, end, next_, eol):
+        self.codes, self.chars, self.start, self.end, self.next, self.eol = codes, chars, start, end, next_, eol
+
+
+def _read_lines(text: str) -> list[_Line]:
+    lines: list[_Line] = []
+    n = len(text)
+    i = 1 if text[:1] == "\ufeff" else 0
+    while i < n:
+        start = i
+        codes: list[int] = []
+        chars: list[str] = []
+        column = 1
+        while i < n:
+            ch = text[i]
+            if ch in "\n\r":
+                break
+            if ch == "\t":
+                stop = math.ceil(column / 4) * 4
+                codes.append(_HT)
+                chars.append("\t")
+                while column < stop:
+                    column += 1
+                    codes.append(_VS)
+                    chars.append("")
+                column += 1
+            elif ch == "\0":
+                codes.append(0xFFFD)
+                chars.append("\ufffd")
+                column += 1
+            else:
+                codes.append(ord(ch))
+                chars.append(ch)
+                column += 2 if ord(ch) > 0xFFFF else 1   # columns are counted in UTF-16 units, like the screen
+            i += 1
+        end = i
+        eol = "\r\n" if text[i:i + 2] == "\r\n" else text[i:i + 1]
+        i += len(eol)
+        lines.append(_Line(codes, chars, start, end, i, eol))
+    return lines
+
+
+def _at(c: list[int], i: int):
+    return c[i] if 0 <= i < len(c) else None
+
+
+def _is_space(c) -> bool:
+    return c == 32 or c == _HT or c == _VS
+
+
+def _is_digit(c) -> bool:
+    return c is not None and 48 <= c <= 57
+
+
+def _is_alpha(c) -> bool:
+    return c is not None and (65 <= c <= 90 or 97 <= c <= 122)
+
+
+def _is_alnum(c) -> bool:
+    return _is_digit(c) or _is_alpha(c)
+
+
+def _spaces(c: list[int], p: int, limit: float = math.inf) -> int:
+    n = 0
+    while n < limit and _is_space(_at(c, p + n)):
+        n += 1
+    return n
+
+
+def _blank_from(c: list[int], p: int) -> bool:
+    return p + _spaces(c, p) >= len(c)
+
+
+def _slice(L: _Line, p: int, q: int | None = None) -> str:
+    out = []
+    at_tab = False
+    for k in range(p, len(L.codes) if q is None else min(q, len(L.codes))):
+        code = L.codes[k]
+        if code == _VS:
+            if at_tab:
+                continue
+            out.append(" ")
+        else:
+            out.append(L.chars[k])
+        at_tab = code == _HT
+    return "".join(out)
+
+
+_ESCAPE_OR_REFERENCE = re.compile(r"\\([!-/:-@\[-`{-~])|&(#(?:[0-9]{1,7}|[xX][0-9A-Fa-f]{1,6})|[0-9A-Za-z]{1,31});")
+
+
+def _numeric_reference(n: int) -> str:
+    if (n < 9 or n == 11 or 13 < n < 32 or 126 < n < 160 or 55295 < n < 57344 or 64975 < n < 65008
+            or (n & 65535) == 65535 or (n & 65535) == 65534 or n > 1114111):
+        return "\ufffd"
+    return chr(n)
+
+
+def _decode_string(s: str) -> str:
+    def decode(m: re.Match) -> str:
+        if m.group(1):
+            return m.group(1)
+        ref = m.group(2)
+        if ref[0] == "#":
+            hexa = ref[1] in "xX"
+            return _numeric_reference(int(ref[2:] if hexa else ref[1:], 16 if hexa else 10))
+        return m.group(0)   # named references stay as written: none of them decodes to openui-lang / openui
+    return _ESCAPE_OR_REFERENCE.sub(decode, s)
+
+
+def _thematic_break_at(c: list[int], q: int) -> bool:
+    marker = c[q]
+    count = 0
+    i = q
+    while i < len(c):
+        if c[i] == marker:
+            count += 1
+        elif not _is_space(c[i]):
+            return False
+        i += 1
+    return count >= 3
+
+
+def _atx_at(c: list[int], q: int) -> bool:
+    n = 0
+    while _at(c, q + n) == 35:
+        n += 1
+    if n > 6:
+        return False
+    after = _at(c, q + n)
+    return after is None or _is_space(after)
+
+
+def _setext_at(c: list[int], q: int) -> bool:
+    marker = c[q]
+    i = q
+    while _at(c, i) == marker:
+        i += 1
+    return _blank_from(c, i)
+
+
+class _Fence:
+    __slots__ = ("marker", "size_open", "prefix", "lang", "top", "start_line", "last_line", "lines", "eols")
+
+    def __init__(self, marker, size_open, prefix, lang, line):
+        self.marker, self.size_open, self.prefix, self.lang = marker, size_open, prefix, lang
+        self.top, self.start_line, self.last_line, self.lines, self.eols = False, line, line, [], []
+
+
+def _fence_at(L: _Line, q: int, prefix: int, line: int):
+    c = L.codes
+    marker = c[q]
+    i = q
+    while _at(c, i) == marker:
+        i += 1
+    size_open = i - q
+    if size_open < 3:
+        return None
+    i += _spaces(c, i)
+    info_start = i
+    while i < len(c) and not _is_space(c[i]):
+        if marker == 96 and c[i] == 96:
+            return None
+        i += 1
+    info = _slice(L, info_start, i)
+    while i < len(c):
+        if marker == 96 and c[i] == 96:
+            return None
+        i += 1
+    return _Fence(marker, size_open, prefix, _decode_string(info), line)
+
+
+def _closes_fence(c: list[int], p: int, f: _Fence) -> bool:
+    i = p + _spaces(c, p, 3)
+    if _at(c, i) != f.marker:
+        return False
+    n = 0
+    while _at(c, i) == f.marker:
+        i += 1
+        n += 1
+    return n >= f.size_open and _blank_from(c, i)
+
+
+_HTML_RAW = frozenset({"pre", "script", "style", "textarea"})
+_HTML_BLOCK = frozenset("""address article aside base basefont blockquote body caption center col colgroup dd
 details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr
 html iframe legend li link main menu menuitem nav noframes ol optgroup option p param search section summary table
 tbody td tfoot th thead title tr track ul""".split())
-_HTML_TAG_START = re.compile(r"^</?([A-Za-z][A-Za-z0-9-]*)(?=[\s>]|/>|$)")
-_HTML_OPEN_TAG = re.compile(r"^<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*\s*/?>\s*$")
-_HTML_CLOSE_TAG = re.compile(r"^</[A-Za-z][A-Za-z0-9-]*\s*>\s*$")
+_HTML_END = {
+    1: re.compile(r"</(?:script|pre|style|textarea)>", re.I | re.A), 2: re.compile(r"-->"), 3: re.compile(r"\?>"),
+    4: re.compile(r">"), 5: re.compile(r"\]\]>"),
+}
 
 
-def _js_norm(s: str) -> str:
-    """answers.ts norm(): s.replace(/\\s+/g, ' ').trim() with JavaScript's whitespace set."""
-    return _JS_WS_RUN.sub(" ", s or "").strip(_JS_WS_CHARS)
+def _complete_tag(c: list[int], i: int, closing: bool) -> bool:
+    if closing:
+        i += _spaces(c, i)
+        return _at(c, i) == 62 and _blank_from(c, i + 1)
+    s = "nameBefore"
+    while True:
+        ch = _at(c, i)
+        if s == "nameBefore":
+            if ch == 47:
+                i += 1
+                s = "end"
+            elif ch == 58 or ch == 95 or _is_alpha(ch):
+                i += 1
+                s = "name"
+            elif _is_space(ch):
+                i += 1
+            else:
+                s = "end"
+        elif s == "name":
+            if ch in (45, 46, 58, 95) or _is_alnum(ch):
+                i += 1
+            else:
+                s = "nameAfter"
+        elif s == "nameAfter":
+            if ch == 61:
+                i += 1
+                s = "valueBefore"
+            elif _is_space(ch):
+                i += 1
+            else:
+                s = "nameBefore"
+        elif s == "valueBefore":
+            if ch is None or ch in (60, 61, 62, 96):
+                return False
+            if ch == 34 or ch == 39:
+                i += 1
+                while _at(c, i) != ch:
+                    if i >= len(c):
+                        return False
+                    i += 1
+                i += 1
+                s = "quotedAfter"
+            elif _is_space(ch):
+                i += 1
+            else:
+                s = "unquoted"
+        elif s == "unquoted":
+            if ch is None or ch in (34, 39, 47, 60, 61, 62, 96) or _is_space(ch):
+                s = "nameAfter"
+            else:
+                i += 1
+        elif s == "quotedAfter":
+            if ch == 47 or ch == 62 or _is_space(ch):
+                s = "nameBefore"
+            else:
+                return False
+        else:   # end
+            return ch == 62 and _blank_from(c, i + 1)
 
 
-def _js_blank(s: str) -> bool:
-    return s.strip(_JS_WS_CHARS) == ""
+def _html_at(L: _Line, q: int, interrupt: bool, lazy: bool) -> int:
+    c = L.codes
+    i = q + 1
+    if _at(c, i) == 33:
+        if _at(c, i + 1) == 45:
+            return 2 if _at(c, i + 2) == 45 else 0
+        if _at(c, i + 1) == 91:
+            return 5 if _slice(L, i + 2, i + 8) == "CDATA[" else 0
+        return 4 if _is_alpha(_at(c, i + 1)) else 0
+    if _at(c, i) == 63:
+        return 3
+    closing = _at(c, i) == 47
+    if closing:
+        i += 1
+    if not _is_alpha(_at(c, i)):
+        return 0
+    name = []
+    while _at(c, i) == 45 or _is_alnum(_at(c, i)):
+        name.append(L.chars[i])
+        i += 1
+    after = _at(c, i)
+    if not (after is None or after == 47 or after == 62 or _is_space(after)):
+        return 0
+    lower = "".join(name).lower()
+    if after != 47 and not closing and lower in _HTML_RAW:
+        return 1
+    if lower in _HTML_BLOCK:
+        return (6 if _at(c, i + 1) == 62 else 0) if after == 47 else 6
+    if interrupt and not lazy:
+        return 0
+    return 7 if _complete_tag(c, i, closing) else 0
 
 
-def _strip_cr(line: str) -> str:
-    return line[:-1] if line.endswith("\r") else line
+def _quote_at(c: list[int], p: int) -> int:
+    q = p + _spaces(c, p, 3)
+    if _at(c, q) != 62:
+        return -1
+    return q + 2 if _is_space(_at(c, q + 1)) else q + 1
 
 
-def _fence_open(raw: str):
-    line = _strip_cr(raw)
-    m = _FENCE_OPEN.match(line)
-    if not m:
-        return None
-    char, info = m.group(1)[0], m.group(2)
-    if char == "`" and "`" in info:
-        return None
-    first = _js_norm(info).split(" ")[0]
-    return {"char": char, "size": len(m.group(1)), "lang": first.lower()}
+class _List:
+    __slots__ = ("ordered", "marker", "size", "initial_blank_line", "further_blank_lines", "close_flow")
+
+    def __init__(self, ordered, marker, size, initial_blank_line):
+        self.ordered, self.marker, self.size = ordered, marker, size
+        self.initial_blank_line, self.further_blank_lines, self.close_flow = initial_blank_line, False, False
 
 
-def _fence_close(raw: str, open_: dict) -> bool:
-    m = _FENCE_CLOSE.match(_strip_cr(raw))
-    return bool(m) and m.group(1)[0] == open_["char"] and len(m.group(1)) >= open_["size"]
+def _list_at(c: list[int], p: int, cur: _List | None, interrupt: bool):
+    initial = _spaces(c, p, 3)
+    q = p + initial
+    prefix_start = q
+    ch = _at(c, q)
+    bullet = ch in (42, 43, 45)
+    ordered = cur.ordered if cur else not bullet
+    if not ordered:
+        if (ch != cur.marker) if cur else not bullet:
+            return None
+        if ch in (42, 45) and _thematic_break_at(c, q):
+            return None
+    else:
+        if not _is_digit(ch):
+            return None
+        if interrupt and ch != 49:
+            return None
+        size = 0
+        while _is_digit(_at(c, q)):
+            size += 1
+            if size >= 10:
+                break
+            q += 1
+        d = _at(c, q)
+        if not ((not interrupt or size < 2) and ((d == cur.marker) if cur else d in (41, 46))):
+            return None
+    marker = c[q]
+    q += 1
+    initial_size = initial
+    initial_blank_line = False
+    if _blank_from(c, q):
+        if interrupt:
+            return None   # an empty item cannot interrupt a paragraph
+        initial_blank_line = True
+        initial_size += 1
+    else:
+        w = _spaces(c, q, 4)
+        if w >= 1 and not _is_space(_at(c, q + w)):
+            q += w
+        elif _is_space(_at(c, q)):
+            q += 1
+        else:
+            return None
+    return q, _List(ordered, cur.marker if cur else marker, initial_size + (q - prefix_start), initial_blank_line)
 
 
-def _html_block_start(line: str, after_blank: bool):
-    t = re.sub(r"^ {0,3}", "", line, count=1)
-    if not t.startswith("<"):
-        return None
-    if _HTML_RAW_START.match(t):
-        return ("until", _HTML_RAW_END)
-    if t.startswith("<!--"):
-        return ("until", re.compile(r"-->"))
-    if t.startswith("<?"):
-        return ("until", re.compile(r"\?>"))
-    if t.startswith("<![CDATA["):
-        return ("until", re.compile(r"\]\]>"))
-    if re.match(r"^<![A-Za-z]", t):
-        return ("until", re.compile(r">"))
-    m = _HTML_TAG_START.match(t)
-    if m and m.group(1).lower() in _HTML_BLOCK_TAGS:
-        return ("blank", None)
-    if after_blank and (_HTML_OPEN_TAG.match(t) or _HTML_CLOSE_TAG.match(t)):
-        return ("blank", None)
+def _list_continue(st: _List, c: list[int], p: int) -> int:
+    st.close_flow = False
+    if _blank_from(c, p):
+        st.further_blank_lines = st.further_blank_lines or st.initial_blank_line
+        return p + _spaces(c, p, st.size)
+    further = st.further_blank_lines
+    st.further_blank_lines = False
+    st.initial_blank_line = False
+    if not further and _is_space(_at(c, p)):
+        n = _spaces(c, p, st.size)
+        if n == st.size:
+            return p + n
+    st.close_flow = True
+    nxt = _list_at(c, p, st, False)
+    if not nxt:
+        return -1
+    q, item = nxt
+    st.ordered, st.marker, st.size = item.ordered, item.marker, item.size
+    st.initial_blank_line, st.further_blank_lines, st.close_flow = item.initial_blank_line, False, True
+    return q
+
+
+def _container_at(c: list[int], p: int, interrupt: bool):
+    ch = _at(c, p + _spaces(c, p, 3))
+    if ch == 62:
+        return _quote_at(c, p), "quote"
+    if ch in (42, 43, 45) or _is_digit(ch):
+        return _list_at(c, p, None, interrupt)
     return None
 
 
-def scan_blocks(lines: list[str]) -> list[dict]:
-    """Code blocks and HTML blocks of a reply, in order (plain.ts scanBlocks). Lines outside are prose."""
-    out: list[dict] = []
-    n = len(lines)
-    i = 0
-    after_blank = True
-    while i < n:
-        line = _strip_cr(lines[i])
-        html = _html_block_start(line, after_blank)
-        if html:
-            kind, until = html
-            if kind == "until":
-                j = i
-                while j < n and not until.search(_strip_cr(lines[j])):
-                    j += 1
-                j = min(j + 1, n)
-                after_blank = False
-            else:
-                j = i + 1
-                while j < n and not _js_blank(_strip_cr(lines[j])):
-                    j += 1
-                after_blank = True
-            out.append({"kind": "html", "start": i, "end": j})
-            i = j
-            continue
-        open_ = _fence_open(line)
-        if open_:
-            body: list[str] = []
-            j = i + 1
-            closed = False
-            while j < n:
-                if _fence_close(lines[j], open_):
-                    closed = True
-                    break
-                body.append(_strip_cr(lines[j]))
-                j += 1
-            out.append({"kind": "fence", "start": i, "end": j + 1 if closed else j, "closed": closed, "fence": open_, "body": body})
-            i = j + 1 if closed else j
-            after_blank = False
-            continue
-        after_blank = _js_blank(line)
+def _is_control(c) -> bool:
+    return c is not None and (c < 32 or c == 127)
+
+
+def _after_line(c: list[int], i: int) -> int:
+    while _is_space(_at(c, i)):
         i += 1
+    return i if _at(c, i) in (None, _EOLC) else -1
+
+
+def _definition_at(c: list[int], i: int) -> int:
+    if _at(c, i) != 91:
+        return -1
+    i += 1
+    size = 0
+    seen = False
+    while True:
+        ch = _at(c, i)
+        if size > 999 or ch is None or ch == 91 or (ch == 93 and not seen):
+            return -1
+        if ch == 93:
+            i += 1
+            break
+        if ch == _EOLC:
+            i += 1
+            continue
+        while True:
+            d = _at(c, i)
+            if d is None or d in (91, 93, _EOLC):
+                break
+            size += 1
+            if size - 1 > 999:
+                break
+            i += 1
+            if not seen:
+                seen = not _is_space(d)
+            if d == 92 and _at(c, i) in (91, 92, 93):
+                i += 1
+                size += 1
+    if _at(c, i) != 58:
+        return -1
+    i += 1
+    while _at(c, i) == _EOLC or _is_space(_at(c, i)):
+        i += 1
+    if _at(c, i) == 60:
+        i += 1
+        while True:
+            d = _at(c, i)
+            if d == 62:
+                i += 1
+                break
+            if d is None or d == 60 or d == _EOLC:
+                return -1
+            i += 1
+            if d == 92 and _at(c, i) in (60, 62, 92):
+                i += 1
+    else:
+        first = _at(c, i)
+        if first is None or first == 32 or first == 41 or _is_control(first):
+            return -1
+        balance = 0
+        while True:
+            d = _at(c, i)
+            if not balance and (d is None or d == 41 or d == _EOLC or _is_space(d)):
+                break
+            if d == 40:
+                i += 1
+                balance += 1
+                continue
+            if d == 41:
+                i += 1
+                balance -= 1
+                continue
+            if d is None or d == 32 or _is_control(d):
+                return -1
+            i += 1
+            if d == 92 and _at(c, i) in (40, 41, 92):
+                i += 1
+    after_destination = i
+    if _at(c, i) == _EOLC or _is_space(_at(c, i)):
+        while _at(c, i) == _EOLC or _is_space(_at(c, i)):
+            i += 1
+        opener = _at(c, i)
+        if opener in (34, 39, 40):
+            close = 41 if opener == 40 else opener
+            i += 1
+            while True:
+                d = _at(c, i)
+                if d == close:
+                    i += 1
+                    break
+                if d is None:
+                    i = -1
+                    break
+                i += 1
+                if d == 92 and _at(c, i) in (close, 92):
+                    i += 1
+            end = -1 if i < 0 else _after_line(c, i)
+            if end >= 0:
+                return end
+    return _after_line(c, after_destination)
+
+
+def _definitions_only(c: list[int]) -> bool:
+    i = 0
+    while True:
+        j = _definition_at(c, i)
+        if j < 0:
+            return False
+        if j >= len(c):
+            return True
+        i = j + 1
+        while _is_space(_at(c, i)):
+            i += 1
+
+
+def top_level_fences(text: str) -> list[dict]:
+    """The fenced code blocks at the top level of a reply, in order, any language (plain.ts topLevelFences).
+    Each is {start, end, next, closed, lang, code}; start/end/next are positions in `text`; an unclosed
+    block runs to the end of the text."""
+    lines = _read_lines(text)
+    out: list[dict] = []
+    stack: list = []
+    st = {"cur": None, "has_flow": False}
+
+    def finish_fence(f: _Fence, closed_at):
+        if not f.top:
+            return
+        last = f.last_line if closed_at is None else closed_at
+        n = len(f.lines) - 1 if (closed_at is None and f.lines and f.lines[-1] == "" and f.eols[-1] == "") else len(f.lines)
+        code = "".join(s + f.eols[k] if k < n - 1 else s for k, s in enumerate(f.lines[:n]))
+        out.append({"start": lines[f.start_line].start, "end": lines[last].end, "next": lines[last].next,
+                    "closed": closed_at is not None, "lang": f.lang, "code": code})
+
+    def close_flow():
+        if isinstance(st["cur"], _Fence):
+            finish_fence(st["cur"], None)
+        st["cur"] = None
+        st["has_flow"] = False
+
+    def open_containers(c, p, interrupt):
+        while True:
+            r = _container_at(c, p, interrupt)
+            if not r:
+                return p
+            stack.append(r[1])
+            p = r[0]
+
+    def interrupts(L, q, lazy):
+        c = L.codes
+        ch = _at(c, q)
+        if ch == 35:
+            return "other" if _atx_at(c, q) else None
+        if ch in (42, 95):
+            return "other" if _thematic_break_at(c, q) else None
+        if ch == 45:
+            return "setext" if (not lazy and _setext_at(c, q)) else ("other" if _thematic_break_at(c, q) else None)
+        if ch == 61:
+            return "setext" if (not lazy and _setext_at(c, q)) else None
+        if ch == 60:
+            k = _html_at(L, q, True, lazy)
+            return "html7" if k == 7 else ("other" if k else None)
+        if ch in (96, 126):
+            return "other" if _fence_at(L, q, 0, -1) else None
+        return None
+
+    def fresh(li, L, p, lazy, after_paragraph):
+        c = L.codes
+        if _blank_from(c, p):
+            st["cur"] = None
+            return
+        # indented code; one that starts on a lazy line ends with that line (micromark checks "is this line
+        # lazy" at the line ending before looking at the next line)
+        if _is_space(_at(c, p)) and _spaces(c, p, 4) >= 4:
+            st["cur"] = None if lazy else ("indented",)
+            return
+        pre = _spaces(c, p)
+        q = p + pre
+        ch = _at(c, q)
+        if ch == 35 and _atx_at(c, q):
+            st["cur"] = None
+            return
+        if ch in (42, 95) and _thematic_break_at(c, q):
+            st["cur"] = None
+            return
+        if ch == 45 and ((after_paragraph and not lazy and _setext_at(c, q)) or _thematic_break_at(c, q)):
+            st["cur"] = None
+            return
+        if ch == 61 and after_paragraph and not lazy and _setext_at(c, q):
+            st["cur"] = None
+            return
+        if ch == 60:
+            kind = _html_at(L, q, False, lazy)
+            if kind:
+                st["cur"] = None if (kind <= 5 and _HTML_END[kind].search(_slice(L, q))) else ("html", kind)
+                return
+        if ch in (96, 126):
+            f = _fence_at(L, q, pre, li)
+            if f:
+                st["cur"] = f
+                return
+        st["cur"] = ("content", c[q:])
+
+    def feed(li, L, p, lazy) -> bool:
+        c = L.codes
+        after_paragraph = False
+        now = st["cur"]
+        if now is not None:
+            if isinstance(now, _Fence):
+                if lazy:
+                    finish_fence(now, None)
+                    st["cur"] = None
+                elif _closes_fence(c, p, now):
+                    finish_fence(now, li)
+                    st["cur"] = None
+                    return False
+                else:
+                    q = p + _spaces(c, p, now.prefix) if now.prefix > 0 else p
+                    now.lines.append(_slice(L, q))
+                    now.eols.append(L.eol)
+                    now.last_line = li
+                    return False
+            elif now[0] == "content":
+                if _blank_from(c, p):
+                    st["cur"] = None
+                else:
+                    pre = _spaces(c, p)
+                    r = None if pre >= 4 else interrupts(L, p + pre, lazy)
+                    if not r:
+                        now[1].append(_EOLC)
+                        now[1].extend(c[p:])
+                        return True
+                    st["cur"] = None
+                    if r == "html7":
+                        st["cur"] = ("html", 7)   # stays in the containers this line (micromark resolves it later)
+                        return True
+                    after_paragraph = r == "setext" and not _definitions_only(now[1])
+            elif now[0] == "indented":
+                if not lazy and (_blank_from(c, p) or _spaces(c, p, 4) >= 4):
+                    return False
+                st["cur"] = None
+            elif now[1] in (6, 7) and _blank_from(c, p):
+                st["cur"] = None
+            elif lazy:
+                st["cur"] = None
+            else:
+                if now[1] <= 5 and _HTML_END[now[1]].search(_slice(L, p)):
+                    st["cur"] = None
+                return False
+        fresh(li, L, p, lazy, after_paragraph)
+        return False
+
+    def flow_line(li, L, p, lazy, continued):
+        st["has_flow"] = True
+        keep = feed(li, L, p, lazy)
+        if lazy and not keep:
+            del stack[continued:]
+        now = st["cur"]
+        if isinstance(now, _Fence) and now.start_line == li:
+            now.top = not stack
+
+    for li, L in enumerate(lines):
+        c = L.codes
+        p = 0
+        continued = 0
+        while continued < len(stack):
+            k = stack[continued]
+            q = _quote_at(c, p) if k == "quote" else _list_continue(k, c, p)
+            if q < 0:
+                break
+            p = q
+            continued += 1
+            if k != "quote" and k.close_flow:   # the next item of the same list: close the previous item's flow
+                k.close_flow = False
+                close_flow()
+                del stack[continued:]
+                break
+        interrupt = False
+        if continued == len(stack):
+            if not st["has_flow"]:
+                flow_line(li, L, open_containers(c, p, False), False, continued)
+                continue
+            now = st["cur"]
+            if isinstance(now, _Fence) or (now is not None and now[0] == "html"):
+                flow_line(li, L, p, False, continued)
+                continue
+            interrupt = now is not None
+        if _container_at(c, p, interrupt):
+            close_flow()
+            del stack[continued:]
+            flow_line(li, L, open_containers(c, p, interrupt), False, len(stack))
+        else:
+            flow_line(li, L, p, continued != len(stack), continued)
+    close_flow()
     return out
 
 
 def shape_codes(text: str, streaming: bool = False) -> list[str]:
-    """The code of each part of a reply, in the order the screen draws them (split.ts splitShapeSegments).
-    Saved replies: closed blocks only (an unclosed block is broken and stays prose)."""
-    if not text or not _HAS_SHAPE_FENCE.search(text):
+    """The code of each part of a reply, in the order the screen draws them (split.ts splitShapeSegments →
+    plain.ts shapeFences). Saved replies: closed blocks only (an unclosed block is broken and stays prose)."""
+    if not text or ("```" not in text and "~~~" not in text):
         return []
-    return ["\n".join(b["body"]) for b in scan_blocks(text.split("\n"))
-            if b["kind"] == "fence" and b["fence"]["lang"] in SHAPE_FENCE_LANGS and (b["closed"] or streaming)]
+    return [f["code"] for f in top_level_fences(text) if f["lang"] in SHAPE_FENCE_LANGS and (f["closed"] or streaming)]
+
+
+# --- the part key (answers.ts partKey / partKeys) ------------------------------------------------------
+# Not Markdown syntax: the key normalizes the part's code like answers.ts norm(), whose whitespace set is the
+# same explicit list (JavaScript's \s: tab, LF, VT, FF, CR, space, NBSP, U+1680, U+2000-U+200A, U+2028, U+2029,
+# U+202F, U+205F, U+3000, U+FEFF), and hashes UTF-16 code units (charCodeAt).
+KEY_SPACE_CHARS = "\t\n\x0b\x0c\r " + "".join(map(chr, [0x00A0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF]))
+_KEY_SPACE_RUN = re.compile("[" + re.escape(KEY_SPACE_CHARS) + "]+")
+
+
+def _key_norm(s: str) -> str:
+    return _KEY_SPACE_RUN.sub(" ", s or "").strip(KEY_SPACE_CHARS)
 
 
 def part_key(code: str, ordinal: int = 0) -> str:
     """answers.ts partKey: FNV-1a 32bit over the UTF-16 code units of the normalized code."""
     import struct
     h = 0x811C9DC5
-    for (unit,) in struct.iter_unpack("<H", _js_norm(code).encode("utf-16-le", "surrogatepass")):
+    for (unit,) in struct.iter_unpack("<H", _key_norm(code).encode("utf-16-le", "surrogatepass")):
         h ^= unit
         h = (h * 0x01000193) & 0xFFFFFFFF
     return f"p{h:08x}" + (f"-{ordinal}" if ordinal else "")

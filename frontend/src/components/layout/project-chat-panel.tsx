@@ -65,7 +65,7 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
-import { SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeSubmit } from '@/components/chat/chat-shapes';
+import { SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRecheck, type ShapeSubmit } from '@/components/chat/chat-shapes';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { RoomBoard } from '@/components/chat/room-board';
@@ -98,8 +98,9 @@ type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
   | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
 
-// 部品（選択・入力）の答えを送る時の追加情報: 照合情報と、保存された／受け取られなかったの知らせ
-type SendExtra = { answerTo?: AnswerTo; onSaved?: (msg: MessageResponse) => void; onFailed?: (why: string) => void };
+// 部品（選択・入力）の答えを送る時の追加情報: 照合情報、部品が決めた送信 ID（保存されたと分かるまで同じ ID で送る）、
+// 保存された／保存されていない（not saved）／分からない（unknown）の知らせ
+type SendExtra = { answerTo?: AnswerTo; clientMessageId?: string; onSaved?: (msg: MessageResponse) => void; onFailed?: (why: string) => void };
 type SendMessageHandle = (content: string, extra?: SendExtra) => void;
 
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
@@ -1033,6 +1034,7 @@ function ChatInput({
     let savedMessage: MessageResponse | null = null;
     // 部品（選択・入力）の答え: 保存されたら onSaved、保存されなかったら onFailed、分からなければ onFailed('unknown')（1回だけ）
     let settled = false;
+    let checking = false;
     const reportSaved = (m: MessageResponse) => { if (!settled) { settled = true; extra?.onSaved?.(m); } };
     const reportFailed = (why: string) => { if (!settled) { settled = true; extra?.onFailed?.(why); } };
 
@@ -1057,11 +1059,14 @@ function ChatInput({
 
     // 完全形: 送信の瞬間にフロントが本物のUUIDを発行し、サーバーはこれを
     // そのまま行IDにする。キャンセルはいつでもこのIDで確実に削除できる。
+    // 部品の答えは部品が決めた ID（送り直しも同じ ID。サーバーは同じ ID の2回目を保存し直さない）。
+    // 部品の答えの ID は停止の取り消し（墓標）には使わない: 墓標に入ると、同じ ID の送り直しが保存直後に消される
     const tempUserMessageId =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      extra?.clientMessageId
+      || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    optimisticMessageIdRef.current = tempUserMessageId;
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    if (!extra?.answerTo) optimisticMessageIdRef.current = tempUserMessageId;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
       room_id: roomId,
@@ -1104,37 +1109,40 @@ function ChatInput({
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    // 部品の答えの決着。保存の echo が来ていれば保存済み。来ないまま通信が終わった（done だけ・切断・中断・取り消し・
-    // 途中のエラー）時は、保存されたか分からないので、部屋の記録を client_message_id（＝保存される行の id）で確かめてから
-    // 決める。保存されていれば保存済みとして記録に載せ、無ければ失敗（選び直せる）。確かめにも失敗したら「分からない」
-    // （部品が読み直しを促す）。知りもしないのに未保存と断定して二重送信を誘わない。HTTP のエラー応答（503 など）は
-    // 本体に届く前に返るので、確かめずに失敗。requestId の新旧に関わらず必ず一度は決着させる。
-    const settleAnswer = async (knownUnsaved: boolean) => {
-      if (!extra?.answerTo || settled) return;
+    // 部品の答えの決着。保存の echo が来ていれば保存済み。来ないまま通信が終わった（HTTP のエラー応答・done だけ・
+    // 切断・中断・取り消し・途中のエラー）時は、どれも「保存されなかった証拠」ではない（503 は本体が保存した後に
+    // 途中の中継が返すこともある）ので、この送信 ID の保存をサーバーに聞いてから決める（最新の一覧に無いことでは
+    // 決めない）。保存済みなら記録に載せて保存済み、サーバーが「保存されていない」と答えたら失敗（部品は同じ ID で
+    // 送り直せる）、聞けなければ「分からない」（部品は押せず「確かめる」を出す）。requestId の新旧に関わらず必ず一度は決着させる。
+    const settleAnswer = async () => {
+      if (!extra?.answerTo || settled || checking) return;
       if (savedMessage) { reportSaved(savedMessage); return; }
+      checking = true;   // 確かめている間に別の終わり方の知らせが来ても、確かめるのはこの1回
       const dropTemp = () => queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
         old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
       );
-      if (!knownUnsaved) {
-        try {
-          const fresh = await api.rooms.getMessages(roomId, { limit: 30 });
-          const found = fresh.messages.find((m) => m.id === tempUserMessageId);
-          if (found) {
-            savedMessage = found;
-            queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
-              old ? { messages: old.messages.map((m) => (m.id === tempUserMessageId ? found : m)) } : old,
-            );
-            reportSaved(found);
-            return;
-          }
-        } catch {
-          dropTemp();
-          reportFailed('unknown');
-          return;
-        }
+      let verdict: 'saved' | 'not saved' | 'unknown' = 'unknown';
+      let found: MessageResponse | undefined;
+      try {
+        const r = await api.rooms.messageSaved(roomId, tempUserMessageId);
+        if (r && r.saved === true && r.message) { verdict = 'saved'; found = r.message; } else if (r && r.saved === false) verdict = 'not saved';
+      } catch {
+        verdict = 'unknown';
+      }
+      if (verdict === 'saved' && found) {
+        const row = found;
+        savedMessage = row;
+        queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) => {
+          if (!old) return old;
+          return old.messages.some((m) => m.id === row.id)
+            ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
+            : { messages: [row, ...old.messages] };
+        });
+        reportSaved(row);
+        return;
       }
       dropTemp();
-      reportFailed(knownUnsaved ? 'send failed' : 'not saved');
+      reportFailed(verdict);
     };
 
     try {
@@ -1210,7 +1218,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onInterrupted: () => {
-            void settleAnswer(false);   // 保存の echo の前に切れたなら、記録を確かめてから決める
+            void settleAnswer();   // 保存の echo の前に切れたなら、送信 ID で確かめてから決める
             if (streamRequestRef.current !== requestId) return;
             // 返事の通信が切れた。ダンの作業はサーバーで続くので「作業中」の表示は保つが、手元の印
             // （localActive）は立てない。立てると、作業が終わっても誰も外さず停止ボタンのまま残った（2026-10-14）。
@@ -1229,7 +1237,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onComplete: () => {
-            void settleAnswer(false);   // done だけで echo が無い・取り消し（abort）も、ここで決着させる
+            void settleAnswer();   // done だけで echo が無い・取り消し（abort）も、ここで決着させる
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1273,9 +1281,8 @@ function ChatInput({
             }
           },
           onError: (error) => {
-            // HTTP のエラー応答（本体に届く前）は未保存と分かる。サーバーからの error イベントは保存の後かも知れないので確かめる
-            const httpFailure = /^HTTP error/.test(error || '');
-            void settleAnswer(httpFailure);
+            // HTTP のエラー応答も、サーバーからの error イベントも、保存されなかった証拠ではない: 送信 ID で確かめる
+            void settleAnswer();
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1305,8 +1312,8 @@ function ChatInput({
         controller.signal
       );
     } catch (error) {
-      // 取り消し（abort）か、通信そのものの失敗。部品の答えは、保存の echo が無ければ記録を確かめてから決める
-      void settleAnswer(error instanceof Error && error.name !== 'AbortError' && /^HTTP error/.test(error.message));
+      // 取り消し（abort）か、通信そのものの失敗。部品の答えは、保存の echo が無ければ送信 ID で確かめてから決める
+      void settleAnswer();
       if (streamRequestRef.current !== requestId) return;
       syncActiveStatus(false);
       setInterrupted(projectId, false);
@@ -1318,7 +1325,7 @@ function ChatInput({
       }
     } finally {
       // どの終わり方でも、部品の答えは必ず一度決着させる（新しい送信に追い越された時も）
-      void settleAnswer(false);
+      void settleAnswer();
       // ストリームが終わったら必ず ref を破棄する（残骸が「ダン作業中」と
       // 誤判定され、停止後の送信が追い連絡に誤ルーティングされるのを防ぐ）。
       // 次の送信がすでに新しい controller をセットしている場合は触らない。
@@ -2126,13 +2133,16 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
   // 部品（選択・入力）の答え: 同じ経路で本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
-  // 一緒に保存する。サーバーに保存されたら保存された行の id で resolve、保存されなかったら reject（部品が選び直しを出す）、
-  // 保存できたか確かめられなかったら reject(SEND_UNKNOWN)（部品が「確かめる」を出す）
-  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo) => new Promise<{ id: string }>((resolve, reject) => {
+  // 一緒に保存する。送信 ID は部品が決めた物（送り直しも同じ ID）。サーバーに保存されたら保存された行の id で resolve、
+  // 保存されていないとサーバーが答えたら reject（部品が選び直しを出す）、保存できたか確かめられなかったら
+  // reject(SEND_UNKNOWN)（部品が「確かめる」を出す）
+  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo, clientMessageId) => new Promise<{ id: string }>((resolve, reject) => {
     const send = sendMessageRef.current;
     if (!send) { reject(new Error('送信できません')); return; }
-    send(text, { answerTo, onSaved: (msg) => resolve({ id: msg.id }), onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)) });
+    send(text, { answerTo, clientMessageId, onSaved: (msg) => resolve({ id: msg.id }), onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)) });
   }), []);
+  // 今ログインしている本人。部品の「答えました」はこの人の保存済みの発言だけで決める
+  const ownerId = useAuthStore((state) => state.user?.id);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   // 送った直後、まだサーバーの時刻が無いメッセージ（pending）が画面にある間に始まった作業の一歩を、
@@ -2259,10 +2269,23 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 束ね応答が届くまで個別クエリは止めておき（二重取得しない）、届いたら解放する。
   // 束ねが失敗/遅延した時は個別クエリに戻す（従来経路が保険）。
   const initialRoomId = project?.room_id;
-  // 部屋の記録をサーバーから読み直す（部品の「確かめる」: 保存できたか分からない答えの確かめ直し）
-  const refreshRoomRecord = useCallback(async () => {
-    if (!initialRoomId) return;
-    await queryClient.refetchQueries({ queryKey: ['project-messages', initialRoomId] });
+  // 部品の「確かめる」: 保存できたか分からない答えを、その送信 ID でサーバーに聞き直す。保存済みなら記録に載せる。
+  // サーバーが「保存されていない」と答えた時だけ saved: false。聞けない・答えが読めない時は reject（分からないまま）
+  const recheckAnswer = useCallback<ShapeRecheck>(async (clientMessageId) => {
+    if (!initialRoomId) throw new Error('部屋が分かりません');
+    const r = await api.rooms.messageSaved(initialRoomId, clientMessageId);
+    if (r && r.saved === true && r.message) {
+      const row = r.message;
+      queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', initialRoomId], (old) => {
+        if (!old) return old;
+        return old.messages.some((m) => m.id === row.id)
+          ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
+          : { messages: [row, ...old.messages] };
+      });
+      return { saved: true };
+    }
+    if (r && r.saved === false) return { saved: false };
+    throw new Error('保存されたか分かりません');
   }, [queryClient, initialRoomId]);
   useEffect(() => {
     if (!projectId || !initialRoomId) return;
@@ -3163,7 +3186,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
-          <ShapeAnswerProvider messages={messages} submit={answerShapeInRoom} refresh={refreshRoomRecord}>
+          <ShapeAnswerProvider messages={messages} ownerId={ownerId} submit={answerShapeInRoom} recheck={recheckAnswer}>
           <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(

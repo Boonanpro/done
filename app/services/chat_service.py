@@ -154,6 +154,48 @@ def record_message_delivery_sync(
         logging.getLogger(__name__).warning("record_message_delivery_sync failed: %s", exc)
 
 
+# --- Who may use a saved message row (the one rule every path below goes through) ---------------------------
+# A message row is "this sender's own message in this room" only when its room, sender and sender type all
+# match. Every path that reaches a saved row by an id the client chose uses this: the re-read after an insert
+# hit an existing id (send_message), the rewrite after a cancel (chat_routes._replace_user_message), a retry of
+# an answer that was already saved and the "was it saved?" lookup (chat_routes). Writing in a room also needs
+# membership of that room (member_of_room_sync): send_message and the rewrite check it the same way.
+
+class MessageIdTaken(PermissionError):
+    """The id the client chose already belongs to a message that is not this sender's own message in this room."""
+
+
+def is_own_message(row: Optional[dict], room_id: Optional[str], sender_id: Optional[str], sender_type: str = "human") -> bool:
+    return bool(row) and bool(room_id) and bool(sender_id) and row.get("room_id") == room_id \
+        and row.get("sender_id") == sender_id and row.get("sender_type") == sender_type
+
+
+def member_of_room_sync(sb, room_id: Optional[str], user_id: Optional[str]) -> bool:
+    if not room_id or not user_id:
+        return False
+    return bool((sb.table("chat_room_members").select("id").eq("room_id", room_id).eq("user_id", user_id).execute()).data)
+
+
+def reply_target_sync(sb, room_id: Optional[str], reply_to_id: Optional[str]) -> Optional[dict]:
+    """The message a new message quotes, if it is a message of the same room (a quote never reaches into another
+    room; an id from elsewhere or a deleted message is dropped). Shaped like the screen's reply_to_message."""
+    if not room_id or not reply_to_id:
+        return None
+    rows = (sb.table("chat_messages").select("id, room_id, sender_type, content, created_at, sender:users!sender_id(display_name)")
+            .eq("id", reply_to_id).eq("room_id", room_id).execute()).data or []
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r["id"],
+        "sender_name": (r.get("sender") or {}).get("display_name") or "Unknown",
+        "sender_type": r.get("sender_type"),
+        "content": (r.get("content") or "")[:200],
+        "full_content": r.get("content") or "",
+        "created_at": r.get("created_at"),
+    }
+
+
 class ChatService:
     """Done Chat business logic"""
     
@@ -611,13 +653,16 @@ class ChatService:
         キャンセル対応: フロントは送信の瞬間から本物のIDを知っているので、
         いつキャンセルしてもIDで確実に削除できる。対応表は不要）。
         UUID形式でない値は無視して従来通りDB採番。
+
+        同じ id の行がもうある時（届いていた送信のやり直し）は、その行がこの部屋の・この送り主の・この種類の
+        発言（is_own_message）の時だけその行を返し（"_existed": True。数え直し・通知・検知はもう済んでいるので
+        しない）、ほかの行なら MessageIdTaken（他人の行を返さない・書き換えない）。
         """
         # Verify membership
-        member = await self._execute_with_retry(
+        if not await self._execute_with_retry(
             "send_message.membership_check",
-            lambda: self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", sender_id).execute(),
-        )
-        if not member.data:
+            lambda: member_of_room_sync(self.supabase, room_id, sender_id),
+        ):
             raise ValueError("Not a member of this room")
 
         # Get sender info
@@ -647,20 +692,31 @@ class ChatService:
             import uuid as _uuid
             insert_data["id"] = str(_uuid.uuid4())
         if reply_to_id:
-            insert_data["reply_to"] = reply_to_id
+            # 引用先は同じ部屋の発言だけ（ほかの部屋の id・消えた発言は引用として保存しない）
+            if await asyncio.to_thread(reply_target_sync, self.supabase, room_id, reply_to_id):
+                insert_data["reply_to"] = reply_to_id
         if created_at:
             insert_data["created_at"] = created_at
         if ai_context:
             insert_data["ai_context"] = ai_context
 
+        attempts = {"n": 0, "existed": False}
+
         def _insert_idempotent():
+            attempts["n"] += 1
             try:
                 return self.supabase.table("chat_messages").insert(insert_data).execute()
             except Exception as exc:
-                # 23505 = our own id already exists: a previous attempt landed
-                # but its response was lost. Read the row back instead of failing.
+                # 23505 = the id already exists: a previous attempt landed but its response was lost (a retry
+                # inside this call, or the client's retry of the same send). Read the row back instead of
+                # failing, but only if it is this sender's own message in this room.
                 if "23505" in str(exc) or "duplicate key" in str(exc).lower():
-                    return self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
+                    back = self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
+                    row = (back.data or [None])[0]
+                    if not is_own_message(row, room_id, sender_id, sender_type):
+                        raise MessageIdTaken("この発言の ID はほかの発言が使っています")
+                    attempts["existed"] = attempts["n"] == 1   # saved before this call (not by this call's lost insert)
+                    return back
                 raise
 
         result = await self._execute_with_retry(
@@ -671,6 +727,9 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
+            if attempts["existed"]:
+                msg["_existed"] = True
+                return msg
             # 押し込み同期: この部屋のメンバーの新着ストリームへ流す（購読者が無ければ即return）
             try:
                 from app.services.room_feed import publish_message
@@ -843,6 +902,32 @@ class ChatService:
             slim["blocks"] = out
         return slim
 
+    def get_own_message_sync(self, room_id: str, user_id: str, message_id: str) -> Optional[dict]:
+        """The caller's own human message with this id in this room, shaped like get_messages' items, or None
+        (nothing saved under that id, or the row is not theirs / not in this room — never shown). ValueError when
+        the caller is not a member of the room. For the screen's "was my send saved?" (an answer whose echo did
+        not arrive): looked up by its own id, not by searching the latest messages."""
+        if not member_of_room_sync(self.supabase, room_id, user_id):
+            raise ValueError("Not a member of this room")
+        rows = (self.supabase.table("chat_messages").select("*, sender:users!sender_id(id, display_name, avatar_url)")
+                .eq("id", message_id).execute()).data or []
+        row = rows[0] if rows else None
+        if not is_own_message(row, room_id, user_id, "human"):
+            return None
+        out = {
+            "id": row["id"], "room_id": row["room_id"], "sender_id": row["sender_id"],
+            "sender_name": (row.get("sender") or {}).get("display_name") or "Unknown",
+            "sender_type": row["sender_type"], "content": row.get("content") or "", "created_at": row["created_at"],
+        }
+        if row.get("ai_context"):
+            out["ai_context"] = self._slim_ai_context(row["ai_context"])
+        if row.get("reply_to"):
+            out["reply_to_id"] = row["reply_to"]
+            reply = reply_target_sync(self.supabase, room_id, row["reply_to"])
+            if reply:
+                out["reply_to_message"] = {k: reply[k] for k in ("id", "sender_name", "sender_type", "content", "created_at")}
+        return out
+
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:
         """Get messages from a room"""
         # 部屋を開くたびに通るホットパス。従来は「会員チェック→本文→返信元」を
@@ -889,7 +974,7 @@ class ChatService:
                 unique_ids = list(set(reply_to_ids))
                 replied_result = self.supabase.table("chat_messages").select(
                     "id, sender_type, content, created_at, sender:users!sender_id(display_name)"
-                ).in_("id", unique_ids).execute()
+                ).in_("id", unique_ids).eq("room_id", room_id).execute()   # 引用の中身は同じ部屋の発言だけ見せる
                 for rm in (replied_result.data or []):
                     reply_map[rm["id"]] = {
                         "id": rm["id"],

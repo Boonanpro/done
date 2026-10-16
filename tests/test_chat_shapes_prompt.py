@@ -112,18 +112,19 @@ def test_job_runners_stay_prose_only() -> None:
     """Independent jobs (command_job_runner: the non-parallel Codex CLI job that command_center starts by default,
     and its parallel/make variants; parallel_job_runner; api_job_runner) build their brief without the section.
 
-    Decided by the display destination and the role, not by the engine name: the non-parallel job's only chat
-    appearance is the report card (`execute report`), which is cut at 2800 characters, wrapped in a heading when it
-    goes to another room, and spoken instead of written while the owner is on a call; its progress goes to the job
-    feed; and the job has already ended when the report arrives, so an answer to a Choice/Input could not reach the
-    job that asked. A report is therefore prose. (command_handoff is different: it runs the room's own chat turn,
-    whose reply is saved and drawn in that room's chat, so it keeps answer_shapes=True.)"""
+    Not because the screen cannot show a job's text (it can: the job's intermediate messages are saved as the room's
+    'reasoning' events, and the result is reported as an ordinary AI message of the target room), but by choice, for
+    two reasons in the code: the job has already ended when its report arrives, so an answer to a Choice/Input could
+    not reach the job that asked; and the report is cut at 2800 characters, which can cut a part block in the middle.
+    (command_handoff is different: it runs the room's own chat turn, whose reply the owner answers in that room, so it
+    keeps answer_shapes=True.)"""
     runner = (ROOT / "app/services/command_job_runner.py").read_text(encoding="utf-8")
     call = runner[runner.index("asyncio.to_thread(_build_system_prompt"):runner.index("if parallel:", runner.index("asyncio.to_thread(_build_system_prompt"))]
     assert "answer_shapes=False" in call and "answer_shapes=True" not in runner
-    assert "'task':result[:2800]" in runner                      # the report card is a cut copy of the result
+    assert "'task':result[:2800]" in runner                      # the report is the result cut at 2800 characters
+    assert "'reasoning'" in runner                               # the intermediate messages do reach the room (live work view)
     center = (ROOT / "app/services/command_center.py").read_text(encoding="utf-8")
-    assert "spoken_in_call" in center                            # ...and is spoken, not written, during a call
+    assert 'sender_type="ai", message_id=report_message_id' in center   # the report is an ordinary AI message of the room
     for rel in ("app/services/parallel_job_runner.py", "app/services/api_job_runner.py", "app/services/make_job_runner.py"):
         path = ROOT / rel
         if path.exists():

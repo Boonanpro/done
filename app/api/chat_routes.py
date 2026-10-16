@@ -161,29 +161,35 @@ def _check_answer_link(service, room_id: Optional[str], link: dict) -> None:
         raise _AnswerLinkRejected("答えの相手の部品がその返事にありません")
 
 
-def _replace_user_message(service, request, current_user, media_content: str, answer_ctx: Optional[dict]) -> dict:
+def _replace_user_message(service, request, current_user, media_content: str, answer_ctx: Optional[dict], reply_to_id: Optional[str]) -> dict:
     """The replace path (re-send after a cancel): rewrite the owner's own human message in this room.
 
-    Authorization comes first: the row must exist (LookupError → the caller inserts instead), be a human
-    message, belong to the sender and to the room of this request (PermissionError → refused). The
-    update is also filtered on those columns so a concurrent change cannot widen it. ai_context keeps
-    its other keys: only answer_to is replaced (a new link) or removed (plain text now). The returned row
-    is re-read after the update, so the echo the screen gets is what was saved."""
+    Authorization comes first, with the same rules as a new message: the sender must be a member of the room
+    of this request (as send_message checks), and the row must be the sender's own human message in that room
+    (chat_service.is_own_message). No row → LookupError (the caller inserts instead, which checks membership
+    again); anything else → PermissionError (refused). The update is also filtered on those columns so a
+    concurrent change cannot widen it. The re-sent message replaces what was there: the text, the quote
+    (reply_to: the validated quote of this request, or none) and the answer link (ai_context keeps its other
+    keys; answer_to is replaced by the new link or removed for plain text). The returned row is re-read after
+    the update, so the echo the screen gets is what was saved."""
+    from app.services.chat_service import is_own_message, member_of_room_sync
     sb = service.supabase
     rid = request.replace_message_id
     room_id = request.session_id
     uid = current_user.user_id
+    if not member_of_room_sync(sb, room_id, uid):
+        raise PermissionError("この部屋には書き込めません")
     found = (sb.table("chat_messages").select("*").eq("id", rid).execute()).data or []
     if not found:
         raise LookupError(rid)
     row = found[0]
-    if row.get("sender_type") != "human" or row.get("sender_id") != uid or not room_id or row.get("room_id") != room_id:
+    if not is_own_message(row, room_id, uid, "human"):
         raise PermissionError("この発言は書き換えられません")
     ctx = dict(row.get("ai_context") or {}) if isinstance(row.get("ai_context"), dict) else {}
     ctx.pop("answer_to", None)
     if answer_ctx:
         ctx.update(answer_ctx)
-    (sb.table("chat_messages").update({"content": media_content, "ai_context": ctx or None})
+    (sb.table("chat_messages").update({"content": media_content, "ai_context": ctx or None, "reply_to": reply_to_id or None})
      .eq("id", rid).eq("sender_id", uid).eq("room_id", room_id).eq("sender_type", "human").execute())
     updated = (sb.table("chat_messages").select("*").eq("id", rid).eq("room_id", room_id).execute()).data or []
     if not updated:
@@ -191,29 +197,53 @@ def _replace_user_message(service, request, current_user, media_content: str, an
     return updated[0]
 
 
-def _user_message_echo(message: dict, room_id: str, request, reply_msg_data, sender_display_name: Optional[str]) -> dict:
+def _saved_send(service, room_id: Optional[str], user_id: str, message_id: Optional[str]) -> Optional[dict]:
+    """A send whose id is already saved: the row, if it is this sender's own human message in this room (the
+    same send tried again); None if nothing is saved under that id; MessageIdTaken if the id is someone else's
+    or another room's message."""
+    from app.services.chat_service import MessageIdTaken, is_own_message
+    if not message_id or not room_id:
+        return None
+    rows = (service.supabase.table("chat_messages").select("*").eq("id", message_id).execute()).data or []
+    if not rows:
+        return None
+    if not is_own_message(rows[0], room_id, user_id, "human"):
+        raise MessageIdTaken("この発言の ID はほかの発言が使っています")
+    return rows[0]
+
+
+def _reply_for(service, room_id: str, message: dict, known: Optional[dict]) -> Optional[dict]:
+    """The quote of a saved row (its reply_to, in this room), reusing the one already looked up when it is the same."""
+    rid = message.get("reply_to")
+    if not rid:
+        return None
+    if known and known.get("id") == rid:
+        return known
+    from app.services.chat_service import reply_target_sync
+    try:
+        return reply_target_sync(service.supabase, room_id, rid)
+    except Exception:
+        return None
+
+
+def _user_message_echo(message: dict, room_id: str, reply: Optional[dict], sender_display_name: Optional[str]) -> dict:
     """The SSE copy of the owner's saved message, built from the saved row (never from the request): the
-    screen trusts this echo, and in particular marks a part answered only from its ai_context.answer_to."""
+    screen trusts this echo, and in particular marks a part answered only from its ai_context.answer_to.
+    The quote comes from the row's reply_to (reply = that message of this room, chat_service.reply_target_sync)."""
     created = message.get("created_at")
     echo = {
         "id": message["id"],
-        "room_id": room_id,
+        "room_id": message.get("room_id") or room_id,
         "sender_id": message.get("sender_id"),
         "sender_name": sender_display_name or message.get("sender_name") or "You",
         "sender_type": message.get("sender_type") or "human",
         "content": message.get("content") or "",
         "created_at": created.isoformat() if hasattr(created, "isoformat") else str(created),
     }
-    if request.reply_to_id:
-        echo["reply_to_id"] = request.reply_to_id
-        if reply_msg_data:
-            echo["reply_to_message"] = {
-                "id": reply_msg_data["id"],
-                "sender_name": reply_msg_data["sender"]["display_name"] if reply_msg_data.get("sender") else "Unknown",
-                "sender_type": reply_msg_data["sender_type"],
-                "content": reply_msg_data["content"][:200],
-                "created_at": reply_msg_data["created_at"],
-            }
+    if message.get("reply_to"):
+        echo["reply_to_id"] = message["reply_to"]
+        if reply and reply.get("id") == message["reply_to"]:
+            echo["reply_to_message"] = {k: reply[k] for k in ("id", "sender_name", "sender_type", "content", "created_at")}
     if isinstance(message.get("ai_context"), dict) and message["ai_context"]:
         echo["ai_context"] = message["ai_context"]
     return echo
@@ -1873,6 +1903,30 @@ async def get_messages(
         raise HTTPException(status_code=503, detail="Temporary backend error. Please retry.")
 
 
+@router.get("/rooms/{room_id}/messages/{message_id}/saved")
+async def get_message_saved(
+    room_id: str,
+    message_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """Was the caller's send with this id saved? {"saved": true, "message": …} only for the caller's own human
+    message in this room (chat_service.is_own_message); {"saved": false} when nothing of theirs is saved under
+    that id. The screen asks this when an answer's send ended without its echo; any error here is "unknown"
+    there (it never reads an error as "not saved")."""
+    try:
+        row = await asyncio.to_thread(service.get_own_message_sync, room_id, current_user.user_id, message_id)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.warning("Temporary failure in get_message_saved (room=%s): %s", room_id, e)
+        raise HTTPException(status_code=503, detail="Temporary backend error. Please retry.")
+    if not row:
+        return {"saved": False}
+    msgs = _message_responses([row])
+    return {"saved": True, "message": msgs[0]} if msgs else {"saved": False}
+
+
 @router.post("/rooms/{room_id}/messages", response_model=MessageResponse)
 async def send_message(
     room_id: str,
@@ -2256,55 +2310,100 @@ async def send_dan_message_stream(
                     _voice_call = voice_calls.active(request.session_id)
                 except Exception:
                     _voice_call = None
+            # the owner's answer to a part of Dan's reply (chat_shapes): saved with the message as ai_context.answer_to.
+            # The link must point at a part of an AI reply in this room, or the send is refused before anything is saved.
+            _answer_ctx = _answer_to_context(request.answer_to)
             _parallel_save = (
                 _parallel_send_enabled
                 and bool(request.session_id)
                 and not request.replace_message_id
                 and not _streaming_on
                 and not _voice_call
+                and not _answer_ctx   # an answer may be the same send tried again: saved first, so a retry never starts a second turn
             )
-            # the owner's answer to a part of Dan's reply (chat_shapes): saved with the message as ai_context.answer_to.
-            # The link must point at a part of an AI reply in this room, or the send is refused before anything is saved.
-            _answer_ctx = _answer_to_context(request.answer_to)
+            from app.services.chat_service import MessageIdTaken, member_of_room_sync, reply_target_sync
+
+            def _refuse(text: str):
+                return (f"data: {json.dumps({'type': 'error', 'session_id': request.session_id or '', 'message': text})}\n\n"
+                        f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or ''})}\n\n")
+
+            # この部屋に書き込めるのはこの部屋のメンバーだけ。何かを読む・起こす前に確かめる（答えの照合・保存済みの確かめ・
+            # 並列保存の作業開始が、メンバーでない人の問い合わせに答えたり、よその部屋の作業を起こしたりしない）
+            if request.session_id and not await asyncio.to_thread(member_of_room_sync, service.supabase, request.session_id, current_user.user_id):
+                logger.warning("send refused: not a member (room=%s user=%s)", str(request.session_id)[:8], current_user.user_id[:8])
+                done_sent = True
+                yield _refuse("この部屋には書き込めません")
+                return
+
+            # 引用先はこの部屋の発言だけ（ほかの部屋の id・消えた発言は引用しない）。保存の前に決め、保存も echo もこれに従う
+            _reply_msg_data = None
+            if request.reply_to_id and request.session_id:
+                try:
+                    _reply_msg_data = await asyncio.to_thread(reply_target_sync, service.supabase, request.session_id, request.reply_to_id)
+                except Exception:
+                    _reply_msg_data = None
+            _reply_to_id = _reply_msg_data["id"] if _reply_msg_data else None
             if _answer_ctx:
                 try:
                     await asyncio.to_thread(_check_answer_link, service, request.session_id, _answer_ctx["answer_to"])
-                except _AnswerLinkRejected as e:
-                    logger.warning("answer link refused (room=%s user=%s): %s", str(request.session_id)[:8], current_user.user_id[:8], e)
-                    yield f"data: {json.dumps({'type': 'error', 'session_id': request.session_id or '', 'message': str(e)})}\n\n"
+                    # 同じ答えの送り直し（画面は保存されたか分からない時、同じ client_message_id で送り直す）。
+                    # 最初の送信がもう保存されていれば、その行を返して終わる（二重に保存しない・ダンを二度起こさない）
+                    _already = await asyncio.to_thread(_saved_send, service, request.session_id, current_user.user_id, request.client_message_id)
+                except (_AnswerLinkRejected, MessageIdTaken) as e:
+                    logger.warning("answer refused (room=%s user=%s): %s", str(request.session_id)[:8], current_user.user_id[:8], e)
                     done_sent = True
-                    yield f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or ''})}\n\n"
+                    yield _refuse(str(e))
                     return
-            if request.replace_message_id:
-                # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）。本人の、この部屋の、human の行だけ。
-                room_id = request.session_id
-                try:
-                    message = await asyncio.to_thread(_replace_user_message, service, request, current_user, media_content, _answer_ctx)
-                except PermissionError as e:
-                    logger.warning("replace refused (message=%s user=%s): %s", str(request.replace_message_id)[:8], current_user.user_id[:8], e)
-                    yield f"data: {json.dumps({'type': 'error', 'session_id': room_id or '', 'message': str(e)})}\n\n"
+                if _already is not None:
+                    logger.info("answer already saved (room=%s msg=%s): echo only", str(request.session_id)[:8], str(_already.get("id"))[:8])
+                    _u = await service.get_user_by_id(current_user.user_id)
+                    echo = _user_message_echo(_already, request.session_id, _reply_for(service, request.session_id, _already, _reply_msg_data), _u["display_name"] if _u else None)
+                    yield f"data: {json.dumps({'type': 'user_message', 'session_id': request.session_id, 'message': echo})}\n\n"
                     done_sent = True
-                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id or ''})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': request.session_id})}\n\n"
                     return
-                except LookupError:
-                    # 上書きの相手がもう無い（取り消しで消えた）: 新しい行として保存する
-                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
-                except Exception as e:
-                    logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
-                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
-            elif _parallel_save:
-                # 並列保存パス: ここでは保存せず room_id だけ確定する。実際の send_message は
-                # process_message_cli の cold start を起動した直後（裏で並走）に実行する。
-                room_id = request.session_id
-                message = None
-            elif request.session_id:
-                room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
-                _check_cancel_tombstone(room_id, message["id"], service)
-            else:
-                message = await service.send_dan_message(current_user.user_id, media_content)
-                room_id = message["room_id"]
-                _check_cancel_tombstone(room_id, message["id"], service)
+            try:
+                if request.replace_message_id:
+                    # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）。本人の、この部屋の、human の行だけ。
+                    room_id = request.session_id
+                    try:
+                        message = await asyncio.to_thread(_replace_user_message, service, request, current_user, media_content, _answer_ctx, _reply_to_id)
+                    except PermissionError as e:
+                        logger.warning("replace refused (message=%s user=%s): %s", str(request.replace_message_id)[:8], current_user.user_id[:8], e)
+                        done_sent = True
+                        yield _refuse(str(e))
+                        return
+                    except LookupError:
+                        # 上書きの相手がもう無い（取り消しで消えた）: 新しい行として保存する
+                        message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=_reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
+                    except Exception as e:
+                        logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
+                        message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=_reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
+                elif _parallel_save:
+                    # 並列保存パス: ここでは保存せず room_id だけ確定する。実際の send_message は
+                    # process_message_cli の cold start を起動した直後（裏で並走）に実行する。
+                    room_id = request.session_id
+                    message = None
+                elif request.session_id:
+                    room_id = request.session_id
+                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=_reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
+                    _check_cancel_tombstone(room_id, message["id"], service)
+                else:
+                    message = await service.send_dan_message(current_user.user_id, media_content)
+                    room_id = message["room_id"]
+                    _check_cancel_tombstone(room_id, message["id"], service)
+            except MessageIdTaken as e:
+                logger.warning("send refused (room=%s user=%s): %s", str(request.session_id)[:8], current_user.user_id[:8], e)
+                done_sent = True
+                yield _refuse(str(e))
+                return
+            if message is not None and message.get("_existed"):
+                # 同じ送信のやり直しで、最初の送信が（確かめた後で）保存されていた: その行を返して終わる
+                echo = _user_message_echo(message, room_id, _reply_for(service, room_id, message, _reply_msg_data), message.get("sender_name"))
+                yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': echo})}\n\n"
+                done_sent = True
+                yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                return
             # 送信者名は send_message の戻り値（sender_name）を再利用する。
             # 従来はここで users を再度引いており、send_message 内の get_sender と
             # 二重の往復になっていた。上書き(replace)経路は raw 行で sender_name を
@@ -2319,21 +2418,11 @@ async def send_dan_message_stream(
             else:
                 sender_display_name = None
 
-            # 返信先メッセージの内容を取得（ダンのコンテキスト注入 + SSEレスポンス用）
+            # 返信先メッセージの内容（ダンのコンテキスト注入用）。引用先は保存の前に、この部屋の発言だけに決めてある
             reply_context_prefix = ""
-            _reply_msg_data = None
-            if request.reply_to_id:
-                try:
-                    reply_msg_result = service.supabase.table("chat_messages").select(
-                        "id, sender_type, content, created_at, sender:users!sender_id(display_name)"
-                    ).eq("id", request.reply_to_id).execute()
-                    if reply_msg_result.data:
-                        _reply_msg_data = reply_msg_result.data[0]
-                        rm_sender = _reply_msg_data.get("sender", {}).get("display_name", "Unknown") if _reply_msg_data.get("sender") else "Unknown"
-                        rm_type = "ダン" if _reply_msg_data["sender_type"] == "ai" else rm_sender
-                        reply_context_prefix = f"[返信先メッセージ（{rm_type}）: {_reply_msg_data['content'][:500]}]\n\n"
-                except Exception:
-                    pass
+            if _reply_msg_data:
+                rm_type = "ダン" if _reply_msg_data["sender_type"] == "ai" else _reply_msg_data["sender_name"]
+                reply_context_prefix = f"[返信先メッセージ（{rm_type}）: {_reply_msg_data['full_content'][:500]}]\n\n"
 
             # 追い連絡（DAN_STREAMING_INPUT）: すでに常駐セッションでターン実行中なら、
             # この新規メッセージは「割り込んで止める」のではなく、次のステップ境界で
@@ -2397,7 +2486,7 @@ async def send_dan_message_stream(
             # ユーザーメッセージのエコー（即時保存パスのみ即送出。並列保存は cold start 起動後に送出）
             if message is not None:
                 # the echo is built from the saved row (its ai_context.answer_to is what the screen trusts)
-                user_message = _user_message_echo(message, room_id, request, _reply_msg_data, sender_display_name)
+                user_message = _user_message_echo(message, room_id, _reply_for(service, room_id, message, _reply_msg_data), sender_display_name)
 
                 # ユーザーメッセージを送信（session_id付き）
                 yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
@@ -2631,7 +2720,7 @@ async def send_dan_message_stream(
                     try:
                         message = await service.send_message(
                             room_id, current_user.user_id, media_content,
-                            sender_type="human", reply_to_id=request.reply_to_id,
+                            sender_type="human", reply_to_id=_reply_to_id,
                             created_at=request_arrival_iso,
                             message_id=request.client_message_id,
                             ai_context=_answer_ctx,
@@ -2648,7 +2737,7 @@ async def send_dan_message_stream(
                     sender_display_name = message.get("sender_name") or "You"
                     mark_latency("message_saved")
                     # ユーザーメッセージのエコー（最初のAIイベントより前に送出。保存した行から作る）
-                    user_message = _user_message_echo(message, room_id, request, _reply_msg_data, sender_display_name)
+                    user_message = _user_message_echo(message, room_id, _reply_for(service, room_id, message, _reply_msg_data), sender_display_name)
                     yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
                     mark_latency("user_sse_sent")
                     _cli_iter = _prepend_first_event(_gen_first, _cli_agen)
@@ -3526,6 +3615,17 @@ async def cancel_dan_session(
     from app.tools.browser import abort_executor_session
     from app.agent.cli_runner import kill_cli_process
     from app.services.run_service import RunService
+    from app.services.chat_service import member_of_room_sync
+
+    # 止める・取り消すのはこの部屋のメンバーだけ（送信と同じ部屋の権限）。データベースに聞けない時は止めることを優先する
+    # （作業が止められなくなる方が害が大きい。取り消して消すのは本人の発言だけなので、聞けない間に広がるのは止めることだけ）
+    try:
+        _member = await asyncio.to_thread(member_of_room_sync, ChatService().supabase, request.session_id, current_user.user_id)
+    except Exception:
+        logger.warning("cancel: membership check failed (room=%s); stopping anyway", str(request.session_id)[:8], exc_info=True)
+        _member = True
+    if not _member:
+        raise HTTPException(status_code=403, detail="Not a member of this room")
 
     was_running = False
     _sess, _active_turn, _pending_texts = None, None, []

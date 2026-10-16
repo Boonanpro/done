@@ -1062,6 +1062,12 @@ export const api = {
       );
     },
 
+    /** 自分の送信（client_message_id）が保存されたか。本人の・この部屋の発言の時だけ saved: true（部品の答えの確かめ） */
+    messageSaved: (roomId: string, messageId: string) =>
+      request<{ saved: boolean; message?: MessageResponse }>(
+        `/chat/rooms/${roomId}/messages/${encodeURIComponent(messageId)}/saved`
+      ),
+
     searchMessages: (roomId: string, q: string, limit = 50) => {
       const query = new URLSearchParams({ q, limit: limit.toString() });
       return request<MessagesListResponse>(

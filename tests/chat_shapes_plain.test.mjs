@@ -111,10 +111,16 @@ test('読めないエスケープ・生の制御文字のブロックは元の�
   }
 });
 
-test('scanBlocks: フェンスと HTML ブロックの区間（split.ts が同じ読み手を使う）', () => {
-  const lines = ['前', '<!--', '```openui-lang', 'root = Steps(["a"])', '```', '-->', '```python', 'print(1)', '```', '後'];
-  const blocks = web.scanBlocks(lines);
-  assert.deepEqual(blocks.map((b) => [b.kind, b.start, b.end]), [['html', 1, 6], ['fence', 6, 9]]);
-  assert.equal(blocks[1].kind === 'fence' && blocks[1].fence.lang, 'python');
-  assert.equal(web.isShapeLang('openui-lang') && web.isShapeLang('openui') && !web.isShapeLang('python'), true);
+test('topLevelFences: 一番外側のコードブロックの位置・言語名・中身（split.ts が同じ読み手を使う）', () => {
+  const text = ['前', '<!--', '```openui-lang', 'root = Steps(["a"])', '```', '-->', '```python', 'print(1)', '```', '後'].join('\n');
+  const fences = web.topLevelFences(text);
+  assert.equal(fences.length, 1);   // コメントの中のフェンスはコメントの一部
+  const [f] = fences;
+  assert.deepEqual({ lang: f.lang, code: f.code, closed: f.closed }, { lang: 'python', code: 'print(1)', closed: true });
+  assert.equal(text.slice(f.start, f.end), '```python\nprint(1)\n```');
+  assert.equal(text.slice(f.next), '後');
+  assert.equal(web.isShapeLang('openui-lang') && web.isShapeLang('openui') && !web.isShapeLang('python') && !web.isShapeLang('OpenUI'), true);
+  // 置き換えはブロックの後ろの改行を \n にそろえ、前後の文章（CRLF を含む）は元のまま
+  const crlf = '前\r\n```openui-lang\r\nroot = Steps(["a"])\r\n```\r\n後';
+  assert.equal(web.replaceShapeBlocks(crlf), '前\r\n1. a\n後');
 });
