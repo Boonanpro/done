@@ -15,6 +15,9 @@ const nextConfig: NextConfig = {
   // 本番ビルド(ダッシュボード, 3000)と開発サーバー(成果物プレビュー, 3001)を同じ
   // リポジトリで同時に動かすため、出力先を分ける。既定 .next は dev 用。
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  // 開発サーバー（3001・成果物のファイルそのまま）は部品を /_live/_next に出す。
+  // 本番ビルド（3000）が /preview と /_live をそこへ中継するので、両者の /_next が混ざらない。
+  assetPrefix: process.env.NEXT_ASSET_PREFIX || undefined,
   typescript: { tsconfigPath: process.env.NEXT_TSCONFIG || 'tsconfig.json' },
   reactStrictMode: true,
   // 成果物の editorial（/api/voice-note/editorial・artifacts/<slug>/editorial）は process.cwd() で python ワーカーを spawn する

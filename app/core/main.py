@@ -177,6 +177,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("pending artifact publication failed to schedule: %s", e)
 
+    # 公開用の写しを、作った元のファイルの指紋で見張る。ファイルが変われば
+    # （どのファイルを・どの部屋が・手で変えても）止まって1分後に作り直す。
+    try:
+        from app.services import artifact_freshness
+        asyncio.create_task(artifact_freshness.loop())
+    except Exception as e:
+        logger.warning("artifact freshness loop failed to start: %s", e)
+
     # Paid domain work is persisted before it starts.  Resume it here after a
     # process restart; this is independent of the payer's browser return.
     try:

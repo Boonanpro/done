@@ -59,6 +59,8 @@ export interface ArtifactRecord {
   preview_url: string;
   /** Latest verified dedicated release URL, supplied by the publication ledger. */
   delivery_url?: string | null;
+  /** Whether the published copy was built from the current files (server: artifact_freshness.release_state). */
+  release_state?: 'current' | 'updating' | 'stale' | 'none' | null;
   share_url?: string | null;
   draft_url?: string | null;
   production_url?: string | null;

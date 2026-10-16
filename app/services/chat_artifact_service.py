@@ -351,7 +351,7 @@ class ChatArtifactService:
         try:
             result = (
                 self.supabase.table("artifact_publication")
-                .select("artifact_id,shared_url,release_number,published_at")
+                .select("artifact_id,shared_url,release_number,published_at,status,job_status")
                 .in_("artifact_id", ids)
                 .not_.is_("shared_url", "null")
                 .order("release_number", desc=True)
@@ -363,16 +363,28 @@ class ChatArtifactService:
             return artifacts
 
         latest_urls: dict[str, str] = {}
+        latest_release: dict[str, dict] = {}
         for release in result.data or []:
             artifact_id = str(release.get("artifact_id") or "")
             shared_url = str(release.get("shared_url") or "").strip()
             if artifact_id and shared_url.startswith(("https://", "http://")):
                 latest_urls.setdefault(artifact_id, shared_url.rstrip("/"))
+                latest_release.setdefault(artifact_id, release)
 
-        return [
-            {**row, "delivery_url": latest_urls.get(str(row.get("id"))) }
-            for row in artifacts
-        ]
+        # Whether the published copy was built from the current files
+        # (current / updating / stale / none).  The 成果物 tab shows the files
+        # themselves and uses this only to label the published copy.
+        from app.services.artifact_freshness import release_state
+
+        out = []
+        for row in artifacts:
+            artifact_id = str(row.get("id"))
+            try:
+                state = release_state(str(row.get("slug") or ""), latest_release.get(artifact_id))
+            except Exception:  # noqa: BLE001 - a label must never break the artifact list
+                state = None
+            out.append({**row, "delivery_url": latest_urls.get(artifact_id), "release_state": state})
+        return out
 
     def create_sync(self, data: dict, user_id: str) -> Optional[dict]:
         payload = self._normalize_payload({**data, "created_by": user_id})
