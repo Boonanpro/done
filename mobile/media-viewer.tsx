@@ -1,8 +1,10 @@
 import React, {createContext, useContext, useRef, useState} from 'react';
-import {ActivityIndicator, FlatList, Image, Linking, Modal, Pressable, StyleSheet, Text, View, useWindowDimensions} from 'react-native';
+import {ActivityIndicator, Alert, FlatList, Image, Linking, Modal, Platform, Pressable, StyleSheet, Text, ToastAndroid, View, useWindowDimensions} from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {useVideoPlayer, VideoView, type VideoPlayer} from 'expo-video';
 import {useEvent} from 'expo';
+import {Directory, File, Paths} from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library';
 import {Ionicons} from '@expo/vector-icons';
 import {ui} from './ui-language';
 import {useMediaRotation} from './media-rotation';
@@ -22,6 +24,47 @@ export const useMediaGallery=()=>useContext(GalleryContext);
 export function MediaGalleryScope({items,children}:{items:GalleryItem[];children:React.ReactNode}){
  const [selection,setSelection]=useState<{items:GalleryItem[];url:string}|null>(null);
  return <GalleryContext.Provider value={item=>setSelection({items:uniqueMedia([...items,item]),url:item.url})}>{children}{selection&&<MediaViewer items={selection.items} initialUrl={selection.url} onClose={()=>setSelection(null)}/>}</GalleryContext.Provider>;
+}
+// 端末の写真（ギャラリー）へ保存する。URL を一時ファイルへ落としてから MediaStore に登録し、一時ファイルは消す。
+// Android 13 以上は書き込みに許可が要らない。12 以下だけ「写真へのアクセス」を求める。
+function saveFileName(item:GalleryItem){
+ const fromUrl=decodeURIComponent(item.url.split(/[?#]/)[0].split('/').pop()||'');
+ const base=(item.name&&/\.[a-z0-9]{2,5}$/i.test(item.name)?item.name:fromUrl).replace(/[\\/:*?"<>|]/g,'_');
+ if(/\.[a-z0-9]{2,5}$/i.test(base))return base;
+ return `${base||'done-media'}.${item.kind==='video'?'mp4':'jpg'}`;
+}
+export async function saveMediaToPhotos(item:GalleryItem):Promise<'saved'|'denied'>{
+ if(Platform.OS==='android'&&typeof Platform.Version==='number'&&Platform.Version<33){
+  const permission=await MediaLibrary.requestPermissionsAsync(true);
+  if(!permission.granted)return 'denied';
+ }
+ const dir=new Directory(Paths.cache,'media-save');
+ dir.create({idempotent:true,intermediates:true});
+ const target=new File(dir,saveFileName(item));
+ if(target.exists)target.delete();
+ const file=await File.downloadFileAsync(item.url,target);
+ try{await MediaLibrary.saveToLibraryAsync(file.uri)}finally{try{file.delete()}catch{}}
+ return 'saved';
+}
+function SaveButton({item,style}:{item:GalleryItem;style:object}){
+ const [state,setState]=useState<'idle'|'saving'|'saved'>('idle');
+ const current=useRef(item.url);current.current=item.url;
+ const save=async()=>{
+  if(state==='saving')return;
+  setState('saving');
+  try{
+   const result=await saveMediaToPhotos(item);
+   if(current.current!==item.url)return;
+   if(result==='denied'){setState('idle');Alert.alert(ui('Permission required','権限が必要です'),ui('Allow photo access in your device settings to save media.','保存するには、設定アプリから写真へのアクセスを許可してください。'));return}
+   setState('saved');
+   if(Platform.OS==='android')ToastAndroid.show(ui(item.kind==='video'?'Video saved to Photos':'Image saved to Photos',item.kind==='video'?'動画を写真に保存しました':'画像を写真に保存しました'),ToastAndroid.SHORT);
+  }catch(error){
+   if(current.current!==item.url)return;
+   setState('idle');
+   Alert.alert(ui('Could not save','保存できませんでした'),String((error as Error)?.message||error));
+  }
+ };
+ return <Pressable accessibilityRole="button" accessibilityState={{busy:state==='saving'}} accessibilityLabel={ui(item.kind==='video'?'Save video to Photos':'Save image to Photos',item.kind==='video'?'動画を写真に保存':'画像を写真に保存')} onPress={()=>void save()} style={[s.button,s.close,style]}>{state==='saving'?<ActivityIndicator color="#fff"/>:<Ionicons name={state==='saved'?'checkmark':'download-outline'} size={26} color="#fff"/>}</Pressable>;
 }
 export function MediaViewer({items,initialUrl,onClose}:{items:GalleryItem[];initialUrl:string;onClose:()=>void}){
  useMediaRotation();
@@ -43,6 +86,7 @@ export function MediaViewer({items,initialUrl,onClose}:{items:GalleryItem[];init
     <FlatList key={frame.width} ref={list} data={items} horizontal pagingEnabled removeClippedSubviews={false} initialScrollIndex={index} getItemLayout={(_,i)=>({length:frame.width,offset:frame.width*i,index:i})} keyExtractor={(x,i)=>`${x.url}-${i}`} showsHorizontalScrollIndicator={false} extraData={index} windowSize={3} initialNumToRender={1} maxToRenderPerBatch={3} onContentSizeChange={()=>list.current?.scrollToOffset({offset:selectedIndex.current*frame.width,animated:false})} onMomentumScrollEnd={e=>setIndex(Math.max(0,Math.min(items.length-1,Math.round(e.nativeEvent.contentOffset.x/e.nativeEvent.layoutMeasurement.width))))} renderItem={({item,index:i})=><View style={{width:frame.width,height:frame.height}}>{i===index?<MediaPage key={item.url} item={item} player={player}/>:<View style={s.root}/>}</View>}/>
    </View>
    <Pressable accessibilityRole="button" accessibilityLabel={ui('Close media','メディアを閉じる')} onPress={onClose} style={[s.button,s.close,{top:Math.max(insets.top,12),right:Math.max(insets.right,12)}]}><Ionicons name="close" size={26} color="#fff"/></Pressable>
+   {items[index]&&<SaveButton key={items[index].url} item={items[index]} style={{top:Math.max(insets.top,12),right:Math.max(insets.right,12)+60}}/>}
   </View>
  </Modal>;
 }

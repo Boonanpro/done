@@ -1,5 +1,15 @@
 # DAN Mobile
 
+### 画像・動画を写真に保存（1.0.72 / versionCode 71）
+
+チャットの画像・動画を全画面で開いた時、右上の閉じるボタンの左に保存ボタン（下向き矢印）を置いた。押すと、そのファイルを端末の写真（ギャラリー）に保存する。
+`media-viewer.tsx` の `saveMediaToPhotos` が、URL を `expo-file-system` でアプリのキャッシュへ落とし、`expo-media-library` の `saveToLibraryAsync` で MediaStore に登録してから一時ファイルを消す。
+Android 13 以上では書き込みに許可が要らない（`expo-media-library` が `WRITE_EXTERNAL_STORAGE` を見るのは 12 以下だけ）。12 以下では保存の前に「写真へのアクセス」の許可を求め、拒まれたら設定アプリへの案内を出す。
+保存中はボタンが回転表示、済むとチェック表示と Android のトースト（「画像を写真に保存しました」）。失敗はダイアログで理由を出す。
+ファイル名は URL 末尾（例 `8a208b02-….png`）、拡張子が無ければ画像は `.jpg`、動画は `.mp4` を付ける。
+`expo-media-library` は新しいネイティブ部品なので、この版は OTA ではなく APK の入れ替えが要る（prebuild で `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` / `READ_MEDIA_VISUAL_USER_SELECTED` と `requestLegacyExternalStorage` が manifest に入る）。
+`/api/v1/files/<name>` は認証なしで読めるので、ダウンロードにトークンは渡していない。
+
 ### Doneホーム再設計（1.0.28 / versionCode 27）
 
 上部に音声・チャットのアイコン、下部に固定カード1枚を置き、左右スワイプで作業中の部屋の内容だけを切り替えます。履歴はProjects、制作物はLibraryへ集約。英語が既定で、Settingsから日本語へ切替可能です。UI言語は保存され、会話本文は変更しません。
