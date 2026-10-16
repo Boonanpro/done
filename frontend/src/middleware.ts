@@ -6,6 +6,37 @@ import { deliverySlugFromHost, isCustomDomainHost, normalizeHost } from './lib/s
 
 const ACCESS_TOKEN_COOKIE = 'done_access_token';
 
+// /preview/<slug> は成果物のファイルそのものを見せる場所。本番ビルド（3000）が持つ
+// 成果物はビルドした時点の写しなので、ファイルを読む開発サーバー（3001）へ中継する。
+// 開発サーバーは部品を /_live/_next/... に出す（NEXT_ASSET_PREFIX=/_live）ので、
+// 本番ビルド自身の /_next と混ざらない。中継先は frontend_prod.py が本番ビルドの時だけ
+// 渡す（開発サーバー自身と Vercel の専用サイトには無いので、そこでは今までどおり）。
+const LIVE_PREVIEW_ORIGIN = (process.env.DAN_LIVE_PREVIEW_ORIGIN || '').replace(/\/+$/, '');
+const LIVE_ASSET_PREFIX = '/_live';
+let liveAlive: { ok: boolean; at: number } = { ok: false, at: 0 };
+
+async function livePreviewAvailable(): Promise<boolean> {
+  if (!LIVE_PREVIEW_ORIGIN) return false;
+  const now = Date.now();
+  if (now - liveAlive.at < (liveAlive.ok ? 15_000 : 5_000)) return liveAlive.ok;
+  let ok = false;
+  try {
+    const res = await fetch(`${LIVE_PREVIEW_ORIGIN}/manifest.json`, { method: 'HEAD', signal: AbortSignal.timeout(1500), cache: 'no-store' });
+    ok = res.status < 500;
+  } catch {
+    ok = false;
+  }
+  liveAlive = { ok, at: now };
+  return ok;
+}
+
+function rewriteToLive(request: NextRequest): NextResponse {
+  const target = new URL(request.nextUrl.pathname + request.nextUrl.search, LIVE_PREVIEW_ORIGIN);
+  const response = NextResponse.rewrite(target);
+  response.headers.set('x-dan-preview-source', 'files');
+  return response;
+}
+
 const DEFAULT_CUSTOM_DOMAIN_MAP: Record<string, string[]> = {
   ...CUSTOM_DOMAIN_SLUG_MAP,
   kittoku: ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app'],
@@ -219,12 +250,21 @@ export async function middleware(request: NextRequest) {
   // ここから先はダン本体ホスト（localhost 等）。
   // /preview/<slug> はチャット横の編集用プレビュー、/artifacts/<slug> はその実体で、
   // どちらも内部用URL。外部公開URLと中身が重複するため必ず検索対象から外す。
+  if (pathname.startsWith(`${LIVE_ASSET_PREFIX}/`) && LIVE_PREVIEW_ORIGIN) {
+    return rewriteToLive(request);
+  }
   if (pathname.startsWith('/preview/')) {
     const segments = pathname.split('/').filter(Boolean);
+    if (segments.length >= 2 && await livePreviewAvailable()) {
+      return markNoIndex(rewriteToLive(request));
+    }
     if (segments.length >= 2) {
+      // 開発サーバーが止まっている間だけ、ビルド時点の写しで代わりに見せる（印を付ける）。
       const url = request.nextUrl.clone();
       url.pathname = `/artifacts/${segments.slice(1).join('/')}`;
-      return markNoIndex(NextResponse.rewrite(url));
+      const response = NextResponse.rewrite(url);
+      if (LIVE_PREVIEW_ORIGIN) response.headers.set('x-dan-preview-source', 'build');
+      return markNoIndex(response);
     }
   }
 
@@ -248,5 +288,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/', '/artifacts/:path*', '/preview/:path*', '/manifest.webmanifest'],
+  matcher: ['/', '/artifacts/:path*', '/preview/:path*', '/_live/:path*', '/manifest.webmanifest'],
 };
