@@ -106,3 +106,27 @@ def test_callers_that_draw_in_the_chat_screen_are_exactly_these() -> None:
     for rel in ("app/services/collab_wakeup.py", "app/api/collab_routes.py", "app/api/voice_routes.py",
                 "app/api/production_asset_routes.py"):
         assert rel in off and rel not in on
+
+
+def test_job_runners_stay_prose_only() -> None:
+    """Independent jobs (command_job_runner: the non-parallel Codex CLI job that command_center starts by default,
+    and its parallel/make variants; parallel_job_runner; api_job_runner) build their brief without the section.
+
+    Decided by the display destination and the role, not by the engine name: the non-parallel job's only chat
+    appearance is the report card (`execute report`), which is cut at 2800 characters, wrapped in a heading when it
+    goes to another room, and spoken instead of written while the owner is on a call; its progress goes to the job
+    feed; and the job has already ended when the report arrives, so an answer to a Choice/Input could not reach the
+    job that asked. A report is therefore prose. (command_handoff is different: it runs the room's own chat turn,
+    whose reply is saved and drawn in that room's chat, so it keeps answer_shapes=True.)"""
+    runner = (ROOT / "app/services/command_job_runner.py").read_text(encoding="utf-8")
+    call = runner[runner.index("asyncio.to_thread(_build_system_prompt"):runner.index("if parallel:", runner.index("asyncio.to_thread(_build_system_prompt"))]
+    assert "answer_shapes=False" in call and "answer_shapes=True" not in runner
+    assert "'task':result[:2800]" in runner                      # the report card is a cut copy of the result
+    center = (ROOT / "app/services/command_center.py").read_text(encoding="utf-8")
+    assert "spoken_in_call" in center                            # ...and is spoken, not written, during a call
+    for rel in ("app/services/parallel_job_runner.py", "app/services/api_job_runner.py", "app/services/make_job_runner.py"):
+        path = ROOT / rel
+        if path.exists():
+            assert "answer_shapes=True" not in path.read_text(encoding="utf-8"), rel
+    handoff = (ROOT / "app/services/command_handoff.py").read_text(encoding="utf-8")
+    assert "answer_shapes=True" in handoff

@@ -28,7 +28,8 @@ export type AnswerTo = {
   question?: string;
 };
 
-export type UserUtterance = { text: string; at: number; answerTo?: AnswerTo | null };
+/** 部屋にある本人の発言。id は保存された行の id（送った答えが記録に現れたかを見る） */
+export type UserUtterance = { id?: string; text: string; at: number; answerTo?: AnswerTo | null };
 
 function norm(s: string): string {
   return (s || '').replace(/\s+/g, ' ').trim();

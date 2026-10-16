@@ -77,3 +77,44 @@ test('アプリの写しは本体と同じ中身・同じ出力', () => {
   const appSrc = readFileSync(new URL('../mobile/chat-shapes-plain.ts', import.meta.url), 'utf8');
   assert.ok(appSrc.endsWith(webSrc), 'mobile/chat-shapes-plain.ts は見出し3行 + frontend の plain.ts と同じ中身');
 });
+
+// --- 直し2回目（確かめる役の指摘7・8）: HTML ブロックの中は触らない。文字列のエスケープは lang-core と同じ規則 ---
+const BS = String.fromCharCode(92);   // 1文字のバックスラッシュ（試験の本文にバックスラッシュ u をそのまま書かない）
+
+test('HTML コメント・ブロックの中の部品は書き換えない（コメントの一部）。前後の本物の部品は変換する', () => {
+  const choice = '```openui-lang\nroot = Choice("not a question", ["a", "b"])\n```';
+  const comment = `<!--\n${choice}\n-->`;
+  assert.equal(web.replaceShapeBlocks(comment), comment);
+  assert.equal(app.replaceShapeBlocks(comment), comment);
+  const out = web.replaceShapeBlocks(`${comment}\n\n${choice}`);
+  assert.ok(out.startsWith(comment + '\n\n**not a question**\n1. a\n2. b'));
+  const div = `<div>\n${choice}\n</div>`;
+  assert.equal(web.replaceShapeBlocks(div), div);
+  const quoted = `> ${choice.replaceAll('\n', '\n> ')}`;
+  assert.equal(web.replaceShapeBlocks(quoted), quoted);
+});
+
+test('文字列のエスケープ: バックスラッシュ uXXXX は日本語に、バックスラッシュ r や引用符はその文字に（lang-core と同じ JSON の規則）', () => {
+  const block = '```openui-lang\n' + `root = Steps(["${BS}u65e5${BS}u672c${BS}u8a9e", "a${BS}rb", "q${BS}"x", "${BS}ud83d${BS}ude00"])` + '\n```';
+  const out = web.replaceShapeBlocks(block);
+  assert.equal(out, '1. 日本語\n2. a\rb\n3. q"x\n4. 😀');
+  assert.equal(app.replaceShapeBlocks(block), out);
+  assert.deepEqual(web.parseShapeCall(`root = Steps(['it${BS}'s', 'x${BS}qy'])`), { name: 'Steps', args: [["it's", 'xqy']] });
+});
+
+test('読めないエスケープ・生の制御文字のブロックは元のまま（別の文字列に黙って変えない）', () => {
+  for (const code of [`root = Steps(["bad ${BS}q"])`, `root = Steps(["${BS}u12zz"])`, 'root = Steps(["raw\nline"])', `root = Steps(["open${BS}`]) {
+    const block = '```openui-lang\n' + code + '\n```';
+    assert.equal(web.parseShapeCall(code), null, code);
+    assert.equal(web.replaceShapeBlocks(block), block, code);
+    assert.equal(app.replaceShapeBlocks(block), block, code);
+  }
+});
+
+test('scanBlocks: フェンスと HTML ブロックの区間（split.ts が同じ読み手を使う）', () => {
+  const lines = ['前', '<!--', '```openui-lang', 'root = Steps(["a"])', '```', '-->', '```python', 'print(1)', '```', '後'];
+  const blocks = web.scanBlocks(lines);
+  assert.deepEqual(blocks.map((b) => [b.kind, b.start, b.end]), [['html', 1, 6], ['fence', 6, 9]]);
+  assert.equal(blocks[1].kind === 'fence' && blocks[1].fence.lang, 'python');
+  assert.equal(web.isShapeLang('openui-lang') && web.isShapeLang('openui') && !web.isShapeLang('python'), true);
+});

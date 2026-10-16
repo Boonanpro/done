@@ -65,7 +65,7 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
-import { ShapeAnswerProvider, ShapeBlock, type ShapeSubmit } from '@/components/chat/chat-shapes';
+import { SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeSubmit } from '@/components/chat/chat-shapes';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { RoomBoard } from '@/components/chat/room-board';
@@ -1028,7 +1028,10 @@ function ChatInput({
 
   const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = [], extra?: SendExtra) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
-    // 部品（選択・入力）の答え: 保存されたら onSaved、サーバーが受け取らなかったら onFailed（1回だけ）
+    // この送信でサーバーが保存した自分の発言（echo）。前の送信の結果（serverMessageIdRef）は使わない:
+    // 部品からの送信は入力欄の経路を通らないので、前の成功の id が残ったままになる
+    let savedMessage: MessageResponse | null = null;
+    // 部品（選択・入力）の答え: 保存されたら onSaved、保存されなかったら onFailed、分からなければ onFailed('unknown')（1回だけ）
     let settled = false;
     const reportSaved = (m: MessageResponse) => { if (!settled) { settled = true; extra?.onSaved?.(m); } };
     const reportFailed = (why: string) => { if (!settled) { settled = true; extra?.onFailed?.(why); } };
@@ -1101,12 +1104,46 @@ function ChatInput({
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    // 部品の答えの決着。保存の echo が来ていれば保存済み。来ないまま通信が終わった（done だけ・切断・中断・取り消し・
+    // 途中のエラー）時は、保存されたか分からないので、部屋の記録を client_message_id（＝保存される行の id）で確かめてから
+    // 決める。保存されていれば保存済みとして記録に載せ、無ければ失敗（選び直せる）。確かめにも失敗したら「分からない」
+    // （部品が読み直しを促す）。知りもしないのに未保存と断定して二重送信を誘わない。HTTP のエラー応答（503 など）は
+    // 本体に届く前に返るので、確かめずに失敗。requestId の新旧に関わらず必ず一度は決着させる。
+    const settleAnswer = async (knownUnsaved: boolean) => {
+      if (!extra?.answerTo || settled) return;
+      if (savedMessage) { reportSaved(savedMessage); return; }
+      const dropTemp = () => queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
+        old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
+      );
+      if (!knownUnsaved) {
+        try {
+          const fresh = await api.rooms.getMessages(roomId, { limit: 30 });
+          const found = fresh.messages.find((m) => m.id === tempUserMessageId);
+          if (found) {
+            savedMessage = found;
+            queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
+              old ? { messages: old.messages.map((m) => (m.id === tempUserMessageId ? found : m)) } : old,
+            );
+            reportSaved(found);
+            return;
+          }
+        } catch {
+          dropTemp();
+          reportFailed('unknown');
+          return;
+        }
+      }
+      dropTemp();
+      reportFailed(knownUnsaved ? 'send failed' : 'not saved');
+    };
+
     try {
       await api.sm.sendMessageStream(
         { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}), ...(extra?.answerTo ? { answer_to: extra.answerTo } : {}) },
         {
           onUserMessage: (msg) => {
-            if (streamRequestRef.current !== requestId) return;
+            savedMessage = msg;   // この送信の保存の印（新しい送信に追い越されていても、この答えの決着には使う）
+            if (streamRequestRef.current !== requestId) { reportSaved(msg); return; }
             serverMessageIdRef.current = msg.id;
             optimisticMessageIdRef.current = msg.id;
             reportSaved(msg);
@@ -1173,6 +1210,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onInterrupted: () => {
+            void settleAnswer(false);   // 保存の echo の前に切れたなら、記録を確かめてから決める
             if (streamRequestRef.current !== requestId) return;
             // 返事の通信が切れた。ダンの作業はサーバーで続くので「作業中」の表示は保つが、手元の印
             // （localActive）は立てない。立てると、作業が終わっても誰も外さず停止ボタンのまま残った（2026-10-14）。
@@ -1191,6 +1229,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onComplete: () => {
+            void settleAnswer(false);   // done だけで echo が無い・取り消し（abort）も、ここで決着させる
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1234,6 +1273,9 @@ function ChatInput({
             }
           },
           onError: (error) => {
+            // HTTP のエラー応答（本体に届く前）は未保存と分かる。サーバーからの error イベントは保存の後かも知れないので確かめる
+            const httpFailure = /^HTTP error/.test(error || '');
+            void settleAnswer(httpFailure);
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1241,14 +1283,13 @@ function ChatInput({
             onSseStateChange?.(false);
             // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
             queryClient.invalidateQueries({ queryKey: ['projects'] });
-            // サーバーが受け取らなかった送信は「送信中」のまま残さず、文を入力欄に戻す（キャンセルと同じ扱い）
-            if (!serverMessageIdRef.current) {
+            // サーバーが受け取らなかった送信は「送信中」のまま残さず、文を入力欄に戻す（キャンセルと同じ扱い）。
+            // 部品の答えは settleAnswer が決着させる（部品の側で選び直せる。入力欄には戻さない）
+            if (!savedMessage && !extra?.answerTo) {
               queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
                 old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
               );
-              // 部品の答えは部品の側で選び直せる（入力欄に戻さない）
-              if (extra?.answerTo) reportFailed(error || 'send failed');
-              else setMessage((cur) => (cur.trim() ? cur : content));
+              setMessage((cur) => (cur.trim() ? cur : content));
             }
             toast.error(error || 'メッセージの送信に失敗しました');
           },
@@ -1264,6 +1305,8 @@ function ChatInput({
         controller.signal
       );
     } catch (error) {
+      // 取り消し（abort）か、通信そのものの失敗。部品の答えは、保存の echo が無ければ記録を確かめてから決める
+      void settleAnswer(error instanceof Error && error.name !== 'AbortError' && /^HTTP error/.test(error.message));
       if (streamRequestRef.current !== requestId) return;
       syncActiveStatus(false);
       setInterrupted(projectId, false);
@@ -1272,15 +1315,10 @@ function ChatInput({
         // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
         queryClient.invalidateQueries({ queryKey: ['projects'] });
         toast.error('メッセージ送信中に問題が発生しました');
-        // 部品の答え: サーバーに届かなかった送信（HTTP エラーなど）は失敗として部品に返し、仮の発言は消す
-        if (extra?.answerTo && !serverMessageIdRef.current) {
-          queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
-            old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
-          );
-          reportFailed(error.message);
-        }
       }
     } finally {
+      // どの終わり方でも、部品の答えは必ず一度決着させる（新しい送信に追い越された時も）
+      void settleAnswer(false);
       // ストリームが終わったら必ず ref を破棄する（残骸が「ダン作業中」と
       // 誤判定され、停止後の送信が追い連絡に誤ルーティングされるのを防ぐ）。
       // 次の送信がすでに新しい controller をセットしている場合は触らない。
@@ -1302,10 +1340,15 @@ function ChatInput({
     user?.id,
   ]);
 
-  // 親コンポーネントから sendMessageCore を呼べるようにする
+  // 親コンポーネントから sendMessageCore を呼べるようにする（確認カード・部品の答え）。
+  // 入力欄からの送信（handleSendMessage）と同じく、前の送信の結果（保存 id・返事の印）は持ち越さない
   useEffect(() => {
     if (sendMessageRef) {
-      sendMessageRef.current = (content: string, extra?: SendExtra) => { sendMessageCore(content, [], [], undefined, [], extra); };
+      sendMessageRef.current = (content: string, extra?: SendExtra) => {
+        serverMessageIdRef.current = null;
+        aiRespondedRef.current = false;
+        sendMessageCore(content, [], [], undefined, [], extra);
+      };
       return () => { sendMessageRef.current = null; };
     }
   }, [sendMessageRef, sendMessageCore]);
@@ -2083,11 +2126,12 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
   // 部品（選択・入力）の答え: 同じ経路で本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
-  // 一緒に保存する。サーバーに保存されたら resolve、受け取られなかったら reject（部品が選び直しを出す）
-  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo) => new Promise<void>((resolve, reject) => {
+  // 一緒に保存する。サーバーに保存されたら保存された行の id で resolve、保存されなかったら reject（部品が選び直しを出す）、
+  // 保存できたか確かめられなかったら reject(SEND_UNKNOWN)（部品が「確かめる」を出す）
+  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo) => new Promise<{ id: string }>((resolve, reject) => {
     const send = sendMessageRef.current;
     if (!send) { reject(new Error('送信できません')); return; }
-    send(text, { answerTo, onSaved: () => resolve(), onFailed: (why) => reject(new Error(why)) });
+    send(text, { answerTo, onSaved: (msg) => resolve({ id: msg.id }), onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)) });
   }), []);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
@@ -2215,6 +2259,11 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 束ね応答が届くまで個別クエリは止めておき（二重取得しない）、届いたら解放する。
   // 束ねが失敗/遅延した時は個別クエリに戻す（従来経路が保険）。
   const initialRoomId = project?.room_id;
+  // 部屋の記録をサーバーから読み直す（部品の「確かめる」: 保存できたか分からない答えの確かめ直し）
+  const refreshRoomRecord = useCallback(async () => {
+    if (!initialRoomId) return;
+    await queryClient.refetchQueries({ queryKey: ['project-messages', initialRoomId] });
+  }, [queryClient, initialRoomId]);
   useEffect(() => {
     if (!projectId || !initialRoomId) return;
     let cancelled = false;
@@ -3114,7 +3163,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
-          <ShapeAnswerProvider messages={messages} submit={answerShapeInRoom}>
+          <ShapeAnswerProvider messages={messages} submit={answerShapeInRoom} refresh={refreshRoomRecord}>
           <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(

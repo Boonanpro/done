@@ -1,0 +1,158 @@
+[
+  {
+    "name": "one part",
+    "text": "予算は？\n\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```\n\n決まったら進めます。",
+    "codes": [
+      "root = Choice(\"予算\", [\"5万円\", \"10万円\"])"
+    ],
+    "keys": [
+      "pf4e0a1e3"
+    ]
+  },
+  {
+    "name": "two parts, one repeated (ordinal)",
+    "text": "```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```\n```openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n```\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```",
+    "codes": [
+      "root = Choice(\"予算\", [\"5万円\", \"10万円\"])",
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")",
+      "root = Choice(\"予算\", [\"5万円\", \"10万円\"])"
+    ],
+    "keys": [
+      "pf4e0a1e3",
+      "p65db0c2b",
+      "pf4e0a1e3-1"
+    ]
+  },
+  {
+    "name": "whitespace differences normalize to the same key",
+    "text": "```openui-lang\n  root =   Choice(\"予算\",\t[\"5万円\",  \"10万円\"])  \n```",
+    "codes": [
+      "  root =   Choice(\"予算\",\t[\"5万円\",  \"10万円\"])  "
+    ],
+    "keys": [
+      "pf4e0a1e3"
+    ]
+  },
+  {
+    "name": "CRLF reply",
+    "text": "前の文\r\n```openui-lang\r\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\r\n```\r\n後の文",
+    "codes": [
+      "root = Choice(\"予算\", [\"5万円\", \"10万円\"])"
+    ],
+    "keys": [
+      "pf4e0a1e3"
+    ]
+  },
+  {
+    "name": "tilde fence and openui alias",
+    "text": "~~~openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n~~~\n```openui\nroot = Chart(\"line\", [\"9/8\", \"9/9\"], [{name: \"広告費\", values: [1200, 980]}], \"円\")\n```",
+    "codes": [
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")",
+      "root = Chart(\"line\", [\"9/8\", \"9/9\"], [{name: \"広告費\", values: [1200, 980]}], \"円\")"
+    ],
+    "keys": [
+      "p65db0c2b",
+      "p8bbbccad"
+    ]
+  },
+  {
+    "name": "example inside another code block is not a part",
+    "text": "例:\n````markdown\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```\n````\n本物:\n```openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n```",
+    "codes": [
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
+    ],
+    "keys": [
+      "p65db0c2b"
+    ]
+  },
+  {
+    "name": "HTML comment hides a part",
+    "text": "<!--\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```\n-->\n\n```openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n```",
+    "codes": [
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
+    ],
+    "keys": [
+      "p65db0c2b"
+    ]
+  },
+  {
+    "name": "div block hides a part until the blank line",
+    "text": "<div>\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```\n</div>\n\n```openui-lang\nroot = Chart(\"line\", [\"9/8\", \"9/9\"], [{name: \"広告費\", values: [1200, 980]}], \"円\")\n```",
+    "codes": [
+      "root = Chart(\"line\", [\"9/8\", \"9/9\"], [{name: \"広告費\", values: [1200, 980]}], \"円\")"
+    ],
+    "keys": [
+      "p8bbbccad"
+    ]
+  },
+  {
+    "name": "blockquote lines are not fences",
+    "text": "> ```openui-lang\n> root = Choice(\"予算\", [\"5万円\", \"10万円\"])\n> ```\n\n```openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n```",
+    "codes": [
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
+    ],
+    "keys": [
+      "p65db0c2b"
+    ]
+  },
+  {
+    "name": "unclosed saved block is prose",
+    "text": "```openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n```\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])",
+    "codes": [
+      "root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
+    ],
+    "keys": [
+      "p65db0c2b"
+    ]
+  },
+  {
+    "name": "unicode escapes stay in the code (key is over the code, not the value)",
+    "text": "```openui-lang\nroot = Steps([\"\\u65e5\\u672c\", \"a\\rb\"])\n```",
+    "codes": [
+      "root = Steps([\"\\u65e5\\u672c\", \"a\\rb\"])"
+    ],
+    "keys": [
+      "pab176ec8"
+    ]
+  },
+  {
+    "name": "ideographic space and NBSP collapse like JS whitespace",
+    "text": "```openui-lang\nroot　= Choice(\"予算\", [\"5万円\", \"10万円\"])\n```",
+    "codes": [
+      "root　= Choice(\"予算\", [\"5万円\", \"10万円\"])"
+    ],
+    "keys": [
+      "pf4e0a1e3"
+    ]
+  },
+  {
+    "name": "surrogate pair in code",
+    "text": "```openui-lang\nroot = Choice(\"絵文字😀\", [\"👍\", \"👎\"])\n```",
+    "codes": [
+      "root = Choice(\"絵文字😀\", [\"👍\", \"👎\"])"
+    ],
+    "keys": [
+      "p2d00c6ff"
+    ]
+  },
+  {
+    "name": "indented 4 is not a fence; indented 3 is",
+    "text": "    ```openui-lang\n    root = Choice(\"予算\", [\"5万円\", \"10万円\"])\n    ```\n\n   ```openui-lang\n   root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n   ```",
+    "codes": [
+      "   root = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")"
+    ],
+    "keys": [
+      "p65db0c2b"
+    ]
+  },
+  {
+    "name": "type-7 html after paragraph does not start a block",
+    "text": "説明\n<span>\n```openui-lang\nroot = Choice(\"予算\", [\"5万円\", \"10万円\"])\n```\n\n<span>\n```openui-lang\nroot = Steps([\"アプリを開く\", \"予約を確認する\"], \"当日の流れ\")\n```",
+    "codes": [
+      "root = Choice(\"予算\", [\"5万円\", \"10万円\"])"
+    ],
+    "keys": [
+      "pf4e0a1e3"
+    ]
+  }
+]

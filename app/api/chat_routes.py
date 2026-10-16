@@ -118,22 +118,105 @@ logger = logging.getLogger(__name__)
 
 def _answer_to_context(answer_to) -> Optional[dict]:
     """The link from the owner's answer (a pressed Choice / a submitted Input of chat_shapes) to the part
-    it answers, as the human message's ai_context: ``{"answer_to": {message_id, part, kind, value}}``.
-    Unknown keys are dropped, values bounded; anything malformed → None (the message is still saved,
-    just without the link; the screen then shows it as an ordinary message)."""
-    if not isinstance(answer_to, dict):
+    it answers, as the human message's ai_context: ``{"answer_to": {message_id, part, kind, value, question?}}``.
+
+    Strict (chat_schemas.AnswerToLink): exact types, UUID message id, part-key shape, kind choice|input,
+    non-empty value within the shared limits. Nothing is coerced or cut; anything else → None. On the
+    request path the model itself already rejected a bad link with 422, so None here only means
+    "no link"."""
+    if answer_to is None:
         return None
-    message_id = str(answer_to.get("message_id") or "").strip()[:64]
-    part = str(answer_to.get("part") or "").strip()[:64]
-    kind = str(answer_to.get("kind") or "").strip()
-    if not message_id or not part or kind not in ("choice", "input"):
+    from app.models.chat_schemas import AnswerToLink
+    try:
+        link = answer_to if isinstance(answer_to, AnswerToLink) else AnswerToLink.model_validate(answer_to)
+    except ValidationError:
         return None
-    link = {"message_id": message_id, "part": part, "kind": kind,
-            "value": str(answer_to.get("value") or "")[:300]}
-    question = str(answer_to.get("question") or "").strip()
-    if question:
-        link["question"] = question[:200]
-    return {"answer_to": link}
+    return {"answer_to": link.model_dump(exclude_none=True)}
+
+
+class _AnswerLinkRejected(ValueError):
+    """The answer's link does not point at a part of Dan's reply in this room (the send is refused)."""
+
+
+def _check_answer_link(service, room_id: Optional[str], link: dict) -> None:
+    """Refuse an answer whose link is not about this room: the reply must be an AI message of `room_id`
+    and the part key must name one of that reply's parts (app.agent.chat_shapes.part_in_reply). The
+    sender is already the authenticated owner of the message being saved; this ties the link to the
+    room they are writing in, so a link cannot be pointed at another room's reply or at a part that
+    is not there."""
+    if not room_id:
+        raise _AnswerLinkRejected("答えの相手の部屋が分かりません")
+    rows = (service.supabase.table("chat_messages").select("id, room_id, sender_type, content, ai_context")
+            .eq("id", link["message_id"]).eq("room_id", room_id).execute()).data or []
+    if not rows or rows[0].get("sender_type") != "ai":
+        raise _AnswerLinkRejected("答えの相手の返事がこの部屋にありません")
+    row = rows[0]
+    texts = [row.get("content") or ""]
+    blocks = (row.get("ai_context") or {}).get("blocks") if isinstance(row.get("ai_context"), dict) else None
+    for b in blocks or []:
+        if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+            texts.append(b["text"])
+    from app.agent import chat_shapes as _chat_shapes
+    if not _chat_shapes.part_in_reply(texts, link["part"]):
+        raise _AnswerLinkRejected("答えの相手の部品がその返事にありません")
+
+
+def _replace_user_message(service, request, current_user, media_content: str, answer_ctx: Optional[dict]) -> dict:
+    """The replace path (re-send after a cancel): rewrite the owner's own human message in this room.
+
+    Authorization comes first: the row must exist (LookupError → the caller inserts instead), be a human
+    message, belong to the sender and to the room of this request (PermissionError → refused). The
+    update is also filtered on those columns so a concurrent change cannot widen it. ai_context keeps
+    its other keys: only answer_to is replaced (a new link) or removed (plain text now). The returned row
+    is re-read after the update, so the echo the screen gets is what was saved."""
+    sb = service.supabase
+    rid = request.replace_message_id
+    room_id = request.session_id
+    uid = current_user.user_id
+    found = (sb.table("chat_messages").select("*").eq("id", rid).execute()).data or []
+    if not found:
+        raise LookupError(rid)
+    row = found[0]
+    if row.get("sender_type") != "human" or row.get("sender_id") != uid or not room_id or row.get("room_id") != room_id:
+        raise PermissionError("この発言は書き換えられません")
+    ctx = dict(row.get("ai_context") or {}) if isinstance(row.get("ai_context"), dict) else {}
+    ctx.pop("answer_to", None)
+    if answer_ctx:
+        ctx.update(answer_ctx)
+    (sb.table("chat_messages").update({"content": media_content, "ai_context": ctx or None})
+     .eq("id", rid).eq("sender_id", uid).eq("room_id", room_id).eq("sender_type", "human").execute())
+    updated = (sb.table("chat_messages").select("*").eq("id", rid).eq("room_id", room_id).execute()).data or []
+    if not updated:
+        raise LookupError(rid)
+    return updated[0]
+
+
+def _user_message_echo(message: dict, room_id: str, request, reply_msg_data, sender_display_name: Optional[str]) -> dict:
+    """The SSE copy of the owner's saved message, built from the saved row (never from the request): the
+    screen trusts this echo, and in particular marks a part answered only from its ai_context.answer_to."""
+    created = message.get("created_at")
+    echo = {
+        "id": message["id"],
+        "room_id": room_id,
+        "sender_id": message.get("sender_id"),
+        "sender_name": sender_display_name or message.get("sender_name") or "You",
+        "sender_type": message.get("sender_type") or "human",
+        "content": message.get("content") or "",
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else str(created),
+    }
+    if request.reply_to_id:
+        echo["reply_to_id"] = request.reply_to_id
+        if reply_msg_data:
+            echo["reply_to_message"] = {
+                "id": reply_msg_data["id"],
+                "sender_name": reply_msg_data["sender"]["display_name"] if reply_msg_data.get("sender") else "Unknown",
+                "sender_type": reply_msg_data["sender_type"],
+                "content": reply_msg_data["content"][:200],
+                "created_at": reply_msg_data["created_at"],
+            }
+    if isinstance(message.get("ai_context"), dict) and message["ai_context"]:
+        echo["ai_context"] = message["ai_context"]
+    return echo
 
 
 def _message_responses(rows) -> list[MessageResponse]:
@@ -2180,21 +2263,35 @@ async def send_dan_message_stream(
                 and not _streaming_on
                 and not _voice_call
             )
-            # the owner's answer to a part of Dan's reply (chat_shapes): saved with the message as ai_context.answer_to
+            # the owner's answer to a part of Dan's reply (chat_shapes): saved with the message as ai_context.answer_to.
+            # The link must point at a part of an AI reply in this room, or the send is refused before anything is saved.
             _answer_ctx = _answer_to_context(request.answer_to)
+            if _answer_ctx:
+                try:
+                    await asyncio.to_thread(_check_answer_link, service, request.session_id, _answer_ctx["answer_to"])
+                except _AnswerLinkRejected as e:
+                    logger.warning("answer link refused (room=%s user=%s): %s", str(request.session_id)[:8], current_user.user_id[:8], e)
+                    yield f"data: {json.dumps({'type': 'error', 'session_id': request.session_id or '', 'message': str(e)})}\n\n"
+                    done_sent = True
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or ''})}\n\n"
+                    return
             if request.replace_message_id:
-                # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）
+                # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）。本人の、この部屋の、human の行だけ。
                 room_id = request.session_id
                 try:
-                    service.supabase.table("chat_messages").update(
-                        {"content": media_content, **({"ai_context": _answer_ctx} if _answer_ctx else {})}
-                    ).eq("id", request.replace_message_id).eq("sender_type", "human").execute()
-                    # 更新後のメッセージを取得
-                    updated = service.supabase.table("chat_messages").select("*").eq("id", request.replace_message_id).execute()
-                    message = updated.data[0] if updated.data else {"id": request.replace_message_id, "sender_id": current_user.user_id, "sender_type": "human", "room_id": room_id, "content": media_content}
+                    message = await asyncio.to_thread(_replace_user_message, service, request, current_user, media_content, _answer_ctx)
+                except PermissionError as e:
+                    logger.warning("replace refused (message=%s user=%s): %s", str(request.replace_message_id)[:8], current_user.user_id[:8], e)
+                    yield f"data: {json.dumps({'type': 'error', 'session_id': room_id or '', 'message': str(e)})}\n\n"
+                    done_sent = True
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id or ''})}\n\n"
+                    return
+                except LookupError:
+                    # 上書きの相手がもう無い（取り消しで消えた）: 新しい行として保存する
+                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
                 except Exception as e:
                     logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
-                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, ai_context=_answer_ctx)
+                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
             elif _parallel_save:
                 # 並列保存パス: ここでは保存せず room_id だけ確定する。実際の send_message は
                 # process_message_cli の cold start を起動した直後（裏で並走）に実行する。
@@ -2299,27 +2396,8 @@ async def send_dan_message_stream(
 
             # ユーザーメッセージのエコー（即時保存パスのみ即送出。並列保存は cold start 起動後に送出）
             if message is not None:
-                user_message = {
-                    "id": message["id"],
-                    "room_id": room_id,
-                    "sender_id": message["sender_id"],
-                    "sender_name": sender_display_name or "You",
-                    "sender_type": message["sender_type"],
-                    "content": message["content"],
-                    "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
-                }
-                if request.reply_to_id:
-                    user_message["reply_to_id"] = request.reply_to_id
-                    if _reply_msg_data:
-                        user_message["reply_to_message"] = {
-                            "id": _reply_msg_data["id"],
-                            "sender_name": _reply_msg_data["sender"]["display_name"] if _reply_msg_data.get("sender") else "Unknown",
-                            "sender_type": _reply_msg_data["sender_type"],
-                            "content": _reply_msg_data["content"][:200],
-                            "created_at": _reply_msg_data["created_at"],
-                        }
-                if _answer_ctx:
-                    user_message["ai_context"] = _answer_ctx   # the screen marks the part answered only from this saved echo
+                # the echo is built from the saved row (its ai_context.answer_to is what the screen trusts)
+                user_message = _user_message_echo(message, room_id, request, _reply_msg_data, sender_display_name)
 
                 # ユーザーメッセージを送信（session_id付き）
                 yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
@@ -2569,28 +2647,8 @@ async def send_dan_message_stream(
                         raise
                     sender_display_name = message.get("sender_name") or "You"
                     mark_latency("message_saved")
-                    # ユーザーメッセージのエコー（最初のAIイベントより前に送出）
-                    user_message = {
-                        "id": message["id"],
-                        "room_id": room_id,
-                        "sender_id": message["sender_id"],
-                        "sender_name": sender_display_name,
-                        "sender_type": message["sender_type"],
-                        "content": message["content"],
-                        "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
-                    }
-                    if request.reply_to_id:
-                        user_message["reply_to_id"] = request.reply_to_id
-                        if _reply_msg_data:
-                            user_message["reply_to_message"] = {
-                                "id": _reply_msg_data["id"],
-                                "sender_name": _reply_msg_data["sender"]["display_name"] if _reply_msg_data.get("sender") else "Unknown",
-                                "sender_type": _reply_msg_data["sender_type"],
-                                "content": _reply_msg_data["content"][:200],
-                                "created_at": _reply_msg_data["created_at"],
-                            }
-                    if _answer_ctx:
-                        user_message["ai_context"] = _answer_ctx
+                    # ユーザーメッセージのエコー（最初のAIイベントより前に送出。保存した行から作る）
+                    user_message = _user_message_echo(message, room_id, request, _reply_msg_data, sender_display_name)
                     yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
                     mark_latency("user_sse_sent")
                     _cli_iter = _prepend_first_event(_gen_first, _cli_agen)

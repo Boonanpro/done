@@ -12,10 +12,13 @@
  * - 完成した部品は schema.ts の validateComplete で検証し、通らなければ元のコードブロックに戻す
  *   （選択肢の個数、表の列数、グラフの値の数など）。生成途中には検証しない（段階表示を妨げない）。
  * - 選択ボタンと入力欄の答えは、確認カードと同じ経路で「本人の発言」として部屋に送る
- *   （ShapeAnswerProvider の submit = project-chat-panel の answerInRoom）。文面「<問い> → <答え>」に
+ *   （ShapeAnswerProvider の submit = project-chat-panel の answerShapeInRoom）。文面「<問い> → <答え>」に
  *   加えて、どの返事のどの部品への答えか（answer_to: message_id + part）を同じ発言に保存する。
- * - 「答えました」は、その照合情報つきの発言がサーバーに保存されてから出す。送信中は送信中、
- *   失敗したら失敗と出して選び直せる（楽観表示を保存の根拠にしない）。
+ * - 「答えました」の根拠は部屋の記録（照合情報つきの保存済み発言）。送信は idle → sending → saved（保存の
+ *   echo が返り、その行がまだ画面の記録に載る前の一時状態）→ 記録に載ったら記録だけが根拠（取り消しで
+ *   記録から消えれば、答えていない状態に戻って押し直せる）。失敗（failed）は選び直せる。保存できたか
+ *   分からない時（unknown）は「確かめる」で記録を読み直す（分からないまま送り直して二重にしない）。
+ * - 答えの長さの契約は schema.ts の ANSWER_VALUE_MAX（サーバーと同じ数）。入力欄は長い値を受け付けない。
  * - 描画で例外が起きても、その部品だけを元のコードブロック（文章）に戻し、画面全体は落とさない。
  */
 import {
@@ -30,7 +33,7 @@ import {
 import { AlertCircle, Check, Loader2, Send } from 'lucide-react';
 
 import {
-  ChartProps, ChoiceProps, CompareProps, InputProps, SHAPE_SPECS, StepsProps, normalizeOptions, validateComplete,
+  ANSWER_VALUE_MAX, ChartProps, ChoiceProps, CompareProps, InputProps, SHAPE_SPECS, StepsProps, normalizeOptions, validateComplete,
   type ChartInput, type ChoiceInput, type CompareInput, type InputInput, type StepsInput,
 } from '@/lib/chat-shapes/schema';
 import {
@@ -41,31 +44,39 @@ import { parseShapeCall } from '@/lib/chat-shapes/plain';
 
 // --- 答えの経路（部屋の本人の発言と、発言を送る関数） -------------------------------------
 
-/** 本人の発言として部屋へ送る。サーバーに保存されたら resolve、保存されなかったら reject。 */
-export type ShapeSubmit = (text: string, answerTo: AnswerTo) => Promise<void>;
+/**
+ * 本人の発言として部屋へ送る。サーバーに保存されたら保存された行の id で resolve。保存されなかったら reject。
+ * 保存できたか分からない（確かめにも失敗した）時は reject(Error(SEND_UNKNOWN))。
+ */
+export type ShapeSubmit = (text: string, answerTo: AnswerTo) => Promise<{ id: string }>;
+
+/** submit が「保存できたか分からない」で reject する時の message */
+export const SEND_UNKNOWN = 'unknown';
 
 type ShapeAnswerContextValue = {
   /** 部屋にある本人の発言（照合情報つき）。答えた状態の判定に使う */
   utterances: UserUtterance[];
   /** 無ければ答えられない（閲覧だけ） */
   submit: ShapeSubmit | null;
+  /** 部屋の記録をサーバーから読み直す（保存できたか分からない時に押す「確かめる」） */
+  refresh: (() => Promise<void>) | null;
 };
 
-const ShapeAnswerContext = createContext<ShapeAnswerContextValue>({ utterances: [], submit: null });
+const ShapeAnswerContext = createContext<ShapeAnswerContextValue>({ utterances: [], submit: null, refresh: null });
 
-type UtteranceSource = { sender_type: string; content: string | null; created_at: string; ai_context?: unknown; pending?: boolean };
+type UtteranceSource = { id: string; sender_type: string; content: string | null; created_at: string; ai_context?: unknown; pending?: boolean };
 
 export function ShapeAnswerProvider({
-  messages, submit, children,
-}: { messages: UtteranceSource[]; submit: ShapeSubmit | null; children: ReactNode }) {
+  messages, submit, refresh = null, children,
+}: { messages: UtteranceSource[]; submit: ShapeSubmit | null; refresh?: (() => Promise<void>) | null; children: ReactNode }) {
   const utterances = useMemo<UserUtterance[]>(
     () => messages
       // 保存前（pending）の発言は数えない: 「答えました」はサーバーに残ってから
       .filter((m) => m.sender_type === 'human' && !m.pending && (m.content || '').trim())
-      .map((m) => ({ text: m.content || '', at: Date.parse(m.created_at) || 0, answerTo: readAnswerTo(m.ai_context) })),
+      .map((m) => ({ id: m.id, text: m.content || '', at: Date.parse(m.created_at) || 0, answerTo: readAnswerTo(m.ai_context) })),
     [messages],
   );
-  const value = useMemo(() => ({ utterances, submit }), [utterances, submit]);
+  const value = useMemo(() => ({ utterances, submit, refresh }), [utterances, submit, refresh]);
   return <ShapeAnswerContext.Provider value={value}>{children}</ShapeAnswerContext.Provider>;
 }
 
@@ -78,6 +89,8 @@ const ShapeMetaContext = createContext<ShapeMeta>({ messageId: null, part: '', c
 const CARD = 'my-2 w-full max-w-full rounded-xl border border-border bg-card p-3 shadow-sm';
 const CHOICE_BTN = 'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-left text-sm transition-colors disabled:cursor-default';
 const SEND_FAILED = '送れませんでした。もう一度押してください';
+const SEND_UNKNOWN_TEXT = '送れたか確かめられませんでした';
+const TOO_LONG = `長すぎます（単位を含めて${ANSWER_VALUE_MAX}文字まで）`;
 
 function Answered({ text }: { text: string }) {
   return (
@@ -87,20 +100,24 @@ function Answered({ text }: { text: string }) {
   );
 }
 
-function Failed({ text }: { text: string }) {
+function Failed({ text, children }: { text: string; children?: ReactNode }) {
   return (
-    <div className="mt-2 flex items-center gap-1 text-xs text-red-600" role="alert">
-      <AlertCircle className="h-3.5 w-3.5 shrink-0" />{text}
+    <div className="mt-2 flex items-center gap-2 text-xs text-red-600" role="alert">
+      <AlertCircle className="h-3.5 w-3.5 shrink-0" /><span>{text}</span>{children}
     </div>
   );
 }
 
-/** 送信の状態: 押していない / 送信中 / 保存された（照合情報の発言がまだ画面に無い間の保険） / 失敗 */
+/**
+ * 送信の状態: 押していない / 送信中 / 保存された（echo の行 id。その行が画面の記録に載るまでの一時状態） /
+ * 失敗（選び直せる） / 保存できたか分からない（記録を読み直してから決める）
+ */
 type SendState =
   | { status: 'idle' }
   | { status: 'sending'; value: string }
-  | { status: 'saved'; value: string }
-  | { status: 'failed'; value: string };
+  | { status: 'saved'; value: string; id: string }
+  | { status: 'failed'; value: string; reason?: string }
+  | { status: 'unknown'; value: string };
 
 /** 答えられる条件: 送る先がある・保存された返事・閉じまで届いた・ライブ枠でない・まだ答えていない */
 function useCanAnswer(answered: boolean) {
@@ -110,25 +127,68 @@ function useCanAnswer(answered: boolean) {
   return !!submit && !!messageId && complete && !live && !streaming && !answered;
 }
 
+/**
+ * 答えの送信と「答えた」の判定。
+ * - recorded: 部屋の記録（照合情報つきの保存済み発言）にあるこの部品への答え。これが根拠
+ * - saved は、保存の echo が返ってからその行が記録（utterances）に現れるまでの一時状態。行が一度記録に現れたら
+ *   （seenSaved）以後は記録だけを見る。取り消しで記録から消えれば answered は false に戻り、押し直せる
+ *   （「現れた」の印は描画中に合わせる: React の「prop の変化で state を直す」手順。effect で setState しない）
+ */
+function useAnswerSend(recorded: string | null) {
+  const { utterances, submit, refresh } = useContext(ShapeAnswerContext);
+  const [send, setSend] = useState<SendState>({ status: 'idle' });
+  const [seenSaved, setSeenSaved] = useState<string | null>(null);
+  const savedInRecord = send.status === 'saved' && utterances.some((u) => u.id === send.id);
+  if (savedInRecord && seenSaved !== send.id) setSeenSaved(send.id);
+  const seen = send.status === 'saved' && seenSaved === send.id;
+  const answer = recorded ?? (send.status === 'saved' && !seen ? send.value : null);
+  // 記録に現れた後で記録から消えた（取り消し）: 送信の状態としては何もしていないのと同じ
+  const shown: SendState = seen && !savedInRecord ? { status: 'idle' } : send;
+  const run = (text: string, answerTo: AnswerTo, value: string) => {
+    if (!submit) return;
+    setSend({ status: 'sending', value });
+    submit(text, answerTo)
+      .then(({ id }) => setSend({ status: 'saved', value, id }))
+      .catch((e: unknown) => setSend({ status: e instanceof Error && e.message === SEND_UNKNOWN ? 'unknown' : 'failed', value }));
+  };
+  // 保存できたか分からない時: 記録を読み直す。載っていれば recorded が答えになる。載っていなければ失敗（送り直せる）
+  const recheck = () => {
+    if (send.status !== 'unknown') return;
+    const value = send.value;
+    (refresh ? refresh() : Promise.resolve()).finally(() => setSend({ status: 'failed', value, reason: SEND_UNKNOWN }));
+  };
+  return { send: shown, setSend, answer, run, recheck };
+}
+
+function SendProblem({ send, answered, recheck, id }: { send: SendState; answered: boolean; recheck: () => void; id?: string }) {
+  if (answered) return null;
+  if (send.status === 'unknown') {
+    return (
+      <div id={id}>
+        <Failed text={SEND_UNKNOWN_TEXT}>
+          <button type="button" onClick={recheck} className="rounded border border-border px-2 py-0.5 text-xs text-foreground hover:bg-muted">確かめる</button>
+        </Failed>
+      </div>
+    );
+  }
+  if (send.status === 'failed') return <div id={id}><Failed text={send.reason === 'too long' ? TOO_LONG : SEND_FAILED} /></div>;
+  return null;
+}
+
 // --- 部品 ---------------------------------------------------------------------------------
 
 const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
   const question = (props.question || '').trim();
   const options = normalizeOptions(props.options);
-  const { utterances, submit } = useContext(ShapeAnswerContext);
+  const { utterances } = useContext(ShapeAnswerContext);
   const { messageId, part } = useContext(ShapeMetaContext);
-  const [send, setSend] = useState<SendState>({ status: 'idle' });
-  // 答えた状態の根拠は部屋の記録（照合情報つきの保存済み発言）だけ。saved は記録が画面に届くまでの保険
   const recorded = messageId ? findChoiceAnswer(utterances, messageId, part) : null;
-  const answer = recorded ?? (send.status === 'saved' ? send.value : null);
+  const { send, answer, run, recheck } = useAnswerSend(recorded);
   const canAnswer = useCanAnswer(!!answer);
-  const disabled = !canAnswer || send.status === 'sending';
+  const disabled = !canAnswer || send.status === 'sending' || send.status === 'unknown';
   const choose = (o: string) => {
-    if (disabled || !submit || !messageId) return;
-    setSend({ status: 'sending', value: o });
-    submit(choiceAnswerText(question, o), { message_id: messageId, part, kind: 'choice', value: o, question })
-      .then(() => setSend({ status: 'saved', value: o }))
-      .catch(() => setSend({ status: 'failed', value: o }));
+    if (disabled || !messageId) return;
+    run(choiceAnswerText(question, o), { message_id: messageId, part, kind: 'choice', value: o, question }, o);
   };
   return (
     <div className={CARD} data-shape="Choice" data-answered={answer ? 'true' : 'false'} data-send={send.status}>
@@ -154,7 +214,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
         })}
         {options.length === 0 ? <div className="h-8 animate-pulse rounded-lg bg-muted/40" /> : null}
       </div>
-      {send.status === 'failed' ? <Failed text={SEND_FAILED} /> : null}
+      <SendProblem send={send} answered={!!answer} recheck={recheck} />
     </div>
   );
 };
@@ -163,24 +223,25 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   const label = (props.label || '').trim();
   const isNumber = props.kind === 'number';
   const unit = props.unit || '';
-  const { utterances, submit } = useContext(ShapeAnswerContext);
+  const { utterances } = useContext(ShapeAnswerContext);
   const { messageId, part } = useContext(ShapeMetaContext);
   const inputId = useId();
   const [value, setValue] = useState('');
-  const [send, setSend] = useState<SendState>({ status: 'idle' });
   const recorded = messageId ? findInputAnswer(utterances, messageId, part) : null;
-  const answer = recorded ?? (send.status === 'saved' ? send.value : null);
+  const { send, setSend, answer, run, recheck } = useAnswerSend(recorded);
   const canAnswer = useCanAnswer(!!answer);
-  const disabled = !canAnswer || send.status === 'sending';
+  const disabled = !canAnswer || send.status === 'sending' || send.status === 'unknown';
+  // 入力欄が受け付ける長さ: 答えの値（単位つき）が契約の上限に収まる分だけ
+  const maxLength = Math.max(1, ANSWER_VALUE_MAX - (isNumber ? unit.length : 0));
   const doSend = () => {
     const v = value.trim();
-    if (disabled || !v || !submit || !messageId) return;
+    if (disabled || !v || !messageId) return;
     const shown = inputAnswerValue(label, v, isNumber ? unit : undefined);
-    setSend({ status: 'sending', value: shown });
-    submit(inputAnswerText(label, v, isNumber ? unit : undefined), { message_id: messageId, part, kind: 'input', value: shown, question: label })
-      .then(() => setSend({ status: 'saved', value: shown }))
-      .catch(() => setSend({ status: 'failed', value: shown }));   // 入力した値はそのまま残す
+    if (shown.length > ANSWER_VALUE_MAX) { setSend({ status: 'failed', value: shown, reason: 'too long' }); return; }   // 黙って切らない
+    run(inputAnswerText(label, v, isNumber ? unit : undefined), { message_id: messageId, part, kind: 'input', value: shown, question: label }, shown);
+    // 入力した値は失敗しても残す（value はそのまま）
   };
+  const problem = send.status === 'failed' || send.status === 'unknown';
   return (
     <div className={CARD} data-shape="Input" data-answered={answer ? 'true' : 'false'} data-send={send.status}>
       <div className="flex items-start justify-between gap-2">
@@ -196,11 +257,12 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
             inputMode={isNumber ? 'decimal' : 'text'}
             step={isNumber ? 'any' : undefined}
             value={value}
+            maxLength={maxLength}
             onChange={(e) => setValue(e.target.value)}
             disabled={disabled}
             placeholder={props.placeholder || ''}
-            aria-invalid={send.status === 'failed' ? true : undefined}
-            aria-describedby={send.status === 'failed' ? `${inputId}-error` : undefined}
+            aria-invalid={problem ? true : undefined}
+            aria-describedby={problem ? `${inputId}-error` : undefined}
             className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-sm outline-none focus-visible:border-ring disabled:opacity-60"
           />
           {isNumber && unit ? <span className="shrink-0 text-sm text-muted-foreground">{unit}</span> : null}
@@ -213,7 +275,7 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
           </button>
         </form>
       ) : null}
-      {send.status === 'failed' ? <div id={`${inputId}-error`}><Failed text={SEND_FAILED} /></div> : null}
+      <SendProblem send={send} answered={!!answer} recheck={recheck} id={`${inputId}-error`} />
     </div>
   );
 };

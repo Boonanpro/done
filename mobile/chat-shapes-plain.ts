@@ -3,19 +3,155 @@
 // tests/chat_shapes_plain.test.mjs が両方の出力が同じことを見る）。
 /**
  * 部品（```openui-lang の `root = 部品(...)`）を、部品を描けない画面のために読める文章にする。
+ * あわせて、返事の本文の中からコードブロックを見つける読み手（scanBlocks）を持つ。split.ts も同じ読み手を使う。
  *
  * 使う所:
  * - スマホのアプリ（mobile/chat-markdown.tsx）: 同じ部屋の履歴を読むが部品の描画が無いので、
  *   表は Markdown の表、選択肢と入力欄は番号つきの文章、手順は番号つきの行、グラフは数字の行にする。
  *   mobile/chat-shapes-plain.ts はこのファイルと同じ中身（アプリは別のパッケージなので取り込めない。
  *   両方を同じに保つ。tests/chat_shapes_plain.test.mjs が同じ出力になることを見る）。
+ * - 画面の切り出し（split.ts）: どの行がコードブロックで、どれが HTML ブロックかの判定をここから借りる。
  *
- * OpenUI Lang の引数（文字列・数値・配列・{name: "x", values: [...]} の形の物）を読む小さな読み手を
- * 持つ。lang-core には依存しない（アプリに入れないため）。読めない時は null を返し、呼び出し側は
- * 元のコードのまま出す。
+ * コードブロックの見つけ方は Markdown（CommonMark）のとおり:
+ * - 開きは行頭（字下げ3つまで）の ``` か ~~~（3つ以上）。情報文字列の最初の語が言語名。
+ *   バッククォートのフェンスの情報文字列にバッククォートは書けない
+ * - 閉じは同じ文字で開きと同じ本数以上、後ろは空白だけ。行末の CR（CRLF）は無視する
+ * - HTML ブロック（<!-- コメント -->、<pre>/<script>/<style>/<textarea>、<div> などのブロック要素、
+ *   空行の後の単独のタグ）の中はフェンスとして読まない。コメントの中に書かれた部品はコメントの一部
+ *   （部品にしない・書き換えない）。引用（> ```）は行頭が > なので最初からフェンスではない
+ *
+ * 文字列の読み方は OpenUI Lang（lang-core）と同じ規則:
+ * - "..." は JSON の文字列。エスケープは \" \\ \/ \b \f \n \r \t \uXXXX だけ。JSON に無いエスケープや
+ *   生の制御文字は「読めない」とし（null）、呼び出し側は元のブロックをそのまま残す。別の文字列に黙って変えない
+ *   （lang-core はその場合バックスラッシュごと生の文字を見せる。見え方の違いは試験で固定）
+ * - '...' は lang-core の独自規則: \' \\ \n \t だけ、それ以外はバックスラッシュを落として次の文字
+ *
+ * lang-core には依存しない（アプリに入れないため）。
  */
 
 export type ShapeCall = { name: string; args: unknown[] };
+
+// --- コードブロック・HTML ブロックの読み手（split.ts と共有） ------------------------------------
+
+export type FenceInfo = { char: '`' | '~'; size: number; lang: string };
+
+export type ScannedBlock =
+  /** lines[start, end) は HTML ブロック（文章側のまま。中のフェンスはフェンスではない） */
+  | { kind: 'html'; start: number; end: number }
+  /** lines[start, end) はコードブロック。end は閉じ行の次（閉じが無ければ末尾）。body は中身（行末 CR 抜き） */
+  | { kind: 'fence'; start: number; end: number; closed: boolean; fence: FenceInfo; body: string[] };
+
+const SHAPE_FENCE_LANGS = new Set(['openui-lang', 'openui']);
+
+/** その言語名のコードブロックが部品か（openui-lang / openui）。 */
+export function isShapeLang(lang: string): boolean {
+  return SHAPE_FENCE_LANGS.has(lang);
+}
+
+/** 速い前判定: 部品のフェンスの開き行らしき物があるか（本当の判定は scanBlocks）。 */
+export const SHAPE_FENCE_RE = /(^|\n) {0,3}(`{3,}|~{3,})[ \t]*(openui-lang|openui)(?=[ \t\r\n]|$)/i;
+
+const stripCr = (line: string) => line.replace(/\r$/, '');
+
+/** フェンスの開き行なら { char, size, lang }。lang は情報文字列の最初の語（小文字。無ければ ''）。 */
+export function fenceOpen(rawLine: string): FenceInfo | null {
+  const line = stripCr(rawLine);
+  const m = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  if (!m) return null;
+  const char = m[1][0] as '`' | '~';
+  const info = m[2];
+  // CommonMark: バッククォートのフェンスの情報文字列にバッククォートは含められない（その行は開きではない）
+  if (char === '`' && info.includes('`')) return null;
+  const lang = (info.trim().split(/\s+/)[0] || '').toLowerCase();
+  return { char, size: m[1].length, lang };
+}
+
+/** 閉じ行: 開きと同じ文字で本数が同じか多く、後ろは空白だけ。 */
+export function fenceClose(rawLine: string, open: FenceInfo): boolean {
+  const m = stripCr(rawLine).match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+  return !!m && m[1][0] === open.char && m[1].length >= open.size;
+}
+
+// CommonMark 4.6 HTML blocks。種類1〜5は終わりの印が出る行まで、6〜7は空行まで。7だけは段落の途中では始まらない
+const HTML_RAW_START = /^<(script|pre|style|textarea)(?=[\s>]|$)/i;
+const HTML_RAW_END = /<\/(script|pre|style|textarea)>/i;
+const HTML_BLOCK_TAGS = new Set([
+  'address', 'article', 'aside', 'base', 'basefont', 'blockquote', 'body', 'caption', 'center', 'col', 'colgroup', 'dd',
+  'details', 'dialog', 'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'frame', 'frameset',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hr', 'html', 'iframe', 'legend', 'li', 'link', 'main', 'menu',
+  'menuitem', 'nav', 'noframes', 'ol', 'optgroup', 'option', 'p', 'param', 'search', 'section', 'summary', 'table', 'tbody',
+  'td', 'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul',
+]);
+const HTML_TAG_START = /^<\/?([A-Za-z][A-Za-z0-9-]*)(?=[\s>]|\/>|$)/;
+const HTML_OPEN_TAG = /^<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>\s*$/;
+const HTML_CLOSE_TAG = /^<\/[A-Za-z][A-Za-z0-9-]*\s*>\s*$/;
+
+type HtmlEnd = { until: RegExp } | { untilBlank: true };
+
+function htmlBlockStart(line: string, afterBlank: boolean): HtmlEnd | null {
+  const t = line.replace(/^ {0,3}/, '');
+  if (t[0] !== '<') return null;
+  if (HTML_RAW_START.test(t)) return { until: HTML_RAW_END };
+  if (t.startsWith('<!--')) return { until: /-->/ };
+  if (t.startsWith('<?')) return { until: /\?>/ };
+  if (t.startsWith('<![CDATA[')) return { until: /\]\]>/ };
+  if (/^<![A-Za-z]/.test(t)) return { until: />/ };
+  const m = t.match(HTML_TAG_START);
+  if (m && HTML_BLOCK_TAGS.has(m[1].toLowerCase())) return { untilBlank: true };
+  if (afterBlank && (HTML_OPEN_TAG.test(t) || HTML_CLOSE_TAG.test(t))) return { untilBlank: true };
+  return null;
+}
+
+/**
+ * 本文の行の並びから、コードブロックと HTML ブロックを順に見つける。
+ * 返す区間は重ならない。区間の外の行は普通の文章。
+ */
+export function scanBlocks(lines: readonly string[]): ScannedBlock[] {
+  const out: ScannedBlock[] = [];
+  const n = lines.length;
+  let i = 0;
+  let afterBlank = true;   // 文書の先頭は「空行の後」と同じ
+  while (i < n) {
+    const line = stripCr(lines[i]);
+    const html = htmlBlockStart(line, afterBlank);
+    if (html) {
+      let j = i;
+      if ('until' in html) {
+        // 終わりの印がある行まで含める（最初の行にあればその1行。無ければ末尾まで）
+        while (j < n && !html.until.test(stripCr(lines[j]))) j++;
+        j = Math.min(j + 1, n);
+        afterBlank = false;
+      } else {
+        j = i + 1;
+        while (j < n && stripCr(lines[j]).trim() !== '') j++;
+        afterBlank = true;   // 次は空行（か末尾）
+      }
+      out.push({ kind: 'html', start: i, end: j });
+      i = j;
+      continue;
+    }
+    const open = fenceOpen(line);
+    if (open) {
+      const body: string[] = [];
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (fenceClose(lines[j], open)) { closed = true; break; }
+        body.push(stripCr(lines[j]));
+        j++;
+      }
+      out.push({ kind: 'fence', start: i, end: closed ? j + 1 : j, closed, fence: open, body });
+      i = closed ? j + 1 : j;
+      afterBlank = false;
+      continue;
+    }
+    afterBlank = line.trim() === '';
+    i++;
+  }
+  return out;
+}
+
+// --- OpenUI Lang の引数の読み手 ------------------------------------------------------------------
 
 class Reader {
   i = 0;
@@ -42,18 +178,41 @@ class Reader {
     }
     throw new Error('unexpected');
   }
+  /** 文字列。"..." は JSON の規則（読めないエスケープは例外）、'...' は lang-core の独自規則。 */
   str(q: string): string {
     this.i++;
     let out = '';
     while (this.i < this.s.length) {
       const c = this.s[this.i++];
-      if (c === '\\') {
-        const n = this.s[this.i++];
-        out += n === 'n' ? '\n' : n === 't' ? '\t' : (n ?? '');
+      if (c === q) return out;
+      if (c !== '\\') {
+        if (q === '"' && c.charCodeAt(0) < 0x20) throw new Error('control character in string');
+        out += c;
         continue;
       }
-      if (c === q) return out;
-      out += c;
+      const n = this.s[this.i++];
+      if (n === undefined) break;
+      if (q === "'") {
+        out += n === 'n' ? '\n' : n === 't' ? '\t' : n;   // \' と \\ はその文字のまま
+        continue;
+      }
+      switch (n) {
+        case '"': case '\\': case '/': out += n; break;
+        case 'b': out += '\b'; break;
+        case 'f': out += '\f'; break;
+        case 'n': out += '\n'; break;
+        case 'r': out += '\r'; break;
+        case 't': out += '\t'; break;
+        case 'u': {
+          const hex = this.s.slice(this.i, this.i + 4);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error('bad unicode escape');
+          out += String.fromCharCode(parseInt(hex, 16));
+          this.i += 4;
+          break;
+        }
+        default:
+          throw new Error(`unknown escape \\${n}`);
+      }
     }
     throw new Error('unterminated string');
   }
@@ -114,6 +273,8 @@ export function parseShapeCall(code: string): ShapeCall | null {
   }
   return { name: m[1], args };
 }
+
+// --- 読める文章にする ------------------------------------------------------------------------------
 
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -180,37 +341,21 @@ export function shapeToPlainMarkdown(code: string): string | null {
 
 /**
  * 返事の本文の中の ```openui-lang ブロックを読める文章に置き換える（部品を描けない画面用）。
- * フェンスの読み方は split.ts と同じ決まり（字下げ3つまで、``` か ~~~、閉じは同じ文字で本数以上）。
+ * ブロックの見つけ方は scanBlocks（split.ts と同じ）。HTML ブロック（コメントなど）の中は触らない。
  * 読めないブロックはそのまま残す。
  */
 export function replaceShapeBlocks(text: string): string {
-  if (!/(^|\n) {0,3}(`{3,}|~{3,})[ \t]*(openui-lang|openui)(?=[ \t\r\n]|$)/i.test(text)) return text;
+  if (!SHAPE_FENCE_RE.test(text)) return text;
   const lines = text.split('\n');
   const out: string[] = [];
   let i = 0;
-  while (i < lines.length) {
-    const line = lines[i].replace(/\r$/, '');
-    const m = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    const open = m && !(m[1][0] === '`' && m[2].includes('`')) ? { char: m[1][0], size: m[1].length, lang: (m[2].trim().split(/\s+/)[0] || '').toLowerCase() } : null;
-    if (!open) { out.push(lines[i]); i++; continue; }
-    let j = i + 1;
-    const body: string[] = [];
-    let closed = false;
-    while (j < lines.length) {
-      const cm = lines[j].replace(/\r$/, '').match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-      if (cm && cm[1][0] === open.char && cm[1].length >= open.size) { closed = true; break; }
-      body.push(lines[j].replace(/\r$/, ''));
-      j++;
-    }
-    const isShape = open.lang === 'openui-lang' || open.lang === 'openui';
-    const plain = isShape && closed ? shapeToPlainMarkdown(body.join('\n')) : null;
-    if (plain) {
-      out.push(plain);
-      i = j + 1;
-      continue;
-    }
-    out.push(...lines.slice(i, closed ? j + 1 : j));
-    i = closed ? j + 1 : j;
+  for (const b of scanBlocks(lines)) {
+    out.push(...lines.slice(i, b.start));
+    const plain = b.kind === 'fence' && b.closed && isShapeLang(b.fence.lang) ? shapeToPlainMarkdown(b.body.join('\n')) : null;
+    if (plain !== null) out.push(plain);
+    else out.push(...lines.slice(b.start, b.end));
+    i = b.end;
   }
+  out.push(...lines.slice(i));
   return out.join('\n');
 }

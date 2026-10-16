@@ -138,3 +138,56 @@ test('部屋の記録の ai_context から照合情報を読む（壊れた物�
   assert.equal(readAnswerTo({ answer_to: { message_id: 'm', part: 'p', kind: 'other', value: 'A' } }), null);
   assert.equal(readAnswerTo({ answer_to: { message_id: 1, part: 'p', kind: 'choice' } }), null);
 });
+
+// --- 直し2回目（確かめる役の指摘7）: HTML ブロック・引用の中はフェンスではない。鍵の見本（fixture）でサーバーと同じ鍵 ---
+import { readFileSync } from 'node:fs';
+
+test('HTML コメントの中の openui-lang は部品にしない（コメントの一部。文章側に残る）', () => {
+  const fence = `\`\`\`openui-lang\n${CODE}\n\`\`\``;
+  const comment = `<!--\n${fence}\n-->`;
+  assert.deepEqual(splitShapeSegments(comment), [{ kind: 'markdown', text: comment }]);
+  // 1行コメントの後の部品は本物。コメント＋本物の部品
+  const mixed = `<!-- メモ -->\n\n${fence}`;
+  assert.equal(splitShapeSegments(mixed).filter((s) => s.kind === 'shape').length, 1);
+  const both = `${comment}\n\n${fence}`;
+  const segs = splitShapeSegments(both);
+  assert.equal(segs.filter((s) => s.kind === 'shape').length, 1);
+  assert.equal(segs[0].kind, 'markdown');
+  assert.ok(segs[0].text.includes('<!--') && segs[0].text.includes('-->'));
+  // 閉じていないコメント: 末尾まで HTML ブロック
+  assert.deepEqual(splitShapeSegments(`<!--\n${fence}`), [{ kind: 'markdown', text: `<!--\n${fence}` }]);
+  // 生成中（streaming）でもコメントの中は部品にしない
+  assert.equal(splitShapeSegments(comment, { streaming: true }).filter((s) => s.kind === 'shape').length, 0);
+});
+
+test('HTML ブロック: <pre>/<script> は閉じタグまで、<div> などは空行まで。空行の後の単独タグ（種類7）も。段落の途中の <span> は違う', () => {
+  const fence = `\`\`\`openui-lang\n${CODE}\n\`\`\``;
+  const shapes = (t) => splitShapeSegments(t).filter((s) => s.kind === 'shape').length;
+  assert.equal(shapes(`<pre>\n${fence}\n</pre>\n\n${fence}`), 1);
+  assert.equal(shapes(`<script>\n${fence}\n</script>`), 0);
+  assert.equal(shapes(`<div>\n${fence}\n</div>\n\n${fence}`), 1);
+  assert.equal(shapes(`<table>\n<tr><td>\n${fence}\n</td></tr>\n</table>`), 0);
+  assert.equal(shapes(`\n<span>\n${fence}\n\n${fence}`), 1);          // 空行の後の単独タグ → 空行まで HTML
+  assert.equal(shapes(`説明の段落\n<span>\n${fence}`), 1);             // 段落の途中の単独タグは HTML ブロックにならない
+  assert.equal(shapes(`<https://example.com>\n${fence}`), 1);          // 自動リンクはタグではない
+  assert.equal(shapes(`<?php\n${fence}\n?>`), 0);
+  assert.equal(shapes(`<![CDATA[\n${fence}\n]]>`), 0);
+  assert.equal(shapes(`<!DOCTYPE html>\n${fence}`), 1);                 // 1行で終わる種類4
+});
+
+test('引用（> ```）はフェンスではない。引用の後の本物の部品は部品', () => {
+  const fence = `\`\`\`openui-lang\n${CODE}\n\`\`\``;
+  const quoted = `> ${fence.replaceAll('\n', '\n> ')}`;
+  assert.deepEqual(splitShapeSegments(quoted), [{ kind: 'markdown', text: quoted }]);
+  assert.equal(splitShapeSegments(`${quoted}\n\n${fence}`).filter((s) => s.kind === 'shape').length, 1);
+});
+
+test('鍵の見本: tests/fixtures/chat_shapes_part_keys.json は今の split/answers と同じ（サーバー側の試験が同じ見本を読む）', () => {
+  const cases = JSON.parse(readFileSync(new URL('./fixtures/chat_shapes_part_keys.json', import.meta.url), 'utf8'));
+  assert.ok(cases.length >= 15);
+  for (const c of cases) {
+    const codes = splitShapeSegments(c.text).filter((s) => s.kind === 'shape').map((s) => s.code);
+    assert.deepEqual(codes, c.codes, c.name);
+    assert.deepEqual(partKeys(codes), c.keys, c.name);
+  }
+});

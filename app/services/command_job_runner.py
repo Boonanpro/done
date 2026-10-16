@@ -135,9 +135,17 @@ async def run(row):
             initial_state = state.read(job_id)['state']
             state.publish(job_id, 'progress', '依頼内容を確認しています', **({'run_id':run_row['id']} if run_row else {}),
                           state='running' if initial_state=='queued' else initial_state)
+            # answer_shapes stays off for every job here (parallel or not). The chat parts (```openui-lang) are for
+            # a reply the room's chat screen draws and the owner answers in that room. A job's text is not that:
+            # the non-parallel job's only chat appearance is the report card below (`execute report`: cut at 2800
+            # characters, wrapped in a「…からの報告」heading when it goes to another room, and spoken instead of
+            # written when the owner is on a call), its progress goes to the job feed (voice), and the job has
+            # already ended when the report arrives, so an answer to a Choice/Input could not reach the job that
+            # asked. tests/test_chat_shapes_prompt.py pins this (test_job_runners_stay_prose_only).
             instructions = await asyncio.to_thread(_build_system_prompt, project.get('title',''),
                 project.get('description') or '', project.get('status') or 'in_progress',
-                latest_user_message=spec['task'], room_id=row['room_id'], user_id=row['user_id'], include_room_role=False)
+                latest_user_message=spec['task'], room_id=row['room_id'], user_id=row['user_id'], include_room_role=False,
+                answer_shapes=False)
             if parallel:
                 from app.services.parallel_job_runner import JOB_RULES
                 instructions += '\n' + JOB_RULES + (s.get('origin_note') or '') + \

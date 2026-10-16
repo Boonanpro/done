@@ -2,7 +2,7 @@
 
 Plain prose is the default. Use a part only when it serves the user better than sentences: comparing candidates side by side (Compare, in place of a Markdown table), letting the user pick one of 2-6 options (Choice), asking for one number or short value (Input), listing steps the user will follow (Steps), or showing numbers over time or by category (Chart). Greetings, explanations, status reports, yes/no questions and ordinary answers stay prose. An irreversible confirmation is confirm_card, a message to someone else is compose_message; never a part.
 
-Write a part as one fenced code block with the language `openui-lang` containing one statement `root = Part(...)`, placed between your sentences (introduce it in the sentence before). Arguments are positional in the order below; strings use double quotes; trailing optional arguments can be omitted; never use name: value syntax. One part per block; several blocks in one reply are fine. Do not put a part inside another code block or a list item.
+Write a part as one fenced code block with the language `openui-lang` containing one statement `root = Part(...)`, placed between your sentences (introduce it in the sentence before). Arguments are positional in the order below; strings use double quotes; trailing optional arguments can be omitted; never use name: value syntax. One part per block; several blocks in one reply are fine. Do not put a part inside another code block, an HTML comment or a list item. Keep a Choice question or Input label within 200 characters and each option within 200.
 
 Parts (generated from the chat UI; ? = optional):
 - Compare(columns: string[], rows: string[][], caption?: string) — 横並びの表。候補や案を観点ごとに比べる時

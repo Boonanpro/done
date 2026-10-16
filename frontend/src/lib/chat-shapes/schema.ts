@@ -34,10 +34,19 @@ export function normalizeOptions(options: readonly unknown[] | undefined | null)
 export const CHOICE_MIN = 2;
 export const CHOICE_MAX = 6;
 
+/**
+ * 答え（answer_to）の長さの契約。サーバー（app/agent/chat_shapes.py の ANSWER_*_MAX）と同じ数。
+ * - 完成した部品の選択肢・問い・ラベルがこれより長ければ、その部品はコードに戻す（押せる部品にしない）
+ * - 入力欄はこれより長い値を受け付けない（単位を含めて）
+ * - サーバーはこれより長い答えを拒否する（黙って切らない）。画面は値の全文で照合する
+ */
+export const ANSWER_VALUE_MAX = 200;      // 選択肢の文字・入力の値（単位つき）
+export const ANSWER_QUESTION_MAX = 200;   // 問い・ラベル
+
 export const ChoiceProps = z
   .object({
-    question: z.string().describe('何を選ぶか（短い問い）'),
-    options: z.array(z.string()).describe('選択肢。2〜6個'),
+    question: z.string().max(ANSWER_QUESTION_MAX).describe('何を選ぶか（短い問い）'),
+    options: z.array(z.string().max(ANSWER_VALUE_MAX)).describe('選択肢。2〜6個'),
   })
   .refine((v) => v.question.trim().length > 0, { message: '問いが空' })
   .refine((v) => {
@@ -47,9 +56,9 @@ export const ChoiceProps = z
 
 export const InputProps = z
   .object({
-    label: z.string().describe('何を入れてもらうか'),
+    label: z.string().max(ANSWER_QUESTION_MAX).describe('何を入れてもらうか'),
     kind: z.enum(['number', 'text']).optional().describe('number=数値, text=短い文（既定 text）'),
-    unit: z.string().optional().describe('単位（円・人・日など。数値の時だけ）'),
+    unit: z.string().max(20).optional().describe('単位（円・人・日など。数値の時だけ）'),
     placeholder: z.string().optional().describe('入力例'),
   })
   .refine((v) => v.label.trim().length > 0, { message: 'ラベルが空' });
