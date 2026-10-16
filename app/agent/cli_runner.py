@@ -1663,6 +1663,11 @@ def _build_system_prompt(
         "For changes to Dan itself, read D:/done/AGENTS.md."
     )
     parts.append(_ABSOLUTE_RULES)
+    # Answer shapes (table / choice buttons / input / steps / chart as ```openui-lang blocks).
+    # Generated from the frontend part definitions; the same text on every backend.
+    shapes = _chat_shapes.chat_shapes_section()
+    if shapes:
+        parts.append(shapes)
     parts.append(_BROWSER_AUTH_RULES)
     parts.append(
         "## ブラウザの速度と検証\n"
@@ -1947,6 +1952,7 @@ def run_oneshot_cli(
 
 
 from app.agent import codex_runner as _codex
+from app.agent import chat_shapes as _chat_shapes
 from app.agent import turn_flow
 
 # Claude CLI models + Codex CLI (ChatGPT sign-in) models. The model decides the

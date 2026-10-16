@@ -12,7 +12,8 @@
     "lint:fix": "eslint . --fix && biome check --write .",
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit",
-    "generate:api": "openapi-typescript ../openapi.json -o src/types/api.ts"
+    "generate:api": "openapi-typescript ../openapi.json -o src/types/api.ts",
+    "generate:shapes": "node --experimental-strip-types scripts/generate-chat-shapes-prompt.mjs"
   },
   "dependencies": {
     "@blocknote/core": "^0.47.3",
@@ -20,6 +21,7 @@
     "@blocknote/shadcn": "^0.47.3",
     "@gsap/react": "^2.1.2",
     "@hookform/resolvers": "^5.2.2",
+    "@openuidev/react-lang": "1.0.1",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",

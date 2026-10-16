@@ -65,6 +65,8 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
+import { ShapeAnswerProvider, ShapeBlock } from '@/components/chat/chat-shapes';
+import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -114,7 +116,7 @@ function InlineProcessBlock({
 
   return (
     <div className="my-1">
-      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} /> : null}
+      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} live /> : null}
       {isLive ? (
         <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
@@ -296,7 +298,27 @@ const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false 
   );
 });
 
-const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+// 返事の文章と、その中の部品（```openui-lang ブロック）を順に描く。部品が無ければ
+// AiMarkdown そのもの（文章だけの返事の見た目と動きは変わらない）。
+// live: 生成の途中（保存前）。閉じていないブロックも届いた分から部品として描き、その間は押せない。
+// createdAt: この返事の時刻。選択・入力の答え（本人の発言）はこれより後の物だけを数える。
+const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = false, live = false, createdAt }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; createdAt?: string }) {
+  const segments = useMemo(() => splitShapeSegments(text, { streaming: live }), [text, live]);
+  const askedAt = createdAt ? (Date.parse(createdAt) || 0) : 0;
+  const renderFallback = useCallback((code: string) => <AiMarkdown text={'```\n' + code + '\n```'} muted={muted} />, [muted]);
+  if (segments.length === 1 && segments[0].kind === 'markdown') {
+    return <AiMarkdown text={segments[0].text} onImageClick={onImageClick} muted={muted} />;
+  }
+  return (
+    <>
+      {segments.map((s, i) => (s.kind === 'markdown'
+        ? <AiMarkdown key={`md-${i}`} text={s.text} onImageClick={onImageClick} muted={muted} />
+        : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} askedAt={askedAt} renderFallback={renderFallback} />))}
+    </>
+  );
+});
+
+const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false, live = false, createdAt }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; createdAt?: string }) {
   const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
@@ -306,7 +328,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
-      {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} muted={muted} />}
+      {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} createdAt={createdAt} />}
     </>
   );
 });
@@ -358,7 +380,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
 // 文章の中の、ファイル・画像・動画の印（TurnTextSegment が表示に変えるもの）
 const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
 
-const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean }) {
+const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, createdAt }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; createdAt?: string }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -389,14 +411,14 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
       <div className="flex flex-col">
         {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} onImageClick={onImageClick} /> : null}
-        <TurnTextSegment text={final} onImageClick={onImageClick} />
+        <TurnTextSegment text={final} onImageClick={onImageClick} createdAt={createdAt} />
       </div>
     );
   }
   return (
     <div className="flex flex-col">
       {grouped.map((g, i) => (g.kind === 'text'
-        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} />
+        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} live={live} createdAt={createdAt} />
         : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
@@ -595,7 +617,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
         </button>
       )}
       {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled />}
+      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled createdAt={msg.created_at} />}
       {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
           <MediaGrid items={[...aiImages.map((url) => ({ url, kind: 'image' as const })), ...aiVideos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
@@ -613,7 +635,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
           ))}
         </div>
       )}
-      {!useTimeline && aiText && <AiMarkdown text={aiText} onImageClick={onImageClick} />}
+      {!useTimeline && aiText && <AiShapedText text={aiText} onImageClick={onImageClick} createdAt={msg.created_at} />}
       {proposals.length > 0 && (
         <div className="flex flex-wrap gap-3 mt-2">
           {proposals.map((p, i) => (
@@ -3064,6 +3086,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
+          <ShapeAnswerProvider messages={messages} submit={answerInRoom}>
           <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(
@@ -3116,6 +3139,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             ) : null}
             <div ref={messagesEndRef} />
           </div>
+          </ShapeAnswerProvider>
         )}
       </div>
       )}

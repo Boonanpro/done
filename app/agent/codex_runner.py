@@ -103,10 +103,12 @@ def compute_static_hash(system_prompt: str) -> str:
         from app.agent import cli_runner as cr
         from app.agent.backend_parity import parity_static, static_fingerprint
         from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
+        from app.agent.chat_shapes import chat_shapes_section
         return static_fingerprint(
             get_core_prompt(), load_all_bootstrap_files(),
             cr._build_runtime_contract_section(), parity_static("codex"),
             cr._ABSOLUTE_RULES, cr._BROWSER_AUTH_RULES, cr._CLI_PROJECT_TEMPLATE,
+            chat_shapes_section(),
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("codex static hash failed: %s", e)
