@@ -17,15 +17,18 @@
  * - 「答えました」の根拠は部屋の記録（照合情報つきの、今ログインしている本人の保存済み発言だけ。同じ部屋の
  *   別の人の答えは数えない）。送信は idle → sending → saved（保存の echo が返り、その行がまだ画面の記録に載る前の
  *   一時状態）→ 記録に載ったら記録だけが根拠（取り消しで記録から消えれば、答えていない状態に戻って押し直せる）。
- * - 1回の答えの送信は、部品が決めた1つの送信 ID（client_message_id＝保存される行の id）を持ち続ける。保存されたと
- *   分かるまで、送り直しはいつも同じ ID（サーバーは同じ ID の2回目を保存し直さず、保存済みの行を返す）。
+ * - 1回の答えの送信は、部品が決めた1つの送信 ID（client_message_id＝保存される行の id）を持ち続ける。送り直しは
+ *   いつも同じ ID（サーバーは同じ ID の2回目を保存し直さず、保存済みの行を返す）。新しい ID になるのは、この表示が
+ *   保存を確かめた後で取り消されたと確かめた時だけ（前にしか進まない。lib/chat-shapes/answer-sends.ts）。
  *   失敗（failed: サーバーが「その ID は保存されていない」と答えた）は選び直せる（同じ ID で送る）。保存できたか
  *   分からない時（unknown）は押せず、「確かめる」でその ID の保存を聞き直す。聞けなければ unknown のまま。
- * - 送信 ID と状態は部品の中ではなく lib/chat-shapes/answer-sends.ts の置き場に、本人＋部屋＋AI の発言＋部品ごとに
- *   持つ（部屋を離れて戻る・ページを読み直す、をまたいで同じ送信を続ける）。作り直された部品は、決着していない
- *   送信（分からない・失敗・前のページの送信中）があれば、押せるようにする前にその ID の保存をサーバーに確かめる。
- * - 保存済みなのにダンの処理が始まっていなかった（サーバーが started: false と答えた）答えは、同じ ID でもう一度
- *   送る（1回だけ）。サーバーはその送信でダンの処理を始める（保存し直さない）。
+ * - 送信 ID と状態は部品の中ではなく answer-sends.ts の置き場に、本人＋部屋＋AI の発言＋部品ごとに持つ（部屋を
+ *   離れて戻る・ページを読み直す・同じブラウザのほかのタブ、をまたいで同じ送信を続ける）。作り直された部品は、
+ *   決着していない送信（分からない・失敗・このタブが送っていない送信中）があれば、押せるようにする前にその ID の
+ *   保存をサーバーに確かめる。ほかのタブからの取り込みでは聞かない。
+ * - 保存済みとダンの処理の開始は別の状態。始まったと確かでない答えは、サーバーの開始の状態に合わせて確かめ続け、
+ *   始まっていない（started: false）と分かった時だけ同じ ID でもう一度送る（サーバーは1回しか始めない）。確かめを
+ *   使い切っても分からなければ「確かめる」を出す。
  * - 答えの長さの契約は schema.ts の ANSWER_VALUE_MAX（サーバーと同じ数）。入力欄は長い値を受け付けない。
  * - 描画で例外が起きても、その部品だけを元のコードブロック（文章）に戻し、画面全体は落とさない。
  */
@@ -49,7 +52,9 @@ import {
   type AnswerTo, type UserUtterance,
 } from '@/lib/chat-shapes/answers';
 import {
-  PAGE, answerSendKey, getAnswerSend, needsCheck, setAnswerSend, subscribeAnswerSends,
+  PAGE, SEND_BUSY, SEND_UNKNOWN, STALE_SENDING_MS, answerSendHere, answerSendKey, answerSendVersion, attachAnswerSend, getAnswerSend,
+  isGone, mustCheckBeforePress, needsCheck, noteInRecord, recheckAnswerSend, resumeAnswerSend, sendAnswer, subscribeAnswerSends,
+  type AskSaved, type SubmitAnswer,
 } from '@/lib/chat-shapes/answer-sends';
 import { parseShapeCall } from '@/lib/chat-shapes/plain';
 
@@ -57,17 +62,17 @@ import { parseShapeCall } from '@/lib/chat-shapes/plain';
 
 /**
  * 本人の発言として部屋へ送る。clientMessageId は部品が決めた送信 ID（保存される行の id）。
- * サーバーに保存されたら保存された行の id で resolve（echo が無く確かめて分かった時は、ダンの処理が始まったかの
- * started も。false＝保存済みだが始まっていない）。保存されていないとサーバーが答えたら reject。
- * 保存できたか分からない（確かめにも失敗した）時は reject(Error(SEND_UNKNOWN))。
+ * サーバーに保存されたら保存された行の id で resolve（echo が無く確かめて分かった時は、ダンの処理の開始の
+ * started・start も）。保存されていないとサーバーが答えたら reject。保存できたか分からない（確かめにも失敗した）時は
+ * reject(Error(SEND_UNKNOWN))。opts.onEnded はその送信の通信が終わった時に1回（ダンの処理が始まった印を見たか）。
+ * opts.background（始まっていない答えの送り直し）は、ほかの送信の通信中なら送らず reject(Error(SEND_BUSY))。
  */
-export type ShapeSubmit = (text: string, answerTo: AnswerTo, clientMessageId: string) => Promise<{ id: string; started?: boolean | null }>;
+export type ShapeSubmit = SubmitAnswer;
 
 /** その送信 ID の発言が保存されたかをサーバーに聞く（「確かめる」）。聞けなければ reject */
-export type ShapeRecheck = (clientMessageId: string) => Promise<{ saved: boolean; started?: boolean | null }>;
+export type ShapeRecheck = AskSaved;
 
-/** submit が「保存できたか分からない」で reject する時の message */
-export const SEND_UNKNOWN = 'unknown';
+export { SEND_BUSY, SEND_UNKNOWN };
 
 type ShapeAnswerContextValue = {
   /** 部屋にある本人の発言（照合情報つき）。答えた状態の判定に使う */
@@ -128,6 +133,7 @@ const SEND_FAILED = '送れませんでした。もう一度押してくださ�
 const SEND_UNKNOWN_TEXT = '送れたか確かめられませんでした';
 const SEND_UNKNOWN_AGAIN = 'まだ確かめられません。通信が戻ってからもう一度押してください';
 const SEND_VERIFYING = '前に送った答えが届いたか確かめています…';
+const START_UNSURE = '答えは届きましたが、ダンが読み始めたか確かめられませんでした';
 const TOO_LONG = `長すぎます（単位を含めて${ANSWER_VALUE_MAX}文字まで）`;
 
 function Answered({ text }: { text: string }) {
@@ -147,9 +153,9 @@ function Failed({ text, children }: { text: string; children?: ReactNode }) {
 }
 
 /**
- * 送信の状態（画面に出す形）: 押していない / 送信中 / 保存された（その行が画面の記録に載るまでの一時状態） /
- * 失敗（保存されていない。選び直せる。送り直しも同じ id） / 保存できたか分からない（その id の保存を聞き直す。
- * verifying は作り直された部品が押せるようにする前の確かめ）。
+ * 送信の状態（画面に出す形）: 押していない / 送信中 / 保存された（置き場の事実。行がこのタブの記録に載っていない間は
+ * 置き場の答えを出す） / 失敗（保存されていない。選び直せる。送り直しも同じ id） / 保存できたか分からない（その id の
+ * 保存を聞き直す。verifying は作り直された部品が押せるようにする前の確かめ）。
  * id はこの答えの送信 ID（保存されたと分かるまで変えない）。長すぎて送らなかった失敗は前の送信の id を持つ
  */
 type SendState =
@@ -167,92 +173,98 @@ function useCanAnswer(answered: boolean) {
   return !!submit && !!ownerId && !!roomId && !!messageId && complete && !live && !streaming && !answered;
 }
 
-/** 保存済みなのにダンの処理が始まっていなかった答えを、同じ ID でもう一度送る（1回だけ。サーバーはそれで始める） */
-function sendAgainToStart(key: string, submit: ShapeSubmit | null) {
-  const e = getAnswerSend(key);
-  if (!e || e.kicked || !submit) return;
-  setAnswerSend(key, { ...e, kicked: true });
-  submit(e.text, e.answerTo, e.id).catch(() => { /* 答えはもう保存済み（記録が根拠）。始まらなければ次に確かめた時にまた分かる */ });
-}
-
-/**
- * その送信 ID の保存をサーバーに聞いて、置き場の状態を決める: 保存済み（ダンの処理が始まっていなければ同じ ID で
- * 送って始める）／保存されていない＝失敗（同じ ID で送り直せる）／聞けない＝分からない（押せない）。
- * by はこの確かめをした部品の表示の印（その表示ではもう確かめた）。
- */
-function checkAnswerSend(key: string, askSaved: ShapeRecheck | null, submit: ShapeSubmit | null, by: string) {
-  const e = getAnswerSend(key);
-  if (!e || e.checking) return;
-  if (!askSaved) { setAnswerSend(key, { ...e, status: 'unknown', again: true, seenBy: by }); return; }
-  setAnswerSend(key, { ...e, checking: true, again: false });
-  askSaved(e.id)
-    .then((r) => {
-      const cur = getAnswerSend(key);
-      if (!cur || cur.id !== e.id) return;
-      setAnswerSend(key, { ...cur, status: r.saved ? 'saved' : 'failed', checking: false, seenBy: by });
-      if (r.saved && r.started === false) sendAgainToStart(key, submit);
-    })
-    .catch(() => {
-      const cur = getAnswerSend(key);
-      if (cur && cur.id === e.id) setAnswerSend(key, { ...cur, status: 'unknown', checking: false, again: true, seenBy: by });
-    });
-}
-
 /**
  * 答えの送信と「答えた」の判定。
  * - recorded: 部屋の記録（照合情報つきの保存済み発言）にあるこの部品への答え。これが根拠
- * - 送信の状態は置き場（answer-sends.ts）にある。saved は、保存されてからその行が記録（utterances）に載るまでの
- *   一時状態。載ったら印（seen）を付け、以後は記録だけを見る（取り消しで記録から消えれば、押し直せる。新しい ID）
- * - 作り直された部品（この表示がまだ確かめていない、決着していない送信がある）は、押せるようにする前にその ID の
- *   保存をサーバーに確かめる。確かめが済むまでと、分からない間は押せない
+ * - 送信の状態は置き場（answer-sends.ts）にある。保存済みの行がまだ記録に載っていない間は、置き場の答えを出す。
+ *   このタブの記録に一度載った後で消えた・照会で無いと分かった（取り消し）時だけ、押し直せる（新しい ID）
+ * - 部品が描かれた時に1回、決着していない送信があればその ID の保存をサーバーに確かめる（押せるようにする前の確かめは
+ *   この時だけ。ほかのタブからの取り込みでは聞かない）。確かめが済むまでと、分からない間は押せない
  */
 function useAnswerSend(recorded: string | null) {
   const { utterances, submit, recheck: askSaved, ownerId, roomId } = useContext(ShapeAnswerContext);
   const { messageId, part } = useContext(ShapeMetaContext);
   const key = ownerId && roomId && messageId ? answerSendKey(ownerId, roomId, messageId, part) : null;
-  const entry = useSyncExternalStore(subscribeAnswerSends, () => getAnswerSend(key), () => null);
-  // この表示の印。置き場の seenBy がこれと同じなら、この表示が送った・確かめた送信（もう確かめなくてよい）
-  const [by] = useState(newSendId);
+  useSyncExternalStore(subscribeAnswerSends, () => answerSendVersion(key), () => 0);
+  const entry = getAnswerSend(key);
+  const h = answerSendHere(key);
   // 長すぎて送らなかった値（送っていないので置き場は変えない）
   const [tooLong, setTooLong] = useState<string | null>(null);
-  const inRecord = !!entry && entry.status === 'saved' && utterances.some((u) => u.id === entry.id);
-  // 記録に一度載った後で記録から消えた（取り消し）: 送信としては何もしていないのと同じ（押し直しは新しい ID）
-  const withdrawn = !!entry && entry.status === 'saved' && !!entry.seen && !inRecord;
-  const mustCheck = !!entry && !entry.checking && needsCheck(entry) && entry.seenBy !== by;
+  const inRecord = !!entry && utterances.some((u) => u.id === entry.id);
+  const gone = !!entry && isGone(entry, inRecord);
+  // この部品が描いている間、送り先を置き場に結び付ける（開始の確かめはその間だけ続く）
+  useEffect(() => (key ? attachAnswerSend(key, { ask: askSaved, submit }) : undefined), [key, askSaved, submit]);
   useEffect(() => {
-    if (key && entry && inRecord && !entry.seen) setAnswerSend(key, { ...entry, seen: true });   // 記録に載った: 以後は記録が根拠
-  }, [key, entry, inRecord]);
+    if (entry && inRecord) noteInRecord(entry.id);   // このタブの記録に載った: このタブで保存を確かめた
+  }, [entry, inRecord]);
+  // 描かれた時に1回だけ確かめる（取り込みで変わっても聞き直さない）
+  const [mountChecked, setMountChecked] = useState(false);
   useEffect(() => {
-    if (key && mustCheck) checkAnswerSend(key, askSaved, submit, by);
-  }, [key, mustCheck, askSaved, submit, by]);
-  const answer = recorded ?? (entry && entry.status === 'saved' && !entry.seen && !inRecord ? entry.value : null);
+    if (!key) return undefined;
+    let alive = true;
+    const e = getAnswerSend(key);
+    if (e && needsCheck(e, utterances.some((u) => u.id === e.id), answerSendHere(key).sending)) {
+      void resumeAnswerSend(key).finally(() => { if (alive) setMountChecked(true); });
+    } else setMountChecked(true);
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  // ほかのタブ・前のページの「送信中」が長く変わらない: その通信はもう無いとみなして「確かめる」を出す（聞きはしない）
+  const [, setTick] = useState(0);
+  const otherSending = !!entry && entry.status === 'sending' && !h.sending;
+  const staleIn = otherSending ? STALE_SENDING_MS - (Date.now() - entry.at) : 0;
+  useEffect(() => {
+    if (!otherSending || staleIn <= 0) return undefined;
+    const t = setTimeout(() => setTick((x) => x + 1), staleIn + 50);
+    return () => clearTimeout(t);
+  }, [otherSending, staleIn]);
+  const verifying = !mountChecked && !!entry && !gone && mustCheckBeforePress(entry, h.sending);
+  const answer = recorded ?? (entry && entry.status === 'saved' && !gone && !inRecord ? entry.value : null);
   let send: SendState;
   if (tooLong !== null) send = { status: 'failed', value: tooLong, reason: 'too long', id: entry?.id };
-  else if (!entry || withdrawn) send = { status: 'idle' };
-  else if (entry.checking || mustCheck) send = { status: 'unknown', value: entry.value, id: entry.id, checking: true, verifying: entry.seenBy !== by };
-  else if (entry.status === 'unknown') send = { status: 'unknown', value: entry.value, id: entry.id, again: entry.again };
-  else send = { status: entry.status, value: entry.value, id: entry.id };
+  else if (!entry || gone) send = { status: 'idle' };
+  else if (entry.status === 'saved') send = { status: 'saved', value: entry.value, id: entry.id };
+  else if (verifying || h.checking) send = { status: 'unknown', value: entry.value, id: entry.id, checking: true, verifying };
+  else if (entry.status === 'sending' && (h.sending || staleIn > 0)) send = { status: 'sending', value: entry.value, id: entry.id };
+  else if (entry.status === 'sending' || entry.status === 'unknown') send = { status: 'unknown', value: entry.value, id: entry.id, again: h.unsure === entry.id };
+  else send = { status: 'failed', value: entry.value, id: entry.id };
   const run = (text: string, answerTo: AnswerTo, value: string, raw?: string) => {
     if (!submit || !key) return;
     const prev = getAnswerSend(key);
-    // 保存されたと分かっていない送信の続きは同じ送信 ID（二重に保存されない）。初めて（置き場に無い）は新しい ID
-    const id = prev && prev.status !== 'saved' ? prev.id : newSendId();
+    // 保存されたと分かっていない送信の続きは同じ送信 ID（二重に保存されない）。新しい ID は、初めて（置き場に無い）か、
+    // この表示が保存を確かめた後で取り消されたと確かめた時だけ（前の ID を prev に持つ）
+    let id: string;
+    let prevIds: string[] | undefined;
+    if (!prev) id = newSendId();
+    else if (prev.status === 'saved') {
+      if (!isGone(prev, utterances.some((u) => u.id === prev.id))) return;
+      id = newSendId();
+      prevIds = [prev.id, ...(prev.prev ?? [])].slice(0, 10);
+    } else {
+      id = prev.id;
+      prevIds = prev.prev;
+    }
     setTooLong(null);
-    const base = { id, value, text, answerTo, raw, page: PAGE, at: 0, seenBy: by };
-    setAnswerSend(key, { ...base, status: 'sending' });
-    // 結果は置き場に書く（部品が作り直されていても、この送信の結果は残る）
-    submit(text, answerTo, id)
-      .then((saved) => {
-        setAnswerSend(key, { ...base, id: saved.id, status: 'saved' });
-        if (saved.started === false) sendAgainToStart(key, submit);
-      })
-      .catch((e: unknown) => setAnswerSend(key, { ...base, status: e instanceof Error && e.message === SEND_UNKNOWN ? 'unknown' : 'failed' }));
+    sendAnswer(key, { id, value, text, answerTo, raw, page: PAGE, ...(prevIds ? { prev: prevIds } : {}) });
   };
-  // 保存できたか分からない時の「確かめる」
+  // 保存できたか分からない時・ダンが読み始めたか分からない時の「確かめる」
   const recheck = () => {
-    if (key && entry && entry.status === 'unknown' && !entry.checking) checkAnswerSend(key, askSaved, submit, by);
+    if (key && entry && !h.checking) void recheckAnswerSend(key);
   };
-  return { send, setTooLong, answer, run, recheck, raw: entry?.raw };
+  const startUnsure = !!entry && entry.status === 'saved' && entry.start === 'pending' && h.gaveUp === entry.id && !gone;
+  return { send, setTooLong, answer, run, recheck, raw: entry?.raw, startUnsure, checking: h.checking };
+}
+
+/** 答えは保存されたが、ダンの処理が始まったと確かめられないまま確かめを使い切った */
+function StartProblem({ show, checking, recheck }: { show: boolean; checking: boolean; recheck: () => void }) {
+  if (!show) return null;
+  return (
+    <Failed text={START_UNSURE}>
+      <button type="button" onClick={recheck} disabled={checking} className="rounded border border-border px-2 py-0.5 text-xs text-foreground hover:bg-muted disabled:opacity-50">
+        {checking ? '確かめています…' : '確かめる'}
+      </button>
+    </Failed>
+  );
 }
 
 function SendProblem({ send, answered, recheck, id }: { send: SendState; answered: boolean; recheck: () => void; id?: string }) {
@@ -283,7 +295,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
   const { utterances } = useContext(ShapeAnswerContext);
   const { messageId, part } = useContext(ShapeMetaContext);
   const recorded = messageId ? findChoiceAnswer(utterances, messageId, part) : null;
-  const { send, answer, run, recheck } = useAnswerSend(recorded);
+  const { send, answer, run, recheck, startUnsure, checking } = useAnswerSend(recorded);
   const canAnswer = useCanAnswer(!!answer);
   const disabled = !canAnswer || send.status === 'sending' || send.status === 'unknown';
   const choose = (o: string) => {
@@ -315,6 +327,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
         {options.length === 0 ? <div className="h-8 animate-pulse rounded-lg bg-muted/40" /> : null}
       </div>
       <SendProblem send={send} answered={!!answer} recheck={recheck} />
+      <StartProblem show={!!answer && startUnsure} checking={checking} recheck={recheck} />
     </div>
   );
 };
@@ -327,7 +340,7 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   const { messageId, part } = useContext(ShapeMetaContext);
   const inputId = useId();
   const recorded = messageId ? findInputAnswer(utterances, messageId, part) : null;
-  const { send, setTooLong, answer, run, recheck, raw } = useAnswerSend(recorded);
+  const { send, setTooLong, answer, run, recheck, raw, startUnsure, checking } = useAnswerSend(recorded);
   // 作り直された部品は、決着していない送信で打った値を入力欄に戻す
   const [value, setValue] = useState(() => raw ?? '');
   const canAnswer = useCanAnswer(!!answer);
@@ -378,6 +391,7 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
         </form>
       ) : null}
       <SendProblem send={send} answered={!!answer} recheck={recheck} id={`${inputId}-error`} />
+      <StartProblem show={!!answer && startUnsure} checking={checking} recheck={recheck} />
     </div>
   );
 };

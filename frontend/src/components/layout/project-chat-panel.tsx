@@ -65,7 +65,7 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
-import { SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRecheck, type ShapeSubmit } from '@/components/chat/chat-shapes';
+import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRecheck, type ShapeSubmit } from '@/components/chat/chat-shapes';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { RoomBoard } from '@/components/chat/room-board';
@@ -100,8 +100,14 @@ type DisplayItem =
 
 // 部品（選択・入力）の答えを送る時の追加情報: 照合情報、部品が決めた送信 ID（保存されたと分かるまで同じ ID で送る）、
 // 保存された／保存されていない（not saved）／分からない（unknown）の知らせ
-// onSaved の started: echo が無く「保存されたか」の口で確かめた時の、ダンの処理が始まったか（false＝保存済みだが始まっていない）
-type SendExtra = { answerTo?: AnswerTo; clientMessageId?: string; onSaved?: (msg: MessageResponse, started?: boolean | null) => void; onFailed?: (why: string) => void };
+// onSaved の reply: echo が無く「保存されたか」の口で確かめた時の、ダンの処理の開始（started / start）。
+// onEnded: その送信の通信が終わった時に1回（startSeen: ダンの処理が始まった印＝追い連絡を入れた・返事が来た、を見たか）。
+// background: 始まっていない答えの送り直し。ほかの送信の通信中なら、それを切らないよう送らない（onFailed('busy')）
+type SavedStart = { started?: boolean | null; start?: string | null };
+type SendExtra = {
+  answerTo?: AnswerTo; clientMessageId?: string; onSaved?: (msg: MessageResponse, reply?: SavedStart) => void; onFailed?: (why: string) => void;
+  onEnded?: (startSeen: boolean) => void; background?: boolean;
+};
 type SendMessageHandle = (content: string, extra?: SendExtra) => void;
 
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
@@ -1035,8 +1041,10 @@ function ChatInput({
     let savedMessage: MessageResponse | null = null;
     // 部品（選択・入力）の答え: 保存されたら onSaved、保存されなかったら onFailed、分からなければ onFailed('unknown')（1回だけ）
     let settled = false;
-    let checking = false;
-    const reportSaved = (m: MessageResponse, started?: boolean | null) => { if (!settled) { settled = true; extra?.onSaved?.(m, started); } };
+    let settling: Promise<void> | null = null;
+    // この送信の通信の中で、ダンの処理が始まった印（追い連絡を入れた・返事が来た）を見たか
+    let startSeen = false;
+    const reportSaved = (m: MessageResponse, reply?: SavedStart) => { if (!settled) { settled = true; extra?.onSaved?.(m, reply); } };
     const reportFailed = (why: string) => { if (!settled) { settled = true; extra?.onFailed?.(why); } };
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
@@ -1117,19 +1125,20 @@ function ChatInput({
     // 途中の中継が返すこともある）ので、この送信 ID の保存をサーバーに聞いてから決める（最新の一覧に無いことでは
     // 決めない）。保存済みなら記録に載せて保存済み、サーバーが「保存されていない」と答えたら失敗（部品は同じ ID で
     // 送り直せる）、聞けなければ「分からない」（部品は押せず「確かめる」を出す）。requestId の新旧に関わらず必ず一度は決着させる。
-    const settleAnswer = async () => {
-      if (!extra?.answerTo || settled || checking) return;
+    // 確かめている間に別の終わり方の知らせが来ても、確かめるのはこの1回（同じ約束を返す。終わりの知らせ onEnded はこれを待つ）
+    const settleAnswer = () => (settling ??= settleAnswerOnce());
+    const settleAnswerOnce = async () => {
+      if (!extra?.answerTo || settled) return;
       if (savedMessage) { reportSaved(savedMessage); return; }
-      checking = true;   // 確かめている間に別の終わり方の知らせが来ても、確かめるのはこの1回
       const dropTemp = () => queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
         old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
       );
       let verdict: 'saved' | 'not saved' | 'unknown' = 'unknown';
       let found: MessageResponse | undefined;
-      let started: boolean | null | undefined;
+      let reply: SavedStart = {};
       try {
         const r = await api.rooms.messageSaved(roomId, tempUserMessageId);
-        if (r && r.saved === true && r.message) { verdict = 'saved'; found = r.message; started = r.started; } else if (r && r.saved === false) verdict = 'not saved';
+        if (r && r.saved === true && r.message) { verdict = 'saved'; found = r.message; reply = { started: r.started, start: r.start }; } else if (r && r.saved === false) verdict = 'not saved';
       } catch {
         verdict = 'unknown';
       }
@@ -1142,7 +1151,7 @@ function ChatInput({
             ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
             : { messages: [row, ...old.messages] };
         });
-        reportSaved(row, started);   // started: false なら部品が同じ ID で送り直してダンの処理を始めさせる
+        reportSaved(row, reply);   // 部品が開始の状態に合わせる（started: false なら同じ ID で送り直してダンの処理を始めさせる）
         return;
       }
       dropTemp();
@@ -1185,6 +1194,7 @@ function ChatInput({
             }
           },
           onAIMessage: (msg) => {
+            startSeen = true;   // この送信のターンの返事が来た＝ダンの処理が始まった（新しい送信に追い越されていても）
             if (streamRequestRef.current !== requestId) return;
             queryClient.setQueryData(
               queryKey,
@@ -1211,6 +1221,9 @@ function ChatInput({
               (old: { messages: MessageResponse[] } | undefined) =>
                 old ? { messages: old.messages.map((m) => (m.pendingFollowup ? { ...m, pendingFollowup: false } : m)) } : old
             );
+          },
+          onFollowupQueued: () => {
+            startSeen = true;   // 追い連絡を走っているターンに入れた＝ダンの処理に渡った
           },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
@@ -1328,13 +1341,17 @@ function ChatInput({
         toast.error('メッセージ送信中に問題が発生しました');
       }
     } finally {
-      // どの終わり方でも、部品の答えは必ず一度決着させる（新しい送信に追い越された時も）
-      void settleAnswer();
       // ストリームが終わったら必ず ref を破棄する（残骸が「ダン作業中」と
       // 誤判定され、停止後の送信が追い連絡に誤ルーティングされるのを防ぐ）。
       // 次の送信がすでに新しい controller をセットしている場合は触らない。
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
+      }
+      // どの終わり方でも、部品の答えは必ず一度決着させ（新しい送信に追い越された時も）、それから通信の終わりを知らせる
+      // （部品は、保存済みでダンの処理が始まった印を見ていなければ、開始の状態をサーバーに確かめる）
+      if (extra?.answerTo) {
+        await settleAnswer();
+        extra.onEnded?.(startSeen);
       }
     }
   }, [
@@ -1356,6 +1373,8 @@ function ChatInput({
   useEffect(() => {
     if (sendMessageRef) {
       sendMessageRef.current = (content: string, extra?: SendExtra) => {
+        // 始まっていない答えの送り直し（裏で自動）は、ほかの送信の通信中には送らない（それを切らない。部品が後でまた確かめる）
+        if (extra?.background && abortControllerRef.current) { extra.onFailed?.(SEND_BUSY); return; }
         serverMessageIdRef.current = null;
         aiRespondedRef.current = false;
         sendMessageCore(content, [], [], undefined, [], extra);
@@ -2137,13 +2156,17 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
   // 部品（選択・入力）の答え: 同じ経路で本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
-  // 一緒に保存する。送信 ID は部品が決めた物（送り直しも同じ ID）。サーバーに保存されたら保存された行の id で resolve、
-  // 保存されていないとサーバーが答えたら reject（部品が選び直しを出す）、保存できたか確かめられなかったら
-  // reject(SEND_UNKNOWN)（部品が「確かめる」を出す）
-  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo, clientMessageId) => new Promise<{ id: string; started?: boolean | null }>((resolve, reject) => {
+  // 一緒に保存する。送信 ID は部品が決めた物（送り直しも同じ ID）。サーバーに保存されたら保存された行の id で resolve
+  // （echo が無く確かめた時は開始の状態も）、保存されていないとサーバーが答えたら reject（部品が選び直しを出す）、保存できたか
+  // 確かめられなかったら reject(SEND_UNKNOWN)（部品が「確かめる」を出す）。通信が終わったら opts.onEnded
+  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo, clientMessageId, opts) => new Promise<{ id: string; started?: boolean | null; start?: string | null }>((resolve, reject) => {
     const send = sendMessageRef.current;
     if (!send) { reject(new Error('送信できません')); return; }
-    send(text, { answerTo, clientMessageId, onSaved: (msg, started) => resolve({ id: msg.id, started }), onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)) });
+    send(text, {
+      answerTo, clientMessageId, background: opts?.background, onEnded: opts?.onEnded,
+      onSaved: (msg, reply) => resolve({ id: msg.id, ...(reply ?? {}) }),
+      onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)),
+    });
   }), []);
   // 今ログインしている本人。部品の「答えました」はこの人の保存済みの発言だけで決める
   const ownerId = useAuthStore((state) => state.user?.id);
@@ -2286,7 +2309,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
           ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
           : { messages: [row, ...old.messages] };
       });
-      return { saved: true, started: r.started };
+      return { saved: true, started: r.started, start: r.start };
     }
     if (r && r.saved === false) return { saved: false };
     throw new Error('保存されたか分かりません');

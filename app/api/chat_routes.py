@@ -221,17 +221,18 @@ def _is_uuid(value) -> bool:
 
 
 def _may_start_saved_before(right: Optional[dict], room_id: str, message_id: str) -> bool:
-    """A request holding the start right of a send whose row was saved BEFORE this request came (a send tried again):
-    start Dan's processing only if a request in this process took the right earlier and gave it back without starting
-    anything (or held it too long) — the recovery for "saved, but nothing started it". If this process has never seen
-    the right (it was saved before a Core restart, say), whether it started is unknown: it is not started again (the
-    right is marked begun, so no later try starts it either)."""
-    from app.services.chat_service import begin_send_right
+    """A request holding the start right of a send whose row was already there when it came to save it (a send tried
+    again): start Dan's processing only if it is the same send in this process — a request here took the right earlier
+    and gave it back without starting anything (or held it too long): the recovery for "saved, but nothing started it";
+    or another request of the same send created the row while this one held the right (it saved first, without the
+    right, and started nothing). Otherwise (saved before a Core restart, say) whether it started is unknown: it is not
+    started again (the right is settled as unknown, so no later try starts it either, and "was it saved?" says so)."""
+    from app.services.chat_service import send_right_row_created_while_held, settle_send_right_unknown
     if right is None:
         return False
-    if right["returned"]:
+    if right["returned"] or send_right_row_created_while_held("start", room_id, message_id, right["token"]):
         return True
-    begin_send_right("start", room_id, message_id, right["token"])
+    settle_send_right_unknown("start", room_id, message_id, right["token"])
     return False
 
 
@@ -1940,8 +1941,10 @@ async def get_message_saved(
 
     started (the start right of that send, chat_service.send_right_state): true once Dan's processing of it began;
     false when it is saved but nothing started it (the request that saved it ended first and gave the right back, or
-    held it too long) — the screen then sends the same id again, and that request starts it; null when a request is
-    still about to start it, or this process does not know (nothing to do)."""
+    held it too long, or what it began failed for certain) — the screen then sends the same id again, and that request
+    starts it; null when it is not settled: start says which — "taken" (a request holds the right and may still start
+    it: ask again a little later) or "unknown" (this process does not know whether it started — saved before a restart
+    — and will not start it: nothing to do)."""
     try:
         row = await asyncio.to_thread(service.get_own_message_sync, room_id, current_user.user_id, message_id)
     except ValueError as e:
@@ -1955,8 +1958,9 @@ async def get_message_saved(
     if not msgs:
         return {"saved": False}
     from app.services.chat_service import send_right_state
-    state = send_right_state("start", room_id, message_id)
-    return {"saved": True, "message": msgs[0], "started": True if state == "begun" else False if state == "returned" else None}
+    state = send_right_state("start", room_id, message_id) or "unknown"
+    return {"saved": True, "message": msgs[0], "started": True if state == "begun" else False if state == "returned" else None,
+            "start": state}
 
 
 @router.post("/rooms/{room_id}/messages", response_model=MessageResponse)
@@ -2207,20 +2211,37 @@ def _disarm_cancel_tombstone(room_id: str, message_id: str, user_id: str) -> boo
     return True
 
 
-# 部屋で今動いている作業を、この Core で始めさせた人（送信の入口で部屋のメンバーと確かめた後、作業を始める所で記録）。
-# 停止の口がデータベースに部屋のメンバーかを聞けない時、データベースを使わずに本人と確かめられるのはこれだけ:
-# その部屋の作業が今動いていて、それを始めさせたのがこの人なら止めてよい。確かめられない人はメンバー扱いにしない。
+# 部屋で今動いている作業を、この Core で始めさせた人。停止の口がデータベースに部屋のメンバーかを聞けない時、データベースを
+# 使わずに本人と確かめられるのはこれだけ: その部屋の作業が今動いていて、それを始めさせたのがこの人なら止めてよい。確かめ
+# られない人はメンバー扱いにしない。記録は、送信の口（部屋のメンバーと確かめた後）がダンの新しいターンを始めた時に作り、
+# その送信の口がそのターンを流し終える（または切れる）時に消す（印 token で、自分の記録だけを消す）。追い連絡・通話への
+# 受け渡しは新しい作業を始めないので記録しない。記録が無い作業（裏の起き直し・観察者など、ほかの入口から始まった物、
+# 通信が切れた後も続いている物）は、この確かめでは誰の物とも分からない＝止める許可に使わない。
 _room_work_senders: dict = {}   # room_id -> user_id
+_room_work_tokens: dict = {}    # room_id -> その記録を作った送信の口の印
 
 
-def _note_room_work_sender(room_id: str, user_id: str) -> None:
-    if room_id and user_id:
-        _room_work_senders[room_id] = user_id
+def _note_room_work_sender(room_id: str, user_id: str) -> Optional[str]:
+    """この部屋で、この人の送信がダンの新しいターンを始めた。消す時に使う印を返す"""
+    import uuid as _uuid
+    if not room_id or not user_id:
+        return None
+    token = _uuid.uuid4().hex
+    _room_work_senders[room_id] = user_id
+    _room_work_tokens[room_id] = token
+    return token
+
+
+def _forget_room_work_sender(room_id: Optional[str], token: Optional[str]) -> None:
+    """その送信の口がターンを流し終えた: 自分の記録（印が同じ）だけを消す。後の送信が作った記録は残す"""
+    if room_id and token and _room_work_tokens.get(room_id) == token:
+        _room_work_tokens.pop(room_id, None)
+        _room_work_senders.pop(room_id, None)
 
 
 def _started_running_work(room_id: str, user_id: str) -> bool:
     """この部屋の作業が今動いていて、それをこの Core で始めさせたのがこの人か（データベースを使わない確かめ）"""
-    if not room_id or not user_id or _room_work_senders.get(room_id) != user_id:
+    if not room_id or not user_id or room_id not in _room_work_tokens or _room_work_senders.get(room_id) != user_id:
         return False
     from app.services.cancellation import CancellationRegistry
     try:
@@ -2309,7 +2330,8 @@ async def send_dan_message_stream(
         done_sent = False  # done イベント送信済みフラグ
         result_saved = False  # AI回答DB保存済みフラグ
         _early_turn_claim = None  # (room_id, token) 準備中の印（2026-10-14 追補）。finally で外す
-        _start_right = None  # この送信の「処理を始める権利」{room, key, token, begun}。始めずに終わったら finally で返す
+        _start_right = None  # この送信の「処理を始める権利」{room, key, token, begun, settled}。始めずに終わったら finally で返す
+        _work_token = None   # この送信がダンの新しいターンを始めた記録の印（停止の口の本人確かめ。finally で消す）
         cli_saved_ai_message = False  # CLIスレッドがAI応答をDB保存済みか
         replan_requested = _is_replan_request(request.content)
         # スラッシュコマンド検出: /skill-name でスキルを明示起動
@@ -2415,6 +2437,13 @@ async def send_dan_message_stream(
                 return (f"data: {json.dumps({'type': 'error', 'session_id': request.session_id or '', 'message': text})}\n\n"
                         f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or ''})}\n\n")
 
+            # 並列保存の枝が始める前の確かめ（この ID の行がもう無いこと。下の _parallel_now）。待ち時間を増やさないよう、部屋の
+            # メンバーの確かめと同時に聞いておく。答えはメンバーと分かった後でだけ使う（メンバーでなければ捨てる）
+            _prior_probe = None
+            if _parallel_save and _is_uuid(request.client_message_id):
+                _prior_probe = asyncio.ensure_future(asyncio.to_thread(
+                    _saved_send, service, request.session_id, current_user.user_id, request.client_message_id))
+                _prior_probe.add_done_callback(lambda f: f.cancelled() or f.exception())
             # この部屋に書き込めるのはこの部屋のメンバーだけ。何かを読む・起こす前に確かめる（答えの照合・保存済みの確かめ・
             # 並列保存の作業開始が、メンバーでない人の問い合わせに答えたり、よその部屋の作業を起こしたりしない）
             if request.session_id and not await asyncio.to_thread(member_of_room_sync, service.supabase, request.session_id, current_user.user_id):
@@ -2452,7 +2481,7 @@ async def send_dan_message_stream(
             if _send_key:
                 from app.services.chat_service import take_send_right
                 _right = take_send_right("start", request.session_id, _send_key)
-                _start_right = {"room": request.session_id, "key": _send_key, "begun": False, "token": _right["token"] if _right else None}
+                _start_right = {"room": request.session_id, "key": _send_key, "begun": False, "settled": False, "token": _right["token"] if _right else None}
 
             def _echo_only(row: dict, rid: str, name: Optional[str]) -> str:
                 """The saved row's echo and done: this request starts nothing."""
@@ -2467,7 +2496,7 @@ async def send_dan_message_stream(
                 # 戻り道）。ほかの要求が持っている・始めた・この Core が知らない（再起動の前の保存など）なら、保存行を返して終わる
                 if not _may_start_saved_before(_right, request.session_id, _send_key):
                     if _start_right is not None:
-                        _start_right["begun"] = True   # 返さない（始めたか分からない送信を、後の要求も始めない）
+                        _start_right["settled"] = True   # 返さない（始めたか分からない送信を、後の要求も始めない）
                     logger.info("answer already saved (room=%s msg=%s): echo only", str(request.session_id)[:8], str(_already.get("id"))[:8])
                     _u = await service.get_user_by_id(current_user.user_id)
                     done_sent = True
@@ -2478,6 +2507,15 @@ async def send_dan_message_stream(
                 message = dict(_already)
                 room_id = request.session_id
                 _recovered = True
+            # 並列保存の枝（保存より前にダンの処理を始める）に入るのは、処理を始める権利を取れて、かつこの ID の行がまだ無いと
+            # 分かった時だけ。この Core が権利を覚えていない同じ送信の送り直し（Core の再起動・権利の失効の後）でも、前からある行を
+            # 二度始めない。行がある・聞けなかった時は逐次保存の枝で保存し、前からあった行なら始めない（下の _existed）
+            _parallel_now = _parallel_save and not (_send_key and _start_right["token"] is None)
+            if _parallel_now and _prior_probe is not None:
+                try:
+                    _parallel_now = (await _prior_probe) is None
+                except Exception:
+                    _parallel_now = False
             try:
                 if _recovered:
                     pass   # 保存済みの答えの処理を始める（上）。保存し直さない
@@ -2497,7 +2535,7 @@ async def send_dan_message_stream(
                     except Exception as e:
                         logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
                         message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=_reply_to_id, message_id=request.client_message_id, ai_context=_answer_ctx)
-                elif _parallel_save and not (_send_key and _start_right["token"] is None):
+                elif _parallel_now:
                     # 並列保存パス: ここでは保存せず room_id だけ確定する。実際の send_message は
                     # process_message_cli の cold start を起動した直後（裏で並走）に実行する。
                     room_id = request.session_id
@@ -2535,7 +2573,7 @@ async def send_dan_message_stream(
                     and not _may_start_saved_before(_right, room_id, _send_key)):
                 # この要求より前に保存されていた送信（同じ送信の送り直し）で、この Core にはそれを始めずに返した要求も無い:
                 # 始めたか分からないので始めない（後の要求も始めない）
-                _start_right["begun"] = True
+                _start_right["settled"] = True
                 logger.info("send saved before this request (room=%s msg=%s): echo only", str(room_id)[:8], str(message.get("id"))[:8])
                 _u = None if message.get("sender_name") else await service.get_user_by_id(current_user.user_id)
                 done_sent = True
@@ -2555,6 +2593,14 @@ async def send_dan_message_stream(
                 if not _start_right["begun"]:
                     logger.warning("start right moved on (room=%s msg=%s): not starting", str(_start_right["room"])[:8], str(_start_right["key"])[:8])
                 return _start_right["begun"]
+
+            def _undo_begin() -> None:
+                """What this request began failed for certain before it had any effect: give the right back."""
+                if _start_right is None or not _start_right.get("token") or not _start_right.get("begun"):
+                    return
+                from app.services.chat_service import undo_begin_send_right
+                undo_begin_send_right("start", _start_right["room"], _start_right["key"], _start_right["token"])
+                _start_right["begun"] = False
             # 送信者名は send_message の戻り値（sender_name）を再利用する。
             # 従来はここで users を再度引いており、send_message 内の get_sender と
             # 二重の往復になっていた。上書き(replace)経路は raw 行で sender_name を
@@ -2632,7 +2678,6 @@ async def send_dan_message_stream(
             # キャンセルフラグを登録（room_idが確定してから）
             room_id_for_cancel = room_id
             CancellationRegistry.register(room_id)
-            _note_room_work_sender(room_id, current_user.user_id)   # 停止の口が DB に聞けない時の本人の確かめ
             turn_flow.turn_started(room_id)   # 前のターンの「答えた」の印を外す（/active がまた作業中と答える）
 
             # ユーザーメッセージのエコー（即時保存パスのみ即送出。並列保存は cold start 起動後に送出）
@@ -2649,13 +2694,17 @@ async def send_dan_message_stream(
                     done_sent = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     return
+                _handed = False
                 try:
                     from app.services import voice_calls
                     voice_calls.deliver(room_id, _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or []))
-                    logger.info("[VOICE] chat message handed to the call in room=%s msg=%s", room_id, message["id"])
-                    yield f"data: {json.dumps({'type': 'voice_call_routed', 'session_id': room_id, 'message_id': message['id']})}\n\n"
+                    _handed = True
                 except Exception as e:
                     logger.warning("voice call hand-off failed (room=%s): %s", room_id, e)
+                    _undo_begin()   # 通話に渡らなかった（書き込む前の失敗）: 始めた権利を返す。同じ送信をもう一度送れば渡る
+                if _handed:
+                    logger.info("[VOICE] chat message handed to the call in room=%s msg=%s", room_id, message["id"])
+                    yield f"data: {json.dumps({'type': 'voice_call_routed', 'session_id': room_id, 'message_id': message['id']})}\n\n"
                 result_saved = True
                 done_sent = True
                 yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
@@ -2668,6 +2717,7 @@ async def send_dan_message_stream(
                     done_sent = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     return
+                _where = None
                 try:
                     from app.agent.streaming_session import submit_room_followup
                     followup_content = _build_content_with_media(
@@ -2681,10 +2731,15 @@ async def send_dan_message_stream(
                         # この直前に置くための目印（docs/current/chat-timeline-definition.md）。
                         received_at=(_followup_created.isoformat() if hasattr(_followup_created, "isoformat") else _followup_created),
                     )
-                    logger.info("[STREAMING] follow-up queued (%s) for room=%s msg=%s", _where, room_id, message["id"])
-                    yield f"data: {json.dumps({'type': 'followup_queued', 'session_id': room_id, 'message_id': message['id']})}\n\n"
                 except Exception as e:
                     logger.warning("submit_followup failed (room=%s): %s", room_id, e)
+                    # submit_room_followup は待ち行列に入れる操作を最後にしている: 例外なら入っていない（ダンに届かない）。
+                    # 始めた権利を返す（「保存されたか」は started: false と答え、画面が同じ送信をもう一度送れば入る）
+                    _undo_begin()
+                if _where is not None:
+                    logger.info("[STREAMING] follow-up queued (%s) for room=%s msg=%s", _where, room_id, message["id"])
+                    yield f"data: {json.dumps({'type': 'followup_queued', 'session_id': room_id, 'message_id': message['id']})}\n\n"
+                else:
                     yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': '追い連絡の注入に失敗しました'})}\n\n"
                 result_saved = True
                 done_sent = True
@@ -2881,6 +2936,9 @@ async def send_dan_message_stream(
                     done_sent = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     return
+                # この人の送信がこの部屋でダンの新しいターンを始めた（停止の口が DB に聞けない時の本人の確かめ。
+                # この送信の口がターンを流し終える時に finally で消す）
+                _work_token = _note_room_work_sender(room_id, current_user.user_id)
                 if message is None:
                     # 並列保存パス: 先に cold start を起動し（最初の __anext__ でCLIスレッド開始）、
                     # その裏で send_message(~1.27s) を実行して TTFT を短縮する。
@@ -3107,9 +3165,13 @@ async def send_dan_message_stream(
             logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         finally:
+            # この送信が始めたターンの「始めさせた人」の記録を消す（このターンを流すのはここまで。後の送信の記録は残る）
+            _forget_room_work_sender(room_id_for_cancel, _work_token)
             # 処理を始める権利を取ったのに何も始めずに終わった（切断・例外・取り消し）: 返す。同じ送信 ID の次の要求
-            # （画面の送り直し）が始められる＝「保存されたのに処理が始まらない」まま止まらないための戻り道
-            if _start_right is not None and _start_right.get("token") and not _start_right.get("begun"):
+            # （画面の送り直し）が始められる＝「保存されたのに処理が始まらない」まま止まらないための戻り道。
+            # 前からあった行で始めないと決めた（settled）権利は返さない
+            if (_start_right is not None and _start_right.get("token")
+                    and not _start_right.get("begun") and not _start_right.get("settled")):
                 try:
                     from app.services.chat_service import give_back_send_right
                     give_back_send_right("start", _start_right["room"], _start_right["key"], _start_right["token"])

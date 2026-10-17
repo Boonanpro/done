@@ -54,6 +54,7 @@ def env():
         clear_send_rights()
         cr._cancel_tombstones.clear()
         cr._room_work_senders.clear()
+        cr._room_work_tokens.clear()
         state["db"] = fx.FakeDB({
             "projects": [],
             "users": [{"id": USER, "display_name": "dan-test"}, {"id": OTHER, "display_name": "other-test"}],
@@ -221,6 +222,7 @@ def test_stopping_is_for_the_members_of_the_room() -> None:
     killed = []
     runs = NS(get_current_run_for_room=AsyncMock(return_value=None), pause_active_runs_for_room=AsyncMock(return_value=0))
     cr._room_work_senders.clear()
+    cr._room_work_tokens.clear()
     s, client = _cancel_client(db, killed, runs)
     with s:
         r = client.post("/api/v1/chat/dan/cancel", json={"session_id": ROOM}, headers={"x-test-user": OTHER})
@@ -248,6 +250,7 @@ def test_stopping_is_for_the_members_of_the_room() -> None:
             finally:
                 CancellationRegistry.unregister(ROOM)
                 cr._room_work_senders.clear()
+                cr._room_work_tokens.clear()
 
 
 def test_a_tombstone_only_removes_the_requesters_own_row(env) -> None:
@@ -328,9 +331,11 @@ def test_a_saved_send_that_nothing_started_is_started_by_its_retry(env) -> None:
     right = take_send_right("start", ROOM, NEW)
     env.state["db"].tables["chat_messages"].append({"id": NEW, "room_id": ROOM, "sender_type": "human", "sender_id": USER, "content": "Q → A",
                                                     "created_at": "2026-10-17T00:00:02Z", "ai_context": {"answer_to": link()}})
-    assert env.saved(ROOM, NEW)[1]["started"] is None            # a request is about to start it: nothing to do
+    body = env.saved(ROOM, NEW)[1]
+    assert body["started"] is None and body["start"] == "taken"   # a request is about to start it: ask again later
     give_back_send_right("start", ROOM, NEW, right["token"])
-    assert env.saved(ROOM, NEW)[1]["started"] is False           # saved, nothing started it
+    body = env.saved(ROOM, NEW)[1]
+    assert body["started"] is False and body["start"] == "returned"   # saved, nothing started it
     status, events = env.send({"answer_to": link()})
     assert types(events) == ["user_message", "followup_queued", "done"] and len(env.followups) == 1
     assert events[0]["message"]["id"] == NEW and sum(1 for r in rows(env) if r["id"] == NEW) == 1
@@ -412,34 +417,43 @@ def test_a_right_held_too_long_is_handed_over_once() -> None:
     clear_send_rights()
 
 
+def _new_turns(env, starts, killed, on_start=None):
+    """Sends start a new model turn (no turn is running, streaming input off, DAN_PARALLEL_SEND on): the CLI is replaced
+    by one that records each start (and whether its row was already saved then) and answers at once."""
+    db = env.state["db"]
+    db.tables["projects"] = [{"id": "test-project", "room_id": ROOM, "status": "in_progress", "title": "test"}]
+
+    async def cli(**kw):
+        starts.append(kw["content"])
+        if on_start:
+            on_start()
+        yield {"type": "result", "text": "test result", "cli_saved": True, "saved_message_id": "synthetic-ai-" + str(len(starts))}
+
+    run = NS(get_current_run=AsyncMock(return_value=None), create_run=AsyncMock(return_value={"id": "test-run"}), update_run=AsyncMock())
+    s = ExitStack()
+    s.enter_context(patch.dict("os.environ", {"DAN_PARALLEL_SEND": "1"}))
+    s.enter_context(patch("app.agent.streaming_session.streaming_enabled", return_value=False))
+    s.enter_context(patch("app.agent.turn_flow.waits_for_running_turn", return_value=False))
+    s.enter_context(patch("app.agent.turn_flow.claim_new_turn", return_value=None))
+    s.enter_context(patch("app.services.run_service.RunService", return_value=run))
+    s.enter_context(patch("app.agent.cli_runner.process_message_cli", cli))
+    s.enter_context(patch("app.agent.cli_runner.is_cli_active", return_value=False))
+    s.enter_context(patch("app.agent.cli_runner.kill_cli_process", side_effect=lambda room, **k: killed.append(room)))
+    s.enter_context(patch("app.services.outbound_message_service.OutboundMessageService", return_value=NS(digest_for_turn=lambda _: "")))
+    for n in ("_fetch_unseen_voice_digest", "_auto_timeline_refs", "_save_media_artifacts_in_background", "_trigger_observer"):
+        s.enter_context(patch.object(cr, n, return_value=None))
+    for n in ("_notify_dan_completion", "_register_written_chat_artifacts"):
+        s.enter_context(patch.object(cr, n, AsyncMock()))
+    return s
+
+
 def test_the_parallel_save_branch_takes_the_right_before_starting(env) -> None:
     """VERIFY4 P2-4: with streaming input off and DAN_PARALLEL_SEND on, an ordinary send starts the model before its row
     is saved. The same send twice must still start it once: the right is taken before the start (and before the
     "supersede the running turn" step, so the second request also stops nothing)."""
     env.reset()
-    db = env.state["db"]
-    db.tables["projects"] = [{"id": "test-project", "room_id": ROOM, "status": "in_progress", "title": "test"}]
     starts, killed = [], []
-
-    async def cli(**kw):
-        starts.append(kw["content"])
-        yield {"type": "result", "text": "test result", "cli_saved": True, "saved_message_id": "synthetic-ai-" + str(len(starts))}
-
-    run = NS(get_current_run=AsyncMock(return_value=None), create_run=AsyncMock(return_value={"id": "test-run"}), update_run=AsyncMock())
-    with ExitStack() as s:
-        s.enter_context(patch.dict("os.environ", {"DAN_PARALLEL_SEND": "1"}))
-        s.enter_context(patch("app.agent.streaming_session.streaming_enabled", return_value=False))
-        s.enter_context(patch("app.agent.turn_flow.waits_for_running_turn", return_value=False))
-        s.enter_context(patch("app.agent.turn_flow.claim_new_turn", return_value=None))
-        s.enter_context(patch("app.services.run_service.RunService", return_value=run))
-        s.enter_context(patch("app.agent.cli_runner.process_message_cli", cli))
-        s.enter_context(patch("app.agent.cli_runner.is_cli_active", return_value=False))
-        s.enter_context(patch("app.agent.cli_runner.kill_cli_process", side_effect=lambda room, **k: killed.append(room)))
-        s.enter_context(patch("app.services.outbound_message_service.OutboundMessageService", return_value=NS(digest_for_turn=lambda _: "")))
-        for n in ("_fetch_unseen_voice_digest", "_auto_timeline_refs", "_save_media_artifacts_in_background", "_trigger_observer"):
-            s.enter_context(patch.object(cr, n, return_value=None))
-        for n in ("_notify_dan_completion", "_register_written_chat_artifacts"):
-            s.enter_context(patch.object(cr, n, AsyncMock()))
+    with _new_turns(env, starts, killed):
         a = env.send({"content": "plain"})
         b = env.send({"content": "plain"})
     assert len(starts) == 1 and sum(1 for r in rows(env) if r["id"] == NEW) == 1
@@ -455,3 +469,136 @@ def test_the_earlier_refusals_still_hold(env) -> None:
     assert env.send({"answer_to": link(value=0)})[0] == 422                                              # wrong type
     assert types(env.send({"replace_message_id": MID, "content": "x"}, OTHER)[1]) == ["error", "done"]  # someone else's row
     assert rows(env) == before
+
+
+def test_the_parallel_branch_does_not_start_a_row_saved_before_this_core_knew_it(env) -> None:
+    """VERIFY5 P2-3: the parallel branch starts the model before saving. When this Core no longer remembers the send's
+    rights (a restart, an expiry; modelled by forgetting them) and the same send arrives again, its row is already
+    there: the branch checks for it before starting and starts nothing (the send is settled as unknown, so later tries
+    do not start it either). The row is saved once; an answer (saved first, not the parallel branch) behaves the same."""
+    env.reset()
+    starts, killed = [], []
+    with _new_turns(env, starts, killed):
+        a = env.send({"content": "plain"})
+        clear_send_rights()                                   # the Core forgot (restart / expiry)
+        b = env.send({"content": "plain"})
+        c = env.send({"content": "plain"})
+    assert starts == ["plain"] and sum(1 for r in rows(env) if r["id"] == NEW) == 1
+    assert types(a[1]) == ["user_message", "ai_message", "done"]
+    assert types(b[1]) == types(c[1]) == ["user_message", "done"] and not killed
+    body = env.saved(ROOM, NEW)[1]
+    assert body["started"] is None and body["start"] == "unknown"   # not "started": this Core does not know
+    env.state["db"].tables["chat_messages"] = [r for r in env.state["db"].tables["chat_messages"] if r["id"] != NEW]
+    starts.clear()
+    with _new_turns(env, starts, killed):
+        env.send({"answer_to": link()})
+        clear_send_rights()
+        again = env.send({"answer_to": link()})
+    assert len(starts) == 1 and types(again[1]) == ["user_message", "done"]
+
+
+def test_a_follow_up_that_could_not_be_queued_gives_the_start_back(env) -> None:
+    """VERIFY5 P2-2 (4): the injection of the follow-up failed before it queued anything. "Began" is not "started": the
+    right is given back, "was it saved?" says started: false, and the same send again queues it — once."""
+    env.reset()
+    with patch("app.agent.streaming_session.submit_room_followup", side_effect=RuntimeError("rejected before queueing")):
+        status, events = env.send({"answer_to": link()})
+    assert types(events) == ["user_message", "error", "done"] and not env.followups
+    body = env.saved(ROOM, NEW)[1]
+    assert body["started"] is False and body["start"] == "returned"
+    status, events = env.send({"answer_to": link()})
+    assert types(events) == ["user_message", "followup_queued", "done"] and len(env.followups) == 1
+    assert env.saved(ROOM, NEW)[1]["started"] is True
+    status, events = env.send({"answer_to": link()})
+    assert types(events) == ["user_message", "done"] and len(env.followups) == 1
+    assert sum(1 for r in rows(env) if r["id"] == NEW) == 1
+
+
+def test_a_cut_after_the_echo_before_the_start_gives_the_start_back(env) -> None:
+    """VERIFY5 P2-2 (3): the echo went out, then the stream was cut before anything started: the right is given back, so
+    "was it saved?" says started: false (null with "taken" until the clean-up ran), and the same send again starts it."""
+    import asyncio
+    from app.models.chat_schemas import MessageSendRequest
+    env.reset()
+
+    async def cut():
+        response = await cr.send_dan_message_stream(
+            MessageSendRequest(content="Q → A", session_id=ROOM, client_message_id=NEW, answer_to=link()), NS(user_id=USER), env.state["svc"])
+        it = response.body_iterator
+        first = json.loads((await it.__anext__())[6:])
+        before = await cr.get_message_saved(ROOM, NEW, NS(user_id=USER), env.state["svc"])
+        try:
+            await it.athrow(asyncio.CancelledError())
+            await it.__anext__()
+        except (asyncio.CancelledError, StopAsyncIteration):
+            pass
+        return first, before
+
+    first, before = asyncio.run(cut())
+    assert first["type"] == "user_message" and not env.followups
+    assert before["started"] is None and before["start"] == "taken"
+    body = env.saved(ROOM, NEW)[1]
+    assert body["started"] is False and body["start"] == "returned"
+    status, events = env.send({"answer_to": link()})
+    assert types(events) == ["user_message", "followup_queued", "done"] and len(env.followups) == 1
+
+
+def test_the_holder_starts_a_row_another_request_of_the_same_send_created_meanwhile(env) -> None:
+    """The first request holds the start right, but its save is slow. The same send arrives again, cannot take the right,
+    saves first and starts nothing. The holder's first insert then meets that row: it is this send's own row (created in
+    this Core while the holder held the right), so the holder starts it — once — instead of taking it for a send saved
+    before it came and leaving it never started."""
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    env.reset()
+    reached, gate = threading.Event(), threading.Event()
+    real_send = ChatService.send_message
+    calls = {"n": 0}
+
+    async def slow_first(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            reached.set()
+            await asyncio.to_thread(gate.wait, 10)
+        return await real_send(self, *a, **k)
+
+    with patch.object(ChatService, "send_message", slow_first), ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(env.send, {"answer_to": link()})
+        assert reached.wait(10)
+        second = env.send({"answer_to": link()})
+        gate.set()
+        first = first.result(10)
+    assert types(second[1]) == ["user_message", "done"]
+    assert types(first[1]) == ["user_message", "followup_queued", "done"] and len(env.followups) == 1
+    assert sum(1 for r in rows(env) if r["id"] == NEW) == 1 and env.saved(ROOM, NEW)[1]["started"] is True
+
+
+def test_the_record_of_who_started_the_work_is_bound_to_that_turn(env) -> None:
+    """VERIFY5 P2-4: when the membership lookup fails, /dan/cancel lets only the person whose send started the room's
+    running work stop it. That record is made when a send starts a new turn, and is gone when that send's stream ends:
+    a follow-up (no new turn) makes none, and work started later by another entry point is nobody's (503, nothing
+    stopped), even for someone who once started work there and has since left the room."""
+    from app.services.cancellation import CancellationRegistry
+    env.reset()
+    env.send({"answer_to": link()})                                  # a follow-up to a running turn: not a new turn
+    assert ROOM not in cr._room_work_senders and ROOM not in cr._room_work_tokens
+    seen, starts, killed = [], [], []
+    with _new_turns(env, starts, killed, on_start=lambda: seen.append((cr._room_work_senders.get(ROOM), ROOM in cr._room_work_tokens))):
+        env.send({"content": "plain", "client_message_id": "44444444-0000-4000-8000-000000000004"})
+    assert seen == [(USER, True)]                                   # recorded while the turn streams
+    assert ROOM not in cr._room_work_senders and ROOM not in cr._room_work_tokens   # gone when it ended
+    db = env.state["db"]
+    db.tables["chat_room_members"] = [{"id": "new-member", "room_id": ROOM, "user_id": OTHER}]   # USER left the room
+    CancellationRegistry.register(ROOM)                              # later work, started by another entry point
+    runs = NS(get_current_run_for_room=AsyncMock(return_value=None), pause_active_runs_for_room=AsyncMock(return_value=0))
+    s, client = _cancel_client(db, killed, runs)
+    try:
+        with s:
+            r = client.post("/api/v1/chat/dan/cancel", json={"session_id": ROOM}, headers={"x-test-user": USER})
+            assert r.status_code == 403
+            with patch("app.services.chat_service.member_of_room_sync", side_effect=RuntimeError("DB unavailable")):
+                r = client.post("/api/v1/chat/dan/cancel", json={"session_id": ROOM}, headers={"x-test-user": USER})
+            assert r.status_code == 503 and killed == [] and runs.pause_active_runs_for_room.await_count == 0
+    finally:
+        CancellationRegistry.unregister(ROOM)

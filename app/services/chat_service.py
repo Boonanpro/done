@@ -210,18 +210,22 @@ def reply_target_sync(sb, room_id: Optional[str], reply_to_id: Optional[str]) ->
 # begin) or give back (the request ended before it started anything, so a later request with the same id may start
 # it: the recovery for "saved, but nothing ever started"). A right taken and neither begun nor given back for
 # SEND_RIGHT_ABANDONED seconds counts as given back (a request stopped where its clean-up does not run); if its
-# holder then tries to begin after someone else took the right, it does not start.
+# holder then tries to begin after someone else took the right, it does not start. A holder whose start failed before
+# it had any effect (the follow-up was not queued, the call did not get it) gives a begun right back too
+# (undo_begin_send_right): failing for certain is not "started".
 #
 # The rights are about the send whose row exists. When a request CREATES the row (no row had that id: an earlier one
 # was deleted, e.g. withdrawn), the rights an earlier send of that id finished with no longer apply
-# (forget_finished_send_rights); a right a live request of the same send still holds is never dropped. A row that was
-# already there when a request came (a send tried again) is started by it only if a request in this process took its
-# start right and gave it back; if this process never saw it (saved before a restart), it is not started again.
+# (forget_finished_send_rights); a right a live request of the same send still holds is never dropped, and it notes
+# that the row was created while it was held. A row that was already there when the holder came to save it is started
+# by the holder only if it is the same send in this process: a request here took the right and gave it back, or another
+# request of the same send created the row while this one held the right. Otherwise (saved before a restart, say) this
+# process cannot tell whether it started: the right is settled as "unknown" and it is not started, now or later.
 
 SEND_RIGHT_ABANDONED = 60.0
 _SEND_RIGHT_TTL = 6 * 3600.0
 _send_rights_lock = threading.Lock()
-_send_rights: dict = {}   # (kind, room_id, message_id) -> {"token", "state": taken|begun|returned, "at"}
+_send_rights: dict = {}   # (kind, room_id, message_id) -> {"token", "state": taken|begun|returned|unknown, "at"}
 
 
 def _send_right_key(kind: str, room_id: Optional[str], message_id: Optional[str]):
@@ -242,7 +246,7 @@ def take_send_right(kind: str, room_id: Optional[str], message_id: Optional[str]
         cur = _send_rights.get(key)
         returned = False
         if cur is not None:
-            if cur["state"] == "begun":
+            if cur["state"] in ("begun", "unknown"):
                 return None
             if cur["state"] == "taken" and now - cur["at"] <= SEND_RIGHT_ABANDONED:
                 return None
@@ -272,6 +276,37 @@ def give_back_send_right(kind: str, room_id: Optional[str], message_id: Optional
             cur["state"], cur["at"] = "returned", time.time()
 
 
+def undo_begin_send_right(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder began, but what it began failed before it had any effect: give the right back like a request that
+    started nothing (a later request with the same id may start it). Only for a failure that is certain; when it is not
+    clear whether anything happened, the right stays begun (starting twice is worse than not starting)."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token and cur["state"] == "begun":
+            cur["state"], cur["at"] = "returned", time.time()
+
+
+def settle_send_right_unknown(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder found the send saved before it came and it is not the same send in this process (nothing here gave
+    its start back, no request here created the row while this one held the right): whether it started is unknown (it
+    was saved before a restart, say). It is not started — by this request or a later one."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token and cur["state"] == "taken":
+            cur["state"], cur["at"] = "unknown", time.time()
+
+
+def send_right_row_created_while_held(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> bool:
+    """Another request of the same send created the row while this holder held the right (it saved first, without the
+    right): the row the holder met is this send's own."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        return bool(token and cur is not None and cur["token"] == token and cur.get("row_created_while_held"))
+
+
 def note_send_right_row_saved(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
     """The holder's row is saved (the parallel branch begins before it saves: until this, its row may not exist yet)."""
     key = _send_right_key(kind, room_id, message_id)
@@ -284,14 +319,17 @@ def note_send_right_row_saved(kind: str, room_id: Optional[str], message_id: Opt
 def forget_finished_send_rights(room_id: Optional[str], message_id: Optional[str]) -> None:
     """A request just CREATED the row with this id (its insert succeeded), so any earlier row with this id is gone: what
     an earlier send of it finished with belongs to that row and no longer applies — the "saved" right once done, the
-    "start" right once given back, or begun by a holder whose row was saved (and is now gone). A right a request still
-    holds ("taken"), or began before saving its row (the parallel branch), is kept: that request is the same send."""
+    "start" right once given back, settled as unknown, or begun by a holder whose row was saved (and is now gone). A
+    right a request still holds ("taken"), or began before saving its row (the parallel branch), is kept: that request
+    is the same send. A taken right notes that its row now exists (if its holder's insert meets it, it is its own send)."""
     with _send_rights_lock:
         cur = _send_rights.get(_send_right_key("saved", room_id, message_id))
         if cur is not None and cur["state"] != "taken":
             _send_rights.pop(_send_right_key("saved", room_id, message_id), None)
         cur = _send_rights.get(_send_right_key("start", room_id, message_id))
-        if cur is not None and (cur["state"] == "returned" or (cur["state"] == "begun" and cur.get("row_saved"))):
+        if cur is not None and cur["state"] == "taken":
+            cur["row_created_while_held"] = True
+        elif cur is not None and (cur["state"] in ("returned", "unknown") or (cur["state"] == "begun" and cur.get("row_saved"))):
             _send_rights.pop(_send_right_key("start", room_id, message_id), None)
 
 
@@ -303,7 +341,8 @@ def clear_send_rights() -> None:
 
 def send_right_state(kind: str, room_id: Optional[str], message_id: Optional[str]) -> Optional[str]:
     """'begun', 'taken' (a request holds it and may still start), 'returned' (given back or abandoned: nothing started
-    it in this process), or None (this process has never seen it: no knowledge)."""
+    it in this process), 'unknown' (found saved from before, not started here: whether it started is unknown), or None
+    (this process has never seen it: no knowledge)."""
     key = _send_right_key(kind, room_id, message_id)
     with _send_rights_lock:
         cur = _send_rights.get(key)

@@ -417,7 +417,13 @@ def test_send_stream_route_builds_every_echo_from_the_saved_row() -> None:
     the replace branch, and the echo helper on every echo site with the row's own quote (no echo from the request)."""
     src = (ROOT / "app/api/chat_routes.py").read_text(encoding="utf-8")
     gen = src[src.index("async def send_dan_message_stream"):src.index('@router.post("/dan/read"')]
-    assert gen.index("_check_answer_link,") < gen.index("_saved_send,") < gen.index("if request.replace_message_id:") < gen.index("_replace_user_message,")
+    assert gen.index("_check_answer_link,") < gen.index("_already = await asyncio.to_thread(_saved_send,") \
+        < gen.index("if request.replace_message_id:") < gen.index("_replace_user_message,")
+    # the parallel branch's look for a row already saved under the id (VERIFY5 P2-3) is asked beside the membership check
+    # and only read after it (and only for the parallel branch)
+    assert gen.index("_prior_probe = asyncio.ensure_future") < gen.index("if request.session_id and not await asyncio.to_thread(member_of_room_sync") \
+        < gen.index("(await _prior_probe) is None") < gen.index("elif _parallel_now:")
+    assert gen.count("_saved_send,") == 2
     # echo sites: the echo-only replies (already saved / another request of the same send starts it / saved before this
     # request) share _echo_only; the saved echo of the sequential branch; the saved echo of the parallel branch
     assert gen.count("_user_message_echo(") == 3 and gen.count("_reply_for(service") == 3 and gen.count("yield _echo_only(") == 3
