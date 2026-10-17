@@ -3,12 +3,15 @@
 import { useState, useRef, type ReactNode } from 'react';
 import { Play } from 'lucide-react';
 import {MediaViewer, collectChatMedia, mediaKind, type GalleryItem} from './media-viewer';
+import { imageRequest, isPagePath, playableVideo } from '@/lib/chat-media';
 
 /**
  * 複数の画像・動画を LINE 式にまとめて表示する共通部品。
  * 1枚: そのまま（縦横比維持） / 2枚: 横2列 / 3枚: 左1大＋右2小 / 4枚以上: 正方形タイル
  * （4=2列、5枚以上=3列、7枚以上は「+N」で畳む）。
  * プロジェクトルームの吹き出し・コラボ窓口（オーナー/ゲスト）で同じものを使う。
+ * 外の画像（https://…）は Cookie を送らない・Referer なしで読み、読めなければ枠ごと消す（lib/chat-media.ts）。
+ * 外の動画は描かない（<video> は Referer を止められない。吹き出しの読み取りはリンクにして渡す）。
  */
 export interface MediaItem {
   url: string;
@@ -19,7 +22,7 @@ export interface MediaItem {
 const MAX_TILES = 6;
 
 export function MediaGrid({
-  items,
+  items: given,
   className = '',
 }: {
   items: MediaItem[];
@@ -31,11 +34,15 @@ export function MediaGrid({
   const trigger=useRef<HTMLElement|null>(null);
   const [viewing,setViewing]=useState<{items:GalleryItem[];url:string}|null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const items = given.filter((it) => (it.kind === 'video' ? playableVideo(it.url) : !failed.has(it.url)));
+  // 読めなかった外の画像は枠ごと消す（ダンのファイルは今までどおり）
+  const lost = (url: string) => (isPagePath(url) ? undefined : () => setFailed((s) => (s.has(url) ? s : new Set(s).add(url))));
   if (items.length === 0) return null;
 
   const open=(item:MediaItem)=>{trigger.current=document.activeElement as HTMLElement;setViewing({items:collectChatMedia(root.current,items),url:item.url})};
   const viewer=viewing?<MediaViewer items={viewing.items} initialUrl={viewing.url} onClose={()=>setViewing(null)} returnFocus={trigger.current}/>:null;
-  if(items.length===1){const it=items[0];return <div ref={root} data-media-items={JSON.stringify(items)} className={`my-1 ${className}`}><button type="button" aria-label={it.name||(it.kind==='video'?'動画を再生':'画像を開く')} className="relative block max-w-full overflow-hidden rounded-xl border border-border/50" onClick={()=>open(it)}>{it.kind==='video'?<><video src={it.url} muted playsInline preload="metadata" className="max-h-[300px] max-w-full"/><span className="absolute inset-0 flex items-center justify-center"><span className="rounded-full bg-black/55 p-3"><Play className="h-6 w-6 fill-white text-white"/></span></span></>:<img src={it.url} alt={it.name||'添付画像'} className="max-h-64 max-w-full object-contain"/>}</button>{viewer}</div>}
+  if(items.length===1){const it=items[0];return <div ref={root} data-media-items={JSON.stringify(items)} className={`my-1 ${className}`}><button type="button" aria-label={it.name||(it.kind==='video'?'動画を再生':'画像を開く')} className="relative block max-w-full overflow-hidden rounded-xl border border-border/50" onClick={()=>open(it)}>{it.kind==='video'?<><video src={it.url} muted playsInline preload="metadata" className="max-h-[300px] max-w-full"/><span className="absolute inset-0 flex items-center justify-center"><span className="rounded-full bg-black/55 p-3"><Play className="h-6 w-6 fill-white text-white"/></span></span></>:<img src={it.url} alt={it.name||'添付画像'} {...imageRequest(it.url)} onError={lost(it.url)} className="max-h-64 max-w-full object-contain"/>}</button>{viewer}</div>}
 
   const visible = expanded ? items : items.slice(0, MAX_TILES);
   const hidden = items.length - visible.length;
@@ -53,7 +60,7 @@ export function MediaGrid({
         {it.kind === 'video' ? (
           <video src={it.url} muted playsInline preload="metadata" className="h-full w-full object-cover" />
         ) : (
-          <img src={it.url} alt={it.name || ''} className="h-full w-full object-cover" loading="lazy" />
+          <img src={it.url} alt={it.name || ''} {...imageRequest(it.url)} onError={lost(it.url)} className="h-full w-full object-cover" loading="lazy" />
         )}
         {it.kind === 'video' && !isLast && (
           <span className="absolute inset-0 flex items-center justify-center">

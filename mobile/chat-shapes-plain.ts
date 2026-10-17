@@ -750,6 +750,29 @@ export function shapeFences(text: string, opts: { streaming?: boolean } = {}): T
   return topLevelFences(text).filter((f) => isShapeLang(f.lang) && (f.closed || !!opts.streaming));
 }
 
+/**
+ * 文章を、一番外側のコードブロック（部品の openui-lang もほかの言語も。閉じの無い物は文書の終わりまで）と、その外に分ける。
+ * つなげると元の文章に戻る（コードブロックの最後の行の改行は外の側）。添付の印やリンクを読み取る処理は外だけにかけ、
+ * 部品とコードの中身をそのまま残す（部品の名前や画像の値に書いた [添付画像: …] を、部品を読む前に抜き出さない）。
+ */
+export function splitTopFences(text: string): Array<{ code: boolean; text: string }> {
+  if (!text || (text.indexOf('```') < 0 && text.indexOf('~~~') < 0)) return [{ code: false, text: text || '' }];
+  const out: Array<{ code: boolean; text: string }> = [];
+  let prev = 0;
+  for (const f of topLevelFences(text)) {
+    if (f.start > prev) out.push({ code: false, text: text.slice(prev, f.start) });
+    out.push({ code: true, text: text.slice(f.start, f.end) });
+    prev = f.end;
+  }
+  if (prev < text.length || out.length === 0) out.push({ code: false, text: text.slice(prev) });
+  return out;
+}
+
+/** 一番外側のコードブロックの外だけを fn で書き換える（中は1文字も変えない） */
+export function mapOutsideTopFences(text: string, fn: (s: string) => string): string {
+  return splitTopFences(text).map((p) => (p.code ? p.text : fn(p.text))).join('');
+}
+
 // --- OpenUI Lang の引数の読み手 ------------------------------------------------------------------
 
 class Reader {
@@ -926,6 +949,15 @@ function siteFile(s: string): string | null {
   try { decoded = decodeURIComponent(name); } catch { return null; }
   if (decoded === '.' || decoded === '..' || /[/?#]/.test(decoded) || hasSpaceOrControl(decoded)) return null;
   return s;
+}
+
+/**
+ * ダンのファイルの道（/api/v1/files/<名前>、問い合わせ付きも）かを、文字だけで確かめる。通れば s、通らなければ null。
+ * URL をブラウザと同じに読み直せない所（アプリ。READS_URL_LIKE_BROWSER が false）でも使える: 名前に / \ ? # 空白・制御文字が
+ * 無く、符号化を解いても . .. や / にならないので、どの読み方でも1つ上の道へは出ない。
+ */
+export function siteFilePath(s: string): string | null {
+  return typeof s === 'string' ? siteFile(s) : null;
 }
 
 function readUrl(s: string, base?: string): URL | null {

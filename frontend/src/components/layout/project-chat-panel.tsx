@@ -72,6 +72,7 @@ import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
+import { chatImageUrl, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '@/lib/chat-media';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -168,54 +169,6 @@ function eventToStep(event: ExecutionEvent): StepInfo {
   };
 }
 
-function parseMediaContent(content: string): { images: string[]; videos: string[]; files: { name: string; url: string }[]; text: string } {
-  const images: string[] = [];
-  const videos: string[] = [];
-  const files: { name: string; url: string }[] = [];
-  const text = content
-    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
-    .replace(/\[動画分析結果\(Gemini\):\n[\s\S]*?\n\]/g, '')
-    .replace(/\[添付画像: ([^\]]+)\]/g, (_, raw: string) => {
-      // ブラケット内の表記揺れを吸収:
-      //   "name (URL)" / "URL" / "/api/v1/files/x.png" / "C:\path\x.png" / "x.png"
-      // いずれも最終的に /api/v1/files/<filename> へ正規化する。
-      const urlMatch = raw.match(/https?:\/\/\S+|\/api\/\S+/);
-      let token = (urlMatch ? urlMatch[0] : raw.trim().split(/\s+/).pop() || '').trim();
-      // 末尾の記号（`)` `,` `.` `;` `"` `'`）を剥がす
-      token = token.replace(/[)\],.;"'`]+$/, '');
-      if (/^https?:\/\//.test(token)) {
-        const apiMatch = token.match(/\/api\/v1\/files\/[^?#\s)]+/);
-        if (apiMatch) {
-          images.push(apiMatch[0]);
-        } else {
-          images.push(token);
-        }
-        return '';
-      }
-      if (token.startsWith('/api/')) {
-        images.push(token);
-        return '';
-      }
-      const filename = token.replace(/\\/g, '/').split('/').pop();
-      if (filename) images.push(`/api/v1/files/${filename}`);
-      return '';
-    })
-    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, _name, url) => {
-      videos.push(url);
-      return '';
-    })
-    .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, (_, name, url) => {
-      if (/\.(mp4|avi|mov|mkv|webm)$/i.test(name)) {
-        videos.push(url);
-      } else {
-        files.push({ name, url });
-      }
-      return '';
-    })
-    .trim();
-  return { images, videos, files, text };
-}
-
 // Build a short snippet around the matched keyword, with the match highlighted,
 // for the search hit-list. Strips attachment/tool markup so the text reads clean.
 function highlightSnippet(content: string, query: string): React.ReactNode {
@@ -297,14 +250,24 @@ const MUTED_PROSE_CLASS =
   'prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-muted-foreground/80 ' +
   '[&_p]:my-1 [&_pre]:max-h-60 [&_pre]:overflow-auto [&_pre]:text-xs';
 
+// 本文の Markdown の画像（![…](…) も参照の形 ![…][名前] も）。添付と同じ許可の境界（lib/chat-media.ts chatImageUrl）を
+// 通った物だけを描く。外の画像は Cookie を送らない・Referer なしで読み、読めなければ消す（壊れた画像の印を出さない）。
+function MarkdownImage({ src, alt, onImageClick }: { src: unknown; alt?: string; onImageClick?: (url: string) => void }) {
+  const url = chatImageUrl(src);
+  const [failed, setFailed] = useState<string | null>(null);
+  if (!url || failed === url) return null;
+  return <button type="button" data-media-items={JSON.stringify([{url,kind:'image',name:alt}])} onClick={() => onImageClick?.(url)}><img src={url} alt={alt || '画像'} {...imageRequest(url)} onError={isPagePath(url) ? undefined : () => setFailed(url)} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" /></button>;
+}
+
 const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   return (
     <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a({ href, children }) { const kind=href?mediaKind(href):null; return kind&&href?<button type="button" data-media-items={JSON.stringify([{url:href,kind}])} className="underline" onClick={()=>onImageClick?.(href)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
-          img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <button type="button" data-media-items={JSON.stringify([{url:imgSrc,kind:'image',name:alt}])} onClick={() => onImageClick?.(imgSrc)}><img src={imgSrc} alt={alt || '画像'} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" /></button>; },
+          // 画像・動画を指すリンクは画面の中の拡大表示で開く。開くのは境界を通った物だけで、動画はダンのファイルだけ（外の物はふつうのリンク）
+          a({ href, children }) { const url=chatImageUrl(href); const kind=url?mediaKind(url):null; return kind&&url&&(kind==='image'||playableVideo(url))?<button type="button" data-media-items={JSON.stringify([{url,kind}])} className="underline" onClick={()=>onImageClick?.(url)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
+          img({ src, alt }) { return <MarkdownImage src={src} alt={alt} onImageClick={onImageClick} />; },
         }}
       >{text}</ReactMarkdown>
     </div>
@@ -392,9 +355,6 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
   );
 }
 
-// 文章の中の、ファイル・画像・動画の印（TurnTextSegment が表示に変えるもの）
-const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
-
 const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, messageId }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; messageId?: string }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
@@ -419,7 +379,7 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
       if (i === lastTextIndex) return;
       if (g.kind === 'tools') { log.push(...g.items); return; }
       log.push({ type: 'reasoning', text: g.text } as TurnBlock);
-      media.push(...(g.text.match(MEDIA_TAG) || []));
+      media.push(...mediaTags(g.text));   // 文章の中の添付の印（部品・コードブロックの中は見ない。lib/chat-media.ts）
     });
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
