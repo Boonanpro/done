@@ -135,9 +135,19 @@ async def run(row):
             initial_state = state.read(job_id)['state']
             state.publish(job_id, 'progress', '依頼内容を確認しています', **({'run_id':run_row['id']} if run_row else {}),
                           state='running' if initial_state=='queued' else initial_state)
+            # answer_shapes stays off for every job here (parallel or not): a job writes prose. Its text does reach the
+            # chat screen: the intermediate messages are saved as the room's 'reasoning' events (the live work view; also
+            # the job feed), and the final result is reported (`execute report` below) as an ordinary AI message of the
+            # target room (with a「…からの報告」heading and a link when it is another room; spoken instead of written
+            # only when that report goes to the same room while the owner is on a call there). The screen could draw parts
+            # in those. They stay prose by choice, for two reasons: the job has already ended when its report arrives, so
+            # an answer to a Choice/Input could not reach the job that asked (it would start a new chat turn instead); and
+            # the report is cut at 2800 characters, which can cut a part block in the middle.
+            # tests/test_chat_shapes_prompt.py pins this (test_job_runners_stay_prose_only).
             instructions = await asyncio.to_thread(_build_system_prompt, project.get('title',''),
                 project.get('description') or '', project.get('status') or 'in_progress',
-                latest_user_message=spec['task'], room_id=row['room_id'], user_id=row['user_id'], include_room_role=False)
+                latest_user_message=spec['task'], room_id=row['room_id'], user_id=row['user_id'], include_room_role=False,
+                answer_shapes=False)
             if parallel:
                 from app.services.parallel_job_runner import JOB_RULES
                 instructions += '\n' + JOB_RULES + (s.get('origin_note') or '') + \

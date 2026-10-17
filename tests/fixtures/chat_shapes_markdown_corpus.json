@@ -1,0 +1,7778 @@
+[
+ {
+  "name": "verifier:normal",
+  "text": "```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:twice",
+  "text": "```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   },
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])",
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837",
+   "p10d8e837-1"
+  ]
+ },
+ {
+  "name": "verifier:crlf",
+  "text": "```openui-lang\r\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\r\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:comment",
+  "text": "<!--\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n-->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:pre",
+  "text": "<pre>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:div",
+  "text": "<div>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</div>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:htmlAfterFence",
+  "text": "```text\nx\n```\n<x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</x>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:htmlAfterComment",
+  "text": "<!--x-->\n<x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:htmlAfterHeading",
+  "text": "# Heading\n<x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:htmlParagraph",
+  "text": "hello\n<x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</x>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:indented",
+  "text": "    text\n<x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "verifier:proposal",
+  "text": "```proposal\na.json\n```\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "a.json"
+   },
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:quoted",
+  "text": "> <!--\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n> -->",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-nbsp",
+  "text": "```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-nbsp",
+  "text": "<span x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-bom",
+  "text": "```openui-lang\nroot = Choice(\"Q﻿😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q﻿😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q﻿😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-bom",
+  "text": "<span﻿x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-nel",
+  "text": "```openui-lang\nroot = Choice(\"Q😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pbe91ed78"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-nel",
+  "text": "<spanx>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-ls",
+  "text": "```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-ls",
+  "text": "<span x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-ps",
+  "text": "```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-ps",
+  "text": "<span x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-ideographic",
+  "text": "```openui-lang\nroot = Choice(\"Q　😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q　😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q　😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-ideographic",
+  "text": "<span　x>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q 😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:ws-tab",
+  "text": "```openui-lang\nroot = Choice(\"Q\t😀\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\t😀\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\t😀\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "p10d8e837"
+  ]
+ },
+ {
+  "name": "verifier:html-ws-tab",
+  "text": "<span\tx>\n```openui-lang\nroot = Choice(\"Q 😀\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterHeading",
+  "text": "# h\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterSetext",
+  "text": "a\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterThematic",
+  "text": "***\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterClosedFence",
+  "text": "```js\nx\n```\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterCommentSameLine",
+  "text": "<!-- c -->\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterIndented",
+  "text": "    code\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:afterBlank",
+  "text": "a\n\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:paragraphSpan",
+  "text": "a\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:paragraphDiv",
+  "text": "a\n<div>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:paragraphComment",
+  "text": "a\n<!--\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n-->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:divEndsAtBlank",
+  "text": "<div>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n\n```openui\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:commentOneLine",
+  "text": "<!-->\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:commentDashes",
+  "text": "<!--->\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:piOneLine",
+  "text": "<?>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:declaration",
+  "text": "<!DOCTYPE html>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:cdata",
+  "text": "<![CDATA[\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n]]>\n```openui\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:preSelfClosing",
+  "text": "<pre/>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:preClose",
+  "text": "</pre>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:scriptEnd",
+  "text": "<script>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n</script>\n```openui\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:attrs",
+  "text": "<a href=\"x\" title='y' data-x=z>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:attrBadQuote",
+  "text": "<a b\"c\">\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:attrEqEq",
+  "text": "<a b=c=d>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:attrSlashValue",
+  "text": "<a b=/>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:attrNoSpace",
+  "text": "<a b=\"c\"d>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:closeTagSpace",
+  "text": "</span >\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tagTrailingText",
+  "text": "<span> x\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:autolink",
+  "text": "<https://example.com>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:wsNelTag",
+  "text": "<spanx>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:wsNbspTag",
+  "text": "<span x>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:wsTabTag",
+  "text": "<span\tx>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:ideographicBlank",
+  "text": "<div>\n　\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:nbspBlank",
+  "text": "<div>\n \n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tabBlank",
+  "text": "<div>\n\t\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:langNbsp",
+  "text": "```openui-lang x\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:langIdeographic",
+  "text": "```openui-lang　\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:langTabMeta",
+  "text": "```openui-lang\tmeta\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:langCase",
+  "text": "```OpenUI-Lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:langEscape",
+  "text": "```openui\\-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:langRef",
+  "text": "```&#111;penui\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:langHexRef",
+  "text": "```openui&#x2D;lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:langNamedRef",
+  "text": "```openui&amp;\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:langBacktick",
+  "text": "```openui-lang `x`\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tildeBacktick",
+  "text": "~~~openui-lang `x`\nroot = Choice(\"Q\", [\"A\", \"B\"])\n~~~",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:loneCr",
+  "text": "a\r```openui-lang\rroot = Choice(\"Q\", [\"A\", \"B\"])\r```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:crlfMulti",
+  "text": "```openui-lang\r\nroot = Steps(\r\n[\"a\"])\r\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Steps(\r\n[\"a\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Steps(\r\n[\"a\"])"
+  ],
+  "keys": [
+   "p00fb3ccd"
+  ]
+ },
+ {
+  "name": "targeted:bom",
+  "text": "﻿```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:nul",
+  "text": "```openui-lang\nroot = Steps([\"a\u0000b\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Steps([\"a�b\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Steps([\"a�b\"])"
+  ],
+  "keys": [
+   "pbd13604e"
+  ]
+ },
+ {
+  "name": "targeted:unclosed",
+  "text": "a\n\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:unclosedNl",
+  "text": "```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:unclosedNlNl",
+  "text": "```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])\n"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:emptyFence",
+  "text": "```openui-lang\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [
+   ""
+  ],
+  "keys": [
+   "p811c9dc5"
+  ]
+ },
+ {
+  "name": "targeted:openerOnly",
+  "text": "```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:indent3",
+  "text": "   ```openui-lang\n   root = Choice(\"Q\", [\"A\", \"B\"])\n   ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:indent4",
+  "text": "    ```openui-lang\n    root = Choice(\"Q\", [\"A\", \"B\"])\n    ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:indent2Content",
+  "text": "  ```openui-lang\n    a\n b\nc\n  ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "  a\nb\nc"
+   }
+  ],
+  "shape_codes": [
+   "  a\nb\nc"
+  ],
+  "keys": [
+   "p76f420af"
+  ]
+ },
+ {
+  "name": "targeted:tabContent",
+  "text": " ```openui-lang\n\ta\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "   a"
+   }
+  ],
+  "shape_codes": [
+   "   a"
+  ],
+  "keys": [
+   "pe40c292c"
+  ]
+ },
+ {
+  "name": "targeted:tabIndentFence",
+  "text": "\t```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:spaceTabFence",
+  "text": " \t```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:closeIndented4",
+  "text": "```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n    ```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])\n    ```"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:closeShort",
+  "text": "````openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n````",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])\n```"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])\n```"
+  ],
+  "keys": [
+   "p9df152b6"
+  ]
+ },
+ {
+  "name": "targeted:closeWithText",
+  "text": "```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n``` x",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])\n``` x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:quoteFence",
+  "text": "> ```openui-lang\n> root = Choice(\"Q\", [\"A\", \"B\"])\n> ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:quoteThenFence",
+  "text": "> a\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:quoteLazySpan",
+  "text": "> a\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:quoteLazySpanBlank",
+  "text": "> a\n<span>\n\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:quoteLazyDiv",
+  "text": "> a\n<div>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:quoteTab",
+  "text": ">\t```openui-lang\n>\troot = Choice(\"Q\", [\"A\", \"B\"])\n>\t```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:listThenFence",
+  "text": "- a\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:listBlankFence",
+  "text": "- a\n\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:listIndentedFence",
+  "text": "- a\n\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:listInnerFenceOpen",
+  "text": "- a\n  ```js\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:listHeadingSpan",
+  "text": "- # h\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:listLazySpan",
+  "text": "- a\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:orderedInterrupt",
+  "text": "a\n2) b\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:orderedOne",
+  "text": "a\n1) b\n   ```openui-lang\n   root = Choice(\"Q\", [\"A\", \"B\"])\n   ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:lazyOrdered",
+  "text": "> a\n2) b\n   ```openui-lang\n   root = Choice(\"Q\", [\"A\", \"B\"])\n   ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:nestedInterrupt",
+  "text": "a\n- 2) x\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:indentedThenOrdered",
+  "text": "    code\n\n2) x\n   ```openui-lang\n   root = Choice(\"Q\", [\"A\", \"B\"])\n   ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:emptyItemInterrupt",
+  "text": "a\n-\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:emptyItemBlank",
+  "text": "-\n\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:listTab",
+  "text": "-\t```openui-lang\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n\t```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:listWide",
+  "text": "-     a\n      ```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:siblingItem",
+  "text": "- a\n- ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:starBreak",
+  "text": "* * *\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tenDigits",
+  "text": "1234567890. a\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:defSetext",
+  "text": "[a]: /b\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:headingSeven",
+  "text": "####### x\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:defThenParaSetext",
+  "text": "[a]: /b\nc\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:defTitleSetext",
+  "text": "[a]: /b\n\"t\"\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:defBadSetext",
+  "text": "[a]: /b x\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:defDashOne",
+  "text": "[a]: /b\n-\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:defMultiLineLabel",
+  "text": "[a\nb]: /c\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:defAngle",
+  "text": "[a]: <b c>\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:setextLazy",
+  "text": "> a\n---\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:setextAfterList",
+  "text": "- a\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableSpan",
+  "text": "| a |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```\n</span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableThenFence",
+  "text": "| a |\n| - |\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableBlankFence",
+  "text": "| a |\n| - |\n\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:paraThenTable",
+  "text": "text\n| a |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableOrdered2",
+  "text": "| a |\n| - |\n2. x\n\n   ```openui-lang\n   root = Choice(\"Q\", [\"A\", \"B\"])\n   ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableEmptyItem",
+  "text": "| a |\n| - |\n-\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableEmptyStar",
+  "text": "| a |\n| - |\n*\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableEmptyOrdered",
+  "text": "| a |\n| - |\n1.\n   ```openui-lang\n   root = Choice(\"Q\", [\"A\", \"B\"])\n   ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableIndented",
+  "text": "| a |\n| - |\n    code\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableTab",
+  "text": "| a |\n| - |\n\tx\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableEq",
+  "text": "| a |\n| - |\n===\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableDash",
+  "text": "| a |\n| - |\n---\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableQuote",
+  "text": "| a |\n| - |\n> q\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableRowNoPipe",
+  "text": "| a |\n| - |\nrow\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableNote",
+  "text": "| a |\n| - |\n| b |\n※税込\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableHtmlLater",
+  "text": "| a |\n| - |\n<span>\n# h\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableLazyRow",
+  "text": "> | a |\n> | - |\nrow\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableLazyDelim",
+  "text": "> | a |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableInQuote",
+  "text": "> | a |\n> | - |\n> <span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableInList",
+  "text": "- | a |\n  | - |\n  <span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableInListLazy",
+  "text": "- | a |\n  | - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableInListLazyRow",
+  "text": "- | a |\n  | - |\nrow\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableColonOnly",
+  "text": "a\n:-\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableOneCell",
+  "text": "a\n|-\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableCountMismatch",
+  "text": "| a | b |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableDefHead",
+  "text": "[a]: b\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableHeadingHead",
+  "text": "# a | b\n| - | - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableDelim4",
+  "text": "| a |\n    | - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableDelim3",
+  "text": "| a |\n   | - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableEscape",
+  "text": "| a \\| b |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableDashList",
+  "text": "| a | b |\n- | -\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableDashNoSpace",
+  "text": "| a | b |\n-|-\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableQuoteDelim",
+  "text": "| a |\n> | - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableTagHead",
+  "text": "x\n<span>\n| - |\n<i>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableTwo",
+  "text": "| a |\n| - |\n| b |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableAfterTable",
+  "text": "| a |\n| - |\n\n| b |\n| - |\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableSetextRows",
+  "text": "| a |\n| - |\nb\n---\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:tableOrderedHead",
+  "text": "x\n2. a | b\n- | -\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:tableCrlf",
+  "text": "| a |\r\n| - |\r\n<span>\r\n```openui-lang\r\nroot = Choice(\"Q\", [\"A\", \"B\"])\r\n```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:footnoteIndented",
+  "text": "[^1]: note\n    ```openui-lang\n    root = Choice(\"Q\", [\"A\", \"B\"])\n    ```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "targeted:footnote2",
+  "text": "[^1]: note\n  ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  ```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "targeted:footnoteLazySpan",
+  "text": "[^1]: note\n<span>\n```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [
+   "root = Choice(\"Q\", [\"A\", \"B\"])"
+  ],
+  "keys": [
+   "pe13cc096"
+  ]
+ },
+ {
+  "name": "generated:20261018:0",
+  "text": "[x]: a(b\n---\n</div>\n<span>\n[a]: /b\n<!DOCTYPE html>\n```openui-lang\n***\n<![CDATA[\n[b]: <c d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:1",
+  "text": "```OpenUI\n<a b=c=d>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<a b=c=d>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:2",
+  "text": "```js\n2) a\n\t\n####### h\n<pre>\n  - b\n~~~openui-lang\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "2) a\n\t\n####### h\n<pre>\n  - b\n~~~openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:3",
+  "text": "> <!--\n***\nroot = Choice(\"Q\", [\"A\", \"B\"])\n   1. c\n> ```openui-lang\n</pre>\n> - a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:4",
+  "text": "[x]: /y (z)\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:5",
+  "text": ">\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:6",
+  "text": "\t\n>\n> <!--\n```OpenUI\n  text\n  ```openui-lang\na | b\n|\n````\n[a]: /b \"t\"\n",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "  text\n  ```openui-lang\na | b\n|"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:7",
+  "text": "  ```openui-lang\n***\n2) a\n- | x |\n   1. c\n[x]: /y (z)\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n| c | d |\n```openui\n</pre>\n[a]: /b\n<a href=\"x\">\n####### h\n> ```openui-lang\n```openui-lang\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "***\n2) a\n- | x |\n 1. c\n[x]: /y (z)\n  root = Choice(\"Q\", [\"A\", \"B\"])\n| c | d |\n```openui\n</pre>\n[a]: /b\n<a href=\"x\">\n####### h\n> ```openui-lang\n```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:8",
+  "text": "</div>\n####### h\n````openui-lang\n<div>\n___\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<span>\n[a]:\n<!-- x -->\n2) a\n[x]: /y (z)\n[]: /u\nroot = Choice(\"Q\", [\"A\", \"B\"])\n<!DOCTYPE html>\n<x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:9",
+  "text": "<span x>\r[x]: /y (z)",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:10",
+  "text": "| a | b |\r\n[^1]: note\r\n>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:11",
+  "text": "[^1]: note\r\n    code\r\n[]: /u\r\n-\ta\r\n- | -\r\n[x]: /y (z)\r\n```openui-lang x",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:12",
+  "text": "<a b=c=d>\r<a href=\"x\">\r<a b=c=d>\r- | x |\r[b]: <c d>\r+ a\r- | x |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:13",
+  "text": "<x>\n> ```openui-lang\n| a |\n***\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:14",
+  "text": "> <!--\n    code\n> - a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:15",
+  "text": "```js",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:16",
+  "text": "a \\| b\r't'\r \r    ```openui-lang\r</span>\r<!--\r```openui-lang x",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:17",
+  "text": "```openui-lang x\n-|-\n:-\n>\t```\n      deep\n\tcode\n \na\n  root = Choice(\"Q\", [\"A\", \"B\"])\n    code\n[a\\]]: /u\n|\n>\n####### h\n- - -\n-\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "-|-\n:-\n>\t```\n      deep\n\tcode\n \na\n  root = Choice(\"Q\", [\"A\", \"B\"])\n    code\n[a\\]]: /u\n|\n>\n####### h\n- - -\n-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:18",
+  "text": "<?php\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:19",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n- [a]: /b\n't'\n      deep\na \\| b\n  text\n[b]: <c d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:20",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n####### h\n<?php\n<pre>\n___\n\tcode\n[a]: /b\n[a]:\n  text\n[x]: /y (z)\n* a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:21",
+  "text": "<!DOCTYPE html>\r<pre/>\r</span>\r-     a\r't'\r```openui\rx | y\r* a\r[a]:\r:-\r<span\tx>\r- [a]: /b\r- - -\r-->\r<!DOCTYPE html>\rtext b\r",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:22",
+  "text": "---\n```openui-lang\na\n| - |\n+ a\n</div>\n<!DOCTYPE html>\n>\t```\n| - |\n  ```openui-lang\n?>\n-->\n<a b=c=d>\n```OpenUI\n<x>\n:-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "a\n| - |\n+ a\n</div>\n<!DOCTYPE html>\n>\t```\n| - |\n  ```openui-lang\n?>\n-->\n<a b=c=d>\n```OpenUI\n<x>\n:-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:23",
+  "text": "'t'\n-|-\n<![CDATA[\n\t\n+ a\n~~~openui-lang\n   ~~~openui\na | b\n</pre>\n> <!--\n\tcode\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n[^1]: note\n<div>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:24",
+  "text": "|---|---|\n<spanx>\n \n>\n<span\tx>\n-     a\n```openui-lang\n<div>\n- | -\n| - |\n   1. c",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:25",
+  "text": "* a\n~~~openui-lang\n---\na | b\n<?php\n</div>\n````\n<!-- x -->\n\na \\| b\n  root = Choice(\"Q\", [\"A\", \"B\"])\n```OpenUI\n[]: /u\n]]>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "---\na | b\n<?php\n</div>\n````\n<!-- x -->\n\na \\| b\n  root = Choice(\"Q\", [\"A\", \"B\"])\n```OpenUI\n[]: /u\n]]>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:26",
+  "text": "```\r[a]: /b \"t\"\r| :-: | -: |\r<!--\rroot = Choice(\"Q\", [\"A\", \"B\"])\r- [a]: /b\r````\r[b]: <c d>\r?>\r```openui\r<pre>\r[a\\]]: /u\r  ```openui-lang",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "[a]: /b \"t\"\r| :-: | -: |\r<!--\rroot = Choice(\"Q\", [\"A\", \"B\"])\r- [a]: /b"
+   },
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<pre>\r[a\\]]: /u\r  ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:27",
+  "text": "- | x |\n  ```openui-lang\n#h\n<pre>\n   ~~~openui\n+ a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:28",
+  "text": "   ~~~openui\n<x>\n~~~openui-lang\n> <!--\n| a | b |\n[a]: /b \"t\"\n  - b\n- a\n   1. c\na | b\nx | y\n> a\n~~~openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<x>\n~~~openui-lang\n> <!--\n| a | b |\n[a]: /b \"t\"\n- b\n- a\n1. c\na | b\nx | y\n> a\n~~~openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:29",
+  "text": "    code\r\nx | y\r\n>\t```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:30",
+  "text": "> ```openui-lang\r\n1.\r\n- a\r\n  \r\n<span\tx>\r\n```openui\r\n<span\tx>\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:31",
+  "text": "-\ta\n[a]:\n  ```openui-lang\n[a]:\n<div>\n| c | d |\n<span\tx>\n-|-\n-|-\n-     a\n   ~~~openui\na\n> <!--\n___\n|-\n````",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "[a]:\n<div>\n| c | d |\n<span\tx>\n-|-\n-|-\n-     a\n ~~~openui\na\n> <!--\n___\n|-"
+   }
+  ],
+  "shape_codes": [
+   "[a]:\n<div>\n| c | d |\n<span\tx>\n-|-\n-|-\n-     a\n ~~~openui\na\n> <!--\n___\n|-"
+  ],
+  "keys": [
+   "p09255606"
+  ]
+ },
+ {
+  "name": "generated:20261018:32",
+  "text": "---\n1.\n> - a\n\tcode\n<!DOCTYPE html>\n| c | d |\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<span> | x\n+ a\n<span>\n[^1]: note\n```openui-lang x\n> ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "> ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:33",
+  "text": "```OpenUI\n> <!--\n|\n　\n[a]: /b \"t\"\n|\n2) a\n</div>\n[b]: <c d>\n　\n===\n> ```openui-lang\n  ```openui-lang\n-\ta\n~~~openui-lang\n      deep",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "> <!--\n|\n　\n[a]: /b \"t\"\n|\n2) a\n</div>\n[b]: <c d>\n　\n===\n> ```openui-lang\n  ```openui-lang\n-\ta\n~~~openui-lang\n      deep"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:34",
+  "text": "-->\r\n<!--\r\na \\| b\r\n:-\r\n-     a\r\n<!--\r\n</pre>\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:35",
+  "text": "   ~~~openui\n1. a\n```openui\n>\n[x]: /y (z)",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "1. a\n```openui\n>\n[x]: /y (z)"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:36",
+  "text": "a\n````openui-lang\n  - b\n<![CDATA[\n===\n<!-- x -->\n#h\n?>\n|-\n't'\n+ a\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  - b\n<![CDATA[\n===\n<!-- x -->\n#h\n?>\n|-\n't'\n+ a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:37",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:38",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n<!-- x -->\n<a b=c=d>\n> a\n-\n?>\n>\t```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:39",
+  "text": "   ~~~openui\n````openui-lang\n- a\n[]: /u\n```js\n- a\n2) a\n```openui\n[]: /u\n[^1]: note\n> a\n<span> | x",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "````openui-lang\n- a\n[]: /u\n```js\n- a\n2) a\n```openui\n[]: /u\n[^1]: note\n> a\n<span> | x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:40",
+  "text": "\t\n| a | b |\n> a\n[x]: a(b\n- a\n- a\n# h\n<!--\ntext b\ntext b\n<span\tx>\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:41",
+  "text": "```openui-lang\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n[a]: /b\r\n~~~openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  root = Choice(\"Q\", [\"A\", \"B\"])\r\n[a]: /b\r\n~~~openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:42",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n</div>\n-     a\n---\n<span x>\n```openui\n```openui-lang x\n      deep\n  ```openui-lang\n| :-: | -: |\n```OpenUI\n[a]: /b\n　\n[^1]: note\n# h\n<div>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:43",
+  "text": "+ a\r\ntext b\r\n    ```openui-lang\r\n1.",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:44",
+  "text": "a | b\n|---|---|\n~~~\n|\n1. a\n```openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "|\n1. a\n```openui"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:45",
+  "text": "# h\n~~~openui-lang\n~~~openui-lang\n<![CDATA[\n***\n  ```openui-lang\n<![CDATA[",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "~~~openui-lang\n<![CDATA[\n***\n  ```openui-lang\n<![CDATA["
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:46",
+  "text": "> <!--\n<pre/>\n   ~~~openui\n<!DOCTYPE html>\n\"t\"\n-     a\n___\n<a href=\"x\">\n't'\n[a]: /b\na\n---\n[^1]: note\n| c | d |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:47",
+  "text": "  ```openui-lang\n[a]: /b \"t\"\n~~~openui-lang\n   1. c\n- | -\n```js\n[a]:\n````openui-lang\n1.\n# h\n1. a\n<div>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[a]: /b \"t\"\n~~~openui-lang\n 1. c\n- | -\n```js\n[a]:\n````openui-lang\n1.\n# h\n1. a\n<div>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:48",
+  "text": "  root = Choice(\"Q\", [\"A\", \"B\"])\n<x>\n<!DOCTYPE html>\n[a]: /b \"t\"\n<a b=c=d>\n      deep\n\tcode",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:49",
+  "text": "|\n===\nx | y",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:50",
+  "text": "<span x>\n| :-: | -: |\n- | -\n|---|---|\n> a\n> - a\n[a\\]]: /u\nx | y\n</div>\n<!-- x -->\n[x]: /y (z)\n> - a\na \\| b\n* a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:51",
+  "text": "\n:-\n> <!--\n```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:52",
+  "text": ">\t```\n<pre/>\n\tcode\n:-\n1.\n___",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:53",
+  "text": "[b]: <c d>\n- | x |\n- | -\n```js\n      deep\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "      deep"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:54",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n't'\n>\t```\n:-\n<!DOCTYPE html>\n#h\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n[x]: /y (z)\n```openui-lang x\n</span>\n<a b=c=d>\n\t\n<!-- x -->\n2) a\n  \nroot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "</span>\n<a b=c=d>\n\t\n<!-- x -->\n2) a\n  \nroot = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:55",
+  "text": "| :-: | -: |\n  text\n```openui-lang x\n<div>\n<pre/>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<div>\n<pre/>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:56",
+  "text": "-\ta\n~~~\n| c | d |\n- | -\n####### h\nroot = Choice(\"Q\", [\"A\", \"B\"])\n\"t\"\n-->\n- | -\n```js\n- - -\n    code\n-->\n\"t\"\n\tcode\n<!-- x -->",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "| c | d |\n- | -\n####### h\nroot = Choice(\"Q\", [\"A\", \"B\"])\n\"t\"\n-->\n- | -\n```js\n- - -\n    code\n-->\n\"t\"\n\tcode\n<!-- x -->"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:57",
+  "text": "<span> | x\r1. a\r> <!--\r````openui-lang\r \r-     a\r<a b=c=d>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": " \r-     a\r<a b=c=d>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:58",
+  "text": "```openui-lang\n* a\n[a]:\n````\n[^1]: note\n| - |\na \\| b\n- [a]: /b\n- | x |\n1. a\n| c | d |\n-     a\n- [a]: /b",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "* a\n[a]:"
+   }
+  ],
+  "shape_codes": [
+   "* a\n[a]:"
+  ],
+  "keys": [
+   "p238de675"
+  ]
+ },
+ {
+  "name": "generated:20261018:59",
+  "text": "<spanx>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:60",
+  "text": "<!--\n* a\n\t\n- - -\n####### h\n<a href=\"x\">\n[x]: /y (z)\n]]>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:61",
+  "text": "> a\r\n```\r\nx | y\r\n+ a\r\n1.\r\n[a\\]]: /u",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "x | y\r\n+ a\r\n1.\r\n[a\\]]: /u"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:62",
+  "text": "___\n| a |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:63",
+  "text": "  \n- | -\n2) a\n-\n[a]:\n[a]: /b\nroot = Choice(\"Q\", [\"A\", \"B\"])\n---\n- | -\n  - b\n<!--\n```OpenUI\n-|-\n>\t```\n|\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:64",
+  "text": "]]>\n\ntext b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:65",
+  "text": "| a | b |\n> a\n   1. c\n~~~openui-lang\n  \n[x]: a(b\n---\n   1. c\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  \n[x]: a(b\n---\n   1. c"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:66",
+  "text": "﻿<span>\n| a | b |\n[b]: <c d>\n</span>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<pre>\n```openui-lang\n<!-- x -->\n> - a\n\tcode\n> - a\n>\n<a href=\"x\">\n***",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:67",
+  "text": "  text\n|---|---|",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:68",
+  "text": "]]>\n# h\n  text\n[a]: /b\n| a | b |\na | b\n- [a]: /b\n===\n> - a\n````openui-lang\n1. a\n|---|---|\n| a |\n~~~openui-lang\n```\n<pre>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "1. a\n|---|---|\n| a |\n~~~openui-lang\n```\n<pre>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:69",
+  "text": "\n<div>\n```openui-lang x\n# h\n?>\n<span\tx>\n<a href=\"x\">\n    ```openui-lang\n[^1]: note\n<a b=c=d>\n:-\n> a\n- a\n</span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:70",
+  "text": "<span> | x\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:71",
+  "text": "[]: /u\n[]: /u\n-\ta\na \\| b\n> ```openui-lang\n#h\n~~~\n| a |\n|-\n- | -",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "| a |\n|-\n- | -"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:72",
+  "text": "  text\n-->\n   1. c\n<pre/>\n<span> | x\n-->\n    code\n<span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:73",
+  "text": "a\n  \n```js\n-->\n---\n-->\n- [a]: /b\n2) a\n<span x>\n```OpenUI\n===\n~~~openui-lang\n[b]: <c d>\n####### h",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "-->\n---\n-->\n- [a]: /b\n2) a\n<span x>\n```OpenUI\n===\n~~~openui-lang\n[b]: <c d>\n####### h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:74",
+  "text": "<span> | x\n<a href=\"x\">\n\tcode\n[a]: /b\n> <!--\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:75",
+  "text": "</pre>\n| :-: | -: |\n</pre>\n* a\n\"t\"\n</div>\n<spanx>\n<x>\n```openui\n<!-- x -->\n| a |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:76",
+  "text": "````\n[^1]: note\n```js\n[b]: <c d>\n- a\n```openui-lang x\n  text\n[a]: /b\n- - -\n```openui\n```openui-lang x\n***\n| a |\n####### h\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[^1]: note\n```js\n[b]: <c d>\n- a\n```openui-lang x\n  text\n[a]: /b\n- - -\n```openui\n```openui-lang x\n***\n| a |\n####### h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:77",
+  "text": "- | x |\n\t\n]]>\n  ```openui-lang\n|-\n\"t\"\n2) a\n    ```openui-lang\n  \n[a]:\n````openui-lang\n<span x>\n<x>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|-\n\"t\"\n2) a\n  ```openui-lang\n\n[a]:\n````openui-lang\n<span x>\n<x>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:78",
+  "text": "-\n<span x>\n\"t\"\n1. a\n-\ta\n[x]: /y (z)\n-\ta\n  text\n  \n> - a\n* a\n-|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:79",
+  "text": "<x>\n````openui-lang\n#h\n[a]: /b\n  \n[b]: <c d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:80",
+  "text": ":-\n<?php\n***\n[^1]: note\n<![CDATA[\n</div>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:81",
+  "text": "  ```openui-lang\n      deep\n```openui-lang\n| c | d |\n```openui-lang x\n  - b\n  root = Choice(\"Q\", [\"A\", \"B\"])\nx | y",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "    deep\n```openui-lang\n| c | d |\n```openui-lang x\n- b\nroot = Choice(\"Q\", [\"A\", \"B\"])\nx | y"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:82",
+  "text": "\t\n````openui-lang\n[a\\]]: /u\n***\n---\n:-\n　\n-|-\n***\n| :-: | -: |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[a\\]]: /u\n***\n---\n:-\n　\n-|-\n***\n| :-: | -: |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:83",
+  "text": "```OpenUI\r\n \r\n```openui-lang\r\n[^1]: note\r\n|\r\n> - a\r\n```js\r\n\tcode\r\n[^1]: note\r\n<span>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": " \r\n```openui-lang\r\n[^1]: note\r\n|\r\n> - a\r\n```js\r\n\tcode\r\n[^1]: note\r\n<span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:84",
+  "text": "<span x>\r\"t\"\r| c | d |\r1. a\ra\r<span x>\r---\r",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:85",
+  "text": "***\n===\n      deep\n<span\tx>\n<span x>\n\"t\"\n+ a\n[^1]: note",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:86",
+  "text": "1.\n|---|---|\n  root = Choice(\"Q\", [\"A\", \"B\"])\n\n[x]: a(b\n~~~openui-lang\na\n<x>\n~~~openui-lang\n>\t```\n| a |\n?>\n-->\n?>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "a\n<x>\n~~~openui-lang\n>\t```\n| a |\n?>\n-->\n?>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:87",
+  "text": "- - -\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```js\n</div>\n  - b\n      deep\n\"t\"\n<span>\n\"t\"\n- | x |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "</div>\n  - b\n      deep\n\"t\"\n<span>\n\"t\"\n- | x |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:88",
+  "text": ":-\n- | -\n- - -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:89",
+  "text": "````openui-lang\n-|-\n  ```openui-lang\n<span> | x\n```openui-lang x\n| a | b |\n> - a\n___\n~~~\n> a\n2) a\n    code\n  \n-\ta\n</pre>\n\tcode\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "-|-\n  ```openui-lang\n<span> | x\n```openui-lang x\n| a | b |\n> - a\n___\n~~~\n> a\n2) a\n    code\n  \n-\ta\n</pre>\n\tcode"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:90",
+  "text": "<div>\n<?php\n\t\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:91",
+  "text": "?>\n \n1.\n- a\n- [a]: /b\n<a b=c=d>\n1. a\n| a | b |\n[a]:\n```openui-lang\n<!-- x -->\n#h\n<pre/>\n   1. c\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<!-- x -->\n#h\n<pre/>\n   1. c"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:92",
+  "text": "```\n| :-: | -: |\n\tcode\na \\| b\nroot = Choice(\"Q\", [\"A\", \"B\"])\n+ a\n> <!--\n  ```openui-lang\n  text\n<span> | x\n```",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "| :-: | -: |\n\tcode\na \\| b\nroot = Choice(\"Q\", [\"A\", \"B\"])\n+ a\n> <!--\n  ```openui-lang\n  text\n<span> | x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:93",
+  "text": "<![CDATA[\n- [a]: /b\n- | x |\n- [a]: /b\n| a |\n[a]: /b\na \\| b\n===",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:94",
+  "text": "<x>\r\n- | -\r\n<!DOCTYPE html>\r\n\troot = Choice(\"Q\", [\"A\", \"B\"])\r\n> a\r\na \\| b\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:95",
+  "text": "\tcode\n2) a\nx | y\n[a]: /b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:96",
+  "text": "text b\n- | x |\n# h\n<x>\na\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:97",
+  "text": "<![CDATA[\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:98",
+  "text": "2) a\n>\n  \n```OpenUI\n| :-: | -: |\ntext b\na \\| b\n\n# h\n<pre>\n  text\n> <!--\n<spanx>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "| :-: | -: |\ntext b\na \\| b\n\n# h\n<pre>\n  text\n> <!--\n<spanx>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:99",
+  "text": "####### h\n　\n\"t\"\n[a]: /b\n+ a\n<span x>\ntext b\n[x]: /y (z)\n~~~openui-lang\n<![CDATA[\n]]>\n- - -\n```OpenUI\n~~~\n> ```openui-lang\n| - |",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "<![CDATA[\n]]>\n- - -\n```OpenUI"
+   }
+  ],
+  "shape_codes": [
+   "<![CDATA[\n]]>\n- - -\n```OpenUI"
+  ],
+  "keys": [
+   "pd5f21ee0"
+  ]
+ },
+ {
+  "name": "generated:20261018:100",
+  "text": "2) a\r\n> ```openui-lang\r\n't'\r\n't'\r\nroot = Choice(\"Q\", [\"A\", \"B\"])\r\n  text\r\n<!--\r\n  - b\r\n| c | d |\r\n<!--\r\n```openui-lang\r\n<a b=c=d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:101",
+  "text": "<?php\n<!-- x -->\n- a\n>\t```\n?>\n    ```openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:102",
+  "text": "-     a\n___\n```openui\n<a href=\"x\">\n>\n   1. c\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n</pre>\n- | -\n1. a\n````openui-lang\n~~~openui-lang\n</span>\n[a]: /b \"t\"\n   ~~~openui\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<a href=\"x\">\n>\n   1. c\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n</pre>\n- | -\n1. a\n````openui-lang\n~~~openui-lang\n</span>\n[a]: /b \"t\"\n   ~~~openui"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:103",
+  "text": "- [a]: /b\n1.\n<!--\n-     a\n1.\n  root = Choice(\"Q\", [\"A\", \"B\"])\ntext b\n<pre/>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n　\n[x]: /y (z)\n-->\n   1. c\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:104",
+  "text": "</div>\r| :-: | -: |\r<a b=c=d>\r",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:105",
+  "text": "|---|---|\n___\n \n| :-: | -: |\n　\n?>\n[x]: a(b\n>\t```\n:-\n~~~openui-lang\n```openui-lang x\n?>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```openui-lang x\n?>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:106",
+  "text": "?>\r\n    ```openui-lang\r\n<div>\r\n>\r\n  \r\n-     a\r\n~~~openui-lang\r\n</span>\r\n\tcode\r\n't'\r\n<pre>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "</span>\r\n\tcode\r\n't'\r\n<pre>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:107",
+  "text": "####### h\n- | -\na\n:-\n- a\n|\n> - a\n>\t```\n \n>\n[a]:",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:108",
+  "text": "  text\r\n<![CDATA[\r\n-     a\r\n-\ta\r\n  text\r\n[a]: /b\r\n***\r\n| :-: | -: |\r\n</span>\r\n[a]: /b \"t\"\r\n- | x |\r\n<span> | x\r\n?>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:109",
+  "text": "﻿\r-\ta\r't'\r````\ra\r</span>\r't'\r```OpenUI\r> a\r<?php\rroot = Choice(\"Q\", [\"A\", \"B\"])\r[a]:\r<!DOCTYPE html>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "a\r</span>\r't'\r```OpenUI\r> a\r<?php\rroot = Choice(\"Q\", [\"A\", \"B\"])\r[a]:\r<!DOCTYPE html>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:110",
+  "text": "1. a\n \n* a\n<a href=\"x\">\n<!--\n　\n<x>\n ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:111",
+  "text": "a \\| b\n[^1]: note\n-\ta\n<span\tx>\n<?php\n-\ta\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[]: /u\n- [a]: /b\n> <!--\n    ```openui-lang\n===\n</pre>\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:112",
+  "text": "  text\r|---|---|\ra \\| b\r1.",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:113",
+  "text": "> ```openui-lang\n<!-- x -->\n-\n \n<a href=\"x\">\n|\n> <!--\n<![CDATA[\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:114",
+  "text": "[a]:\n| a | b |\n<div>\n  ```openui-lang\n# h\n***\n<div>\n> a\n　",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:115",
+  "text": "a\n- | x |\n>\n> a\n[]: /u\n    code\n~~~\n> a\n- | -",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "> a\n- | -"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:116",
+  "text": "[]: /u",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:117",
+  "text": "\tcode\n-|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:118",
+  "text": "<span>\n```openui\n<div>\n> ```openui-lang\n| :-: | -: |\n|---|---|\n```openui-lang\n1.\n```openui-lang\na",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:119",
+  "text": "[x]: a(b\n[a]: /b\n</div>\n```openui-lang\n~~~openui-lang\n<div>\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n+ a\n| - |\n't'\n   ~~~openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:120",
+  "text": "- a\n| :-: | -: |\n    ```openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:121",
+  "text": "[a]:\n<a b=c=d>\n1. a\n- a\n      deep\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:122",
+  "text": "<x>\r2) a\r<!DOCTYPE html>\r- - -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:123",
+  "text": "   1. c\n1.\n| :-: | -: |\n```openui-lang x\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:124",
+  "text": "<div>\r\na \\| b\r\n| a | b |\r\n<pre>\r\n]]>\r\nroot = Choice(\"Q\", [\"A\", \"B\"])\r\n```js\r\n1.\r\n[]: /u\r\n| :-: | -: |\r\n# h\r\n</pre>\r\n> <!--\r\n[]: /u\r\n?>\r\n* a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:125",
+  "text": "  text",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:126",
+  "text": "-|-\n# h\nx | y\n[a]: /b\n<span x>\n-->\n<span>\n   1. c\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:127",
+  "text": "| :-: | -: |\r````openui-lang\r~~~\r:-\r\t\r  \r```\r~~~\r```openui-lang\r<spanx>\r<spanx>\r<pre/>\rroot = Choice(\"Q\", [\"A\", \"B\"])\r|---|---|",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "~~~\r:-\r\t\r  \r```\r~~~\r```openui-lang\r<spanx>\r<spanx>\r<pre/>\rroot = Choice(\"Q\", [\"A\", \"B\"])\r|---|---|"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:128",
+  "text": "<a href=\"x\">\n\t\n- a\n```openui-lang x\n  \n>\t```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  \n>\t```"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:129",
+  "text": "[x]: /y (z)\n[a]:\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<span>\na | b\n<div>\n</pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:130",
+  "text": "<div>\n# h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:131",
+  "text": "|---|---|\n<span\tx>\n<!-- x -->\n~~~\n[a]: /b \"t\"\n-\n+ a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[a]: /b \"t\"\n-\n+ a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:132",
+  "text": "[x]: a(b\n>\t```\n</span>\n<span>\n[^1]: note\n| a | b |\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:133",
+  "text": "'t'\n-|-\n?>\n<!--\n  \n| c | d |\n-\ta",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:134",
+  "text": "　\r___\r  root = Choice(\"Q\", [\"A\", \"B\"])\r\troot = Choice(\"Q\", [\"A\", \"B\"])\r<span> | x\r| c | d |\r- | -\r\tcode\r\"t\"\r~~~openui-lang\r* a\r<span x>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "* a\r<span x>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:135",
+  "text": "﻿　\n2) a\n<a href=\"x\">\n1.\n- a\n>\t```\n<span\tx>\n```\n>\n[^1]: note\n  \n===\n    ```openui-lang\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:136",
+  "text": "> ```openui-lang\n \n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:137",
+  "text": "~~~openui-lang\n####### h\n[x]: /y (z)\n<spanx>\n* a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n````\n<pre/>\n\t\n-\ta\n[x]: /y (z)\n####### h\n \n| :-: | -: |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "####### h\n[x]: /y (z)\n<spanx>\n* a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n````\n<pre/>\n\t\n-\ta\n[x]: /y (z)\n####### h\n \n| :-: | -: |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:138",
+  "text": "1. a\n| :-: | -: |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:139",
+  "text": "####### h\r\n-     a\r\n<x>\r\n-->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:140",
+  "text": "\t\n-\n</pre>\n \n<span>\n-|-\n| :-: | -: |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:141",
+  "text": "<x>\na \\| b\n~~~openui-lang\n<span>\n[a\\]]: /u\n[x]: a(b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:142",
+  "text": "````openui-lang\n  text\n#h\n<span\tx>\n  \n|---|---|\n1.\n####### h\n  ",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  text\n#h\n<span\tx>\n  \n|---|---|\n1.\n####### h\n  "
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:143",
+  "text": "<pre>\n\tcode\n \n<div>\n```openui\n```OpenUI\n  \nx | y\n| c | d |\n[^1]: note\n~~~openui-lang\n  ```openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:144",
+  "text": "<span\tx>\n> <!--\n```js\n2) a\n-     a\n| :-: | -: |\n<a href=\"x\">\na | b\n-\ta\n]]>\n</div>\n-\n|\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:145",
+  "text": "<span> | x\n[a]: /b \"t\"\n---",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:146",
+  "text": "<pre>\n```\ntext b\n   1. c\n<![CDATA[\n| c | d |\n</span>\n>\t```\n####### h\n####### h\n|---|---|\n<a b=c=d>\n- | -\n</pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:147",
+  "text": "***\n   1. c\n\t\n```openui-lang x\n```openui-lang x\n  text\n\tcode\n| :-: | -: |\n***\n| c | d |\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<pre/>\n[]: /u\n  ```openui-lang\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```openui-lang x\n  text\n\tcode\n| :-: | -: |\n***\n| c | d |\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<pre/>\n[]: /u\n  ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:148",
+  "text": "-->\n<!DOCTYPE html>\n2) a\n|\n</span>\n~~~\n___\n  \nroot = Choice(\"Q\", [\"A\", \"B\"])\n___\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "___\n  \nroot = Choice(\"Q\", [\"A\", \"B\"])\n___"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:149",
+  "text": "___\n[b]: <c d>\n</span>\n<![CDATA[\n\tcode\n<pre/>\n- | x |\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:150",
+  "text": "- | x |\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:151",
+  "text": "   ~~~openui\ntext b\n</pre>\n[a]: /b\na \\| b\n#h\n| - |\n-->\n| - |\n't'\n___\n[x]: /y (z)\n<x>\n[x]: /y (z)\n<span>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "text b\n</pre>\n[a]: /b\na \\| b\n#h\n| - |\n-->\n| - |\n't'\n___\n[x]: /y (z)\n<x>\n[x]: /y (z)\n<span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:152",
+  "text": "#h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:153",
+  "text": "* a\n-|-\n```openui-lang x\n- [a]: /b\n-     a\n<span x>\n| - |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "- [a]: /b\n-     a\n<span x>\n| - |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:154",
+  "text": "- | -\n# h\n<!DOCTYPE html>\n[^1]: note\n<div>\n?>\n    ```openui-lang\n> <!--\n:-\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:155",
+  "text": "<span\tx>\n- | -\n````openui-lang\n>\t```\n-\n1. a\n<span>\n---\n~~~openui-lang\n- - -\n[a\\]]: /u\n***\n  root = Choice(\"Q\", [\"A\", \"B\"])\n[a\\]]: /u\n~~~openui-lang\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:156",
+  "text": "___\n```openui-lang x\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:157",
+  "text": "  ```openui-lang\rx | y\r-|-\r't'\r    ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "x | y\r-|-\r't'\r  ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:158",
+  "text": "<div>\n- a\n-\n| a | b |\n```openui-lang x\n[a]: /b\nx | y\n- [a]: /b\n<pre/>\n# h\n-->\n　",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:159",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n# h\n* a\n- - -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:160",
+  "text": "[a]: /b \"t\"",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:161",
+  "text": "-\n-|-\n####### h\n\n:-\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:162",
+  "text": "</span>\n# h\n    ```openui-lang\n<!-- x -->\na | b\n1.",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:163",
+  "text": "- [a]: /b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:164",
+  "text": "<span\tx>\n[^1]: note",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:165",
+  "text": "* a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:166",
+  "text": "___\n<!--\n[]: /u\n| c | d |\n[a]: /b\n    code\n#h\n[b]: <c d>\n~~~openui-lang\n+ a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:167",
+  "text": "-|-\r[^1]: note\r```openui\r<![CDATA[\r* a\r```openui-lang x\r</div>\r[x]: a(b\r> ```openui-lang\r[a]: /b\r> ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<![CDATA[\r* a\r```openui-lang x\r</div>\r[x]: a(b\r> ```openui-lang\r[a]: /b\r> ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:168",
+  "text": "a\n\n# h\n<span>\n- a\n   ~~~openui\n~~~\n<?php",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:169",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\n<spanx>\n***\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:170",
+  "text": "~~~\n~~~\n````\n[a]:\n-\n```js\n  text\n<span>\n  \n  \n| a |\n[]: /u\n| c | d |",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": ""
+   },
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[a]:\n-\n```js\n  text\n<span>\n  \n  \n| a |\n[]: /u\n| c | d |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:171",
+  "text": "a \\| b\n</pre>\n+ a\n|",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:172",
+  "text": "[a\\]]: /u\n```openui-lang\n- a\n  root = Choice(\"Q\", [\"A\", \"B\"])\n</div>\n> - a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[a]: /b\na | b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "- a\n  root = Choice(\"Q\", [\"A\", \"B\"])\n</div>\n> - a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[a]: /b\na | b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:173",
+  "text": "<!--\n# h\n```OpenUI\n\tcode\n</span>\n\"t\"\n't'\n```\n　\n]]>\n-->\n<!--\n* a\n<pre/>\n```openui-lang x\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:174",
+  "text": "<![CDATA[\n[a]: /b\n- | -\n't'\n\na \\| b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:175",
+  "text": "-\n<span> | x\n[a]: /b\n```\n````\n<span x>\n]]>\n>\n<div>\n\tcode\n  ",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:176",
+  "text": "> - a\n|\n<span\tx>\n<spanx>\n2) a\n# h\n#h\na\n    ```openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:177",
+  "text": "﻿ \n      deep\n|\n</div>\n[a]:\n't'\n> - a\n?>\n- - -\n:-\n?>\n      deep\n> <!--\n-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:178",
+  "text": ">\t```\n[^1]: note\n1. a\n| a | b |\n   1. c\n<a b=c=d>\n  text\n   1. c\n<?php\n<pre>\n1. a\n<pre/>\n[a]: /b \"t\"\n<span x>\n-     a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:179",
+  "text": "[b]: <c d>\n```openui\na\n<span>\n[a]:\n- - -\n   1. c\n<span>\n2) a\n't'\n  \n2) a\n　\n</pre>\n\troot = Choice(\"Q\", [\"A\", \"B\"])\ntext b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "a\n<span>\n[a]:\n- - -\n   1. c\n<span>\n2) a\n't'\n  \n2) a\n　\n</pre>\n\troot = Choice(\"Q\", [\"A\", \"B\"])\ntext b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:180",
+  "text": "\n- [a]: /b\n|---|---|\n\"t\"\n> ```openui-lang\n[a]: /b \"t\"\n| a |\n- [a]: /b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:181",
+  "text": "a | b\n2) a\n      deep\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:182",
+  "text": "   1. c\n    ```openui-lang\n| a | b |\n<span\tx>\n　\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:183",
+  "text": "#h\n1. a\n[^1]: note\n- a\n\"t\"\n</pre>\n[]: /u\n-\ta\n[a]:\n    ```openui-lang\n> ```openui-lang\n| a | b |\n- - -\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:184",
+  "text": "|\na \\| b\n1.\n#h\n[]: /u\n- | x |\n|---|---|\n  ```openui-lang\na \\| b\n-\ta",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:185",
+  "text": "<pre>\na \\| b\n>\n|---|---|\n---\n````\n-\ta\n  ```openui-lang\n```OpenUI",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:186",
+  "text": ">\t```\n]]>\n      deep\n</span>\n   ~~~openui\n```openui-lang x\n   1. c\n\t\n***\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```openui-lang x\n1. c\n \n***"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:187",
+  "text": "[a]: /b \"t\"\n \n1. a\n* a\n\"t\"\n<span\tx>\n[b]: <c d>\nx | y\n```OpenUI\n-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:188",
+  "text": "***\n[a]: /b \"t\"\n<a b=c=d>\n####### h\n</span>\n-     a\n-->\n-\ta\n> ```openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:189",
+  "text": "````\n[b]: <c d>\nx | y\n<a href=\"x\">\n---\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[a]: /b\n<pre>\n?>\n```openui-lang x\n]]>\n\t\n<!--\n-|-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[b]: <c d>\nx | y\n<a href=\"x\">\n---\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[a]: /b\n<pre>\n?>\n```openui-lang x\n]]>\n\t\n<!--\n-|-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:190",
+  "text": "1. a\n't'\n```js\n<!-- x -->\nroot = Choice(\"Q\", [\"A\", \"B\"])\n<!DOCTYPE html>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<!-- x -->\nroot = Choice(\"Q\", [\"A\", \"B\"])\n<!DOCTYPE html>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:191",
+  "text": "| c | d |\n---\n<!-- x -->\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:192",
+  "text": "> - a\n<div>\n- a\n<span\tx>\n- | x |\n- - -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:193",
+  "text": "a\n|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:194",
+  "text": "    ```openui-lang\n[x]: /y (z)\n<spanx>\n[a]: /b \"t\"\n| c | d |\n[]: /u\n>\t```\n[]: /u\nx | y\n<pre>\n    code\n't'\n[]: /u",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:195",
+  "text": "| c | d |\n> ```openui-lang\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n|-\n| - |\n| a | b |\n      deep\n<span\tx>\n* a\na | b\n~~~openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:196",
+  "text": "﻿1.\n-     a\n</pre>\n>\t```\n[]: /u\n-     a\n-     a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:197",
+  "text": "````\n1. a\n<a href=\"x\">\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "1. a\n<a href=\"x\">"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:198",
+  "text": "    ```openui-lang\n<div>\n\t\n<!--\n<div>\n> <!--\n> - a\n<span\tx>\n>\n- a\n>\n　\n  ```openui-lang\n    ```openui-lang\n<span x>\n]]>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:199",
+  "text": "　\n<!DOCTYPE html>\n\tcode\n  ```openui-lang\n***\n- | -\n|---|---|\n   1. c\n\"t\"\n<span x>\na \\| b\n|\n]]>\n<span>\na \\| b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "***\n- | -\n|---|---|\n 1. c\n\"t\"\n<span x>\na \\| b\n|\n]]>\n<span>\na \\| b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:200",
+  "text": "<pre>\n<![CDATA[\n|\n  ```openui-lang\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:201",
+  "text": "| c | d |\n</pre>\n  - b\n[x]: /y (z)\n\n  \n<div>\n---\n   1. c\n  root = Choice(\"Q\", [\"A\", \"B\"])\n|---|---|\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:202",
+  "text": "```\n- | -\n-\n| a | b |\n      deep\n<![CDATA[",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "- | -\n-\n| a | b |\n      deep\n<![CDATA["
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:203",
+  "text": "[x]: /y (z)\n| a | b |\n[x]: /y (z)\n| a | b |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:204",
+  "text": "|\n1.\n    code\n:-\n<pre>\n<span\tx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:205",
+  "text": "| c | d |\n-->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:206",
+  "text": "  root = Choice(\"Q\", [\"A\", \"B\"])\rtext b\r```openui\r  text\r",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  text"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:207",
+  "text": "[b]: <c d>\n[x]: a(b\n```\n  text\na | b\n```js\n|---|---|\n    code\na\n\"t\"\n\"t\"\na | b\n<div>\n<pre>\n   1. c",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "  text\na | b\n```js\n|---|---|\n    code\na\n\"t\"\n\"t\"\na | b\n<div>\n<pre>\n   1. c"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:208",
+  "text": "?>\n</span>\n't'\n<![CDATA[\n<!--\n-\ta\n[a\\]]: /u\n[a\\]]: /u\n| c | d |\n- a\n\"t\"\n|---|---|\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:209",
+  "text": "| a |\n<!DOCTYPE html>\n[a\\]]: /u\n  \n2) a\n- - -\n<!--\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<!DOCTYPE html>\n>\n<!--",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:210",
+  "text": "﻿text b\n   1. c\n\n<x>\n- [a]: /b\n```js\n　\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:211",
+  "text": "<?php\n>\t```\n- | x |\n| c | d |\n#h\n- | x |\n</pre>\n| a | b |\n| c | d |\n\n2) a\n<span x>\n-->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:212",
+  "text": "root = Choice(\"Q\", [\"A\", \"B\"])\ra | b\r<!-- x -->\r|\r-|-\r[b]: <c d>\r<![CDATA[\r]]>\r  - b\r===\r  root = Choice(\"Q\", [\"A\", \"B\"])\rx | y\r[a]: /b \"t\"",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:213",
+  "text": "|\n<pre/>\n\tcode\n<?php\n===\n<!--\n|\n<x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:214",
+  "text": "- | -\n]]>\n```openui\n:-\n-->",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ":-\n-->"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:215",
+  "text": "  ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:216",
+  "text": " \n-     a\n> a\n-     a\n|---|---|\n1. a\n</div>\n<spanx>\n> <!--\nx | y\n　\n<div>\n</pre>\n***",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:217",
+  "text": "- a\n<span x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:218",
+  "text": "```openui\nx | y\n~~~openui-lang\n```js\n[b]: <c d>\n|---|---|\ntext b\n# h\n```OpenUI\n\n\n<?php\n[b]: <c d>\n>\t```\n2) a\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "x | y\n~~~openui-lang\n```js\n[b]: <c d>\n|---|---|\ntext b\n# h\n```OpenUI\n\n\n<?php\n[b]: <c d>\n>\t```\n2) a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:219",
+  "text": ":-\n```OpenUI\n- a\n1.\n　\n- | -\n</span>\n  text",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "- a\n1.\n　\n- | -\n</span>\n  text"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:220",
+  "text": "```\n[a]: /b \"t\"\n:-\n<a href=\"x\">\n  text\n-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[a]: /b \"t\"\n:-\n<a href=\"x\">\n  text\n-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:221",
+  "text": ">\t```\n<!--\n \ntext b\nroot = Choice(\"Q\", [\"A\", \"B\"])\n| a | b |\n```\n***\n  \n> ```openui-lang\n>\t```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:222",
+  "text": "* a\n1. a\n| a | b |\n\n|-\n> a\n* a\n</div>\n\t\n[^1]: note\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:223",
+  "text": "<!-- x -->\r####### h\r---\r  text\r\troot = Choice(\"Q\", [\"A\", \"B\"])\r> a\r-\ta\r1.",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:224",
+  "text": "```\r\n</div>\r\n<div>\r\n[x]: a(b\r\n<a b=c=d>\r\n    ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "</div>\r\n<div>\r\n[x]: a(b\r\n<a b=c=d>\r\n    ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:225",
+  "text": "~~~\n  \n```\n2) a\n####### h\n<spanx>\n<a href=\"x\">\n    ```openui-lang\n[a\\]]: /u\n<pre/>\n2) a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "  \n```\n2) a\n####### h\n<spanx>\n<a href=\"x\">\n    ```openui-lang\n[a\\]]: /u\n<pre/>\n2) a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:226",
+  "text": "x | y",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:227",
+  "text": "- a\r\r| - |\r<pre>\r</pre>\r    code\r  \r---\r#h\r```openui-lang\r  ```openui-lang\r<span\tx>\r\t\r<!-- x -->",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  ```openui-lang\r<span\tx>\r\t\r<!-- x -->"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:228",
+  "text": "~~~openui-lang\r\n  ```openui-lang\r\n[x]: /y (z)\r\n```js\r\n```openui\r\n<x>\r\n- | x |\r\n```openui-lang\r\n-\r\na \\| b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  ```openui-lang\r\n[x]: /y (z)\r\n```js\r\n```openui\r\n<x>\r\n- | x |\r\n```openui-lang\r\n-\r\na \\| b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:229",
+  "text": "[^1]: note\n+ a\n<spanx>\n| :-: | -: |\n````\n---\n<pre>\n\"t\"\n  - b\na | b\n#h\n---",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "---\n<pre>\n\"t\"\n  - b\na | b\n#h\n---"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:230",
+  "text": "<div>\r\n```openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:231",
+  "text": "~~~openui-lang\r\n<x>\r\n[a]: /b\r\n[b]: <c d>\r\n|---|---|\r\n* a\r\n|\r\nx | y\r\n\"t\"\r\n<span\tx>\r\n  ```openui-lang\r\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<x>\r\n[a]: /b\r\n[b]: <c d>\r\n|---|---|\r\n* a\r\n|\r\nx | y\r\n\"t\"\r\n<span\tx>\r\n  ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:232",
+  "text": ">\n</pre>\n* a\n      deep\n***\n[a]:\n~~~\n####### h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:233",
+  "text": "  text\n]]>\n> - a\n\"t\"\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:234",
+  "text": "| a | b |\n<div>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:235",
+  "text": "<!--\n<pre>\na \\| b\n't'\n| c | d |\n   ~~~openui\n~~~\n[a]:\n　\n<!-- x -->\n<spanx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:236",
+  "text": "- | -\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```openui\n[a]:\n?>\n1. a\n| a | b |\n- a\n___\n> - a\n***\n| - |\n  ",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[a]:\n?>\n1. a\n| a | b |\n- a\n___\n> - a\n***\n| - |\n  "
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:237",
+  "text": "> a\r\n</span>\r\n- a\r\n   1. c\r\n####### h\r\n````openui-lang\r\n| a | b |\r\n[a]: /b\r\n[x]: /y (z)\r\n<!DOCTYPE html>\r\n</div>\r\n> <!--\r\n<span\tx>\r\n<span> | x\r\n```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "| a | b |\r\n[a]: /b\r\n[x]: /y (z)\r\n<!DOCTYPE html>\r\n</div>\r\n> <!--\r\n<span\tx>\r\n<span> | x\r\n```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:238",
+  "text": "#h\n<!-- x -->\n- - -\n- a\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n  root = Choice(\"Q\", [\"A\", \"B\"])\n?>\n</div>\n   ~~~openui\n   ~~~openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:239",
+  "text": "[a]: /b \"t\"\n<![CDATA[\n ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:240",
+  "text": "<spanx>\n[]: /u\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:241",
+  "text": "# h\n<!DOCTYPE html>\n1. a\n```openui-lang x\n   ~~~openui\n```openui-lang\n　",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "   ~~~openui\n```openui-lang\n　"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:242",
+  "text": "> ```openui-lang\na \\| b\n| - |\n:-\n___\n</span>\n  ```openui-lang\n-->\n>\n?>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:243",
+  "text": "   ~~~openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:244",
+  "text": "\t\nx | y\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:245",
+  "text": "> a\n  text\n</div>\n```OpenUI\n<span>\n<?php\n- | -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:246",
+  "text": "\"t\"\n1. a\na\n-\ta\n[x]: /y (z)\n   1. c",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:247",
+  "text": "> <!--\r\n<span>\r\nroot = Choice(\"Q\", [\"A\", \"B\"])\r\n<div>\r\n~~~\r\n]]>\r\n1.\r\n1. a\r\n  - b\r\n<span x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:248",
+  "text": "- - -\r\n- | x |\r\n[]: /u\r\n<span\tx>\r\n<pre>\r\n]]>\r\n| :-: | -: |\r\n> ```openui-lang\r\n</span>\r\n      deep\r\n</span>\r\na | b\r\n   1. c\r\n<![CDATA[\r\n\tcode",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:249",
+  "text": "| a |\na\n- [a]: /b\n[^1]: note\n<div>\n[]: /u\n[]: /u\n<pre/>\n+ a\n|---|---|\n   1. c",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:250",
+  "text": "a\n  \n<![CDATA[\n[x]: /y (z)\n> a\n   ~~~openui\n```\n<span> | x\n[x]: a(b\n  - b\n````openui-lang\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:251",
+  "text": "```openui-lang\r?>\r- | -\rroot = Choice(\"Q\", [\"A\", \"B\"])\r>\t```\r|\r  text\r-->\r- [a]: /b\r***\r***\r　\r  text\r \r    ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "?>\r- | -\rroot = Choice(\"Q\", [\"A\", \"B\"])\r>\t```\r|\r  text\r-->\r- [a]: /b\r***\r***\r　\r  text\r \r    ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:252",
+  "text": "<a href=\"x\">\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:253",
+  "text": "[]: /u\n```openui-lang x\n]]>\n  text\n- [a]: /b\n-\ta\n2) a\n[x]: /y (z)\n    code\n|\n[a]:\n:-\n    code",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "]]>\n  text\n- [a]: /b\n-\ta\n2) a\n[x]: /y (z)\n    code\n|\n[a]:\n:-\n    code"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:254",
+  "text": "```js\n####### h\n| a |\n| c | d |\n<spanx>\n<span x>\n> a\n```openui-lang x\n> ```openui-lang\n[]: /u\n]]>\n+ a\n[b]: <c d>\na \\| b\n<span>\n \n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "####### h\n| a |\n| c | d |\n<spanx>\n<span x>\n> a\n```openui-lang x\n> ```openui-lang\n[]: /u\n]]>\n+ a\n[b]: <c d>\na \\| b\n<span>\n "
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:255",
+  "text": "[b]: <c d>\n[b]: <c d>\n    ```openui-lang\n````",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:256",
+  "text": "___\n|---|---|\n<span\tx>\n \n    ```openui-lang\n-     a\na | b\n-     a\n[x]: /y (z)\n  - b\n>\n- - -\n- | x |\n<![CDATA[\n```openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:257",
+  "text": "#h\r\n| a |\r\na \\| b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:258",
+  "text": "> <!--\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n[x]: /y (z)\n+ a\n<!--\n> <!--\n|-\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n```openui-lang x\n<!-- x -->\n- | x |\n</span>\n\"t\"\n<span\tx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:259",
+  "text": "<pre>\n[b]: <c d>\n\n      deep\n<!-- x -->\n```js\n#h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:260",
+  "text": "#h\n<a b=c=d>\n  text\n- | -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:261",
+  "text": "[a]: /b \"t\"\r\n# h\r\n| c | d |\r\n- - -\r\n[x]: a(b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:262",
+  "text": "<!--\r\n<span\tx>\r\n#h\r\n# h\r\n-|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:263",
+  "text": "|\n````openui-lang\n</div>\n</div>\n  ```openui-lang\n\"t\"\n't'\n?>\n[x]: a(b\n[x]: /y (z)\n \ntext b\na\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "</div>\n</div>\n  ```openui-lang\n\"t\"\n't'\n?>\n[x]: a(b\n[x]: /y (z)\n \ntext b\na"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:264",
+  "text": "```js\n####### h\n<!DOCTYPE html>\n</div>\n- | x |\n| c | d |\n> ```openui-lang\n* a\n___\n- a\n~~~\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "####### h\n<!DOCTYPE html>\n</div>\n- | x |\n| c | d |\n> ```openui-lang\n* a\n___\n- a\n~~~"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:265",
+  "text": "| a | b |\n[a]: /b \"t\"\n   1. c\n| a |\n't'\n````openui-lang\n<!-- x -->\n~~~\n> <!--\n</div>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<!-- x -->\n~~~\n> <!--\n</div>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:266",
+  "text": "-|-\n<spanx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:267",
+  "text": "-|-\n[a\\]]: /u\n</span>\n```js\n---\n \n```\n\n---\n- a\n<pre/>\n> a\n    code\n* a\n<span x>\n|---|---|\n",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "---\n "
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:268",
+  "text": "[x]: a(b\n<spanx>\n- [a]: /b\n[b]: <c d>\n***\n| c | d |\n- | -\n- | x |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:269",
+  "text": "| :-: | -: |\n___\n[]: /u\n      deep\n]]>\n[b]: <c d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:270",
+  "text": "2) a\n:-\n[]: /u\n</pre>\n<pre/>\n- a\n:-\n```js\n~~~\n___\n  \n  ```openui-lang\n    ```openui-lang\n?>\n　\n> - a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  ```openui-lang\n?>\n　\n> - a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:271",
+  "text": ">\t```\n```openui-lang\n```\n1.\n\tcode\n<!-- x -->\n[a]:\nx | y\n ",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [
+   ""
+  ],
+  "keys": [
+   "p811c9dc5"
+  ]
+ },
+ {
+  "name": "generated:20261018:272",
+  "text": "# h\n\n-|-\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:273",
+  "text": "?>\n[a]: /b \"t\"\n| c | d |\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<x>\n<a b=c=d>\n1. a\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:274",
+  "text": "\n  ```openui-lang\n# h\n  \n<span>\n[x]: /y (z)\n      deep\n[x]: /y (z)\n<!--\n| a |\n> - a\n- - -\nx | y",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "# h\n\n<span>\n[x]: /y (z)\n    deep\n[x]: /y (z)\n<!--\n| a |\n> - a\n- - -\nx | y"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:275",
+  "text": ":-\n   1. c\n1. a\n<a b=c=d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:276",
+  "text": "﻿-\n- | -\n# h\n| c | d |\n***\n \n```openui-lang\n<span x>\n```OpenUI\n# h\n  ```openui-lang\n~~~\n# h\na \\| b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<span x>\n```OpenUI\n# h\n  ```openui-lang\n~~~\n# h\na \\| b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:277",
+  "text": "\t\r[]: /u\r\r- | x |\r####### h\r  - b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:278",
+  "text": "~~~\n- | x |\n<!--\n```\n```js\n> <!--\n<?php\n]]>\n####### h\n>\n> a\n<!-- x -->",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "- | x |\n<!--\n```\n```js\n> <!--\n<?php\n]]>\n####### h\n>\n> a\n<!-- x -->"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:279",
+  "text": "  - b\r-\ta\r   ~~~openui\ra \\| b\rroot = Choice(\"Q\", [\"A\", \"B\"])\r> <!--\r[]: /u\r> - a\r[x]: /y (z)\r```openui\r# h",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "a \\| b\rroot = Choice(\"Q\", [\"A\", \"B\"])\r> <!--\r[]: /u\r> - a\r[x]: /y (z)\r```openui\r# h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:280",
+  "text": "text b\na | b\n---\n[b]: <c d>\ntext b\n- - -\n[a]: /b \"t\"\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:281",
+  "text": "[a]: /b \"t\"\n|-\n[x]: a(b\n|\n<span> | x\n***\n[b]: <c d>\n1. a\n- [a]: /b\n- | x |\n  root = Choice(\"Q\", [\"A\", \"B\"])\n```openui-lang x\n- - -",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "- - -"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:282",
+  "text": "~~~\n# h\n|\n<?php\n```js\n<a href=\"x\">\n<span\tx>\n```openui-lang\n<span\tx>\n* a\n-\n<!--\n| :-: | -: |\n- | x |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "# h\n|\n<?php\n```js\n<a href=\"x\">\n<span\tx>\n```openui-lang\n<span\tx>\n* a\n-\n<!--\n| :-: | -: |\n- | x |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:283",
+  "text": "# h\n````\n|---|---|\n[b]: <c d>\n<pre>\n***\n>\t```\nroot = Choice(\"Q\", [\"A\", \"B\"])\n````openui-lang\n>\t```\n</pre>\n<![CDATA[\n===\n- | -\n<pre>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "|---|---|\n[b]: <c d>\n<pre>\n***\n>\t```\nroot = Choice(\"Q\", [\"A\", \"B\"])\n````openui-lang\n>\t```\n</pre>\n<![CDATA[\n===\n- | -\n<pre>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:284",
+  "text": "> <!--\n<span>\n---\n</div>\n| - |\n```js\n</span>\n-\ta\n<!-- x -->\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:285",
+  "text": "<!-- x -->\n| c | d |\n|-\n    ```openui-lang\n:-\n[x]: /y (z)\n> <!--",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:286",
+  "text": "# h\r\n:-\r\n```openui-lang\r\n- a\r\n?>\r\n| - |\r\n```openui\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n```openui-lang x\r\n|-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "- a\r\n?>\r\n| - |\r\n```openui\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n```openui-lang x\r\n|-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:287",
+  "text": "<![CDATA[\nroot = Choice(\"Q\", [\"A\", \"B\"])\n<pre/>\n[x]: /y (z)\n| - |\n<span x>\n:-\n      deep\n1. a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:288",
+  "text": "\tcode\n---\n```openui\n>\n<pre/>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ">\n<pre/>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:289",
+  "text": "####### h\r\n<div>\r\n<!DOCTYPE html>\r\n<spanx>\r\n2) a\r\n<![CDATA[\r\n```openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:290",
+  "text": "   1. c\n> <!--\n- | x |\n      deep\n- a\n-|-\n[x]: a(b\n<!-- x -->\n<a b=c=d>\n````\n<![CDATA[\n~~~\n[x]: a(b\n  - b\n[^1]: note\n<?php",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:291",
+  "text": "|-\n| a | b |\n<![CDATA[\n\n~~~openui-lang\n- [a]: /b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:292",
+  "text": "|---|---|\n```OpenUI\n<pre>\n|\n```openui\na \\| b\n  \n~~~",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<pre>\n|\n```openui\na \\| b\n  \n~~~"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:293",
+  "text": "text b\n***\n    code\n~~~openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:294",
+  "text": "```\n<!--\n<div>\n?>\n> <!--\n</pre>\n# h",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<!--\n<div>\n?>\n> <!--\n</pre>\n# h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:295",
+  "text": "___\r<span x>\r</span>\r]]>\r<?php\rtext b\r<a href=\"x\">\r\troot = Choice(\"Q\", [\"A\", \"B\"])\r  ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:296",
+  "text": "<![CDATA[\r\n[a\\]]: /u\r\n####### h\r\n<spanx>\r\n]]>\r\n      deep\r\n[b]: <c d>\r\n-     a\r\n<pre>\r\n- - -\r\n````openui-lang\r\n      deep\r\n|\r\n-->\r\n| :-: | -: |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:297",
+  "text": "</div>\n\n- - -\n　\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:298",
+  "text": "<![CDATA[\n<a b=c=d>\n   ~~~openui\n| - |\n\"t\"\n>\t```\n- - -\n-|-\n  root = Choice(\"Q\", [\"A\", \"B\"])\n>\n| c | d |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:299",
+  "text": "| a |\n```openui\n  text\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n* a\n<!-- x -->\n<a b=c=d>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  text\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n* a\n<!-- x -->\n<a b=c=d>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:300",
+  "text": "<pre/>\n<!-- x -->\n \n<pre>\n<!DOCTYPE html>\n~~~openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:301",
+  "text": "> a\n===\n<span> | x\n<span x>\n2) a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:302",
+  "text": "> <!--\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[a\\]]: /u\n<![CDATA[\n-\n2) a\n　",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:303",
+  "text": "<a b=c=d>\n<pre>\n1. a\n---\n  ```openui-lang\n> - a\n\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:304",
+  "text": "[x]: a(b\n|\n    ```openui-lang\n<pre>\n</span>\n　\n[a]:\n+ a\n| :-: | -: |\n| a | b |\n  text\n[b]: <c d>\n| c | d |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:305",
+  "text": "</span>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:306",
+  "text": "---\n      deep",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:307",
+  "text": "```\n   ~~~openui\n<a href=\"x\">\n<div>\n-     a\n[b]: <c d>\n:-\n</span>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "   ~~~openui\n<a href=\"x\">\n<div>\n-     a\n[b]: <c d>\n:-\n</span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:308",
+  "text": "\n<!-- x -->\n|\n-     a\n\t\n-     a\n<!-- x -->\n?>\n \n| - |\n<span>\n| a | b |\n</pre>\n---\n[a]: /b\n-|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:309",
+  "text": "<div>\n> <!--\n't'\n```OpenUI\n```openui-lang\n-->\n \n-|-\n　\n-->\n<a b=c=d>\n<!--\n````\n-\n***\n---",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:310",
+  "text": "<spanx>\n- - -\n      deep\n+ a\n<pre/>\n|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:311",
+  "text": "```OpenUI\ntext b\n[x]: a(b\n   1. c\n[a\\]]: /u\n<!--\n[]: /u\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n```\n't'\n[x]: /y (z)\n2) a\n    code",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "text b\n[x]: a(b\n   1. c\n[a\\]]: /u\n<!--\n[]: /u\n\troot = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:312",
+  "text": "  - b\n```openui-lang x\n|\n \n```openui-lang\n|-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|\n \n```openui-lang\n|-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:313",
+  "text": "<pre>\n```\n\"t\"\n===\n<?php\n  - b\n1.\n   1. c\n[]: /u\n1.\n___\n[]: /u\n<?php\n####### h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:314",
+  "text": "~~~\n```openui-lang x\n<span x>\n]]>\n[b]: <c d>\n```openui-lang x\n<!DOCTYPE html>\n> - a\n\n      deep\n    code\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "```openui-lang x\n<span x>\n]]>\n[b]: <c d>\n```openui-lang x\n<!DOCTYPE html>\n> - a\n\n      deep\n    code"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:315",
+  "text": "<x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:316",
+  "text": "|-\n| a |\n> - a\n<span>\n</div>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:317",
+  "text": "<spanx>\n<!DOCTYPE html>\n<span>\n't'\n| - |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:318",
+  "text": "\"t\"\r\n|-\r\n</div>\r\n~~~\r\n[a]: /b\r\n</span>\r\n't'\r\na \\| b\r\n1.\r\n \r\n<div>\r\n```\r\n   ~~~openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:319",
+  "text": "  - b\n:-\n<!--\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:320",
+  "text": "</span>\r\n    ```openui-lang\r\n```openui\r\n  - b\r\n[a]: /b \"t\"\r\n>\t```\r\n[x]: /y (z)\r\n- | x |\r\n<a b=c=d>\r\n\troot = Choice(\"Q\", [\"A\", \"B\"])\r\n]]>\r\na \\| b\r\n  text\r\n# h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:321",
+  "text": ">\n  text\n-\ta\n# h\n<pre/>\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n[^1]: note",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:322",
+  "text": "a\n| a | b |\n[a]: /b \"t\"\n<span> | x",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:323",
+  "text": "'t'\n---\n- - -\n\t\n<![CDATA[\n```openui\n####### h\n[^1]: note\n   1. c\n```js\n<span x>\n| a | b |\n2) a\n[a]: /b \"t\"\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:324",
+  "text": "> - a\n|---|---|\n|---|---|\n \n-\n   1. c\n```OpenUI",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:325",
+  "text": "===\n?>\n?>\n<!DOCTYPE html>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:326",
+  "text": "~~~openui-lang\n~~~openui-lang\n    code\n~~~\n- | -\n<span\tx>\n[a]: /b \"t\"\n>\n> <!--\n>\t```\n<a href=\"x\">",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": "~~~openui-lang\n    code"
+   }
+  ],
+  "shape_codes": [
+   "~~~openui-lang\n    code"
+  ],
+  "keys": [
+   "p9e6b8b87"
+  ]
+ },
+ {
+  "name": "generated:20261018:327",
+  "text": "# h\n[x]: /y (z)\n  text\n````openui-lang\n```openui\n---\n```OpenUI\n</pre>\n|-\n<span\tx>\n[a]:",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```openui\n---\n```OpenUI\n</pre>\n|-\n<span\tx>\n[a]:"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:328",
+  "text": "```OpenUI\n<!DOCTYPE html>\n  text\n[^1]: note\n| - |\n| a |\n<?php\n```openui\n- | -",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<!DOCTYPE html>\n  text\n[^1]: note\n| - |\n| a |\n<?php\n```openui\n- | -"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:329",
+  "text": "  ```openui-lang\n</pre>\n<span\tx>\n[a]:\n| c | d |\n-\ta\n#h\n-\ta\na\n[]: /u\n___\n  text\n[x]: a(b\n<!--",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "</pre>\n<span\tx>\n[a]:\n| c | d |\n-\ta\n#h\n-\ta\na\n[]: /u\n___\ntext\n[x]: a(b\n<!--"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:330",
+  "text": "a | b\n* a\n[a]: /b\n<span>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:331",
+  "text": "````openui-lang\n  - b\n      deep\n</pre>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n| a |\n####### h\n:-\n\n| c | d |\n<span>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  - b\n      deep\n</pre>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n| a |\n####### h\n:-\n\n| c | d |\n<span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:332",
+  "text": "- - -\r````openui-lang\r   ~~~openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "   ~~~openui"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:333",
+  "text": "[x]: /y (z)",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:334",
+  "text": "<!--\n<pre/>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:335",
+  "text": "[^1]: note\n</pre>\n| :-: | -: |\ntext b\n\tcode\n[]: /u\n</pre>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n</span>\n===\na | b\n```openui\n~~~\na\n```OpenUI\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "~~~\na\n```OpenUI"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:336",
+  "text": "<![CDATA[\n> <!--\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```js\n    ```openui-lang\n<a b=c=d>\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:337",
+  "text": "> <!--\n<![CDATA[\n```\na \\| b\n|-\n   ~~~openui\n```OpenUI\n>\n</span>\n<pre>\n<![CDATA[\n```OpenUI\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:338",
+  "text": "   ~~~openui\n<span> | x\n[a]:\n```openui\n<![CDATA[\n<pre/>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n***\n-|-\n***\n[a\\]]: /u\n```openui-lang\n  text",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<span> | x\n[a]:\n```openui\n<![CDATA[\n<pre/>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n***\n-|-\n***\n[a\\]]: /u\n```openui-lang\ntext"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:339",
+  "text": ">\n[b]: <c d>\n\n\"t\"\na\n* a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:340",
+  "text": "    code\n<span> | x\n```openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:341",
+  "text": "   1. c\n<![CDATA[\n- - -\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:342",
+  "text": "[x]: a(b\n| :-: | -: |\n\"t\"\n[x]: /y (z)\n```openui\n```OpenUI\n<!DOCTYPE html>\n* a\n> a\n2) a\n===\n| :-: | -: |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```OpenUI\n<!DOCTYPE html>\n* a\n> a\n2) a\n===\n| :-: | -: |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:343",
+  "text": "<!-- x -->\n___\n```openui-lang\n<!--\n|\n>\n> <!--\n\troot = Choice(\"Q\", [\"A\", \"B\"])\ntext b\n~~~\n  ```openui-lang\n    ```openui-lang\n-\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<!--\n|\n>\n> <!--\n\troot = Choice(\"Q\", [\"A\", \"B\"])\ntext b\n~~~\n  ```openui-lang\n    ```openui-lang\n-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:344",
+  "text": "> <!--\n>\na \\| b\n<!DOCTYPE html>\n<![CDATA[\n+ a\n####### h\n    code\n<!-- x -->\n````openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:345",
+  "text": "|---|---|\n<!-- x -->\n  \n?>\n</pre>\n- [a]: /b\n- [a]: /b\n+ a\n```openui-lang\n| a | b |\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<span x>\n't'\n<pre/>\n<a b=c=d>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "| a | b |\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<span x>\n't'\n<pre/>\n<a b=c=d>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:346",
+  "text": "> ```openui-lang\n<![CDATA[\n[b]: <c d>\n# h\n<pre>\n- | x |\n- [a]: /b\ntext b\n1. a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n+ a\na \\| b\n> ```openui-lang\na \\| b\n[b]: <c d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:347",
+  "text": "```openui\n|-\n- - -\n  - b\n[]: /u\n<!-- x -->\n<span\tx>\n```openui-lang x\n</pre>\n> a\n# h\n| a |\n-\n===\n```openui\n    code",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|-\n- - -\n  - b\n[]: /u\n<!-- x -->\n<span\tx>\n```openui-lang x\n</pre>\n> a\n# h\n| a |\n-\n===\n```openui\n    code"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:348",
+  "text": "# h\n<span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:349",
+  "text": "[b]: <c d>\r\n> - a\r\ntext b\r\na\r\ntext b\r\n't'\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:350",
+  "text": "<div>\n[^1]: note\n\n***\n<span>\n[]: /u\na \\| b\n>\t```\nroot = Choice(\"Q\", [\"A\", \"B\"])\n　\n<div>\n```openui\n2) a\n~~~openui-lang\n```openui\n<pre>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:351",
+  "text": "﻿<spanx>\n===\n    ```openui-lang\n* a\n> a\n- | -\n1. a\n<span x>\n\"t\"\n===\n<a href=\"x\">\n````\n\n# h",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "\n# h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:352",
+  "text": ":-\n<pre/>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:353",
+  "text": "[]: /u\n> a\n  ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:354",
+  "text": ">\t```\r\n   ~~~openui\r\n      deep\r\n- [a]: /b\r\n<![CDATA[\r\n-|-\r\n```js\r\n- | -\r\n \r\n[x]: a(b\r\n> - a\r\n-->\r\n<!DOCTYPE html>\r\n[a]: /b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "   deep\r\n- [a]: /b\r\n<![CDATA[\r\n-|-\r\n```js\r\n- | -\r\n \r\n[x]: a(b\r\n> - a\r\n-->\r\n<!DOCTYPE html>\r\n[a]: /b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:355",
+  "text": "```openui\r\n| a | b |\r\n> - a\r\n[a\\]]: /u\r\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "| a | b |\r\n> - a\r\n[a\\]]: /u"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:356",
+  "text": "<![CDATA[\n \n1.\n[x]: a(b\n?>\n```\n[x]: /y (z)\n-     a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:357",
+  "text": "[]: /u\n \n* a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:358",
+  "text": "?>\n| c | d |\n> <!--\n- | -\n> - a\n<div>\n<div>\nx | y\nroot = Choice(\"Q\", [\"A\", \"B\"])\n\tcode\n```openui-lang x\n```js\n\"t\"\n:-\n#h\n:-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:359",
+  "text": "2) a\n>\n<div>\n| a |\n>\n>\t```\na\n~~~\n> <!--\n<div>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:360",
+  "text": "   1. c\r\n<span>\r\n```openui-lang x\r\n<span>\r\n___\r\n</span>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<span>\r\n___\r\n</span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:361",
+  "text": "[x]: /y (z)",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:362",
+  "text": "<!--\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:363",
+  "text": "<div>\n- a\n```js\n[x]: /y (z)\n| - |\n***\n<span>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```js\n| a | b |\n<!DOCTYPE html>\n　\n[a\\]]: /u\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:364",
+  "text": "===\n| a | b |\n````\n[a]: /b \"t\"\n  text\n<span x>\n\t\n- | x |\n# h\n?>\n[x]: /y (z)",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[a]: /b \"t\"\n  text\n<span x>\n\t\n- | x |\n# h\n?>\n[x]: /y (z)"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:365",
+  "text": "<pre/>\n   ~~~openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:366",
+  "text": "[a]:\n===\n \n    ```openui-lang\n[a]: /b \"t\"\n2) a\n  - b\n    code\n````\n  \n<div>\n      deep\n```openui-lang x",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "  \n<div>\n      deep\n```openui-lang x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:367",
+  "text": "> ```openui-lang\ntext b\n-\n't'\na \\| b\n<div>\n:-\n- a\n####### h\n<pre>\n</div>\n</div>\n1.\n<spanx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:368",
+  "text": "* a\n      deep\n~~~openui-lang\n-\ta\n</div>\n>\t```\n</div>\n<?php\n> a\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "-\ta\n</div>\n>\t```\n</div>\n<?php\n> a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:369",
+  "text": " \n-->\n- | -\n \ntext b\n1.\nx | y\n-->\n<span\tx>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:370",
+  "text": "  ```openui-lang\n[x]: /y (z)",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[x]: /y (z)"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:371",
+  "text": "<!DOCTYPE html>\n+ a\n1.\n<!--\n-     a\na | b\n```openui\n   ~~~openui\n````\n>\t```\n ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:372",
+  "text": "﻿  \n# h\n| a | b |\n    code\na\n<pre>\n| a |\n[b]: <c d>\n___\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:373",
+  "text": "?>\n<div>\n> - a\ntext b\n* a\n\n- a\na | b\n1.",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:374",
+  "text": "    code\n  ```openui-lang\n> <!--\n> ```openui-lang\n####### h\nroot = Choice(\"Q\", [\"A\", \"B\"])\n  ```openui-lang\n    code\n> - a\n> - a\n***\n1. a\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<x>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "> <!--\n> ```openui-lang\n####### h\nroot = Choice(\"Q\", [\"A\", \"B\"])\n```openui-lang\n  code\n> - a\n> - a\n***\n1. a\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<x>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:375",
+  "text": "\t\r\n:-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:376",
+  "text": "</pre>\r\n<!-- x -->\r\n>\r\n<span x>\r\n| c | d |\r\n| a |\r\n\"t\"\r\n<!DOCTYPE html>\r\n- - -\r\n```openui\r\n```OpenUI\r\n[^1]: note\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:377",
+  "text": "<span\tx>\n</pre>\n```openui-lang x\nx | y\n   1. c\n      deep\n</span>\n  root = Choice(\"Q\", [\"A\", \"B\"])\nroot = Choice(\"Q\", [\"A\", \"B\"])\n- - -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:378",
+  "text": "﻿```openui-lang\r- | -\r    code",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "- | -\r    code"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:379",
+  "text": "<!--\n| c | d |\n|-\n````openui-lang\n<!DOCTYPE html>\n```openui\n- [a]: /b\n[]: /u\n<?php\n```\n-->\n</pre>\n```\n|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:380",
+  "text": "<a href=\"x\">\n<span> | x\n* a\n- | -\n> ```openui-lang\n|---|---|\n<?php\n  \n|---|---|\n[a]: /b \"t\"\n```\n't'\n| - |\n?>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "'t'\n| - |\n?>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:381",
+  "text": "<span>\n-\ntext b\n> - a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:382",
+  "text": "> - a\n \n-\n  text\n| a | b |\n't'\n````\n| a |\n```\n<div>\n````openui-lang\n</pre>\n1. a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "| a |\n```\n<div>\n````openui-lang\n</pre>\n1. a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:383",
+  "text": "  root = Choice(\"Q\", [\"A\", \"B\"])\n<!--\n- | x |\n[a]: /b \"t\"\n      deep\n```OpenUI\n<spanx>\n####### h\n> <!--\n```openui-lang\n___",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:384",
+  "text": "    ```openui-lang\n[x]: /y (z)\n- a\n    ```openui-lang\n<a b=c=d>\n\t\n[]: /u\n[]: /u\n   1. c\n<div>\n  ```openui-lang\n[b]: <c d>\n> ```openui-lang\n<![CDATA[\n>\n   ~~~openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:385",
+  "text": "| :-: | -: |\r2) a\r<!--\r　\r</pre>\r~~~openui-lang\r<x>\r<span x>\r-\ta\r-     a\r<div>\r---\r      deep\r  \r  root = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:386",
+  "text": "  text\n  text\n- | -\n| a | b |\n___\n\t\n<?php\n<!DOCTYPE html>\n> ```openui-lang\n| - |\n<span>\n+ a\n  - b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:387",
+  "text": "[x]: /y (z)\n| a | b |\n?>\n===\n<div>\n<!-- x -->\n> ```openui-lang\n    ```openui-lang\n<pre>\n- - -\n- - -\n:-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:388",
+  "text": "<?php\n<a b=c=d>\n<span\tx>\n<pre>\na\na \\| b\n't'\n[x]: a(b\n<spanx>\ntext b\n      deep\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:389",
+  "text": "# h\n___\na \\| b\n  text\n<span\tx>\n  text\n   1. c",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:390",
+  "text": "  ```openui-lang\r|\r- [a]: /b\r<a b=c=d>\r[a\\]]: /u",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|\r- [a]: /b\r<a b=c=d>\r[a\\]]: /u"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:391",
+  "text": "|\n<div>\n|\n    ```openui-lang\n[b]: <c d>\n````\n```\n<span> | x\n````\n````openui-lang\n      deep\n    code\n't'\n#h\n?>\nx | y",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:392",
+  "text": "> - a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:393",
+  "text": "a\r\n<span x>\r\n   1. c\r\n| c | d |\r\n```\r\n[a]: /b \"t\"\r\n\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n\tcode\r\n| - |\r\n> <!--\r\n    code",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[a]: /b \"t\"\r\n\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n\tcode\r\n| - |\r\n> <!--\r\n    code"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:394",
+  "text": "````openui-lang\r\n> - a\r\n<a b=c=d>\r\n- | -\r\n<!-- x -->\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\na | b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "> - a\r\n<a b=c=d>\r\n- | -\r\n<!-- x -->\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\na | b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:395",
+  "text": "> ```openui-lang\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:396",
+  "text": "|-\n</div>\n \n-->\n####### h\n> a\n\t\n</div>\n> - a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:397",
+  "text": "-\ntext b\n  - b\n<!-- x -->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:398",
+  "text": "| a | b |\n| :-: | -: |\n</pre>\n \n1. a\ntext b\n1.\na",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:399",
+  "text": "<pre>\n't'\n- [a]: /b\n<span>\n\n   ~~~openui\n<span\tx>\n   ~~~openui",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:400",
+  "text": "- | -\nroot = Choice(\"Q\", [\"A\", \"B\"])\n````openui-lang\n\"t\"\n]]>\n<div>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "\"t\"\n]]>\n<div>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:401",
+  "text": "\tcode\n```OpenUI\n-\ta\n>\n| a |\n</div>\n| :-: | -: |\n#h\n    code\n===\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "-\ta\n>\n| a |\n</div>\n| :-: | -: |\n#h\n    code\n==="
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:402",
+  "text": "---\n<x>\n<x>\n[]: /u\n````\n```openui\n<x>\n   ~~~openui\n<span> | x\n-\ta\nx | y\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:403",
+  "text": "<!-- x -->\n-->\n<span x>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:404",
+  "text": "[a]: /b\n[]: /u\nx | y",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:405",
+  "text": "<spanx>\n[a]: /b\n2) a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n   1. c\n</span>\n-|-\n[x]: a(b\n1. a\n===\n  text\n| :-: | -: |\n```openui-lang x\n<spanx>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<spanx>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:406",
+  "text": "- a\n    code\n<span> | x\n<pre/>\n```openui-lang x\n|\n- | x |\n<x>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|\n- | x |\n<x>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:407",
+  "text": "---",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:408",
+  "text": "#h\n:-\n~~~\n|-\n- a\n| a |\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "|-\n- a\n| a |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:409",
+  "text": "- | -\r\n<spanx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:410",
+  "text": "<span>\n-     a\n[a]: /b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:411",
+  "text": "a | b\n1. a\n---\n[x]: a(b\n> - a\n```OpenUI\n      deep\n> - a\nx | y\n't'\n<span\tx>\n# h\n<![CDATA[\nroot = Choice(\"Q\", [\"A\", \"B\"])\n|-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "      deep\n> - a\nx | y\n't'\n<span\tx>\n# h\n<![CDATA[\nroot = Choice(\"Q\", [\"A\", \"B\"])\n|-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:412",
+  "text": "<x>\r#h\r[^1]: note\r| a |\r-->\r#h\r<spanx>\r[b]: <c d>\r<pre>\r```openui-lang\r<span\tx>\r+ a\r[^1]: note",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:413",
+  "text": "```openui-lang\r\n:-\r\n[a]: /b\r\n####### h",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ":-\r\n[a]: /b\r\n####### h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:414",
+  "text": "# h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:415",
+  "text": "  \n- - -\n    code\n</div>\n<!--\n\n<pre>\n- [a]: /b\n+ a\n  root = Choice(\"Q\", [\"A\", \"B\"])\n-|-\n<pre>\n</pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:416",
+  "text": "<pre>\n</div>\n> a\n<![CDATA[\n|-\n\"t\"\n| c | d |\n  - b\n> <!--\n  root = Choice(\"Q\", [\"A\", \"B\"])\n---\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n  ```openui-lang\nroot = Choice(\"Q\", [\"A\", \"B\"])\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:417",
+  "text": "<span>\n```OpenUI",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:418",
+  "text": "````\n| c | d |\n\n<!-- x -->",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "| c | d |\n\n<!-- x -->"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:419",
+  "text": "1. a\n<!DOCTYPE html>\n-\n   ~~~openui\n<span x>\n-     a\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n>\t```\n-     a\n  ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:420",
+  "text": "> - a\nx | y\n> ```openui-lang\n\tcode\n2) a\n- [a]: /b\n</div>\n1. a\n-->\n[x]: /y (z)",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:421",
+  "text": "   ~~~openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:422",
+  "text": "    ```openui-lang\n- | -\n+ a\n___\n<?php\n---\n\tcode\n-->\n-     a\n1. a\n</pre>\n> <!--\n| a |\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:423",
+  "text": "> - a\n\"t\"\ntext b\n> ```openui-lang\n|-\n]]>\n<?php\n  text\n<!-- x -->\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:424",
+  "text": "-     a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:425",
+  "text": "\t",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:426",
+  "text": "<?php\r\ntext b\r\n]]>\r\na | b\r\n___",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:427",
+  "text": "　",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:428",
+  "text": "````openui-lang\n   ~~~openui\n-     a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "   ~~~openui\n-     a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:429",
+  "text": "1.\n:-\n<pre>\n```\n|\n\tcode\n####### h\na \\| b\n      deep\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:430",
+  "text": "<a b=c=d>\n<x>\n\t\n    code\n-->\n> ```openui-lang\n<span x>\n> a\n| c | d |\na",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:431",
+  "text": "a | b\n```openui\n[a]: /b \"t\"\n      deep\n\t\n<!--",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[a]: /b \"t\"\n      deep\n\t\n<!--"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:432",
+  "text": "?>\n]]>\n####### h\n   1. c\n````\n> ```openui-lang\n<span> | x\ntext b\n<!DOCTYPE html>\n> <!--\n[b]: <c d>\n  root = Choice(\"Q\", [\"A\", \"B\"])\nx | y",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "> ```openui-lang\n<span> | x\ntext b\n<!DOCTYPE html>\n> <!--\n[b]: <c d>\n  root = Choice(\"Q\", [\"A\", \"B\"])\nx | y"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:433",
+  "text": "[b]: <c d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:434",
+  "text": "[a]:\n# h\ntext b\n:-\n```\n~~~\n-\ta\n####### h\n+ a\n]]>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "~~~\n-\ta\n####### h\n+ a\n]]>\nroot = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:435",
+  "text": "<!-- x -->\r\n-|-\r\n[a]:\r\n't'\r\na | b\r\n1.\r\n```OpenUI\r\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:436",
+  "text": "    ```openui-lang\n<span> | x\n</pre>\n<pre>\n<?php\n\n```openui-lang\n\tcode\n-     a\n<pre>\n<a href=\"x\">\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:437",
+  "text": "<div>\nx | y\n####### h\n<span> | x\n　\n````\n[^1]: note\n| a | b |\n````\n\"t\"\n  text\n| c | d |\n|",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:438",
+  "text": "a | b\n　",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:439",
+  "text": "text b\n````\n[x]: /y (z)\n    code\n   ~~~openui\n- - -\n```openui-lang x\n> <!--\n\t\n[b]: <c d>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[x]: /y (z)\n    code\n   ~~~openui\n- - -\n```openui-lang x\n> <!--\n\t\n[b]: <c d>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:440",
+  "text": "  root = Choice(\"Q\", [\"A\", \"B\"])\n| :-: | -: |\nx | y\n| - |\n    ```openui-lang\n| a | b |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:441",
+  "text": "[a\\]]: /u\n      deep\n|",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:442",
+  "text": "```OpenUI\n> <!--\n<span x>\n####### h\n    code",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "> <!--\n<span x>\n####### h\n    code"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:443",
+  "text": "<div>\n<!--\n---\n```\n-\ta\n \n  \n<?php\n   1. c\n[b]: <c d>\na\n___\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:444",
+  "text": "```openui-lang x\n```\n  - b\n",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [
+   ""
+  ],
+  "keys": [
+   "p811c9dc5"
+  ]
+ },
+ {
+  "name": "generated:20261018:445",
+  "text": "- | x |\r\n|\r\n   ~~~openui\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:446",
+  "text": "| - |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:447",
+  "text": "-\ta\n[a\\]]: /u\n</span>\n[b]: <c d>\n-\ta",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:448",
+  "text": "]]>\n   1. c\n~~~openui-lang\n?>\n      deep\n***\n+ a\n|\n   ~~~openui\n[b]: <c d>\n<span\tx>\n> <!--\n</span>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "?>\n      deep\n***\n+ a\n|\n   ~~~openui\n[b]: <c d>\n<span\tx>\n> <!--\n</span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:449",
+  "text": "a | b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:450",
+  "text": "[a]: /b \"t\"\n<span> | x\n-\n~~~openui-lang\n---\n- - -",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "---\n- - -"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:451",
+  "text": "      deep\n> a\n      deep\n  - b\n    code\nroot = Choice(\"Q\", [\"A\", \"B\"])\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<!--",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:452",
+  "text": "<div>\n[]: /u\n~~~\n[a]: /b \"t\"\n]]>\n> a\n[]: /u\nx | y\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<span x>\n| a |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:453",
+  "text": "<!--\r\n> a\r\n　\r\n~~~\r\n</span>\r\n```openui-lang\r\n```openui-lang x\r\n| - |\r\n| :-: | -: |\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:454",
+  "text": ":-\n<spanx>\n</span>\n| :-: | -: |\n~~~\n<!DOCTYPE html>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<!DOCTYPE html>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:455",
+  "text": "    code\r\n  ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:456",
+  "text": "  \n- - -\n```OpenUI\n#h\n```openui-lang\n<span x>\n　\n   1. c\n> - a\n>\n|---|---|\n````\n<a href=\"x\">\n> <!--\n1. a\n1.\n",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "#h\n```openui-lang\n<span x>\n　\n   1. c\n> - a\n>\n|---|---|"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:457",
+  "text": "> <!--\n# h\n1. a\n<!--\n___\n　\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:458",
+  "text": "﻿?>\n+ a\n<span x>\n```js\n<span> | x\n- | x |\n[b]: <c d>\n[a\\]]: /u\n***",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<span> | x\n- | x |\n[b]: <c d>\n[a\\]]: /u\n***"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:459",
+  "text": "___\n```openui-lang x\na\n</div>\n[^1]: note\n<div>\n[]: /u\n:-\n| - |\n| - |\n~~~openui-lang\n\n<![CDATA[\n<?php\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "a\n</div>\n[^1]: note\n<div>\n[]: /u\n:-\n| - |\n| - |\n~~~openui-lang\n\n<![CDATA[\n<?php"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:460",
+  "text": "___\n<pre/>\n#h\n> - a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:461",
+  "text": "<div>\n</pre>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n</div>\n***\n# h\n***\n````openui-lang\n===\n1. a\n- | -\na | b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:462",
+  "text": "```openui-lang\n</pre>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "</pre>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:463",
+  "text": " \n  ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:464",
+  "text": "[a]: /b \"t\"\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n> a\n<pre/>\n####### h\n| - |\n# h\n-\n]]>\n[^1]: note\n[]: /u\n> - a\na \\| b\n~~~\n```\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "```"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:465",
+  "text": "<pre>\n  - b\n  text\n[x]: a(b\n- | -",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:466",
+  "text": "```\n<x>\n  \n| - |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<x>\n  \n| - |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:467",
+  "text": "\t\n<a href=\"x\">\n|\n<?php\n[^1]: note\n<a href=\"x\">\n1. a\n[a\\]]: /u\n| a | b |\n```openui-lang x\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:468",
+  "text": "<pre>\nx | y\n<a b=c=d>\n  ```openui-lang\na | b\n- | -\n      deep\n    ```openui-lang\n1. a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:469",
+  "text": "</span>\n| a |\n   ~~~openui\n> ```openui-lang\n[a\\]]: /u\na | b\n:-\n| :-: | -: |\n```openui-lang x\n- | -\n \n[x]: a(b\n      deep\n</pre>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:470",
+  "text": ":-\n[^1]: note\n\n| - |\n\"t\"\n　\n<![CDATA[\n-\ta\n-->\n####### h\n```openui-lang x\n\t\n-\n___\n####### h\n> <!--",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:471",
+  "text": "* a\r\n>\r\n\troot = Choice(\"Q\", [\"A\", \"B\"])\r\n- [a]: /b\r\n[]: /u\r\n- a\r\n|---|---|\r\n| - |\r\n~~~openui-lang\r\n| - |\r\n:-\r\n- | x |\r\n    code\r\nx | y",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "| - |\r\n:-\r\n- | x |\r\n    code\r\nx | y"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:472",
+  "text": "```OpenUI\n[^1]: note\n[a]: /b \"t\"",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[^1]: note\n[a]: /b \"t\""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:473",
+  "text": "text b\r<!DOCTYPE html>\ra \\| b\r[a]: /b\r  text\rx | y\r```openui-lang\r<![CDATA[\r+ a\r[a\\]]: /u\r<div>\r<pre/>\r[x]: a(b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<![CDATA[\r+ a\r[a\\]]: /u\r<div>\r<pre/>\r[x]: a(b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:474",
+  "text": "-|-\n```openui\n      deep\n#h\n> <!--\n|-\ntext b\nroot = Choice(\"Q\", [\"A\", \"B\"])\n>\n?>\n```openui-lang x\n<!--\n  text\nroot = Choice(\"Q\", [\"A\", \"B\"])\n|-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "      deep\n#h\n> <!--\n|-\ntext b\nroot = Choice(\"Q\", [\"A\", \"B\"])\n>\n?>\n```openui-lang x\n<!--\n  text\nroot = Choice(\"Q\", [\"A\", \"B\"])\n|-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:475",
+  "text": "___\n| c | d |\n    ```openui-lang\n-\n  ```openui-lang\n# h\na | b\n```openui-lang x\n***",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "# h\na | b\n```openui-lang x\n***"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:476",
+  "text": "  root = Choice(\"Q\", [\"A\", \"B\"])\n[]: /u\n> - a\n<span> | x\n   ~~~openui\n````openui-lang\n  text\n[]: /u\n| a |\n[a]:\n\tcode\n<pre>\n\n:-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "````openui-lang\ntext\n[]: /u\n| a |\n[a]:\n code\n<pre>\n\n:-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:477",
+  "text": "[a\\]]: /u\n```\n[x]: a(b\n<span>\n?>\n</div>\n<span> | x\n  \n| a | b |\n| - |\n-->\nx | y\n\"t\"",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[x]: a(b\n<span>\n?>\n</div>\n<span> | x\n  \n| a | b |\n| - |\n-->\nx | y\n\"t\""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:478",
+  "text": "2) a\n<pre/>\n- - -\na\n<?php\n- a\n1. a\n- [a]: /b\n<a href=\"x\">\n~~~openui-lang\n  ```openui-lang\n-     a\n-|-\n<span>\n####### h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:479",
+  "text": "<?php\n|---|---|\n<!-- x -->\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:480",
+  "text": "<div>\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<span> | x\n> ```openui-lang\n#h\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:481",
+  "text": "﻿:-\n| a |\n</div>\n> <!--\na\n[a]:\n<pre>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:482",
+  "text": "> ```openui-lang\n-->\n[x]: a(b\n+ a\n<span> | x\n[a]:\n  ```openui-lang\n- - -\n[x]: a(b\n<!--\n####### h\n<!-- x -->\n<x>\n2) a\n<span>\n<a b=c=d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:483",
+  "text": "> <!--\n````openui-lang\n```OpenUI\n####### h\n　\n[x]: a(b\na \\| b\n      deep\n~~~",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```OpenUI\n####### h\n　\n[x]: a(b\na \\| b\n      deep\n~~~"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:484",
+  "text": "[x]: a(b\n| a | b |\n[]: /u\n| :-: | -: |\n````\n___\na\n[a]: /b \"t\"\n<pre/>\n</div>\n[x]: a(b",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "___\na\n[a]: /b \"t\"\n<pre/>\n</div>\n[x]: a(b"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:485",
+  "text": "﻿<![CDATA[\na \\| b\n  - b\n</span>\n***\n-     a\n　\n\troot = Choice(\"Q\", [\"A\", \"B\"])\na \\| b\n| a | b |\n  - b\n1.\n>\t```\n```openui-lang\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:486",
+  "text": "- [a]: /b\n</span>\n<spanx>\na | b\n| :-: | -: |\n>\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:487",
+  "text": "[a\\]]: /u\n```openui-lang\n>\n<span>\n- | x |\n    ```openui-lang\n<x>\n> - a\na\n[x]: /y (z)\n> <!--\n?>\n````",
+  "fences": [
+   {
+    "closed": true,
+    "shape": true,
+    "code": ">\n<span>\n- | x |\n    ```openui-lang\n<x>\n> - a\na\n[x]: /y (z)\n> <!--\n?>"
+   }
+  ],
+  "shape_codes": [
+   ">\n<span>\n- | x |\n    ```openui-lang\n<x>\n> - a\na\n[x]: /y (z)\n> <!--\n?>"
+  ],
+  "keys": [
+   "p2e7a6469"
+  ]
+ },
+ {
+  "name": "generated:20261018:488",
+  "text": "> <!--\n    ```openui-lang\n<a b=c=d>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:489",
+  "text": "| a | b |\n***\n[a]:\n___\n　\n<?php\n    ```openui-lang\n| a | b |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:490",
+  "text": "<!-- x -->\n~~~\n<pre>\n```openui-lang x\n<div>\n  text\n \n  root = Choice(\"Q\", [\"A\", \"B\"])\n-\ta\n####### h\n- a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<pre>\n```openui-lang x\n<div>\n  text\n \n  root = Choice(\"Q\", [\"A\", \"B\"])\n-\ta\n####### h\n- a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:491",
+  "text": "</div>\n-\n> <!--\n  \n~~~\n?>\n<!DOCTYPE html>\n[a]: /b \"t\"\n:-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "?>\n<!DOCTYPE html>\n[a]: /b \"t\"\n:-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:492",
+  "text": "> <!--\n+ a\n\tcode\n- | x |\n-\ta\n> - a\n-->\nroot = Choice(\"Q\", [\"A\", \"B\"])\n<!--\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n> - a\n|-\n1.\n| a | b |\n| a | b |\n-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:493",
+  "text": "- | -\n   ~~~openui\n\na\n-\n<a href=\"x\">\n| a | b |\n---\n<pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:494",
+  "text": "</span>\na | b\n===\n<pre>\n1. a\n</pre>\n-     a\n\tcode\n| a |\n[b]: <c d>\n> <!--",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:495",
+  "text": "<pre>\r\n```openui-lang x\r\n***\r\n| c | d |\r\n```openui-lang\r\na | b\r\na\r\n<div>\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n  root = Choice(\"Q\", [\"A\", \"B\"])\r\n[a]: /b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:496",
+  "text": "- a\n> - a\n````openui-lang\n  root = Choice(\"Q\", [\"A\", \"B\"])\n  \n[b]: <c d>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  root = Choice(\"Q\", [\"A\", \"B\"])\n  \n[b]: <c d>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:497",
+  "text": "   1. c\n  ```openui-lang\n[x]: a(b\n####### h\n___\ntext b\n___\na\n```openui\n- [a]: /b\ntext b\n-\na\n[a\\]]: /u\nx | y",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[x]: a(b\n####### h\n___\ntext b\n___\na\n```openui\n- [a]: /b\ntext b\n-\na\n[a\\]]: /u\nx | y"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:498",
+  "text": "<span>\n```openui\n't'\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n| :-: | -: |\n#h\n>\t```\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:499",
+  "text": "-|-\r~~~openui-lang\r[b]: <c d>\r```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[b]: <c d>\r```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:500",
+  "text": "```js\n</span>\n1.\n#h\n> ```openui-lang\n<span>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "</span>\n1.\n#h\n> ```openui-lang\n<span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:501",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\r- a\r?>\r- - -\r- | -\r<x>\r* a\r> a\r~~~openui-lang\r<spanx>\r```openui\r<x>\r[x]: /y (z)\r[a]: /b \"t\"\r<pre/>\r\troot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<spanx>\r```openui\r<x>\r[x]: /y (z)\r[a]: /b \"t\"\r<pre/>\r\troot = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:502",
+  "text": "\n<a b=c=d>\n:-\n```openui\n| a | b |\n   1. c",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:503",
+  "text": "<pre>\n<pre>\n- | x |\n> a\n\t\n<span>\n####### h\n<span>\n<spanx>\na\n　\n- [a]: /b\n[a]:\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:504",
+  "text": "  - b\n:-\n<!DOCTYPE html>\n| :-: | -: |\n---\na | b\n|-\n  root = Choice(\"Q\", [\"A\", \"B\"])\n[a]:\n<?php\n[^1]: note\n___\n```OpenUI\n[b]: <c d>\n    ```openui-lang\n|---|---|\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:505",
+  "text": "___\r-\ta\r2) a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:506",
+  "text": "# h\n    code\n___\n> a\n　\n  root = Choice(\"Q\", [\"A\", \"B\"])\n</span>\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n]]>\n````openui-lang\n|---|---|\n[x]: a(b\n|-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|---|---|\n[x]: a(b\n|-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:507",
+  "text": "````openui-lang\n***\na | b\n[a]: /b\n-\n\t\n<span x>\n~~~",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "***\na | b\n[a]: /b\n-\n\t\n<span x>\n~~~"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:508",
+  "text": "<a b=c=d>\r\n  text\r\n[a\\]]: /u\r\n<pre/>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:509",
+  "text": "___\n't'",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:510",
+  "text": "﻿x | y\n```OpenUI\n1. a\n[a\\]]: /u\n<![CDATA[\n- a\n[x]: a(b\n\"t\"\n \n# h\n- - -\n<x>\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "1. a\n[a\\]]: /u\n<![CDATA[\n- a\n[x]: a(b\n\"t\"\n \n# h\n- - -\n<x>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:511",
+  "text": "a | b\n| :-: | -: |\n```openui-lang\n___\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "___"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:512",
+  "text": "<!-- x -->\r- | x |\r<x>\r[^1]: note\r| a |\r```js\r~~~\r<spanx>\r| a |\r    code\r  text\r",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "~~~\r<spanx>\r| a |\r    code\r  text"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:513",
+  "text": "####### h\n```openui-lang x\n      deep\n***\n?>\n<!--\n[b]: <c d>\n<span x>\n<span> | x\n[a]: /b\n \n>\t```\n> - a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "      deep\n***\n?>\n<!--\n[b]: <c d>\n<span x>\n<span> | x\n[a]: /b\n \n>\t```\n> - a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:514",
+  "text": "    code\n<span\tx>\n    code\n \n</div>\n2) a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:515",
+  "text": "| a | b |\n?>\n| a | b |\n[a]: /b\n<span>\n<pre/>\ntext b\n===\n[]: /u\n```js\n<span>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<span>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:516",
+  "text": "  - b\n> - a\n| c | d |\n- [a]: /b\na\n[^1]: note\ntext b\n> - a\n</pre>\n<span\tx>\nx | y\n|-\nx | y\n  ```openui-lang",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:517",
+  "text": "x | y\n  ```openui-lang\n|-\n    ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "|-\n  ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:518",
+  "text": "<span>\nx | y\n<div>\n<span>\n<span\tx>\n* a\n</span>\n    ```openui-lang\n[x]: /y (z)\n</div>\n>\t```",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:519",
+  "text": "~~~\n<!-- x -->\n> a\n-|-\n[^1]: note\n<span> | x\n<span\tx>\n+ a\n```js\n<pre>\n> <!--\n[a]:\n<![CDATA[\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "<!-- x -->\n> a\n-|-\n[^1]: note\n<span> | x\n<span\tx>\n+ a\n```js\n<pre>\n> <!--\n[a]:\n<![CDATA["
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:520",
+  "text": "|\n\n[x]: /y (z)\n~~~",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:521",
+  "text": "[a]: /b \"t\"\n]]>\n| :-: | -: |\n  text\n````openui-lang\n<?php\n-     a\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<?php\n-     a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:522",
+  "text": "text b\n't'\ntext b\n|---|---|\n| :-: | -: |\n| a |\n</span>\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:523",
+  "text": "===\n</span>\n<span x>\n````openui-lang\n    code\n-\ta\n</pre>\n't'\n<?php\n<span> | x",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "    code\n-\ta\n</pre>\n't'\n<?php\n<span> | x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:524",
+  "text": "> <!--\r-     a\r| c | d |\r",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:525",
+  "text": "</div>\n```openui-lang x\na \\| b\n<span x>\n-|-\n- | x |\n<!--\n<div>\n</pre>\n-|-\n- a\n| c | d |\n</pre>\n|",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:526",
+  "text": "<span\tx>\n~~~\n    ```openui-lang\n<!-- x -->\n===\n  - b\n| c | d |\n---\n<span> | x\n```openui\n-     a\n\t\n# h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:527",
+  "text": "<spanx>\n1. a\n-->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:528",
+  "text": "```OpenUI\n  text\n<spanx>\n    ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "  text\n<spanx>\n    ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:529",
+  "text": "1. a\n</pre>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:530",
+  "text": "</div>\n> ```openui-lang\n<span x>\na | b\n[^1]: note\n<![CDATA[\n>\t```\n<pre/>\n```\n```openui\n> ```openui-lang\n　\n<span x>\n- a\n- | -\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:531",
+  "text": "text b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:532",
+  "text": "<spanx>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:533",
+  "text": "~~~openui-lang\n  - b\n  ```openui-lang\n===\n# h\n| c | d |\n2) a\n    ```openui-lang\n<pre>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "  - b\n  ```openui-lang\n===\n# h\n| c | d |\n2) a\n    ```openui-lang\n<pre>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:534",
+  "text": "-\ta\n- - -\n\troot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:535",
+  "text": "\"t\"\n[a]:\n　\n<span\tx>\n1.\n    ```openui-lang\n#h\n2) a\n```\n[a\\]]: /u\n~~~openui-lang\n[]: /u\n't'\n-",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "[a\\]]: /u\n~~~openui-lang\n[]: /u\n't'\n-"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:536",
+  "text": "]]>\n* a\nroot = Choice(\"Q\", [\"A\", \"B\"])\n</span>\n***\n===\n  root = Choice(\"Q\", [\"A\", \"B\"])\n<span x>\n[b]: <c d>\n  ```openui-lang\n<?php\n      deep\n```openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "<?php\n    deep\n```openui"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:537",
+  "text": "a\n<span\tx>\n[b]: <c d>\n|\n-|-\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:538",
+  "text": "?>\n<!-- x -->\n|---|---|\n````openui-lang\n[]: /u\n?>\n[^1]: note\na \\| b\n```\n2) a\n  \n````openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[]: /u\n?>\n[^1]: note\na \\| b\n```\n2) a\n  \n````openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:539",
+  "text": "  root = Choice(\"Q\", [\"A\", \"B\"])\n````\n* a\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "* a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:540",
+  "text": "- | x |\n---\n<pre/>\n#h\n# h\n\t\n===\n<a b=c=d>\n<!-- x -->\n\tcode\n~~~openui-lang\n-|-\n<pre/>\n>\t```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "-|-\n<pre/>\n>\t```"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:541",
+  "text": "***\n***\n[]: /u\n[a\\]]: /u\n<a b=c=d>\n   ~~~openui",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:542",
+  "text": "<span x>\n  ```openui-lang\n```openui-lang\n      deep\n```openui-lang\n   ~~~openui\n   1. c",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```openui-lang\n    deep\n```openui-lang\n ~~~openui\n 1. c"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:543",
+  "text": "-\ta\n[]: /u\n\t\n\n>\t```\n　\n| :-: | -: |\n\tcode\n```openui\n\tcode",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "\tcode"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:544",
+  "text": "<pre>\r\n-->\r\n===\r\n| - |\r\n---\r\na\r\n[]: /u\r\n-     a\r\n___\r\n  - b\r\n    ```openui-lang\r\n1.\r\n```OpenUI\r\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:545",
+  "text": "\"t\"\n?>\n\troot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:546",
+  "text": "</div>\r[x]: a(b\r<?php\r[a]:\r:-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:547",
+  "text": "+ a\n  text\n|---|---|\n[a]:\n   1. c\n2) a\n[x]: /y (z)\n[a]: /b\n> <!--\n- [a]: /b\n| a | b |\n````openui-lang\n| a | b |\n| a | b |",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "| a | b |\n| a | b |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:548",
+  "text": "[x]: a(b\n't'\n[x]: a(b\n  ```openui-lang\n   1. c\n[a]: /b \"t\"\n- - -\n- | x |\n[]: /u\n> - a\n\troot = Choice(\"Q\", [\"A\", \"B\"])",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": " 1. c\n[a]: /b \"t\"\n- - -\n- | x |\n[]: /u\n> - a\n  root = Choice(\"Q\", [\"A\", \"B\"])"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:549",
+  "text": "```openui\n1.\n* a\n<pre>\n1. a\n</div>\n<?php\n> ```openui-lang",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "1.\n* a\n<pre>\n1. a\n</div>\n<?php\n> ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:550",
+  "text": "<span>\n#h\n[b]: <c d>\n    ```openui-lang\n<span>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:551",
+  "text": "***\r>\t```\r[]: /u\r- | x |\r-\ta\r<?php\r| c | d |\r- | -\r|-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:552",
+  "text": "x | y\n<pre>\n2) a\nx | y\n2) a\n~~~\n\"t\"\n1. a\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:553",
+  "text": "'t'\n| c | d |\n~~~openui-lang\n[x]: /y (z)\n  ```openui-lang\n> - a\n[^1]: note\n- | x |\n---\n~~~openui-lang\n| a | b |\n]]>",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[x]: /y (z)\n  ```openui-lang\n> - a\n[^1]: note\n- | x |\n---\n~~~openui-lang\n| a | b |\n]]>"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:554",
+  "text": "</pre>\r\n  text\r\n<span>\r\n- a\r\n</pre>\r\n<?php\r\n      deep\r\n```openui\r\n| - |\r\n[x]: a(b\r\n===\r\n\r\n[b]: <c d>\r\n| - |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:555",
+  "text": "root = Choice(\"Q\", [\"A\", \"B\"])\n- [a]: /b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:556",
+  "text": "####### h\n| - |\n```openui\n[x]: /y (z)\n|---|---|\n[x]: a(b\n't'\n---\n| - |\n<a href=\"x\">\n  text",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "[x]: /y (z)\n|---|---|\n[x]: a(b\n't'\n---\n| - |\n<a href=\"x\">\n  text"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:557",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\nroot = Choice(\"Q\", [\"A\", \"B\"])\n[]: /u\n-     a\n  text\n</span>\na\n<span>\n-\n　\n1.\n```",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:558",
+  "text": "  text\n|---|---|\n````\n  text\n   1. c\n2) a\n[x]: a(b\n[a\\]]: /u\n<span>\n> ```openui-lang\n<div>\n<x>\n| a |\n```OpenUI",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "  text\n   1. c\n2) a\n[x]: a(b\n[a\\]]: /u\n<span>\n> ```openui-lang\n<div>\n<x>\n| a |\n```OpenUI"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:559",
+  "text": "?>\n　\n| c | d |\n  \n[b]: <c d>\n|-\n<spanx>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n~~~\n- | -\n~~~\n-     a\n",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "- | -"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:560",
+  "text": "a \\| b\n####### h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:561",
+  "text": "> <!--\r\n</pre>\r\n#h\r\n````openui-lang\r\n<x>\r\n```openui\r\n> <!--",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:562",
+  "text": "<!--\n<spanx>\n```js\n````\n      deep\n```OpenUI\n't'\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<pre/>\n~~~\n-",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:563",
+  "text": "<span>\n[a\\]]: /u\n<span\tx>\n<!-- x -->\n<span x>\n<spanx>\n___\n---\n  ",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:564",
+  "text": "[x]: a(b\n[^1]: note\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<?php\n2) a\n2) a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:565",
+  "text": "    ```openui-lang\r\n<x>\r\nx | y\r\n````openui-lang\r\nroot = Choice(\"Q\", [\"A\", \"B\"])\r\n \r\n<x>\r\n-->\r\n>\t```\r\n<!DOCTYPE html>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:566",
+  "text": "<a b=c=d>\n* a\n[x]: /y (z)\n<spanx>\na\n-\ta\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:567",
+  "text": "a \\| b\n    code\n[x]: a(b\na | b\n\n\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:568",
+  "text": "﻿<x>\n[x]: a(b\n| :-: | -: |\n> <!--\nroot = Choice(\"Q\", [\"A\", \"B\"])\na\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:569",
+  "text": "[x]: /y (z)",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:570",
+  "text": "'t'\n> a\n</pre>\n___\n<span x>\n````openui-lang\n```openui-lang x\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "```openui-lang x"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:571",
+  "text": "<![CDATA[\n***\n-\n  text\n<spanx>\n| :-: | -: |\n-|-\n[a]: /b \"t\"\ntext b\n<spanx>\n===\n---\ntext b",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:572",
+  "text": "  \n- | x |\n[a]:\n|\n```openui-lang x\n?>\na | b\n+ a",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "?>\na | b\n+ a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:573",
+  "text": "<a href=\"x\">\n[x]: a(b\n1.\n<!-- x -->\n<pre/>\n't'\n+ a\n|---|---|\n- | -\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:574",
+  "text": "[a]: /b \"t\"",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:575",
+  "text": "[a]: /b \"t\"\n___\n</span>\n```openui-lang x\n:-\n- | -\n```openui-lang\n　\n[a]: /b \"t\"\n> a\n<pre>\n-\ta",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:576",
+  "text": "      deep\r\n````\r\n|\r\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "|"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:577",
+  "text": "-\ta\n  - b\n> - a\n> <!--\n<span> | x\n```OpenUI\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": ""
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:578",
+  "text": "- | -\n___\n<a href=\"x\">",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:579",
+  "text": "<spanx>\na | b\na\n> - a\n---\n| :-: | -: |\n```openui\na",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "a"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:580",
+  "text": "___\n<pre/>\n\"t\"\n<?php\n| :-: | -: |\n<spanx>\n-->\n \n[x]: /y (z)\n-     a\n-\n|\n[a]: /b \"t\"\n  text",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:581",
+  "text": "___\r",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:582",
+  "text": "<x>\n-\ta\n> ```openui-lang\n+ a\n<div>\n* a\n[a]:\n<span> | x\n   1. c\n</span>\n#h\na \\| b\n<a href=\"x\">\n[x]: a(b\n#h",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:583",
+  "text": "[x]: a(b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:584",
+  "text": ">\t```\n- [a]: /b\n-     a\n    ```openui-lang\n:-\na | b\n[a]: /b\n[x]: /y (z)\n</div>",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:585",
+  "text": "- - -\n<!-- x -->\n[x]: a(b\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n<span>\n</pre>\n<!-- x -->\na\n<x>\n<pre/>\na | b\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:586",
+  "text": "  text\r\n<pre/>\r\n```OpenUI\r\n[x]: a(b\r\n| c | d |\r\n````\r\n",
+  "fences": [
+   {
+    "closed": true,
+    "shape": false,
+    "code": "[x]: a(b\r\n| c | d |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:587",
+  "text": "[x]: a(b\n \ntext b\n]]>\n?>\n#h\n  \nx | y\n\t\n   1. c\n  root = Choice(\"Q\", [\"A\", \"B\"])\n[x]: /y (z)",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:588",
+  "text": "> - a\n~~~openui-lang\n-\n</span>\n> ```openui-lang\n<a b=c=d>\n| a |\n  ```openui-lang\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "-\n</span>\n> ```openui-lang\n<a b=c=d>\n| a |\n  ```openui-lang"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:589",
+  "text": "\"t\"\nroot = Choice(\"Q\", [\"A\", \"B\"])\na \\| b\n?>\n\t\n  - b\n[b]: <c d>\n<span>\n<!-- x -->",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:590",
+  "text": "[b]: <c d>\ntext b\n\t\n</div>\n>\t```\n-->\n\tcode\n<a b=c=d>\n \n<!-- x -->\n| a | b |\ntext b\n````openui-lang\nx | y",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:591",
+  "text": "    ```openui-lang\n===\n[x]: a(b\n<![CDATA[\n1.",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:592",
+  "text": "\troot = Choice(\"Q\", [\"A\", \"B\"])\r\n[x]: /y (z)\r\n| - |\r\n<pre>\r\n<pre/>\r\n#h\r\n[b]: <c d>\r\n````\r\n>\r\n  - b\r\n| - |",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:593",
+  "text": "- [a]: /b\n+ a\n+ a\n \n   1. c\ntext b\n   1. c",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:594",
+  "text": "<span> | x\n",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:595",
+  "text": "    code\n<pre/>\n| a |\n<span>\nroot = Choice(\"Q\", [\"A\", \"B\"])\n| a | b |\n[a\\]]: /u\n> - a",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:596",
+  "text": "<span x>\n[b]: <c d>\n- | x |\n\troot = Choice(\"Q\", [\"A\", \"B\"])\n```js\n-     a\n<spanx>\n-\ta\n[a\\]]: /u\n>\n1. a\n- | x |\n| - |\n<x>\n#h",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "-     a\n<spanx>\n-\ta\n[a\\]]: /u\n>\n1. a\n- | x |\n| - |\n<x>\n#h"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:597",
+  "text": "```OpenUI\n</div>\n't'\n~~~\n2) a\n| - |\n  \n|---|---|\n<spanx>\n---\n]]>\n[a]:",
+  "fences": [
+   {
+    "closed": false,
+    "shape": false,
+    "code": "</div>\n't'\n~~~\n2) a\n| - |\n  \n|---|---|\n<spanx>\n---\n]]>\n[a]:"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:598",
+  "text": "```openui\nroot = Choice(\"Q\", [\"A\", \"B\"])\n   1. c\n<spanx>\n<!-- x -->\n>\t```\n- | -\n| a |\n",
+  "fences": [
+   {
+    "closed": false,
+    "shape": true,
+    "code": "root = Choice(\"Q\", [\"A\", \"B\"])\n   1. c\n<spanx>\n<!-- x -->\n>\t```\n- | -\n| a |"
+   }
+  ],
+  "shape_codes": [],
+  "keys": []
+ },
+ {
+  "name": "generated:20261018:599",
+  "text": "<span>\n[a]:\ntext b\n* a\n~~~",
+  "fences": [],
+  "shape_codes": [],
+  "keys": []
+ }
+]

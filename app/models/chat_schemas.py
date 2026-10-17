@@ -1,10 +1,12 @@
 """
 Pydantic Schemas for Done Chat
 """
-from pydantic import BaseModel, Field, EmailStr
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
+from typing import Literal, Optional, List
 from datetime import datetime
 from enum import Enum
+
+from app.agent import chat_shapes as _chat_shapes
 
 
 # ==================== Enums ====================
@@ -202,6 +204,24 @@ class AddMemberRequest(BaseModel):
 
 # ==================== Message Schemas ====================
 
+class AnswerToLink(BaseModel):
+    """The link from the owner's answer (a pressed Choice / a submitted Input of chat_shapes) to the part it
+    answers; saved as the human message's ai_context.answer_to and matched by the screen.
+
+    Strict: every field must have exactly this type (123 is not "123", a list is not a string, 0 is not "").
+    message_id is the id of Dan's reply (a UUID in this room), part the key the screen made for the part
+    (answers.ts partKey), value the full option text / input value. Longer than the shared limits
+    (app.agent.chat_shapes.ANSWER_*_MAX, the same numbers the screen enforces) is rejected, never cut:
+    the screen matches on the full value, so a cut value would silently stop matching its option."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    message_id: str = Field(..., pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+    part: str = Field(..., pattern=_chat_shapes.PART_KEY_RE.pattern)
+    kind: Literal["choice", "input"]
+    value: str = Field(..., min_length=1, max_length=_chat_shapes.ANSWER_VALUE_MAX)
+    question: Optional[str] = Field(None, min_length=1, max_length=_chat_shapes.ANSWER_QUESTION_MAX)
+
+
 class MessageSendRequest(BaseModel):
     """Send message request"""
     content: str = Field(..., min_length=0, max_length=10000)
@@ -212,6 +232,7 @@ class MessageSendRequest(BaseModel):
     replace_message_id: Optional[str] = Field(None, description="ID of existing user message to update instead of creating new")
     client_message_id: Optional[str] = Field(None, description="Client-side optimistic message id — lets an early cancel delete the row before the client learns the real id")
     timeline_refs: Optional[List[dict]] = Field(default=[], description="Explicit production timeline references [{content_id, title}]")
+    answer_to: Optional[AnswerToLink] = Field(None, description="When this message answers a part of Dan's reply (Choice / Input): {message_id, part, kind, value, question?}; saved as ai_context.answer_to so the screen can match the answer to that part. Wrong types or lengths are rejected (422)")
 
 
 class ReplyToMessage(BaseModel):

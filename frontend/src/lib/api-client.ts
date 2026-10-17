@@ -303,6 +303,8 @@ export interface StateMachineMessageRequest {
   replace_message_id?: string;
   timeline_refs?: { content_id: string; title: string }[];
   client_message_id?: string;
+  /** この発言がダンの返事の部品（選択・入力）への答えなら、どの返事のどの部品か（chat-shapes） */
+  answer_to?: { message_id: string; part: string; kind: 'choice' | 'input'; value: string; question?: string };
 }
 
 export interface StateMachineConfirmRequest {
@@ -1060,6 +1062,12 @@ export const api = {
       );
     },
 
+    /** 自分の送信（client_message_id）が保存されたか。本人の・この部屋の発言の時だけ saved: true（部品の答えの確かめ） */
+    messageSaved: (roomId: string, messageId: string) =>
+      request<{ saved: boolean; message?: MessageResponse; started?: boolean | null; start?: string | null }>(
+        `/chat/rooms/${roomId}/messages/${encodeURIComponent(messageId)}/saved`
+      ),
+
     searchMessages: (roomId: string, q: string, limit = 50) => {
       const query = new URLSearchParams({ q, limit: limit.toString() });
       return request<MessagesListResponse>(
@@ -1294,7 +1302,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}), ...(data.replace_message_id ? { replace_message_id: data.replace_message_id } : {}), ...(data.timeline_refs?.length ? { timeline_refs: data.timeline_refs } : {}), ...(data.client_message_id ? { client_message_id: data.client_message_id } : {}) }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}), ...(data.replace_message_id ? { replace_message_id: data.replace_message_id } : {}), ...(data.timeline_refs?.length ? { timeline_refs: data.timeline_refs } : {}), ...(data.client_message_id ? { client_message_id: data.client_message_id } : {}), ...(data.answer_to ? { answer_to: data.answer_to } : {}) }),
           signal,  // AbortSignal追加
         });
 

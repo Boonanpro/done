@@ -3,6 +3,7 @@
 import {useRef,useState} from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {ChevronLeft,ChevronRight,RefreshCw,X} from 'lucide-react';
+import {imageRequest,playableVideo} from '@/lib/chat-media';
 
 export type GalleryItem={url:string;kind:'image'|'video';name?:string};
 export function mediaKind(url:string):GalleryItem['kind']|null {
@@ -17,7 +18,8 @@ export function collectChatMedia(source:Element|null, fallback:GalleryItem[]=[])
  scope?.querySelectorAll('[data-media-items]').forEach(node=>{
   try{const values=JSON.parse(node.getAttribute('data-media-items')||'[]');if(Array.isArray(values))for(const item of values){if(typeof item.url==='string'&&(item.kind==='image'||item.kind==='video'))items.push(item)}}catch{/* Ignore incomplete streamed markup. */}
  });
- return [...items,...fallback].filter((item,i,all)=>all.findIndex(x=>x.url===item.url)===i);
+ // 外の動画は開かない（<video> は Referer を止められない。外の画像は Cookie なし・Referer なしで開く。lib/chat-media.ts）
+ return [...items,...fallback].filter((item,i,all)=>all.findIndex(x=>x.url===item.url)===i&&(item.kind!=='video'||playableVideo(item.url)));
 }
 export function MediaViewer({items,initialUrl,onClose,returnFocus}:{items:GalleryItem[];initialUrl:string;onClose:()=>void;returnFocus?:HTMLElement|null}){
  const [index,setIndex]=useState(()=>Math.max(0,items.findIndex(x=>x.url===initialUrl)));
@@ -35,8 +37,8 @@ export function MediaViewer({items,initialUrl,onClose,returnFocus}:{items:Galler
    <Dialog.Title className="sr-only">{label('Chat media','チャットのメディア')}</Dialog.Title>
    <header className="flex shrink-0 items-center justify-between px-4 py-1"><span aria-live="polite" className="text-sm tabular-nums">{index+1} / {items.length}</span><Dialog.Close className={control} aria-label={label('Close media','メディアを閉じる')}><X/></Dialog.Close></header>
    <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden" style={{touchAction:'pan-y pinch-zoom'}} onPointerDown={e=>{if(!e.isPrimary)return;const rect=e.currentTarget.getBoundingClientRect();if(item.kind==='video'&&e.clientY>rect.bottom-80)return;gesture.current={x:e.clientX,y:e.clientY}}} onPointerCancel={()=>{gesture.current=null}} onPointerUp={e=>{const start=gesture.current;gesture.current=null;if(!start)return;const dx=e.clientX-start.x,dy=e.clientY-start.y;if(Math.abs(dx)>55&&Math.abs(dx)>Math.abs(dy)*1.4)go(index+(dx<0?1:-1))}}>
-    {item.kind==='video'?<video key={`${item.url}-${retry}`} src={item.url} controls autoPlay playsInline preload="metadata" className="h-full w-full object-contain" onError={()=>setFailed(true)}/>:<img key={`${item.url}-${retry}`} src={item.url} alt={item.name||label('Photo','画像')} draggable={false} className="h-full w-full select-none object-contain" onError={()=>setFailed(true)}/>}
-    {failed&&<div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black"><p>{label('Could not load this media','メディアを読み込めませんでした')}</p><button type="button" className={control} aria-label={label('Retry','再試行')} onClick={()=>{setFailed(false);setRetry(x=>x+1)}}><RefreshCw/></button></div>}
+    {item.kind==='video'?(playableVideo(item.url)&&<video key={`${item.url}-${retry}`} src={item.url} controls autoPlay playsInline preload="metadata" className="h-full w-full object-contain" onError={()=>setFailed(true)}/>):<img key={`${item.url}-${retry}`} src={item.url} alt={item.name||label('Photo','画像')} {...imageRequest(item.url)} draggable={false} className="h-full w-full select-none object-contain" onError={()=>setFailed(true)}/>}
+    {(failed||(item.kind==='video'&&!playableVideo(item.url)))&&<div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black"><p>{label('Could not load this media','メディアを読み込めませんでした')}</p><button type="button" className={control} aria-label={label('Retry','再試行')} onClick={()=>{setFailed(false);setRetry(x=>x+1)}}><RefreshCw/></button></div>}
    </div>
    <footer className="flex shrink-0 items-center justify-between gap-4 px-4 py-2"><button type="button" className={control} disabled={index===0} onClick={()=>go(index-1)} aria-label={label('Previous media','前のメディア')}><ChevronLeft/></button><span className="truncate text-sm">{item.name||''}</span><button type="button" className={control} disabled={index===items.length-1} onClick={()=>go(index+1)} aria-label={label('Next media','次のメディア')}><ChevronRight/></button></footer>
   </Dialog.Content>

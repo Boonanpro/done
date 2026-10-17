@@ -10,6 +10,7 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { ChatMarkdown, splitLinks } from './chat-markdown';
+import { siteFilePath, splitTopFences } from './chat-shapes-plain';
 import { CONFIRM_CARD, ConfirmCard, SEND_CARD, SendCard } from './send-card';
 import { describe as describeStep, elapsedLabel, KIND as STEP_KIND, summarize as summarizeSteps } from './work-log';
 import { Breathe, StepIn } from './motion-bits';
@@ -576,48 +577,71 @@ function cleanArtifactUrl(artifact: ChatArtifactResponse): string | null {
   }
 }
 
+// ダンのファイル（この入口の /api/v1/files/<名前>）か。アプリが自分で読む（画像・動画として出す）のはこれだけ。
+// React Native の画像・動画の読み込みは Cookie を止められないので、外の画像・動画は押せば開くリンクにする
+// （Web は外の画像を Cookie なし・Referer なしで出す。frontend/src/lib/chat-media.ts）。同じ入口のほかの道は読まない。
+function isDanFile(url: string) {
+  return url.startsWith(`${API_BASE_URL}/`) && siteFilePath(url.slice(API_BASE_URL.length)) !== null;
+}
+
+// 本文から画像・動画・ファイルの印とリンクを読み取る。一番外側のコードブロック（部品の ```openui-lang も、ほかの言語も）の
+// 中は読まない（中身をそのまま残す。部品の名前や画像の値に書いた [添付画像: …] を、部品を文章にする前に抜き出さない）。
 function parseRichContent(content: string): ParsedMediaContent {
   const images: string[] = [];
   const videos: { name: string; url: string }[] = [];
   const files: { name: string; url: string }[] = [];
+  const link = (label: string, url: string) => `[${label.replace(/[[\]]/g, '')}](${url})`;
+  // 外のサイトの https の添付はリンクに、この入口のほかの道などは読まずに印を文字のまま残す
+  const outside = (whole: string, label: string, url: string) => (/^https:\/\//i.test(url) && !url.startsWith(`${API_BASE_URL}/`) ? link(label, url) : whole);
 
-  let text = content
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, _name:string, url:string)=>{images.push(normalizeUrl(url));return '';})
-    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
-    .replace(/\[添付画像: ([^\]]+)\]/g, (_, raw: string) => {
-      images.push(normalizeUrl(raw));
-      return '';
+  const read = (s: string) => s
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, name: string, url: string) => {
+      const normalized = normalizeUrl(url);
+      if (isDanFile(normalized)) { images.push(normalized); return ''; }
+      return link(name || ui('Image', '画像'), normalized);
     })
-    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, name: string, url: string) => {
-      videos.push({ name, url: normalizeUrl(url) });
-      return '';
+    .replace(/\[添付画像: ([^\]]+)\]/g, (whole: string, raw: string) => {
+      const normalized = normalizeUrl(raw);
+      if (isDanFile(normalized)) { images.push(normalized); return ''; }
+      return outside(whole, ui('Image', '画像'), normalized);
+    })
+    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (whole: string, name: string, url: string) => {
+      const normalized = normalizeUrl(url);
+      if (isDanFile(normalized)) { videos.push({ name, url: normalized }); return ''; }
+      return outside(whole, name, normalized);
     })
     .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, (_, name: string, url: string) => {
       const normalized = normalizeUrl(url);
-      if (/\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(name) || /\.(mp4|mov|m4v|webm|avi|mkv)(?:[?#].*)?$/i.test(normalized)) {
+      if (isDanFile(normalized) && (/\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(name) || /\.(mp4|mov|m4v|webm|avi|mkv)(?:[?#].*)?$/i.test(normalized))) {
         videos.push({ name, url: normalized });
       } else {
         files.push({ name, url: normalized });
       }
       return '';
-    })
-    .trim();
+    });
+
+  const unwrapped = content.replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '');
+  const text = splitTopFences(unwrapped).map((p) => (p.code ? p.text : read(p.text))).join('').trim();
 
   const parts: Array<ParsedText | ParsedLink> = [];
-  const markdownLinkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = markdownLinkPattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ kind: 'text', value: text.slice(lastIndex, match.index) });
+  for (const piece of splitTopFences(text)) {
+    if (piece.code) {
+      parts.push({ kind: 'text', value: piece.text });
+      continue;
     }
-    parts.push({ kind: 'link', label: match[1], url: normalizeUrl(match[2]) });
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push({ kind: 'text', value: text.slice(lastIndex) });
+    const markdownLinkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = markdownLinkPattern.exec(piece.text)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push({ kind: 'text', value: piece.text.slice(lastIndex, match.index) });
+      }
+      parts.push({ kind: 'link', label: match[1], url: normalizeUrl(match[2]) });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < piece.text.length) {
+      parts.push({ kind: 'text', value: piece.text.slice(lastIndex) });
+    }
   }
 
   return { images, videos, files, parts };
@@ -969,8 +993,9 @@ function renderSearchSnippet(content: string, query: string) {
   );
 }
 
-// 文章の中の、ファイル・画像・動画の印（RichMessageContent が表示に変えるもの）
+// 文章の中の、ファイル・画像・動画の印（RichMessageContent が表示に変えるもの）。一番外側のコードブロック（部品を含む）の中は見ない
 const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
+const mediaTags = (text: string) => splitTopFences(text).flatMap((p) => (p.code ? [] : p.text.match(MEDIA_TAG) || []));
 
 function AiTurnBlocks({
   blocks,
@@ -1013,7 +1038,7 @@ function AiTurnBlocks({
       if (i === lastTextIndex) return;
       if (g.kind === 'tools') { log.push(...g.items); return; }
       log.push({ type: 'reasoning', text: g.text } as TurnBlock);
-      media.push(...(g.text.match(MEDIA_TAG) || []));
+      media.push(...mediaTags(g.text));
     });
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
@@ -3656,14 +3681,15 @@ function AppMain() {
   const chatMedia = useMemo(()=>uniqueMedia([...messages].sort((a,b)=>a.created_at.localeCompare(b.created_at)).flatMap(message=>{
     const parsed=parseRichContent(message.content||'');
     const items:GalleryItem[]=[...parsed.images.map(url=>({url,kind:'image' as const})),...parsed.videos.map(v=>({url:v.url,name:v.name,kind:'video' as const}))];
-    for(const part of parsed.parts){if(part.kind==='link'){const kind=mediaKind(part.url);if(kind)items.push({url:part.url,kind,name:part.label})}}
+    for(const part of parsed.parts){if(part.kind==='link'&&isDanFile(part.url)){const kind=mediaKind(part.url);if(kind)items.push({url:part.url,kind,name:part.label})}}
     return items;
   })),[messages]);
 
   const handleOpenMessageUrl = useCallback((url: string) => {
     const normalized = normalizeUrl(url);
     if (isXOperation(normalized)) { void openPrivateArtifact(); return; }
-    if(mediaKind(normalized)||chatMedia.some(x=>x.url===normalized)){openChatMedia(normalized,mediaKind(normalized)||chatMedia.find(x=>x.url===normalized)?.kind||'image');return;}
+    // アプリの中で開く（画像・動画を読む）のはダンのファイルだけ。外の画像・動画はブラウザで開く（isDanFile の説明）
+    if(isDanFile(normalized)&&(mediaKind(normalized)||chatMedia.some(x=>x.url===normalized))){openChatMedia(normalized,mediaKind(normalized)||chatMedia.find(x=>x.url===normalized)?.kind||'image');return;}
     if (isArtifactUrl(normalized)) {
       setArtifactView({
         title: artifactTitleFromUrl(normalized),

@@ -54,7 +54,7 @@ async def start(row):
     try:
         async for event in process_message_cli(room_id=row['room_id'], user_id=row['user_id'],
                 content=row['plain_note'] + '\n\n【実行時の確認規則】\n' + CONFIRMATION_RULE,
-                project_id=project['id'], run_id=run['id']):
+                project_id=project['id'], run_id=run['id'], answer_shapes=True):   # drawn by that room's chat screen
             if event.get('type') == 'result':
                 spec['result'] = event.get('text') or ''
                 spec['is_error'] = bool(event.get('is_error'))

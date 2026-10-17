@@ -4,6 +4,7 @@ import { Fragment, type ReactNode } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
 
 import { splitMarkdownBlocks } from './markdown-blocks';
+import { replaceShapeBlocks } from './chat-shapes-plain';
 
 export { splitLinks } from './markdown-blocks';
 
@@ -28,7 +29,8 @@ export function ChatMarkdown({
   textStyle: StyleProp<TextStyle>;
   renderText: (text: string, key: string) => ReactNode;
 }) {
-  const blocks = splitMarkdownBlocks(text);
+  // ダンの返事の部品（```openui-lang）は、このアプリでは描けないので読める文章にしてから分ける
+  const blocks = splitMarkdownBlocks(replaceShapeBlocks(text));
   return (
     <>
       {blocks.map((block, index) => {

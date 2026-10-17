@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import re
 import asyncio
+import threading
 import time
 import random
 import logging
@@ -152,6 +153,204 @@ def record_message_delivery_sync(
             }).eq("id", member["id"]).execute()
     except Exception as exc:
         logging.getLogger(__name__).warning("record_message_delivery_sync failed: %s", exc)
+
+
+# --- Who may use a saved message row (the one rule every path below goes through) ---------------------------
+# A message row is "this sender's own message in this room" only when its room, sender and sender type all
+# match. Every path that reaches a saved row by an id the client chose uses this: the re-read after an insert
+# hit an existing id (send_message), the rewrite after a cancel (chat_routes._replace_user_message), a retry of
+# an answer that was already saved and the "was it saved?" lookup (chat_routes). Writing in a room also needs
+# membership of that room (member_of_room_sync): send_message and the rewrite check it the same way.
+
+class MessageIdTaken(PermissionError):
+    """The id the client chose already belongs to a message that is not this sender's own message in this room."""
+
+
+def is_own_message(row: Optional[dict], room_id: Optional[str], sender_id: Optional[str], sender_type: str = "human") -> bool:
+    return bool(row) and bool(room_id) and bool(sender_id) and row.get("room_id") == room_id \
+        and row.get("sender_id") == sender_id and row.get("sender_type") == sender_type
+
+
+def member_of_room_sync(sb, room_id: Optional[str], user_id: Optional[str]) -> bool:
+    if not room_id or not user_id:
+        return False
+    return bool((sb.table("chat_room_members").select("id").eq("room_id", room_id).eq("user_id", user_id).execute()).data)
+
+
+def reply_target_sync(sb, room_id: Optional[str], reply_to_id: Optional[str]) -> Optional[dict]:
+    """The message a new message quotes, if it is a message of the same room (a quote never reaches into another
+    room; an id from elsewhere or a deleted message is dropped). Shaped like the screen's reply_to_message."""
+    if not room_id or not reply_to_id:
+        return None
+    rows = (sb.table("chat_messages").select("id, room_id, sender_type, content, created_at, sender:users!sender_id(display_name)")
+            .eq("id", reply_to_id).eq("room_id", room_id).execute()).data or []
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r["id"],
+        "sender_name": (r.get("sender") or {}).get("display_name") or "Unknown",
+        "sender_type": r.get("sender_type"),
+        "content": (r.get("content") or "")[:200],
+        "full_content": r.get("content") or "",
+        "created_at": r.get("created_at"),
+    }
+
+
+# --- What one send does only once (the second rule every path below goes through) -----------------------------
+# The same send (the same client_message_id) can arrive more than once: a retry inside send_message after a lost
+# insert response, the screen sending an answer again with the same id, two requests racing. Saving is once by the
+# id being the row's primary key. What follows a save — the counting / feed / detection of a new message ("saved"),
+# and starting Dan's processing of it ("start") — is NOT decided by which request saved the row: an insert that met
+# the id cannot tell whether its own earlier attempt landed or another request saved first. Instead each send id has
+# one right per kind, taken atomically in this process (the chat routes run only in Core). Only the request that
+# holds the right does that thing; the others answer with the saved row.
+#
+# The start right has three steps: take (this request will start it) → begin (it starts now; only one token can ever
+# begin) or give back (the request ended before it started anything, so a later request with the same id may start
+# it: the recovery for "saved, but nothing ever started"). A right taken and neither begun nor given back for
+# SEND_RIGHT_ABANDONED seconds counts as given back (a request stopped where its clean-up does not run); if its
+# holder then tries to begin after someone else took the right, it does not start. A holder whose start failed before
+# it had any effect (the follow-up was not queued, the call did not get it) gives a begun right back too
+# (undo_begin_send_right): failing for certain is not "started".
+#
+# The rights are about the send whose row exists. When a request CREATES the row (no row had that id: an earlier one
+# was deleted, e.g. withdrawn), the rights an earlier send of that id finished with no longer apply
+# (forget_finished_send_rights); a right a live request of the same send still holds is never dropped, and it notes
+# that the row was created while it was held. A row that was already there when the holder came to save it is started
+# by the holder only if it is the same send in this process: a request here took the right and gave it back, or another
+# request of the same send created the row while this one held the right. Otherwise (saved before a restart, say) this
+# process cannot tell whether it started: the right is settled as "unknown" and it is not started, now or later.
+
+SEND_RIGHT_ABANDONED = 60.0
+_SEND_RIGHT_TTL = 6 * 3600.0
+_send_rights_lock = threading.Lock()
+_send_rights: dict = {}   # (kind, room_id, message_id) -> {"token", "state": taken|begun|returned|unknown, "at"}
+
+
+def _send_right_key(kind: str, room_id: Optional[str], message_id: Optional[str]):
+    return (kind, str(room_id or ""), str(message_id or ""))
+
+
+def take_send_right(kind: str, room_id: Optional[str], message_id: Optional[str]) -> Optional[dict]:
+    """Take the right to do `kind` for this send. {"token", "returned": bool} — returned is True when someone held it
+    in this process and gave it back without doing it (or abandoned it) — or None (someone holds it, or did it)."""
+    import uuid as _uuid
+    if not room_id or not message_id:
+        return None
+    now = time.time()
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        for k in [k for k, v in _send_rights.items() if now - v["at"] > _SEND_RIGHT_TTL]:
+            _send_rights.pop(k, None)
+        cur = _send_rights.get(key)
+        returned = False
+        if cur is not None:
+            if cur["state"] in ("begun", "unknown"):
+                return None
+            if cur["state"] == "taken" and now - cur["at"] <= SEND_RIGHT_ABANDONED:
+                return None
+            returned = True   # given back, or taken and abandoned
+        token = _uuid.uuid4().hex
+        _send_rights[key] = {"token": token, "state": "taken", "at": now}
+        return {"token": token, "returned": returned}
+
+
+def begin_send_right(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> bool:
+    """The holder starts doing it now. True only for the current holder (once); False if the right moved on."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if not token or cur is None or cur["token"] != token or cur["state"] != "taken":
+            return False
+        cur["state"], cur["at"] = "begun", time.time()
+        return True
+
+
+def give_back_send_right(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder ended without doing it: a later request with the same id may take the right."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token and cur["state"] == "taken":
+            cur["state"], cur["at"] = "returned", time.time()
+
+
+def undo_begin_send_right(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder began, but what it began failed before it had any effect: give the right back like a request that
+    started nothing (a later request with the same id may start it). Only for a failure that is certain; when it is not
+    clear whether anything happened, the right stays begun (starting twice is worse than not starting)."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token and cur["state"] == "begun":
+            cur["state"], cur["at"] = "returned", time.time()
+
+
+def settle_send_right_unknown(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder found the send saved before it came and it is not the same send in this process (nothing here gave
+    its start back, no request here created the row while this one held the right): whether it started is unknown (it
+    was saved before a restart, say). It is not started — by this request or a later one."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token and cur["state"] == "taken":
+            cur["state"], cur["at"] = "unknown", time.time()
+
+
+def send_right_row_created_while_held(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> bool:
+    """Another request of the same send created the row while this holder held the right (it saved first, without the
+    right): the row the holder met is this send's own."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        return bool(token and cur is not None and cur["token"] == token and cur.get("row_created_while_held"))
+
+
+def note_send_right_row_saved(kind: str, room_id: Optional[str], message_id: Optional[str], token: Optional[str]) -> None:
+    """The holder's row is saved (the parallel branch begins before it saves: until this, its row may not exist yet)."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if token and cur is not None and cur["token"] == token:
+            cur["row_saved"] = True
+
+
+def forget_finished_send_rights(room_id: Optional[str], message_id: Optional[str]) -> None:
+    """A request just CREATED the row with this id (its insert succeeded), so any earlier row with this id is gone: what
+    an earlier send of it finished with belongs to that row and no longer applies — the "saved" right once done, the
+    "start" right once given back, settled as unknown, or begun by a holder whose row was saved (and is now gone). A
+    right a request still holds ("taken"), or began before saving its row (the parallel branch), is kept: that request
+    is the same send. A taken right notes that its row now exists (if its holder's insert meets it, it is its own send)."""
+    with _send_rights_lock:
+        cur = _send_rights.get(_send_right_key("saved", room_id, message_id))
+        if cur is not None and cur["state"] != "taken":
+            _send_rights.pop(_send_right_key("saved", room_id, message_id), None)
+        cur = _send_rights.get(_send_right_key("start", room_id, message_id))
+        if cur is not None and cur["state"] == "taken":
+            cur["row_created_while_held"] = True
+        elif cur is not None and (cur["state"] in ("returned", "unknown") or (cur["state"] == "begun" and cur.get("row_saved"))):
+            _send_rights.pop(_send_right_key("start", room_id, message_id), None)
+
+
+def clear_send_rights() -> None:
+    """Forget every right (tests start each scenario from a fresh process state)."""
+    with _send_rights_lock:
+        _send_rights.clear()
+
+
+def send_right_state(kind: str, room_id: Optional[str], message_id: Optional[str]) -> Optional[str]:
+    """'begun', 'taken' (a request holds it and may still start), 'returned' (given back or abandoned: nothing started
+    it in this process), 'unknown' (found saved from before, not started here: whether it started is unknown), or None
+    (this process has never seen it: no knowledge)."""
+    key = _send_right_key(kind, room_id, message_id)
+    with _send_rights_lock:
+        cur = _send_rights.get(key)
+        if cur is None:
+            return None
+        if cur["state"] == "taken" and time.time() - cur["at"] > SEND_RIGHT_ABANDONED:
+            return "returned"
+        return cur["state"]
 
 
 class ChatService:
@@ -595,8 +794,12 @@ class ChatService:
         except Exception as exc:
             self.logger.warning("Unread counter update failed: %s", exc)
     
-    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None, message_id: str = None) -> dict:
+    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None, message_id: str = None, ai_context: dict = None) -> dict:
         """Send a message to a room
+
+        ai_context: for a human message, the link from the owner's answer to the part it answers
+        (``{"answer_to": {"message_id", "part", "kind", "value"}}``; chat_shapes). The text stays the
+        owner's ordinary message「<問い> → <答え>」, the link is what the screen matches on.
 
         created_at: 明示指定時はその時刻で保存（既定はDBの now()）。並列保存パス
         （DAN_PARALLEL_SEND）は run 作成や CLI 起動の後に insert するため、DB任せだと
@@ -607,13 +810,19 @@ class ChatService:
         キャンセル対応: フロントは送信の瞬間から本物のIDを知っているので、
         いつキャンセルしてもIDで確実に削除できる。対応表は不要）。
         UUID形式でない値は無視して従来通りDB採番。
+
+        同じ id の行がもうある時（届いていた送信のやり直し）は、その行がこの部屋の・この送り主の・この種類の
+        発言（is_own_message）の時だけその行を返し、ほかの行なら MessageIdTaken（他人の行を返さない・書き換えない）。
+        "_existed": True は「この呼び出しの最初の挿入が、もうある行に当たった」＝この呼び出しの前に保存されていた、という
+        確かな事実の印（数え直し・知らせ・検知はしない）。2回目以降の挿入が当たった時は付けない: 前の試行が届いて応答だけ
+        失われたのか、同じ送信の別の要求が先に保存したのか分からない。その時の数え直し・新着の知らせ・検知は、この送信 ID の
+        "saved" の権利（take_send_right）を取れた呼び出しだけが1回する。
         """
         # Verify membership
-        member = await self._execute_with_retry(
+        if not await self._execute_with_retry(
             "send_message.membership_check",
-            lambda: self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", sender_id).execute(),
-        )
-        if not member.data:
+            lambda: member_of_room_sync(self.supabase, room_id, sender_id),
+        ):
             raise ValueError("Not a member of this room")
 
         # Get sender info
@@ -643,18 +852,33 @@ class ChatService:
             import uuid as _uuid
             insert_data["id"] = str(_uuid.uuid4())
         if reply_to_id:
-            insert_data["reply_to"] = reply_to_id
+            # 引用先は同じ部屋の発言だけ（ほかの部屋の id・消えた発言は引用として保存しない）
+            if await asyncio.to_thread(reply_target_sync, self.supabase, room_id, reply_to_id):
+                insert_data["reply_to"] = reply_to_id
         if created_at:
             insert_data["created_at"] = created_at
+        if ai_context:
+            insert_data["ai_context"] = ai_context
+
+        insert = {"attempts": 0, "before": False, "created": False}
 
         def _insert_idempotent():
+            insert["attempts"] += 1
             try:
-                return self.supabase.table("chat_messages").insert(insert_data).execute()
+                done = self.supabase.table("chat_messages").insert(insert_data).execute()
+                insert["created"] = True   # this call created the row (no row had this id)
+                return done
             except Exception as exc:
-                # 23505 = our own id already exists: a previous attempt landed
-                # but its response was lost. Read the row back instead of failing.
+                # 23505 = the id already exists: an earlier attempt landed but its response was lost (a retry
+                # inside this call), or another request of the same send saved it first. Read the row back instead
+                # of failing, but only if it is this sender's own message in this room.
                 if "23505" in str(exc) or "duplicate key" in str(exc).lower():
-                    return self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
+                    back = self.supabase.table("chat_messages").select("*").eq("id", insert_data["id"]).execute()
+                    row = (back.data or [None])[0]
+                    if not is_own_message(row, room_id, sender_id, sender_type):
+                        raise MessageIdTaken("この発言の ID はほかの発言が使っています")
+                    insert["before"] = insert["attempts"] == 1   # the first insert of this call met it: saved before this call
+                    return back
                 raise
 
         result = await self._execute_with_retry(
@@ -665,6 +889,19 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
+            if insert["before"]:
+                msg["_existed"] = True
+                return msg
+            if insert["created"]:
+                # a new row: what an earlier, since deleted row with this id finished with does not apply to it
+                msg["_created"] = True
+                forget_finished_send_rights(room_id, msg["id"])
+            # 保存の後の知らせは、この送信 ID で1回だけ（権利を取れた呼び出しが行う。行を保存したのがこの呼び出しの
+            # 前の試行でも、同じ送信の別の要求でも同じ）
+            right = take_send_right("saved", room_id, msg["id"])
+            if right is None:
+                return msg
+            begin_send_right("saved", room_id, msg["id"], right["token"])
             # 押し込み同期: この部屋のメンバーの新着ストリームへ流す（購読者が無ければ即return）
             try:
                 from app.services.room_feed import publish_message
@@ -837,6 +1074,32 @@ class ChatService:
             slim["blocks"] = out
         return slim
 
+    def get_own_message_sync(self, room_id: str, user_id: str, message_id: str) -> Optional[dict]:
+        """The caller's own human message with this id in this room, shaped like get_messages' items, or None
+        (nothing saved under that id, or the row is not theirs / not in this room — never shown). ValueError when
+        the caller is not a member of the room. For the screen's "was my send saved?" (an answer whose echo did
+        not arrive): looked up by its own id, not by searching the latest messages."""
+        if not member_of_room_sync(self.supabase, room_id, user_id):
+            raise ValueError("Not a member of this room")
+        rows = (self.supabase.table("chat_messages").select("*, sender:users!sender_id(id, display_name, avatar_url)")
+                .eq("id", message_id).execute()).data or []
+        row = rows[0] if rows else None
+        if not is_own_message(row, room_id, user_id, "human"):
+            return None
+        out = {
+            "id": row["id"], "room_id": row["room_id"], "sender_id": row["sender_id"],
+            "sender_name": (row.get("sender") or {}).get("display_name") or "Unknown",
+            "sender_type": row["sender_type"], "content": row.get("content") or "", "created_at": row["created_at"],
+        }
+        if row.get("ai_context"):
+            out["ai_context"] = self._slim_ai_context(row["ai_context"])
+        if row.get("reply_to"):
+            out["reply_to_id"] = row["reply_to"]
+            reply = reply_target_sync(self.supabase, room_id, row["reply_to"])
+            if reply:
+                out["reply_to_message"] = {k: reply[k] for k in ("id", "sender_name", "sender_type", "content", "created_at")}
+        return out
+
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:
         """Get messages from a room"""
         # 部屋を開くたびに通るホットパス。従来は「会員チェック→本文→返信元」を
@@ -883,7 +1146,7 @@ class ChatService:
                 unique_ids = list(set(reply_to_ids))
                 replied_result = self.supabase.table("chat_messages").select(
                     "id, sender_type, content, created_at, sender:users!sender_id(display_name)"
-                ).in_("id", unique_ids).execute()
+                ).in_("id", unique_ids).eq("room_id", room_id).execute()   # 引用の中身は同じ部屋の発言だけ見せる
                 for rm in (replied_result.data or []):
                     reply_map[rm["id"]] = {
                         "id": rm["id"],
@@ -1870,7 +2133,7 @@ class ChatService:
                 from app.agent.cli_runner import process_message_cli
                 async for _ev in process_message_cli(
                     room_id=room_id, user_id=user_id, content=content,
-                    project_id=None, run_id=None,
+                    project_id=None, run_id=None, answer_shapes=True,   # drawn by the room's chat screen
                 ):
                     pass
             except Exception:

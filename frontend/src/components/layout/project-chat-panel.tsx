@@ -65,10 +65,14 @@ import {
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { ModelSwitcher } from '@/components/chat/model-switcher';
 import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutboundEventContent, isCollabLogContent, ConfirmCard, parseConfirmCardMarker } from '@/components/chat/outbound-message-card';
+import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRecheck, type ShapeSubmit } from '@/components/chat/chat-shapes';
+import { splitShapeSegments } from '@/lib/chat-shapes/split';
+import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
+import { chatImageUrl, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '@/lib/chat-media';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -95,6 +99,18 @@ type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
   | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
 
+// 部品（選択・入力）の答えを送る時の追加情報: 照合情報、部品が決めた送信 ID（保存されたと分かるまで同じ ID で送る）、
+// 保存された／保存されていない（not saved）／分からない（unknown）の知らせ
+// onSaved の reply: echo が無く「保存されたか」の口で確かめた時の、ダンの処理の開始（started / start）。
+// onEnded: その送信の通信が終わった時に1回（startSeen: ダンの処理が始まった印＝追い連絡を入れた・返事が来た、を見たか）。
+// background: 始まっていない答えの送り直し。ほかの送信の通信中なら、それを切らないよう送らない（onFailed('busy')）
+type SavedStart = { started?: boolean | null; start?: string | null };
+type SendExtra = {
+  answerTo?: AnswerTo; clientMessageId?: string; onSaved?: (msg: MessageResponse, reply?: SavedStart) => void; onFailed?: (why: string) => void;
+  onEnded?: (startSeen: boolean) => void; background?: boolean;
+};
+type SendMessageHandle = (content: string, extra?: SendExtra) => void;
+
 // Phase 2: the live in-progress turn renders with the SAME inline timeline as
 // a finished turn (text segments + a collapsible tool group), so there's no
 // separate "process monitor" box anymore. The tool group starts collapsed even
@@ -114,7 +130,7 @@ function InlineProcessBlock({
 
   return (
     <div className="my-1">
-      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} /> : null}
+      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} live /> : null}
       {isLive ? (
         <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
@@ -151,54 +167,6 @@ function eventToStep(event: ExecutionEvent): StepInfo {
     type: 'reasoning',
     role,
   };
-}
-
-function parseMediaContent(content: string): { images: string[]; videos: string[]; files: { name: string; url: string }[]; text: string } {
-  const images: string[] = [];
-  const videos: string[] = [];
-  const files: { name: string; url: string }[] = [];
-  const text = content
-    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
-    .replace(/\[動画分析結果\(Gemini\):\n[\s\S]*?\n\]/g, '')
-    .replace(/\[添付画像: ([^\]]+)\]/g, (_, raw: string) => {
-      // ブラケット内の表記揺れを吸収:
-      //   "name (URL)" / "URL" / "/api/v1/files/x.png" / "C:\path\x.png" / "x.png"
-      // いずれも最終的に /api/v1/files/<filename> へ正規化する。
-      const urlMatch = raw.match(/https?:\/\/\S+|\/api\/\S+/);
-      let token = (urlMatch ? urlMatch[0] : raw.trim().split(/\s+/).pop() || '').trim();
-      // 末尾の記号（`)` `,` `.` `;` `"` `'`）を剥がす
-      token = token.replace(/[)\],.;"'`]+$/, '');
-      if (/^https?:\/\//.test(token)) {
-        const apiMatch = token.match(/\/api\/v1\/files\/[^?#\s)]+/);
-        if (apiMatch) {
-          images.push(apiMatch[0]);
-        } else {
-          images.push(token);
-        }
-        return '';
-      }
-      if (token.startsWith('/api/')) {
-        images.push(token);
-        return '';
-      }
-      const filename = token.replace(/\\/g, '/').split('/').pop();
-      if (filename) images.push(`/api/v1/files/${filename}`);
-      return '';
-    })
-    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, _name, url) => {
-      videos.push(url);
-      return '';
-    })
-    .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, (_, name, url) => {
-      if (/\.(mp4|avi|mov|mkv|webm)$/i.test(name)) {
-        videos.push(url);
-      } else {
-        files.push({ name, url });
-      }
-      return '';
-    })
-    .trim();
-  return { images, videos, files, text };
 }
 
 // Build a short snippet around the matched keyword, with the match highlighted,
@@ -282,21 +250,53 @@ const MUTED_PROSE_CLASS =
   'prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-muted-foreground/80 ' +
   '[&_p]:my-1 [&_pre]:max-h-60 [&_pre]:overflow-auto [&_pre]:text-xs';
 
+// 本文の Markdown の画像（![…](…) も参照の形 ![…][名前] も）。添付と同じ許可の境界（lib/chat-media.ts chatImageUrl）を
+// 通った物だけを描く。外の画像は Cookie を送らない・Referer なしで読み、読めなければ消す（壊れた画像の印を出さない）。
+function MarkdownImage({ src, alt, onImageClick }: { src: unknown; alt?: string; onImageClick?: (url: string) => void }) {
+  const url = chatImageUrl(src);
+  const [failed, setFailed] = useState<string | null>(null);
+  if (!url || failed === url) return null;
+  return <button type="button" data-media-items={JSON.stringify([{url,kind:'image',name:alt}])} onClick={() => onImageClick?.(url)}><img src={url} alt={alt || '画像'} {...imageRequest(url)} onError={isPagePath(url) ? undefined : () => setFailed(url)} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" /></button>;
+}
+
 const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   return (
     <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a({ href, children }) { const kind=href?mediaKind(href):null; return kind&&href?<button type="button" data-media-items={JSON.stringify([{url:href,kind}])} className="underline" onClick={()=>onImageClick?.(href)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
-          img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <button type="button" data-media-items={JSON.stringify([{url:imgSrc,kind:'image',name:alt}])} onClick={() => onImageClick?.(imgSrc)}><img src={imgSrc} alt={alt || '画像'} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" /></button>; },
+          // 画像・動画を指すリンクは画面の中の拡大表示で開く。開くのは境界を通った物だけで、動画はダンのファイルだけ（外の物はふつうのリンク）
+          a({ href, children }) { const url=chatImageUrl(href); const kind=url?mediaKind(url):null; return kind&&url&&(kind==='image'||playableVideo(url))?<button type="button" data-media-items={JSON.stringify([{url,kind}])} className="underline" onClick={()=>onImageClick?.(url)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
+          img({ src, alt }) { return <MarkdownImage src={src} alt={alt} onImageClick={onImageClick} />; },
         }}
       >{text}</ReactMarkdown>
     </div>
   );
 });
 
-const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+// 返事の文章と、その中の部品（```openui-lang ブロック）を順に描く。部品が無ければ
+// AiMarkdown そのもの（文章だけの返事の見た目と動きは変わらない）。
+// live: 生成の途中（ライブ枠、保存前）。閉じていないブロックも届いた分から部品として描き、
+//       閉じが届いても保存されるまでは押せない。
+// messageId: 保存された返事の id。選択・入力の答え（本人の発言）は「この id のこの部品への答え」
+//       という照合情報（answer_to）で結ぶ。無ければ（ライブ枠）答えられない。
+const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = false, live = false, messageId }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; messageId?: string }) {
+  const segments = useMemo(() => splitShapeSegments(text, { streaming: live }), [text, live]);
+  const keys = useMemo(() => partKeys(segments.filter((s) => s.kind === 'shape').map((s) => (s.kind === 'shape' ? s.code : ''))), [segments]);
+  const renderFallback = useCallback((code: string) => <AiMarkdown text={'```\n' + code + '\n```'} muted={muted} />, [muted]);
+  if (segments.length === 1 && segments[0].kind === 'markdown') {
+    return <AiMarkdown text={segments[0].text} onImageClick={onImageClick} muted={muted} />;
+  }
+  return (
+    <>
+      {segments.map((s, i) => (s.kind === 'markdown'
+        ? <AiMarkdown key={`md-${i}`} text={s.text} onImageClick={onImageClick} muted={muted} />
+        : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} live={live} messageId={live ? null : (messageId || null)} part={keys[s.index] || `i${s.index}`} renderFallback={renderFallback} />))}
+    </>
+  );
+});
+
+const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false, live = false, messageId }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; messageId?: string }) {
   const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
@@ -306,7 +306,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
-      {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} muted={muted} />}
+      {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} messageId={messageId} />}
     </>
   );
 });
@@ -355,10 +355,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
   );
 }
 
-// 文章の中の、ファイル・画像・動画の印（TurnTextSegment が表示に変えるもの）
-const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
-
-const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean }) {
+const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, messageId }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; messageId?: string }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -382,21 +379,21 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
       if (i === lastTextIndex) return;
       if (g.kind === 'tools') { log.push(...g.items); return; }
       log.push({ type: 'reasoning', text: g.text } as TurnBlock);
-      media.push(...(g.text.match(MEDIA_TAG) || []));
+      media.push(...mediaTags(g.text));   // 文章の中の添付の印（部品・コードブロックの中は見ない。lib/chat-media.ts）
     });
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
       <div className="flex flex-col">
         {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} onImageClick={onImageClick} /> : null}
-        <TurnTextSegment text={final} onImageClick={onImageClick} />
+        <TurnTextSegment text={final} onImageClick={onImageClick} messageId={messageId} />
       </div>
     );
   }
   return (
     <div className="flex flex-col">
       {grouped.map((g, i) => (g.kind === 'text'
-        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} />
+        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} live={live} messageId={messageId} />
         : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
@@ -595,7 +592,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
         </button>
       )}
       {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled />}
+      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} settled messageId={msg.id} />}
       {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
           <MediaGrid items={[...aiImages.map((url) => ({ url, kind: 'image' as const })), ...aiVideos.map((url) => ({ url, kind: 'video' as const }))]} onImageClick={onImageClick} />
@@ -613,7 +610,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
           ))}
         </div>
       )}
-      {!useTimeline && aiText && <AiMarkdown text={aiText} onImageClick={onImageClick} />}
+      {!useTimeline && aiText && <AiShapedText text={aiText} onImageClick={onImageClick} messageId={msg.id} />}
       {proposals.length > 0 && (
         <div className="flex flex-wrap gap-3 mt-2">
           {proposals.map((p, i) => (
@@ -673,7 +670,7 @@ function ChatInput({
   roomId: string;
   isSessionActive: boolean;
   activeOriginMessageId?: string | null;
-  sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
+  sendMessageRef?: React.MutableRefObject<SendMessageHandle | null>;
   onSseStateChange?: (connected: boolean) => void;
   replyTo?: MessageResponse | null;
   onClearReply?: () => void;
@@ -997,8 +994,18 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = []) => {
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = [], extra?: SendExtra) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
+    // この送信でサーバーが保存した自分の発言（echo）。前の送信の結果（serverMessageIdRef）は使わない:
+    // 部品からの送信は入力欄の経路を通らないので、前の成功の id が残ったままになる
+    let savedMessage: MessageResponse | null = null;
+    // 部品（選択・入力）の答え: 保存されたら onSaved、保存されなかったら onFailed、分からなければ onFailed('unknown')（1回だけ）
+    let settled = false;
+    let settling: Promise<void> | null = null;
+    // この送信の通信の中で、ダンの処理が始まった印（追い連絡を入れた・返事が来た）を見たか
+    let startSeen = false;
+    const reportSaved = (m: MessageResponse, reply?: SavedStart) => { if (!settled) { settled = true; extra?.onSaved?.(m, reply); } };
+    const reportFailed = (why: string) => { if (!settled) { settled = true; extra?.onFailed?.(why); } };
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
     const filePrefix = fileUrls.map(f => `[添付ファイル: ${f.name} (${f.url})]`).join('\n');
@@ -1021,11 +1028,14 @@ function ChatInput({
 
     // 完全形: 送信の瞬間にフロントが本物のUUIDを発行し、サーバーはこれを
     // そのまま行IDにする。キャンセルはいつでもこのIDで確実に削除できる。
+    // 部品の答えは部品が決めた ID（送り直しも同じ ID。サーバーは同じ ID の2回目を保存し直さない）。
+    // 部品の答えの ID は停止の取り消し（墓標）には使わない: 墓標に入ると、同じ ID の送り直しが保存直後に消される
     const tempUserMessageId =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      extra?.clientMessageId
+      || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    optimisticMessageIdRef.current = tempUserMessageId;
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    if (!extra?.answerTo) optimisticMessageIdRef.current = tempUserMessageId;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
       room_id: roomId,
@@ -1059,23 +1069,65 @@ function ChatInput({
       }));
       replaceMessageIdRef.current = null;
     } else {
-      // 新規送信: 楽観的メッセージを追加
-      queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-        messages: [optimisticUserMessage, ...(old?.messages || [])],
-      }));
+      // 新規送信: 楽観的メッセージを追加（同じ ID の行がもう記録にある＝保存済みの答えを同じ ID で送り直す時は足さない）
+      queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => (
+        old?.messages?.some((m) => m.id === tempUserMessageId)
+          ? old
+          : { messages: [optimisticUserMessage, ...(old?.messages || [])] }
+      ));
     }
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    // 部品の答えの決着。保存の echo が来ていれば保存済み。来ないまま通信が終わった（HTTP のエラー応答・done だけ・
+    // 切断・中断・取り消し・途中のエラー）時は、どれも「保存されなかった証拠」ではない（503 は本体が保存した後に
+    // 途中の中継が返すこともある）ので、この送信 ID の保存をサーバーに聞いてから決める（最新の一覧に無いことでは
+    // 決めない）。保存済みなら記録に載せて保存済み、サーバーが「保存されていない」と答えたら失敗（部品は同じ ID で
+    // 送り直せる）、聞けなければ「分からない」（部品は押せず「確かめる」を出す）。requestId の新旧に関わらず必ず一度は決着させる。
+    // 確かめている間に別の終わり方の知らせが来ても、確かめるのはこの1回（同じ約束を返す。終わりの知らせ onEnded はこれを待つ）
+    const settleAnswer = () => (settling ??= settleAnswerOnce());
+    const settleAnswerOnce = async () => {
+      if (!extra?.answerTo || settled) return;
+      if (savedMessage) { reportSaved(savedMessage); return; }
+      const dropTemp = () => queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) =>
+        old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
+      );
+      let verdict: 'saved' | 'not saved' | 'unknown' = 'unknown';
+      let found: MessageResponse | undefined;
+      let reply: SavedStart = {};
+      try {
+        const r = await api.rooms.messageSaved(roomId, tempUserMessageId);
+        if (r && r.saved === true && r.message) { verdict = 'saved'; found = r.message; reply = { started: r.started, start: r.start }; } else if (r && r.saved === false) verdict = 'not saved';
+      } catch {
+        verdict = 'unknown';
+      }
+      if (verdict === 'saved' && found) {
+        const row = found;
+        savedMessage = row;
+        queryClient.setQueryData<{ messages: MessageResponse[] }>(queryKey, (old) => {
+          if (!old) return old;
+          return old.messages.some((m) => m.id === row.id)
+            ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
+            : { messages: [row, ...old.messages] };
+        });
+        reportSaved(row, reply);   // 部品が開始の状態に合わせる（started: false なら同じ ID で送り直してダンの処理を始めさせる）
+        return;
+      }
+      dropTemp();
+      reportFailed(verdict);
+    };
+
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}) },
+        { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}), ...(extra?.answerTo ? { answer_to: extra.answerTo } : {}) },
         {
           onUserMessage: (msg) => {
-            if (streamRequestRef.current !== requestId) return;
+            savedMessage = msg;   // この送信の保存の印（新しい送信に追い越されていても、この答えの決着には使う）
+            if (streamRequestRef.current !== requestId) { reportSaved(msg); return; }
             serverMessageIdRef.current = msg.id;
             optimisticMessageIdRef.current = msg.id;
+            reportSaved(msg);
             if (currentReplaceId) {
               // replace: 既存メッセージの内容をサーバー版で上書き
               queryClient.setQueryData(
@@ -1102,6 +1154,7 @@ function ChatInput({
             }
           },
           onAIMessage: (msg) => {
+            startSeen = true;   // この送信のターンの返事が来た＝ダンの処理が始まった（新しい送信に追い越されていても）
             if (streamRequestRef.current !== requestId) return;
             queryClient.setQueryData(
               queryKey,
@@ -1129,6 +1182,9 @@ function ChatInput({
                 old ? { messages: old.messages.map((m) => (m.pendingFollowup ? { ...m, pendingFollowup: false } : m)) } : old
             );
           },
+          onFollowupQueued: () => {
+            startSeen = true;   // 追い連絡を走っているターンに入れた＝ダンの処理に渡った
+          },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
             aiRespondedRef.current = true;
@@ -1139,6 +1195,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onInterrupted: () => {
+            void settleAnswer();   // 保存の echo の前に切れたなら、送信 ID で確かめてから決める
             if (streamRequestRef.current !== requestId) return;
             // 返事の通信が切れた。ダンの作業はサーバーで続くので「作業中」の表示は保つが、手元の印
             // （localActive）は立てない。立てると、作業が終わっても誰も外さず停止ボタンのまま残った（2026-10-14）。
@@ -1157,6 +1214,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onComplete: () => {
+            void settleAnswer();   // done だけで echo が無い・取り消し（abort）も、ここで決着させる
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1200,6 +1258,8 @@ function ChatInput({
             }
           },
           onError: (error) => {
+            // HTTP のエラー応答も、サーバーからの error イベントも、保存されなかった証拠ではない: 送信 ID で確かめる
+            void settleAnswer();
             if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
@@ -1207,8 +1267,9 @@ function ChatInput({
             onSseStateChange?.(false);
             // 送信失敗 → 楽観点灯した「ダンが作業中…」をサーバー真実で即消す
             queryClient.invalidateQueries({ queryKey: ['projects'] });
-            // サーバーが受け取らなかった送信は「送信中」のまま残さず、文を入力欄に戻す（キャンセルと同じ扱い）
-            if (!serverMessageIdRef.current) {
+            // サーバーが受け取らなかった送信は「送信中」のまま残さず、文を入力欄に戻す（キャンセルと同じ扱い）。
+            // 部品の答えは settleAnswer が決着させる（部品の側で選び直せる。入力欄には戻さない）
+            if (!savedMessage && !extra?.answerTo) {
               queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', roomId], (old) =>
                 old ? { messages: old.messages.filter((m) => m.id !== tempUserMessageId) } : old,
               );
@@ -1228,6 +1289,8 @@ function ChatInput({
         controller.signal
       );
     } catch (error) {
+      // 取り消し（abort）か、通信そのものの失敗。部品の答えは、保存の echo が無ければ送信 ID で確かめてから決める
+      void settleAnswer();
       if (streamRequestRef.current !== requestId) return;
       syncActiveStatus(false);
       setInterrupted(projectId, false);
@@ -1244,6 +1307,12 @@ function ChatInput({
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
       }
+      // どの終わり方でも、部品の答えは必ず一度決着させ（新しい送信に追い越された時も）、それから通信の終わりを知らせる
+      // （部品は、保存済みでダンの処理が始まった印を見ていなければ、開始の状態をサーバーに確かめる）
+      if (extra?.answerTo) {
+        await settleAnswer();
+        extra.onEnded?.(startSeen);
+      }
     }
   }, [
     invalidateProjectChrome,
@@ -1259,10 +1328,17 @@ function ChatInput({
     user?.id,
   ]);
 
-  // 親コンポーネントから sendMessageCore を呼べるようにする
+  // 親コンポーネントから sendMessageCore を呼べるようにする（確認カード・部品の答え）。
+  // 入力欄からの送信（handleSendMessage）と同じく、前の送信の結果（保存 id・返事の印）は持ち越さない
   useEffect(() => {
     if (sendMessageRef) {
-      sendMessageRef.current = (content: string) => { sendMessageCore(content); };
+      sendMessageRef.current = (content: string, extra?: SendExtra) => {
+        // 始まっていない答えの送り直し（裏で自動）は、ほかの送信の通信中には送らない（それを切らない。部品が後でまた確かめる）
+        if (extra?.background && abortControllerRef.current) { extra.onFailed?.(SEND_BUSY); return; }
+        serverMessageIdRef.current = null;
+        aiRespondedRef.current = false;
+        sendMessageCore(content, [], [], undefined, [], extra);
+      };
       return () => { sendMessageRef.current = null; };
     }
   }, [sendMessageRef, sendMessageCore]);
@@ -2036,9 +2112,24 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const sendMessageRef = useRef<((content: string) => void) | null>(null);
+  const sendMessageRef = useRef<SendMessageHandle | null>(null);
   // 確認カードの答え（「承認: …」/「やめる: …」）を、本人の発言としてこの部屋に送る
   const answerInRoom = useCallback((text: string) => { sendMessageRef.current?.(text); }, []);
+  // 部品（選択・入力）の答え: 同じ経路で本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
+  // 一緒に保存する。送信 ID は部品が決めた物（送り直しも同じ ID）。サーバーに保存されたら保存された行の id で resolve
+  // （echo が無く確かめた時は開始の状態も）、保存されていないとサーバーが答えたら reject（部品が選び直しを出す）、保存できたか
+  // 確かめられなかったら reject(SEND_UNKNOWN)（部品が「確かめる」を出す）。通信が終わったら opts.onEnded
+  const answerShapeInRoom = useCallback<ShapeSubmit>((text, answerTo, clientMessageId, opts) => new Promise<{ id: string; started?: boolean | null; start?: string | null }>((resolve, reject) => {
+    const send = sendMessageRef.current;
+    if (!send) { reject(new Error('送信できません')); return; }
+    send(text, {
+      answerTo, clientMessageId, background: opts?.background, onEnded: opts?.onEnded,
+      onSaved: (msg, reply) => resolve({ id: msg.id, ...(reply ?? {}) }),
+      onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)),
+    });
+  }), []);
+  // 今ログインしている本人。部品の「答えました」はこの人の保存済みの発言だけで決める
+  const ownerId = useAuthStore((state) => state.user?.id);
   const isNearBottomRef = useRef(true);
   const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   // 送った直後、まだサーバーの時刻が無いメッセージ（pending）が画面にある間に始まった作業の一歩を、
@@ -2165,6 +2256,24 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   // 束ね応答が届くまで個別クエリは止めておき（二重取得しない）、届いたら解放する。
   // 束ねが失敗/遅延した時は個別クエリに戻す（従来経路が保険）。
   const initialRoomId = project?.room_id;
+  // 部品の「確かめる」: 保存できたか分からない答えを、その送信 ID でサーバーに聞き直す。保存済みなら記録に載せる。
+  // サーバーが「保存されていない」と答えた時だけ saved: false。聞けない・答えが読めない時は reject（分からないまま）
+  const recheckAnswer = useCallback<ShapeRecheck>(async (clientMessageId) => {
+    if (!initialRoomId) throw new Error('部屋が分かりません');
+    const r = await api.rooms.messageSaved(initialRoomId, clientMessageId);
+    if (r && r.saved === true && r.message) {
+      const row = r.message;
+      queryClient.setQueryData<{ messages: MessageResponse[] }>(['project-messages', initialRoomId], (old) => {
+        if (!old) return old;
+        return old.messages.some((m) => m.id === row.id)
+          ? { messages: old.messages.map((m) => (m.id === row.id ? row : m)) }
+          : { messages: [row, ...old.messages] };
+      });
+      return { saved: true, started: r.started, start: r.start };
+    }
+    if (r && r.saved === false) return { saved: false };
+    throw new Error('保存されたか分かりません');
+  }, [queryClient, initialRoomId]);
   useEffect(() => {
     if (!projectId || !initialRoomId) return;
     let cancelled = false;
@@ -3064,6 +3173,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
+          <ShapeAnswerProvider messages={messages} ownerId={ownerId} roomId={initialRoomId} submit={answerShapeInRoom} recheck={recheckAnswer}>
           <div ref={messagesContentRef} className="flex flex-col gap-2 p-4">
             {(() => {
               const lastExecutionIndex = visibleDisplayItems.reduce(
@@ -3116,6 +3226,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             ) : null}
             <div ref={messagesEndRef} />
           </div>
+          </ShapeAnswerProvider>
         )}
       </div>
       )}
