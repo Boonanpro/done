@@ -4,6 +4,7 @@
 // 実行: node --experimental-strip-types --test tests/chat_shapes_looks.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createLibrary, defineComponent, createParser } from '../frontend/node_modules/@openuidev/lang-core/dist/index.mjs';
 import {
   ChoiceProps, CompareProps, SHAPE_SPECS, choiceOptions, normalizeOptions, validateComplete,
@@ -102,6 +103,103 @@ test('画像の URL: この画面のホストを指す https:// は同じサイ�
   assert.equal(safeImageUrl('https://cdn.paina.info/a.png', host), 'https://cdn.paina.info/a.png');
   assert.equal(safeImageUrl('https://dan.paina.info/api/v1/chat/x'), 'https://dan.paina.info/api/v1/chat/x');
   assert.equal(safeImageUrl('https://localhost:3000/api/v1/chat/x', 'localhost:3000'), null);
+});
+
+// 確かめる役（VERIFY7）の 71 個の URL の例（scratch の verify7/security.mjs と同じ並び。この画面のホストは dan-test.invalid）
+const SITE = 'dan-test.invalid';
+const VERIFY7_URLS = [
+  '/api/v1/files/a.png', '/api/v1/files/a.png?v=1', 'javascript:alert(1)', 'data:image/svg+xml,x', 'http://x.invalid/a', '//x.invalid/a',
+  `${BS}${BS}x.invalid/a`, `https:${BS}x.invalid/a`, '/api/v1/chat/dan', '/api/v1/files/..', '/api/v1/files/.', '/api/v1/files/%2e%2e',
+  '/api/v1/files/a%2fb', '/api/v1/files/a%3fb', '/api/v1/files/a%23b', '/api/v1/files/a%5cb', '/api/v1/files/a%00b', '/api/v1/files/a%252fb',
+  '/api/v1/files/%252e%252e', '/api/v1/files/a?x=%2f%3f%23', '/api/v1/files/日本語.png', '/api/v1/files/a.png#x',
+  'https://user:pass@x.invalid/a', 'https://x.invalid@dan-test.invalid/a', 'https://例え.テスト/a', 'https://xn--r8jz45g.xn--zckzah/a',
+  'https://127.1/a', 'https://2130706433/a', 'https://0x7f000001/a', 'https://0177.0.0.1/a', 'https://[::1]/a', 'https://x.invalid:99999/a',
+  'https://x.invalid/a/../b', 'https://x.invalid/a%2fb?x=%23', `https://x.invalid/a${LF}b`, `https://x.invalid/a${BS}b`, 'https://x.invalid/a%5cb',
+  'https://x.invalid/a?q=<svg>', 'https://x.invalid/?token=sample-not-a-secret',
+];
+for (const h of [SITE, SITE.toUpperCase(), SITE + ':443', SITE + ':0443', SITE + ':00443', SITE + ':8443', SITE + '.', SITE + ':0']) {
+  for (const path of ['/api/v1/files/a.png', '/api/v1/chat/dan', '/api/v1/files/../chat/dan', '/api/v1/files/%2e%2e/chat/dan']) VERIFY7_URLS.push('https://' + h + path);
+}
+// 71 個のうち通る物と、その時に返す値（ほかは全部 null）
+const VERIFY7_PASS = new Map([
+  ['/api/v1/files/a.png', '/api/v1/files/a.png'], ['/api/v1/files/a.png?v=1', '/api/v1/files/a.png?v=1'],
+  ['/api/v1/files/a%252fb', '/api/v1/files/a%252fb'], ['/api/v1/files/%252e%252e', '/api/v1/files/%252e%252e'],
+  ['/api/v1/files/a?x=%2f%3f%23', '/api/v1/files/a?x=%2f%3f%23'], ['/api/v1/files/日本語.png', '/api/v1/files/日本語.png'],
+  ...['https://xn--r8jz45g.xn--zckzah/a', 'https://127.1/a', 'https://2130706433/a', 'https://0x7f000001/a', 'https://0177.0.0.1/a',
+    'https://x.invalid/a/../b', 'https://x.invalid/a%2fb?x=%23', 'https://x.invalid/a%5cb', 'https://x.invalid/a?q=<svg>',
+    'https://x.invalid/?token=sample-not-a-secret'].map((u) => [u, u]),
+  ...[SITE, SITE.toUpperCase(), SITE + ':443', SITE + ':0443', SITE + ':00443'].map((h) => ['https://' + h + '/api/v1/files/a.png', '/api/v1/files/a.png']),
+]);
+
+/** 通った値をブラウザが実際に要求する先（この画面 https://<site>/ から読んだ時）が、この画面のホストならダンのファイル1つ */
+function requestedIsSafe(result, site) {
+  const page = new URL(`https://${site}/`);
+  const u = new URL(result, page);
+  if (u.hostname !== page.hostname) return result.startsWith('https://');
+  const name = u.pathname.slice('/api/v1/files/'.length);
+  return u.origin === page.origin && u.pathname.startsWith('/api/v1/files/') && !!name && !name.includes('/')
+    && !['.', '..'].includes(decodeURIComponent(name)) && !u.hash;
+}
+
+test('画像の URL: 確かめる役の 71 個の例。同じサイトの判定はブラウザと同じ読み方（ホスト・ポート・道を直してから）で、Web とアプリの写しが同じ', () => {
+  assert.equal(VERIFY7_URLS.length, 71);
+  for (const v of VERIFY7_URLS) {
+    const got = safeImageUrl(v, SITE);
+    assert.equal(got, VERIFY7_PASS.get(v) ?? null, JSON.stringify(v));
+    assert.equal(app.safeImageUrl(v, SITE), got, JSON.stringify(v));
+    assert.equal(app.safeImageUrl(v), safeImageUrl(v), JSON.stringify(v));
+    if (got) assert.ok(requestedIsSafe(got, SITE), JSON.stringify(v));
+  }
+  // VERIFY7 の sameOriginEscape 6 件（前はファイル以外の同じサイトの口へ Cookie つき GET を通した）
+  for (const port of [':0443', ':00443']) {
+    for (const path of ['/api/v1/chat/dan', '/api/v1/files/../chat/dan', '/api/v1/files/%2e%2e/chat/dan']) {
+      assert.equal(safeImageUrl(`https://${SITE}${port}${path}`, SITE), null, port + path);
+      assert.equal(app.safeImageUrl(`https://${SITE}${port}${path}`, SITE), null, port + path);
+    }
+  }
+});
+
+test('画像の URL: 同じホストは、ゼロ埋めのポート・数字だけのホストも直してから見る。別のポートは通さない（Cookie はポートで分かれない）', () => {
+  const host = '127.0.0.1:3002';   // 試験の画面（next dev）
+  const same = ['https://127.0.0.1:3002', 'https://127.0.0.1:03002', 'https://2130706433:3002', 'https://127.1:3002', 'https://0x7f.0.0.1:3002',
+    'https://0177.0.0.1:03002', 'https://0x7f000001:3002'];
+  for (const origin of same) {
+    for (const path of ['/api/v1/chat/dan', '/api/v1/chat/dan?probe=1', '/api/v1/files/../chat/dan', '/api/v1/files/%2e%2e/chat/dan',
+      '/api/v1/files/.%2e/chat/dan', '/api/v1/files/%2E./chat/dan', '/api/v1/files/a.png/..', '/api/v1/files/', '/']) {
+      assert.equal(safeImageUrl(origin + path, host), null, origin + path);
+    }
+    assert.equal(safeImageUrl(origin + '/api/v1/files/a.png', host), '/api/v1/files/a.png', origin);
+  }
+  for (const v of ['https://127.0.0.1:3003/api/v1/files/a.png', 'https://127.0.0.1/api/v1/files/a.png', 'https://127.0.0.1:443/api/v1/files/a.png',
+    'https://127.0.0.1:0/api/v1/files/a.png', 'https://2130706433/api/v1/chat/dan', 'https://127.0.0.1:8001/api/v1/chat/dan']) {
+    assert.equal(safeImageUrl(v, host), null, v);
+  }
+  // 本番の形（443 の画面）: :0443・:00443 は 443、:8443 は別のポート
+  assert.equal(safeImageUrl('https://dan.paina.info:0443/api/v1/files/a.png', 'dan.paina.info'), '/api/v1/files/a.png');
+  assert.equal(safeImageUrl('https://dan.paina.info:00443/api/v1/chat/dan', 'dan.paina.info'), null);
+  assert.equal(safeImageUrl('https://dan.paina.info:8443/api/v1/files/a.png', 'dan.paina.info'), null);
+  assert.equal(safeImageUrl('https://dan.paina.info:8443/a.png', 'dan.paina.info'), null);
+  // ブラウザが URL として読めない物（範囲外のポート・5つ組の数字のホスト）は通さない
+  for (const v of ['https://x.invalid:99999/a', 'https://x.invalid:65536/a', 'https://1.2.3.4.5/a', 'https://256.0.0.1/a']) assert.equal(safeImageUrl(v), null, v);
+  // 書いた道で通らない物（. を含む道）は、直すとダンのファイルになっても通さない
+  assert.equal(safeImageUrl('/api/v1/files/./a.png'), null);
+  assert.equal(safeImageUrl('https://dan.paina.info/api/v1/files/x/../a.png', 'dan.paina.info'), null);
+  // ほかのホストは今までどおり https の画像として通る（読むのは画面の側で Cookie を送らない要求）
+  assert.equal(safeImageUrl('https://images.dan-test.invalid/a.png', SITE), 'https://images.dan-test.invalid/a.png');
+});
+
+test('画像の URL: ブラウザと同じ読み方ができない URL（React Native の URL は文字列を切り出すだけ）の所では画像を通さない。アプリの文章は変わらない', () => {
+  const choice = 'root = Choice("ロゴ", [{label: "A案", image: "/api/v1/files/a.png"}, {label: "ベージュ", color: "#d8c7a8", image: "https://example.com/b.png"}, "C案"])';
+  const code = [
+    // React Native 0.81 の URL と同じく、直さずに文字列を持つだけの URL
+    "globalThis.URL = class { constructor(u, b) { this._u = b ? String(b).replace(/[/]$/, '') + u : u; } get href() { return this._u; } };",
+    `const app = await import(${JSON.stringify(new URL('../mobile/chat-shapes-plain.ts', import.meta.url).href)});`,
+    `console.log(JSON.stringify([app.safeImageUrl('/api/v1/files/a.png'), app.safeImageUrl('https://example.com/a.png'), app.readLook({label: 'A', color: '#ABC', image: '/api/v1/files/a.png'}), app.shapeToPlainMarkdown(${JSON.stringify(choice)})]));`,
+  ].join('\n');
+  const out = JSON.parse(execFileSync(process.execPath, ['--experimental-strip-types', '--no-warnings', '--input-type=module', '-e', code], { encoding: 'utf8' }));
+  assert.deepEqual(out.slice(0, 3), [null, null, { label: 'A', color: '#abc', image: null }]);
+  assert.equal(out[3], app.shapeToPlainMarkdown(choice));
+  assert.match(out[3], /^\*\*ロゴ\*\*\n1\. A案\n2\. ベージュ（#d8c7a8）\n3\. C案\n/);
 });
 
 test('選択肢・セル1つの読み方: 文字はそのまま名前、物は名前と検査を通った実物だけ、名前が文字でない物は無い扱い', () => {

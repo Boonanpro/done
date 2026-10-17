@@ -33,6 +33,9 @@
  * - 選択肢と表の見出し・セルは実物を持てる（{label, color?, image?}。表は色だけ）。色の値と画像の URL は plain.ts の
  *   safeColor・safeImageUrl を通った物だけを描き、通らなければ名前だけ。出すのは閉じまで届いてから（生成の途中の URL を
  *   読みに行かない）。読み込みに失敗した画像は枠ごと消す。押した答えは今までどおり名前（label）。
+ *   外の画像（https://…）は認証情報を送らない要求（crossOrigin=anonymous）で読む: Referer だけでなく、その配信先の
+ *   Cookie も送らない。CORS に応じない外の画像は読めず、読めない画像と同じく枠ごと消える。ダンのファイル
+ *   （/api/v1/files/…。safeImageUrl が同じサイトの物は道だけで返す）は今までどおり同じサイトの要求（Cookie つき）。
  * - 描画で例外が起きても、その部品だけを元のコードブロック（文章）に戻し、画面全体は落とさない。
  */
 import {
@@ -356,6 +359,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
                   {/* eslint-disable-next-line @next/next/no-img-element -- 本人のファイルか https の縮小画像をそのまま見せる */}
                   <img
                     src={image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" draggable={false}
+                    crossOrigin={image.startsWith('/') ? undefined : 'anonymous'}
                     onError={() => setBroken((b) => (b.has(image) ? b : new Set(b).add(image)))}
                     className="block aspect-[4/3] w-full object-contain"
                   />

@@ -928,19 +928,47 @@ function siteFile(s: string): string | null {
   return s;
 }
 
+function readUrl(s: string, base?: string): URL | null {
+  try { return new URL(s, base); } catch { return null; }
+}
+
+/**
+ * この環境の URL が、画像を読むブラウザと同じ読み方（WHATWG URL）をするか。数字だけのホスト・ゼロ埋めのポート・符号化した
+ * .. を、ブラウザが実際に要求する形へ直せる所だけ true。React Native の URL は文字列を切り出すだけで直さないので false に
+ * なり、そこでは画像の URL を全部通さない（アプリは画像を読まず名前だけを出すので、文章は変わらない）。
+ */
+const READS_URL_LIKE_BROWSER = readUrl('https://0x7F.1:0443/a/%2e%2E/b')?.href === 'https://127.0.0.1/b';
+
+/** 書いた形の道と、ブラウザが読む形（.. を解き、ポート・ホストを直した後）の道の両方が、ダンのファイル1つ */
+function siteFileAsRead(written: string, u: URL): boolean {
+  return siteFile(written) !== null && !u.hash && siteFile(u.pathname + u.search) !== null;
+}
+
 /**
  * 縮小画像の URL: ダンのファイル（/api/v1/files/<名前>）と、https:// の URL（ホスト名は英数字とハイフンと点、利用者名なし）
  * だけ。javascript: data: http: blob: //ホスト などは null。siteHost（この画面のホスト。例 dan.paina.info）を渡すと、
  * そのホストを指す https:// の URL も同じサイトの道の決まりで見る（ダンのファイル以外は null、通れば道だけを返す）。
+ * ホスト・ポート・道は、ブラウザと同じ読み方で直してから比べる（:0443 は 443、2130706433 は 127.0.0.1、
+ * /api/v1/files/../ や %2e%2e は1つ上の道になる）。同じホストの別のポートは通さない（Cookie はポートで分かれない）。
  */
 export function safeImageUrl(v: unknown, siteHost?: string | null): string | null {
-  if (typeof v !== 'string') return null;
+  if (typeof v !== 'string' || !READS_URL_LIKE_BROWSER) return null;
   const s = v.trim();
   if (!s || s.length > 2048 || hasSpaceOrControl(s)) return null;
-  if (s.startsWith('/')) return siteFile(s);
+  // この画面のオリジン。ホストが分からない時（サーバーで描く・アプリの文章化）は仮の名前で、同じサイトの判定は道だけ
+  const site = readUrl(`https://${siteHost || 'site.invalid'}/`);
+  if (!site) return null;
+  if (s.startsWith('/')) {
+    const u = readUrl(s, site.href);
+    return u && u.origin === site.origin && siteFileAsRead(s, u) ? s : null;
+  }
   const m = HTTPS_URL.exec(s);
-  if (!m) return null;
-  if (siteHost && m[1].toLowerCase().replace(/:443$/, '') === siteHost.toLowerCase().replace(/:443$/, '')) return siteFile(m[2] || '');
+  const u = m ? readUrl(s) : null;
+  if (!m || !u || u.protocol !== 'https:' || u.username || u.password) return null;
+  if (siteHost && u.hostname === site.hostname) {
+    const path = m[2] || '';
+    return u.port === site.port && siteFileAsRead(path, u) ? path : null;
+  }
   return s;
 }
 
