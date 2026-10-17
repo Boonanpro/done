@@ -81,3 +81,15 @@
 - 変更するファイル: quote-writing.md
 - 何を直したか: quote-writing.md の「運用室での形」に「ダンのブラウザで x.com のそのアカウントから「引用」で出す」とあった。ブラウザで x.com を自動操作する投稿はXの自動化ルールに反し、シャドウバンや凍結のおそれがあるので、10/14 に本人と「引用は手動」と決めていた（記憶 feedback-x-quote-manual-only）。10/16 に運用室がダンのブラウザで自動投稿する作りに変わり、本人に叱られた（「お前が自動投稿するのやめようねって話したじゃん」）。運用室の「投稿する」は、本人のブラウザでXの投稿画面（本文と引用元入り）を開く形に戻し、画像・動画は「端末に保存」（スマホは共有メニュー、PCはダウンロードかコピー）で渡す。最後の「ポストする」は本人が押す。スキルの文もこの手順に直す。
 - 確かめたこと: 運用室の裏側から引用を投稿する処理（quote-send・quote_browser.py）を消し、自動テスト（39件）で「引用を出す経路が無いこと・APIの送信は引用を断ること」を確かめた。テスト用アカウントで、PC幅で4点のダウンロード、スマホ幅で保存ボタンの表示、「Xの投稿画面を開く」の行き先が x.com/intent/post（本文と引用元のURL入り・画像の行は入らない）であることを確かめ、Xへの通信は0件だった。
+
+## 2026-10-17 記事の文章はゴーストライターに書かせ、ダンは題材・インタビューの答え・直した版・画像・引用を受け持つ（運用室の「記事を作る」）
+- 種類: 操作
+- 変更するファイル: ghostwriter.md、SKILL.md
+- 何を直したか: 本人の決定（2026-10-17 20:42〜20:47）「記事執筆部分はまずゴーストライターを使えるようにして、あとから俺独自の部分を足す（守破離）」「ゴーストライターそのままの記事と、X運用で直した記事を比較したい」「止まった時はダンのスキルだけで書かない。止まっていると報告」「入口は『記事を作る』ボタン（題材探しから）と参考記事のURLを貼る、の2つ」「題材選びは任せる」。これを手順にした ghostwriter.md を新しく作り、SKILL.md の表から案内する。Ghost Writer（app.levela.co.jp/ghost-writer）の操作は、画面の要素の番号が衝突して壊れやすい（記憶 project-ghost-writer-levela）ので、画面が裏で呼んでいる API（/api/auth/login・/api/fetch-url・/api/analyze-style・/api/interview/start・/api/interview/continue・/api/generate-article・/api/sessions・/api/articles）を直接呼ぶ道具 frontend/src/app/artifacts/x-operation/ghostwriter.py にまとめた。本人の答え待ちで作業が終わっても、インタビューの会話を jobs/x-ghostwriter/<行のid>/state.json と Ghost Writer のセッションに残すので、答えが来たら続きから進められる。Ghost Writer はタイトルを作らない（タイトル欄が必須の入力で、空だとインタビューを始めない）ので、タイトルは title-cover.md で作って渡す。
+- 確かめたこと: 2026-10-17 21時台、Ghost Writer の画面の JavaScript（startInterview・sendReply・generateArticle・analyzeStyleAPI・fetchUrl・createSession）を読み、呼ぶ API と送る項目を写した（タイトル欄が空だと startInterview が止まることもここで確かめた）。道具の fetch で保存済みのログイン情報からログインし、5,000万円の記事（x.com/FukurouKantoku/status/2110361715749822593）の本文2,951字を3.8秒で取れた。begin・answer・generate と運用室への書き込み（stage・reference・draft・ask・stop）は、1本目を作る時に確かめる。
+
+## 2026-10-17 Ghost Writer の下書き保存（セッション・記事）の失敗では止めない
+- 種類: 操作
+- 変更するファイル: ghostwriter.md
+- 何を直したか: 1本目（run fe7e85ac）で、インタビュー開始の直前に Ghost Writer の /api/sessions が 500 を返し、道具がそれを「止まった」として扱って作業が終わった。Ghost Writer の画面のコード（createSession・updateSession）は、この保存が失敗しても console に出すだけで、インタビューと生成を続ける。インタビューの会話は道具の state.json にも残るので、保存の失敗で止める理由がない。道具（ghostwriter.py）はセッションと記事の保存を「失敗しても続ける」に直し、ghostwriter.md の「止まった時」に、止まった扱いにするのは文体の分析・インタビュー・生成・参考記事の取得の失敗だけだと書く。
+- 確かめたこと: 2026-10-17 21:1x、GET /api/sessions も POST /api/sessions も 500（Ghost Writer 側の障害）。同じ時に GET /api/articles・/api/contexts・/api/config は 200 だった。直した道具で同じ行の続き（begin から）を出し直した。
