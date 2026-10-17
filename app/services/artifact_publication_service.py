@@ -306,6 +306,12 @@ class ArtifactPublicationService:
         # デプロイ直前に最新の公開リビジョンをビルドへ焼き込む。これが配信内容の
         # 唯一の供給路（配信ページは実行時に DB を読まない）。
         self.write_release_snapshot(str(artifact.get("slug") or ""))
+        # What this build is made from.  The freshness loop compares it with the
+        # files later and rebuilds when they differ (artifact_freshness.py), so a
+        # change reaches the published copy whichever file or room it came from.
+        from app.services.artifact_freshness import source_fingerprint
+
+        built_from = source_fingerprint(str(artifact.get("slug") or ""))
         env = os.environ.copy()
         env.update(
             {
@@ -408,6 +414,7 @@ class ArtifactPublicationService:
                         "phase": "promoted",
                         "deployment_url": deployment_url,
                         "promoted_at": now,
+                        **({"source_fingerprint": built_from[0]} if built_from else {}),
                     },
                 }
             )

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import { Providers } from '@/components/providers';
 import { AppShell } from '@/components/layout/app-shell';
+import { CrashGuard } from '@/components/layout/crash-guard';
 import './globals.css';
 
 const geistSans = Geist({
@@ -42,9 +43,11 @@ export default function RootLayout({
   return (
     <html lang="ja" className="dark">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased h-full`}>
-        <Providers>
-          <AppShell>{children}</AppShell>
-        </Providers>
+        <CrashGuard>
+          <Providers>
+            <AppShell>{children}</AppShell>
+          </Providers>
+        </CrashGuard>
       </body>
     </html>
   );

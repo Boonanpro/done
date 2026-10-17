@@ -8,5 +8,8 @@ REM Logs: <repo>\frontend-dev-3001.log / .err.log
 setlocal
 set "REPO_ROOT=%~dp0.."
 set "NEXT_DIST_DIR=.next-preview"
+REM Assets under /_live/_next so the dashboard (3000) can proxy /preview and /_live here
+REM without mixing them up with its own /_next (frontend/src/middleware.ts).
+set "NEXT_ASSET_PREFIX=/_live"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'C:\Program Files\nodejs\npm.cmd' -ArgumentList 'run','dev','--','--hostname','0.0.0.0','--port','3001' -WorkingDirectory '%REPO_ROOT%\frontend' -RedirectStandardOutput '%REPO_ROOT%\frontend-dev-3001.log' -RedirectStandardError '%REPO_ROOT%\frontend-dev-3001.err.log' -WindowStyle Hidden"
 endlocal

@@ -4,6 +4,7 @@
 2サーバー構成:
   - 3000: 本番ビルド `next start`（ダッシュボード。描画2〜3倍、タブ移動10倍速）
   - 3001: 開発サーバー `next dev`（成果物プレビュー。HMR が要る。start_preview_dev.bat）
+          3000 の /preview/<slug> と /_live/* はここへ中継する（成果物はいつもファイルそのまま）
 
 使い方:
   python scripts/frontend_prod.py build     # .next-prod-<n> へビルド（稼働中の3000は止めない）
@@ -38,6 +39,9 @@ NPM = r"C:\Program Files\nodejs\npm.cmd"
 NODE = r"C:\Program Files\nodejs\node.exe"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 KEEP_BUILDS = 2
+# /preview/<slug>（成果物のファイルそのもの）の中継先。開発サーバー（start_preview_dev.bat）。
+# 本番ビルドの成果物はビルド時点の写しなので、本人に見せる画面はこちらから出す（middleware.ts）。
+LIVE_PREVIEW_ORIGIN = os.environ.get("DAN_LIVE_PREVIEW_ORIGIN", "http://127.0.0.1:3001")
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -82,10 +86,14 @@ def build() -> Path:
     config = json.loads((FRONTEND / 'tsconfig.json').read_text(encoding='utf-8'))
     config['include'] = ['next-env.d.ts', 'src/**/*.ts', 'src/**/*.tsx', '*.ts', '*.mts',
                          f'{dist}/types/**/*.ts', f'{dist}/dev/types/**/*.ts']
-    config['exclude'] = ['node_modules']
+    # 成果物（src/app/artifacts/**）の型はここでは確かめない。本人が見る成果物は開発サーバーが
+    # ファイルから直接出し（middleware.ts）、公開用の写しは専用サイトのビルドが確かめる。
+    # 誰かの書きかけの成果物でダッシュボードのビルド全体が止まっていた（2026-10-16 dev-lead）。
+    config['exclude'] = ['node_modules', 'src/app/artifacts/**']
     config['compilerOptions']['tsBuildInfoFile'] = f'{dist}/tsconfig.tsbuildinfo'
     (FRONTEND / config_name).write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
-    env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TSCONFIG=config_name, NEXT_TELEMETRY_DISABLED="1")
+    env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TSCONFIG=config_name, NEXT_TELEMETRY_DISABLED="1",
+               DAN_LIVE_PREVIEW_ORIGIN=LIVE_PREVIEW_ORIGIN, NEXT_PUBLIC_DASHBOARD_BUILD=dist)
     log(f"build -> {dist}")
     t0 = time.time()
     logf = open(TMP / "next_build.log", "w", encoding="utf-8")
@@ -131,7 +139,8 @@ def start() -> None:
         if not _port_open(PORT):
             break
         time.sleep(0.25)
-    env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TELEMETRY_DISABLED="1", NODE_ENV="production")
+    env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TELEMETRY_DISABLED="1", NODE_ENV="production",
+               DAN_LIVE_PREVIEW_ORIGIN=LIVE_PREVIEW_ORIGIN, NEXT_PUBLIC_DASHBOARD_BUILD=dist)
     TMP.mkdir(exist_ok=True)
     out = open(ROOT / "frontend-prod-3000.log", "a", encoding="utf-8")
     flags = NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)

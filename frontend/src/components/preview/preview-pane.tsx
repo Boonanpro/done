@@ -39,6 +39,29 @@ function isPublished(a?: ArtifactRecord | null) {
   return !!(a.delivery_url || a.production_url || a.custom_domain || /^https?:\/\//.test(a.share_url || ''));
 }
 
+/** 公開用の写し（専用サイト）が今のファイルと同じかを示す。タブ自体は常に今のファイルを映す。 */
+function ReleaseBadge({ artifact, url }: { artifact: ArtifactRecord; url: string }) {
+  const state = artifact.release_state;
+  if (!state || state === 'none' || !url) return null;
+  const look = {
+    current: { text: '公開版: 最新', cls: 'border-emerald-300 text-emerald-700', title: '公開用のサイトは今のファイルと同じです' },
+    updating: { text: '公開版: 更新中', cls: 'border-amber-300 text-amber-700', title: 'ファイルが変わったので、公開用のサイトを作り直しています（数分）' },
+    stale: { text: '公開版: 古い', cls: 'border-red-300 text-red-700', title: '公開用のサイトの作り直しに失敗しています。今のファイルとは違う内容です' },
+  }[state];
+  if (!look) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={look.title}
+      className={`shrink-0 whitespace-nowrap rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted ${look.cls}`}
+    >
+      {look.text}
+    </a>
+  );
+}
+
 /** Undo / Redo ボタン。編集中のみ表示。 */
 function UndoRedoButtons() {
   const undoStack = useEditHistoryStore((s) => s.undoStack);
@@ -248,7 +271,9 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
       ? 2_500
       : artifact && !isPublished(artifact) && artifact.publish_status !== 'failed'
         ? 5_000
-        : false,
+        : artifact?.release_state === 'updating'
+          ? 15_000
+          : false,
   });
 
   const saveEditsMutation = useMutation({
@@ -278,6 +303,7 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
       latest.production_url !== artifact.production_url ||
       latest.custom_domain !== artifact.custom_domain ||
       latest.delivery_url !== artifact.delivery_url ||
+      latest.release_state !== artifact.release_state ||
       latest.publish_status !== artifact.publish_status ||
       latest.last_publish_error !== artifact.last_publish_error
     ) {
@@ -294,15 +320,20 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
   // release used by the full-screen view, and takes precedence over retired
   // shared /preview paths left on older artifact cards.
   const releaseUrl = artifact?.delivery_url || draftUrl || shareUrl || publicPreviewUrl;
-  // Private tools depend on the dashboard session and its backend services.
-  // Keep both embedded and full-screen editing on the dashboard origin.
-  const privateEditorUrl = artifact && ['voice-note', 'pornblocker-guard-beacon', 'pornblocker-roadmap', 'aix-dashboard'].includes(artifact.slug)
-    ? `${typeof window === 'undefined' ? '' : window.location.origin}/preview/${artifact.slug}`
+  // The tab shows the artifact's files themselves, for every artifact alike.
+  // /preview/<slug> on the dashboard origin is served from those files (the
+  // dashboard proxies it to the preview dev server, see middleware.ts), so an
+  // edit to any file shows up without waiting for a build or a deploy.  The
+  // published copy is only labelled below (release_state); it is never shown
+  // here in place of the files, because it may be older than them.
+  const liveEditorUrl = artifact && publicPreviewUrl.startsWith('/preview/')
+    ? `${typeof window === 'undefined' ? '' : window.location.origin}${publicPreviewUrl}`
     : '';
-  const publicShareUrl = privateEditorUrl || (artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '');
+  const publicShareUrl = artifact && releaseUrl ? cleanArtifactUrl(artifact, releaseUrl) : '';
+  const openUrl = liveEditorUrl || publicShareUrl;
   // クロスオリジン化: プレビューiframe は成果物配信オリジンを
   // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
-  const baseIframeSrc = privateEditorUrl || absolutePublicUrl(releaseUrl);
+  const baseIframeSrc = liveEditorUrl || absolutePublicUrl(releaseUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
   // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
   // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。
@@ -487,13 +518,14 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
         >
           <Copy className="h-3.5 w-3.5" />
         </button>
+        <ReleaseBadge artifact={artifact} url={publicShareUrl} />
         <a
-          href={isPublished(artifact) ? publicShareUrl : undefined}
-          aria-disabled={!isPublished(artifact)}
+          href={openUrl || undefined}
+          aria-disabled={!openUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground aria-disabled:pointer-events-none aria-disabled:opacity-40"
-          title={isPublished(artifact) ? '全画面で開く' : '公開が完了すると開けます'}
+          title={openUrl ? '全画面で開く' : '公開が完了すると開けます'}
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
@@ -582,7 +614,7 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
       </div>
       <div className="flex flex-1 overflow-hidden bg-background">
         <div className="relative flex-1 overflow-hidden">
-          {isPublished(artifact) ? (
+          {(liveEditorUrl || isPublished(artifact)) ? (
             <iframe
               key={`${artifact.id}:${iframeSrc}`}
               ref={iframeRef}
