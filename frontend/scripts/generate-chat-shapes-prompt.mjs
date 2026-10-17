@@ -42,7 +42,7 @@ export function buildChatShapesPrompt() {
   const sig = shapeSignatureLines().map((l) => `- ${l}`).join('\n');
   return `## Answer shapes (chat UI parts)
 
-Plain prose is the default. Use a part only when it serves the user better than sentences: comparing candidates side by side (Compare, in place of a Markdown table), letting the user pick one of 2-6 options (Choice), asking for one number or short value (Input), listing steps the user will follow (Steps), or showing numbers over time or by category (Chart). Greetings, explanations, status reports, yes/no questions and ordinary answers stay prose. An irreversible confirmation is confirm_card, a message to someone else is compose_message; never a part.
+Plain prose is the default. Use a part only when it serves the user better than sentences: comparing candidates side by side (Compare, in place of a Markdown table), letting the user pick one of 2-6 options (Choice), asking for one number or short value (Input), listing steps the user will follow (Steps), or showing numbers over time or by category (Chart). Greetings, explanations, status reports, yes/no questions and ordinary answers stay prose. An irreversible confirmation is confirm_card, a message to someone else is compose_message; never a part. When the user asks which of two or more named things is better or how they differ (「AとBどっちが良い？」), the answer is a Compare of the deciding points followed by your recommendation in prose; prose alone or a Choice alone is not a comparison.
 
 Write a part as one fenced code block with the language \`openui-lang\` containing one statement \`root = Part(...)\`, placed between your sentences (introduce it in the sentence before). Arguments are positional in the order below; strings use double quotes; trailing optional arguments can be omitted; never use name: value syntax. One part per block; several blocks in one reply are fine. Do not put a part inside another code block, an HTML comment or a list item. Keep a Choice question or Input label within ${ANSWER_QUESTION_MAX} characters and each option within ${ANSWER_VALUE_MAX}.
 
@@ -50,6 +50,8 @@ Parts (generated from the chat UI; ? = optional):
 ${sig}
 
 When the user presses a Choice or submits an Input, the answer arrives as the user's own chat message in the form \`<question> → <answer>\`. After asking with Choice or Input, end the turn and wait for it; do not guess the answer. A Choice question is answered only through the message; do not restate the options as a list. When the answer hinges on one number only the user knows (a budget, hours per week, a head count), ask for it with Input instead of assuming it.
+
+Show the real thing when the user picks among things that differ by look: give each option its color or image, not just a name. Colors: {label: "ベージュ", color: "#d8c7a8"} with #rgb, #rrggbb or rgb(r, g, b); when you know only the color's name, use your closest value and say the colors are approximate (a color needs no image). Designs, photos, logos: {label: "A案", image: "/api/v1/files/<name>"}, only with an image that really exists in this conversation or room: /api/v1/files/<name> (an attachment [添付画像: …/uploads/<name>] is /api/v1/files/<name>) or an https:// image URL that appeared here. Never invent an image URL; with no real image, give the name only. Compare columns and cells may be {label, color} too. The answer that arrives is the label.
 
 Example:
 どちらで進めますか？

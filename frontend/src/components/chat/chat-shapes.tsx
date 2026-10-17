@@ -30,6 +30,9 @@
  *   始まっていない（started: false）と分かった時だけ同じ ID でもう一度送る（サーバーは1回しか始めない）。確かめを
  *   使い切っても分からなければ「確かめる」を出す。
  * - 答えの長さの契約は schema.ts の ANSWER_VALUE_MAX（サーバーと同じ数）。入力欄は長い値を受け付けない。
+ * - 選択肢と表の見出し・セルは実物を持てる（{label, color?, image?}。表は色だけ）。色の値と画像の URL は plain.ts の
+ *   safeColor・safeImageUrl を通った物だけを描き、通らなければ名前だけ。出すのは閉じまで届いてから（生成の途中の URL を
+ *   読みに行かない）。読み込みに失敗した画像は枠ごと消す。押した答えは今までどおり名前（label）。
  * - 描画で例外が起きても、その部品だけを元のコードブロック（文章）に戻し、画面全体は落とさない。
  */
 import {
@@ -44,7 +47,7 @@ import {
 import { AlertCircle, Check, Loader2, Send } from 'lucide-react';
 
 import {
-  ANSWER_VALUE_MAX, ChartProps, ChoiceProps, CompareProps, InputProps, SHAPE_SPECS, StepsProps, normalizeOptions, validateComplete,
+  ANSWER_VALUE_MAX, ChartProps, ChoiceProps, CompareProps, InputProps, SHAPE_SPECS, StepsProps, choiceOptions, validateComplete,
   type ChartInput, type ChoiceInput, type CompareInput, type InputInput, type StepsInput,
 } from '@/lib/chat-shapes/schema';
 import {
@@ -56,7 +59,7 @@ import {
   isGone, mustCheckBeforePress, needsCheck, noteInRecord, recheckAnswerSend, resumeAnswerSend, sendAnswer, subscribeAnswerSends,
   type AskSaved, type SubmitAnswer,
 } from '@/lib/chat-shapes/answer-sends';
-import { parseShapeCall } from '@/lib/chat-shapes/plain';
+import { parseShapeCall, readLook, type Look } from '@/lib/chat-shapes/plain';
 
 // --- 答えの経路（部屋の本人の発言と、発言を送る関数） -------------------------------------
 
@@ -129,6 +132,8 @@ const ShapeMetaContext = createContext<ShapeMeta>({ messageId: null, part: '', c
 
 const CARD = 'my-2 w-full max-w-full rounded-xl border border-border bg-card p-3 shadow-sm';
 const CHOICE_BTN = 'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-left text-sm transition-colors disabled:cursor-default';
+// 画像つきの選択肢が並ぶ時のカード（画像を大きめに、名前はその下）
+const CHOICE_CARD = 'flex min-w-0 flex-col items-stretch gap-1.5 rounded-lg border p-1.5 text-left text-sm transition-colors disabled:cursor-default';
 const SEND_FAILED = '送れませんでした。もう一度押してください';
 const SEND_UNKNOWN_TEXT = '送れたか確かめられませんでした';
 const SEND_UNKNOWN_AGAIN = 'まだ確かめられません。通信が戻ってからもう一度押してください';
@@ -141,6 +146,24 @@ function Answered({ text }: { text: string }) {
     <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
       <Check className="h-3.5 w-3.5" />{text}
     </span>
+  );
+}
+
+const subscribeNothing = () => () => {};
+/** ブラウザで描いている時だけ true（サーバーで先に作る HTML には実物の画像を入れない） */
+function useOnClient(): boolean {
+  return useSyncExternalStore(subscribeNothing, () => true, () => false);
+}
+
+/** この画面のホスト（https:// の画像の URL がこのサイトを指す時は、ダンのファイルの道の決まりで見る。plain.ts safeImageUrl） */
+function siteHost(): string | null {
+  return typeof window !== 'undefined' ? window.location.host : null;
+}
+
+/** 色見本。color は plain.ts safeColor を通った値だけ。暗い背景でも黒・濃紺が、明るい背景でも白が見えるよう縁を付ける */
+function Swatch({ color, className = 'h-5 w-5' }: { color: string; className?: string }) {
+  return (
+    <span aria-hidden data-swatch={color} className={`inline-block shrink-0 rounded-md border border-foreground/40 ${className}`} style={{ backgroundColor: color }} />
   );
 }
 
@@ -291,9 +314,15 @@ function SendProblem({ send, answered, recheck, id }: { send: SendState; answere
 
 const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
   const question = (props.question || '').trim();
-  const options = normalizeOptions(props.options);
+  const options = choiceOptions(props.options, siteHost());
   const { utterances } = useContext(ShapeAnswerContext);
-  const { messageId, part } = useContext(ShapeMetaContext);
+  const { messageId, part, complete } = useContext(ShapeMetaContext);
+  // 実物は閉じまで届いてから・ブラウザでだけ出す。読み込みに失敗した画像は枠ごと消して名前だけにする
+  const onClient = useOnClient();
+  const looks = complete && onClient;
+  const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
+  const imageOf = (o: Look) => (looks && o.image && !broken.has(o.image) ? o.image : null);
+  const cards = options.some((o) => imageOf(o));
   const recorded = messageId ? findChoiceAnswer(utterances, messageId, part) : null;
   const { send, answer, run, recheck, startUnsure, checking } = useAnswerSend(recorded);
   const canAnswer = useCanAnswer(!!answer);
@@ -308,19 +337,35 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
         <div className="text-sm font-semibold leading-snug">{question}</div>
         {answer ? <Answered text="答えました" /> : send.status === 'sending' ? <span className="text-xs text-muted-foreground">送っています…</span> : null}
       </div>
-      <div className="mt-2 flex flex-col gap-1.5">
+      {/* カードは上詰め（画像の無い・読めなかった選択肢を、隣の画像の高さまで空の枠として伸ばさない） */}
+      <div className={cards ? 'mt-2 grid grid-cols-2 items-start gap-2 sm:grid-cols-3' : 'mt-2 flex flex-col gap-1.5'} data-choice-layout={cards ? 'cards' : 'list'}>
         {options.map((o) => {
-          const picked = answer === o;
-          const sending = send.status === 'sending' && send.value === o;
-          const failedPick = send.status === 'failed' && send.value === o;
+          const picked = answer === o.label;
+          const sending = send.status === 'sending' && send.value === o.label;
+          const failedPick = send.status === 'failed' && send.value === o.label;
           const cls = picked ? 'border-primary bg-primary/10 font-medium'
             : answer ? 'border-border opacity-50'
             : failedPick ? 'border-red-500/60 hover:bg-muted'
             : 'border-border hover:bg-muted';
+          const image = imageOf(o);
+          const color = looks ? o.color : null;
           return (
-            <button key={o} type="button" disabled={disabled} onClick={() => choose(o)} aria-pressed={picked} className={`${CHOICE_BTN} ${cls}`}>
-              {sending ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : null}
-              <span>{o}</span>
+            <button key={o.label} type="button" disabled={disabled} onClick={() => choose(o.label)} aria-pressed={picked} className={`${cards ? CHOICE_CARD : CHOICE_BTN} ${cls}`}>
+              {image ? (
+                <span className="block w-full overflow-hidden rounded-md bg-muted/60" data-option-image>
+                  {/* eslint-disable-next-line @next/next/no-img-element -- 本人のファイルか https の縮小画像をそのまま見せる */}
+                  <img
+                    src={image} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" draggable={false}
+                    onError={() => setBroken((b) => (b.has(image) ? b : new Set(b).add(image)))}
+                    className="block aspect-[4/3] w-full object-contain"
+                  />
+                </span>
+              ) : null}
+              <span className="inline-flex min-w-0 items-center gap-2">
+                {sending ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : null}
+                {color ? <Swatch color={color} /> : null}
+                <span className="min-w-0 break-words">{o.label}</span>
+              </span>
             </button>
           );
         })}
@@ -396,9 +441,21 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   );
 };
 
+/** 表の見出し・セル: 文字と、色見本があればその左に（looks の時だけ） */
+function CellBody({ look, looks }: { look: Look | null; looks: boolean }) {
+  const text = look?.label ?? '';
+  const color = looks ? look?.color : null;
+  if (!color) return <>{text}</>;
+  return <span className="inline-flex items-center gap-1.5"><Swatch color={color} className="h-4 w-4" /><span>{text}</span></span>;
+}
+
 const CompareView: ComponentRenderer<CompareInput> = ({ props }) => {
-  const columns = (props.columns || []).map((c) => (typeof c === 'string' ? c : ''));
-  const rows = (props.rows || []).filter(Array.isArray) as string[][];
+  const { complete } = useContext(ShapeMetaContext);
+  // 色見本は閉じまで届いてから（生成の途中の色の値を描かない）
+  const onClient = useOnClient();
+  const looks = complete && onClient;
+  const columns = (props.columns || []).map((c) => readLook(c));
+  const rows = ((props.rows || []).filter(Array.isArray) as unknown[][]).map((r) => r.map((c) => readLook(c)));
   // 表は吹き出しの幅いっぱいに使う。候補の列には読める最小幅を確保し、入り切らない時は表の中だけ横に動かす
   return (
     <div className={`${CARD} overflow-x-auto p-0`} data-shape="Compare">
@@ -408,7 +465,7 @@ const CompareView: ComponentRenderer<CompareInput> = ({ props }) => {
           <thead>
             <tr className="border-b border-border">
               {columns.map((c, i) => (
-                <th key={i} className={`whitespace-nowrap px-3 py-2 text-left font-medium ${i === 0 ? 'text-muted-foreground' : 'min-w-[9rem]'}`}>{c}</th>
+                <th key={i} className={`whitespace-nowrap px-3 py-2 text-left font-medium ${i === 0 ? 'text-muted-foreground' : 'min-w-[9rem]'}`}><CellBody look={c} looks={looks} /></th>
               ))}
             </tr>
           </thead>
@@ -417,12 +474,12 @@ const CompareView: ComponentRenderer<CompareInput> = ({ props }) => {
           {rows.map((r, ri) => (
             <tr key={ri} className="border-b border-border last:border-0">
               {(columns.length ? columns : r).map((_, ci) => {
-                const text = typeof r[ci] === 'string' ? r[ci] : '';
+                const look = r[ci] ?? null;
                 // 先頭列（観点）は短ければ折らない。長い観点名は普通に折り返す
-                const nowrap = ci === 0 && text.length <= 12;
+                const nowrap = ci === 0 && (look?.label ?? '').length <= 12;
                 return (
                   <td key={ci} className={`px-3 py-2 align-top ${ci === 0 ? 'text-muted-foreground' : 'min-w-[9rem]'} ${nowrap ? 'whitespace-nowrap' : 'break-words'}`}>
-                    {text}
+                    <CellBody look={look} looks={looks} />
                   </td>
                 );
               })}

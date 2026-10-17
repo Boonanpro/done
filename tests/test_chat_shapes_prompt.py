@@ -19,7 +19,21 @@ def test_section_is_generated_file_content() -> None:
     for name in ("Compare", "Choice", "Input", "Steps", "Chart"):
         assert f"- {name}(" in section
     assert "```openui-lang" in section
-    assert len(section) <= 2500
+    # 2026-10-17 (fix6): the comparison sentence the owner accepted and the "show the real thing" paragraph made it
+    # 3.3KB (was 2.3KB); the cap moved from 2500 to 3400 with them
+    assert len(section) <= 3400
+
+
+def test_section_asks_for_the_real_thing_and_a_table_for_comparisons() -> None:
+    section = chat_shapes_section()
+    # the sentence tried in REPORT3 (fix2/build_prompt.py EXTRA), word for word
+    assert ("When the user asks which of two or more named things is better or how they differ (「AとBどっちが良い？」), "
+            "the answer is a Compare of the deciding points followed by your recommendation in prose; "
+            "prose alone or a Choice alone is not a comparison.") in section
+    assert "Show the real thing when the user picks among things that differ by look" in section
+    assert "Never invent an image URL" in section
+    assert "(string | {label: string, color?: string, image?: string})[]" in section   # Choice options
+    assert "rows: (string | {label: string, color?: string})[][]" in section            # Compare cells
 
 
 def test_missing_file_degrades_to_empty(monkeypatch, tmp_path) -> None:

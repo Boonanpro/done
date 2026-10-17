@@ -873,11 +873,102 @@ export function parseShapeCall(code: string): ShapeCall | null {
   return { name: m[1], args };
 }
 
+// --- 実物（色見本・縮小画像）の値の検査 ------------------------------------------------------------------
+//
+// 選択ボタンの選択肢と表の見出し・セルは、文字のほかに {label, color?, image?} で書ける（Choice は色と画像、Compare は
+// 色だけ）。画面に差し込む値は必ずここを通し、通らない値は捨てて名前（label）だけを出す。画面（chat-shapes.tsx）・
+// 選択肢の整え方（schema.ts）・部品を描けない画面の文章化（このファイル。アプリの写しも）が同じ関数を使う。
+
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const RGB_COLOR = /^rgb\(\s*(\d{1,3})\s*(?:,\s*|\s+)(\d{1,3})\s*(?:,\s*|\s+)(\d{1,3})\s*\)$/i;
+
+/**
+ * 色見本の値: #rgb・#rrggbb・rgb(r, g, b)（0〜255 の整数）だけ。返すのは読んだ数字から作り直した値で、元の文字列を
+ * そのまま CSS に入れない（「red; background: url(…)」のような差し込みを防ぐ）。それ以外は null（色見本を出さない）。
+ */
+export function safeColor(v: unknown): string | null {
+  if (typeof v !== 'string' || v.length > 40) return null;
+  const s = v.trim();
+  if (HEX_COLOR.test(s)) return s.toLowerCase();
+  const m = RGB_COLOR.exec(s);
+  if (!m) return null;
+  const n = [m[1], m[2], m[3]].map(Number);
+  return n.every((x) => x <= 255) ? `rgb(${n.join(', ')})` : null;
+}
+
+/**
+ * 同じサイトの中で画像として読んでよい道: ダンのファイルの配信（app/api/file_routes.py の /api/v1/files/<名前>）だけ。
+ * 画像の読み込みはログインの Cookie つきの GET になるので、ほかの道（読むだけで何かが起きる口がありうる）は画像にしない。
+ */
+export const SITE_IMAGE_PREFIX = '/api/v1/files/';
+const SITE_FILE_QUERY = /^[A-Za-z0-9._~=&%-]*$/;
+const HTTPS_URL = /^https:\/\/([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::\d{1,5})?)(\/.*)?$/i;
+
+/** 空白・制御文字（C0・DEL・C1）・バックスラッシュを含むか */
+function hasSpaceOrControl(s: string): boolean {
+  if (/\s/.test(s)) return true;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x5c) return true;
+  }
+  return false;
+}
+
+/** ダンのファイルの道（/api/v1/files/<名前>）なら、そのまま。名前は1つの区切りで、. や .. や符号化した / ? # にならない物 */
+function siteFile(s: string): string | null {
+  if (!s.startsWith(SITE_IMAGE_PREFIX)) return null;
+  const rest = s.slice(SITE_IMAGE_PREFIX.length);
+  const q = rest.indexOf('?');
+  const name = q < 0 ? rest : rest.slice(0, q);
+  if (q >= 0 && !SITE_FILE_QUERY.test(rest.slice(q + 1))) return null;
+  if (!name || /[/?#]/.test(name)) return null;
+  let decoded: string;
+  try { decoded = decodeURIComponent(name); } catch { return null; }
+  if (decoded === '.' || decoded === '..' || /[/?#]/.test(decoded) || hasSpaceOrControl(decoded)) return null;
+  return s;
+}
+
+/**
+ * 縮小画像の URL: ダンのファイル（/api/v1/files/<名前>）と、https:// の URL（ホスト名は英数字とハイフンと点、利用者名なし）
+ * だけ。javascript: data: http: blob: //ホスト などは null。siteHost（この画面のホスト。例 dan.paina.info）を渡すと、
+ * そのホストを指す https:// の URL も同じサイトの道の決まりで見る（ダンのファイル以外は null、通れば道だけを返す）。
+ */
+export function safeImageUrl(v: unknown, siteHost?: string | null): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!s || s.length > 2048 || hasSpaceOrControl(s)) return null;
+  if (s.startsWith('/')) return siteFile(s);
+  const m = HTTPS_URL.exec(s);
+  if (!m) return null;
+  if (siteHost && m[1].toLowerCase().replace(/:443$/, '') === siteHost.toLowerCase().replace(/:443$/, '')) return siteFile(m[2] || '');
+  return s;
+}
+
+/** 選択肢・表のセル1つの、名前と検査を通った実物 */
+export type Look = { label: string; color: string | null; image: string | null };
+
+/**
+ * 選択肢・表のセル1つを読む: 文字ならそれが名前、{label, color?, image?} なら名前と、検査を通った色と画像（通らなければ
+ * null）。名前が文字でない物は null（その選択肢・セルは無い物として扱う）。ほかの鍵は見ない。siteHost は safeImageUrl へ。
+ */
+export function readLook(v: unknown, siteHost?: string | null): Look | null {
+  if (typeof v === 'string') return { label: v, color: null, image: null };
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const o = v as { label?: unknown; color?: unknown; image?: unknown };
+  if (typeof o.label !== 'string') return null;
+  return { label: o.label, color: safeColor(o.color), image: safeImageUrl(o.image, siteHost) };
+}
+
 // --- 読める文章にする ------------------------------------------------------------------------------
 
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const cell = (s: string) => s.replace(/\|/g, '｜').replace(/\n/g, ' ');
+/** 選択肢・表のセルの文章: 名前と、色見本があれば後ろに括弧で色の値（画像は名前だけ。読めない値は空） */
+const lookText = (v: unknown): string => {
+  const l = readLook(v);
+  return l ? `${l.label}${l.color ? `（${l.color}）` : ''}` : '';
+};
 
 /**
  * 部品を読める文章（Markdown）にする。読めない・知らない部品なら null（呼び出し側は元のコードのまま）。
@@ -889,8 +980,8 @@ export function shapeToPlainMarkdown(code: string): string | null {
   const [a0, a1, a2, a3, a4] = call.args;
   switch (call.name) {
     case 'Compare': {
-      const columns = strs(a0);
-      const rows = Array.isArray(a1) ? a1.map(strs) : [];
+      const columns = Array.isArray(a0) ? a0.map(lookText) : [];
+      const rows = Array.isArray(a1) ? a1.map((r) => (Array.isArray(r) ? r.map(lookText) : [])) : [];
       if (columns.length === 0 || rows.length === 0) return null;
       const head = `| ${columns.map(cell).join(' | ')} |`;
       const rule = `|${columns.map(() => '---').join('|')}|`;
@@ -899,7 +990,7 @@ export function shapeToPlainMarkdown(code: string): string | null {
     }
     case 'Choice': {
       const q = str(a0);
-      const options = strs(a1);
+      const options = Array.isArray(a1) ? a1.filter((o) => readLook(o) !== null).map(lookText) : [];
       if (!q || options.length === 0) return null;
       return [`**${q}**`, ...options.map((o, i) => `${i + 1}. ${o}`), '', `（この画面では押せません。番号か選択肢の文字をそのまま送ってください: 「${q} → …」）`].join('\n');
     }

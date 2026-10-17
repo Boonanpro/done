@@ -16,19 +16,29 @@
  * React に依存しない（node から直接読める）。
  */
 import { z } from 'zod/v4';
+import { readLook, type Look } from './plain.ts';
 
-/** 選択肢の整え方: 前後の空白を除き、空と重複を落とす（完成時の検証と描画で同じ物を使う） */
-export function normalizeOptions(options: readonly unknown[] | undefined | null): string[] {
+/**
+ * 選択肢の整え方: 文字か {label, color?, image?} を読み（plain.ts readLook。色と画像は検査を通った物だけ残る）、名前の
+ * 前後の空白を除き、名前が空と重複の物を落とす（完成時の検証と描画で同じ物を使う）。siteHost は画像の検査へ渡す
+ */
+export function choiceOptions(options: readonly unknown[] | undefined | null, siteHost?: string | null): Look[] {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: Look[] = [];
   for (const o of options || []) {
-    if (typeof o !== 'string') continue;
-    const t = o.replace(/\s+/g, ' ').trim();
+    const look = readLook(o, siteHost);
+    if (!look) continue;
+    const t = look.label.replace(/\s+/g, ' ').trim();
     if (!t || seen.has(t)) continue;
     seen.add(t);
-    out.push(t);
+    out.push({ ...look, label: t });
   }
   return out;
+}
+
+/** 選択肢の名前だけ（押した時の答えはこの名前） */
+export function normalizeOptions(options: readonly unknown[] | undefined | null): string[] {
+  return choiceOptions(options).map((o) => o.label);
 }
 
 export const CHOICE_MIN = 2;
@@ -43,10 +53,34 @@ export const CHOICE_MAX = 6;
 export const ANSWER_VALUE_MAX = 200;      // 選択肢の文字・入力の値（単位つき）
 export const ANSWER_QUESTION_MAX = 200;   // 問い・ラベル
 
+/**
+ * 実物（色見本・縮小画像）つきの名前。値の検査は plain.ts（safeColor・safeImageUrl）で、通らない値は捨てて名前だけを出す
+ * （部品はコードに戻さない）。ここでは型だけを見る。名前は押した時の答えなので長さの契約に入る
+ */
+const ChoiceOption = z.union([
+  z.string().max(ANSWER_VALUE_MAX),
+  z.object({
+    label: z.string().max(ANSWER_VALUE_MAX).describe('選択肢の名前（押すとこれが答え）'),
+    color: z.string().optional().describe('色見本: #rgb・#rrggbb・rgb(r, g, b)'),
+    image: z.string().optional().describe('縮小画像: /api/v1/files/… か https://'),
+  }),
+]);
+const CompareCell = z.union([
+  z.string(),
+  z.object({
+    label: z.string().describe('セルの文字'),
+    color: z.string().optional().describe('色見本: #rgb・#rrggbb・rgb(r, g, b)'),
+  }),
+]);
+/** 表の見出し・セルの文字（{label, color} なら label） */
+export function cellLabel(c: unknown): string {
+  return readLook(c)?.label ?? '';
+}
+
 export const ChoiceProps = z
   .object({
     question: z.string().max(ANSWER_QUESTION_MAX).describe('何を選ぶか（短い問い）'),
-    options: z.array(z.string().max(ANSWER_VALUE_MAX)).describe('選択肢。2〜6個'),
+    options: z.array(ChoiceOption).describe('選択肢。2〜6個'),
   })
   .refine((v) => v.question.trim().length > 0, { message: '問いが空' })
   .refine((v) => {
@@ -65,11 +99,12 @@ export const InputProps = z
 
 export const CompareProps = z
   .object({
-    columns: z.array(z.string()).describe('列の見出し。先頭は比べる観点の列'),
-    rows: z.array(z.array(z.string())).describe('行。各行は columns と同じ個数の文字列'),
+    columns: z.array(CompareCell).describe('列の見出し。先頭は比べる観点の列'),
+    rows: z.array(z.array(CompareCell)).describe('行。各行は columns と同じ個数'),
     caption: z.string().optional().describe('表の題'),
   })
-  .refine((v) => v.columns.length >= 2 && v.columns.every((c) => c.trim().length > 0), { message: '列は2つ以上、見出しは空でない' })
+  // 先頭（観点の列）の見出しは空でもよい（表の左上を空けるのはよくある書き方。2026-10-17 の実モデルで Claude が書いた）
+  .refine((v) => v.columns.length >= 2 && v.columns.every((c, i) => i === 0 || cellLabel(c).trim().length > 0), { message: '列は2つ以上、観点の列より後の見出しは空でない' })
   .refine((v) => v.rows.length >= 1, { message: '行が無い' })
   // 列より多いセルは隠れてしまうので受け付けない。足りないセルは空欄として描く
   .refine((v) => v.rows.every((r) => r.length >= 1 && r.length <= v.columns.length), { message: '行のセル数が列数を超えている' });
