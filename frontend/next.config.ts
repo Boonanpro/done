@@ -1,7 +1,19 @@
+import path from 'node:path';
+
 import type { NextConfig } from 'next';
 import withPWA from 'next-pwa';
 
 import { CUSTOM_DOMAIN_REWRITES } from './src/lib/custom-domain-rewrites.generated';
+import { startLiveVersionWatcher } from './src/lib/live-version/server';
+
+// 成果物タブ用の開発サーバー（3001）か。ここだけ「今のファイルの版」を作り、画面の部品に
+// 焼き込む（'dan-live-version' → current.gen.ts）。画面はその版をサーバーの版と比べて、
+// 古い部品・HMR の取りこぼしを自分で直す（src/lib/live-version/）。
+const LIVE_DEV = process.env.NODE_ENV === 'development' && process.env.NEXT_ASSET_PREFIX === '/_live';
+if (LIVE_DEV) startLiveVersionWatcher(process.cwd());
+const LIVE_VERSION_MODULE = LIVE_DEV
+  ? './src/lib/live-version/current.gen.ts'
+  : './src/lib/live-version/stub.ts';
 
 // 静的アセットのキャッシュバスト用バージョン文字列を build-time に決定する。
 // Vercel では VERCEL_GIT_COMMIT_SHA が自動付与される。ローカル dev ではタイムスタンプ。
@@ -29,7 +41,16 @@ const nextConfig: NextConfig = {
   },
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,
-  turbopack: {},
+  turbopack: {
+    resolveAlias: { 'dan-live-version': LIVE_VERSION_MODULE },
+  },
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      'dan-live-version': path.resolve(process.cwd(), LIVE_VERSION_MODULE),
+    };
+    return config;
+  },
   experimental: {
     // middleware(proxy) があると Next がリクエストボディをバッファし、
     // デフォルト10MBで打ち切る（超過分は欠落→バックエンドへのproxyが
@@ -99,6 +120,14 @@ const nextConfig: NextConfig = {
     const coreBackendUrl =
       process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
     return [
+      // 成果物タブの画面が版を比べる・知らせる先（src/lib/live-version/guard.ts）。
+      // 画面からは /_live/* で来るので、ダッシュボード（3000）がこの開発サーバーへ中継する。
+      ...(LIVE_DEV
+        ? [
+            { source: '/_live/live-version', destination: '/dan-live/version' },
+            { source: '/_live/live-view', destination: '/dan-live/view' },
+          ]
+        : []),
       {
         source: '/preview/:path*',
         destination: '/artifacts/:path*',
