@@ -43,6 +43,7 @@ PATCH_HEAD = re.compile(r'\*\*\* (?:Add File|Update File|Delete File|Move to): (
 ESCAPED_NEWLINE = re.compile(r'\\n(?=[-+ @]|\*\*\* )')     # a patch written inside a script's string literal
 WRAPPERS = ('runtime_system_context', 'conversation_so_far', 'room_state', 'system-reminder', 'recent_chat_full',
             'environment_context', 'user_instructions', 'INSTRUCTIONS')
+USER_RECORD, USER_ROLE = re.compile(r'"type":\s*"user"'), re.compile(r'"role":\s*"user"')
 IDENT = ['-c', 'user.name=Dan (rescue_wip)', '-c', 'user.email=dan-rescue@localhost']
 
 
@@ -165,7 +166,7 @@ def attribute(repo, paths, since):
         with lines:
             for line in lines:
                 head = line[:160]
-                if '"type":"user"' in head or ('"response_item"' in head and '"role":"user"' in line[:600]):
+                if USER_RECORD.search(head) or ('"response_item"' in head and USER_ROLE.search(line[:600])):
                     if '"tool_result"' not in line[:3000]:
                         try:
                             asked = _label(_user_text(json.loads(line)) or '') or asked
@@ -240,9 +241,10 @@ def plan(repo=ROOT, quiet_minutes=30.0, target='origin/main'):
             g = groups.setdefault(f'session:{session}', {'session': session, 'label': '', 'files': [], 'last': ''})
             if when >= g['last']:
                 g['last'], g['label'] = when, asked or g['label']
-        else:
+        else:                    # one branch a day; a file still being written waits alone, not with the day's others
             day = datetime.fromtimestamp(mt or now).strftime('%Y%m%d')
-            g = groups.setdefault(f'unknown:{day}', {'session': None, 'files': [], 'last': '',
+            fresh = '-now' if mt and now - mt < quiet else ''
+            g = groups.setdefault(f'unknown:{day}{fresh}', {'session': None, 'files': [], 'last': '',
                                                     'label': '編集の記録が無い変更（シェルや別の仕組みが書いた）'})
         g['files'].append({'path': p, 'code': codes[p], 'mtime': mt,
                            'others': sorted({e[1] for e in mine[:-1]} - {g['session']})})
