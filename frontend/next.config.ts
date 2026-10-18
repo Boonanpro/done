@@ -66,11 +66,22 @@ const nextConfig: NextConfig = {
     //
     // この設定を入れると、Inspector で画像を差し替え → リロード → 即時反映される。
     // ASSET_VERSION の dev 起動時刻固定問題（dev サーバー再起動まで古い画像が残る）も解消する。
+    //
+    // /_live/*（成果物タブが映す開発サーバーの部品）だけは no-store にする。
+    // 部品のファイル名は直しても変わらないのに、Cloudflare が no-cache を
+    // max-age=14400 に書き換えるので、開いていたブラウザが最大4時間古い部品を使い続けた
+    // （2026-10-18 実測）。no-store は書き換えられない。
     return [
       {
-        source: '/:path((?!_next/static|_next/image|api/|ws/).*)',
+        source: '/:path((?!_next/static|_next/image|_live/|api/|ws/).*)',
         headers: [
           { key: 'Cache-Control', value: 'no-cache, must-revalidate' },
+        ],
+      },
+      {
+        source: '/_live/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store, must-revalidate' },
         ],
       },
     ];
