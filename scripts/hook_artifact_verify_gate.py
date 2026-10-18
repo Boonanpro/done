@@ -48,7 +48,11 @@ WRITE_MARK = re.compile(
 SEEN_RE = re.compile(r"\[artifact_seen\] slug=([\w*-]+) result=(OK|NG|UNCHECKED)")
 PATCH_FILE = re.compile(r"\*\*\* (?:Add|Update|Delete) File: (.+)")
 ACK_WORDS = re.compile(r"未確認|確かめ(?:て|られて)(?:い)?(?:ない|ません)|確認(?:でき)?て(?:い)?(?:ない|ません)|開いて(?:い)?(?:ない|ません|おらず)|"
-                       r"NG|古い版|古い写し|再起動(?:待ち|が要る|を待)|読み直し(?:の途中|を待)|作り直し(?:を待|てい|中)|更新中|まだ直", re.I)
+                       r"(?<![A-Za-z])NG(?![A-Za-z])|古い版|古い写し|再起動(?:待ち|が要る|を待)|読み直し(?:の途中|を待)|作り直し(?:を待|てい|中)|更新中|まだ直", re.I)
+# `cat > 先 <<'EOF' … EOF` / `tee 先 <<EOF`: 中身は「先」に書く文章で、中に成果物のパスが出ても成果物は書き換わらない
+# （10/18 試験ファイルに書いた試験用のパスを成果物の書き換えと数えた）。中身だけ除き、書き込む先は残して判定する。
+# python - <<EOF のようにコマンドへ渡す中身は、そのコードが成果物を書くことがあるので除かない。
+DATA_HEREDOC = re.compile(r"(\b(?:cat|tee(?:\s+-a)?)\b[^\n]*?<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n)(.*?)(\n\2\b)", re.S)
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "write_file", "edit_file"}
 SHELL_TOOLS = {"Bash", "PowerShell", "bash", "exec", "shell", "local_shell", "exec_command"}
 
@@ -91,6 +95,7 @@ def edits_of(name: str, args) -> set[str]:
             text += "\n" + v
     if not text:
         return set()
+    text = DATA_HEREDOC.sub(lambda m: m.group(1) + m.group(4), text)
     out = set()
     for f in PATCH_FILE.findall(text):
         out |= slugs_in_path(f.strip())
