@@ -11,6 +11,9 @@ shadcn auto-install, artifact registration, forbidden patterns...).
 Output contract (Codex): stdout JSON ``hookSpecificOutput`` with
 ``permissionDecision: deny`` blocks a PreToolUse; ``additionalContext`` on
 PostToolUse is shown to the model. Exit code 2 from a Claude hook = deny.
+``Stop`` (end of a turn) passes the payload through unchanged (Codex gives the
+rollout as ``transcript_path``, like Claude); a hook's ``{"decision":"block"}``
+or exit code 2 makes Codex continue the turn with the reason, as Claude does.
 """
 
 from __future__ import annotations
@@ -122,10 +125,19 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         return 0
     event = payload.get("hook_event_name") or (sys.argv[1] if len(sys.argv) > 1 else "")
-    if event not in ("PreToolUse", "PostToolUse"):
+    if event not in ("PreToolUse", "PostToolUse", "Stop"):
         return 0
     hooks = _load_hooks(event)
     if not hooks:
+        return 0
+    if event == "Stop":
+        for _matcher, command in hooks:
+            rc, out, err = _run_hook(command, payload)
+            _log(f"Stop {command[:70]} rc={rc} out={out.strip()[:120]!r} err={err.strip()[:120]!r}")
+            reason = _deny_reason(rc, out, err)
+            if reason:
+                print(json.dumps({"decision": "block", "reason": reason}))  # ASCII escapes (see above)
+                return 0
         return 0
 
     contexts: list[str] = []

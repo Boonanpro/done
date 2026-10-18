@@ -11,6 +11,10 @@
 // 部品が古くてもこの処理は新しい）。部品側の LiveVersionMark が読み込んだ版を
 // window.__danLiveLoaded に書く。古い部品にはこの印が無いので、それも「違う」と数える。
 // toString() で埋め込むので、外の変数・import を使わないこと。
+//
+// 成果物に裏側（_server）がある時は、裏側が今のファイルで動いているかも見る。裏側が古いまま
+// 20秒続いたら「裏側の更新待ち」を出し（押しても古い動きになることがあるため）、裏側が
+// 新しくなったら画面も読み直す（古い裏側から取った中身を残さない）。
 
 export type LiveGuardOptions = { serverVersion: string };
 
@@ -19,6 +23,7 @@ type GuardState = {
   state: string;
   reason?: string;
   mismatchSince: number;
+  backend?: string;
   check?: () => void;
 };
 type LiveWindow = Window & {
@@ -132,9 +137,10 @@ export function installLiveGuard(opts: LiveGuardOptions): void {
       reason: guard.reason || '',
       visible: document.visibilityState === 'visible',
       reloads: recentReloads().length,
+      backend: guard.backend || '',
       at: Date.now(),
     };
-    const key = [payload.loaded, payload.server, payload.state, payload.reason, payload.visible].join('|');
+    const key = [payload.loaded, payload.server, payload.state, payload.reason, payload.visible, payload.backend].join('|');
     if (!force && key === lastSent && Date.now() - lastSentAt < HEARTBEAT_MS) return;
     lastSent = key;
     lastSentAt = Date.now();
@@ -171,6 +177,59 @@ export function installLiveGuard(opts: LiveGuardOptions): void {
   const hideBanner = function () {
     if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
     banner = null;
+  };
+
+  // 裏側が古い間の知らせ。押す物ではない（押しても直らない）ので、読み直しのボタンとは別に出す。
+  let backendNote: HTMLDivElement | null = null;
+  const showBackendNote = function (text: string) {
+    if (!document.body) return;
+    if (!backendNote) {
+      backendNote = document.createElement('div');
+      backendNote.setAttribute('role', 'status');
+      backendNote.setAttribute(
+        'style',
+        'position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:2147483647;max-width:92vw;' +
+          'padding:8px 14px;border-radius:10px;border:1px solid #f59e0b;background:#fffbeb;color:#78350f;' +
+          'font:13px/1.5 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.12);pointer-events:none;',
+      );
+      document.body.appendChild(backendNote);
+    }
+    backendNote.textContent = text;
+  };
+  const hideBackendNote = function () {
+    if (backendNote && backendNote.parentNode) backendNote.parentNode.removeChild(backendNote);
+    backendNote = null;
+  };
+  const BACKEND_GRACE_MS = 20000;
+  let backendBehindSince = 0;
+  let backendNoted = false;
+  const seeBackend = function (b: { current?: boolean; state?: string } | null | undefined) {
+    if (!b) {
+      guard.backend = '';
+      return;
+    }
+    if (b.current) {
+      guard.backend = 'current';
+      backendBehindSince = 0;
+      if (backendNoted) {
+        backendNoted = false;
+        hideBackendNote();
+        // 古い裏側から読んだ中身が画面に残っているので、入力中でなければ読み直す
+        act();
+      }
+      return;
+    }
+    guard.backend = b.state || 'behind';
+    if (!backendBehindSince) backendBehindSince = Date.now();
+    if (Date.now() - backendBehindSince < BACKEND_GRACE_MS) return;
+    backendNoted = true;
+    showBackendNote(
+      b.state === 'needs-restart'
+        ? 'この画面の裏側（サーバー）は、ダン本体の再起動を待っています。それまでボタンが古い動きをすることがあります'
+        : b.state === 'failed'
+          ? 'この画面の裏側（サーバー）の新しい版が読み込めず、古い版で動いています。ダンが直すまで古い動きをすることがあります'
+          : 'この画面の裏側（サーバー）を新しい版に切り替えています',
+    );
   };
 
   let refreshing = false;
@@ -272,13 +331,17 @@ export function installLiveGuard(opts: LiveGuardOptions): void {
     if (checking || refreshing) return;
     checking = true;
     origFetch
-      .call(window, VERSION_URL, { cache: 'no-store', credentials: 'same-origin' })
+      .call(window, slug ? VERSION_URL + '?slug=' + encodeURIComponent(slug) : VERSION_URL, {
+        cache: 'no-store',
+        credentials: 'same-origin',
+      })
       .then(function (r) {
         return r.ok ? r.json() : null;
       })
       .then(
-        function (data: { version?: string } | null) {
+        function (data: { version?: string; backend?: { current?: boolean; state?: string } | null } | null) {
           checking = false;
+          if (data) seeBackend(data.backend);
           // サーバーの版が変わっても待ち時間は数え直さない（ほかの作業がファイルを直し続けると、
           // HMR が切れた画面がいつまでも読み直さなくなる）。数え直すのは画面の版が届いた時だけ。
           if (data && typeof data.version === 'string' && data.version) guard.server = data.version;
