@@ -71,6 +71,15 @@ def test_codex_apply_patch_delete_is_refused(live):
     assert guard.check({'tool_name': 'Delete', 'tool_input': {'file_path': 'app/api/chat_routes.py'}, 'cwd': str(live)})
 
 
+def test_codex_raw_apply_patch(live):
+    def patch(*heads):
+        return {'tool_name': 'apply_patch', 'cwd': str(live),
+                'tool_input': {'command': '*** Begin Patch\n' + ''.join(f'*** {h}\n+x\n' for h in heads) + '*** End Patch'}}
+    assert guard.check(patch('Update File: app/api/chat_routes.py'))
+    assert guard.check(patch('Add File: .data/x.json', 'Delete File: frontend/src/lib/api-client.ts'))
+    assert guard.check(patch('Add File: .data/x.json', 'Add File: frontend/src/app/artifacts/shop/page.tsx')) is None
+
+
 @pytest.mark.parametrize('command', [
     'echo hi > app/api/chat_routes.py',
     'cat >> app/api/new.py <<EOF\nline > other\nEOF',

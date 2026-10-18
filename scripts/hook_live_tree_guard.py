@@ -334,12 +334,20 @@ def check(payload: dict) -> str | None:
             return None
         kind, what = hits[0]
         return _message(what, kind)
-    path = ti.get("file_path") or ti.get("notebook_path") or ti.get("path")
-    if not path:
-        return None
-    p = _norm(path, cwd)
-    rel = live_file(p) if p else None
-    return _message(rel, "file") if rel else None
+    if tool == "apply_patch":                              # Codex without the bridge (a terminal opened in D:\done)
+        patch = ti.get("command") or ti.get("patch") or ti.get("input") or ""
+        paths = _PATCH_FILE.findall(patch if isinstance(patch, str) else json.dumps(patch))
+    else:
+        paths = [ti.get("file_path") or ti.get("notebook_path") or ti.get("path")]
+    for path in filter(None, paths):
+        p = _norm(path.strip(), cwd)
+        rel = live_file(p) if p else None
+        if rel:
+            return _message(rel, "file")
+    return None
+
+
+_PATCH_FILE = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", re.MULTILINE)
 
 
 def _message(what: str, kind: str) -> str:

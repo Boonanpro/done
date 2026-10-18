@@ -1,0 +1,5 @@
+# Codex opened in D:\done (the running Dan): refuse writes to what git tracks here and point to a worktree
+# (scripts/hook_live_tree_guard.py, 2026-10-18). Codex runs a project hook only after it is trusted once.
+[[hooks.PreToolUse]]
+matcher = "Bash|apply_patch"
+hooks = [{ type = "command", command = "python D:/done/scripts/hook_live_tree_guard.py", timeout = 30 }]
