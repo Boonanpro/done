@@ -261,3 +261,11 @@ data/today_illust/
 /safeguard-commercial-hyperframes/
 /Safeguard-HyperFrames.mp4
 /scratch-set-aside/
+
+# 機械が書くファイル（2026-10-18）。動いているフォルダ（D:\done）を書きかけで汚さないよう git の対象から外す。
+# follow_github は、git の対象から外れたファイルを消さずに残す。
+/.data/
+/.claude/feature_registry.json
+/frontend/src/app/artifact-sources.css
+/frontend/public/sw.js
+/frontend/public/workbox-*.js
