@@ -118,3 +118,24 @@ def test_codex_apply_patch_and_output(tmp_path):
             codex_call('text(await tools.exec_command({cmd: "python D:/done/scripts/artifact_seen.py --slug fukurou-inbox --wait 90"}));'),
             codex_out('[artifact_seen] slug=fukurou-inbox result=OK（本人の画面と裏側が今の版）')]
     assert run(tmp_path, rows, last_assistant_message='直しました') is None
+
+
+def test_data_heredoc_body_is_not_an_edit(tmp_path):
+    body = ("cat > tests/t.py <<'EOF'\n"
+            "LIVE = 'D:/done/frontend/src/app/artifacts/x-operation'\n"
+            "open(LIVE + '/a.tsx', 'w')\n"
+            "EOF\n"
+            "echo ok")
+    assert run(tmp_path, [claude_tool('Bash', {'command': body}, '1')]) is None
+    into_artifact = "cat > D:/done/frontend/src/app/artifacts/x-operation/a.tsx <<'EOF'\nx\nEOF"
+    assert run(tmp_path, [claude_tool('Bash', {'command': into_artifact}, '1')])['decision'] == 'block'
+    code = "python - <<'EOF'\nopen('D:/done/frontend/src/app/artifacts/x-operation/a.tsx','w').write('x')\nEOF"
+    assert run(tmp_path, [claude_tool('Bash', {'command': code}, '1')])['decision'] == 'block'
+
+
+def test_ng_word_next_to_japanese_counts_as_reported(tmp_path):
+    rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
+            claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
+            claude_result('2', '[artifact_seen] slug=x-operation result=NG（まだ古い所がある）'),
+            claude_text('確認の結果はNGでした。')]
+    assert run(tmp_path, rows) is None
