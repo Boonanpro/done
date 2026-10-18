@@ -22,6 +22,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(r"D:/done")
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 PACKAGE_JSON = FRONTEND_DIR / "package.json"
+NO_SAVE = False  # set per call: True when the edited file is in the running folder
 
 # bare import を抽出: `from "<name>"` `from '<name>'` `require("<name>")`
 # scoped (@org/pkg) と subpath (lib/foo) も拾う
@@ -112,7 +113,7 @@ def installed_packages() -> set[str]:
 def install(name: str) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
-            ["npm", "install", name, "--silent", "--no-fund", "--no-audit"],
+            ["npm", "install", name, "--silent", "--no-fund", "--no-audit", *(["--no-save"] if NO_SAVE else [])],
             cwd=str(FRONTEND_DIR),
             capture_output=True,
             text=True,
@@ -137,10 +138,13 @@ def main() -> int:
     file_path = data.get("tool_input", {}).get("file_path", "")
     if not file_path or not file_path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
         return 0
-    try:
-        Path(file_path).resolve().relative_to(FRONTEND_DIR.resolve())
-    except ValueError:
+    # 書いたファイルが属する frontend（作業場所ごとに別）。D:\done では package.json を変えない（2026-10-18）
+    global FRONTEND_DIR, PACKAGE_JSON, NO_SAVE
+    front = next((d for d in Path(file_path).resolve().parents if d.name == "frontend" and (d / "package.json").exists()), None)
+    if front is None:
         return 0
+    FRONTEND_DIR, PACKAGE_JSON = front, front / "package.json"
+    NO_SAVE = front.resolve() == (PROJECT_ROOT / "frontend").resolve()
 
     p = Path(file_path)
     if not p.exists():
@@ -166,7 +170,10 @@ def main() -> int:
     if installable:
         for name in installable:
             ok, err = install(name)
-            if ok:
+            if ok and NO_SAVE:
+                msgs.append(f"[npm auto-install] installed {name} without changing D:\\done's package.json. To keep it, "
+                            "add it from a worktree (python D:/done/scripts/work.py new <name>) and ship.")
+            elif ok:
                 msgs.append(f"[npm auto-install] added: {name}")
             else:
                 msgs.append(f"[npm auto-install] FAILED {name}: {err[:200]}")
