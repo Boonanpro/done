@@ -1,10 +1,9 @@
-"""The folder Dan runs from follows GitHub through git itself (2026-10-14).
+"""The folder Dan runs from follows GitHub through git's own fast-forward (2026-10-14, simplified 2026-10-18).
 
-Before: the folder held everyone's uncommitted work, a plain `git pull` stopped on the first such file, so nobody pulled
-and each worker kept the folder in step with GitHub by hand. Nothing noticed a fix that was on GitHub and not in the
-folder; committing that file from the folder would have taken the fix out of GitHub again.
+Nobody writes the folder's tracked files any more (scripts/hook_live_tree_guard.py); work lives on branches. What is
+left uncommitted here only matters when GitHub changes the same file: then git refuses and nothing changes.
 
-Each test builds a small "GitHub" and a folder cloned from it, changes both the way workers do, and follows."""
+Each test builds a small "GitHub" and a folder cloned from it, changes both, and follows."""
 import importlib.util
 import subprocess
 from pathlib import Path
@@ -67,57 +66,34 @@ def state(folder):
 def test_a_fix_that_is_only_on_github_arrives_and_uncommitted_work_stays(world):
     github, folder = world
     top = pushed(github, {'fixed.py': 'one\ntwo FIXED\nthree\n', 'new.py': 'new\n'}, deleted=['gone.py'])
-    write(folder, 'mine.py', THREE + 'my work\n')                          # someone's uncommitted work
+    write(folder, 'mine.py', THREE + 'my work\n')                          # a file left uncommitted here
     ok, what = follow_github.follow(folder)
     assert ok, what
     assert read(folder, 'fixed.py') == 'one\ntwo FIXED\nthree\n' and read(folder, 'new.py') == 'new\n'
     assert not (folder / 'gone.py').exists()
     assert read(folder, 'mine.py') == THREE + 'my work\n'
     assert git(folder, 'rev-parse', 'HEAD').stdout.strip() == top
-    assert git(folder, 'status', '--porcelain').stdout == ' M mine.py\n'     # git now shows the uncommitted work and nothing more
+    assert git(folder, 'status', '--porcelain').stdout == ' M mine.py\n'
+    assert 'Uncommitted here (1)' in what and 'mine.py' in what and 'rescue_wip' in what
 
 
-def test_what_a_worker_already_put_in_the_folder_by_hand_is_recognised(world):
-    """The usual flow: edit in the folder so it runs, commit from another place, push. The folder already holds it."""
-    github, folder = world
-    change = {'fixed.py': 'one\ntwo FIXED\nthree\n', 'new.py': 'new\n', 'app/[room]/page.tsx': 'ONE\ntwo\nthree\n'}
-    for name, text in change.items():
-        write(folder, name, text)
-    (folder / 'gone.py').unlink()
-    top = pushed(github, change, deleted=['gone.py'])
-    before = state(folder)[2]
-    assert git(folder, 'fetch', '-q').returncode == 0
-    assert git(folder, 'merge', '--ff-only', 'origin/main').returncode != 0   # why nobody could pull
-    ok, what = follow_github.follow(folder)
-    assert ok, what
-    assert state(folder) == (top, '', before)                               # no file written, nothing left to show
-
-
-def test_uncommitted_work_on_top_of_githubs_change_is_kept_and_shown_alone(world):
-    github, folder = world
-    write(folder, 'shared.py', 'ONE by a\ntwo\nthree\nwork of b\n')         # a's change and b's unfinished work, one file
-    pushed(github, {'shared.py': 'ONE by a\ntwo\nthree\n'})                # a commits only a's part
-    ok, what = follow_github.follow(folder)
-    assert ok, what
-    assert read(folder, 'shared.py') == 'ONE by a\ntwo\nthree\nwork of b\n'
-    assert git(folder, 'diff').stdout.count('\n+work of b') == 1 and 'ONE by a' not in [
-        l[1:] for l in git(folder, 'diff').stdout.splitlines() if l.startswith(('+', '-')) and not l.startswith(('+++', '---'))]
-
-
-@pytest.mark.parametrize('here, why', [
-    ('one\ntwo\nthree\nwork of b\n', "lacks GitHub's change"),              # would merge cleanly: still a person's call
-    ('one\ntwo MINE\nthree\n', "lacks GitHub's change"),                    # the same line changed both ways
+@pytest.mark.parametrize('here', [
+    'one\ntwo FIXED\nthree\n',                 # the same change copied in by hand
+    'one\ntwo FIXED\nthree\nwork of b\n',      # GitHub's change with unfinished work on top
+    'one\ntwo\nthree\nwork of b\n',            # unfinished work that lacks GitHub's change
+    'one\ntwo MINE\nthree\n',                  # the same line changed both ways
 ])
-def test_a_file_that_lacks_githubs_change_and_has_work_in_it_stops_everything(world, here, why):
+def test_a_file_changed_here_and_on_github_stops_everything(world, here):
     github, folder = world
     write(folder, 'shared.py', here)
     write(folder, 'mine.py', THREE + 'my work\n')
     pushed(github, {'shared.py': 'one\ntwo FIXED\nthree\n', 'fixed.py': 'one\ntwo FIXED\nthree\n'})
     before = state(folder)
     ok, what = follow_github.follow(folder)
-    assert not ok and 'shared.py' in what and why in what and 'nothing was changed' in what
-    fetched = state(folder)
-    assert fetched == before                                                # not even the other, harmless file moved
+    assert not ok and 'shared.py' in what and 'nothing was changed' in what and 'rescue_wip' in what
+    assert state(folder) == before                                          # not even the other, harmless file moved
+    ok, dry = follow_github.follow(folder, fetch=False, dry=True)
+    assert not ok and 'shared.py' in dry
 
 
 def test_a_file_new_on_github_that_sits_here_with_other_content_stops(world):
@@ -140,20 +116,42 @@ def test_a_delete_on_one_side_and_a_change_on_the_other_stops(world, case):
         pushed(github, {}, deleted=['fixed.py'])
     before = state(folder)
     ok, what = follow_github.follow(folder)
-    assert not ok and case in what and state(folder) == before
+    assert not ok and 'fixed.py' in what and state(folder) == before
+
+
+def test_a_file_github_stops_tracking_and_ignores_stays_here(world):
+    """A file a machine writes (settings.local.json, a generated list) leaves git without leaving the folder."""
+    github, folder = world
+    write(folder, 'mine.py', THREE + 'written by a machine\n')             # changed here
+    write(github, '.gitignore', 'mine.py\ngone.py\n')
+    git(github, 'rm', '-q', '--cached', 'mine.py', 'gone.py')
+    git(github, 'add', '.gitignore'); git(github, 'commit', '-q', '-m', 'stop tracking machine files')
+    ok, what = follow_github.follow(folder)
+    assert ok, what
+    assert read(folder, 'mine.py') == THREE + 'written by a machine\n' and read(folder, 'gone.py') == THREE
+    assert git(folder, 'status', '--porcelain').stdout == ''
+    assert 'kept as local files' in what
+
+
+def test_a_file_github_deletes_and_does_not_ignore_goes(world):
+    github, folder = world
+    pushed(github, {}, deleted=['gone.py'])
+    ok, what = follow_github.follow(folder)
+    assert ok and not (folder / 'gone.py').exists()
 
 
 def test_windows_line_endings_in_the_folder_are_not_a_difference(world):
     github, folder = world
     git(folder, 'config', 'core.autocrlf', 'true')
-    write(folder, 'fixed.py', 'one\r\ntwo FIXED\r\nthree\r\n')              # same change, saved with CRLF
-    write(folder, 'shared.py', 'ONE\r\ntwo\r\nthree\r\nwork\r\n')
-    top = pushed(github, {'fixed.py': 'one\ntwo FIXED\nthree\n', 'shared.py': 'ONE\ntwo\nthree\n'})
+    write(folder, 'fixed.py', 'one\r\ntwo\r\nthree\r\n')                    # unchanged, saved with CRLF
+    write(folder, 'shared.py', 'one\r\ntwo\r\nthree\r\nwork\r\n')
+    top = pushed(github, {'fixed.py': 'one\ntwo FIXED\nthree\n'})
     ok, what = follow_github.follow(folder)
     assert ok, what
     assert git(folder, 'rev-parse', 'HEAD').stdout.strip() == top
     assert git(folder, 'status', '--porcelain').stdout == ' M shared.py\n'
-    assert read(folder, 'shared.py') == 'ONE\r\ntwo\r\nthree\r\nwork\r\n'
+    assert read(folder, 'shared.py') == 'one\r\ntwo\r\nthree\r\nwork\r\n'
+    assert 'FIXED' in read(folder, 'fixed.py')
 
 
 def test_nothing_to_do_and_things_it_will_not_touch(world):
@@ -174,7 +172,7 @@ def test_looking_first_changes_nothing(world):
     git(folder, 'fetch', '-q')
     before = state(folder)
     ok, what = follow_github.follow(folder, dry=True)
-    assert ok and '1 brought in from GitHub: fixed.py' in what and state(folder) == before
+    assert ok and 'would follow' in what and 'fixed.py' in what and state(folder) == before
 
 
 def test_github_out_of_reach_is_said_and_asked_only_once(world, monkeypatch):

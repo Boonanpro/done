@@ -29,7 +29,7 @@ SETTINGS = Path(os.environ.get("DAN_HOOK_SETTINGS") or (WORKSPACE / ".claude" / 
 LOG = PROJECT_ROOT / "codex_hook_bridge.log"
 HOOK_TIMEOUT = int(os.environ.get("DAN_HOOK_TIMEOUT", "120"))
 
-_PATCH_FILE_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$", re.MULTILINE)
+_PATCH_FILE_RE = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+?)\s*$", re.MULTILINE)
 
 
 def _log(msg: str) -> None:
@@ -73,9 +73,8 @@ def _synthesize(payload: dict) -> list[dict]:
     patch = tool_input.get("command") or tool_input.get("patch") or ""
     out = []
     for kind, path in _PATCH_FILE_RE.findall(patch):
-        if kind == "Delete":
-            continue
-        name = "Write" if kind == "Add" else "Edit"
+        # A deletion reaches only hooks whose matcher names "Delete" (the live tree guard); the others never saw it.
+        name = {"Add File": "Write", "Move to": "Write", "Delete File": "Delete"}.get(kind, "Edit")
         p = dict(payload)
         p["tool_name"] = name
         p["tool_input"] = {"file_path": path.strip()}
