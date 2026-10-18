@@ -3,7 +3,7 @@
     python D:/done/scripts/work.py new <name> [--from <branch>]   a worktree D:\\dan-workspace\\<name> on branch dan/<name>
     python D:/done/scripts/work.py save [what]                     commit everything in this worktree (often: git keeps it)
     python D:/done/scripts/work.py try [stop]                      run this worktree: API on 8001, screens on 3002
-    python D:/done/scripts/work.py ship "<title>" [--body TEXT]    take in main, push, PR, merge, follow_github
+    python D:/done/scripts/work.py ship "<title>" [--body TEXT] [--no-follow]   take in main, push, PR, merge, follow_github
     python D:/done/scripts/work.py list                            every branch of work, where it is, how far from main
 
 Why (2026-10-17/18): sessions wrote unfinished work straight into the running folder (D:\\done). Shipping one change
@@ -278,7 +278,7 @@ def main(argv):
         elif cmd == 'ship' and len(args) > 1:
             wt = here(at)
             body = args[args.index('--body') + 1] if '--body' in args else None
-            steps, hints = ship(wt, args[1], body)
+            steps, hints = ship(wt, args[1], body, follow='--no-follow' not in args)
             print('\n'.join(steps))
             if hints:
                 print('入れ替えが要るもの:\n  ' + '\n  '.join(hints))
