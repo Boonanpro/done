@@ -66,18 +66,58 @@ def clock_srt(t):
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
 
 
-def transcribe(clip, srt, model):
+def cuda_dlls():
+    # cuBLAS / cuDNN come from the nvidia-*-cu12 wheels; Windows only finds them once their bin folders are added
+    import glob, site
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        for d in glob.glob(os.path.join(sp, 'nvidia', '*', 'bin')):
+            os.add_dll_directory(d)
+            os.environ['PATH'] = d + os.pathsep + os.environ['PATH']
+
+
+def gpu_free_mb():
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        free = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(0)).free
+        pynvml.nvmlShutdown()
+        return free // 2**20
+    except Exception:
+        return None
+
+
+def wait_for_gpu(need_mb, wait_s):
+    """The 8 GB GPU is shared (Voice Input, lifelog keep Whisper loaded): wait for room instead of failing."""
+    import time
+    deadline = time.time() + wait_s
+    while True:
+        free = gpu_free_mb()
+        if free is None or free >= need_mb:
+            return free
+        if time.time() >= deadline:
+            raise RuntimeError(f'GPU has {free} MB free, {need_mb} MB needed (other work is using it)')
+        print(f'GPU busy: {free} MB free, waiting', file=sys.stderr)
+        time.sleep(5)
+
+
+def transcribe(clip, srt, model, device='auto', gpu_wait=180, need_mb=2000):
+    cuda_dlls()
     from faster_whisper import WhisperModel
     segs = None
-    for device, ctype in (('cuda', 'int8_float16'), ('cpu', 'int8')):
-        try:  # CUDA errors (missing cuBLAS) only show up while decoding, so run it inside the try
-            m = WhisperModel(model, device=device, compute_type=ctype)
+    devices = {'auto': ('cuda', 'cpu'), 'cuda': ('cuda',), 'cpu': ('cpu',)}[device]
+    for dev in devices:
+        try:  # CUDA errors (missing DLL, out of memory) can show up only while decoding, so run it inside the try
+            if dev == 'cuda':
+                print(f'GPU free before load: {wait_for_gpu(need_mb, gpu_wait)} MB', file=sys.stderr)
+            m = WhisperModel(model, device=dev, compute_type='int8_float16' if dev == 'cuda' else 'int8')
             segs = list(m.transcribe(clip, language='ja', vad_filter=True)[0])
+            print(f'transcribed on {dev}', file=sys.stderr)
+            del m
             break
         except Exception as e:
-            if device == 'cpu':
+            if dev == devices[-1]:
                 raise
-            print(f'cuda unavailable ({e}); using cpu', file=sys.stderr)
+            print(f'cuda failed ({e}); using cpu', file=sys.stderr)
     lines = []
     for s in segs:
         text = s.text.strip()
@@ -126,6 +166,8 @@ def main():
     ap.add_argument('--subs', help='an .srt to burn (write one with --srt-only and check it first)')
     ap.add_argument('--srt-only', help='transcribe the cut part to this .srt and stop')
     ap.add_argument('--model', default='large-v3-turbo')
+    ap.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'], help='auto: GPU, CPU only if the GPU stays busy or fails')
+    ap.add_argument('--gpu-wait', type=int, default=180, help='seconds to wait for free GPU memory before falling back')
     ap.add_argument('--credit', help='one line in the top-left corner, e.g. 出典：〇〇公式 2026.03.22')
     ap.add_argument('--width', type=int, default=1280, help='longest side is reduced to this')
     ap.add_argument('--long', action='store_true', help='allow more than 140 seconds')
@@ -160,7 +202,7 @@ def main():
         raw = small
     sys.stdout.reconfigure(encoding='utf-8')
     if a.srt_only:
-        n = transcribe(raw, a.srt_only, a.model)
+        n = transcribe(raw, a.srt_only, a.model, a.device, a.gpu_wait)
         print(json.dumps({'srt': a.srt_only, 'lines': n, 'seconds': round(dur, 2), **meta}, ensure_ascii=False))
         return
     burn(raw, a.out, w, h, a.subs, a.credit, has_audio)
