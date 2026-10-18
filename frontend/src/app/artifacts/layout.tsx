@@ -1,5 +1,8 @@
 import { DedicatedArtifactProvider } from '@/components/artifacts/artifact-link';
+import { LiveVersionMark } from '@/components/artifacts/live-version-mark';
 import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loader';
+import { installLiveGuard } from '@/lib/live-version/guard';
+import { readLiveVersion } from '@/lib/live-version/server';
 import type { Metadata } from 'next';
 
 import { ArtifactAnalytics } from './_seo/analytics';
@@ -32,6 +35,11 @@ import { ArtifactStructuredData } from './_seo/structured-data';
  *      height:100vh で自己完結するため body:auto でも壊れず両立する
  *    - これにより「成果物は普通にスクロールできる」が既定になり、ページ個別に
  *      解除を書き忘れて縦長ページが切れる事故が再発しなくなる
+ *
+ * ④ liveGuardScript（成果物タブ＝開発サーバー 3001 の時だけ）:
+ *    画面が動かしている部品の版と、今のファイルの版を比べ、違えば部品を取り直して
+ *    読み直す（lib/live-version/guard.ts）。ダンが直した物と本人が見ている物が
+ *    食い違わないようにする。HTML は毎回取り直されるので、部品が古くてもこの処理は新しい。
  */
 
 const publicArtifactHostMap = JSON.stringify({
@@ -121,6 +129,10 @@ function prePaintScript(fallbackSlug: string | null): string {
 `.trim();
 }
 
+function liveGuardScript(serverVersion: string): string {
+  return `(${installLiveGuard.toString()})(${JSON.stringify({ serverVersion })});`;
+}
+
 const scrollResetStyle = `
 html, body {
   height: auto !important;
@@ -136,14 +148,18 @@ export default function ArtifactsLayout({ children }: { children: React.ReactNod
   // release.gen.json を各成果物の server page が読み、EditableText が初回 HTML に
   // 描画する（lib/editable-release.ts）。配信ページに DOM 後書き換えは存在しない。
   const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
+  // 開発サーバー（3001）だけが current.gen.ts を書く。本番ビルド・Vercel では空。
+  const liveVersion = process.env.NODE_ENV === 'development' ? readLiveVersion() : '';
   return (
     <>
+      {liveVersion ? <script dangerouslySetInnerHTML={{ __html: liveGuardScript(liveVersion) }} /> : null}
       <style dangerouslySetInnerHTML={{ __html: scrollResetStyle }} />
       <script dangerouslySetInnerHTML={{ __html: prePaintScript(dedicatedArtifactSlug) }} />
       <ArtifactStructuredData />
       <ArtifactAnalytics />
       <DedicatedArtifactProvider slug={dedicatedArtifactSlug}>{children}</DedicatedArtifactProvider>
       <InspectorRuntimeLoader fallbackSlug={dedicatedArtifactSlug} />
+      <LiveVersionMark />
     </>
   );
 }
