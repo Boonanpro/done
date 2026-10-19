@@ -41,6 +41,8 @@
 import {
   Component, createContext, memo, useCallback, useContext, useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode,
 } from 'react';
+// react-lang より先に読む（開発用画面の「OpenUI Inspect」小窓を付けさせない）
+import '@/lib/chat-shapes/no-openui-devtools';
 import {
   Renderer, createLibrary, defineComponent, useIsStreaming, type ComponentRenderer, type ParseResult,
 } from '@openuidev/react-lang';
