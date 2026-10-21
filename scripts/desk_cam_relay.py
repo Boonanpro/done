@@ -55,7 +55,7 @@ def dshow_devices():
     """(映像デバイス名, 音声デバイス名) のリスト。"""
     out = subprocess.run([FFMPEG, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
                          capture_output=True, text=True, encoding="utf-8", errors="replace",
-                         creationflags=NO_WINDOW).stderr
+                         creationflags=NO_WINDOW, timeout=15).stderr
     video, audio = [], []
     for name, kind in re.findall(r'"([^"]+)" \((video|audio)\)', out):
         (video if kind == "video" else audio).append(name)
@@ -100,8 +100,11 @@ def build_command(camera, audio_devices, requested):
             mode = "none"
     else:
         mode = "none"
+    # 映像の時刻はカメラ自身の時計が既定で、音（PC の時計）と少しずつずれる。ずれた音を ffmpeg が待たせるので
+    # 中身も遅れ、NAS の録画で声が映像より 22 秒前・時刻の印が 55 秒先になった（2026-10-20）。映像も PC の時計に揃える。
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostats", "-progress", "pipe:1",
-           "-f", "dshow", "-rtbufsize", "512M", "-pixel_format", "nv12", "-i", source,  # 形式・コマ数はカメラ任せ（ZV-E10 II は 1080p60 固定）
+           "-f", "dshow", "-rtbufsize", "512M", "-pixel_format", "nv12", "-use_video_device_timestamps", "0",
+           "-i", source,  # 形式・コマ数はカメラ任せ（ZV-E10 II は 1080p60 固定）
            "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-b:v", "10M", "-g", "60", "-pix_fmt", "yuv420p"]
     if mode == "none":
         cmd += ["-an"]
@@ -121,7 +124,8 @@ def start_spare(audio_devices):
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-f", "dshow", "-i", f"audio={cam_mic}",
            "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
            "-f", "segment", "-segment_time", str(SPARE_SEGMENT), "-segment_atclocktime", "1",
-           "-reset_timestamps", "1", "-strftime", "1", "-segment_format", "matroska", "-fflags", "+flush_packets",
+           "-reset_timestamps", "1", "-strftime", "1", "-segment_format", "matroska",
+           "-segment_format_options", "cluster_time_limit=1000:flush_packets=1",
            str(SPARE_DIR / "cam_%Y%m%d_%H%M%S.mka")]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             creationflags=NO_WINDOW)
@@ -130,7 +134,9 @@ def start_spare(audio_devices):
 def spare_recording(since):
     """予備の音が今も書かれているか（since より後に始まり、いちばん新しいファイルが更新され続けている）。"""
     try:
-        newest = max(f.stat().st_mtime for f in SPARE_DIR.glob("cam_*.mka"))
+        # A header-only file is not proof that the microphone is delivering audio.
+        newest = max(s.st_mtime for f in SPARE_DIR.glob("cam_*.mka")
+                     for s in [f.stat()] if s.st_size > 4096)
     except ValueError:
         return False
     return newest >= since and time.time() - newest < SPARE_STALE
@@ -188,8 +194,7 @@ def relay(camera, audio, requested):
     reason, ticks = None, 0
     while p.poll() is None:
         if mode == "motu":
-            ok = spare is not None and spare.poll() is None and (
-                time.time() - spare_started < SPARE_STALE or spare_recording(spare_started))
+            ok = spare is not None and spare.poll() is None and spare_recording(spare_started)
             if ok != spare_ok and (ok or spare_ok is not None or time.time() - started > SPARE_STALE):
                 log("予備（カメラのマイク）" + ("録音中" if ok else "が録れていない"))
                 spare_ok = ok
@@ -239,9 +244,12 @@ def main():
                 write_status(relaying=False, requested=audio_mode(), switching=switching)
                 time.sleep(1 if switching else 5)
                 continue
-            write_status(relaying=False, requested=audio_mode())
+            write_status(relaying=False, sending=False, spare=False, requested=audio_mode(),
+                         error="USBストリーミングの映像デバイスがWindowsに見つかりません")
         except Exception as e:  # noqa: BLE001
             log(f"エラー {type(e).__name__}: {e}")
+            write_status(relaying=False, sending=False, spare=False, requested=audio_mode(),
+                         error=f"{type(e).__name__}: {e}")
         time.sleep(10)
 
 
