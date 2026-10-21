@@ -904,8 +904,11 @@ GET_CREDENTIALS_TOOL = {
 `service` 名が分かっているならそれでもよい。url と service は併用可（url優先）。
 
 返される内容:
-- 保存済みの場合: ログインID と パスワード
-- 未保存の場合: 認証情報が見つからない旨のメッセージ（ユーザーに聞くこと）""",
+- 保存済みの場合: ログインID と パスワード（先頭2文字以外は伏せてある。ログインの入力は browser の fill_credential で行う）
+- 未保存の場合: 認証情報が見つからない旨のメッセージ（ユーザーに聞くこと）
+
+本人に「パスワード教えて」と聞かれたら、再設定せずに、結果にある「パスワードを表示」リンクをチャットに出す。
+本人がPC（WindowsのPIN）かスマホ（指紋・顔認証）で本人確認すると、本人の画面にだけ全文が出る。""",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -2934,6 +2937,14 @@ def format_tool_result(
         pw = result.get('password', '')
         masked_pw = f"{pw[:2]}{'*' * (len(pw) - 2)}" if pw and len(pw) > 2 else '（なし）'
         lines.append(f"パスワード: {masked_pw}")
+        # 全文はダンに渡さない。本人が見たい時は本人の画面で本人確認して表示する。
+        from urllib.parse import quote
+        svc = result.get('service', '')
+        lines.append(
+            "本人がパスワードの全文を知りたい時は、再設定せずに次のリンクをチャットに出す"
+            "（本人がPINか指紋・顔認証で確かめると、本人の画面にだけ全文が出る）: "
+            f"[{svc} のパスワードを表示](https://dan.paina.info/vault?service={quote(svc)})"
+        )
         return FormattedToolResult(text="\n".join(lines), images=images)
 
     # 個人情報取得結果: 復号した実値を明示的に含める（フォーム入力に使う）
