@@ -2,8 +2,7 @@
 Credentials API Routes for Phase 3B: Execution Engine
 認証情報の保存・取得・削除API
 """
-from fastapi import APIRouter, HTTPException
-from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.models.schemas import (
     CredentialRequest,
@@ -12,15 +11,17 @@ from app.models.schemas import (
     CredentialListItem,
 )
 from app.services.credentials_service import get_credentials_service
+from app.api.secret_vault_routes import require_owner
+from app.services.auth_service import TokenData
 
 router = APIRouter()
 
-# デフォルトユーザーID（認証未実装のため仮）
-DEFAULT_USER_ID = "default-user"
+# 2026-10-21 まで認証なしで外から呼べた（user_id をクエリで渡せば本人の保管庫を
+# 一覧・上書き・削除できた）。本人のログインだけを通し、本人の user_id で扱う。
 
 
 @router.post("/credentials", response_model=CredentialResponse)
-async def save_credentials(request: CredentialRequest, user_id: Optional[str] = None):
+async def save_credentials(request: CredentialRequest, user: TokenData = Depends(require_owner)):
     """
     認証情報を暗号化して保存
     
@@ -45,7 +46,7 @@ async def save_credentials(request: CredentialRequest, user_id: Optional[str] = 
     ```
     """
     try:
-        uid = user_id or DEFAULT_USER_ID
+        uid = user.user_id
         service = get_credentials_service()
         result = await service.save_credential(
             user_id=uid,
@@ -58,7 +59,7 @@ async def save_credentials(request: CredentialRequest, user_id: Optional[str] = 
 
 
 @router.get("/credentials", response_model=CredentialListResponse)
-async def list_credentials(user_id: Optional[str] = None):
+async def list_credentials(user: TokenData = Depends(require_owner)):
     """
     保存済みサービス一覧を取得
     
@@ -81,7 +82,7 @@ async def list_credentials(user_id: Optional[str] = None):
     ```
     """
     try:
-        uid = user_id or DEFAULT_USER_ID
+        uid = user.user_id
         service = get_credentials_service()
         credentials = await service.list_credentials(user_id=uid)
         
@@ -100,7 +101,7 @@ async def list_credentials(user_id: Optional[str] = None):
 
 
 @router.delete("/credentials/{service}", response_model=CredentialResponse)
-async def delete_credentials(service: str, user_id: Optional[str] = None):
+async def delete_credentials(service: str, user: TokenData = Depends(require_owner)):
     """
     認証情報を削除
     
@@ -114,7 +115,7 @@ async def delete_credentials(service: str, user_id: Optional[str] = None):
     ```
     """
     try:
-        uid = user_id or DEFAULT_USER_ID
+        uid = user.user_id
         cred_service = get_credentials_service()
         result = await cred_service.delete_credential(user_id=uid, service=service)
         
