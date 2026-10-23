@@ -273,3 +273,19 @@ def test_files_in_a_folder_the_target_ignores_stay_as_local_files(world, tmp_pat
     p = rescue.plan(world, target='target')
     assert 'runtime/log/a.jsonl' in p['local']
     assert all(f['path'] != 'runtime/log/a.jsonl' for g in p['groups'] for f in g['files'])
+
+
+def test_a_link_standing_where_a_committed_folder_was_is_moved_first(world, tmp_path):
+    """A folder git tracks replaced by a link to somewhere else: the link is saved and moved aside before the folder's
+    files come back (2026-10-23: scripts/yoshikawa_proposal/remotion/public/frames in the running folder)."""
+    import shutil
+    shutil.rmtree(world / 'web')
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (world / 'web').symlink_to(elsewhere)
+    assert rescue.main(['--repo', str(world), '--target', 'target', '--apply', '--quiet-minutes', '0']) == 0
+    assert (world / 'web').is_dir() and not (world / 'web').is_symlink()
+    assert (world / 'web' / 'page.tsx').read_text() == 'committed\n'
+    branches = git(world, 'branch', '--list', 'wip/*').stdout.split()
+    links = [b for b in branches if git(world, 'ls-tree', b, '--', 'web').stdout.startswith('120000')]
+    assert links                                                                        # the link itself is kept

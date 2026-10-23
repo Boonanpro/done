@@ -688,7 +688,8 @@ def after(payload: dict) -> str | None:
         try:
             branch, commit, saved = rescue_wip.save(LIVE, group, append=True)
             where = rescue_wip.keep_dir(LIVE)
-            back = [rel for rel, blob in saved.items() if rescue_wip.restore(LIVE, rel, blob, where) == "restored"]
+            order = sorted(saved, key=lambda rel: (rescue_wip._entry(str(LIVE), "HEAD", rel) is not None, rel))
+            back = [rel for rel in order if rescue_wip.restore(LIVE, rel, saved[rel], where) == "restored"]
             rescue_wip._write_journal(str(LIVE), {"at": datetime.now().isoformat(timespec="seconds"), "branch": branch,
                                                   "commit": commit, "session": session, "label": group["label"],
                                                   "saved": saved, "by": "hook_live_tree_guard"})

@@ -318,11 +318,11 @@ def _commit(repo, parent, entries, msg):
                 raise RuntimeError(f"git {' '.join(args[:2])}: {p.stderr.decode('utf-8', 'replace').strip()[:300]}")
             return p.stdout
         g('read-tree', parent)
-        for rel, e in entries.items():
-            if e is None:
+        for rel, e in sorted(entries.items(), key=lambda kv: kv[1] is not None):   # removals first: a file may
+            if e is None:                                                         # take a folder's place
                 g('update-index', '--force-remove', '--', rel)
             else:
-                g('update-index', '--add', '--cacheinfo', f'{e[0]},{e[1]},{rel}')
+                g('update-index', '--add', '--replace', '--cacheinfo', f'{e[0]},{e[1]},{rel}')
         tree = g('write-tree').decode().strip()
     finally:
         if os.path.exists(index):
@@ -401,7 +401,7 @@ def restore(repo, rel, expected, keep_dir, same=None):
             return 'changed'
     head = _entry(repo, 'HEAD', rel)
     if head:
-        _out(repo, 'update-index', '--add', '--cacheinfo', f'{head[0]},{head[1]},{rel}')
+        _out(repo, 'update-index', '--add', '--replace', '--cacheinfo', f'{head[0]},{head[1]},{rel}')
         for _ in range(3):                                         # git can be busy with its index for a moment
             if os.path.lexists(full):
                 break
@@ -482,10 +482,14 @@ def apply(repo, p, quiet):
             _write_journal(repo, {'at': datetime.now().isoformat(timespec='seconds'), 'branch': branch, 'commit': commit,
                                   'session': g['session'], 'label': g['label'], 'saved': more})
         saved_all.append((g, branch, commit, saved))
-    for g, branch, commit, saved in saved_all:                     # everything is on branches now
-        result = {rel: restore(repo, rel, blob, where) for rel, blob in saved.items()}
-        kept = [rel for rel, r in result.items() if r == 'changed']
-        failed = [rel for rel, r in result.items() if r == 'failed']
+    # everything is on branches now. Put back what is new here first, over all groups: a new file or link can stand
+    # where a committed folder has to come back.
+    every = {rel: blob for _, _, _, saved in saved_all for rel, blob in saved.items()}
+    order = sorted(every, key=lambda rel: (_entry(repo, 'HEAD', rel) is not None, rel))
+    result = {rel: restore(repo, rel, every[rel], where) for rel in order}
+    for g, branch, commit, saved in saved_all:
+        kept = [rel for rel in saved if result[rel] == 'changed']
+        failed = [rel for rel in saved if result[rel] == 'failed']
         name = branch or next((done[k] for k in saved.items() if k in done), '(saved before)')
         lines.append(f"{name} {(commit or '')[:8]}: moved {len(saved) - len(kept) - len(failed)}"
                      + (f", left here (changed meanwhile) {kept}" if kept else '')
