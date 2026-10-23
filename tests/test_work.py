@@ -20,8 +20,14 @@ if args[:2] == ['pr', 'create']:
 elif args[:2] == ['pr', 'merge']:
     subprocess.run(['git', 'push', '-q', 'origin', 'HEAD:main'], check=True)
     if '--delete-branch' in args:
-        b = subprocess.run(['git', 'symbolic-ref', '--short', 'HEAD'], capture_output=True, text=True).stdout.strip()
-        subprocess.run(['git', 'push', '-q', 'origin', '--delete', b], check=True)
+        # gh 2.89: after merging on GitHub it switches this checkout to main, which another worktree (the running
+        # folder) has checked out, and fails
+        r = subprocess.run(['git', 'checkout', 'main'], capture_output=True, text=True)
+        if r.returncode:
+            sys.stderr.write(r.stderr)
+            sys.exit(1)
+elif args[:2] == ['pr', 'view']:
+    print('MERGED')
 '''
 
 
@@ -56,6 +62,11 @@ def world(tmp_path, monkeypatch):
     return github, live, spaces
 
 
+def tested(wt, command='python -c "print(1)"'):
+    ok, tail = work.test(wt, command)
+    assert ok, tail
+
+
 def other_push(github, tmp_path, name, text):
     """Someone else's work lands on GitHub main."""
     other = tmp_path / 'other'
@@ -77,8 +88,9 @@ def test_new_save_and_ship_reach_the_running_folder(world):
     assert work.save(path, 'half done')
     assert work.save(path) is None                                         # nothing new to keep
     assert 'wip: half done' in git(path, 'log', '-1', '--format=%s').stdout
+    tested(path)
     steps, hints = work.ship(path, 'Feature A')
-    assert steps[0] == 'pushed dan/feature-a' and steps[2] == 'merged' and 'now on GitHub main' in steps[3]
+    assert steps[0] == 'pushed dan/feature-a' and steps[2] == 'merged' and 'now on GitHub main' in steps[-1]
     assert (live / 'app.py').read_text() == 'one\ntwo\nthree\nfeature a\n'
     assert git(live, 'status', '--porcelain').stdout == ''
     assert hints == []
@@ -90,8 +102,8 @@ def test_two_pieces_of_work_on_one_file_meet_on_the_second_branch_not_in_the_run
     b, _, _ = work.new('b')
     for wt in (a, b):
         git(wt, 'config', 'user.email', 't@example.invalid'); git(wt, 'config', 'user.name', 't')
-    (a / 'app.py').write_text('one\nTWO by a\nthree\n'); work.save(a)
-    (b / 'app.py').write_text('one\nTWO by b\nthree\n'); work.save(b)
+    (a / 'app.py').write_text('one\nTWO by a\nthree\n'); work.save(a); tested(a)
+    (b / 'app.py').write_text('one\nTWO by b\nthree\n'); work.save(b); tested(b)
     work.ship(a, 'A')
     before = (live / 'app.py').read_text()
     with pytest.raises(work.Stop) as stop:
@@ -108,7 +120,7 @@ def test_other_work_on_main_is_taken_in_on_the_branch(world, tmp_path):
     github, live, spaces = world
     a, _, _ = work.new('a')
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
-    (a / 'mine.py').write_text('mine\n'); work.save(a)
+    (a / 'mine.py').write_text('mine\n'); work.save(a); tested(a)
     other_push(github, tmp_path, 'theirs.py', 'theirs\n')
     work.ship(a, 'A')
     assert (live / 'mine.py').exists() and (live / 'theirs.py').exists()
@@ -123,12 +135,16 @@ def test_refusals(world):
         work.new('a')
     with pytest.raises(work.Stop):
         work.new('bad name')
-    (a / 'loose.py').write_text('x\n')
+    (a / 'app.py').write_text('changed\n')
     with pytest.raises(work.Stop) as stop:
         work.ship(a, 'A')
     assert 'save' in str(stop.value)
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
-    git(a, 'clean', '-fdq')
+    git(a, 'checkout', '-q', '--', 'app.py')
+    with pytest.raises(work.Stop) as stop:
+        work.ship(a, 'A')
+    assert 'work.py test' in str(stop.value)                               # never tested
+    tested(a)
     with pytest.raises(work.Stop) as stop:
         work.ship(a, 'A')
     assert '変更がありません' in str(stop.value)
@@ -149,3 +165,94 @@ def test_restart_hints():
     assert work._restart_hint(['frontend/src/x.tsx'])[0].startswith('画面')
     assert work._restart_hint(['app/core/main.py'])[0].startswith('本体')
     assert work._restart_hint(['scripts/x.py', 'docs/a.md']) == []
+
+
+
+# --- 2026-10-23: what the 2026-10-18 check found ---------------------------------------------------------------------------
+
+def test_a_worktrees_packages_are_its_own(world):
+    """npm install in a worktree must not reach the running folder (2026-10-18 check: node_modules was a link to it)."""
+    github, live, spaces = world
+    nm = live / 'frontend' / 'node_modules' / 'react'
+    nm.mkdir(parents=True)
+    (nm / 'package.json').write_text('{"version": "19"}')
+    (live / 'frontend' / 'package.json').write_text('{}')
+    git(live, 'add', 'frontend/package.json'); git(live, 'commit', '-q', '-m', 'frontend'); git(live, 'push', '-q')
+    path, _, _ = work.new('pk')
+    mine = path / 'frontend' / 'node_modules'
+    assert mine.is_dir() and not mine.is_symlink() and (mine / 'react' / 'package.json').read_text() == '{"version": "19"}'
+    (mine / 'react' / 'package.json').write_text('{"version": "20"}')                # an install in the worktree
+    (mine / 'left-pad').mkdir()
+    assert (nm / 'package.json').read_text() == '{"version": "19"}' and not (live / 'frontend/node_modules/left-pad').exists()
+
+
+def test_ship_merges_without_switching_to_main(world):
+    """gh pr merge --delete-branch fails in a worktree when main is checked out in the running folder (2026-10-18)."""
+    github, live, spaces = world
+    a, _, _ = work.new('a')
+    git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
+    (a / 'mine.py').write_text('mine\n'); work.save(a); tested(a)
+    steps, _ = work.ship(a, 'A')
+    assert 'merged' in steps and (live / 'mine.py').exists()
+    assert 'dan/a' not in git(live, 'ls-remote', '--heads', 'origin').stdout                 # removed on GitHub
+
+
+def test_main_that_breaks_the_tests_stops_ship_before_anything_leaves(world, tmp_path):
+    """After taking in main the tests run again; a failure stops ship before push (2026-10-18 check: it shipped an
+    untested combination)."""
+    github, live, spaces = world
+    a, _, _ = work.new('a')
+    git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
+    (a / 'mine.py').write_text('from theirs import VALUE\nassert VALUE == 1\n'); work.save(a)
+    (a / 'theirs.py').write_text('VALUE = 1\n'); work.save(a)
+    tested(a, 'python mine.py')
+    git(a, 'rm', '-q', 'theirs.py'); git(a, 'commit', '-q', '-m', 'drop')        # theirs.py comes from main below
+    tested(a, 'python -c "print(1)"')
+    work.test(a, 'python mine.py')                                             # fails now: the record says so
+    other_push(github, tmp_path, 'theirs.py', 'VALUE = 2\n')
+    pushed_before = git(live, 'ls-remote', '--heads', 'origin').stdout
+    with pytest.raises(work.Stop) as stop:
+        work.ship(a, 'A')
+    assert '試験が通りませんでした' in str(stop.value)
+    assert git(live, 'ls-remote', '--heads', 'origin').stdout == pushed_before          # nothing pushed
+
+
+def test_main_is_tested_again_when_it_brought_something(world, tmp_path):
+    github, live, spaces = world
+    a, _, _ = work.new('a')
+    git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
+    (a / 'mine.py').write_text('mine\n'); work.save(a); tested(a)
+    other_push(github, tmp_path, 'theirs.py', 'theirs\n')
+    steps, _ = work.ship(a, 'A')
+    assert steps[0].startswith('tested with main')
+
+
+def test_a_follow_that_fails_makes_ship_fail_and_says_where_it_stopped(world, monkeypatch):
+    github, live, spaces = world
+    a, _, _ = work.new('a')
+    git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
+    (a / 'app.py').write_text('one\ntwo\nthree\nfour\n'); work.save(a); tested(a)
+    (live / 'app.py').write_text('left here by hand\n')                              # follow_github will stop
+    with pytest.raises(work.Stop) as stop:
+        work.ship(a, 'A')
+    assert 'GitHub の main には入りました' in str(stop.value) and 'app.py' in str(stop.value)
+    assert 'merged' in stop.value.steps
+    assert work.main(['ship', 'A', '--at', str(a)]) == 1                             # the command says it failed
+
+
+def test_save_takes_work_and_leaves_notes_out(world):
+    """save chooses: tracked changes and new files in the repository's folders; not a REPORT/ or another folder the
+    repository does not have (2026-10-18 check: it used git add -A)."""
+    github, live, spaces = world
+    a, _, _ = work.new('a')
+    git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
+    (a / 'app.py').write_text('changed\n')
+    (a / 'scripts' / 'new_tool.py').write_text('x\n')
+    (a / 'REPORT').mkdir(); (a / 'REPORT' / 'README.md').write_text('notes\n')
+    (a / 'tmp-notes').mkdir(); (a / 'tmp-notes' / 'a.txt').write_text('scratch\n')
+    work.save(a)
+    committed = git(a, 'show', '--name-only', '--format=', 'HEAD').stdout.split()
+    assert sorted(committed) == ['app.py', 'scripts/new_tool.py']
+    assert work.changes(a) == ([], ['REPORT/README.md', 'tmp-notes/a.txt'])
+    work.save(a, only=['REPORT/README.md'])
+    assert 'REPORT/README.md' in git(a, 'show', '--name-only', '--format=', 'HEAD').stdout
