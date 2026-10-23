@@ -1112,8 +1112,12 @@ def _save_execution_event_sync(
     tool_name: Optional[str] = None,
     tool_label: Optional[str] = None,
     content: Optional[str] = None,
+    tool_input: Optional[dict] = None,
 ):
-    """CLIスレッドからDB直接保存（sync）。disconnect時は1度だけ再接続リトライ。"""
+    """CLIスレッドからDB直接保存（sync）。disconnect時は1度だけ再接続リトライ。
+
+    tool_use は、チャットの作業中の1行（「お店のページを見ています」）を metadata.activity に添える
+    （app/agent/activity_line.py。空なら画面は前の1行のまま）。"""
     from app.services.execution_events import normalize_event_type
     from app.services.supabase_client import get_supabase_client
 
@@ -1126,6 +1130,12 @@ def _save_execution_event_sync(
         metadata["original_event_type"] = original_type
     if turn_id:
         metadata["turn_id"] = turn_id
+    if normalized_type == "tool_use" and tool_name:
+        try:
+            from app.agent.activity_line import activity_phrase
+            metadata["activity"] = activity_phrase(tool_name, tool_input)
+        except Exception:
+            pass
     row = {
         # Client-side id makes the disconnect retry idempotent (PK conflict
         # instead of a second row).
@@ -1553,7 +1563,7 @@ def _build_language_alignment_section(latest_user_message: str = "", user_messag
     message such as 「今作業中？」 was taken for Chinese and the whole turn came out in Chinese (2026-10-04)."""
     return (
         "## Language\n\n"
-        "Write everything the user sees (progress notes between tool calls and the final answer) in the language the user "
+        "Write everything the user sees (your reply) in the language the user "
         "normally speaks with you. If a message is clearly written in a different language, answer that message in its "
         "language. A short message (kanji only, \"OK\", a URL) is not a change of language."
     )
@@ -1701,7 +1711,6 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - ステータス: {status}
 
 ### 着手ルール
-- 大きな変更を始める前に、方針を 1〜2 文でチャットに伝えてから手を動かす
 - 依頼と既存の承認の範囲で実装を進める。新たな範囲変更や未承認の外部行為だけ確認する
 - 軽微な質問・調査・修正は事前承認不要、即実行
 - 提案書 HTML や提案動画はユーザーが「提案書作って」「提案動画作って」と明示要求した時だけ作る (それ以外はチャット右ペインのライブプレビューで直接成果物を作って会話しながら詰める)"""
@@ -2626,6 +2635,7 @@ def _run_cli_process(
                             turn_id=turn_id,
                             tool_name=ev.get("name", ""),
                             tool_label=tool_label,
+                            tool_input=ev.get("input", {}),
                         )
                         reasoning_steps_acc.append(f"🔧 {tool_label}")
                         turn_blocks.append({
@@ -2782,6 +2792,9 @@ def _run_cli_in_thread(
     env["DAN_ROOM_ID"] = room_id
     env["DAN_LOCK_OWNER"] = "room:" + room_id
     env["CLAUDE_CODE_ENABLE_TASKS"] = "true"
+    # Claude Code は黙って作業が続くと「近況を伝えて」と差し込み、途中の「〇〇を調べています」を書かせる。
+    # チャットは作業中の1行を画面が出すので止める（2026-10-23。triBool なので "0" で切れる）
+    env["CLAUDE_CODE_SILENT_TURN_REMINDER"] = "0"
     if project_id:
         env["DAN_PROJECT_ID"] = project_id
 
@@ -3132,7 +3145,7 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
                         state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
                         state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                         if project_id:
-                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
+                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label, tool_input=ev.get("input", {}))
             elif rtype == "system":
                 sid = raw_ev.get("session_id")
                 if sid:
@@ -3245,6 +3258,7 @@ async def _process_via_streaming_session(
     env["NO_COLOR"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["DAN_LOCK_OWNER"] = "room:" + room_id
+    env["CLAUDE_CODE_SILENT_TURN_REMINDER"] = "0"   # 近況の催促を止める（一回きりの経路と同じ。理由はそちら）
     run_cwd = cwd or str(CLI_WORKSPACE)
 
     from app.agent.streaming_session import get_session
@@ -3463,7 +3477,7 @@ async def _process_via_streaming_session(
                             _cli_debug(f"[STREAMING] artifact path tracking failed: {e}")
                         _emit(ev)
                         if project_id:
-                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
+                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label, tool_input=ev.get("input", {}))
                             state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                             state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
                             state["last_block_at"] = datetime.now(timezone.utc).isoformat()

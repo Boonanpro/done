@@ -10,7 +10,12 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { ChatMarkdown, splitLinks } from './chat-markdown';
-import { siteFilePath, splitTopFences } from './chat-shapes-plain';
+import { ShapeMessageContext, ShapeRoomContext, type ShapeRoom } from './chat-shapes';
+import { readAnswerTo, type AnswerTo, type UserUtterance } from './chat-shapes-answers';
+import { SEND_BUSY, SEND_UNKNOWN } from './chat-shapes-answer-sends';
+import { readJobReport } from './chat-shapes-job-report';
+import { JobReportCard } from './job-report-card';
+import { shapeFences, siteFilePath, splitTopFences } from './chat-shapes-plain';
 import { CONFIRM_CARD, ConfirmCard, SEND_CARD, SendCard } from './send-card';
 import { describe as describeStep, elapsedLabel, KIND as STEP_KIND, summarize as summarizeSteps } from './work-log';
 import { Breathe, StepIn } from './motion-bits';
@@ -62,6 +67,7 @@ import {
   type ChatListItem as ChatListItemOf,
   type ExecutionEvent,
   type TurnBlock,
+  liveLineOf,
 } from './chatTimeline';
 import { TypingDots } from './typing-dots';
 import { VoiceHost, useVoice } from './voice-host';
@@ -219,6 +225,7 @@ type MessageResponse = {
     blocks?: TurnBlock[];
     turn_id?: string;
   } | null;
+  sender_id?: string | null;
   // 送った瞬間の、まだサーバーに届いていない自分のメッセージ。id は送信時に発行した本物のID（届けば同じ id の
   // 保存行に置き換わる）。並びは「一番下」（端末の時計は使わない。docs/current/chat-timeline-definition.md）。
   pending?: boolean;
@@ -863,6 +870,10 @@ function RichMessageContent({
   );
 }
 
+// 作業の一覧（「N件の作業」の折りたたみ・途中の説明文・作業の種類の札）を出すか。2026-10-23 から既定は出さない
+// （ダン開発室「返事を人の短さに」）。作業中は3つの点と今していることの1行だけ。戻す時は EXPO_PUBLIC_DAN_SHOW_WORK=1 で作り直す。
+const SHOW_WORK = process.env.EXPO_PUBLIC_DAN_SHOW_WORK === '1';
+
 // A run of tool/reasoning/error steps, collapsed under "N件の作業 を表示" —
 // the same inline-timeline treatment the web chat gives ai_context.blocks.
 // 畳んだ物を開け閉めしても、押した見出しを画面の同じ位置に留める（チャットの一覧は下から積む作りなので、
@@ -1043,13 +1054,20 @@ function AiTurnBlocks({
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
       <View>
-        {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={false} /> : null}
+        {SHOW_WORK && log.length > 0 ? <TurnToolGroup items={log} defaultOpen={false} /> : null}
         {media.length > 0 ? (
           <RichMessageContent content={media.join('\n')} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
         ) : null}
         <RichMessageContent content={final} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
       </View>
     );
+  }
+  if (!SHOW_WORK) {
+    // 作業中: 途中で出したファイル・画像だけ（文章は出さない。途中の説明か書きかけの返事かは終わるまで分からない。
+    // 返事は保存されてから出る。その下の1行は吹き出しの側が出す。PC の InlineProcessBlock と同じ）
+    const media = grouped.flatMap((g) => (g.kind === 'text' ? mediaTags(g.text) : []));
+    if (media.length === 0) return null;
+    return <RichMessageContent content={media.join('\n')} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />;
   }
   return (
     <View>
@@ -1066,6 +1084,17 @@ function AiTurnBlocks({
     </View>
   );
 }
+
+// 部品の答えの送信（handleSend の answer）。onSaved/onFailed は1回だけ、onEnded は通信が終わった時に1回
+type ShapeAnswerSend = {
+  answerTo: AnswerTo;
+  id: string;
+  background?: boolean;
+  onSaved: (msg: MessageResponse, reply?: { started?: boolean | null; start?: string | null }) => void;
+  onFailed: (why: string) => void;
+  onEnded?: (startSeen: boolean) => void;
+};
+type AnswerTrack = { saved: MessageResponse | null; startSeen: boolean };
 
 // 送信の瞬間にクライアントが本物のメッセージIDを発行する（Web版と同じ「完全形」）。
 // サーバーはこのUUIDをそのまま chat_messages の行IDにするので、キャンセルが
@@ -1086,6 +1115,8 @@ async function streamDanMessage(
   options?: {
     clientMessageId?: string;
     timelineRefs?: { content_id: string; title: string }[];
+    // 部品（選択ボタン・入力欄）の答えの照合情報（どの返事のどの部品への答えか）
+    answerTo?: AnswerTo;
     // 呼び出し側が途中キャンセルできるよう、接続を閉じるハンドルを渡す
     registerCancel?: (close: () => void) => void;
   },
@@ -1102,6 +1133,7 @@ async function streamDanMessage(
         session_id: roomId,
         ...(options?.clientMessageId ? { client_message_id: options.clientMessageId } : {}),
         ...(options?.timelineRefs?.length ? { timeline_refs: options.timelineRefs } : {}),
+        ...(options?.answerTo ? { answer_to: options.answerTo } : {}),
       }),
       pollingInterval: 0,
     });
@@ -1762,11 +1794,52 @@ function AppMain() {
   // 3つの点の横に出す「いまダンがしていること」（宣言・作業の一歩）。送ったこの端末ではストリームの最新、
   // それ以外は記録の最新の一歩。
   const typingLabel = useMemo(() => {
+    // 作業の一覧を出さない時は、作業の記録に添えた平易な1行（道具の名前やコマンドは出さない）
+    if (!SHOW_WORK) return liveLineOf(liveTurnGroups[liveTurnGroups.length - 1]?.blocks || []);
     if (activity && activity !== 'Thinking...') return activity;
     const last = liveTurnGroups[liveTurnGroups.length - 1]?.blocks.slice(-1)[0];
     if (!last) return '';
     return last.type === 'tool' ? last.label || '' : (last as { text?: string }).text || '';
   }, [activity, liveTurnGroups]);
+
+  // 部品（選択ボタン・入力欄）の答えの経路: PC と同じ（本人の発言として送り、照合情報 answer_to と送信 ID を付ける。
+  // 答えたかは部屋の記録の、本人の保存済み発言の照合情報で見る）。chat-shapes.tsx の useAnswerSend がこれを使う
+  const ownerId = user?.id ?? null;
+  const shapeUtterances = useMemo<UserUtterance[]>(
+    () => (ownerId ? messages : [])
+      .filter((m) => m.sender_type === 'human' && !m.pending && (!m.sender_id || m.sender_id === ownerId) && (m.content || '').trim())
+      .map((m) => ({ id: m.id, text: m.content || '', at: Date.parse(m.created_at) || 0, answerTo: readAnswerTo(m.ai_context) })),
+    [messages, ownerId],
+  );
+  const handleSendRef = useRef<(text?: string, answer?: ShapeAnswerSend) => Promise<void>>(async () => {});
+  const handleOpenMessageUrlRef = useRef<(url: string) => void>(() => {});
+  const shapeRoomId = currentProject?.room_id ?? null;
+  const shapeRoom = useMemo<ShapeRoom>(() => ({
+    utterances: shapeUtterances,
+    ownerId,
+    roomId: shapeRoomId,
+    submit: (text, answerTo, id, opts) => new Promise((resolve, reject) => {
+      void handleSendRef.current(text, {
+        answerTo, id, background: opts?.background, onEnded: opts?.onEnded,
+        onSaved: (msg, reply) => resolve({ id: msg.id, ...(reply ?? {}) }),
+        onFailed: (why) => reject(new Error(why === 'unknown' ? SEND_UNKNOWN : why)),
+      });
+    }),
+    askSaved: async (id) => {
+      if (!shapeRoomId || !token) throw new Error('部屋が分かりません');
+      const r = await apiRequest<{ saved: boolean; message?: MessageResponse; started?: boolean | null; start?: string | null }>(
+        `/chat/rooms/${shapeRoomId}/messages/${encodeURIComponent(id)}/saved`, {}, token);
+      if (r && r.saved === true && r.message) {
+        const row = r.message;
+        setMessages((current) => upsertMessage(current, row));
+        return { saved: true, started: r.started, start: r.start };
+      }
+      if (r && r.saved === false) return { saved: false };
+      throw new Error('保存されたか分かりません');
+    },
+    openUrl: (url) => handleOpenMessageUrlRef.current(url),
+    siteUrl: (path) => `${API_BASE_URL}${path}`,
+  }), [shapeUtterances, ownerId, shapeRoomId, token]);
 
   // コラボ窓口の未読（サーバー判定 unread_count の合計）。👥ボタンのバッジと
   // アプリアイコンのバッジに合算する。開いている窓口は既読扱い。
@@ -3163,12 +3236,53 @@ function AppMain() {
     [token, projects, currentProject, refreshProjects],
   );
 
+  handleSendRef.current = handleSend;
+  // 部品（選択ボタン・入力欄）の答えの送信: PC の project-chat-panel.tsx と同じ決め方（2026-10-23。それまでは送れなかった
+  // 時も「送っています…」のまま固まった）。保存の echo（user_message）が来たら保存済み。来ないまま終わった時（連打の
+  // 間引き・送る前の失敗・切断も含む）は、この送信 ID の保存をサーバーに聞いて決める（保存済み／保存されていない／
+  // 分からない）。ダンの処理が始まった印（返事・追い連絡）を見たかは onEnded で知らせる。同じ ID の送り直しは二重に保存されない。
+  async function handleSend(text?: string, answer?: ShapeAnswerSend) {
+    if (!answer) return handleSendInner(text);
+    const roomId = currentProject?.room_id;
+    if (answer.background && currentProject && (inFlightSendsRef.current.get(currentProject.id) ?? 0) > 0) {
+      answer.onFailed(SEND_BUSY);
+      return;
+    }
+    const track: AnswerTrack = { saved: null, startSeen: false };
+    try {
+      await handleSendInner(text, answer, track);
+    } catch {
+      // 決めるのは下の照会
+    }
+    if (!track.saved) {   // 保存の echo を見ていれば、その場で onSaved を知らせてある
+      let verdict: 'saved' | 'not saved' | 'unknown' = 'unknown';
+      try {
+        const r = roomId && token
+          ? await apiRequest<{ saved: boolean; message?: MessageResponse; started?: boolean | null; start?: string | null }>(
+            `/chat/rooms/${roomId}/messages/${encodeURIComponent(answer.id)}/saved`, {}, token)
+          : null;
+        if (r && r.saved === true && r.message) {
+          const row = r.message;
+          setMessages((current) => upsertMessage(current, row));
+          answer.onSaved(row, { started: r.started, start: r.start });
+          verdict = 'saved';
+        } else if (r && r.saved === false) verdict = 'not saved';
+      } catch {
+        verdict = 'unknown';
+      }
+      if (verdict !== 'saved') answer.onFailed(verdict);
+    }
+    answer.onEnded?.(track.startSeen);
+  }
+
   // text: 入力欄の代わりに送る文（確認カードの答えなど）。入力欄の下書き・添付には触らない。
-  async function handleSend(text?: string) {
+  // answer: 部品の答えの時の照合情報と送信 ID（上の handleSend）。track に保存の echo とダンの処理の開始の印を書く
+  async function handleSendInner(text?: string, answer?: ShapeAnswerSend, track?: AnswerTrack) {
     if (!token) return;
-    // 連打ガード（以前は sending が兼ねていたが、追い連絡を許可するため時刻で弾く）。
+    const answerTo = answer?.answerTo;
+    // 連打ガード（以前は sending が兼ねていたが、追い連絡を許可するため時刻で弾く）。部品の答えは部品が二重押しを止める
     const tappedAt = Date.now();
-    if (tappedAt - lastSendAtRef.current < 700) return;
+    if (!answer && tappedAt - lastSendAtRef.current < 700) return;
     lastSendAtRef.current = tappedAt;
     // このフローが属する部屋と、開始時点のその部屋のキャンセル世代。
     // 以降で世代がずれていたらこの部屋の停止ボタン（または復帰ウォッチ
@@ -3253,7 +3367,7 @@ function AppMain() {
     // サーバーURLへ差し替えて Dan に送信する。失敗時は楽観メッセージを取り消す。
     // 送信の瞬間に発行する本物のメッセージID（サーバーはこれを行IDにする）。画面の仮の行も同じ id にするので、
     // エコーでも部屋のフィードでも同じ行が置き換わるだけ（二重に出ない）。
-    const clientMessageId = uuidv4();
+    const clientMessageId = answer?.id ?? uuidv4();
     const optimisticId = clientMessageId;
     const sentAt = Date.now();
     for (const [id, entry] of sentInputsRef.current) if (sentAt - entry.at > 3_600_000) sentInputsRef.current.delete(id);
@@ -3380,6 +3494,7 @@ function AppMain() {
           sent = true;
           const incoming = event.message;
           echoedUserMsg = incoming;
+          if (track && !track.saved) { track.saved = incoming; answer?.onSaved(incoming); }
           if (viewing) {
             setMessages((current) =>
               upsertMessage(
@@ -3391,8 +3506,10 @@ function AppMain() {
         } else if (event.type === 'followup_queued' || event.type === 'voice_call_routed') {
           // 作業中の追い連絡として、または通話中のダンへ渡された。どちらも届いている（並びは届いた時刻のまま）。
           sent = true;
+          if (track) track.startSeen = true;
         } else if (event.type === 'ai_message' && isMessageResponse(event.message)) {
           sent = true;
+          if (track) track.startSeen = true;
           const incoming = event.message;
           if (viewing) setMessages((current) => upsertMessage(current, incoming));
         } else if (event.type === 'done') {
@@ -3410,6 +3527,7 @@ function AppMain() {
       }, {
         clientMessageId,
         timelineRefs: sentTimelineRefs,
+        answerTo,
         registerCancel: (close) => {
           activeStreamsRef.current.set(clientMessageId, {
             close,
@@ -3700,6 +3818,7 @@ function AppMain() {
     }
     openUrl(normalized);
   }, [chatMedia, token]);
+  handleOpenMessageUrlRef.current = handleOpenMessageUrl;
 
   function handleBackToProjects() {
     setScreen('projects');
@@ -4100,6 +4219,7 @@ function AppMain() {
           </View>
         ) : (
           <KeepInPlace.Provider value={keepInPlace}>
+          <ShapeRoomContext.Provider value={shapeRoom}>
           <FlatList
             contentContainerStyle={styles.messageList}
             data={chatListItems}
@@ -4150,7 +4270,7 @@ function AppMain() {
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
                       <View style={styles.typingInline}>
                         <TypingDots color="#7a8f86" />
-                        {typingLabel && !item.blocks.some((b) => b.type === 'tool') ? (
+                        {typingLabel && (!SHOW_WORK || !item.blocks.some((b) => b.type === 'tool')) ? (
                           <Text style={styles.typingLabel} numberOfLines={1}>
                             {typingLabel.split('\n')[0]}
                           </Text>
@@ -4228,6 +4348,14 @@ function AppMain() {
                   </View>
                 );
               }
+              // 並行作業の報告は1行の札（作業の名前と「終わった／止まった」。押すと全文）。本文には流さない（PC と同じ）
+              const jobReport = msg.sender_type === 'ai' ? readJobReport(msg.ai_context, msg.content) : null;
+              if (jobReport) {
+                return (
+                  <JobReportCard report={jobReport} messageId={msg.id}
+                    renderBody={(body) => <RichMessageContent content={body} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={openChatMedia} />} />
+                );
+              }
               const mine = msg.sender_type === 'human';
               // Render the full timeline (text + "N件の作業") when the AI message
               // carries blocks with tool steps or multiple text segments — same
@@ -4246,7 +4374,7 @@ function AppMain() {
                     // 作業ログ入りの吹き出しは幅をコンテンツ任せにしない。
                     // 短いツール行だけの瞬間に吹き出しが異常に細く縮んで
                     // 縦長になるのを防ぐ（プロセスログ表示の幅バグ対策）。
-                    useBlocks && !mine && styles.wideBubble,
+                    (useBlocks || (msg.sender_type === 'ai' && shapeFences(msg.content || '').length > 0)) && !mine && styles.wideBubble,
                     highlightId === msg.id && styles.messageBubbleHighlight,
                   ]}
                 >
@@ -4254,6 +4382,7 @@ function AppMain() {
                     <Text style={styles.messageSender}>{mine ? ui('You','あなた') : msg.sender_type === 'ai' ? 'Done' : msg.sender_name || 'Done'}</Text>
                     <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
                   </View>
+                  <ShapeMessageContext.Provider value={msg.sender_type === 'ai' && !msg.pending ? msg.id : null}>
                   {useBlocks ? (
                     <AiTurnBlocks blocks={blocks!} mine={mine} settled onOpenUrl={handleOpenMessageUrl} onPlayVideo={openChatMedia} />
                   ) : (
@@ -4265,6 +4394,7 @@ function AppMain() {
                       videoProgress={uploadProgress?.id === msg.id ? uploadProgress.value : undefined}
                     />
                   )}
+                  </ShapeMessageContext.Provider>
                 </View>
               );
             }}
@@ -4289,6 +4419,7 @@ function AppMain() {
               }, 320);
             }}
           />
+          </ShapeRoomContext.Provider>
           </KeepInPlace.Provider>
         )}
 

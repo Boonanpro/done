@@ -14,7 +14,8 @@
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit",
     "generate:api": "openapi-typescript ../openapi.json -o src/types/api.ts",
-    "generate:shapes": "node --experimental-strip-types scripts/generate-chat-shapes-prompt.mjs"
+    "generate:shapes": "node --experimental-strip-types scripts/generate-chat-shapes-prompt.mjs",
+    "sync:mobile-shapes": "node scripts/sync-mobile-chat-shapes.mjs"
   },
   "dependencies": {
     "@blocknote/core": "^0.47.3",

@@ -2,7 +2,7 @@
 
 import { callDuration, callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import {
   AlertCircle,
   Check,
@@ -68,6 +68,7 @@ import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutb
 import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRecheck, type ShapeSubmit } from '@/components/chat/chat-shapes';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
+import { JOB_STATE_TEXT, readJobReport, type JobReport } from '@/lib/chat-shapes/job-report';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -93,6 +94,8 @@ type StepInfo = {
   label: string;
   type: 'tool' | 'reasoning' | 'error';
   role?: 'researcher' | 'critic' | 'leader' | null;
+  /** 作業中の1行（「お店のページを見ています」）。サーバーが道具ごとに作る（app/agent/activity_line.py）。空なら前の1行のまま */
+  activity?: string;
 };
 
 type DisplayItem =
@@ -111,12 +114,53 @@ type SendExtra = {
 };
 type SendMessageHandle = (content: string, extra?: SendExtra) => void;
 
-// Phase 2: the live in-progress turn renders with the SAME inline timeline as
-// a finished turn (text segments + a collapsible tool group), so there's no
-// separate "process monitor" box anymore. The tool group starts collapsed even
-// while live（「〇件の作業」をタップで開ける）; a spinner trails the steps as the
-// working indicator. Once the run finishes this block is dropped and the saved
-// message's blocks take over (also collapsed).
+// 作業の一覧（「N件の作業」の折りたたみ・途中の説明文）を出すか。2026-10-23 から既定は出さない（ダン開発室
+// 「返事を人の短さに」）。戻す時は NEXT_PUBLIC_DAN_SHOW_WORK=1 でビルドするか、このブラウザで
+// localStorage.setItem('dan-show-work', '1') して読み直す。
+const SHOW_WORK_DEFAULT = process.env.NEXT_PUBLIC_DAN_SHOW_WORK === '1';
+function readShowWork(): boolean {
+  if (typeof window === 'undefined') return SHOW_WORK_DEFAULT;
+  try {
+    const v = window.localStorage.getItem('dan-show-work');
+    return v === null ? SHOW_WORK_DEFAULT : v === '1';
+  } catch {
+    return SHOW_WORK_DEFAULT;
+  }
+}
+const subscribeShowWork = (cb: () => void) => {
+  window.addEventListener('storage', cb);
+  return () => window.removeEventListener('storage', cb);
+};
+function useShowWork(): boolean {
+  return useSyncExternalStore(subscribeShowWork, readShowWork, () => SHOW_WORK_DEFAULT);
+}
+
+/** 作業中の1行: 道具ごとの言葉（activity）の一番新しい物。返事を書き始めていれば「書いています」、何も無ければ「考えています」 */
+function liveLine(steps: StepInfo[]): string {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const st = steps[i];
+    if (st.type === 'reasoning' && i === steps.length - 1 && st.label && st.label !== 'Thinking...') return '返事を書いています';
+    if (st.type === 'tool' && st.activity) return st.activity;
+  }
+  return '考えています';
+}
+
+/** 点が3つ動く目印と、今していることの1行。行は増やさず、書き換えるだけ */
+function LiveLine({ text }: { text: string }) {
+  return (
+    <div className="my-1 flex items-center gap-2 text-sm text-muted-foreground" role="status" aria-live="polite" data-live-line>
+      <span className="flex items-center gap-1" aria-hidden>
+        {[0, 1, 2].map((d) => (
+          <span key={d} className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/70 motion-reduce:animate-none" style={{ animationDelay: `${d * 150}ms` }} />
+        ))}
+      </span>
+      <span key={text} className="truncate animate-in fade-in duration-300">{text}</span>
+    </div>
+  );
+}
+
+// 作業中のターン。作業の一覧を出さない（既定）時は、途中で出したファイル・画像と作業中の1行だけを出す（文章は出さない）。出す時（SHOW_WORK）は、終わったターンと同じ並び（文章＋畳んだ作業の一覧）にスピナーが付く。
+// 終わるとこの枠は消え、保存された返事に替わる。
 function InlineProcessBlock({
   steps,
   isLive = false,
@@ -125,8 +169,21 @@ function InlineProcessBlock({
   isLive?: boolean;
   defaultCollapsed?: boolean; // kept for call-site compatibility (unused)
 }) {
+  const showWork = useShowWork();
   if (steps.length === 0 && !isLive) return null;
   const blocks = stepsToBlocks(steps);
+  if (!showWork) {
+    if (!isLive) return null;
+    // 文章は出さない（途中の説明か書きかけの返事かは、終わるまで分からない。返事は保存されてから出る）。
+    // 途中で出したファイル・画像・動画だけは今までどおり出す
+    const media = blocks.flatMap((b) => (b.type === 'text' ? mediaTags(b.text || '') : []));
+    return (
+      <div className="my-1">
+        {media.length > 0 ? <TurnTextSegment text={media.join('\n')} /> : null}
+        <LiveLine text={liveLine(steps)} />
+      </div>
+    );
+  }
 
   return (
     <div className="my-1">
@@ -147,10 +204,12 @@ function eventToStep(event: ExecutionEvent): StepInfo {
     member === 'researcher' || member === 'critic' || member === 'leader' ? member : null;
 
   if (event.event_type === 'tool_use') {
+    const activity = event.metadata?.activity;
     return {
       label: event.tool_label || event.tool_name || 'ツール実行',
       type: 'tool',
       role,
+      activity: typeof activity === 'string' ? activity : undefined,
     };
   }
 
@@ -356,6 +415,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
 }
 
 const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, messageId }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; messageId?: string }) {
+  const showWork = useShowWork();
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -384,7 +444,7 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
       <div className="flex flex-col">
-        {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
+        {showWork && log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} onImageClick={onImageClick} /> : null}
         <TurnTextSegment text={final} onImageClick={onImageClick} messageId={messageId} />
       </div>
@@ -432,6 +492,32 @@ function formatDateSeparator(d: Date): string {
   const weekday = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()];
   const base = `${d.getMonth() + 1}月${d.getDate()}日(${weekday})`;
   return d.getFullYear() === now.getFullYear() ? base : `${d.getFullYear()}年${base}`;
+}
+
+// 並行作業の報告の札。押すと報告の全文が開く（スマホ mobile/App.tsx・開発室のチャットも同じ形）
+function JobReportCard({ report, onImageClick, messageId }: { report: JobReport; onImageClick?: (url: string) => void; messageId?: string }) {
+  const [open, setOpen] = useState(false);
+  const stopped = report.state === 'stopped';
+  return (
+    <div className="my-0.5" data-job-report={report.state}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="inline-flex max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted"
+      >
+        {stopped ? <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-500" /> : <Check className="h-3.5 w-3.5 shrink-0 text-green-500" />}
+        <span className="min-w-0 truncate font-medium text-foreground">{report.title}</span>
+        <span className="shrink-0">{JOB_STATE_TEXT[report.state]}</span>
+        {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+      </button>
+      {open ? (
+        <div className="mt-2 rounded-xl border border-border bg-card/60 p-3">
+          <TurnTextSegment text={report.body} onImageClick={onImageClick} messageId={messageId} />
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, onAnswer }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void; onAnswer?: (text: string) => void }) {
@@ -556,6 +642,9 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
   if (msg.sender_type === 'ai' && isCollabLogContent(msg.content)) {
     return <OutboundEventLine content={msg.content || ''} />;
   }
+  // 並行作業の報告は1行の札（作業の名前と「終わった／止まった」。押すと全文）。本文には流さない（lib/chat-shapes/job-report.ts）
+  const jobReport = msg.sender_type === 'ai' ? readJobReport(msg.ai_context, msg.content) : null;
+  if (jobReport) return <JobReportCard report={jobReport} onImageClick={onImageClick} messageId={msg.id} />;
 
   const rawContent = msg.content || '';
   // Extract proposal blocks and split content into segments

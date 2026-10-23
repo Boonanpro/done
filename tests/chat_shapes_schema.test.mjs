@@ -50,7 +50,7 @@ test('validateComplete は知らない部品名と検証の理由を返す', () 
   const r = validateComplete('Chart', { kind: 'line', labels: ['a', 'b'], series: [{ name: 'x', values: [10] }] });
   assert.equal(r.ok, false);
   assert.match(r.reason, /値の数/);
-  assert.equal(SHAPE_SPECS.length, 5);
+  assert.equal(SHAPE_SPECS.length, 16);
   // 位置引数の順（refine を足しても zod の shape の順は変わらない＝lang-core の位置引数の順）
   assert.deepEqual(Object.keys(ChartProps.shape), ['kind', 'labels', 'series', 'unit', 'title']);
   assert.deepEqual(Object.keys(ChoiceProps.shape), ['question', 'options']);

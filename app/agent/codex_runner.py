@@ -590,6 +590,7 @@ def run_codex_process(
             cr._save_execution_event_sync(
                 room_id, "tool_use", project_id=project_id, run_id=run_id,
                 turn_id=turn_id, tool_name=ev.get("name", ""), tool_label=tool_label,
+                tool_input=ev.get("input", {}),
             )
             reasoning_steps_acc.append(f"🔧 {tool_label}")
             turn_blocks.append({

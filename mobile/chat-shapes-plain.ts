@@ -1,6 +1,6 @@
-// スマホのアプリ用: ダンの返事の中の部品（```openui-lang）を読める文章にする。
-// frontend/src/lib/chat-shapes/plain.ts と同じ中身（アプリは別のパッケージなので取り込めない。両方を同じに保つ。
-// tests/chat_shapes_plain.test.mjs が両方の出力が同じことを見る）。
+// スマホのアプリ用の写し: frontend/src/lib/chat-shapes/plain.ts と同じ中身（同じフォルダの読み込みの名前だけ違う）。
+// frontend/scripts/sync-mobile-chat-shapes.mjs が作る。手で直さず、元を直して写し直す
+// （tests/chat_shapes_program.test.mjs が同じ中身かを見る）。
 /**
  * 部品（```openui-lang の `root = 部品(...)`）を、部品を描けない画面のために読める文章にする。
  * あわせて、返事の本文の中から部品のコードブロックを見つける読み手（topLevelFences）を持つ。split.ts もこれを使う。
@@ -778,6 +778,8 @@ export function mapOutsideTopFences(text: string, fn: (s: string) => string): st
 class Reader {
   i = 0;
   s: string;
+  /** 組み合わせ（parseShapeProgram）の読み方: 名前の後に ( があれば部品の呼び出し、無ければ別の文の名前（参照） */
+  program = false;
   constructor(s: string) { this.s = s; }
   ws() { while (this.i < this.s.length && /\s/.test(this.s[this.i])) this.i++; }
   peek() { return this.s[this.i]; }
@@ -796,6 +798,21 @@ class Reader {
       if (w[0] === 'true') return true;
       if (w[0] === 'false') return false;
       if (w[0] === 'null') return null;
+      if (this.program) {
+        this.ws();
+        if (this.peek() !== '(') return new ShapeRef(w[0]);
+        this.i++;
+        const args: unknown[] = [];
+        for (;;) {
+          this.ws();
+          if (this.peek() === ')') { this.i++; return new ShapeNode(w[0], args); }
+          args.push(this.value());
+          this.ws();
+          if (this.peek() === ',') { this.i++; continue; }
+          if (this.peek() === ')') { this.i++; return new ShapeNode(w[0], args); }
+          throw new Error('bad call');
+        }
+      }
       throw new Error(`unexpected ${w[0]}`);
     }
     throw new Error('unexpected');
@@ -895,6 +912,108 @@ export function parseShapeCall(code: string): ShapeCall | null {
   }
   return { name: m[1], args };
 }
+
+// --- 部品の組み合わせ（複数の文・入れ子。2026-10-23） --------------------------------------------------
+//
+// 1つのブロックに `root = Card([head, Row([a, b])], "注文")` と `head = Heading("…")` のような文を何行でも書ける
+// （OpenUI Lang の書き方。lang-core と同じく、文の順番は問わず、名前で別の文を指せる）。部品の引数の中に部品を書いてもよい。
+// 画面（Web）は lang-core が読む。ここは部品を描けない所の文章化・完成時の検証・アプリの描画のための読み手で、
+// lang-core と同じ物を読む（tests/chat_shapes_program.test.mjs が突き合わせる）。
+
+/** 部品の呼び出し1つ（引数の中に ShapeNode が入っていることがある） */
+export class ShapeNode {
+  name: string;
+  args: unknown[];
+  constructor(name: string, args: unknown[]) { this.name = name; this.args = args; }
+}
+
+/** 別の文の名前（読んだ後で中身に置き換える） */
+class ShapeRef {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+
+/** 1つのブロックの部品の数の上限（同じ文を何度も指して大きくする書き方を止める） */
+export const PROGRAM_NODE_MAX = 80;
+/** 入れ子の深さの上限 */
+export const PROGRAM_DEPTH_MAX = 6;
+
+/**
+ * ブロック全体（`名前 = 値` の文の並び）を読み、root の部品を返す。読めない（書き方の誤り・同じ名前の文が2つ・知らない名前・
+ * 名前の輪・root が部品でない・大きすぎる）なら null。1文だけの `root = 部品(...)` もこれで読める。
+ */
+export function parseShapeProgram(code: string): ShapeNode | null {
+  const r = new Reader(code);
+  r.program = true;
+  const defs = new Map<string, unknown>();
+  try {
+    for (;;) {
+      r.ws();
+      if (r.i >= r.s.length) break;
+      const w = r.s.slice(r.i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+      if (!w) return null;
+      r.i += w[0].length;
+      r.eat('=');
+      if (defs.has(w[0])) return null;
+      defs.set(w[0], r.value());
+    }
+  } catch {
+    return null;
+  }
+  let count = 0;
+  const resolve = (v: unknown, path: ReadonlySet<string>, depth: number): unknown => {
+    if (depth > PROGRAM_DEPTH_MAX * 4) throw new Error('too deep');
+    if (v instanceof ShapeRef) {
+      if (path.has(v.name) || !defs.has(v.name)) throw new Error(`bad ref ${v.name}`);
+      return resolve(defs.get(v.name), new Set([...path, v.name]), depth + 1);
+    }
+    if (v instanceof ShapeNode) {
+      if (++count > PROGRAM_NODE_MAX) throw new Error('too many parts');
+      return new ShapeNode(v.name, v.args.map((a) => resolve(a, path, depth + 1)));
+    }
+    if (Array.isArray(v)) return v.map((x) => resolve(x, path, depth + 1));
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, resolve(x, path, depth + 1)]));
+    }
+    return v;
+  };
+  if (!defs.has('root')) return null;
+  try {
+    const root = resolve(defs.get('root'), new Set(['root']), 0);
+    return root instanceof ShapeNode ? root : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 部品の入れ子の深さ（root が 1） */
+export function programDepth(node: ShapeNode): number {
+  let max = 0;
+  const walk = (v: unknown): void => {
+    if (v instanceof ShapeNode) max = Math.max(max, programDepth(v));
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v as Record<string, unknown>).forEach(walk);
+  };
+  node.args.forEach(walk);
+  return max + 1;
+}
+
+/** 木の中の部品を上から順に（自分も含む） */
+export function programNodes(node: ShapeNode): ShapeNode[] {
+  const out: ShapeNode[] = [node];
+  const walk = (v: unknown): void => {
+    if (v instanceof ShapeNode) out.push(...programNodes(v));
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v as Record<string, unknown>).forEach(walk);
+  };
+  node.args.forEach(walk);
+  return out;
+}
+
+/** 中に部品を並べる部品（子の一覧が最初の引数）。ほかの部品の引数に部品は入れられない */
+export const CONTAINER_SHAPES: ReadonlySet<string> = new Set(['Card', 'Row', 'Column']);
+/** 押すと答えが届く部品（1つのブロックに1つまで。答えの照合はブロックごと） */
+export const ANSWER_SHAPES: ReadonlySet<string> = new Set(['Choice', 'Input']);
 
 // --- 実物（色見本・縮小画像）の値の検査 ------------------------------------------------------------------
 //
@@ -1004,6 +1123,21 @@ export function safeImageUrl(v: unknown, siteHost?: string | null): string | nul
   return s;
 }
 
+/**
+ * ボタン（Button）の行き先: https:// の URL（利用者名なし）か、このサイトの道（/ で始まり // ではない）だけ。押すのは本人なので
+ * 画像と違って道の種類は絞らない。javascript: data: http: //ホスト、空白・制御文字・バックスラッシュを含む物は null。
+ */
+export function safeLinkUrl(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!s || s.length > 2048 || hasSpaceOrControl(s)) return null;
+  if (s.startsWith('/')) return s.startsWith('//') ? null : s;
+  const m = HTTPS_URL.exec(s);
+  if (!m) return null;
+  const u = readUrl(s);
+  return u && u.protocol === 'https:' && !u.username && !u.password ? s : null;
+}
+
 /** 選択肢・表のセル1つの、名前と検査を通った実物 */
 export type Look = { label: string; color: string | null; image: string | null };
 
@@ -1032,13 +1166,70 @@ const lookText = (v: unknown): string => {
 
 /**
  * 部品を読める文章（Markdown）にする。読めない・知らない部品なら null（呼び出し側は元のコードのまま）。
- * 選択肢・入力欄には「答えはチャットで」と添える（アプリでは押せない）。
+ * 選択肢・入力欄には「答えはチャットで」と添える（部品を描けない画面では押せない）。組み合わせた部品は中の部品を順に文章にする。
  */
 export function shapeToPlainMarkdown(code: string): string | null {
-  const call = parseShapeCall(code);
-  if (!call) return null;
+  const root = parseShapeProgram(code);
+  return root ? nodeToPlain(root) : null;
+}
+
+/** 組み合わせの中の子（部品か、文字だけの子）を文章に。読めない子が1つでもあれば null */
+function childrenPlain(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: string[] = [];
+  for (const c of v) {
+    const t = typeof c === 'string' ? c : c instanceof ShapeNode ? nodeToPlain(c) : null;
+    if (t === null) return null;
+    if (t.trim()) out.push(t);
+  }
+  return out;
+}
+
+function nodeToPlain(call: ShapeNode): string | null {
   const [a0, a1, a2, a3, a4] = call.args;
   switch (call.name) {
+    case 'Card': {
+      const kids = childrenPlain(a0);
+      if (!kids) return null;
+      return [...(str(a1) ? [`**${str(a1)}**`] : []), ...kids].join('\n\n');
+    }
+    case 'Column': {
+      const kids = childrenPlain(a0);
+      return kids ? kids.join('\n\n') : null;
+    }
+    case 'Row': {
+      const kids = childrenPlain(a0);
+      if (!kids) return null;
+      return kids.every((k) => !k.includes('\n')) ? kids.join('　／　') : kids.join('\n\n');
+    }
+    case 'Heading':
+      return str(a0) ? [`**${str(a0)}**`, ...(str(a1) ? [str(a1)] : [])].join('\n') : null;
+    case 'Text':
+      return typeof a0 === 'string' ? a0 : null;
+    case 'Image':
+      return '';
+    case 'Stat': {
+      const value = typeof a1 === 'number' ? a1.toLocaleString('ja-JP') : str(a1);
+      if (!str(a0) || !value) return null;
+      return `${str(a0)}: **${value}${str(a2)}**${str(a3) ? `（${str(a3)}）` : ''}`;
+    }
+    case 'Facts': {
+      const items = Array.isArray(a0)
+        ? a0.filter((x): x is { label?: unknown; value?: unknown } => !!x && typeof x === 'object' && !(x instanceof ShapeNode))
+            .map((x) => ({ label: str(x.label), value: typeof x.value === 'number' ? x.value.toLocaleString('ja-JP') : str(x.value) }))
+            .filter((x) => x.label)
+        : [];
+      return items.length ? items.map((x) => `- ${x.label}: ${x.value}`).join('\n') : null;
+    }
+    case 'Badge':
+      return str(a0) ? `【${str(a0)}】` : null;
+    case 'Button': {
+      if (!str(a0)) return null;
+      const url = safeLinkUrl(a1);
+      return url ? `[${str(a0).replace(/[[\]]/g, '')}](${url})` : str(a0);
+    }
+    case 'Divider':
+      return '---';
     case 'Compare': {
       const columns = Array.isArray(a0) ? a0.map(lookText) : [];
       const rows = Array.isArray(a1) ? a1.map((r) => (Array.isArray(r) ? r.map(lookText) : [])) : [];
