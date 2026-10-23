@@ -16,7 +16,7 @@
 - 通話中の言葉の判定で例外が出ても、通話の裏側が止まらないようにした。
 - 検索結果に URL の無い行があっても、DeepSeek 側がまるごと失敗しないようにした。
 - `DAN_API_JOB_TOOLS` で道具を絞った時は、検索の一覧・本文取りの道具もその指定に従う。
-- Mac に無い `msvcrt` でロックを取っていた3か所（作業の状態 `command_job_state`、作業の順番 `work_locks`、Jev の予算）を、共通の `app/services/file_lock.py`（Windows は msvcrt、Mac は fcntl）にした。Mac の本番では、通話から頼んだ作業や裏の作業が状態を書けずに落ちていた。
+- Mac に無い `msvcrt` でロックを取っていた3か所（作業の状態 `command_job_state`、作業の順番 `work_locks`、Jev の予算）を、共通の `app/services/file_lock.py`（Windows は msvcrt、Mac は fcntl）にした。Mac の本番は、まだ GitHub に無い読み替え（`app/_posix_compat.py`）で msvcrt の代わりを持っていたので落ちてはいなかったが、その代わりは同じプロセスの中の2つ目の持ち主を止めなかった。`file_lock` は Mac では flock を使い、同じプロセスの中でも止める。
 
 ## テスト
 
