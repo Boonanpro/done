@@ -277,12 +277,13 @@ def _hash(repo, rel):
 
 
 def _entry(repo, ref, rel):
-    """(mode, blob) of rel in a commit, or None."""
-    out = _git(repo, 'ls-tree', '-z', ref, '--', rel).stdout.split(b'\0')[0].decode('utf-8', 'surrogateescape')
+    """(mode, blob) of the file rel in a commit, or None (also when rel is a folder there)."""
+    out = _git(repo, 'ls-tree', '-z', '--full-tree', ref, '--', rel).stdout.split(b'\0')[0].decode('utf-8', 'surrogateescape')
     if not out:
         return None
-    mode, _, blob = out.split('\t', 1)[0].split()
-    return mode, blob
+    head, path = out.split('\t', 1)
+    mode, kind, blob = head.split()
+    return (mode, blob) if kind == 'blob' and path == rel else None
 
 
 def _index_entry(repo, rel):

@@ -289,3 +289,5 @@ def test_a_link_standing_where_a_committed_folder_was_is_moved_first(world, tmp_
     branches = git(world, 'branch', '--list', 'wip/*').stdout.split()
     links = [b for b in branches if git(world, 'ls-tree', b, '--', 'web').stdout.startswith('120000')]
     assert links                                                                        # the link itself is kept
+    assert git(world, 'status', '--porcelain').stdout.splitlines() == [' M machine.json']
+    assert sorted(git(world, 'ls-files', 'web').stdout.split()) == ['web/page.tsx']   # nothing made of the two names
