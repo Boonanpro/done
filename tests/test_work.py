@@ -209,7 +209,7 @@ def test_main_that_breaks_the_tests_stops_ship_before_anything_leaves(world, tmp
     git(a, 'rm', '-q', 'theirs.py'); git(a, 'commit', '-q', '-m', 'drop')        # theirs.py comes from main below
     passed_tests(a, 'python -c "print(1)"')
     work.test(a, 'python mine.py')                                             # fails now: the record says so
-    other_push(github, tmp_path, 'theirs.py', 'VALUE = 2\n')
+    other_push(github, tmp_path, 'theirs.py', 'VALUE = 200\n')   # another size: python's .pyc check is by size and second
     pushed_before = git(live, 'ls-remote', '--heads', 'origin').stdout
     with pytest.raises(work.Stop) as stop:
         work.ship(a, 'A')
