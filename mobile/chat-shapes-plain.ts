@@ -1,6 +1,6 @@
-// スマホのアプリ用: ダンの返事の中の部品（```openui-lang）を読める文章にする。
-// frontend/src/lib/chat-shapes/plain.ts と同じ中身（アプリは別のパッケージなので取り込めない。両方を同じに保つ。
-// tests/chat_shapes_plain.test.mjs が両方の出力が同じことを見る）。
+// スマホのアプリ用の写し: frontend/src/lib/chat-shapes/plain.ts と同じ中身（同じフォルダの読み込みの名前だけ違う）。
+// frontend/scripts/sync-mobile-chat-shapes.mjs が作る。手で直さず、元を直して写し直す
+// （tests/chat_shapes_program.test.mjs が同じ中身かを見る）。
 /**
  * 部品（```openui-lang の `root = 部品(...)`）を、部品を描けない画面のために読める文章にする。
  * あわせて、返事の本文の中から部品のコードブロックを見つける読み手（topLevelFences）を持つ。split.ts もこれを使う。

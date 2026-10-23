@@ -104,6 +104,42 @@ test('部品を描けない画面の文章: 組み合わせの中身を順に、
   for (const code of PROGRAMS) assert.equal(mobile.shapeToPlainMarkdown(code), shapeToPlainMarkdown(code), code);
 });
 
+test('スマホの写しは、写す道具が今の中身から作る物と同じ（読み手・検査・答えの送信・グラフ・報告の札）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { COPIES, mobileCopy } = await import('../frontend/scripts/sync-mobile-chat-shapes.mjs');
+  for (const [name, copy] of Object.entries(COPIES)) {
+    const written = readFileSync(new URL(`../mobile/${copy}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(written, mobileCopy(name), `mobile/${copy} が古い（frontend で npm run sync:mobile-shapes）`);
+  }
+});
+
+test('グラフの形: 棒は0の線から上下、折れ線は欠けた値で切れる、種類を取り違えない', async () => {
+  const { chartGeometry } = await import('../frontend/src/lib/chat-shapes/chart-geometry.ts');
+  const bar = chartGeometry({ kind: 'bar', labels: ['1月', '2月', '3月'], series: [{ name: '損益', values: [30, -20, 10] }], unit: '万円' }, 400);
+  assert.equal(bar.kind, 'bar');
+  const [b1, b2] = bar.series[0].bars;
+  assert.ok(Math.abs(b1.y + b1.h - bar.zeroY) < 0.01, '正の棒は0の線まで');
+  assert.ok(Math.abs(b2.y - bar.zeroY) < 0.01, '負の棒は0の線から下へ');
+  assert.ok(bar.yTicks.some((t) => t.zero), '0の目盛りがある');
+  const line = chartGeometry({ kind: 'line', labels: ['a', 'b', 'c', 'd'], series: [{ name: 'x', values: [1, null, 3, 4] }] }, 400);
+  assert.equal(line.kind, 'line');
+  assert.equal(line.series[0].points.length, 3);
+  assert.equal((line.series[0].path.match(/M/g) || []).length, 2, '欠けた値で線が2本に分かれる');
+  const many = chartGeometry({ kind: 'bar', labels: Array.from({ length: 30 }, (_, i) => `ラベル${i}`), series: [{ name: 'x', values: Array(30).fill(1) }] }, 300);
+  assert.ok(many.xLabels.length < 30, '重なる名前は間引く');
+});
+
+test('並行作業の報告の札: 印つき・印の無い古い報告・止まった知らせ・ふつうの返事', async () => {
+  const { readJobReport } = await import('../frontend/src/lib/chat-shapes/job-report.ts');
+  const marked = readJobReport({ job_report: { title: '返事の短さの点検', state: 'done' } }, '**【並行作業：あなたは…】**\n\n確認は完了しました。');
+  assert.deepEqual(marked, { title: '返事の短さの点検', state: 'done', body: '確認は完了しました。' });
+  const old = readJobReport(null, '**【並行作業：検索をDeepSeekに】**\n\n作業を停止しました: Codex error');
+  assert.equal(old.title, '検索をDeepSeekに');
+  assert.equal(old.state, 'stopped');
+  assert.equal(readJobReport(null, '了解、注文するね'), null);
+  assert.equal(readJobReport({ blocks: [] }, '並行作業の話をしよう'), null);
+});
+
 test('アプリの答えの写しは本体と同じ中身', async () => {
   const { readFileSync } = await import('node:fs');
   const body = readFileSync(new URL('../frontend/src/lib/chat-shapes/answers.ts', import.meta.url), 'utf8');

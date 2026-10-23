@@ -1,50 +1,44 @@
 // スマホのアプリで、ダンの返事の中の部品（```openui-lang のブロック）を描く（2026-10-23。それまでは文章に直して出していた）。
 //
-// - 読み手は Web と同じ物の写し（chat-shapes-plain.ts の parseShapeProgram。lang-core と同じ木を読む）。部品の名前・引数の
-//   順は frontend/src/lib/chat-shapes/schema.ts と同じ。描けない・読めないブロックは今までどおり文章（shapeToPlainMarkdown）に戻す
-// - 選択ボタンと入力欄は、PC と同じく「<問い> → <答え>」を本人の発言として送り、どの返事のどの部品への答えか（answer_to）を
-//   付ける（鍵は chat-shapes-answers.ts の partKeys。Web の answers.ts の写し）。答えたかは部屋の記録の照合情報で見る
-// - 写真はダンのファイル（/api/v1/files/…）と https:// の画像だけ。ボタンの行き先は safeLinkUrl を通った物だけ
+// PC（frontend/src/components/chat/chat-shapes.tsx）と見た目と動きを同じにする（2026-10-23 本人「スマホとPCは差が無いように
+// ちゃんと同じにしたい」）。決まりは PC と同じファイルの写しを使い、ここは描くだけ:
+// - 読み手と完成時の検査: chat-shapes-plain.ts / chat-shapes-schema.ts（checkShapeProgram。欠けた部品は描かずに文章へ戻す）
+// - 選択ボタン・入力欄の答えの送信の状態: chat-shapes-answer-sends.ts / chat-shapes-use-answer-send.ts（送れなかった時は
+//   「送れませんでした。もう一度押してください」、分からない時は「確かめる」。送っています…で固まらない）
+// - グラフの形: chat-shapes-chart-geometry.ts（折れ線と棒、負の値、欠けた値を PC と同じ計算で描く）
+// 写しは frontend/scripts/sync-mobile-chat-shapes.mjs が作る。
+// - 写真はダンのファイル（/api/v1/files/…）と https:// の画像だけ（PC の safeImageUrl と同じ範囲。アプリの URL 読みは
+//   ブラウザと違うので、ここで同じ範囲を確かめる）。ボタンの行き先は safeLinkUrl を通った物だけ
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import Svg, { Circle, G, Line, Path, Rect, Text as SvgText } from 'react-native-svg';
 
+import { ShapeNode, readLook, safeColor, safeLinkUrl, siteFilePath } from './chat-shapes-plain';
+import { ANSWER_VALUE_MAX, SHAPE_SPECS, checkShapeProgram, choiceOptions } from './chat-shapes-schema';
 import {
-  ANSWER_SHAPES, CONTAINER_SHAPES, PROGRAM_DEPTH_MAX, ShapeNode, parseShapeProgram, programDepth, programNodes, readLook,
-  safeColor, safeLinkUrl, siteFilePath,
-} from './chat-shapes-plain';
-import { choiceAnswerText, inputAnswerText, inputAnswerValue, type AnswerTo } from './chat-shapes-answers';
+  choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, type UserUtterance,
+} from './chat-shapes-answers';
+import type { AskSaved, SubmitAnswer } from './chat-shapes-answer-sends';
+import {
+  CHECK_BUTTON, CHECKING_TEXT, SEND_FAILED, SEND_UNKNOWN_AGAIN, SEND_UNKNOWN_TEXT, SEND_VERIFYING, SENDING_TEXT, START_UNSURE, TOO_LONG,
+  canAnswer, useAnswerSend, type AnswerEnv, type SendState,
+} from './chat-shapes-use-answer-send';
+import { CHART_HEIGHT, chartGeometry } from './chat-shapes-chart-geometry';
 
-/** 部品の名前と、位置引数の名前（schema.ts の zod の shape の順と同じ） */
-const ARG_NAMES: Record<string, string[]> = {
-  Compare: ['columns', 'rows', 'caption'],
-  Choice: ['question', 'options'],
-  Input: ['label', 'kind', 'unit', 'placeholder'],
-  Steps: ['steps', 'title'],
-  Chart: ['kind', 'labels', 'series', 'unit', 'title'],
-  Card: ['children', 'title', 'image'],
-  Row: ['children', 'align'],
-  Column: ['children'],
-  Heading: ['text', 'sub'],
-  Text: ['text', 'tone'],
-  Image: ['src', 'alt', 'shape'],
-  Stat: ['label', 'value', 'unit', 'note', 'tone'],
-  Facts: ['items'],
-  Badge: ['text', 'tone'],
-  Button: ['label', 'url'],
-  Divider: [],
-};
-const ANSWER_VALUE_MAX = 200;
-
-/** 部屋の側から渡す物: 答えを送る・答えた記録・リンクを開く・写真の URL */
+/** 部屋の側から渡す物: 本人の発言（答えた記録）・答えを送る・送ったか聞き直す・本人・部屋・リンクを開く・写真の URL */
 export type ShapeRoom = {
-  submit: ((text: string, answerTo: AnswerTo) => void) | null;
-  /** `${message_id}|${part}` → 答えの値（部屋の記録の、本人の発言の照合情報から） */
-  answers: ReadonlyMap<string, string>;
+  utterances: UserUtterance[];
+  submit: SubmitAnswer | null;
+  askSaved: AskSaved | null;
+  ownerId: string | null;
+  roomId: string | null;
   openUrl: (url: string) => void;
   /** ダンのファイルの道（/api/v1/files/…）をアプリが読める URL に */
   siteUrl: (path: string) => string;
 };
-export const ShapeRoomContext = createContext<ShapeRoom>({ submit: null, answers: new Map(), openUrl: () => {}, siteUrl: (p) => p });
+export const ShapeRoomContext = createContext<ShapeRoom>({
+  utterances: [], submit: null, askSaved: null, ownerId: null, roomId: null, openUrl: () => {}, siteUrl: (p) => p,
+});
 /** 描いている吹き出しの返事の id（保存済みのダンの返事だけ。無ければ答えられない） */
 export const ShapeMessageContext = createContext<string | null>(null);
 /** このブロックの部品の鍵（partKeys） */
@@ -52,41 +46,40 @@ const PartContext = createContext<string>('');
 /** 組み合わせの中か（中の部品は自分の枠を付けない） */
 const InsideContext = createContext(false);
 
-/**
- * 1つのブロックを描けるかの確かめ（Web の checkShapeProgram と同じ決まりを、アプリで分かる範囲で）。
- * 知らない部品・置けない所の部品・答えの部品が2つ以上・深すぎる、なら null（呼び出し側は文章に戻す）
- */
+/** 1つのブロックを描けるか（PC と同じ checkShapeProgram）。描けなければ null（呼び出し側は文章に戻す） */
 export function readShapeBlock(code: string): ShapeNode | null {
-  const root = parseShapeProgram(code);
-  if (!root || programDepth(root) > PROGRAM_DEPTH_MAX) return null;
-  const nodes = programNodes(root);
-  if (nodes.filter((n) => ANSWER_SHAPES.has(n.name)).length > 1) return null;
-  const hasNode = (v: unknown): boolean =>
-    v instanceof ShapeNode || (Array.isArray(v) ? v.some(hasNode) : !!v && typeof v === 'object' && Object.values(v as Record<string, unknown>).some(hasNode));
-  for (const n of nodes) {
-    const names = ARG_NAMES[n.name];
-    if (!names || n.args.length > names.length) return null;
-    for (let i = 0; i < n.args.length; i++) {
-      if (CONTAINER_SHAPES.has(n.name) && i === 0) {
-        const a = n.args[0];
-        if (!Array.isArray(a) || a.length === 0 || !a.every((c) => c instanceof ShapeNode || typeof c === 'string')) return null;
-      } else if (hasNode(n.args[i])) return null;
-    }
-  }
-  return root;
+  const r = checkShapeProgram(code);
+  return r.ok ? r.root : null;
 }
 
-const propsOf = (n: ShapeNode): Record<string, unknown> =>
-  Object.fromEntries((ARG_NAMES[n.name] || []).map((k, i) => [k, n.args[i]]));
+/** 位置引数を部品定義の名前へ（schema.ts の zod の shape の順。PC の lang-core と同じ当て方） */
+const propsOf = (n: ShapeNode): Record<string, unknown> => {
+  const spec = SHAPE_SPECS.find((x) => x.name === n.name);
+  const keys = spec ? Object.keys(spec.props.shape) : [];
+  return Object.fromEntries(keys.map((k, i) => [k, n.args[i]]));
+};
+
+function useAnswerEnv(): AnswerEnv {
+  const room = useContext(ShapeRoomContext);
+  const messageId = useContext(ShapeMessageContext);
+  const part = useContext(PartContext);
+  return { utterances: room.utterances, submit: room.submit, askSaved: room.askSaved, ownerId: room.ownerId, roomId: room.roomId, messageId, part };
+}
+
+/** 画像の URL（PC の safeImageUrl と同じ範囲: ダンのファイルの道か、利用者名の無い https://） */
+function imageUrl(src: unknown, siteUrl: (p: string) => string): string | null {
+  const s = typeof src === 'string' ? src.trim() : '';
+  if (!s || s.length > 2048) return null;
+  if (siteFilePath(s)) return siteUrl(s);
+  return /^https:\/\/[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*(?::\d{1,5})?(?:\/[^\s\\]*)?$/.test(s) ? s : null;
+}
+
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 const num = (v: unknown) => (typeof v === 'number' ? v.toLocaleString('ja-JP') : str(v));
 
 function useImageUrl(src: unknown): string | null {
   const { siteUrl } = useContext(ShapeRoomContext);
-  const s = str(src).trim();
-  if (!s) return null;
-  if (siteFilePath(s)) return siteUrl(s);
-  return /^https:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/[^\s\\]*)?$/.test(s) ? s : null;
+  return imageUrl(src, siteUrl);
 }
 
 function Photo({ src, ratio }: { src: unknown; ratio: number }) {
@@ -120,88 +113,144 @@ function Children({ items, row = false }: { items: unknown; row?: boolean }) {
 const TONE: Record<string, string> = { good: '#1f7a4d', warn: '#9a6400', bad: '#c0442e', info: '#2a6f9e' };
 const TONE_BG: Record<string, string> = { good: 'rgba(31,122,77,0.10)', warn: 'rgba(154,100,0,0.10)', bad: 'rgba(192,68,46,0.10)', info: 'rgba(42,111,158,0.10)' };
 
+/** 送れなかった・分からない時の知らせ（PC の SendProblem と同じ文と動き） */
+function SendProblem({ send, answered, recheck }: { send: SendState; answered: boolean; recheck: () => void }) {
+  if (answered) return null;
+  if (send.status === 'unknown' && send.verifying) {
+    return <View style={styles.problemRow}><ActivityIndicator size="small" color="#6b7a72" /><Text style={styles.muted}>{SEND_VERIFYING}</Text></View>;
+  }
+  if (send.status === 'unknown') {
+    return (
+      <View style={styles.problemRow}>
+        <Text style={styles.problem}>{send.again ? SEND_UNKNOWN_AGAIN : SEND_UNKNOWN_TEXT}</Text>
+        <Pressable onPress={recheck} disabled={!!send.checking} style={styles.checkBtn}><Text style={styles.checkText}>{send.checking ? CHECKING_TEXT : CHECK_BUTTON}</Text></Pressable>
+      </View>
+    );
+  }
+  if (send.status === 'failed') return <Text style={styles.problem}>{send.reason === 'too long' ? TOO_LONG : SEND_FAILED}</Text>;
+  return null;
+}
+
+/** 答えは保存されたが、ダンが読み始めたと確かめられなかった（PC の StartProblem と同じ） */
+function StartProblem({ show, checking, recheck }: { show: boolean; checking: boolean; recheck: () => void }) {
+  if (!show) return null;
+  return (
+    <View style={styles.problemRow}>
+      <Text style={styles.problem}>{START_UNSURE}</Text>
+      <Pressable onPress={recheck} disabled={checking} style={styles.checkBtn}><Text style={styles.checkText}>{checking ? CHECKING_TEXT : CHECK_BUTTON}</Text></Pressable>
+    </View>
+  );
+}
+
+function OptionImage({ uri }: { uri: string }) {
+  const [broken, setBroken] = useState(false);
+  if (broken) return null;
+  return <Image source={{ uri }} onError={() => setBroken(true)} style={styles.optionImage} resizeMode="contain" />;
+}
+
 function ChoiceNode({ p }: { p: Record<string, unknown> }) {
-  const room = useContext(ShapeRoomContext);
-  const messageId = useContext(ShapeMessageContext);
-  const part = useContext(PartContext);
-  const question = str(p.question).trim();
-  const seen = new Set<string>();
-  const options = (Array.isArray(p.options) ? p.options : [])
-    .map((o) => readLook(o))
-    .filter((o): o is NonNullable<typeof o> => !!o && !!o.label.trim() && !seen.has(o.label.trim()) && !!seen.add(o.label.trim()))
-    .map((o) => ({ ...o, label: o.label.replace(/\s+/g, ' ').trim(), color: safeColor(o.color) }));
-  const answered = messageId ? room.answers.get(`${messageId}|${part}`) ?? null : null;
-  const [sent, setSent] = useState<string | null>(null);
-  const picked = answered ?? sent;
-  const canAnswer = !!room.submit && !!messageId && !picked;
+  const env = useAnswerEnv();
+  const { siteUrl } = useContext(ShapeRoomContext);
+  const question = (typeof p.question === 'string' ? p.question : '').trim();
+  // 名前と色は PC と同じ整え方（choiceOptions）。写真は元の値から、PC と同じ範囲だけ
+  const raw = Array.isArray(p.options) ? p.options : [];
+  const images = new Map<string, string>();
+  for (const o of raw) {
+    if (o && typeof o === 'object' && typeof (o as { label?: unknown }).label === 'string') {
+      const u = imageUrl((o as { image?: unknown }).image, siteUrl);
+      if (u) images.set((o as { label: string }).label.replace(/\s+/g, ' ').trim(), u);
+    }
+  }
+  const options = choiceOptions(raw);
+  const cards = options.some((o) => images.has(o.label));
+  const recorded = env.messageId ? findChoiceAnswer(env.utterances, env.messageId, env.part) : null;
+  const { send, answer, run, recheck, startUnsure, checking } = useAnswerSend(env, recorded);
+  const can = canAnswer(env, { complete: true, live: false, streaming: false, answered: !!answer });
+  const disabled = !can || send.status === 'sending' || send.status === 'unknown';
+  const choose = (o: string) => {
+    if (disabled || !env.messageId) return;
+    run(choiceAnswerText(question, o), { message_id: env.messageId, part: env.part, kind: 'choice', value: o, question }, o);
+  };
   return (
     <Box>
-      {question ? <Text style={styles.question}>{question}</Text> : null}
-      <View style={styles.options}>
+      <View style={styles.headRow}>
+        <Text style={[styles.question, { flex: 1 }]}>{question}</Text>
+        {answer ? <Text style={styles.answered}>✓ 答えました</Text> : send.status === 'sending' ? <Text style={styles.answered}>{SENDING_TEXT}</Text> : null}
+      </View>
+      <View style={cards ? styles.optionGrid : styles.options}>
         {options.map((o) => {
-          const on = picked === o.label;
+          const picked = answer === o.label;
+          const sending = send.status === 'sending' && send.value === o.label;
+          const failedPick = send.status === 'failed' && send.value === o.label;
+          const image = images.get(o.label);
           return (
             <Pressable
               key={o.label}
-              disabled={!canAnswer || o.label.length > ANSWER_VALUE_MAX}
-              onPress={() => {
-                if (!room.submit || !messageId) return;
-                setSent(o.label);
-                room.submit(choiceAnswerText(question, o.label), { message_id: messageId, part, kind: 'choice', value: o.label, question });
-              }}
-              style={({ pressed }) => [styles.option, on && styles.optionOn, (pressed || (!!picked && !on)) && styles.optionDim]}
+              disabled={disabled}
+              onPress={() => choose(o.label)}
+              accessibilityState={{ selected: picked, disabled }}
+              style={[cards ? styles.optionCard : styles.option, picked && styles.optionOn, !!answer && !picked && styles.optionDim, failedPick && styles.optionFailed]}
             >
-              {o.color ? <View style={[styles.swatch, { backgroundColor: o.color }]} /> : null}
-              <Text style={[styles.optionText, on && styles.optionTextOn]}>{o.label}</Text>
+              {image ? <OptionImage uri={image} /> : null}
+              <View style={styles.optionLabel}>
+                {sending ? <ActivityIndicator size="small" color="#245e49" /> : null}
+                {o.color ? <View style={[styles.swatch, { backgroundColor: o.color }]} /> : null}
+                <Text style={[styles.optionText, picked && styles.optionTextOn]}>{o.label}</Text>
+              </View>
             </Pressable>
           );
         })}
       </View>
-      {picked ? <Text style={styles.answered}>✓ {answered ? '答えました' : '送っています…'}</Text> : null}
+      <SendProblem send={send} answered={!!answer} recheck={recheck} />
+      <StartProblem show={!!answer && startUnsure} checking={checking} recheck={recheck} />
     </Box>
   );
 }
 
 function InputNode({ p }: { p: Record<string, unknown> }) {
-  const room = useContext(ShapeRoomContext);
-  const messageId = useContext(ShapeMessageContext);
-  const part = useContext(PartContext);
-  const label = str(p.label).trim();
-  const unit = str(p.unit);
-  const [value, setValue] = useState('');
-  const answered = messageId ? room.answers.get(`${messageId}|${part}`) ?? null : null;
-  const [sent, setSent] = useState<string | null>(null);
-  const done = answered ?? sent;
-  const send = () => {
+  const env = useAnswerEnv();
+  const label = (typeof p.label === 'string' ? p.label : '').trim();
+  const isNumber = p.kind === 'number';
+  const unit = typeof p.unit === 'string' ? p.unit : '';
+  const recorded = env.messageId ? findInputAnswer(env.utterances, env.messageId, env.part) : null;
+  const { send, setTooLong, answer, run, recheck, raw, startUnsure, checking } = useAnswerSend(env, recorded);
+  const [value, setValue] = useState(() => raw ?? '');
+  const can = canAnswer(env, { complete: true, live: false, streaming: false, answered: !!answer });
+  const disabled = !can || send.status === 'sending' || send.status === 'unknown';
+  const maxLength = Math.max(1, ANSWER_VALUE_MAX - (isNumber ? unit.length : 0));
+  const doSend = () => {
     const v = value.trim();
-    if (!v || !room.submit || !messageId) return;
-    const val = inputAnswerValue(label, v, unit);
-    if (val.length > ANSWER_VALUE_MAX) return;
-    setSent(val);
-    room.submit(inputAnswerText(label, v, unit), { message_id: messageId, part, kind: 'input', value: val, question: label });
+    if (disabled || !v || !env.messageId) return;
+    const shown = inputAnswerValue(label, v, isNumber ? unit : undefined);
+    if (shown.length > ANSWER_VALUE_MAX) { setTooLong(shown); return; }
+    run(inputAnswerText(label, v, isNumber ? unit : undefined), { message_id: env.messageId, part: env.part, kind: 'input', value: shown, question: label }, shown, v);
   };
   return (
     <Box>
-      {label ? <Text style={styles.question}>{label}</Text> : null}
-      {done ? (
-        <Text style={styles.answered}>✓ {done}{answered ? '' : '（送っています…）'}</Text>
-      ) : (
+      <View style={styles.headRow}>
+        <Text style={[styles.question, { flex: 1 }]}>{label}</Text>
+        {answer ? <Text style={styles.answered}>✓ 答えました: {answer}</Text> : null}
+      </View>
+      {!answer ? (
         <View style={styles.inputRow}>
           <TextInput
             value={value}
             onChangeText={setValue}
-            editable={!!room.submit && !!messageId}
-            placeholder={str(p.placeholder)}
-            keyboardType={p.kind === 'number' ? 'numeric' : 'default'}
-            onSubmitEditing={send}
-            style={styles.input}
+            editable={!disabled}
+            maxLength={maxLength}
+            placeholder={typeof p.placeholder === 'string' ? p.placeholder : ''}
+            keyboardType={isNumber ? 'decimal-pad' : 'default'}
+            onSubmitEditing={doSend}
+            style={[styles.input, disabled && styles.optionDim]}
           />
-          {unit ? <Text style={styles.unit}>{unit}</Text> : null}
-          <Pressable onPress={send} disabled={!value.trim() || !room.submit || !messageId} style={styles.sendBtn}>
-            <Text style={styles.sendText}>送る</Text>
+          {isNumber && unit ? <Text style={styles.unit}>{unit}</Text> : null}
+          <Pressable onPress={doSend} disabled={disabled || !value.trim()} style={[styles.sendBtn, (disabled || !value.trim()) && styles.optionDim]}>
+            <Text style={styles.sendText}>{send.status === 'sending' ? '送っています' : '送る'}</Text>
           </Pressable>
         </View>
-      )}
+      ) : null}
+      <SendProblem send={send} answered={!!answer} recheck={recheck} />
+      <StartProblem show={!!answer && startUnsure} checking={checking} recheck={recheck} />
     </Box>
   );
 }
@@ -216,7 +265,7 @@ function CompareNode({ p }: { p: Record<string, unknown> }) {
     </View>
   );
   return (
-    <Box flat>
+    <Box>
       {str(p.caption) ? <Text style={styles.question}>{str(p.caption)}</Text> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
         <View style={styles.table}>
@@ -230,34 +279,52 @@ function CompareNode({ p }: { p: Record<string, unknown> }) {
   );
 }
 
+const PRIMARY = '#245e49';
+const MUTED = '#6b7a72';
+const toneColor = (tone: 'primary' | 'muted') => (tone === 'primary' ? PRIMARY : MUTED);
+
+/** グラフ（PC と同じ chartGeometry の計算結果を描く。折れ線・棒・負の値・欠けた値が PC と同じ形） */
 function ChartNode({ p }: { p: Record<string, unknown> }) {
-  const labels = (Array.isArray(p.labels) ? p.labels : []).map(str);
-  const series = (Array.isArray(p.series) ? p.series : []).filter((s): s is { name?: unknown; values?: unknown } => !!s && typeof s === 'object');
-  const unit = str(p.unit);
-  const all = series.flatMap((s) => (Array.isArray(s.values) ? s.values.filter((v): v is number => typeof v === 'number') : []));
-  const max = Math.max(1, ...all.map(Math.abs));
-  const colors = ['#245e49', '#7fb39b', '#c08a3e', '#5a7fb0'];
+  const [width, setWidth] = useState(0);
+  const geo = useMemo(() => (width > 0 ? chartGeometry(p, width) : null), [width, p]);
   return (
     <Box>
-      {str(p.title) ? <Text style={styles.question}>{str(p.title)}</Text> : null}
-      {labels.map((l, i) => (
-        <View key={i} style={styles.barRow}>
-          <Text style={styles.barLabel} numberOfLines={1}>{l}</Text>
-          <View style={{ flex: 1, gap: 2 }}>
-            {series.map((s, si) => {
-              const v = Array.isArray(s.values) ? s.values[i] : undefined;
-              if (typeof v !== 'number') return null;
-              return (
-                <View key={si} style={styles.barLine}>
-                  <View style={[styles.bar, { width: `${Math.max(2, (Math.abs(v) / max) * 100)}%`, backgroundColor: colors[si % colors.length] }]} />
-                  <Text style={styles.barValue}>{v.toLocaleString('ja-JP')}{unit}</Text>
-                </View>
-              );
-            })}
-          </View>
+      {typeof p.title === 'string' && p.title ? <Text style={styles.question}>{p.title}</Text> : null}
+      <View style={{ height: CHART_HEIGHT, alignSelf: 'stretch' }} onLayout={(e) => setWidth(Math.round(e.nativeEvent.layout.width))}>
+        {geo ? (
+          <Svg width={geo.width} height={geo.height}>
+            {geo.yTicks.map((t) => (
+              <G key={t.label}>
+                <Line x1={geo.plot.x} x2={geo.plot.x + geo.plot.w} y1={t.y} y2={t.y} stroke="#dbe2da" strokeDasharray={t.zero ? undefined : '3 3'} strokeWidth={t.zero ? 1.2 : 1} />
+                <SvgText x={geo.plot.x - 6} y={t.y + 4} textAnchor="end" fontSize={11} fill={MUTED}>{t.label}</SvgText>
+              </G>
+            ))}
+            {geo.xLabels.map((l, i) => (
+              <SvgText key={`${l.label}-${i}`} x={l.x} y={geo.plot.y + geo.plot.h + 16} textAnchor="middle" fontSize={11} fill={MUTED}>{l.label}</SvgText>
+            ))}
+            {geo.series.map((s) => (geo.kind === 'bar'
+              ? s.bars.map((b, i) => <Rect key={`${s.name}-${i}`} x={b.x} y={b.y} width={b.w} height={b.h} rx={3} fill={toneColor(s.style.tone)} fillOpacity={s.style.opacity} />)
+              : (
+                <G key={s.name}>
+                  <Path d={s.path} fill="none" stroke={toneColor(s.style.tone)} strokeOpacity={s.style.opacity} strokeWidth={2} strokeDasharray={s.style.dash ?? undefined} />
+                  {s.points.map((pt, i) => <Circle key={i} cx={pt.x} cy={pt.y} r={3} fill={toneColor(s.style.tone)} fillOpacity={s.style.opacity} />)}
+                </G>
+              )))}
+          </Svg>
+        ) : null}
+      </View>
+      {geo && geo.series.length > 1 ? (
+        <View style={styles.legend}>
+          {geo.series.map((s) => (
+            <View key={s.name} style={styles.legendItem}>
+              {geo.kind === 'bar'
+                ? <View style={{ width: 12, height: 12, borderRadius: 2, backgroundColor: toneColor(s.style.tone), opacity: s.style.opacity }} />
+                : <Svg width={22} height={8}><Line x1={0} y1={4} x2={22} y2={4} stroke={toneColor(s.style.tone)} strokeOpacity={s.style.opacity} strokeWidth={2} strokeDasharray={s.style.dash ?? undefined} /></Svg>}
+              <Text style={styles.small}>{s.name}</Text>
+            </View>
+          ))}
         </View>
-      ))}
-      {series.length > 1 ? <Text style={styles.small}>{series.map((s, si) => `${['■', '■', '■', '■'][si % 4]} ${str(s.name)}`).join('　')}</Text> : null}
+      ) : null}
     </Box>
   );
 }
@@ -410,6 +477,18 @@ const styles = StyleSheet.create({
   optionTextOn: { color: '#fff', fontWeight: '600' },
   swatch: { width: 16, height: 16, borderRadius: 4, borderWidth: 1, borderColor: 'rgba(0,0,0,0.35)' },
   answered: { fontSize: 12, color: '#59685f' },
+  headRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  problemRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  problem: { fontSize: 12, color: '#c0442e' },
+  checkBtn: { borderWidth: 1, borderColor: '#dbe2da', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
+  checkText: { fontSize: 12, color: '#1f2724' },
+  optionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  optionCard: { width: '47%', borderWidth: 1, borderColor: '#b9c7bf', borderRadius: 10, padding: 6, gap: 6, backgroundColor: '#fff' },
+  optionImage: { width: '100%', aspectRatio: 4 / 3, borderRadius: 6, backgroundColor: '#eef2ee' },
+  optionLabel: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
+  optionFailed: { borderColor: 'rgba(192,68,46,0.6)' },
+  legend: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', columnGap: 16, rowGap: 4 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   inputRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   input: { flex: 1, borderWidth: 1, borderColor: '#b9c7bf', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, fontSize: 15, backgroundColor: '#fff', color: '#1f2724' },
   unit: { fontSize: 14, color: '#59685f' },

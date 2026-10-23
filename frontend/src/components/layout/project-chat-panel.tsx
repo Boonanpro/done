@@ -68,6 +68,7 @@ import { OutboundMessageCard, OutboundEventLine, parseOutboundCardMarker, isOutb
 import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRecheck, type ShapeSubmit } from '@/components/chat/chat-shapes';
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
+import { JOB_STATE_TEXT, readJobReport, type JobReport } from '@/lib/chat-shapes/job-report';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -158,8 +159,7 @@ function LiveLine({ text }: { text: string }) {
   );
 }
 
-// 作業中のターン。作業の一覧を出さない（既定）時は、途中で出したファイル・画像と、最後の道具の後に書いている返事だけを出し、
-// その下に作業中の1行。出す時（SHOW_WORK）は、終わったターンと同じ並び（文章＋畳んだ作業の一覧）にスピナーが付く。
+// 作業中のターン。作業の一覧を出さない（既定）時は、途中で出したファイル・画像と作業中の1行だけを出す（文章は出さない）。出す時（SHOW_WORK）は、終わったターンと同じ並び（文章＋畳んだ作業の一覧）にスピナーが付く。
 // 終わるとこの枠は消え、保存された返事に替わる。
 function InlineProcessBlock({
   steps,
@@ -174,13 +174,12 @@ function InlineProcessBlock({
   const blocks = stepsToBlocks(steps);
   if (!showWork) {
     if (!isLive) return null;
-    const lastTool = blocks.reduce((acc, b, i) => (b.type === 'tool' || b.type === 'error' ? i : acc), -1);
-    const media = blocks.slice(0, lastTool + 1).flatMap((b) => (b.type === 'text' ? mediaTags(b.text || '') : []));
-    const tail = blocks.slice(lastTool + 1).flatMap((b) => (b.type === 'text' && b.text && b.text !== 'Thinking...' ? [b.text] : [])).join('\n\n');
+    // 文章は出さない（途中の説明か書きかけの返事かは、終わるまで分からない。返事は保存されてから出る）。
+    // 途中で出したファイル・画像・動画だけは今までどおり出す
+    const media = blocks.flatMap((b) => (b.type === 'text' ? mediaTags(b.text || '') : []));
     return (
       <div className="my-1">
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} /> : null}
-        {tail.trim() ? <TurnTextSegment text={tail} live /> : null}
         <LiveLine text={liveLine(steps)} />
       </div>
     );
@@ -495,6 +494,32 @@ function formatDateSeparator(d: Date): string {
   return d.getFullYear() === now.getFullYear() ? base : `${d.getFullYear()}年${base}`;
 }
 
+// 並行作業の報告の札。押すと報告の全文が開く（スマホ mobile/App.tsx・開発室のチャットも同じ形）
+function JobReportCard({ report, onImageClick, messageId }: { report: JobReport; onImageClick?: (url: string) => void; messageId?: string }) {
+  const [open, setOpen] = useState(false);
+  const stopped = report.state === 'stopped';
+  return (
+    <div className="my-0.5" data-job-report={report.state}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="inline-flex max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 px-3 py-1 text-sm text-muted-foreground transition-colors hover:bg-muted"
+      >
+        {stopped ? <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-500" /> : <Check className="h-3.5 w-3.5 shrink-0 text-green-500" />}
+        <span className="min-w-0 truncate font-medium text-foreground">{report.title}</span>
+        <span className="shrink-0">{JOB_STATE_TEXT[report.state]}</span>
+        {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+      </button>
+      {open ? (
+        <div className="mt-2 rounded-xl border border-border bg-card/60 p-3">
+          <TurnTextSegment text={report.body} onImageClick={onImageClick} messageId={messageId} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, onAnswer }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void; onAnswer?: (text: string) => void }) {
 
   // 追い連絡の仮送信状態（クライアント側フラグ）。半透明＋バッジで表示。
@@ -617,6 +642,9 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
   if (msg.sender_type === 'ai' && isCollabLogContent(msg.content)) {
     return <OutboundEventLine content={msg.content || ''} />;
   }
+  // 並行作業の報告は1行の札（作業の名前と「終わった／止まった」。押すと全文）。本文には流さない（lib/chat-shapes/job-report.ts）
+  const jobReport = msg.sender_type === 'ai' ? readJobReport(msg.ai_context, msg.content) : null;
+  if (jobReport) return <JobReportCard report={jobReport} onImageClick={onImageClick} messageId={msg.id} />;
 
   const rawContent = msg.content || '';
   // Extract proposal blocks and split content into segments

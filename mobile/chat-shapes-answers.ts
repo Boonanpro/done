@@ -1,6 +1,6 @@
-// スマホのアプリ用: 部品（選択ボタン・入力欄）の答えの文面と部品の鍵。
-// frontend/src/lib/chat-shapes/answers.ts と同じ中身（アプリは別のパッケージなので取り込めない。両方を同じに保つ。
-// tests/chat_shapes_program.test.mjs が同じ中身であることを見る）。
+// スマホのアプリ用の写し: frontend/src/lib/chat-shapes/answers.ts と同じ中身（同じフォルダの読み込みの名前だけ違う）。
+// frontend/scripts/sync-mobile-chat-shapes.mjs が作る。手で直さず、元を直して写し直す
+// （tests/chat_shapes_program.test.mjs が同じ中身かを見る）。
 /**
  * 部品（選択ボタン・入力欄）の答えを「本人の発言」にする時の文面と、
  * 部屋の記録からその答えを探し直す（再読み込みしても答えた状態が分かる）ための関数。

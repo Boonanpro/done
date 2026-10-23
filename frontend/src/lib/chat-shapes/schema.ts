@@ -126,14 +126,15 @@ export const ChartProps = z
     kind: z.enum(['line', 'bar']).describe('line=推移, bar=比較'),
     labels: z.array(z.string()).describe('横軸の目盛り（月・項目名など）'),
     series: z
-      .array(z.object({ name: z.string(), values: z.array(z.number()) }))
-      .describe('系列。values は labels と同じ個数'),
+      .array(z.object({ name: z.string(), values: z.array(z.number().nullable()) }))
+      .describe('系列。values は labels と同じ個数。値の無い所は null（折れ線はそこで切れ、棒は描かない）'),
     unit: z.string().optional().describe('値の単位'),
     title: z.string().optional().describe('グラフの題'),
   })
   .refine((v) => v.labels.length >= 1 && v.series.length >= 1, { message: '目盛りか系列が無い' })
   .refine((v) => v.series.every((s) => s.values.length === v.labels.length), { message: '値の数が目盛りの数と違う' })
-  .refine((v) => v.series.every((s) => s.values.every((x) => Number.isFinite(x))), { message: '数値でない値がある' })
+  .refine((v) => v.series.every((s) => s.values.every((x) => x === null || Number.isFinite(x))), { message: '数値でない値がある' })
+  .refine((v) => v.series.some((s) => s.values.some((x) => x !== null)), { message: '値が1つも無い' })
   .refine((v) => {
     const names = v.series.map((s) => s.name.trim());
     return names.every((n) => n.length > 0 && n !== 'label') && new Set(names).size === names.length;

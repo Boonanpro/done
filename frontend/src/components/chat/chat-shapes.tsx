@@ -46,9 +46,6 @@ import '@/lib/chat-shapes/no-openui-devtools';
 import {
   Renderer, createLibrary, defineComponent, useIsStreaming, useRenderNode, type ComponentRenderer, type ParseResult,
 } from '@openuidev/react-lang';
-import {
-  Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
-} from 'recharts';
 import { AlertCircle, Check, ExternalLink, Loader2, Send } from 'lucide-react';
 
 import {
@@ -61,12 +58,13 @@ import {
   choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, readAnswerTo,
   type AnswerTo, type UserUtterance,
 } from '@/lib/chat-shapes/answers';
+import { SEND_BUSY, SEND_UNKNOWN, type AskSaved, type SubmitAnswer } from '@/lib/chat-shapes/answer-sends';
 import {
-  PAGE, SEND_BUSY, SEND_UNKNOWN, STALE_SENDING_MS, answerSendHere, answerSendKey, answerSendVersion, attachAnswerSend, getAnswerSend,
-  isGone, mustCheckBeforePress, needsCheck, noteInRecord, recheckAnswerSend, resumeAnswerSend, sendAnswer, subscribeAnswerSends,
-  type AskSaved, type SubmitAnswer,
-} from '@/lib/chat-shapes/answer-sends';
+  CHECK_BUTTON, CHECKING_TEXT, SEND_FAILED, SEND_UNKNOWN_AGAIN, SEND_UNKNOWN_TEXT, SEND_VERIFYING, SENDING_TEXT, START_UNSURE, TOO_LONG,
+  canAnswer, useAnswerSend, type AnswerEnv, type SendState,
+} from '@/lib/chat-shapes/use-answer-send';
 import { readLook, safeImageUrl, safeLinkUrl, type Look } from '@/lib/chat-shapes/plain';
+import { CHART_HEIGHT, chartGeometry, type ChartGeometry } from '@/lib/chat-shapes/chart-geometry';
 
 // --- 答えの経路（部屋の本人の発言と、発言を送る関数） -------------------------------------
 
@@ -124,13 +122,6 @@ export function ShapeAnswerProvider({
   return <ShapeAnswerContext.Provider value={value}>{children}</ShapeAnswerContext.Provider>;
 }
 
-/** 新しい送信 ID（保存される行の id。サーバーは UUID の形の時だけそのまま使う） */
-function newSendId(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
-  const h = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
-}
-
 /** 1つの部品ブロックの素性: どの返事（id）のどの部品（part）か、閉じまで届いたか、ライブ枠（保存前）か */
 type ShapeMeta = { messageId: string | null; part: string; complete: boolean; live: boolean };
 const ShapeMetaContext = createContext<ShapeMeta>({ messageId: null, part: '', complete: false, live: false });
@@ -148,12 +139,6 @@ function useBox(extra = ''): string {
   const inside = useContext(InsideContext);
   return inside ? `my-1 w-full max-w-full ${extra}` : `${CARD} ${extra}`;
 }
-const SEND_FAILED = '送れませんでした。もう一度押してください';
-const SEND_UNKNOWN_TEXT = '送れたか確かめられませんでした';
-const SEND_UNKNOWN_AGAIN = 'まだ確かめられません。通信が戻ってからもう一度押してください';
-const SEND_VERIFYING = '前に送った答えが届いたか確かめています…';
-const START_UNSURE = '答えは届きましたが、ダンが読み始めたか確かめられませんでした';
-const TOO_LONG = `長すぎます（単位を含めて${ANSWER_VALUE_MAX}文字まで）`;
 
 function Answered({ text }: { text: string }) {
   return (
@@ -189,107 +174,19 @@ function Failed({ text, children }: { text: string; children?: ReactNode }) {
   );
 }
 
-/**
- * 送信の状態（画面に出す形）: 押していない / 送信中 / 保存された（置き場の事実。行がこのタブの記録に載っていない間は
- * 置き場の答えを出す） / 失敗（保存されていない。選び直せる。送り直しも同じ id） / 保存できたか分からない（その id の
- * 保存を聞き直す。verifying は作り直された部品が押せるようにする前の確かめ）。
- * id はこの答えの送信 ID（保存されたと分かるまで変えない）。長すぎて送らなかった失敗は前の送信の id を持つ
- */
-type SendState =
-  | { status: 'idle' }
-  | { status: 'sending'; value: string; id: string }
-  | { status: 'saved'; value: string; id: string }
-  | { status: 'failed'; value: string; id?: string; reason?: string }
-  | { status: 'unknown'; value: string; id: string; checking?: boolean; again?: boolean; verifying?: boolean };
-
-/** 答えられる条件: 送る先がある・本人と部屋が分かる・保存された返事・閉じまで届いた・ライブ枠でない・まだ答えていない */
+/** 答えられる条件（use-answer-send.ts canAnswer。スマホと同じ） */
 function useCanAnswer(answered: boolean) {
-  const { submit, ownerId, roomId } = useContext(ShapeAnswerContext);
-  const { messageId, complete, live } = useContext(ShapeMetaContext);
+  const env = useAnswerEnv();
+  const { complete, live } = useContext(ShapeMetaContext);
   const streaming = useIsStreaming();
-  return !!submit && !!ownerId && !!roomId && !!messageId && complete && !live && !streaming && !answered;
+  return canAnswer(env, { complete, live, streaming, answered });
 }
 
-/**
- * 答えの送信と「答えた」の判定。
- * - recorded: 部屋の記録（照合情報つきの保存済み発言）にあるこの部品への答え。これが根拠
- * - 送信の状態は置き場（answer-sends.ts）にある。保存済みの行がまだ記録に載っていない間は、置き場の答えを出す。
- *   このタブの記録に一度載った後で消えた・照会で無いと分かった（取り消し）時だけ、押し直せる（新しい ID）
- * - 部品が描かれた時に1回、決着していない送信があればその ID の保存をサーバーに確かめる（押せるようにする前の確かめは
- *   この時だけ。ほかのタブからの取り込みでは聞かない）。確かめが済むまでと、分からない間は押せない
- */
-function useAnswerSend(recorded: string | null) {
-  const { utterances, submit, recheck: askSaved, ownerId, roomId } = useContext(ShapeAnswerContext);
+/** この部品の答えの置き場所（部屋の文脈＋この部品の素性） */
+function useAnswerEnv(): AnswerEnv {
+  const { utterances, submit, recheck, ownerId, roomId } = useContext(ShapeAnswerContext);
   const { messageId, part } = useContext(ShapeMetaContext);
-  const key = ownerId && roomId && messageId ? answerSendKey(ownerId, roomId, messageId, part) : null;
-  useSyncExternalStore(subscribeAnswerSends, () => answerSendVersion(key), () => 0);
-  const entry = getAnswerSend(key);
-  const h = answerSendHere(key);
-  // 長すぎて送らなかった値（送っていないので置き場は変えない）
-  const [tooLong, setTooLong] = useState<string | null>(null);
-  const inRecord = !!entry && utterances.some((u) => u.id === entry.id);
-  const gone = !!entry && isGone(entry, inRecord);
-  // この部品が描いている間、送り先を置き場に結び付ける（開始の確かめはその間だけ続く）
-  useEffect(() => (key ? attachAnswerSend(key, { ask: askSaved, submit }) : undefined), [key, askSaved, submit]);
-  useEffect(() => {
-    if (entry && inRecord) noteInRecord(entry.id);   // このタブの記録に載った: このタブで保存を確かめた
-  }, [entry, inRecord]);
-  // 描かれた時に1回だけ確かめる（取り込みで変わっても聞き直さない）
-  const [mountChecked, setMountChecked] = useState(false);
-  useEffect(() => {
-    if (!key) return undefined;
-    let alive = true;
-    const e = getAnswerSend(key);
-    if (e && needsCheck(e, utterances.some((u) => u.id === e.id), answerSendHere(key).sending)) {
-      void resumeAnswerSend(key).finally(() => { if (alive) setMountChecked(true); });
-    } else setMountChecked(true);
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-  // ほかのタブ・前のページの「送信中」が長く変わらない: その通信はもう無いとみなして「確かめる」を出す（聞きはしない）
-  const [, setTick] = useState(0);
-  const otherSending = !!entry && entry.status === 'sending' && !h.sending;
-  const staleIn = otherSending ? STALE_SENDING_MS - (Date.now() - entry.at) : 0;
-  useEffect(() => {
-    if (!otherSending || staleIn <= 0) return undefined;
-    const t = setTimeout(() => setTick((x) => x + 1), staleIn + 50);
-    return () => clearTimeout(t);
-  }, [otherSending, staleIn]);
-  const verifying = !mountChecked && !!entry && !gone && mustCheckBeforePress(entry, h.sending);
-  const answer = recorded ?? (entry && entry.status === 'saved' && !gone && !inRecord ? entry.value : null);
-  let send: SendState;
-  if (tooLong !== null) send = { status: 'failed', value: tooLong, reason: 'too long', id: entry?.id };
-  else if (!entry || gone) send = { status: 'idle' };
-  else if (entry.status === 'saved') send = { status: 'saved', value: entry.value, id: entry.id };
-  else if (verifying || h.checking) send = { status: 'unknown', value: entry.value, id: entry.id, checking: true, verifying };
-  else if (entry.status === 'sending' && (h.sending || staleIn > 0)) send = { status: 'sending', value: entry.value, id: entry.id };
-  else if (entry.status === 'sending' || entry.status === 'unknown') send = { status: 'unknown', value: entry.value, id: entry.id, again: h.unsure === entry.id };
-  else send = { status: 'failed', value: entry.value, id: entry.id };
-  const run = (text: string, answerTo: AnswerTo, value: string, raw?: string) => {
-    if (!submit || !key) return;
-    const prev = getAnswerSend(key);
-    // 保存されたと分かっていない送信の続きは同じ送信 ID（二重に保存されない）。新しい ID は、初めて（置き場に無い）か、
-    // この表示が保存を確かめた後で取り消されたと確かめた時だけ（前の ID を prev に持つ）
-    let id: string;
-    let prevIds: string[] | undefined;
-    if (!prev) id = newSendId();
-    else if (prev.status === 'saved') {
-      if (!isGone(prev, utterances.some((u) => u.id === prev.id))) return;
-      id = newSendId();
-      prevIds = [prev.id, ...(prev.prev ?? [])].slice(0, 10);
-    } else {
-      id = prev.id;
-      prevIds = prev.prev;
-    }
-    setTooLong(null);
-    sendAnswer(key, { id, value, text, answerTo, raw, page: PAGE, ...(prevIds ? { prev: prevIds } : {}) });
-  };
-  // 保存できたか分からない時・ダンが読み始めたか分からない時の「確かめる」
-  const recheck = () => {
-    if (key && entry && !h.checking) void recheckAnswerSend(key);
-  };
-  const startUnsure = !!entry && entry.status === 'saved' && entry.start === 'pending' && h.gaveUp === entry.id && !gone;
-  return { send, setTooLong, answer, run, recheck, raw: entry?.raw, startUnsure, checking: h.checking };
+  return { utterances, submit, askSaved: recheck, ownerId, roomId, messageId, part };
 }
 
 /** 答えは保存されたが、ダンの処理が始まったと確かめられないまま確かめを使い切った */
@@ -339,7 +236,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
   const imageOf = (o: Look) => (looks && o.image && !broken.has(o.image) ? o.image : null);
   const cards = options.some((o) => imageOf(o));
   const recorded = messageId ? findChoiceAnswer(utterances, messageId, part) : null;
-  const { send, answer, run, recheck, startUnsure, checking } = useAnswerSend(recorded);
+  const { send, answer, run, recheck, startUnsure, checking } = useAnswerSend(useAnswerEnv(), recorded);
   const canAnswer = useCanAnswer(!!answer);
   const disabled = !canAnswer || send.status === 'sending' || send.status === 'unknown';
   const choose = (o: string) => {
@@ -402,7 +299,7 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   const { messageId, part } = useContext(ShapeMetaContext);
   const inputId = useId();
   const recorded = messageId ? findInputAnswer(utterances, messageId, part) : null;
-  const { send, setTooLong, answer, run, recheck, raw, startUnsure, checking } = useAnswerSend(recorded);
+  const { send, setTooLong, answer, run, recheck, raw, startUnsure, checking } = useAnswerSend(useAnswerEnv(), recorded);
   // 作り直された部品は、決着していない送信で打った値を入力欄に戻す
   const [value, setValue] = useState(() => raw ?? '');
   const canAnswer = useCanAnswer(!!answer);
@@ -529,101 +426,88 @@ const StepsView: ComponentRenderer<StepsInput> = ({ props }) => {
   );
 };
 
-// 単色のテーマ（白のアクセント）に合わせ、系列は同じ色の濃さと線種で分ける。凡例も同じ見た目で描く
-const SERIES_STYLE = [
-  { color: 'var(--primary)', opacity: 1, dash: undefined as string | undefined },
-  { color: 'var(--primary)', opacity: 0.55, dash: '6 3' },
-  { color: 'var(--primary)', opacity: 0.3, dash: '2 3' },
-  { color: 'var(--muted-foreground)', opacity: 0.8, dash: '4 2' },
-];
+// グラフは形の計算（lib/chat-shapes/chart-geometry.ts）をスマホと共有し、同じ計算結果を SVG で描く（2026-10-23。
+// それまでの recharts は PC だけで、スマホと形が違った）。色は画面の配色（primary / muted-foreground）。
+const toneColor = (tone: 'primary' | 'muted') => (tone === 'primary' ? 'var(--primary)' : 'var(--muted-foreground)');
 
-function SeriesLegend({ names, kind }: { names: string[]; kind: 'line' | 'bar' }) {
+/** 要素の幅（変わったら読み直す）。サーバーで描く時は 0 */
+function useWidth<T extends HTMLElement>(): [(el: T | null) => void, number] {
+  const [el, setEl] = useState<T | null>(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    if (!el) return undefined;
+    setW(el.clientWidth);
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => setW(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return [setEl, w];
+}
+
+function SeriesLegend({ geo }: { geo: ChartGeometry }) {
   return (
     <ul className="mt-1 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground" data-shape-legend>
-      {names.map((n, i) => {
-        const st = SERIES_STYLE[i % SERIES_STYLE.length];
-        return (
-          <li key={n} className="inline-flex items-center gap-1.5">
-            {kind === 'bar' ? (
-              <span className="inline-block h-3 w-3 rounded-sm" style={{ background: st.color, opacity: st.opacity }} aria-hidden />
-            ) : (
-              <svg width="22" height="8" aria-hidden><line x1="0" y1="4" x2="22" y2="4" stroke={st.color} strokeOpacity={st.opacity} strokeWidth="2" strokeDasharray={st.dash} /></svg>
-            )}
-            <span>{n}</span>
-          </li>
-        );
-      })}
+      {geo.series.map((s) => (
+        <li key={s.name} className="inline-flex items-center gap-1.5">
+          {geo.kind === 'bar' ? (
+            <span className="inline-block h-3 w-3 rounded-sm" style={{ background: toneColor(s.style.tone), opacity: s.style.opacity }} aria-hidden />
+          ) : (
+            <svg width="22" height="8" aria-hidden><line x1="0" y1="4" x2="22" y2="4" stroke={toneColor(s.style.tone)} strokeOpacity={s.style.opacity} strokeWidth="2" strokeDasharray={s.style.dash ?? undefined} /></svg>
+          )}
+          <span>{s.name}</span>
+        </li>
+      ))}
     </ul>
   );
 }
 
 const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
   const box = useBox();
-  const labels = (props.labels || []).map((l) => (typeof l === 'string' ? l : String(l ?? '')));
-  const series = (props.series || []).filter((s) => s && typeof s === 'object' && Array.isArray(s.values));
-  const unit = props.unit || '';
-  const names = series.map((s, si) => s.name || `系列${si + 1}`);
-  // まだ届いていない・数値でない値は null（描かない）。0 にすると存在しない下降が見える
-  const data = useMemo(
-    () => labels.map((label, i) => {
-      const row: Record<string, string | number | null> = { label };
-      series.forEach((s, si) => {
-        const v = s.values[i];
-        row[names[si]] = typeof v === 'number' && Number.isFinite(v) ? v : null;
-      });
-      return row;
-    }),
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const geo = useMemo(
+    () => (width > 0 ? chartGeometry(props, width) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [JSON.stringify(labels), JSON.stringify(series)],
+    [width, props.kind, props.unit, JSON.stringify(props.labels), JSON.stringify(props.series)],
   );
-  const fmt = (v: unknown) => (typeof v === 'number' ? `${v.toLocaleString('ja-JP')}${unit}` : v == null ? '—' : `${String(v)}${unit}`);
-  const kind: 'line' | 'bar' = props.kind === 'line' ? 'line' : 'bar';
-  const common = { data, margin: { top: 8, right: 12, left: 0, bottom: 0 } };
-  const axisStyle = { fontSize: 11, fill: 'var(--muted-foreground)' };
-  const tooltipStyle = {
-    contentStyle: { background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 },
-    labelStyle: { color: 'var(--foreground)' },
-    itemStyle: { color: 'var(--foreground)' },
-  };
+  const ready = !!geo && geo.series.length > 0 && (props.labels || []).length > 0;
   return (
-    <div className={box} data-shape="Chart">
+    <div className={box} data-shape="Chart" data-chart-kind={props.kind === 'line' ? 'line' : 'bar'}>
       {props.title ? <div className="mb-1 text-sm font-semibold">{props.title}</div> : null}
-      <div className="h-[220px] w-full">
-        {data.length > 0 && names.length > 0 ? (
-          <ResponsiveContainer width="100%" height="100%">
-            {kind === 'line' ? (
-              <LineChart {...common}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" tick={axisStyle} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
-                <YAxis tick={axisStyle} axisLine={false} tickLine={false} width={72} tickFormatter={(v) => fmt(v)} />
-                <Tooltip {...tooltipStyle} formatter={(v) => fmt(v)} />
-                {names.length > 1 ? <Legend content={() => <SeriesLegend names={names} kind="line" />} /> : null}
-                {names.map((n, i) => {
-                  const st = SERIES_STYLE[i % SERIES_STYLE.length];
-                  return (
-                    <Line key={n} type="monotone" dataKey={n} stroke={st.color} strokeOpacity={st.opacity} connectNulls={false}
-                      strokeWidth={2} strokeDasharray={st.dash} dot={{ r: 3, strokeOpacity: st.opacity }} isAnimationActive={false} />
-                  );
-                })}
-              </LineChart>
-            ) : (
-              <BarChart {...common}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" tick={axisStyle} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
-                <YAxis tick={axisStyle} axisLine={false} tickLine={false} width={72} tickFormatter={(v) => fmt(v)} />
-                <Tooltip {...tooltipStyle} cursor={{ fill: 'var(--muted)' }} formatter={(v) => fmt(v)} />
-                {names.length > 1 ? <Legend content={() => <SeriesLegend names={names} kind="bar" />} /> : null}
-                {names.map((n, i) => {
-                  const st = SERIES_STYLE[i % SERIES_STYLE.length];
-                  return <Bar key={n} dataKey={n} fill={st.color} fillOpacity={st.opacity} radius={[4, 4, 0, 0]} isAnimationActive={false} />;
-                })}
-              </BarChart>
-            )}
-          </ResponsiveContainer>
+      <div ref={ref} className="w-full" style={{ height: CHART_HEIGHT }}>
+        {ready && geo ? (
+          <svg width={geo.width} height={geo.height} role="img" aria-label={props.title || 'グラフ'}>
+            {geo.yTicks.map((t) => (
+              <g key={t.label}>
+                <line x1={geo.plot.x} x2={geo.plot.x + geo.plot.w} y1={t.y} y2={t.y} stroke="var(--border)" strokeDasharray={t.zero ? undefined : '3 3'} strokeWidth={t.zero ? 1.2 : 1} />
+                <text x={geo.plot.x - 6} y={t.y + 4} textAnchor="end" fontSize="11" fill="var(--muted-foreground)">{t.label}</text>
+              </g>
+            ))}
+            {geo.xLabels.map((l, i) => (
+              <text key={`${l.label}-${i}`} x={l.x} y={geo.plot.y + geo.plot.h + 16} textAnchor="middle" fontSize="11" fill="var(--muted-foreground)">{l.label}</text>
+            ))}
+            {geo.series.map((s) => (geo.kind === 'bar'
+              ? s.bars.map((b, i) => (
+                <rect key={`${s.name}-${i}`} x={b.x} y={b.y} width={b.w} height={b.h} rx={3} fill={toneColor(s.style.tone)} fillOpacity={s.style.opacity}>
+                  <title>{`${b.label} ${s.name}: ${geo.format(b.value)}`}</title>
+                </rect>
+              ))
+              : (
+                <g key={s.name}>
+                  <path d={s.path} fill="none" stroke={toneColor(s.style.tone)} strokeOpacity={s.style.opacity} strokeWidth={2} strokeDasharray={s.style.dash ?? undefined} />
+                  {s.points.map((pt, i) => (
+                    <circle key={i} cx={pt.x} cy={pt.y} r={3} fill={toneColor(s.style.tone)} fillOpacity={s.style.opacity}>
+                      <title>{`${pt.label} ${s.name}: ${geo.format(pt.value)}`}</title>
+                    </circle>
+                  ))}
+                </g>
+              )))}
+          </svg>
         ) : (
           <div className="h-full animate-pulse rounded-lg bg-muted/40" />
         )}
       </div>
+      {ready && geo && geo.series.length > 1 ? <SeriesLegend geo={geo} /> : null}
     </div>
   );
 };
