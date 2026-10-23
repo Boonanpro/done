@@ -283,3 +283,18 @@ def test_a_venv_copy_points_its_scripts_at_itself(tmp_path, monkeypatch):
     assert str(src) not in (dst / 'bin' / 'activate').read_text()
     assert os.readlink(dst / 'bin' / 'python3') == str(dst / 'bin' / 'python')
     assert (src / 'bin' / 'pip').read_text().startswith(f'#!{src}/bin/python')           # the shared one untouched
+
+
+def test_a_stop_between_making_a_branch_and_noting_it_makes_no_second_copy(world, monkeypatch):
+    """Killed right after the branch was made and before the journal line (2026-10-24, a hard kill in the copy of the
+    running folder left wip/20261017-unknown and wip/20261017-unknown-2 with the same files)."""
+    github, folder = world
+    write(folder, 'app/core.py', 'work\n')
+    real = rescue._write_journal
+    monkeypatch.setattr(rescue, '_write_journal', lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        rescue.apply(folder, rescue.plan(folder, 0, 'origin/main'), 0)
+    monkeypatch.setattr(rescue, '_write_journal', real)
+    rescue.apply(folder, rescue.plan(folder, 0, 'origin/main'), 0)
+    assert len(git(folder, 'branch', '--list', 'wip/*').stdout.split()) == 1
+    assert (folder / 'app/core.py').read_text() == 'one\n'

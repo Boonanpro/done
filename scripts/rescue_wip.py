@@ -334,6 +334,17 @@ def _commit(repo, parent, entries, msg):
     return _out(repo, *IDENT, 'commit-tree', tree, '-p', parent, '-m', msg).decode().strip()
 
 
+def _same_branch(repo, branch, commit):
+    """An existing branch named branch or branch-<n> whose tip holds the same files on the same parent as commit."""
+    want = _out(repo, 'rev-parse', f'{commit}^{{tree}}', f'{commit}^').decode().split()
+    refs = _git(repo, 'for-each-ref', '--format=%(refname:short)', f'refs/heads/{branch}', f'refs/heads/{branch}-*').stdout
+    for name in refs.decode().split():
+        got = _git(repo, 'rev-parse', f'{name}^{{tree}}', f'{name}^').stdout.decode().split()
+        if got == want:
+            return name, _out(repo, 'rev-parse', name).decode().strip()
+    return None
+
+
 def _free_branch(repo, branch):
     if _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}').returncode:
         return branch
@@ -355,8 +366,6 @@ def save(repo, group, append=False):
     old = None
     if append and _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}').returncode == 0:
         old = _out(repo, 'rev-parse', f'refs/heads/{branch}').decode().strip()
-    elif not append:
-        branch = _free_branch(repo, branch)
     files = [f['path'] for f in group['files']]
     staged, here = {}, {}
     for f in group['files']:
@@ -372,7 +381,13 @@ def save(repo, group, append=False):
     commit = _commit(repo, parent, here, f'wip: rescued from the running folder ({len(files)} files)\n\n{about}')
     if commit == (old or head):
         return branch, commit, {}                                 # nothing that differs: nothing to save
-    _out(repo, 'update-ref', f'refs/heads/{branch}', commit, old or '')   # create (or move only from what we read)
+    same = None if append else _same_branch(repo, branch, commit)
+    if same:                     # a run stopped after making this branch and before noting it: use that one
+        branch, commit = same
+    else:
+        if not append:
+            branch = _free_branch(repo, branch)
+        _out(repo, 'update-ref', f'refs/heads/{branch}', commit, old or '')   # create (or move only from what we read)
     saved = {}
     for rel in files:
         want = here[rel]
@@ -502,7 +517,7 @@ def apply(repo, p, quiet):
     for g, branch, commit, saved in saved_all:
         kept = [rel for rel in saved if result[rel] == 'changed']
         failed = [rel for rel in saved if result[rel] == 'failed']
-        name = branch or next((done[k] for k in saved.items() if k in done), '(saved before)')
+        name = branch or next((done[k] for k in done if k[0] in saved), '(saved before)')
         lines.append(f"{name} {(commit or '')[:8]}: moved {len(saved) - len(kept) - len(failed)}"
                      + (f", left here (changed meanwhile) {kept}" if kept else '')
                      + (f", saved but not put back (run again) {failed}" if failed else ''))
