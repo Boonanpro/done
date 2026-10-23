@@ -16,11 +16,15 @@ Here a copy is judged by what it was built from, not by who touched what:
   redeploys the ones that differ once the folder has been quiet for a minute.
 * ``release_state()`` tells the UI whether the copy is current, so a copy that
   is known to be old is never presented as the artifact.
+* Every pass writes what it saw to ``.tmp/artifact-releases.json``.  The phone
+  app opens this copy, so ``scripts/artifact_seen.py`` reads it to tell whether
+  the owner's phone shows the current files yet (2026-10-18).
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -41,6 +45,7 @@ ARTIFACTS_ROOT = PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts"
 _SKIP_DIRS = {"_server", "__pycache__", "node_modules", ".next"}
 _SKIP_FILES = {"release.gen.json", "release.gen.json.tmp"}
 
+SNAPSHOT = PROJECT_ROOT / ".tmp" / "artifact-releases.json"
 QUIET_SECONDS = 60        # the folder must stop changing this long before a rebuild
 LOOP_SECONDS = 60
 FAILURE_BACKOFF = 30 * 60  # a source that failed to deploy is retried after this
@@ -191,6 +196,30 @@ def _published_rows() -> list[dict[str, Any]]:
     return out
 
 
+def write_snapshot(rows: list[dict[str, Any]], running: set[str]) -> None:
+    """What the published copies were built from, for scripts/artifact_seen.py (no DB access there)."""
+    sites = {}
+    for row in rows:
+        sites[row["slug"]] = {
+            "artifact_id": str(row["artifact_id"]),
+            "status": row.get("status"),
+            "shared_url": row.get("shared_url"),
+            "published_at": row.get("published_at"),
+            "release_number": row.get("release_number"),
+            "job_status": {k: v for k, v in (row.get("job_status") or {}).items()
+                           if k in ("source_fingerprint", "promoted_at")} if isinstance(row.get("job_status"), dict) else {},
+            "deploying": str(row["artifact_id"]) in running,
+        }
+    data = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "sites": sites}
+    try:
+        SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SNAPSHOT.with_name(f"{SNAPSHOT.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, SNAPSHOT)
+    except OSError as exc:
+        logger.warning("[artifact-fresh] snapshot write failed: %s", exc)
+
+
 def reconcile_once(now: Optional[float] = None) -> list[str]:
     """Schedule a rebuild for the first published site whose files changed.
 
@@ -201,9 +230,12 @@ def reconcile_once(now: Optional[float] = None) -> list[str]:
     from app.services.artifact_publication_service import schedule_dedicated_deploy
 
     now = now or time.time()
-    if _deploy_running():
+    running = _deploy_running()
+    rows = _published_rows()
+    write_snapshot(rows, running)
+    if running:
         return []
-    for row in _published_rows():
+    for row in rows:
         artifact_id = str(row["artifact_id"])
         current = source_fingerprint(row["slug"])
         if current is None or row.get("status") == "deploying":

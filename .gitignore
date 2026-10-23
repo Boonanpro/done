@@ -269,3 +269,6 @@ data/today_illust/
 /frontend/src/app/artifact-sources.css
 /frontend/public/sw.js
 /frontend/public/workbox-*.js
+# 成果物タブ用の開発サーバーが書く「今のファイルの版」（frontend/src/lib/live-version/server.ts）
+/frontend/src/lib/live-version/current.gen.ts
+/frontend/src/lib/live-version/*.tmp

@@ -135,6 +135,11 @@ async def lifespan(app: FastAPI):
         start_sweeper()
     except Exception:
         logger.exception("artifact archive sweeper start failed")
+    try:
+        from app.services import artifact_backends
+        artifact_backends.start_watcher()
+    except Exception:
+        logger.exception("artifact backend watcher start failed")
     yield
 
 
@@ -184,9 +189,9 @@ app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
 app.include_router(dan_notion_router, prefix="/api/v1")
 # 成果物ごとの裏側の処理は成果物フォルダ（artifacts/<slug>/_server）に置き、ここでは載せるだけにする
-from app.services.artifact_backends import routers as artifact_routers
-for _slug, _artifact_router in artifact_routers():
-    app.include_router(_artifact_router, prefix="/api/v1")
+# 成果物の _server を直すと、本体を再起動せずにその成果物の裏側だけ読み直す（artifact_backends.start_watcher）
+from app.services import artifact_backends
+artifact_backends.mount(app, prefix="/api/v1")
 app.include_router(chat_artifact_router, prefix="/api/v1")
 app.include_router(image_generation_router, prefix="/api/v1")
 app.include_router(video_generation_router, prefix="/api/v1")

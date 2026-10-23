@@ -285,6 +285,12 @@ def build_codex_profile(
                 f"hooks = [{{ type = \"command\", command = {bridge}, timeout = 180 }}]",
                 "",
             ]
+        # End of turn: e.g. a changed artifact must be checked on the owner's screen first (hook_artifact_verify_gate).
+        lines += [
+            "[[hooks.Stop]]",
+            f"hooks = [{{ type = \"command\", command = {bridge}, timeout = 60 }}]",
+            "",
+        ]
     for name, cfg in (mcp_json.get("mcpServers") or {}).items():
         if not isinstance(cfg, dict):
             continue

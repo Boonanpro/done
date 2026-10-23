@@ -30,6 +30,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python D:/done/scripts/hook_artifact_verify_gate.py",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }

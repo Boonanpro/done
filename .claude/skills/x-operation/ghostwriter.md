@@ -2,7 +2,7 @@
 
 ## 前提
 
-記事の型と文章は Ghost Writer（Levela、app.levela.co.jp/ghost-writer）に任せる。私は、題材選び・インタビューへの答え・直した版・表紙と画像・セルフ引用を受け持つ。本人は、Ghost Writer が書いたままの原稿と、このスキル（article-writing.md・title-cover.md）で直した原稿の2本を運用室で見比べて選ぶ。
+記事の型と文章は Ghost Writer（Levela、app.levela.co.jp/ghost-writer）に任せる。私は、題材選び・インタビューへの答え・直した版・表紙と画像・セルフ引用を受け持つ。本人は、Ghost Writer が書いたままの原稿と、その原稿の行と順を残して言い方だけ直した原稿（読みやすく直した版）の2本を運用室で見比べて選ぶ。
 
 Ghost Writer が止まった時は、私が代わりに書かない。止まった段階と出ていたエラーを知らせて終える（本人の決定 2026-10-17）。
 
@@ -12,6 +12,14 @@ Ghost Writer が止まった時は、私が代わりに書かない。止まっ�
 |---|---|---|
 | 題材探しから | 参考記事の指定なし | 1 から |
 | 参考記事のURLを貼った | 参考記事のURLあり | 2 から（1 は飛ばす） |
+
+入力欄には、URLのほかに「どんな記事にしたいか」の文章も書ける。文章があると、依頼文に「本人の希望」として入り、行の item.ghostwriter.wish にも残る。URLが無ければ題材探しから、URLがあればそのURLから始める点は、文章があっても変わらない。
+
+### 本人の希望がある時
+
+- 題材探しなら、1 の絞り込みで、希望に合う記事だけを候補にする（例：「権威性を使いたい」なら、タイトルに有名人・有名な物の名前がある記事）。合う記事が3件無ければ、ある分だけにして理由に書く。
+- 題材の当てはめ（何の話を当てはめるか）・インタビューの答え・タイトルづくりにも希望を入れる。希望の中の事実（「失敗も入れたい」の失敗の中身など）は、記録にある事実だけで埋め、無い件数や期間は作らない。
+- どう反映したかを、`reference` に渡す JSON の `wishApplied` に1〜3文で書く（運用室の「希望の反映」に出る）。参考記事が指定された時も、その1件を `candidates` にして `reference` を呼ぶ。
 
 ## 道具
 
@@ -27,9 +35,12 @@ python D:/done/frontend/src/app/artifacts/x-operation/ghostwriter.py <命令> --
 | `generate [--length 2500-3500]` | 本文を生成して raw.md に保存。Ghost Writer が本文に付けた見出しを `title_in_article` で返す |
 | `stage --text 説明 [--state running/done]` | 運用室の一覧に出る進み具合を書き換える |
 | `reference --file candidates.json` | 題材の候補3件・選んだ1件・理由を運用室に残す |
-| `draft --variant raw/edited --file F.md --title T [--cover URL]` | 原稿を運用室に置く（raw は今の行、edited は隣に新しい行） |
+| `draft --variant raw/edited --file F.md --title T [--cover URL] [--method yomiyasu]` | 原稿を運用室に置く（raw は今の行、edited は隣の行。2回目からは同じ行を書き換える）。edited は method が yomiyasu（既定）なら「読みやすく直した版」と出る |
 | `ask --file questions.json` | 本人に聞く質問を、記事の編集アシスタントの欄に出して答え待ちにする |
 | `stop --stage 段階 --error エラー` | 止まったことを運用室と部屋のチャットに知らせる |
+| `edit --file 本文.md --selected-file 範囲.txt --instruction-file 指示.txt --out 直した本文.md` | 選んだ範囲だけ Ghost Writer に書き直させ、変わった段落だけを今の本文に差し戻す（運用室には書かない。「編集アシスタントの直し」） |
+
+Git Bash から呼ぶ時は `MSYS_NO_PATHCONV=1` を前に付ける。付けないと `/api/v1/files/…` のような引数が `C:/Program Files/Git/api/v1/files/…` に書き換えられて保存される。
 
 作業の控え（参考記事・材料・答え・原稿）は `D:/dan-workspace/jobs/x-ghostwriter/<run>/` に置く。インタビューの会話は同じ場所の state.json と Ghost Writer のセッションに残るので、作業が途中で終わっても続きから進められる。
 
@@ -51,7 +62,7 @@ python D:/done/frontend/src/app/artifacts/x-operation/ghostwriter.py <命令> --
 5. 3件を候補にして1件選び、`reference` で残す。理由は「形の名前・本人のどの話を当てはめるか・役目」を1〜2文で書く。
 
 ```json
-{"candidates":[{"url":"https://x.com/…/status/…","title":"…","author":"@…","impressions":3820000,"reason":"…"}],"chosen":0,"reason":"…"}
+{"candidates":[{"url":"https://x.com/…/status/…","title":"…","author":"@…","impressions":3820000,"reason":"…"}],"chosen":0,"reason":"…","wishApplied":"（本人の希望がある時だけ）…"}
 ```
 
 ### 2. 参考記事を読む
@@ -69,7 +80,7 @@ python D:/done/frontend/src/app/artifacts/x-operation/ghostwriter.py <命令> --
 | `D:/done/.data/lifelog/<日付>.jsonl`（ピンの常時録音の文字起こし） | 日々の会話での本人の言葉（題材の言葉で rg） |
 | 面談の録音（`D:/dan-hw/meeting-rec/recordings/`、文字起こしがあれば） | 相談者の困りごと |
 
-memo.txt の最後に、アカウント・読者・記事の末尾の案内（SKILL.md の表）と、書かないこと（煽り語・本人が使わない言い方）を足す。この memo.txt を begin の内容メモとして渡す。推測は書かない。
+memo.txt の最後に、アカウント・読者・記事の末尾の案内（SKILL.md の表）と、書かないこと（本人が使わない言い方。煽り語は使ってよい）を足す。この memo.txt を begin の内容メモとして渡す。推測は書かない。
 
 ### 4. タイトルを決めて始める
 
@@ -93,10 +104,16 @@ Ghost Writer はタイトルを作らない（タイトル欄が必須で、空�
 
 ### 7. 直した版を置く
 
-raw.md を元に、article-writing.md と title-cover.md の手順で直した `<控え>/edited.md` を作り、`draft --variant edited --file edited.md --title <タイトル>` で隣に置く。
+Ghost Writer の原稿は、行と段落の区切りが短く、そのまま読める形になっていることが多い。直した版では、その形と話の順を残し、文の中の言い方だけを直す。組み直したり材料を足したりすると、1段落が長くなり、前に書いた記事と同じ話が増える（本人の判定 2026-10-18）。
 
-- 事実は raw.md と memo.txt にある物だけを使う。
-- Ghost Writer は参考記事の決め台詞・見出しの組み方・語尾をそのままなぞることが多い。本人のアカウントで使わない言い方は、ここで外す。
+1. 元にする本文を決める。運用室の「ゴーストライターそのまま」の行の今の本文を読む（本人が直していればそちらが元）。`<控え>/source.md` に保存する。
+2. yomiyasu（`D:/dan-workspace/tools/yomiyasu`。古ければ `git pull`）の `skills/yomiyasu/SKILL.md` を読み、その手順で推敲する。直すのは、比喩・何を指すか分からない語・主語と述語のずれ・予告だけの文・助詞で切った見出しで、言い換えは同じ記事の前後に書いてある事実でする。行と段落の区切り・見出しの数と順・数字・言い切りは変えない。本人の言葉（材料メモに本人の言い方として書いてある語）は残す。
+3. 読む材料は memo.txt だけにする。過去の記事や記録を開いて話を足さない。
+4. `python <yomiyasu>/skills/yomiyasu/scripts/yomiyasu_check.py run --source source.md --final edited.md --stance=説明 --material memo.txt --fact-gaps` を動かし、数字・言い切り・文の種類が変わった所を元に戻す。直したらもう一度 run し、最後に `verify --final edited.md`。
+5. Xに出ない書式を直す。`---` だけの行は外す（見出しで区切れている）。2行にまたがる `**…**` は行ごとに `**` で閉じる。
+6. `draft --variant edited --method yomiyasu --file edited.md --title <タイトル>` で隣に置く。
+
+- 事実は source.md と memo.txt にある物だけを使う。
 - 表紙・記事内の画像・動画は、本人が選んだ方に付ける（2本の比較は文章でする）。
 
 最後に `stage --text "原稿2本ができました" --state done`。
@@ -110,6 +127,19 @@ raw.md を元に、article-writing.md と title-cover.md の手順で直した `
 本人が編集アシスタントで「こっちで進めて」のように選んだら、その原稿に article-writing.md の「画像の用意」と title-cover.md の表紙を付ける（運用室への返し方は運用室の決まり）。記事がXに出た後、セルフ引用の案を quote-writing.md で作る（投稿は本人）。
 
 本人が選ばなかった方との違い・本人が直した所は、次にスキルを直す材料になる。直す時は skill-creator の手順で汎化してから入れる。
+
+## 編集アシスタントの直し
+
+ゴーストライターで書いた記事（運用室の行に ghostwriter がある）への一部の直しは、Ghost Writer の「範囲の書き直し」に回す。書き手と文体の分析が元の原稿と同じなので、直した所の改行・文の塊の長さ・言い回しが前後とそろう（本人の決定 2026-10-18）。
+
+1. 直す範囲を決める。コメントから来た依頼なら、コメントした所（context.selection.selectedContent）。編集アシスタントの欄からなら、依頼文が指す段落を本文から探す。どこか決められない時は、推測で広げずに、どこを直すかを本人に聞いて終える。
+2. 今の本文を `current.md`、範囲（本文にある文字のまま）を `selected.txt`、本人の依頼を指示の文にして `instruction.txt` に保存し、`edit --run <ghostwriter.runId> --file current.md --selected-file selected.txt --instruction-file instruction.txt --out edited.md` を動かす（控えは `jobs/x-editorial/<作業>/`）。
+3. 出てきた JSON の changes を読む。`outside_selection` が0でなければ、範囲から離れた段落の変更を元に戻す。
+4. yomiyasu の check（`yomiyasu_check.py run --source current.md --final edited.md --stance=説明`）で、依頼の外で意味・数字・言い切りが変わった所を戻す。
+5. 変更案として返す。コメントからの依頼なら、範囲の置き換え後の文だけ。欄からの依頼なら edited.md の全文（運用室が変わった所を紫の線で出す）。返事に「ゴーストライターで書き直しました」と、どの範囲かを書く。
+
+- **ゴーストライターが止まった時**（`edit` が GHOSTWRITER_STOPPED を出した時。`stop` は使わない）と、ghostwriter が無い記事：自分で、直す所の前後の改行・文の塊の長さ・言い回しに合わせて書き、4と同じ check をしてから変更案にする。止まっていた時は、返事にそのことと理由を書く。
+- **記事全体を作り直すほどの直し**（構成・題材・主張を変える）：作り直さずに、ゴーストライターのインタビューに答えを足して全体を作り直す方法を返事で提案し、本人の返事を待つ。
 
 ## 止まった時
 

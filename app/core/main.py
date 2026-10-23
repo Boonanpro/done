@@ -275,6 +275,8 @@ async def _slow_request_logger(request, call_next):
 
 app.include_router(sandbox_router)
 app.include_router(chat_router, prefix="/api/v1")
+from app.api.secret_vault_routes import router as secret_vault_router  # noqa: E402
+app.include_router(secret_vault_router, prefix="/api/v1")
 app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(voice_router)  # /api/v1/voice prefix が router 側に
 app.include_router(voice_ws_router)
