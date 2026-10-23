@@ -79,6 +79,7 @@ class Dialogue:
     def __init__(self):
         self.turns = []
         self.heard_at = 0.0
+        self.prefetch = None   # voice_prefetch.Prefetch while this server answers the call
 
     def add(self, role, delta):
         if not delta: return
@@ -107,11 +108,15 @@ def chunks(text):
 
 async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, speak=None):
     """One function call of the backend model, run here. Returns the function_call_output item."""
-    from app.services.voice_responses import run_function
+    from app.services.voice_responses import run_function, search_output
     started = time.monotonic()
     try: args = json.loads(item.get('arguments') or '{}')
     except ValueError: args = {}
-    try: output = await run_function(item.get('name'), args, user_id, room_id, dialogue.recent(), speak=speak)
+    early = None
+    if item.get('name') == 'web_search' and dialogue.prefetch is not None:   # a search started while the owner was speaking
+        try: early = await dialogue.prefetch.take(str(args.get('query') or ''), dialogue.turns)
+        except Exception: early = None
+    try: output = search_output(early, str(args.get('query') or '')) if early else await run_function(item.get('name'), args, user_id, room_id, dialogue.recent(), speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
     try:   # place names the speech model would misread get their reading (voice_furigana)
@@ -326,6 +331,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
             if own:
+                from app.services import voice_prefetch
+                if voice_prefetch.enabled(): dialogue.prefetch = voice_prefetch.Prefetch(user_id, record)
                 feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat(), session_id))
                 working.add(feed); feed.add_done_callback(working.discard)
                 if room_id:   # from now on the room's chat goes to this call, not to a chat Dan
@@ -346,7 +353,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     if now - spoke.get(side, 0) > 1.5: record('speech_start', side=side, at_s=round(now - started, 2))
                     spoke[side] = now
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
-                if kind == 'session.input_transcript.delta': dialogue.add('user', event.get('delta') or '')
+                if kind == 'session.input_transcript.delta':
+                    dialogue.add('user', event.get('delta') or '')
+                    if dialogue.prefetch is not None: dialogue.prefetch.heard(dialogue)
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
                 if kind == 'response.event':
                     inner = event.get('event') or {}
@@ -364,6 +373,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
         for task in working: task.cancel()
+        if dialogue.prefetch is not None:
+            try: await dialogue.prefetch.close()
+            except Exception: pass
         ENDING.pop(session_id, None)
         try:
             from app.services import voice_calls

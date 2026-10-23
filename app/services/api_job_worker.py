@@ -23,7 +23,7 @@ MAX_TURNS = 120
 # 0.2-0.4 s a step over 16 (6-8 s on 2026-09-23 has not held since the prompt cache). DAN_API_JOB_TOOLS=a,b,c narrows it.
 JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'all').split(',')
 OUTPUT_CHARS = 12000
-PARALLEL_READS = {'web_search', 'read_url', 'lookup', 'places'}
+PARALLEL_READS = {'web_search', 'read_url', 'lookup', 'places', 'search_results', 'fetch_page'}
 CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。確定操作はまだ実行していません。画面を読み取り、承認済みの具体的な操作だけを再開してください。'
                 '条件変更があれば以前の承認は無効です。\n')
 
@@ -35,6 +35,57 @@ def job_tools(mcp_tools):
         if JOB_TOOLS() != ['all'] and tool.name not in JOB_TOOLS(): continue
         out.append({'name': tool.name, 'description': (tool.description or '')[:1024], 'parameters': dict(tool.inputSchema or {'type': 'object', 'properties': {}})})
     return out
+
+
+# DeepSeek's Search and Fetch handed to the job's model itself (2026-10-23): web_search answers through a second model
+# that reads the results for it, and a page was read by driving the browser. A model that reads a list itself needs
+# neither: the list comes back in about 0.7 s and a page without a login in 1-5 s.
+SEARCH_TOOLS = [
+    {'name': 'search_results', 'description': ('ウェブ検索の結果の一覧をそのまま受け取る（1件ごとにタイトル・URL・サイト名・日付・600〜800字の要約。'
+                                                '1秒ほど）。自分で読み比べたい時・候補を並べたい時はこれ。答えだけ欲しい時は web_search。'
+                                                '「明日」「今週末」は日付に直して検索語に入れる。site: lang: after: before: が使える。'),
+     'parameters': {'type': 'object', 'properties': {
+         'query': {'type': 'string', 'description': '検索語（128字まで）'},
+         'count': {'type': 'integer', 'description': '件数（1〜20、既定8）'},
+         'with_text': {'type': 'boolean', 'description': '上位3件のページ本文も付ける（数字や表が要約に無い時）'}},
+         'required': ['query']}},
+    {'name': 'fetch_page', 'description': ('ログイン不要のページの本文を Markdown で受け取る（ブラウザを開くより速い）。ログインや画面の操作が要るページ、'
+                                           '本文が取れなかったページは browser で開く。'),
+     'parameters': {'type': 'object', 'properties': {'url': {'type': 'string'}}, 'required': ['url']}},
+]
+
+
+async def search_tool(name, args):
+    """search_results / fetch_page: the text the model reads."""
+    import httpx
+    from app.services import web_search
+    async with httpx.AsyncClient() as client:
+        if name == 'fetch_page':
+            page = await web_search.fetch_page(client, str(args.get('url') or ''))
+            if not page or not page['content'].strip():
+                return 'このページの本文は取れなかった（ログインが要る・サイトが断った・中身が無い）。要るなら browser で開く。'
+            return (page['title'] + chr(10) * 2 + page['content'])[:OUTPUT_CHARS]
+        count = max(1, min(20, int(args.get('count') or 8)))
+        with_text = bool(args.get('with_text'))
+        rows = await web_search.search_list(client, str(args.get('query') or ''), count, with_text)
+    if not rows:
+        return '検索結果は0件だった。検索語を変える。'
+    out = []
+    for i, r in enumerate(rows, 1):
+        text = ('本文: ' + r['content'][:2500]) if with_text and i <= 3 and r.get('content') else (r.get('summary') or r.get('snippet') or '')
+        out.append(f"[{i}] {r.get('title') or ''}（{r.get('site_name') or ''} / 日付 {(r.get('date') or '不明')[:10]}）" + chr(10) + str(r.get('url')) + chr(10) + text)
+    return (chr(10) * 2).join(out)[:OUTPUT_CHARS]
+
+
+async def call_any(call_tool, name, args):
+    """A Dan tool through MCP, or one of the search tools above."""
+    if name in ('search_results', 'fetch_page'):
+        try:
+            text = await search_tool(name, args)
+        except Exception as exc:
+            text = f'検索できなかった: {str(exc)[:200] or type(exc).__name__}。web_search か browser で調べる。'
+        return [type('T', (), {'type': 'text', 'text': text})()]
+    return await call_tool(name, args)
 
 
 _SECRET = ('pass', 'secret', 'token', 'card', 'cvv', 'otp', 'code', 'pin')
@@ -191,7 +242,7 @@ class Worker:
         mcp = await list_tools()
         native = job_tools(mcp)
         instructions = (s.get('instructions') or '') + chr(10) + dan_tools.catalog(mcp, native=[t['name'] for t in native])
-        provider.start(instructions, native + [dan_tools.HELP, dan_tools.USE], first)
+        provider.start(instructions, native + SEARCH_TOOLS + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         used_browser = used_desktop = False
         stuck = Stuck()
@@ -223,7 +274,7 @@ class Worker:
             ahead = {}
             s_now = self.read()
             if len(calls) > 1 and all(name_of(c) in PARALLEL_READS for c in calls) and s_now['revision'] <= s_now.get('applied_revision', 0):
-                ahead = {c['id']: asyncio.ensure_future(call_tool(name_of(c), args_of(c))) for c in calls}
+                ahead = {c['id']: asyncio.ensure_future(call_any(call_tool, name_of(c), args_of(c))) for c in calls}
             for call in calls:
                 if self.read().get('state') == 'cancelled': return
                 # A new instruction from the owner is read before any further action. Tools wait at their gate until
@@ -243,9 +294,9 @@ class Worker:
                     elif call['name'] == 'dan_tool_help':
                         contents = [type('T', (), {'type': 'text', 'text': dan_tools.help_text(mcp, str(call['args'].get('name') or ''))})()]
                     elif call['name'] == 'dan_tool':
-                        contents = await call_tool(str(call['args'].get('name') or ''), call['args'].get('arguments') or {})
+                        contents = await call_any(call_tool, str(call['args'].get('name') or ''), call['args'].get('arguments') or {})
                     else:
-                        contents = await call_tool(call['name'], call['args'])
+                        contents = await call_any(call_tool, call['name'], call['args'])
                 except Exception as exc:
                     contents = [type('T', (), {'type': 'text', 'text': f'操作は実行していません: {type(exc).__name__}: {str(exc)[:300]}'})()]
                 output, images = function_output(contents)
