@@ -146,3 +146,42 @@ test('アプリの答えの写しは本体と同じ中身', async () => {
   const copy = readFileSync(new URL('../mobile/chat-shapes-answers.ts', import.meta.url), 'utf8');
   assert.equal(copy.split('\n').slice(3).join('\n'), body);
 });
+
+// 作業中の1行と、押すと開く一覧（2026-10-24。本人「考えています」だけの時間が超長くて遅く感じる」「準備していますはダメ」）
+test('作業中の1行: 道具の言葉・思考の要約・返事を書いています・考えています', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-24T10:00:00');
+  assert.equal(L.liveLineText([]), '考えています');
+  assert.equal(L.liveLineText([{ kind: 'thinking', text: 'まず画面を確かめる。次に、お店のページを開きます。', at: t0 }]), '次に、お店のページを開きます。');
+  // 英語の思考は出さない（前の一歩の言葉のまま）
+  assert.equal(L.liveLineText([{ kind: 'tool', activity: 'お店のページを見ています', at: t0 }, { kind: 'thinking', text: 'Let me check.', at: t0 + 1 }]), 'お店のページを見ています');
+  assert.equal(L.liveLineText([{ kind: 'tool', activity: '注文の画面を開いています', at: t0 }, { kind: 'text', text: '注文できたよ', at: t0 + 1 }]), '返事を書いています');
+  assert.equal(L.elapsedText(t0, t0 + 14_000), '14秒');
+  assert.equal(L.elapsedText(t0, t0 + 65_000), '1分05秒');
+  assert.equal(L.elapsedText(t0, t0 + 3_725_000), '1時間02分');
+  for (const s of [L.liveLineText([]), ...L.liveRows([], t0, t0).map((r) => r.label)]) assert.ok(!s.includes('準備'), s);
+});
+
+test('作業中の一覧: 時刻・かかった秒数・同じ言葉はまとめる・書きかけの返事は中身を出さない', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-24T10:00:00');
+  const rows = L.liveRows([
+    { kind: 'tool', activity: 'お店のページを見ています', at: t0 + 5_000 },
+    { kind: 'tool', activity: 'お店のページを見ています', at: t0 + 9_000 },
+    { kind: 'text', text: 'カートを確かめます。', at: t0 + 13_000 },
+    { kind: 'tool', activity: '注文の画面を開いています', at: t0 + 14_000 },
+    { kind: 'text', text: '注文できたよ。合計1,135円', at: t0 + 20_000 },
+  ], t0 + 26_000, t0);
+  assert.deepEqual(rows.map((r) => [r.label, r.count, r.seconds, r.now]), [
+    ['考えています', 1, 5, false],
+    ['お店のページを見ています', 2, 8, false],
+    ['カートを確かめます。', 1, 1, false],
+    ['注文の画面を開いています', 1, 6, false],
+    ['返事を書いています', 1, 6, true],
+  ]);
+  assert.equal(L.clockText(t0 + 5_000), '10:00:05');
+  // 送った時刻は、30分より前の発言なら起点にしない
+  assert.equal(L.turnStartedAt(t0 + 3_000, t0), t0);
+  assert.equal(L.turnStartedAt(t0 + 3_000, t0 - 3_600_000), t0 + 3_000);
+  assert.equal(L.turnStartedAt(null, t0), t0);
+});
