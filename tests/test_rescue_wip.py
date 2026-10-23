@@ -133,26 +133,130 @@ def test_apply_moves_each_group_to_its_branch_and_reads_it_back(world, capsys):
     assert 'skipped' in capsys.readouterr().out
 
 
+def _move(world, group):
+    branch, commit, saved = rescue.save(world, group)
+    where = rescue.keep_dir(world)
+    result = {rel: rescue.restore(world, rel, blob, where) for rel, blob in saved.items()}
+    return branch, commit, result, where
+
+
 def test_a_file_written_while_moving_stays_in_the_folder(world, monkeypatch):
+    """Written after it was saved and before it was put back: the new text stays in the folder, untouched."""
     p = rescue.plan(world, target='target')
     group = next(g for g in p['groups'] if g['session'] == 'aaaa1111')
-    real = rescue._hash
-
-    def late(repo, rel):
-        if rel == 'app/a.py':
-            write(world, 'app/a.py', 'committed\nwork of claude\nand one more line\n', age_minutes=0)
-        return real(repo, rel)
-    monkeypatch.setattr(rescue, '_hash', late)
-    branch, commit, moved, kept = rescue.move(world, group)
-    assert kept == ['app/a.py'] and moved == ['app/new.py']
+    branch, commit, saved = rescue.save(world, group)
+    write(world, 'app/a.py', 'committed\nwork of claude\nand one more line\n', age_minutes=0)
+    where = rescue.keep_dir(world)
+    assert rescue.restore(world, 'app/a.py', saved['app/a.py'], where) == 'changed'
+    assert rescue.restore(world, 'app/new.py', saved['app/new.py'], where) == 'restored'
     assert (world / 'app/a.py').read_text().endswith('and one more line\n')
     assert git(world, 'show', f'{branch}:app/a.py').stdout == 'committed\nwork of claude\n'
+    assert (where / 'app/new.py').read_text() == 'new by claude\n'                       # the folder's copy is kept too
+
+
+def test_a_write_in_the_instant_of_putting_back_is_not_lost(world, monkeypatch):
+    """The check and the put-back are one move: a write that lands between them goes to a kept file, not to nowhere.
+    (2026-10-18 check: a write between the last comparison and checkout-index was overwritten.)"""
+    p = rescue.plan(world, target='target')
+    group = next(g for g in p['groups'] if g['session'] == 'aaaa1111')
+    branch, commit, saved = rescue.save(world, group)
+    real = rescue._hash_path
+    late = 'committed\nwork of claude\nwritten in the instant\n'
+
+    def racing(repo, rel, path):
+        if rel == 'app/a.py':                     # the writer still holds the file: its write lands in the moved copy
+            Path(path).write_text(late)
+        return real(repo, rel, path)
+    monkeypatch.setattr(rescue, '_hash_path', racing)
+    where = rescue.keep_dir(world)
+    assert rescue.restore(world, 'app/a.py', saved['app/a.py'], where) == 'changed'
+    assert (world / 'app/a.py').read_text() == late                                     # given back, nothing lost
+
+
+def test_a_file_recreated_after_its_deletion_was_saved_stays(world):
+    p = rescue.plan(world, target='target')
+    group = next(g for g in p['groups'] if g['session'] == 'bbbb2222')
+    branch, commit, saved = rescue.save(world, group)
+    assert saved['old.py'] is None
+    write(world, 'old.py', 'written again\n', age_minutes=0)
+    assert rescue.restore(world, 'old.py', None, rescue.keep_dir(world)) == 'changed'
+    assert (world / 'old.py').read_text() == 'written again\n'
+
+
+def test_line_ending_only_files_are_checked_before_put_back(world):
+    git(world, 'config', 'core.autocrlf', 'true')
+    write(world, 'app/c.py', 'committed\r\n')
+    p = rescue.plan(world, target='target')
+    assert 'app/c.py' in p['eol_only']
+    write(world, 'app/c.py', 'committed\r\nreal work after the plan\r\n')               # written after the plan
+    rescue.apply(world, p, 30)
+    assert (world / 'app/c.py').read_bytes() == b'committed\r\nreal work after the plan\r\n'
+    write(world, 'app/c.py', 'committed\r\n')
+    rescue.apply(world, rescue.plan(world, target='target'), 30)
+    assert 'app/c.py' not in git(world, 'status', '--porcelain').stdout                   # still only line endings: back
+
+
+def test_staged_work_is_kept_as_well_as_the_folders_version(world):
+    """`git add` then more editing: both versions are on the branch (2026-10-18 check: the staged one was lost)."""
+    write(world, 'app/a.py', 'committed\nstaged version\n')
+    git(world, 'add', 'app/a.py')
+    write(world, 'app/a.py', 'committed\nstaged version\nthen edited more\n')
+    p = rescue.plan(world, target='target')
+    group = next(g for g in p['groups'] if any(f['path'] == 'app/a.py' for f in g['files']))
+    branch, commit, saved = rescue.save(world, group)
+    assert git(world, 'show', f'{branch}:app/a.py').stdout.endswith('then edited more\n')
+    assert git(world, 'show', f'{branch}~1:app/a.py').stdout == 'committed\nstaged version\n'
+    assert git(world, 'show', f'{branch}~2:app/a.py').stdout == 'committed\n'
+    rescue.restore(world, 'app/a.py', saved['app/a.py'], rescue.keep_dir(world))
+    assert 'app/a.py' not in git(world, 'status', '--porcelain').stdout                  # index and file both back
+
+
+def test_a_rename_and_a_staged_new_file_are_moved_whole(world):
+    """`git mv` and `git add` of a new file (2026-10-18 check: both stopped halfway)."""
+    git(world, 'mv', 'app/b.py', 'app/b2.py')
+    write(world, 'app/staged_new.py', 'brand new\n')
+    git(world, 'add', 'app/staged_new.py')
+    assert rescue.main(['--repo', str(world), '--target', 'target', '--apply', '--quiet-minutes', '0']) == 0
+    branches = git(world, 'branch', '--list', 'wip/*').stdout.split()
+    files = {}
+    for b in branches:
+        for line in git(world, 'diff', '--name-status', '--no-renames', f'main...{b}').stdout.splitlines():
+            code, path = line.split('\t')
+            files.setdefault(path, set()).add(code)
+    assert 'A' in files['app/b2.py'] and 'D' in files['app/b.py'] and 'A' in files['app/staged_new.py']
+    status = git(world, 'status', '--porcelain').stdout.splitlines()
+    assert status == [' M machine.json']
+    assert (world / 'app/b.py').read_text() == 'committed\n' and not (world / 'app/b2.py').exists()
+
+
+def test_a_run_cut_short_is_finished_by_running_again_without_copies(world, monkeypatch):
+    """Everything is saved before anything is put back; a stop in between leaves all work on branches, and the next
+    run only puts files back (2026-10-18 check: groups were saved and put back one after another)."""
+    real = rescue.restore
+    calls = []
+
+    def stop_after_one(*a, **k):
+        if calls:
+            raise KeyboardInterrupt
+        calls.append(a)
+        return real(*a, **k)
+    monkeypatch.setattr(rescue, 'restore', stop_after_one)
+    with pytest.raises(KeyboardInterrupt):
+        rescue.main(['--repo', str(world), '--target', 'target', '--apply', '--quiet-minutes', '0'])
+    branches = git(world, 'branch', '--list', 'wip/*').stdout.split()
+    on_branches = {path for b in branches for path in
+                   git(world, 'diff', '--name-only', '--no-renames', f'main...{b}').stdout.split()}
+    assert {'app/a.py', 'app/new.py', 'app/b.py', 'app/c.py', 'web/page.tsx', 'old.py'} <= on_branches
+    monkeypatch.setattr(rescue, 'restore', real)
+    assert rescue.main(['--repo', str(world), '--target', 'target', '--apply', '--quiet-minutes', '0']) == 0
+    assert git(world, 'branch', '--list', 'wip/*').stdout.split() == branches              # no second copies
+    assert git(world, 'status', '--porcelain').stdout.splitlines() == [' M machine.json']
 
 
 def test_a_branch_name_already_taken_gets_a_new_one(world):
     p = rescue.plan(world, target='target')
     group = next(g for g in p['groups'] if g['session'] == 'aaaa1111')
     git(world, 'branch', group['branch'])
-    branch, *_ = rescue.move(world, group)
+    branch, *_ = rescue.save(world, group)
     assert branch == group['branch'] + '-2'
     assert git(world, 'rev-parse', group['branch']).stdout == git(world, 'rev-parse', 'main').stdout

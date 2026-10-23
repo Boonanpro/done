@@ -20,7 +20,10 @@ import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(r"D:/done")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from follow_github import live_root  # noqa: E402
+
+PROJECT_ROOT = live_root()
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 UI_DIR = FRONTEND_DIR / "src" / "components" / "ui"
 
@@ -109,10 +112,10 @@ def main() -> int:
     if not missing:
         return 0
     if live:
-        # 動いているダン（D:\done）の共通部品は git が追うので、ここには足さない（2026-10-18）
+        # 動いているダン（PROJECT_ROOT）の共通部品は git が追うので、ここには足さない（2026-10-18）
         sys.stderr.write(
-            f"[shadcn] {', '.join(missing)} は frontend/src/components/ui にまだありません。D:\\done の共通部品は"
-            " 直接足せないので、`python D:/done/scripts/work.py new <名前>` の作業場所で足して ship するか、"
+            f"[shadcn] {', '.join(missing)} は frontend/src/components/ui にまだありません。{PROJECT_ROOT} の共通部品は"
+            f" 直接足せないので、`python {PROJECT_ROOT}/scripts/work.py new <名前>` の作業場所で足して ship するか、"
             "成果物のフォルダの中に部品を置いて使ってください。\n")
         return 0
 

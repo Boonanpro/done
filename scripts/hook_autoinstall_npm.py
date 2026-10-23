@@ -10,19 +10,33 @@ build-error フリーズを未然に防ぐ。
 セキュリティ:
 - 既知ホワイトリストに含まれる名前だけ install する
 - typo した未知パッケージで悪性ライブラリを引かないようにする
+
+どこに入れるか（2026-10-23）:
+- 作業場所（/Users/mikihonda/dan-workspace/<名前>）の frontend: 普通に `npm install <名前>`。package.json に残り、
+  ship で本番に入る。node_modules は作業場所ごとの複製（scripts/work.py new）なので、本番には届かない。
+- 動いているダン（/Users/mikihonda/done）の frontend（成果物が使う物）: package.json は git が追うので変えない。
+  代わりに git が追わない `frontend/.artifact-packages.json` に名前を残し、npm にはそこにある全部を毎回
+  まとめて渡す（`npm install --no-save A B C`）。npm は名前を渡されなかった --no-save の物を次の install で
+  消すので、まとめて渡さないと前に入れた物が消える。follow_github が package.json の変更を取り込む時も
+  install_live() を通るので、そこでも消えない。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(r"D:/done")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from follow_github import live_root  # noqa: E402
+
+PROJECT_ROOT = live_root()
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 PACKAGE_JSON = FRONTEND_DIR / "package.json"
 NO_SAVE = False  # set per call: True when the edited file is in the running folder
+ARTIFACT_PACKAGES = ".artifact-packages.json"
 
 # bare import を抽出: `from "<name>"` `from '<name>'` `require("<name>")`
 # scoped (@org/pkg) と subpath (lib/foo) も拾う
@@ -98,35 +112,61 @@ def extract_imports(text: str) -> set[str]:
 
 
 def installed_packages() -> set[str]:
-    if not PACKAGE_JSON.exists():
-        return set()
-    try:
-        pkg = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
-    except Exception:
-        return set()
-    out = set()
-    for k in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
-        out.update((pkg.get(k) or {}).keys())
+    """Named in package.json, or the artifacts' list, or actually present in node_modules."""
+    out = set(artifact_packages(FRONTEND_DIR))
+    if PACKAGE_JSON.exists():
+        try:
+            pkg = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
+            for k in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                out.update((pkg.get(k) or {}).keys())
+        except Exception:
+            pass
     return out
 
 
-def install(name: str) -> tuple[bool, str]:
+def _present(front: Path, name: str) -> bool:
+    return (front / "node_modules" / name / "package.json").is_file()
+
+
+def artifact_packages(front: Path) -> list[str]:
     try:
-        proc = subprocess.run(
-            ["npm", "install", name, "--silent", "--no-fund", "--no-audit", *(["--no-save"] if NO_SAVE else [])],
-            cwd=str(FRONTEND_DIR),
-            capture_output=True,
-            text=True,
-            timeout=180,
-            shell=True,
-        )
+        names = json.loads((Path(front) / ARTIFACT_PACKAGES).read_text(encoding="utf-8"))
+        return sorted({n for n in names if isinstance(n, str) and n in ALLOWED_PACKAGES})
+    except Exception:
+        return []
+
+
+def _npm(front: Path, args: list[str]) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(["npm", *args, "--silent", "--no-fund", "--no-audit"], cwd=str(front),
+                              capture_output=True, text=True, timeout=600, shell=(os.name == "nt"))
     except subprocess.TimeoutExpired:
-        return False, f"timeout installing {name}"
-    except Exception as e:
+        return False, "timeout"
+    except Exception as e:  # noqa: BLE001
         return False, f"install error: {e}"
-    if proc.returncode == 0:
-        return True, ""
-    return False, (proc.stderr or proc.stdout)[-300:]
+    return (True, "") if proc.returncode == 0 else (False, (proc.stderr or proc.stdout)[-300:])
+
+
+def install_live(front: Path, add: list[str] = ()) -> tuple[bool, str]:
+    """The running folder's frontend: package.json as committed plus every package artifacts asked for, in one npm
+    call, so that none of them is pruned. New names are recorded in .artifact-packages.json first."""
+    front = Path(front)
+    names = sorted(set(artifact_packages(front)) | {n for n in add if n in ALLOWED_PACKAGES})
+    if add:
+        tmp = front / (ARTIFACT_PACKAGES + ".tmp")
+        tmp.write_text(json.dumps(names, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, front / ARTIFACT_PACKAGES)
+    ok, err = _npm(front, ["install", "--no-save", *names])
+    if not ok:
+        return False, err
+    gone = [n for n in names if not _present(front, n)]
+    return (False, "not present after install: " + ", ".join(gone)) if gone else (True, f"{len(names)} artifact packages kept")
+
+
+def install(name: str) -> tuple[bool, str]:
+    if NO_SAVE:
+        return install_live(FRONTEND_DIR, [name])
+    return _npm(FRONTEND_DIR, ["install", name])
 
 
 def main() -> int:
@@ -138,7 +178,7 @@ def main() -> int:
     file_path = data.get("tool_input", {}).get("file_path", "")
     if not file_path or not file_path.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
         return 0
-    # 書いたファイルが属する frontend（作業場所ごとに別）。D:\done では package.json を変えない（2026-10-18）
+    # 書いたファイルが属する frontend（作業場所ごとに別）。動いているダンでは package.json を変えない（2026-10-18）
     global FRONTEND_DIR, PACKAGE_JSON, NO_SAVE
     front = next((d for d in Path(file_path).resolve().parents if d.name == "frontend" and (d / "package.json").exists()), None)
     if front is None:
@@ -159,7 +199,7 @@ def main() -> int:
         return 0
 
     have = installed_packages()
-    missing = [n for n in wanted if n not in have]
+    missing = [n for n in wanted if n not in have or not _present(FRONTEND_DIR, n)]
     if not missing:
         return 0
 
@@ -171,8 +211,8 @@ def main() -> int:
         for name in installable:
             ok, err = install(name)
             if ok and NO_SAVE:
-                msgs.append(f"[npm auto-install] installed {name} without changing D:\\done's package.json. To keep it, "
-                            "add it from a worktree (python D:/done/scripts/work.py new <name>) and ship.")
+                msgs.append(f"[npm auto-install] installed {name} for artifacts (kept in frontend/{ARTIFACT_PACKAGES}; "
+                            f"{PROJECT_ROOT}'s package.json is not changed).")
             elif ok:
                 msgs.append(f"[npm auto-install] added: {name}")
             else:

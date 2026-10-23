@@ -33,11 +33,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from follow_github import NO_WINDOW, _git, _out, line_endings_only, status  # noqa: E402
+from follow_github import NO_WINDOW, _git, _out, dan_dir, line_endings_only, live_root, status, tree_lock  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = live_root()
 HOME = Path.home()
-TRANSCRIPTS = [HOME / '.claude' / 'projects', HOME / '.codex' / 'sessions']
+TRANSCRIPTS = [HOME / '.claude' / 'projects', HOME / '.codex' / 'sessions',
+               *(Path(x) for x in os.environ.get('DAN_TRANSCRIPTS', '').split(os.pathsep) if x)]
+# Where the running folder was before (records written on the Windows PC say D:\\done)
+ALIASES = [a for a in os.environ.get('DAN_LIVE_ALIASES', 'D:/done').split(os.pathsep) if a]
 WRITE_TOOLS = {'Write', 'Edit', 'MultiEdit', 'NotebookEdit'}
 PATCH_HEAD = re.compile(r'\*\*\* (?:Add File|Update File|Delete File|Move to): ([^\n]+)')
 ESCAPED_NEWLINE = re.compile(r'\\n(?=[-+ @]|\*\*\* )')     # a patch written inside a script's string literal
@@ -71,21 +74,6 @@ def _mtime(repo, rel):
 
 
 # --- who wrote it --------------------------------------------------------------------------------------------------------
-
-def _norm(path, cwd=None):
-    s = str(path).strip()
-    if not s:
-        return None
-    m = re.match(r'^/([a-zA-Z])(/.*)?$', s)
-    if m and os.name == 'nt':
-        s = f'{m.group(1).upper()}:{m.group(2) or "/"}'
-    p = Path(s)
-    if not p.is_absolute():
-        if not cwd:
-            return None
-        p = Path(cwd) / p
-    return os.path.normcase(os.path.normpath(str(p)))
-
 
 def _label(text):
     """What the person asked, from a user message as the session recorded it ('' for a message that is only context)."""
@@ -151,10 +139,39 @@ def _candidates(paths, since):
     return [Path(x) for x in found]
 
 
+def _fold(s):
+    return s.lower() if sys.platform in ('darwin', 'win32') else s
+
+
+def _rel(raw, cwd, repo):
+    """The path relative to the running folder (posix form) when raw points into it, under its current name or one
+    it had before (ALIASES); else None."""
+    s = str(raw or '').strip().replace('\\', '/')
+    if not s:
+        return None
+    if not (s.startswith('/') or re.match(r'^[A-Za-z]:/', s)):
+        if not cwd:
+            return None
+        s = str(cwd).replace('\\', '/').rstrip('/') + '/' + s
+    s = re.sub(r'/+', '/', s)
+    parts = []
+    for part in s.split('/'):
+        if part == '..' and parts:
+            parts.pop()
+        elif part not in ('.', ''):
+            parts.append(part)
+    s = ('/' if s.startswith('/') else '') + '/'.join(parts)
+    roots = [str(repo), os.path.realpath(str(repo)), *ALIASES]
+    for root in roots:
+        root = root.replace('\\', '/').rstrip('/')
+        if _fold(s).startswith(_fold(root) + '/'):
+            return s[len(root) + 1:]
+    return None
+
+
 def attribute(repo, paths, since):
     """rel path -> list of (time, session id, what was asked, transcript) of edit-tool writes to it, oldest first."""
-    live = os.path.normcase(os.path.normpath(str(repo)))
-    wanted = {os.path.normcase(p): p for p in paths}
+    wanted = {_fold(p): p for p in paths}
     names = {os.path.basename(p) for p in paths}
     edits = defaultdict(list)
     for tr in _candidates(paths, since):
@@ -191,7 +208,7 @@ def attribute(repo, paths, since):
                     for c in (rec.get('message') or {}).get('content') or []:
                         if isinstance(c, dict) and c.get('type') == 'tool_use' and c.get('name') in WRITE_TOOLS:
                             ti = c.get('input') or {}
-                            hits.append(_norm(ti.get('file_path') or ti.get('notebook_path') or '', rec.get('cwd')))
+                            hits.append(_rel(ti.get('file_path') or ti.get('notebook_path') or '', rec.get('cwd'), repo))
                     session = rec.get('sessionId') or session
                 elif rec.get('type') == 'response_item':
                     pl = rec.get('payload') or {}
@@ -200,10 +217,10 @@ def attribute(repo, paths, since):
                         body = body if isinstance(body, str) else json.dumps(body)
                         for raw in PATCH_HEAD.findall(body):
                             raw = ESCAPED_NEWLINE.split(raw, 1)[0].split('")', 1)[0].replace('\\\\', '\\')
-                            hits.append(_norm(raw.strip(), cwd))
+                            hits.append(_rel(raw.strip(), cwd, repo))
                 for h in hits:
-                    if h and h.startswith(live + os.sep):
-                        rel = wanted.get(os.path.normcase(os.path.relpath(h, live).replace(os.sep, '/')))
+                    if h:
+                        rel = wanted.get(_fold(h))
                         if rel:
                             edits[rel].append((rec.get('timestamp') or '', session, asked, str(tr)))
     for v in edits.values():
@@ -257,70 +274,226 @@ def plan(repo=ROOT, quiet_minutes=30.0, target='origin/main'):
 
 
 # --- moving ---------------------------------------------------------------------------------------------------------------
+# Two steps, never mixed: first every file is saved in a commit on a branch and read back (save), then the folder's copies
+# are put back to the committed ones (restore). The folder's copy is never deleted: it is moved into
+# .git/dan/rescued/<time>/ (never a change in git's eyes), so even a write that lands in the instant between the two steps survives.
 
 def _hash(repo, rel):
-    return _out(repo, 'hash-object', '--path', rel, '--', os.path.join(repo, rel)).decode().strip()
+    full = os.path.join(repo, rel)
+    if os.path.islink(full):
+        return _out(repo, 'hash-object', '--stdin', data=os.readlink(full).encode('utf-8', 'surrogateescape')).decode().strip()
+    return _out(repo, 'hash-object', '--path', rel, '--', full).decode().strip()
 
 
-def move(repo, group):
-    """Commit the group's files to a new branch, read the commit back, then put the folder's copies back.
-    Returns (branch, commit, moved, left here because they changed meanwhile)."""
-    repo = str(repo)
-    branch = group['branch']
-    if _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}').returncode == 0:
-        n = 2
-        while _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}-{n}').returncode == 0:
-            n += 1
-        branch = f'{branch}-{n}'
-    head = _out(repo, 'rev-parse', 'HEAD').decode().strip()
+def _entry(repo, ref, rel):
+    """(mode, blob) of rel in a commit, or None."""
+    out = _git(repo, 'ls-tree', '-z', ref, '--', rel).stdout.split(b'\0')[0].decode('utf-8', 'surrogateescape')
+    if not out:
+        return None
+    mode, _, blob = out.split('\t', 1)[0].split()
+    return mode, blob
+
+
+def _index_entry(repo, rel):
+    out = _git(repo, 'ls-files', '-s', '-z', '--', rel).stdout.split(b'\0')[0].decode('utf-8', 'surrogateescape')
+    if not out:
+        return None
+    mode, blob, _stage = out.split('\t', 1)[0].split()
+    return mode, blob
+
+
+def _worktree_entry(repo, rel, env=None):
+    """(mode, blob) of the file as it is in the folder (written into git's object store), or None when it is gone."""
+    full = os.path.join(repo, rel)
+    if os.path.islink(full):
+        blob = _out(repo, 'hash-object', '-w', '--stdin', data=os.readlink(full).encode('utf-8', 'surrogateescape'))
+        return '120000', blob.decode().strip()
+    if not os.path.isfile(full):
+        return None
+    blob = _out(repo, 'hash-object', '-w', '--path', rel, '--', full).decode().strip()
+    return ('100755' if os.access(full, os.X_OK) else '100644'), blob
+
+
+def _commit(repo, parent, entries, msg):
+    """A commit on top of parent with entries {rel: (mode, blob) or None (removed)}; built in a separate index."""
     fd, index = tempfile.mkstemp(suffix='.index')
     os.close(fd)
     os.unlink(index)
-    env = dict(os.environ, GIT_INDEX_FILE=index)     # a separate index: the folder's own is not touched
-    hashed = {}
+    env = dict(os.environ, GIT_INDEX_FILE=index)       # the folder's own index is not touched
     try:
-        def g(*args):
-            p = _git(repo, *args, env=env)
+        def g(*args, data=None):
+            p = _git(repo, *args, data=data, env=env)
             if p.returncode:
                 raise RuntimeError(f"git {' '.join(args[:2])}: {p.stderr.decode('utf-8', 'replace').strip()[:300]}")
             return p.stdout
-        g('read-tree', head)
-        for f in group['files']:
-            rel, full = f['path'], os.path.join(repo, f['path'])
-            if os.path.isfile(full):
-                blob = g('hash-object', '-w', '--path', rel, '--', full).decode().strip()
-                old = _git(repo, 'ls-tree', head, '--', rel).stdout.split()
-                g('update-index', '--add', '--cacheinfo', f"{old[0].decode() if old else '100644'},{blob},{rel}")
-                hashed[rel] = (blob, f['mtime'])
-            else:
+        g('read-tree', parent)
+        for rel, e in entries.items():
+            if e is None:
                 g('update-index', '--force-remove', '--', rel)
-                hashed[rel] = (None, None)
+            else:
+                g('update-index', '--add', '--cacheinfo', f'{e[0]},{e[1]},{rel}')
         tree = g('write-tree').decode().strip()
-        msg = (f"wip: rescued from the running folder ({len(hashed)} files)\n\n"
-               f"Session: {group['session'] or 'none recorded'}\nAsked: {group['label'] or 'unknown'}\n\n"
-               "Moved by scripts/rescue_wip.py on " + datetime.now().strftime('%Y-%m-%d %H:%M') + '.\n')
-        commit = _out(repo, *IDENT, 'commit-tree', tree, '-p', head, '-m', msg).decode().strip()
-        _out(repo, 'update-ref', f'refs/heads/{branch}', commit, '')         # create only, never move a branch
     finally:
         if os.path.exists(index):
             os.unlink(index)
-    moved, kept = [], []
+    if tree == _out(repo, 'rev-parse', f'{parent}^{{tree}}').decode().strip():
+        return parent
+    return _out(repo, *IDENT, 'commit-tree', tree, '-p', parent, '-m', msg).decode().strip()
+
+
+def _free_branch(repo, branch):
+    if _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}').returncode:
+        return branch
+    n = 2
+    while _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}-{n}').returncode == 0:
+        n += 1
+    return f'{branch}-{n}'
+
+
+def save(repo, group, append=False):
+    """Commit the group's files to a branch and read the commit back. Changes nothing in the folder.
+    A file staged with `git add` and changed again afterwards keeps both versions: the staged one in a first commit,
+    the folder's one in the next. append=True adds to the branch when it exists (the guard's sweep of one session).
+    Returns (branch, commit, saved) with saved = {rel: blob in the folder, or None for a file deleted here}."""
+    repo = str(repo)
+    head = _out(repo, 'rev-parse', 'HEAD').decode().strip()
+    branch = group['branch']
+    old = None
+    if append and _git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}').returncode == 0:
+        old = _out(repo, 'rev-parse', f'refs/heads/{branch}').decode().strip()
+    elif not append:
+        branch = _free_branch(repo, branch)
+    files = [f['path'] for f in group['files']]
+    staged, here = {}, {}
     for f in group['files']:
-        rel, full = f['path'], os.path.join(repo, f['path'])
-        blob, mt = hashed[rel]
-        in_branch = _git(repo, 'rev-parse', '--verify', '--quiet', f'{commit}:{rel}').stdout.decode().strip() or None
-        now_blob = _hash(repo, rel) if os.path.isfile(full) else None
-        if in_branch != blob or now_blob != blob or (mt and _mtime(repo, rel) != mt):
-            kept.append(rel)                                   # changed while we worked, or not read back: leave it
+        rel = f['path']
+        if f['code'][:1] not in (' ', '?'):
+            staged[rel] = _index_entry(repo, rel)
+        here[rel] = _worktree_entry(repo, rel)
+    about = (f"Session: {group.get('session') or 'none recorded'}\nAsked: {group.get('label') or 'unknown'}\n\n"
+             f"Moved by scripts/rescue_wip.py on {datetime.now().strftime('%Y-%m-%d %H:%M')}.\n")
+    parent = old or head
+    if staged and any(staged[r] != here[r] for r in staged):
+        parent = _commit(repo, parent, staged, f'wip: staged with git add in the running folder ({len(staged)} files)\n\n{about}')
+    commit = _commit(repo, parent, here, f'wip: rescued from the running folder ({len(files)} files)\n\n{about}')
+    if commit == (old or head):
+        return branch, commit, {}                                 # nothing that differs: nothing to save
+    _out(repo, 'update-ref', f'refs/heads/{branch}', commit, old or '')   # create (or move only from what we read)
+    saved = {}
+    for rel in files:
+        want = here[rel]
+        got = _entry(repo, commit, rel)
+        if got != want and not (want is None and got is None):
+            raise RuntimeError(f'{rel}: the branch {branch} does not hold what the folder has; nothing was put back')
+        saved[rel] = want[1] if want else None
+    return branch, commit, saved
+
+
+def restore(repo, rel, expected, keep_dir, same=None):
+    """Put the folder's rel back to the commit HEAD, if it still is what was saved (blob `expected`, None = deleted;
+    or, given `same`, when same(path of the moved copy) says so). The folder's copy is moved (not deleted) into
+    keep_dir first. Returns 'restored' or 'changed' (left as it is)."""
+    repo = str(repo)
+    full = os.path.join(repo, rel)
+    aside = Path(keep_dir) / rel
+    if expected is None and same is None:
+        if os.path.lexists(full):
+            return 'changed'                                       # recreated since it was saved
+    else:
+        if not os.path.lexists(full):
+            return 'changed'
+        aside.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(full, aside)                                    # atomic: a writer from now on writes to its own new file
+        if not (same(aside) if same else _hash_path(repo, rel, aside) == expected):                                      # written after it was saved: give it back untouched
+            if not os.path.lexists(full):
+                os.replace(aside, full)
+            return 'changed'
+    head = _entry(repo, 'HEAD', rel)
+    if head:
+        _out(repo, 'update-index', '--add', '--cacheinfo', f'{head[0]},{head[1]},{rel}')
+        if not os.path.lexists(full):
+            _git(repo, 'checkout-index', '-u', '--', rel)          # no -f: never over a file written meanwhile
+    else:
+        _git(repo, 'update-index', '--force-remove', '--', rel)
+    return 'restored'
+
+
+def _hash_path(repo, rel, path):
+    path = str(path)
+    if os.path.islink(path):
+        return _out(repo, 'hash-object', '--stdin', data=os.readlink(path).encode('utf-8', 'surrogateescape')).decode().strip()
+    return _out(repo, 'hash-object', '--path', rel, '--', path).decode().strip()
+
+
+def _eol_only(repo, rel, path):
+    head = _git(repo, 'cat-file', 'blob', f'HEAD:{rel}')
+    try:
+        here = Path(path).read_bytes()
+    except OSError:
+        return False
+    return head.returncode == 0 and b'\0' not in here and here.replace(b'\r\n', b'\n') == head.stdout.replace(b'\r\n', b'\n')
+
+
+def keep_dir(repo):
+    return dan_dir(repo) / 'rescued' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+
+
+def _journal_file(repo):
+    return dan_dir(repo) / 'rescue_journal.jsonl'
+
+
+def _journal(repo):
+    """{(rel, blob): branch} of everything rescue_wip has saved before, so a run cut short is finished without a
+    second copy: a file whose content is already on a branch is only put back."""
+    out = {}
+    try:
+        for line in _journal_file(repo).read_text(encoding='utf-8').splitlines():
+            rec = json.loads(line)
+            if _git(repo, 'cat-file', '-e', f"{rec['commit']}^{{commit}}").returncode == 0:
+                for rel, blob in (rec.get('saved') or {}).items():
+                    out[(rel, blob)] = rec['branch']
+    except (OSError, ValueError, KeyError):
+        pass
+    return out
+
+
+def _write_journal(repo, rec):
+    with _journal_file(repo).open('a', encoding='utf-8') as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def apply(repo, p, quiet):
+    """Save every group first; only when all are saved, put the folder back. Safe to run again after a stop."""
+    repo = str(repo)
+    done = _journal(repo)
+    where = keep_dir(repo)
+    lines, saved_all = [], []
+    for g in p['groups']:
+        if g['busy']:
+            lines.append(f"skipped {g['branch']}: written within {quiet:.0f} minutes; run again later")
             continue
-        if _git(repo, 'ls-files', '--error-unmatch', '--', rel).returncode == 0:
-            if f['code'][:1] not in (' ', '?'):
-                _out(repo, 'reset', '-q', head, '--', rel)     # staged here: unstage (the index only)
-            _out(repo, 'checkout-index', '-f', '-u', '--', rel)
-        elif blob is not None:
-            os.unlink(full)
-        moved.append(rel)
-    return branch, commit, moved, kept
+        current = {f['path']: (_hash(repo, f['path']) if os.path.lexists(os.path.join(repo, f['path'])) else None)
+                   for f in g['files']}
+        todo = dict(g, files=[f for f in g['files'] if (f['path'], current[f['path']]) not in done])
+        saved = {f['path']: current[f['path']] for f in g['files'] if (f['path'], current[f['path']]) in done}
+        branch = commit = None
+        if todo['files']:
+            branch, commit, more = save(repo, todo)
+            saved.update(more)
+            _write_journal(repo, {'at': datetime.now().isoformat(timespec='seconds'), 'branch': branch, 'commit': commit,
+                                  'session': g['session'], 'label': g['label'], 'saved': more})
+        saved_all.append((g, branch, commit, saved))
+    for g, branch, commit, saved in saved_all:                     # everything is on branches now
+        kept = [rel for rel, blob in saved.items() if restore(repo, rel, blob, where) != 'restored']
+        name = branch or next((done[k] for k in saved.items() if k in done), '(saved before)')
+        lines.append(f"{name} {(commit or '')[:8]}: moved {len(saved) - len(kept)}"
+                     + (f", left here (changed meanwhile) {kept}" if kept else ''))
+    for rel in p['eol_only']:                  # nothing to keep in them: put back only if that is still true
+        if os.path.lexists(os.path.join(repo, rel)):
+            restore(repo, rel, None, where, same=lambda path, rel=rel: _eol_only(repo, rel, path))
+    return lines
 
 
 # --- the command ---------------------------------------------------------------------------------------------------------
@@ -359,20 +532,12 @@ def main(argv):
         if p['groups']:
             print('\n(dry run: nothing moved. --apply moves the groups not marked 待つ)')
         return 0
-    if p['eol_only']:
-        _out(repo, 'checkout-index', '-f', '-u', '--', *p['eol_only'])
-    log = Path(repo) / '.data' / 'rescue_wip.jsonl'
-    log.parent.mkdir(parents=True, exist_ok=True)
-    for g in p['groups']:
-        if g['busy']:
-            print(f"\nskipped {g['branch']}: written within {quiet:.0f} minutes; run again later")
-            continue
-        branch, commit, moved, kept = move(repo, g)
-        print(f"\n{branch} {commit[:8]}: moved {len(moved)}" + (f", left here (changed meanwhile) {kept}" if kept else ''))
-        with log.open('a', encoding='utf-8') as fh:
-            fh.write(json.dumps({'at': datetime.now().isoformat(timespec='seconds'), 'branch': branch, 'commit': commit,
-                                 'session': g['session'], 'label': g['label'], 'moved': moved, 'kept': kept},
-                                ensure_ascii=False) + '\n')
+    with tree_lock(repo) as held:
+        if not held:
+            print('another tool is changing the folder right now; nothing moved. Run again.')
+            return 1
+        for line in apply(repo, p, quiet):
+            print('\n' + line)
     print('\nContinue a piece of work: python scripts/work.py new <name> --from <branch>')
     return 0
 

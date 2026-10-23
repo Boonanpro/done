@@ -183,3 +183,45 @@ def test_github_out_of_reach_is_said_and_asked_only_once(world, monkeypatch):
     monkeypatch.setattr(follow_github, '_git', lambda repo, *a, **k: (asked.append(a) if a[0] == 'fetch' else None) or real(repo, *a, **k))
     ok, what = follow_github.follow(folder)
     assert not ok and 'could not be reached' in what and len(asked) == 1
+
+
+def test_files_kept_as_local_are_on_disk_while_git_moves(world, monkeypatch):
+    """A stop right after git's move does not lose a machine's file (2026-10-18 check: it was kept only in memory)."""
+    github, folder = world
+    write(folder, 'mine.py', THREE + 'written by a machine\n')
+    write(github, '.gitignore', 'mine.py\n')
+    git(github, 'rm', '-q', '--cached', 'mine.py')
+    git(github, 'add', '.gitignore'); git(github, 'commit', '-q', '-m', 'stop tracking')
+    real = follow_github._git
+
+    def crash_after_merge(repo, *a, **k):
+        p = real(repo, *a, **k)
+        if a[:1] == ('merge',):
+            raise RuntimeError('power cut')
+        return p
+    monkeypatch.setattr(follow_github, '_git', crash_after_merge)
+    ok, what = follow_github.follow(folder)
+    assert not ok and 'power cut' in what
+    copies = list((folder / '.git' / 'dan' / 'follow_github').glob('kept-*/mine.py'))
+    assert copies and copies[0].read_text() == THREE + 'written by a machine\n'
+
+
+def test_a_local_ignored_file_github_starts_tracking_is_set_aside_not_overwritten(world):
+    """Git overwrites an ignored file without a word; the local copy is kept and named (2026-10-18 check)."""
+    github, folder = world
+    write(folder, '.git/info/exclude', 'local.cfg\n')
+    write(folder, 'local.cfg', 'my local settings\n')
+    pushed(github, {'local.cfg': 'settings from github\n'})
+    ok, what = follow_github.follow(folder)
+    assert ok, what
+    assert read(folder, 'local.cfg') == 'settings from github\n'
+    aside = list((folder / '.git' / 'dan' / 'follow_github').glob('replaced-*/local.cfg'))
+    assert aside and aside[0].read_text() == 'my local settings\n'
+    assert 'local.cfg' in what and 'replaced' in what
+
+
+def test_a_rename_left_here_names_both_names(world):
+    github, folder = world
+    git(folder, 'mv', 'gone.py', 'renamed.py')
+    names = [p for _, p in follow_github.status(folder)]
+    assert 'gone.py' in names and 'renamed.py' in names
