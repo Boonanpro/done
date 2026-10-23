@@ -27,7 +27,10 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-WORKSPACE = Path(os.environ.get("DAN_CLI_WORKSPACE") or "D:/dan-workspace")
+# Where the room sessions run (their .claude/settings.json declares the hooks): ~/dan-workspace on the Mac mini,
+# D:/dan-workspace on the Windows standby. Until 2026-10-23 only the Windows place was known, so on the Mac no hook
+# ran for Codex rooms ("settings unreadable" in codex_hook_bridge.log).
+WORKSPACE = Path(os.environ.get("DAN_CLI_WORKSPACE") or ("D:/dan-workspace" if os.name == "nt" else Path.home() / "dan-workspace"))
 SETTINGS = Path(os.environ.get("DAN_HOOK_SETTINGS") or (WORKSPACE / ".claude" / "settings.json"))
 LOG = PROJECT_ROOT / "codex_hook_bridge.log"
 HOOK_TIMEOUT = int(os.environ.get("DAN_HOOK_TIMEOUT", "120"))
