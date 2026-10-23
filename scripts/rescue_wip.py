@@ -402,10 +402,16 @@ def restore(repo, rel, expected, keep_dir, same=None):
     head = _entry(repo, 'HEAD', rel)
     if head:
         _out(repo, 'update-index', '--add', '--cacheinfo', f'{head[0]},{head[1]},{rel}')
-        if not os.path.lexists(full):
+        for _ in range(3):                                         # git can be busy with its index for a moment
+            if os.path.lexists(full):
+                break
             _git(repo, 'checkout-index', '-u', '--', rel)          # no -f: never over a file written meanwhile
+            if not os.path.lexists(full):
+                time.sleep(0.3)
+        if not os.path.lexists(full):
+            return 'failed'                                        # saved on the branch; a run again puts it back
     else:
-        _git(repo, 'update-index', '--force-remove', '--', rel)
+        _out(repo, 'update-index', '--force-remove', '--', rel)
     return 'restored'
 
 
@@ -477,10 +483,13 @@ def apply(repo, p, quiet):
                                   'session': g['session'], 'label': g['label'], 'saved': more})
         saved_all.append((g, branch, commit, saved))
     for g, branch, commit, saved in saved_all:                     # everything is on branches now
-        kept = [rel for rel, blob in saved.items() if restore(repo, rel, blob, where) != 'restored']
+        result = {rel: restore(repo, rel, blob, where) for rel, blob in saved.items()}
+        kept = [rel for rel, r in result.items() if r == 'changed']
+        failed = [rel for rel, r in result.items() if r == 'failed']
         name = branch or next((done[k] for k in saved.items() if k in done), '(saved before)')
-        lines.append(f"{name} {(commit or '')[:8]}: moved {len(saved) - len(kept)}"
-                     + (f", left here (changed meanwhile) {kept}" if kept else ''))
+        lines.append(f"{name} {(commit or '')[:8]}: moved {len(saved) - len(kept) - len(failed)}"
+                     + (f", left here (changed meanwhile) {kept}" if kept else '')
+                     + (f", saved but not put back (run again) {failed}" if failed else ''))
     for rel in p['eol_only']:                  # nothing to keep in them: put back only if that is still true
         if os.path.lexists(os.path.join(repo, rel)):
             restore(repo, rel, None, where, same=lambda path, rel=rel: _eol_only(repo, rel, path))
