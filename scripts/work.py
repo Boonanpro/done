@@ -133,7 +133,29 @@ def venv(wt):
         raise Stop(f'{src} は venv ではないので写せません。DAN_VENV=<venv の場所> を付けてください。')
     if not _clone_tree(src, dst):
         raise Stop(f'{src} を {dst} へ写せませんでした。`python -m venv {dst}` で作り、requirements.txt を入れてください。')
+    _repoint(src, dst)
     return dst, True
+
+
+def _repoint(src, dst):
+    """A copied venv still names its first home in its scripts (`#!/.../dan-venv/bin/python` in pip, VIRTUAL_ENV in
+    activate) and in links, so `.venv/bin/pip install` would install into the shared one (2026-10-23 check).
+    Every such mention in bin/ is pointed at the copy."""
+    old, new = str(src).encode(), str(dst).encode()
+    for f in (dst / ('Scripts' if os.name == 'nt' else 'bin')).iterdir():
+        if f.is_symlink():
+            target = os.readlink(f)
+            if target.startswith(str(src)):
+                f.unlink()
+                f.symlink_to(str(dst) + target[len(str(src)):])
+            continue
+        if not f.is_file():
+            continue
+        data = f.read_bytes()
+        if old in data and b'\0' not in data[:4096]:
+            mode = f.stat().st_mode
+            f.write_bytes(data.replace(old, new))
+            os.chmod(f, mode)
 
 
 def _python(wt):

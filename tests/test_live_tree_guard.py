@@ -216,57 +216,59 @@ def test_pip_from_a_worktree_into_the_shared_python_is_refused(live):
     assert shell('pip install requests', live.parent) is None                # not Dan work: not this guard's business
 
 
-# --- the guarantee: whatever wrote it, a changed tracked file is moved out ---------------------------------------------------
+# --- 2026-10-24: the flag is what holds; the guard explains and refuses taking it off ---------------------------------------
 
-def run_tool(live, payload, act):
-    import rescue_wip  # noqa: F401
-    guard.before(payload)
-    act()
-    return guard.after(payload)
-
-
-def test_a_write_the_shell_reading_missed_is_saved_on_a_branch_and_put_back(live, monkeypatch):
-    sys.path.insert(0, str(SCRIPTS))
-    monkeypatch.setenv('DAN_LIVE_TREE', str(live))
-    import follow_github
-    monkeypatch.setattr(follow_github, 'ROOT', live)
-    (live / 'app/api/other.py').write_text('someone\'s old work\n')            # already here before: left alone
-    payload = {'tool_name': 'Bash', 'tool_input': {'command': './some_program'}, 'session_id': 'cafe1234-0000',
-               'tool_use_id': 't1', 'cwd': str(live)}
-
-    def program_writes():
-        (live / 'app/api/chat_routes.py').write_text('written by a program\n')
-        (live / 'app/api/brand_new.py').write_text('new\n')
-    said = run_tool(live, payload, program_writes)
-    assert said and 'wip/' in said and 'chat_routes.py' in said and 'brand_new.py' in said
-    branch = next(b for b in git(live, 'branch', '--list', 'wip/*').stdout.split() if b.endswith('cafe1234'))
-    assert git(live, 'show', f'{branch}:app/api/chat_routes.py').stdout == 'written by a program\n'
-    assert git(live, 'show', f'{branch}:app/api/brand_new.py').stdout == 'new\n'
-    assert (live / 'app/api/chat_routes.py').read_text() == 'x\n' and not (live / 'app/api/brand_new.py').exists()
-    assert (live / 'app/api/other.py').read_text() == 'someone\'s old work\n'
-    # a second slip in the same session goes on the same branch, after the first
-    said = run_tool(live, dict(payload, tool_use_id='t2'), lambda: (live / 'frontend/package.json').write_text('{}\n'))
-    assert said and branch in said
-    assert git(live, 'show', f'{branch}:app/api/chat_routes.py').stdout == 'written by a program\n'
-    assert git(live, 'show', f'{branch}:frontend/package.json').stdout == '{}\n'
+@pytest.mark.parametrize('command', [
+    'chflags nouchg app/api/chat_routes.py',
+    'chflags -R nouchg .',
+    'chmod u+w app/api/chat_routes.py',
+    'chmod -R 755 app',
+    'xattr -c app/api/chat_routes.py',
+    'python -c "import os; os.chflags(\'app/api/chat_routes.py\', 0)"',
+    'python3 -c "import os; os.chmod(\'.\', 0o755)"',
+])
+def test_taking_the_flag_off_is_refused(live, command):
+    reason = shell(command, live)
+    assert reason and ('印' in reason or 'git が追うファイル' in reason), command
 
 
-def test_nothing_changed_nothing_said(live, monkeypatch):
-    monkeypatch.setenv('DAN_LIVE_TREE', str(live))
-    payload = {'tool_name': 'Bash', 'tool_input': {'command': 'ls'}, 'session_id': 's', 'tool_use_id': 't3'}
-    assert run_tool(live, payload, lambda: (live / '.data' / 'x.json').write_text('{}')) is None
+@pytest.mark.parametrize('command', [
+    'chmod +x .data/run.sh',
+    'chflags nouchg /tmp/somefile',
+    'chmod 644 frontend/src/app/artifacts/shop/page.tsx',
+])
+def test_flags_elsewhere_pass(live, command):
+    assert shell(command, live) is None, command
+
+
+def test_the_hook_says_nothing_after_a_tool(live):
+    """No second half any more: PostToolUse is not read (2026-10-24)."""
+    env = {**__import__('os').environ, 'DAN_LIVE_TREE': str(live)}
+    payload = {'hook_event_name': 'PostToolUse', 'tool_name': 'Bash', 'tool_input': {'command': './x'},
+               'session_id': 's', 'tool_use_id': 't', 'cwd': str(live)}
+    (live / 'app/api/chat_routes.py').write_text('changed by someone\n')
+    out = subprocess.run([sys.executable, str(SCRIPTS / 'hook_live_tree_guard.py')], input=json.dumps(payload).encode(),
+                         capture_output=True, env=env)
+    assert out.stdout.strip() == b'' and (live / 'app/api/chat_routes.py').read_text() == 'changed by someone\n'
     assert git(live, 'branch', '--list', 'wip/*').stdout == ''
 
 
-def test_the_hook_reports_after_the_tool_in_both_formats(live, monkeypatch):
-    env = {**__import__('os').environ, 'DAN_LIVE_TREE': str(live)}
-    payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': './x'},
-               'session_id': 'beef0000', 'tool_use_id': 't9', 'cwd': str(live)}
-    run = lambda p: subprocess.run([sys.executable, str(SCRIPTS / 'hook_live_tree_guard.py')],
-                                   input=json.dumps(p).encode(), capture_output=True, env=env)
-    assert run(payload).stdout.strip() == b''
-    (live / 'app/api/chat_routes.py').write_text('slipped\n')
-    out = json.loads(run(dict(payload, hook_event_name='PostToolUse')).stdout)
-    assert out['decision'] == 'block' and 'wip/' in out['reason']
-    assert out['hookSpecificOutput']['additionalContext'] == out['reason']
-    assert (live / 'app/api/chat_routes.py').read_text() == 'x\n'
+def test_a_codex_deletion_reaches_the_guard_through_the_bridge(live):
+    """The bridge turns a deletion into a "Delete" call; the matchers that register the guard must name it
+    (2026-10-23 check: the room settings in ship-checklist.md lacked it)."""
+    spec2 = importlib.util.spec_from_file_location('codex_hook_bridge', SCRIPTS / 'codex_hook_bridge.py')
+    bridge = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(bridge)
+    patch = '*** Begin Patch\n*** Delete File: app/api/chat_routes.py\n*** End Patch'
+    shaped = bridge._synthesize({'tool_name': 'apply_patch', 'tool_input': {'command': patch}, 'cwd': str(live)})
+    assert [s['tool_name'] for s in shaped] == ['Delete']
+    repo_settings = json.loads((SCRIPTS.parent / '.claude' / 'settings.json').read_text())
+    matchers = [g['matcher'] for g in repo_settings['hooks']['PreToolUse']
+                if any('hook_live_tree_guard' in h['command'] for h in g['hooks'])]
+    assert matchers and all(bridge._matches(m, 'Delete') for m in matchers)
+    checklist = SCRIPTS.parent / 'REPORT' / 'ship-checklist.md'
+    if checklist.exists():
+        import re as _re
+        for m in _re.findall(r'"matcher":\s*"([^"]+)"', checklist.read_text()):
+            assert bridge._matches(m, 'Delete'), m
+    assert guard.check(shaped[0])

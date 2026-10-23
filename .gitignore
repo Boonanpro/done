@@ -272,6 +272,7 @@ data/today_illust/
 # 成果物が使うパッケージの名前（scripts/hook_autoinstall_npm.py、2026-10-23）と、作業場所だけの Python（work.py venv）
 /frontend/.artifact-packages.json
 /frontend/.artifact-packages.json.tmp
+/frontend/.artifact-packages.lock
 /.venv/
 # 成果物タブ用の開発サーバーが書く「今のファイルの版」（frontend/src/lib/live-version/server.ts）
 /frontend/src/lib/live-version/current.gen.ts

@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from follow_github import (NO_WINDOW, _git, _out, dan_dir, ignored_by, line_endings_only, live_root,  # noqa: E402
                            status, tree_lock)
+import live_lock  # noqa: E402
 
 ROOT = live_root()
 HOME = Path.home()
@@ -346,7 +347,8 @@ def save(repo, group, append=False):
     """Commit the group's files to a branch and read the commit back. Changes nothing in the folder.
     A file staged with `git add` and changed again afterwards keeps both versions: the staged one in a first commit,
     the folder's one in the next. append=True adds to the branch when it exists (the guard's sweep of one session).
-    Returns (branch, commit, saved) with saved = {rel: blob in the folder, or None for a file deleted here}."""
+    Returns (branch, commit, saved) with saved = {rel: blob in the folder, or None for a file deleted here}; the blobs
+    of staged versions are in save.last_staged (for the journal)."""
     repo = str(repo)
     head = _out(repo, 'rev-parse', 'HEAD').decode().strip()
     branch = group['branch']
@@ -378,6 +380,7 @@ def save(repo, group, append=False):
         if got != want and not (want is None and got is None):
             raise RuntimeError(f'{rel}: the branch {branch} does not hold what the folder has; nothing was put back')
         saved[rel] = want[1] if want else None
+    save.last_staged = {rel: (e[1] if e else 'removed') for rel, e in staged.items()}
     return branch, commit, saved
 
 
@@ -441,15 +444,17 @@ def _journal_file(repo):
 
 
 def _journal(repo):
-    """{(rel, blob): branch} of everything rescue_wip has saved before, so a run cut short is finished without a
-    second copy: a file whose content is already on a branch is only put back."""
+    """{(rel, blob, staged blob): branch} of everything rescue_wip has saved before, so a run cut short is finished
+    without a second copy: a file whose content (in the folder and, if staged, in git's index) is already on a branch
+    is only put back. A staged version that changed since is saved again (2026-10-23 check)."""
     out = {}
     try:
         for line in _journal_file(repo).read_text(encoding='utf-8').splitlines():
             rec = json.loads(line)
             if _git(repo, 'cat-file', '-e', f"{rec['commit']}^{{commit}}").returncode == 0:
+                staged = rec.get('staged') or {}
                 for rel, blob in (rec.get('saved') or {}).items():
-                    out[(rel, blob)] = rec['branch']
+                    out[(rel, blob, staged.get(rel))] = rec['branch']
     except (OSError, ValueError, KeyError):
         pass
     return out
@@ -474,20 +479,26 @@ def apply(repo, p, quiet):
             continue
         current = {f['path']: (_hash(repo, f['path']) if os.path.lexists(os.path.join(repo, f['path'])) else None)
                    for f in g['files']}
-        todo = dict(g, files=[f for f in g['files'] if (f['path'], current[f['path']]) not in done])
-        saved = {f['path']: current[f['path']] for f in g['files'] if (f['path'], current[f['path']]) in done}
+        key = {f['path']: (f['path'], current[f['path']], _staged_blob(repo, f)) for f in g['files']}
+        todo = dict(g, files=[f for f in g['files'] if key[f['path']] not in done])
+        saved = {f['path']: current[f['path']] for f in g['files'] if key[f['path']] in done}
         branch = commit = None
         if todo['files']:
             branch, commit, more = save(repo, todo)
             saved.update(more)
             _write_journal(repo, {'at': datetime.now().isoformat(timespec='seconds'), 'branch': branch, 'commit': commit,
-                                  'session': g['session'], 'label': g['label'], 'saved': more})
+                                  'session': g['session'], 'label': g['label'], 'saved': more,
+                                  'staged': getattr(save, 'last_staged', {})})
         saved_all.append((g, branch, commit, saved))
     # everything is on branches now. Put back what is new here first, over all groups: a new file or link can stand
     # where a committed folder has to come back.
     every = {rel: blob for _, _, _, saved in saved_all for rel, blob in saved.items()}
     order = sorted(every, key=lambda rel: (_entry(repo, 'HEAD', rel) is not None, rel))
-    result = {rel: restore(repo, rel, every[rel], where) for rel in order}
+    with live_lock.opened(repo, [*order, *p['eol_only']]):        # the running folder's code is locked otherwise
+        result = {rel: restore(repo, rel, every[rel], where) for rel in order}
+        for rel in p['eol_only']:              # nothing to keep in them: put back only if that is still true
+            if os.path.lexists(os.path.join(repo, rel)):
+                restore(repo, rel, None, where, same=lambda path, rel=rel: _eol_only(repo, rel, path))
     for g, branch, commit, saved in saved_all:
         kept = [rel for rel in saved if result[rel] == 'changed']
         failed = [rel for rel in saved if result[rel] == 'failed']
@@ -495,10 +506,16 @@ def apply(repo, p, quiet):
         lines.append(f"{name} {(commit or '')[:8]}: moved {len(saved) - len(kept) - len(failed)}"
                      + (f", left here (changed meanwhile) {kept}" if kept else '')
                      + (f", saved but not put back (run again) {failed}" if failed else ''))
-    for rel in p['eol_only']:                  # nothing to keep in them: put back only if that is still true
-        if os.path.lexists(os.path.join(repo, rel)):
-            restore(repo, rel, None, where, same=lambda path, rel=rel: _eol_only(repo, rel, path))
     return lines
+
+
+def _staged_blob(repo, f):
+    """The blob of the version staged with `git add`, when the index differs from HEAD for this file; else None."""
+    if f['code'][:1] in (' ', '?'):
+        return None
+    e = _index_entry(repo, f['path'])
+    return e[1] if e else 'removed'
+
 
 
 # --- the command ---------------------------------------------------------------------------------------------------------

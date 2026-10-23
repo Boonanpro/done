@@ -17,6 +17,7 @@ Run it after a merge on GitHub (scripts/work.py ship does) and before restarting
 Usage: python scripts/follow_github.py [--no-fetch] [--dry] [--repo PATH]   exit 0 = on GitHub main, 1 = stopped
 """
 import contextlib
+import filecmp
 import os
 import shutil
 import subprocess
@@ -270,12 +271,53 @@ def follow(repo=ROOT, target='origin/main', fetch=True, dry=False, packages=True
         return False, f'could not compare the folder with GitHub: {type(exc).__name__}: {exc}'
 
 
+def _finish_earlier(repo):
+    """What an earlier run left half done (it stopped, or the power went): machine files copied aside before git moved
+    and not yet put back. Returns (said, problems)."""
+    said, problems = [], []
+    root = dan_dir(repo) / 'follow_github'
+    for keep in sorted(root.glob('kept-*')) if root.is_dir() else []:
+        rest = []
+        for f in (x for x in keep.rglob('*') if x.is_file()):
+            rel = f.relative_to(keep).as_posix()
+            dst = os.path.join(repo, rel)
+            if not os.path.lexists(dst):
+                with live_lock().opened(repo, [rel]):
+                    os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
+                    shutil.copy2(f, dst)
+                said.append(rel)
+            elif not filecmp.cmp(f, dst, shallow=False):
+                rest.append(rel)
+        if rest:
+            problems.append(f'{keep}: {", ".join(rest)} differ from the files here; both are kept, choose by hand')
+        else:
+            shutil.rmtree(keep, ignore_errors=True)
+    return said, problems
+
+
+def live_lock():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import live_lock as mod   # noqa: E402
+    return mod
+
+
+def _packages_marker(repo):
+    return dan_dir(repo) / 'follow_github' / 'packages-pending'
+
+
 def _follow_locked(repo, target, branch, dry, packages):
+    lock = live_lock()
     base, theirs = _out(repo, 'rev-parse', 'HEAD').decode().strip(), _out(repo, 'rev-parse', target).decode().strip()
+    if not dry:
+        finished, problems = _finish_earlier(repo)
+    else:
+        finished, problems = [], []
     left = leftovers(repo)
     note = _note(left)
+    earlier = f'; put back what an earlier run had set aside: {", ".join(finished)}' if finished else ''
     if base == theirs:
-        return True, f'already on GitHub {branch} ({theirs[:8]})' + note
+        done = f'already on GitHub {branch} ({theirs[:8]})' + earlier + note
+        return _finish(repo, done, problems, packages and not dry and _packages_marker(repo).exists(), dry)
     if _git(repo, 'merge-base', '--is-ancestor', base, theirs).returncode:
         return False, f"the folder's commit {base[:8]} is not part of GitHub {branch}: there are commits here that were never pushed. Not touched"
     changed = _paths(_out(repo, 'diff', '--name-only', '--no-renames', '-z', base, theirs))
@@ -292,23 +334,30 @@ def _follow_locked(repo, target, branch, dry, packages):
         extra = f'; would set aside local files GitHub now tracks: {", ".join(displaced)}' if displaced else ''
         return True, f'would follow GitHub {branch} — {said}: ' + ', '.join(changed[:20]) + extra + note
 
-    resaved = [p for code, p in status(repo) if code == ' M' and p in set(changed) and p not in left]
-    if resaved:      # only re-saved with Windows line endings: let git see the committed text it will replace
-        _out(repo, 'checkout-index', '-f', '-u', '--', *resaved)
-    aside = _copy_aside(repo, displaced, 'replaced')
-    keep = _copy_aside(repo, kept, 'kept')            # on disk before git deletes them; put back below
-    dirty_kept = [p for p in kept if p in left]
-    if dirty_kept:   # git would refuse to delete a changed file: let it see the committed one, put ours back after
-        _out(repo, 'checkout-index', '-f', '-u', '--', *dirty_kept)
-    moved = _git(repo, 'merge', '--ff-only', '--quiet', theirs)
-    for rel in kept:
-        if moved.returncode == 0 or rel in dirty_kept:
-            dst = os.path.join(repo, rel)
-            os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
-            shutil.copy2(keep / rel, dst)
-    if keep:
-        shutil.rmtree(keep, ignore_errors=True)       # every kept file is back in place
+    needs_packages = bool({'frontend/package.json', 'frontend/package-lock.json'} & set(changed))
+    if packages and needs_packages:            # said before git moves: a stop from here on is finished by a run again
+        _packages_marker(repo).parent.mkdir(parents=True, exist_ok=True)
+        _packages_marker(repo).write_text(theirs + '\n', encoding='utf-8')
+    with lock.opened(repo, [*changed, *kept, *displaced]):    # the only writes to the locked code
+        resaved = [p for code, p in status(repo) if code == ' M' and p in set(changed) and p not in left]
+        if resaved:  # only re-saved with Windows line endings: let git see the committed text it will replace
+            _out(repo, 'checkout-index', '-f', '-u', '--', *resaved)
+        aside = _copy_aside(repo, displaced, 'replaced')
+        keep = _copy_aside(repo, kept, 'kept')        # on disk before git deletes them; put back below
+        dirty_kept = [p for p in kept if p in left]
+        if dirty_kept:  # git would refuse to delete a changed file: let it see the committed one, put ours back after
+            _out(repo, 'checkout-index', '-f', '-u', '--', *dirty_kept)
+        moved = _git(repo, 'merge', '--ff-only', '--quiet', theirs)
+        for rel in kept:
+            if moved.returncode == 0 or rel in dirty_kept:
+                dst = os.path.join(repo, rel)
+                os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
+                shutil.copy2(keep / rel, dst)
+        if keep:
+            shutil.rmtree(keep, ignore_errors=True)   # every kept file is back in place
     if moved.returncode:
+        with contextlib.suppress(OSError):
+            _packages_marker(repo).unlink()
         return False, ('NOT brought up to GitHub main; git refused and nothing was changed. Files left uncommitted '
                        'here are in the way: move them to a branch (python scripts/rescue_wip.py --apply), then run '
                        'this again.\n' + moved.stderr.decode('utf-8', 'replace').strip()[-800:])
@@ -317,13 +366,34 @@ def _follow_locked(repo, target, branch, dry, packages):
     if aside:
         keep_note += (f'; local files GitHub now tracks were replaced by GitHub\'s version, the local copies are in '
                       f'{aside}: {", ".join(displaced)}')
-    done = f'now on GitHub {branch} ({theirs[:8]}) — {said}{keep_note}' + note
-    if packages and {'frontend/package.json', 'frontend/package-lock.json'} & set(changed):
-        ok, why = _install_frontend(repo)
-        if not ok:
-            return False, done + '\nBUT the frontend packages could not be installed (the screens may not build): ' + why
-        done += '\nfrontend packages installed (' + why + ')'
-    return True, done
+    done = f'now on GitHub {branch} ({theirs[:8]}) — {said}{keep_note}{earlier}' + note
+    return _finish(repo, done, problems, packages and _packages_marker(repo).exists(), dry)
+
+
+def _finish(repo, done, problems, install, dry):
+    """The end of every run: packages still owed, the lock, and what is left to settle by hand. Success only when
+    nothing is owed."""
+    ok = True
+    if install:
+        good, why = _install_frontend(repo)
+        if good:
+            with contextlib.suppress(OSError):
+                _packages_marker(repo).unlink()
+            done += '\nfrontend packages installed (' + why + ')'
+        else:
+            ok = False
+            done += ('\nBUT the frontend packages could not be installed (the screens may not build); run this '
+                     'again to retry: ' + why)
+    lock = live_lock()
+    if not dry and lock.active(repo):
+        _, _, bad = lock.lock(repo)
+        if bad:
+            ok = False
+            done += '\nBUT these could not be locked again: ' + ', '.join(bad[:10])
+    if problems:
+        ok = False
+        done += '\nLeft to settle: ' + '; '.join(problems)
+    return ok, done
 
 
 def _install_frontend(repo):

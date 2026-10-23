@@ -149,18 +149,38 @@ def _npm(front: Path, args: list[str]) -> tuple[bool, str]:
 
 def install_live(front: Path, add: list[str] = ()) -> tuple[bool, str]:
     """The running folder's frontend: package.json as committed plus every package artifacts asked for, in one npm
-    call, so that none of them is pruned. New names are recorded in .artifact-packages.json first."""
+    call, so that none of them is pruned. New names are recorded in .artifact-packages.json first. One at a time
+    (a lock file): two sessions adding a package each would otherwise both read the old list and the later write
+    would drop the earlier name, and two npm runs in one node_modules break it (2026-10-23 check)."""
     front = Path(front)
-    names = sorted(set(artifact_packages(front)) | {n for n in add if n in ALLOWED_PACKAGES})
-    if add:
-        tmp = front / (ARTIFACT_PACKAGES + ".tmp")
-        tmp.write_text(json.dumps(names, indent=1) + "\n", encoding="utf-8")
-        os.replace(tmp, front / ARTIFACT_PACKAGES)
-    ok, err = _npm(front, ["install", "--no-save", *names])
+    with _one_at_a_time(front / ".artifact-packages.lock"):
+        names = sorted(set(artifact_packages(front)) | {n for n in add if n in ALLOWED_PACKAGES})
+        if add:
+            tmp = front / (ARTIFACT_PACKAGES + ".tmp")
+            tmp.write_text(json.dumps(names, indent=1) + "\n", encoding="utf-8")
+            os.replace(tmp, front / ARTIFACT_PACKAGES)
+        ok, err = _npm(front, ["install", "--no-save", *names])
     if not ok:
         return False, err
     gone = [n for n in names if not _present(front, n)]
     return (False, "not present after install: " + ", ".join(gone)) if gone else (True, f"{len(names)} artifact packages kept")
+
+
+class _one_at_a_time:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        self.fh = open(self.path, "a+")
+        try:
+            import fcntl
+            fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX)      # waits for the other install
+        except ImportError:                                    # Windows standby: no lock
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        self.fh.close()                                        # closing lets the next one in
 
 
 def install(name: str) -> tuple[bool, str]:

@@ -6,17 +6,17 @@ collided with seven files of other sessions' half-done work, follow_github stopp
 strangers' work by hand; a dashboard rebuild would have published all of it. Each piece of work now lives in its own
 worktree and branch (`python scripts/work.py new <name>`), where git keeps every saved step.
 
-Two halves, one hook (2026-10-23):
+What holds since 2026-10-24 is the operating system: the running folder's code carries the "user immutable" flag
+(scripts/live_lock.py), so any write to it fails, by whatever program. This hook only explains, early and in plain
+words, why a write will not work and where to do the work instead. It refuses, before a tool runs (PreToolUse):
+writes to a file git tracks (or would track) in the running folder, by path (Write / Edit / MultiEdit / NotebookEdit /
+Codex's apply_patch, a deletion through the Codex bridge) or by the usual ways of writing in a shell line (redirects,
+tee, cp/mv/rm/ln/rsync, sed -i, git and npm commands that change the tree, sh -c and eval, python -c / node -e that open
+a file for writing, variables, cd); and taking the flag off or changing the mode there (chflags, chmod, xattr, chown,
+os.chflags in code), which a session of the same user could do.
 
-1. Before a tool runs (PreToolUse), it is refused when it would write a file git tracks (or would track) in the running
-   folder: Write / Edit / MultiEdit / NotebookEdit / Codex's apply_patch by their path, a shell line by the usual ways
-   of writing a file (redirects, tee, cp/mv/rm/ln/rsync, sed -i, git and npm commands that change the tree, sh -c and
-   eval, python -c / node -e that open a file for writing, variables, cd). This half gives the early, clear answer.
-2. After it ran (PostToolUse), the folder itself is looked at: a tracked file that changed during the call, by any way
-   at all (a script, a program, a path spelled some way the first half did not read), is saved on the session's branch
-   wip/<date>-<session> and put back to the committed version, and the session is told. This half is the guarantee:
-   reading shell text can never be complete, the folder's state is. Nothing is lost: the content is on the branch and
-   the folder's copy is kept in .git/dan/rescued/.
+Until 2026-10-23 a second half looked at the folder after each tool and moved what had changed to the branch of the
+session it guessed; it was removed (2026-10-24) because a guess took one session's work into another's branch.
 
 Everything git does not track passes: user artifacts (frontend/src/app/artifacts/<slug>/, frontend/public/artifacts/),
 runtime data (.data, logs, node_modules, builds) and worktrees kept inside the folder. The rule is the folder's own
@@ -25,8 +25,8 @@ runtime data (.data, logs, node_modules, builds) and worktrees kept inside the f
 Also refused from a worktree: `pip install` into the shared Python (it is the running Dan's); `work.py venv` gives the
 worktree its own copy.
 
-Registered for Claude Code (PreToolUse and PostToolUse, matcher Write|Edit|MultiEdit|NotebookEdit|Bash) and, through
-scripts/codex_hook_bridge.py, for Codex.
+Registered for Claude Code (PreToolUse, matcher Write|Edit|MultiEdit|NotebookEdit|Bash|Delete) and, through
+scripts/codex_hook_bridge.py, for Codex (the bridge turns a deletion in apply_patch into a "Delete" call).
 """
 from __future__ import annotations
 
@@ -36,12 +36,10 @@ import re
 import shlex
 import subprocess
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from follow_github import dan_dir, live_root, status, tree_lock  # noqa: E402
+from follow_github import live_root  # noqa: E402
 
 LIVE = live_root()
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -64,7 +62,8 @@ WRITES_IN_CODE = re.compile(
     r"""open\s*\([^)]*?,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+]|\.write_(?:text|bytes)\s*\(|writeFile|appendFile|"""
     r"""createWriteStream|copyFile|\brename(?:Sync)?\s*\(|\bunlink(?:Sync)?\s*\(|\brm(?:Sync)?\s*\(|rmtree|"""
     r"""shutil\.(?:copy|move)|os\.(?:replace|rename|remove|unlink)|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|"""
-    r"""\.touch\s*\(|open\s*\(\s*['"][^'"]*['"]\s*,\s*['"]>|sysopen|File\.write|IO\.write|FileUtils""")
+    r"""\.touch\s*\(|open\s*\(\s*['"][^'"]*['"]\s*,\s*['"]>|sysopen|File\.write|IO\.write|FileUtils|"""
+    r"""chflags|lchflags|chmod|chown|setxattr|removexattr|xattr""")
 PATH_IN_CODE = re.compile(r"""['"]([^'"\n]{1,400})['"]""")
 
 
@@ -419,6 +418,13 @@ def shell_writes(command: str, cwd: str | None, depth: int = 0):
                 if not a.startswith("-"):
                     target(a, here, must_exist=True)
             continue
+        if name in ("chflags", "chmod", "chown", "chgrp", "xattr", "setfile", "chattr"):
+            for a in _positionals(xargs)[1 if name in ("chflags", "chmod", "chown", "chgrp") else 0:]:
+                p = _norm(a, here)
+                if p is not None and _locked_place(p):
+                    found.append(("lock", f"{name} {a}"))
+                    break
+            continue
         if name in INTERPRETERS:
             code = None
             for k, a in enumerate(args):
@@ -522,9 +528,19 @@ def _git_reads_only(sub: str, rest: list[str]) -> bool:
     return False
 
 
+def _locked_place(p: Path) -> bool:
+    """p is the running folder itself, a folder holding code there, or a file git tracks or would track there."""
+    rel = _rel_in_live(p)
+    if rel is None or _nested_worktree(p):
+        return False
+    if p.is_dir() and not p.is_symlink():
+        return rel == "" or _tracked_under(p)
+    return bool(live_file(p))
+
+
 def _tracked_under(d: Path) -> bool:
     rel = _rel_in_live(d)
-    r = subprocess.run(["git", "-C", str(LIVE), "ls-files", "--", rel], capture_output=True, timeout=20,
+    r = subprocess.run(["git", "-C", str(LIVE), "ls-files", "--", rel or "."], capture_output=True, timeout=20,
                        creationflags=NO_WINDOW)
     return bool(r.stdout.strip())
 
@@ -612,6 +628,8 @@ def _message(what: str, kind: str) -> str:
         "git": f"{what} は動いているダン（{LIVE}）の中身を変えるので、ここでは使えません。{LIVE} を変えるのは scripts/follow_github.py だけです。",
         "npm": f"{what} は {LIVE / 'frontend'} の package.json か node_modules を変えるので、ここでは使えません。"
                "成果物が使うパッケージは、成果物のファイルに import を書けば自動で入ります。",
+        "lock": f"{what} は、動いているダン（{LIVE}）のコードに付けた変更禁止の印や権限を変えるので、使えません。"
+                "印を外すのは、本番を GitHub に合わせる係（scripts/follow_github.py）だけです。",
         "pip": f"{what} は、動いているダンと共用の Python に入れるので、作業場所からは使えません。"
                f"`{work} venv` でこの作業場所だけの Python（.venv）を作り、`.venv/bin/python -m pip {what.split()[-1]} ...` で入れてください。"
                "本番に要るなら requirements.txt にも書いてください。",
@@ -628,103 +646,19 @@ def _message(what: str, kind: str) -> str:
     )
 
 
-# --- after: look at the folder -------------------------------------------------------------------------------------------
-
-def _snapshot_file(payload: dict) -> Path:
-    key = payload.get("tool_use_id") or payload.get("call_id") or payload.get("session_id") or "nosession"
-    return dan_dir(LIVE) / "guard" / (re.sub(r"[^\w.-]", "_", str(key))[:120] + ".json")
-
-
-def _dirty() -> dict[str, list]:
-    """Everything uncommitted in the folder: rel -> [code, size, mtime_ns, inode] (None when gone)."""
-    out = {}
-    for code, rel in status(LIVE):
-        try:
-            st = os.lstat(LIVE / rel)
-            out[rel] = [code, st.st_size, st.st_mtime_ns, st.st_ino]
-        except OSError:
-            out[rel] = [code, None, None, None]
-    return out
-
-
-def before(payload: dict) -> None:
-    f = _snapshot_file(payload)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"at": time.time(), "dirty": _dirty()}), encoding="utf-8")
-    os.replace(tmp, f)
-    if time.time() % 50 < 1:                                # now and then: snapshots of calls that never ended
-        for old in f.parent.glob("*.json"):
-            try:
-                if time.time() - old.stat().st_mtime > 86400:
-                    old.unlink()
-            except OSError:
-                pass
-
-
-def after(payload: dict) -> str | None:
-    """Tracked files that changed in the folder while the tool ran: saved on the session's branch, put back.
-    Returns what to tell the session, or None."""
-    f = _snapshot_file(payload)
-    try:
-        snap = json.loads(f.read_text(encoding="utf-8"))
-        f.unlink()
-    except (OSError, ValueError):
-        return None
-    with tree_lock(LIVE, wait=30) as held:
-        if not held:
-            return None
-        now = _dirty()
-        changed = sorted(rel for rel, st in now.items() if snap["dirty"].get(rel) != st)
-        if not changed:
-            return None
-        import rescue_wip                                  # noqa: E402  (only when something slipped through)
-        session = str(payload.get("session_id") or "unknown")
-        tool = payload.get("tool_name") or ""
-        what = (payload.get("tool_input") or {}).get("command") or (payload.get("tool_input") or {}).get("file_path") or ""
-        group = {"branch": f"wip/{datetime.now():%Y%m%d}-{session[:8]}", "session": session,
-                 "label": f"関所が見つけた書き込み（{tool}: {str(what)[:120]}）",
-                 "files": [{"path": rel, "code": now[rel][0]} for rel in changed]}
-        try:
-            branch, commit, saved = rescue_wip.save(LIVE, group, append=True)
-            where = rescue_wip.keep_dir(LIVE)
-            order = sorted(saved, key=lambda rel: (rescue_wip._entry(str(LIVE), "HEAD", rel) is not None, rel))
-            back = [rel for rel in order if rescue_wip.restore(LIVE, rel, saved[rel], where) == "restored"]
-            rescue_wip._write_journal(str(LIVE), {"at": datetime.now().isoformat(timespec="seconds"), "branch": branch,
-                                                  "commit": commit, "session": session, "label": group["label"],
-                                                  "saved": saved, "by": "hook_live_tree_guard"})
-        except Exception as exc:  # noqa: BLE001 — say it; the files stay as they are
-            return (f"このツールの実行中に、動いているダン（{LIVE}）の git が追うファイルが変わりました: {', '.join(changed)}。"
-                    f"分岐へ移せませんでした（{type(exc).__name__}: {exc}）。`python {LIVE.as_posix()}/scripts/rescue_wip.py` で確かめてください。")
-    left = [rel for rel in changed if rel not in back]
-    return (
-        f"このツールの実行中に、動いているダン（{LIVE}）の git が追うファイルが変わりました: {', '.join(changed)}。\n"
-        f"中身は分岐 {branch} に保存し、{LIVE} のファイルは GitHub の版に戻しました（戻す前のファイルの写しは {where}）。"
-        + (f" 次のファイルは保存の後にまた変わったので、そのまま残しています: {', '.join(left)}。" if left else "")
-        + f"\n続けるなら作業場所で: `python {LIVE.as_posix()}/scripts/work.py new <名前> --from {branch}`（続きの場所があるなら"
-          f" そこで `git merge {branch}`）。{LIVE} には書かないでください。"
-    )
-
-
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
     except Exception:  # noqa: BLE001
         return 0
     event = payload.get("hook_event_name") or (sys.argv[1] if len(sys.argv) > 1 else "PreToolUse")
+    if event != "PreToolUse":
+        return 0
     try:
-        if event == "PostToolUse":
-            said = after(payload)
-            if said:
-                print(json.dumps({"decision": "block", "reason": said,
-                                  "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": said}}))
-            return 0
         reason = check(payload)
         if reason:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": reason}}))   # ASCII escapes
-            return 0
-        before(payload)
     except Exception as exc:  # noqa: BLE001 — a broken guard must not stop every tool on the machine
         sys.stderr.write(f"hook_live_tree_guard: {type(exc).__name__}: {exc}\n")
     return 0
