@@ -117,7 +117,7 @@ def attempts(folder):
 def test_locked_code_cannot_be_written_by_any_means(world):
     github, folder = world
     nf, nd, bad = live_lock.lock(folder)
-    assert not bad and nf == 6 and live_lock.active(folder)
+    assert not bad and nf == 5 and live_lock.active(folder)                # the tracked artifact is not locked
     for what, act in attempts(folder).items():
         with pytest.raises((PermissionError, OSError)):
             act()

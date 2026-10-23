@@ -2,7 +2,7 @@ import type { MetadataRoute } from 'next';
 import { headers } from 'next/headers';
 
 import { ARTIFACT_PAGES } from '@/lib/artifact-pages.generated';
-import { ARTIFACT_SITEMAPS } from '@/lib/artifact-sitemaps.generated';
+import { ARTIFACT_SITEMAPS } from '@/generated/artifact-sitemaps';
 import { CUSTOM_DOMAIN_SLUG_MAP } from '@/lib/custom-domain-rewrites.generated';
 import {
   deliverySlugFromHost,

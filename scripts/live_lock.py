@@ -43,6 +43,9 @@ CACHES = {'__pycache__', '.DS_Store'}
 # logs and .data at the top, .claude/mcp_<room>.json, app/uploads, app/logs and app/database.db, the frontend's .next-*
 # builds, .env.local and tsconfig.<build>.json, generated public files, and new artifacts.
 ALWAYS_OPEN = {'', '.claude', 'app', 'frontend', 'frontend/public', 'frontend/src/app/artifacts', 'frontend/public/artifacts'}
+# Artifacts are written directly by Dan and its sessions (the rule since 2026-10-18), the few tracked ones too
+# (publication writes their release.gen.json): nothing under these is locked.
+ARTIFACTS = ('frontend/src/app/artifacts/', 'frontend/public/artifacts/')
 
 
 def active(repo) -> bool:
@@ -59,16 +62,17 @@ def plan(repo):
     """(files, folders) to lock, relative to repo. Files: what git tracks and exists. Folders: those holding tracked
     files and nothing else that git does not track (Python caches aside), minus ALWAYS_OPEN."""
     repo = str(repo)
-    files = [p for p in _tracked(repo) if os.path.lexists(os.path.join(repo, p))]
-    tracked = set(files)
+    every = [p for p in _tracked(repo) if os.path.lexists(os.path.join(repo, p))]
+    tracked = set(every)
+    files = [p for p in every if not p.startswith(ARTIFACTS)]
     holders = set()
-    for p in files:
+    for p in every:
         parts = p.split('/')
         for k in range(len(parts)):
             holders.add('/'.join(parts[:k]))
     folders = []
     for d in sorted(holders):
-        if d in ALWAYS_OPEN or d == '.git' or d.startswith('.git/'):
+        if d in ALWAYS_OPEN or d == '.git' or d.startswith('.git/') or (d + '/').startswith(ARTIFACTS):
             continue
         full = os.path.join(repo, d)
         if not os.path.isdir(full) or os.path.islink(full):

@@ -291,6 +291,8 @@ def try_up(wt):
     log = open(state / 'screens.log', 'w', encoding='utf-8')
     subprocess.run([_python(wt), str(wt / 'scripts' / 'wire_artifact_tailwind_sources.py')], stdout=log,
                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+    subprocess.run(['node', 'scripts/sync-artifact-sitemaps.mjs'], cwd=str(wt / 'frontend'), stdout=log,   # src/generated
+                   stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
     if not (wt / 'frontend' / 'node_modules').is_dir():
         _own_node_modules(wt)
     # webpack: the same bundler as the owner's preview (3001)

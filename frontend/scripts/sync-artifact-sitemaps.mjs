@@ -1,4 +1,4 @@
-// ビルド直前に artifact-sitemaps.generated.ts の読み込み口を、実在する成果物だけに絞る。
+// ビルド直前に src/generated/artifact-sitemaps.ts の読み込み口を、実在する成果物だけに絞る。
 //
 // 成果物のフォルダ (src/app/artifacts/<slug>/) は .gitignore で GitHub に載らない。
 // GitHub から取ったコードでビルドする共有 frontend では import 先が無く、
@@ -6,13 +6,14 @@
 // 手元や専用プロジェクトのビルドでは sitemap.ts が実在するので、一覧は変わらない。
 //
 // 一覧の生成元は scripts/generate_sitemap_registry.py。書式はそちらに合わせる。
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ARTIFACTS = join(FRONTEND, 'src', 'app', 'artifacts');
-const OUT = join(FRONTEND, 'src', 'lib', 'artifact-sitemaps.generated.ts');
+// git の対象外の src/generated/ に置く。成果物が増えるたびに変わる、実行時に作るファイルなので（2026-10-24）。
+const OUT = join(FRONTEND, 'src', 'generated', 'artifact-sitemaps.ts');
 
 function slugsWithSitemap() {
   if (!existsSync(ARTIFACTS)) return [];
@@ -47,6 +48,7 @@ const present = slugsWithSitemap();
 if (listed.join('\n') === present.join('\n')) {
   console.log(`[sync-artifact-sitemaps] unchanged (${present.length} artifacts)`);
 } else {
+  mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(OUT, render(present), 'utf8');
   const dropped = listed.filter((slug) => !present.includes(slug));
   console.log(
