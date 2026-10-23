@@ -113,8 +113,10 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     try: args = json.loads(item.get('arguments') or '{}')
     except ValueError: args = {}
     early = None
-    if item.get('name') == 'web_search' and dialogue.prefetch is not None:   # a search started while the owner was speaking
-        try: early = await dialogue.prefetch.take(str(args.get('query') or ''), dialogue.turns)
+    if dialogue.prefetch is not None:   # a search started while the owner was speaking; take() sees every call in order
+        try:
+            if item.get('name') == 'web_search': early = await dialogue.prefetch.take(str(args.get('query') or ''), dialogue.turns)
+            else: dialogue.prefetch.saw_call(dialogue.turns)
         except Exception: early = None
     try: output = search_output(early, str(args.get('query') or '')) if early else await run_function(item.get('name'), args, user_id, room_id, dialogue.recent(), speak=speak)
     except Exception as exc:
@@ -353,15 +355,16 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     if now - spoke.get(side, 0) > 1.5: record('speech_start', side=side, at_s=round(now - started, 2))
                     spoke[side] = now
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
-                if kind == 'session.input_transcript.delta':
-                    dialogue.add('user', event.get('delta') or '')
-                    if dialogue.prefetch is not None: dialogue.prefetch.heard(dialogue)
+                if kind == 'session.input_transcript.delta': dialogue.add('user', event.get('delta') or '')
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
                 if kind == 'response.event':
                     inner = event.get('event') or {}
                     counts['response.event:'+str(inner.get('type'))] = counts.get('response.event:'+str(inner.get('type')), 0)+1
                 if counts[kind] <= 3 or 'delegation' in kind or kind in ('session.closed', 'error'):
                     record('sideband_event', **summary(event))
+                if kind == 'session.input_transcript.delta' and dialogue.prefetch is not None:   # the owner's words so far, added above
+                    try: dialogue.prefetch.heard(dialogue)
+                    except Exception as exc: record('prefetch_failed', error_type=type(exc).__name__)   # the call goes on without it
                 if own and kind == 'response.event':
                     # tasks run in creation order: a function call is registered (no await before it) before the
                     # response's completion gathers the outputs; the receive loop itself never waits on a function

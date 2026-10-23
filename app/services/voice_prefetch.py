@@ -21,14 +21,16 @@ the newest search is close to the finished sentence.
 A result is used only for the same request and only once: the owner's words since the searched part may only be an ending
 (「って」「教えて」「いくら？」). 「明日の天気って…いや明後日」 adds words, so the early result is dropped and the backend's
 own search runs. The backend's query is not compared word by word: it rewrites the owner's words (「ドル円」 became
-「USD JPY 為替レート」 in the 2026-10-23 test call), and the first search of the turn is the owner's question.
+「USD JPY 為替レート」 in the 2026-10-23 test call), and the first search of the turn is the owner's question. That holds only
+while the search is the backend's first step for the question: after another function (places for 「近くのラーメン屋」,
+get_location for a weather without a place) its web_search asks something narrower that the owner's words did not, so it
+runs on its own (2026-10-24 review: the ramen question's later web_search had been handed the whole question's result).
 
 Switch: DAN_VOICE_PREFETCH=0. Logged as metadata only (counts and times, no words), like the rest of the sideband.
 """
 import asyncio
 import json
 import os
-import re
 import time
 
 MIN_CHARS = 6          # 「えーと」「あのさ」 are not judged
@@ -43,13 +45,32 @@ KINDS = {'search': 'ウェブで公開されている情報を調べる話（天
          'wait': 'まだ言い始めたばかりで、何の話か分からない'}
 ASK = '通話で本人が話している途中の言葉（言い終わっていないこともある）。この言葉が向かっている先として一番近いものを選ぶ。'
 # what may follow the searched words without changing the question
-ENDING = re.compile(r'^(?:って|て|は|の|を|が|も|か|よ|ね|な|ん|る|た|だ|です|ですか|でしょう|だっけ|かな|かね|何|なに|なん|いくら|いつ|何時|どこ|どう|'
-                    r'どれくらい|ぐらい|くらい|教えて|調べて|知りたい|分かる|わかる|ある|あります|見て|くれる|くれない|ちょうだい|ほしい|欲しい|なってる|'
-                    r'なった|なの|やつ|とか|ください|お願い|[、。？！?!\s　…ー〜])*$')
+ENDINGS = ('って', 'て', 'は', 'の', 'を', 'が', 'も', 'か', 'よ', 'ね', 'な', 'ん', 'る', 'た', 'だ', 'です', 'ですか', 'でしょう', 'だっけ',
+           'かな', 'かね', '何', 'なに', 'なん', 'いくら', 'いつ', '何時', 'どこ', 'どう', 'どれくらい', 'ぐらい', 'くらい', '教えて', '調べて',
+           '知りたい', '分かる', 'わかる', 'ある', 'あります', '見て', 'くれる', 'くれない', 'ちょうだい', 'ほしい', '欲しい', 'なってる', 'なった',
+           'なの', 'やつ', 'とか', 'ください', 'お願い')
+MARKS = set('、。？！?!　…ー〜')
+
+
+def is_ending(text):
+    """Is the text made only of ENDINGS and marks? Walked once over the positions the words can reach. A regular
+    expression did this until 2026-10-24: 「なん」 also reads as 「な」+「ん」, and a failing match tried every split,
+    4 times longer per 「なん」 (22 of them 1.6 s), on the event loop that runs every call and chat of Core."""
+    reach = [True] + [False] * len(text)
+    for i, ch in enumerate(text):
+        if not reach[i]:
+            continue
+        if ch in MARKS or ch.isspace():
+            reach[i + 1] = True
+        for word in ENDINGS:
+            if text.startswith(word, i):
+                reach[i + len(word)] = True
+    return reach[-1]
 
 
 def enabled():
-    return os.environ.get('DAN_VOICE_PREFETCH', '1') != '0'
+    from app.services.web_search import _env   # .env too: Core's environment does not carry it (2026-10-24 review)
+    return (_env('DAN_VOICE_PREFETCH') or '1').strip() != '0'
 
 
 class Early:
@@ -74,7 +95,7 @@ def only_an_ending(searched, final):
     if not final.startswith(searched):
         return False
     rest = final[len(searched):]
-    return any(ENDING.match(searched[len(searched) - k:] + rest) for k in range(0, min(4, len(searched)) + 1))
+    return any(is_ending(searched[len(searched) - k:] + rest) for k in range(0, min(4, len(searched)) + 1))
 
 
 class Prefetch:
@@ -86,6 +107,7 @@ class Prefetch:
         self.judging = None
         self.search_turn = None   # the owner's turn judged to be a search
         self.judge = None         # Jev's Decisions, opened once per call
+        self.calls = []           # the owner's newest turn at each function call of the backend (newest last)
         self.counts = {'judged': 0, 'started': 0, 'hit': 0, 'missed': 0, 'jev': 0, 'flash': 0}
 
     @staticmethod
@@ -104,7 +126,7 @@ class Prefetch:
         started = [s for s in self.searches if s.turn is turn]
         if turn is None or len(started) >= PER_TURN:
             return
-        if turn is self.search_turn:
+        if turn is self.search_turn and started:
             if len(text) - len(started[-1].text) >= RESEARCH_CHARS:
                 self.start(text, turn)
             return
@@ -141,10 +163,15 @@ class Prefetch:
         except Exception:
             return ''
 
+    def saw_call(self, turns):
+        """A function call of the backend, of any name (called before the call runs)."""
+        turn, _ = self.latest(turns)
+        self.calls = (self.calls + [turn])[-20:]
+
     def start(self, text, turn):
         from app.services import web_search
         early = Early(text, turn)
-        early.task = asyncio.ensure_future(web_search.find(text))
+        early.task = asyncio.ensure_future(web_search.find(text, fallback=False))
         self.searches.append(early)
         self.counts['started'] += 1
         self.record('prefetch_started', chars=len(text))
@@ -174,8 +201,15 @@ class Prefetch:
             if final is None or not only_an_ending(s.text, final):
                 why = why or 'more_words'
                 continue
+            since = turns[next(i for i, t in enumerate(turns) if t is s.turn):]
+            if any(c is t for c in self.calls for t in since):
+                why = why or 'after_other_call'
+                for o in self.searches:   # the question went another way: its early searches answer nothing
+                    if o.turn is s.turn: o.used = True
+                continue
             best = s
             break
+        self.saw_call(turns)
         if not best:
             if why:
                 self.counts['missed'] += 1

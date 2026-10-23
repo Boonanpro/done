@@ -131,7 +131,7 @@ async def _deepseek(question):
         seen, results = set(), []
         for i in range(max(map(len, lists), default=0)):   # interleave the queries' lists, best first
             for rows in lists:
-                if i < len(rows) and rows[i].get('url') not in seen:
+                if i < len(rows) and rows[i].get('url') and rows[i]['url'] not in seen:
                     seen.add(rows[i].get('url'))
                     results.append(rows[i])
         results = results[:12]
@@ -172,18 +172,43 @@ async def _openai(query):
     return {'answer': ' '.join(text).strip()[:4000], 'sources': sources}
 
 
-async def find(query):
+DEEPSEEK_SECONDS = 10   # DeepSeek's whole search (queries, search, answer) takes about 3 s; past this OpenAI answers
+TOTAL_SECONDS = 40      # the longest a search may take, fallback included: the voice search's own limit before 2026-10-23
+COOLDOWN_SECONDS = 120  # after DeepSeek failed or ran out of time, searches go straight to OpenAI for this long
+_deepseek_down = [0.0]  # monotonic time until which DeepSeek is skipped
+
+
+async def find(query, fallback=True):
     """The answer to a question from the web: {'success', 'answer', 'sources': [{title, url}], 'engine', 'seconds'} or
-    {'success': False, 'error'}. DeepSeek first unless DAN_WEB_SEARCH_ENGINE=openai; OpenAI when DeepSeek fails."""
+    {'success': False, 'error'}. DeepSeek first unless DAN_WEB_SEARCH_ENGINE=openai; OpenAI when DeepSeek fails.
+
+    Bounded (2026-10-24 review): DeepSeek's own waits add up to 80 s and OpenAI's to 60 s, so a slow DeepSeek day kept a
+    call silent for over two minutes. DeepSeek now gets DEEPSEEK_SECONDS, everything TOTAL_SECONDS, and after a DeepSeek
+    failure the next searches skip it for COOLDOWN_SECONDS. fallback=False tries the first engine only (a search started
+    early in a call: falling back there spent the OpenAI balance the call runs on, up to three times per question)."""
     started, tried = time.perf_counter(), []
-    for name in (['deepseek', 'openai'] if engine() != 'openai' else ['openai']):
+    names = ['openai'] if engine() == 'openai' else ['deepseek', 'openai']
+    if names[0] == 'deepseek' and time.monotonic() < _deepseek_down[0]:
+        names = ['openai']
+        tried.append('deepseek: 直前に失敗したので飛ばした')
+    if not fallback:
+        names = names[:1] if not tried else []
+    for name in names:
+        left = TOTAL_SECONDS - (time.perf_counter() - started)
         try:
-            got = await (_deepseek(query) if name == 'deepseek' else _openai(query))
+            if name == 'deepseek':
+                got = await asyncio.wait_for(_deepseek(query), min(DEEPSEEK_SECONDS, left))
+            else:
+                got = await asyncio.wait_for(_openai(query), max(0.0, left))
             if got['answer']:
                 return {'success': True, **got, 'engine': name, 'seconds': round(time.perf_counter() - started, 2)}
             tried.append(f'{name}: 答えが空')
+        except asyncio.TimeoutError:
+            tried.append(f'{name}: 時間切れ')
+            if name == 'deepseek': _deepseek_down[0] = time.monotonic() + COOLDOWN_SECONDS
         except Exception as exc:
             tried.append(f'{name}: {str(exc)[:160] or type(exc).__name__}')
+            if name == 'deepseek': _deepseek_down[0] = time.monotonic() + COOLDOWN_SECONDS
     return {'success': False, 'error': '検索できなかった（' + ' / '.join(tried) + '）'}
 
 

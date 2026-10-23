@@ -64,4 +64,6 @@ DeepSeek が落とした所:
 - `app/services/voice_prefetch.py`・`voice_sideband.py`: 話し終わる前の検索。`DAN_VOICE_PREFETCH=0` で止まる。記録は回数と秒数だけ（言葉は残さない）。
 - `app/services/jev_browser_budget.py`: 予算ファイルの鍵を Mac でも動くようにした。
 
+点検の指摘の直し（締め切り・判定の速さ・先回りの渡し先）は `search-deepseek-20261024-fixes.md`。
+
 触っていないもの: 通話の声（gpt-live-1）と通話の設定、裏のモデル（gpt-5.6-terra）、動画の制作相談の通話の検索、Codex の中の検索。

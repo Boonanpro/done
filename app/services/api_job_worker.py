@@ -242,7 +242,8 @@ class Worker:
         mcp = await list_tools()
         native = job_tools(mcp)
         instructions = (s.get('instructions') or '') + chr(10) + dan_tools.catalog(mcp, native=[t['name'] for t in native])
-        provider.start(instructions, native + SEARCH_TOOLS + [dan_tools.HELP, dan_tools.USE], first)
+        provider.start(instructions, native + [t for t in SEARCH_TOOLS if JOB_TOOLS() == ['all'] or t['name'] in JOB_TOOLS()]
+                       + [dan_tools.HELP, dan_tools.USE], first)
         totals = {'input': 0, 'cached': 0, 'output': 0, 'cache_write': 0, 'steps': 0, 'model': model}
         used_browser = used_desktop = False
         stuck = Stuck()
