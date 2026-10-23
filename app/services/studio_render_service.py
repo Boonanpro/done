@@ -15,8 +15,8 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-FFMPEG = os.path.expanduser("~/ffmpeg/bin/ffmpeg.exe")
-FFPROBE = os.path.expanduser("~/ffmpeg/bin/ffprobe.exe")
+FFMPEG = os.path.expanduser("~/ffmpeg/bin/ffmpeg.exe") if os.name == "nt" else (__import__("shutil").which("ffmpeg") or "ffmpeg")
+FFPROBE = os.path.expanduser("~/ffmpeg/bin/ffprobe.exe") if os.name == "nt" else (__import__("shutil").which("ffprobe") or "ffprobe")
 
 
 class StudioRenderService:

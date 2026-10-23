@@ -501,6 +501,7 @@ def _chrome_executable_path(playwright) -> str:
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         ]
         for candidate in candidates:
             if candidate and os.path.exists(candidate):

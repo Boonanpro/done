@@ -119,3 +119,16 @@ try {
 } catch {
     Write-WatchdogLog "named tunnel start failed: $($_.Exception.Message)"
 }
+
+# 4) この PC が控え（ダンの本体は Mac）の時、voice.paina.info を Mac からこの PC の音声入力へ中継する
+if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.dan\standby')) {
+    try {
+        & "$Root\scripts\voice_relay_to_mac.ps1" | ForEach-Object { Write-WatchdogLog $_ }
+    } catch {
+        Write-WatchdogLog "voice relay to Mac failed: $($_.Exception.Message)"
+    }
+    # ピンの録音の文字起こしを Mac へ（10分に1回、変わった分だけ）
+    Start-Process -FilePath $Python -ArgumentList "`"$Root\scripts\push_lifelog_to_mac.py`"" -WindowStyle Hidden
+    # Mac が再起動の後に鍵の画面やログイン画面で止まっていたら戻す（2分に1回見る）
+    Start-Process -FilePath $Python -ArgumentList "`"$Root\scripts\mac_keeper.py`"" -WindowStyle Hidden
+}

@@ -28,7 +28,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _WATCH_DIRS = [_PROJECT_ROOT / "frontend" / "src"]
 _EXCLUDE_PARTS = ("artifacts", "demo", "scratch", "api")
 _SNAPSHOT_SCRIPT = _PROJECT_ROOT / "scripts" / "ui_snapshot.py"
-_MARKER = Path(os.environ.get("DAN_ARCHIVE_ROOT") or "D:/dan-archive") / "story" / "shots" / ".last_auto"
+from app.paths import DAN_ARCHIVE_ROOT
+_MARKER = DAN_ARCHIVE_ROOT / "story" / "shots" / ".last_auto"
 
 _started = False
 _task: Optional["asyncio.Task"] = None

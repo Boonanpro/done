@@ -40,6 +40,9 @@ ACTIVE_RUN_STATES = {
 # run whose updated_at was 90 s old, a guess that closed live turns (2026-09-28).
 
 
+
+from app.core.standby import MACHINE as _MACHINE   # which machine started the run (app/core/standby.py)
+
 class RunService:
     """Persist the current authoritative run for a project."""
 
@@ -63,7 +66,7 @@ class RunService:
             "claude_session_id": claude_session_id,
             "parent_run_id": parent_run_id,
             "state": state,
-            "metadata": metadata or {},
+            "metadata": {"machine": _MACHINE, **(metadata or {})},
         }
         query = self.supabase.table("agent_runs").insert(row)
         result = await asyncio.to_thread(query.execute)
@@ -139,7 +142,7 @@ class RunService:
         if superseded_by_run_id is not None:
             updates["superseded_by_run_id"] = superseded_by_run_id
         if metadata is not None:
-            updates["metadata"] = metadata
+            updates["metadata"] = {"machine": _MACHINE, **metadata}   # keep the machine tag a full replacement would drop
 
         query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
         if only_if_active:
