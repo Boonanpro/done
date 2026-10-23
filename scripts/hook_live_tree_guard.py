@@ -549,6 +549,7 @@ def _code_writes(code: str, here: str | None):
     """python -c / node -e / a heredoc fed to an interpreter: a file path into the folder in code that writes files."""
     if not WRITES_IN_CODE.search(code):
         return []
+    kind = "lock" if re.search(r"chflags|chmod|chown|xattr", code) else "file"
     found = []
     for raw in PATH_IN_CODE.findall(code):
         if "/" not in raw and "\\" not in raw and "." not in raw:
@@ -558,9 +559,9 @@ def _code_writes(code: str, here: str | None):
             continue
         rel = live_file(p) if (os.path.lexists(p) or p.parent.is_dir()) and not p.is_dir() else None
         if rel:
-            found.append(("file", rel))
+            found.append((kind, rel))
         elif p.is_dir() and _rel_in_live(p) is not None and not _nested_worktree(p) and _tracked_under(p):
-            found.append(("file", (_rel_in_live(p) or ".") + "/"))
+            found.append((kind, (_rel_in_live(p) or ".") + "/"))
     return found
 
 

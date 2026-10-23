@@ -42,7 +42,9 @@ CACHES = {'__pycache__', '.DS_Store'}
 # Folders Dan's runtime creates things in, open even on a fresh checkout where they hold nothing else yet:
 # logs and .data at the top, .claude/mcp_<room>.json, app/uploads, app/logs and app/database.db, the frontend's .next-*
 # builds, .env.local and tsconfig.<build>.json, generated public files, and new artifacts.
-ALWAYS_OPEN = {'', '.claude', 'app', 'frontend', 'frontend/public', 'frontend/src/app/artifacts', 'frontend/public/artifacts'}
+ALWAYS_OPEN = {'', '.claude', 'app', 'frontend', 'frontend/public', 'frontend/src/app/artifacts', 'frontend/public/artifacts',
+               'frontend/src/generated',            # artifact-sources.css, artifact-sitemaps.ts (builds)
+               'frontend/src/lib/live-version'}     # current.gen.ts (the preview server's version of the files)
 # Artifacts are written directly by Dan and its sessions (the rule since 2026-10-18), the few tracked ones too
 # (publication writes their release.gen.json): nothing under these is locked.
 ARTIFACTS = ('frontend/src/app/artifacts/', 'frontend/public/artifacts/')
@@ -112,6 +114,12 @@ def lock(repo=None) -> tuple[int, int, list[str]]:
     files, folders = plan(repo)
     bad = [p for p in files if not _set(repo, p, True)]
     bad += [d + '/' for d in folders if not _set(repo, d, True)]
+    # exactly the plan: what was locked before and is no longer in it (an artifact, a folder that became a place the
+    # runtime writes) is opened
+    every = [p for p in _tracked(repo) if os.path.lexists(os.path.join(repo, p))]
+    holders = {'/'.join(p.split('/')[:k]) for p in every for k in range(len(p.split('/')))}
+    for rel in (set(every) - set(files)) | (holders - set(folders)):
+        _set(repo, rel, False)
     (dan_dir(repo) / 'locked').write_text('1\n', encoding='utf-8')
     return len(files), len(folders), bad
 
