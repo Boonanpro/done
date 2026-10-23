@@ -13,7 +13,7 @@
 // One step in an AI turn's inline timeline (mirrors the web chat's ai_context.blocks).
 export type TurnBlock =
   | { type: 'text'; text?: string }
-  | { type: 'tool'; name?: string; label?: string; detail?: string }
+  | { type: 'tool'; name?: string; label?: string; detail?: string; activity?: string }
   | { type: 'reasoning'; text?: string }
   | { type: 'error'; text?: string };
 
@@ -43,7 +43,9 @@ export type AgentRun = {
 
 export function eventToStep(event: ExecutionEvent): TurnBlock {
   if (event.event_type === 'tool_use') {
-    return { type: 'tool', label: event.tool_label || event.tool_name || 'ツール実行' };
+    // activity: 作業中の1行（「お店のページを見ています」）。サーバーが道具ごとに作る（app/agent/activity_line.py）
+    const activity = event.metadata?.activity;
+    return { type: 'tool', label: event.tool_label || event.tool_name || 'ツール実行', ...(typeof activity === 'string' ? { activity } : {}) };
   }
   if (event.event_type === 'error') {
     return { type: 'error', text: event.content || 'エラー' };
@@ -361,4 +363,17 @@ export function tidyRelayMessage<M extends VoiceLike>(msg: M, projectId?: string
     return { ...msg, content: text };
   }
   return msg;
+}
+
+/**
+ * 作業中の1行: 道具ごとの言葉（activity）の一番新しい物。返事を書き始めていれば「返事を書いています」、
+ * 何も無ければ「考えています」。PC の画面（project-chat-panel.tsx liveLine）と同じ決まり。
+ */
+export function liveLineOf(blocks: TurnBlock[]): string {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if ((b.type === 'text' || b.type === 'reasoning') && i === blocks.length - 1 && b.text && b.text !== 'Thinking...') return '返事を書いています';
+    if (b.type === 'tool' && b.activity) return b.activity;
+  }
+  return '考えています';
 }

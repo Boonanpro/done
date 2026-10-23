@@ -12,8 +12,11 @@ from pathlib import Path
 # Core prompt used by active runtimes.
 CORE_PROMPT = "You are Dan, a personal AI assistant."
 
-# Workspace bootstrap root.
-WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
+import os
+
+# Workspace bootstrap root. DAN_BOOTSTRAP_DIR points a test Dan at another set of USER/SOUL/RULES files
+# (2026-10-23: the new way of speaking was tried on a test Core without touching the files every room reads).
+WORKSPACE_DIR = Path(os.environ.get("DAN_BOOTSTRAP_DIR") or (Path.home() / ".dan" / "workspace"))
 
 
 def get_core_prompt() -> str:

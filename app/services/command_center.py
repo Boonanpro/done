@@ -245,9 +245,13 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     engine = requested if requested in ('api', 'make', 'parallel') else 'cli'
     extra = {}
     if engine in ('make', 'parallel'):
-        from app.services.parallel_job_runner import model_key, room_model, title_of
+        from app.services.parallel_job_runner import model_key, placeholder_name, room_model, title_of
+        # 名前が無い時は頼んだ文の頭を名前にしない（仮の名前の後、下で短い名前を付ける。2026-10-23）
+        named = str(params.get('title') or '').strip()
         extra = {'model': model_key(params.get('model')) or (room_model(target_room) if engine == 'parallel' else 'opus'),
-                 'title': title_of(params.get('title') or task)}
+                 'title': title_of(named) if named else placeholder_name(task)}
+        if not named:
+            extra['auto_title'] = True   # 作業を走らせる Core が短い名前を付ける（parallel_job_runner.name_job）
         if engine == 'parallel' and params.get('quiet'):
             extra['quiet'] = True   # asked from a site (X運用室): its result is not posted in the room's chat
     elif engine == 'api' and params.get('model'):

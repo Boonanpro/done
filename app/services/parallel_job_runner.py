@@ -70,6 +70,85 @@ def title_of(task):
     return (first[:57] + '…') if len(first) > 58 else first
 
 
+def placeholder_name(task):
+    """A name for a job started without one, until name_job sets a short one. The head of the instruction is not a name
+    (2026-10-23: 「【並行作業：あなたはダン開発室の付箋「chat-short-reply…確かめるダン。直さない。気づいた…】」); a short
+    「…」 in it is (a proposal's name, a file), else just 「作業」."""
+    import re
+    m = re.search(r'「([^「」\n]{2,32})」', str(task)[:600])
+    return m.group(1) if m else '作業'
+
+
+async def name_job(job_id, task):
+    """Give a job started without a name a short one (a few words), once, in the background. Best effort."""
+    from app.agent.cli_runner import run_oneshot_cli
+    prompt = ('次の依頼を、作業の一覧に出す短い名前にしてください。日本語で12字以内、何をする作業か分かる名詞句（例: '
+              '「伸びる投稿の調査」「返事の短さの点検」「注文画面の直し」）。名前だけを1行で答え、説明や括弧は書かない。\n\n依頼:\n'
+              + str(task)[:3000])
+    try:
+        out = await asyncio.to_thread(run_oneshot_cli, prompt, 'sonnet', 60)
+    except Exception:
+        logger.exception('naming job %s failed', job_id)
+        return
+    name = next((line.strip().strip('「」"\'*#・ ') for line in str(out or '').splitlines() if line.strip()), '')
+    if 2 <= len(name) <= 24:
+        state.change(job_id, lambda x: x.update(title=name, auto_title=False))
+
+
+_naming: dict[str, asyncio.Task] = {}
+
+
+def start_naming(job_id):
+    """Name a job started without a name, in the Core process that runs it (once; the task is kept so it is not dropped)."""
+    s = state.read(job_id) or {}
+    if not s.get('auto_title') or job_id in _naming:
+        return None
+    task = asyncio.get_running_loop().create_task(name_job(job_id, s.get('task', '')))
+    _naming[job_id] = task
+    task.add_done_callback(lambda _t: None)
+    return task
+
+
+async def ensure_named(job_id, wait=30):
+    """Before the report is written: wait (a little) for the short name, so the card does not say 「作業」."""
+    task = _naming.get(job_id) or start_naming(job_id)
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), wait)
+    except Exception:
+        pass
+
+
+def report_card(s, failed):
+    """What the chat shows for a job's report: one line (the job's name and done / stopped) that opens the full text
+    (ai_context.job_report; PC, phone and the dev-room chat draw it the same). 2026-10-23 本人「書かれてることが膨大過ぎて
+    何から答えていいか何の話か見失う」: the report stays in the room's record for Dan, the owner gets one short reply."""
+    return {'job_id': s['id'], 'title': s.get('title') or placeholder_name(s.get('task', '')),
+            'state': 'stopped' if failed else 'done', 'model_label': LABELS.get(s.get('model') or '', s.get('model') or '')}
+
+
+def wake_room(s, failed):
+    """Wake the room's Dan to read the report and answer the owner in one short message. Skipped when the room already
+    has a wake-up due within two minutes (e.g. the job itself asked to be told, or two jobs ended together): that turn
+    reads the report from the record too."""
+    from datetime import datetime, timedelta, timezone
+    from app.services import followups
+    soon = datetime.now(timezone.utc) + timedelta(minutes=2)
+    for w in followups.list_watches(s['room_id']):
+        try:
+            due = datetime.fromisoformat(str(w.get('fire_at')).replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if w.get('kind') == 'at' and due <= soon:
+            return None
+    name = s.get('title') or placeholder_name(s.get('task', ''))
+    note = (f'並行作業「{name}」が{"止まった" if failed else "終わった"}。報告は部屋の記録にある（本人の画面には1行の札だけが出ていて、'
+            '押すと全文が開く）。報告を読み、本人への返事を短く1通だけ書く: 結果と、本人が次に決めることだけ。聞きたいことは最後に1つだけ。'
+            '報告の書き写し、ファイルの場所、行番号、仕組みの中の言葉は書かない。部屋の決まり（担当の手順など）があれば、それに従って次へ進める。')
+    return followups.create_watch(s['room_id'], s['user_id'], 'at', note, delay_seconds=3)
+
+
 async def deliver(job_id, text):
     """The job's answer as a message of the room, under the job's name. On a call in this room the call speaks it."""
     from app.services.chat_service import ChatService
@@ -84,11 +163,20 @@ async def deliver(job_id, text):
         return None
     if voice_calls.active(s['room_id']):
         return None
-    body = f"**【並行作業：{s.get('title') or title_of(s['task'])}】**\n\n{text.strip()}"
+    await ensure_named(job_id)
+    s = state.read(job_id)
+    failed = s.get('state') == 'failed'
+    card = report_card(s, failed)
+    body = f"**【並行作業：{card['title']}】**\n\n{text.strip()}"
     revision = s.get('delivered_revision', -1) + 1
     message_id = report_id(job_id + (f':{revision}' if revision else ''))
-    message = await ChatService().send_message(s['room_id'], s['user_id'], body, sender_type='ai', message_id=message_id)
+    message = await ChatService().send_message(s['room_id'], s['user_id'], body, sender_type='ai', message_id=message_id,
+                                               ai_context={'job_report': card})
     state.change(job_id, lambda x: x.update(delivered_revision=revision, report_message_id=message.get('id', message_id)))
+    try:
+        await asyncio.to_thread(wake_room, s, failed)
+    except Exception:
+        logger.exception('waking the room for job %s failed', job_id)
     return message
 
 
@@ -263,6 +351,7 @@ async def run(row):
             if s['state'] in state.TERMINAL:
                 return
             state.publish(job_id, 'progress', '作業を始めています', state='running')
+            start_naming(job_id)
             while True:
                 launch = await _launch(job_id, state.read(job_id))
                 job_mcp = launch[3]
@@ -369,7 +458,7 @@ async def control(room_id, user_id, job_id, operation, text='', model=''):
         if s['model'] == 'astra' and not s.get('persistent_thread'):
             # GPT-6 started without the room's session: continue in a new job that knows the previous result
             follow = f"{s['task']}\n\n（前回の結果）\n{(s.get('result') or s.get('error') or '')[:4000]}\n\n（追加の指示）\n{text}"
-            return await start(room_id, user_id, follow, 'astra')
+            return await start(room_id, user_id, follow, 'astra', s.get('title') or '')
 
         def reopen(x):
             x['revision'] += 1
