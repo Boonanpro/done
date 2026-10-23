@@ -62,7 +62,7 @@ def world(tmp_path, monkeypatch):
     return github, live, spaces
 
 
-def tested(wt, command='python -c "print(1)"'):
+def passed_tests(wt, command='python -c "print(1)"'):
     ok, tail = work.test(wt, command)
     assert ok, tail
 
@@ -88,7 +88,7 @@ def test_new_save_and_ship_reach_the_running_folder(world):
     assert work.save(path, 'half done')
     assert work.save(path) is None                                         # nothing new to keep
     assert 'wip: half done' in git(path, 'log', '-1', '--format=%s').stdout
-    tested(path)
+    passed_tests(path)
     steps, hints = work.ship(path, 'Feature A')
     assert steps[0] == 'pushed dan/feature-a' and steps[2] == 'merged' and 'now on GitHub main' in steps[-1]
     assert (live / 'app.py').read_text() == 'one\ntwo\nthree\nfeature a\n'
@@ -102,8 +102,8 @@ def test_two_pieces_of_work_on_one_file_meet_on_the_second_branch_not_in_the_run
     b, _, _ = work.new('b')
     for wt in (a, b):
         git(wt, 'config', 'user.email', 't@example.invalid'); git(wt, 'config', 'user.name', 't')
-    (a / 'app.py').write_text('one\nTWO by a\nthree\n'); work.save(a); tested(a)
-    (b / 'app.py').write_text('one\nTWO by b\nthree\n'); work.save(b); tested(b)
+    (a / 'app.py').write_text('one\nTWO by a\nthree\n'); work.save(a); passed_tests(a)
+    (b / 'app.py').write_text('one\nTWO by b\nthree\n'); work.save(b); passed_tests(b)
     work.ship(a, 'A')
     before = (live / 'app.py').read_text()
     with pytest.raises(work.Stop) as stop:
@@ -120,7 +120,7 @@ def test_other_work_on_main_is_taken_in_on_the_branch(world, tmp_path):
     github, live, spaces = world
     a, _, _ = work.new('a')
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
-    (a / 'mine.py').write_text('mine\n'); work.save(a); tested(a)
+    (a / 'mine.py').write_text('mine\n'); work.save(a); passed_tests(a)
     other_push(github, tmp_path, 'theirs.py', 'theirs\n')
     work.ship(a, 'A')
     assert (live / 'mine.py').exists() and (live / 'theirs.py').exists()
@@ -144,7 +144,7 @@ def test_refusals(world):
     with pytest.raises(work.Stop) as stop:
         work.ship(a, 'A')
     assert 'work.py test' in str(stop.value)                               # never tested
-    tested(a)
+    passed_tests(a)
     with pytest.raises(work.Stop) as stop:
         work.ship(a, 'A')
     assert '変更がありません' in str(stop.value)
@@ -191,7 +191,7 @@ def test_ship_merges_without_switching_to_main(world):
     github, live, spaces = world
     a, _, _ = work.new('a')
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
-    (a / 'mine.py').write_text('mine\n'); work.save(a); tested(a)
+    (a / 'mine.py').write_text('mine\n'); work.save(a); passed_tests(a)
     steps, _ = work.ship(a, 'A')
     assert 'merged' in steps and (live / 'mine.py').exists()
     assert 'dan/a' not in git(live, 'ls-remote', '--heads', 'origin').stdout                 # removed on GitHub
@@ -205,9 +205,9 @@ def test_main_that_breaks_the_tests_stops_ship_before_anything_leaves(world, tmp
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
     (a / 'mine.py').write_text('from theirs import VALUE\nassert VALUE == 1\n'); work.save(a)
     (a / 'theirs.py').write_text('VALUE = 1\n'); work.save(a)
-    tested(a, 'python mine.py')
+    passed_tests(a, 'python mine.py')
     git(a, 'rm', '-q', 'theirs.py'); git(a, 'commit', '-q', '-m', 'drop')        # theirs.py comes from main below
-    tested(a, 'python -c "print(1)"')
+    passed_tests(a, 'python -c "print(1)"')
     work.test(a, 'python mine.py')                                             # fails now: the record says so
     other_push(github, tmp_path, 'theirs.py', 'VALUE = 2\n')
     pushed_before = git(live, 'ls-remote', '--heads', 'origin').stdout
@@ -221,7 +221,7 @@ def test_main_is_tested_again_when_it_brought_something(world, tmp_path):
     github, live, spaces = world
     a, _, _ = work.new('a')
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
-    (a / 'mine.py').write_text('mine\n'); work.save(a); tested(a)
+    (a / 'mine.py').write_text('mine\n'); work.save(a); passed_tests(a)
     other_push(github, tmp_path, 'theirs.py', 'theirs\n')
     steps, _ = work.ship(a, 'A')
     assert steps[0].startswith('tested with main')
@@ -231,7 +231,7 @@ def test_a_follow_that_fails_makes_ship_fail_and_says_where_it_stopped(world, mo
     github, live, spaces = world
     a, _, _ = work.new('a')
     git(a, 'config', 'user.email', 't@example.invalid'); git(a, 'config', 'user.name', 't')
-    (a / 'app.py').write_text('one\ntwo\nthree\nfour\n'); work.save(a); tested(a)
+    (a / 'app.py').write_text('one\ntwo\nthree\nfour\n'); work.save(a); passed_tests(a)
     (live / 'app.py').write_text('left here by hand\n')                              # follow_github will stop
     with pytest.raises(work.Stop) as stop:
         work.ship(a, 'A')
