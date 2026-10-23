@@ -44,16 +44,18 @@ import {
 // react-lang より先に読む（開発用画面の「OpenUI Inspect」小窓を付けさせない）
 import '@/lib/chat-shapes/no-openui-devtools';
 import {
-  Renderer, createLibrary, defineComponent, useIsStreaming, type ComponentRenderer, type ParseResult,
+  Renderer, createLibrary, defineComponent, useIsStreaming, useRenderNode, type ComponentRenderer, type ParseResult,
 } from '@openuidev/react-lang';
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
-import { AlertCircle, Check, Loader2, Send } from 'lucide-react';
+import { AlertCircle, Check, ExternalLink, Loader2, Send } from 'lucide-react';
 
 import {
-  ANSWER_VALUE_MAX, ChartProps, ChoiceProps, CompareProps, InputProps, SHAPE_SPECS, StepsProps, choiceOptions, validateComplete,
-  type ChartInput, type ChoiceInput, type CompareInput, type InputInput, type StepsInput,
+  ANSWER_VALUE_MAX, BadgeProps, ButtonProps, CardProps, ChartProps, ChoiceProps, ColumnProps, CompareProps, DividerProps, FactsProps,
+  HeadingProps, ImageProps, InputProps, RowProps, StatProps, StepsProps, TextProps, checkShapeProgram, choiceOptions,
+  type BadgeInput, type ButtonInput, type CardInput, type ChartInput, type ChoiceInput, type ColumnInput, type CompareInput,
+  type FactsInput, type HeadingInput, type ImageInput, type InputInput, type RowInput, type StatInput, type StepsInput, type TextInput,
 } from '@/lib/chat-shapes/schema';
 import {
   choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, readAnswerTo,
@@ -64,7 +66,7 @@ import {
   isGone, mustCheckBeforePress, needsCheck, noteInRecord, recheckAnswerSend, resumeAnswerSend, sendAnswer, subscribeAnswerSends,
   type AskSaved, type SubmitAnswer,
 } from '@/lib/chat-shapes/answer-sends';
-import { parseShapeCall, readLook, type Look } from '@/lib/chat-shapes/plain';
+import { readLook, safeImageUrl, safeLinkUrl, type Look } from '@/lib/chat-shapes/plain';
 
 // --- 答えの経路（部屋の本人の発言と、発言を送る関数） -------------------------------------
 
@@ -139,6 +141,13 @@ const CARD = 'my-2 w-full max-w-full rounded-xl border border-border bg-card p-3
 const CHOICE_BTN = 'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-left text-sm transition-colors disabled:cursor-default';
 // 画像つきの選択肢が並ぶ時のカード（画像を大きめに、名前はその下）
 const CHOICE_CARD = 'flex min-w-0 flex-col items-stretch gap-1.5 rounded-lg border p-1.5 text-left text-sm transition-colors disabled:cursor-default';
+/** 組み合わせ（Card・Row・Column）の中か。中の部品は自分の枠を付けず、外のカードの中に収まる */
+const InsideContext = createContext(false);
+/** 部品の外枠の class: 一番外側ならカード、組み合わせの中なら枠なし（Compare の表は細い枠だけ残す） */
+function useBox(extra = ''): string {
+  const inside = useContext(InsideContext);
+  return inside ? `my-1 w-full max-w-full ${extra}` : `${CARD} ${extra}`;
+}
 const SEND_FAILED = '送れませんでした。もう一度押してください';
 const SEND_UNKNOWN_TEXT = '送れたか確かめられませんでした';
 const SEND_UNKNOWN_AGAIN = 'まだ確かめられません。通信が戻ってからもう一度押してください';
@@ -318,6 +327,7 @@ function SendProblem({ send, answered, recheck, id }: { send: SendState; answere
 // --- 部品 ---------------------------------------------------------------------------------
 
 const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
+  const box = useBox();
   const question = (props.question || '').trim();
   const options = choiceOptions(props.options, siteHost());
   const { utterances } = useContext(ShapeAnswerContext);
@@ -337,7 +347,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
     run(choiceAnswerText(question, o), { message_id: messageId, part, kind: 'choice', value: o, question }, o);
   };
   return (
-    <div className={CARD} data-shape="Choice" data-answered={answer ? 'true' : 'false'} data-send={send.status}>
+    <div className={box} data-shape="Choice" data-answered={answer ? 'true' : 'false'} data-send={send.status}>
       <div className="flex items-start justify-between gap-2">
         <div className="text-sm font-semibold leading-snug">{question}</div>
         {answer ? <Answered text="答えました" /> : send.status === 'sending' ? <span className="text-xs text-muted-foreground">送っています…</span> : null}
@@ -384,6 +394,7 @@ const ChoiceView: ComponentRenderer<ChoiceInput> = ({ props }) => {
 };
 
 const InputView: ComponentRenderer<InputInput> = ({ props }) => {
+  const box = useBox();
   const label = (props.label || '').trim();
   const isNumber = props.kind === 'number';
   const unit = props.unit || '';
@@ -409,7 +420,7 @@ const InputView: ComponentRenderer<InputInput> = ({ props }) => {
   };
   const problem = send.status === 'failed' || send.status === 'unknown';
   return (
-    <div className={CARD} data-shape="Input" data-answered={answer ? 'true' : 'false'} data-send={send.status}>
+    <div className={box} data-shape="Input" data-answered={answer ? 'true' : 'false'} data-send={send.status}>
       <div className="flex items-start justify-between gap-2">
         <label htmlFor={inputId} className="text-sm font-semibold leading-snug">{label}</label>
         {answer ? <Answered text={`答えました: ${answer}`} /> : null}
@@ -456,6 +467,7 @@ function CellBody({ look, looks }: { look: Look | null; looks: boolean }) {
 }
 
 const CompareView: ComponentRenderer<CompareInput> = ({ props }) => {
+  const box = useBox('overflow-x-auto p-0');
   const { complete } = useContext(ShapeMetaContext);
   // 色見本は閉じまで届いてから（生成の途中の色の値を描かない）
   const onClient = useOnClient();
@@ -464,7 +476,7 @@ const CompareView: ComponentRenderer<CompareInput> = ({ props }) => {
   const rows = ((props.rows || []).filter(Array.isArray) as unknown[][]).map((r) => r.map((c) => readLook(c)));
   // 表は吹き出しの幅いっぱいに使う。候補の列には読める最小幅を確保し、入り切らない時は表の中だけ横に動かす
   return (
-    <div className={`${CARD} overflow-x-auto p-0`} data-shape="Compare">
+    <div className={box} data-shape="Compare">
       {props.caption ? <div className="px-3 pt-2.5 text-sm font-semibold">{props.caption}</div> : null}
       <table className="w-full min-w-full table-auto text-sm">
         {columns.length > 0 ? (
@@ -498,9 +510,10 @@ const CompareView: ComponentRenderer<CompareInput> = ({ props }) => {
 };
 
 const StepsView: ComponentRenderer<StepsInput> = ({ props }) => {
+  const box = useBox();
   const steps = (props.steps || []).filter((s): s is string => typeof s === 'string' && !!s.trim());
   return (
-    <div className={CARD} data-shape="Steps">
+    <div className={box} data-shape="Steps">
       {props.title ? <div className="mb-2 text-sm font-semibold">{props.title}</div> : null}
       <ol className="flex flex-col gap-2">
         {steps.map((s, i) => (
@@ -545,6 +558,7 @@ function SeriesLegend({ names, kind }: { names: string[]; kind: 'line' | 'bar' }
 }
 
 const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
+  const box = useBox();
   const labels = (props.labels || []).map((l) => (typeof l === 'string' ? l : String(l ?? '')));
   const series = (props.series || []).filter((s) => s && typeof s === 'object' && Array.isArray(s.values));
   const unit = props.unit || '';
@@ -572,7 +586,7 @@ const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
     itemStyle: { color: 'var(--foreground)' },
   };
   return (
-    <div className={CARD} data-shape="Chart">
+    <div className={box} data-shape="Chart">
       {props.title ? <div className="mb-1 text-sm font-semibold">{props.title}</div> : null}
       <div className="h-[220px] w-full">
         {data.length > 0 && names.length > 0 ? (
@@ -614,6 +628,146 @@ const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
   );
 };
 
+// --- 組み合わせて画面を作る小さな部品（2026-10-23） ---------------------------------------------------
+// Card・Row・Column の子は lang-core の要素（useRenderNode で描く）か、文字だけの子。子は InsideContext の中で描き、
+// 中の部品（表・選択ボタンなど）は自分の枠を付けない。写真は plain.ts safeImageUrl、ボタンの行き先は safeLinkUrl を通った物だけ。
+
+/** 子の部品の名前（lang-core の要素なら typeName） */
+const childName = (c: unknown): string => (c && typeof c === 'object' && typeof (c as { typeName?: unknown }).typeName === 'string' ? (c as { typeName: string }).typeName : '');
+/** 横並びの中で幅を分け合う部品（カード・縦並び・表・グラフ）。ほかの部品（数字・札・ボタン）は中身の幅のまま */
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts']);
+
+function ChildList({ items, row = false }: { items: unknown; row?: boolean }) {
+  const renderNode = useRenderNode();
+  const list = Array.isArray(items) ? items : [];
+  return (
+    <InsideContext.Provider value={true}>
+      {list.map((c, i) => (typeof c === 'string'
+        ? <p key={i} className="text-sm leading-relaxed">{c}</p>
+        : <div key={i} className={row && WIDE.has(childName(c)) ? 'min-w-0 flex-1 basis-44' : 'min-w-0'}>{renderNode(c)}</div>))}
+    </InsideContext.Provider>
+  );
+}
+
+/** 写真1枚。読めなければ枠ごと消す。外の写真は Cookie・Referer を送らずに読む */
+function ShapeImage({ src, alt, className }: { src: unknown; alt?: string; className: string }) {
+  const { complete } = useContext(ShapeMetaContext);
+  const onClient = useOnClient();
+  const url = complete && onClient ? safeImageUrl(src, siteHost()) : null;
+  const [broken, setBroken] = useState<string | null>(null);
+  if (!url || broken === url) return null;
+  return (
+    <img
+      src={url} alt={alt || ''} loading="lazy" decoding="async" referrerPolicy="no-referrer" draggable={false}
+      crossOrigin={url.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(url)}
+      className={`w-full rounded-lg border border-border bg-muted/30 object-cover ${className}`}
+    />
+  );
+}
+
+const TONE_TEXT: Record<string, string> = {
+  good: 'text-emerald-700 dark:text-emerald-400', warn: 'text-amber-700 dark:text-amber-400',
+  bad: 'text-red-600 dark:text-red-400', info: 'text-sky-700 dark:text-sky-400', neutral: '', normal: '',
+};
+const TONE_BADGE: Record<string, string> = {
+  good: 'border-emerald-600/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300',
+  warn: 'border-amber-600/30 bg-amber-500/10 text-amber-800 dark:text-amber-300',
+  bad: 'border-red-600/30 bg-red-500/10 text-red-700 dark:text-red-300',
+  info: 'border-sky-600/30 bg-sky-500/10 text-sky-800 dark:text-sky-300',
+  neutral: 'border-border bg-muted text-muted-foreground',
+};
+
+const CardView: ComponentRenderer<CardInput> = ({ props }) => {
+  // 組み合わせの中のカードは、外のカードと区別できるよう細い枠だけ付ける
+  const inside = useContext(InsideContext);
+  const outer = useBox('flex flex-col gap-2');
+  const box = inside ? 'flex h-full w-full flex-col gap-1.5 rounded-lg border border-border p-2.5' : outer;
+  return (
+    <div className={box} data-shape="Card">
+      <ShapeImage src={props.image} className="aspect-[16/9] max-h-56" />
+      {props.title ? <div className="text-sm font-semibold">{props.title}</div> : null}
+      <ChildList items={props.children} />
+    </div>
+  );
+};
+
+const RowView: ComponentRenderer<RowInput> = ({ props }) => {
+  const justify = props.align === 'center' ? 'justify-center' : props.align === 'between' ? 'justify-between' : 'justify-start';
+  return (
+    <div className={`flex w-full flex-wrap items-stretch gap-x-4 gap-y-2 ${justify}`} data-shape="Row">
+      <ChildList items={props.children} row />
+    </div>
+  );
+};
+
+const ColumnView: ComponentRenderer<ColumnInput> = ({ props }) => (
+  <div className="flex w-full flex-col gap-2" data-shape="Column">
+    <ChildList items={props.children} />
+  </div>
+);
+
+const HeadingView: ComponentRenderer<HeadingInput> = ({ props }) => (
+  <div data-shape="Heading">
+    <div className="text-base font-semibold leading-snug">{props.text}</div>
+    {props.sub ? <div className="text-sm text-muted-foreground">{props.sub}</div> : null}
+  </div>
+);
+
+const TextView: ComponentRenderer<TextInput> = ({ props }) => {
+  const tone = props.tone === 'muted' ? 'text-sm text-muted-foreground' : props.tone === 'strong' ? 'text-sm font-semibold'
+    : props.tone === 'small' ? 'text-xs text-muted-foreground' : 'text-sm';
+  return <p className={`leading-relaxed ${tone}`} data-shape="Text">{props.text}</p>;
+};
+
+const ImageView: ComponentRenderer<ImageInput> = ({ props }) => {
+  const shape = props.shape === 'square' ? 'aspect-square max-w-[16rem]' : props.shape === 'tall' ? 'aspect-[3/4] max-w-[16rem]' : 'aspect-[16/9]';
+  return <div className="w-full" data-shape="Image"><ShapeImage src={props.src} alt={props.alt} className={shape} /></div>;
+};
+
+const StatView: ComponentRenderer<StatInput> = ({ props }) => {
+  const value = typeof props.value === 'number' ? props.value.toLocaleString('ja-JP') : props.value;
+  return (
+    <div className="min-w-[6rem]" data-shape="Stat">
+      <div className="text-xs text-muted-foreground">{props.label}</div>
+      <div className={`text-xl font-semibold tabular-nums leading-tight ${TONE_TEXT[props.tone || 'neutral'] || ''}`}>
+        {value}{props.unit ? <span className="ml-0.5 text-sm font-medium">{props.unit}</span> : null}
+      </div>
+      {props.note ? <div className="text-xs text-muted-foreground">{props.note}</div> : null}
+    </div>
+  );
+};
+
+const FactsView: ComponentRenderer<FactsInput> = ({ props }) => (
+  <dl className="grid w-full grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" data-shape="Facts">
+    {(props.items || []).map((x, i) => (
+      <div key={i} className="contents">
+        <dt className="text-muted-foreground">{x.label}</dt>
+        <dd className="min-w-0 break-words">{typeof x.value === 'number' ? x.value.toLocaleString('ja-JP') : x.value}</dd>
+      </div>
+    ))}
+  </dl>
+);
+
+const BadgeView: ComponentRenderer<BadgeInput> = ({ props }) => (
+  <span className={`inline-flex w-fit items-center rounded-full border px-2 py-0.5 text-xs font-medium ${TONE_BADGE[props.tone || 'neutral'] || TONE_BADGE.neutral}`} data-shape="Badge">
+    {props.text}
+  </span>
+);
+
+const ButtonView: ComponentRenderer<ButtonInput> = ({ props }) => {
+  const { complete } = useContext(ShapeMetaContext);
+  const url = complete ? safeLinkUrl(props.url) : null;
+  const cls = 'inline-flex w-fit items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium';
+  if (!url) return <span className={`${cls} border border-border text-muted-foreground`} data-shape="Button">{props.label}</span>;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" className={`${cls} bg-primary text-primary-foreground hover:bg-primary/90`} data-shape="Button">
+      {props.label}<ExternalLink className="h-3.5 w-3.5" />
+    </a>
+  );
+};
+
+const DividerView: ComponentRenderer<Record<string, never>> = () => <hr className="my-1 w-full border-border" data-shape="Divider" />;
+
 // --- 部品一覧（OpenUI の library） ----------------------------------------------------------
 
 export const shapeLibrary = createLibrary({
@@ -623,23 +777,27 @@ export const shapeLibrary = createLibrary({
     defineComponent({ name: 'Input', description: '入力欄', props: InputProps, component: InputView }),
     defineComponent({ name: 'Steps', description: '手順', props: StepsProps, component: StepsView }),
     defineComponent({ name: 'Chart', description: 'グラフ', props: ChartProps, component: ChartView }),
+    defineComponent({ name: 'Card', description: 'カード', props: CardProps, component: CardView }),
+    defineComponent({ name: 'Row', description: '横並び', props: RowProps, component: RowView }),
+    defineComponent({ name: 'Column', description: '縦並び', props: ColumnProps, component: ColumnView }),
+    defineComponent({ name: 'Heading', description: '見出し', props: HeadingProps, component: HeadingView }),
+    defineComponent({ name: 'Text', description: '文', props: TextProps, component: TextView }),
+    defineComponent({ name: 'Image', description: '写真', props: ImageProps, component: ImageView }),
+    defineComponent({ name: 'Stat', description: '数字', props: StatProps, component: StatView }),
+    defineComponent({ name: 'Facts', description: '事実の並び', props: FactsProps, component: FactsView }),
+    defineComponent({ name: 'Badge', description: '札', props: BadgeProps, component: BadgeView }),
+    defineComponent({ name: 'Button', description: 'ボタン', props: ButtonProps, component: ButtonView }),
+    defineComponent({ name: 'Divider', description: '区切り線', props: DividerProps, component: DividerView }),
   ],
 });
 
 /**
- * 完成したブロックの検証: `root = 部品(引数…)` を読み、位置引数を部品定義の順に名前へ当てて
- * schema.ts の validateComplete にかける。通らなければ理由（画面は元のコードに戻す）。
+ * 完成したブロックの検証: ブロック全体（root と名前で指す文、入れ子の部品）を読み、部品ごとに schema.ts の検証と
+ * 組み合わせの決まりにかける（checkShapeProgram）。通らなければ理由（画面は元のコードに戻す）。
  */
 export function checkCompleteShape(code: string): { ok: true; name: string } | { ok: false; reason: string } {
-  const call = parseShapeCall(code);
-  if (!call) return { ok: false, reason: 'root = 部品(...) の形で読めない' };
-  const spec = SHAPE_SPECS.find((s) => s.name === call.name);
-  if (!spec) return { ok: false, reason: `知らない部品: ${call.name}` };
-  const keys = Object.keys(spec.props.shape);
-  if (call.args.length > keys.length) return { ok: false, reason: `${call.name}: 引数が多い` };
-  const props = Object.fromEntries(call.args.map((a, i) => [keys[i], a]));
-  const r = validateComplete(call.name, props);
-  return r.ok ? { ok: true, name: call.name } : r;
+  const r = checkShapeProgram(code);
+  return r.ok ? { ok: true, name: r.root.name } : r;
 }
 
 // --- 1ブロックの描画（例外はその部品だけ文章に戻す） --------------------------------------------

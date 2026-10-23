@@ -4,7 +4,9 @@ import { Fragment, type ReactNode } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
 
 import { splitMarkdownBlocks } from './markdown-blocks';
-import { replaceShapeBlocks } from './chat-shapes-plain';
+import { shapeFences, shapeToPlainMarkdown } from './chat-shapes-plain';
+import { partKeys } from './chat-shapes-answers';
+import { ShapeBlockView, readShapeBlock } from './chat-shapes';
 
 export { splitLinks } from './markdown-blocks';
 
@@ -29,8 +31,34 @@ export function ChatMarkdown({
   textStyle: StyleProp<TextStyle>;
   renderText: (text: string, key: string) => ReactNode;
 }) {
-  // ダンの返事の部品（```openui-lang）は、このアプリでは描けないので読める文章にしてから分ける
-  const blocks = splitMarkdownBlocks(replaceShapeBlocks(text));
+  // ダンの返事の部品（```openui-lang）は部品として描く（chat-shapes.tsx）。描けないブロックは読める文章にして、前後と同じに描く
+  const fences = shapeFences(text);
+  if (fences.length === 0) return <MarkdownBlocks text={text} textStyle={textStyle} renderText={renderText} />;
+  const keys = partKeys(fences.map((f) => f.code));
+  const out: ReactNode[] = [];
+  let prev = 0;
+  fences.forEach((f, i) => {
+    const before = text.slice(prev, f.start);
+    if (before.trim()) out.push(<MarkdownBlocks key={`m${i}`} text={before} textStyle={textStyle} renderText={renderText} />);
+    if (readShapeBlock(f.code)) out.push(<ShapeBlockView key={`s${i}`} code={f.code} part={keys[i]} />);
+    else out.push(<MarkdownBlocks key={`s${i}`} text={shapeToPlainMarkdown(f.code) ?? '```\n' + f.code + '\n```'} textStyle={textStyle} renderText={renderText} />);
+    prev = f.next;
+  });
+  const after = text.slice(prev);
+  if (after.trim()) out.push(<MarkdownBlocks key="end" text={after} textStyle={textStyle} renderText={renderText} />);
+  return <>{out}</>;
+}
+
+function MarkdownBlocks({
+  text,
+  textStyle,
+  renderText,
+}: {
+  text: string;
+  textStyle: StyleProp<TextStyle>;
+  renderText: (text: string, key: string) => ReactNode;
+}) {
+  const blocks = splitMarkdownBlocks(text);
   return (
     <>
       {blocks.map((block, index) => {

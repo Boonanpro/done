@@ -10,7 +10,9 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { ChatMarkdown, splitLinks } from './chat-markdown';
-import { siteFilePath, splitTopFences } from './chat-shapes-plain';
+import { ShapeMessageContext, ShapeRoomContext, type ShapeRoom } from './chat-shapes';
+import { readAnswerTo, type AnswerTo } from './chat-shapes-answers';
+import { shapeFences, siteFilePath, splitTopFences } from './chat-shapes-plain';
 import { CONFIRM_CARD, ConfirmCard, SEND_CARD, SendCard } from './send-card';
 import { describe as describeStep, elapsedLabel, KIND as STEP_KIND, summarize as summarizeSteps } from './work-log';
 import { Breathe, StepIn } from './motion-bits';
@@ -62,6 +64,7 @@ import {
   type ChatListItem as ChatListItemOf,
   type ExecutionEvent,
   type TurnBlock,
+  liveLineOf,
 } from './chatTimeline';
 import { TypingDots } from './typing-dots';
 import { VoiceHost, useVoice } from './voice-host';
@@ -863,6 +866,10 @@ function RichMessageContent({
   );
 }
 
+// 作業の一覧（「N件の作業」の折りたたみ・途中の説明文・作業の種類の札）を出すか。2026-10-23 から既定は出さない
+// （ダン開発室「返事を人の短さに」）。作業中は3つの点と今していることの1行だけ。戻す時は EXPO_PUBLIC_DAN_SHOW_WORK=1 で作り直す。
+const SHOW_WORK = process.env.EXPO_PUBLIC_DAN_SHOW_WORK === '1';
+
 // A run of tool/reasoning/error steps, collapsed under "N件の作業 を表示" —
 // the same inline-timeline treatment the web chat gives ai_context.blocks.
 // 畳んだ物を開け閉めしても、押した見出しを画面の同じ位置に留める（チャットの一覧は下から積む作りなので、
@@ -1043,11 +1050,23 @@ function AiTurnBlocks({
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
       <View>
-        {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={false} /> : null}
+        {SHOW_WORK && log.length > 0 ? <TurnToolGroup items={log} defaultOpen={false} /> : null}
         {media.length > 0 ? (
           <RichMessageContent content={media.join('\n')} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
         ) : null}
         <RichMessageContent content={final} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
+      </View>
+    );
+  }
+  if (!SHOW_WORK) {
+    // 作業中: 途中で出したファイル・画像と、最後の作業の後に書いている返事だけ（その下の1行は吹き出しの側が出す）
+    const media = grouped.flatMap((g, i) => (g.kind === 'text' && i < lastToolsIndex ? mediaTags(g.text) : []));
+    const tail = grouped.filter((g, i) => g.kind === 'text' && i > lastToolsIndex && g.text !== 'Thinking...').map((g) => (g as { text: string }).text).join('\n\n');
+    if (media.length === 0 && !tail.trim()) return null;
+    return (
+      <View>
+        {media.length > 0 ? <RichMessageContent content={media.join('\n')} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} /> : null}
+        {tail.trim() ? <RichMessageContent content={tail} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} /> : null}
       </View>
     );
   }
@@ -1086,6 +1105,8 @@ async function streamDanMessage(
   options?: {
     clientMessageId?: string;
     timelineRefs?: { content_id: string; title: string }[];
+    // 部品（選択ボタン・入力欄）の答えの照合情報（どの返事のどの部品への答えか）
+    answerTo?: AnswerTo;
     // 呼び出し側が途中キャンセルできるよう、接続を閉じるハンドルを渡す
     registerCancel?: (close: () => void) => void;
   },
@@ -1102,6 +1123,7 @@ async function streamDanMessage(
         session_id: roomId,
         ...(options?.clientMessageId ? { client_message_id: options.clientMessageId } : {}),
         ...(options?.timelineRefs?.length ? { timeline_refs: options.timelineRefs } : {}),
+        ...(options?.answerTo ? { answer_to: options.answerTo } : {}),
       }),
       pollingInterval: 0,
     });
@@ -1762,11 +1784,32 @@ function AppMain() {
   // 3つの点の横に出す「いまダンがしていること」（宣言・作業の一歩）。送ったこの端末ではストリームの最新、
   // それ以外は記録の最新の一歩。
   const typingLabel = useMemo(() => {
+    // 作業の一覧を出さない時は、作業の記録に添えた平易な1行（道具の名前やコマンドは出さない）
+    if (!SHOW_WORK) return liveLineOf(liveTurnGroups[liveTurnGroups.length - 1]?.blocks || []);
     if (activity && activity !== 'Thinking...') return activity;
     const last = liveTurnGroups[liveTurnGroups.length - 1]?.blocks.slice(-1)[0];
     if (!last) return '';
     return last.type === 'tool' ? last.label || '' : (last as { text?: string }).text || '';
   }, [activity, liveTurnGroups]);
+
+  // 部品（選択ボタン・入力欄）の答えの経路: 本人の発言として送り、照合情報（answer_to）を付ける。答えたかは部屋の記録から
+  const shapeAnswers = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of messages) {
+      if (m.sender_type !== 'human' || m.pending) continue;
+      const a = readAnswerTo(m.ai_context);
+      if (a && a.value) map.set(`${a.message_id}|${a.part}`, a.value);
+    }
+    return map;
+  }, [messages]);
+  const handleSendRef = useRef<(text?: string, answerTo?: AnswerTo) => Promise<void>>(async () => {});
+  const handleOpenMessageUrlRef = useRef<(url: string) => void>(() => {});
+  const shapeRoom = useMemo<ShapeRoom>(() => ({
+    submit: (text, answerTo) => { void handleSendRef.current(text, answerTo); },
+    answers: shapeAnswers,
+    openUrl: (url) => handleOpenMessageUrlRef.current(url),
+    siteUrl: (path) => `${API_BASE_URL}${path}`,
+  }), [shapeAnswers]);
 
   // コラボ窓口の未読（サーバー判定 unread_count の合計）。👥ボタンのバッジと
   // アプリアイコンのバッジに合算する。開いている窓口は既読扱い。
@@ -3163,8 +3206,10 @@ function AppMain() {
     [token, projects, currentProject, refreshProjects],
   );
 
+  handleSendRef.current = handleSend;
   // text: 入力欄の代わりに送る文（確認カードの答えなど）。入力欄の下書き・添付には触らない。
-  async function handleSend(text?: string) {
+  // answerTo: 部品（選択ボタン・入力欄）の答えの時の照合情報（chat-shapes.tsx）
+  async function handleSend(text?: string, answerTo?: AnswerTo) {
     if (!token) return;
     // 連打ガード（以前は sending が兼ねていたが、追い連絡を許可するため時刻で弾く）。
     const tappedAt = Date.now();
@@ -3410,6 +3455,7 @@ function AppMain() {
       }, {
         clientMessageId,
         timelineRefs: sentTimelineRefs,
+        answerTo,
         registerCancel: (close) => {
           activeStreamsRef.current.set(clientMessageId, {
             close,
@@ -3700,6 +3746,7 @@ function AppMain() {
     }
     openUrl(normalized);
   }, [chatMedia, token]);
+  handleOpenMessageUrlRef.current = handleOpenMessageUrl;
 
   function handleBackToProjects() {
     setScreen('projects');
@@ -4100,6 +4147,7 @@ function AppMain() {
           </View>
         ) : (
           <KeepInPlace.Provider value={keepInPlace}>
+          <ShapeRoomContext.Provider value={shapeRoom}>
           <FlatList
             contentContainerStyle={styles.messageList}
             data={chatListItems}
@@ -4150,7 +4198,7 @@ function AppMain() {
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
                       <View style={styles.typingInline}>
                         <TypingDots color="#7a8f86" />
-                        {typingLabel && !item.blocks.some((b) => b.type === 'tool') ? (
+                        {typingLabel && (!SHOW_WORK || !item.blocks.some((b) => b.type === 'tool')) ? (
                           <Text style={styles.typingLabel} numberOfLines={1}>
                             {typingLabel.split('\n')[0]}
                           </Text>
@@ -4246,7 +4294,7 @@ function AppMain() {
                     // 作業ログ入りの吹き出しは幅をコンテンツ任せにしない。
                     // 短いツール行だけの瞬間に吹き出しが異常に細く縮んで
                     // 縦長になるのを防ぐ（プロセスログ表示の幅バグ対策）。
-                    useBlocks && !mine && styles.wideBubble,
+                    (useBlocks || (msg.sender_type === 'ai' && shapeFences(msg.content || '').length > 0)) && !mine && styles.wideBubble,
                     highlightId === msg.id && styles.messageBubbleHighlight,
                   ]}
                 >
@@ -4254,6 +4302,7 @@ function AppMain() {
                     <Text style={styles.messageSender}>{mine ? ui('You','あなた') : msg.sender_type === 'ai' ? 'Done' : msg.sender_name || 'Done'}</Text>
                     <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
                   </View>
+                  <ShapeMessageContext.Provider value={msg.sender_type === 'ai' && !msg.pending ? msg.id : null}>
                   {useBlocks ? (
                     <AiTurnBlocks blocks={blocks!} mine={mine} settled onOpenUrl={handleOpenMessageUrl} onPlayVideo={openChatMedia} />
                   ) : (
@@ -4265,6 +4314,7 @@ function AppMain() {
                       videoProgress={uploadProgress?.id === msg.id ? uploadProgress.value : undefined}
                     />
                   )}
+                  </ShapeMessageContext.Provider>
                 </View>
               );
             }}
@@ -4289,6 +4339,7 @@ function AppMain() {
               }, 320);
             }}
           />
+          </ShapeRoomContext.Provider>
           </KeepInPlace.Provider>
         )}
 

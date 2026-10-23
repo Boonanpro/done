@@ -16,12 +16,14 @@ ROOT = Path(__file__).resolve().parent.parent
 def test_section_is_generated_file_content() -> None:
     section = chat_shapes_section()
     assert section.startswith("## Answer shapes")
-    for name in ("Compare", "Choice", "Input", "Steps", "Chart"):
+    for name in ("Compare", "Choice", "Input", "Steps", "Chart", "Card", "Row", "Column", "Heading", "Text", "Image", "Stat",
+                 "Facts", "Badge", "Button", "Divider"):
         assert f"- {name}(" in section
     assert "```openui-lang" in section
     # 2026-10-17 (fix6): the comparison sentence the owner accepted and the "show the real thing" paragraph made it
-    # 3.3KB (was 2.3KB); the cap moved from 2500 to 3400 with them
-    assert len(section) <= 3400
+    # 3.3KB (was 2.3KB); the cap moved from 2500 to 3400 with them. 2026-10-23: the eleven small parts to compose a
+    # layout with, the composition rules and a Card example made it 5.1KB; the cap moved to 5400
+    assert len(section) <= 5400
 
 
 def test_section_asks_for_the_real_thing_and_a_table_for_comparisons() -> None:

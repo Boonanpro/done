@@ -2,7 +2,7 @@
 
 import { callDuration, callSide, collapseCalls, tidyRelayMessage } from '@/lib/voice-fragments';
 import { perfLog, roomClickStart } from '@/lib/perf-log';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import {
   AlertCircle,
   Check,
@@ -93,6 +93,8 @@ type StepInfo = {
   label: string;
   type: 'tool' | 'reasoning' | 'error';
   role?: 'researcher' | 'critic' | 'leader' | null;
+  /** 作業中の1行（「お店のページを見ています」）。サーバーが道具ごとに作る（app/agent/activity_line.py）。空なら前の1行のまま */
+  activity?: string;
 };
 
 type DisplayItem =
@@ -111,12 +113,54 @@ type SendExtra = {
 };
 type SendMessageHandle = (content: string, extra?: SendExtra) => void;
 
-// Phase 2: the live in-progress turn renders with the SAME inline timeline as
-// a finished turn (text segments + a collapsible tool group), so there's no
-// separate "process monitor" box anymore. The tool group starts collapsed even
-// while live（「〇件の作業」をタップで開ける）; a spinner trails the steps as the
-// working indicator. Once the run finishes this block is dropped and the saved
-// message's blocks take over (also collapsed).
+// 作業の一覧（「N件の作業」の折りたたみ・途中の説明文）を出すか。2026-10-23 から既定は出さない（ダン開発室
+// 「返事を人の短さに」）。戻す時は NEXT_PUBLIC_DAN_SHOW_WORK=1 でビルドするか、このブラウザで
+// localStorage.setItem('dan-show-work', '1') して読み直す。
+const SHOW_WORK_DEFAULT = process.env.NEXT_PUBLIC_DAN_SHOW_WORK === '1';
+function readShowWork(): boolean {
+  if (typeof window === 'undefined') return SHOW_WORK_DEFAULT;
+  try {
+    const v = window.localStorage.getItem('dan-show-work');
+    return v === null ? SHOW_WORK_DEFAULT : v === '1';
+  } catch {
+    return SHOW_WORK_DEFAULT;
+  }
+}
+const subscribeShowWork = (cb: () => void) => {
+  window.addEventListener('storage', cb);
+  return () => window.removeEventListener('storage', cb);
+};
+function useShowWork(): boolean {
+  return useSyncExternalStore(subscribeShowWork, readShowWork, () => SHOW_WORK_DEFAULT);
+}
+
+/** 作業中の1行: 道具ごとの言葉（activity）の一番新しい物。返事を書き始めていれば「書いています」、何も無ければ「考えています」 */
+function liveLine(steps: StepInfo[]): string {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const st = steps[i];
+    if (st.type === 'reasoning' && i === steps.length - 1 && st.label && st.label !== 'Thinking...') return '返事を書いています';
+    if (st.type === 'tool' && st.activity) return st.activity;
+  }
+  return '考えています';
+}
+
+/** 点が3つ動く目印と、今していることの1行。行は増やさず、書き換えるだけ */
+function LiveLine({ text }: { text: string }) {
+  return (
+    <div className="my-1 flex items-center gap-2 text-sm text-muted-foreground" role="status" aria-live="polite" data-live-line>
+      <span className="flex items-center gap-1" aria-hidden>
+        {[0, 1, 2].map((d) => (
+          <span key={d} className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/70 motion-reduce:animate-none" style={{ animationDelay: `${d * 150}ms` }} />
+        ))}
+      </span>
+      <span key={text} className="truncate animate-in fade-in duration-300">{text}</span>
+    </div>
+  );
+}
+
+// 作業中のターン。作業の一覧を出さない（既定）時は、途中で出したファイル・画像と、最後の道具の後に書いている返事だけを出し、
+// その下に作業中の1行。出す時（SHOW_WORK）は、終わったターンと同じ並び（文章＋畳んだ作業の一覧）にスピナーが付く。
+// 終わるとこの枠は消え、保存された返事に替わる。
 function InlineProcessBlock({
   steps,
   isLive = false,
@@ -125,8 +169,22 @@ function InlineProcessBlock({
   isLive?: boolean;
   defaultCollapsed?: boolean; // kept for call-site compatibility (unused)
 }) {
+  const showWork = useShowWork();
   if (steps.length === 0 && !isLive) return null;
   const blocks = stepsToBlocks(steps);
+  if (!showWork) {
+    if (!isLive) return null;
+    const lastTool = blocks.reduce((acc, b, i) => (b.type === 'tool' || b.type === 'error' ? i : acc), -1);
+    const media = blocks.slice(0, lastTool + 1).flatMap((b) => (b.type === 'text' ? mediaTags(b.text || '') : []));
+    const tail = blocks.slice(lastTool + 1).flatMap((b) => (b.type === 'text' && b.text && b.text !== 'Thinking...' ? [b.text] : [])).join('\n\n');
+    return (
+      <div className="my-1">
+        {media.length > 0 ? <TurnTextSegment text={media.join('\n')} /> : null}
+        {tail.trim() ? <TurnTextSegment text={tail} live /> : null}
+        <LiveLine text={liveLine(steps)} />
+      </div>
+    );
+  }
 
   return (
     <div className="my-1">
@@ -147,10 +205,12 @@ function eventToStep(event: ExecutionEvent): StepInfo {
     member === 'researcher' || member === 'critic' || member === 'leader' ? member : null;
 
   if (event.event_type === 'tool_use') {
+    const activity = event.metadata?.activity;
     return {
       label: event.tool_label || event.tool_name || 'ツール実行',
       type: 'tool',
       role,
+      activity: typeof activity === 'string' ? activity : undefined,
     };
   }
 
@@ -356,6 +416,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
 }
 
 const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false, settled = false, live = false, messageId }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean; settled?: boolean; live?: boolean; messageId?: string }) {
+  const showWork = useShowWork();
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -384,7 +445,7 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
     return (
       <div className="flex flex-col">
-        {log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
+        {showWork && log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} onImageClick={onImageClick} /> : null}
         <TurnTextSegment text={final} onImageClick={onImageClick} messageId={messageId} />
       </div>
