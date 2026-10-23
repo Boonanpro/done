@@ -138,7 +138,7 @@ def test_reading_and_allowed_writes_pass(live, command):
 
 
 def test_hook_prints_a_codex_readable_denial(live, monkeypatch):
-    env = dict(**__import__('os').environ, DAN_LIVE_TREE=str(live))
+    env = {**__import__('os').environ, 'DAN_LIVE_TREE': str(live)}
     payload = {'tool_name': 'Write', 'tool_input': {'file_path': str(live / 'app/api/chat_routes.py')}, 'cwd': str(live)}
     out = subprocess.run([sys.executable, str(SCRIPTS / 'hook_live_tree_guard.py')], input=json.dumps(payload).encode(),
                          capture_output=True, env=env).stdout.decode('ascii')
@@ -259,7 +259,7 @@ def test_nothing_changed_nothing_said(live, monkeypatch):
 
 
 def test_the_hook_reports_after_the_tool_in_both_formats(live, monkeypatch):
-    env = dict(**__import__('os').environ, DAN_LIVE_TREE=str(live))
+    env = {**__import__('os').environ, 'DAN_LIVE_TREE': str(live)}
     payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': './x'},
                'session_id': 'beef0000', 'tool_use_id': 't9', 'cwd': str(live)}
     run = lambda p: subprocess.run([sys.executable, str(SCRIPTS / 'hook_live_tree_guard.py')],

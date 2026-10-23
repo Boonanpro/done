@@ -33,7 +33,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from follow_github import NO_WINDOW, _git, _out, dan_dir, line_endings_only, live_root, status, tree_lock  # noqa: E402
+from follow_github import (NO_WINDOW, _git, _out, dan_dir, ignored_by, line_endings_only, live_root,  # noqa: E402
+                           status, tree_lock)
 
 ROOT = live_root()
 HOME = Path.home()
@@ -53,17 +54,7 @@ IDENT = ['-c', 'user.name=Dan (rescue_wip)', '-c', 'user.email=dan-rescue@localh
 # --- what is uncommitted -------------------------------------------------------------------------------------------------
 
 def _ignored_on(repo, paths, target):
-    if not paths:
-        return set()
-    ignore = _git(repo, 'show', f'{target}:.gitignore').stdout
-    with tempfile.NamedTemporaryFile('wb', delete=False, suffix='.gitignore') as f:
-        f.write(ignore)
-    try:
-        p = _git(repo, '-c', f'core.excludesFile={f.name}', 'check-ignore', '--no-index', '-z', '--stdin',
-                 data=b'\0'.join(x.encode('utf-8', 'surrogateescape') for x in paths) + b'\0')
-    finally:
-        os.unlink(f.name)
-    return {x.decode('utf-8', 'surrogateescape') for x in p.stdout.split(b'\0') if x}
+    return ignored_by(repo, target, paths)
 
 
 def _mtime(repo, rel):

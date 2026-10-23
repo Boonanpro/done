@@ -260,3 +260,16 @@ def test_a_branch_name_already_taken_gets_a_new_one(world):
     branch, *_ = rescue.save(world, group)
     assert branch == group['branch'] + '-2'
     assert git(world, 'rev-parse', group['branch']).stdout == git(world, 'rev-parse', 'main').stdout
+
+
+def test_files_in_a_folder_the_target_ignores_stay_as_local_files(world, tmp_path):
+    """A folder pattern (/runtime/) in the target's .gitignore covers the files in it (git check-ignore --no-index
+    sees it only when asked about the folder; 2026-10-23, 982 runtime files were listed as work)."""
+    side = tmp_path / 'side'
+    git(world, 'worktree', 'add', '-q', str(side), 'target')
+    (side / '.gitignore').write_text((side / '.gitignore').read_text() + '/runtime/\n')
+    git(side, 'commit', '-q', '-am', 'ignore runtime')
+    write(world, 'runtime/log/a.jsonl', 'runtime\n')
+    p = rescue.plan(world, target='target')
+    assert 'runtime/log/a.jsonl' in p['local']
+    assert all(f['path'] != 'runtime/log/a.jsonl' for g in p['groups'] for f in g['files'])

@@ -179,19 +179,38 @@ def _note(left):
             + '\n  -> python scripts/rescue_wip.py lists them by the session that wrote them; --apply moves them to branches')
 
 
-def _ignored_by(repo, theirs, paths):
-    """Those of paths that the .gitignore of commit `theirs` ignores."""
+def ignored_by(repo, theirs, paths):
+    """Those of paths that the .gitignore of commit `theirs` ignores, itself or by one of its folders
+    (git check-ignore --no-index sees a folder pattern like /.data/ only when asked about the folder)."""
     if not paths:
         return set()
-    ignore = _git(repo, 'show', f'{theirs}:.gitignore').stdout
-    with tempfile.NamedTemporaryFile('wb', delete=False, suffix='.gitignore') as f:
-        f.write(ignore)
-    try:
-        p = _git(repo, '-c', f'core.excludesFile={f.name}', 'check-ignore', '--no-index', '-z', '--stdin',
-                 data=NUL.join(x.encode('utf-8', 'surrogateescape') for x in paths) + NUL)
-    finally:
-        os.unlink(f.name)
-    return set(_paths(p.stdout))
+    asked = set()
+    for p in paths:
+        asked.add(p)
+        parts = p.split('/')
+        asked.update('/'.join(parts[:k]) + '/' for k in range(1, len(parts)))
+    # Asked in an empty repository holding only the commit's .gitignore files: this folder's own .git/info/exclude
+    # and the machine's global excludes are not GitHub's rules (a copied Windows exclude file once ignored everything).
+    with tempfile.TemporaryDirectory() as tmp:
+        _git(tmp, 'init', '-q')
+        names = _paths(_out(repo, 'ls-tree', '-r', '-z', '--name-only', theirs))
+        for name in (n for n in names if n == '.gitignore' or n.endswith('/.gitignore')):
+            dst = os.path.join(tmp, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, 'wb') as fh:
+                fh.write(_out(repo, 'cat-file', 'blob', f'{theirs}:{name}'))
+        p = _git(tmp, '-c', 'core.excludesFile=', 'check-ignore', '--no-index', '-z', '--stdin',
+                 data=NUL.join(x.encode('utf-8', 'surrogateescape') for x in sorted(asked)) + NUL)
+    hit = set(_paths(p.stdout))
+    out = set()
+    for path in paths:
+        parts = path.split('/')
+        if path in hit or any('/'.join(parts[:k]) + '/' in hit for k in range(1, len(parts))):
+            out.add(path)
+    return out
+
+
+_ignored_by = ignored_by
 
 
 def _kept_untracked(repo, base, theirs):
