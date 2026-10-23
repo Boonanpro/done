@@ -14,6 +14,11 @@ import sys
 import time
 from pathlib import Path
 
+def _dan_ws():
+    from app.paths import DAN_WORKSPACE
+    return DAN_WORKSPACE.as_posix()
+
+
 ROOT = Path(__file__).resolve().parents[2]
 IDLE_SECONDS = 900
 CALL_SECONDS = 600
@@ -34,7 +39,7 @@ class Host:
         env = {**os.environ, 'DAN_USER_ID': self.user_id, 'DAN_SESSION_ID': self.room_id or '', 'DAN_TOOL_HOST': '1',
                # named like a job's browser: headless, its own profile (logins seeded from the owner's), kept between calls
                'DAN_BROWSER_ROOM': 'voice-job-call-' + key, 'DAN_BROWSER_HEADLESS': '1', 'DAN_BROWSER_OBSERVATION': 'dom',
-               'DAN_WORK_DIR': f'D:/dan-workspace/jobs/call-{key}', 'DAN_CORE_PORT': '9000', 'PYTHONIOENCODING': 'utf-8'}
+               'DAN_WORK_DIR': f'{_dan_ws()}/jobs/call-{key}', 'DAN_CORE_PORT': '9000', 'PYTHONIOENCODING': 'utf-8'}
         os.makedirs(env['DAN_WORK_DIR'], exist_ok=True)
         creation = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0   # never a console window (owner's rule)
         self.process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'app.services.tool_host', cwd=str(ROOT), env=env,

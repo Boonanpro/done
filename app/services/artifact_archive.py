@@ -23,7 +23,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 SOURCE = Path(__file__).resolve().parents[2]/'frontend'/'src'/'app'/'artifacts'
-REPO = Path(os.environ.get('DAN_ARTIFACTS_REPO', 'D:/done-artifacts'))
+from app.paths import DONE_ARTIFACTS as REPO
 TARGET = REPO/'src'/'app'/'artifacts'
 API_SOURCE = SOURCE.parent/'api'
 API_TARGET = REPO/'src'/'app'/'api'

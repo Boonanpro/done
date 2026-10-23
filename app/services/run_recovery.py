@@ -56,14 +56,17 @@ def recover_orphaned_runs_sync() -> int:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=GRACE_SECONDS)).isoformat()
     runs = (
         sb.table("agent_runs")
-        .select("id,room_id,project_id,state,created_at,updated_at")
+        .select("id,room_id,project_id,state,created_at,updated_at,metadata")
         .eq("state", "running")
         .lt("created_at", cutoff)
         .execute()
     )
     message_cutoff = datetime.now(timezone.utc) - timedelta(hours=MESSAGE_MAX_AGE_HOURS)
     recovered = 0
+    from app.core.standby import run_is_mine
     for run in runs.data or []:
+        if not run_is_mine(run):   # a run on the other machine (Mac / Windows) is that Core's to recover
+            continue
         run_id = run["id"]
         room_id = run.get("room_id")
         try:

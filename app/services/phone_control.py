@@ -18,6 +18,7 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from app.paths import DONE_ROOT as _DONE_ROOT
 
 ADB = os.environ.get('DAN_ADB') or shutil.which('adb') or str(Path.home()/'AppData'/'Local'/'Android'/'Sdk'/'platform-tools'/'adb.exe')
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -243,7 +244,7 @@ def run(params):
     if action == 'read':
         return read(serial)
     if action == 'screenshot':
-        path = Path('D:/done/uploads')/f'phone-{int(time.time())}.png'
+        path = (_DONE_ROOT/'uploads')/f'phone-{int(time.time())}.png'
         path.write_bytes(_adb(serial, 'exec-out', 'screencap', '-p', binary=True))
         return f'スクリーンショット: {path}（画像として読む）'
     if action == 'tap':

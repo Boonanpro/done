@@ -9,6 +9,11 @@ import time
 from app.services import command_job_state as state
 from app.services.editor_codex import CodexTurn
 
+def _dan_ws():
+    from app.paths import DAN_WORKSPACE
+    return DAN_WORKSPACE.as_posix()
+
+
 _tasks = {}
 _slots = asyncio.Semaphore(4)
 
@@ -162,6 +167,7 @@ async def run(row):
 確認済みの複数操作は browser_script でまとめられる。途中の観測を見て判断する必要があるところで区切る。
 実行結果と残件を短く報告する。外部APIのクライアントを自作して確認手順を迂回しない。
 '''
+            from app.paths import localize as _localize; instructions = _localize(instructions)
             # Only the job-scoped Dan MCP is enabled; inherited connectors cannot
             # bypass the job's confirmation and pause boundary.
             config_path = Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))) / 'config.toml'
@@ -172,7 +178,7 @@ async def run(row):
                 'env': {'DAN_USER_ID':row['user_id'], 'DAN_SESSION_ID':row['room_id'],
                     'DAN_BROWSER_ROOM':state.browser_room(job_id), 'DAN_COMMAND_JOB_ID':job_id,
                     'DAN_BROWSER_HEADLESS':'1', 'DAN_BROWSER_OBSERVATION':'dom', 'DAN_CORE_PORT':'9000',
-                    'DAN_WORK_DIR':f'D:/dan-workspace/jobs/{job_id[:8]}', **({'DAN_PARALLEL_JOB':'1'} if parallel else {})}}
+                    'DAN_WORK_DIR':f'{_dan_ws()}/jobs/{job_id[:8]}', **({'DAN_PARALLEL_JOB':'1'} if parallel else {})}}
             owner = CodexTurn()
             owner.receive_timeout = 3600
             sent = 0
@@ -313,7 +319,7 @@ def _note_file_changes(job_id, owner, item):
     a file another piece of work holds, tell the job at once to undo that change and come back to it later."""
     from app.services import work_locks
     import os
-    work_dir = f'D:/dan-workspace/jobs/{job_id[:8]}'
+    work_dir = f'{_dan_ws()}/jobs/{job_id[:8]}'
     title = (state.read(job_id) or {}).get('title') or ''
     for change in item.get('changes') or []:
         key = work_locks.file_key(change.get('path'), work_dir)

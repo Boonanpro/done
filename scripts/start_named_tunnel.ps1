@@ -3,6 +3,14 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
 $TokenFile = Join-Path $env:USERPROFILE '.cloudflared\dan-paina.token'
 if (-not (Test-Path -LiteralPath $TokenFile)) { exit 0 }
+# A standby machine (~/.dan/standby exists) does not carry dan.paina.info: with a connector on both machines
+# Cloudflare would split requests between them (app/core/standby.py). Stop one that is running.
+if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.dan\standby')) {
+    Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains('dan-paina.token') } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    exit 0
+}
 $Mutex = [System.Threading.Mutex]::new($false, 'Local\DanNamedTunnelStart')
 $Acquired = $false
 try {

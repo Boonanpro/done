@@ -102,7 +102,10 @@ def reconcile_once(dry_run=False):
         if turn:
             newest[room_id] = turn['id']
     closed = 0
+    from app.core.standby import run_is_mine
     for run in rows:
+        if not run_is_mine(run):   # started on the other machine (Mac / Windows): only that Core can judge it
+            continue
         if alive(run, newest):
             continue
         if dry_run:
