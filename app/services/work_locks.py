@@ -60,7 +60,7 @@ def _path(key):
 
 @contextmanager
 def _exclusive():
-    import msvcrt
+    from app.services.file_lock import lock as file_lock
     LOCKS.mkdir(parents=True, exist_ok=True)
     with (LOCKS / '.guard').open('a+b') as guard:
         if guard.tell() == 0:
@@ -68,7 +68,7 @@ def _exclusive():
         deadline = time.monotonic() + 10
         while True:
             try:
-                guard.seek(0); msvcrt.locking(guard.fileno(), msvcrt.LK_NBLCK, 1)
+                guard.seek(0); file_lock(guard.fileno(), True)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -77,7 +77,7 @@ def _exclusive():
         try:
             yield
         finally:
-            guard.seek(0); msvcrt.locking(guard.fileno(), msvcrt.LK_UNLCK, 1)
+            guard.seek(0); file_lock(guard.fileno(), False)
 
 
 def _job(job_id):
