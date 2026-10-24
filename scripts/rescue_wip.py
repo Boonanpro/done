@@ -16,7 +16,7 @@ Left alone:
 - files the target's .gitignore ignores (they stay as local files; follow_github keeps them).
 - files that differ only by Windows line endings (nothing to keep; --apply puts back the committed text).
 
-Usage: python scripts/rescue_wip.py [--repo D:/done] [--apply] [--quiet-minutes 30] [--target origin/main] [--json]
+Usage: python scripts/rescue_wip.py [--repo ~/done] [--apply] [--quiet-minutes 30] [--target origin/main] [--skip PREFIX]... [--json]
 (--target: the commit whose .gitignore decides which files stay as local files)
 """
 from __future__ import annotations
@@ -34,8 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from follow_github import (NO_WINDOW, _git, _out, dan_dir, ignored_by, line_endings_only, live_root,  # noqa: E402
-                           status, tree_lock)
-import live_lock  # noqa: E402
+                           same_as, status, tree_lock)
 
 ROOT = live_root()
 HOME = Path.home()
@@ -229,14 +228,18 @@ def _utc_seconds(stamp):
 
 # --- the plan ------------------------------------------------------------------------------------------------------------
 
-def plan(repo=ROOT, quiet_minutes=30.0, target='origin/main'):
+def plan(repo=ROOT, quiet_minutes=30.0, target='origin/main', skip=()):
+    """skip: path prefixes left where they are (runtime data at an odd place, work someone is doing now).
+    Files that already hold the target's text are not work either: follow_github takes them in."""
     repo = str(repo)
     items = status(repo)
     codes = {p: c for c, p in items}
     eol = line_endings_only(repo, [p for c, p in items if c == ' M'])
     rest = [p for p in codes if p not in eol]
     local = _ignored_on(repo, rest, target)
-    work = [p for p in rest if p not in local]
+    skipped = sorted(p for p in rest if p not in local and p.startswith(tuple(skip)))
+    same = sorted(p for p in rest if p not in local and p not in skipped and same_as(repo, target, p))
+    work = [p for p in rest if p not in local and p not in skipped and p not in same]
     times = [t for t in (_mtime(repo, p) for p in work) if t]
     since = (min(times) if times else time.time()) - 86400
     edits = attribute(repo, work, since)
@@ -262,7 +265,8 @@ def plan(repo=ROOT, quiet_minutes=30.0, target='origin/main'):
         g['busy'] = (now - max(stamps + [_utc_seconds(g['last'])] or [0])) < quiet
         day = datetime.fromtimestamp(max(stamps) if stamps else now).strftime('%Y%m%d')
         g['branch'] = f"wip/{day}-{g['session'][:8]}" if g['session'] else f"wip/{key.split(':', 1)[1]}-unknown"
-    return {'eol_only': sorted(eol), 'local': sorted(local), 'groups': sorted(groups.values(), key=lambda g: g['branch'])}
+    return {'eol_only': sorted(eol), 'local': sorted(local), 'skipped': skipped, 'same': same,
+            'groups': sorted(groups.values(), key=lambda g: g['branch'])}
 
 
 # --- moving ---------------------------------------------------------------------------------------------------------------
@@ -509,11 +513,10 @@ def apply(repo, p, quiet):
     # where a committed folder has to come back.
     every = {rel: blob for _, _, _, saved in saved_all for rel, blob in saved.items()}
     order = sorted(every, key=lambda rel: (_entry(repo, 'HEAD', rel) is not None, rel))
-    with live_lock.opened(repo, [*order, *p['eol_only']]):        # the running folder's code is locked otherwise
-        result = {rel: restore(repo, rel, every[rel], where) for rel in order}
-        for rel in p['eol_only']:              # nothing to keep in them: put back only if that is still true
-            if os.path.lexists(os.path.join(repo, rel)):
-                restore(repo, rel, None, where, same=lambda path, rel=rel: _eol_only(repo, rel, path))
+    result = {rel: restore(repo, rel, every[rel], where) for rel in order}
+    for rel in p['eol_only']:              # nothing to keep in them: put back only if that is still true
+        if os.path.lexists(os.path.join(repo, rel)):
+            restore(repo, rel, None, where, same=lambda path, rel=rel: _eol_only(repo, rel, path))
     for g, branch, commit, saved in saved_all:
         kept = [rel for rel in saved if result[rel] == 'changed']
         failed = [rel for rel in saved if result[rel] == 'failed']
@@ -550,6 +553,12 @@ def _show(p):
             out.append(f"    {f['code'].strip() or '?':>2} {f['path']}  {when}{also}")
     if p['eol_only']:
         out.append(f"\nWindows line endings only, nothing to keep ({len(p['eol_only'])}): " + ', '.join(p['eol_only']))
+    if p.get('same'):
+        out.append(f"\nAlready what the target has, left for follow_github ({len(p['same'])}): " + ', '.join(p['same'][:12])
+                   + (' ...' if len(p['same']) > 12 else ''))
+    if p.get('skipped'):
+        out.append(f"\nLeft where they are (--skip) ({len(p['skipped'])}): " + ', '.join(p['skipped'][:6])
+                   + (' ...' if len(p['skipped']) > 6 else ''))
     if p['local']:
         out.append(f"\nStay as local files (the .gitignore ignores them) ({len(p['local'])}): "
                    + ', '.join(p['local'][:12]) + (' ...' if len(p['local']) > 12 else ''))
@@ -563,7 +572,8 @@ def main(argv):
     repo = argv[argv.index('--repo') + 1] if '--repo' in argv else str(ROOT)
     quiet = float(argv[argv.index('--quiet-minutes') + 1]) if '--quiet-minutes' in argv else 30.0
     target = argv[argv.index('--target') + 1] if '--target' in argv else 'origin/main'
-    p = plan(repo, quiet, target)
+    skip = [argv[i + 1] for i, a in enumerate(argv) if a == '--skip' and i + 1 < len(argv)]
+    p = plan(repo, quiet, target, skip)
     print(json.dumps(p, ensure_ascii=False, indent=1) if '--json' in argv else _show(p))
     if '--apply' not in argv:
         if p['groups']:

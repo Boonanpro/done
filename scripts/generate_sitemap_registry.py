@@ -5,7 +5,7 @@ frontend/src/lib/artifact-pages.generated.ts に {slug: [paths]} を書き出す
 独自ドメイン公開時の app/sitemap.ts がこれを参照する。
 
 あわせて frontend/src/app/artifacts/<slug>/sitemap.ts を持つ成果物については、
-frontend/src/generated/artifact-sitemaps.ts に {slug: () => import(...)} を書き出す。
+frontend/src/lib/artifact-sitemaps.generated.ts に {slug: () => import(...)} を書き出す。
 質問ページのように投稿のたびに増える動的ページは page.tsx の走査では拾えないので、
 成果物が自前の sitemap.ts を持つ場合は app/sitemap.ts がそちらを優先して使う。
 
@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS = ROOT / "frontend" / "src" / "app" / "artifacts"
 OUT = ROOT / "frontend" / "src" / "lib" / "artifact-pages.generated.ts"
-OUT_SITEMAPS = ROOT / "frontend" / "src" / "generated" / "artifact-sitemaps.ts"   # not tracked (2026-10-24)
+OUT_SITEMAPS = ROOT / "frontend" / "src" / "lib" / "artifact-sitemaps.generated.ts"
 
 
 def pages_for(slug_dir: Path) -> list[str]:
@@ -49,7 +49,6 @@ def write_sitemap_loaders(slugs: list[str]) -> None:
     for slug in slugs:
         lines.append(f'  "{slug}": () => import("@/app/artifacts/{slug}/sitemap"),')
     lines.append("};")
-    OUT_SITEMAPS.parent.mkdir(parents=True, exist_ok=True)
     OUT_SITEMAPS.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
 
 

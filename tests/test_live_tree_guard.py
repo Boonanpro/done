@@ -216,28 +216,18 @@ def test_pip_from_a_worktree_into_the_shared_python_is_refused(live):
     assert shell('pip install requests', live.parent) is None                # not Dan work: not this guard's business
 
 
-# --- 2026-10-24: the flag is what holds; the guard explains and refuses taking it off ---------------------------------------
+# --- 2026-10-24: the light form. Ordinary writes are refused with a pointer to a worktree; Dan's own scripts run ------------
 
 @pytest.mark.parametrize('command', [
-    'chflags nouchg app/api/chat_routes.py',
-    'chflags -R nouchg .',
-    'chmod u+w app/api/chat_routes.py',
-    'chmod -R 755 app',
-    'xattr -c app/api/chat_routes.py',
-    'python -c "import os; os.chflags(\'app/api/chat_routes.py\', 0)"',
-    'python3 -c "import os; os.chmod(\'.\', 0o755)"',
+    'python scripts/frontend_prod.py build',
+    'python scripts/install_git_hooks.py',
+    'python scripts/follow_github.py',
+    'python scripts/generate_sitemap_registry.py',
+    'cd frontend && node scripts/sync-artifact-sitemaps.mjs',
+    'cd frontend && npm run build',
+    'chmod +x .githooks/pre-commit',
 ])
-def test_taking_the_flag_off_is_refused(live, command):
-    reason = shell(command, live)
-    assert reason and ('印' in reason or 'git が追うファイル' in reason), command
-
-
-@pytest.mark.parametrize('command', [
-    'chmod +x .data/run.sh',
-    'chflags nouchg /tmp/somefile',
-    'chmod 644 frontend/src/app/artifacts/shop/page.tsx',
-])
-def test_flags_elsewhere_pass(live, command):
+def test_dans_own_scripts_are_not_refused(live, command):
     assert shell(command, live) is None, command
 
 

@@ -78,7 +78,6 @@ def test_a_fix_that_is_only_on_github_arrives_and_uncommitted_work_stays(world):
 
 
 @pytest.mark.parametrize('here', [
-    'one\ntwo FIXED\nthree\n',                 # the same change copied in by hand
     'one\ntwo FIXED\nthree\nwork of b\n',      # GitHub's change with unfinished work on top
     'one\ntwo\nthree\nwork of b\n',            # unfinished work that lacks GitHub's change
     'one\ntwo MINE\nthree\n',                  # the same line changed both ways
@@ -225,3 +224,16 @@ def test_a_rename_left_here_names_both_names(world):
     git(folder, 'mv', 'gone.py', 'renamed.py')
     names = [p for _, p in follow_github.status(folder)]
     assert 'gone.py' in names and 'renamed.py' in names
+
+
+def test_a_file_that_already_holds_githubs_text_is_taken_in(world):
+    """Copied in by hand, or a fix made here first and then committed (the Mac fixes of 2026-10-23): not work, so the
+    folder follows instead of stopping (2026-10-24)."""
+    github, folder = world
+    write(folder, 'shared.py', 'one\r\ntwo FIXED\r\nthree\r\n')            # same text, Windows line endings
+    write(folder, 'brand_new.py', 'added on both sides\n')
+    pushed(github, {'shared.py': 'one\ntwo FIXED\nthree\n', 'brand_new.py': 'added on both sides\n'})
+    ok, what = follow_github.follow(folder)
+    assert ok, what
+    assert read(folder, 'shared.py') == 'one\ntwo FIXED\nthree\n' and read(folder, 'brand_new.py') == 'added on both sides\n'
+    assert git(folder, 'status', '--porcelain').stdout == ''

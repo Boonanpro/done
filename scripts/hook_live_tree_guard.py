@@ -6,14 +6,14 @@ collided with seven files of other sessions' half-done work, follow_github stopp
 strangers' work by hand; a dashboard rebuild would have published all of it. Each piece of work now lives in its own
 worktree and branch (`python scripts/work.py new <name>`), where git keeps every saved step.
 
-What holds since 2026-10-24 is the operating system: the running folder's code carries the "user immutable" flag
-(scripts/live_lock.py), so any write to it fails, by whatever program. This hook only explains, early and in plain
-words, why a write will not work and where to do the work instead. It refuses, before a tool runs (PreToolUse):
-writes to a file git tracks (or would track) in the running folder, by path (Write / Edit / MultiEdit / NotebookEdit /
-Codex's apply_patch, a deletion through the Codex bridge) or by the usual ways of writing in a shell line (redirects,
-tee, cp/mv/rm/ln/rsync, sed -i, git and npm commands that change the tree, sh -c and eval, python -c / node -e that open
-a file for writing, variables, cd); and taking the flag off or changing the mode there (chflags, chmod, xattr, chown,
-os.chflags in code), which a session of the same user could do.
+The aim is to stop the ordinary, accidental write and say where to work instead (the owner, 2026-10-24: Dan's
+sessions do not look for ways around, they just write in the wrong place; closing every way around is more than is
+needed). It refuses, before a tool runs (PreToolUse), writes to a file git tracks (or would track) in the running
+folder: by path (Write / Edit / MultiEdit / NotebookEdit / Codex's apply_patch, a deletion through the Codex bridge),
+or by the usual ways of writing in a shell line (redirects, tee, cp/mv/rm/ln/rsync, sed -i, git and npm commands that
+change the tree, sh -c and eval, python -c / node -e that open a file for writing, variables, cd). A program that
+writes by itself is not seen; follow_github names what is left uncommitted and scripts/rescue_wip.py moves it to a
+branch. Dan's own scripts (the screen build, follow_github, install_git_hooks) run as programs and are not refused.
 
 Until 2026-10-23 a second half looked at the folder after each tool and moved what had changed to the branch of the
 session it guessed; it was removed (2026-10-24) because a guess took one session's work into another's branch.
@@ -62,8 +62,7 @@ WRITES_IN_CODE = re.compile(
     r"""open\s*\([^)]*?,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+]|\.write_(?:text|bytes)\s*\(|writeFile|appendFile|"""
     r"""createWriteStream|copyFile|\brename(?:Sync)?\s*\(|\bunlink(?:Sync)?\s*\(|\brm(?:Sync)?\s*\(|rmtree|"""
     r"""shutil\.(?:copy|move)|os\.(?:replace|rename|remove|unlink)|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|"""
-    r"""\.touch\s*\(|open\s*\(\s*['"][^'"]*['"]\s*,\s*['"]>|sysopen|File\.write|IO\.write|FileUtils|"""
-    r"""chflags|lchflags|chmod|chown|setxattr|removexattr|xattr""")
+    r"""\.touch\s*\(|open\s*\(\s*['"][^'"]*['"]\s*,\s*['"]>|sysopen|File\.write|IO\.write|FileUtils""")
 PATH_IN_CODE = re.compile(r"""['"]([^'"\n]{1,400})['"]""")
 
 
@@ -418,13 +417,6 @@ def shell_writes(command: str, cwd: str | None, depth: int = 0):
                 if not a.startswith("-"):
                     target(a, here, must_exist=True)
             continue
-        if name in ("chflags", "chmod", "chown", "chgrp", "xattr", "setfile", "chattr"):
-            for a in _positionals(xargs)[1 if name in ("chflags", "chmod", "chown", "chgrp") else 0:]:
-                p = _norm(a, here)
-                if p is not None and _locked_place(p):
-                    found.append(("lock", f"{name} {a}"))
-                    break
-            continue
         if name in INTERPRETERS:
             code = None
             for k, a in enumerate(args):
@@ -528,16 +520,6 @@ def _git_reads_only(sub: str, rest: list[str]) -> bool:
     return False
 
 
-def _locked_place(p: Path) -> bool:
-    """p is the running folder itself, a folder holding code there, or a file git tracks or would track there."""
-    rel = _rel_in_live(p)
-    if rel is None or _nested_worktree(p):
-        return False
-    if p.is_dir() and not p.is_symlink():
-        return rel == "" or _tracked_under(p)
-    return bool(live_file(p))
-
-
 def _tracked_under(d: Path) -> bool:
     rel = _rel_in_live(d)
     r = subprocess.run(["git", "-C", str(LIVE), "ls-files", "--", rel or "."], capture_output=True, timeout=20,
@@ -549,7 +531,7 @@ def _code_writes(code: str, here: str | None):
     """python -c / node -e / a heredoc fed to an interpreter: a file path into the folder in code that writes files."""
     if not WRITES_IN_CODE.search(code):
         return []
-    kind = "lock" if re.search(r"chflags|chmod|chown|xattr", code) else "file"
+    kind = "file"
     found = []
     for raw in PATH_IN_CODE.findall(code):
         if "/" not in raw and "\\" not in raw and "." not in raw:
@@ -629,8 +611,6 @@ def _message(what: str, kind: str) -> str:
         "git": f"{what} は動いているダン（{LIVE}）の中身を変えるので、ここでは使えません。{LIVE} を変えるのは scripts/follow_github.py だけです。",
         "npm": f"{what} は {LIVE / 'frontend'} の package.json か node_modules を変えるので、ここでは使えません。"
                "成果物が使うパッケージは、成果物のファイルに import を書けば自動で入ります。",
-        "lock": f"{what} は、動いているダン（{LIVE}）のコードに付けた変更禁止の印や権限を変えるので、使えません。"
-                "印を外すのは、本番を GitHub に合わせる係（scripts/follow_github.py）だけです。",
         "pip": f"{what} は、動いているダンと共用の Python に入れるので、作業場所からは使えません。"
                f"`{work} venv` でこの作業場所だけの Python（.venv）を作り、`.venv/bin/python -m pip {what.split()[-1]} ...` で入れてください。"
                "本番に要るなら requirements.txt にも書いてください。",

@@ -28,8 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_DIR = ROOT / "frontend" / "src" / "app" / "artifacts"
-# Generated where git does not track and the code folders stay locked (scripts/live_lock.py, 2026-10-24).
-OUT_FILE = ROOT / "frontend" / "src" / "generated" / "artifact-sources.css"
+OUT_FILE = ROOT / "frontend" / "src" / "app" / "artifact-sources.css"
 
 HEADER = """/* 自動生成 — 直接編集しないこと。
  * 生成元: scripts/wire_artifact_tailwind_sources.py
@@ -59,9 +58,9 @@ def build_lines() -> list[str]:
             for f in sorted(d.rglob("*")):
                 if f.is_file() and f.suffix in SOURCE_EXTS:
                     rel = f.relative_to(ARTIFACTS_DIR).as_posix()
-                    lines.append(f'@source "../app/artifacts/{rel}";')
+                    lines.append(f'@source "./artifacts/{rel}";')
         else:
-            lines.append(f'@source "../app/artifacts/{d.name}/**/*.{{ts,tsx,js,jsx,mdx}}";')
+            lines.append(f'@source "./artifacts/{d.name}/**/*.{{ts,tsx,js,jsx,mdx}}";')
     return lines
 
 

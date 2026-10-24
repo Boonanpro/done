@@ -273,10 +273,6 @@ data/today_illust/
 /frontend/.artifact-packages.json
 /frontend/.artifact-packages.json.tmp
 /frontend/.artifact-packages.lock
-# 実行中に作る画面のファイル（frontend/src/generated/README.md、2026-10-24）
-/frontend/src/generated/*
-!/frontend/src/generated/README.md
-/frontend/src/lib/artifact-sitemaps.generated.ts
 /.venv/
 # 成果物タブ用の開発サーバーが書く「今のファイルの版」（frontend/src/lib/live-version/server.ts）
 /frontend/src/lib/live-version/current.gen.ts

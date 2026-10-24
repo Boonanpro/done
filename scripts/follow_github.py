@@ -214,6 +214,19 @@ def ignored_by(repo, theirs, paths):
 _ignored_by = ignored_by
 
 
+def same_as(repo, ref, rel):
+    """The file here holds the text commit `ref` has for it (line endings aside)."""
+    full = os.path.join(repo, rel)
+    if not os.path.isfile(full) or os.path.islink(full):
+        return False
+    blob = _git(repo, 'cat-file', 'blob', f'{ref}:{rel}')
+    if blob.returncode:
+        return False
+    with open(full, 'rb') as fh:
+        here = fh.read()
+    return NUL not in here and here.replace(b'\r\n', b'\n') == blob.stdout.replace(b'\r\n', b'\n')
+
+
 def _kept_untracked(repo, base, theirs):
     """Files GitHub deletes that its .gitignore ignores and that are here: they stay here as local files."""
     gone = _paths(_out(repo, 'diff', '--name-only', '--no-renames', '--diff-filter=D', '-z', base, theirs))
@@ -282,9 +295,8 @@ def _finish_earlier(repo):
             rel = f.relative_to(keep).as_posix()
             dst = os.path.join(repo, rel)
             if not os.path.lexists(dst):
-                with live_lock().opened(repo, [rel]):
-                    os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
-                    shutil.copy2(f, dst)
+                os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
+                shutil.copy2(f, dst)
                 said.append(rel)
             elif not filecmp.cmp(f, dst, shallow=False):
                 rest.append(rel)
@@ -295,18 +307,11 @@ def _finish_earlier(repo):
     return said, problems
 
 
-def live_lock():
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import live_lock as mod   # noqa: E402
-    return mod
-
-
 def _packages_marker(repo):
     return dan_dir(repo) / 'follow_github' / 'packages-pending'
 
 
 def _follow_locked(repo, target, branch, dry, packages):
-    lock = live_lock()
     base, theirs = _out(repo, 'rev-parse', 'HEAD').decode().strip(), _out(repo, 'rev-parse', target).decode().strip()
     if not dry:
         finished, problems = _finish_earlier(repo)
@@ -325,6 +330,8 @@ def _follow_locked(repo, target, branch, dry, packages):
     said = f'{commits} commits, {len(changed)} files'
     kept = _kept_untracked(repo, base, theirs)
     hit = sorted((set(changed) & set(left)) - set(kept))   # git alone would quietly bring back a file deleted here
+    same = [p for p in hit if same_as(repo, theirs, p)]    # already what GitHub has (copied in by hand): not work
+    hit = [p for p in hit if p not in same]
     if hit:
         return False, ('NOT brought up to GitHub main; nothing was changed. These files are uncommitted here and '
                        'changed on GitHub: ' + ', '.join(hit) + '\n  -> move them to a branch '
@@ -338,23 +345,28 @@ def _follow_locked(repo, target, branch, dry, packages):
     if packages and needs_packages:            # said before git moves: a stop from here on is finished by a run again
         _packages_marker(repo).parent.mkdir(parents=True, exist_ok=True)
         _packages_marker(repo).write_text(theirs + '\n', encoding='utf-8')
-    with lock.opened(repo, [*changed, *kept, *displaced]):    # the only writes to the locked code
-        resaved = [p for code, p in status(repo) if code == ' M' and p in set(changed) and p not in left]
-        if resaved:  # only re-saved with Windows line endings: let git see the committed text it will replace
-            _out(repo, 'checkout-index', '-f', '-u', '--', *resaved)
-        aside = _copy_aside(repo, displaced, 'replaced')
-        keep = _copy_aside(repo, kept, 'kept')        # on disk before git deletes them; put back below
-        dirty_kept = [p for p in kept if p in left]
-        if dirty_kept:  # git would refuse to delete a changed file: let it see the committed one, put ours back after
-            _out(repo, 'checkout-index', '-f', '-u', '--', *dirty_kept)
-        moved = _git(repo, 'merge', '--ff-only', '--quiet', theirs)
-        for rel in kept:
-            if moved.returncode == 0 or rel in dirty_kept:
-                dst = os.path.join(repo, rel)
-                os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
-                shutil.copy2(keep / rel, dst)
-        if keep:
-            shutil.rmtree(keep, ignore_errors=True)   # every kept file is back in place
+    resaved = [p for code, p in status(repo) if code == ' M' and p in set(changed) and p not in left]
+    resaved += [p for p in same if _git(repo, 'ls-files', '--error-unmatch', '--', p).returncode == 0]
+    if resaved:  # only re-saved with Windows line endings, or already GitHub's text: git writes the same text again
+        _out(repo, 'checkout-index', '-f', '-u', '--', *resaved)
+    new_same = [p for p in same if p not in resaved]
+    if new_same:  # a new file here that GitHub adds with the same content: set aside so git can add it
+        _copy_aside(repo, new_same, 'same')
+        for p in new_same:
+            os.remove(os.path.join(repo, p))
+    aside = _copy_aside(repo, displaced, 'replaced')
+    keep = _copy_aside(repo, kept, 'kept')        # on disk before git deletes them; put back below
+    dirty_kept = [p for p in kept if p in left]
+    if dirty_kept:  # git would refuse to delete a changed file: let it see the committed one, put ours back after
+        _out(repo, 'checkout-index', '-f', '-u', '--', *dirty_kept)
+    moved = _git(repo, 'merge', '--ff-only', '--quiet', theirs)
+    for rel in kept:
+        if moved.returncode == 0 or rel in dirty_kept:
+            dst = os.path.join(repo, rel)
+            os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
+            shutil.copy2(keep / rel, dst)
+    if keep:
+        shutil.rmtree(keep, ignore_errors=True)   # every kept file is back in place
     if moved.returncode:
         with contextlib.suppress(OSError):
             _packages_marker(repo).unlink()
@@ -371,8 +383,8 @@ def _follow_locked(repo, target, branch, dry, packages):
 
 
 def _finish(repo, done, problems, install, dry):
-    """The end of every run: packages still owed, the lock, and what is left to settle by hand. Success only when
-    nothing is owed."""
+    """The end of every run: packages still owed and what is left to settle by hand. Success only when nothing is
+    owed."""
     ok = True
     if install:
         good, why = _install_frontend(repo)
@@ -384,12 +396,6 @@ def _finish(repo, done, problems, install, dry):
             ok = False
             done += ('\nBUT the frontend packages could not be installed (the screens may not build); run this '
                      'again to retry: ' + why)
-    lock = live_lock()
-    if not dry and lock.active(repo):
-        _, _, bad = lock.lock(repo)
-        if bad:
-            ok = False
-            done += '\nBUT these could not be locked again: ' + ', '.join(bad[:10])
     if problems:
         ok = False
         done += '\nLeft to settle: ' + '; '.join(problems)

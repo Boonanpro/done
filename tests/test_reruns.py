@@ -1,7 +1,7 @@
-"""The running folder's code cannot be written (2026-10-24): macOS's user-immutable flag on every tracked file and on
-the folders that hold only code. Only the updaters (follow_github, rescue_wip) open what they change and lock again.
-Also the re-runs the 2026-10-23 check found unsafe: a follow cut short, a package install that failed, a rescue run again
-after a staged version changed, two package lists written at once, a venv copy that installed into the shared one."""
+"""Runs that stop halfway and runs that happen at once (2026-10-23/24 checks): a follow cut short, a package install that
+failed, a rescue run again after a staged version changed or after a hard stop, two package lists written at once, a
+venv copy that installed into the shared one. And: nothing locks the running folder (the owner chose the light form on
+2026-10-24), so Dan's own scripts write where they always did."""
 import importlib.util
 import json
 import os
@@ -26,10 +26,8 @@ def load(name):
 
 
 follow_github = load('follow_github')
-live_lock = load('live_lock')
 rescue = load('rescue_wip')
 
-mac_only = pytest.mark.skipif(not live_lock.SUPPORTED, reason='chflags is macOS only')
 
 
 def git(where, *args):
@@ -59,7 +57,6 @@ def world(tmp_path):
     write(folder, '.data/state.json', '{}')
     write(folder, 'core.log', 'started\n')
     yield github, folder
-    live_lock.unlock(folder)                              # let pytest remove the folder
 
 
 def push(github, changes, deleted=()):
@@ -68,112 +65,6 @@ def push(github, changes, deleted=()):
     for name in deleted:
         (github / name).unlink()
     git(github, 'add', '-A'); git(github, 'commit', '-q', '-m', 'pushed')
-
-
-def attempts(folder):
-    """Every way a session might write the code; each returns True when it changed something."""
-    code = folder / 'app' / 'core.py'
-
-    def py_write():
-        code.write_text('changed\n')
-
-    def replace():
-        tmp = folder / 'app' / 'core.py.tmp'
-        tmp.write_text('changed\n')
-        os.replace(tmp, code)
-
-    def delete():
-        code.unlink()
-
-    def rename():
-        os.rename(code, folder / 'app' / 'core2.py')
-
-    def new_file():
-        (folder / 'app' / 'api' / 'new_routes.py').write_text('x\n')
-
-    def chmod():
-        os.chmod(code, 0o777)
-
-    def shell():
-        r = subprocess.run(f'echo x >> "{code}"', shell=True, capture_output=True)
-        if r.returncode:
-            raise PermissionError(r.stderr)
-
-    def sed():
-        r = subprocess.run(['sed', '-i', '', 's/one/two/', str(code)], capture_output=True)
-        if r.returncode:
-            raise PermissionError(r.stderr)
-
-    def git_checkout():
-        r = git(folder, 'checkout', 'HEAD~0', '--', 'app/core.py')
-        if r.returncode:
-            raise PermissionError(r.stderr)
-        code.write_text('changed\n')
-    return {'write': py_write, 'replace': replace, 'delete': delete, 'rename': rename, 'new file': new_file,
-            'chmod': chmod, 'shell >>': shell, 'sed -i': sed, 'git checkout + write': git_checkout}
-
-
-@mac_only
-def test_locked_code_cannot_be_written_by_any_means(world):
-    github, folder = world
-    nf, nd, bad = live_lock.lock(folder)
-    assert not bad and nf == 5 and live_lock.active(folder)                # the tracked artifact is not locked
-    for what, act in attempts(folder).items():
-        with pytest.raises((PermissionError, OSError)):
-            act()
-    assert (folder / 'app' / 'core.py').read_text() == 'one\n'
-    assert not (folder / 'app' / 'api' / 'new_routes.py').exists()          # a folder of code only: nothing added
-    changed = [l for l in git(folder, 'status', '--porcelain').stdout.splitlines() if not l.startswith('??')]
-    assert changed == []                                                  # no code changed, moved or removed
-    # app/ stays open for the runtime (uploads, logs); a new file can appear there, never a change to code
-    assert [l for l in git(folder, 'status', '--porcelain').stdout.splitlines()] in ([], ['?? app/core.py.tmp'])
-
-
-@mac_only
-def test_runtime_writes_stay_possible(world):
-    github, folder = world
-    live_lock.lock(folder)
-    write(folder, '.data/state.json', '{"a": 1}')                         # runtime data
-    (folder / 'core.log').write_text('more\n')                            # logs at the top
-    (folder / 'core.log').rename(folder / 'core.1.log')                   # log rotation
-    write(folder, 'frontend/src/app/artifacts/shop/page.tsx', 'x\n')       # a new artifact
-    write(folder, 'frontend/.next-prod-1/build.txt', 'x\n')               # a build next to the code
-    assert (folder / 'frontend/src/app/artifacts/shop/page.tsx').exists()
-
-
-@mac_only
-def test_follow_github_opens_only_what_changes_and_locks_again(world):
-    github, folder = world
-    live_lock.lock(folder)
-    push(github, {'app/core.py': 'two\n', 'app/api/added.py': 'new\n'}, deleted=['frontend/src/app/page.tsx'])
-    ok, what = follow_github.follow(folder)
-    assert ok, what
-    assert (folder / 'app/core.py').read_text() == 'two\n' and (folder / 'app/api/added.py').exists()
-    assert not (folder / 'frontend/src/app/page.tsx').exists()
-    with pytest.raises(PermissionError):
-        (folder / 'app/api/added.py').write_text('changed\n')            # the new file is locked too
-    assert 'not locked now: 0' in live_lock.status(folder)
-
-
-@mac_only
-def test_rescue_puts_back_through_the_lock(world):
-    github, folder = world
-    write(folder, 'app/core.py', 'left here before the lock\n')
-    live_lock.lock(folder)                                               # a changed file is locked as it is
-    p = rescue.plan(folder, quiet_minutes=0, target='origin/main')
-    rescue.apply(folder, p, 0)
-    branch = git(folder, 'branch', '--list', 'wip/*').stdout.split()[0]
-    assert git(folder, 'show', f'{branch}:app/core.py').stdout == 'left here before the lock\n'
-    assert (folder / 'app/core.py').read_text() == 'one\n'
-    assert 'not locked now: 0' in live_lock.status(folder)
-
-
-@mac_only
-def test_unlock_takes_every_flag_off(world):
-    github, folder = world
-    live_lock.lock(folder)
-    assert live_lock.unlock(folder) > 0 and not live_lock.active(folder)
-    (folder / 'app' / 'core.py').write_text('writable again\n')
 
 
 # --- re-runs (2026-10-23 check, finding 5) ---------------------------------------------------------------------------------

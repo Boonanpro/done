@@ -291,3 +291,17 @@ def test_a_link_standing_where_a_committed_folder_was_is_moved_first(world, tmp_
     assert links                                                                        # the link itself is kept
     assert git(world, 'status', '--porcelain').stdout.splitlines() == [' M machine.json']
     assert sorted(git(world, 'ls-files', 'web').stdout.split()) == ['web/page.tsx']   # nothing made of the two names
+
+
+def test_files_that_hold_the_targets_text_and_skipped_prefixes_stay(world, tmp_path):
+    """A fix already on the target is left for follow_github; --skip leaves runtime data at an odd place alone
+    (the lifelog folder named like a Windows share path, 2026-10-24)."""
+    side = tmp_path / 'side2'
+    git(world, 'worktree', 'add', '-q', str(side), 'target')
+    (side / 'app' / 'a.py').write_text('committed\nwork of claude\n')
+    git(side, 'commit', '-q', '-am', 'the fix lands on the target')
+    write(world, '\\\\nas\\share\\lifelog/2026-10-24/a.ogg', 'audio')
+    p = rescue.plan(world, 0, 'target', skip=['\\\\nas'])
+    moved = {f['path'] for g in p['groups'] for f in g['files']}
+    assert 'app/a.py' in p['same'] and 'app/a.py' not in moved
+    assert any(x.startswith('\\\\nas') for x in p['skipped']) and not any(x.startswith('\\\\nas') for x in moved)
