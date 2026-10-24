@@ -4154,6 +4154,19 @@ function AppMain() {
             </Text>
           </View>
           <View style={styles.appBarRight}>
+            {/* 新しい版があれば、チャットの上に段を足さずアプリバーの印にする。押すと更新が始まる。 */}
+            {appUpdate.phase === 'ready' && appUpdate.latest ? (
+              <Pressable
+                onPress={appUpdate.start}
+                accessibilityRole="button"
+                accessibilityLabel={ui(`Update to ${appUpdate.latest.version_name}`, `新しい版 ${appUpdate.latest.version_name} に更新する`)}
+                hitSlop={6}
+                style={({ pressed }) => [styles.appBarIconButton, styles.chatAppBarIcon, pressed && styles.buttonPressed]}
+              >
+                <Ionicons name="arrow-up-circle" size={24} color="#1d6b57" />
+                <View style={styles.chatBarDot} />
+              </Pressable>
+            ) : null}
             {artifacts.length > 0 ? (
               <Pressable
                 onPress={() => (artifacts.length === 1 ? handleOpenArtifact(artifacts[0]) : setArtifactSheetOpen(true))}
@@ -4216,7 +4229,8 @@ function AppMain() {
             </Pressable>
           </View>
         </View>
-        <AppUpdateBanner update={appUpdate} />
+        {/* 落としている間と、本人の操作が要る時（提供元の許可・インストール）だけ1枚出す。 */}
+        {appUpdate.phase !== 'ready' ? <AppUpdateBanner update={appUpdate} /> : null}
 
         {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
             これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
@@ -5727,6 +5741,7 @@ const styles = StyleSheet.create({
   chatAppBarIcon: {width:40},
   chatBarCount: {position:'absolute',top:8,right:2,minWidth:16,height:16,borderRadius:8,paddingHorizontal:3,backgroundColor:'#e4e9e3',borderWidth:1.5,borderColor:'#f6f7f3',alignItems:'center',justifyContent:'center'},
   chatBarCountText: {color:'#304d40',fontSize:10,fontWeight:'800'},
+  chatBarDot: {position:'absolute',top:9,right:6,width:8,height:8,borderRadius:4,backgroundColor:'#d9534f',borderWidth:1.5,borderColor:'#f6f7f3'},
   attachButton: {
     alignItems: 'center',
     height: 48,
