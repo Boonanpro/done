@@ -19,7 +19,7 @@ router = APIRouter(prefix="/video-review", tags=["video-review"])
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
-DAN_WORKSPACE = Path("D:/dan-workspace")
+from app.paths import DAN_WORKSPACE
 SESSION_DIR = UPLOADS_DIR / "video-review-sessions"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 

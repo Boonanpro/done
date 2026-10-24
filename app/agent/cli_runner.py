@@ -36,7 +36,8 @@ _sessions_in_db: Dict[str, str] = {}   # what cli_sessions already holds, as far
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
 
 # 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
-CLI_WORKSPACE = Path("D:/dan-workspace")
+from app.paths import DAN_WORKSPACE as CLI_WORKSPACE
+from app.paths import localize as _localize_paths
 CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # ワンショット生成（タイトル等）専用の中立な空ディレクトリ。
@@ -1698,6 +1699,7 @@ def _build_system_prompt(
         "Dan infrastructure and user deliverables are separate scopes. "
         "For changes to Dan itself, read D:/done/AGENTS.md."
     )
+    parts[-1] = _localize_paths(parts[-1])
     parts.append(_ABSOLUTE_RULES)
     # Answer shapes (table / choice buttons / input / steps / chart as ```openui-lang blocks).
     # Generated from the frontend part definitions; the same text on every backend (Claude / Codex),

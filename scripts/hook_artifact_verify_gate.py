@@ -30,10 +30,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STORE = Path(os.environ.get("DAN_ARTIFACT_GATE_DIR") or (Path("D:/done") / ".data" / "artifact_gate"))
-LIVE = os.environ.get("DAN_ARTIFACT_GATE_LIVE", "D:/done").replace("\\", "/").rstrip("/").lower()
+STORE = Path(os.environ.get("DAN_ARTIFACT_GATE_DIR") or (Path(__file__).resolve().parent.parent / ".data" / "artifact_gate"))
+LIVE = os.environ.get("DAN_ARTIFACT_GATE_LIVE", Path(__file__).resolve().parent.parent.as_posix()).replace("\\", "/").rstrip("/").lower()
 MAX_BLOCKS = 3
-SEEN_CMD = os.environ.get("DAN_ARTIFACT_SEEN", "D:/done/scripts/artifact_seen.py")
+SEEN_CMD = os.environ.get("DAN_ARTIFACT_SEEN", (Path(__file__).resolve().parent.parent / "scripts/artifact_seen.py").as_posix())
 
 _live_abs = re.escape(LIVE) + r"/frontend/src/app/artifacts/([\w-]+)"
 _live_msys = "/" + re.escape(LIVE[0]) + re.escape(LIVE[2:]) + r"/frontend/src/app/artifacts/([\w-]+)" if re.match(r"^[a-z]:/", LIVE) else None

@@ -520,7 +520,29 @@ def _call(params):
 
 
 async def run(params):
+    import sys
+    if sys.platform != "win32":
+        return await asyncio.to_thread(_relay, params)
     return await asyncio.to_thread(_call, params)
+
+
+def _relay(params):
+    """ダンの本体が Mac にある時: Windows の PC のダンに頼んで、Windows のアプリを操作する（app/core/api/desktop_relay_routes.py）。"""
+    import json
+    import os
+    import urllib.request
+    from app.core.api.desktop_relay_routes import relay_token
+    port = int(os.environ.get("DAN_WINDOWS_RELAY_PORT", "19000"))
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/internal/desktop", data=json.dumps(params).encode(),
+        headers={"Content-Type": "application/json", "X-Dan-Desktop-Token": relay_token()}, method="POST")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=240) as response:
+            return json.load(response)["result"]
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f"Windows の PC につながりませんでした（{type(exc).__name__}: {exc}）。"
+                    "Windows の PC が起きているか、中継（voice_relay_to_mac.ps1）が動いているかを確かめる。")
 
 
 # ---- replay -------------------------------------------------------------------

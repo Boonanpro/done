@@ -115,83 +115,88 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("browser reaper failed to start: %s", e)
 
-    # 続報ポーラー: 予約された follow-up を期限到来時に発火し、ダンを再起動して
-    # チャットに報告させる（ターン制エージェントが「完了したら報告します」を守れる
-    # ようにする土台）。失敗してもコア起動は妨げない。
-    try:
-        from app.services.followup_poller import start_poller
-        start_poller()
-    except Exception as e:
-        logger.warning("follow-up poller failed to start: %s", e)
+    from app.core.standby import is_standby
 
-    # メール受信ポーラー: Gmail/iCloud を定期取り込みし、ダンの送信台帳に一致する
-    # 返信だけを「返信案」提案として通知タブに出す。失敗してもコア起動は妨げない。
-    try:
-        from app.services.email_poller import start_poller as start_email_poller
-        start_email_poller()
-    except Exception as e:
-        logger.warning("email poller failed to start: %s", e)
+    if is_standby():
+        logger.info("standby: shared work (follow-ups, mail, Instagram, run recovery, publication) is left to the active Dan")
+    else:
+        # 続報ポーラー: 予約された follow-up を期限到来時に発火し、ダンを再起動して
+        # チャットに報告させる（ターン制エージェントが「完了したら報告します」を守れる
+        # ようにする土台）。失敗してもコア起動は妨げない。
+        try:
+            from app.services.followup_poller import start_poller
+            start_poller()
+        except Exception as e:
+            logger.warning("follow-up poller failed to start: %s", e)
 
-    # Instagram DM ポーラー: ダンがDMを送ったアカウントだけを低頻度(既定60分)で
-    # 巡回し、返信は案件ルームでダンを起動、新規DMは通知タブに出す。
-    # スレッドは開かないので既読は付かない。失敗してもコア起動は妨げない。
-    try:
-        from app.services.instagram_poller import start_poller as start_ig_poller
-        start_ig_poller()
-    except Exception as e:
-        logger.warning("instagram poller failed to start: %s", e)
+        # メール受信ポーラー: Gmail/iCloud を定期取り込みし、ダンの送信台帳に一致する
+        # 返信だけを「返信案」提案として通知タブに出す。失敗してもコア起動は妨げない。
+        try:
+            from app.services.email_poller import start_poller as start_email_poller
+            start_email_poller()
+        except Exception as e:
+            logger.warning("email poller failed to start: %s", e)
 
-    # 「今日やったこと」ポーラー: ダン/CLI/git/見張りの証拠を定期(既定5分)+ターン完了時に
-    # 判定し daily_achievements を更新する。失敗してもコア起動は妨げない。
-    try:
-        from app.services.achievement_poller import start_poller as start_achievement_poller
-        start_achievement_poller()
-    except Exception as e:
-        logger.warning("achievement poller failed to start: %s", e)
+        # Instagram DM ポーラー: ダンがDMを送ったアカウントだけを低頻度(既定60分)で
+        # 巡回し、返信は案件ルームでダンを起動、新規DMは通知タブに出す。
+        # スレッドは開かないので既読は付かない。失敗してもコア起動は妨げない。
+        try:
+            from app.services.instagram_poller import start_poller as start_ig_poller
+            start_ig_poller()
+        except Exception as e:
+            logger.warning("instagram poller failed to start: %s", e)
 
-    # UIスクショウォッチャー: フロントのコード変更を検知して変わった画面だけ自動保存
-    # (ダン開発の物語の素材。ユーザー操作不要)。失敗してもコア起動は妨げない。
-    try:
-        from app.services.ui_snapshot_watcher import start_watcher as start_ui_watcher
-        start_ui_watcher()
-    except Exception as e:
-        logger.warning("ui snapshot watcher failed to start: %s", e)
+        # 「今日やったこと」ポーラー: ダン/CLI/git/見張りの証拠を定期(既定5分)+ターン完了時に
+        # 判定し daily_achievements を更新する。失敗してもコア起動は妨げない。
+        try:
+            from app.services.achievement_poller import start_poller as start_achievement_poller
+            start_achievement_poller()
+        except Exception as e:
+            logger.warning("achievement poller failed to start: %s", e)
 
-    # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
-    # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
-    try:
-        from app.services.run_recovery import recover_orphaned_runs
-        asyncio.create_task(recover_orphaned_runs())
-        # While this Core runs, it closes the runs whose work is gone (it alone can see that)
-        from app.services import run_reconciler
-        asyncio.create_task(run_reconciler.loop())
-    except Exception as e:
-        logger.warning("run recovery failed to schedule: %s", e)
+        # UIスクショウォッチャー: フロントのコード変更を検知して変わった画面だけ自動保存
+        # (ダン開発の物語の素材。ユーザー操作不要)。失敗してもコア起動は妨げない。
+        try:
+            from app.services.ui_snapshot_watcher import start_watcher as start_ui_watcher
+            start_ui_watcher()
+        except Exception as e:
+            logger.warning("ui snapshot watcher failed to start: %s", e)
 
-    # 成果物の公開保証: 登録済みなのに一度も公開に到達していない専用サイトを、
-    # 登録時と同じスケジューラで公開する。公開はコア内のスレッドで走るため、
-    # 取りこぼしが生まれる経路は「コアの停止」だけ。それをここで拾う。
-    try:
-        from app.services.artifact_publication_service import publish_pending_artifacts
-        asyncio.create_task(asyncio.to_thread(publish_pending_artifacts))
-    except Exception as e:
-        logger.warning("pending artifact publication failed to schedule: %s", e)
+        # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
+        # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
+        try:
+            from app.services.run_recovery import recover_orphaned_runs
+            asyncio.create_task(recover_orphaned_runs())
+            # While this Core runs, it closes the runs whose work is gone (it alone can see that)
+            from app.services import run_reconciler
+            asyncio.create_task(run_reconciler.loop())
+        except Exception as e:
+            logger.warning("run recovery failed to schedule: %s", e)
 
-    # 公開用の写しを、作った元のファイルの指紋で見張る。ファイルが変われば
-    # （どのファイルを・どの部屋が・手で変えても）止まって1分後に作り直す。
-    try:
-        from app.services import artifact_freshness
-        asyncio.create_task(artifact_freshness.loop())
-    except Exception as e:
-        logger.warning("artifact freshness loop failed to start: %s", e)
+        # 成果物の公開保証: 登録済みなのに一度も公開に到達していない専用サイトを、
+        # 登録時と同じスケジューラで公開する。公開はコア内のスレッドで走るため、
+        # 取りこぼしが生まれる経路は「コアの停止」だけ。それをここで拾う。
+        try:
+            from app.services.artifact_publication_service import publish_pending_artifacts
+            asyncio.create_task(asyncio.to_thread(publish_pending_artifacts))
+        except Exception as e:
+            logger.warning("pending artifact publication failed to schedule: %s", e)
 
-    # Paid domain work is persisted before it starts.  Resume it here after a
-    # process restart; this is independent of the payer's browser return.
-    try:
-        from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
-        asyncio.create_task(recover_paid_domain_registrations())
-    except Exception as e:
-        logger.warning("domain publication recovery failed to schedule: %s", e)
+        # 公開用の写しを、作った元のファイルの指紋で見張る。ファイルが変われば
+        # （どのファイルを・どの部屋が・手で変えても）止まって1分後に作り直す。
+        try:
+            from app.services import artifact_freshness
+            asyncio.create_task(artifact_freshness.loop())
+        except Exception as e:
+            logger.warning("artifact freshness loop failed to start: %s", e)
+
+        # Paid domain work is persisted before it starts.  Resume it here after a
+        # process restart; this is independent of the payer's browser return.
+        try:
+            from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
+            asyncio.create_task(recover_paid_domain_registrations())
+        except Exception as e:
+            logger.warning("domain publication recovery failed to schedule: %s", e)
 
     yield
 
@@ -217,6 +222,8 @@ app = FastAPI(
 
 from app.core.api.browser_routes import router as browser_manager_router
 app.include_router(browser_manager_router)
+from app.core.api.desktop_relay_routes import router as desktop_relay_router
+app.include_router(desktop_relay_router)
 from app.core.api.command_job_routes import router as command_job_router
 app.include_router(command_job_router)
 

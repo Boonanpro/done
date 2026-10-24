@@ -35,8 +35,8 @@ TMP = ROOT / ".tmp"
 PID_FILE = TMP / "frontend_prod.pid"
 STATE_FILE = TMP / "frontend_prod.json"
 PORT = int(os.environ.get("DAN_FRONTEND_PORT", "3000"))
-NPM = r"C:\Program Files\nodejs\npm.cmd"
-NODE = r"C:\Program Files\nodejs\node.exe"
+NPM = r"C:\Program Files\nodejs\npm.cmd" if os.name == "nt" else (shutil.which("npm") or "npm")
+NODE = r"C:\Program Files\nodejs\node.exe" if os.name == "nt" else (shutil.which("node") or "node")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 KEEP_BUILDS = 2
 # /preview/<slug>（成果物のファイルそのもの）の中継先。開発サーバー（start_preview_dev.bat）。
@@ -110,12 +110,25 @@ def build() -> Path:
 
 
 def _kill_pid(pid: int) -> None:
+    if os.name != "nt":
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        return
     subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, creationflags=NO_WINDOW)
 
 
 def _kill_port(port: int) -> None:
     # netstat prints in the console code page (cp932 here): decoded as UTF-8 by text=True it came back None and the
     # restart died after stopping the old server, leaving 3000 down (2026-09-30).
+    if os.name != "nt":
+        out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True, text=True).stdout
+        for pid in out.split():
+            if pid.isdigit() and int(pid) != os.getpid():
+                _kill_pid(int(pid))
+        return
     out = subprocess.run(["netstat", "-ano"], capture_output=True, encoding="mbcs", errors="replace", creationflags=NO_WINDOW).stdout or ""
     for line in out.splitlines():
         if f":{port} " in line and "LISTENING" in line:
@@ -148,7 +161,7 @@ def start() -> None:
     p = subprocess.Popen(
         [NODE, str(next_bin), "start", "-p", str(PORT), "-H", "::"],
         cwd=str(FRONTEND), env=env, stdout=out, stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True,
+        stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True, start_new_session=os.name != "nt",
     )
     st["pid"] = p.pid
     st["dist"] = dist

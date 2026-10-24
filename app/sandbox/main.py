@@ -106,35 +106,40 @@ def _boot_selfcheck() -> None:
 async def lifespan(app: FastAPI):
     logger.info("sandbox started")
     _boot_selfcheck()
-    from app.api.production_asset_routes import _recover_stale_running_jobs
-    _recover_stale_running_jobs()
-    try:
-        from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
-        resumed = await recover_paid_domain_registrations()
-        if resumed:
-            logger.info("resumed %s paid domain registration(s)", resumed)
-    except Exception:
-        logger.exception("paid domain registration recovery failed")
-    try:
-        from app.services.room_board_service import start_board_poller
-        start_board_poller()
-    except Exception:
-        logger.exception("room board poller start failed")
-    try:
-        from app.services.artifact_documents_service import start_document_notifier
-        start_document_notifier()
-    except Exception:
-        logger.exception("artifact document notifier start failed")
-    try:
-        from app.services.pornblocker_guard_beacon_service import start_alert_watcher
-        start_alert_watcher()
-    except Exception:
-        logger.exception("pornblocker alert watcher start failed")
-    try:
-        from app.services.artifact_archive import start_sweeper
-        start_sweeper()
-    except Exception:
-        logger.exception("artifact archive sweeper start failed")
+    from app.core.standby import is_standby
+
+    if is_standby():
+        logger.info("standby: shared work (job recovery, board, documents, alerts, archive) is left to the active Dan")
+    else:
+        from app.api.production_asset_routes import _recover_stale_running_jobs
+        _recover_stale_running_jobs()
+        try:
+            from app.tools.publish_site.orchestrator import recover_paid_domain_registrations
+            resumed = await recover_paid_domain_registrations()
+            if resumed:
+                logger.info("resumed %s paid domain registration(s)", resumed)
+        except Exception:
+            logger.exception("paid domain registration recovery failed")
+        try:
+            from app.services.room_board_service import start_board_poller
+            start_board_poller()
+        except Exception:
+            logger.exception("room board poller start failed")
+        try:
+            from app.services.artifact_documents_service import start_document_notifier
+            start_document_notifier()
+        except Exception:
+            logger.exception("artifact document notifier start failed")
+        try:
+            from app.services.pornblocker_guard_beacon_service import start_alert_watcher
+            start_alert_watcher()
+        except Exception:
+            logger.exception("pornblocker alert watcher start failed")
+        try:
+            from app.services.artifact_archive import start_sweeper
+            start_sweeper()
+        except Exception:
+            logger.exception("artifact archive sweeper start failed")
     try:
         from app.services import artifact_backends
         artifact_backends.start_watcher()

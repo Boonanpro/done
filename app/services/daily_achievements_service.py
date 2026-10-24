@@ -26,6 +26,16 @@ from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+def _done_root():
+    from app.paths import DONE_ROOT
+    return DONE_ROOT.as_posix()
+
+
+def _done_artifacts():
+    from app.paths import DONE_ARTIFACTS
+    return DONE_ARTIFACTS.as_posix()
+
+
 logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
@@ -37,7 +47,7 @@ CLI_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 GIT_REPOS: List[Path] = [
     _PROJECT_ROOT,
-    Path(os.environ.get("DAN_DONE_ARTIFACTS_DIR") or "D:/done-artifacts"),
+    Path(os.environ.get("DAN_DONE_ARTIFACTS_DIR") or _done_artifacts()),
     WORKSPACE_DIR,
 ]
 ILLUST_DIR = _PROJECT_ROOT / "data" / "today_illust"
@@ -246,7 +256,7 @@ def _iter_cli_files() -> List[Path]:
 
 def _short_path(p: str) -> str:
     p = p.replace("\\", "/")
-    for root in ("D:/done/", "D:/done-artifacts/"):
+    for root in (_done_root() + "/", _done_artifacts() + "/"):
         if p.startswith(root):
             return p[len(root):]
     return p.split("/")[-1]

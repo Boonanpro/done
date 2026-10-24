@@ -14,7 +14,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_LEGACY_WORKSPACE = Path("D:/dan-workspace")
+from app.paths import DAN_WORKSPACE as _LEGACY_WORKSPACE
 
 
 def resolve_cli_workspace() -> Path:
