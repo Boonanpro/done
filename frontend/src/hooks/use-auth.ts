@@ -24,6 +24,12 @@ function collectGuestTokens(): string[] {
   return tokens;
 }
 
+/** ログイン後に戻る先。同じサイトの中のパスだけ受ける（//evil.example や https://… へは飛ばさない） */
+export function safeRedirect(value: string | null | undefined): string | null {
+  if (!value || !value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\') || value.startsWith('/login')) return null;
+  return value;
+}
+
 export function useAuth() {
   const router = useRouter();
   const { user, token, isAuthenticated, isLoading, setUser, setToken, setLoading, logout: clearAuth } = useAuthStore();
@@ -92,7 +98,7 @@ export function useAuth() {
   }, [isLoading, setUser, setToken, setLoading, token]);
 
   const login = useCallback(
-    async (data: LoginRequest) => {
+    async (data: LoginRequest, redirect?: string | null) => {
       setLoading(true);
       try {
         const guestTokens = collectGuestTokens();
@@ -104,8 +110,8 @@ export function useAuth() {
         setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
-        // Redirect based on role: owner → /chat, others → /collab
-        window.location.href = userData.id === OWNER_USER_ID ? '/chat' : '/collab';
+        // ログインを求めた画面（開発室など）から来たらそこへ戻す。無ければ持ち主は /chat、ほかは /collab
+        window.location.href = (userData.id === OWNER_USER_ID && safeRedirect(redirect)) || (userData.id === OWNER_USER_ID ? '/chat' : '/collab');
         return { success: true };
       } catch (error) {
         setLoading(false);

@@ -14,7 +14,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { useAuth } from '@/hooks/use-auth';
+import { safeRedirect, useAuth } from '@/hooks/use-auth';
+import { refreshSession } from '@/lib/session-refresh';
+import { setImmediateToken, setStoredToken } from '@/lib/api-client';
 
 const loginSchema = z.object({
   email: z.string().email('有効なメールアドレスを入力してください'),
@@ -33,6 +35,16 @@ export default function LoginPage() {
   }, [router]);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // 開発室などから「ログインして戻る」で来た時の戻り先。ログインがまだ生きていれば（更新用の Cookie が30日もつ）、
+  // 何も入れずにそのまま戻す（2026-10-24 本人「ダンにログインさせられて、その後ブラウザ版のダンが開く…めんどくさい」）
+  // 画面は0.5秒かけて浮き出るので、戻れる時は form がほぼ見えないうちに移る。
+  useEffect(() => {
+    const back = safeRedirect(new URLSearchParams(window.location.search).get('redirect'));
+    if (!back) return;
+    refreshSession(token => { setStoredToken(token); setImmediateToken(token); })
+      .then(() => window.location.replace(back))
+      .catch(() => undefined);   // ログインが切れていれば、ふつうにログインしてもらう（ログイン後に戻る）
+  }, []);
 
   const {
     register,
@@ -47,7 +59,7 @@ export default function LoginPage() {
     setIsSubmitting(true);
 
     try {
-      const result = await login(data);
+      const result = await login(data, new URLSearchParams(window.location.search).get('redirect'));
 
       if (!result.success) {
         // 「認証情報が違う」と言えるのはサーバーが 401 を返した時だけ。

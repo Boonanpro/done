@@ -1639,7 +1639,9 @@ async def login(
     # APK が毎日ログアウトする原因だった。使うたびにローテーションで30日延びる
     # ので、日常的に使っている限りログアウトしない。
     token_pair = create_token_pair(user_id=user["id"], email=user["email"], remember_me=True)
-    set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
+    # Cookie の寿命もトークンと同じ30日にする。省くと Cookie だけ1日で消え、ブラウザでは
+    # 毎日ログイン画面に戻されていた（2026-10-24 開発室を全画面で開くたびにログイン）。
+    set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token, remember_me=True)
     return TokenResponse(
         access_token=token_pair.access_token,
         refresh_token=token_pair.refresh_token,
@@ -1668,7 +1670,7 @@ async def refresh_token_endpoint(
         clear_auth_cookies(response)
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
+    set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token, remember_me=True)
     return TokenResponse(
         access_token=token_pair.access_token,
         refresh_token=token_pair.refresh_token,
