@@ -633,6 +633,16 @@ def _build_reseed_context(
     )
 
 
+def _tidy_reply(text: str, blocks: Optional[list], user_text: Optional[str]) -> tuple:
+    """保存の手前で、返事の頭に付いた途中の英語の独り言を外す（app/agent/reply_text.py）。失敗しても本文はそのまま。"""
+    try:
+        from app.agent.reply_text import tidy_reply
+        return tidy_reply(text, blocks, user_text)
+    except Exception as exc:  # noqa: BLE001
+        _cli_debug(f"[REPLY] tidy failed: {exc}")
+        return text, blocks
+
+
 def _wrap_latest_user_message(context: str, content: str) -> str:
     if not context:
         return content
@@ -2984,6 +2994,7 @@ def _run_cli_in_thread(
 
             # DB-first: CLIスレッドからAI応答を保存（SSE断線対策）
             # SSEハンドラに依存せず、ここで確実にDBに書き込む
+            text, result_data["turn_blocks"] = _tidy_reply(text, result_data.get("turn_blocks", []), content)
             cli_saved = False
             if not skip_save:
                 reasoning = result_data.get("reasoning_steps", [])
@@ -3643,6 +3654,8 @@ async def _process_via_streaming_session(
                 turn_start = placed or (state.get("last_block_at") if continuation else None) or turn_start
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
+                # 頭に付いた途中の英語の独り言を外す（app/agent/reply_text.py。どのモデルの経路も同じ）
+                text, state["turn_blocks"] = _tidy_reply(text, state["turn_blocks"], content)
                 if not skip_save and not (empty_continuation and not state["turn_blocks"]):
                     cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id,
                                                       ends_turn=not continuation and placed is None, run_id=run_id)

@@ -891,6 +891,7 @@ def run_codex_turn_in_thread(
             if not text.strip():
                 text = "（応答テキストが生成されませんでした。もう一度お試しください。）"
 
+            text, result_data["turn_blocks"] = cr._tidy_reply(text, result_data.get("turn_blocks", []), content)
             cli_saved = False
             if not skip_save:
                 cli_saved = cr._save_ai_message_sync(
