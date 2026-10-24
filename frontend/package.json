@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "dev:mobile": "next dev --turbopack --experimental-https --experimental-https-key certificates/localhost-key.pem --experimental-https-cert certificates/localhost.pem --hostname 0.0.0.0",
-    "predev": "python ../scripts/wire_artifact_tailwind_sources.py",
-    "prebuild": "python ../scripts/wire_artifact_tailwind_sources.py && node scripts/sync-artifact-sitemaps.mjs",
+    "predev": "node scripts/wire-artifact-tailwind.mjs",
+    "prebuild": "node scripts/wire-artifact-tailwind.mjs && node scripts/sync-artifact-sitemaps.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint . && biome check .",
