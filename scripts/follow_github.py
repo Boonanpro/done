@@ -1,37 +1,113 @@
-"""Bring this folder (the code Dan runs from) up to GitHub main, through git itself.
+"""Bring this folder (the code Dan runs from) up to GitHub main. It is the only thing that changes what git tracks here.
 
-The folder is shared: several workers edit it at once and it always holds work nobody has committed yet. A plain
-`git pull` stops on the first such file, so for months nobody pulled, and each worker kept the folder in step with
-GitHub by hand. Nothing noticed a fix that was on GitHub and not in the folder, and committing such a file from the
-folder would have taken the fix back out of GitHub (2026-10-14: the folder said it was on the commit of 10-11, 34 behind).
+Since 2026-10-18 nobody writes the tracked files of this folder: every piece of work has its own worktree and branch
+(scripts/work.py), and scripts/hook_live_tree_guard.py refuses writes here. So following GitHub is git's own
+fast-forward. Git refuses it, changing nothing, when a file left uncommitted here would be overwritten; that file is
+named, and scripts/rescue_wip.py moves it to a branch of its own.
 
-What this does, for every file GitHub changed since the commit the folder is on:
-- the folder already holds GitHub's content, alone or under uncommitted work of its own: nothing in the file changes
-- the folder still has the old content, untouched: git brings in GitHub's
-- the folder lacks GitHub's change and has uncommitted work in the same file: STOP. Nothing at all is changed, and the
-  files are named. Someone decides how the two fit, commits or puts the file right, and runs this again.
-Then the folder's commit moves to GitHub main (a fast-forward; git itself refuses anything else), and `git status`
-shows the uncommitted work and nothing more.
+One more case is handled: a file GitHub stops tracking and now ignores (a file a machine writes, such as
+.claude/settings.local.json) stays here as it is, instead of being deleted by the fast-forward.
 
-Run it after pushing and before restarting Dan (scripts/restart_dan_core.py runs it). In this folder it replaces
-`git pull`, which stays forbidden along with stash, reset --hard and checkout.
+Before 2026-10-18 the folder held everyone's unfinished work, files were copied in by hand, and this script compared
+three versions of every file to get past them (the history of scripts/follow_github.py has that version).
 
-Usage: python scripts/follow_github.py [--no-fetch] [--dry]     exit 0 = on GitHub main, 1 = stopped (reason printed)
+Run it after a merge on GitHub (scripts/work.py ship does) and before restarting Dan (scripts/restart_dan_core.py does).
+`git pull`, stash, reset, checkout and restore stay off-limits here.
+
+Usage: python scripts/follow_github.py [--no-fetch] [--dry] [--repo PATH]   exit 0 = on GitHub main, 1 = stopped
 """
+import contextlib
+import filecmp
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-NUL, CRLF, LF = bytes([0]), bytes([13, 10]), bytes([10])
+NUL = bytes([0])
 
 
-def _git(repo, *args, data=None):
-    return subprocess.run(['git', '-c', 'core.quotepath=off', '--literal-pathspecs', *args], cwd=str(repo), input=data,
-                          capture_output=True, creationflags=NO_WINDOW)
+def live_root(start=None) -> Path:
+    """The folder Dan runs from: DAN_LIVE_TREE, else the main checkout of the repository this script is in.
+    From a worktree (/Users/mikihonda/dan-workspace/<name>) that is still the running folder, not the worktree."""
+    if os.environ.get('DAN_LIVE_TREE'):
+        return Path(os.environ['DAN_LIVE_TREE'])
+    top = Path(start or Path(__file__).resolve().parents[1])
+    dot = top / '.git'
+    if dot.is_file():                                # a worktree: "gitdir: <main>/.git/worktrees/<name>"
+        try:
+            line = dot.read_text(encoding='utf-8').strip()
+            if line.startswith('gitdir:'):
+                common = Path(line[7:].strip()).resolve().parent.parent
+                if common.name == '.git':
+                    return common.parent
+        except OSError:
+            pass
+    return top
+
+
+ROOT = live_root()
+
+
+def dan_dir(repo) -> Path:
+    """Where these tools keep their lock, journal and the copies they set aside: inside the folder's .git, which git
+    never shows as a change and no .gitignore has to mention."""
+    g = Path(repo) / '.git'
+    if not g.is_dir():
+        g = Path(_git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.decode().strip())
+    d = g / 'dan'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@contextlib.contextmanager
+def tree_lock(repo, wait=60.0):
+    """Only one of follow_github / rescue_wip / the guard's sweep changes the running folder at a time.
+    Yields True when held, False when another holder kept it for `wait` seconds."""
+    fh = open(dan_dir(repo) / 'tree.lock', 'a+')
+    got = False
+    try:
+        try:
+            import fcntl
+        except ImportError:                          # Windows: msvcrt locks a byte range
+            import msvcrt
+            end = time.time() + wait
+            while True:
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    got = True
+                    break
+                except OSError:
+                    if time.time() >= end:
+                        break
+                    time.sleep(0.2)
+            yield got
+            if got:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        end = time.time() + wait
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except OSError:
+                if time.time() >= end:
+                    break
+                time.sleep(0.2)
+        yield got
+    finally:
+        fh.close()                                   # closing releases the lock
+
+
+def _git(repo, *args, data=None, env=None):
+    return subprocess.run(['git', '-c', 'core.quotepath=off', *args], cwd=str(repo), input=data, capture_output=True,
+                          creationflags=NO_WINDOW, env=env)
 
 
 def _out(repo, *args, data=None):
@@ -41,59 +117,153 @@ def _out(repo, *args, data=None):
     return p.stdout
 
 
-def _tree(repo, rev):
-    """path -> blob id for every file of a commit."""
-    files = {}
-    for entry in _out(repo, 'ls-tree', '-r', '-z', rev).split(NUL):
-        if entry:
-            meta, path = entry.split(b'\t', 1)
-            files[path.decode('utf-8', 'surrogateescape')] = meta.split()[2].decode()
-    return files
+def _paths(raw):
+    return [p.decode('utf-8', 'surrogateescape') for p in raw.split(NUL) if p]
 
 
-def _blobs(repo, ids):
-    """blob id -> its bytes, in one git process."""
-    ids = sorted({i for i in ids if i})
-    if not ids:
-        return {}
-    out, got, at = _out(repo, 'cat-file', '--batch', data=LF.join(i.encode() for i in ids) + LF), {}, 0
-    for blob in ids:
-        end = out.index(LF, at)
-        size = int(out[at:end].split()[2])
-        got[blob] = out[end + 1:end + 1 + size]
+def status(repo=ROOT, renames=False):
+    """(code, path) for everything uncommitted here: tracked files changed, files git would track.
+    A rename (`git mv`) is two entries: ('R ', new name) and ('D ', old name) — both hold part of the work.
+    With renames=True each entry is (code, path, old name or None)."""
+    raw = _out(repo, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames')
+    out, items = [], raw.split(NUL)
+    i = 0
+    while i < len(items):
+        item = items[i].decode('utf-8', 'surrogateescape')
+        if item:
+            orig = None
+            if item[0] in 'RC' and i + 1 < len(items):      # --no-renames still leaves copies/renames of some gits
+                orig = items[i + 1].decode('utf-8', 'surrogateescape')
+                i += 1
+            out.append((item[:2], item[3:], orig))
+            if orig and item[0] == 'R':
+                out.append(('D ', orig, None))
+        i += 1
+    return out if renames else [(c, p) for c, p, _ in out]
+
+
+def line_endings_only(repo, paths):
+    """The changed files whose text is the committed text saved with Windows line endings: nothing to keep in them.
+    Git still lists them as changed after core.autocrlf was switched on, and refuses to overwrite them."""
+    paths = [p for p in paths if os.path.isfile(os.path.join(repo, p))]
+    if not paths:
+        return set()
+    out = _out(repo, 'cat-file', '--batch', data=b''.join(f'HEAD:{p}\n'.encode('utf-8', 'surrogateescape') for p in paths))
+    same, at = set(), 0
+    for path in paths:
+        end = out.index(b'\n', at)
+        head = out[at:end].split()
+        if len(head) < 3 or head[1] != b'blob':
+            at = end + 1
+            continue
+        size = int(head[2])
+        blob = out[end + 1:end + 1 + size]
         at = end + 1 + size + 1
-    return got
+        with open(os.path.join(repo, path), 'rb') as fh:
+            here = fh.read()
+        if NUL not in here and here.replace(b'\r\n', b'\n') == blob.replace(b'\r\n', b'\n'):
+            same.add(path)
+    return same
 
 
-def _text(data):
-    """Bytes with Windows line endings read as plain ones (a file with a NUL is not text: left as it is). The folder's
-    files are saved either way, and git, set to convert them here, does not count that as a change."""
-    return data if data is None or NUL in data else data.replace(CRLF, LF)
+def leftovers(repo=ROOT):
+    """What is uncommitted here and holds work: it belongs on a branch."""
+    items = status(repo)
+    same = line_endings_only(repo, [p for code, p in items if code == ' M'])
+    return [p for code, p in items if p not in same]
 
 
-def _in_folder(repo, path):
-    try:
-        with open(os.path.join(repo, path), 'rb') as f:
-            return f.read()
-    except OSError:
+def _note(left):
+    if not left:
+        return ''
+    return (f'\nUncommitted here ({len(left)}), on no branch: ' + ', '.join(left[:15]) + (' ...' if len(left) > 15 else '')
+            + '\n  -> python scripts/rescue_wip.py lists them by the session that wrote them; --apply moves them to branches')
+
+
+def ignored_by(repo, theirs, paths):
+    """Those of paths that the .gitignore of commit `theirs` ignores, itself or by one of its folders
+    (git check-ignore --no-index sees a folder pattern like /.data/ only when asked about the folder)."""
+    if not paths:
+        return set()
+    asked = set()
+    for p in paths:
+        asked.add(p)
+        parts = p.split('/')
+        asked.update('/'.join(parts[:k]) + '/' for k in range(1, len(parts)))
+    # Asked in an empty repository holding only the commit's .gitignore files: this folder's own .git/info/exclude
+    # and the machine's global excludes are not GitHub's rules (a copied Windows exclude file once ignored everything).
+    with tempfile.TemporaryDirectory() as tmp:
+        _git(tmp, 'init', '-q')
+        names = _paths(_out(repo, 'ls-tree', '-r', '-z', '--name-only', theirs))
+        for name in (n for n in names if n == '.gitignore' or n.endswith('/.gitignore')):
+            dst = os.path.join(tmp, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, 'wb') as fh:
+                fh.write(_out(repo, 'cat-file', 'blob', f'{theirs}:{name}'))
+        p = _git(tmp, '-c', 'core.excludesFile=', 'check-ignore', '--no-index', '-z', '--stdin',
+                 data=NUL.join(x.encode('utf-8', 'surrogateescape') for x in sorted(asked)) + NUL)
+    hit = set(_paths(p.stdout))
+    out = set()
+    for path in paths:
+        parts = path.split('/')
+        if path in hit or any('/'.join(parts[:k]) + '/' in hit for k in range(1, len(parts))):
+            out.add(path)
+    return out
+
+
+_ignored_by = ignored_by
+
+
+def same_as(repo, ref, rel):
+    """The file here holds the text commit `ref` has for it (line endings aside)."""
+    full = os.path.join(repo, rel)
+    if not os.path.isfile(full) or os.path.islink(full):
+        return False
+    blob = _git(repo, 'cat-file', 'blob', f'{ref}:{rel}')
+    if blob.returncode:
+        return False
+    with open(full, 'rb') as fh:
+        here = fh.read()
+    return NUL not in here and here.replace(b'\r\n', b'\n') == blob.stdout.replace(b'\r\n', b'\n')
+
+
+def _kept_untracked(repo, base, theirs):
+    """Files GitHub deletes that its .gitignore ignores and that are here: they stay here as local files."""
+    gone = _paths(_out(repo, 'diff', '--name-only', '--no-renames', '--diff-filter=D', '-z', base, theirs))
+    here = [p for p in gone if os.path.isfile(os.path.join(repo, p))]
+    return sorted(_ignored_by(repo, theirs, here))
+
+
+def _displaced(repo, base, theirs):
+    """Local files git ignores here that GitHub starts tracking with other content. Git would overwrite them without
+    a word (an ignored file counts as expendable); they are copied aside first."""
+    added = _paths(_out(repo, 'diff', '--name-only', '--no-renames', '--diff-filter=A', '-z', base, theirs))
+    out = []
+    for rel in added:
+        full = os.path.join(repo, rel)
+        if not os.path.isfile(full) or _git(repo, 'ls-files', '--error-unmatch', '--', rel).returncode == 0:
+            continue
+        mine = _git(repo, 'hash-object', '--path', rel, '--', full).stdout.decode().strip()
+        if mine != _git(repo, 'rev-parse', f'{theirs}:{rel}').stdout.decode().strip():
+            out.append(rel)
+    return out
+
+
+def _copy_aside(repo, paths, kind):
+    """Copy files to .git/dan/follow_github/<kind>-<time>/ (on disk, so a crash halfway loses nothing)."""
+    if not paths:
         return None
+    where = dan_dir(repo) / 'follow_github' / f"{kind}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+    for rel in paths:
+        dst = where / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(os.path.join(repo, rel), dst)
+    return where
 
 
-def _holds(here, before, github):
-    """True when the file in the folder already has everything GitHub changed in it (merging GitHub's change in would
-    leave the file exactly as it is), so the rest of it is uncommitted work on top."""
-    with tempfile.TemporaryDirectory() as d:
-        names = []
-        for name, data in (('here', here), ('before', before or b''), ('github', github)):
-            names.append(os.path.join(d, name))
-            with open(names[-1], 'wb') as f:
-                f.write(data)
-        merged = subprocess.run(['git', 'merge-file', '-p', *names], capture_output=True, creationflags=NO_WINDOW)
-        return merged.returncode == 0 and merged.stdout == here
-
-
-def follow(repo=ROOT, target='origin/main', fetch=True, dry=False):
-    """(True, what happened) when the folder is on the target; (False, why) when stopped with nothing changed."""
+def follow(repo=ROOT, target='origin/main', fetch=True, dry=False, packages=True):
+    """(True, what happened) when the folder is on the target; (False, why) when stopped with nothing changed,
+    or when the folder moved but the frontend's packages could not be installed (said so)."""
     repo = str(repo)
     remote, _, branch = target.partition('/')
     try:
@@ -106,60 +276,143 @@ def follow(repo=ROOT, target='origin/main', fetch=True, dry=False):
             got = _git(repo, 'fetch', '--quiet', remote, branch)
             if got.returncode:   # asked once; never retried here (GitHub is used at a human pace)
                 return False, 'GitHub could not be reached, so the folder was not compared: ' + got.stderr.decode('utf-8', 'replace').strip()[-300:]
-        base, theirs = _out(repo, 'rev-parse', 'HEAD').decode().strip(), _out(repo, 'rev-parse', target).decode().strip()
-        if base == theirs:
-            return True, f'already on GitHub {branch} ({theirs[:8]})'
-        if _git(repo, 'merge-base', '--is-ancestor', base, theirs).returncode:
-            return False, f"the folder's commit {base[:8]} is not part of GitHub {branch}: there are commits here that were never pushed. Not touched"
-
-        changed = [p.decode('utf-8', 'surrogateescape')
-                   for p in _out(repo, 'diff', '--name-only', '--no-renames', '-z', base, theirs).split(NUL) if p]
-        before, github = _tree(repo, base), _tree(repo, theirs)
-        stored = _blobs(repo, [tree.get(p) for p in changed for tree in (before, github)])
-        same, brought, blocked = [], [], []
-        for path in changed:
-            b, t = _text(stored.get(before.get(path))), _text(stored.get(github.get(path)))
-            o = _text(_in_folder(repo, path))
-            if os.path.isdir(os.path.join(repo, path)):
-                blocked.append(f'{path}: a folder here, a file on GitHub')
-            elif o == t:
-                same.append(path)                        # both None: deleted on GitHub and already gone here
-            elif o == b:
-                brought.append(path)                     # untouched here (or not here yet): git puts GitHub's in
-            elif o is None:
-                blocked.append(f'{path}: deleted here, changed on GitHub')
-            elif t is None:
-                blocked.append(f'{path}: changed here, deleted on GitHub')
-            elif _holds(o, b, t):
-                same.append(path)                        # GitHub's change plus uncommitted work on top
-            else:
-                blocked.append(f"{path}: lacks GitHub's change and has uncommitted work in the same file")
-        commits = _out(repo, 'rev-list', '--count', f'{base}..{theirs}').decode().strip()
-        if blocked:
-            return False, (f'NOT brought up to GitHub {branch} ({commits} commits behind); nothing was changed. '
-                           'Decide how these fit, then run again:\n  ' + '\n  '.join(blocked))
-        said = (f'{commits} commits, {len(changed)} files GitHub changed: {len(same)} already held here, '
-                f'{len(brought)} brought in from GitHub' + (': ' + ', '.join(brought[:20]) if brought else ''))
-        if dry:
-            return True, f'would follow GitHub {branch} — {said}'
-
-        # The files that already hold GitHub's content: tell git so (its list of the files only; no file is written).
-        # Without this git sees them as changed against the old commit and refuses the whole fast-forward.
-        listed = NUL.join(p.encode('utf-8', 'surrogateescape') for p in same)
-        if same:
-            _out(repo, 'reset', '-q', theirs, '--pathspec-from-file=-', '--pathspec-file-nul', data=listed)
-        moved = _git(repo, 'merge', '--ff-only', '--quiet', theirs)
-        if moved.returncode:
-            if same:
-                _out(repo, 'reset', '-q', base, '--pathspec-from-file=-', '--pathspec-file-nul', data=listed)
-            return False, 'git refused the fast-forward; nothing was changed:\n' + moved.stderr.decode('utf-8', 'replace').strip()[-800:]
-        return True, f'now on GitHub {branch} ({theirs[:8]}) — {said}'
+        with tree_lock(repo) as held:
+            if not held:
+                return False, 'another tool (rescue_wip or the guard) is changing the folder right now: not touched; run again'
+            return _follow_locked(repo, target, branch, dry, packages)
     except Exception as exc:   # an unexpected git answer: say it, leave the folder as it is
         return False, f'could not compare the folder with GitHub: {type(exc).__name__}: {exc}'
 
 
+def _finish_earlier(repo):
+    """What an earlier run left half done (it stopped, or the power went): machine files copied aside before git moved
+    and not yet put back. Returns (said, problems)."""
+    said, problems = [], []
+    root = dan_dir(repo) / 'follow_github'
+    for keep in sorted(root.glob('kept-*')) if root.is_dir() else []:
+        rest = []
+        for f in (x for x in keep.rglob('*') if x.is_file()):
+            rel = f.relative_to(keep).as_posix()
+            dst = os.path.join(repo, rel)
+            if not os.path.lexists(dst):
+                os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
+                shutil.copy2(f, dst)
+                said.append(rel)
+            elif not filecmp.cmp(f, dst, shallow=False):
+                rest.append(rel)
+        if rest:
+            problems.append(f'{keep}: {", ".join(rest)} differ from the files here; both are kept, choose by hand')
+        else:
+            shutil.rmtree(keep, ignore_errors=True)
+    return said, problems
+
+
+def _packages_marker(repo):
+    return dan_dir(repo) / 'follow_github' / 'packages-pending'
+
+
+def _follow_locked(repo, target, branch, dry, packages):
+    base, theirs = _out(repo, 'rev-parse', 'HEAD').decode().strip(), _out(repo, 'rev-parse', target).decode().strip()
+    if not dry:
+        finished, problems = _finish_earlier(repo)
+    else:
+        finished, problems = [], []
+    left = leftovers(repo)
+    note = _note(left)
+    earlier = f'; put back what an earlier run had set aside: {", ".join(finished)}' if finished else ''
+    if base == theirs:
+        done = f'already on GitHub {branch} ({theirs[:8]})' + earlier + note
+        return _finish(repo, done, problems, packages and not dry and _packages_marker(repo).exists(), dry)
+    if _git(repo, 'merge-base', '--is-ancestor', base, theirs).returncode:
+        return False, f"the folder's commit {base[:8]} is not part of GitHub {branch}: there are commits here that were never pushed. Not touched"
+    changed = _paths(_out(repo, 'diff', '--name-only', '--no-renames', '-z', base, theirs))
+    commits = _out(repo, 'rev-list', '--count', f'{base}..{theirs}').decode().strip()
+    said = f'{commits} commits, {len(changed)} files'
+    kept = _kept_untracked(repo, base, theirs)
+    hit = sorted((set(changed) & set(left)) - set(kept))   # git alone would quietly bring back a file deleted here
+    same = [p for p in hit if same_as(repo, theirs, p)]    # already what GitHub has (copied in by hand): not work
+    hit = [p for p in hit if p not in same]
+    if hit:
+        return False, ('NOT brought up to GitHub main; nothing was changed. These files are uncommitted here and '
+                       'changed on GitHub: ' + ', '.join(hit) + '\n  -> move them to a branch '
+                       '(python scripts/rescue_wip.py --apply), then run this again.' + note)
+    displaced = _displaced(repo, base, theirs)
+    if dry:
+        extra = f'; would set aside local files GitHub now tracks: {", ".join(displaced)}' if displaced else ''
+        return True, f'would follow GitHub {branch} — {said}: ' + ', '.join(changed[:20]) + extra + note
+
+    needs_packages = bool({'frontend/package.json', 'frontend/package-lock.json'} & set(changed))
+    if packages and needs_packages:            # said before git moves: a stop from here on is finished by a run again
+        _packages_marker(repo).parent.mkdir(parents=True, exist_ok=True)
+        _packages_marker(repo).write_text(theirs + '\n', encoding='utf-8')
+    resaved = [p for code, p in status(repo) if code == ' M' and p in set(changed) and p not in left]
+    resaved += [p for p in same if _git(repo, 'ls-files', '--error-unmatch', '--', p).returncode == 0]
+    if resaved:  # only re-saved with Windows line endings, or already GitHub's text: git writes the same text again
+        _out(repo, 'checkout-index', '-f', '-u', '--', *resaved)
+    new_same = [p for p in same if p not in resaved]
+    if new_same:  # a new file here that GitHub adds with the same content: set aside so git can add it
+        _copy_aside(repo, new_same, 'same')
+        for p in new_same:
+            os.remove(os.path.join(repo, p))
+    aside = _copy_aside(repo, displaced, 'replaced')
+    keep = _copy_aside(repo, kept, 'kept')        # on disk before git deletes them; put back below
+    dirty_kept = [p for p in kept if p in left]
+    if dirty_kept:  # git would refuse to delete a changed file: let it see the committed one, put ours back after
+        _out(repo, 'checkout-index', '-f', '-u', '--', *dirty_kept)
+    moved = _git(repo, 'merge', '--ff-only', '--quiet', theirs)
+    for rel in kept:
+        if moved.returncode == 0 or rel in dirty_kept:
+            dst = os.path.join(repo, rel)
+            os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
+            shutil.copy2(keep / rel, dst)
+    if keep:
+        shutil.rmtree(keep, ignore_errors=True)   # every kept file is back in place
+    if moved.returncode:
+        with contextlib.suppress(OSError):
+            _packages_marker(repo).unlink()
+        return False, ('NOT brought up to GitHub main; git refused and nothing was changed. Files left uncommitted '
+                       'here are in the way: move them to a branch (python scripts/rescue_wip.py --apply), then run '
+                       'this again.\n' + moved.stderr.decode('utf-8', 'replace').strip()[-800:])
+    note = _note(leftovers(repo))
+    keep_note = f'; kept as local files: {", ".join(kept)}' if kept else ''
+    if aside:
+        keep_note += (f'; local files GitHub now tracks were replaced by GitHub\'s version, the local copies are in '
+                      f'{aside}: {", ".join(displaced)}')
+    done = f'now on GitHub {branch} ({theirs[:8]}) — {said}{keep_note}{earlier}' + note
+    return _finish(repo, done, problems, packages and _packages_marker(repo).exists(), dry)
+
+
+def _finish(repo, done, problems, install, dry):
+    """The end of every run: packages still owed and what is left to settle by hand. Success only when nothing is
+    owed."""
+    ok = True
+    if install:
+        good, why = _install_frontend(repo)
+        if good:
+            with contextlib.suppress(OSError):
+                _packages_marker(repo).unlink()
+            done += '\nfrontend packages installed (' + why + ')'
+        else:
+            ok = False
+            done += ('\nBUT the frontend packages could not be installed (the screens may not build); run this '
+                     'again to retry: ' + why)
+    if problems:
+        ok = False
+        done += '\nLeft to settle: ' + '; '.join(problems)
+    return ok, done
+
+
+def _install_frontend(repo):
+    """package.json changed on GitHub: install it into the folder's node_modules, with the artifacts' own packages."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from hook_autoinstall_npm import install_live   # noqa: E402
+    return install_live(Path(repo) / 'frontend')
+
+
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8')
-    ok, what = follow(fetch='--no-fetch' not in sys.argv, dry='--dry' in sys.argv)
+    args = sys.argv[1:]
+    where = args[args.index('--repo') + 1] if '--repo' in args else ROOT
+    ok, what = follow(where, fetch='--no-fetch' not in args, dry='--dry' in args)
     print(what)
     sys.exit(0 if ok else 1)

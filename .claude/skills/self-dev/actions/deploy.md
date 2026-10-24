@@ -1,74 +1,25 @@
-# deploy: テスト完了後のデプロイ手順
+# deploy: 本番に入れる
 
-## 概要
+本番に入れる道は1本だけ。作業場所の中で `work.py ship` を使う。D:\done で pull・commit・手で写すことはしない。
 
-テスト完了後、ドレインパターンで安全にデプロイする。
-他のアクティブセッションが処理中でないことを確認してからgit pushする。
+## 前提
 
-## 前提条件
-
-- modify-and-test が完了していること
-- テスト結果に問題がないこと
+- [modify-and-test.md](modify-and-test.md) で試して、結果に問題がない。`work.py try stop` で試験用のサーバーを止めてある。
+- 持ち主がその変更を本番に入れてよいと言っている（ボードの付箋なら「本番に入れる」が押されている）。
+- GitHub は人の速さで使う。関係する変更は1つの分岐にまとめ、1回の ship にする。
 
 ## 手順
 
-### Step 1: テスト用サーバーの停止
-
-port 8001のテスト用バックエンドを停止する:
-
-```bash
-netstat -ano | findstr :8001 | findstr LISTENING
-taskkill //F //PID <PID>
-```
-
-### Step 2: アクティブセッションの確認
-
-```bash
-curl http://127.0.0.1:8000/api/v1/chat/dan/sessions/active-list \
-  -H "Authorization: Bearer <token>"
-```
-
-レスポンス例:
-```json
-{"active_session_ids": ["session-abc", "session-xyz"]}
-```
-
-- 自分自身のセッション以外にアクティブなものがなければ → Step 4へ
-- 他にアクティブなセッションがある → Step 3へ
-
-### Step 3: 待機（ドレインパターン）
-
-- 30秒間隔でポーリング（最大10分）
-- 10分経っても空かない場合: ユーザーに報告して判断を仰ぐ
-  - 「セッション XXX がまだアクティブです。強制的にデプロイしますか？」
-
-### Step 4: Scope規律の確認（commit前・必須）
-
-このプロジェクトは **1 commit = 1 scope** を pre-commit hook と CI で物理強制している。混在した commit は作成できない。
-
-```bash
-python scripts/scope_diff.py --working
-```
-
-- ダン infra（`app/**`, `.claude/**` 等）と 成果物（`artifacts/<slug>/**`）を同じ commit に混ぜない
-- 違う scope が混在していたら scope ごとに `git add <path>` を分けて別 commit にする
-- 詳細は `CLAUDE.md` の「Scope規律」節を参照
-
-### Step 5: git push
-
-```bash
-git add <変更ファイル>
-git commit -m "変更内容の説明"
-git push origin main
-```
-
-### Step 6: 報告
-
-以下のように報告する:
-
-> mainにpushしました。約30秒で自動反映されます。
-
-**絶対に言ってはいけないこと:**
-- 「完了しました」（反映はauto_deploy任せ）
-- 「再起動しました」（port 8000には触らない）
-- 「反映しました」（auto_deployが行う）
+1. 保存していない変更を残さない: `python D:/done/scripts/work.py save "仕上げ"`
+2. 1つのコミットに、ダンの仕組み（`app/**`、`.claude/**` など）と成果物（`artifacts/<slug>/**`）を混ぜない（pre-commit hook が止める。分け方は `python scripts/scope_diff.py --working`）。
+3. 入れる:
+   ```
+   python D:/done/scripts/work.py ship "変更の題"
+   ```
+   ship は、最新の main を取り込み → push → PR → マージ → `follow_github.py`（D:\done を main に合わせる）の順に1回ずつ進む。
+   - **main とぶつかったら止まる。** 名前の出たファイルを、この作業場所で直して `save` し、試し直してから、もう一度 ship する。ほかの作業の中身は、ここで初めて混ざる。動いているダンには、混ぜ終わって試した物だけが届く。
+   - GitHub が認証・権限で断ったら、その1回でやめて報告する。繰り返さない。
+4. ship が出す「入れ替えが要るもの」に従う。
+   - 画面: `python D:/done/scripts/frontend_prod.py restart`（会話は止まらない）
+   - 本体（Core・サンドボックス）: `python D:/done/scripts/restart_dan_core.py --when-idle --then "<入れ替え後に確かめること>"`（全部の会話が終わってから入れ替わり、結果が部屋に届く）
+5. 入れ替わった実物で確かめてから、「本番に入りました」と報告する。保存した・マージした・動いている、を分けて書く。

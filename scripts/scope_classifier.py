@@ -151,6 +151,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     ".github/**",
     ".githooks/**",
     ".claude/**",
+    ".codex/**",
     ".cursor/**",
     "docs/**",
     # frontend infra

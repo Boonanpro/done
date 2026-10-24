@@ -1,0 +1,7 @@
+# Codex opened in the running Dan's folder or a worktree of it: refuse writes to what git tracks in the running folder,
+# and point to a worktree (scripts/hook_live_tree_guard.py, 2026-10-18 / 2026-10-24).
+# Codex runs a project hook only after the project is trusted once.
+[[hooks.PreToolUse]]
+matcher = "Bash|apply_patch"
+hooks = [{ type = "command", command = "python \"$(git rev-parse --show-toplevel)/scripts/hook_live_tree_guard.py\"", timeout = 30 }]
+
