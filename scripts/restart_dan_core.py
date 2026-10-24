@@ -12,6 +12,9 @@ pushed and not only what happens to be in the folder. A folder that cannot follo
       until nothing is running (the asking turn included), brings the folder up to GitHub main, checks that the code on
       disk loads, stops, has the watchdog start the core, runs verify_dan.py, and wakes Dan in the asking room with the
       outcome.
+
+On the Mac (2026-10-24) launchd's com.dan.core starts the core again by itself (KeepAlive) and the core starts the
+sandbox; on Windows the DanStackWatchdog task does.
 """
 import os
 import subprocess
@@ -28,10 +31,33 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 def listeners():
     found = {}
-    for c in psutil.net_connections(kind="inet"):
+    for c in connections():
         if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port in PORTS and c.pid:
             found.setdefault(c.pid, set()).add(c.laddr.port)
     return found
+
+
+def connections():
+    """Every listening socket this user can see. On macOS the system-wide psutil.net_connections() raises AccessDenied
+    as soon as it meets another user's process (2026-10-24: a restart handed over at 01:32 died there silently), so
+    there each process is asked on its own and the ones that refuse are skipped; the core and sandbox are ours."""
+    if sys.platform != 'darwin':
+        return psutil.net_connections(kind="inet")
+    out = []
+    for p in psutil.process_iter():
+        try:
+            out.extend(Conn(p.pid, c) for c in p.net_connections(kind="inet"))
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return out
+
+
+class Conn:
+    """A per-process connection (which carries no pid) shaped like psutil.net_connections()'s rows."""
+    __slots__ = ('pid', 'status', 'laddr')
+
+    def __init__(self, pid, c):
+        self.pid, self.status, self.laddr = pid, c.status, c.laddr
 
 
 def busy():
@@ -118,6 +144,7 @@ QUIET = 120
 WAIT = 30 * 60        # a restart Dan asked for waits this long for everyone to finish
 BACK_UP = 5 * 60      # and this long for the core and sandbox to answer again
 WATCHDOG = r'\DanStackWatchdog'
+LAUNCHD_JOB = 'com.dan.core'
 
 
 def loads():
@@ -151,7 +178,12 @@ def start():
     """True once the core and sandbox answer. The watchdog task starts them, as it does after a crash: started from
     here they would inherit the environment of the Dan turn that asked (its room, its locks)."""
     deadline = time.time() + BACK_UP
-    subprocess.run(['schtasks', '/Run', '/TN', WATCHDOG], capture_output=True, creationflags=NO_WINDOW)
+    if sys.platform == 'darwin':
+        # KeepAlive starts the core again within ThrottleInterval (20 s); kickstart without -k only starts a job that
+        # is not running, so it never kills the one launchd may already have started.
+        subprocess.run(['launchctl', 'kickstart', f'gui/{os.getuid()}/{LAUNCHD_JOB}'], capture_output=True)
+    else:
+        subprocess.run(['schtasks', '/Run', '/TN', WATCHDOG], capture_output=True, creationflags=NO_WINDOW)
     while time.time() < deadline:
         if healthy():
             return True
@@ -197,7 +229,23 @@ def asking_room():
 
 
 def restart_when_idle(room, then, asked):
-    """The part that runs outside the core."""
+    """The part that runs outside the core. Nobody reads its output, so a failure is told to the room, never dropped."""
+    try:
+        return _restart_when_idle(room, then, asked)
+    except Exception as exc:
+        import traceback
+        where = traceback.extract_tb(exc.__traceback__)[-1]
+        note = (f'本体の再起動の途中で失敗した（{type(exc).__name__}: {str(exc)[:300]}、'
+                f'{Path(where.filename).name}:{where.lineno}）。本体が動いているか、9000 / 8000 番の /health を確かめる。')
+        try:
+            with open(ROOT / 'logs' / 'restart_dan_core.log', 'a', encoding='utf-8') as f:
+                f.write(traceback.format_exc())
+        except OSError:
+            pass
+        wake(room, note)
+
+
+def _restart_when_idle(room, then, asked):
     after = '続けて確かめること: ' + then if then else ''
     deadline = time.time() + WAIT
     while True:
@@ -233,11 +281,16 @@ def hand_over(room, then):
     mine = ('DAN_SESSION_ID', 'DAN_ROOM_ID', 'DAN_LOCK_OWNER', 'DAN_PROJECT_ID', 'CLAUDECODE')   # the asking turn's, not the check's
     quiet = dict(cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                  env={k: v for k, v in os.environ.items() if k not in mine})
-    apart = NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-    try:   # out of any job the asking CLI holds its children in, when the job allows leaving
-        p = subprocess.Popen(cmd, creationflags=apart | getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0), **quiet)
-    except OSError:
-        p = subprocess.Popen(cmd, creationflags=apart, **quiet)
+    if os.name != 'nt':
+        # Its own session: launchd ends the rest of com.dan.core's process group when the core exits, and the asking
+        # CLI's group is ended with the turn.
+        p = subprocess.Popen(cmd, start_new_session=True, **quiet)
+    else:
+        apart = NO_WINDOW | getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+        try:   # out of any job the asking CLI holds its children in, when the job allows leaving
+            p = subprocess.Popen(cmd, creationflags=apart | getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0), **quiet)
+        except OSError:
+            p = subprocess.Popen(cmd, creationflags=apart, **quiet)
     print(f'handed over (pid {p.pid}). The core restarts once no call, turn or parallel work is running; your own turn '
           f'counts, so finish it. You are woken in this room with the outcome (up to {WAIT // 60} min if others are working).')
 

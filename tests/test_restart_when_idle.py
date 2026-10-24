@@ -128,3 +128,47 @@ def test_asking_for_help_does_not_restart(monkeypatch, capsys):
     monkeypatch.setattr(restart, 'hand_over', lambda room, then: (room, then))
     monkeypatch.setattr(restart.sys, 'argv', ['restart_dan_core.py', '--when-idle', '--room', 'r', '--then', '-で始まる確認'])
     assert restart.main() == ('r', '-で始まる確認')
+
+
+def test_a_failure_outside_the_core_is_told_to_the_room_not_dropped(world, monkeypatch):
+    """2026-10-24: on the Mac the outside process died at core_started_at() and nobody heard of it."""
+    state, did, woke = world
+    def boom():
+        raise restart.psutil.AccessDenied(26067)
+    monkeypatch.setattr(restart, 'core_started_at', boom)
+    monkeypatch.setattr(restart, 'ROOT', Path(__file__).resolve().parents[1] / '.tmp' / 'restart-test')
+    (restart.ROOT / 'logs').mkdir(parents=True, exist_ok=True)
+    restart.restart_when_idle('room-1', '', asked=100)
+    assert 'stop' not in did and '失敗した' in woke[0][1] and 'AccessDenied' in woke[0][1]
+
+
+def test_on_the_mac_listeners_skip_processes_that_refuse(monkeypatch):
+    """The system-wide call raises AccessDenied on macOS; each process is asked on its own instead."""
+    from collections import namedtuple
+    Addr = namedtuple('Addr', 'ip port')
+    Row = namedtuple('Row', 'status laddr')
+
+    class Proc:
+        def __init__(self, pid, rows):
+            self.pid, self.rows = pid, rows
+
+        def net_connections(self, kind):
+            if self.rows is None:
+                raise restart.psutil.AccessDenied(self.pid)
+            return self.rows
+    procs = [Proc(1, None), Proc(8120, [Row(restart.psutil.CONN_LISTEN, Addr('127.0.0.1', 9000))]),
+             Proc(8126, [Row(restart.psutil.CONN_LISTEN, Addr('127.0.0.1', 8000)), Row('ESTABLISHED', Addr('127.0.0.1', 51000))]),
+             Proc(5000, [Row(restart.psutil.CONN_LISTEN, Addr('127.0.0.1', 3000))])]
+    monkeypatch.setattr(restart.sys, 'platform', 'darwin')
+    monkeypatch.setattr(restart.psutil, 'process_iter', lambda *a, **k: iter(procs))
+    monkeypatch.setattr(restart.psutil, 'net_connections', lambda **k: pytest.fail('system-wide call on the Mac'))
+    assert restart.listeners() == {8120: {9000}, 8126: {8000}}
+
+
+def test_on_the_mac_launchd_starts_the_core(monkeypatch):
+    ran = []
+    monkeypatch.setattr(restart.sys, 'platform', 'darwin')
+    monkeypatch.setattr(restart.subprocess, 'run', lambda cmd, **k: ran.append(cmd))
+    monkeypatch.setattr(restart, 'healthy', lambda: True)
+    assert restart.start()
+    assert ran[0][:2] == ['launchctl', 'kickstart'] and ran[0][2].endswith('/com.dan.core') and '-k' not in ran[0]
