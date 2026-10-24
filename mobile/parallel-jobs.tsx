@@ -1,6 +1,8 @@
 // 並行作業バー（アプリ版）: 1つの部屋の中で、メインの会話と並行して走っている作業の一覧。
 //
 // - 一覧が空なら何も描かない。あれば1行の折りたたみバー「並行作業 N件（進行中 M）」。
+//   variant="icon" の時は、チャットの上の段を増やさないよう、アプリバーの中の小さな印（件数・動いていれば緑の点）
+//   だけを出し、押すとアプリバーの下に一覧が重なって開く（チャットの表示域は縮まない）。
 // - 開くと各作業の題名・モデル・状態・最新の進み具合を出し、
 //   指示を足す / モデルを替える / 止める / 結果を見る の操作ができる。
 // - 動いている作業がある間（かつアプリが前面の間）は4秒ごと、それ以外は30秒ごとに取り直す。
@@ -14,6 +16,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -75,12 +78,16 @@ interface ParallelJobsBarProps {
   request: ParallelJobsRequest;
   /** 結果メッセージへ移動する。読み込まれていなければ false を返す。 */
   onShowMessage?: (messageId: string) => boolean;
+  /** bar = 1行の折りたたみバー（従来）／ icon = アプリバーの中の印。押すと一覧が重なって開く。 */
+  variant?: 'bar' | 'icon';
+  /** variant=icon の一覧を出す位置（画面の上からの距離。アプリバーの下端）。 */
+  dropdownTop?: number;
 }
 
 const FAST_MS = 4000;
 const SLOW_MS = 30000;
 
-export function ParallelJobsBar({ projectId, request, onShowMessage }: ParallelJobsBarProps) {
+export function ParallelJobsBar({ projectId, request, onShowMessage, variant = 'bar', dropdownTop = 0 }: ParallelJobsBarProps) {
   const [data, setData] = useState<ParallelJobsResponse | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [busyJobId, setBusyJobId] = useState<string | null>(null);
@@ -211,6 +218,7 @@ export function ParallelJobsBar({ projectId, request, onShowMessage }: ParallelJ
   const showResult = (job: ParallelJob) => {
     if (!job.report_message_id) return;
     const ok = onShowMessage?.(job.report_message_id) ?? false;
+    if (ok && variant === 'icon') setExpanded(false); // 重なった一覧を閉じて、会話の結果を見せる
     if (!ok) {
       Alert.alert(
         ui('Not loaded yet', 'まだ読み込まれていません'),
@@ -240,6 +248,202 @@ export function ParallelJobsBar({ projectId, request, onShowMessage }: ParallelJ
     }
   };
 
+  const list = (
+    <ScrollView style={[styles.body, variant === 'icon' && styles.dropdownBody]} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+      {jobs.map((job) => {
+        const busy = busyJobId === job.id;
+        const status = job.waiting_for ? `${job.state_label}・${job.waiting_for}` : job.state_label;
+        const detail = job.active ? job.last_progress : job.result_excerpt ?? job.last_progress;
+        const statusStyle =
+          job.state === 'failed'
+            ? styles.stateFailed
+            : job.state === 'awaiting_confirmation'
+              ? styles.stateAttention
+              : job.active
+                ? styles.stateActive
+                : styles.stateDone;
+        return (
+          <View key={job.id} style={styles.row}>
+            <View style={styles.rowTop}>
+              <Text style={styles.title} numberOfLines={1}>
+                {job.title}
+              </Text>
+              <View style={styles.chip}>
+                <Text style={styles.chipText}>{job.model_label}</Text>
+              </View>
+              {busy ? <ActivityIndicator size="small" color="#5b6b63" /> : null}
+            </View>
+            <Text style={[styles.state, statusStyle]} numberOfLines={1}>
+              {status}
+            </Text>
+            {detail ? (
+              <Text style={styles.detail} numberOfLines={1}>
+                {detail}
+              </Text>
+            ) : null}
+
+            <View style={styles.actions}>
+              {job.active ? (
+                <>
+                  <Pressable
+                    disabled={busy}
+                    onPress={() => {
+                      setAddingFor((cur) => (cur === job.id ? null : job.id));
+                      setAddText('');
+                    }}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.action, pressed && styles.pressed, busy && styles.disabled]}
+                  >
+                    <Text style={styles.actionText}>{ui('Add instruction', '指示を足す')}</Text>
+                  </Pressable>
+                  {models.length > 1 ? (
+                    <Pressable
+                      disabled={busy}
+                      onPress={() => chooseModel(job)}
+                      hitSlop={6}
+                      style={({ pressed }) => [styles.action, pressed && styles.pressed, busy && styles.disabled]}
+                    >
+                      <Text style={styles.actionText}>{ui('Model', 'モデル')}: {job.model_label} ▾</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    disabled={busy}
+                    onPress={() => cancel(job)}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.action, pressed && styles.pressed, busy && styles.disabled]}
+                  >
+                    <Text style={[styles.actionText, styles.actionDanger]}>{ui('Stop', '止める')}</Text>
+                  </Pressable>
+                </>
+              ) : null}
+              {!job.active && job.report_message_id && onShowMessage ? (
+                <Pressable
+                  onPress={() => showResult(job)}
+                  hitSlop={6}
+                  style={({ pressed }) => [styles.action, pressed && styles.pressed]}
+                >
+                  <Text style={[styles.actionText, styles.actionPrimary]}>{ui('See result', '結果を見る')}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+
+            {addingFor === job.id ? (
+              <View style={styles.inputRow}>
+                <TextInput
+                  autoFocus
+                  value={addText}
+                  onChangeText={setAddText}
+                  placeholder={ui('Extra instruction for this job', 'この作業への追加の指示')}
+                  placeholderTextColor="#8a978f"
+                  style={styles.input}
+                  returnKeyType="send"
+                  onSubmitEditing={() => void submitAdd(job)}
+                />
+                <Pressable
+                  disabled={busy || !addText.trim()}
+                  onPress={() => void submitAdd(job)}
+                  style={({ pressed }) => [
+                    styles.sendButton,
+                    pressed && styles.pressed,
+                    (busy || !addText.trim()) && styles.disabled,
+                  ]}
+                >
+                  <Text style={styles.sendText}>{ui('Send', '送る')}</Text>
+                </Pressable>
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
+
+      {newOpen ? (
+        <View style={styles.newBox}>
+          <TextInput
+            autoFocus
+            value={newTask}
+            onChangeText={setNewTask}
+            placeholder={ui('What should run in parallel?', '並行で頼みたいこと')}
+            placeholderTextColor="#8a978f"
+            style={[styles.input, styles.newInput]}
+            multiline
+          />
+          {models.length > 0 ? (
+            <View style={styles.modelRow}>
+              {models.map((m) => {
+                const selected = m.id === selectedNewModel;
+                return (
+                  <Pressable
+                    key={m.id}
+                    onPress={() => setNewModel(m.id)}
+                    accessibilityState={{ selected }}
+                    style={({ pressed }) => [styles.modelChip, selected && styles.modelChipSelected, pressed && styles.pressed]}
+                  >
+                    <Text style={[styles.modelChipText, selected && styles.modelChipTextSelected]}>{m.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+          <View style={styles.newActions}>
+            <Pressable onPress={() => setNewOpen(false)} hitSlop={6} style={({ pressed }) => [styles.action, pressed && styles.pressed]}>
+              <Text style={styles.actionText}>{ui('Cancel', 'やめる')}</Text>
+            </Pressable>
+            <Pressable
+              disabled={starting || !newTask.trim()}
+              onPress={() => void start()}
+              style={({ pressed }) => [
+                styles.sendButton,
+                pressed && styles.pressed,
+                (starting || !newTask.trim()) && styles.disabled,
+              ]}
+            >
+              <Text style={styles.sendText}>{starting ? ui('Starting…', '開始中…') : ui('Start', '頼む')}</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable onPress={() => setNewOpen(true)} hitSlop={6} style={({ pressed }) => [styles.newEntry, pressed && styles.pressed]}>
+          <Ionicons name="add" size={14} color="#304d40" />
+          <Text style={styles.newEntryText}>{ui('Run in parallel', '並行で頼む')}</Text>
+        </Pressable>
+      )}
+    </ScrollView>
+  );
+
+  if (variant === 'icon') {
+    return (
+      <>
+        <Pressable
+          onPress={() => setExpanded((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          accessibilityLabel={ui(`Parallel jobs ${jobs.length}, ${activeCount} running`, `並行作業 ${jobs.length}件、進行中 ${activeCount}`)}
+          hitSlop={6}
+          style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+        >
+          <Ionicons name="layers-outline" size={22} color="#162e27" />
+          <View style={[styles.iconBadge, activeCount > 0 && styles.iconBadgeActive]}>
+            <Text style={[styles.iconBadgeText, activeCount > 0 && styles.iconBadgeTextActive]}>{jobs.length}</Text>
+          </View>
+        </Pressable>
+        <Modal visible={expanded} transparent animationType="fade" onRequestClose={() => setExpanded(false)} statusBarTranslucent>
+          <Pressable style={styles.dropdownBackdrop} onPress={() => setExpanded(false)} accessibilityLabel={ui('Close', '閉じる')} />
+          <View style={[styles.dropdown, { top: dropdownTop }]}>
+            <View style={styles.dropdownHeader}>
+              <Ionicons name="layers-outline" size={14} color="#5b6b63" />
+              <Text style={styles.headerText} numberOfLines={1}>
+                {ui(`Parallel jobs ${jobs.length}`, `並行作業 ${jobs.length}件`)}
+                <Text style={styles.headerMuted}>{ui(` (${activeCount} running)`, `（進行中 ${activeCount}）`)}</Text>
+              </Text>
+              {activeCount > 0 ? <ActivityIndicator size="small" color="#5b6b63" style={styles.headerSpinner} /> : null}
+            </View>
+            {list}
+          </View>
+        </Modal>
+      </>
+    );
+  }
+
   return (
     <View style={styles.bar}>
       <Pressable
@@ -258,167 +462,7 @@ export function ParallelJobsBar({ projectId, request, onShowMessage }: ParallelJ
         {activeCount > 0 ? <ActivityIndicator size="small" color="#5b6b63" style={styles.headerSpinner} /> : null}
       </Pressable>
 
-      {expanded ? (
-        <ScrollView style={styles.body} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
-          {jobs.map((job) => {
-            const busy = busyJobId === job.id;
-            const status = job.waiting_for ? `${job.state_label}・${job.waiting_for}` : job.state_label;
-            const detail = job.active ? job.last_progress : job.result_excerpt ?? job.last_progress;
-            const statusStyle =
-              job.state === 'failed'
-                ? styles.stateFailed
-                : job.state === 'awaiting_confirmation'
-                  ? styles.stateAttention
-                  : job.active
-                    ? styles.stateActive
-                    : styles.stateDone;
-            return (
-              <View key={job.id} style={styles.row}>
-                <View style={styles.rowTop}>
-                  <Text style={styles.title} numberOfLines={1}>
-                    {job.title}
-                  </Text>
-                  <View style={styles.chip}>
-                    <Text style={styles.chipText}>{job.model_label}</Text>
-                  </View>
-                  {busy ? <ActivityIndicator size="small" color="#5b6b63" /> : null}
-                </View>
-                <Text style={[styles.state, statusStyle]} numberOfLines={1}>
-                  {status}
-                </Text>
-                {detail ? (
-                  <Text style={styles.detail} numberOfLines={1}>
-                    {detail}
-                  </Text>
-                ) : null}
-
-                <View style={styles.actions}>
-                  {job.active ? (
-                    <>
-                      <Pressable
-                        disabled={busy}
-                        onPress={() => {
-                          setAddingFor((cur) => (cur === job.id ? null : job.id));
-                          setAddText('');
-                        }}
-                        hitSlop={6}
-                        style={({ pressed }) => [styles.action, pressed && styles.pressed, busy && styles.disabled]}
-                      >
-                        <Text style={styles.actionText}>{ui('Add instruction', '指示を足す')}</Text>
-                      </Pressable>
-                      {models.length > 1 ? (
-                        <Pressable
-                          disabled={busy}
-                          onPress={() => chooseModel(job)}
-                          hitSlop={6}
-                          style={({ pressed }) => [styles.action, pressed && styles.pressed, busy && styles.disabled]}
-                        >
-                          <Text style={styles.actionText}>{ui('Model', 'モデル')}: {job.model_label} ▾</Text>
-                        </Pressable>
-                      ) : null}
-                      <Pressable
-                        disabled={busy}
-                        onPress={() => cancel(job)}
-                        hitSlop={6}
-                        style={({ pressed }) => [styles.action, pressed && styles.pressed, busy && styles.disabled]}
-                      >
-                        <Text style={[styles.actionText, styles.actionDanger]}>{ui('Stop', '止める')}</Text>
-                      </Pressable>
-                    </>
-                  ) : null}
-                  {!job.active && job.report_message_id && onShowMessage ? (
-                    <Pressable
-                      onPress={() => showResult(job)}
-                      hitSlop={6}
-                      style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-                    >
-                      <Text style={[styles.actionText, styles.actionPrimary]}>{ui('See result', '結果を見る')}</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-
-                {addingFor === job.id ? (
-                  <View style={styles.inputRow}>
-                    <TextInput
-                      autoFocus
-                      value={addText}
-                      onChangeText={setAddText}
-                      placeholder={ui('Extra instruction for this job', 'この作業への追加の指示')}
-                      placeholderTextColor="#8a978f"
-                      style={styles.input}
-                      returnKeyType="send"
-                      onSubmitEditing={() => void submitAdd(job)}
-                    />
-                    <Pressable
-                      disabled={busy || !addText.trim()}
-                      onPress={() => void submitAdd(job)}
-                      style={({ pressed }) => [
-                        styles.sendButton,
-                        pressed && styles.pressed,
-                        (busy || !addText.trim()) && styles.disabled,
-                      ]}
-                    >
-                      <Text style={styles.sendText}>{ui('Send', '送る')}</Text>
-                    </Pressable>
-                  </View>
-                ) : null}
-              </View>
-            );
-          })}
-
-          {newOpen ? (
-            <View style={styles.newBox}>
-              <TextInput
-                autoFocus
-                value={newTask}
-                onChangeText={setNewTask}
-                placeholder={ui('What should run in parallel?', '並行で頼みたいこと')}
-                placeholderTextColor="#8a978f"
-                style={[styles.input, styles.newInput]}
-                multiline
-              />
-              {models.length > 0 ? (
-                <View style={styles.modelRow}>
-                  {models.map((m) => {
-                    const selected = m.id === selectedNewModel;
-                    return (
-                      <Pressable
-                        key={m.id}
-                        onPress={() => setNewModel(m.id)}
-                        accessibilityState={{ selected }}
-                        style={({ pressed }) => [styles.modelChip, selected && styles.modelChipSelected, pressed && styles.pressed]}
-                      >
-                        <Text style={[styles.modelChipText, selected && styles.modelChipTextSelected]}>{m.label}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              ) : null}
-              <View style={styles.newActions}>
-                <Pressable onPress={() => setNewOpen(false)} hitSlop={6} style={({ pressed }) => [styles.action, pressed && styles.pressed]}>
-                  <Text style={styles.actionText}>{ui('Cancel', 'やめる')}</Text>
-                </Pressable>
-                <Pressable
-                  disabled={starting || !newTask.trim()}
-                  onPress={() => void start()}
-                  style={({ pressed }) => [
-                    styles.sendButton,
-                    pressed && styles.pressed,
-                    (starting || !newTask.trim()) && styles.disabled,
-                  ]}
-                >
-                  <Text style={styles.sendText}>{starting ? ui('Starting…', '開始中…') : ui('Start', '頼む')}</Text>
-                </Pressable>
-              </View>
-            </View>
-          ) : (
-            <Pressable onPress={() => setNewOpen(true)} hitSlop={6} style={({ pressed }) => [styles.newEntry, pressed && styles.pressed]}>
-              <Ionicons name="add" size={14} color="#304d40" />
-              <Text style={styles.newEntryText}>{ui('Run in parallel', '並行で頼む')}</Text>
-            </Pressable>
-          )}
-        </ScrollView>
-      ) : null}
+      {expanded ? list : null}
     </View>
   );
 }
@@ -598,4 +642,55 @@ const styles = StyleSheet.create({
   },
   pressed: { opacity: 0.6 },
   disabled: { opacity: 0.4 },
+  iconButton: {
+    alignItems: 'center',
+    height: 48,
+    justifyContent: 'center',
+    width: 40,
+  },
+  iconBadge: {
+    alignItems: 'center',
+    backgroundColor: '#e4e9e3',
+    borderColor: '#f6f7f3',
+    borderRadius: 8,
+    borderWidth: 1.5,
+    height: 16,
+    justifyContent: 'center',
+    minWidth: 16,
+    paddingHorizontal: 3,
+    position: 'absolute',
+    right: 3,
+    top: 8,
+  },
+  iconBadgeActive: { backgroundColor: '#2f8a5f' },
+  iconBadgeText: { color: '#304d40', fontSize: 10, fontWeight: '800' },
+  iconBadgeTextActive: { color: '#ffffff' },
+  dropdownBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(22,46,39,0.12)',
+  },
+  dropdown: {
+    backgroundColor: '#f6f7f3',
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    elevation: 8,
+    left: 0,
+    paddingBottom: 4,
+    position: 'absolute',
+    right: 0,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+  },
+  dropdownHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 36,
+    paddingHorizontal: 12,
+  },
+  dropdownBody: {
+    maxHeight: 420,
+  },
 });

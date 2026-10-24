@@ -1404,6 +1404,9 @@ function AppMain() {
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [attachSheetOpen, setAttachSheetOpen] = useState(false);
+  // チャットの上の段を増やさないため、成果物・並行作業はアプリバーの中の印にして、押すと重ねて開く。
+  const [artifactSheetOpen, setArtifactSheetOpen] = useState(false);
+  const [chatBarHeight, setChatBarHeight] = useState(0);
   const [loadingMessages, setLoadingMessages] = useState(false);
   // 押し込み同期で写しが最新と分かっている時は「最新の状態を取得中…」を出さない
   const [quietSync, setQuietSync] = useState(false);
@@ -4120,7 +4123,10 @@ function AppMain() {
         keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
         style={styles.chatWrap}
       >
-        <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
+        <View
+          style={[styles.appBar, styles.chatAppBar, { paddingTop: insets.top + 2 }]}
+          onLayout={(e) => setChatBarHeight(e.nativeEvent.layout.height)}
+        >
           <Pressable
             onPress={handleBackToProjects}
             accessibilityRole="button"
@@ -4136,6 +4142,38 @@ function AppMain() {
             </Text>
           </View>
           <View style={styles.appBarRight}>
+            {artifacts.length > 0 ? (
+              <Pressable
+                onPress={() => (artifacts.length === 1 ? handleOpenArtifact(artifacts[0]) : setArtifactSheetOpen(true))}
+                accessibilityRole="button"
+                accessibilityLabel={artifacts.length === 1
+                  ? ui(`Open ${artifacts[0].label || artifacts[0].slug || 'artifact'}`, `${artifacts[0].label || artifacts[0].slug || '成果物'}を開く`)
+                  : ui(`Artifacts ${artifacts.length}`, `成果物 ${artifacts.length}件`)}
+                hitSlop={6}
+                style={({ pressed }) => [styles.appBarIconButton, styles.chatAppBarIcon, pressed && styles.buttonPressed]}
+              >
+                <Ionicons name="browsers-outline" size={22} color="#162e27" />
+                {artifacts.length > 1 ? (
+                  <View style={styles.chatBarCount}>
+                    <Text style={styles.chatBarCountText}>{artifacts.length}</Text>
+                  </View>
+                ) : null}
+              </Pressable>
+            ) : null}
+            {currentProject?.id && token ? (
+              <ParallelJobsBar
+                variant="icon"
+                dropdownTop={chatBarHeight}
+                projectId={currentProject.id}
+                request={(path, init) => apiRequest(path, init, token)}
+                onShowMessage={(id) => {
+                  if (!messages.some((m) => m.id === id)) return false;
+                  setHighlightId(id);
+                  setPendingJumpId(id);
+                  return true;
+                }}
+              />
+            ) : null}
             <Pressable
               onPress={() => { if (currentProject?.room_id && token) voice.start({roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token}); }}
               onLongPress={() => {
@@ -4151,7 +4189,7 @@ function AppMain() {
               accessibilityLabel={ui("Start voice conversation","音声で話す")} accessibilityRole="button"
               accessibilityHint={ui("Hold to choose an audio device","長押しすると音声機器を選べます")}
               hitSlop={10}
-              style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+              style={({ pressed }) => [styles.appBarIconButton, styles.chatAppBarIcon, pressed && styles.buttonPressed]}
             >
               <Ionicons name="mic-outline" size={22} color="#162e27" />
             </Pressable>
@@ -4160,48 +4198,12 @@ function AppMain() {
               accessibilityRole="button"
               accessibilityLabel={ui("Search this chat","この会話を検索")}
               hitSlop={10}
-              style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+              style={({ pressed }) => [styles.appBarIconButton, styles.chatAppBarIcon, pressed && styles.buttonPressed]}
             >
               <Ionicons name="search" size={22} color="#162e27" />
             </Pressable>
           </View>
         </View>
-
-        {artifacts.length > 0 || loadingArtifacts ? (
-          <View style={styles.artifactTabs}>
-            {loadingArtifacts ? (
-              <ActivityIndicator color="#304d40" size="small" />
-            ) : (
-              artifacts.map((artifact) => (
-                <Pressable
-                  key={artifact.id}
-                  onPress={() => handleOpenArtifact(artifact)}
-                  style={({ pressed }) => [
-                    styles.artifactTab,
-                    pressed && styles.buttonPressed,
-                  ]}
-                >
-                  <Text style={styles.artifactTabText} numberOfLines={1}>
-                    {artifact.label || artifact.slug || 'Artifact'}
-                  </Text>
-                </Pressable>
-              ))
-            )}
-          </View>
-        ) : null}
-
-        {currentProject?.id && token ? (
-          <ParallelJobsBar
-            projectId={currentProject.id}
-            request={(path, init) => apiRequest(path, init, token)}
-            onShowMessage={(id) => {
-              if (!messages.some((m) => m.id === id)) return false;
-              setHighlightId(id);
-              setPendingJumpId(id);
-              return true;
-            }}
-          />
-        ) : null}
 
         {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
             これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
@@ -4461,39 +4463,26 @@ function AppMain() {
           </View>
         ) : null}
 
-        <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
+        {/* 入力欄は1段: ［＋］［入力欄］［送信/停止］。制作物の追加は＋のシートの中。 */}
+        <View style={[styles.composer, styles.composerRow, { paddingBottom: 6 + insets.bottom }]}>
+          <Pressable
+            onPress={() => setAttachSheetOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel={ui("Attach photos, files or a production","写真・ファイル・制作物を添付")}
+            hitSlop={6}
+            style={({ pressed }) => [styles.attachButton, styles.composerRowButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="add-circle-outline" size={28} color={timelineRefs.length > 0 ? '#245e49' : '#59685f'} />
+          </Pressable>
           <TextInput
             multiline
             onChangeText={setDraft}
             accessibilityLabel={ui("Message Done","ダンへのメッセージ")}
             placeholder={ui("Message Done…","Danに話しかける…")}
             placeholderTextColor="#59685f"
-            style={styles.composerInput}
+            style={[styles.composerInput, styles.composerInputRow]}
             value={draft}
           />
-          <View style={styles.composerTools}>
-          <Pressable
-            onPress={() => setAttachSheetOpen(true)}
-            accessibilityRole="button"
-            accessibilityLabel={ui("Attach photos or files","写真・ファイルを添付")}
-            hitSlop={6}
-            style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
-          >
-            <Ionicons name="add-circle-outline" size={28} color="#59685f" />
-          </Pressable>
-          <Pressable
-            onPress={openTimelineSheet}
-            accessibilityRole="button"
-            accessibilityLabel={ui("Add a production reference","制作物を会話に追加")}
-            hitSlop={6}
-            style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
-          >
-            <Ionicons
-              name="film-outline"
-              size={24}
-              color={timelineRefs.length > 0 ? '#245e49' : '#59685f'}
-            />
-          </Pressable>
           {/* Web版と同じ切替: 入力が空でダンが動いている間は停止ボタン。
               文字を打ち始めたら Send に戻る（＝追い連絡）。 */}
           {!draft.trim() && attachments.length === 0 && (streamingHere || liveRunActive) ? (
@@ -4501,10 +4490,9 @@ function AppMain() {
               onPress={handleCancelTurn}
               accessibilityRole="button"
               accessibilityLabel={ui("Stop work","ダンの作業を停止")}
-              style={({ pressed }) => [styles.stopButton, pressed && styles.buttonPressed]}
+              style={({ pressed }) => [styles.stopButton, styles.composerRowSend, pressed && styles.buttonPressed]}
             >
               <Ionicons name="square" size={14} color="#ffffff" />
-              
             </Pressable>
           ) : (
             <Pressable
@@ -4515,16 +4503,16 @@ function AppMain() {
               onPress={() => handleSend()}
               style={({ pressed }) => [
                 styles.sendButton,
+                styles.composerRowSend,
                 (pressed || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
                 pressed && pressedScale({ pressed }),
               ]}
             >
               {/* No spinner here — the live "working" indicator already shows in
                   Dan's chat bubble; a second one on the send button is redundant. */}
-              <Ionicons name="arrow-up" size={24} color="#fff" />
+              <Ionicons name="arrow-up" size={22} color="#fff" />
             </Pressable>
           )}
-          </View>
         </View>
       </KeyboardAvoidingView>
 
@@ -4683,11 +4671,57 @@ function AppMain() {
               <Ionicons name="document" size={22} color="#162e27" />
               <Text style={styles.sheetActionText}>{ui("Files","ファイル")}</Text>
             </Pressable>
+            <View style={styles.sheetDivider} />
+            <Pressable
+              onPress={() => { setAttachSheetOpen(false); void openTimelineSheet(); }}
+              style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+            >
+              <Ionicons name="film" size={22} color="#162e27" />
+              <Text style={styles.sheetActionText}>{ui("Production","制作物")}</Text>
+            </Pressable>
             <Pressable
               onPress={() => setAttachSheetOpen(false)}
               style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
             >
               <Text style={styles.sheetCancelText}>{ui("Cancel","キャンセル")}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={artifactSheetOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setArtifactSheetOpen(false)}
+        statusBarTranslucent
+      >
+        <View style={styles.sheetRoot}>
+          <Pressable style={styles.sheetBackdrop} onPress={() => setArtifactSheetOpen(false)} />
+          <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
+            <View style={styles.sheetGrabber} />
+            <Text style={styles.sheetHeading}>{ui("Artifacts","成果物")}</Text>
+            <ScrollView style={{ maxHeight: 360 }}>
+              {artifacts.map((artifact, i) => (
+                <Fragment key={artifact.id}>
+                  {i > 0 ? <View style={styles.sheetDivider} /> : null}
+                  <Pressable
+                    onPress={() => { setArtifactSheetOpen(false); handleOpenArtifact(artifact); }}
+                    style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+                  >
+                    <Ionicons name="browsers-outline" size={22} color="#162e27" />
+                    <Text style={styles.sheetActionText} numberOfLines={1}>
+                      {artifact.label || artifact.slug || 'Artifact'}
+                    </Text>
+                  </Pressable>
+                </Fragment>
+              ))}
+            </ScrollView>
+            <Pressable
+              onPress={() => setArtifactSheetOpen(false)}
+              style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
+            >
+              <Text style={styles.sheetCancelText}>{ui("Close","閉じる")}</Text>
             </Pressable>
           </View>
         </View>
@@ -5659,6 +5693,16 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   composer: {paddingHorizontal:16,paddingTop:10,borderTopWidth:1,borderTopColor:'#dbe2da',backgroundColor:'#f6f7f3',gap:5},
+  // チャットの入力は1段（＋・入力欄・送信を横に並べる）。チャットの表示域を広く取るため上下の余白も詰める。
+  composerRow: {flexDirection:'row',alignItems:'flex-end',paddingHorizontal:6,paddingTop:6,gap:4},
+  composerInputRow: {flex:1,minHeight:44,borderRadius:22,paddingVertical:10,paddingHorizontal:14},
+  composerRowButton: {height:44,width:40},
+  composerRowSend: {width:44,height:44,borderRadius:22,marginLeft:0},
+  // チャット画面のアプリバー: 上下の余白を詰め、印を4つ並べても題名が残るよう幅を40に。
+  chatAppBar: {paddingBottom:0,paddingHorizontal:4,gap:0},
+  chatAppBarIcon: {width:40},
+  chatBarCount: {position:'absolute',top:8,right:2,minWidth:16,height:16,borderRadius:8,paddingHorizontal:3,backgroundColor:'#e4e9e3',borderWidth:1.5,borderColor:'#f6f7f3',alignItems:'center',justifyContent:'center'},
+  chatBarCountText: {color:'#304d40',fontSize:10,fontWeight:'800'},
   attachButton: {
     alignItems: 'center',
     height: 48,
