@@ -2,7 +2,7 @@
   "expo": {
     "name": "Done",
     "slug": "dan-mobile",
-    "version": "1.0.73",
+    "version": "1.0.74",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -25,7 +25,7 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION"
       ],
-      "versionCode": 72,
+      "versionCode": 73,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -43,6 +43,7 @@
       "expo-notifications",
       "./plugins/withDanSmsForwarder",
       "./plugins/withDanVoiceCall",
+      "./plugins/withDanAppUpdate",
       [
         "expo-image-picker",
         {

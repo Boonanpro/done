@@ -6,7 +6,7 @@ speech model already understood; the guessing layer produced the wrong turns and
 voice works in the form implemented here: the model that understood the request is the one that chooses the tool.
 
 What lives here: the backend model's instructions, the function definitions, and their execution against Dan's parts.
-The web search is a function: OpenAI's hosted search runs in a separate small call only when asked (search_web; the hosted
+The web search is a function: Dan's own search (web_search.py) runs only when asked (search_web; OpenAI's hosted search
 tool's own definition is 4,436 tokens and was sent with every response of a call, half the backend's input, 2026-09-24). Long work goes to Dan's job runner (the API worker, DAN_VOICE_WORK_ENGINE).
 The earlier client delegation (the phone answered through a Jev-based intake) was removed on 2026-09-23.
 """
@@ -156,28 +156,20 @@ def delegation(room_id=None, user_id=None, title='', records=''):
                                               'parallel_tool_calls': True, 'reasoning': {'effort': REASONING}}}
 
 
-SEARCH_MODEL = os.environ.get('DAN_VOICE_SEARCH_MODEL', BACKEND_MODEL)   # Luna picked another day's weather 2 times in 3 (2026-09-24)
-
-
 async def search_web(query):
-    """OpenAI's hosted web search in its own small call (the search model reads the pages and returns the facts)."""
-    import httpx
-    from app.config import settings
-    body = {'model': SEARCH_MODEL, 'tools': [{'type': 'web_search'}], 'tool_choice': 'required', 'reasoning': {'effort': 'low'},
-            # the search model has no clock: without today's date it answered Osaka's weather with another day's figures (2026-09-24)
-            'instructions': '今は ' + datetime.now(ZoneInfo('Asia/Tokyo')).strftime('%Y年%m月%d日 %H:%M（日本時間）') + '。'
-                            '質問に答えるのに必要な事実だけを、日本語で短く書く。数値・日付・時刻はそのまま。最後に出どころのサイト名。',
-            'input': query}
-    try:
-        async with httpx.AsyncClient(timeout=40) as client:
-            r = await client.post('https://api.openai.com/v1/responses', json=body, headers={'Authorization': 'Bearer ' + settings.OPENAI_API_KEY})
-        data = r.json()
-        if r.status_code != 200:
-            return {'error': str((data.get('error') or {}).get('message') or r.status_code)[:200]}
-        text = ' '.join(c.get('text', '') for o in data.get('output', []) if o.get('type') == 'message' for c in o.get('content', []))
-        return {'found': text.strip()[:3000], 'source': {'what': 'ウェブ検索', 'query': query}}
-    except Exception as exc:
-        return {'error': f'検索できなかった: {type(exc).__name__}'}
+    """Dan's web search (app/services/web_search.py, DeepSeek with OpenAI as the fallback). It had its own copy of
+    OpenAI's search here until 2026-10-23; one search now serves chat, jobs and calls, and a search no longer spends the
+    OpenAI balance the call itself runs on."""
+    from app.services import web_search
+    return search_output(await web_search.find(query), query)
+
+
+def search_output(found, query):
+    """What the backend reads from a search (web_search.find's result, or one started early by voice_prefetch)."""
+    if not found['success']:
+        return {'error': found['error']}
+    names = '、'.join(dict.fromkeys(s['title'] for s in found['sources'] if s['title']))
+    return {'found': found['answer'][:3000] + ('\n出どころ: ' + names if names else ''), 'source': {'what': 'ウェブ検索', 'query': query}}
 
 
 async def run_function(name, args, user_id, room_id, dialogue, speak=None):

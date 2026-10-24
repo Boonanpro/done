@@ -36,6 +36,7 @@ import remarkGfm from 'remark-gfm';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import {
   api,
   type ActiveSessionStatus,
@@ -69,6 +70,7 @@ import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRec
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { JOB_STATE_TEXT, readJobReport, type JobReport } from '@/lib/chat-shapes/job-report';
+import { clockText, elapsedText, liveLineText, liveRows, liveStartedAt, liveStepsFromEvents, secondsText, sentSinceReply, type LiveStep } from '@/lib/chat-shapes/live-line';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -92,15 +94,18 @@ const CHAT_OLDER_FETCH_LIMIT = 100;
 
 type StepInfo = {
   label: string;
-  type: 'tool' | 'reasoning' | 'error';
+  /** reasoning = ダンが書いた文（途中の説明か書きかけの返事）、thinking = 思考の日本語の要約（作業中の1行と一覧だけに使う） */
+  type: 'tool' | 'reasoning' | 'thinking' | 'error';
   role?: 'researcher' | 'critic' | 'leader' | null;
   /** 作業中の1行（「お店のページを見ています」）。サーバーが道具ごとに作る（app/agent/activity_line.py）。空なら前の1行のまま */
   activity?: string;
+  /** 起きた時刻（ミリ秒） */
+  at?: number;
 };
 
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
-  | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
+  | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean; startedAt?: number | null; live?: LiveStep[] };
 
 // 部品（選択・入力）の答えを送る時の追加情報: 照合情報、部品が決めた送信 ID（保存されたと分かるまで同じ ID で送る）、
 // 保存された／保存されていない（not saved）／分からない（unknown）の知らせ
@@ -135,26 +140,56 @@ function useShowWork(): boolean {
   return useSyncExternalStore(subscribeShowWork, readShowWork, () => SHOW_WORK_DEFAULT);
 }
 
-/** 作業中の1行: 道具ごとの言葉（activity）の一番新しい物。返事を書き始めていれば「書いています」、何も無ければ「考えています」 */
-function liveLine(steps: StepInfo[]): string {
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const st = steps[i];
-    if (st.type === 'reasoning' && i === steps.length - 1 && st.label && st.label !== 'Thinking...') return '返事を書いています';
-    if (st.type === 'tool' && st.activity) return st.activity;
-  }
-  return '考えています';
+/** 1秒ごとに進む時計（作業中の1行の経過秒数用。この行だけ描き直す） */
+function useNowEverySecond(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  return now;
 }
 
-/** 点が3つ動く目印と、今していることの1行。行は増やさず、書き換えるだけ */
-function LiveLine({ text }: { text: string }) {
+/**
+ * 点が3つ動く目印と、今していることの1行＋送ってからの秒数。行は増やさず、書き換えるだけ。
+ * 押すと、このターンでやったことが時刻とかかった秒数つきで全部開き、もう一度押すと閉じる（2026-10-24）
+ */
+function LiveLine({ live, startedAt }: { live: LiveStep[]; startedAt?: number | null }) {
+  const now = useNowEverySecond();
+  const [open, setOpen] = useState(false);
+  const text = liveLineText(live);
+  const from = startedAt ?? live.find((st) => st.at)?.at ?? null;
+  const rows = open ? liveRows(live, now, from) : [];
   return (
-    <div className="my-1 flex items-center gap-2 text-sm text-muted-foreground" role="status" aria-live="polite" data-live-line>
-      <span className="flex items-center gap-1" aria-hidden>
-        {[0, 1, 2].map((d) => (
-          <span key={d} className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/70 motion-reduce:animate-none" style={{ animationDelay: `${d * 150}ms` }} />
-        ))}
-      </span>
-      <span key={text} className="truncate animate-in fade-in duration-300">{text}</span>
+    <div className="my-1" data-live-line>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex max-w-full items-center gap-2 rounded-md py-0.5 pr-1 text-left text-sm text-muted-foreground hover:text-foreground"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="flex shrink-0 items-center gap-1" aria-hidden>
+          {[0, 1, 2].map((d) => (
+            <span key={d} className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/70 motion-reduce:animate-none" style={{ animationDelay: `${d * 150}ms` }} />
+          ))}
+        </span>
+        <span key={text} className="min-w-0 truncate animate-in fade-in duration-300">{text}</span>
+        {from ? <span className="shrink-0 tabular-nums text-xs text-muted-foreground/80" data-live-elapsed>{elapsedText(from, now)}</span> : null}
+        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 opacity-60 transition-transform', open && 'rotate-180')} aria-hidden />
+      </button>
+      {open ? (
+        <ol className="mt-1 ml-1 max-w-xl space-y-0.5 border-l border-border pl-3 text-xs text-muted-foreground" data-live-rows>
+          {rows.map((r) => (
+            <li key={r.key} className={cn('flex items-baseline gap-2', r.now && 'text-foreground')}>
+              <span className="shrink-0 tabular-nums opacity-70">{clockText(r.at)}</span>
+              <span className="min-w-0 flex-1 break-words">{r.label}{r.count > 1 ? <span className="opacity-60">{` ×${r.count}`}</span> : null}</span>
+              <span className="shrink-0 tabular-nums opacity-70">{secondsText(r.seconds)}</span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
     </div>
   );
 }
@@ -164,9 +199,14 @@ function LiveLine({ text }: { text: string }) {
 function InlineProcessBlock({
   steps,
   isLive = false,
+  startedAt,
+  live = [],
 }: {
   steps: StepInfo[];
   isLive?: boolean;
+  startedAt?: number | null;
+  /** 作業中の1行と一覧の一歩（今の作業の出来事ぜんぶ。lib/chat-shapes/live-line.ts liveStepsFromEvents） */
+  live?: LiveStep[];
   defaultCollapsed?: boolean; // kept for call-site compatibility (unused)
 }) {
   const showWork = useShowWork();
@@ -180,7 +220,7 @@ function InlineProcessBlock({
     return (
       <div className="my-1">
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} /> : null}
-        <LiveLine text={liveLine(steps)} />
+        <LiveLine live={live} startedAt={startedAt} />
       </div>
     );
   }
@@ -203,6 +243,7 @@ function eventToStep(event: ExecutionEvent): StepInfo {
   const role =
     member === 'researcher' || member === 'critic' || member === 'leader' ? member : null;
 
+  const at = new Date(event.created_at).getTime() || undefined;
   if (event.event_type === 'tool_use') {
     const activity = event.metadata?.activity;
     return {
@@ -210,6 +251,7 @@ function eventToStep(event: ExecutionEvent): StepInfo {
       type: 'tool',
       role,
       activity: typeof activity === 'string' ? activity : undefined,
+      at,
     };
   }
 
@@ -218,13 +260,16 @@ function eventToStep(event: ExecutionEvent): StepInfo {
       label: event.content || 'エラー',
       type: 'error',
       role,
+      at,
     };
   }
 
   return {
     label: event.content || event.event_type,
-    type: 'reasoning',
+    // 思考の要約（サーバーが metadata.kind=thinking を付ける。app/agent/cli_runner.py _save_thinking_event）
+    type: event.metadata?.kind === 'thinking' ? 'thinking' : 'reasoning',
     role,
+    at,
   };
 }
 
@@ -462,7 +507,8 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
 // Live in-progress steps (execution events) → the same block shape so the
 // live turn renders with the identical inline-timeline UI as the finished one.
 function stepsToBlocks(steps: StepInfo[]): TurnBlock[] {
-  return steps.map((s) => {
+  // 思考の要約は作業中の1行と一覧だけに使い、文としては出さない
+  return steps.filter((s) => s.type !== 'thinking').map((s) => {
     if (s.type === 'tool') return { type: 'tool', label: s.label };
     if (s.type === 'error') return { type: 'error', text: s.label };
     // reasoning step = Dan's intermediate Japanese text → show as answer text
@@ -2589,6 +2635,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
     const chronologicalMessages = collapseCalls([...messages].reverse()).map((m) => tidyRelayMessage(m, projectId));
     const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
     const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
+    // 作業中の1行の秒数の起点に使う、最後のダンの返事より後に本人が送った時刻（追い連絡があっても最初に送った時から数える）
+    const sentTimes = sentSinceReply(chronologicalMessages);
     // Anchor the live execution block to the current RUN's start, not the last
     // human message. Without this, a follow-up sent mid-run (a newer human msg)
     // drags the live block below it, so Dan's in-progress output appears to jump
@@ -2670,6 +2718,9 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
           return leftTime - rightTime;
         });
 
+      // 作業中の1行と一覧は、追い連絡でターンが分かれても今の作業の出来事ぜんぶ（スマホと同じ。live-line.ts）
+      const liveAll = liveStepsFromEvents(liveGroups.flatMap((g) => g.events));
+      const liveFrom = liveStartedAt(liveAll.find((st) => st.at)?.at, sentTimes);
       liveGroups.forEach((group, index) => {
         const steps = group.events.map(eventToStep);
         if (steps.length === 0) return;
@@ -2683,6 +2734,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             id: `live-${projectId}-${group.key}`,
             steps,
             isLive: index === liveGroups.length - 1,
+            startedAt: liveFrom,
+            live: liveAll,
           },
           sortKey: startedAfterSend ? Number.MAX_SAFE_INTEGER - 500 + index : groupTime,
           subKey: 2,
@@ -2700,6 +2753,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             type: 'reasoning',
           }],
           isLive: true,
+          startedAt: liveStartedAt(null, sentTimes) ?? (runStart ? new Date(runStart).getTime() || null : null),
+          live: [],
         },
         // 「考え中」は出来事ではなく状態なので、いつも一番下（docs/current/chat-timeline-definition.md §2）。
         // 送った直後のメッセージ（pending、サーバーの時刻がまだ無い）は MAX-1000 番台に置かれるので、
@@ -3282,6 +3337,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
                       key={item.id}
                       steps={item.steps}
                       isLive={item.isLive}
+                      startedAt={item.startedAt}
+                      live={item.live}
                       defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
                     />
                   );

@@ -35,20 +35,20 @@ def enabled():
 
 @contextmanager
 def locked():
-    import msvcrt
+    from app.services.file_lock import lock as lock_file
     PATH.parent.mkdir(parents=True,exist_ok=True)
     with PATH.with_suffix('.lock').open('a+b') as lock:
         if lock.tell()==0:lock.write(b'0');lock.flush()
         deadline=time.monotonic()+.1
         while True:
             try:
-                lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1);break
+                lock.seek(0);lock_file(lock.fileno(),True);break
             except OSError:
                 if time.monotonic()>=deadline:raise TimeoutError('budget_lock_busy')
                 time.sleep(.005)
         try:yield
         finally:
-            lock.seek(0);msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
+            lock.seek(0);lock_file(lock.fileno(),False)
 
 
 def reserve(body,user_id):

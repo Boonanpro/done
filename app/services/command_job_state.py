@@ -18,7 +18,7 @@ def path(job_id):
 
 @contextmanager
 def locked(job_id):
-    import msvcrt
+    from app.services.file_lock import lock as file_lock
     ROOT.mkdir(parents=True, exist_ok=True)
     with path(job_id).with_suffix('.lock').open('a+b') as lock:
         if lock.tell() == 0:
@@ -26,14 +26,14 @@ def locked(job_id):
         deadline = time.monotonic() + 10
         while True:
             try:
-                lock.seek(0); msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                lock.seek(0); file_lock(lock.fileno(), True)
                 break
             except OSError:
                 if time.monotonic() >= deadline: raise TimeoutError('作業状態の更新が混み合っています')
                 time.sleep(.01)
         try: yield
         finally:
-            lock.seek(0); msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            lock.seek(0); file_lock(lock.fileno(), False)
 
 def read(job_id):
     try: return json.loads(path(job_id).read_text(encoding='utf-8'))

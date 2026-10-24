@@ -11,6 +11,7 @@ the owner is not told about it (SOUL.md, 裏の作業には触れない).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -109,3 +110,21 @@ def activity_phrase(name: str, tool_input: dict | None = None) -> str:
     if n in ("collab_thread", "split_to_new_room"):
         return "部屋を用意しています"
     return "作業しています"
+
+
+# Kana or kanji. A thinking summary without any is not shown (the owner reads Japanese; 2026-10-24).
+_JA = re.compile(r"[぀-ヿ㐀-鿿]")
+
+
+def thinking_text(text: Any, limit: int = 600) -> str:
+    """The part of a model's thinking the work line may show, or "" (2026-10-24, 本人「考えています」だけの時間が
+    超長くて遅く感じる」). Claude CLI streams thinking text only some of the time (mostly empty, sometimes a short
+    Japanese summary of what it is doing); Codex streams reasoning summaries only when they are switched on. Text
+    with no Japanese in it returns "" so the line never shows English thinking. The screens take its last
+    sentence (frontend/src/lib/chat-shapes/live-line.ts)."""
+    if not isinstance(text, str):
+        return ""
+    t = text.strip()
+    if not t or not _JA.search(t):
+        return ""
+    return t[-limit:] if len(t) > limit else t
