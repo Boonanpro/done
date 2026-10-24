@@ -4516,8 +4516,6 @@ function AppMain() {
             multiline
             onChangeText={setDraft}
             accessibilityLabel={ui("Message Done","ダンへのメッセージ")}
-            placeholder={ui("Message Done…","Danに話しかける…")}
-            placeholderTextColor="#59685f"
             style={[styles.composerInput, styles.composerInputRow]}
             value={draft}
           />
