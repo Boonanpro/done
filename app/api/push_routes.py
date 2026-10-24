@@ -132,3 +132,12 @@ async def send_test_notification(current_user: TokenData = Depends(get_current_u
             },
         )
     return {"success": True, **result}
+
+
+@router.get("/native/app-latest")
+async def read_app_latest():
+    """The phone app's newest APK (app/services/app_release.py): {"latest": {version_name, version_code, url, size,
+    notes, published_at} | null}. The app asks on start and when it comes back to the front, and shows
+    「新しい版があります［更新する］」 when the versionCode is newer than its own (mobile/app-update.tsx, 2026-10-24)."""
+    from app.services import app_release
+    return {"latest": app_release.latest()}

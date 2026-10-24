@@ -22,12 +22,13 @@ export const COPIES = {
   'use-answer-send.ts': 'chat-shapes-use-answer-send.ts',
   'chart-geometry.ts': 'chat-shapes-chart-geometry.ts',
   'job-report.ts': 'chat-shapes-job-report.ts',
+  'live-line.ts': 'chat-shapes-live-line.ts',
 };
 
 /** 写しの中身: 頭の3行の説明＋同じ本文（同じフォルダの読み込みだけ写しの名前に替える） */
 export function mobileCopy(name) {
   const body = readFileSync(resolve(SRC, name), 'utf8').replace(/\r\n/g, '\n').replace(
-    /(['"])\.\/(plain|answers|schema|answer-sends|use-answer-send|chart-geometry|job-report)(?:\.ts)?\1/g,
+    /(['"])\.\/(plain|answers|schema|answer-sends|use-answer-send|chart-geometry|job-report|live-line)(?:\.ts)?\1/g,
     (_, q, base) => `${q}./${COPIES[`${base}.ts`].replace(/\.ts$/, '')}${q}`,
   );
   return [

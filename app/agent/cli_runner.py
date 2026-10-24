@@ -594,8 +594,9 @@ def _build_reseed_context(
     event_lines = []
     for ev in reversed(events):
         label = ev.get("tool_label") or ev.get("content") or ev.get("tool_name") or ev.get("event_type")
+        etype = "thinking" if (ev.get("metadata") or {}).get("kind") == "thinking" else ev.get("event_type", "")
         event_lines.append(
-            f"- {ev.get('created_at', '')} {ev.get('event_type', '')}: {_one_line(label, 260)}"
+            f"- {ev.get('created_at', '')} {etype}: {_one_line(label, 260)}"
         )
 
     run_lines = []
@@ -1113,11 +1114,14 @@ def _save_execution_event_sync(
     tool_label: Optional[str] = None,
     content: Optional[str] = None,
     tool_input: Optional[dict] = None,
+    kind: Optional[str] = None,
 ):
     """CLIスレッドからDB直接保存（sync）。disconnect時は1度だけ再接続リトライ。
 
     tool_use は、チャットの作業中の1行（「お店のページを見ています」）を metadata.activity に添える
-    （app/agent/activity_line.py。空なら画面は前の1行のまま）。"""
+    （app/agent/activity_line.py。空なら画面は前の1行のまま）。
+    kind="thinking" は、モデルの思考の日本語の要約（reasoning として保存し、metadata.kind で返事の文と分ける。
+    画面は作業中の1行と、押すと開く作業の一覧にだけ使う。2026-10-24）。"""
     from app.services.execution_events import normalize_event_type
     from app.services.supabase_client import get_supabase_client
 
@@ -1130,6 +1134,8 @@ def _save_execution_event_sync(
         metadata["original_event_type"] = original_type
     if turn_id:
         metadata["turn_id"] = turn_id
+    if kind:
+        metadata["kind"] = kind
     if normalized_type == "tool_use" and tool_name:
         try:
             from app.agent.activity_line import activity_phrase
@@ -1167,6 +1173,20 @@ def _save_execution_event_sync(
             _cli_debug(f"_save_execution_event_sync failed: {e}")
             return
 
+
+
+def _save_thinking_event(room_id: str, project_id: Optional[str], run_id: Optional[str], turn_id: Optional[str], text: Any) -> None:
+    """Keep a thinking summary for the chat's work line when it is in Japanese (activity_line.thinking_text).
+    Every backend calls this with its thinking / reasoning text; nothing is saved for empty or English text."""
+    if not project_id:
+        return
+    try:
+        from app.agent.activity_line import thinking_text
+        shown = thinking_text(text)
+    except Exception:
+        return
+    if shown:
+        _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, turn_id=turn_id, content=shown, kind="thinking")
 
 def _update_run_sync(
     run_id: Optional[str],
@@ -2645,9 +2665,10 @@ def _run_cli_process(
                             "detail": _tool_detail(ev.get("input", {})),
                         })
                     elif ev["type"] == "reasoning" and ev.get("text", "").strip():
-                        # thinkingはプロセスモニターに送らない（英語で読みにくい）
-                        # reasoning_full にだけ蓄積（デバッグ用に保持）
+                        # 思考は返事の文として出さない。日本語の要約だけ、作業中の1行用に kind=thinking で残す
+                        # （英語の思考は残さない。app/agent/activity_line.py thinking_text）
                         reasoning_full_acc.append(ev.get("text", ""))
+                        _save_thinking_event(room_id, project_id, run_id, turn_id, ev.get("text", ""))
                     elif ev["type"] == "text":
                         # テキスト出力（日本語の独り言）はプロセスモニターに表示
                         text_preview = ev.get("text", "").strip()
@@ -3146,6 +3167,8 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
                         state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                         if project_id:
                             _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label, tool_input=ev.get("input", {}))
+                    elif ev["type"] == "reasoning":
+                        _save_thinking_event(room_id, project_id, state["run_id"], state["turn_id"], ev.get("text", ""))
             elif rtype == "system":
                 sid = raw_ev.get("session_id")
                 if sid:
@@ -3511,6 +3534,7 @@ async def _process_via_streaming_session(
                         _emit(ev)
                         if ev.get("text", "").strip():
                             state["reasoning_full_acc"].append(ev["text"])
+                            _save_thinking_event(room_id, project_id, run_id, state["turn_id"], ev["text"])
 
             elif rtype == "system":
                 sid = raw_ev.get("session_id")

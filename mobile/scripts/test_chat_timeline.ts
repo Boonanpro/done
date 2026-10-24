@@ -96,4 +96,33 @@ const live = (messages: TimelineMessageLike[], events: ExecutionEvent[]) =>
   assert.deepStrictEqual(other.map((e) => e.id), ['f1']);
 }
 
+// --- 作業中の1行と一覧: 追い連絡で吹き出しが分かれても、それまでの一歩を消さず、秒数は最初に送った時から ----
+// （2026-10-24 見直し: 一番下の吹き出しの一歩だけになり、秒数も追い連絡の時刻から数え直していた。PC と同じ決まり）
+{
+  const act = (id: string, at: number, activity: string, turn = 'tx'): ExecutionEvent =>
+    ({ ...ev(id, at, turn), metadata: { activity } });
+  const events = [act('e1', 3000, 'お店のページを見ています'), act('e2', 10000, '営業時間を調べています'),
+    act('e3', 20000, '注文の画面を開いています'), act('e4', 25000, 'カートを確かめています', 'ty')];
+  const messages = [msg1, msg2];
+  const items = buildChatListItems({ messages, liveTurnGroups: live(messages, events), showLiveTurn: true });
+  const bottom = items[0];
+  assert.ok(bottom.kind === 'live' && bottom.typing);
+  if (bottom.kind !== 'live') throw new Error('no live');
+  assert.deepStrictEqual((bottom.live || []).map((st) => st.activity),
+    ['お店のページを見ています', '営業時間を調べています', '注文の画面を開いています', 'カートを確かめています']);
+  assert.strictEqual(bottom.startedAt, T);   // msg1 を送った時（msg2 の 15秒後からではない）
+  // 追い連絡の直後でまだ次の一歩が無い時（一番下は本人の発言）も、それまでの一歩と最初の時刻を持つ
+  const msg3: TimelineMessageLike = { id: 'msg3', sender_type: 'human', created_at: iso(30000) };
+  const later = buildChatListItems({ messages: [msg1, msg2, msg3], liveTurnGroups: live([msg1, msg2, msg3], events), showLiveTurn: true })[0];
+  assert.ok(later.kind === 'typing');
+  if (later.kind !== 'typing') throw new Error('no typing');
+  assert.strictEqual((later.live || []).length, 4);
+  assert.strictEqual(later.startedAt, T);
+  // 返事が保存された後の新しい頼みは、その発言の時刻から
+  const reply: TimelineMessageLike = { id: 'a1', sender_type: 'ai', created_at: iso(40000) };
+  const msg4: TimelineMessageLike = { id: 'msg4', sender_type: 'human', created_at: iso(50000) };
+  const next = buildChatListItems({ messages: [msg1, msg2, reply, msg4], liveTurnGroups: [], showLiveTurn: true })[0];
+  assert.ok(next.kind === 'typing' && next.startedAt === T + 50000);
+}
+
 console.log('chat timeline: all scenarios passed');

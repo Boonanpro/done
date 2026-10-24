@@ -55,7 +55,7 @@ function plainCommand(text: string) {
 
 export function describe(step: TurnBlock): { kind: StepKind; title: string; detail: string } {
   if (step.type === 'error') return { kind: 'error', title: step.text || 'エラー', detail: '' };
-  if (step.type === 'reasoning' || step.type === 'text') return { kind: 'think', title: (step.text || '').trim(), detail: '' };
+  if (step.type === 'reasoning' || step.type === 'text' || step.type === 'thinking') return { kind: 'think', title: (step.text || '').trim(), detail: '' };
   const name = shortName(step.name || '');
   const raw = (step.label || '').trim();
   const kind = (TOOL_KIND.find(([re]) => re.test(name || raw)) || [null, 'other'])[1] as StepKind;

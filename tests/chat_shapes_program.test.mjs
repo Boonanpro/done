@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { ShapeNode, parseShapeProgram, programDepth, safeLinkUrl, shapeToPlainMarkdown } from '../frontend/src/lib/chat-shapes/plain.ts';
 import * as mobile from '../mobile/chat-shapes-plain.ts';
@@ -145,4 +146,94 @@ test('アプリの答えの写しは本体と同じ中身', async () => {
   const body = readFileSync(new URL('../frontend/src/lib/chat-shapes/answers.ts', import.meta.url), 'utf8');
   const copy = readFileSync(new URL('../mobile/chat-shapes-answers.ts', import.meta.url), 'utf8');
   assert.equal(copy.split('\n').slice(3).join('\n'), body);
+});
+
+// 作業中の1行と、押すと開く一覧（2026-10-24。本人「考えています」だけの時間が超長くて遅く感じる」「準備していますはダメ」）
+test('作業中の1行: 道具の言葉・思考の要約・返事を書いています・考えています', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-24T10:00:00');
+  assert.equal(L.liveLineText([]), '考えています');
+  assert.equal(L.liveLineText([{ kind: 'thinking', text: 'まず画面を確かめる。次に、お店のページを開きます。', at: t0 }]), '次に、お店のページを開きます。');
+  // 英語の思考は出さない（前の一歩の言葉のまま）
+  assert.equal(L.liveLineText([{ kind: 'tool', activity: 'お店のページを見ています', at: t0 }, { kind: 'thinking', text: 'Let me check.', at: t0 + 1 }]), 'お店のページを見ています');
+  assert.equal(L.liveLineText([{ kind: 'tool', activity: '注文の画面を開いています', at: t0 }, { kind: 'text', text: '注文できたよ', at: t0 + 1 }]), '返事を書いています');
+  assert.equal(L.elapsedText(t0, t0 + 14_000), '14秒');
+  assert.equal(L.elapsedText(t0, t0 + 65_000), '1分05秒');
+  assert.equal(L.elapsedText(t0, t0 + 3_725_000), '1時間02分');
+  for (const s of [L.liveLineText([]), ...L.liveRows([], t0, t0).map((r) => r.label)]) assert.ok(!s.includes('準備'), s);
+});
+
+test('作業中の一覧: 時刻・かかった秒数・同じ言葉はまとめる・書きかけの返事は中身を出さない', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-24T10:00:00');
+  const rows = L.liveRows([
+    { kind: 'tool', activity: 'お店のページを見ています', at: t0 + 5_000 },
+    { kind: 'tool', activity: 'お店のページを見ています', at: t0 + 9_000 },
+    { kind: 'text', text: 'カートを確かめます。', at: t0 + 13_000 },
+    { kind: 'tool', activity: '注文の画面を開いています', at: t0 + 14_000 },
+    { kind: 'text', text: '注文できたよ。合計1,135円', at: t0 + 20_000 },
+  ], t0 + 26_000, t0);
+  assert.deepEqual(rows.map((r) => [r.label, r.count, r.seconds, r.now]), [
+    ['考えています', 1, 5, false],
+    ['お店のページを見ています', 2, 8, false],
+    ['カートを確かめます。', 1, 1, false],
+    ['注文の画面を開いています', 1, 6, false],
+    ['返事を書いています', 1, 6, true],
+  ]);
+  assert.equal(L.clockText(t0 + 5_000), '10:00:05');
+  // 秒数の起点: 最後の返事より後に送った一番早い発言（追い連絡で数え直さない）。30分より前の発言は使わない
+  assert.equal(L.liveStartedAt(t0 + 3_000, [t0, t0 + 40_000]), t0);
+  assert.equal(L.liveStartedAt(t0 + 3_000, [t0 - 3_600_000]), t0 + 3_000);
+  assert.equal(L.liveStartedAt(null, [t0]), t0);
+  assert.deepEqual(L.sentSinceReply([
+    { sender_type: 'human', created_at: '2026-10-24T09:00:00Z' },
+    { sender_type: 'ai', created_at: '2026-10-24T09:01:00Z' },
+    { sender_type: 'human', created_at: '2026-10-24T09:05:00Z' },
+    { sender_type: 'human', created_at: '2026-10-24T09:05:40Z' },
+  ]), [Date.parse('2026-10-24T09:05:00Z'), Date.parse('2026-10-24T09:05:40Z')]);
+});
+
+// 2026-10-24 見直し: 日本語の後に続く英語の文がそのまま出ていた・「準備しています」が残っていた
+test('作業中の1行: 文ごとに判定し、英語が主の文は出さず、準備・起動の言葉は「考えています」', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-24T10:00:00');
+  assert.equal(L.shownLine('まず画面を確かめる。Let me check the cart first.'), 'まず画面を確かめる。');
+  assert.equal(L.shownLine('Let me check. 次に、お店のページを開きます。'), '次に、お店のページを開きます。');
+  assert.equal(L.shownLine('Now I will open the 設定 page.'), '');
+  assert.equal(L.shownLine('GitHub の PR を作ります。'), 'GitHub の PR を作ります。');
+  for (const t of ['準備しています。', '今、準備中です', '起動しています'])
+    assert.equal(L.shownLine(t), '考えています', t);
+  const ev = (event_type, content, metadata, s) => ({ event_type, content, metadata, created_at: new Date(t0 + s * 1000).toISOString() });
+  const events = [
+    ev('reasoning', '準備しています。', { kind: 'thinking' }, 1),
+    ev('tool_use', null, { activity: 'お店のページを見ています' }, 3),
+    ev('reasoning', 'カートを確かめた。Let me open the order page now.', { kind: 'thinking' }, 6),
+    ev('reasoning', 'Thinking...', null, 7),
+  ];
+  const steps = L.liveStepsFromEvents(events);
+  assert.equal(steps.length, 3);
+  assert.equal(L.liveLineText(steps), 'カートを確かめた。');
+  const rows = L.liveRows(steps, t0 + 10_000, t0).map((r) => r.label);
+  assert.deepEqual(rows, ['考えています', 'お店のページを見ています', 'カートを確かめた。']);
+  for (const r of rows) assert.ok(!/[A-Za-z]{3}/.test(r) && !r.includes('準備'), r);
+  // 英語だけの思考なら、1行は前の道具の言葉のまま
+  assert.equal(L.liveLineText(L.liveStepsFromEvents([events[1], ev('reasoning', 'Checking the cart.', { kind: 'thinking' }, 8)])), 'お店のページを見ています');
+});
+
+test('PC・スマホ・開発室とも、作業中の1行は同じ関数を通る（自前の変換を持たない）', () => {
+  const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+  const pc = read('../frontend/src/components/layout/project-chat-panel.tsx');
+  assert.match(pc, /from '@\/lib\/chat-shapes\/live-line'/);
+  for (const fn of ['liveStepsFromEvents', 'liveStartedAt', 'sentSinceReply', 'liveLineText', 'liveRows']) assert.ok(pc.includes(fn), `PC: ${fn}`);
+  const phone = read('../mobile/chatTimeline.ts') + read('../mobile/live-line-view.tsx');
+  assert.match(phone, /from '\.\/chat-shapes-live-line'/);
+  for (const fn of ['liveStepsFromEvents', 'liveStartedAt', 'sentSinceReply', 'liveLineText', 'liveRows']) assert.ok(phone.includes(fn), `スマホ: ${fn}`);
+  for (const src of [pc, phone]) assert.ok(!/function (toLiveSteps|liveStepsOf)\b/.test(src), '自前の変換が残っている');
+  // 開発室の画面は git の外（成果物）。この場所にある時だけ見る
+  const dev = new URL('../frontend/src/app/artifacts/dev-lead/page-body.tsx', import.meta.url);
+  if (existsSync(dev)) {
+    const src = readFileSync(dev, 'utf8');
+    for (const fn of ['liveStepsFromEvents', 'liveStartedAt', 'sentSinceReply', 'liveLineText', 'liveRows']) assert.ok(src.includes(fn), `開発室: ${fn}`);
+    assert.ok(!/function liveStepsOf\b/.test(src), '開発室に自前の変換が残っている');
+  }
 });
