@@ -18,6 +18,8 @@ from app.services.auth_service import TokenData
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["files"])
+from app.api.resumable_upload_routes import router as resumable_router
+router.include_router(resumable_router)
 
 # Upload directory - relative to project root
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
@@ -25,11 +27,11 @@ UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {
-    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".avif"},
     "document": {".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"},
     "archive": {".zip", ".rar", ".7z", ".tar", ".gz"},
-    "audio": {".mp3", ".wav", ".ogg", ".m4a", ".flac"},
-    "video": {".mp4", ".avi", ".mov", ".mkv", ".webm"},
+    "audio": {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus"},
+    "video": {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".3gp"},
 }
 
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB (スマホ動画は100MB超が多いため引き上げ)
