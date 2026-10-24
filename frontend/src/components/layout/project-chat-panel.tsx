@@ -70,7 +70,7 @@ import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRec
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { JOB_STATE_TEXT, readJobReport, type JobReport } from '@/lib/chat-shapes/job-report';
-import { clockText, elapsedText, liveLineText, liveRows, secondsText, turnStartedAt, type LiveStep } from '@/lib/chat-shapes/live-line';
+import { clockText, elapsedText, liveLineText, liveRows, liveStartedAt, liveStepsFromEvents, secondsText, sentSinceReply, type LiveStep } from '@/lib/chat-shapes/live-line';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -105,7 +105,7 @@ type StepInfo = {
 
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
-  | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean; startedAt?: number | null };
+  | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean; startedAt?: number | null; live?: LiveStep[] };
 
 // 部品（選択・入力）の答えを送る時の追加情報: 照合情報、部品が決めた送信 ID（保存されたと分かるまで同じ ID で送る）、
 // 保存された／保存されていない（not saved）／分からない（unknown）の知らせ
@@ -140,18 +140,6 @@ function useShowWork(): boolean {
   return useSyncExternalStore(subscribeShowWork, readShowWork, () => SHOW_WORK_DEFAULT);
 }
 
-/** 画面の一歩を、作業中の1行の決まり（lib/chat-shapes/live-line.ts。スマホ・開発室と同じ）の形にする */
-function toLiveSteps(steps: StepInfo[]): LiveStep[] {
-  return steps
-    .filter((st) => !(st.type === 'reasoning' && (!st.label || st.label === 'Thinking...')))
-    .map((st) => ({
-      kind: st.type === 'reasoning' ? 'text' : st.type,
-      text: st.type === 'tool' ? undefined : st.label,
-      activity: st.type === 'tool' ? st.activity : undefined,
-      at: st.at,
-    }));
-}
-
 /** 1秒ごとに進む時計（作業中の1行の経過秒数用。この行だけ描き直す） */
 function useNowEverySecond(): number {
   const [now, setNow] = useState(() => Date.now());
@@ -166,10 +154,9 @@ function useNowEverySecond(): number {
  * 点が3つ動く目印と、今していることの1行＋送ってからの秒数。行は増やさず、書き換えるだけ。
  * 押すと、このターンでやったことが時刻とかかった秒数つきで全部開き、もう一度押すと閉じる（2026-10-24）
  */
-function LiveLine({ steps, startedAt }: { steps: StepInfo[]; startedAt?: number | null }) {
+function LiveLine({ live, startedAt }: { live: LiveStep[]; startedAt?: number | null }) {
   const now = useNowEverySecond();
   const [open, setOpen] = useState(false);
-  const live = toLiveSteps(steps);
   const text = liveLineText(live);
   const from = startedAt ?? live.find((st) => st.at)?.at ?? null;
   const rows = open ? liveRows(live, now, from) : [];
@@ -213,10 +200,13 @@ function InlineProcessBlock({
   steps,
   isLive = false,
   startedAt,
+  live = [],
 }: {
   steps: StepInfo[];
   isLive?: boolean;
   startedAt?: number | null;
+  /** 作業中の1行と一覧の一歩（今の作業の出来事ぜんぶ。lib/chat-shapes/live-line.ts liveStepsFromEvents） */
+  live?: LiveStep[];
   defaultCollapsed?: boolean; // kept for call-site compatibility (unused)
 }) {
   const showWork = useShowWork();
@@ -230,7 +220,7 @@ function InlineProcessBlock({
     return (
       <div className="my-1">
         {media.length > 0 ? <TurnTextSegment text={media.join('\n')} /> : null}
-        <LiveLine steps={steps} startedAt={startedAt} />
+        <LiveLine live={live} startedAt={startedAt} />
       </div>
     );
   }
@@ -2645,9 +2635,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
     const chronologicalMessages = collapseCalls([...messages].reverse()).map((m) => tidyRelayMessage(m, projectId));
     const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
     const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
-    // 作業中の1行の経過秒数の起点に使う、本人が送った時刻（一番新しい発言が本人の時だけ）
-    const newestMsg = chronologicalMessages[chronologicalMessages.length - 1];
-    const sentAt = newestMsg?.sender_type === 'human' ? new Date(newestMsg.created_at).getTime() || null : null;
+    // 作業中の1行の秒数の起点に使う、最後のダンの返事より後に本人が送った時刻（追い連絡があっても最初に送った時から数える）
+    const sentTimes = sentSinceReply(chronologicalMessages);
     // Anchor the live execution block to the current RUN's start, not the last
     // human message. Without this, a follow-up sent mid-run (a newer human msg)
     // drags the live block below it, so Dan's in-progress output appears to jump
@@ -2729,6 +2718,9 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
           return leftTime - rightTime;
         });
 
+      // 作業中の1行と一覧は、追い連絡でターンが分かれても今の作業の出来事ぜんぶ（スマホと同じ。live-line.ts）
+      const liveAll = liveStepsFromEvents(liveGroups.flatMap((g) => g.events));
+      const liveFrom = liveStartedAt(liveAll.find((st) => st.at)?.at, sentTimes);
       liveGroups.forEach((group, index) => {
         const steps = group.events.map(eventToStep);
         if (steps.length === 0) return;
@@ -2742,7 +2734,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             id: `live-${projectId}-${group.key}`,
             steps,
             isLive: index === liveGroups.length - 1,
-            startedAt: turnStartedAt(steps.find((st) => st.at)?.at, index === liveGroups.length - 1 ? sentAt : null),
+            startedAt: liveFrom,
+            live: liveAll,
           },
           sortKey: startedAfterSend ? Number.MAX_SAFE_INTEGER - 500 + index : groupTime,
           subKey: 2,
@@ -2760,7 +2753,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             type: 'reasoning',
           }],
           isLive: true,
-          startedAt: sentAt ?? (runStart ? new Date(runStart).getTime() || null : null),
+          startedAt: liveStartedAt(null, sentTimes) ?? (runStart ? new Date(runStart).getTime() || null : null),
+          live: [],
         },
         // 「考え中」は出来事ではなく状態なので、いつも一番下（docs/current/chat-timeline-definition.md §2）。
         // 送った直後のメッセージ（pending、サーバーの時刻がまだ無い）は MAX-1000 番台に置かれるので、
@@ -3344,6 +3338,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
                       steps={item.steps}
                       isLive={item.isLive}
                       startedAt={item.startedAt}
+                      live={item.live}
                       defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
                     />
                   );

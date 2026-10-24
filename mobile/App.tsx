@@ -1800,7 +1800,7 @@ function AppMain() {
   // それ以外は記録の最新の一歩。
   const typingLabel = useMemo(() => {
     // 作業の一覧を出さない時は、作業の記録に添えた平易な1行（道具の名前やコマンドは出さない）
-    if (!SHOW_WORK) return liveLineOf(liveTurnGroups[liveTurnGroups.length - 1]?.blocks || []);
+    if (!SHOW_WORK) return liveLineOf(liveTurnGroups.flatMap((g) => g.live));
     if (activity && activity !== 'Thinking...') return activity;
     const last = liveTurnGroups[liveTurnGroups.length - 1]?.blocks.slice(-1)[0];
     if (!last) return '';
@@ -4262,7 +4262,7 @@ function AppMain() {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.typingBubble]}>
                     {!SHOW_WORK ? (
-                      <LiveLineView blocks={[]} startedAt={item.startedAt} text={typingLabel || '考えています'} />
+                      <LiveLineView live={item.live || []} startedAt={item.startedAt} />
                     ) : (
                       <>
                         <TypingDots color="#7a8f86" />
@@ -4288,7 +4288,7 @@ function AppMain() {
                     {item.typing && !SHOW_WORK ? (
                       // 一番下の作業ログの吹き出しの中に、3つの点と今していること・秒数（押すと作業の一覧が開く）
                       <View style={{ marginTop: 4 }}>
-                        <LiveLineView blocks={item.blocks} startedAt={item.startedAt} text={liveLineOf(item.blocks)} />
+                        <LiveLineView live={item.live || []} startedAt={item.startedAt} />
                       </View>
                     ) : item.typing ? (
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）

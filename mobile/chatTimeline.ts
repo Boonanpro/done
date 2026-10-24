@@ -10,7 +10,7 @@
 // App.tsx から切り出してあるのは、UI 抜きでこの並び順をテストするため
 // （scripts/test_chat_timeline.ts）。
 
-import { liveLineText, turnStartedAt, type LiveStep } from './chat-shapes-live-line';
+import { liveLineText, liveStartedAt, liveStepsFromEvents, sentSinceReply, type LiveStep } from './chat-shapes-live-line';
 
 // One step in an AI turn's inline timeline (mirrors the web chat's ai_context.blocks).
 // thinking: 思考の日本語の要約（サーバーが metadata.kind=thinking を付ける）。作業中の1行と一覧だけに使い、文としては出さない。
@@ -68,6 +68,8 @@ export type LiveTurnGroup = {
   key: string;
   blocks: TurnBlock[];
   anchorMs: number;
+  /** 作業中の1行と一覧の一歩（PC・開発室と同じ変換。chat-shapes-live-line.ts liveStepsFromEvents） */
+  live: LiveStep[];
 };
 
 // タイムライン構築に必要な最小限のメッセージ形（App.tsx の MessageResponse が満たす）。
@@ -85,8 +87,8 @@ export type TimelineMessageLike = {
 // merged into ONE chronologically sorted timeline.
 export type ChatListItem<M extends TimelineMessageLike = TimelineMessageLike> =
   | { kind: 'message'; key: string; sortMs: number; msg: M }
-  | { kind: 'live'; key: string; sortMs: number; blocks: TurnBlock[]; typing?: boolean; startedAt?: number | null }
-  | { kind: 'typing'; key: string; sortMs: number; startedAt?: number | null };
+  | { kind: 'live'; key: string; sortMs: number; blocks: TurnBlock[]; typing?: boolean; startedAt?: number | null; live?: LiveStep[] }
+  | { kind: 'typing'; key: string; sortMs: number; startedAt?: number | null; live?: LiveStep[] };
 
 // すでに保存済み ai_message として届いたターン。ライブ側で二重表示しないために使う。
 export function collectSavedTurnIds(messages: TimelineMessageLike[]): Set<string> {
@@ -141,6 +143,7 @@ export function groupLiveTurns(args: {
       out.push({
         key: part === 0 ? key : `${key}#${part}`,
         blocks: segment.map(eventToStep),
+        live: liveStepsFromEvents(segment),
         anchorMs: new Date(segment[0].created_at).getTime() || runStartMs,
       });
       part += 1;
@@ -215,16 +218,14 @@ export function buildChatListItems<M extends TimelineMessageLike>(args: {
   }));
   const sorted = [...items, ...liveItems].sort((a, b) => b.sortMs - a.sortMs);
   if (!showLiveTurn) return sorted;
-  // 作業中の1行の経過秒数の起点: 一番新しい発言が本人の物ならその時刻（送った時）。PC と同じ（live-line.ts turnStartedAt）
-  const newest = messages[messages.length - 1];
-  const sentAt = newest && newest.sender_type === 'human' ? new Date(newest.created_at).getTime() || null : null;
+  // 作業中の1行と一覧は、追い連絡で吹き出しが分かれても今の作業の一歩ぜんぶ。秒数は最初に送った時から
+  // （2026-10-24 見直し: 追い連絡のたびに一覧が消えて0から数え直していた。PC と同じ決まり。live-line.ts）
+  const live = args.liveTurnGroups.flatMap((g) => g.live).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  const startedAt = liveStartedAt(live.find((st) => st.at)?.at, sentSinceReply(messages));
   // 3つの点は一番下。一番下が作業ログの吹き出しなら、その吹き出しの中の一番下に入れる（吹き出しを2つにしない）。
   const bottom = sorted[0];
-  if (bottom && bottom.kind === 'live') {
-    const startedAt = turnStartedAt(bottom.blocks.find((b) => b.at)?.at, sentAt);
-    return [{ ...bottom, typing: true, startedAt }, ...sorted.slice(1)];
-  }
-  return [{ kind: 'typing', key: '__typing__', sortMs: BOTTOM, startedAt: sentAt }, ...sorted];
+  if (bottom && bottom.kind === 'live') return [{ ...bottom, typing: true, startedAt, live }, ...sorted.slice(1)];
+  return [{ kind: 'typing', key: '__typing__', sortMs: BOTTOM, startedAt, live }, ...sorted];
 }
 
 // 送信案の「📤 …を送信済み」「🗑 送信案を破棄」の行は会話の記録としてだけ残し、画面には出さない
@@ -379,22 +380,10 @@ export function tidyRelayMessage<M extends VoiceLike>(msg: M, projectId?: string
   return msg;
 }
 
-/** 画面の一歩を、作業中の1行の決まり（chat-shapes-live-line.ts。PC・開発室と同じ）の形にする */
-export function toLiveSteps(blocks: TurnBlock[]): LiveStep[] {
-  return blocks
-    .filter((b) => !((b.type === 'text' || b.type === 'reasoning') && (!b.text || b.text === 'Thinking...')))
-    .map((b) => ({
-      kind: b.type === 'reasoning' ? 'text' : b.type,
-      text: b.type === 'tool' ? undefined : b.text,
-      activity: b.type === 'tool' ? b.activity : undefined,
-      at: b.at,
-    }));
-}
-
 /**
  * 作業中の1行: 道具ごとの言葉（activity）か思考の要約の一番新しい物。返事を書き始めていれば「返事を書いています」、
  * 何も無ければ「考えています」。PC の画面と同じ決まり（chat-shapes-live-line.ts liveLineText）。
  */
-export function liveLineOf(blocks: TurnBlock[]): string {
-  return liveLineText(toLiveSteps(blocks));
+export function liveLineOf(live: LiveStep[]): string {
+  return liveLineText(live);
 }

@@ -4,8 +4,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { clockText, elapsedText, liveRows, secondsText } from './chat-shapes-live-line';
-import { toLiveSteps, type TurnBlock } from './chatTimeline';
+import { clockText, elapsedText, liveLineText, liveRows, secondsText, type LiveStep } from './chat-shapes-live-line';
 import { TypingDots } from './typing-dots';
 
 // 畳んだ物を開け閉めしても、押した見出しを画面の同じ位置に留める（チャットの一覧は下から積む作りなので、
@@ -17,7 +16,7 @@ export const KeepInPlace = createContext<((moved: number) => void) | null>(null)
  * 全部開き、もう一度押すと閉じる。PC・開発室と同じ決まり（chat-shapes-live-line.ts。2026-10-24）。
  * 開け閉めしても1行を画面の同じ位置に留める（TurnToolGroup と同じ KeepInPlace）。
  */
-export function LiveLineView({ blocks, startedAt, text }: { blocks: TurnBlock[]; startedAt?: number | null; text: string }) {
+export function LiveLineView({ live, startedAt }: { live: LiveStep[]; startedAt?: number | null }) {
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -37,7 +36,8 @@ export function LiveLineView({ blocks, startedAt, text }: { blocks: TurnBlock[];
     before.current = null;
     header.current.measureInWindow((_x, y) => { if (Math.abs(y - was) > 1) keep(y - was); });
   }, [open, keep]);
-  const steps = toLiveSteps(blocks);
+  const steps = live;
+  const text = liveLineText(steps);
   const from = startedAt ?? steps.find((st) => st.at)?.at ?? null;
   const rows = open ? liveRows(steps, now, from) : [];
   return (

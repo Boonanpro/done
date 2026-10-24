@@ -12,7 +12,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 type Latest = { version_name: string; version_code: number; url: string; size?: number | null; notes?: string | null };
 type Installed = { versionName: string; versionCode: number };
-type Native = {
+export type Native = {
   info(): Promise<Installed>;
   canInstall(): Promise<boolean>;
   openInstallSettings(): Promise<boolean>;
@@ -39,27 +39,41 @@ export function isNewer(latest: Latest | null, installed: Installed | null): boo
   return !!latest && !!installed && Number.isFinite(latest.version_code) && latest.version_code > installed.versionCode;
 }
 
-export function useAppUpdate(apiBase: string, token: string | null): AppUpdate {
-  const updater = useRef(nativeUpdater()).current;
-  const [installed, setInstalled] = useState<Installed | null>(null);
+/**
+ * 最新版を問い合わせるのは、起動した時と画面に戻った時の1回ずつだけ（2026-10-24 見直し: 取得のたびに latest が変わり、
+ * それに頼る関数が作り直されて useEffect が再び問い合わせる、が回り続けていた）。問い合わせと［更新する］は
+ * 一度作ったら変わらない関数にし、今の値は ref から読む。updaterOverride は試験台で端末の部品の代わりを渡す口。
+ */
+export function useAppUpdate(apiBase: string, token: string | null, updaterOverride?: Native | null): AppUpdate {
+  const updater = useRef(updaterOverride !== undefined ? updaterOverride : nativeUpdater()).current;
   const [latest, setLatest] = useState<Latest | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>('none');
   const [progress, setProgress] = useState(0);
   const phaseRef = useRef<UpdatePhase>('none');
   phaseRef.current = phase;
+  const latestRef = useRef<Latest | null>(null);
+  const installedRef = useRef<Installed | null>(null);
+  const baseRef = useRef(apiBase);
+  baseRef.current = apiBase;
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   // 1回の［更新する］で落とすのは1回だけ（設定から戻った時に画面の「戻った」の知らせが2回来ることがある）
   const runningRef = useRef(false);
+  const checkingRef = useRef(false);
 
   const check = useCallback(async () => {
-    if (!updater) return;
+    if (!updater || checkingRef.current) return;
+    checkingRef.current = true;
     try {
-      const mine = installed ?? (await updater.info());
-      if (!installed) setInstalled(mine);
+      const mine = installedRef.current ?? (await updater.info());
+      installedRef.current = mine;
       // ログインしていなくても見る（ログインの画面にも出す。最新版の情報は誰が見てもよい物だけ）
-      const res = await fetch(`${apiBase}/api/v1/push/native/app-latest`, token ? { headers: { Authorization: `Bearer ${token}` } } : {});
+      const t = tokenRef.current;
+      const res = await fetch(`${baseRef.current}/api/v1/push/native/app-latest`, t ? { headers: { Authorization: `Bearer ${t}` } } : {});
       if (!res.ok) return;
       const body = (await res.json()) as { latest?: Latest | null };
       const next = body.latest ?? null;
+      latestRef.current = next;
       setLatest(next);
       const busy = phaseRef.current === 'downloading' || phaseRef.current === 'permission' || phaseRef.current === 'installing';
       if (!busy) setPhase(isNewer(next, mine) ? 'ready' : 'none');
@@ -72,11 +86,14 @@ export function useAppUpdate(apiBase: string, token: string | null): AppUpdate {
       if (phaseRef.current === 'installing' && !isNewer(next, mine)) setPhase('none');
     } catch {
       /* 次に戻った時にまた見る */
+    } finally {
+      checkingRef.current = false;
     }
-  }, [apiBase, installed, token, updater]);
+  }, [updater]);
 
   const run = useCallback(async () => {
-    if (!updater || !latest || runningRef.current) return;
+    const target = latestRef.current;
+    if (!updater || !target || runningRef.current) return;
     runningRef.current = true;
     try {
       if (!(await updater.canInstall())) {
@@ -85,11 +102,11 @@ export function useAppUpdate(apiBase: string, token: string | null): AppUpdate {
       }
       setPhase('downloading');
       setProgress(0);
-      const target = `${FileSystem.cacheDirectory}Done-${latest.version_name}.apk`;
-      await FileSystem.deleteAsync(target, { idempotent: true }).catch(() => undefined);
-      const url = /^https?:/.test(latest.url) ? latest.url : `${apiBase}${latest.url}`;
-      const dl = FileSystem.createDownloadResumable(url, target, {}, (p) => {
-        const total = p.totalBytesExpectedToWrite || latest.size || 0;
+      const file = `${FileSystem.cacheDirectory}Done-${target.version_name}.apk`;
+      await FileSystem.deleteAsync(file, { idempotent: true }).catch(() => undefined);
+      const url = /^https?:/.test(target.url) ? target.url : `${baseRef.current}${target.url}`;
+      const dl = FileSystem.createDownloadResumable(url, file, {}, (p) => {
+        const total = p.totalBytesExpectedToWrite || target.size || 0;
         if (total > 0) setProgress(Math.min(1, p.totalBytesWritten / total));
       });
       const done = await dl.downloadAsync();
@@ -102,12 +119,13 @@ export function useAppUpdate(apiBase: string, token: string | null): AppUpdate {
     } finally {
       runningRef.current = false;
     }
-  }, [apiBase, latest, updater]);
+  }, [updater]);
 
   const openSettings = useCallback(() => {
     void updater?.openInstallSettings().catch(() => undefined);
   }, [updater]);
 
+  // 起動した時に1回、画面に戻った時（active になった時）に1回。check・run は作り直されないので、この登録は1度だけ
   useEffect(() => {
     void check();
     const sub = AppState.addEventListener('change', (state) => {

@@ -8,7 +8,12 @@
  * - 後ろに送ってからの経過（「14秒」「1分05秒」）。1秒ごとに進むので、止まっていないと分かる。
  * - 押すと、そのターンでやったことが時刻とかかった秒数つきで全部並ぶ（liveRows）。同じ言葉が続く一歩は1行にまとめる。
  *
- * PC・スマホ・開発室のチャットが同じ物を使う（スマホの写しは frontend/scripts/sync-mobile-chat-shapes.mjs が作る）。依存なし。
+ * - 出す文は1文ずつ確かめる。英語が主の文は出さない（思考は英語で流れることがある）。「準備しています」のような
+ *   起動の言葉は「考えています」に置き換える（本人にとって準備中か考え中かの区別は要らない）。
+ * - 追い連絡でターンや吹き出しが分かれても、返事が保存されるまでの作業は1つの一覧にまとめ、秒数は最初に送った時から。
+ *
+ * 画面ごとの記録（作業の出来事 execution_events）は liveStepFromEvent で LiveStep にする。PC・スマホ・開発室の
+ * チャットが同じ物を使う（スマホの写しは frontend/scripts/sync-mobile-chat-shapes.mjs が作る）。依存なし。
  */
 
 /** 画面ごとの記録を、この形に直して渡す */
@@ -26,8 +31,12 @@ export type LiveStep = {
 export const LINE_THINKING = '考えています';
 export const LINE_WRITING = '返事を書いています';
 
-const JA = /[぀-ヿ㐀-鿿]/;
+const JA_CHAR = /[\u3040-\u30ff\u3400-\u9fff]/g;
+const LATIN_CHAR = /[A-Za-z]/g;
 const LINE_MAX = 48;
+/** 起動・準備の言葉（本人には「考えています」と同じ）。短い文で「準備・起動」が中心の物だけ（長い説明の文は残す） */
+const PREPARING = /(?:準備|起動)(?:中|して|を|が|に)/;
+const isPreparing = (sentence: string) => sentence.length <= 24 && PREPARING.test(sentence);
 
 function plainText(s: string): string {
   return s
@@ -43,13 +52,34 @@ function clip(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-/** 日本語の文の最後の1文（思考の要約の最後は「次にすること」が多い）。日本語が無ければ "" */
-export function lastSentence(text: string | undefined, max = LINE_MAX): string {
+/** 日本語が主の文か（日本語の字が2つ以上で、英字が日本語の字の3倍を超えない。「GitHub の PR を作ります。」は出す） */
+export function isJapaneseSentence(sentence: string): boolean {
+  const ja = (sentence.match(JA_CHAR) || []).length;
+  const latin = (sentence.match(LATIN_CHAR) || []).length;
+  return ja >= 2 && latin <= ja * 3;
+}
+
+/** 出してよい文だけ（古い順）。英語が主の文は落とし、起動・準備の言葉は「考えています」にする */
+export function shownSentences(text: string | undefined): string[] {
   const t = plainText(text || '');
-  if (!t || !JA.test(t)) return '';
-  const parts = t.split(/(?<=[。！？!?])\s*/).map((p) => p.trim()).filter(Boolean);
-  const last = parts.length ? parts[parts.length - 1] : t;
-  return clip(last, max);
+  if (!t) return [];
+  return t
+    .split(/(?<=[。！？!?])\s*|(?<=\.)\s+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .filter(isJapaneseSentence)
+    .map((p) => (isPreparing(p) ? LINE_THINKING : p));
+}
+
+/** 1行に出す言葉（道具の言葉にも同じ決まり）。出せなければ "" */
+export function shownLine(text: string | undefined, max = LINE_MAX): string {
+  const parts = shownSentences(text);
+  return parts.length ? clip(parts[parts.length - 1], max) : '';
+}
+
+/** 日本語の文の最後の1文（思考の要約の最後は「次にすること」が多い）。出せる文が無ければ "" */
+export function lastSentence(text: string | undefined, max = LINE_MAX): string {
+  return shownLine(text, max);
 }
 
 /** 作業中の1行 */
@@ -61,7 +91,10 @@ export function liveLineText(steps: LiveStep[]): string {
       const line = lastSentence(st.text);
       if (line) return line;
     }
-    if (st.kind === 'tool' && st.activity) return st.activity;
+    if (st.kind === 'tool' && st.activity) {
+      const line = shownLine(st.activity);
+      if (line) return line;
+    }
   }
   return LINE_THINKING;
 }
@@ -105,13 +138,13 @@ export type LiveRow = {
 };
 
 function rowLabel(st: LiveStep, isLast: boolean): string {
-  if (st.kind === 'tool') return st.activity || '';
+  if (st.kind === 'tool') return shownLine(st.activity, 120);
   if (st.kind === 'thinking') return lastSentence(st.text, 120);
   if (st.kind === 'text') {
     // 最後の文は書きかけの返事かもしれないので、中身は出さない（返事は保存されてから出る）
     if (isLast) return LINE_WRITING;
-    const t = plainText(st.text || '');
-    return t ? clip(t, 120) : '';
+    const parts = shownSentences(st.text);
+    return parts.length ? clip(parts.join(''), 120) : '';
   }
   return 'うまくいかなかったので、やり直しています';
 }
@@ -127,8 +160,9 @@ export function liveRows(steps: LiveStep[], nowMs: number, startedAt?: number | 
     const label = rowLabel(st, i === steps.length - 1);
     if (!label) return;
     const prev = rows[rows.length - 1];
-    if (prev && prev.label === label && prev.key !== 'start') {
-      prev.count += 1;
+    // 同じ言葉が続く一歩は1行に（「考えています」が続く時は数を付けない）
+    if (prev && prev.label === label && (prev.key !== 'start' || label === LINE_THINKING)) {
+      if (label !== LINE_THINKING) prev.count += 1;
       return;
     }
     rows.push({ key: `s${i}`, label, count: 1, at: st.at ?? null, seconds: null, now: false });
@@ -146,14 +180,59 @@ export function liveRows(steps: LiveStep[], nowMs: number, startedAt?: number | 
   return rows;
 }
 
+/** 作業の出来事（execution_events の1行。PC・スマホ・開発室とも同じ形で受け取る） */
+export type LiveEventLike = {
+  event_type: string;
+  content?: string | null;
+  metadata?: Record<string, unknown> | null;
+  created_at?: string | null;
+};
+
+/** 作業の出来事1つを、作業中の1行と一覧の一歩にする（どの画面もこれを通る）。出さない出来事は null */
+export function liveStepFromEvent(e: LiveEventLike): LiveStep | null {
+  const at = (e.created_at && Date.parse(e.created_at)) || undefined;
+  if (e.event_type === 'tool_use') {
+    const act = e.metadata?.activity;
+    return { kind: 'tool', activity: typeof act === 'string' ? act : undefined, at };
+  }
+  if (e.event_type === 'error') return { kind: 'error', text: e.content || '', at };
+  if (e.event_type === 'reasoning' || e.event_type === 'text') {
+    const text = (e.content || '').trim();
+    if (!text || text === 'Thinking...') return null;
+    return { kind: e.metadata?.kind === 'thinking' ? 'thinking' : 'text', text, at };
+  }
+  return null;
+}
+
+/** 作業の出来事の並び → 一歩の並び（時刻順） */
+export function liveStepsFromEvents(events: LiveEventLike[]): LiveStep[] {
+  return events
+    .map(liveStepFromEvent)
+    .filter((st): st is LiveStep => !!st)
+    .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+}
+
 /**
- * 送ってからの経過の起点: このターンの最初の一歩と、その前に本人が送った時刻のうち早い方。
- * 本人の発言が無い起き方（並行作業の報告で起きた等）は最初の一歩の時刻。lastHumanAt は、画面の一番新しい発言が
- * 本人の物の時だけ渡す。30分より前の発言は起点にしない（前の話の続きで起きたターン）。
+ * 作業中の秒数の起点（2026-10-24 見直し: 追い連絡のたびに0から数え直していた）。sentTimes は、最後に保存された
+ * ダンの返事より後に本人が送った発言の時刻。その一番早い物（最初に送った時）から数える。最初の一歩より30分以上
+ * 前の発言は起点にしない。本人の発言が無い起き方（並行作業の報告で起きた等）は最初の一歩の時刻。
  */
-export function turnStartedAt(firstStepAt: number | null | undefined, lastHumanAt: number | null | undefined): number | null {
+export function liveStartedAt(firstStepAt: number | null | undefined, sentTimes: number[]): number | null {
   const a = firstStepAt && Number.isFinite(firstStepAt) ? firstStepAt : null;
-  const h = lastHumanAt && Number.isFinite(lastHumanAt) ? lastHumanAt : null;
-  if (a && h) return h <= a && a - h < 30 * 60_000 ? h : a;
+  const sent = sentTimes.filter((t) => Number.isFinite(t) && t > 0 && (!a || a - t < 30 * 60_000)).sort((x, y) => x - y);
+  const h = sent.length ? sent[0] : null;
+  if (a && h) return Math.min(a, h);
   return a ?? h;
+}
+
+/** 最後に保存されたダンの返事より後に、本人が送った発言の時刻（古い順）。messages は古い順 */
+export function sentSinceReply(messages: { sender_type: string; created_at: string }[]): number[] {
+  const out: number[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.sender_type !== 'human') break;
+    const t = Date.parse(m.created_at);
+    if (Number.isFinite(t)) out.unshift(t);
+  }
+  return out;
 }

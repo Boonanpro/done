@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { ShapeNode, parseShapeProgram, programDepth, safeLinkUrl, shapeToPlainMarkdown } from '../frontend/src/lib/chat-shapes/plain.ts';
 import * as mobile from '../mobile/chat-shapes-plain.ts';
@@ -180,8 +181,59 @@ test('作業中の一覧: 時刻・かかった秒数・同じ言葉はまとめ
     ['返事を書いています', 1, 6, true],
   ]);
   assert.equal(L.clockText(t0 + 5_000), '10:00:05');
-  // 送った時刻は、30分より前の発言なら起点にしない
-  assert.equal(L.turnStartedAt(t0 + 3_000, t0), t0);
-  assert.equal(L.turnStartedAt(t0 + 3_000, t0 - 3_600_000), t0 + 3_000);
-  assert.equal(L.turnStartedAt(null, t0), t0);
+  // 秒数の起点: 最後の返事より後に送った一番早い発言（追い連絡で数え直さない）。30分より前の発言は使わない
+  assert.equal(L.liveStartedAt(t0 + 3_000, [t0, t0 + 40_000]), t0);
+  assert.equal(L.liveStartedAt(t0 + 3_000, [t0 - 3_600_000]), t0 + 3_000);
+  assert.equal(L.liveStartedAt(null, [t0]), t0);
+  assert.deepEqual(L.sentSinceReply([
+    { sender_type: 'human', created_at: '2026-10-24T09:00:00Z' },
+    { sender_type: 'ai', created_at: '2026-10-24T09:01:00Z' },
+    { sender_type: 'human', created_at: '2026-10-24T09:05:00Z' },
+    { sender_type: 'human', created_at: '2026-10-24T09:05:40Z' },
+  ]), [Date.parse('2026-10-24T09:05:00Z'), Date.parse('2026-10-24T09:05:40Z')]);
+});
+
+// 2026-10-24 見直し: 日本語の後に続く英語の文がそのまま出ていた・「準備しています」が残っていた
+test('作業中の1行: 文ごとに判定し、英語が主の文は出さず、準備・起動の言葉は「考えています」', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-24T10:00:00');
+  assert.equal(L.shownLine('まず画面を確かめる。Let me check the cart first.'), 'まず画面を確かめる。');
+  assert.equal(L.shownLine('Let me check. 次に、お店のページを開きます。'), '次に、お店のページを開きます。');
+  assert.equal(L.shownLine('Now I will open the 設定 page.'), '');
+  assert.equal(L.shownLine('GitHub の PR を作ります。'), 'GitHub の PR を作ります。');
+  for (const t of ['準備しています。', '今、準備中です', '起動しています'])
+    assert.equal(L.shownLine(t), '考えています', t);
+  const ev = (event_type, content, metadata, s) => ({ event_type, content, metadata, created_at: new Date(t0 + s * 1000).toISOString() });
+  const events = [
+    ev('reasoning', '準備しています。', { kind: 'thinking' }, 1),
+    ev('tool_use', null, { activity: 'お店のページを見ています' }, 3),
+    ev('reasoning', 'カートを確かめた。Let me open the order page now.', { kind: 'thinking' }, 6),
+    ev('reasoning', 'Thinking...', null, 7),
+  ];
+  const steps = L.liveStepsFromEvents(events);
+  assert.equal(steps.length, 3);
+  assert.equal(L.liveLineText(steps), 'カートを確かめた。');
+  const rows = L.liveRows(steps, t0 + 10_000, t0).map((r) => r.label);
+  assert.deepEqual(rows, ['考えています', 'お店のページを見ています', 'カートを確かめた。']);
+  for (const r of rows) assert.ok(!/[A-Za-z]{3}/.test(r) && !r.includes('準備'), r);
+  // 英語だけの思考なら、1行は前の道具の言葉のまま
+  assert.equal(L.liveLineText(L.liveStepsFromEvents([events[1], ev('reasoning', 'Checking the cart.', { kind: 'thinking' }, 8)])), 'お店のページを見ています');
+});
+
+test('PC・スマホ・開発室とも、作業中の1行は同じ関数を通る（自前の変換を持たない）', () => {
+  const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+  const pc = read('../frontend/src/components/layout/project-chat-panel.tsx');
+  assert.match(pc, /from '@\/lib\/chat-shapes\/live-line'/);
+  for (const fn of ['liveStepsFromEvents', 'liveStartedAt', 'sentSinceReply', 'liveLineText', 'liveRows']) assert.ok(pc.includes(fn), `PC: ${fn}`);
+  const phone = read('../mobile/chatTimeline.ts') + read('../mobile/live-line-view.tsx');
+  assert.match(phone, /from '\.\/chat-shapes-live-line'/);
+  for (const fn of ['liveStepsFromEvents', 'liveStartedAt', 'sentSinceReply', 'liveLineText', 'liveRows']) assert.ok(phone.includes(fn), `スマホ: ${fn}`);
+  for (const src of [pc, phone]) assert.ok(!/function (toLiveSteps|liveStepsOf)\b/.test(src), '自前の変換が残っている');
+  // 開発室の画面は git の外（成果物）。この場所にある時だけ見る
+  const dev = new URL('../frontend/src/app/artifacts/dev-lead/page-body.tsx', import.meta.url);
+  if (existsSync(dev)) {
+    const src = readFileSync(dev, 'utf8');
+    for (const fn of ['liveStepsFromEvents', 'liveStartedAt', 'sentSinceReply', 'liveLineText', 'liveRows']) assert.ok(src.includes(fn), `開発室: ${fn}`);
+    assert.ok(!/function liveStepsOf\b/.test(src), '開発室に自前の変換が残っている');
+  }
 });
