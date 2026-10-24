@@ -9,6 +9,7 @@ import {Ionicons} from '@expo/vector-icons';
 import {ui} from './ui-language';
 import {useMediaRotation} from './media-rotation';
 import {useMediaImmersive} from './media-immersive';
+import {ZoomImage} from './zoom-image';
 
 export type GalleryItem={url:string;kind:'image'|'video';name?:string};
 export function mediaKind(url:string):GalleryItem['kind']|null {
@@ -72,6 +73,8 @@ export function MediaViewer({items,initialUrl,onClose}:{items:GalleryItem[];init
  const {width,height}=useWindowDimensions(),insets=useSafeAreaInsets();
  const [frame,setFrame]=useState({width,height:height});
  const [index,setIndex]=useState(()=>Math.max(0,items.findIndex(x=>x.url===initialUrl)));
+ // 写真を拡大している間は横送りを止める（指で動かすと拡大した写真の中を見る）
+ const [zoomed,setZoomed]=useState(false);
  // The player belongs to the gallery, not a virtualized page: resizing a long
  // list can temporarily recycle the selected page without interrupting playback.
  const videoSource=items[index]?.kind==='video'?items[index].url:null;
@@ -83,17 +86,17 @@ export function MediaViewer({items,initialUrl,onClose}:{items:GalleryItem[];init
  return <Modal visible={immersiveReady} hardwareAccelerated animationType="fade" onRequestClose={onClose} statusBarTranslucent navigationBarTranslucent supportedOrientations={['portrait','portrait-upside-down','landscape-left','landscape-right']}>
   <View style={s.root}>
    <View style={{flex:1,minHeight:0}} onLayout={e=>{const {width,height}=e.nativeEvent.layout;if(width>0&&height>0)setFrame(previous=>previous.width===width&&previous.height===height?previous:{width,height})}}>
-    <FlatList key={frame.width} ref={list} data={items} horizontal pagingEnabled removeClippedSubviews={false} initialScrollIndex={index} getItemLayout={(_,i)=>({length:frame.width,offset:frame.width*i,index:i})} keyExtractor={(x,i)=>`${x.url}-${i}`} showsHorizontalScrollIndicator={false} extraData={index} windowSize={3} initialNumToRender={1} maxToRenderPerBatch={3} onContentSizeChange={()=>list.current?.scrollToOffset({offset:selectedIndex.current*frame.width,animated:false})} onMomentumScrollEnd={e=>setIndex(Math.max(0,Math.min(items.length-1,Math.round(e.nativeEvent.contentOffset.x/e.nativeEvent.layoutMeasurement.width))))} renderItem={({item,index:i})=><View style={{width:frame.width,height:frame.height}}>{i===index?<MediaPage key={item.url} item={item} player={player}/>:<View style={s.root}/>}</View>}/>
+    <FlatList key={frame.width} ref={list} data={items} horizontal pagingEnabled scrollEnabled={!zoomed} removeClippedSubviews={false} initialScrollIndex={index} getItemLayout={(_,i)=>({length:frame.width,offset:frame.width*i,index:i})} keyExtractor={(x,i)=>`${x.url}-${i}`} showsHorizontalScrollIndicator={false} extraData={index} windowSize={3} initialNumToRender={1} maxToRenderPerBatch={3} onContentSizeChange={()=>list.current?.scrollToOffset({offset:selectedIndex.current*frame.width,animated:false})} onMomentumScrollEnd={e=>setIndex(Math.max(0,Math.min(items.length-1,Math.round(e.nativeEvent.contentOffset.x/e.nativeEvent.layoutMeasurement.width))))} renderItem={({item,index:i})=><View style={{width:frame.width,height:frame.height}}>{i===index?<MediaPage key={item.url} item={item} player={player} onZoomChange={setZoomed}/>:<View style={s.root}/>}</View>}/>
    </View>
    <Pressable accessibilityRole="button" accessibilityLabel={ui('Close media','メディアを閉じる')} onPress={onClose} style={[s.button,s.close,{top:Math.max(insets.top,12),right:Math.max(insets.right,12)}]}><Ionicons name="close" size={26} color="#fff"/></Pressable>
    {items[index]&&<SaveButton key={items[index].url} item={items[index]} style={{top:Math.max(insets.top,12),right:Math.max(insets.right,12)+60}}/>}
   </View>
  </Modal>;
 }
-function MediaPage({item,player}:{item:GalleryItem;player:VideoPlayer}){
+function MediaPage({item,player,onZoomChange}:{item:GalleryItem;player:VideoPlayer;onZoomChange:(zoomed:boolean)=>void}){
  const [attempt,setAttempt]=useState(0),[error,setError]=useState(false),[loading,setLoading]=useState(true);
  if(item.kind==='video')return <ViewerVideo url={item.url} player={player} onRetry={()=>void player.replaceAsync(item.url).then(()=>player.play()).catch(()=>{})}/>;
- return <View style={s.root}><Image key={attempt} source={{uri:item.url}} resizeMode="contain" style={StyleSheet.absoluteFill} accessibilityLabel={item.name||ui('Photo','画像')} onLoadStart={()=>setLoading(true)} onLoadEnd={()=>setLoading(false)} onError={()=>setError(true)}/>{loading&&!error&&<ActivityIndicator style={s.center} color="#fff"/>}{error&&<Failure retry={()=>{setError(false);setAttempt(x=>x+1)}}/>}</View>;
+ return <View style={s.root}><ZoomImage key={attempt} source={{uri:item.url}} onZoomChange={onZoomChange} accessibilityLabel={item.name||ui('Photo','画像')} onLoadStart={()=>setLoading(true)} onLoadEnd={()=>setLoading(false)} onError={()=>setError(true)}/>{loading&&!error&&<ActivityIndicator style={s.center} color="#fff"/>}{error&&<Failure retry={()=>{setError(false);setAttempt(x=>x+1)}}/>}</View>;
 }
 function ViewerVideo({url,player,onRetry}:{url:string;player:VideoPlayer;onRetry:()=>void}){
  const {status}=useEvent(player,'statusChange',{status:player.status});
