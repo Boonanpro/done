@@ -33,6 +33,7 @@ import {
   BackHandler,
   FlatList,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -1344,11 +1345,25 @@ export default function App() {
   );
 }
 
+// Android reports a hidden keyboard as one whose top is the bottom of the visible area, which in edge-to-edge sits
+// above the navigation bar, so KeyboardAvoidingView kept that bar's height as a gap under the composer after the
+// keyboard closed (2026-10-24). Only let it shrink the screen while the keyboard is really up.
+function useKeyboardShown() {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () => setShown(true));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setShown(false));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  return shown;
+}
+
 function AppMain() {
   const language = useUiLanguage();
   const voice = useVoice();
   const [projectQuery, setProjectQuery] = useState('');
   const safeInsets = useSafeAreaInsets();
+  const keyboardShown = useKeyboardShown();
   const insets = {...safeInsets, top: voice.minimized ? 0 : safeInsets.top};
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
   useEffect(() => { if (auth.status === 'signed_out') voice.stop(); }, [auth.status]);
@@ -4133,6 +4148,7 @@ function AppMain() {
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
+        enabled={Platform.OS === 'ios' || keyboardShown}
         style={styles.chatWrap}
       >
         <View
