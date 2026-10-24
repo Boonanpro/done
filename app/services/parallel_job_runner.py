@@ -23,6 +23,11 @@ from pathlib import Path
 from app.services import command_job_state as state
 from app.services import work_locks
 
+def _dan_ws():
+    from app.paths import DAN_WORKSPACE
+    return DAN_WORKSPACE.as_posix()
+
+
 logger = logging.getLogger(__name__)
 
 MODELS = {'opus': 'opus', 'fable': 'fable', 'astra': 'gpt-6-astra'}
@@ -221,7 +226,7 @@ async def _launch(job_id, s):
         user_messages='', latest_user_message=task, room_id=room, user_id=user))
     from app.services.command_center import CONFIRMATION_RULE
     system_prompt += '\n' + JOB_RULES + '\n' + CONFIRMATION_RULE + (s.get('origin_note') or '')
-    work_dir = f'D:/dan-workspace/jobs/{job_id[:8]}'
+    work_dir = f'{_dan_ws()}/jobs/{job_id[:8]}'
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     cfg = json.loads(Path(room_mcp).read_text(encoding='utf-8'))
     tools_env = cfg['mcpServers']['dan-tools'].setdefault('env', {})
@@ -259,7 +264,7 @@ async def _session(job_id, s, first):
     cmd, env, first_text, job_mcp = first
     cmd = [c for c in cmd if c != '--include-partial-messages']   # whole messages only: one progress line per step
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            env=env, cwd='D:/dan-workspace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                            env=env, cwd=_dan_ws(), creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     _procs[job_id] = proc
     lines: queue.Queue = queue.Queue()
 

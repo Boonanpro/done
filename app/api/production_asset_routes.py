@@ -4630,7 +4630,7 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         # so VFR sources can't flicker by one frame when a scrub settles.
         try:
             _pr = subprocess.run(
-                [_ffmpeg().replace("ffmpeg.exe", "ffprobe.exe"), "-v", "error",
+                [_ffprobe(), "-v", "error",
                  "-select_streams", "v:0", "-show_entries", "packet=pts_time",
                  "-of", "csv=p=0", str(src)],
                 capture_output=True, text=True, creationflags=creationflags, check=False,

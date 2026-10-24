@@ -24,7 +24,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import Svg, { Circle } from 'react-native-svg';
-import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -69,6 +69,8 @@ import {
   type TurnBlock,
   liveLineOf,
 } from './chatTimeline';
+import { KeepInPlace, LiveLineView } from './live-line-view';
+import { AppUpdateBanner, useAppUpdate } from './app-update';
 import { TypingDots } from './typing-dots';
 import { VoiceHost, useVoice } from './voice-host';
 import {DoneDashboard} from './done-dashboard';
@@ -878,7 +880,6 @@ const SHOW_WORK = process.env.EXPO_PUBLIC_DAN_SHOW_WORK === '1';
 // the same inline-timeline treatment the web chat gives ai_context.blocks.
 // 畳んだ物を開け閉めしても、押した見出しを画面の同じ位置に留める（チャットの一覧は下から積む作りなので、
 // 開くと上へ伸びて見出しが画面の外へ逃げていた）。一覧の側が、開け閉めの前後で見出しの位置を測ってずれを戻す。
-const KeepInPlace = createContext<((moved: number) => void) | null>(null);
 
 function TurnToolGroup({ items, defaultOpen = false, live = false, startedMs }: { items: TurnBlock[]; defaultOpen?: boolean; live?: boolean; startedMs?: number }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -1029,6 +1030,7 @@ function AiTurnBlocks({
 }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
+    if (b.type === 'thinking') continue; // 思考の要約は作業中の1行と一覧だけに使う
     if (b.type === 'text' || b.type === 'reasoning') {
       const t = (b.text || '').trim();
       if (!t) continue;
@@ -1794,11 +1796,14 @@ function AppMain() {
     return () => { stopped = true; clearTimeout(timer); };
   }, [token, projects]);
 
+  // アプリの新しい版の［更新する］（ホームとチャットの上に出す。app-update.tsx）
+  const appUpdate = useAppUpdate(API_BASE_URL, token ?? null);
+
   // 3つの点の横に出す「いまダンがしていること」（宣言・作業の一歩）。送ったこの端末ではストリームの最新、
   // それ以外は記録の最新の一歩。
   const typingLabel = useMemo(() => {
     // 作業の一覧を出さない時は、作業の記録に添えた平易な1行（道具の名前やコマンドは出さない）
-    if (!SHOW_WORK) return liveLineOf(liveTurnGroups[liveTurnGroups.length - 1]?.blocks || []);
+    if (!SHOW_WORK) return liveLineOf(liveTurnGroups.flatMap((g) => g.live));
     if (activity && activity !== 'Thinking...') return activity;
     const last = liveTurnGroups[liveTurnGroups.length - 1]?.blocks.slice(-1)[0];
     if (!last) return '';
@@ -2487,6 +2492,11 @@ function AppMain() {
     async (url?: unknown) => {
       if (!token || typeof url !== 'string') return;
       await syncNotificationBadge(0);
+      // アプリの新しい版の知らせ → ホーム（一番上に［更新する］が出ている）
+      if (url.startsWith('/app-update')) {
+        setScreen('projects');
+        return;
+      }
       // コラボ窓口の通知 → コラボチャット画面を直接開く
       const collabMatch = url.match(/\/collab\/([^/?#]+)/);
       if (collabMatch?.[1]) {
@@ -3842,6 +3852,7 @@ function AppMain() {
     return (
       <SafeAreaView style={styles.screen}>
         <StatusBar style="dark" />
+        <AppUpdateBanner update={appUpdate} />
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.loginWrap}
@@ -3901,8 +3912,9 @@ function AppMain() {
   if (pinTapPendingRef.current && hub?.room_id && token) { pinTapPendingRef.current = false; setTimeout(() => pinTapRef.current(), 0); }
 
   if (screen === 'projects' || screen === 'collab') {
-    return <View style={{flex:1}}><DoneDashboard projects={projects} running={streamingProjects} loading={pullRefreshing || (loadingProjects && projects.length === 0)}
-      top={insets.top} bottom={insets.bottom} onVoice={startHubVoice} onProject={id=>void handleSelectProject(id)}
+    const showUpdate = appUpdate.phase !== 'none';
+    return <View style={{flex:1}}>{showUpdate ? <View style={{backgroundColor:'#fbfaf7'}}><AppUpdateBanner update={appUpdate} topInset={insets.top}/></View> : null}<DoneDashboard projects={projects} running={streamingProjects} loading={pullRefreshing || (loadingProjects && projects.length === 0)}
+      top={showUpdate ? 0 : insets.top} bottom={insets.bottom} onVoice={startHubVoice} onProject={id=>void handleSelectProject(id)}
       onNew={()=>void handleNewProject()} onSettings={()=>setScreen('settings')} tab={screen==='collab'?'collab':dashboardTab} onTab={tab=>{setDashboardTab(tab);setScreen('projects')}} collab={<CollabRoomsScreen request={collabRequest} topInset={0} onOpenRoom={room=>{setCollabRoom({id:room.id,title:room.title});setScreen('collabChat')}}/>}
       onMenu={item=>{const project=projects.find(x=>x.id===item.id);if(project)handleProjectLongPress(project)}}
       onRefresh={handleRefreshProjectList}
@@ -4204,6 +4216,7 @@ function AppMain() {
             </Pressable>
           </View>
         </View>
+        <AppUpdateBanner update={appUpdate} />
 
         {/* キャッシュを即描画しつつ裏で最新を取得している間の控えめな表示。
             これが無いと「古い状態」が確定情報に見える（実際は更新中）。 */}
@@ -4250,12 +4263,18 @@ function AppMain() {
                 // 考え中・作業中は状態なので、常に一番下に3つの点だけ（定義 2）。
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble, styles.typingBubble]}>
-                    <TypingDots color="#7a8f86" />
-                    {typingLabel ? (
-                      <Text style={styles.typingLabel} numberOfLines={1}>
-                        {typingLabel.split('\n')[0]}
-                      </Text>
-                    ) : null}
+                    {!SHOW_WORK ? (
+                      <LiveLineView live={item.live || []} startedAt={item.startedAt} />
+                    ) : (
+                      <>
+                        <TypingDots color="#7a8f86" />
+                        {typingLabel ? (
+                          <Text style={styles.typingLabel} numberOfLines={1}>
+                            {typingLabel.split('\n')[0]}
+                          </Text>
+                        ) : null}
+                      </>
+                    )}
                   </View>
                 );
               }
@@ -4268,7 +4287,12 @@ function AppMain() {
                     {item.blocks.length > 0 ? (
                       <AiTurnBlocks blocks={item.blocks} mine={false} live startedMs={item.sortMs} onOpenUrl={handleOpenMessageUrl} onPlayVideo={openChatMedia} />
                     ) : null}
-                    {item.typing ? (
+                    {item.typing && !SHOW_WORK ? (
+                      // 一番下の作業ログの吹き出しの中に、3つの点と今していること・秒数（押すと作業の一覧が開く）
+                      <View style={{ marginTop: 4 }}>
+                        <LiveLineView live={item.live || []} startedAt={item.startedAt} />
+                      </View>
+                    ) : item.typing ? (
                       // 一番下の作業ログの吹き出しの中に、考え中の3つの点と今していること（吹き出しを2つにしない）
                       <View style={styles.typingInline}>
                         <TypingDots color="#7a8f86" />

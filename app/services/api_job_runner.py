@@ -15,6 +15,11 @@ from zoneinfo import ZoneInfo
 from app.services import command_job_state as state
 from app.services.command_job_runner import mark_status, relay_request
 
+def _dan_ws():
+    from app.paths import DAN_WORKSPACE
+    return DAN_WORKSPACE.as_posix()
+
+
 JOB_INSTRUCTIONS = '''
 この依頼は独立した作業です。利用者との追加会話は同じ実行へ届きます。
 購入・送信・削除・支払いなど取り返しのつかない確定の直前だけ、具体的な内容と金額を言葉で伝えて本人の返事を待つ（そこでターンを終える。返事は追加の発言として届く）。それ以外の操作は承認を求めずに最後まで進める。承認や追加指示が届くと同じ作業が再開する。
@@ -34,7 +39,8 @@ def job_rules():
     """The job's rules and the local date (the owner's 「明日」「26日」; a job without it spent a step running `date`)."""
     from app.services.command_center import CONFIRMATION_RULE
     now = datetime.now(ZoneInfo('Asia/Tokyo'))
-    return CONFIRMATION_RULE + JOB_INSTRUCTIONS + f"現在の日時: {now.isoformat(timespec='minutes')}（{'月火水木金土日'[now.weekday()]}曜日）" + chr(10)
+    from app.paths import localize
+    return CONFIRMATION_RULE + localize(JOB_INSTRUCTIONS) + f"現在の日時: {now.isoformat(timespec='minutes')}（{'月火水木金土日'[now.weekday()]}曜日）" + chr(10)
 
 
 def job_instructions(room_title=''):
@@ -78,7 +84,7 @@ async def run(row):
         state.change(job_id, lambda s: s.update(instructions=instructions, history=history))
         env = {**os.environ, 'DAN_USER_ID': row['user_id'], 'DAN_SESSION_ID': row['room_id'], 'DAN_BROWSER_ROOM': state.browser_room(job_id),
                'DAN_COMMAND_JOB_ID': job_id, 'DAN_BROWSER_HEADLESS': '1', 'DAN_BROWSER_OBSERVATION': 'dom', 'DAN_CORE_PORT': '9000',
-               'DAN_WORK_DIR': f'D:/dan-workspace/jobs/{job_id[:8]}',   # the job's own folder: never Dan's repository
+               'DAN_WORK_DIR': f'{_dan_ws()}/jobs/{job_id[:8]}',   # the job's own folder: never Dan's repository
                'PYTHONIOENCODING': 'utf-8'}
         root = Path(__file__).resolve().parents[2]
         creation = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0   # never a console window (owner's rule)

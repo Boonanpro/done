@@ -660,6 +660,8 @@ def run_codex_process(
                 elif ev["type"] == "reasoning":
                     event_queue.put(ev)
                     reasoning_full_acc.append(ev["text"])
+                    # 日本語の要約だけ、作業中の1行用に残す（Claude と同じ。cli_runner._save_thinking_event）
+                    cr._save_thinking_event(room_id, project_id, run_id, turn_id, ev["text"])
                 elif ev["type"] == "error":
                     if _is_informational(ev["message"]):
                         cr._cli_debug(f"[CODEX] notice: {ev['message'][:160]}")
@@ -889,6 +891,7 @@ def run_codex_turn_in_thread(
             if not text.strip():
                 text = "（応答テキストが生成されませんでした。もう一度お試しください。）"
 
+            text, result_data["turn_blocks"] = cr._tidy_reply(text, result_data.get("turn_blocks", []), content)
             cli_saved = False
             if not skip_save:
                 cli_saved = cr._save_ai_message_sync(

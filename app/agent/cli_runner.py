@@ -36,7 +36,8 @@ _sessions_in_db: Dict[str, str] = {}   # what cli_sessions already holds, as far
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
 
 # 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
-CLI_WORKSPACE = Path("D:/dan-workspace")
+from app.paths import DAN_WORKSPACE as CLI_WORKSPACE
+from app.paths import localize as _localize_paths
 CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # ワンショット生成（タイトル等）専用の中立な空ディレクトリ。
@@ -594,8 +595,9 @@ def _build_reseed_context(
     event_lines = []
     for ev in reversed(events):
         label = ev.get("tool_label") or ev.get("content") or ev.get("tool_name") or ev.get("event_type")
+        etype = "thinking" if (ev.get("metadata") or {}).get("kind") == "thinking" else ev.get("event_type", "")
         event_lines.append(
-            f"- {ev.get('created_at', '')} {ev.get('event_type', '')}: {_one_line(label, 260)}"
+            f"- {ev.get('created_at', '')} {etype}: {_one_line(label, 260)}"
         )
 
     run_lines = []
@@ -629,6 +631,16 @@ def _build_reseed_context(
         f"{body}\n"
         "</conversation_so_far>"
     )
+
+
+def _tidy_reply(text: str, blocks: Optional[list], user_text: Optional[str]) -> tuple:
+    """保存の手前で、返事の頭に付いた途中の英語の独り言を外す（app/agent/reply_text.py）。失敗しても本文はそのまま。"""
+    try:
+        from app.agent.reply_text import tidy_reply
+        return tidy_reply(text, blocks, user_text)
+    except Exception as exc:  # noqa: BLE001
+        _cli_debug(f"[REPLY] tidy failed: {exc}")
+        return text, blocks
 
 
 def _wrap_latest_user_message(context: str, content: str) -> str:
@@ -1113,11 +1125,14 @@ def _save_execution_event_sync(
     tool_label: Optional[str] = None,
     content: Optional[str] = None,
     tool_input: Optional[dict] = None,
+    kind: Optional[str] = None,
 ):
     """CLIスレッドからDB直接保存（sync）。disconnect時は1度だけ再接続リトライ。
 
     tool_use は、チャットの作業中の1行（「お店のページを見ています」）を metadata.activity に添える
-    （app/agent/activity_line.py。空なら画面は前の1行のまま）。"""
+    （app/agent/activity_line.py。空なら画面は前の1行のまま）。
+    kind="thinking" は、モデルの思考の日本語の要約（reasoning として保存し、metadata.kind で返事の文と分ける。
+    画面は作業中の1行と、押すと開く作業の一覧にだけ使う。2026-10-24）。"""
     from app.services.execution_events import normalize_event_type
     from app.services.supabase_client import get_supabase_client
 
@@ -1130,6 +1145,8 @@ def _save_execution_event_sync(
         metadata["original_event_type"] = original_type
     if turn_id:
         metadata["turn_id"] = turn_id
+    if kind:
+        metadata["kind"] = kind
     if normalized_type == "tool_use" and tool_name:
         try:
             from app.agent.activity_line import activity_phrase
@@ -1167,6 +1184,20 @@ def _save_execution_event_sync(
             _cli_debug(f"_save_execution_event_sync failed: {e}")
             return
 
+
+
+def _save_thinking_event(room_id: str, project_id: Optional[str], run_id: Optional[str], turn_id: Optional[str], text: Any) -> None:
+    """Keep a thinking summary for the chat's work line when it is in Japanese (activity_line.thinking_text).
+    Every backend calls this with its thinking / reasoning text; nothing is saved for empty or English text."""
+    if not project_id:
+        return
+    try:
+        from app.agent.activity_line import thinking_text
+        shown = thinking_text(text)
+    except Exception:
+        return
+    if shown:
+        _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, turn_id=turn_id, content=shown, kind="thinking")
 
 def _update_run_sync(
     run_id: Optional[str],
@@ -1678,6 +1709,7 @@ def _build_system_prompt(
         "Dan infrastructure and user deliverables are separate scopes. "
         "For changes to Dan itself, read D:/done/AGENTS.md."
     )
+    parts[-1] = _localize_paths(parts[-1])
     parts.append(_ABSOLUTE_RULES)
     # Answer shapes (table / choice buttons / input / steps / chart as ```openui-lang blocks).
     # Generated from the frontend part definitions; the same text on every backend (Claude / Codex),
@@ -2645,9 +2677,10 @@ def _run_cli_process(
                             "detail": _tool_detail(ev.get("input", {})),
                         })
                     elif ev["type"] == "reasoning" and ev.get("text", "").strip():
-                        # thinkingはプロセスモニターに送らない（英語で読みにくい）
-                        # reasoning_full にだけ蓄積（デバッグ用に保持）
+                        # 思考は返事の文として出さない。日本語の要約だけ、作業中の1行用に kind=thinking で残す
+                        # （英語の思考は残さない。app/agent/activity_line.py thinking_text）
                         reasoning_full_acc.append(ev.get("text", ""))
+                        _save_thinking_event(room_id, project_id, run_id, turn_id, ev.get("text", ""))
                     elif ev["type"] == "text":
                         # テキスト出力（日本語の独り言）はプロセスモニターに表示
                         text_preview = ev.get("text", "").strip()
@@ -2961,6 +2994,7 @@ def _run_cli_in_thread(
 
             # DB-first: CLIスレッドからAI応答を保存（SSE断線対策）
             # SSEハンドラに依存せず、ここで確実にDBに書き込む
+            text, result_data["turn_blocks"] = _tidy_reply(text, result_data.get("turn_blocks", []), content)
             cli_saved = False
             if not skip_save:
                 reasoning = result_data.get("reasoning_steps", [])
@@ -3146,6 +3180,8 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
                         state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                         if project_id:
                             _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label, tool_input=ev.get("input", {}))
+                    elif ev["type"] == "reasoning":
+                        _save_thinking_event(room_id, project_id, state["run_id"], state["turn_id"], ev.get("text", ""))
             elif rtype == "system":
                 sid = raw_ev.get("session_id")
                 if sid:
@@ -3511,6 +3547,7 @@ async def _process_via_streaming_session(
                         _emit(ev)
                         if ev.get("text", "").strip():
                             state["reasoning_full_acc"].append(ev["text"])
+                            _save_thinking_event(room_id, project_id, run_id, state["turn_id"], ev["text"])
 
             elif rtype == "system":
                 sid = raw_ev.get("session_id")
@@ -3617,6 +3654,8 @@ async def _process_via_streaming_session(
                 turn_start = placed or (state.get("last_block_at") if continuation else None) or turn_start
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
+                # 頭に付いた途中の英語の独り言を外す（app/agent/reply_text.py。どのモデルの経路も同じ）
+                text, state["turn_blocks"] = _tidy_reply(text, state["turn_blocks"], content)
                 if not skip_save and not (empty_continuation and not state["turn_blocks"]):
                     cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id,
                                                       ends_turn=not continuation and placed is None, run_id=run_id)

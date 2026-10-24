@@ -23,10 +23,11 @@ exit 0 = 許可 / exit 2 = ブロック（stderr がモデルへの返事にな�
 import json
 import os
 import sys
+from pathlib import Path
 
 LOG_NAME = "generalization-log.md"
-CREATOR_DIR = "D:/done/.claude/skills/skill-creator"
-CACHE = "D:/done/.data/skill_gate/judged.json"
+CREATOR_DIR = (Path(__file__).resolve().parent.parent / ".claude/skills/skill-creator").as_posix()
+CACHE = (Path(__file__).resolve().parent.parent / ".data/skill_gate/judged.json").as_posix()
 JUDGE_TIMEOUT = int(os.environ.get("DAN_SKILL_GATE_TIMEOUT", "90"))
 JUDGE_VERSION = "1"
 

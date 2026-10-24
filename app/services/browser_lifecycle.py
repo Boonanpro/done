@@ -150,7 +150,7 @@ def _owns_port(profile: Path, port: int) -> bool:
     import psutil
     marker = os.path.normcase(os.path.abspath(str(profile)))
     for process in psutil.process_iter(["name"]):
-        if (process.info["name"] or "").lower() not in {"chrome.exe", "chromium.exe", "msedge.exe", "headless_shell.exe", "chrome", "chromium", "headless_shell"}:
+        if (process.info["name"] or "").lower() not in {"chrome.exe", "chromium.exe", "msedge.exe", "headless_shell.exe", "chrome", "chromium", "headless_shell", "google chrome"}:
             continue
         try:
             args = process.cmdline()

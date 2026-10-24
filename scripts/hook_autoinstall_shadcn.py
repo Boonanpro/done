@@ -20,7 +20,10 @@ import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(r"D:/done")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from follow_github import live_root  # noqa: E402
+
+PROJECT_ROOT = live_root()
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 UI_DIR = FRONTEND_DIR / "src" / "components" / "ui"
 
@@ -83,11 +86,13 @@ def main() -> int:
     if not file_path or not file_path.endswith((".tsx", ".ts")):
         return 0
 
-    # フロントエンド外のファイルはスキップ
-    try:
-        Path(file_path).resolve().relative_to(FRONTEND_DIR.resolve())
-    except ValueError:
+    # 書いたファイルが属する frontend（作業場所ごとに別）。フロントエンド外のファイルはスキップ
+    global FRONTEND_DIR, UI_DIR
+    front = next((d for d in Path(file_path).resolve().parents if d.name == "frontend" and (d / "package.json").exists()), None)
+    if front is None:
         return 0
+    FRONTEND_DIR, UI_DIR = front, front / "src" / "components" / "ui"
+    live = front.resolve() == (PROJECT_ROOT / "frontend").resolve()
 
     # 書き込み後の内容を読む
     p = Path(file_path)
@@ -105,6 +110,13 @@ def main() -> int:
     have = installed_components()
     missing = [n for n in wanted if n not in have and n in KNOWN_SHADCN]
     if not missing:
+        return 0
+    if live:
+        # 動いているダン（PROJECT_ROOT）の共通部品は git が追うので、ここには足さない（2026-10-18）
+        sys.stderr.write(
+            f"[shadcn] {', '.join(missing)} は frontend/src/components/ui にまだありません。{PROJECT_ROOT} の共通部品は"
+            f" 直接足せないので、`python {PROJECT_ROOT}/scripts/work.py new <名前>` の作業場所で足して ship するか、"
+            "成果物のフォルダの中に部品を置いて使ってください。\n")
         return 0
 
     installed, failed = [], []

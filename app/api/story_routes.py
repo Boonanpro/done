@@ -16,7 +16,8 @@ from app.api.chat_routes import get_current_user
 from app.services.auth_service import TokenData
 
 router = APIRouter(prefix="/story", tags=["story"])
-STORY_DIR = Path(os.environ.get("DAN_ARCHIVE_ROOT") or "D:/dan-archive") / "story"
+from app.paths import DAN_ARCHIVE_ROOT
+STORY_DIR = DAN_ARCHIVE_ROOT / "story"
 
 
 @router.get("")
