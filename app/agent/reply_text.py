@@ -21,11 +21,8 @@ from typing import Any, List, Optional
 
 _JA_CHAR = re.compile(r"[぀-ヿ㐀-鿿ｦ-ﾝ]")
 _LATIN_CHAR = re.compile(r"[A-Za-z]")
-# 本人の言葉を包みから取り出す（_wrap_latest_user_message と並行作業の依頼の包み）
-_USER_WRAPPERS = (
-    re.compile(r"<latest_user_message>\s*([\s\S]*?)\s*</latest_user_message>"),
-    re.compile(r"<user_request>\s*([\s\S]*?)\s*</user_request>"),
-)
+# 本人の言葉を包みから取り出す（内側の包みから。cli_runner._wrap_latest_user_message と codex_runner.wrap_turn_content）
+_USER_WRAPPERS = ("latest_user_message", "user_request")
 # 文ではない段落の書き出し（コード・引用・表・箇条書き・見出し・添付の印・部品）
 _NOT_PROSE_START = re.compile(r"^\s*(?:```|~~~|>|\||[-*+]\s|\d+[.)]\s|#|\[添付|<)")
 
@@ -61,11 +58,15 @@ def _is_japanese_prose(paragraph: str) -> bool:
 def user_speaks_japanese(user_text: Optional[str]) -> bool:
     """本人の言葉が日本語か。ダンが付けた包みがあれば、中の本人の言葉だけで決める。"""
     s = user_text or ""
-    for pat in _USER_WRAPPERS:
-        found = pat.findall(s)
-        if found:
-            s = found[-1]
-            break
+    for tag in _USER_WRAPPERS:
+        # 最後の開きの印から。指示文の中に印の名前が書かれていても、本物の包みは一番後ろにある
+        start = s.rfind(f"<{tag}>")
+        if start < 0:
+            continue
+        inner = s[start + len(tag) + 2:]
+        end = inner.find(f"</{tag}>")
+        s = inner if end < 0 else inner[:end]
+        break
     return is_japanese(s)
 
 

@@ -55,6 +55,12 @@ def test_user_language_reads_the_wrapped_message():
     assert user_speaks_japanese(f"<room_state>Room state in English wrapper text.</room_state>\n<latest_user_message>{JA_ASK}</latest_user_message>")
     assert user_speaks_japanese(f"Internal recovery context.\n<user_request>{JA_ASK}</user_request>")
     assert not user_speaks_japanese(None)
+    # Codex の包み: 指示文の中に印の名前が出てきても、本物の（最後の）包みの中で決める
+    codex = ("<runtime_system_context>\n<user_request> の内容に応答すること。日本語の指示がここに長く続きます。\n"
+             "</runtime_system_context>\n\n<user_request>\nfind three cafes near the station\n</user_request>")
+    assert not user_speaks_japanese(codex)
+    nested = f"<runtime_system_context>x</runtime_system_context><user_request>前の話<latest_user_message>{JA_ASK}</latest_user_message></user_request>"
+    assert user_speaks_japanese(nested)
 
 
 def test_tidy_reply_applies_to_text_blocks_only():
