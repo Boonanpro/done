@@ -278,7 +278,7 @@ class Prefetch:
         self.judging = None
         self.heard(dialogue)   # words that arrived while judging
 
-    def same_args(self, early, name, args):
+    def same_args(self, early, name, args, context=None):
         if early.name != name:
             return False
         if name == 'get_calendar':
@@ -287,7 +287,8 @@ class Prefetch:
                                   'days': int(args.get('days') or (1 if args.get('from') else 14))}
         if name == 'search_records':
             from app.services.voice_past import keywords
-            return keywords(early.args['query'], early.context) == keywords(str(args.get('query') or ''), early.context)
+            return keywords(early.args['query'], early.context) == keywords(
+                str(args.get('query') or ''), early.context if context is None else context)
         return early.args == args
 
     async def take_read(self, name, args, dialogue, user_id, room_id):
@@ -303,7 +304,7 @@ class Prefetch:
             since = dialogue.turns[next(i for i, t in enumerate(dialogue.turns) if t is s.turn):]
             if any(c is t for c in self.calls for t in since):
                 continue
-            if self.same_args(s, name, args):
+            if self.same_args(s, name, args, dialogue.recent()):
                 best = s
                 break
         self.saw_call(dialogue.turns)
@@ -313,11 +314,12 @@ class Prefetch:
             if s.turn is best.turn:
                 s.used = True
         try:
-            result = await asyncio.wait_for(asyncio.shield(best.task), timeout=1.0)
-        except asyncio.CancelledError:
-            if not best.task.cancelled():
-                raise
-            return None
+            # wait() separates an expired/cancelled prefetch from cancellation of the
+            # backend call itself. Never swallow the latter and start a fresh read.
+            done, _ = await asyncio.wait((best.task,), timeout=1.0)
+            if not done or best.task.cancelled():
+                return None
+            result = best.task.result()
         except Exception:
             return None
         final = said_since(dialogue.turns, best.turn)

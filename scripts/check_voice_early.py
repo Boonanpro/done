@@ -3,7 +3,7 @@
 No Dan HTTP listener, room writes, jobs, browser operations or phone calls. Only Live,
 its delegated backend, and Jev are real. Fixture tools have a fixed 0.8 s read delay.
 `prepare` generates the SAME ten utterances for both runs; `baseline` loads committed
-HEAD versions of the four voice modules. Outputs contain synthetic speech only.
+the pinned baseline versions of the four voice modules. Outputs contain synthetic speech only.
 Run with this worktree's Python. The existing credential service holds keys.
 """
 import asyncio

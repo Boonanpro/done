@@ -1,0 +1,2443 @@
+{
+  "baseline_commit": "9512ea13",
+  "hardware": "Mac mini / Apple M6 / 32 GiB",
+  "test": "Real Live/Responses/Jev; Kyoko synthetic audio; read/work fixtures only; 0.8s fixture read delay",
+  "baseline": {
+    "rows": [
+      {
+        "q": "今の作業はどうなってる？",
+        "expected": "job_status",
+        "start": 10.0,
+        "end": 11.939833333333333,
+        "heard": "今の作業はどうなってる",
+        "functions": [
+          "job_status"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.237,
+        "done_after_audio_end_s": 3.212,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "明日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 26.939833333333333,
+        "end": 28.49775,
+        "heard": "明日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "days": 1,
+            "from": "2026-10-26"
+          }
+        ],
+        "start_after_audio_end_s": 1.935,
+        "done_after_audio_end_s": 2.737,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "今日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 43.49775,
+        "end": 45.13158333333333,
+        "heard": "今日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "days": 1,
+            "from": "2026-10-25"
+          }
+        ],
+        "start_after_audio_end_s": 2.433,
+        "done_after_audio_end_s": 3.233,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+        "expected": "search_records",
+        "start": 60.13158333333333,
+        "end": 64.37954166666667,
+        "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+        "functions": [
+          "search_records"
+        ],
+        "requests": [
+          {
+            "query": "パソコン 相談 決めた 続き"
+          }
+        ],
+        "start_after_audio_end_s": 1.753,
+        "done_after_audio_end_s": 2.556,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "この部屋にはどんな資料がある？",
+        "expected": "room_files",
+        "start": 79.37954166666667,
+        "end": 81.5945,
+        "heard": "この部屋にはどんな資料がある",
+        "functions": [
+          "room_files"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.566,
+        "done_after_audio_end_s": 3.368,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のパン屋のホームページを作って。",
+        "expected": "start_work",
+        "start": 96.5945,
+        "end": 99.44308333333333,
+        "heard": "テスト用のパン屋のホームページを作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のパン屋のホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.526,
+        "done_after_audio_end_s": 3.526,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の商品紹介動画を作って。",
+        "expected": "start_work",
+        "start": 114.44308333333333,
+        "end": 117.36133333333333,
+        "heard": "テスト用の商品紹介動画を作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の商品紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.809,
+        "done_after_audio_end_s": 2.809,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の売上の表をまとめた資料を作って。",
+        "expected": "start_work",
+        "start": 132.36133333333333,
+        "end": 135.88329166666668,
+        "heard": "テスト用の売り上げの表をまとめた資料を作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の売り上げの表をまとめた資料を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.499,
+        "done_after_audio_end_s": 3.499,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の在庫管理のプログラムを作って。",
+        "expected": "start_work",
+        "start": 150.88329166666668,
+        "end": 153.92925,
+        "heard": "テスト用の在庫管理のプログラムを作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の在庫管理のプログラムを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.716,
+        "done_after_audio_end_s": 2.716,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+        "expected": "start_work",
+        "start": 168.92925,
+        "end": 174.83125,
+        "heard": "テスト用のカフェのホームページを作って。それとは別に犬の紹介動画も作って ",
+        "functions": [
+          "start_work",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のカフェのホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          },
+          {
+            "task": "犬の紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.956,
+        "done_after_audio_end_s": 2.956,
+        "prefetch_hits": 0
+      }
+    ],
+    "prefetch": [
+      {
+        "t": 244120.824406833,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 38,
+        "started": 2,
+        "hit": 0,
+        "missed": 0,
+        "jev": 38,
+        "flash": 0
+      }
+    ]
+  },
+  "after": {
+    "rows": [
+      {
+        "q": "今の作業はどうなってる？",
+        "expected": "job_status",
+        "start": 10.0,
+        "end": 11.939833333333333,
+        "heard": "今の作業はどうなってる",
+        "functions": [
+          "job_status"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 0.715,
+        "done_after_audio_end_s": 2.534,
+        "prefetch_hits": 1
+      },
+      {
+        "q": "明日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 26.939833333333333,
+        "end": 28.49775,
+        "heard": "明日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "from": "2026-10-26",
+            "days": 1
+          }
+        ],
+        "start_after_audio_end_s": 0.609,
+        "done_after_audio_end_s": 2.48,
+        "prefetch_hits": 1
+      },
+      {
+        "q": "今日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 43.49775,
+        "end": 45.13158333333333,
+        "heard": "今日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "from": "2026-10-25",
+            "days": 1
+          }
+        ],
+        "start_after_audio_end_s": 1.157,
+        "done_after_audio_end_s": 2.853,
+        "prefetch_hits": 1
+      },
+      {
+        "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+        "expected": "search_records",
+        "start": 60.13158333333333,
+        "end": 64.37954166666667,
+        "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+        "functions": [
+          "search_records",
+          "search_records"
+        ],
+        "requests": [
+          {
+            "query": "さっき相談したパソコンの話の続き、何"
+          },
+          {
+            "query": "パソコン PC 相談 決めた 続き"
+          }
+        ],
+        "start_after_audio_end_s": 0.14,
+        "done_after_audio_end_s": 3.214,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "この部屋にはどんな資料がある？",
+        "expected": "room_files",
+        "start": 79.37954166666667,
+        "end": 81.5945,
+        "heard": "この部屋にはどんな資料がある",
+        "functions": [
+          "room_files"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 0.745,
+        "done_after_audio_end_s": 2.13,
+        "prefetch_hits": 1
+      },
+      {
+        "q": "テスト用のパン屋のホームページを作って。",
+        "expected": "start_work",
+        "start": 96.5945,
+        "end": 99.44308333333333,
+        "heard": "テスト用のパン屋のホームページを作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のパン屋のホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.109,
+        "done_after_audio_end_s": 3.109,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の商品紹介動画を作って。",
+        "expected": "start_work",
+        "start": 114.44308333333333,
+        "end": 117.36133333333333,
+        "heard": "テスト用の商品紹介動画を作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の商品紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.009,
+        "done_after_audio_end_s": 3.009,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の売上の表をまとめた資料を作って。",
+        "expected": "start_work",
+        "start": 132.36133333333333,
+        "end": 135.88329166666668,
+        "heard": "テスト用の売り上げの表をまとめた資料を作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の売り上げの表をまとめた資料を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.698,
+        "done_after_audio_end_s": 2.698,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の在庫管理のプログラムを作って。",
+        "expected": "start_work",
+        "start": 150.88329166666668,
+        "end": 153.92925,
+        "heard": "テスト用の在庫管理のプログラムを作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の在庫管理のプログラムを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.009,
+        "done_after_audio_end_s": 3.009,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+        "expected": "start_work",
+        "start": 168.92925,
+        "end": 174.83125,
+        "heard": "テスト用のカフェのホームページを作って、それとは別に犬の紹介動画も作って",
+        "functions": [
+          "list_operations",
+          "start_work",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のカフェのホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          },
+          {
+            "task": "テスト用の犬の紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.033,
+        "done_after_audio_end_s": 3.033,
+        "prefetch_hits": 0
+      }
+    ],
+    "prefetch": [
+      {
+        "t": 244632.00732025,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 43,
+        "started": 10,
+        "hit": 4,
+        "missed": 0,
+        "jev": 43,
+        "flash": 0
+      }
+    ]
+  },
+  "initial_baseline": {
+    "rows": [
+      {
+        "q": "今の作業はどうなってる？",
+        "expected": "job_status",
+        "start": 10.0,
+        "end": 11.939833333333333,
+        "heard": "今の作業はどうなってる",
+        "functions": [
+          "job_status"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.245,
+        "done_after_audio_end_s": 3.214,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "明日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 26.939833333333333,
+        "end": 28.49775,
+        "heard": "明日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "days": 1,
+            "from": "2026-10-26"
+          }
+        ],
+        "start_after_audio_end_s": 2.295,
+        "done_after_audio_end_s": 3.097,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "今日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 43.49775,
+        "end": 45.13158333333333,
+        "heard": "今日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "days": 1,
+            "from": "2026-10-25"
+          }
+        ],
+        "start_after_audio_end_s": 2.618,
+        "done_after_audio_end_s": 3.42,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+        "expected": "search_records",
+        "start": 60.13158333333333,
+        "end": 64.37954166666667,
+        "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+        "functions": [
+          "search_records"
+        ],
+        "requests": [
+          {
+            "query": "パソコン PC 相談 決めた 続き"
+          }
+        ],
+        "start_after_audio_end_s": 2.191,
+        "done_after_audio_end_s": 2.993,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "この部屋にはどんな資料がある？",
+        "expected": "room_files",
+        "start": 79.37954166666667,
+        "end": 81.5945,
+        "heard": "この部屋にはどんな資料がある",
+        "functions": [
+          "room_files"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.05,
+        "done_after_audio_end_s": 2.852,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のパン屋のホームページを作って。",
+        "expected": "start_work",
+        "start": 96.5945,
+        "end": 99.44308333333333,
+        "heard": "テスト用のパン屋のホームページを作って",
+        "functions": [
+          "job_status"
+        ],
+        "requests": [],
+        "start_after_audio_end_s": null,
+        "done_after_audio_end_s": null,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の商品紹介動画を作って。",
+        "expected": "start_work",
+        "start": 114.44308333333333,
+        "end": 117.36133333333333,
+        "heard": "テスト用の商品紹介動画を作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の商品紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.552,
+        "done_after_audio_end_s": 2.552,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の売上の表をまとめた資料を作って。",
+        "expected": "start_work",
+        "start": 132.36133333333333,
+        "end": 135.88329166666668,
+        "heard": "テスト用の売上の表をまとめた資料を作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の売上の表をまとめた資料を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.938,
+        "done_after_audio_end_s": 2.938,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の在庫管理のプログラムを作って。",
+        "expected": "start_work",
+        "start": 150.88329166666668,
+        "end": 153.92925,
+        "heard": "テスト用の在庫管理のプログラムを作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の在庫管理のプログラムを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.771,
+        "done_after_audio_end_s": 2.771,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+        "expected": "start_work",
+        "start": 168.92925,
+        "end": 174.83125,
+        "heard": "テスト用のカフェのホームページを作って、それとは別に犬の紹介動画も作って",
+        "functions": [
+          "start_work",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のカフェのホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          },
+          {
+            "task": "犬の紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.566,
+        "done_after_audio_end_s": 2.566,
+        "prefetch_hits": 0
+      }
+    ],
+    "prefetch": [
+      {
+        "t": 243605.591326416,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 38,
+        "started": 2,
+        "hit": 0,
+        "missed": 0,
+        "jev": 38,
+        "flash": 0
+      }
+    ]
+  },
+  "initial_after": {
+    "rows": [
+      {
+        "q": "今の作業はどうなってる？",
+        "expected": "job_status",
+        "start": 10.0,
+        "end": 11.939833333333333,
+        "heard": "今の作業はどうなってる",
+        "functions": [
+          "list_operations",
+          "job_status"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.571,
+        "done_after_audio_end_s": 3.524,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "明日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 26.939833333333333,
+        "end": 28.49775,
+        "heard": "明日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "from": "2026-10-26",
+            "days": 1
+          }
+        ],
+        "start_after_audio_end_s": 0.617,
+        "done_after_audio_end_s": 2.58,
+        "prefetch_hits": 1
+      },
+      {
+        "q": "今日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 43.49775,
+        "end": 45.13158333333333,
+        "heard": "今日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "from": "2026-10-25",
+            "days": 1
+          }
+        ],
+        "start_after_audio_end_s": 0.614,
+        "done_after_audio_end_s": 2.958,
+        "prefetch_hits": 1
+      },
+      {
+        "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+        "expected": "search_records",
+        "start": 60.13158333333333,
+        "end": 64.37954166666667,
+        "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+        "functions": [
+          "search_records"
+        ],
+        "requests": [
+          {
+            "query": "パソコン 相談 決めた 続き"
+          }
+        ],
+        "start_after_audio_end_s": 2.17,
+        "done_after_audio_end_s": 2.971,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "この部屋にはどんな資料がある？",
+        "expected": "room_files",
+        "start": 79.37954166666667,
+        "end": 81.5945,
+        "heard": "この部屋にはどんな資料がある",
+        "functions": [
+          "room_files"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.917,
+        "done_after_audio_end_s": 3.72,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のパン屋のホームページを作って。",
+        "expected": "start_work",
+        "start": 96.5945,
+        "end": 99.44308333333333,
+        "heard": "テスト用のパン屋のホームページを作って",
+        "functions": [
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のパン屋のホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.904,
+        "done_after_audio_end_s": 2.904,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の商品紹介動画を作って。",
+        "expected": "start_work",
+        "start": 114.44308333333333,
+        "end": 117.36133333333333,
+        "heard": "テスト用の商品紹介動画を作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の商品紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.958,
+        "done_after_audio_end_s": 2.958,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の売上の表をまとめた資料を作って。",
+        "expected": "start_work",
+        "start": 132.36133333333333,
+        "end": 135.88329166666668,
+        "heard": "テスト用の売り上げの表をまとめた資料を作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の売り上げの表をまとめた資料を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.023,
+        "done_after_audio_end_s": 3.023,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の在庫管理のプログラムを作って。",
+        "expected": "start_work",
+        "start": 150.88329166666668,
+        "end": 153.92925,
+        "heard": "テスト用の在庫管理のプログラムを作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の在庫管理のプログラムを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.818,
+        "done_after_audio_end_s": 2.818,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+        "expected": "start_work",
+        "start": 168.92925,
+        "end": 174.83125,
+        "heard": "テスト用のカフェのホームページを作って、それとは別に犬の紹介動画も作って",
+        "functions": [
+          "list_operations",
+          "start_work",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のカフェのホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          },
+          {
+            "task": "犬の紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.323,
+        "done_after_audio_end_s": 3.323,
+        "prefetch_hits": 0
+      }
+    ],
+    "prefetch": [
+      {
+        "t": 243838.210842875,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 39,
+        "started": 9,
+        "hit": 2,
+        "missed": 0,
+        "jev": 39,
+        "flash": 0
+      }
+    ]
+  },
+  "jev_unavailable_run": {
+    "rows": [
+      {
+        "q": "今の作業はどうなってる？",
+        "expected": "job_status",
+        "start": 10.0,
+        "end": 11.939833333333333,
+        "heard": "今の作業はどうなってる",
+        "functions": [
+          "job_status"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.621,
+        "done_after_audio_end_s": 3.559,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "明日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 26.939833333333333,
+        "end": 28.49775,
+        "heard": "明日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "days": 1,
+            "from": "2026-10-26"
+          }
+        ],
+        "start_after_audio_end_s": 2.728,
+        "done_after_audio_end_s": 3.53,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "今日の予定を教えて。",
+        "expected": "get_calendar",
+        "start": 43.49775,
+        "end": 45.13158333333333,
+        "heard": "今日の予定を教えて",
+        "functions": [
+          "get_calendar"
+        ],
+        "requests": [
+          {
+            "days": 1,
+            "from": "2026-10-25"
+          }
+        ],
+        "start_after_audio_end_s": 2.816,
+        "done_after_audio_end_s": 3.616,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+        "expected": "search_records",
+        "start": 60.13158333333333,
+        "end": 64.37954166666667,
+        "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+        "functions": [
+          "search_records"
+        ],
+        "requests": [
+          {
+            "query": "パソコン PC 相談 決めた 続き"
+          }
+        ],
+        "start_after_audio_end_s": 2.52,
+        "done_after_audio_end_s": 3.323,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "この部屋にはどんな資料がある？",
+        "expected": "room_files",
+        "start": 79.37954166666667,
+        "end": 81.5945,
+        "heard": "この部屋にはどんな資料がある",
+        "functions": [
+          "room_files"
+        ],
+        "requests": [
+          {}
+        ],
+        "start_after_audio_end_s": 2.144,
+        "done_after_audio_end_s": 2.945,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のパン屋のホームページを作って。",
+        "expected": "start_work",
+        "start": 96.5945,
+        "end": 99.44308333333333,
+        "heard": "テスト用のパン屋のホームページを作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のパン屋のホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.02,
+        "done_after_audio_end_s": 3.02,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の商品紹介動画を作って。",
+        "expected": "start_work",
+        "start": 114.44308333333333,
+        "end": 117.36133333333333,
+        "heard": "テスト用の商品紹介動画を作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の商品紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.181,
+        "done_after_audio_end_s": 3.181,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の売上の表をまとめた資料を作って。",
+        "expected": "start_work",
+        "start": 132.36133333333333,
+        "end": 135.88329166666668,
+        "heard": "テスト用の売上げの表をまとめた資料を作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の売上げの表をまとめた資料を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.337,
+        "done_after_audio_end_s": 2.337,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用の在庫管理のプログラムを作って。",
+        "expected": "start_work",
+        "start": 150.88329166666668,
+        "end": 153.92925,
+        "heard": "テスト用の在庫管理のプログラムを作って",
+        "functions": [
+          "list_operations",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用の在庫管理のプログラムを作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 2.935,
+        "done_after_audio_end_s": 2.935,
+        "prefetch_hits": 0
+      },
+      {
+        "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+        "expected": "start_work",
+        "start": 168.92925,
+        "end": 174.83125,
+        "heard": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って",
+        "functions": [
+          "list_operations",
+          "start_work",
+          "start_work"
+        ],
+        "requests": [
+          {
+            "task": "テスト用のカフェのホームページを作って",
+            "kind": "make",
+            "model": "opus"
+          },
+          {
+            "task": "犬の紹介動画を作って",
+            "kind": "make",
+            "model": "opus"
+          }
+        ],
+        "start_after_audio_end_s": 3.291,
+        "done_after_audio_end_s": 3.291,
+        "prefetch_hits": 0
+      }
+    ],
+    "prefetch": [
+      {
+        "t": 244362.38383725,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 34,
+        "started": 5,
+        "hit": 0,
+        "missed": 0,
+        "jev": 0,
+        "flash": 34
+      }
+    ]
+  },
+  "jev_intents": {
+    "baseline": [
+      {
+        "text": "明日の尼崎の天気って",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 416.84
+      },
+      {
+        "text": "今のドル円はいくら",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 145.39
+      },
+      {
+        "text": "大阪城の開館時間を",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 172.21
+      },
+      {
+        "text": "最新のアイフォンの値段",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 154.95
+      },
+      {
+        "text": "京都の紅葉の見頃を",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 140.33
+      },
+      {
+        "text": "今週末の大阪のイベント",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 138.92
+      },
+      {
+        "text": "明日の予定を教えて",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 151.02
+      },
+      {
+        "text": "今の作業はどうなってる",
+        "expected": "read",
+        "choice": "work",
+        "correct": false,
+        "ms": 173.0
+      },
+      {
+        "text": "この部屋にあるファイルは",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 135.87
+      },
+      {
+        "text": "さっきのパソコンの相談、何を決めた",
+        "expected": "read",
+        "choice": "talk",
+        "correct": false,
+        "ms": 155.42
+      },
+      {
+        "text": "昨日送ったメールの返事は来た",
+        "expected": "read",
+        "choice": "talk",
+        "correct": false,
+        "ms": 137.2
+      },
+      {
+        "text": "保存した住所を教えて",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 144.87
+      },
+      {
+        "text": "パン屋のホームページを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 137.5
+      },
+      {
+        "text": "紹介動画を作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 144.17
+      },
+      {
+        "text": "この表の計算を直して",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 147.66
+      },
+      {
+        "text": "明日の朝にリマインドを入れて",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 155.18
+      },
+      {
+        "text": "メールの下書きを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 142.5
+      },
+      {
+        "text": "この写真を明るくして",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 221.32
+      },
+      {
+        "text": "ありがとう、助かった",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 136.34
+      },
+      {
+        "text": "やっぱりやめておく",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 148.62
+      },
+      {
+        "text": "パソコンを買おうか迷ってる",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 140.14
+      },
+      {
+        "text": "今日は疲れたね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 137.39
+      },
+      {
+        "text": "いや、それは頼んでいない",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 132.83
+      },
+      {
+        "text": "うん、その考えはいいね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 165.98
+      },
+      {
+        "text": "あのさ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 164.0
+      },
+      {
+        "text": "えーっと",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 139.11
+      },
+      {
+        "text": "なんだっけ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 145.23
+      },
+      {
+        "text": "そういえば",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 154.61
+      },
+      {
+        "text": "その、あれを",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 143.83
+      },
+      {
+        "text": "ちょっとね",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 136.36
+      }
+    ],
+    "after": [
+      {
+        "text": "明日の尼崎の天気って",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 156.48
+      },
+      {
+        "text": "今のドル円はいくら",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 139.91
+      },
+      {
+        "text": "大阪城の開館時間を",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 165.37
+      },
+      {
+        "text": "最新のアイフォンの値段",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 174.68
+      },
+      {
+        "text": "京都の紅葉の見頃を",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 142.86
+      },
+      {
+        "text": "今週末の大阪のイベント",
+        "expected": "search",
+        "choice": "search",
+        "correct": true,
+        "ms": 159.67
+      },
+      {
+        "text": "明日の予定を教えて",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 141.0
+      },
+      {
+        "text": "今の作業はどうなってる",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 150.92
+      },
+      {
+        "text": "この部屋にあるファイルは",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 141.13
+      },
+      {
+        "text": "さっきのパソコンの相談、何を決めた",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 137.74
+      },
+      {
+        "text": "昨日送ったメールの返事は来た",
+        "expected": "read",
+        "choice": "talk",
+        "correct": false,
+        "ms": 135.97
+      },
+      {
+        "text": "保存した住所を教えて",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 150.85
+      },
+      {
+        "text": "パン屋のホームページを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 134.36
+      },
+      {
+        "text": "紹介動画を作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 136.42
+      },
+      {
+        "text": "この表の計算を直して",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 134.41
+      },
+      {
+        "text": "明日の朝にリマインドを入れて",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 146.1
+      },
+      {
+        "text": "メールの下書きを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 147.72
+      },
+      {
+        "text": "この写真を明るくして",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 154.44
+      },
+      {
+        "text": "ありがとう、助かった",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 144.12
+      },
+      {
+        "text": "やっぱりやめておく",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 135.48
+      },
+      {
+        "text": "パソコンを買おうか迷ってる",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 137.09
+      },
+      {
+        "text": "今日は疲れたね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 132.71
+      },
+      {
+        "text": "いや、それは頼んでいない",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 151.64
+      },
+      {
+        "text": "うん、その考えはいいね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 139.61
+      },
+      {
+        "text": "あのさ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 142.39
+      },
+      {
+        "text": "えーっと",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 147.18
+      },
+      {
+        "text": "なんだっけ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 139.27
+      },
+      {
+        "text": "そういえば",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 138.33
+      },
+      {
+        "text": "その、あれを",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 157.63
+      },
+      {
+        "text": "ちょっとね",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 142.86
+      }
+    ]
+  },
+  "laya": {
+    "device": "mps",
+    "package": "laya 0.4.15",
+    "cold_s": 5.528,
+    "correct": 13,
+    "total": 30,
+    "median_ms": 24.785,
+    "rows": [
+      {
+        "text": "明日の尼崎の天気って",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 25.39,
+        "probabilities": {
+          "search": 0.0053,
+          "read": 0.048,
+          "work": 0.0087,
+          "talk": 0.2525,
+          "wait": 0.6855
+        }
+      },
+      {
+        "text": "今のドル円はいくら",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 24.71,
+        "probabilities": {
+          "search": 0.0188,
+          "read": 0.1296,
+          "work": 0.0162,
+          "talk": 0.1079,
+          "wait": 0.7274
+        }
+      },
+      {
+        "text": "大阪城の開館時間を",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 24.99,
+        "probabilities": {
+          "search": 0.0031,
+          "read": 0.0198,
+          "work": 0.0171,
+          "talk": 0.1072,
+          "wait": 0.8528
+        }
+      },
+      {
+        "text": "最新のアイフォンの値段",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 22.98,
+        "probabilities": {
+          "search": 0.0114,
+          "read": 0.194,
+          "work": 0.0479,
+          "talk": 0.0823,
+          "wait": 0.6644
+        }
+      },
+      {
+        "text": "京都の紅葉の見頃を",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 22.32,
+        "probabilities": {
+          "search": 0.0025,
+          "read": 0.0664,
+          "work": 0.035,
+          "talk": 0.0431,
+          "wait": 0.853
+        }
+      },
+      {
+        "text": "今週末の大阪のイベント",
+        "expected": "search",
+        "choice": "talk",
+        "correct": false,
+        "ms": 22.31,
+        "probabilities": {
+          "search": 0.0067,
+          "read": 0.1092,
+          "work": 0.0235,
+          "talk": 0.5844,
+          "wait": 0.2763
+        }
+      },
+      {
+        "text": "明日の予定を教えて",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 24.86,
+        "probabilities": {
+          "search": 0.033,
+          "read": 0.2864,
+          "work": 0.0419,
+          "talk": 0.1816,
+          "wait": 0.4571
+        }
+      },
+      {
+        "text": "今の作業はどうなってる",
+        "expected": "read",
+        "choice": "talk",
+        "correct": false,
+        "ms": 22.43,
+        "probabilities": {
+          "search": 0.0148,
+          "read": 0.0241,
+          "work": 0.018,
+          "talk": 0.841,
+          "wait": 0.102
+        }
+      },
+      {
+        "text": "この部屋にあるファイルは",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 22.34,
+        "probabilities": {
+          "search": 0.0424,
+          "read": 0.1379,
+          "work": 0.1194,
+          "talk": 0.2555,
+          "wait": 0.4448
+        }
+      },
+      {
+        "text": "さっきのパソコンの相談、何を決めた",
+        "expected": "read",
+        "choice": "talk",
+        "correct": false,
+        "ms": 25.95,
+        "probabilities": {
+          "search": 0.0085,
+          "read": 0.2219,
+          "work": 0.0356,
+          "talk": 0.4402,
+          "wait": 0.2938
+        }
+      },
+      {
+        "text": "昨日送ったメールの返事は来た",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 24.54,
+        "probabilities": {
+          "search": 0.0229,
+          "read": 0.0967,
+          "work": 0.0918,
+          "talk": 0.2869,
+          "wait": 0.5016
+        }
+      },
+      {
+        "text": "保存した住所を教えて",
+        "expected": "read",
+        "choice": "read",
+        "correct": true,
+        "ms": 22.28,
+        "probabilities": {
+          "search": 0.0273,
+          "read": 0.5704,
+          "work": 0.0162,
+          "talk": 0.0782,
+          "wait": 0.3079
+        }
+      },
+      {
+        "text": "パン屋のホームページを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 23.16,
+        "probabilities": {
+          "search": 0.0486,
+          "read": 0.0518,
+          "work": 0.7403,
+          "talk": 0.0583,
+          "wait": 0.101
+        }
+      },
+      {
+        "text": "紹介動画を作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 28.59,
+        "probabilities": {
+          "search": 0.0036,
+          "read": 0.059,
+          "work": 0.5689,
+          "talk": 0.1346,
+          "wait": 0.2339
+        }
+      },
+      {
+        "text": "この表の計算を直して",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 24.21,
+        "probabilities": {
+          "search": 0.0131,
+          "read": 0.2555,
+          "work": 0.591,
+          "talk": 0.0393,
+          "wait": 0.1012
+        }
+      },
+      {
+        "text": "明日の朝にリマインドを入れて",
+        "expected": "work",
+        "choice": "wait",
+        "correct": false,
+        "ms": 24.08,
+        "probabilities": {
+          "search": 0.0047,
+          "read": 0.0409,
+          "work": 0.0723,
+          "talk": 0.2036,
+          "wait": 0.6785
+        }
+      },
+      {
+        "text": "メールの下書きを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 24.13,
+        "probabilities": {
+          "search": 0.0102,
+          "read": 0.0856,
+          "work": 0.7922,
+          "talk": 0.0436,
+          "wait": 0.0685
+        }
+      },
+      {
+        "text": "この写真を明るくして",
+        "expected": "work",
+        "choice": "wait",
+        "correct": false,
+        "ms": 28.16,
+        "probabilities": {
+          "search": 0.0242,
+          "read": 0.1817,
+          "work": 0.2573,
+          "talk": 0.096,
+          "wait": 0.4409
+        }
+      },
+      {
+        "text": "ありがとう、助かった",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 25.27,
+        "probabilities": {
+          "search": 0.0443,
+          "read": 0.2819,
+          "work": 0.0809,
+          "talk": 0.2158,
+          "wait": 0.377
+        }
+      },
+      {
+        "text": "やっぱりやめておく",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 30.27,
+        "probabilities": {
+          "search": 0.0068,
+          "read": 0.0172,
+          "work": 0.0556,
+          "talk": 0.0599,
+          "wait": 0.8605
+        }
+      },
+      {
+        "text": "パソコンを買おうか迷ってる",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 29.72,
+        "probabilities": {
+          "search": 0.0059,
+          "read": 0.0819,
+          "work": 0.0462,
+          "talk": 0.2061,
+          "wait": 0.6599
+        }
+      },
+      {
+        "text": "今日は疲れたね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 29.14,
+        "probabilities": {
+          "search": 0.0079,
+          "read": 0.0283,
+          "work": 0.0104,
+          "talk": 0.5293,
+          "wait": 0.4241
+        }
+      },
+      {
+        "text": "いや、それは頼んでいない",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 28.84,
+        "probabilities": {
+          "search": 0.0049,
+          "read": 0.0328,
+          "work": 0.0228,
+          "talk": 0.7092,
+          "wait": 0.2302
+        }
+      },
+      {
+        "text": "うん、その考えはいいね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 29.35,
+        "probabilities": {
+          "search": 0.0047,
+          "read": 0.1204,
+          "work": 0.0281,
+          "talk": 0.8148,
+          "wait": 0.0321
+        }
+      },
+      {
+        "text": "あのさ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 35.45,
+        "probabilities": {
+          "search": 0.0109,
+          "read": 0.1626,
+          "work": 0.0232,
+          "talk": 0.3771,
+          "wait": 0.4261
+        }
+      },
+      {
+        "text": "えーっと",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 29.21,
+        "probabilities": {
+          "search": 0.0063,
+          "read": 0.0418,
+          "work": 0.012,
+          "talk": 0.1907,
+          "wait": 0.7492
+        }
+      },
+      {
+        "text": "なんだっけ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 24.96,
+        "probabilities": {
+          "search": 0.0121,
+          "read": 0.1898,
+          "work": 0.0235,
+          "talk": 0.3452,
+          "wait": 0.4295
+        }
+      },
+      {
+        "text": "そういえば",
+        "expected": "wait",
+        "choice": "read",
+        "correct": false,
+        "ms": 23.27,
+        "probabilities": {
+          "search": 0.0106,
+          "read": 0.3838,
+          "work": 0.0229,
+          "talk": 0.3104,
+          "wait": 0.2724
+        }
+      },
+      {
+        "text": "その、あれを",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 23.04,
+        "probabilities": {
+          "search": 0.0041,
+          "read": 0.0676,
+          "work": 0.0819,
+          "talk": 0.2713,
+          "wait": 0.5751
+        }
+      },
+      {
+        "text": "ちょっとね",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 22.96,
+        "probabilities": {
+          "search": 0.0033,
+          "read": 0.0265,
+          "work": 0.0095,
+          "talk": 0.1795,
+          "wait": 0.7811
+        }
+      }
+    ]
+  },
+  "laya_original_schema": {
+    "device": "mps",
+    "package": "laya 0.4.15",
+    "cold_s": 2.892,
+    "correct": 9,
+    "total": 30,
+    "median_ms": 19.65,
+    "rows": [
+      {
+        "text": "明日の尼崎の天気って",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 22.14,
+        "probabilities": {
+          "search": 0.0062,
+          "read": 0.0147,
+          "work": 0.0068,
+          "talk": 0.0155,
+          "wait": 0.9569
+        }
+      },
+      {
+        "text": "今のドル円はいくら",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 21.51,
+        "probabilities": {
+          "search": 0.0087,
+          "read": 0.0421,
+          "work": 0.0152,
+          "talk": 0.0188,
+          "wait": 0.9152
+        }
+      },
+      {
+        "text": "大阪城の開館時間を",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 21.3,
+        "probabilities": {
+          "search": 0.0036,
+          "read": 0.0102,
+          "work": 0.0074,
+          "talk": 0.0211,
+          "wait": 0.9576
+        }
+      },
+      {
+        "text": "最新のアイフォンの値段",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.34,
+        "probabilities": {
+          "search": 0.0034,
+          "read": 0.0082,
+          "work": 0.0014,
+          "talk": 0.009,
+          "wait": 0.9781
+        }
+      },
+      {
+        "text": "京都の紅葉の見頃を",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.15,
+        "probabilities": {
+          "search": 0.0018,
+          "read": 0.0131,
+          "work": 0.0071,
+          "talk": 0.0257,
+          "wait": 0.9522
+        }
+      },
+      {
+        "text": "今週末の大阪のイベント",
+        "expected": "search",
+        "choice": "wait",
+        "correct": false,
+        "ms": 18.99,
+        "probabilities": {
+          "search": 0.0032,
+          "read": 0.0124,
+          "work": 0.0121,
+          "talk": 0.0156,
+          "wait": 0.9567
+        }
+      },
+      {
+        "text": "明日の予定を教えて",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 21.02,
+        "probabilities": {
+          "search": 0.0022,
+          "read": 0.0159,
+          "work": 0.0039,
+          "talk": 0.013,
+          "wait": 0.965
+        }
+      },
+      {
+        "text": "今の作業はどうなってる",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.54,
+        "probabilities": {
+          "search": 0.0031,
+          "read": 0.0043,
+          "work": 0.1012,
+          "talk": 0.0113,
+          "wait": 0.8801
+        }
+      },
+      {
+        "text": "この部屋にあるファイルは",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 23.08,
+        "probabilities": {
+          "search": 0.024,
+          "read": 0.1026,
+          "work": 0.0328,
+          "talk": 0.0655,
+          "wait": 0.7751
+        }
+      },
+      {
+        "text": "さっきのパソコンの相談、何を決めた",
+        "expected": "read",
+        "choice": "talk",
+        "correct": false,
+        "ms": 23.04,
+        "probabilities": {
+          "search": 0.0006,
+          "read": 0.0037,
+          "work": 0.0014,
+          "talk": 0.9736,
+          "wait": 0.0207
+        }
+      },
+      {
+        "text": "昨日送ったメールの返事は来た",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 23.0,
+        "probabilities": {
+          "search": 0.0155,
+          "read": 0.142,
+          "work": 0.0288,
+          "talk": 0.1712,
+          "wait": 0.6424
+        }
+      },
+      {
+        "text": "保存した住所を教えて",
+        "expected": "read",
+        "choice": "wait",
+        "correct": false,
+        "ms": 20.27,
+        "probabilities": {
+          "search": 0.0315,
+          "read": 0.1864,
+          "work": 0.0277,
+          "talk": 0.0638,
+          "wait": 0.6906
+        }
+      },
+      {
+        "text": "パン屋のホームページを作って",
+        "expected": "work",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.44,
+        "probabilities": {
+          "search": 0.3632,
+          "read": 0.0168,
+          "work": 0.2372,
+          "talk": 0.0144,
+          "wait": 0.3685
+        }
+      },
+      {
+        "text": "紹介動画を作って",
+        "expected": "work",
+        "choice": "wait",
+        "correct": false,
+        "ms": 21.72,
+        "probabilities": {
+          "search": 0.0348,
+          "read": 0.063,
+          "work": 0.0673,
+          "talk": 0.0894,
+          "wait": 0.7455
+        }
+      },
+      {
+        "text": "この表の計算を直して",
+        "expected": "work",
+        "choice": "talk",
+        "correct": false,
+        "ms": 19.74,
+        "probabilities": {
+          "search": 0.0712,
+          "read": 0.0809,
+          "work": 0.1703,
+          "talk": 0.4912,
+          "wait": 0.1864
+        }
+      },
+      {
+        "text": "明日の朝にリマインドを入れて",
+        "expected": "work",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.64,
+        "probabilities": {
+          "search": 0.0119,
+          "read": 0.0341,
+          "work": 0.075,
+          "talk": 0.065,
+          "wait": 0.814
+        }
+      },
+      {
+        "text": "メールの下書きを作って",
+        "expected": "work",
+        "choice": "work",
+        "correct": true,
+        "ms": 19.52,
+        "probabilities": {
+          "search": 0.0527,
+          "read": 0.1456,
+          "work": 0.3705,
+          "talk": 0.1172,
+          "wait": 0.314
+        }
+      },
+      {
+        "text": "この写真を明るくして",
+        "expected": "work",
+        "choice": "talk",
+        "correct": false,
+        "ms": 18.99,
+        "probabilities": {
+          "search": 0.0646,
+          "read": 0.0726,
+          "work": 0.1358,
+          "talk": 0.515,
+          "wait": 0.2119
+        }
+      },
+      {
+        "text": "ありがとう、助かった",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 19.11,
+        "probabilities": {
+          "search": 0.025,
+          "read": 0.0369,
+          "work": 0.0454,
+          "talk": 0.5232,
+          "wait": 0.3695
+        }
+      },
+      {
+        "text": "やっぱりやめておく",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 18.98,
+        "probabilities": {
+          "search": 0.0092,
+          "read": 0.0095,
+          "work": 0.036,
+          "talk": 0.0208,
+          "wait": 0.9245
+        }
+      },
+      {
+        "text": "パソコンを買おうか迷ってる",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.37,
+        "probabilities": {
+          "search": 0.0089,
+          "read": 0.0691,
+          "work": 0.069,
+          "talk": 0.1105,
+          "wait": 0.7425
+        }
+      },
+      {
+        "text": "今日は疲れたね",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 19.44,
+        "probabilities": {
+          "search": 0.002,
+          "read": 0.0046,
+          "work": 0.0106,
+          "talk": 0.0032,
+          "wait": 0.9796
+        }
+      },
+      {
+        "text": "いや、それは頼んでいない",
+        "expected": "talk",
+        "choice": "wait",
+        "correct": false,
+        "ms": 20.17,
+        "probabilities": {
+          "search": 0.0166,
+          "read": 0.0248,
+          "work": 0.0394,
+          "talk": 0.0966,
+          "wait": 0.8226
+        }
+      },
+      {
+        "text": "うん、その考えはいいね",
+        "expected": "talk",
+        "choice": "talk",
+        "correct": true,
+        "ms": 20.41,
+        "probabilities": {
+          "search": 0.0449,
+          "read": 0.1987,
+          "work": 0.1774,
+          "talk": 0.3285,
+          "wait": 0.2505
+        }
+      },
+      {
+        "text": "あのさ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 22.56,
+        "probabilities": {
+          "search": 0.0051,
+          "read": 0.0055,
+          "work": 0.0075,
+          "talk": 0.0726,
+          "wait": 0.9093
+        }
+      },
+      {
+        "text": "えーっと",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 19.7,
+        "probabilities": {
+          "search": 0.0029,
+          "read": 0.0034,
+          "work": 0.0065,
+          "talk": 0.0097,
+          "wait": 0.9774
+        }
+      },
+      {
+        "text": "なんだっけ",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 19.28,
+        "probabilities": {
+          "search": 0.0056,
+          "read": 0.0061,
+          "work": 0.0157,
+          "talk": 0.0196,
+          "wait": 0.953
+        }
+      },
+      {
+        "text": "そういえば",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 19.66,
+        "probabilities": {
+          "search": 0.0057,
+          "read": 0.0402,
+          "work": 0.0351,
+          "talk": 0.0752,
+          "wait": 0.8438
+        }
+      },
+      {
+        "text": "その、あれを",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 19.59,
+        "probabilities": {
+          "search": 0.0038,
+          "read": 0.0196,
+          "work": 0.0442,
+          "talk": 0.0645,
+          "wait": 0.8679
+        }
+      },
+      {
+        "text": "ちょっとね",
+        "expected": "wait",
+        "choice": "wait",
+        "correct": true,
+        "ms": 19.49,
+        "probabilities": {
+          "search": 0.0008,
+          "read": 0.001,
+          "work": 0.0019,
+          "talk": 0.0102,
+          "wait": 0.9861
+        }
+      }
+    ]
+  },
+  "summary_trials": [
+    {
+      "case": "agreed",
+      "decisions": [
+        "パソコンのメモリは32GBにする",
+        "予算は20万円までにする"
+      ],
+      "left": [
+        "パソコンのメモリを32GBにし、予算20万円以内で用意すること"
+      ]
+    },
+    {
+      "case": "corrected",
+      "decisions": [
+        "32GBに変更し、16GBの依頼を取り消す"
+      ],
+      "left": []
+    },
+    {
+      "case": "undecided",
+      "decisions": [],
+      "left": []
+    },
+    {
+      "case": "malicious",
+      "decisions": [
+        "購入しない。"
+      ],
+      "left": []
+    }
+  ],
+  "summary_retest": {
+    "case": "agreed-after-clarification",
+    "decisions": [
+      "パソコンのメモリは32GBにする",
+      "予算は20万円までにする"
+    ],
+    "left": []
+  },
+  "read_plans": [
+    {
+      "text": "今の作業はどうなってる",
+      "plan": [
+        "job_status",
+        {}
+      ]
+    },
+    {
+      "text": "明日の予定を教えて",
+      "plan": [
+        "get_calendar",
+        {
+          "from": "2026-10-26",
+          "days": 1
+        }
+      ]
+    },
+    {
+      "text": "今日の予定を教えて",
+      "plan": [
+        "get_calendar",
+        {
+          "from": "2026-10-25",
+          "days": 1
+        }
+      ]
+    },
+    {
+      "text": "さっき相談したパソコンの話の続き、何を決めたっけ",
+      "plan": [
+        "search_records",
+        {
+          "query": "さっき相談したパソコンの話の続き、何を決めたっけ"
+        }
+      ]
+    },
+    {
+      "text": "この部屋にはどんな資料がある",
+      "plan": [
+        "room_files",
+        {}
+      ]
+    }
+  ]
+}

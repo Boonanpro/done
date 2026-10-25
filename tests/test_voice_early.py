@@ -76,6 +76,20 @@ async def test_correction_during_read_wait_drops_result(reads, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_backend_does_not_run_a_fallback_read(reads, monkeypatch):
+    async def slow(*a, **kw):
+        reads.append(a[0]); await asyncio.Event().wait()
+    monkeypatch.setattr(R, 'run_function', slow)
+    d, p = await ready()
+    task = asyncio.create_task(S.execute_call({'name':'job_status','arguments':'{}'},'u','r',d,lambda *a,**kw:None,'x'))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError): await task
+    await p.close()
+    assert reads == ['job_status']
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_judge_and_never_starts_late_read(reads, monkeypatch):
     entered = asyncio.Event()
     async def delayed(self, text):
@@ -136,6 +150,9 @@ def test_calendar_and_history_require_equal_effective_arguments():
     e.context = []
     assert p.same_args(e, 'search_records', {'query':'新幹線 予約'})
     assert not p.same_args(e, 'search_records', {'query':'新幹線 取消'})
+    e.args = {'query':'あれ'}
+    e.context = [{'role':'user','text':'新幹線'}, {'role':'user','text':'カメラ'}]
+    assert not p.same_args(e, 'search_records', {'query':'あれ'}, e.context + [{'role':'assistant','text':'はい'}])
 
 
 def test_only_literal_owner_evidence_can_make_a_decision():
