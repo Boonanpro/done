@@ -12,8 +12,10 @@ deepseek-flash 53/60 at 0.9 s, keyword rules 13/60 on words they were not writte
 deepseek-flash recognises instead. Neither writes the query: the words heard so far are the question, and web_search
 writes its own queries from it.
 
-Only searches start early: they read and change nothing, so a wrong guess costs one search (0.6 yen). Anything that
+Searches and a fixed allowlist of reads start early. Work only preloads the operation catalogue. Anything that
 sends, pays, books or changes something still waits for the finished request and the owner's approval.
+Reads require equal effective function arguments, an unchanged utterance, the same call/room/owner and a five-second
+TTL. Failed or late guesses are discarded. DAN_VOICE_PREFETCH_READ=0 disables the added reads independently.
 
 Once a turn is known to be a search, its growing words are searched again without judging (up to 3 searches a turn), so
 the newest search is close to the finished sentence.
@@ -32,12 +34,21 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 MIN_CHARS = 6          # 「えーと」「あのさ」 are not judged
 STEP_CHARS = 3         # judge again once the words grew by this much
 RESEARCH_CHARS = 4     # a turn known to be a search is searched again once its words grew by this much
 PER_TURN = 3           # searches started early for one turn of the owner, at most
 KEEP_SECONDS = 90
+READ_SECONDS = 5  # live status must not be answered with an old snapshot
+READS = {'job_status': '今動いている作業の様子',
+         'calendar_today': '今日の予定', 'calendar_tomorrow': '明日の予定',
+         'calendar_week': '今日から7日間の予定',
+         'search_records': '前の会話や作業の記録を読む',
+         'room_files': 'この部屋のファイル一覧を読む',
+         'none': '上のどれにも正確に当てはまらない、日付や対象がまだ曖昧、取り消し・言い直し'}
 KINDS = {'search': 'ウェブで公開されている情報を調べる話（天気・値段・営業時間・ニュース・店・発売日など）',
          'read': 'ダンが持っている本人の情報を読む話（予定・メール・保存した住所など・前の作業の様子・本人のアカウントの中身・前に買った物）',
          'work': 'ダンに作業を頼む話（直す・作る・差し替える・下書き・リマインドを入れる）',
@@ -74,9 +85,10 @@ def enabled():
 
 
 class Early:
-    def __init__(self, text, turn):
+    def __init__(self, text, turn, name='web_search', args=None):
         self.text, self.turn, self.started = text, turn, time.monotonic()   # turn: the owner's turn object in Dialogue.turns
         self.task, self.used = None, False
+        self.name, self.args = name, args or {}
 
 
 def said_since(turns, turn):
@@ -100,8 +112,9 @@ def only_an_ending(searched, final):
 
 class Prefetch:
     """One call's early searches. heard() after every delta of the owner's words; take() when the backend searches."""
-    def __init__(self, user_id, record=lambda *a, **k: None):
+    def __init__(self, user_id, record=lambda *a, **k: None, room_id=None):
         self.user_id, self.record = user_id, record
+        self.room_id, self.dialogue, self.closed = room_id, None, False
         self.searches = []        # Early
         self.judged = ('', None)  # (text, turn) last judged
         self.judging = None
@@ -119,7 +132,14 @@ class Prefetch:
         return None, ''
 
     def heard(self, dialogue):
-        if not enabled() or (self.judging and not self.judging.done()):
+        if self.closed or not enabled():
+            return
+        if self.dialogue is None:
+            self.dialogue = dialogue
+        if self.dialogue is not dialogue:
+            return
+        self.prune()
+        if self.judging and not self.judging.done():
             return
         turn, text = self.latest(dialogue.turns)
         last_text, last_turn = self.judged
@@ -134,6 +154,38 @@ class Prefetch:
             return
         self.judged = (text, turn)
         self.judging = asyncio.ensure_future(self._judge_and_search(dialogue, text, turn))
+
+    def prune(self):
+        now = time.monotonic()
+        keep = []
+        for s in self.searches:
+            if now - s.started < (KEEP_SECONDS if s.name == 'web_search' else READ_SECONDS):
+                keep.append(s)
+            elif s.task and not s.task.done():
+                s.task.cancel()
+        self.searches = keep[-40:]
+
+    async def read_plan(self, text):
+        """Choose only a fixed read, never generated tool names or arbitrary arguments."""
+        if self.judge is None:
+            from app.services.jev_decisions import Decisions
+            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400)
+        got = await self.judge.choose({'utterance_so_far': text}, {'read': {
+            'type': 'choice', 'criteria': READS,
+            'instructions': '本人の依頼に正確に合う読み取りを1つ選ぶ。推測で日付を補わない。複数の依頼や取り消しはnone。'}})
+        if not got.get('available'):
+            return None  # normal backend still reads it; do not add another paid fallback
+        answer = got['answers']['read']
+        route = answer['choice'] if answer['probabilities'].get(answer['choice'], 0) >= .8 else 'none'
+        today = datetime.now(ZoneInfo('Asia/Tokyo')).date()
+        if route.startswith('calendar_'):
+            offset, days = {'calendar_today': (0, 1), 'calendar_tomorrow': (1, 1), 'calendar_week': (0, 7)}[route]
+            return 'get_calendar', {'from': (today + timedelta(days=offset)).isoformat(), 'days': days}
+        if route == 'search_records':
+            return route, {'query': text}
+        if route in ('job_status', 'room_files') and self.room_id:
+            return route, {}
+        return None
 
     async def kind(self, text):
         """'search' / 'read' / 'work' / 'talk' / 'wait', or '' when no judge answered."""
@@ -169,12 +221,29 @@ class Prefetch:
         self.calls = (self.calls + [turn])[-20:]
 
     def start(self, text, turn):
+        if self.closed:
+            return
         from app.services import web_search
         early = Early(text, turn)
         early.task = asyncio.ensure_future(web_search.find(text))
+        early.task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
         self.searches.append(early)
         self.counts['started'] += 1
         self.record('prefetch_started', chars=len(text))
+
+    def start_read(self, text, turn, name, args, dialogue):
+        # Explicit allowlist: no browser, generic dan_tool, personal secrets or writes.
+        if self.closed or name not in ('job_status', 'get_calendar', 'search_records', 'room_files', 'list_operations'):
+            return
+        from app.services.voice_responses import run_function
+        early = Early(text, turn, name, dict(args))
+        early.context = dialogue.recent()
+        early.task = asyncio.create_task(run_function(name, args, self.user_id, self.room_id, early.context))
+        # Retrieve errors even if the backend never asks for this read.
+        early.task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+        self.searches.append(early)
+        self.counts['started'] += 1
+        self.record('prefetch_started', name=name, chars=len(text))
 
     async def _judge_and_search(self, dialogue, text, turn):
         started = time.monotonic()
@@ -184,18 +253,82 @@ class Prefetch:
             kind = ''
         self.counts['judged'] += 1
         self.record('prefetch_judged', result=kind, chars=len(text), ms=round((time.monotonic() - started) * 1000))
-        if kind == 'search':
+        # A slow judge may return after the request was corrected, replaced or the call closed.
+        final = said_since(dialogue.turns, turn)
+        current = not self.closed and final is not None and only_an_ending(text, final)
+        if kind == 'search' and not self.closed and self.latest(dialogue.turns)[0] is turn:
             self.search_turn = turn
             self.start(text, turn)
-        now = time.monotonic()
-        self.searches = [s for s in self.searches if now - s.started < KEEP_SECONDS]
+        elif kind in ('read', 'work') and current and self.room_id:
+            from app.services.web_search import _env
+            if (_env('DAN_VOICE_PREFETCH_READ') or '1').strip() != '0':
+                plan = ('list_operations', {}) if kind == 'work' else await self.read_plan(text)
+                final = said_since(dialogue.turns, turn)
+                if plan and not self.closed and final is not None and only_an_ending(text, final):
+                    # One read plan per request. Growth or correction falls back to the backend.
+                    if not any(s.turn is turn for s in self.searches):
+                        self.start_read(text, turn, *plan, dialogue)
+        self.prune()
+        self.judging = None
         self.heard(dialogue)   # words that arrived while judging
+
+    def same_args(self, early, name, args):
+        if early.name != name:
+            return False
+        if name == 'get_calendar':
+            today = datetime.now(ZoneInfo('Asia/Tokyo')).date().isoformat()
+            return early.args == {'from': args.get('from') or today,
+                                  'days': int(args.get('days') or (1 if args.get('from') else 14))}
+        if name == 'search_records':
+            from app.services.voice_past import keywords
+            return keywords(early.args['query'], early.context) == keywords(str(args.get('query') or ''), early.context)
+        return early.args == args
+
+    async def take_read(self, name, args, dialogue, user_id, room_id):
+        """Same call, owner, room, exact read parameters and unchanged utterance; consume before awaiting."""
+        if self.closed or self.dialogue is not dialogue or (self.user_id, self.room_id) != (user_id, room_id):
+            return None
+        self.prune()
+        best = None
+        for s in reversed(self.searches):
+            final = said_since(dialogue.turns, s.turn)
+            if s.used or s.name == 'web_search' or final is None or not only_an_ending(s.text, final):
+                continue
+            since = dialogue.turns[next(i for i, t in enumerate(dialogue.turns) if t is s.turn):]
+            if any(c is t for c in self.calls for t in since):
+                continue
+            if self.same_args(s, name, args):
+                best = s
+                break
+        self.saw_call(dialogue.turns)
+        if best is None:
+            return None
+        for s in self.searches:
+            if s.turn is best.turn:
+                s.used = True
+        try:
+            result = await asyncio.wait_for(asyncio.shield(best.task), timeout=1.0)
+        except asyncio.CancelledError:
+            if not best.task.cancelled():
+                raise
+            return None
+        except Exception:
+            return None
+        final = said_since(dialogue.turns, best.turn)
+        if self.closed or time.monotonic() - best.started >= READ_SECONDS or final is None or not only_an_ending(best.text, final):
+            return None
+        if not isinstance(result, dict) or result.get('error'):
+            return None
+        self.counts['hit'] += 1
+        self.record('prefetch_hit', name=name, started_before_s=round(time.monotonic() - best.started, 2))
+        return result
 
     async def take(self, query, turns):
         """The early result for the backend's web_search(query), or None. Waits for a search still running."""
         best, why = None, ''
+        self.prune()
         for s in reversed(self.searches):
-            if s.used:
+            if s.used or s.name != 'web_search' or self.closed:
                 continue
             final = said_since(turns, s.turn)
             if final is None or not only_an_ending(s.text, final):
@@ -225,12 +358,22 @@ class Prefetch:
             return None
         if not found.get('success'):
             return None
+        final = said_since(turns, best.turn)
+        if self.closed or final is None or not only_an_ending(best.text, final) or time.monotonic() - best.started >= KEEP_SECONDS:
+            return None
         self.counts['hit'] += 1
         self.record('prefetch_hit', started_before_s=round(ahead, 2), waited_ms=round((time.monotonic() - waited) * 1000),
                     search_s=found.get('seconds'))
         return found
 
     async def close(self):
+        self.closed = True
+        tasks = [s.task for s in self.searches if s.task]
+        if self.judging:
+            tasks.append(self.judging)
+        for task in tasks:
+            if not task.done(): task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for s in self.searches:
             if s.task and not s.task.done():
                 s.task.cancel()
