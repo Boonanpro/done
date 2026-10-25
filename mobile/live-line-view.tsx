@@ -51,7 +51,7 @@ export function LiveLineView({ live, startedAt }: { live: LiveStep[]; startedAt?
       ) : null}
       <Pressable ref={header} onPress={toggle} style={styles.liveLineRow} hitSlop={8} accessibilityRole="button" accessibilityState={{ expanded: open }}>
         <TypingDots color="#7a8f86" />
-        <Text style={styles.label} numberOfLines={1}>{text.split('\n')[0]}</Text>
+        <Text style={styles.label} numberOfLines={open ? undefined : 1}>{text.split('\n')[0]}</Text>
         {from ? <Text style={styles.liveElapsed}>{elapsedText(from, now)}</Text> : null}
         <Ionicons name={open ? 'chevron-down' : 'chevron-up'} size={13} color="#7a8f86" style={{ marginLeft: 4 }} />
       </Pressable>
