@@ -14,8 +14,13 @@
   書き換えは Write/Edit/MultiEdit、Codex の apply_patch、シェルの書き込み（> ・write_text・sed -i・
   cp/mv など）を数える。シェルは見分けが粗いので、読むだけのコマンドでも書き込みの印があれば数える
   （確かめを1回走らせれば通る）。
-結果が NG か UNCHECKED（本人が開いていない）の時は、最後の返事に「直った」とだけ書いて終えないよう、
-一度だけ止めて、その結果をそのまま伝えるよう返す（返事が未確認・NG の理由に触れていれば止めない）。
+このターンで確かめた結果が NG（作り直しや読み直しの途中）の時は、一度だけ止めて、待ってから確かめ直させる。
+UNCHECKED（本人が開いていない）は止めない（開けば新しい版に切り替わる）。
+
+確かめた結果は本人への返事に書かせない（2026-10-25 本人: 「本人の画面を確かめた結果を足します。パソコンで開いている
+顧客管理のタブは、もう新しい版に…」は「一切いらない」「内部的な話」）。止めるとその後に書いた文だけが本人に届く返事に
+なる（Claude の result も Codex の最後の文もそう）ので、止める時は「確かめる前に書いた本人への答えを、そのまま全部
+もう一度書いて終える」よう案内する。10-25 はこの案内が無く、答えが捨てられて確かめた結果の1段落だけが届いた。
 
 同じ書き換えで止めるのは3回まで（.data/artifact_gate/ に数える）。それを超えたら通して記録だけ残す。
 exit 0 = 通す / stdout に {"decision":"block","reason":…} = 続けさせる（Claude と Codex で同じ形）。
@@ -47,8 +52,6 @@ WRITE_MARK = re.compile(
     r"\bos\.replace\(|apply_patch|\*\*\* (?:Add|Update|Delete) File:", re.I)
 SEEN_RE = re.compile(r"\[artifact_seen\] slug=([\w*-]+) result=(OK|NG|UNCHECKED)")
 PATCH_FILE = re.compile(r"\*\*\* (?:Add|Update|Delete) File: (.+)")
-ACK_WORDS = re.compile(r"未確認|確かめ(?:て|られて)(?:い)?(?:ない|ません)|確認(?:でき)?て(?:い)?(?:ない|ません)|開いて(?:い)?(?:ない|ません|おらず)|"
-                       r"(?<![A-Za-z])NG(?![A-Za-z])|古い版|古い写し|再起動(?:待ち|が要る|を待)|読み直し(?:の途中|を待)|作り直し(?:を待|てい|中)|更新中|まだ直", re.I)
 # `cat > 先 <<'EOF' … EOF` / `tee 先 <<EOF`: 中身は「先」に書く文章で、中に成果物のパスが出ても成果物は書き換わらない
 # （10/18 試験ファイルに書いた試験用のパスを成果物の書き換えと数えた）。中身だけ除き、書き込む先は残して判定する。
 # python - <<EOF のようにコマンドへ渡す中身は、そのコードが成果物を書くことがあるので除かない。
@@ -118,8 +121,21 @@ def _texts(obj, out: list[str]) -> None:
             _texts(v, out)
 
 
+def _is_turn_start(content) -> bool:
+    """本人（または起こした仕組み）からの新しい言葉か。道具の結果と、止める仕組みからの案内は数えない。"""
+    texts: list[str] = []
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return False
+        texts = [b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text")]
+    joined = "\n".join(texts).lstrip()
+    return bool(joined) and not joined.startswith(("Stop hook feedback", "[成果物の確認の関所]"))
+
+
 def read_events(path: str) -> tuple[list[tuple], str]:
-    """記録を順に (種類, …) へ。('edit', slugs) / ('seen', slug, result)。最後の返事の文も返す。"""
+    """記録を順に (種類, …) へ。('edit', slugs) / ('seen', slug, result) / ('turn',)。最後の返事の文も返す。"""
     events: list[tuple] = []
     last_text = ""
     try:
@@ -136,6 +152,9 @@ def read_events(path: str) -> tuple[list[tuple], str]:
                 continue
             # Claude Code: {"type":"assistant","message":{"content":[{"type":"tool_use",...}]}} / user の tool_result
             msg = d.get("message") if isinstance(d.get("message"), dict) else None
+            if msg is not None and d.get("type") == "user" and _is_turn_start(msg.get("content")):
+                events.append(("turn",))
+                continue
             if msg is not None and isinstance(msg.get("content"), list):
                 for block in msg["content"]:
                     if not isinstance(block, dict):
@@ -170,6 +189,8 @@ def read_events(path: str) -> tuple[list[tuple], str]:
                 for t in texts:
                     for slug, result in SEEN_RE.findall(t):
                         events.append(("seen", slug, result))
+            elif ptype == "message" and p.get("role") == "user" and _is_turn_start(p.get("content")):
+                events.append(("turn",))
             elif ptype == "message" and p.get("role") == "assistant":
                 texts = []
                 _texts(p.get("content"), texts)
@@ -188,7 +209,7 @@ def pending(events: list[tuple]) -> tuple[dict[str, int], dict[str, str]]:
         if ev[0] == "edit":
             for s in ev[1]:
                 last_edit[s] = i
-        else:
+        elif ev[0] == "seen":
             last_seen[ev[1]] = (i, ev[2])
     unchecked, results = {}, {}
     for s, i in last_edit.items():
@@ -210,6 +231,23 @@ def count_block(session: str, key: str) -> int:
     data[key] = data.get(key, 0) + 1
     f.write_text(json.dumps(data), encoding="utf-8")
     return data[key]
+
+
+def this_turn_results(events: list[tuple]) -> dict[str, str]:
+    """このターン（最後の本人の言葉の後）で確かめた slug → 最後の結果。前のターンの NG で次のターンを止めない
+    （10-25 前のターンの NG のまま、次の「READY」だけのターンが止められた）。"""
+    start = max((i for i, ev in enumerate(events) if ev[0] == "turn"), default=-1)
+    out: dict[str, str] = {}
+    for ev in events[start + 1:]:
+        if ev[0] == "seen":
+            out[ev[1]] = ev[2]
+    return out
+
+
+REWRITE = ("確かめた結果（版・画面・裏側・公開版がどうだったか）は本人への返事に書かない。本人に言う話ではない。"
+           "この後に書く文が、本人に届く返事の全部になる（確かめる前に書いた文は届かない）。"
+           "確かめ終えたら、確かめる前に書いた本人への答えを、言い直さずそのまま全部もう一度書いて終えること"
+           "（「結果を足します」のような書き出しにしない）。")
 
 
 def block(reason: str) -> int:
@@ -241,19 +279,20 @@ def main() -> int:
         return block(
             f"この作業で成果物（{', '.join(names)}）を書き換えたが、その後に本人の画面と本番の裏側を確かめていない。"
             "ダンのブラウザ・テスト用アカウント・8001 の確認用サーバーで見えたことは、本人の画面の証拠にならない。"
-            f"終える前に次を走らせ、出た結果どおりに報告すること:\n{cmds}\n"
-            "result=OK なら本人の画面と裏側が今の版。NG なら「直った」と書かず、NG の行の理由（入力中で読み直し待ち・"
-            "裏側の再起動待ちなど）をそのまま伝える。UNCHECKED なら本人が開いていないので「本人の画面ではまだ確かめていない"
-            "（開けば自動で新しい版に切り替わる）」と書く。")
-    bad = {s: r for s, r in results.items() if r != "OK"}
-    if bad and not payload.get("stop_hook_active") and not ACK_WORDS.search(message):
+            f"終える前に次を走らせること:\n{cmds}\n"
+            "result=NG なら、NG の行の理由（読み直し待ち・作り直し中など）が片付くまで待って、もう一度走らせる。"
+            "待っても直らない（作り直しに失敗している等）時だけ、本人の言葉で「〜はまだ直っていません」と1文書く。"
+            + REWRITE)
+    bad = {s: r for s, r in this_turn_results(events).items() if r == "NG"}
+    if bad and not payload.get("stop_hook_active"):
         key = "r:" + ",".join(f"{s}={r}" for s, r in sorted(bad.items())) + ":" + hashlib.sha1(message.encode()).hexdigest()[:8]
         if count_block(session, key) > 1:
             return 0
         lines = ", ".join(f"{s}={r}" for s, r in sorted(bad.items()))
+        cmds = "\n".join(f"  python {SEEN_CMD} --slug {s} --wait 90" for s in sorted(bad))
         return block(
-            f"artifact_seen の結果が OK ではない（{lines}）のに、返事にそれが書かれていない。"
-            "NG なら直ったとは書かず理由をそのまま、UNCHECKED なら「本人の画面ではまだ確かめていない」と、返事に入れ直すこと。")
+            f"確かめた結果が NG のまま（{lines}）。NG の行の理由が片付くまで待って、もう一度走らせること:\n{cmds}\n"
+            "待っても直らない時だけ、本人の言葉で「〜はまだ直っていません」と1文書く。" + REWRITE)
     return 0
 
 

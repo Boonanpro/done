@@ -97,3 +97,16 @@ def tidy_reply(text: str, blocks: Optional[List[Any]], user_text: Optional[str])
             for b in blocks
         ]
     return text, blocks
+
+
+# 「本人に伝えることは無い」の印（2026-10-25）。見張りや付箋の部屋どうしの連絡で起こされたダンは、伝える新しいことが
+# 無ければこの印だけを返す。今までは保存した後で app/services/followup_poller.py が消していたので、消すまでの間に画面と
+# 通知に「WATCH_NO_CHANGE」が出た（本人「そのWATCH_NO_CHANGEもいらん」）。印の返事は、どの経路でも保存しない。
+SILENT_MARKS = ("WATCH_NO_CHANGE",)
+_SILENT_MAX = 200   # followup_poller._discard_no_change_report と同じ長さ（印に短い言い訳が付いた返事も同じに扱う）
+
+
+def is_silent_reply(text: Optional[str]) -> bool:
+    """本人に何も見せない返事か（印だけ、または印に短い文が付いただけ）"""
+    t = (text or "").strip().strip("`*_").strip()
+    return bool(t) and len(t) <= _SILENT_MAX and any(m in t for m in SILENT_MARKS)

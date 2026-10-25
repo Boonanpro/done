@@ -3071,8 +3071,13 @@ async def send_dan_message_stream(
                         # 割り込み終了の result は is_error=True が付くことがある（実測）ため
                         # is_error では弾かない。continuation＋本文空＝無言の中間ターン。
                         empty_continuation = is_continuation and not result_text
+                        # 「伝えることは無い」の印だけの返事は、画面にも出さず保存もしない（app/agent/reply_text.py）
+                        from app.agent.reply_text import is_silent_reply
+                        silent_reply = is_silent_reply(result_text)
                         ai_response_content = "" if empty_continuation else (final_text or "応答を生成できませんでした。もう一度お試しください。")
-                        if cli_saved_ai_message:
+                        if silent_reply:
+                            pass
+                        elif cli_saved_ai_message:
                             ai_context = {"turn_id": event.get("turn_id")} if event.get("turn_id") else None
                             # DB保存済み行の実IDをそのまま返す。合成ID(cli-saved-*)だと
                             # ポーリングで取得したDB行とキャッシュ上で別メッセージ扱いに

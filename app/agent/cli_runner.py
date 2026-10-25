@@ -1479,6 +1479,13 @@ def _save_ai_message_sync(
     if _answers_withdrawn(room_id):
         _cli_debug(f"[CANCEL] reply not saved: the message it answers was withdrawn (room {room_id[:8]})")
         return False
+    from app.agent.reply_text import is_silent_reply
+    if is_silent_reply(content):
+        # 「伝えることは無い」の返事（app/agent/reply_text.py）。保存も通知もしない。どのモデルの経路もここを通る。
+        if ends_turn:
+            turn_flow.turn_answered(room_id)
+        _cli_debug(f"[REPLY] silent reply not saved (room {room_id[:8]})")
+        return False
     content = sanitize_artifact_public_urls(content)
     if blocks:
         from app.services.message_media import portable   # the phone draws from blocks, not from content

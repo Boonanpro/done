@@ -71,3 +71,27 @@ def test_tidy_reply_applies_to_text_blocks_only():
     assert out[0] == blocks[0]
     assert out[1]["text"] == "Checking the official pages now."
     assert out[2]["text"] == BODY
+
+
+# 「伝えることは無い」の印（10-25 本人「そのWATCH_NO_CHANGEもいらん」）
+def test_silent_reply_is_recognized():
+    from app.agent.reply_text import is_silent_reply
+    assert is_silent_reply("WATCH_NO_CHANGE")
+    assert is_silent_reply("  `WATCH_NO_CHANGE`\n")
+    assert is_silent_reply("**WATCH_NO_CHANGE**")
+    assert not is_silent_reply("")
+    assert not is_silent_reply("できました。合計1,135円です。")
+    assert not is_silent_reply("WATCH_NO_CHANGE " + "あ" * 300)
+
+
+def test_silent_reply_is_never_saved(monkeypatch):
+    from app.agent import cli_runner
+    monkeypatch.setattr(cli_runner, "_answers_withdrawn", lambda room_id: False)
+    answered = []
+    monkeypatch.setattr(cli_runner.turn_flow, "turn_answered", lambda room_id: answered.append(room_id) or 0.0)
+
+    def no_db():
+        raise AssertionError("a silent reply must not reach the database")
+    monkeypatch.setattr("app.services.supabase_client.get_supabase_client", no_db)
+    assert cli_runner._save_ai_message_sync("room-1", "WATCH_NO_CHANGE", ends_turn=True) is False
+    assert answered == ["room-1"]
