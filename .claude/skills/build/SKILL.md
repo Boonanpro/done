@@ -21,6 +21,8 @@ Japanese copy (introductions, catchphrases, articles) follows [copywriting.md](r
 
 Choose the implementation order and design appropriate to the task. [design-options.md](references/design-options.md) lists optional components and approaches. Read a recipe only for the selected approach. HTML proposals use `actions/proposal_html.md` only when requested.
 
+When creating or revising dashboards, management screens and apps, communicate state, type and action first through grouping, alignment, placement, color, shape and motion. Put actions beside their targets; add a short label or explanation only when the visual arrangement leaves the meaning unclear. For example, keep the headings of income and expense columns, but omit a repeated “expense amount” caption beside every amount in the expense column. Do not rely on color or motion alone, or remove necessary action names, field labels, error/recovery information, decision-critical facts or accessible names. Before finishing, use the text check in [criteria.md](criteria.md) to remove redundant labels, explanations and legends from the affected screens.
+
 Verify affected behavior and appearance. A new responsive site needs relevant viewport, interaction, editing and delivery checks; a narrow fix needs checks for that fix and plausible regressions. Inspect screenshots yourself, but attach extra screenshots only when requested. Report the actual artifact URL and observed state.
 
 Dan's browser (the test account) is not the owner's screen. After changing an artifact, run `python scripts/artifact_seen.py --slug <slug> --wait 90` before reporting it done. It shows three things and ends with `[artifact_seen] slug=<slug> result=OK|NG|UNCHECKED`:
