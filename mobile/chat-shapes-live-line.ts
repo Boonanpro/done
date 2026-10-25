@@ -5,15 +5,24 @@
  * 作業中の1行と、押すと開く作業の一覧の決まり（2026-10-24）。本人「考えていますとか返事を書いていますってだけだと
  * やっぱ待たされてる感がえぐいわ。本当に進んでる？ってなる」「準備していますはダメ。人間っぽくないから」。
  *
- * - 1行: 一番新しい一歩の言葉。道具なら道具ごとの平易な言葉（サーバーの metadata.activity。app/agent/activity_line.py）、
- *   思考の日本語の要約が届いていればその最後の1文、どちらも無ければ「考えています」。起動中も「考えています」で、
+ * - 1行: 今の段取りの言葉（下の 2026-10-25 の決まり）。何も無ければ「考えています」。起動中も「考えています」で、
  *   別の言葉は作らない。書き始めた返事（最後の一歩が文）は「返事を書いています」。
  * - 後ろに送ってからの経過（「14秒」「1分05秒」）。1秒ごとに進むので、止まっていないと分かる。
- * - 押すと、そのターンでやったことが時刻とかかった秒数つきで全部並ぶ（liveRows）。同じ言葉が続く一歩は1行にまとめる。
+ * - 押すと、終わった段取りが開く（liveRows）。
  *
  * - 出す文は1文ずつ確かめる。英語が主の文は出さない（思考は英語で流れることがある）。「準備しています」のような
  *   起動の言葉は「考えています」に置き換える（本人にとって準備中か考え中かの区別は要らない）。
  * - 追い連絡でターンや吹き出しが分かれても、返事が保存されるまでの作業は1つの一覧にまとめ、秒数は最初に送った時から。
+ *
+ * 2026-10-25 作り直し（本人「何をしてるのかわからなさすぎる」）。道具の種類ごとの言葉では何のための一歩か分からないので、
+ * ダン自身が書いた文を使う（progress の done・doing、コマンドに添えた日本語の説明。app/agent/activity_line.py）。
+ *   サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。   ← 終わった段取り（done）
+ *   その後は新しい版があるか聞きに来ているだけでした。
+ *   アプリが自分の版を知らせているか確かめています 8秒                      ← 今の段取り（1行。動きと秒数）
+ * - 1行は、最後の done 以降にダンが書いた「〜しています」を、後から来る道具の言葉より優先する。ダンの言葉が無い時だけ
+ *   道具の言葉・思考の要約・「考えています」。
+ * - 押して開く一覧は、終わった段取りの文だけを古い順に並べる（今の段取りは一番下の1行が動いて示すので、一覧には入れない）。
+ *   チェックマーク・矢印・番号・分母・時刻は付けない。段取りの総数は決めない（本人 2026-10-25）。
  *
  * 画面ごとの記録（作業の出来事 execution_events）は liveStepFromEvent で LiveStep にする。PC・スマホ・開発室の
  * チャットが同じ物を使う（スマホの写しは frontend/scripts/sync-mobile-chat-shapes.mjs が作る）。依存なし。
@@ -27,6 +36,10 @@ export type LiveStep = {
   text?: string;
   /** 道具の平易な言葉（空なら1行は前のまま） */
   activity?: string;
+  /** activity がダン自身の書いた言葉か（progress の doing・コマンドの説明）。道具の種類からの言葉より優先する */
+  own?: boolean;
+  /** 終わった段取りの文（progress の done。「〜しました」「〜でした」） */
+  done?: string;
   /** 起きた時刻（ミリ秒）。無ければ一覧の時刻と秒数を出さない */
   at?: number;
 };
@@ -85,11 +98,28 @@ export function lastSentence(text: string | undefined, max = LINE_MAX): string {
   return shownLine(text, max);
 }
 
+/** 最後に段取りが終わった一歩の位置（無ければ -1） */
+function lastDoneIndex(steps: LiveStep[]): number {
+  for (let i = steps.length - 1; i >= 0; i--) if (steps[i].done && shownSentences(steps[i].done).length) return i;
+  return -1;
+}
+
 /** 作業中の1行 */
 export function liveLineText(steps: LiveStep[]): string {
-  for (let i = steps.length - 1; i >= 0; i--) {
+  const last = steps.length - 1;
+  if (last >= 0 && steps[last].kind === 'text' && (steps[last].text || '').trim()) return LINE_WRITING;
+  const d = lastDoneIndex(steps);
+  // 今の段取りでダンが書いた言葉（done と同じ一歩の doing も今の段取り）
+  for (let i = last; i >= Math.max(d, 0); i--) {
     const st = steps[i];
-    if (st.kind === 'text' && i === steps.length - 1 && (st.text || '').trim()) return LINE_WRITING;
+    if (st.kind === 'tool' && st.own && st.activity) {
+      const line = shownLine(st.activity);
+      if (line) return line;
+    }
+  }
+  // ダンの言葉が無ければ、段取りが終わった後の道具の言葉か思考の要約
+  for (let i = last; i > d; i--) {
+    const st = steps[i];
     if (st.kind === 'thinking') {
       const line = lastSentence(st.text);
       if (line) return line;
@@ -125,61 +155,35 @@ export function clockText(ms: number | null | undefined): string {
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
 }
 
-/** 押すと開く一覧の1行 */
+/** 押すと開く一覧の1行（終わった段取り） */
 export type LiveRow = {
   key: string;
-  /** 一歩の言葉 */
+  /** 終わった段取りの文 */
   label: string;
-  /** 同じ言葉が続いた数（2以上で「×3」） */
+  /** 互換のため残す（いつも 1） */
   count: number;
-  /** 始まった時刻（ミリ秒） */
+  /** 互換のため残す（いつも null。終わった段取りに時刻は付けない） */
   at: number | null;
-  /** かかった秒数。今している一歩は経過中の秒数 */
+  /** 互換のため残す（いつも null） */
   seconds: number | null;
-  /** 今している一歩か */
+  /** 互換のため残す（いつも false。今の段取りは一番下の1行が示す） */
   now: boolean;
 };
 
-function rowLabel(st: LiveStep, isLast: boolean): string {
-  if (st.kind === 'tool') return shownLine(st.activity, 120);
-  if (st.kind === 'thinking') return lastSentence(st.text, 120);
-  if (st.kind === 'text') {
-    // 最後の文は書きかけの返事かもしれないので、中身は出さない（返事は保存されてから出る）
-    if (isLast) return LINE_WRITING;
-    const parts = shownSentences(st.text);
-    return parts.length ? clip(parts.join(''), 120) : '';
-  }
-  return 'うまくいかなかったので、やり直しています';
-}
-
-/** そのターンでやったことの一覧（古い順）。startedAt は送った時刻（最初の行「考えています」の始まり） */
-export function liveRows(steps: LiveStep[], nowMs: number, startedAt?: number | null): LiveRow[] {
+/**
+ * 押すと開く一覧: そのターンで終わった段取りの文（古い順）。今の段取りは入れない（一番下の1行が動いて示す）。
+ * 引数の nowMs・startedAt は前の作りとの互換のため受け取るだけ。
+ */
+export function liveRows(steps: LiveStep[], _nowMs?: number, _startedAt?: number | null): LiveRow[] {
   const rows: LiveRow[] = [];
-  const firstAt = steps.find((s) => s.at)?.at ?? null;
-  if (startedAt && (!firstAt || startedAt < firstAt - 999)) {
-    rows.push({ key: 'start', label: LINE_THINKING, count: 1, at: startedAt, seconds: null, now: false });
-  }
   steps.forEach((st, i) => {
-    const label = rowLabel(st, i === steps.length - 1);
-    if (!label) return;
-    const prev = rows[rows.length - 1];
-    // 同じ言葉が続く一歩は1行に（「考えています」が続く時は数を付けない）
-    if (prev && prev.label === label && (prev.key !== 'start' || label === LINE_THINKING)) {
-      if (label !== LINE_THINKING) prev.count += 1;
-      return;
-    }
-    rows.push({ key: `s${i}`, label, count: 1, at: st.at ?? null, seconds: null, now: false });
+    if (!st.done) return;
+    const parts = shownSentences(st.done);
+    if (!parts.length) return;
+    const label = clip(parts.join(''), 160);
+    if (rows.length && rows[rows.length - 1].label === label) return;
+    rows.push({ key: `d${i}`, label, count: 1, at: null, seconds: null, now: false });
   });
-  rows.forEach((r, i) => {
-    const next = rows[i + 1];
-    if (r.at == null) return;
-    if (next && next.at != null) r.seconds = Math.max(0, Math.round((next.at - r.at) / 1000));
-    else if (!next) {
-      r.seconds = Math.max(0, Math.floor((nowMs - r.at) / 1000));
-      r.now = true;
-    }
-  });
-  if (rows.length && !rows.some((r) => r.now)) rows[rows.length - 1].now = true;
   return rows;
 }
 
@@ -196,7 +200,11 @@ export function liveStepFromEvent(e: LiveEventLike): LiveStep | null {
   const at = (e.created_at && Date.parse(e.created_at)) || undefined;
   if (e.event_type === 'tool_use') {
     const act = e.metadata?.activity;
-    return { kind: 'tool', activity: typeof act === 'string' ? act : undefined, at };
+    const done = e.metadata?.done;
+    const step: LiveStep = { kind: 'tool', activity: typeof act === 'string' ? act : undefined, at };
+    if (e.metadata?.activity_kind === 'dan') step.own = true;
+    if (typeof done === 'string' && done.trim()) step.done = done;
+    return step;
   }
   if (e.event_type === 'error') return { kind: 'error', text: e.content || '', at };
   if (e.event_type === 'reasoning' || e.event_type === 'text') {

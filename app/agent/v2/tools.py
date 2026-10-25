@@ -384,6 +384,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.places import TOOL as PLACES_TOOL
     from app.services.phone_control import TOOL as PHONE_TOOL
     from app.services.confirm_cards import TOOL as CONFIRM_CARD_TOOL
+    from app.services.work_progress import TOOL as PROGRESS_TOOL
     from app.services.parallel_work_tool import TOOL as PARALLEL_WORK_TOOL
     from app.services.video_analyzer import TOOL as VIDEO_TOOL
     return [
@@ -399,6 +400,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         VIDEO_TOOL,
         PHONE_TOOL,
         CONFIRM_CARD_TOOL,
+        PROGRESS_TOOL,
         WAIT_TOOL,
         DESKTOP_TOOL,
         COMMAND_CENTER_TOOL,
@@ -1330,6 +1332,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_phone", "desktop")
     if tool_name == "confirm_card":
         return ("_confirm_card", "read")
+    if tool_name == "progress":
+        return ("_progress", "read")
 
     if tool_name == "wait_until":
         return ("_wait_until", "wait")
@@ -1421,7 +1425,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_video", "_phone", "_confirm_card"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_video", "_phone", "_confirm_card", "_progress"}:
             return
 
         error_type = result.get("error_type")
@@ -2569,6 +2573,9 @@ async def execute_tool(
         from app.services.phone_control import tool as phone_tool
         return await phone_tool(params)
 
+    if skill_name == "_progress":
+        from app.services.work_progress import tool as progress_tool
+        return await progress_tool(params)
     if skill_name == "_confirm_card":
         from app.services.confirm_cards import tool as confirm_card_tool
         return await confirm_card_tool(params)

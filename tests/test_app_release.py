@@ -47,3 +47,16 @@ def test_refused_or_dry_run_places_nothing(tmp_path, monkeypatch):
     # 同じ版をもう一度は登録しない
     with pytest.raises(ValueError):
         ar.publish(apk)
+
+
+def test_note_installed_keeps_one_row_per_phone(tmp_path, monkeypatch):
+    from app.services import app_release
+    monkeypatch.setattr(app_release, "INSTALLS_FILE", tmp_path / "installs.json")
+    app_release.note_installed("u1", "1.0.76", "75", "samsung SM-S921Q")
+    app_release.note_installed("u1", "1.0.77", 76, "samsung SM-S921Q")
+    app_release.note_installed("u1", "1.0.76", 75, "samsung SM-S911C")
+    app_release.note_installed("u2", "1.0.77", 76, "x")
+    app_release.note_installed("u1", "1.0.77", "bad", "y")
+    rows = app_release.installed("u1")
+    assert {(r["device"], r["version_name"]) for r in rows} == {("samsung SM-S921Q", "1.0.77"), ("samsung SM-S911C", "1.0.76")}
+    assert len(app_release.installed()) == 3
