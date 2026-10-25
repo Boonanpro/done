@@ -38,6 +38,8 @@ MIN_CHARS = 14         # fewer new characters than this are a backchannel, not a
 USER_S = 1.0           # the owner's words settle (「それ図にして」 is a request to the listener too)
 MODEL_TIMEOUT_S = 8.0
 MAX_SCENES = 40
+HOLD_S = 6.0           # after a scene was replaced, Dan's next words wait this long before another decision (2026-10-25: a
+                       # flow Dan listed step by step was redrawn 4 times in 15 seconds); the owner's words are not held
 NOT_ON_STAGE = ('Choice', 'Input', 'Button')   # answers and links need a chat; the stage is looked at while talking
 
 _stages = {}   # room_id -> Stage, for the backend tool show_on_stage (voice_responses)
@@ -75,6 +77,55 @@ def part_names():
     return {l[2:].split('(')[0] for l in part_lines()}
 
 
+ICON_ALIASES = {'ticket': 'doc', 'gate': 'check', 'map': 'pin', 'location': 'pin', 'user': 'person', 'shop': 'store',
+                'plane': 'globe', 'airplane': 'globe', 'bus': 'car', 'taxi': 'car', 'package': 'box', 'delivery': 'truck',
+                'payment': 'card', 'cash': 'money', 'yen': 'money', 'wallet': 'money', 'email': 'mail', 'message': 'chat',
+                'phone-call': 'phone', 'smartphone': 'phone', 'laptop': 'pc', 'computer': 'pc', 'cloud-upload': 'cloud',
+                'ok': 'check', 'done': 'check', 'alert': 'warning', 'error': 'bad', 'time': 'clock', 'timer': 'clock',
+                'date': 'calendar', 'schedule': 'calendar', 'photo': 'image', 'picture': 'image', 'settings': 'gear',
+                'robot': 'bot', 'ai': 'bot', 'hospital': 'home', 'building': 'home', 'office': 'home', 'company': 'home',
+                'book': 'doc', 'note': 'doc', 'list': 'doc', 'form': 'doc', 'contract': 'doc', 'receipt': 'doc',
+                'tv': 'video', 'movie': 'video', 'speaker': 'mic', 'sound': 'mic', 'tag': 'flag', 'target': 'flag'}
+_ICON = re.compile(r'(,\s*)?\bicon:\s*"([A-Za-z0-9_-]+)"(\s*,)?')
+_icons = None
+
+
+def icon_names():
+    """The Flow icons the screen draws (read from its signature in the parts list)."""
+    global _icons
+    if _icons is None:
+        found = set()
+        for line in part_lines():
+            if line.startswith('- Flow('):
+                m = re.search(r'icon\?:\s*((?:"[a-z]+"\s*\|\s*)+"[a-z]+")', line)
+                if m: found = set(re.findall(r'"([a-z]+)"', m.group(1)))
+        _icons = found
+    return _icons
+
+
+def sanitize(program):
+    """A stray icon name becomes the nearest known one, or no icon: the screen's checker refuses the whole scene for one
+    unknown icon (2026-10-25: "ticket" and "gate" left the stage blank for 18 seconds and again at the end of the call)."""
+    known = icon_names()
+    if not known or not isinstance(program, str): return program
+    out = []
+    pos = 0
+    for m in _ICON.finditer(program):
+        name = m.group(2)
+        if name in known: continue
+        alias = ICON_ALIASES.get(name.lower())
+        out.append(program[pos:m.start()])
+        if alias in known:
+            out.append((m.group(1) or '') + 'icon: "' + alias + '"' + (m.group(3) or ''))
+        elif m.group(1) and m.group(3):
+            out.append(m.group(3))          # a, icon: "x", b  ->  a, b
+        elif m.group(1) or m.group(3):
+            out.append('')                  # the only key, or first/last: the comma goes with it
+        pos = m.end()
+    out.append(program[pos:])
+    return ''.join(out)
+
+
 INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、本人の画面に出す「図」を決めて描く係です。声は出せません。画面だけです。
 入力は、直前の会話（ユーザー＝本人、Dan＝ダン）、今の画面の札と中身、そして本人からの明示の頼み（あれば）です。
 出力は JSON だけ: {"action": "keep" | "caption" | "replace", "caption": "今の話を6〜14文字で", "program": "部品のプログラム（replace の時だけ）"}
@@ -86,7 +137,13 @@ action の決め方:
 - 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。
 
 描き方の決まり（program は OpenUI Lang。`root = Part(...)` に加え、`name = Part(...)` の行を書いて root から名前で参照できる。引数は位置で渡し、文字は二重引用符、省略できる引数は後ろから省く。name: value の書き方はしない）:
-- 文字だけの表・箇条書きにしない。人・物・流れは Flow（アイコン＋矢印の図）、今どこかは Flow の tone "now"、金額・件数・時刻は Stat で大きく1つ、比べる話は Compare、推移は Chart、順番は Steps。見出しは Heading で1行。
+- 図は、声を聞いていない人が見ても何の話か分かる物にする。Heading の text は「この図が言っていること」を1文で（例: 「予約から乗るまでは4段階」「東京まで約2時間半・14,920円」）。Heading の sub に、図の読み方か要点を1行足す。
+- 文字だけの表・箇条書きにしない。人・物・流れは Flow（アイコン＋矢印の図）、今どこかは Flow の tone "now"、金額・件数・時刻は Stat で大きく1つ、比べる話は Compare、推移は Chart、順番は Steps。
+- Flow の箱の label は、それが何かが分かる言葉（「公開鍵」ではなく「アプリの鍵」、「表」ではなく「会員の表」）。箱の sub に役割や状態を短く。矢印の label は「持つ」「読める」のような動き（動詞）。名詞を3つ並べただけの Flow は描かない。
+- 数字が出た話は、その数字を Stat にして何の数字かを label に書き、note に条件（いつ・どの区間・税込かなど）を書く。
+- Flow の icon は一覧にある名前だけ（ticket・gate・map は無い。きっぷは doc、改札は check、場所は pin）。無い名前を書くと図ごと出ない。
+- replace の時は、Heading も新しい図に合わせて書き直す（前の画面の見出しを残さない。料金の見出しの下に流れの図、のような食い違いを作らない）。
+- ダンが口で挙げた段階・項目は、図にも全部入れる（「予約→駅→改札→ホーム→乗車→到着」と言ったら6個全部。6個を超える時だけまとめる）。
 - 画面は1枚で、通話しながら一目で分かる量にする: 部品は6個まで、Flow の箱は6個まで、箱の文字は8文字まで、Stat は3個まで。
 - Choice・Input・Button は使わない。Image は会話に実在する URL（/api/v1/files/… か https://）がある時だけ。URL を作らない。
 - 事実は会話に出た物だけ。数字・名前を補わない。分からない所は書かない。
@@ -97,7 +154,8 @@ action の決め方:
 {parts}
 
 例:
-{"action": "replace", "caption": "DB の守りの仕組み", "program": "root = Column([Heading(\\"誰が何を読めるか\\"), Flow([{id: \\"app\\", label: \\"アプリ\\", icon: \\"phone\\"}, {id: \\"api\\", label: \\"ダンの鍵\\", icon: \\"key\\", tone: \\"now\\"}, {id: \\"db\\", label: \\"DB\\", icon: \\"database\\"}], [{from: \\"app\\", to: \\"api\\", label: \\"本人の印\\"}, {from: \\"api\\", to: \\"db\\", label: \\"許可した表だけ\\"}])])"}
+{"action": "replace", "caption": "DB の守りの仕組み", "program": "root = Column([Heading(\\"DB は許した表しか読めない\\", \\"アプリの鍵では会員の表に届かない\\"), Flow([{id: \\"app\\", label: \\"アプリ\\", icon: \\"phone\\", sub: \\"みきさんの手元\\"}, {id: \\"api\\", label: \\"ダンの鍵\\", icon: \\"key\\", sub: \\"本人の印つき\\", tone: \\"now\\"}, {id: \\"db\\", label: \\"会員の表\\", icon: \\"database\\", sub: \\"守られている\\", tone: \\"good\\"}], [{from: \\"app\\", to: \\"api\\", label: \\"渡す\\"}, {from: \\"api\\", to: \\"db\\", label: \\"読める\\"}])])"}
+{"action": "replace", "caption": "東京までの料金と時間", "program": "root = Column([Heading(\\"東京まで約2時間半・14,920円\\", \\"のぞみ指定席、新大阪から\\"), Row([Stat(\\"料金\\", 14920, \\"円\\", \\"指定席・片道\\"), Stat(\\"所要時間\\", \\"2時間30分\\", \\"\\", \\"新大阪→品川\\")])])"}
 """
 
 
@@ -185,12 +243,16 @@ class Stage:
     def __init__(self, room_id, session_id, dialogue, record, ask=None):
         self.room_id, self.session_id, self.dialogue, self.record = room_id, session_id, dialogue, record
         self.ask = ask or ask_model
-        self.version, self.caption, self.program, self.at = 0, '', '', None
+        # The version counts on from the room's previous call: the screen long-polls for a version above the last one
+        # it saw, so a new call restarting at 1 never reached it (2026-10-25 3rd test call: 5 scenes drawn, none shown).
+        self.version = int((read_state(room_id) or {}).get('version') or 0)
+        self.caption, self.program, self.at = '', '', None
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
         self._timer = None
         self._decisions = 0          # decisions started
         self._applied = 0            # the newest decision whose answer reached the screen
+        self._last_replace = -1e9    # when the scene was last replaced (monotonic)
         self._tasks = set()
         self._names = None
         _stages[room_id] = self
@@ -233,6 +295,10 @@ class Stage:
         await asyncio.sleep(wait)
         self._timer = None
         if self.pending_chars < MIN_CHARS and not self.user_pending: return
+        held = HOLD_S - (time.monotonic() - self._last_replace)
+        if held > 0 and not self.user_pending:
+            self._schedule(held)   # the words so far are decided on together, after the hold
+            return
         task = asyncio.ensure_future(self.decide())
         self._tasks.add(task); task.add_done_callback(self._tasks.discard)
 
@@ -253,7 +319,7 @@ class Stage:
         elapsed = round((time.monotonic() - started) * 1000)
         action = str(data.get('action') or 'keep')
         caption = str(data.get('caption') or '').strip()[:40]
-        program = data.get('program')
+        program = sanitize(data.get('program')) if isinstance(data.get('program'), str) else data.get('program')
         if request and action != 'replace' and well_formed(program, self._known()): action = 'replace'
         if mine < self._applied:
             self.record('stage_stale', action=action, elapsed_ms=elapsed)
@@ -265,6 +331,7 @@ class Stage:
                 if caption and caption != self.caption: self._apply(caption, None)
                 return 'rejected'
             self._apply(caption or self.caption, program.strip())
+            self._last_replace = time.monotonic()
             self.record('stage_scene', elapsed_ms=elapsed, chars=len(program), version=self.version, **usage)
             return 'replace'
         if action == 'caption' and caption and caption != self.caption:
