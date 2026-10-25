@@ -633,6 +633,15 @@ def _build_reseed_context(
     )
 
 
+def _is_silent_text(text: Optional[str]) -> bool:
+    """「伝えることは無い」の印だけの文か（app/agent/reply_text.py）。失敗したら印ではない扱い。"""
+    try:
+        from app.agent.reply_text import is_silent_reply
+        return is_silent_reply(text)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _tidy_reply(text: str, blocks: Optional[list], user_text: Optional[str]) -> tuple:
     """保存の手前で、返事の頭に付いた途中の英語の独り言を外す（app/agent/reply_text.py）。失敗しても本文はそのまま。"""
     try:
@@ -1136,6 +1145,10 @@ def _save_execution_event_sync(
     画面は作業中の1行と、押すと開く作業の一覧にだけ使う。2026-10-24）。"""
     from app.services.execution_events import normalize_event_type
     from app.services.supabase_client import get_supabase_client
+    from app.agent.reply_text import is_silent_reply
+
+    if event_type == "reasoning" and is_silent_reply(content):
+        return   # 「伝えることは無い」の印は、作業の記録（作業中の1行・押して開く一覧）にも残さない（app/agent/reply_text.py）
 
     # Heartbeat the run so an active turn never looks stale to the sweeper.
     _heartbeat_run_sync(run_id)
@@ -1478,6 +1491,13 @@ def _save_ai_message_sync(
 
     if _answers_withdrawn(room_id):
         _cli_debug(f"[CANCEL] reply not saved: the message it answers was withdrawn (room {room_id[:8]})")
+        return False
+    from app.agent.reply_text import is_silent_reply
+    if is_silent_reply(content):
+        # 「伝えることは無い」の返事（app/agent/reply_text.py）。保存も通知もしない。どのモデルの経路もここを通る。
+        if ends_turn:
+            turn_flow.turn_answered(room_id)
+        _cli_debug(f"[REPLY] silent reply not saved (room {room_id[:8]})")
         return False
     content = sanitize_artifact_public_urls(content)
     if blocks:
@@ -2659,11 +2679,13 @@ def _run_cli_process(
                     else:
                         _task_active[0] = False
                 _cli_debug(f"  Event: type={ev['type']}, name={ev.get('name', '')}, text_len={len(ev.get('text', ''))}")
+                silent_text = ev["type"] == "text" and _is_silent_text(ev.get("text"))
                 if ev["type"] == "text":
                     final_text_parts.append(ev["text"])
-                    if ev.get("text", "").strip():
+                    if ev.get("text", "").strip() and not silent_text:
                         turn_blocks.append({"type": "text", "text": ev["text"]})
-                event_queue.put(ev)
+                if not silent_text:   # 印だけの文は画面へ流さない（返事の決め手としては final_text_parts に残す）
+                    event_queue.put(ev)
 
                 # DB-first: CLIスレッドから直接DB保存（SSE断線対策）
                 if project_id:
@@ -3468,11 +3490,14 @@ async def _process_via_streaming_session(
                 for ev in _classify_content_blocks(blocks):
                     if ev["type"] == "text":
                         txt = ev.get("text", "")
+                        silent_text = _is_silent_text(txt)
                         if txt.strip():
                             state["final_text_parts"].append(txt)
-                            state["turn_blocks"].append({"type": "text", "text": txt})
+                            if not silent_text:
+                                state["turn_blocks"].append({"type": "text", "text": txt})
                             state["last_block_at"] = datetime.now(timezone.utc).isoformat()
-                        _emit(ev)
+                        if not silent_text:   # 印だけの文は画面へ流さない（返事の決め手としては final_text_parts に残す）
+                            _emit(ev)
                         # テキスト反復崩壊の検知。同一出力行が連続 N 回出たら割り込み、
                         # 後段の result / run() が loop_detected を見て friendly result +
                         # stop + reseed（ツールループと同じ復旧）に乗せる。崩壊テキストは
