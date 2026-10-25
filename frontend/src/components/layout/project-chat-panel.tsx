@@ -183,7 +183,7 @@ function LiveLine({ live, startedAt }: { live: LiveStep[]; startedAt?: number | 
             <span key={d} className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/70 motion-reduce:animate-none" style={{ animationDelay: `${d * 150}ms` }} />
           ))}
         </span>
-        <span key={text} className="min-w-0 truncate animate-in fade-in duration-300">{text}</span>
+        <span key={text} className={cn('min-w-0 animate-in fade-in duration-300', open ? 'break-words' : 'truncate')}>{text}</span>
         {from ? <span className="shrink-0 tabular-nums text-xs text-muted-foreground/80" data-live-elapsed>{elapsedText(from, now)}</span> : null}
         <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 opacity-60 transition-transform', !open && 'rotate-180')} aria-hidden />
       </button>
