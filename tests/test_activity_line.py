@@ -90,3 +90,22 @@ def test_tool_event_carries_dans_words(monkeypatch):
     cli_runner._save_execution_event_sync("room", "tool_use", tool_name="Read", tool_input={"file_path": "/a"})
     assert rows[0]["metadata"] == {"activity": "版を確かめています", "activity_kind": "dan", "done": "記録を見ました。"}
     assert rows[1]["metadata"] == {"activity": "資料を読んでいます"}
+
+
+def test_web_addresses_show_only_the_site() -> None:
+    """2026-10-25: a GPT room showed 「「https://…」を調べています」 (Codex reports opening a page with the address as its words)."""
+    from app.agent.activity_line import done_note, own_activity, thinking_text
+    assert activity_phrase("WebSearch", {"query": "https://tabelog.com/hyogo/A2803/A280301/28001234/"}) == "tabelog.com を読んでいます"
+    assert activity_phrase("WebSearch", {"query": "www.ramen-ichitetsu.jp/menu"}) == "ramen-ichitetsu.jp を読んでいます"
+    assert activity_phrase("WebSearch", {"query": "site:tabelog.com 尼崎 ラーメン 日曜"}) == "「尼崎 ラーメン 日曜」を調べています"
+    assert "http" not in activity_phrase("mcp__dan-tools__web_search", {"query": "営業時間 https://example.com/a/b"})
+    assert own_activity("mcp__dan-tools__progress", {"doing": "https://tabelog.com/hyogo/x/ の営業時間を確かめています"}) == "tabelog.com の営業時間を確かめています"
+    assert done_note("progress", {"done": "公式（https://www.newold.jp/shop）を見ました。日曜も23時まででした。"}) == "公式（newold.jp）を見ました。日曜も23時まででした。"
+    assert "http" not in thinking_text("次に https://tabelog.com/hyogo/x を開きます。")
+
+
+def test_codex_page_open_is_reading_that_page() -> None:
+    from app.agent.codex_runner import _item_to_events
+    ev = _item_to_events({"type": "web_search", "id": "w1", "query": "https://tabelog.com/hyogo/x/",
+                          "action": {"type": "open_page", "url": "https://tabelog.com/hyogo/x/"}})
+    assert ev[0]["name"] == "WebFetch" and activity_phrase(ev[0]["name"], ev[0]["input"]) == "tabelog.com を読んでいます"

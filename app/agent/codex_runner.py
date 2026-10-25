@@ -27,6 +27,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -419,6 +420,9 @@ def _item_to_events(item: Dict[str, Any]) -> list[Dict[str, Any]]:
         # Codex announces a search before it knows the words (query "") and fills them in when it completes
         # (query, or action.query / action.queries); opening a page has no query, only the page in results.
         query = web_search_query(item)
+        if query and re.fullmatch(r"(?:https?://|www\.)\S+", query, re.I):
+            # opening a page arrives with the address as its words: it is reading that page
+            return [{"type": "tool_use", "id": iid, "name": "WebFetch", "input": {"url": query}}]
         if query:
             return [{"type": "tool_use", "id": iid, "name": "WebSearch", "input": {"query": query}}]
         url = web_search_url(item)
