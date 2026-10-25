@@ -74,6 +74,20 @@ def _fast(serial):
             _u2[serial] = dev
         except Exception:
             return None
+    # The server's UiAutomation suppresses every accessibility service on the phone while it runs (Android's
+    # default), so an app under test that works through one (the porn blocker's screen guard) silently stopped
+    # for the 10 minutes the server stays up, and Samsung's own services too (S24, 2026-10-25). Flag 1 is
+    # UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES; it takes effect when the server next takes its
+    # UiAutomation, which a dump does. Checked on every call:
+    # u2 restarts a dead server with the default flags.
+    try:
+        conf = dev.jsonrpc.getConfigurator()
+        if conf.get('uiAutomationFlags') != 1:
+            conf['uiAutomationFlags'] = 1
+            dev.jsonrpc.setConfigurator(conf)
+            dev.dump_hierarchy(compressed=True)
+    except Exception:
+        pass
     old = _idle.pop(serial, None)
     if old:
         old.cancel()
