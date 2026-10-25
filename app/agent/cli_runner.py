@@ -482,8 +482,12 @@ def _build_room_state_context(
         tail_budget = max(0, max_chars - len(head))
         body = head + body[-tail_budget:]
     # この部屋がみきさんのどの画面に出ているか（場所の地図、2026-10-25）。切り詰めの外に置く
-    from app.agent.place_map import place_context
-    place = place_context(room_id, project_id, sb)
+    try:
+        from app.agent.place_map import place_context
+        place = place_context(room_id, project_id, sb)
+    except Exception as e:
+        _cli_debug(f"place_context failed: {e}")
+        place = ""
     return (place + "\n" + body) if place else body
 
 
