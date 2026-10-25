@@ -667,7 +667,7 @@ const FLOW_ICON: Record<string, LucideIcon> = {
   link: LinkIcon, bolt: Zap,
 };
 const FLOW_TONE: Record<string, string> = {
-  now: 'border-primary bg-primary/15 text-foreground ring-2 ring-primary/40 shadow-md',
+  now: 'border-sky-400 bg-sky-500/15 text-foreground ring-2 ring-sky-400/40 shadow-md',
   good: 'border-emerald-600/40 bg-emerald-500/10', warn: 'border-amber-600/40 bg-amber-500/10', bad: 'border-red-600/40 bg-red-500/10',
   neutral: 'border-border bg-muted/40',
 };
@@ -691,7 +691,7 @@ const FlowView: ComponentRenderer<FlowInput> = ({ props }) => {
                 className={`flex min-w-[5.5rem] max-w-[9rem] flex-col items-center gap-1 rounded-xl border px-3 py-2 text-center ${FLOW_TONE[n.tone || 'neutral'] || FLOW_TONE.neutral}`}
                 data-flow-node={n.id} data-flow-tone={n.tone || 'neutral'}
               >
-                {Icon ? <Icon className={`h-6 w-6 ${n.tone === 'now' ? 'text-primary' : 'text-muted-foreground'}`} aria-hidden /> : null}
+                {Icon ? <Icon className={`h-6 w-6 ${n.tone === 'now' ? 'text-sky-500 dark:text-sky-300' : n.tone === 'good' ? 'text-emerald-600 dark:text-emerald-400' : n.tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : n.tone === 'bad' ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'}`} aria-hidden /> : null}
                 <div className="text-sm font-medium leading-tight">{n.label}</div>
                 {n.sub ? <div className="text-[11px] leading-tight text-muted-foreground">{n.sub}</div> : null}
               </div>
