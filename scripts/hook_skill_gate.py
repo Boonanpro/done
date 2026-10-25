@@ -237,6 +237,16 @@ def _judge(entry_text: str):
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)  # 定額のログインで動かす（従量課金にしない）
     env.pop("CLAUDECODE", None)
+    # ダン本体は Claude を長く使える鍵（~/.dan/claude_oauth_token、scripts/mac/run_core.sh）で起動するが、作業の中の
+    # 道具や関所には渡らない。鍵が無いと、保管庫のログインが切れた時に判定役が起動できず、スキルを書けなくなる（2026-10-25）。
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        token_file = Path.home() / ".dan" / "claude_oauth_token"
+        try:
+            token = "".join(token_file.read_text(encoding="utf-8").split())
+        except OSError:
+            token = ""
+        if token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     env["PYTHONIOENCODING"] = "utf-8"
     cmd = [exe, "-p", "--model", os.environ.get("DAN_SKILL_GATE_MODEL", "sonnet"),
            "--output-format", "json", "--tools", "", "--strict-mcp-config",

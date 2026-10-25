@@ -6,16 +6,27 @@
 
 ## 2つの使い道
 
-- **話すダン**: 部屋ごとに、どの場所に出ているかを見分け（`app/agent/place_map.py` の `identify_place`）、その場所の前書きの `speak` を前置き `<place>` に入れる。成果物タブなら、右の成果物の地図の `speak` も入れる。確かめ方: `python scripts/place_map.py speak --room <部屋のid>`。
-- **直すダン**: `python scripts/place_shot.py <場所> --tag before|after` が、前書きの `open` で画面をテスト用アカウントで開いて撮り、`shows` に書いた物（番号の並び・表など）の見本を `probe` の入れ物に入れて、本当に見えるかを測る。見えなければ NG。
+- **話すダン**: 部屋ごとに、どの場所に出ているかを見分け（`app/agent/place_map.py` の `identify_place`）、その場所の前書きの `speak` を前置き `<place>` に入れる。どの端末から最後に書いたか（チャットの受け口が `.tmp/room-clients.json` に残す）と、みきさんの画面が今どの成果物を出しているか（成果物の画面が数秒ごとに知らせる `.tmp/live-views.json`）も入れ、分からない時は「分からない」と書く。確かめ方: `python scripts/place_map.py speak --room <部屋のid>`。会話の長い部屋で新しく始める時も、前置きの先頭に残る。
+- **直すダン**: `python scripts/place_shot.py <場所> --tag before|after` が、前書きの `open` で画面をテスト用アカウントで開いて撮り、3つを測る。1つでも NG なら全体が NG。
+  1. 着いたか: 開いた道のままか（/login・/collab に移されていないか）、`ready` の部品が見えるか
+  2. 本物の画面: エラーの文（`errors` と決まった文）や Next のエラーの画面が出ていないか、白紙でないか、`probe.real` の本物の入れ物が透けたり隠れたりしていないか
+  3. 見本: `shows` の物（番号の並び・表など）の見本を `probe` の入れ物に入れ、印・罫線・太さがあり、透けていないか
 
 ## 置き場所
 
-- 共通の場所: このフォルダの `<id>.md`。今あるのは [chat](chat.md)・[artifact-tab](artifact-tab.md)・[dev-lead-room](dev-lead-room.md)・[mobile](mobile.md)。
-- 成果物: `frontend/src/app/artifacts/<slug>/MAP.md`。成果物と一緒に done-artifacts に残る。
-  - 新しい成果物を作る時に一緒に作る: `python scripts/place_map.py draft <slug> "名前"` でコードから下書きを作り、「（ここを書く）」を埋めて `stamp`。
-  - 前書きの `fingerprint` は画面のファイル（`_server` と MAP.md を除く .tsx/.ts/.css など）から作った指紋。画面を書き換えると合わなくなる。
-  - 成果物の画面を書き換えたターンは、終わる前に地図を直して `python scripts/place_map.py stamp <slug>`（FRESH になる）と `place_shot.py artifact:<slug>` を走らせる。走らせずに終えようとすると `scripts/hook_artifact_verify_gate.py` が止める。地図の無い成果物は、その時に下書きから作る。
+- 共通の場所: このフォルダの `<id>.md`。今あるのは [chat](chat.md)・[artifact-tab](artifact-tab.md)・[dev-lead-room](dev-lead-room.md)・[mobile](mobile.md)。前書きの `watches` に、その場所を描くファイルを書く。
+- 成果物: `frontend/src/app/artifacts/<slug>/MAP.md`。成果物と一緒に done-artifacts に残る。新しい成果物を作る時に一緒に作る: `python scripts/place_map.py draft <slug> "名前"` でコードから下書きを作り、「（ここを書く）」を埋めて `stamp`。
+
+## 画面を直す時の順番（関所が見る）
+
+同じ木（動いているダンか作業場所）で:
+
+1. 最初の書き換えの前に `python scripts/place_shot.py <場所> --tag before`
+2. 画面のファイルを直す（成果物の `_server`・`MAP.md`・`PRODUCT.md` 以外、または共通の場所の `watches` のファイル）
+3. 変わった所の地図の説明を直して `python scripts/place_map.py stamp <場所>`。画面が変わったのに説明が1字も変わっていなければ断られる。説明を変えなくてよい直し（見た目の崩れを直しただけ等）は `--unchanged "理由"` で、理由が地図の `last_review` に残る
+4. `python scripts/place_shot.py <場所> --tag after`（作業場所の画面のサーバーは `--base`）。NG なら直して撮り直す
+
+`scripts/hook_artifact_verify_gate.py`（Stop）が、このターンの書き換えごとに、書き換えの前の before・最後の書き換えの後の after（OK）・いちばん新しい地図の状態が FRESH、の3つを見る。撮った結果は `covers` に書いた場所にも数える（dev-lead-room を撮れば開発室のボードの分にもなる）。直す前を撮っていなかった時は、後からは撮れないので1回だけ止める。動いているダンの成果物なら、あわせて本人の画面の確認（`artifact_seen.py`）も要る。確かめた結果は本人への返事に書かない。
 
 ## 1枚の形
 
@@ -26,12 +37,17 @@
 place: artifact:<slug>         # 共通の場所は id（chat など）
 name: 画面の名前（みきさんが呼ぶ名前）
 open: /preview/<slug>          # ブラウザで開く道。開けない場所は書かず、reach に行き方
+ready: '[aria-label="…"]'      # 開けたと分かる、本物の画面の部品（CSS）。殻やエラーの画面には無い物を選ぶ
+covers: [dev-lead-room]        # 同じ画面を撮る別の場所（撮った結果をそちらにも数える）
+errors: ["…"]                  # この画面のエラーの文（決まった文に足す）
+watches: [frontend/…/*.tsx]    # 共通の場所だけ。その場所を描くファイル
 ready: '[data-x]'              # 開けたと分かる CSS の印（省略時 body）
 speak: |                       # 話すダンに渡す2〜5行。みきさんに何が見えていて、何が出せないか
   - …
-probe: {module: style, scope: app, bubble: md}   # 返事の吹き出しの入れ物。CSS モジュールの名前か {classes: "…"}
+probe: {module: style, scope: app, bubble: md, real: '[class*="_md__"]'}   # 吹き出しの入れ物。CSS モジュールの名前か {classes: "…"}。real は本物の入れ物
 shows: [番号の並び, 点の並び, 表, 見出し, 太字, コード]   # その入れ物で見えるはずの物
-fingerprint: …                 # 成果物だけ。stamp が書く
+fingerprint: …                 # stamp が書く（画面のファイルの指紋）
+described: …                   # stamp が書く（説明の指紋）
 ---
 # 名前
 
