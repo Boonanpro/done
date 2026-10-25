@@ -258,3 +258,14 @@ test('PC・スマホ・開発室とも、作業中の1行は同じ関数を通�
     assert.ok(!/function liveStepsOf\b/.test(src), '開発室に自前の変換が残っている');
   }
 });
+
+// 2026-10-25: GPT の部屋で調べものの行に URL がそのまま出た。どの文でも URL はサイト名だけにする
+test('作業中の1行と一覧: URL はサイト名だけ', async () => {
+  for (const L of [await import('../frontend/src/lib/chat-shapes/live-line.ts'), await import('../mobile/chat-shapes-live-line.ts')]) {
+    assert.equal(L.shownLine('「https://tabelog.com/hyogo/A2803/A280301/28001234/」を調べています'), '「tabelog.com」を調べています');
+    assert.equal(L.shownLine('https://www.newold.jp/shop の営業時間を確かめています'), 'newold.jp の営業時間を確かめています');
+    const rows = L.liveRows([{ kind: 'tool', done: '公式（https://www.newold.jp/shop?x=1）を見ました。日曜も23時まででした。' }]);
+    assert.equal(rows[0].label, '公式（newold.jp）を見ました。日曜も23時まででした。');
+    assert.equal(L.liveLineText([{ kind: 'thinking', text: '次に https://tabelog.com/hyogo/x を開きます。' }]), '次に tabelog.com を開きます。');
+  }
+});

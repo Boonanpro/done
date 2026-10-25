@@ -54,11 +54,16 @@ const LINE_MAX = 48;
 const PREPARING = /(?:準備|起動)(?:中|して|を|が|に)/;
 const isPreparing = (sentence: string) => sentence.length <= 24 && PREPARING.test(sentence);
 
+/** URL はサイト名だけにする（「https://tabelog.com/hyogo/…」→「tabelog.com」。2026-10-25 GPT の部屋で URL がそのまま出た） */
+const URL_RE = /(?:https?:\/\/|www\.)[^\s「」『』（）()<>"'、。]+/gi;
+const siteOf = (url: string) => url.replace(/^https?:\/\//i, '').split(/[/?#:]/)[0].replace(/^www\./i, '');
+
 function plainText(s: string): string {
   return s
     .replace(/```[\s\S]*?(```|$)/g, ' ')
     .replace(/\[(添付[^\]]*)\]/g, ' ')
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(URL_RE, siteOf)
     .replace(/[*_`#>|]/g, '')
     .replace(/\s+/g, ' ')
     .trim();

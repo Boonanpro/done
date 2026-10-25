@@ -42,6 +42,26 @@ def _host(url: Any) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+# A web address in a line is shown as its site (「https://tabelog.com/hyogo/…」→「tabelog.com」; 2026-10-25, a GPT
+# room showed 「「https://…」を調べています」). Codex reports opening a page as a search whose words are the address.
+_URL = re.compile(r"(?:https?://|www\.)[^\s「」『』（）()<>\"'、。]+", re.I)
+_SITE = re.compile(r"(?<!\S)-?site:\S+", re.I)
+
+
+def _site_of(url: str) -> str:
+    return _host(url if "://" in url else "http://" + url) or ""
+
+
+def no_urls(text: Any) -> str:
+    """Every web address in text replaced by its site name."""
+    return _URL.sub(lambda m: _site_of(m.group(0)), str(text or ""))
+
+
+def _is_url(text: Any) -> bool:
+    s = str(text or "").strip()
+    return bool(s) and bool(_URL.fullmatch(s))
+
+
 def _short(text: Any, limit: int = 24) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= limit else s[: limit - 1] + "…"
@@ -74,7 +94,12 @@ def activity_phrase(name: str, tool_input: dict | None = None) -> str:
     if n in ("browser_plan", "browser_script", "browser_flow"):
         return "ページを操作しています"
     if n in ("web_search", "WebSearch"):
-        q = _short(a.get("query"))
+        raw = str(a.get("query") or "").strip()
+        if _is_url(raw):
+            host = _site_of(raw)
+            return f"{host} を読んでいます" if host else "ページを読んでいます"
+        # 「site:tabelog.com 尼崎 ラーメン」→「尼崎 ラーメン」; addresses inside the words become their site
+        q = _short(" ".join(no_urls(_SITE.sub(" ", raw)).split()))
         return f"「{q}」を調べています" if q else "調べています"
     if n in ("read_url", "WebFetch"):
         host = _host(a.get("url"))
@@ -130,7 +155,7 @@ def _japanese(s: str) -> bool:
 
 
 def _clean(text: Any, limit: int) -> str:
-    s = " ".join(str(text or "").split()).strip()
+    s = " ".join(no_urls(text).split()).strip()
     # a leading mark or number (「✓」「→」「1.」「(2)」) is not part of the sentence
     s = re.sub(r"^(?:[✓✔☑→・*#\-]|\d+[.)．）]|[(（]\d+[)）])\s*", "", s)
     return s[:limit]
@@ -177,7 +202,7 @@ def thinking_text(text: Any, limit: int = 600) -> str:
     sentence (frontend/src/lib/chat-shapes/live-line.ts)."""
     if not isinstance(text, str):
         return ""
-    t = text.strip()
+    t = no_urls(text).strip()
     if not t or not _JA.search(t):
         return ""
     return t[-limit:] if len(t) > limit else t
