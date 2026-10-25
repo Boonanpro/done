@@ -180,8 +180,14 @@ def _ensure_browser_locked(room_id: str, profile: Path) -> int:
     from app.tools import browser
     port = _saved_port(profile)
     if _cdp_ready(port) and _owns_port(profile, port):
-        _touch(profile)
-        return port
+        if _has_profile_loaded(port):
+            _touch(profile)
+            return port
+        # macOS Chrome keeps running after its last window closes, without a profile. Playwright cannot attach to it
+        # ("Browser context management is not supported"), so every browser call failed until it was reopened (2026-10-25).
+        browser._write_browser_recovery_log("core_browser_without_profile", profile=profile.name, port=port)
+        if not _close_profile(profile, port)[0]:
+            raise RuntimeError("A browser without a profile could not be closed")
     if not 1024 <= port <= 65535 or browser._port_listening(port):
         port = browser._pick_free_port()
     profile.mkdir(parents=True, exist_ok=True)
@@ -199,6 +205,35 @@ def _ensure_browser_locked(room_id: str, profile: Path) -> int:
             return port
         time.sleep(0.1)
     raise RuntimeError("Core-owned browser did not expose CDP; no CLI fallback was used")
+
+
+def _has_profile_loaded(port: int) -> bool:
+    """False only when the browser answers and has no default context. An unclear answer keeps the browser."""
+    async def work(call):
+        return bool((await call("Target.getBrowserContexts")).get("defaultBrowserContextId"))
+    try:
+        return _with_cdp(port, work)
+    except Exception:
+        return True
+
+
+def _close_by_cdp(port: int, wait_seconds: float = 10.0) -> bool:
+    """Browser.close over a raw connection: works where Playwright cannot attach (a browser without a profile)."""
+    from app.tools import browser
+
+    async def work(call):
+        try:
+            await call("Browser.close")
+        except Exception:
+            pass   # Chrome can drop the connection before replying; the port decides.
+    try:
+        _with_cdp(port, work)
+    except Exception:
+        pass
+    deadline = time.monotonic() + wait_seconds
+    while browser._port_listening(port) and time.monotonic() < deadline:
+        time.sleep(.1)
+    return not browser._port_listening(port)
 
 
 def _with_cdp(port: int, work):
@@ -326,7 +361,7 @@ def _close_profile(profile: Path, port: int) -> tuple[bool, bool]:
     if not _owns_port(profile, port):
         # This profile's browser is gone and its old port has been reused.
         return True, True
-    ok = asyncio.run(browser._graceful_close_cdp(async_playwright, port))
+    ok = asyncio.run(browser._graceful_close_cdp(async_playwright, port)) or _close_by_cdp(port)
     graceful = ok
     if not ok:
         processes, scan_ok = browser._list_dedicated_browser_processes(profile)

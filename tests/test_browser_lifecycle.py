@@ -124,6 +124,37 @@ def test_same_room_ensure_is_serialized(isolated, monkeypatch):
     assert all(result["port"] == 54321 for result in results)
 
 
+def test_browser_without_profile_is_reopened(isolated, monkeypatch):
+    # macOS Chrome alive on its port with no window and no profile: Playwright cannot attach to it.
+    profile = make_profile("room")
+    monkeypatch.setattr(lifecycle, "_has_profile_loaded", lambda port: False)
+    close = Mock(return_value=(True, True))
+    monkeypatch.setattr(lifecycle, "_close_profile", close)
+    spawn = Mock()
+    monkeypatch.setattr(browser, "_spawn_detached_browser", spawn)
+    monkeypatch.setattr(browser, "_chrome_executable_path", lambda pw: "chrome")
+    monkeypatch.setattr(browser, "_port_listening", lambda port: False)
+    assert lifecycle._ensure_browser("room", profile) == 54321
+    close.assert_called_once_with(profile, 54321)
+    spawn.assert_called_once()
+
+
+def test_loaded_browser_is_reused(isolated, monkeypatch):
+    profile = make_profile("room")
+    monkeypatch.setattr(lifecycle, "_has_profile_loaded", lambda port: True)
+    close = Mock()
+    monkeypatch.setattr(lifecycle, "_close_profile", close)
+    assert lifecycle._ensure_browser("room", profile) == 54321
+    close.assert_not_called()
+
+
+def test_close_falls_back_to_raw_cdp_when_playwright_cannot_attach(isolated, monkeypatch):
+    profile = make_profile("room")
+    monkeypatch.setattr(browser, "_graceful_close_cdp", AsyncMock(return_value=False))
+    monkeypatch.setattr(lifecycle, "_close_by_cdp", Mock(return_value=True))
+    assert lifecycle._close_profile(profile, 54321) == (True, True)
+
+
 def test_room_paths_are_confined_and_distinct(isolated):
     assert lifecycle.profile_for_room("../a/b").parent == isolated / ".ai_secretary"
     assert lifecycle.profile_for_room("a/b") != lifecycle.profile_for_room("ab")
