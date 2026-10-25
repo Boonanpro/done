@@ -652,6 +652,10 @@ async def _notify_dan_completion(
         # 👍リアクションだけのターンは通知しない（受領スタンプに通知価値はない）。
         if (final_text or "").strip() == "👍":
             return
+        # 「伝えることは無い」の印だけの返事は通知しない（app/agent/reply_text.py。保存もしていない）。
+        from app.agent.reply_text import is_silent_reply
+        if is_silent_reply(final_text):
+            return
         from app.services.push_service import get_push_service
 
         body = _compact_text(final_text, 120) if final_text else ""
@@ -3039,7 +3043,8 @@ async def send_dan_message_stream(
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
                         final_text = event["text"]
                         text_preview = event["text"].strip()
-                        if text_preview and len(text_preview) > 10:
+                        from app.agent.reply_text import is_silent_reply as _silent
+                        if text_preview and len(text_preview) > 10 and not _silent(text_preview):
                             # Use full text preview without truncation.
                             label = text_preview
                             reasoning_steps.append(label)

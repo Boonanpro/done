@@ -134,41 +134,40 @@ def report_card(s, failed):
             'state': 'stopped' if failed else 'done', 'model_label': LABELS.get(s.get('model') or '', s.get('model') or '')}
 
 
-def wake_room(s, failed):
-    """Wake the room's Dan to read the report and answer the owner in one short message. Skipped when the room already
-    has a wake-up due within two minutes (e.g. the job itself asked to be told, or two jobs ended together): that turn
-    reads the report from the record too."""
-    from datetime import datetime, timedelta, timezone
+REPORT_IN_NOTE = 12000   # 部屋のダンに渡す報告の長さの上限（全文は作業の記録 state.result に残る）
+
+
+def wake_room(s, failed, report=''):
+    """Wake the room's Dan with the job's report so the owner gets exactly one Japanese message from the room's Dan —
+    or none when nothing in the report is useful to the owner. 2026-10-25 本人: 報告の札＋まとめの2通、英語の報告、
+    「意味分からん難しい話を長々されるのは困る」. The report itself is no longer posted in the chat; it stays in the
+    job's record (state.result) and goes to the room's Dan in the wake-up note."""
     from app.services import followups
-    soon = datetime.now(timezone.utc) + timedelta(minutes=2)
-    for w in followups.list_watches(s['room_id']):
-        try:
-            due = datetime.fromisoformat(str(w.get('fire_at')).replace('Z', '+00:00'))
-        except ValueError:
-            continue
-        if w.get('kind') == 'at' and due <= soon:
-            return None
     name = s.get('title') or placeholder_name(s.get('task', ''))
-    note = (f'並行作業「{name}」が{"止まった" if failed else "終わった"}。報告は部屋の記録にある（本人の画面には1行の札だけが出ていて、'
-            '押すと全文が開く）。報告を読み、本人への返事を短く1通だけ書く: 結果と、本人が次に決めることだけ。聞きたいことは最後に1つだけ。'
+    body = (report or '').strip()
+    if len(body) > REPORT_IN_NOTE:
+        body = body[:REPORT_IN_NOTE] + '\n…（ここまで。全文は parallel_work の list で読める）'
+    note = (f'並行作業「{name}」が{"止まった" if failed else "終わった"}。本人にはまだ何も見えていない。報告の全文:\n'
+            f'<<<報告\n{body}\n報告>>>\n'
+            '報告を読み、本人への返事を日本語で短く1通だけ書く: 本人が知って役に立つこと（できた物・できなかったこと・本人がすること・'
+            '決めてほしいこと）だけ。報告が英語でも返事は日本語。聞きたいことは最後に1つだけ。'
             '報告の書き写し、ファイルの場所、行番号、仕組みの中の言葉、どう確かめたか、裏の仕組みの状態（版・入れ替え・反映待ち・'
-            'モデル名・試しの部屋）は書かない。本人が知って役に立つこと（できた物・できなかったこと・本人がすること・決めてほしいこと）が'
-            '無い時（使い方が変わらない裏の直し、確かめただけ、途中経過）は、本文を正確に「WATCH_NO_CHANGE」とだけ書く（保存されず、'
-            '本人には何も出ない。10-25 本人「意味分からん難しい話を長々されるのは困る」）。'
-            '部屋の決まり（担当の手順など）があれば、それに従って次へ進める。')
+            'モデル名・試しの部屋）は書かない。本人が知って役に立つことが無い時（使い方が変わらない裏の直し、確かめただけ、途中経過）は、'
+            '本文を正確に「WATCH_NO_CHANGE」とだけ書く（保存されず、本人には何も出ない。10-25 本人「意味分からん難しい話を'
+            '長々されるのは困る」）。部屋の決まり（担当の手順など）があれば、それに従って次へ進める。')
     return followups.create_watch(s['room_id'], s['user_id'], 'at', note, delay_seconds=3)
 
 
 async def deliver(job_id, text):
-    """The job's answer as a message of the room, under the job's name. On a call in this room the call speaks it."""
-    from app.services.chat_service import ChatService
-    from app.services.command_center import report_id
+    """The job's answer goes to the room's Dan, who tells the owner in one short Japanese message (or nothing). On a call
+    in this room the call speaks it."""
+    from app.agent.reply_text import is_silent_reply
     from app.services import voice_calls
     s = state.read(job_id)
+    revision = s.get('delivered_revision', -1) + 1
     if s.get('quiet'):
         # Work asked from a site (X運用室) answers there. The room keeps the result in the job's state, and the room's
         # Dan reads it on his next turn (chat_routes._fetch_unseen_voice_digest); nothing is posted in the chat.
-        revision = s.get('delivered_revision', -1) + 1
         state.change(job_id, lambda x: x.update(delivered_revision=revision, quiet_delivered_at=state.now()))
         return None
     if voice_calls.active(s['room_id']):
@@ -176,18 +175,14 @@ async def deliver(job_id, text):
     await ensure_named(job_id)
     s = state.read(job_id)
     failed = s.get('state') == 'failed'
-    card = report_card(s, failed)
-    body = f"**【並行作業：{card['title']}】**\n\n{text.strip()}"
-    revision = s.get('delivered_revision', -1) + 1
-    message_id = report_id(job_id + (f':{revision}' if revision else ''))
-    message = await ChatService().send_message(s['room_id'], s['user_id'], body, sender_type='ai', message_id=message_id,
-                                               ai_context={'job_report': card})
-    state.change(job_id, lambda x: x.update(delivered_revision=revision, report_message_id=message.get('id', message_id)))
+    state.change(job_id, lambda x: x.update(delivered_revision=revision, report_message_id=None))
+    if is_silent_reply(text):
+        return None   # 「伝えることは無い」の印だけの報告は、部屋のダンも起こさない
     try:
-        await asyncio.to_thread(wake_room, s, failed)
+        await asyncio.to_thread(wake_room, s, failed, text)
     except Exception:
         logger.exception('waking the room for job %s failed', job_id)
-    return message
+    return None
 
 
 def _kill(job_id):

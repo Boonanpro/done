@@ -237,8 +237,8 @@ async def _discard_no_change_report(room_id: str, since_iso: str) -> bool:
         )
         deleted_count = 0
         for m in rows:
-            c = (m.get("content") or "").strip()
-            if _NO_CHANGE_SENTINEL in c and len(c) <= 200:
+            from app.agent.reply_text import is_silent_reply
+            if is_silent_reply(m.get("content")):   # 本文が印だけの時だけ（印について話す返事は消さない）
                 sb.table("chat_messages").delete().eq("id", m["id"]).execute()
                 deleted_count += 1
         if deleted_count:
