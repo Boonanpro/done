@@ -122,7 +122,7 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     try: args = json.loads(item.get('arguments') or '{}')
     except ValueError: args = {}
     early = None
-    if dialogue.prefetch is not None:   # a search started while the owner was speaking; take() sees every call in order
+    if dialogue.prefetch is not None and (dialogue.prefetch.user_id, dialogue.prefetch.room_id) == (user_id, room_id):
         try:
             if item.get('name') == 'web_search': early = await dialogue.prefetch.take(str(args.get('query') or ''), dialogue.turns)
             else: early = await dialogue.prefetch.take_read(item.get('name'), args, dialogue, user_id, room_id)
@@ -277,6 +277,7 @@ async def chat_feed(send, room_id, dialogue, record):
 LEFT_OVER = """通話の書き起こし（ユーザー＝本人、Dan＝ダン）と、通話中に始めた作業の一覧を渡す。
 電話が切れた時点で、本人が頼んだ・聞いたのに、ダンがまだ答えていない、またはやり終えていないことだけを挙げる。
 挙げないもの: 答え終わったこと、通話中に始めた作業が引き受けていること、本人が取り消した・自分でやる・後でいいと言ったこと、雑談やあいさつ。
+相談で仕様・予算を決めただけの発言はleftに入れない。決定から購入・制作などの新しい実行依頼を推測しない。
 さらに、相談で本人が明示的に決めたことだけをdecisionsに3行まで書く。対象・名前・日付・金額は原文どおり。
 最後の訂正や取り消しを優先する。候補・提案・未回答の質問・作業開始の通知・作業結果・推測は決定にしない。
 各決定に、それを裏付ける本人の発言そのままの引用evidenceを付ける。決定がなければ空配列。
@@ -454,7 +455,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
             # shown during a call is kept in the room, once, to look back at)
             try:
                 from app.services.chat_service import ChatService
-                parts = ['\n'.join(decisions)] if decisions else []
+                parts = ['\n\n'.join(decisions)] if decisions else []
                 if stage is not None and stage.scenes: parts.append(stage.summary())
                 await ChatService().send_message(room_id, user_id, '\n\n'.join(parts), sender_type='ai',
                                                  created_at=datetime.fromtimestamp(began.timestamp() + 1, timezone.utc).isoformat())

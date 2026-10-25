@@ -174,3 +174,67 @@ def test_summary_retains_early_decisions_after_recent_context_rotates():
         d.add('assistant',str(i)); d.add('user','はい')
     assert not any('32GB' in t['text'] for t in d.turns)
     assert d.history[0]['text'] == '32GBでお願い'
+
+
+def test_session_configuration_contains_both_consultation_rules(monkeypatch):
+    from app.services import voice_live as L
+    monkeypatch.setattr(R, 'catalog', lambda: '')
+    monkeypatch.setattr(R, 'remembered', lambda: '')
+    monkeypatch.setattr(R, 'tools', lambda: [])
+    config = L.session_config()
+    assert 'その一点だけ' in config['instructions']
+    assert 'その一点だけ' in config['delegation']['responses']['instructions']
+    assert config['delegation']['type'] == 'responses'
+
+
+@pytest.mark.asyncio
+async def test_work_guess_does_not_block_later_status_read(reads, monkeypatch):
+    async def kind(self, text): return 'read' if 'どう' in text else 'work'
+    monkeypatch.setattr(P.Prefetch, 'kind', kind)
+    d, p = await ready('今の作業について')
+    d.add('user','どうなってる？');p.heard(d)
+    await asyncio.sleep(.02)
+    assert [c[0] for c in reads] == ['list_operations','job_status']
+    assert await p.take_read('job_status', {}, d, 'u','r') == {'value':'job_status'}
+    await p.close()
+
+
+@pytest.mark.asyncio
+async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(monkeypatch):
+    from app.services import voice_stage, voice_calls
+    from app.services.chat_service import ChatService
+    sent = []
+    async def write(self, room, user, content, **kwargs):
+        sent.append((room,user,content,kwargs))
+        return {'id':str(len(sent))}
+    monkeypatch.setattr(ChatService, '__init__', lambda self: None)
+    monkeypatch.setattr(ChatService, 'send_message', write)
+    monkeypatch.setattr(voice_calls, 'begin', lambda *a: None)
+    monkeypatch.setattr(voice_calls, 'end', lambda *a: None)
+    monkeypatch.setattr(P, 'enabled', lambda: False)
+    monkeypatch.setattr(S, 'note', lambda *a, **kw: None)
+    class Stage:
+        scenes = ['one']
+        def __init__(self, *a): pass
+        def heard(self, *a): pass
+        def close(self): pass
+        def summary(self): return '図の記録'
+    monkeypatch.setattr(voice_stage, 'Stage', Stage)
+    monkeypatch.setattr(voice_stage, 'enabled', lambda: True)
+    async def after(*a, decisions_out, **kw):
+        decisions_out.append('メモリ32GBにする。')
+        return []
+    monkeypatch.setattr(S, 'after_call', after)
+    events=iter([{'type':'session.input_transcript.delta','delta':'32GBでお願い'}, {'type':'session.closed'}])
+    class Socket:
+        async def __aenter__(self): return self
+        async def __aexit__(self,*a): pass
+        async def recv(self): return json.dumps(next(events))
+        async def send(self,*a): pass
+    import websockets
+    monkeypatch.setattr(websockets,'connect',lambda *a,**kw:Socket())
+    await S._run('test','u','r','fake',True)
+    assert len(sent)==2
+    assert sent[0][2].startswith('📞 ダンと通話')
+    assert sent[1][2]=='メモリ32GBにする。\n\n図の記録'
+    assert datetime.fromisoformat(sent[1][3]['created_at'])-datetime.fromisoformat(sent[0][3]['created_at'])==timedelta(seconds=1)

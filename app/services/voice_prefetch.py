@@ -50,9 +50,9 @@ READS = {'job_status': '今動いている作業の様子',
          'room_files': 'この部屋のファイル一覧を読む',
          'none': '上のどれにも正確に当てはまらない、日付や対象がまだ曖昧、取り消し・言い直し'}
 KINDS = {'search': 'ウェブで公開されている情報を調べる話（天気・値段・営業時間・ニュース・店・発売日など）',
-         'read': 'ダンが持っている本人の情報を読む話（予定・メール・保存した住所など・前の作業の様子・本人のアカウントの中身・前に買った物）',
-         'work': 'ダンに作業を頼む話（直す・作る・差し替える・下書き・リマインドを入れる）',
-         'talk': '相談・雑談・返事・お礼・言い直し（調べものや作業の依頼ではない）',
+         'read': '本人の情報を読む・思い出す質問。今の作業はどうなってる、予定、メール、保存した住所、前の会話や相談で何を決めたか、この部屋のファイルや資料、アカウントの中身を確認する。変更や新しい制作は頼んでいない。',
+         'work': '新しい作業や変更を実行してほしい依頼（直して・作って・差し替えて・下書きして・リマインドを入れて）。今ある作業の状況を聞くだけならread。',
+         'talk': '今ここで考える相談・雑談・返事・お礼・言い直し。過去の相談で何を決めたかを思い出す質問はread。',
          'wait': 'まだ言い始めたばかりで、何の話か分からない'}
 ASK = '通話で本人が話している途中の言葉（言い終わっていないこともある）。この言葉が向かっている先として一番近いものを選ぶ。'
 # what may follow the searched words without changing the question
@@ -163,6 +163,8 @@ class Prefetch:
                 keep.append(s)
             elif s.task and not s.task.done():
                 s.task.cancel()
+        for s in keep[:-40]:
+            if s.task and not s.task.done(): s.task.cancel()
         self.searches = keep[-40:]
 
     async def read_plan(self, text):
@@ -255,18 +257,22 @@ class Prefetch:
         self.record('prefetch_judged', result=kind, chars=len(text), ms=round((time.monotonic() - started) * 1000))
         # A slow judge may return after the request was corrected, replaced or the call closed.
         final = said_since(dialogue.turns, turn)
-        current = not self.closed and final is not None and only_an_ending(text, final)
-        if kind == 'search' and not self.closed and self.latest(dialogue.turns)[0] is turn:
+        untouched = not any(c is turn for c in self.calls)
+        current = not self.closed and untouched and final is not None and only_an_ending(text, final)
+        if kind == 'search' and not self.closed and untouched and self.latest(dialogue.turns)[0] is turn:
             self.search_turn = turn
             self.start(text, turn)
         elif kind in ('read', 'work') and current and self.room_id:
             from app.services.web_search import _env
             if (_env('DAN_VOICE_PREFETCH_READ') or '1').strip() != '0':
-                plan = ('list_operations', {}) if kind == 'work' else await self.read_plan(text)
+                try:
+                    plan = ('list_operations', {}) if kind == 'work' else await self.read_plan(text)
+                except Exception:
+                    plan = None
                 final = said_since(dialogue.turns, turn)
-                if plan and not self.closed and final is not None and only_an_ending(text, final):
-                    # One read plan per request. Growth or correction falls back to the backend.
-                    if not any(s.turn is turn for s in self.searches):
+                if plan and not self.closed and not any(c is turn for c in self.calls) and final is not None and only_an_ending(text, final):
+                    # One read per function. An early work guess must not block a later status read.
+                    if not any(s.turn is turn and s.name == plan[0] for s in self.searches):
                         self.start_read(text, turn, *plan, dialogue)
         self.prune()
         self.judging = None

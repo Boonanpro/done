@@ -17,6 +17,7 @@ import time
 import wave
 
 ROOT = Path(__file__).resolve().parents[1]
+BASELINE = '9512ea13'  # contains search-deepseek #660 and voice-show-stage #661
 sys.path.insert(0, str(ROOT))
 OUT = ROOT / '.tmp/voice-early'
 OUT.mkdir(parents=True, exist_ok=True)
@@ -59,7 +60,7 @@ async def main(mode):
     from app.services import voice_prefetch as P, voice_sideband as S, voice_live as L, voice_responses as R
     if mode == 'baseline':
         for module in (P, R, L, S):
-            source = subprocess.check_output(['git', 'show', 'HEAD:' + module.__file__.removeprefix(str(ROOT) + '/')], cwd=ROOT, text=True)
+            source = subprocess.check_output(['git', 'show', BASELINE + ':' + module.__file__.removeprefix(str(ROOT) + '/')], cwd=ROOT, text=True)
             exec(compile(source, module.__file__, 'exec'), module.__dict__)
     from app.config import settings
     from app.services.jev_decisions import Decisions
@@ -104,7 +105,7 @@ async def main(mode):
         if name in ('get_calendar', 'job_status', 'search_records', 'room_files'):
             await asyncio.sleep(.8)
         values = {
-            'job_status': {'jobs': [{'task':'パン屋のサイト','state':'running','progress':'表紙を作成中'}]},
+            'job_status': {'jobs': [{'task':'テスト用の調査','state':'running','progress':'表紙を作成中'}]},
             'get_calendar': {'events':[{'title':'テスト打ち合わせ','start':str(args.get('from') or '今日')+' 15:00'}]},
             'search_records': {'records':[{'text':'パソコンはメモリ32GBと決めた。'}]},
             'room_files': {'files':[{'name':'test-plan.pdf','label':'テスト企画書'}]},
@@ -156,7 +157,7 @@ async def main(mode):
             'start_after_audio_end_s':round(matching[0]['t']-end,3) if matching else None,
             'done_after_audio_end_s':round(done[0]['t']-end,3) if done else None,
             'prefetch_hits':len([e for e in inside if e['kind']=='note' and e.get('phase')=='prefetch_hit'])})
-    (OUT/f'{mode}.json').write_text(json.dumps({'mode':mode,'fixture_delay_s':.8,'rows':rows,'log':log},ensure_ascii=False,indent=2))
+    (OUT/f'{mode}.json').write_text(json.dumps({'mode':mode,'baseline_commit':BASELINE,'fixture_delay_s':.8,'rows':rows,'log':log},ensure_ascii=False,indent=2))
     print(json.dumps(rows,ensure_ascii=False,indent=2))
 
 
