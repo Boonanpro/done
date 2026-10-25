@@ -255,3 +255,60 @@ async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(mo
     assert sent[0][2].startswith('📞 ダンと通話')
     assert sent[1][2]=='メモリ32GBにする。\n\n図の記録'
     assert datetime.fromisoformat(sent[1][3]['created_at'])-datetime.fromisoformat(sent[0][3]['created_at'])==timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('summary_fails', [False, True])
+async def test_merged_stage_survives_call_end_and_decision_extraction_failure(monkeypatch, tmp_path, summary_fails):
+    """Real merged Stage + real sideband close; only model/socket/storage boundaries are fixtures."""
+    from app.services import voice_stage as V, voice_calls
+    from app.services.chat_service import ChatService
+    import websockets
+    sent, notes = [], []
+    monkeypatch.setattr(V, 'ROOT', tmp_path)
+    previous = V.Stage('integration-room', 'previous-call', S.Dialogue(), lambda *a, **kw: None)
+    for _ in range(7): previous._apply('古い画面', 'root = Stat("前の通話", 1)')
+    previous.close()
+    async def draw(*a):
+        return {'action':'replace', 'caption':'決まった仕様', 'program':'root = Flow([{id: "a", label: "きっぷ", icon: "ticket"}, {id: "b", label: "改札", icon: "gate"}])'}, {}
+    monkeypatch.setattr(V, 'ask_model', draw)
+    monkeypatch.setattr(V, 'enabled', lambda: True)
+    monkeypatch.setattr(P, 'enabled', lambda: False)
+    monkeypatch.setattr(voice_calls, 'begin', lambda *a: None)
+    monkeypatch.setattr(voice_calls, 'end', lambda *a: None)
+    monkeypatch.setattr(S, 'note', lambda *a, **kw: notes.append((a,kw)))
+    async def idle(*a): await asyncio.Event().wait()
+    monkeypatch.setattr(S, 'job_feed', idle)
+    monkeypatch.setattr(S, 'chat_feed', idle)
+    async def write(self, room, user, content, **kwargs):
+        assert (room,user) == ('integration-room','test-user')
+        sent.append((content,kwargs)); return {'id':str(len(sent))}
+    monkeypatch.setattr(ChatService, '__init__', lambda self: None)
+    monkeypatch.setattr(ChatService, 'send_message', write)
+    async def after(*a, decisions_out, **kw):
+        if summary_fails: raise RuntimeError('fixture model unavailable')
+        decisions_out.append('メモリ32GBにする。'); return []
+    monkeypatch.setattr(S, 'after_call', after)
+    class Socket:
+        count = 0
+        async def __aenter__(self): return self
+        async def __aexit__(self,*a): pass
+        async def send(self,*a): pass
+        async def recv(self):
+            self.count += 1
+            if self.count == 1: return json.dumps({'type':'session.input_transcript.delta','delta':'32GBでお願い'})
+            stage = V.for_room('integration-room')
+            assert stage.session_id == 'integration-call'
+            await stage.show('今の決定を図にして')
+            assert V.read_state('integration-room')['version'] == 8
+            return json.dumps({'type':'session.closed'})
+    monkeypatch.setattr(websockets, 'connect', lambda *a, **kw: Socket())
+    await S._run('integration-call','test-user','integration-room','fixture',True)
+    assert len(sent) == 2 and sent[0][0].startswith('📞 ダンと通話')
+    assert sent[1][0].count('```openui-lang') == 1
+    assert ('メモリ32GBにする。' in sent[1][0]) is not summary_fails
+    assert 'icon: "doc"' in sent[1][0] and 'icon: "check"' in sent[1][0]
+    assert '前の通話' not in sent[1][0]
+    assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
+    state = V.read_state('integration-room')
+    assert not state['active'] and state['version'] == 8 and V.for_room('integration-room') is None
