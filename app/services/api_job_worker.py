@@ -23,7 +23,7 @@ MAX_TURNS = 120
 # 0.2-0.4 s a step over 16 (6-8 s on 2026-09-23 has not held since the prompt cache). DAN_API_JOB_TOOLS=a,b,c narrows it.
 JOB_TOOLS = lambda: os.environ.get('DAN_API_JOB_TOOLS', 'all').split(',')
 OUTPUT_CHARS = 12000
-PARALLEL_READS = {'web_search', 'read_url', 'lookup', 'places', 'search_results', 'fetch_page'}
+PARALLEL_READS = {'web_search', 'read_url', 'lookup', 'places', 'search_results'}
 CONTINUATION = ('本人の返事を受け付けた現在の作業状態です。確定操作はまだ実行していません。画面を読み取り、承認済みの具体的な操作だけを再開してください。'
                 '条件変更があれば以前の承認は無効です。\n')
 
@@ -37,9 +37,10 @@ def job_tools(mcp_tools):
     return out
 
 
-# DeepSeek's Search and Fetch handed to the job's model itself (2026-10-23): web_search answers through a second model
-# that reads the results for it, and a page was read by driving the browser. A model that reads a list itself needs
-# neither: the list comes back in about 0.7 s and a page without a login in 1-5 s.
+# DeepSeek's Search handed to the job's model itself (2026-10-23): web_search answers through a second model that reads
+# the results for it, and a model that reads a list itself does not need it (the list comes back in about 0.7 s). Pages
+# are read with read_url like everywhere else (DeepSeek's Fetch sat here until 2026-10-25: twice as slow as read_url and
+# it lost most of the text on a third of 12 pages).
 SEARCH_TOOLS = [
     {'name': 'search_results', 'description': ('ウェブ検索の結果の一覧をそのまま受け取る（1件ごとにタイトル・URL・サイト名・日付・600〜800字の要約。'
                                                 '1秒ほど）。自分で読み比べたい時・候補を並べたい時はこれ。答えだけ欲しい時は web_search。'
@@ -49,22 +50,14 @@ SEARCH_TOOLS = [
          'count': {'type': 'integer', 'description': '件数（1〜20、既定8）'},
          'with_text': {'type': 'boolean', 'description': '上位3件のページ本文も付ける（数字や表が要約に無い時）'}},
          'required': ['query']}},
-    {'name': 'fetch_page', 'description': ('ログイン不要のページの本文を Markdown で受け取る（ブラウザを開くより速い）。ログインや画面の操作が要るページ、'
-                                           '本文が取れなかったページは browser で開く。'),
-     'parameters': {'type': 'object', 'properties': {'url': {'type': 'string'}}, 'required': ['url']}},
 ]
 
 
 async def search_tool(name, args):
-    """search_results / fetch_page: the text the model reads."""
+    """search_results: the text the model reads."""
     import httpx
     from app.services import web_search
     async with httpx.AsyncClient() as client:
-        if name == 'fetch_page':
-            page = await web_search.fetch_page(client, str(args.get('url') or ''))
-            if not page or not page['content'].strip():
-                return 'このページの本文は取れなかった（ログインが要る・サイトが断った・中身が無い）。要るなら browser で開く。'
-            return (page['title'] + chr(10) * 2 + page['content'])[:OUTPUT_CHARS]
         count = max(1, min(20, int(args.get('count') or 8)))
         with_text = bool(args.get('with_text'))
         rows = await web_search.search_list(client, str(args.get('query') or ''), count, with_text)
@@ -79,7 +72,7 @@ async def search_tool(name, args):
 
 async def call_any(call_tool, name, args):
     """A Dan tool through MCP, or one of the search tools above."""
-    if name in ('search_results', 'fetch_page'):
+    if name == 'search_results':
         try:
             text = await search_tool(name, args)
         except Exception as exc:
