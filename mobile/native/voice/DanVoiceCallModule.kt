@@ -15,10 +15,6 @@ class DanVoiceCallModule(private val context: ReactApplicationContext) : ReactCo
   @ReactMethod fun unbindRemoteAudio(pcId: Int) { DanWebRtcAudio.unbind(pcId) }
   @ReactMethod fun quietSpeechInput(promise: Promise) { DanWebRtcAudio.quietSpeechInput(context, promise) }
   @ReactMethod fun audioEndpointStats(pcId: Int, promise: Promise) { DanWebRtcAudio.stats(pcId, promise) }
-  @ReactMethod fun atomCueOnPhone(pcId: Int, promise: Promise) { DanWebRtcAudio.cueOnPhone(pcId, promise) }
-  @ReactMethod fun connectAtomAudio(pcId: Int, host: String, key: String, promise: Promise) {
-    DanWebRtcAudio.connectAtom(context, pcId, host, key, promise)
-  }
   @ReactMethod fun connectPinAudio(pcId: Int, promise: Promise) { DanWebRtcAudio.connectPin(context, pcId, promise) }
   /** Keeps the phone connected to the Dan pin (touch input, 「ヘイダン」, calls), with the screen or without it. */
   @ReactMethod fun startPinLink(apiBase: String?) {
@@ -73,39 +69,7 @@ class DanVoiceCallModule(private val context: ReactApplicationContext) : ReactCo
     }
   }
   override fun getName() = "DanVoiceCall"
-  @ReactMethod fun startAtomRelay(base:String,token:String,host:String,key:String,promise:Promise) {
-    // Reject before starting/stopping the shared service. A duplicate request must
-    // not enter failure cleanup and tear down the existing conversation.
-    if (DanAtomRelay.status().getBoolean("enabled") || DanWebRtcAudio.hasPeerOwner()) {
-      promise.reject("VOICE_BUSY", "An audio connection is already active")
-      return
-    }
-    var lease: String? = null
-    try {
-      lease = DanAudioLease.acquire("relay")
-      ContextCompat.startForegroundService(context,Intent(context,DanVoiceCallService::class.java).setAction("RELAY").putExtra("audioLease",lease))
-      DanAtomRelay.start(context,base,token,host,key,lease);promise.resolve(true)
-    } catch(e:Exception) {
-      if (lease != null && DanAudioLease.owns(lease)) {
-        DanAtomRelay.stop();context.stopService(Intent(context,DanVoiceCallService::class.java));DanAudioLease.release(lease)
-      }
-      promise.reject("ATOM_RELAY",e)
-    }
-  }
-  @ReactMethod fun atomRelayStatus(promise:Promise) {promise.resolve(DanAtomRelay.status())}
-  @ReactMethod fun resumeAtomAudio() {DanAtomRelay.resumeAudio()}
-  @ReactMethod fun endAtomCall() {DanAtomRelay.endCall()}
-  @ReactMethod fun muteAtomMicrophone(value:Boolean) {DanAtomRelay.muteMicrophone(value)}
-  @ReactMethod fun stopAtomRelay() {
-    val lease = DanAudioLease.current("relay") ?: return
-    DanAtomRelay.stop()
-    context.startService(Intent(context,DanVoiceCallService::class.java).setAction("CLOSE").putExtra("audioLease",lease))
-  }
   @ReactMethod fun start(promise: Promise) {
-    if (DanAtomRelay.status().getBoolean("enabled")) {
-      promise.reject("VOICE_BUSY", "Atom relay is already active")
-      return
-    }
     var lease: String? = null
     try {
       lease = DanAudioLease.acquire("phone")

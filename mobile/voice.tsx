@@ -17,6 +17,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
 import { RTCPeerConnection, mediaDevices } from 'react-native-webrtc';
 import { withAudioRecovery } from './voice-sdp';
@@ -32,7 +33,7 @@ import { fetch } from 'expo/fetch';
 import { LiveGreeting } from '../frontend/src/components/voice/live-greeting';
 import { LiveJobs, type LiveJob } from '../frontend/src/components/voice/live-jobs';
 import { voiceQuality, voiceTransport } from './voice-quality';
-import { startVoiceBackground, stopVoiceBackground, onVoiceEnd, onVoiceTick, markVoiceConnected, playVoiceCue, playAtomVoiceCue, playPinVoiceCue, setWorkWaiting, bindRemoteAudio, unbindRemoteAudio, audioEndpointStats, muteExternalAudio, connectAtomAudio, connectPinAudio, quietSpeechInput } from './voice-background';
+import { startVoiceBackground, stopVoiceBackground, onVoiceEnd, onVoiceTick, markVoiceConnected, playVoiceCue, playPinVoiceCue, setWorkWaiting, bindRemoteAudio, unbindRemoteAudio, audioEndpointStats, muteExternalAudio, connectPinAudio, quietSpeechInput } from './voice-background';
 import { WorkWaiting, isWorking } from '../frontend/src/components/voice/work-waiting';
 
 type RtEvent = { type: string; [key: string]: unknown };
@@ -61,7 +62,7 @@ interface VoiceOverlayProps {
   expanded?: boolean;
   onMinimize?: () => void;
   onExpand?: () => void;
-  audioEndpoint?: 'phone' | 'atom' | 'pin';
+  audioEndpoint?: 'phone' | 'pin';
 }
 
 export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, token, expanded = true, onMinimize, onExpand, audioEndpoint = 'phone' }: VoiceOverlayProps) {
@@ -73,6 +74,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
   const [elapsed, setElapsed] = useState(0);
   const [muted, setMuted] = useState(false);
   const [audioRoute, setAudioRoute] = useState('');
+  // The call's stage (the caption and the scene the server draws while Dan talks): the web page /voice-stage, which
+  // the PC panel also draws. It tells us when a scene is showing, and gets the room above the orb only then.
+  const [stageShown, setStageShown] = useState(false);
   const availableRoutes = useRef<string[]>([]);
   const routeBusy = useRef(false);
   const observeRoute = useCallback((event: {selectedAudioDevice?: string; availableAudioDeviceList?: string}) => {
@@ -186,8 +190,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     endingRef.current = true;
     // Capture the native destination before unbind removes the call's route.
     // Do not wait for this query/cue before closing microphone and paid transport.
-    const atomEndCue = audioEndpoint === 'atom' ? playAtomVoiceCue('standby', pcRef.current?._pcId)
-      : audioEndpoint === 'pin' ? playPinVoiceCue('standby', pcRef.current?._pcId) : null;
+    const externalEndCue = audioEndpoint === 'pin' ? playPinVoiceCue('standby', pcRef.current?._pcId) : null;
     genRef.current++;
     setStatus('ending');
     cleanupRef.current(); cleanupRef.current = () => {};
@@ -202,7 +205,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       finished = true; clearTimeout(cueDeadline); disconnect(); onClose();
     };
     cueDeadline = setTimeout(finish, 2500);
-    void (atomEndCue ?? playVoiceCue('standby')).catch(() => {}).finally(finish);
+    void (externalEndCue ?? playVoiceCue('standby')).catch(() => {}).finally(finish);
   };
   useEffect(() => {
     const listener = onVoiceEnd(() => finishRef.current());
@@ -221,16 +224,15 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
     // 「確認します」) removed the real-time feel of the call (2026-09-22); a short, varied acknowledgement is wanted instead.
     let remoteTrack: any = null;
     let started = false;
-    let atomSettings: {host: string; key: string} | null = null;
-    let atomAttached = false;
-    let resolveAtom: () => void = () => {};
-    let rejectAtom: (error: Error) => void = () => {};
-    // Atom and the Dan pin both replace the phone microphone; the call waits until one of them delivers audio.
-    const external = audioEndpoint === 'atom' || audioEndpoint === 'pin';
-    const deviceName = audioEndpoint === 'pin' ? ui("the pin","ピン") : 'Atom';
-    const atomReady = external ? new Promise<void>((resolve,reject) => {resolveAtom=resolve;rejectAtom=reject;}) : Promise.resolve();
-    void atomReady.catch(() => {});
-    let atomDeadline: ReturnType<typeof setTimeout> | undefined;
+    let externalAttached = false;
+    let resolveExternal: () => void = () => {};
+    let rejectExternal: (error: Error) => void = () => {};
+    // The Dan pin replaces the phone microphone; the call waits until it delivers audio (the only external device since 2026-10-25).
+    const external = audioEndpoint === 'pin';
+    const deviceName = ui("the pin","ピン");
+    const externalReady = external ? new Promise<void>((resolve,reject) => {resolveExternal=resolve;rejectExternal=reject;}) : Promise.resolve();
+    void externalReady.catch(() => {});
+    let externalDeadline: ReturnType<typeof setTimeout> | undefined;
     let polling = false;
     let jobPollUnavailable = false;
     let nextQualityReport = 0;
@@ -294,7 +296,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       saveTranscript(role, text);
     };
     cleanupRef.current = () => {
-      clearTimeout(atomDeadline); rejectAtom(new Error(ui("Call ended","通話を終了しました")));
+      clearTimeout(externalDeadline); rejectExternal(new Error(ui("Call ended","通話を終了しました")));
       if (pcRef.current?._pcId != null) unbindRemoteAudio(pcRef.current._pcId);
       clearInterval(audioTimer); waiting.close();
       clearInterval(timer); clearTimeout(deadline); flush('user'); flush('assistant');
@@ -324,10 +326,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       const lease = await startVoiceBackground();
       if (!live()) { stopVoiceBackground(lease); return; }
       backgroundLeaseRef.current = lease;
-      if (audioEndpoint === 'atom') {
-        atomSettings = await request('atom-direct', {}) as {host: string; key: string};
-        if (!live()) return;
-      }
       if (audioEndpoint === 'pin' && Platform.OS === 'android' && Number(Platform.Version) >= 31) {
         const granted = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN, PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT]);
@@ -351,24 +349,17 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           if (!live()) unbindRemoteAudio(peerId);
           else {
             console.info('DanVoice remote_audio_bound', bound);
-            if (audioEndpoint === 'pin' && !atomAttached) {
-              atomAttached = true;
+            if (audioEndpoint === 'pin' && !externalAttached) {
+              externalAttached = true;
               if (!bound) throw new Error(ui("Could not prepare the pin audio.","ピンの音声処理を準備できませんでした"));
               void connectPinAudio(peerId).then(() => {
-                if (live()) resolveAtom(); else unbindRemoteAudio(peerId);
-              }).catch(error => rejectAtom(new Error(ui(`Could not connect to the pin (${String(error?.message ?? error)}).`,`ピンに接続できませんでした（${String(error?.message ?? error)}）`))));
-            }
-            if (atomSettings && !atomAttached) {
-              atomAttached = true;
-              if (!bound) throw new Error(ui("Could not prepare Atom audio.","Atomの音声処理を準備できませんでした"));
-              void connectAtomAudio(peerId,atomSettings.host,atomSettings.key).then(() => {
-                if (live()) resolveAtom(); else unbindRemoteAudio(peerId);
-              }).catch(rejectAtom);
+                if (live()) resolveExternal(); else unbindRemoteAudio(peerId);
+              }).catch(error => rejectExternal(new Error(ui(`Could not connect to the pin (${String(error?.message ?? error)}).`,`ピンに接続できませんでした（${String(error?.message ?? error)}）`))));
             }
           }
-        }).catch(error => {rejectAtom(error);console.warn('DanVoice remote_audio_bind_failed', String(error));});
+        }).catch(error => {rejectExternal(error);console.warn('DanVoice remote_audio_bind_failed', String(error));});
       });
-      // The pinned Android SDK resolves these per-source modes. Atom PCM enters
+      // The pinned Android SDK resolves these per-source modes. External (pin) PCM enters
       // after platform effects, so keep its processing in software. Phone calls
       // can use platform effects with a software fallback when unavailable.
       // Earbuds with an in-ear mic hear a whisper quietly; noise suppression would erase it, and the native capture
@@ -457,19 +448,18 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         if (message.type === 'session.started') {
           sessionId = message.session?.id || sessionId; started = true;
           clearTimeout(deadline);
-          atomDeadline = setTimeout(() => rejectAtom(new Error(ui(`${deviceName} audio connection timed out.`,`${deviceName}への音声接続がタイムアウトしました`))), audioEndpoint === 'pin' ? 20000 : 10000);
+          externalDeadline = setTimeout(() => rejectExternal(new Error(ui(`${deviceName} audio connection timed out.`,`${deviceName}への音声接続がタイムアウトしました`))), 20000);
           dcSend({type:'session.instructions.append',event_id:`mobile-clock-${Date.now()}`,delegation_id:null,
             content:`端末の現在日時は ${new Date().toLocaleString('ja-JP')} (${Intl.DateTimeFormat().resolvedOptions().timeZone})。この日時は既知の情報として答えられます。`});
-          void atomReady.then(async () => {
-            clearTimeout(atomDeadline);
+          void externalReady.then(async () => {
+            clearTimeout(externalDeadline);
             if (!live()) return;
             if (external) {
               micRef.current?.getAudioTracks().forEach((track: any) => { track.enabled = !mutedRef.current; });
               if (pcRef.current?._pcId != null) muteExternalAudio(pcRef.current._pcId, mutedRef.current);
             }
             setStatus('connected'); connectedAtRef.current = Date.now(); markVoiceConnected();
-            await (audioEndpoint === 'atom' ? playAtomVoiceCue('ready', pcRef.current?._pcId)
-              : audioEndpoint === 'pin' ? playPinVoiceCue('ready', pcRef.current?._pcId) : playVoiceCue('ready')).catch(() => {});
+            await (audioEndpoint === 'pin' ? playPinVoiceCue('ready', pcRef.current?._pcId) : playVoiceCue('ready')).catch(() => {});
             if (live() && !latestUserRef.current) greeting.start(`mobile-greeting-${Date.now()}`);
           }).catch(error => {
             if (!live()) return;
@@ -663,17 +653,28 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             <Text style={vstyles.timer}>{status === 'connected' || status === 'ending' ? duration : '—:—'}</Text>
           </View>
           <View style={vstyles.centerArea}>
-            <Text style={vstyles.callTitle}>{"Done"}</Text>
-            {!!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
+            {status === 'connected' && !!token && (
+              <View style={stageShown ? {width:'100%',flex:1,marginBottom:8,borderRadius:16,overflow:'hidden'} : {width:'100%',height:1,opacity:0}} accessibilityElementsHidden={!stageShown}>
+                <WebView
+                  source={{uri:`${apiBase}/voice-stage?room=${encodeURIComponent(roomId)}`}}
+                  injectedJavaScriptBeforeContentLoaded={`try{localStorage.setItem('done-token',${JSON.stringify(token)});}catch(e){} true;`}
+                  onMessage={event => { try { const m = JSON.parse(event.nativeEvent.data); if (m?.type === 'stage') setStageShown(!!m.shown); } catch {} }}
+                  style={{flex:1,backgroundColor:'transparent'}} containerStyle={{backgroundColor:'transparent'}}
+                  javaScriptEnabled domStorageEnabled originWhitelist={['*']} setSupportMultipleWindows={false}
+                />
+              </View>
+            )}
+            {!stageShown && <Text style={vstyles.callTitle}>{"Done"}</Text>}
+            {!stageShown && !!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
             <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
             {status === 'connected' && !!currentActivity && <ShimmerLine text={currentActivity.length > 52 ? currentActivity.slice(0, 51) + '…' : currentActivity} color={currentActivity.startsWith('Stopped') ? '#e5534b' : '#a49d92'} />}
             {status === 'error' && <Text style={vstyles.statusText}>{error}</Text>}
             {status === 'error' && <Pressable accessibilityRole="button" style={vstyles.retryButton} onPress={() => void connect()}><Text style={vstyles.retryText}>{ui("Reconnect","再接続")}</Text></Pressable>}
           </View>
           <View style={vstyles.controls}>
-            {audioEndpoint !== 'atom' && <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={speakerOn ? ui("Turn speaker off","スピーカーをオフ") : ui("Turn speaker on","スピーカーをオン")} accessibilityState={{selected:speakerOn,disabled:status !== 'connected'}} disabled={status !== 'connected'} onPress={() => void toggleSpeaker()} style={[vstyles.controlButton,speakerOn && {backgroundColor:'#e4e9e5'},status !== 'connected' && {opacity:0.4}]}>
+            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={speakerOn ? ui("Turn speaker off","スピーカーをオフ") : ui("Turn speaker on","スピーカーをオン")} accessibilityState={{selected:speakerOn,disabled:status !== 'connected'}} disabled={status !== 'connected'} onPress={() => void toggleSpeaker()} style={[vstyles.controlButton,speakerOn && {backgroundColor:'#e4e9e5'},status !== 'connected' && {opacity:0.4}]}>
               <Ionicons name={speakerOn ? 'volume-high' : ['BLUETOOTH','WIRED_HEADSET'].includes(audioRoute) ? 'headset-outline' : 'ear-outline'} size={26} color={speakerOn ? '#15251f' : '#e4e9e5'} />
-            </Pressable></View>}
+            </Pressable></View>
             <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={muted ? ui("Unmute","ミュート解除") : ui("Mute microphone","マイクをミュート")} accessibilityState={{selected:muted}} onPress={toggleMute} style={[vstyles.controlButton,muted && {backgroundColor:'#e4e9e5'}]}>
               <Ionicons name={muted ? 'mic-off' : 'mic'} size={26} color={muted ? '#15251f' : '#e4e9e5'} />
             </Pressable></View>

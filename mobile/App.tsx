@@ -76,7 +76,6 @@ import { TypingDots } from './typing-dots';
 import { VoiceHost, useVoice } from './voice-host';
 import {DoneDashboard} from './done-dashboard';
 import {ui, useUiLanguage, setUiLanguage} from './ui-language';
-import { AtomRelayControl } from './atom-relay-control';
 import { reportLocation, watchLocation } from './location-report';
 import { CollabRoomsScreen, CollabChatScreen, type CollabRoomSummary } from './collab';
 import { ParallelJobsBar } from './parallel-jobs';
@@ -4000,9 +3999,6 @@ function AppMain() {
         <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}>
           <Text style={styles.settingsSectionLabel}>{ui('LANGUAGE','表示言語')}</Text>
           <View style={styles.settingsCard}>{(['en','ja'] as const).map(value=><Pressable key={value} accessibilityRole="radio" accessibilityState={{checked:language===value}} onPress={()=>void setUiLanguage(value).catch(()=>Alert.alert(ui('Could not save language','表示言語を保存できませんでした')))} style={styles.settingsRow}><Text style={[styles.settingsRowLabel,{flex:1}]}>{value==='en'?'English':'日本語'}</Text>{language===value&&<Ionicons name="checkmark" size={22} color="#245e49"/>}</Pressable>)}</View>
-          <Text style={styles.settingsSectionLabel}>{ui('AUDIO DEVICE','音声機器')}</Text>
-          {token&&<View style={{marginHorizontal:16,padding:16,borderRadius:16,backgroundColor:'#203b31'}}><AtomRelayControl apiBase={API_BASE_URL} token={token} callActive={!!voice.roomId} onStartDirect={hub?.room_id?()=>{if(hub.room_id)voice.start({roomId:hub.room_id,chatTitle:'Done',apiBase:API_BASE_URL,token,audioEndpoint:'atom'})}:undefined}/></View>}
-
           <Text style={styles.settingsSectionLabel}>{ui('RECORDING','記録')}</Text>
           <View style={styles.settingsCard}>
             <Pressable
@@ -4243,8 +4239,6 @@ function AppMain() {
                 const call = {roomId:currentProject.room_id,chatTitle:currentProject.title,apiBase:API_BASE_URL,token};
                 Alert.alert(ui("Audio device","音声機器を選ぶ"), ui("Start a voice conversation in this room.","この部屋で会話を始めます。"), [
                   {text:ui("Phone / headphones","スマホ・イヤホン"),onPress:()=>voice.start(call)},
-                  {text:'Atom',onPress:()=>voice.start({...call,audioEndpoint:'atom'})},
-                  // Android shows at most three buttons; tapping outside the dialog cancels.
                   {text:ui("Pin","ピン"),onPress:()=>voice.start({...call,audioEndpoint:'pin'})},
                 ], {cancelable: true});
               }}

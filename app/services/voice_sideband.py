@@ -323,7 +323,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
     import websockets
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
-    counts, dialogue, working, spoke = {}, Dialogue(), set(), {}
+    counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
                                       max_size=8*1024*1024, open_timeout=10) as socket:
@@ -342,6 +342,12 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     voice_calls.begin(room_id, session_id)
                     inbox = asyncio.create_task(chat_feed(send, room_id, dialogue, record))
                     working.add(inbox); inbox.add_done_callback(working.discard)
+                    # The stage: what the owner's screen shows while Dan talks (voice_stage). A failure there never
+                    # touches the call's audio or its delegations.
+                    from app.services import voice_stage
+                    if voice_stage.enabled():
+                        try: stage = voice_stage.Stage(room_id, session_id, dialogue, record)
+                        except Exception as exc: record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
             while time.monotonic()-started < MAX_SECONDS:
                 try: event = json.loads(await socket.recv())
                 except (TypeError, ValueError): continue
@@ -357,6 +363,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
                 if kind == 'session.input_transcript.delta': dialogue.add('user', event.get('delta') or '')
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
+                if stage is not None and kind in ('session.input_transcript.delta', 'session.output_transcript.delta'):
+                    try: stage.heard('user' if kind == 'session.input_transcript.delta' else 'assistant', event.get('delta') or '')
+                    except Exception as exc: record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
                 if kind == 'response.event':
                     inner = event.get('event') or {}
                     counts['response.event:'+str(inner.get('type'))] = counts.get('response.event:'+str(inner.get('type')), 0)+1
@@ -386,10 +395,23 @@ async def _run(session_id, user_id, room_id, api_key, own):
         except Exception:
             pass
         record('sideband_closed', seconds=round(time.monotonic()-started), counts=dict(sorted(counts.items(), key=lambda x: -x[1])[:20]))
+        if stage is not None:
+            try: stage.close()
+            except Exception: logger.exception('stage not closed room=%s', room_id)
         try:
             await call_log(room_id, user_id, began, round(time.monotonic()-started))
         except Exception:
             logger.exception('call log not written room=%s', room_id)
+        if stage is not None and stage.scenes:
+            # The screens the call showed, as one message right after the call's line (owner, 2026-10-17: what was
+            # shown during a call is kept in the room, once, to look back at)
+            try:
+                from app.services.chat_service import ChatService
+                await ChatService().send_message(room_id, user_id, stage.summary(), sender_type='ai',
+                                                 created_at=datetime.fromtimestamp(began.timestamp() + 1, timezone.utc).isoformat())
+                record('stage_recorded', scenes=len(stage.scenes))
+            except Exception:
+                logger.exception('stage record not written room=%s', room_id)
         if own:
             try:
                 left = await after_call(user_id, room_id, dialogue.turns, began.isoformat())

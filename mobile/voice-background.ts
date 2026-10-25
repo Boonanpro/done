@@ -27,11 +27,6 @@ export function markVoiceConnected() {
 export async function playVoiceCue(kind: 'ready' | 'standby') {
   if (Platform.OS === 'android') await NativeModules.DanVoiceCall.cue(kind);
 }
-export async function playAtomVoiceCue(kind: 'ready' | 'standby', pcId: number | undefined) {
-  if (Platform.OS === 'android' && pcId != null && await NativeModules.DanVoiceCall?.atomCueOnPhone?.(pcId)) {
-    await playVoiceCue(kind);
-  }
-}
 /** Ready/standby cue on the pin during a pin call; falls back to the phone when the pin cannot play it. */
 export async function playPinVoiceCue(kind: 'ready' | 'standby', pcId: number | undefined) {
   if (Platform.OS === 'android' && pcId != null && await NativeModules.DanVoiceCall?.pinCue?.(pcId, kind).catch(() => false)) return;
@@ -64,9 +59,4 @@ export function muteExternalAudio(pcId: number, value: boolean) {
 export async function connectPinAudio(pcId: number) {
   if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.connectPinAudio) throw new Error('アプリの更新が必要です');
   return NativeModules.DanVoiceCall.connectPinAudio(pcId);
-}
-
-export async function connectAtomAudio(pcId: number, host: string, key: string) {
-  if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.connectAtomAudio) throw new Error('アプリの更新が必要です');
-  return NativeModules.DanVoiceCall.connectAtomAudio(pcId, host, key);
 }

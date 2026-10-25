@@ -12,7 +12,7 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TESTS = ("DanPcmQueueTest", "DanExternalAudioTest", "DanAtomSocketTest", "DanAudioLeaseTest")
+TESTS = ("DanPcmQueueTest", "DanExternalAudioTest", "DanAudioLeaseTest")
 
 
 def main() -> None:
@@ -48,7 +48,7 @@ def main() -> None:
     classes.mkdir(exist_ok=True)
     classpath = os.pathsep.join(map(str, (work / "webrtc-classes.jar", android_jar)))
     sources = [ROOT / "mobile/native/voice" / (name + ".java")
-               for name in ("DanPcmQueue", "DanExternalAudio", "DanAtomSocket", "DanAudioLease")]
+               for name in ("DanPcmQueue", "DanExternalAudio", "DanAudioLease")]
     sources += [ROOT / "tests/native" / (name + ".java") for name in TESTS]
     # Remove a previous report so a failed run cannot leave a stale green report.
     report = work / "report.json"

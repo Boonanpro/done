@@ -32,6 +32,7 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気は get_location の現在地を使う。近くの店・施設は dan_tool の places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
 - ファイル・画像・動画・資料を「出して」「見せて」「貼って」「送って（この画面に）」と言われたら show_in_chat（1秒で本人のチャット画面に出る。画像・動画はその場に表示、資料は押せば開くリンク）。どのファイルか分からなければ room_files でこの部屋のファイル一覧（新しい順・何の資料か）を見て選ぶ。作業に渡したり、パソコンで開いたりしない。出せたら「出しました」とだけ言う。
 - パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
+- 図・表・数字を本人の通話画面に出す頼み（「図にして」「画面に出して」「表で見せて」）は show_on_stage（1〜3秒で本人の通話画面に出る。何を描くかは話の中身から画面係が決める）。出たら「出しました」とだけ。普段は頼まれなくても画面係が話に合わせて描いているので、自分から呼ばない。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
@@ -70,6 +71,8 @@ TOOLS = [
     {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
      'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'},
                                                     'job_id': {'type': 'string', 'description': '対象の作業の id（省略時は一番新しい作業）'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'show_on_stage', 'description': '本人の通話画面に、今の話の図・表・数字を出す（本人が「図にして」「画面に出して」と頼んだ時）。描く中身は画面係が会話から決める。',
+     'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を図にしてほしいか（本人の言葉のまま。例: 今の3つの案を比べて、支払いの流れ）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'end_call', 'description': '通話を終える。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
 ]
 
@@ -273,6 +276,11 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         await execute({'action': 'work', 'task': task + parts.VOICE_TASK, 'engine': 'api',
                        'replay': {'id': flow['id'], 'values': args.get('values') or {}}}, room_id, user_id)
         return {'started': True, 'note': '再生を始めた。結果は後で別に届く。本人に今言うことはない。'}
+    if name == 'show_on_stage':
+        from app.services import voice_stage
+        stage = voice_stage.for_room(room_id)
+        if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
+        return await stage.show(str(args.get('what') or ''))
     if name == 'end_call':
         return {'ok': True}
     if name == 'web_search':

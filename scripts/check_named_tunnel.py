@@ -13,8 +13,6 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'devices' / 'atom-echo-s3r'))
-from voice_credentials import load_credentials
 
 
 async def check():
@@ -33,8 +31,9 @@ async def check():
         response = await client.get(base + '/api/v1/chat/me')
         assert response.status_code == 401, 'Anonymous protected API must be denied'
         result['anonymous_denied'] = True
-        auth = await load_credentials(ROOT / '.tmp/atom-headless-auth.json', 'http://127.0.0.1:9000')
-        headers = {'Authorization': 'Bearer ' + auth['token']}
+        # the owner's token (DAN_TOKEN); the Atom's stored login this used was retired on 2026-10-25
+        import os
+        headers = {'Authorization': 'Bearer ' + os.environ['DAN_TOKEN']}
         response = await client.get(base + '/api/v1/chat/me', headers=headers)
         response.raise_for_status()
         result['authenticated_me'] = True

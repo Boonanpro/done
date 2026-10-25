@@ -46,13 +46,18 @@ import '@/lib/chat-shapes/no-openui-devtools';
 import {
   Renderer, createLibrary, defineComponent, useIsStreaming, useRenderNode, type ComponentRenderer, type ParseResult,
 } from '@openuidev/react-lang';
-import { AlertCircle, Check, ExternalLink, Loader2, Send } from 'lucide-react';
+import {
+  AlertCircle, AlertTriangle, ArrowRight, BarChart3, Bot, Calendar, Camera, Car, Check, CheckCircle2, Clock, Cloud, Coins, CreditCard,
+  Database, Ear, ExternalLink, Eye, File, FileText, Flag, Folder, Glasses, Globe, HelpCircle, Heart, Home, Image as ImageIcon, Key, Landmark,
+  Link as LinkIcon, Loader2, Lock, Mail, MapPin, MessageSquare, Mic, Monitor, Package, Search, Send, Server, Settings, Shield, Smartphone, Star,
+  Store, TrainFront, Truck, User, Users, Video, Wrench, Zap, type LucideIcon,
+} from 'lucide-react';
 
 import {
   ANSWER_VALUE_MAX, BadgeProps, ButtonProps, CardProps, ChartProps, ChoiceProps, ColumnProps, CompareProps, DividerProps, FactsProps,
-  HeadingProps, ImageProps, InputProps, RowProps, StatProps, StepsProps, TextProps, checkShapeProgram, choiceOptions,
+  FlowProps, HeadingProps, ImageProps, InputProps, RowProps, StatProps, StepsProps, TextProps, checkShapeProgram, choiceOptions, flowEdges,
   type BadgeInput, type ButtonInput, type CardInput, type ChartInput, type ChoiceInput, type ColumnInput, type CompareInput,
-  type FactsInput, type HeadingInput, type ImageInput, type InputInput, type RowInput, type StatInput, type StepsInput, type TextInput,
+  type FactsInput, type FlowInput, type HeadingInput, type ImageInput, type InputInput, type RowInput, type StatInput, type StepsInput, type TextInput,
 } from '@/lib/chat-shapes/schema';
 import {
   choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, readAnswerTo,
@@ -519,7 +524,7 @@ const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
 /** 子の部品の名前（lang-core の要素なら typeName） */
 const childName = (c: unknown): string => (c && typeof c === 'object' && typeof (c as { typeName?: unknown }).typeName === 'string' ? (c as { typeName: string }).typeName : '');
 /** 横並びの中で幅を分け合う部品（カード・縦並び・表・グラフ）。ほかの部品（数字・札・ボタン）は中身の幅のまま */
-const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts']);
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow']);
 
 function ChildList({ items, row = false }: { items: unknown; row?: boolean }) {
   const renderNode = useRenderNode();
@@ -652,6 +657,63 @@ const ButtonView: ComponentRenderer<ButtonInput> = ({ props }) => {
 
 const DividerView: ComponentRenderer<Record<string, never>> = () => <hr className="my-1 w-full border-border" data-shape="Divider" />;
 
+// --- 矢印でつなぐ図 ------------------------------------------------------------------------------
+const FLOW_ICON: Record<string, LucideIcon> = {
+  person: User, people: Users, phone: Smartphone, pc: Monitor, server: Server, database: Database, cloud: Cloud, mail: Mail, chat: MessageSquare,
+  money: Coins, card: CreditCard, bank: Landmark, doc: FileText, calendar: Calendar, clock: Clock, check: CheckCircle2, warning: AlertTriangle,
+  lock: Lock, key: Key, shield: Shield, globe: Globe, home: Home, car: Car, train: TrainFront, camera: Camera, mic: Mic, video: Video, bot: Bot,
+  search: Search, tool: Wrench, chart: BarChart3, box: Package, truck: Truck, store: Store, flag: Flag, star: Star, heart: Heart,
+  question: HelpCircle, gear: Settings, image: ImageIcon, pin: MapPin, glasses: Glasses, ear: Ear, eye: Eye, file: File, folder: Folder,
+  link: LinkIcon, bolt: Zap,
+};
+const FLOW_TONE: Record<string, string> = {
+  now: 'border-sky-400 bg-sky-500/15 text-foreground ring-2 ring-sky-400/40 shadow-md',
+  good: 'border-emerald-600/40 bg-emerald-500/10', warn: 'border-amber-600/40 bg-amber-500/10', bad: 'border-red-600/40 bg-red-500/10',
+  neutral: 'border-border bg-muted/40',
+};
+
+/** 人・物・流れを、アイコンの箱と矢印で。箱は書かれた順に並び、隣り合う箱の間の矢印はその場所に、離れた箱の矢印は図の下に文字で */
+const FlowView: ComponentRenderer<FlowInput> = ({ props }) => {
+  const box = useBox('flex flex-col gap-2');
+  const nodes = Array.isArray(props.nodes) ? props.nodes : [];
+  const { between, others } = flowEdges({ nodes, edges: props.edges });
+  const nameOf = (id: string) => nodes.find((n) => n.id === id)?.label || id;
+  return (
+    <div className={box} data-shape="Flow">
+      {props.title ? <div className="text-sm font-semibold">{props.title}</div> : null}
+      <div className="flex w-full flex-wrap items-center justify-center gap-y-3">
+        {nodes.map((n, i) => {
+          const Icon = n.icon ? FLOW_ICON[n.icon] : undefined;
+          const edge = between.get(i);
+          return (
+            <div key={`${n.id}-${i}`} className="flex items-center">
+              <div
+                className={`flex min-w-[5.5rem] max-w-[9rem] flex-col items-center gap-1 rounded-xl border px-3 py-2 text-center ${FLOW_TONE[n.tone || 'neutral'] || FLOW_TONE.neutral}`}
+                data-flow-node={n.id} data-flow-tone={n.tone || 'neutral'}
+              >
+                {Icon ? <Icon className={`h-6 w-6 ${n.tone === 'now' ? 'text-sky-500 dark:text-sky-300' : n.tone === 'good' ? 'text-emerald-600 dark:text-emerald-400' : n.tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : n.tone === 'bad' ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'}`} aria-hidden /> : null}
+                <div className="text-sm font-medium leading-tight">{n.label}</div>
+                {n.sub ? <div className="text-[11px] leading-tight text-muted-foreground">{n.sub}</div> : null}
+              </div>
+              {i < nodes.length - 1 ? (
+                <div className="flex w-14 flex-col items-center justify-center px-1 text-muted-foreground" data-flow-edge={edge ? 'yes' : 'no'}>
+                  {edge?.label ? <div className="max-w-[3.5rem] truncate text-[10px] leading-tight">{edge.label}</div> : null}
+                  {edge ? <ArrowRight className="h-5 w-5" aria-hidden /> : <div className="h-5" />}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {others.length ? (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          {others.map((e, i) => <span key={i}>{nameOf(e.from)} → {nameOf(e.to)}{e.label ? `（${e.label}）` : ''}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 // --- 部品一覧（OpenUI の library） ----------------------------------------------------------
 
 export const shapeLibrary = createLibrary({
@@ -672,6 +734,7 @@ export const shapeLibrary = createLibrary({
     defineComponent({ name: 'Badge', description: '札', props: BadgeProps, component: BadgeView }),
     defineComponent({ name: 'Button', description: 'ボタン', props: ButtonProps, component: ButtonView }),
     defineComponent({ name: 'Divider', description: '区切り線', props: DividerProps, component: DividerView }),
+    defineComponent({ name: 'Flow', description: '矢印でつなぐ図', props: FlowProps, component: FlowView }),
   ],
 });
 

@@ -184,7 +184,8 @@ def save(wt, what=None, only=None):
     else:
         git(wt, 'add', '-u')
         take = changes(wt)[0]
-        new = [p for p in take if git(wt, 'ls-files', '--error-unmatch', '--', p, check=False).returncode]
+        # paths that exist and are not tracked yet (a file removed with git rm is in `take` too and must not be added back: 2026-10-25)
+        new = [p for p in take if (Path(wt) / p).exists() and git(wt, 'ls-files', '--error-unmatch', '--', p, check=False).returncode]
         if new:
             git(wt, 'add', '--', *new)
     if not git(wt, 'diff', '--cached', '--quiet', check=False).returncode:

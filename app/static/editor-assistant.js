@@ -342,7 +342,7 @@ async function runReasoning(){
       const r=await fetch(base+'/reason',{method:'POST',credentials:'omit',signal:controller.signal,
         headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},
         body:JSON.stringify({room_id:b.context.room_id,turn_id:b.turn_id,outputs,
-          runtime:{voice_model:LIVE_VOICE?'gpt-live-1':null,waiting_for_user:waitingForUser,notifications_paused:notificationsPaused,pending_question:pendingQuestion,live_facts:LIVE_VOICE?liveFacts():null}})});
+          runtime:{voice_model:LIVE_VOICE?(window.__liveModel||'gpt-live-1'):null,waiting_for_user:waitingForUser,notifications_paused:notificationsPaused,pending_question:pendingQuestion,live_facts:LIVE_VOICE?liveFacts():null}})});
       if(!r.ok)await readApiResponse(r);
       record('reasoning_response_opened',{turn_id:b.turn_id,elapsed_ms:Date.now()-requestStarted});
       const reader=r.body.getReader(),decoder=new TextDecoder();let pending='',done=false,hasTools=false;

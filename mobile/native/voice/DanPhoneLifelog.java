@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * (DanPinLifelog) in the pin's own shape — 10 ms Opus frames, 16 kHz mono, wrapped as Omi packets
  * ([index lo, index hi, sub] + frame) — so the speech cutting, the .dpo files, the uploads and the PC side stay as
  * they are. It records only while the owner's switch (設定「スマホで記録」) is on, no pin is linked (the pin takes over
- * the moment its link is ready, DanPinLink) and no call holds the audio (DanAudioLease: phone calls and the Atom
+ * the moment its link is ready, DanPinLink) and no call holds the audio (DanAudioLease: phone calls and the pin
  * relay). It captures inside the standing pin foreground service (DanVoiceCallService PIN, microphone type), so
  * the screen may be off and the phone in a pocket; a partial wake lock keeps the CPU up between frames.
  */

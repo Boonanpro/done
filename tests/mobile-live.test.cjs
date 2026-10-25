@@ -55,7 +55,6 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
     async createOffer() {return {type: 'offer', sdp: 'offer'};}
     async setLocalDescription(value) {this.localDescription = value;}
     async setRemoteDescription() {
-      if(audioEndpoint==='atom') this.listeners.track({track:{kind:'audio',id:'remote-audio',_peerConnectionId:41}});
       this.event({type: 'session.started', session: {id: 'live-test'}});
     }
     event(value) {this.receive({data: JSON.stringify(value)});}
@@ -68,6 +67,7 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
     'react-native': {Animated, DeviceEventEmitter:{addListener:()=>({remove(){}})}, Easing: {linear: 0}, Platform: {OS: 'android',Version: 31}, StyleSheet: {create: x => x},
       PermissionsAndroid: {PERMISSIONS: {BLUETOOTH_CONNECT: 'bt'}, check: async () => true}},
     '@expo/vector-icons': {},
+    'react-native-webview': {WebView: () => ({})},   // the call's stage (voice-stage page) is not exercised here
     'react-native-safe-area-context': {useSafeAreaInsets: () => ({top:0,bottom:0,left:0,right:0})},
     'react-native-webrtc': {RTCPeerConnection: PC, mediaDevices: {getUserMedia: async () => {
       track = {enabled:true,stop() {this.stopped = true;}}; return {getTracks: () => [track],getAudioTracks:()=>[track]};
@@ -91,7 +91,6 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
       performance, fetch: async (url, options) => {
         const body = JSON.parse(options.body); requests.push({url,body});
         let data = {};
-        if (url.endsWith('/atom-direct')) data={host:'test.invalid',key:'test'};
         if (url.endsWith('/live/session')) data = failSession ? {detail: 'unavailable'} : {session: {id: 'live-test'},transport: {sdp: 'answer'}};
         if (url.endsWith('/command-center') && body.args?.action==='jobs') data={jobs:activeJob ? [{id:'job',task:'write memo',state:'running',created_at:new Date().toISOString(),seq:0,events:[]}] : []};
         if (url.endsWith('/command-center') && body.args?.action==='jobs' && jobPollIndex < jobPollResults.length) {
@@ -146,49 +145,6 @@ test('an explicit end request is not acted on by the phone: the server decides (
   assert.ok(!h.pc.closed);
   assert.equal(h.requests.filter(r=>r.url.endsWith('/live/call-control')).length,0);
  } finally {h.dispose();}
-});
-
-test('Atom setup keeps phone mic closed and greeting waits for the same peer attachment', async () => {
-  const h=harness({audioEndpoint:'atom',holdAtom:true});
-  try {
-    for(let i=0;i<8;i++) await tick();
-    assert.equal(h.track.enabled,false);
-    assert.ok(!h.sent.some(e=>String(e.event_id).startsWith('mobile-greeting')));
-    h.releaseAtom(); for(let i=0;i<4;i++) await tick();
-    assert.equal(h.track.enabled,true);
-    assert.ok(h.sent.some(e=>String(e.event_id).startsWith('mobile-greeting')));
-    assert.deepEqual(h.cues,[]); // Atom firmware owns the cues for this route.
-    assert.equal(h.requests.filter(r=>r.url.endsWith('/live/session')).length,1);
-    h.endFromNotification(); for(let i=0;i<4;i++) await tick();
-    assert.equal(h.pc.closed,true); assert.deepEqual(h.cues,[]);
-  } finally {h.dispose();}
-});
-
-test('Atom headset cues capture route before teardown without delaying paid audio closure', async () => {
-  const h=harness({audioEndpoint:'atom',atomHeadset:true,holdStandby:true});
-  try {
-    for(let i=0;i<8;i++) await tick();
-    assert.deepEqual(h.cues,['ready']);
-    h.endFromNotification();
-    assert.equal(h.pc.closed,true);
-    assert.equal(h.track.stopped,true);
-    const destination=h.audioBindings.findIndex(x=>x[0]==='cueDestination'&&x[2]==='standby');
-    const unbind=h.audioBindings.findIndex(x=>x[0]==='unbind');
-    assert.ok(destination>=0 && unbind>destination);
-    assert.equal(h.closed,0);
-    h.finishCue(); for(let i=0;i<4;i++) await tick();
-    assert.equal(h.closed,1);
-    assert.deepEqual(h.cues,['ready','standby']);
-  } finally {h.dispose();}
-});
-
-test('Atom attachment failure closes paid audio instead of falling back to phone mic', async () => {
-  const h=harness({audioEndpoint:'atom',failAtom:true});
-  try {
-    for(let i=0;i<12;i++) await tick();
-    assert.equal(h.track.enabled,false); assert.equal(h.track.stopped,true); assert.equal(h.pc.closed,true);
-    assert.ok(!h.sent.some(e=>String(e.event_id).startsWith('mobile-greeting')));
-  } finally {h.dispose();}
 });
 
 test('failed audio reservation never opens or stops another microphone/audio route', async () => {

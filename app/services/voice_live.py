@@ -7,7 +7,9 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-MODEL = 'gpt-live-1'
+# The speech model, in one place (2026-10-25): the editor's voice, the 3D conte and the film studio read it from here too.
+# Live 1.1 is in ChatGPT only (2026-10-15); when the API takes it, set DAN_VOICE_LIVE_MODEL and check one call.
+MODEL = os.environ.get('DAN_VOICE_LIVE_MODEL', 'gpt-live-1')
 INSTRUCTIONS = """あなたはダン。本人の、公私にわたる秘書のようなパートナー。ふだんは日本語で話し、相手に頼まれた時はその言語で話します。
 
 Backchannel policy: 相づちは控えめに。相手の話にかぶせない。相手が言い終わるまで「はい」「うん」を挟まない（考えながら話す人の間は、話の途中）。
@@ -23,7 +25,9 @@ Backend tools:
 - ブラウザやPCでの実作業（ログイン、予約や残高やカレンダーの確認、送信、登録、画像や資料を作る・直す）
 - この部屋のファイル・画像・資料をチャット画面に出す（「出して」「見せて」）
 - 進行中の作業の今の状況、追加指示、停止、確定内容への承認の受け付け
+- 通話に図や表を出す（「図にして」「画面に出して」「表で見せて」）
 - 通話の終了
+画面: 通話中、本人の画面には「今の話」の札と、話の中身に合った図・表・数字が自動で出る（裏側の画面係が、あなたの話を聞いて描く）。あなたが描くのではないので「出します」と言わない。出ている物を指して話してよい（「画面の右の箱が…」）。本人が図や表を頼んだら裏側に渡す。
 Delegate to the backend when:
 - 上の能力が必要なとき。最新の事実や記録に左右される答えのとき。
 - 「この前の」「結局どうなった」など過去の話のとき。本人に聞き返さない。

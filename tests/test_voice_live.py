@@ -61,7 +61,7 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_live_one_with_the_responses_delegation(self):
         config = live.session_config()
-        self.assertEqual(config['model'], 'gpt-live-1')
+        self.assertEqual(config['model'], live.MODEL)
         self.assertEqual(config['delegation']['type'], 'responses')
         tools = config['delegation']['responses']['tools']
         self.assertIn('web_search', [t.get('name') for t in tools])
