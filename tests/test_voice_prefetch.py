@@ -9,11 +9,10 @@ from app.services import voice_sideband as S
 @pytest.fixture
 def fake(monkeypatch):
     searched = []
-    async def find(text, fallback=True):
-        assert fallback is False   # a search started early never spends the OpenAI balance
+    async def find(text):
         searched.append(text)
         await asyncio.sleep(.01)
-        return {'success': True, 'answer': 'ans:' + text, 'sources': [], 'engine': 'deepseek', 'seconds': .01}
+        return {'success': True, 'answer': 'ans:' + text, 'sources': [], 'seconds': .01}
     monkeypatch.setattr('app.services.web_search.find', find)
     kinds = {}
     async def kind(self, text):

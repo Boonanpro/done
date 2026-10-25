@@ -157,7 +157,7 @@ def delegation(room_id=None, user_id=None, title='', records=''):
 
 
 async def search_web(query):
-    """Dan's web search (app/services/web_search.py, DeepSeek with OpenAI as the fallback). It had its own copy of
+    """Dan's web search (app/services/web_search.py, DeepSeek). It had its own copy of
     OpenAI's search here until 2026-10-23; one search now serves chat, jobs and calls, and a search no longer spends the
     OpenAI balance the call itself runs on."""
     from app.services import web_search

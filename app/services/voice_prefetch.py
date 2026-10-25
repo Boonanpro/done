@@ -171,7 +171,7 @@ class Prefetch:
     def start(self, text, turn):
         from app.services import web_search
         early = Early(text, turn)
-        early.task = asyncio.ensure_future(web_search.find(text, fallback=False))
+        early.task = asyncio.ensure_future(web_search.find(text))
         self.searches.append(early)
         self.counts['started'] += 1
         self.record('prefetch_started', chars=len(text))
