@@ -25,6 +25,7 @@ INSTRUCTIONS = """You operate a minimal 3D previs scene, not a final video gener
 
 def live_config(state):
     import json
-    return {"model":"gpt-live-1", "audio":{"output":{"voice":"meridian"}},
+    from app.services.voice_live import MODEL
+    return {"model":MODEL, "audio":{"output":{"voice":"meridian"}},
         "instructions":"あなたはダン。ユーザーと一緒に目の前の3Dコンテを編集します。自然で短い日本語で話します。変更の依頼はバックエンドへ委譲してください。単なる雑談はそのまま答えます。接続時は発言を待ちます。操作結果が届いてから短く報告し、未対応の動作はできたと言いません。",
         "delegation":{"type":"responses","responses":{"model":"gpt-6-astra","instructions":INSTRUCTIONS+"\nCurrent scene: "+json.dumps(state),"tools":TOOLS,"parallel_tool_calls":False,"reasoning":{"effort":"low"}}}}

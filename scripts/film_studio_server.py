@@ -93,7 +93,8 @@ async def message(request:Request):
 @app.post('/api/session')
 async def session(request:Request):
     body=await request.json()
-    config={'model':'gpt-live-1','audio':{'output':{'voice':'meridian'}},
+    from app.services.voice_live import MODEL
+    config={'model':MODEL,'audio':{'output':{'voice':'meridian'}},
         'instructions':'あなたはダン。日本語で自然に短く会話します。ユーザーは監督として映画を詰めています。作品の相談・提案・変更は文脈と原文を保ってバックエンドへ委譲します。単なる相槌には不要です。接続しただけで話し出さず発言を待ってください。結果が来たら会話として伝え、処理分類や内部状態を読み上げません。',
         'delegation':{'type':'responses','responses':{'model':'gpt-6-astra','instructions':studio.INSTRUCTIONS+'\nCurrent project: '+json.dumps(studio.context(),ensure_ascii=False),
             'tools':studio.tools(),'parallel_tool_calls':False,'reasoning':{'effort':'medium'}}}}

@@ -837,9 +837,6 @@ async function request<T>(
 // ==================== API Methods ====================
 
 export const api = {
-  commandCenter: {
-    device: () => request<{ connected: boolean; state: string; requested?: boolean; room_id?: string }>('/voicelog/command-center/device'),
-  },
   // Auth endpoints
   auth: {
     login: (data: LoginRequest) =>

@@ -9,7 +9,7 @@ import java.util.concurrent.locks.LockSupport;
 import org.webrtc.AudioTrackSink;
 import org.webrtc.audio.JavaAudioDeviceModule;
 
-/** Local Atom PCM endpoint for one phone-owned peer connection. No network I/O in callbacks. */
+/** Local external-device (the Dan pin) PCM endpoint for one phone-owned peer connection. No network I/O in callbacks. */
 public final class DanExternalAudio implements JavaAudioDeviceModule.AudioBufferCallback, AudioTrackSink {
   public static final int SAMPLE_RATE = 48000;
   public static final int FRAME_BYTES = 960;
@@ -49,7 +49,7 @@ public final class DanExternalAudio implements JavaAudioDeviceModule.AudioBuffer
   public JavaAudioDeviceModule createDeviceModule(Context context) {
     return JavaAudioDeviceModule.builder(context)
         .setInputSampleRate(SAMPLE_RATE).setUseStereoInput(false)
-        // Leave platform effects available for the phone microphone. Atom calls
+        // Leave platform effects available for the phone microphone. External-device calls
         // explicitly request software processing on their capture source, since
         // their PCM is injected after Android's microphone effects.
         .setUseHardwareAcousticEchoCanceler(JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported())
@@ -107,7 +107,7 @@ public final class DanExternalAudio implements JavaAudioDeviceModule.AudioBuffer
         input.read(buffer, System.nanoTime());
       }
       buffer.limit(limit); buffer.position(position);
-      return 0; // Arrival time is not an Atom capture timestamp.
+      return 0; // Arrival time is not the device's capture timestamp.
     } finally { routeLock.unlock(); }
   }
 

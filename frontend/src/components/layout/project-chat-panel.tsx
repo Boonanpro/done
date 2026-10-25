@@ -3029,7 +3029,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   return (
     <div data-media-gallery-scope className="relative flex h-full w-full overflow-hidden">
     {voiceOpen && project?.room_id && (
-      <div className="fixed bottom-4 right-4 z-50 w-[360px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
+      <div className="dark fixed bottom-4 right-4 z-50 w-[520px] max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
         <VoiceSession
           roomId={project.room_id}
           chatTitle={project.title || undefined}

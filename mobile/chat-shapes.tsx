@@ -9,12 +9,13 @@
 // 写しは frontend/scripts/sync-mobile-chat-shapes.mjs が作る。
 // - 写真はダンのファイル（/api/v1/files/…）と https:// の画像だけ（PC の safeImageUrl と同じ範囲。アプリの URL 読みは
 //   ブラウザと違うので、ここで同じ範囲を確かめる）。ボタンの行き先は safeLinkUrl を通った物だけ
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import Svg, { Circle, G, Line, Path, Rect, Text as SvgText } from 'react-native-svg';
 
 import { ShapeNode, readLook, safeColor, safeLinkUrl, siteFilePath } from './chat-shapes-plain';
-import { ANSWER_VALUE_MAX, SHAPE_SPECS, checkShapeProgram, choiceOptions } from './chat-shapes-schema';
+import { ANSWER_VALUE_MAX, SHAPE_SPECS, checkShapeProgram, choiceOptions, flowEdges } from './chat-shapes-schema';
+import { Ionicons } from '@expo/vector-icons';
 import {
   choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, type UserUtterance,
 } from './chat-shapes-answers';
@@ -97,7 +98,7 @@ function Box({ children, flat, framed }: { children: ReactNode; flat?: boolean; 
 }
 
 /** 横並びの中で幅を分け合う部品（Web の chat-shapes.tsx WIDE と同じ） */
-const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts']);
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow']);
 
 function Children({ items, row = false }: { items: unknown; row?: boolean }) {
   const list = Array.isArray(items) ? items : [];
@@ -329,6 +330,55 @@ function ChartNode({ p }: { p: Record<string, unknown> }) {
   );
 }
 
+/** 矢印でつなぐ図（PC の FlowView と同じ並べ方。アイコンは Ionicons に当てる） */
+const FLOW_ICON: Record<string, ComponentProps<typeof Ionicons>['name']> = {
+  person: 'person-outline', people: 'people-outline', phone: 'phone-portrait-outline', pc: 'desktop-outline', server: 'server-outline',
+  database: 'server-outline', cloud: 'cloud-outline', mail: 'mail-outline', chat: 'chatbubble-outline', money: 'cash-outline', card: 'card-outline',
+  bank: 'business-outline', doc: 'document-text-outline', calendar: 'calendar-outline', clock: 'time-outline', check: 'checkmark-circle-outline',
+  warning: 'warning-outline', lock: 'lock-closed-outline', key: 'key-outline', shield: 'shield-outline', globe: 'globe-outline', home: 'home-outline',
+  car: 'car-outline', train: 'train-outline', camera: 'camera-outline', mic: 'mic-outline', video: 'videocam-outline', bot: 'hardware-chip-outline',
+  search: 'search-outline', tool: 'build-outline', chart: 'bar-chart-outline', box: 'cube-outline', truck: 'bus-outline', store: 'storefront-outline',
+  flag: 'flag-outline', star: 'star-outline', heart: 'heart-outline', question: 'help-circle-outline', gear: 'settings-outline', image: 'image-outline',
+  pin: 'location-outline', glasses: 'glasses-outline', ear: 'ear-outline', eye: 'eye-outline', file: 'document-outline', folder: 'folder-outline',
+  link: 'link-outline', bolt: 'flash-outline',
+};
+const FLOW_TONE_BORDER: Record<string, string> = { now: '#2a6f9e', good: TONE.good, warn: TONE.warn, bad: TONE.bad };
+function FlowNodeView({ p }: { p: Record<string, unknown> }) {
+  const nodes = (Array.isArray(p.nodes) ? p.nodes : []) as { id: string; label: string; icon?: string; sub?: string; tone?: string }[];
+  const edges = Array.isArray(p.edges) ? (p.edges as { from: string; to: string; label?: string }[]) : undefined;
+  const { between, others } = flowEdges({ nodes, edges });
+  const nameOf = (id: string) => nodes.find((n) => n.id === id)?.label || id;
+  return (
+    <Box>
+      {str(p.title) ? <Text style={styles.question}>{str(p.title)}</Text> : null}
+      <View style={styles.flow}>
+        {nodes.map((n, i) => {
+          const icon = n.icon ? FLOW_ICON[n.icon] : undefined;
+          const edge = between.get(i);
+          const now = n.tone === 'now';
+          const border = FLOW_TONE_BORDER[str(n.tone)];
+          return (
+            <View key={`${n.id}-${i}`} style={styles.flowItem}>
+              <View style={[styles.flowNode, !!border && { borderColor: border, borderWidth: now ? 2 : 1 }, now && styles.flowNow, !!TONE_BG[str(n.tone)] && { backgroundColor: TONE_BG[str(n.tone)] }]}>
+                {icon ? <Ionicons name={icon} size={20} color={now ? '#2a6f9e' : '#5c6660'} /> : null}
+                <Text style={styles.flowLabel}>{n.label}</Text>
+                {n.sub ? <Text style={styles.flowSub}>{n.sub}</Text> : null}
+              </View>
+              {i < nodes.length - 1 ? (
+                <View style={styles.flowArrow}>
+                  {edge?.label ? <Text style={styles.flowEdgeLabel} numberOfLines={1}>{edge.label}</Text> : null}
+                  {edge ? <Ionicons name="arrow-forward" size={18} color="#8a938d" /> : <View style={{ height: 18 }} />}
+                </View>
+              ) : null}
+            </View>
+          );
+        })}
+      </View>
+      {others.length ? <Text style={styles.small}>{others.map((e) => `${nameOf(e.from)} → ${nameOf(e.to)}${e.label ? `（${e.label}）` : ''}`).join('　')}</Text> : null}
+    </Box>
+  );
+}
+
 function Node({ node }: { node: ShapeNode }) {
   const p = propsOf(node);
   const { openUrl } = useContext(ShapeRoomContext);
@@ -422,6 +472,8 @@ function Node({ node }: { node: ShapeNode }) {
       return <CompareNode p={p} />;
     case 'Chart':
       return <ChartNode p={p} />;
+    case 'Flow':
+      return <FlowNodeView p={p} />;
     default:
       return null;
   }
@@ -455,6 +507,14 @@ const styles = StyleSheet.create({
   small: { fontSize: 12, color: '#6b7a72' },
   photo: { width: '100%', borderRadius: 10, backgroundColor: '#eef2ee' },
   stat: { minWidth: 88 },
+  flow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', rowGap: 10 },
+  flowItem: { flexDirection: 'row', alignItems: 'center' },
+  flowNode: { minWidth: 84, maxWidth: 140, alignItems: 'center', gap: 3, borderWidth: 1, borderColor: '#dbe2da', backgroundColor: '#f6f8f5', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8 },
+  flowNow: { backgroundColor: 'rgba(42,111,158,0.12)' },
+  flowLabel: { fontSize: 13, fontWeight: '600', color: '#1f2724', textAlign: 'center' },
+  flowSub: { fontSize: 10, color: '#6b746e', textAlign: 'center' },
+  flowArrow: { width: 48, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2 },
+  flowEdgeLabel: { fontSize: 9, color: '#6b746e', maxWidth: 46 },
   statValue: { fontSize: 22, fontWeight: '700', color: '#1f2724', fontVariant: ['tabular-nums'] },
   statUnit: { fontSize: 14, fontWeight: '600' },
   facts: { gap: 4 },

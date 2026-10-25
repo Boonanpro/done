@@ -811,7 +811,7 @@ async function connectLive(){
     const e=JSON.parse(data);
     if(e.type==='session.closed'){session.finalized=true;record('live_session_closed',{reason:e.reason,usage:e.usage});flushAudit().catch(()=>{});session.finalize?.();if(!session.closing&&gen===generation)recoverConnection('live_'+e.reason).catch(error);return;}
     if(gen!==generation||liveConnection!==session)return;
-    if(e.type==='session.started'){session.started=true;session.id=e.session.id;connectedAt=Date.now();session.startedAt=connectedAt;session.editContext=structuredClone(livePausedContext?.room_id===context?.room_id?livePausedContext:context);livePausedContext=null;session.views=[];liveObserve(context,session);const memo=readConsultationMemo(session);if(memo)liveAppend('thinking',JSON.stringify({kind:'consultation_sheet',sheet:memo,read_silently:true}));record('connection_stage',{stage:'ready',model:'gpt-live-1',live_session_id:session.id});state('接続しました');ready();return;}
+    if(e.type==='session.started'){session.started=true;session.id=e.session.id;connectedAt=Date.now();session.startedAt=connectedAt;session.editContext=structuredClone(livePausedContext?.room_id===context?.room_id?livePausedContext:context);livePausedContext=null;session.views=[];liveObserve(context,session);const memo=readConsultationMemo(session);if(memo)liveAppend('thinking',JSON.stringify({kind:'consultation_sheet',sheet:memo,read_silently:true}));record('connection_stage',{stage:'ready',model:window.__liveModel||'gpt-live-1',live_session_id:session.id});state('接続しました');ready();return;}
     if(['session.input_transcript.delta','session.output_transcript.delta'].includes(e.type)){liveTranscript(e,session);return;}
     if(['session.commentary.appended','session.thinking.appended','session.instructions.appended'].includes(e.type)){record('live_append_ack',{kind:e.type,client_event_id:e.client_event_id});return;}
     if(e.type==='response.event'){handleLiveResponseEvent(e,session).catch(error);return;}
@@ -824,7 +824,7 @@ async function connectLive(){
   const offer=await peer.createOffer();await peer.setLocalDescription(offer);
   if(peer.iceGatheringState!=='complete')await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{peer.removeEventListener('icegatheringstatechange',check);reject(Error('音声接続の準備がタイムアウトしました'));},10000);function check(){if(peer.iceGatheringState==='complete'){clearTimeout(timer);peer.removeEventListener('icegatheringstatechange',check);resolve();}}peer.addEventListener('icegatheringstatechange',check);check();});
   const result=await api('/live/session',{sdp:peer.localDescription.sdp,history:conversationMemory,client_build:window.__danEditorBuild||null});
-  record('live_runtime',{...result.runtime,model:result.model});
+  window.__liveModel=result.model;record('live_runtime',{...result.runtime,model:result.model});
   if(gen!==generation)return;
   session.id=result.session.id;await peer.setRemoteDescription({type:'answer',sdp:result.transport.sdp});
   let timer;try{await Promise.race([opened,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('LIVE 1への接続がタイムアウトしました')),30000);})]);}finally{clearTimeout(timer);}

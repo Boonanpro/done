@@ -22,13 +22,11 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.services.auth_service import TokenData, decode_access_token
-from app.api.atom_relay_routes import router as atom_relay_router
 from app.services.chat_service import ChatService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/voicelog", tags=["voice-mode"])
-router.include_router(atom_relay_router)
 
 CLIENT_SECRETS_ENDPOINT = "https://api.openai.com/v1/realtime/client_secrets"
 REALTIME_MODEL = "gpt-realtime-2.1"
@@ -47,27 +45,23 @@ def _get_user(request: Request) -> TokenData:
     return td
 
 
-@router.get('/command-center/device')
-async def command_center_device(request: Request):
+@router.get('/stage/{room_id}')
+async def call_stage(room_id: str, request: Request, after: int = 0, wait: float = 25):
+    """What the owner's screen shows during a call (voice_stage): the caption and the current scene. Long poll: answers
+    when the stage's version passes `after`, when the call ends, or after `wait` seconds with the state as it is. The
+    stage is a file written by the sideband, so any process can serve this."""
     import asyncio
-    import json
-    from pathlib import Path
+    from app.services import voice_stage
     user = _get_user(request)
-    try:
-        destination = json.loads((Path(__file__).resolve().parents[2] / '.tmp/atom-voice-room.json').read_text(encoding='utf-8'))
-        if not await ChatService().get_room(destination['room_id'], user.user_id):
-            raise HTTPException(status_code=403, detail='No access to this device')
-        async with httpx.AsyncClient(timeout=2) as client:
-            device, voice = await asyncio.gather(client.get('http://127.0.0.1:48801/status'), client.get('http://127.0.0.1:48802/status'))
-            device.raise_for_status()
-            voice.raise_for_status()
-            d, v = device.json(), voice.json()
-        return {'connected': bool(d.get('device_connected')), 'state': v.get('state'),
-            'requested': bool(d.get('requested')), 'room_id': destination['room_id']}
-    except HTTPException:
-        raise
-    except Exception:
-        return {'connected': False, 'state': 'unavailable'}
+    if not await ChatService().get_room(room_id, user.user_id):
+        raise HTTPException(status_code=403, detail='No access to this room')
+    deadline = asyncio.get_running_loop().time() + max(0.0, min(float(wait), 30.0))
+    while True:
+        state = voice_stage.read_state(room_id)
+        if not state: state = {'room_id': room_id, 'version': 0, 'caption': '', 'program': '', 'at': None, 'active': False, 'scenes': 0}
+        if int(state.get('version') or 0) > after or not state.get('active') or asyncio.get_running_loop().time() >= deadline:
+            return {k: state.get(k) for k in ('room_id', 'version', 'caption', 'program', 'at', 'active', 'scenes')}
+        await asyncio.sleep(.15)
 
 
 _EDITOR_TOOLS = [   # the editor assistant's shared definitions (the phone/web voice tools retired 2026-09-23)
@@ -120,7 +114,7 @@ class LiveSessionRequest(BaseModel):
     server_delegation: bool = True   # kept for older apps; the server's sideband always answers (Responses delegation)
     sdp: str = Field(default='', max_length=65536)
     room_id: str
-    device: bool = False
+    device: bool = False   # kept for older apps (the Atom speaker, retired 2026-10-25)
     provider: Literal['openai'] = 'openai'
     timezone: str = Field(default='Asia/Tokyo', max_length=128)
 

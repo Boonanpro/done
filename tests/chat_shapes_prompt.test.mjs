@@ -14,11 +14,11 @@ test('書かれている指示文は、部品定義から作った物と同じ',
 
 // 長さの上限: 比べる質問の一文と「実物を出す」の段落を足した時（2026-10-17）に 2,500 → 3,400 字、
 // 組み合わせる小さな部品11個と組み方・例を足した時（2026-10-23）に 3,400 → 5,400 字
-test('部品16個の名前が全部、指示文の一覧に出ている。長さは5.4KB以内', () => {
+test('部品17個の名前が全部、指示文の一覧に出ている。長さは7KB以内', () => {
   const lines = shapeSignatureLines();
   assert.deepEqual(lines.map((l) => l.split('(')[0]), [...SHAPE_NAMES]);
-  assert.equal(SHAPE_NAMES.length, 16);
+  assert.equal(SHAPE_NAMES.length, 17);
   const text = buildChatShapesPrompt();
   assert.ok(text.includes('```openui-lang'));
-  assert.ok(text.length <= 5400, `prompt is ${text.length} chars`);
+  assert.ok(text.length <= 7000, `prompt is ${text.length} chars`);   // 2026-10-25: Flow and its icon names
 });

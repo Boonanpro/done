@@ -5,11 +5,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 
 import { VoiceOrb } from './voice-orb';
-import { connectAtomWifi, type AtomWifiTransport } from './atom-wifi-transport';
-import { waitForStandbyDrain } from './standby-drain';
 
 import { LiveJobs, type LiveJob } from './live-jobs';
-import { LiveGreeting } from './live-greeting';
+import { VoiceStage } from './voice-stage';
 import { WorkWaiting, isWorking } from './work-waiting';
 import { WaitingAudio } from './waiting-audio';
 import { QUIET_SPEECH_MIC, liftQuietSpeech } from './quiet-speech';
@@ -70,7 +68,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const micRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const atomWifiRef = useRef<AtomWifiTransport | null>(null);
   const genRef = useRef(0);
 
   const guardianTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -171,8 +168,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     }
     micRef.current?.getTracks().forEach((t) => t.stop());
     micRef.current = null;
-    atomWifiRef.current?.close();
-    atomWifiRef.current = null;
     if (audioRef.current) {
       audioRef.current.srcObject = null;
       audioRef.current.remove();
@@ -210,44 +205,13 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     };
     flushTranscriptsRef.current = () => { flush('user'); flush('assistant'); };
     let ending = false;
-    const endCall = async () => {
-      if (ending || !live()) return;
-      ending = true;
-      waiting.close();
-      micRef.current?.getAudioTracks().forEach(track => { track.enabled = false; });
-      (window as Window & { atomEvent?: (event: Record<string, unknown>) => void }).atomEvent?.({ type: 'standby_requested' });
-      // A completed end-call request wins over further model speech. Allow a
-      // short audible tail, but never wait indefinitely for Live to stop talking.
-      await waitForStandbyDrain(() => ({ active: live(), generating: false, playing: outputPlaying, epoch: 0 }),
-        { tailMs: 150, timeoutMs: 700 });
-      if (!live()) return;
-      flush('user'); flush('assistant');
-      try {
-        await atomWifiRef.current?.standby();
-        disconnect();
-      } catch (error) {
-        setError('待機への切り替えに失敗しました'); setStatus('error'); disconnect();
-        throw error;
-      }
-    };
-    // The server ends the call (backend end_call → session.close): the Atom returns
-    // to standby; a browser call closes the voice panel.
+    // The server ends the call (backend end_call → session.close): a browser call closes the voice panel.
     const hangUp = () => {
       if (ending || !live()) return;
-      if (atomWifiRef.current) { void endCall().catch(() => {}); return; }
       ending = true;
       waiting.close();
       disconnect();
       onClose();
-    };
-    const greeting = new LiveGreeting(dcSend, type => {
-      (window as Window & { atomEvent?: (event: { type: string }) => void }).atomEvent?.({ type });
-    });
-    (window as Window & { __atomGreet?: () => boolean }).__atomGreet = () => {
-      if (!live() || !started || ending || !atomWifiRef.current) return false;
-      if (dcRef.current?.readyState !== 'open') return false;
-      greeting.start(crypto.randomUUID());
-      return true;
     };
     let ready: () => void = () => {};
     let failed: (error: Error) => void = () => {};
@@ -255,10 +219,8 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     void opened.catch(() => {});
     const handleLiveEvent = (msg: RtEvent) => {
       if (!live()) return;
-      greeting.observe(msg);
       if (msg.type === 'session.started') {
         started = true; ready();
-        (window as Window & { __atomConfig?: unknown }).__atomConfig = { model: 'gpt-live-1', backend: 'gpt-6-astra' };
         pushLog('✅', 'Live 1 connected');
       } else if (msg.type === 'session.closed') {
         flush('user'); flush('assistant');
@@ -288,7 +250,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     let pc: RTCPeerConnection | null = null;
     let mic: MediaStream | null = null;
     let audioEl: HTMLAudioElement | null = null;
-    let atomWifi: AtomWifiTransport | null = null;
     let sessionId = '';
     const closeSession = () => {
       if (!sessionId) return;
@@ -299,8 +260,6 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       sessionId = '';
     };
     const cleanupLocal = () => {
-      atomWifi?.close();
-      if (atomWifiRef.current === atomWifi) atomWifiRef.current = null;
       try {
         pc?.close();
       } catch {
@@ -329,16 +288,12 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
 
       const audioCtx = new AudioContext({ sampleRate: 48000 });
       audioCtxRef.current = audioCtx;
-      atomWifi = await connectAtomWifi(roomId, audioCtx);
-      waitingAudioRef.current = new WaitingAudio(audioCtx, atomWifi?.cueOutput ?? audioCtx.destination);
+      waitingAudioRef.current = new WaitingAudio(audioCtx, audioCtx.destination);
       if (!live()) { cleanupLocal(); return; }
-      atomWifiRef.current = atomWifi;
-      if (atomWifi) audioEl.volume = 0;
 
       pc.ontrack = (e) => {
         const stream = e.streams[0] || new MediaStream([e.track]);
         if (audioEl) { audioEl.srcObject = stream; void audioEl.play().catch(() => {}); }
-        atomWifi?.play(stream);
         // AI音声の音量 → オーブの雲の揺らめき
         try {
           const src = audioCtx.createMediaStreamSource(stream);
@@ -352,7 +307,7 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       };
 
       try {
-        mic = atomWifi?.stream ?? await navigator.mediaDevices.getUserMedia({ audio: QUIET_SPEECH_MIC });
+        mic = await navigator.mediaDevices.getUserMedia({ audio: QUIET_SPEECH_MIC });
       } catch {
         throw new Error('マイクの使用が許可されませんでした');
       }
@@ -361,7 +316,7 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
         return;
       }
       // What Live hears. Muting and stopping still act on the raw mic tracks.
-      const uplink = atomWifi ? mic : await liftQuietSpeech(audioCtx, mic);
+      const uplink = await liftQuietSpeech(audioCtx, mic);
       for (const track of uplink.getAudioTracks()) pc.addTrack(track, uplink);
       // マイク音量 → オーブ全体の揺れ
       try {
@@ -389,7 +344,7 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       if (!live()) { cleanupLocal(); return; }
       const response = await fetch('/api/v1/voicelog/live/session', {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ room_id: roomId, sdp: peer.localDescription?.sdp, provider: 'openai', device: !!atomWifi,
+        body: JSON.stringify({ room_id: roomId, sdp: peer.localDescription?.sdp, provider: 'openai',
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, server_delegation: true }),
       });
       const session = await response.json();
@@ -407,12 +362,11 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       const samples = new Float32Array(1024);
       guardianTimerRef.current = setInterval(() => {
         if (!live() || ending) return;
-        greeting.tick();
         const analyser = aiAnalyserRef.current;
         if (!analyser) return;
         analyser.getFloatTimeDomainData(samples);
         const rms = Math.sqrt(samples.reduce((sum, x) => sum + x * x, 0) / samples.length);
-        if (rms > .004) { lastOutput = performance.now(); outputPlaying = true; greeting.audio(); }
+        if (rms > .004) { lastOutput = performance.now(); outputPlaying = true; }
         else if (performance.now() - lastOutput > 500) outputPlaying = false;
         waiting.update(performance.now(), isWorking(undefined, workingJobsRef.current),
           outputPlaying || readLevel(micAnalyserRef.current) > .025, started && !ending);
@@ -451,6 +405,9 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
           <X className="h-4 w-4" />
         </button>
       </div>
+
+      {/* The stage: the caption and the scene the server draws while Dan talks (voice_stage). */}
+      <VoiceStage roomId={roomId} active={status === 'connected'} className="w-full" />
 
       <VoiceOrb size={150} getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
 

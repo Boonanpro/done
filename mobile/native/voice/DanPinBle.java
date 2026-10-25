@@ -30,7 +30,7 @@ import java.util.concurrent.locks.LockSupport;
 
 /**
  * One BLE link to the Dan pin (XIAO nRF52840 Sense running the Omi devkit firmware). Its microphone feeds the
- * phone-owned call through the same external PCM endpoint as Atom. Dan's voice goes to the pin's speaker only
+ * phone-owned call through the external PCM endpoint (DanExternalAudio). Dan's voice goes to the pin's speaker only
  * with the Dan pin firmware (D:/dan-hw, speaker.c), whose speaker characteristic accepts streamed 16 kHz
  * mu-law written without response. The stock Omi one plays a single short clip, so Dan then stays on the phone.
  *

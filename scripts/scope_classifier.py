@@ -138,7 +138,6 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     # standalone services (phone voice bridge etc.)
     "services/**",
     # Dan's wearable voice device, bridge, firmware and provisioning tools.
-    "devices/atom-echo-s3r/**",
     # repo-root tooling manifests
     "skills-lock.json",
     # ops / tooling
@@ -163,7 +162,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/.vercelignore",
     "frontend/.npmrc",                # npm settings (stops @openuidev/lang-core's install-time telemetry)
     "frontend/tools/**",              # local file: packages npm preloads (tools/openui-telemetry-off)
-    "frontend/public/*-worklet.js",   # audio worklets of the voice transports (atom / gemini)
+    "frontend/public/*-worklet.js",   # audio worklets of the voice transports (gemini)
     "frontend/tailwind.config.*",
     "frontend/postcss.config.*",
     "frontend/eslint.config.*",
@@ -203,7 +202,6 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/public/sw.js",
     "frontend/public/workbox-*.js",
     "frontend/public/audio-worklet-processor.js",
-    "frontend/public/atom-wifi-worklet.js",
     "frontend/public/file.svg",
     "frontend/public/globe.svg",
     "frontend/public/next.svg",

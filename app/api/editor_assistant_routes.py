@@ -695,7 +695,8 @@ async def live_session(request: Request, body: LiveSessionRequest):
         raise HTTPException(502, 'LIVE 1への接続が完了しませんでした。マイクを押して接続し直してください。') from exc
     from app.services.editor_live import parse_session_response
     data=parse_session_response(response)
-    return {'session':{'id':data['session']['id']},'transport':data['transport'],'model':'gpt-live-1',
+    from app.services.editor_live import MODEL as LIVE_MODEL
+    return {'session':{'id':data['session']['id']},'transport':data['transport'],'model':LIVE_MODEL,
             'runtime':{'client_build':body.client_build,'instructions_hash':hashlib.sha256(config['instructions'].encode()).hexdigest()[:16],
                        'history_hash':hashlib.sha256(json.dumps(config['input'],ensure_ascii=False).encode()).hexdigest()[:16],'history_rows':len(body.history)}}
 
@@ -783,7 +784,7 @@ async def reason(request: Request, body: ReasonRequest):
                             state['inputs'].append({'role':'user','content':[
                                 {'type':'input_text','text':'直前の確認ツールが返した実際の画像です。新しい依頼ではありません。'},
                                 {'type':'input_image','image_url':image}]})
-                async for event in editor_reasoning.stream_response(state['inputs'],editor_reasoning.tools_for_conversation(EDITOR_TOOLS)+([{'type':'web_search'}] if body.runtime.get('voice_model')=='gpt-live-1' else []),live=body.runtime.get('voice_model')=='gpt-live-1',run_key=(body.room_id,body.turn_id)):
+                async for event in editor_reasoning.stream_response(state['inputs'],editor_reasoning.tools_for_conversation(EDITOR_TOOLS)+([{'type':'web_search'}] if body.runtime.get('voice_model') else []),live=bool(body.runtime.get('voice_model')),run_key=(body.room_id,body.turn_id)):
                     if await request.is_disconnected():return
                     if path.with_suffix('.canceled').exists():return
                     if event['type']=='completed':

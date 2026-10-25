@@ -222,6 +222,55 @@ export const ButtonProps = z
 
 export const DividerProps = z.object({});
 
+// --- 矢印でつなぐ図（2026-10-25、通話の画面係と一緒に）-----------------------------------------------------------------
+// 人・物・流れをアイコンの箱と矢印で描く。文字だけの表や箇条書きにしない時の部品。nodes は流れの順に並べ、edges を省けば
+// 順につなぐ。tone "now" は今どこかを示す（箱が目立つ色になる）。アイコンの名前は FLOW_ICONS のどれか（PC は lucide、
+// スマホは Ionicons に当てる。無い名前はアイコン無しで描き、部品はコードに戻さない）。
+export const FLOW_ICONS = [
+  'person', 'people', 'phone', 'pc', 'server', 'database', 'cloud', 'mail', 'chat', 'money', 'card', 'bank', 'doc', 'calendar', 'clock',
+  'check', 'warning', 'lock', 'key', 'shield', 'globe', 'home', 'car', 'train', 'camera', 'mic', 'video', 'bot', 'search', 'tool', 'chart',
+  'box', 'truck', 'store', 'flag', 'star', 'heart', 'question', 'gear', 'image', 'pin', 'glasses', 'ear', 'eye', 'file', 'folder', 'link', 'bolt',
+] as const;
+export const FLOW_NODE_MAX = 8;
+const FlowNode = z.object({
+  id: z.string().max(40).describe('箱の名前（edges で指す）'),
+  label: z.string().max(40).describe('箱の文字（短く、8文字まで）'),
+  icon: z.enum(FLOW_ICONS).optional().describe('アイコン'),
+  sub: z.string().max(60).optional().describe('箱の下の小さな補足'),
+  tone: z.enum(['neutral', 'now', 'good', 'warn', 'bad']).optional().describe('now=今ここ'),
+});
+const FlowEdge = z.object({
+  from: z.string().describe('矢印の元の箱の id'),
+  to: z.string().describe('矢印の先の箱の id'),
+  label: z.string().max(30).optional().describe('矢印に添える短い文字'),
+});
+export const FlowProps = z
+  .object({
+    nodes: z.array(FlowNode).describe(`箱。流れの順に2〜${FLOW_NODE_MAX}個`),
+    edges: z.array(FlowEdge).optional().describe('矢印。省くと箱を順につなぐ'),
+    title: z.string().optional().describe('図の題'),
+  })
+  .refine((v) => v.nodes.length >= 2 && v.nodes.length <= FLOW_NODE_MAX, { message: `箱は2〜${FLOW_NODE_MAX}個` })
+  .refine((v) => v.nodes.every((n) => nonEmpty(n.id) && nonEmpty(n.label)), { message: '箱の id か文字が空' })
+  .refine((v) => new Set(v.nodes.map((n) => n.id)).size === v.nodes.length, { message: '箱の id が重複' })
+  .refine((v) => (v.edges || []).every((e) => v.nodes.some((n) => n.id === e.from) && v.nodes.some((n) => n.id === e.to)), { message: '矢印が無い箱を指している' });
+export type FlowInput = z.infer<typeof FlowProps>;
+
+/** 描く矢印: 書かれた edges（省かれていれば箱を順につなぐ）。隣り合う箱の間の矢印はその場所に、それ以外は図の下に文字で */
+export type FlowEdgeInput = { from: string; to: string; label?: string };
+export function flowEdges(v: { nodes: { id: string }[]; edges?: FlowEdgeInput[] }) {
+  const ids = v.nodes.map((n) => n.id);
+  const edges: FlowEdgeInput[] = v.edges && v.edges.length ? v.edges : ids.slice(1).map((to, i) => ({ from: ids[i], to }));
+  const between = new Map<number, { label?: string }>();   // i: between nodes[i] and nodes[i+1]
+  const others: FlowEdgeInput[] = [];
+  for (const e of edges) {
+    const a = ids.indexOf(e.from), b = ids.indexOf(e.to);
+    if (a >= 0 && b === a + 1 && !between.has(a)) between.set(a, { label: e.label });
+    else others.push(e);
+  }
+  return { between, others };
+}
+
 export type ChoiceInput = z.infer<typeof ChoiceProps>;
 export type InputInput = z.infer<typeof InputProps>;
 export type CompareInput = z.infer<typeof CompareProps>;
@@ -276,6 +325,7 @@ export const SHAPE_SPECS = [
   { name: 'Badge', description: '小さな札（状態・種類）', props: BadgeProps },
   { name: 'Button', description: 'リンクを開くボタン', props: ButtonProps },
   { name: 'Divider', description: '区切り線', props: DividerProps },
+  { name: 'Flow', description: '矢印でつなぐ図（人・物・流れ）。箱は流れの順、edges を省くと順につなぐ。tone now=今ここ', props: FlowProps },
 ] as const;
 
 export const SHAPE_NAMES: readonly string[] = SHAPE_SPECS.map((s) => s.name);

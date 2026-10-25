@@ -1,3 +1,4 @@
+from app.services import editor_live
 from app.services.editor_live import session_config
 import httpx
 import pytest
@@ -30,7 +31,7 @@ def test_live_uses_responses_tools_and_original_history():
         {'role': 'assistant', 'text': '文字を中央に置く案はどう？'},
         {'role': 'system', 'text': 'not a conversation message'},
     ], [])
-    assert config['model'] == 'gpt-live-1'
+    assert config['model'] == editor_live.MODEL
     assert config['delegation']['type'] == 'responses'
     backend=config['delegation']['responses']
     assert backend['model']=='gpt-6-astra'
