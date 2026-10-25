@@ -1,5 +1,5 @@
 import {uploadMedia, uploadError} from './resumable-upload';
-import {isXOperation, privateArtifactUrl} from './private-artifact';
+import {isXOperation, privateArtifactUrl, signedInBrowserUrl} from './private-artifact';
 import {AttachmentCard} from './attachment-card';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Updates from 'expo-updates';
@@ -661,6 +661,16 @@ function openUrl(url: string) {
   void Linking.openURL(url).catch(() => {
     Alert.alert('Open failed', url);
   });
+}
+
+// ブラウザで開く時にダンのログインを渡す先: ダンの入口の画面と、成果物の公開先（dan-site-*.vercel.app）。
+// 外のサイトには渡さない（入館証はダンの入口にしか出さず、ほかの住所にはそのまま進むだけ）。
+function needsDanSignIn(url: string) {
+  try {
+    const u = new URL(url);
+    if (u.origin === new URL(API_BASE_URL).origin) return !isDanFile(url);
+    return u.protocol === 'https:' && /^dan-site-[\w-]+\.vercel\.app$/.test(u.hostname);
+  } catch { return false; }
 }
 
 function isArtifactUrl(url: string) {
@@ -3801,6 +3811,17 @@ function AppMain() {
     return cleanArtifactUrl(artifact);
   }
 
+  // ダンの画面をスマホのブラウザで開く。ログインの画面を出さないよう、入館証を付けて開く。
+  async function openSignedIn(url: string) {
+    if (token && needsDanSignIn(url)) {
+      const fresh = await ensureFreshAccessToken(token);
+      const refresh = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY).catch(() => null);
+      const entered = await signedInBrowserUrl(API_BASE_URL, fresh, refresh, url);
+      if (entered) { openUrl(entered); return; }
+    }
+    openUrl(url);
+  }
+
   async function openPrivateArtifact() {
     if (!token) return;
     try { openUrl(await privateArtifactUrl(API_BASE_URL, await ensureFreshAccessToken(token))); }
@@ -3844,7 +3865,7 @@ function AppMain() {
       setScreen('artifact');
       return;
     }
-    openUrl(normalized);
+    void openSignedIn(normalized);
   }, [chatMedia, token]);
   handleOpenMessageUrlRef.current = handleOpenMessageUrl;
 
@@ -4121,7 +4142,7 @@ function AppMain() {
             </Text>
           </View>
           <Pressable
-            onPress={() => openUrl(artifactView.url)}
+            onPress={() => void openSignedIn(artifactView.url)}
             hitSlop={10}
             style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
