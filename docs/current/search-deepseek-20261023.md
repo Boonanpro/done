@@ -58,9 +58,9 @@ DeepSeek が落とした所:
 
 ## 4. 変えたもの
 
-- `app/services/web_search.py`: 検索の本体。DeepSeek（検索語2つ→本文つき検索→deepseek-flash でまとめ）を既定にし、DeepSeek が失敗・空の時は OpenAI に戻る。`.env` の `DAN_WEB_SEARCH_ENGINE=openai` で OpenAI に戻せる（再起動不要）。
+- `app/services/web_search.py`: 検索の本体。DeepSeek（検索語2つ→本文つき検索→deepseek-flash でまとめ）だけで答える。15秒で答えが無ければ「検索できなかった」を返す。OpenAI の予備と切り替えの設定は 2026-10-25 に外した（1つの仕事は1つの仕組みで、という本人の方針）。
 - `app/services/voice_responses.py`: 通話の裏側の検索の写しを消し、上の本体を使う。
-- `app/services/api_job_worker.py`: 裏で作業するモデルに `search_results`（検索の一覧）と `fetch_page`（ログイン不要のページの本文）を直接渡す。
+- `app/services/api_job_worker.py`: 裏で作業するモデルに `search_results`（検索の一覧）を直接渡す。ページの本文はどこでも `read_url`（Jina Reader）で読む。DeepSeek の Fetch（`fetch_page`）は 2026-10-25 に外した: 12ページで比べると Jina の約2倍遅く、4ページで本文の大半を取りこぼし、1ページは空だった。
 - `app/services/voice_prefetch.py`・`voice_sideband.py`: 話し終わる前の検索。`DAN_VOICE_PREFETCH=0` で止まる。記録は回数と秒数だけ（言葉は残さない）。
 - `app/services/jev_browser_budget.py`: 予算ファイルの鍵を Mac でも動くようにした。
 

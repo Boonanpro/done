@@ -58,16 +58,11 @@ async def test_web_search_is_a_function_run_in_its_own_call_with_the_date(monkey
     from app.services import voice_responses
     config = voice_responses.delegation()['responses']
     assert {'type': 'web_search'} not in config['tools'] and 'web_search' in [t.get('name') for t in config['tools']]
-    sent = {}
-    class Response:
-        status_code = 200
-        def json(self): return {'output': [{'type': 'message', 'content': [{'text': '晴れ、最高31度。出どころ: 気象庁'}]}]}
-    class Client:
-        def __init__(self, **k): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        async def post(self, url, json, headers): sent.update(json); return Response()
-    import httpx
-    monkeypatch.setattr(httpx, 'AsyncClient', Client)
+    from app.services import web_search
+    asked = []
+    async def deepseek(query):
+        asked.append(query)
+        return {'answer': '晴れ、最高31度。', 'sources': [{'title': '気象庁', 'url': 'https://www.jma.go.jp/'}]}
+    monkeypatch.setattr(web_search, '_deepseek', deepseek)
     out = await voice_responses.run_function('web_search', {'query': '大阪の今日の天気'}, 'u', 'r', [])
-    assert out['found'].startswith('晴れ') and sent['tools'] == [{'type': 'web_search'}] and '年' in sent['instructions']
+    assert out['found'].startswith('晴れ') and asked == ['大阪の今日の天気']
