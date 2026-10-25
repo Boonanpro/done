@@ -243,7 +243,10 @@ class Stage:
     def __init__(self, room_id, session_id, dialogue, record, ask=None):
         self.room_id, self.session_id, self.dialogue, self.record = room_id, session_id, dialogue, record
         self.ask = ask or ask_model
-        self.version, self.caption, self.program, self.at = 0, '', '', None
+        # The version counts on from the room's previous call: the screen long-polls for a version above the last one
+        # it saw, so a new call restarting at 1 never reached it (2026-10-25 3rd test call: 5 scenes drawn, none shown).
+        self.version = int((read_state(room_id) or {}).get('version') or 0)
+        self.caption, self.program, self.at = '', '', None
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
         self._timer = None

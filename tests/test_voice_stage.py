@@ -76,7 +76,7 @@ async def test_backchannels_do_not_ask_the_model(room, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_caption_only_and_keep_leave_the_scene(room, monkeypatch):
-    monkeypatch.setattr(S, 'QUIET_S', .02)
+    monkeypatch.setattr(S, 'QUIET_S', .02); monkeypatch.setattr(S, 'HOLD_S', 0)   # the hold after a replace has its own test
     stage, _, log = make_stage(room, [{'action': 'replace', 'caption': 'A', 'program': FLOW}, {'action': 'caption', 'caption': 'B'}, {'action': 'keep', 'caption': 'B'}])
     for text in ('一つ目の説明をここでします。', '二つ目の話題に少し動きました。', '同じ話を続けています、はい。'):
         stage.dialogue.add('assistant', text); stage.heard('assistant', text)
@@ -169,3 +169,14 @@ async def test_after_a_replace_dans_next_words_wait_for_the_hold(room, monkeypat
     assert len(seen) == 1                      # inside the hold: no second decision yet, the sentences pile up
     await asyncio.sleep(.35)
     assert len(seen) == 2 and S.read_state(room)['version'] == 2 and 'そしてホームに並びます。' in seen[1]
+
+
+def test_a_new_call_counts_its_versions_on_from_the_rooms_last_call(room):
+    # the screen waits for a version above the last one it saw; a call restarting at 1 would never reach it (2026-10-25)
+    first = S.Stage(room, 'sess-1', Dialogue(), lambda *a, **k: None, ask=None)
+    for _ in range(7): first._apply('c', FLOW)
+    first.close()
+    second = S.Stage(room, 'sess-2', Dialogue(), lambda *a, **k: None, ask=None)
+    second._apply('d', FLOW)
+    state = S.read_state(room)
+    assert state['version'] == 8 and state['session_id'] == 'sess-2' and state['active']

@@ -30,6 +30,7 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
     if (!active || !roomId) return;
     let stopped = false;
     let after = 0;
+    let session = '';
     const controller = { current: new AbortController() };
     const loop = async () => {
       let failures = 0;
@@ -43,13 +44,16 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
           if (!response.ok) throw new Error(String(response.status));
           const data = (await response.json()) as StageState;
           failures = 0;
-          if ((data.version || 0) > after || after === 0) {
+          // a new call (session) is taken even if its version is not above the last one seen (the server counts on
+          // across calls since 2026-10-25; this keeps older servers working too)
+          if ((data.version || 0) > after || after === 0 || (data.session_id || '') !== session) {
             after = data.version || 0;
+            session = data.session_id || '';
             setState(data);
             onStateRef.current?.(data);
           }
           if (!data.active) await new Promise((r) => setTimeout(r, 1500));   // no call yet (or it ended): look again, slowly
-        } catch (error) {
+        } catch {
           if (stopped) return;
           failures += 1;
           await new Promise((r) => setTimeout(r, Math.min(5000, 500 * failures)));
@@ -64,20 +68,23 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
 
 /** The caption and the scene. Draws nothing until a scene exists (the orb alone is the call's face until then). */
 export function VoiceStage({ roomId, active, className = '', onShown }: { roomId: string; active: boolean; className?: string; onShown?: (shown: boolean) => void }) {
-  const state = useVoiceStage(roomId, active);
-  const program = state?.program?.trim() || '';
-  const ok = program ? checkCompleteShape(program) : null;
   // The last scene that drew: a new program the checker refuses (an unknown icon, a bad argument) keeps it on the stage
   // instead of blanking the call's screen (2026-10-25). A new call (session) starts empty.
-  const lastGood = useRef<{ program: string; version: number; session: string } | null>(null);
+  const [lastGood, setLastGood] = useState<{ program: string; version: number; session: string } | null>(null);
+  const state = useVoiceStage(roomId, active, (s) => {
+    const p = s.program?.trim() || '';
+    const check = p ? checkCompleteShape(p) : null;
+    if (check?.ok) setLastGood({ program: p, version: s.version || 0, session: s.session_id || '' });
+    else if (check && !check.ok) console.warn('[voice-stage] scene not drawable, keeping the last one:', check.reason);
+  });
+  const program = state?.program?.trim() || '';
+  const ok = program ? checkCompleteShape(program) : null;
   const session = state?.session_id || '';
-  if (ok?.ok && state) lastGood.current = { program, version: state.version || 0, session };
-  else if (ok && !ok.ok && program) console.warn('[voice-stage] scene not drawable, keeping the last one:', ok.reason);
-  const scene = ok?.ok && state ? { program, version: state.version || 0 } : (lastGood.current && lastGood.current.session === session ? lastGood.current : null);
+  const scene = ok?.ok && state ? { program, version: state.version || 0 } : (lastGood && lastGood.session === session ? lastGood : null);
   const drawable = !!scene;
   const shown = !!state?.active && (drawable || !!state?.caption);
   const onShownRef = useRef(onShown);
-  onShownRef.current = onShown;
+  useEffect(() => { onShownRef.current = onShown; }, [onShown]);
   useEffect(() => { onShownRef.current?.(shown && drawable); }, [shown, drawable]);
   if (!shown) return null;
   return (
