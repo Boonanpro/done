@@ -202,6 +202,8 @@ def table(ledger: dict) -> str:
         "",
         f"指摘 {n_items} 件を、同じ根っこごとに {len(roots)} 件にまとめました。そのうち {repeats} 件は、同じ指摘が2回以上来た物です。",
         "",
+        "分け方: " + "、".join(f"{label} {sum(1 for r in roots if r['kind'] == k)}件" for k, label in KINDS.items()),
+        "",
         "| 決まり（同じ根っこ） | 指摘 | 分け方 | 今の点検 | 例（元の言葉） | 次にすること |",
         "|---|---|---|---|---|---|",
     ]
@@ -209,7 +211,7 @@ def table(ledger: dict) -> str:
         ex = next((i for i in r["items"] if not i.get("quote", "").startswith("（")), r["items"][0])
         rep = sum(1 for i in r["items"] if i.get("repeat"))
         count = f"{len(r['items'])}件" + (f"（うち2回目以上 {rep}）" if rep else "")
-        state = r["check"]["state"] + ("：" + "、".join(r["check"]["by"]) if r["check"]["by"] else "")
+        state = r["check"]["state"]
         lines.append(f"| {_cell(r['rule'])} | {count} | {KINDS.get(r['kind'], r['kind'])} | {_cell(state)} | "
                      f"「{_cell(ex['quote'])}」（{ex.get('date') or '日付なし'}、{_cell(ex['where'])}） | {_cell(r.get('next', ''))} |")
     if ledger.get("unsure"):
@@ -248,8 +250,9 @@ def weekly(ledger: dict, days: int, today: date | None = None) -> dict:
             s = similarity(roots[a]["rule"], roots[b]["rule"])
             if s >= 0.3:
                 overlaps.append((roots[a]["id"], roots[b]["id"], round(s, 2)))
-    known = {i["src"] for r in roots for i in r["items"]} | {u["src"] for u in ledger.get("unsure", [])} \
-        | {u["src"] for u in ledger.get("not_owner", [])} | {t["src"] for t in ledger.get("touches", [])}
+    known = {s for r in roots for i in r["items"] for s in (i["src"], i.get("dup"))} \
+        | {u["src"] for u in ledger.get("unsure", [])} | {u["src"] for u in ledger.get("not_owner", [])} \
+        | {t["src"] for t in ledger.get("touches", [])} | {f for u in ledger.get("subtract", []) for f in u["files"]}
     mem = WORKSPACE / "memory"
     loose = sorted(f"memory/{p.name}" for p in mem.glob("feedback*.md") if f"memory/{p.name}" not in known) if mem.is_dir() else []
     return {"since": since.isoformat(), "recent": recent, "repeats": repeats, "text_only": text_only,
