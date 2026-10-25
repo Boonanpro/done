@@ -2,12 +2,20 @@
 place: dev-lead-room
 name: 開発室のボードの話し合い（枝・付箋ごとの部屋）
 open: /preview/dev-lead
+ready: '[class*="_canvas__"]'
+covers: [artifact:dev-lead]
 speak: |
-  - みきさんは PC のダン本体の画面で「ダン開発室」の部屋を開き、右の成果物タブのボード（枝と付箋の地図）の左側で、この話し合いを読んでいる。同じボードの上に、ほかの枝の話し合いと付箋の状態も見えている。
+  - PC では、ダン本体の「ダン開発室」の部屋の右の成果物タブにボード（枝と付箋の地図）が出て、その左側の一覧でこの話し合いを選んで読む。スマホではボードの公開版の写しを開いて読む。同じボードの上に、ほかの枝の話し合いと付箋の状態も見えている。
   - 返事の吹き出しは Markdown（番号・点の並び、表、太字、コード）と ```openui-lang の部品、[添付画像: …] などの印を描く。見出しは本文と同じ大きさの太字にしかならない。
-  - 付箋はボードに出ている札の言葉（例「場所の地図と自分で確かめる」）で呼ぶ。左の「ダン開発室」の部屋（全体の部屋）は別の会話で、みきさんはここから書いたことをそちらで読まない。
-probe: {module: style, scope: app, bubble: md}
+  - 付箋はボードに出ている札の言葉（例「場所の地図と自分で確かめる」）で呼ぶ。全体の部屋（「ダン開発室」）は別の会話で、ここに書いたことはそちらには出ない。
+probe: {module: style, scope: app, bubble: md, real: '[class*="_md__"]'}
 shows: [番号の並び, 点の並び, 表, 見出し, 太字, コード]
+watches:
+  - frontend/src/app/artifacts/dev-lead/page-body.tsx
+  - frontend/src/app/artifacts/dev-lead/style.module.css
+  - frontend/src/app/artifacts/dev-lead/model.ts
+fingerprint: a455832e844e0868
+described: b51f0ab40acda937
 ---
 # 開発室のボードの話し合い
 
@@ -42,3 +50,16 @@ shows: [番号の並び, 点の並び, 表, 見出し, 太字, コード]
 - 画面全体に `.app :where(ul,ol){list-style:none}` があり、吹き出しの `.md` の中で並びの印を戻さないと、番号と点が消えて余白だけ残る（2026-10-25 に起きた）。
 - 話し合いの部屋はダンの部屋の一覧に出ない隠れた部屋（projects.metadata.hidden）。元の部屋（origin_room_id）がダン開発室。
 - スマホのアプリは成果物の公開版の写しでボードを開くので、写しの作り直し（数分）が終わるまで古い見た目のまま。
+
+<!-- place_map:auto:start -->
+## コードから（自動）
+
+`python scripts/place_map.py stamp dev-lead-room` が書き直す。手で直さない。
+
+- 見張るファイル: `frontend/src/app/artifacts/dev-lead/model.ts`, `frontend/src/app/artifacts/dev-lead/page-body.tsx`, `frontend/src/app/artifacts/dev-lead/style.module.css`
+- ラベル: 「この話に書く」、「止める（Esc）」、「送る」、「処理の流れ」、「送っています」、「見本あり」、「枝の言葉」、「この枝を消す」、「足す枝の言葉」、「何もない所に置く箱の言葉」、「大きな枝を足す」、「モデル」、「ダンの性能目標とプロジェクトの目標を開く」、「性能目標とプロジェクトの目標を直す」、「目標を畳む」、「言葉を直す」、「小さくする」、「大きくする」、「パネルの幅を変える」、「閉じる」
+- ボタンの字: 「保存」、「並びを元に戻す」
+- 見出し: 「ダンに入ったもの」、「何が、どこから変わったか」
+
+<!-- place_map:files {"frontend/src/app/artifacts/dev-lead/model.ts": "4510b48416", "frontend/src/app/artifacts/dev-lead/page-body.tsx": "74f3fa381f", "frontend/src/app/artifacts/dev-lead/style.module.css": "34252829fd"} -->
+<!-- place_map:auto:end -->

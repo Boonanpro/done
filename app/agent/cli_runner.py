@@ -369,6 +369,7 @@ def _build_room_state_context(
     message_limit: int = 8,
     event_limit: int = 16,
     run_limit: int = 3,
+    with_place: bool = True,
 ) -> str:
     """Build a small authoritative room state from DB.
 
@@ -481,14 +482,18 @@ def _build_room_state_context(
         head = "\n".join(lines[:4]) + "\n...\n"
         tail_budget = max(0, max_chars - len(head))
         body = head + body[-tail_budget:]
-    # この部屋がみきさんのどの画面に出ているか（場所の地図、2026-10-25）。切り詰めの外に置く
+    place = _place_block(room_id, project_id, sb) if with_place else ""
+    return (place + "\n" + body) if place else body
+
+
+def _place_block(room_id: str, project_id: Optional[str], sb=None) -> str:
+    """この部屋がみきさんのどの画面に出ているか（場所の地図、2026-10-25）。どの組み立てでも切り詰めの外、先頭に置く。"""
     try:
         from app.agent.place_map import place_context
-        place = place_context(room_id, project_id, sb)
+        return place_context(room_id, project_id, sb)
     except Exception as e:
         _cli_debug(f"place_context failed: {e}")
-        place = ""
-    return (place + "\n" + body) if place else body
+        return ""
 
 
 def _build_reseed_context_legacy_unused(room_id: str, max_chars: int = 8000, max_msgs: int = 40) -> str:
@@ -586,6 +591,7 @@ def _build_reseed_context(
         message_limit=12,
         event_limit=24,
         run_limit=5,
+        with_place=False,
     )
 
     chat_lines = []
@@ -630,8 +636,10 @@ def _build_reseed_context(
     body = "\n\n".join(sections)
     if len(body) > max_chars:
         body = body[-max_chars:]
+    place = _place_block(room_id, project_id, sb)
     return (
-        "<conversation_so_far>\n"
+        (place + "\n" if place else "")
+        + "<conversation_so_far>\n"
         "Internal recovery context from this exact room. Use it as context only; "
         "do not quote this wrapper. Continue naturally from the latest room-specific "
         "state and avoid replaying old work.\n\n"

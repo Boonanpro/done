@@ -4,7 +4,15 @@ name: スマホのダンのアプリ（Galaxy）
 reach: Mac mini に USB でつないだ開発用の Galaxy S24 を phone の道具で開く（ブラウザでは開けない）
 speak: |
   - スマホのアプリは PC と同じ部屋と会話を読むが、描き方が違う。表・見出し・コード・太字と ```openui-lang の部品は描くが、番号と点の並びは「1.」「-」の文字のまま出る。
-  - 画像・動画は [添付画像: …] などの印から出る。PC の成果物タブは無く、成果物は公開版の写しをブラウザで開く。
+  - 画像・動画は [添付画像: …] などの印から出る。PC の成果物タブは無く、成果物は押した時だけ公開版の写しをブラウザで開く。
+watches:
+  - mobile/App.tsx
+  - mobile/chat-markdown.tsx
+  - mobile/markdown-blocks.ts
+  - mobile/chat-shapes*.ts*
+  - mobile/chatTimeline.ts
+fingerprint: d4fe195a8cc4cbae
+described: 66aa5e9803b91174
 ---
 # スマホのダンのアプリ
 
@@ -35,3 +43,13 @@ speak: |
 
 - アプリの画面を直したら、アプリを作り直して入れ直すまで変わらない（版が上がる。記憶の reference-mac-android-build）。
 - PC で直した描き方（chat-shapes）は、アプリの写し（mobile/chat-shapes*）にも写す。
+
+<!-- place_map:auto:start -->
+## コードから（自動）
+
+`python scripts/place_map.py stamp mobile` が書き直す。手で直さない。
+
+- 見張るファイル: `mobile/App.tsx`, `mobile/chat-markdown.tsx`, `mobile/chat-shapes-answer-sends.ts`, `mobile/chat-shapes-answers.ts`, `mobile/chat-shapes-chart-geometry.ts`, `mobile/chat-shapes-job-report.ts`, `mobile/chat-shapes-live-line.ts`, `mobile/chat-shapes-plain.ts`, `mobile/chat-shapes-schema.ts`, `mobile/chat-shapes-use-answer-send.ts`, `mobile/chat-shapes.tsx`, `mobile/chatTimeline.ts`, `mobile/markdown-blocks.ts`
+
+<!-- place_map:files {"mobile/App.tsx": "fcfddbd676", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "f5e10bab52", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-plain.ts": "f00a082827", "mobile/chat-shapes-schema.ts": "e64c750f5d", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "27bc9a1ac9", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/markdown-blocks.ts": "a88af55511"} -->
+<!-- place_map:auto:end -->
