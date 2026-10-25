@@ -481,7 +481,10 @@ def _build_room_state_context(
         head = "\n".join(lines[:4]) + "\n...\n"
         tail_budget = max(0, max_chars - len(head))
         body = head + body[-tail_budget:]
-    return body
+    # この部屋がみきさんのどの画面に出ているか（場所の地図、2026-10-25）。切り詰めの外に置く
+    from app.agent.place_map import place_context
+    place = place_context(room_id, project_id, sb)
+    return (place + "\n" + body) if place else body
 
 
 def _build_reseed_context_legacy_unused(room_id: str, max_chars: int = 8000, max_msgs: int = 40) -> str:

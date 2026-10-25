@@ -85,8 +85,11 @@ PROBE_JS = r"""
       ok = ok && cs.display === 'list-item' && cs.listStyleType !== 'none';
       why = `display=${cs.display} list-style-type=${cs.listStyleType}`;
     } else if (sel === 'td') {
-      ok = ok && parseFloat(cs.borderTopWidth) > 0;
-      why = `border=${cs.borderTopWidth} ${cs.borderTopStyle}`;
+      // 表として並んでいて、どこかに罫線がある（枠の表も、行の下線だけの表も）
+      const line = (x) => x && ['Top', 'Bottom', 'Left', 'Right'].some((k) => parseFloat(getComputedStyle(x)['border' + k + 'Width']) > 0 && getComputedStyle(x)['border' + k + 'Style'] !== 'none');
+      const lined = [el, el.parentElement, inner.querySelector('th'), inner.querySelector('thead')].some(line);
+      ok = ok && cs.display === 'table-cell' && lined;
+      why = `display=${cs.display} 罫線=${lined ? 'あり' : '無し'}`;
     } else if (sel === 'h3' || sel === 'strong') {
       ok = ok && (parseInt(cs.fontWeight) >= 600 || parseFloat(cs.fontSize) > parseFloat(base.fontSize) * 1.15);
       why = `font-weight=${cs.fontWeight} font-size=${cs.fontSize}`;

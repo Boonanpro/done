@@ -43,6 +43,14 @@ def run(tmp_path, rows, **extra):
 SEEN_OK = '...\n[artifact_seen] slug=x-operation result=OK（本人の画面と裏側が今の版）'
 
 
+def mapped(slug, tid='m', shot='OK'):
+    """画面を書き換えた後の、地図の stamp と画面を撮った結果（2026-10-25 場所の地図）。"""
+    return [claude_tool('Bash', {'command': f'python D:/done/scripts/place_map.py stamp {slug}'}, tid + '1'),
+            claude_result(tid + '1', f'[place_map] slug={slug} result=FRESH'),
+            claude_tool('Bash', {'command': f'python D:/done/scripts/place_shot.py artifact:{slug} --tag after'}, tid + '2'),
+            claude_result(tid + '2', f'[place_shot] place=artifact:{slug} tag=after result={shot}')]
+
+
 def test_no_artifact_edit_passes(tmp_path):
     assert run(tmp_path, [claude_tool('Edit', {'file_path': 'D:/done/app/x.py'}, '1'), claude_text('done')]) is None
 
@@ -60,7 +68,7 @@ def test_windows_path_and_mcp_tool_blocks(tmp_path):
 def test_check_after_edit_passes(tmp_path):
     rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
             claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation --wait 90'}, '2'),
-            claude_result('2', SEEN_OK), claude_text('本人の画面でも新しい版です')]
+            claude_result('2', SEEN_OK), *mapped('x-operation'), claude_text('本人の画面でも新しい版です')]
     assert run(tmp_path, rows) is None
 
 
@@ -91,7 +99,7 @@ def test_ng_result_must_be_reported(tmp_path):
     ng = '[artifact_seen] slug=x-operation result=NG（まだ古い所がある）'
     rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
             claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
-            claude_result('2', ng)]
+            claude_result('2', ng), *mapped('x-operation')]
     r = run(tmp_path, rows + [claude_text('直しました。')])
     assert r['decision'] == 'block' and 'NG' in r['reason']
     assert run(tmp_path, rows + [claude_text('裏側が再起動待ちのため、まだ直っていません。')]) is None
@@ -101,7 +109,7 @@ def test_unchecked_with_ack_passes(tmp_path):
     rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
             claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
             claude_result('2', '[artifact_seen] slug=x-operation result=UNCHECKED（本人の画面では未確認）'),
-            claude_text('みきさんの画面ではまだ確かめていません。')]
+            *mapped('x-operation'), claude_text('みきさんの画面ではまだ確かめていません。')]
     assert run(tmp_path, rows) is None
 
 
@@ -116,7 +124,9 @@ def test_codex_apply_patch_and_output(tmp_path):
     assert 'fukurou-inbox' in run(tmp_path, [codex_call(patch)])['reason']
     rows = [codex_call(patch),
             codex_call('text(await tools.exec_command({cmd: "python D:/done/scripts/artifact_seen.py --slug fukurou-inbox --wait 90"}));'),
-            codex_out('[artifact_seen] slug=fukurou-inbox result=OK（本人の画面と裏側が今の版）')]
+            codex_out('[artifact_seen] slug=fukurou-inbox result=OK（本人の画面と裏側が今の版）'),
+            codex_call('text(await tools.exec_command({cmd: "python D:/done/scripts/place_map.py stamp fukurou-inbox && python D:/done/scripts/place_shot.py fukurou-inbox"}));'),
+            codex_out('[place_map] slug=fukurou-inbox result=FRESH\n[place_shot] place=artifact:fukurou-inbox tag=now result=OK')]
     assert run(tmp_path, rows, last_assistant_message='直しました') is None
 
 
@@ -137,5 +147,57 @@ def test_ng_word_next_to_japanese_counts_as_reported(tmp_path):
     rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
             claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
             claude_result('2', '[artifact_seen] slug=x-operation result=NG（まだ古い所がある）'),
-            claude_text('確認の結果はNGでした。')]
+            *mapped('x-operation'), claude_text('確認の結果はNGでした。')]
     assert run(tmp_path, rows) is None
+
+
+# --- 場所の地図（2026-10-25）: 画面を書き換えたら、地図を直して（FRESH）画面を撮るまで終われない ---
+
+def edited_and_seen(path='/x-operation/a.tsx'):
+    return [claude_tool('Edit', {'file_path': LIVE + path}, '1'),
+            claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
+            claude_result('2', SEEN_OK)]
+
+
+def test_screen_edit_without_map_blocks(tmp_path):
+    r = run(tmp_path, edited_and_seen() + [claude_text('直しました')])
+    assert r['decision'] == 'block' and 'place_map.py check x-operation' in r['reason'] and 'place_shot.py artifact:x-operation' in r['reason']
+
+
+def test_stale_map_still_blocks(tmp_path):
+    rows = edited_and_seen() + [claude_tool('Bash', {'command': 'python D:/done/scripts/place_map.py check x-operation'}, '3'),
+                                claude_result('3', '[place_map] slug=x-operation result=STALE')]
+    r = run(tmp_path, rows + [claude_text('直しました')])
+    assert r['decision'] == 'block' and 'place_map.py check' in r['reason']
+
+
+def test_map_before_last_screen_edit_does_not_count(tmp_path):
+    rows = edited_and_seen() + mapped('x-operation') + [claude_tool('Edit', {'file_path': LIVE + '/x-operation/b.tsx'}, '9'),
+                                                       claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '10'),
+                                                       claude_result('10', SEEN_OK)]
+    assert run(tmp_path, rows)['decision'] == 'block'
+
+
+def test_server_and_map_only_edits_need_no_map(tmp_path):
+    for path in ('/x-operation/_server/routes.py', '/x-operation/MAP.md', '/x-operation/PRODUCT.md'):
+        assert run(tmp_path, edited_and_seen(path) + [claude_text('直しました')]) is None, path
+
+
+def test_shell_write_to_map_only_needs_no_map(tmp_path):
+    rows = [claude_tool('Bash', {'command': "cat > D:/done/frontend/src/app/artifacts/x-operation/MAP.md <<'EOF'\nx\nEOF"}, '1'),
+            claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
+            claude_result('2', SEEN_OK)]
+    assert run(tmp_path, rows) is None
+
+
+def test_shot_ng_must_be_reported(tmp_path):
+    rows = edited_and_seen() + mapped('x-operation', shot='NG')
+    r = run(tmp_path, rows + [claude_text('直しました')])
+    assert r['decision'] == 'block' and '撮った結果' in r['reason']
+    assert run(tmp_path, rows + [claude_text('番号の並びがまだ見えていません（NG）。')]) is None
+
+
+def test_map_block_is_capped(tmp_path):
+    rows = edited_and_seen()
+    got = [run(tmp_path, rows) for _ in range(5)]
+    assert [g is not None for g in got] == [True, True, True, False, False]

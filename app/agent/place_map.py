@@ -269,6 +269,8 @@ def place_context(room_id: str, project_id: Optional[str] = None, sb=None) -> st
             maps.append(str(art["path"]))
         elif place["kind"] == "artifact-tab":
             lines.append(f"右の画面は成果物 {slug}。地図はまだ無い（{ARTIFACTS_DIR / slug / MAP_NAME}）")
+    if place.get("others"):
+        lines.append("この部屋の成果物タブで切り替えられるほかの成果物: " + "、".join(place["others"]))
     lines.append("地図の全文: " + " / ".join(maps))
     lines.append("</place>")
     return "\n".join(lines)
