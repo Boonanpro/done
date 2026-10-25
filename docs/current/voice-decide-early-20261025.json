@@ -2439,5 +2439,385 @@
         {}
       ]
     }
-  ]
+  ],
+  "live_read_medians_s": {
+    "baseline": {
+      "start_after_audio_end_s": 2.237,
+      "done_after_audio_end_s": 3.212
+    },
+    "after": {
+      "start_after_audio_end_s": 0.715,
+      "done_after_audio_end_s": 2.534
+    }
+  },
+  "rounding": "Decimal(str(value)), ROUND_HALF_UP to 2 decimal places; raw JSON remains 3 decimals",
+  "post_merge_integration": {
+    "baseline": {
+      "mode": "baseline",
+      "baseline_commit": "d7ceeca472df9111046f6f90ca904b9c4793b1f0",
+      "type": "offline fixtures, full text; not audio or model evaluation",
+      "judge_s": 0.15,
+      "route_s": 0.15,
+      "backend_request_s": 0.5,
+      "read_s": 0.8,
+      "rows": [
+        {
+          "q": "今の作業はどうなってる？",
+          "expected": "job_status",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 1.46,
+          "hits": 0,
+          "work_requests": 0,
+          "stage_version": 1,
+          "functions": [
+            "job_status"
+          ]
+        },
+        {
+          "q": "明日の予定を教えて。",
+          "expected": "get_calendar",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 1.305,
+          "hits": 0,
+          "work_requests": 0,
+          "stage_version": 2,
+          "functions": [
+            "get_calendar"
+          ]
+        },
+        {
+          "q": "今日の予定を教えて。",
+          "expected": "get_calendar",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 1.305,
+          "hits": 0,
+          "work_requests": 0,
+          "stage_version": 3,
+          "functions": [
+            "get_calendar"
+          ]
+        },
+        {
+          "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+          "expected": "search_records",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 1.305,
+          "hits": 0,
+          "work_requests": 0,
+          "stage_version": 4,
+          "functions": [
+            "search_records"
+          ]
+        },
+        {
+          "q": "この部屋にはどんな資料がある？",
+          "expected": "room_files",
+          "start_after_text_s": 0.501,
+          "done_after_text_s": 1.302,
+          "hits": 0,
+          "work_requests": 0,
+          "stage_version": 5,
+          "functions": [
+            "room_files"
+          ]
+        },
+        {
+          "q": "テスト用のパン屋のホームページを作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.502,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 6,
+          "functions": [
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用の商品紹介動画を作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.503,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 7,
+          "functions": [
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用の売上の表をまとめた資料を作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.502,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 8,
+          "functions": [
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用の在庫管理のプログラムを作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.502,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 9,
+          "functions": [
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.503,
+          "hits": 0,
+          "work_requests": 2,
+          "stage_version": 10,
+          "functions": [
+            "start_work",
+            "start_work"
+          ]
+        }
+      ]
+    },
+    "after": {
+      "mode": "after",
+      "baseline_commit": "d7ceeca472df9111046f6f90ca904b9c4793b1f0",
+      "type": "offline fixtures, full text; not audio or model evaluation",
+      "judge_s": 0.15,
+      "route_s": 0.15,
+      "backend_request_s": 0.5,
+      "read_s": 0.8,
+      "rows": [
+        {
+          "q": "今の作業はどうなってる？",
+          "expected": "job_status",
+          "start_after_text_s": 0.308,
+          "done_after_text_s": 1.253,
+          "hits": 1,
+          "work_requests": 0,
+          "stage_version": 1,
+          "functions": [
+            "job_status"
+          ]
+        },
+        {
+          "q": "明日の予定を教えて。",
+          "expected": "get_calendar",
+          "start_after_text_s": 0.304,
+          "done_after_text_s": 1.106,
+          "hits": 1,
+          "work_requests": 0,
+          "stage_version": 2,
+          "functions": [
+            "get_calendar"
+          ]
+        },
+        {
+          "q": "今日の予定を教えて。",
+          "expected": "get_calendar",
+          "start_after_text_s": 0.304,
+          "done_after_text_s": 1.11,
+          "hits": 1,
+          "work_requests": 0,
+          "stage_version": 3,
+          "functions": [
+            "get_calendar"
+          ]
+        },
+        {
+          "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+          "expected": "search_records",
+          "start_after_text_s": 0.304,
+          "done_after_text_s": 1.305,
+          "hits": 0,
+          "work_requests": 0,
+          "stage_version": 4,
+          "functions": [
+            "search_records",
+            "search_records"
+          ]
+        },
+        {
+          "q": "この部屋にはどんな資料がある？",
+          "expected": "room_files",
+          "start_after_text_s": 0.303,
+          "done_after_text_s": 1.106,
+          "hits": 1,
+          "work_requests": 0,
+          "stage_version": 5,
+          "functions": [
+            "room_files"
+          ]
+        },
+        {
+          "q": "テスト用のパン屋のホームページを作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.503,
+          "done_after_text_s": 0.503,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 6,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用の商品紹介動画を作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.502,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 7,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用の売上の表をまとめた資料を作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.501,
+          "done_after_text_s": 0.501,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 8,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用の在庫管理のプログラムを作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.502,
+          "hits": 0,
+          "work_requests": 1,
+          "stage_version": 9,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ]
+        },
+        {
+          "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+          "expected": "start_work",
+          "start_after_text_s": 0.502,
+          "done_after_text_s": 0.503,
+          "hits": 0,
+          "work_requests": 2,
+          "stage_version": 10,
+          "functions": [
+            "list_operations",
+            "start_work",
+            "start_work"
+          ]
+        }
+      ]
+    },
+    "tests": {
+      "passed": 61,
+      "deselected_existing_failures": 2
+    },
+    "merged_commit": "d7ceeca472df9111046f6f90ca904b9c4793b1f0",
+    "voice_modules_unchanged_since_paid_baseline": true,
+    "limits": [
+      "Full text, model decisions and backend request times are fixtures; not a new paid call or speech timing measurement",
+      "Owner screen and actual initiation before speech end remain unverified",
+      "Stage runtime and storage are real; drawing provider is mocked; no visual browser check"
+    ]
+  },
+  "cost_audit": {
+    "calls": [
+      {
+        "run": "baseline-first",
+        "seconds": 194,
+        "backend_completions": 20,
+        "input_tokens": 116278,
+        "cached_tokens": 109172,
+        "output_tokens": 691,
+        "live_usd_estimate": 0.16166666666666668,
+        "backend_usd_estimate": 0.0443384
+      },
+      {
+        "run": "after-first",
+        "seconds": 194,
+        "backend_completions": 20,
+        "input_tokens": 119550,
+        "cached_tokens": 112290,
+        "output_tokens": 612,
+        "live_usd_estimate": 0.16166666666666668,
+        "backend_usd_estimate": 0.044322
+      },
+      {
+        "run": "baseline",
+        "seconds": 194,
+        "backend_completions": 20,
+        "input_tokens": 117207,
+        "cached_tokens": 110038,
+        "output_tokens": 630,
+        "live_usd_estimate": 0.16166666666666668,
+        "backend_usd_estimate": 0.0439056
+      },
+      {
+        "run": "after-jev-unavailable",
+        "seconds": 194,
+        "backend_completions": 20,
+        "input_tokens": 120163,
+        "cached_tokens": 112854,
+        "output_tokens": 677,
+        "live_usd_estimate": 0.16166666666666668,
+        "backend_usd_estimate": 0.0453128
+      },
+      {
+        "run": "after",
+        "seconds": 194,
+        "backend_completions": 20,
+        "input_tokens": 119633,
+        "cached_tokens": 112415,
+        "output_tokens": 593,
+        "live_usd_estimate": 0.16166666666666668,
+        "backend_usd_estimate": 0.044035
+      }
+    ],
+    "jev_reservations": [
+      {
+        "file": "jev-budget.json",
+        "enabled": true,
+        "publish": true,
+        "approved_usd": 0.3,
+        "reserved_usd": 0.037484916,
+        "requests": 174,
+        "max_requests": 250
+      },
+      {
+        "file": "jev-intents-budget.json",
+        "enabled": true,
+        "publish": true,
+        "approved_usd": 0.1,
+        "reserved_usd": 0.01412229,
+        "requests": 65,
+        "max_requests": 90
+      }
+    ],
+    "recorded_usd_estimate": 1.0818543393333333,
+    "accounting_source": "scripts/report_voice_cost.py and app/services/jev_browser_budget.py; internal price assumptions, not invoice or newly verified rates",
+    "conversion_assumption_jpy_per_usd": 200,
+    "recorded_jpy_estimate": 216.37086786666666,
+    "deepseek_unmetered_calls": {
+      "classification": 34,
+      "summary": 5
+    },
+    "deepseek_unmetered_jpy_contingency": 50,
+    "budget_estimate_with_contingency_jpy": 266.3708678666667,
+    "limits": "DeepSeek token usage and invoice/actual exchange rate not recorded. 50 JPY is a budget allowance, not a proven upper bound. Exact total cannot be certified from these logs.",
+    "additional_paid_calls_for_integration": 0
+  }
 }
