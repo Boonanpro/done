@@ -14,7 +14,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ShapeBlock, checkCompleteShape } from '@/components/chat/chat-shapes';
 
-export type StageState = { version: number; caption: string; program: string; at: string | null; active: boolean; scenes?: number };
+export type StageState = { version: number; caption: string; program: string; at: string | null; active: boolean; scenes?: number; session_id?: string };
 
 export function stageHeaders(): Record<string, string> {
   const token = typeof localStorage !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
@@ -66,7 +66,15 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
 export function VoiceStage({ roomId, active, className = '', onShown }: { roomId: string; active: boolean; className?: string; onShown?: (shown: boolean) => void }) {
   const state = useVoiceStage(roomId, active);
   const program = state?.program?.trim() || '';
-  const drawable = program ? checkCompleteShape(program).ok : false;
+  const ok = program ? checkCompleteShape(program) : null;
+  // The last scene that drew: a new program the checker refuses (an unknown icon, a bad argument) keeps it on the stage
+  // instead of blanking the call's screen (2026-10-25). A new call (session) starts empty.
+  const lastGood = useRef<{ program: string; version: number; session: string } | null>(null);
+  const session = state?.session_id || '';
+  if (ok?.ok && state) lastGood.current = { program, version: state.version || 0, session };
+  else if (ok && !ok.ok && program) console.warn('[voice-stage] scene not drawable, keeping the last one:', ok.reason);
+  const scene = ok?.ok && state ? { program, version: state.version || 0 } : (lastGood.current && lastGood.current.session === session ? lastGood.current : null);
+  const drawable = !!scene;
   const shown = !!state?.active && (drawable || !!state?.caption);
   const onShownRef = useRef(onShown);
   onShownRef.current = onShown;
@@ -81,8 +89,8 @@ export function VoiceStage({ roomId, active, className = '', onShown }: { roomId
         </div>
       ) : null}
       {drawable ? (
-        <div key={state?.version} className="animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both" data-stage-scene>
-          <ShapeBlock code={program} complete live messageId={null} part="stage" renderFallback={() => null} />
+        <div key={scene.version} className="animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both" data-stage-scene>
+          <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
         </div>
       ) : null}
     </div>

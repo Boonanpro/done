@@ -143,3 +143,29 @@ def test_close_marks_the_file_inactive_and_the_summary_is_one_message_with_the_s
     text = stage.summary()
     assert text.startswith('🖼 通話中に出した画面（2枚）') and text.count('```openui-lang') == 2 and FLOW in text and '支払いの流れ' in text
     assert S.Stage(room, 's', Dialogue(), lambda *a, **k: None, ask=None).summary() == ''
+
+
+def test_stray_icons_become_known_ones_or_go(monkeypatch):
+    # the screen refuses a whole scene for one unknown icon (2026-10-25: "ticket"/"gate" left the stage blank)
+    assert 'icon: "doc"' in S.sanitize('root = Flow([{id: "a", label: "きっぷ", icon: "ticket", sub: "s"}])')
+    assert 'icon: "check"' in S.sanitize('root = Flow([{id: "a", label: "改札", icon: "gate"}])')
+    assert S.sanitize('root = Flow([{id: "a", label: "x", icon: "zzz", sub: "s"}, {id: "b", icon: "qqq"}])') == 'root = Flow([{id: "a", label: "x", sub: "s"}, {id: "b"}])'
+    assert S.sanitize('root = Flow([{id: "a", icon: "train"}])') == 'root = Flow([{id: "a", icon: "train"}])'   # known: untouched
+    assert S.well_formed(S.sanitize('root = Flow([{id: "a", label: "x", icon: "zzz"}])'))
+
+
+@pytest.mark.asyncio
+async def test_after_a_replace_dans_next_words_wait_for_the_hold(room, monkeypatch):
+    monkeypatch.setattr(S, 'QUIET_S', .02); monkeypatch.setattr(S, 'SENTENCE_S', .01); monkeypatch.setattr(S, 'HOLD_S', .3)
+    second = FLOW.replace('"a"', '"z"')
+    stage, seen, log = make_stage(room, [{'action': 'replace', 'caption': '一', 'program': FLOW},
+                                         {'action': 'replace', 'caption': '二', 'program': second}])
+    stage.dialogue.add('assistant', 'まず予約をして、駅へ向かいます。'); stage.heard('assistant', 'まず予約をして、駅へ向かいます。')
+    await asyncio.sleep(.1)
+    assert S.read_state(room)['version'] == 1
+    for delta in ('次に改札を通ります。', 'そしてホームに並びます。'):
+        stage.dialogue.add('assistant', delta); stage.heard('assistant', delta)
+        await asyncio.sleep(.08)
+    assert len(seen) == 1                      # inside the hold: no second decision yet, the sentences pile up
+    await asyncio.sleep(.35)
+    assert len(seen) == 2 and S.read_state(room)['version'] == 2 and 'そしてホームに並びます。' in seen[1]
