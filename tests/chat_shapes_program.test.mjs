@@ -163,22 +163,20 @@ test('作業中の1行: 道具の言葉・思考の要約・返事を書いて�
   for (const s of [L.liveLineText([]), ...L.liveRows([], t0, t0).map((r) => r.label)]) assert.ok(!s.includes('準備'), s);
 });
 
-test('作業中の一覧: 時刻・かかった秒数・同じ言葉はまとめる・書きかけの返事は中身を出さない', async () => {
+test('作業中の一覧: 終わった段取りの文だけ（時刻・秒数・数・今の段取りは入れない）', async () => {
   const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
   const t0 = Date.parse('2026-10-24T10:00:00');
   const rows = L.liveRows([
     { kind: 'tool', activity: 'お店のページを見ています', at: t0 + 5_000 },
-    { kind: 'tool', activity: 'お店のページを見ています', at: t0 + 9_000 },
+    { kind: 'tool', activity: 'サーバーの記録を探しています', own: true, at: t0 + 6_000 },
+    { kind: 'tool', activity: '', done: 'サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。', at: t0 + 9_000 },
     { kind: 'text', text: 'カートを確かめます。', at: t0 + 13_000 },
-    { kind: 'tool', activity: '注文の画面を開いています', at: t0 + 14_000 },
-    { kind: 'text', text: '注文できたよ。合計1,135円', at: t0 + 20_000 },
+    { kind: 'tool', activity: 'アプリが自分の版を知らせているか確かめています', own: true, done: 'その後は新しい版があるか聞きに来ているだけでした。', at: t0 + 14_000 },
+    { kind: 'tool', activity: '資料を読んでいます', at: t0 + 15_000 },
   ], t0 + 26_000, t0);
-  assert.deepEqual(rows.map((r) => [r.label, r.count, r.seconds, r.now]), [
-    ['考えています', 1, 5, false],
-    ['お店のページを見ています', 2, 8, false],
-    ['カートを確かめます。', 1, 1, false],
-    ['注文の画面を開いています', 1, 6, false],
-    ['返事を書いています', 1, 6, true],
+  assert.deepEqual(rows.map((r) => [r.label, r.count, r.at, r.seconds, r.now]), [
+    ['サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。', 1, null, null, false],
+    ['その後は新しい版があるか聞きに来ているだけでした。', 1, null, null, false],
   ]);
   assert.equal(L.clockText(t0 + 5_000), '10:00:05');
   // 秒数の起点: 最後の返事より後に送った一番早い発言（追い連絡で数え直さない）。30分より前の発言は使わない
@@ -213,11 +211,34 @@ test('作業中の1行: 文ごとに判定し、英語が主の文は出さず�
   const steps = L.liveStepsFromEvents(events);
   assert.equal(steps.length, 3);
   assert.equal(L.liveLineText(steps), 'カートを確かめた。');
-  const rows = L.liveRows(steps, t0 + 10_000, t0).map((r) => r.label);
-  assert.deepEqual(rows, ['考えています', 'お店のページを見ています', 'カートを確かめた。']);
-  for (const r of rows) assert.ok(!/[A-Za-z]{3}/.test(r) && !r.includes('準備'), r);
+  // done の無い作業は一覧に出ない
+  assert.deepEqual(L.liveRows(steps, t0 + 10_000, t0), []);
   // 英語だけの思考なら、1行は前の道具の言葉のまま
   assert.equal(L.liveLineText(L.liveStepsFromEvents([events[1], ev('reasoning', 'Checking the cart.', { kind: 'thinking' }, 8)])), 'お店のページを見ています');
+});
+
+// 2026-10-25 作り直し: ダン自身が書いた言葉（progress・コマンドの説明）を道具の種類の言葉より優先する
+test('作業中の1行: ダンの言葉が道具の言葉に勝ち、段取りが終わると次の言葉へ', async () => {
+  const L = await import('../frontend/src/lib/chat-shapes/live-line.ts');
+  const t0 = Date.parse('2026-10-25T10:00:00');
+  const ev = (event_type, content, metadata, s) => ({ event_type, content, metadata, created_at: new Date(t0 + s * 1000).toISOString() });
+  const doing = ev('tool_use', null, { activity: 'サーバーの記録を探しています', activity_kind: 'dan' }, 1);
+  const read = ev('tool_use', null, { activity: '資料を読んでいます' }, 2);
+  const work = ev('tool_use', null, { activity: '作業しています' }, 3);
+  assert.equal(L.liveLineText(L.liveStepsFromEvents([doing, read, work])), 'サーバーの記録を探しています');
+  // done と doing を1回で: 一覧に done、1行は doing
+  const step = ev('tool_use', null, { activity: 'アプリが自分の版を知らせているか確かめています', activity_kind: 'dan', done: 'サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。' }, 4);
+  const steps = L.liveStepsFromEvents([doing, read, step, work]);
+  assert.equal(L.liveLineText(steps), 'アプリが自分の版を知らせているか確かめています');
+  assert.deepEqual(L.liveRows(steps).map((r) => r.label), ['サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。']);
+  // done だけ（次の言葉が無い）: 前の「〜しています」は終わったので、その後の道具の言葉か「考えています」
+  const onlyDone = ev('tool_use', null, { activity: '', done: 'その後は新しい版があるか聞きに来ているだけでした。' }, 5);
+  assert.equal(L.liveLineText(L.liveStepsFromEvents([doing, onlyDone])), '考えています');
+  assert.equal(L.liveLineText(L.liveStepsFromEvents([doing, onlyDone, ev('tool_use', null, { activity: 'ページを読んでいます' }, 6)])), 'ページを読んでいます');
+  // 英語の done は一覧に出さない・書き始めた返事は「返事を書いています」
+  assert.deepEqual(L.liveRows(L.liveStepsFromEvents([ev('tool_use', null, { done: 'Checked the server log.' }, 1)])), []);
+  assert.equal(L.liveLineText(L.liveStepsFromEvents([doing, ev('text', '入っていました。', null, 7)])), '返事を書いています');
+  for (const r of L.liveRows(steps)) assert.ok(!/[✓→]|\d+\/\d+/.test(r.label), r.label);
 });
 
 test('PC・スマホ・開発室とも、作業中の1行は同じ関数を通る（自前の変換を持たない）', () => {

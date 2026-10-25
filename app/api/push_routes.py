@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.config import settings
-from app.api.chat_routes import get_current_user, TokenData
+from app.api.chat_routes import get_current_user, get_optional_user, TokenData
 from app.services.push_service import get_push_service
 
 router = APIRouter(prefix="/push", tags=["push"])
@@ -135,9 +135,20 @@ async def send_test_notification(current_user: TokenData = Depends(get_current_u
 
 
 @router.get("/native/app-latest")
-async def read_app_latest():
+async def read_app_latest(v: Optional[str] = None, code: Optional[int] = None, device: Optional[str] = None,
+                          user: Optional[TokenData] = Depends(get_optional_user)):
     """The phone app's newest APK (app/services/app_release.py): {"latest": {version_name, version_code, url, size,
     notes, published_at} | null}. The app asks on start and when it comes back to the front, and shows
-    「新しい版があります［更新する］」 when the versionCode is newer than its own (mobile/app-update.tsx, 2026-10-24)."""
+    「新しい版があります［更新する］」 when the versionCode is newer than its own (mobile/app-update.tsx, 2026-10-24).
+    From 1.0.77 the app adds its own version (v, code) and device; it is remembered per phone (app_release.installed)."""
     from app.services import app_release
+    if v and code:
+        app_release.note_installed(getattr(user, "user_id", None) or "", v, code, device or "")
     return {"latest": app_release.latest()}
+
+
+@router.get("/native/app-installed")
+async def read_app_installed(user: TokenData = Depends(get_current_user)):
+    """The versions this user's phones last said they run (newest first)."""
+    from app.services import app_release
+    return {"installed": app_release.installed(user.user_id), "latest": app_release.latest()}

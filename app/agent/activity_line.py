@@ -109,7 +109,60 @@ def activity_phrase(name: str, tool_input: dict | None = None) -> str:
         return "PCのアプリを操作しています"
     if n in ("collab_thread", "split_to_new_room"):
         return "部屋を用意しています"
+    if n == "progress":
+        return ""
     return "作業しています"
+
+
+# Dan's own words for the line (2026-10-25, 本人「何をしてるのかわからなさすぎる」「人間が見て、今何をしているのか…
+# 具体的にわかるプロセスモニターに」). The words above say only what kind of tool runs; what a step is for comes from
+# Dan: the progress tool (app/services/work_progress.py: done = a finished step, doing = the step now) and, on the
+# Claude CLI, the description written with a command or a helper ("サーバーの記録を探しています"). Codex commands carry
+# no description, so there progress is the only source. Only Japanese sentences pass; a doing line must read
+# 「〜しています」, a done line 「〜しました」「〜でした」 (the owner turned down other ways of writing, 2026-10-25).
+_DOING_END = re.compile(r"(?:て|で)います[。.]?$")
+_LATIN = re.compile(r"[A-Za-z]")
+
+
+def _japanese(s: str) -> bool:
+    ja = len(_JA.findall(s))
+    return ja >= 2 and len(_LATIN.findall(s)) <= ja * 3
+
+
+def _clean(text: Any, limit: int) -> str:
+    s = " ".join(str(text or "").split()).strip()
+    # a leading mark or number (「✓」「→」「1.」「(2)」) is not part of the sentence
+    s = re.sub(r"^(?:[✓✔☑→・*#\-]|\d+[.)．）]|[(（]\d+[)）])\s*", "", s)
+    return s[:limit]
+
+
+def own_activity(name: str, tool_input: dict | None = None) -> str:
+    """The line Dan wrote for the step it is doing now (「アプリが自分の版を知らせているか確かめています」), or ""."""
+    n = _base_name(name)
+    a = tool_input if isinstance(tool_input, dict) else {}
+    if n == "progress":
+        text = a.get("doing")
+    elif n in ("Bash", "bash", "Agent", "Task", "parallel_work"):
+        text = a.get("description") if n != "parallel_work" else a.get("title")
+    else:
+        return ""
+    s = _clean(text, 80)
+    if n == "parallel_work":
+        # a job title is a noun (「作業中の表示を具体的に」): only the shape Dan says out loud
+        s = f"手分けして「{s}」を進めています" if s and _japanese(s) else ""
+        return s
+    if not s or not _japanese(s) or not _DOING_END.search(s):
+        return ""
+    return s.rstrip("。.")
+
+
+def done_note(name: str, tool_input: dict | None = None) -> str:
+    """A finished step in Dan's words (「サーバーの記録を見ました。…」), or ""."""
+    if _base_name(name) != "progress":
+        return ""
+    a = tool_input if isinstance(tool_input, dict) else {}
+    s = _clean(a.get("done"), 200)
+    return s if s and _japanese(s) else ""
 
 
 # Kana or kanji. A thinking summary without any is not shown (the owner reads Japanese; 2026-10-24).

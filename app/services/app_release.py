@@ -24,6 +24,9 @@ from typing import Any, Optional
 _ROOT = Path(__file__).resolve().parent.parent.parent
 RELEASE_FILE = Path(os.getenv("DAN_APP_RELEASE_FILE") or (_ROOT / ".data" / "app_release.json"))
 UPLOADS = _ROOT / "uploads"
+# Which version each phone runs (2026-10-25: Dan could not tell whether the owner's phone had installed 1.0.76; the app
+# now sends its version with every app-latest question). {"<user_id>|<device>": {version_name, version_code, device, seen_at}}
+INSTALLS_FILE = Path(os.getenv("DAN_APP_INSTALLS_FILE") or (_ROOT / ".data" / "app_installs.json"))
 
 # 登録してよい APK の条件（2026-10-24 見直し: 試験用の接続先を向いた APK や署名違いも登録できていた）。
 # 接続先は APK の中の assets/app.config（expo の extra.apiBaseUrl）、署名は apksigner の証明書の SHA-256。
@@ -91,6 +94,46 @@ def latest() -> Optional[dict[str, Any]]:
     if not isinstance(data, dict) or not data.get("url") or not isinstance(data.get("version_code"), int):
         return None
     return {k: data.get(k) for k in ("version_name", "version_code", "url", "size", "notes", "published_at")}
+
+
+def note_installed(user_id: str, version_name: str, version_code: Any, device: str = "") -> None:
+    """Remember the version a phone said it runs (GET app-latest with ?v=&code=&device=). Best effort."""
+    try:
+        code = int(version_code)
+    except (TypeError, ValueError):
+        return
+    name = str(version_name or "")[:20]
+    dev = " ".join(str(device or "").split())[:60]
+    if not name or code <= 0:
+        return
+    key = f"{user_id or 'anonymous'}|{dev}"
+    try:
+        data = json.loads(INSTALLS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = {"user_id": user_id or None, "device": dev, "version_name": name, "version_code": code,
+                 "seen_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        INSTALLS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = INSTALLS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(INSTALLS_FILE)
+    except OSError:
+        pass
+
+
+def installed(user_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """The versions phones last said they run (newest first); only this user's when user_id is given."""
+    try:
+        data = json.loads(INSTALLS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = [v for v in (data.values() if isinstance(data, dict) else []) if isinstance(v, dict)]
+    if user_id:
+        rows = [r for r in rows if r.get("user_id") == user_id]
+    return sorted(rows, key=lambda r: str(r.get("seen_at") or ""), reverse=True)
 
 
 def publish(apk: Path, notes: str = "", dry_run: bool = False) -> dict[str, Any]:

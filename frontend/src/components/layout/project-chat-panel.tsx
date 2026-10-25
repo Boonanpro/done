@@ -70,7 +70,7 @@ import { SEND_BUSY, SEND_UNKNOWN, ShapeAnswerProvider, ShapeBlock, type ShapeRec
 import { splitShapeSegments } from '@/lib/chat-shapes/split';
 import { partKeys, type AnswerTo } from '@/lib/chat-shapes/answers';
 import { JOB_STATE_TEXT, readJobReport, type JobReport } from '@/lib/chat-shapes/job-report';
-import { clockText, elapsedText, liveLineText, liveRows, liveStartedAt, liveStepsFromEvents, secondsText, sentSinceReply, type LiveStep } from '@/lib/chat-shapes/live-line';
+import { elapsedText, liveLineText, liveRows, liveStartedAt, liveStepsFromEvents, sentSinceReply, type LiveStep } from '@/lib/chat-shapes/live-line';
 import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
@@ -152,16 +152,24 @@ function useNowEverySecond(): number {
 
 /**
  * 点が3つ動く目印と、今していることの1行＋送ってからの秒数。行は増やさず、書き換えるだけ。
- * 押すと、このターンでやったことが時刻とかかった秒数つきで全部開き、もう一度押すと閉じる（2026-10-24）
+ * 押すと、終わった段取りの文がこの1行の上に古い順に開き、もう一度押すと閉じる。今の段取りは一番下のこの1行が
+ * 動いて示す（2026-10-25。決まりは lib/chat-shapes/live-line.ts）
  */
 function LiveLine({ live, startedAt }: { live: LiveStep[]; startedAt?: number | null }) {
   const now = useNowEverySecond();
   const [open, setOpen] = useState(false);
   const text = liveLineText(live);
   const from = startedAt ?? live.find((st) => st.at)?.at ?? null;
-  const rows = open ? liveRows(live, now, from) : [];
+  const rows = open ? liveRows(live) : [];
   return (
     <div className="my-1" data-live-line>
+      {rows.length ? (
+        <ol className="mb-1 ml-1 max-w-xl space-y-0.5 border-l border-border pl-3 text-xs text-muted-foreground" data-live-rows>
+          {rows.map((r) => (
+            <li key={r.key} className="break-words">{r.label}</li>
+          ))}
+        </ol>
+      ) : null}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -177,19 +185,8 @@ function LiveLine({ live, startedAt }: { live: LiveStep[]; startedAt?: number | 
         </span>
         <span key={text} className="min-w-0 truncate animate-in fade-in duration-300">{text}</span>
         {from ? <span className="shrink-0 tabular-nums text-xs text-muted-foreground/80" data-live-elapsed>{elapsedText(from, now)}</span> : null}
-        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 opacity-60 transition-transform', open && 'rotate-180')} aria-hidden />
+        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 opacity-60 transition-transform', !open && 'rotate-180')} aria-hidden />
       </button>
-      {open ? (
-        <ol className="mt-1 ml-1 max-w-xl space-y-0.5 border-l border-border pl-3 text-xs text-muted-foreground" data-live-rows>
-          {rows.map((r) => (
-            <li key={r.key} className={cn('flex items-baseline gap-2', r.now && 'text-foreground')}>
-              <span className="shrink-0 tabular-nums opacity-70">{clockText(r.at)}</span>
-              <span className="min-w-0 flex-1 break-words">{r.label}{r.count > 1 ? <span className="opacity-60">{` ×${r.count}`}</span> : null}</span>
-              <span className="shrink-0 tabular-nums opacity-70">{secondsText(r.seconds)}</span>
-            </li>
-          ))}
-        </ol>
-      ) : null}
     </div>
   );
 }

@@ -381,7 +381,7 @@ export function tidyRelayMessage<M extends VoiceLike>(msg: M, projectId?: string
 }
 
 /**
- * 作業中の1行: 道具ごとの言葉（activity）か思考の要約の一番新しい物。返事を書き始めていれば「返事を書いています」、
+ * 作業中の1行: 今の段取りでダンが書いた言葉、無ければ道具ごとの言葉か思考の要約。返事を書き始めていれば「返事を書いています」、
  * 何も無ければ「考えています」。PC の画面と同じ決まり（chat-shapes-live-line.ts liveLineText）。
  */
 export function liveLineOf(live: LiveStep[]): string {

@@ -2,6 +2,7 @@
 // ただどこから押せばいいのか分からないのでそれは分かりやすくしてほしい」。
 //
 // 起動した時と画面に戻った時に、サーバーの最新版（GET /api/v1/push/native/app-latest。app/services/app_release.py）を見て、
+// （問い合わせには入っている版と端末を添える。サーバーが端末ごとに覚える。1.0.77〜）
 // 入っている版より新しければホーム・チャット・ログインの画面の上に「新しい版 1.0.x があります［更新する］」を出す。
 // ［更新する］で APK を落とし、Android のインストール画面を開く（plugins/withDanAppUpdate.js の DanAppUpdate）。
 // 初めての時だけ Android が「この提供元のアプリを許可」を求めるので、1文の案内と設定を開くボタンを出し、
@@ -32,6 +33,13 @@ function nativeUpdater(): Native | null {
   if (Platform.OS !== 'android') return null;
   const m = (NativeModules as { DanAppUpdate?: Native }).DanAppUpdate;
   return m && typeof m.install === 'function' ? m : null;
+}
+
+/** 問い合わせに添える、入っている版と端末（「v=1.0.77&code=76&device=samsung SM-S921Q」） */
+export function mineQuery(mine: Installed): string {
+  const c = (Platform.constants || {}) as { Brand?: string; Manufacturer?: string; Model?: string };
+  const device = [c.Brand || c.Manufacturer, c.Model].filter(Boolean).join(' ');
+  return new URLSearchParams({ v: String(mine.versionName), code: String(mine.versionCode), device }).toString();
 }
 
 /** 新しい版が要るか（versionCode で比べる。版の名前は見せるだけ） */
@@ -69,7 +77,8 @@ export function useAppUpdate(apiBase: string, token: string | null, updaterOverr
       installedRef.current = mine;
       // ログインしていなくても見る（ログインの画面にも出す。最新版の情報は誰が見てもよい物だけ）
       const t = tokenRef.current;
-      const res = await fetch(`${baseRef.current}/api/v1/push/native/app-latest`, t ? { headers: { Authorization: `Bearer ${t}` } } : {});
+      // 入っている版と端末を添える（どのスマホに何の版が入っているかをダンが確かめられるように。2026-10-25）
+      const res = await fetch(`${baseRef.current}/api/v1/push/native/app-latest?${mineQuery(mine)}`, t ? { headers: { Authorization: `Bearer ${t}` } } : {});
       if (!res.ok) return;
       const body = (await res.json()) as { latest?: Latest | null };
       const next = body.latest ?? null;

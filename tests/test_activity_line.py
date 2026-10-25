@@ -47,3 +47,46 @@ def test_save_thinking_event_marks_kind_and_skips_english(monkeypatch):
     assert len(saved) == 1
     args, kwargs = saved[0]
     assert args == ("room", "reasoning") and kwargs["kind"] == "thinking" and kwargs["content"] == "次にお店のページを開きます。"
+
+
+# 2026-10-25: Dan's own words for the work line (progress tool, Japanese command descriptions)
+def test_own_activity_and_done_note():
+    from app.agent.activity_line import done_note, own_activity
+    p = "mcp__dan-tools__progress"
+    assert own_activity(p, {"doing": "アプリが自分の版を知らせているか確かめています。"}) == "アプリが自分の版を知らせているか確かめています"
+    assert done_note(p, {"done": "✓ サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。"}) == \
+        "サーバーの記録を見ました。スマホは 1.0.75 と 1.0.76 を落としていました。"
+    assert done_note(p, {"done": "3つの店を調べました。"}) == "3つの店を調べました。"
+    # English, or a doing line that is not 「〜しています」, is not Dan's line
+    assert own_activity(p, {"doing": "Checking the app version"}) == ""
+    assert own_activity(p, {"doing": "版を確かめる"}) == ""
+    assert done_note(p, {"done": "Checked the server log."}) == ""
+    assert own_activity("Bash", {"description": "サーバーの記録を探しています", "command": "rg x"}) == "サーバーの記録を探しています"
+    assert own_activity("Bash", {"description": "Search the server log"}) == ""
+    assert own_activity("mcp__dan-tools__web_search", {"query": "記録を探しています"}) == ""
+    assert done_note("Bash", {"done": "見ました。"}) == ""
+    # the progress call itself does not change the line by kind
+    assert activity_phrase(p, {"done": "見ました。"}) == ""
+
+
+def test_tool_event_carries_dans_words(monkeypatch):
+    from app.agent import cli_runner
+    rows = []
+
+    class _T:
+        def insert(self, row):
+            rows.append(row)
+            return self
+
+        def execute(self):
+            return None
+
+    class _C:
+        client = type("X", (), {"table": lambda self, name: _T()})()
+
+    monkeypatch.setattr("app.services.supabase_client.get_supabase_client", lambda: _C())
+    cli_runner._save_execution_event_sync("room", "tool_use", tool_name="mcp__dan-tools__progress",
+                                          tool_input={"done": "記録を見ました。", "doing": "版を確かめています"})
+    cli_runner._save_execution_event_sync("room", "tool_use", tool_name="Read", tool_input={"file_path": "/a"})
+    assert rows[0]["metadata"] == {"activity": "版を確かめています", "activity_kind": "dan", "done": "記録を見ました。"}
+    assert rows[1]["metadata"] == {"activity": "資料を読んでいます"}
