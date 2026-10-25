@@ -278,10 +278,12 @@ def build_codex_profile(
     # through the bridge that reshapes apply_patch into Write/Edit payloads.
     if (os.environ.get("DAN_CODEX_HOOKS") or "1").strip().lower() not in ("0", "false", "off"):
         bridge = _toml_inline_string(f"python {(_PROJECT_ROOT / 'scripts' / 'codex_hook_bridge.py').as_posix()}")
-        for event in ("PreToolUse", "PostToolUse"):
+        # PostToolUse runs after every tool: hook_progress_nudge counts the tools of a turn (MCP tools arrive as
+        # mcp__dan_tools__<name>, web search as webrun). PreToolUse guards only commands and file edits.
+        for event, matcher in (("PreToolUse", "Bash|apply_patch"), ("PostToolUse", ".*")):
             lines += [
                 f"[[hooks.{event}]]",
-                'matcher = "Bash|apply_patch"',
+                f'matcher = "{matcher}"',
                 f"hooks = [{{ type = \"command\", command = {bridge}, timeout = 180 }}]",
                 "",
             ]
@@ -351,6 +353,24 @@ def build_codex_cmd(
 # JSONL → Dan events
 # ---------------------------------------------------------------------------
 
+def web_search_query(item: Dict[str, Any]) -> str:
+    action = item.get("action") if isinstance(item.get("action"), dict) else {}
+    for q in (action.get("query"), *(action.get("queries") or []), item.get("query")):
+        if isinstance(q, str) and q.strip():
+            return q.strip()
+    return ""
+
+
+def web_search_url(item: Dict[str, Any]) -> str:
+    action = item.get("action") if isinstance(item.get("action"), dict) else {}
+    if isinstance(action.get("url"), str) and action["url"].strip():
+        return action["url"].strip()
+    for r in item.get("results") or []:
+        if isinstance(r, dict) and isinstance(r.get("url"), str) and r["url"].strip():
+            return r["url"].strip()
+    return ""
+
+
 def _item_to_events(item: Dict[str, Any]) -> list[Dict[str, Any]]:
     """Map one Codex item onto Dan events (tool names follow the Claude SDK
     names so ``_format_tool_label`` / artifact path tracking keep working)."""
@@ -396,12 +416,15 @@ def _item_to_events(item: Dict[str, Any]) -> list[Dict[str, Any]]:
             "input": args,
         }]
     if itype == "web_search":
-        return [{
-            "type": "tool_use",
-            "id": iid,
-            "name": "WebSearch",
-            "input": {"query": item.get("query") or ""},
-        }]
+        # Codex announces a search before it knows the words (query "") and fills them in when it completes
+        # (query, or action.query / action.queries); opening a page has no query, only the page in results.
+        query = web_search_query(item)
+        if query:
+            return [{"type": "tool_use", "id": iid, "name": "WebSearch", "input": {"query": query}}]
+        url = web_search_url(item)
+        if url:
+            return [{"type": "tool_use", "id": iid, "name": "WebFetch", "input": {"url": url}}]
+        return [{"type": "tool_use", "id": iid, "name": "WebSearch", "input": {"query": ""}}]
     if itype in ("todo_list", "plan"):
         return [{"type": "tool_use", "id": iid, "name": "TodoWrite", "input": {"items": item.get("items") or []}}]
     if itype == "error":
@@ -637,6 +660,10 @@ def run_codex_process(
             itype = item.get("type", "")
             # Tool-ish items are announced at start; text/reasoning only when complete.
             if itype in ("command_execution", "file_change", "mcp_tool_call", "web_search", "todo_list", "plan"):
+                # A search is shown once its words are known (the started item has none; 「調べています」 only).
+                if (itype == "web_search" and etype != "item.completed"
+                        and not web_search_query(item) and not web_search_url(item)):
+                    continue
                 for ev in _item_to_events(item):
                     _emit_tool(ev)
                     if room_id.startswith('editor_') and etype in ('item.started','item.completed'):

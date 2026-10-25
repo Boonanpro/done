@@ -61,6 +61,20 @@ def _load_hooks(event: str) -> list[tuple[str, str]]:
     return out
 
 
+def _context_text(out: str) -> str:
+    """What a PostToolUse hook wants the model to see: Claude-style JSON
+    ``hookSpecificOutput.additionalContext`` (hook_progress_nudge) gives just that text; other output as-is."""
+    text = (out or "").strip()
+    if text.startswith("{"):
+        try:
+            spec = (json.loads(text) or {}).get("hookSpecificOutput") or {}
+            if isinstance(spec, dict) and isinstance(spec.get("additionalContext"), str):
+                return spec["additionalContext"].strip()
+        except (ValueError, AttributeError):
+            pass
+    return text
+
+
 def _matches(matcher: str, tool_name: str) -> bool:
     if not matcher or matcher == "*":
         return True
@@ -162,10 +176,10 @@ def main() -> int:
                     }))  # ASCII escapes: stdout is cp932 on Windows, Codex reads UTF-8
                     return 0
             else:
-                text = out.strip()
+                text = _context_text(out)
                 if text:
                     # Claude shows plain hook stdout to the model; Codex wants
-                    # additionalContext. JSON outputs are passed as-is text.
+                    # additionalContext.
                     contexts.append(text[:2000])
     if event == "PostToolUse" and contexts:
         print(json.dumps({
