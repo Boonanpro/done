@@ -15,8 +15,9 @@ watches:
   - frontend/src/components/chat/chat-shapes.tsx
   - frontend/src/lib/chat-shapes/*.ts
   - frontend/src/app/globals.css
-fingerprint: 18bc5142019cca11
+fingerprint: 5ef48619a1339f97
 described: acd6f1482daa8985
+last_review: "2026-10-26 説明は変えない: globals.css の追加は通話の画面係（[data-stage-scene]）だけで、チャットの吹き出しの見え方は変わらない"
 ---
 # ダンのチャット
 
@@ -58,5 +59,5 @@ described: acd6f1482daa8985
 - 見張るファイル: `frontend/src/app/globals.css`, `frontend/src/components/chat/chat-shapes.tsx`, `frontend/src/components/layout/project-chat-panel.tsx`, `frontend/src/lib/chat-shapes/answer-sends.ts`, `frontend/src/lib/chat-shapes/answers.ts`, `frontend/src/lib/chat-shapes/chart-geometry.ts`, `frontend/src/lib/chat-shapes/job-report.ts`, `frontend/src/lib/chat-shapes/live-line.ts`, `frontend/src/lib/chat-shapes/no-openui-devtools.ts`, `frontend/src/lib/chat-shapes/plain.ts`, `frontend/src/lib/chat-shapes/schema.ts`, `frontend/src/lib/chat-shapes/split.ts`, `frontend/src/lib/chat-shapes/use-answer-send.ts`
 - ラベル: 「部品を準備中」、「このコメントを外す」、「タイムライン参照を外す」
 
-<!-- place_map:files {"frontend/src/app/globals.css": "3662a2f304", "frontend/src/components/chat/chat-shapes.tsx": "7a62cd72d3", "frontend/src/components/layout/project-chat-panel.tsx": "d85e4e440d", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "be1dd2effa", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "c93fc29f64", "frontend/src/lib/chat-shapes/schema.ts": "d5afefe4b8", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
+<!-- place_map:files {"frontend/src/app/globals.css": "551c3aa0ec", "frontend/src/components/chat/chat-shapes.tsx": "7a62cd72d3", "frontend/src/components/layout/project-chat-panel.tsx": "d85e4e440d", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "be1dd2effa", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "c93fc29f64", "frontend/src/lib/chat-shapes/schema.ts": "d5afefe4b8", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
 <!-- place_map:auto:end -->
