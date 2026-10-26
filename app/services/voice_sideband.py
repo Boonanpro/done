@@ -87,6 +87,7 @@ class Dialogue:
         self.history = []      # full transcript for this bounded (MAX_SECONDS) call; never written to logs
         self.history_chars = 0
         self.history_complete = True
+        self.delegated_at = 0.0   # when the speech model last handed the owner's words to the backend (the stage's flow yields to it)
 
     def add(self, role, delta):
         if not delta: return
@@ -427,13 +428,18 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     # touches the call's audio or its delegations.
                     from app.services import voice_stage
                     if voice_stage.enabled():
-                        try: stage = voice_stage.Stage(room_id, session_id, dialogue, record, user_id=user_id)
+                        async def stage_speak(text):   # what the stage itself says into the call (a message read back, 「送りました」)
+                            for part in chunks(text):
+                                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+                            record('stage_spoken', chars=len(text))
+                        try: stage = voice_stage.Stage(room_id, session_id, dialogue, record, user_id=user_id, speak=stage_speak)
                         except Exception as exc: record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
             while time.monotonic()-started < MAX_SECONDS:
                 try: event = json.loads(await socket.recv())
                 except (TypeError, ValueError): continue
                 kind = str(event.get('type') or '')
                 counts[kind] = counts.get(kind, 0)+1
+                if kind == 'session.delegation.created': dialogue.delegated_at = time.monotonic()
                 # When each side starts speaking, as times only (no words, no audio): a first delta after 1.5 s of quiet.
                 # Without it, why Dan was silent for some seconds after an answer reached it could not be told (2026-10-01).
                 if kind in ('session.output_audio.delta', 'session.input_transcript.delta'):

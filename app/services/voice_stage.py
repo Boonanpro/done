@@ -168,6 +168,118 @@ def safe_image(url):
     return None
 
 
+# -- a message draft on the stage (2026-10-27: 「○○さんにメッセージ送って」 → the draft is shown, revised by voice, sent by voice) --
+# What the owner says that means "send it" / "not yet". The server reads the call's transcript itself: the model that
+# calls send is not trusted to have heard an approval (the owner: 「送って」「いいよ」以外の言葉では送らない).
+APPROVAL = re.compile(r'(いいよ|いいです|いいっす|良いよ|よいよ|送って|送信して|送っちゃって|送ろう|送る|オッケー|オーケー|おっけ|ok|okay|お願い|大丈夫|それで|はい|うん|ええ|どうぞ|ゴー|go|頼む|よろしく|やって|進めて|問題ない|承認|了解)', re.I)
+HESITATION = re.compile(r'(待って|まって|まだ|やめ|止め|とめ|ちょっと|うーん|う〜ん|えーと|えっと|直し|なおし|変え|かえ|違う|ちがう|なし|ダメ|だめ|送らない|やっぱ|考え|後で|あとで|どうしよう|どうかな|かな[。？?]?$|微妙|保留|一旦|いったん|見せて|読んで|もう一回|もう一度|\?|？)', re.I)
+FLOW_S = 1.0           # the owner's words about the draft on the stage settle this long before the server acts on them
+READ_BACK_FRESH_S = 12.0   # a read-back this recent is not said again by the backend
+FLOW_INSTRUCTIONS = """通話中、本人の画面にはダンが作ったメッセージの下書き（送信案: 宛先・件名・本文）が出ています。本人の直前の言葉が、その下書きに対して何を求めているかを判定します。出力は JSON だけ:
+{"intent": "revise" | "send" | "approve" | "stop" | "discard" | "other", "body": "直した本文全体（revise の時だけ）", "subject": "直した件名（件名を変える時だけ）", "to_name": "直した宛名（宛名を変える時だけ）"}
+- revise: 文面・件名・宛名を変える頼み（「もっと短く」「最後に日程を足して」「2行目を柔らかく」「宛名を田中様に」）。body には直した後の本文全体を書く。頼まれた所だけ変え、ほかの行は一字も変えない。本人が言った内容（日時・名前・数字）だけを使い、補わない。
+- send: 送ってほしいという頼み（「送って」「送信して」「それで出して」「送っちゃって」）。
+- approve: ダンが宛先と要点を読み上げて「送っていいですか」と聞いた後の、承認の返事（「いいよ」「OK」「はい」「お願い」「それで」）。
+- stop: 待ってほしい・保留（「ちょっと待って」「まだ」「うーん」「もう一回読んで」）。
+- discard: 送らない・取り下げ（「やめて」「送らないで」「消して」「なしで」）。
+- other: 下書きと関係ない話、挨拶、相づち、ダンへの質問。
+迷う時は other か stop（送る側に倒さない）。"""
+
+
+def flow_input(card, dan_words, owner_words):
+    return ('今の下書き:' + chr(10) + card_text(card) + chr(10) + chr(10) + 'ダンの直前の言葉: ' + (' '.join(str(dan_words or '').split())[:400] or '（無し）')
+            + chr(10) + '本人の新しい言葉: ' + ' '.join(str(owner_words or '').split())[:600])
+
+
+CARD_CHANNELS_SPOKEN = {'email': 'メール', 'instagram_dm': 'Instagram の DM', 'instagram_comment': 'Instagram のコメント', 'collab': '窓口のチャット',
+                        'line': 'LINE', 'sms': 'SMS', 'web_form': 'フォーム', 'chatwork': 'Chatwork', 'slack': 'Slack', 'x_dm': 'X の DM'}
+
+
+async def _silent(text):
+    """Where no voice is attached (tests, a stage without a call): the result is only recorded."""
+    return None
+
+
+def _message_service():
+    from app.services.outbound_message_service import OutboundMessageService
+    return OutboundMessageService()
+
+
+def card_of(row):
+    """The stage's view of a proposal row (dan_proposals): what the screen draws and the record keeps."""
+    ad = row.get('action_data') or {}
+    return {'proposal_id': str(row.get('id') or ''), 'status': str(row.get('status') or 'pending'), 'channel': str(ad.get('channel') or 'other'),
+            'to': str(ad.get('to') or ''), 'to_name': str(ad.get('to_name') or ''), 'subject': str(ad.get('subject') or ''),
+            'body': str(row.get('content') or ''), 'intent': str(ad.get('intent') or ''), 'revision': int(ad.get('revision') or 1),
+            'sent_at': str(ad.get('sent_at') or ''), 'sendable': str(ad.get('channel') or '') in SENDABLE}
+
+
+SENDABLE = {'email', 'instagram_dm', 'instagram_comment', 'collab'}   # app.services.outbound_message_service.SERVER_SENDABLE
+
+
+def spoken_summary(card):
+    """What Dan says before sending: who, by what, about what (the owner answers to this)."""
+    who = card.get('to_name') or card.get('to') or '相手'
+    how = CARD_CHANNELS_SPOKEN.get(card.get('channel') or '', 'メッセージ')
+    what = card.get('subject') or card.get('intent') or ''
+    body = ' '.join(str(card.get('body') or '').split())
+    gist = body[:60] + ('…' if len(body) > 60 else '')
+    return f'{who}さん宛ての{how}。' + (f'件名は「{what}」。' if what else '') + f'本文は「{gist}」。これで送っていいですか。'
+
+
+SEND_QUESTION = re.compile(r'(送っていい|送ってもいい|送りますか|送信していい|送信してもいい|送ってよろしい|送ってもよろしい|送信しますか|これで送|送って大丈夫|送信して大丈夫)')
+
+
+def mention_of(card, text):
+    """Dan's words are the read-back: they name the recipient (the name, the address's user part, or 宛て) AND ask whether
+    to send. 「○○さん宛てに文面を出しました」 alone is the announcement of the draft, not a read-back (2026-10-27 test call 5:
+    it counted, and the owner's first 「送って」 sent the mail without the question)."""
+    text = str(text or '')
+    if not SEND_QUESTION.search(text): return False
+    for key in (card.get('to_name') or '', (card.get('to') or '').split('@')[0].lstrip('@')):
+        key = key.replace('様', '').replace('さん', '').strip()
+        if len(key) >= 2 and key in text: return True
+    return bool(re.search(r'(宛て|あて|宛先)', text))
+
+
+def approval_heard(history, mark, card, since=None):
+    """Whether the owner approved sending, read from the call's transcript after `mark` (where the transcript stood when
+    the draft was last put on the stage): Dan must have read the message back (a turn mentioning the recipient) and the
+    owner's latest words, after that, must be an approval without a hesitation. Words already judged (before `since`,
+    the last refusal) are not judged again. Returns (ok, reason)."""
+    turns = words_since(history, mark)
+    read = -1
+    for i, t in enumerate(turns):
+        if t['role'] == 'assistant' and mention_of(card, t['text']): read = i
+    if read < 0: return False, '宛先と要点をまだ読み上げていない'
+    owner = [t for t in turns[read + 1:] if t['role'] == 'user' and t['text'].strip()]
+    if since is not None:
+        owner = [t for t in words_since(history, since) if t['role'] == 'user' and t['text'].strip()] if owner else []
+    if not owner: return False, '読み上げの後の本人の返事がまだ聞こえていない'
+    last = owner[-1]['text'].strip()
+    if HESITATION.search(last): return False, f'本人の返事「{last[:40]}」は承認の言葉ではない'
+    if not APPROVAL.search(last): return False, f'本人の返事「{last[:40]}」に承認の言葉が無い'
+    return True, last[:80]
+
+
+def transcript_mark(history):
+    """Where the transcript stands now: (turns, characters of the last turn)."""
+    return (len(history), len(history[-1]['text']) if history else 0)
+
+
+def words_since(history, mark):
+    """The turns after a mark (the first one cut at the mark's character)."""
+    n, chars = mark or (0, 0)
+    if n <= 0: return [dict(t) for t in history]
+    out = []
+    if n - 1 < len(history):
+        head = history[n - 1]
+        rest = head['text'][chars:]
+        if rest.strip(): out.append({'role': head['role'], 'text': rest})
+    out.extend(dict(t) for t in history[n:])
+    return out
+
+
 INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、本人の画面に出す「図」を決めて描く係です。声は出せません。画面だけです。
 入力は、直前の会話（ユーザー＝本人、Dan＝ダン）、今の画面の札と中身、そして本人からの明示の頼み（あれば）です。
 出力は JSON だけ: {"action": "keep" | "caption" | "replace" | "back", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL", "version": 前に出した図の番号}
@@ -181,6 +293,8 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は、今の図と同じ型のまま全部入れて replace する（Flow なら Flow のまま箱を足す）。
 - 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（流れの図と料金の数字を行ったり来たりさせない）。
 - 今の画面が本物のページの写真（（画像）で始まる）の時は、本人がそのページの話をしている間は keep。写真の中身を絵に描き直さない。
+- 今の画面が送信案（（送信案）で始まる。宛先・件名・本文）の時は、本人がその文面を直したり送るかを決めたりしている間なので keep（札も据え置き）。文面の内容を図に描き直さない。
+- 本人が「○○にメッセージ送って」「メールして」「返事して」と頼んだ時と、ダンがその文面を作っている間は keep。文面はダンが下書き（送信案）として画面に出すので、文面や宛先を図にしない。
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
 - 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 手順・流れ・段取り・比べる物を聞かれたなら、質問の言葉から見出しだけの骨組み（Steps か、箱2〜3個の Flow）を描いてよい（中身はダンの言葉で育てる）。数字・料金・時間を聞かれた時は、ダンがまだ言っていないので caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
@@ -291,9 +405,9 @@ async def ask_model(system, user):
     return (data if isinstance(data, dict) else {}), {'input_tokens': getattr(usage, 'prompt_tokens', 0) or 0, 'output_tokens': getattr(usage, 'completion_tokens', 0) or 0}
 
 
-def decision_input(turns, caption, program, request=None, html=None, image=None, fresh=None, scenes=None):
+def decision_input(turns, caption, program, request=None, html=None, image=None, fresh=None, scenes=None, card=None):
     talk = chr(10).join(('ユーザー' if t['role'] == 'user' else 'Dan') + ': ' + t['text'].strip()[:700] for t in turns if t['text'].strip())
-    shown = program or (('（自由な絵）' + chr(10) + html[:1500]) if html else '') or (('（画像）' + image) if image else '') or '（まだ無い）'
+    shown = program or (('（自由な絵）' + chr(10) + html[:1500]) if html else '') or (('（画像）' + image) if image else '') or (card_text(card) if card else '') or '（まだ無い）'
     text = '直前の会話（新しい物が下）:' + chr(10) + talk
     if fresh:
         text += chr(10) + chr(10) + '新しく届いた言葉（前回の判断の後）:' + chr(10) + chr(10).join(('ユーザー' if r == 'user' else 'Dan') + ': ' + w.strip()[:700] for r, w in fresh if w.strip())
@@ -304,6 +418,10 @@ def decision_input(turns, caption, program, request=None, html=None, image=None,
     return text
 
 
+def card_text(card):
+    return '（送信案）宛先: ' + (card.get('to_name') or card.get('to') or '') + (' 件名: ' + card['subject'] if card.get('subject') else '') + ' 本文: ' + ' '.join(str(card.get('body') or '').split())[:300]
+
+
 class Stage:
     """One call's stage: the listener, the file the screen reads, and the scenes shown (for the record after the call).
 
@@ -311,13 +429,18 @@ class Stage:
     cleaned here, drawn by the screen in a sandboxed frame) or an image (one of Dan's files or an https URL, including a
     photograph of a page taken for the owner: show_page)."""
 
-    def __init__(self, room_id, session_id, dialogue, record, ask=None, user_id=None):
+    def __init__(self, room_id, session_id, dialogue, record, ask=None, user_id=None, speak=None):
         self.room_id, self.session_id, self.dialogue, self.record, self.user_id = room_id, session_id, dialogue, record, user_id
         self.ask = ask or ask_model
+        self.speak = speak               # the call's spoken commentary (voice_sideband): what the server itself says
+        self._flow_timer, self._flow_mark = None, None
         # The version counts on from the room's previous call: the screen long-polls for a version above the last one
         # it saw, so a new call restarting at 1 never reached it (2026-10-25 3rd test call: 5 scenes drawn, none shown).
         self.version = int((read_state(room_id) or {}).get('version') or 0)
         self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
+        self.card = None             # a message draft on the stage (card_of), with the transcript's mark when it was last put there
+        self._card_mark, self._card_refused = None, None
+        self._read_back_at = -1e9   # when the server itself last read the draft back
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
         self._fresh = []             # (role, words) since the last decision: what the model judges on
@@ -334,7 +457,7 @@ class Stage:
     # -- what the screen reads --------------------------------------------------------------------------------
     def state(self, active=True):
         return {'room_id': self.room_id, 'session_id': self.session_id, 'version': self.version, 'caption': self.caption,
-                'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'at': self.at,
+                'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'card': self.card, 'at': self.at,
                 'active': active, 'scenes': len(self.scenes)}
 
     def write(self, active=True):
@@ -366,6 +489,7 @@ class Stage:
             self.user_pending = True
             self._owner_asked = True
             wait = USER_S
+            if self.card and self.card.get('status') == 'pending': self._schedule_flow()
         self._schedule(wait)
 
     def _schedule(self, wait):
@@ -396,7 +520,7 @@ class Stage:
         if not turns and not request: return None
         started = time.monotonic()
         try:
-            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image, fresh, self.scenes)), MODEL_TIMEOUT_S)
+            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image, fresh, self.scenes, self.card)), MODEL_TIMEOUT_S)
         except Exception as exc:
             self.record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
             return None
@@ -412,6 +536,10 @@ class Stage:
             self.record('stage_stale', action=action, elapsed_ms=elapsed)
             return None
         self._applied = mine
+        if self.card and self.card.get('status') == 'pending' and not request and action in ('replace', 'back'):
+            # the owner is revising or approving a message: the listener's drawings wait (the card is the scene)
+            self.record('stage_keep', elapsed_ms=elapsed, held_for='card', **usage)
+            return 'keep'
         if action == 'back':
             scene = next((sc for sc in self.scenes if str(sc.get('version')) == str(data.get('version'))), None)
             if scene is None or self._same_scene(scene):
@@ -458,21 +586,26 @@ class Stage:
         """The kind and body of the scene on the stage now."""
         if self.program: return 'program', self.program
         if self.html: return 'html', self.html
+        if self.card: return 'card', self.card.get('proposal_id') or ''
         return 'image', self.image
 
     def _same_scene(self, scene):
-        return (scene.get('program') or '', scene.get('html') or '', scene.get('image') or '') == (self.program, self.html, self.image)
+        return (scene.get('program') or '', scene.get('html') or '', scene.get('image') or '', (scene.get('card') or {}).get('proposal_id') or '') == (self.program, self.html, self.image, (self.card or {}).get('proposal_id') or '')
 
-    def _apply(self, caption, program=None, html=None, image=None, page_url=''):
-        """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image)."""
+    def _apply(self, caption, program=None, html=None, image=None, page_url='', card=None):
+        """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image / card).
+        A card with the same proposal as the one on the stage is a revision of that scene (one record, newest text)."""
         self.version += 1
         self.caption = caption
         self.at = datetime.now(timezone.utc).isoformat()
-        if program is not None or html is not None or image is not None:
+        if program is not None or html is not None or image is not None or card is not None:
             self._owner_asked = False
-            self.program, self.html, self.image, self.page_url = program or '', html or '', image or '', page_url or ''
-            self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': self.program,
-                                'html': self.html, 'image': self.image, 'page_url': self.page_url})
+            self.program, self.html, self.image, self.page_url, self.card = program or '', html or '', image or '', page_url or '', card or None
+            same = card and self.scenes and (self.scenes[-1].get('card') or {}).get('proposal_id') == card.get('proposal_id')
+            if same: self.scenes[-1].update({'version': self.version, 'at': self.at, 'caption': caption, 'card': dict(card)})
+            else:
+                self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': self.program,
+                                    'html': self.html, 'image': self.image, 'page_url': self.page_url, 'card': dict(card) if card else None})
             del self.scenes[:-MAX_SCENES]
         self.write(active=True)
 
@@ -502,9 +635,196 @@ class Stage:
         self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version)
         return {'shown': True, 'caption': caption, 'url': target, 'image': path}
 
+    # -- the owner's words about the draft on the stage, heard by the server itself ----------------------------------
+    # The speech model answered 「もっと短くして」 and 「送って」 by itself and handed nothing to the backend (2026-10-27,
+    # test calls 2 and 3: the draft stayed as it was and 「送りました」 was said with nothing sent). While a draft is on the
+    # stage, the server reads the owner's words, lets a small model say what they ask for, and acts: revises the
+    # draft, reads it back, sends only through approval_heard. A backend tool doing the same thing meanwhile is
+    # harmless: a send is guarded by the card's status, a revision is the newest text either way.
+    def _schedule_flow(self):
+        if self._flow_timer is not None: self._flow_timer.cancel()
+        self._flow_timer = asyncio.get_running_loop().create_task(self._flow_after(FLOW_S))
+
+    async def _flow_after(self, wait):
+        await asyncio.sleep(wait)
+        self._flow_timer = None
+        task = asyncio.ensure_future(self.flow())
+        self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+
+    async def flow(self):
+        card = self.card
+        if not card or card.get('status') != 'pending' or self.dialogue is None: return None
+        history = self.dialogue.history
+        since = words_since(history, self._flow_mark or self._card_mark)
+        owner_words = ' '.join(t['text'] for t in since if t['role'] == 'user').strip()
+        if not owner_words: return None
+        self._flow_mark = transcript_mark(history)
+        dan_words = ' '.join(t['text'] for t in since if t['role'] == 'assistant')
+        started = time.monotonic()
+        try:
+            data, usage = await asyncio.wait_for(self.ask(FLOW_INSTRUCTIONS, flow_input(card, dan_words, owner_words)), MODEL_TIMEOUT_S)
+        except Exception as exc:
+            self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            return None
+        intent = str(data.get('intent') or 'other')
+        elapsed = round((time.monotonic() - started) * 1000)
+        if self.card is not card or card.get('status') != 'pending': return None   # changed meanwhile (the backend acted)
+        if intent == 'revise':
+            body = str(data.get('body') or '').strip()
+            subject, to_name = data.get('subject'), data.get('to_name')
+            if not body and not subject and not to_name:
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='empty', **usage); return None
+            out = await self.revise_message(card['proposal_id'], body=body or None, subject=str(subject).strip() if subject else None, to_name=str(to_name).strip() if to_name else None)
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='revised' if out.get('revised') else 'failed', **usage)
+            return out
+        if intent in ('send', 'approve'):
+            ok, why = approval_heard(history, self._card_mark, card, self._card_refused)
+            if ok:
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='send', **usage)
+                return await self.send_message(card['proposal_id'], speak=self.speak or _silent)
+            # not approved yet: the message is read back (unless Dan already did, since the owner's words), then the
+            # owner's next words decide
+            if any(t['role'] == 'assistant' and mention_of(card, t['text']) for t in words_since(history, self._flow_mark)) or mention_of(card, dan_words):
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_by_dan', detail=why[:80], **usage)
+                return 'read_back'
+            # the server reads back at once (about 2 s after the owner's words; the backend's own read-back came 8 s
+            # later in test call 7 and collided with the owner's next words). A backend call meanwhile is told it was
+            # read already (send_message), so the owner does not hear it twice (test call 6).
+            text = spoken_summary(card)
+            self._read_back_at = time.monotonic()
+            self.dialogue.add('assistant', text)   # the read-back counts even when the commentary is not transcribed
+            if self.speak is not None:
+                try: await self.speak(text)
+                except Exception as exc: self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back', detail=why[:80], **usage)
+            return 'read_back'
+        if intent == 'stop':
+            self._card_refused = transcript_mark(history)   # the next answer is judged alone
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='held', **usage)
+            return 'held'
+        if intent == 'discard':
+            out = await self.discard_message(card['proposal_id'])
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='discarded' if out.get('discarded') else 'failed', **usage)
+            return out
+        self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='none', **usage)
+        return None
+
+    # -- a message on the stage: drafted, revised and sent by voice ------------------------------------------------
+    def _put_card(self, row, caption=None):
+        card = card_of(row)
+        self._apply((caption or card.get('intent') or card.get('subject') or ('メッセージ: ' + (card.get('to_name') or card.get('to') or '')))[:40], card=card)
+        self._card_mark = transcript_mark(self.dialogue.history if self.dialogue is not None else [])
+        self._card_refused, self._flow_mark = None, None
+        self._last_replace = time.monotonic()
+        return card
+
+    async def draft_message(self, channel, to, body, subject='', to_name='', intent='', from_account=''):
+        """A message draft, as the chat's card (the same record: dan_proposals, the card in the room) and on the stage."""
+        started = time.monotonic()
+        if not self.user_id: return {'shown': False, 'reason': 'この通話の持ち主が分からないので下書きを作れない。'}
+        if not (str(channel or '').strip() and str(to or '').strip() and str(body or '').strip()):
+            return {'shown': False, 'reason': '手段（email など）・宛先・本文の3つが要る。'}
+        try:
+            svc = _message_service()
+            row = await asyncio.to_thread(svc.create_draft, user_id=self.user_id, room_id=self.room_id, channel=str(channel), to=str(to).strip(),
+                                          body=str(body).strip(), subject=str(subject or '').strip() or None, intent=str(intent or '').strip() or None,
+                                          to_name=str(to_name or '').strip() or None, from_account=str(from_account or '').strip() or None, show_card=True)
+        except Exception as exc:
+            self.record('stage_draft_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            return {'shown': False, 'reason': f'下書きを作れなかった: {str(exc)[:120]}'}
+        card = self._put_card(row)
+        self.record('stage_draft', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, channel=card['channel'])
+        return {'shown': True, 'proposal_id': card['proposal_id'], 'channel': card['channel'], 'to': card['to'], 'to_name': card['to_name'],
+                'subject': card['subject'], 'body': card['body'], 'sendable_now': card['sendable'],
+                'note': '本人の通話画面と部屋に下書きが出た。本文は読み上げず、誰宛てに何の件かを一言。直しの頼みは revise_message_on_stage、「送って」は send_message_on_stage（読み上げて承認の言葉を聞いてから）。'}
+
+    async def revise_message(self, proposal_id='', body=None, subject=None, to=None, to_name=None):
+        """The draft revised by voice (「もっと短く」): the newest text replaces the card's, in place on the stage."""
+        started = time.monotonic()
+        pid = str(proposal_id or (self.card or {}).get('proposal_id') or '').strip()
+        if not pid: return {'revised': False, 'reason': '直す下書きが画面に無い。先に draft_message_on_stage。'}
+        try:
+            svc = _message_service()
+            row = await asyncio.to_thread(svc.revise_draft, pid, self.user_id, body=body, subject=subject, to=to, to_name=to_name)
+        except Exception as exc:
+            self.record('stage_revise_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            return {'revised': False, 'reason': f'直せなかった: {str(exc)[:120]}'}
+        card = self._put_card(row, caption=self.caption if self.card and self.card.get('proposal_id') == pid else None)
+        self.record('stage_revise', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, revision=card['revision'])
+        return {'revised': True, 'proposal_id': pid, 'body': card['body'], 'subject': card['subject'], 'to': card['to'],
+                'note': '画面の文面が新しい版になった。「直しました」とだけ。'}
+
+    async def send_message(self, proposal_id='', speak=None):
+        """Send the draft on the stage, only when the transcript shows Dan read it back and the owner's latest words
+        approve (approval_heard). The model's own belief that it heard 「いいよ」 is not enough (2026-10-27).
+        With `speak` (the call's spoken commentary) the delivery runs in the background and its result is spoken when
+        it arrives: an SMTP send took 7 s in the first test call, during which the call answered nothing."""
+        started = time.monotonic()
+        pid = str(proposal_id or (self.card or {}).get('proposal_id') or '').strip()
+        card = self.card if self.card and self.card.get('proposal_id') == pid else None
+        if not card: return {'sent': False, 'reason': 'その下書きは画面に無い。先に draft_message_on_stage で出す。'}
+        if card.get('status') == 'sending': return {'sent': 'sending', 'reason': '今送っている。結果は声で届く。'}
+        if card.get('status') != 'pending': return {'sent': False, 'reason': 'この下書きはもう送ったか取り下げた。'}
+        if not card.get('sendable'):
+            self.record('stage_send_refused', reason='manual_channel', channel=card.get('channel'))
+            return {'sent': False, 'reason': f'{CARD_CHANNELS_SPOKEN.get(card.get("channel"), card.get("channel"))} は通話中には送れない（ダンがブラウザで送る手段）。下書きは部屋に残っているので、通話の後にチャットから送る。'}
+        history = self.dialogue.history if self.dialogue is not None else []
+        ok, why = approval_heard(history, self._card_mark, card, self._card_refused)
+        if not ok:
+            self._card_refused = transcript_mark(history)   # these words were judged; the next answer is judged alone
+            self.record('stage_send_refused', reason=why[:80])
+            if time.monotonic() - self._read_back_at < READ_BACK_FRESH_S:
+                return {'sent': False, 'reason': why, 'read_back_done': True,
+                        'note': '送っていない。宛先と要点はもう声で読み上げて本人の返事を待っている。返事は空にする（重ねて読み上げない）。本人が「いいよ」「送って」のように答えたら、もう一度 send_message_on_stage。'}
+            return {'sent': False, 'reason': why, 'read_back': spoken_summary(card),
+                    'note': '送っていない。まず read_back の内容を声で言って本人の返事を待つ。本人が「いいよ」「送って」のように答えたら、もう一度 send_message_on_stage。'}
+        self.card = dict(card, status='sending')   # no second send while this one is on its way
+        if speak is not None:
+            task = asyncio.ensure_future(self._deliver(pid, why, started, speak))
+            self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+            return {'sent': 'sending', 'proposal_id': pid, 'to': card['to'], 'to_name': card['to_name'],
+                    'note': '承認を確かめて送信を始めた。「送ります」とだけ言う。送れたかどうかは数秒後に声で本人に届くので、自分では言わない。'}
+        return await self._deliver(pid, why, started, None)
+
+    async def _deliver(self, pid, why, started, speak):
+        try:
+            svc = _message_service()
+            row = await svc.send(pid, self.user_id, sent_by='dan')
+        except Exception as exc:
+            self.record('stage_send_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            if self.card and self.card.get('proposal_id') == pid: self.card['status'] = 'pending'
+            if speak is not None: await speak('送れませんでした。下書きは部屋に残っています。')
+            return {'sent': False, 'reason': f'送れなかった: {str(exc)[:120]}'}
+        if str(row.get('status')) != 'sent':   # a channel Dan sends by hand got locked: not sent here
+            try: await asyncio.to_thread(svc.release, pid, self.user_id)
+            except Exception: pass
+            if self.card and self.card.get('proposal_id') == pid: self.card['status'] = 'pending'
+            self.record('stage_send_refused', reason='not_sent', status=str(row.get('status')))
+            if speak is not None: await speak('この手段は通話中には送れませんでした。下書きは部屋に残っています。')
+            return {'sent': False, 'reason': 'この手段は通話中には送れない。下書きは部屋に残っている。'}
+        card = self._put_card(row, caption=self.caption)
+        self.record('stage_sent', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, channel=card['channel'], approved_by=why[:40])
+        if speak is not None: await speak('送りました。')
+        return {'sent': True, 'proposal_id': pid, 'to': card['to'], 'to_name': card['to_name'], 'note': '送った。「送りました」とだけ。'}
+
+    async def discard_message(self, proposal_id=''):
+        """The owner gave the message up (「やめて」「送らないで」): the draft is withdrawn and the card leaves the stage."""
+        pid = str(proposal_id or (self.card or {}).get('proposal_id') or '').strip()
+        card = self.card if self.card and self.card.get('proposal_id') == pid else None
+        if not card: return {'discarded': False, 'reason': 'その下書きは画面に無い。'}
+        try:
+            svc = _message_service()
+            row = await asyncio.to_thread(svc.discard, pid, self.user_id, by='dan')
+        except Exception as exc:
+            return {'discarded': False, 'reason': f'取り下げられなかった: {str(exc)[:120]}'}
+        self._put_card(row, caption=self.caption)
+        self.record('stage_discarded', version=self.version)
+        return {'discarded': True, 'note': '取り下げた。「取り下げました」とだけ。'}
+
     # -- the end ----------------------------------------------------------------------------------------------
     def close(self):
         if self._timer is not None: self._timer.cancel(); self._timer = None
+        if self._flow_timer is not None: self._flow_timer.cancel(); self._flow_timer = None
         for task in list(self._tasks): task.cancel()
         self.write(active=False)
         if _stages.get(self.room_id) is self: _stages.pop(self.room_id, None)
@@ -527,6 +847,12 @@ class Stage:
             elif scene.get('image'):
                 lines.append(f'[添付画像: {scene["image"]}]')
                 if scene.get('page_url'): lines.append(scene['page_url'])
+            elif scene.get('card'):
+                card = scene['card']
+                state = {'sent': '送信済み', 'rejected': '取り下げ', 'pending': '下書き'}.get(card.get('status'), card.get('status') or '')
+                lines.append(f'✉ {CARD_CHANNELS_SPOKEN.get(card.get("channel"), "メッセージ")} 宛先: {card.get("to_name") or card.get("to")}（{state}）')
+                if card.get('subject'): lines.append('件名: ' + card['subject'])
+                lines.append('本文: ' + ' '.join(str(card.get('body') or '').split())[:300])
         return chr(10).join(lines)
 
 

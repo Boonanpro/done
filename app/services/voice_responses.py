@@ -36,6 +36,9 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
 - 図・表・数字を本人の通話画面に出す頼み（「図にして」「画面に出して」「表で見せて」）は show_on_stage（1〜3秒で本人の通話画面に出る。何を描くかは話の中身から画面係が決める）。出たら「出しました」とだけ。普段は頼まれなくても画面係が話に合わせて描いているので、自分から呼ばない。
 - 実際のページや成果物の画面を見せる頼み（「このページ見せて」「X運用室を出して」「サイトの今の見た目を画面に」）は show_page_on_stage（URL か成果物の名前。2〜5秒でその画面の写真が本人の通話画面に出る）。頼まれたら前置きを言わずにすぐ呼ぶ（「出しますね」と言ってから呼ぶと、その分だけ画面が遅れる）。自分が read_page で読んだ URL や、作業で作った成果物も、本人が見たがったらこれで出す。出たら「出しました」とだけ。
+- 「○○さんにメッセージ送って」「○○にメールして」「○○さんに返事して」のように外の相手への文面を頼まれたら、本文を自分で書いて draft_message_on_stage（手段・宛先・本文。宛先のアドレスや相手の名前が分からなければ get_saved_information / search_records で探し、無ければその一点だけ聞く）。下書きは本人の通話画面と部屋に出る。出たら本文は読み上げず、「○○さん宛てに、△△の件の文面を出しました」のように誰宛てに何の件かを一言。
+- 出した下書きへの直しの頼み（「もっと短く」「最後に日程を足して」「2行目を柔らかく」「宛名を変えて」）は、本文全体を書き直して revise_message_on_stage に渡す（画面の文面がその場で替わる）。出たら「直しました」とだけ。
+- 「送って」「それで送って」と言われても、その場では送らない。send_message_on_stage を呼ぶと、まだ承認が聞こえていない時は sent: false と read_back（宛先と要点の読み上げ文）が返るので、その read_back を声でそのまま言って本人の返事を待つ。本人が「いいよ」「送って」「OK」のように答えたら、もう一度 send_message_on_stage を呼ぶ（送るかどうかはサーバーが本人の最後の言葉を見て決める。本人の返事を待たずに続けて2回呼ばない）。「うーん」「ちょっと待って」「まだ」「やめて」のような返事では送らない。送れたら「送りました」とだけ。本人が「やめて」「送らないで」と言ったら discard_message_on_stage。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
@@ -78,6 +81,23 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を図にしてほしいか（本人の言葉のまま。例: 今の3つの案を比べて、支払いの流れ）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'show_page_on_stage', 'description': '実際のページの画面を本人の通話画面に写す（本人が「このページ見せて」「成果物の〇〇を出して」と頼んだ時）。URL（https://… か /artifacts/… のような道）か、本人の成果物の名前（例: X運用室、台本室）を渡す。',
      'parameters': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'ページの URL か、このサイトの道（省略可）'}, 'artifact': {'type': 'string', 'description': '成果物の名前の一部（URL が無い時）'}, 'note': {'type': 'string', 'description': '画面の札に出す短い言葉（例: X運用室の今の記事）'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'draft_message_on_stage', 'description': '外の相手へのメッセージの下書き（送信案）を作り、本人の通話画面と部屋に出す（本人が「○○さんにメッセージ送って」「メールして」と頼んだ時）。本文はあなたが書く。送信はしない。',
+     'parameters': {'type': 'object', 'properties': {'channel': {'type': 'string', 'enum': ['email', 'instagram_dm', 'collab', 'line', 'sms', 'chatwork', 'slack', 'x_dm', 'web_form', 'other'], 'description': '手段'},
+                                                     'to': {'type': 'string', 'description': '宛先（メールアドレス・Instagram のユーザー名・電話番号など）'},
+                                                     'to_name': {'type': 'string', 'description': '相手の呼び名（例: 田中様）'},
+                                                     'subject': {'type': 'string', 'description': '件名（メールの新規送信だけ）'},
+                                                     'body': {'type': 'string', 'description': '本文の完成形（挨拶から署名まで）'},
+                                                     'intent': {'type': 'string', 'description': '何の連絡か一言（例: 打ち合わせの日程変更）'},
+                                                     'from_account': {'type': 'string', 'description': 'SNS の送信元アカウント（分かる時だけ）'}},
+                    'required': ['channel', 'to', 'body'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'revise_message_on_stage', 'description': '通話画面に出ている下書きを直す（本人の「もっと短く」「最後に日程を足して」などを反映した本文全体を渡す）。画面の文面がその場で替わる。',
+     'parameters': {'type': 'object', 'properties': {'proposal_id': {'type': 'string', 'description': '下書きの id（draft_message_on_stage の返事にある。省略時は画面の下書き）'},
+                                                     'body': {'type': 'string', 'description': '直した後の本文全体'}, 'subject': {'type': 'string'}, 'to': {'type': 'string'}, 'to_name': {'type': 'string'}},
+                    'additionalProperties': False}},
+    {'type': 'function', 'name': 'send_message_on_stage', 'description': '通話画面の下書きを送る。本人が「送って」と言った時に呼ぶ。まだ読み上げと本人の承認の言葉が無ければ送らず、読み上げる文（read_back）を返す。本人が「いいよ」「送って」と答えた後にもう一度呼ぶと送る（送るかどうかはサーバーが本人の最後の言葉で決める）。',
+     'parameters': {'type': 'object', 'properties': {'proposal_id': {'type': 'string', 'description': '下書きの id（省略時は画面の下書き）'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'discard_message_on_stage', 'description': '通話画面の下書きを取り下げる（本人が「やめて」「送らないで」と言った時）。',
+     'parameters': {'type': 'object', 'properties': {'proposal_id': {'type': 'string'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'end_call', 'description': '通話を終える。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
 ]
 
@@ -291,6 +311,18 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         stage = voice_stage.for_room(room_id)
         if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
         return await stage.show_page(str(args.get('url') or ''), str(args.get('artifact') or ''), str(args.get('note') or ''))
+    if name in ('draft_message_on_stage', 'revise_message_on_stage', 'send_message_on_stage', 'discard_message_on_stage'):
+        from app.services import voice_stage
+        stage = voice_stage.for_room(room_id)
+        if stage is None: return {'shown': False, 'sent': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。下書きはチャットの送信案で。'}
+        if name == 'draft_message_on_stage':
+            return await stage.draft_message(str(args.get('channel') or ''), str(args.get('to') or ''), str(args.get('body') or ''), str(args.get('subject') or ''),
+                                             str(args.get('to_name') or ''), str(args.get('intent') or ''), str(args.get('from_account') or ''))
+        if name == 'revise_message_on_stage':
+            return await stage.revise_message(str(args.get('proposal_id') or ''), body=args.get('body'), subject=args.get('subject'), to=args.get('to'), to_name=args.get('to_name'))
+        if name == 'send_message_on_stage':
+            return await stage.send_message(str(args.get('proposal_id') or ''), speak=speak)
+        return await stage.discard_message(str(args.get('proposal_id') or ''))
     if name == 'end_call':
         return {'ok': True}
     if name == 'web_search':
