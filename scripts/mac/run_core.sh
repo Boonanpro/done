@@ -10,4 +10,6 @@ if [ -f "$HOME/.dan/standby" ]; then export DAN_STANDBY=1; else unset DAN_STANDB
 cd "$HOME/done"
 log="$HOME/done/dan_core.log"
 if [ -f "$log" ] && [ $(stat -f%z "$log") -gt 20971520 ]; then mv "$log" "$HOME/done/dan_core.previous.log"; fi
-exec python -m uvicorn app.core.main:app --host 127.0.0.1 --port 9000 --loop app.core.event_loop:new_loop >> "$log" 2>&1
+# --timeout-graceful-shutdown: a stop must not wait forever for the screens' open long polls (2026-10-27 the core sat in
+# "Waiting for connections to close" with 9000 closed until it was killed by hand).
+exec python -m uvicorn app.core.main:app --host 127.0.0.1 --port 9000 --loop app.core.event_loop:new_loop --timeout-graceful-shutdown 15 >> "$log" 2>&1
