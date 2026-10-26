@@ -254,3 +254,16 @@ def test_long_room_keeps_the_place_on_reseed(monkeypatch):
     assert state.startswith("<place>") and "ここは見本の場所" in state
     assert reseed.startswith("<place>") and "ここは見本の場所" in reseed and len(reseed) > 12000
     assert reseed.count("<place>") == 1
+
+
+def test_common_map_ignores_artifacts_absent_from_this_tree(pm):
+    """成果物は done-artifacts にあり、作業場所には無い。無い成果物のファイルは見ずに比べる（2026-10-26）。"""
+    p = pm.map_path("dev-lead-room")
+    p.write_text(p.read_text().replace("speak:", "watches:\n  - frontend/src/app/artifacts/demo/*.css\n  - frontend/src/components/*.tsx\nspeak:"), encoding="utf-8")
+    stamp(pm, "dev-lead-room")
+    import shutil
+    shutil.rmtree(pm.ARTIFACTS_DIR / "demo")
+    state, why = pm.map_state("dev-lead-room")
+    assert state == "FRESH" and "demo" in why
+    (pm.tree_of("dev-lead-room") / "frontend/src/components/panel.tsx").write_text("export const A = 3")
+    assert pm.map_state("dev-lead-room")[0] == "STALE"

@@ -38,6 +38,8 @@ place: artifact:<slug>         # 共通の場所は id（chat など）
 name: 画面の名前（みきさんが呼ぶ名前）
 open: /preview/<slug>          # ブラウザで開く道。開けない場所は書かず、reach に行き方
 ready: '[aria-label="…"]'      # 開けたと分かる、本物の画面の部品（CSS）。殻やエラーの画面には無い物を選ぶ
+                               # CSS モジュールの名前は、成果物の画面のサーバー（3001）では style-module__<印>__canvas、
+                               # 作業場所の webpack では style_canvas__<印>。両方に当たるよう '[class*="_canvas__"], [class$="__canvas"]' と書く
 covers: [dev-lead-room]        # 同じ画面を撮る別の場所（撮った結果をそちらにも数える）
 errors: ["…"]                  # この画面のエラーの文（決まった文に足す）
 watches: [frontend/…/*.tsx]    # 共通の場所だけ。その場所を描くファイル
