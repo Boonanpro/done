@@ -87,6 +87,7 @@ class Dialogue:
         self.history = []      # full transcript for this bounded (MAX_SECONDS) call; never written to logs
         self.history_chars = 0
         self.history_complete = True
+        self.delegated_at = 0.0   # when the speech model last handed the owner's words to the backend (the stage's flow yields to it)
 
     def add(self, role, delta):
         if not delta: return
@@ -438,6 +439,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 except (TypeError, ValueError): continue
                 kind = str(event.get('type') or '')
                 counts[kind] = counts.get(kind, 0)+1
+                if kind == 'session.delegation.created': dialogue.delegated_at = time.monotonic()
                 # When each side starts speaking, as times only (no words, no audio): a first delta after 1.5 s of quiet.
                 # Without it, why Dan was silent for some seconds after an answer reached it could not be told (2026-10-01).
                 if kind in ('session.output_audio.delta', 'session.input_transcript.delta'):

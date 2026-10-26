@@ -685,6 +685,11 @@ class Stage:
             if any(t['role'] == 'assistant' and mention_of(card, t['text']) for t in words_since(history, self._flow_mark)) or mention_of(card, dan_words):
                 self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_by_dan', detail=why[:80], **usage)
                 return 'read_back'
+            if getattr(self.dialogue, 'delegated_at', 0.0) >= getattr(self.dialogue, 'heard_at', 0.0) - .5:
+                # the speech model handed these words to the backend: its answer carries the read-back (send_message_on_stage
+                # returns read_back); saying it here too made the owner hear it twice (test call 6, 2026-10-27)
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_delegated', detail=why[:80], **usage)
+                return 'read_back'
             text = spoken_summary(card)
             self.dialogue.add('assistant', text)   # the read-back counts even when the commentary is not transcribed
             if self.speak is not None:
