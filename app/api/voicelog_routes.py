@@ -60,7 +60,7 @@ async def call_stage(room_id: str, request: Request, after: int = 0, wait: float
         state = voice_stage.read_state(room_id)
         if not state: state = {'room_id': room_id, 'version': 0, 'caption': '', 'program': '', 'at': None, 'active': False, 'scenes': 0}
         if int(state.get('version') or 0) > after or not state.get('active') or asyncio.get_running_loop().time() >= deadline:
-            return {k: state.get(k) for k in ('room_id', 'session_id', 'version', 'caption', 'program', 'at', 'active', 'scenes')}
+            return {k: state.get(k) for k in ('room_id', 'session_id', 'version', 'caption', 'program', 'html', 'image', 'page_url', 'at', 'active', 'scenes')}
         await asyncio.sleep(.15)
 
 

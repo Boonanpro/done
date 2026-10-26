@@ -25,6 +25,7 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  const [stageShown, setStageShown] = useState(false);   // a scene is on the stage: the orb goes small
   const [currentActivity, setCurrentActivity] = useState<string | null>(null);
   /** オーブ下に出す活動フィード（ツール実行・委譲の進行を1行ずつ）。文字起こしは出さない。 */
   const [activity, setActivity] = useState<string[]>([]);
@@ -406,17 +407,30 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
         </button>
       </div>
 
-      {/* The stage: the caption and the scene the server draws while Dan talks (voice_stage). */}
-      <VoiceStage roomId={roomId} active={status === 'connected'} className="w-full" />
+      {/* The stage: the caption and the scene the server draws while Dan talks (voice_stage). While a scene shows, the
+          orb shrinks into the status row so the scene has the panel (2026-10-26: the 150px orb stayed under every scene). */}
+      <VoiceStage roomId={roomId} active={status === 'connected'} className="w-full" onShown={setStageShown} />
 
-      <VoiceOrb size={150} getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
+      {stageShown ? (
+        <div className="flex w-full items-center gap-2 text-xs text-muted-foreground" data-voice-orb="small">
+          <VoiceOrb size={40} getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
+          <span className="min-h-5 truncate">
+            {status === 'error' && <span className="text-destructive">{error}</span>}
+            {status === 'connected' && currentActivity && `（${currentActivity}）`}
+          </span>
+        </div>
+      ) : (
+        <>
+          <VoiceOrb size={150} getUserLevel={getUserLevel} getAiLevel={getAiLevel} active={status === 'connected'} />
 
-      <div className="min-h-5 text-center text-xs text-muted-foreground">
-        {status === 'connecting' && '接続中…'}
-        {status === 'error' && <span className="text-destructive">{error}</span>}
-        {status === 'connected' && currentActivity && `（${currentActivity}）`}
-        {status === 'connected' && !currentActivity && (speaking ? '' : '')}
-      </div>
+          <div className="min-h-5 text-center text-xs text-muted-foreground">
+            {status === 'connecting' && '接続中…'}
+            {status === 'error' && <span className="text-destructive">{error}</span>}
+            {status === 'connected' && currentActivity && `（${currentActivity}）`}
+            {status === 'connected' && !currentActivity && (speaking ? '' : '')}
+          </div>
+        </>
+      )}
 
       {activity.length > 0 && (
         <div className="w-full space-y-1 border-t border-border pt-2">

@@ -32,15 +32,22 @@ logger = logging.getLogger(__name__)
 
 MODEL = os.environ.get('DAN_VOICE_STAGE_MODEL', 'gpt-5.4-mini')
 REASONING = os.environ.get('DAN_VOICE_STAGE_REASONING', 'none')   # gpt-5 class only ('minimal' is refused by gpt-5.4)
-QUIET_S = .9           # Dan paused this long: a stretch of speech ended
-SENTENCE_S = .35       # a sentence ended and enough was said: decide sooner
+QUIET_S = .7           # Dan paused this long: a stretch of speech ended
+SENTENCE_S = .25       # a sentence ended and enough was said: decide sooner
+CLAUSE_S = .3          # a clause ended (、) and enough was said: decide without waiting for the sentence (2026-10-27: Dan
+                       # speaks one sentence for 10 seconds without a pause; the owner saw the drawing 9-12 s after the topic)
 MIN_CHARS = 14         # fewer new characters than this are a backchannel, not a stretch worth a decision
-USER_S = 1.0           # the owner's words settle (「それ図にして」 is a request to the listener too)
+CLAUSE_CHARS = 24      # a clause this long says what the topic is
+USER_S = .6            # the owner's words settle (「それ図にして」 is a request to the listener too)
 MODEL_TIMEOUT_S = 8.0
 MAX_SCENES = 40
-HOLD_S = 6.0           # after a scene was replaced, Dan's next words wait this long before another decision (2026-10-25: a
-                       # flow Dan listed step by step was redrawn 4 times in 15 seconds); the owner's words are not held
+HOLD_S = 1.5           # after a scene was replaced, Dan's next words wait this long before another decision (2026-10-25: a
+                       # flow Dan listed step by step was redrawn 4 times in 15 seconds; 6 s then, which the owner felt as
+                       # the drawing lagging the talk, so 1.5 s since 2026-10-27); the owner's words are not held
+HTML_MAX = 12000       # a free drawing (SVG/HTML) the model writes for the stage
 NOT_ON_STAGE = ('Choice', 'Input', 'Button')   # answers and links need a chat; the stage is looked at while talking
+PAGE_TIMEOUT_S = 15.0  # opening a page to photograph it for the stage
+PAGE_VIEWPORT = {'width': 960, 'height': 600}
 
 _stages = {}   # room_id -> Stage, for the backend tool show_on_stage (voice_responses)
 
@@ -126,15 +133,54 @@ def sanitize(program):
     return ''.join(out)
 
 
+_TAG_OUT = re.compile(r'<\s*(script|iframe|object|embed|link|meta|base|form|input|button|textarea|select|frame|frameset|applet|audio|video|source|track)\b[^>]*>.*?(<\s*/\s*\1\s*>|$)', re.I | re.S)
+_TAG_SELF = re.compile(r'<\s*/?\s*(script|iframe|object|embed|link|meta|base|form|input|button|textarea|select|frame|frameset|applet|audio|video|source|track)\b[^>]*>', re.I)
+_ON_ATTR = re.compile(r'\s+on[a-z]+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)', re.I)
+_BAD_URL = re.compile(r'(href|src|xlink:href|action|formaction|data|poster)\s*=\s*("|\')?\s*(javascript|vbscript|data:text/html|file):[^"\'\s>]*', re.I)
+_STYLE_URL = re.compile(r'(expression\s*\(|url\s*\(\s*["\']?\s*(javascript|vbscript|file):)', re.I)
+
+
+def clean_html(markup):
+    """A free drawing (SVG/HTML) the model wrote, with everything that could run or reach out removed: scripts, frames,
+    forms, event attributes, javascript: URLs. The screen also draws it in a sandboxed frame with no scripts and its own
+    origin, so this is the second wall. None when nothing drawable is left or the markup is too large."""
+    if not isinstance(markup, str): return None
+    text = markup.strip()
+    if not text or len(text) > HTML_MAX: return None
+    text = re.sub(r'^```[a-z]*\s*|\s*```$', '', text, flags=re.I).strip()
+    text = _TAG_OUT.sub('', text)
+    text = _TAG_SELF.sub('', text)
+    text = _ON_ATTR.sub('', text)
+    text = _BAD_URL.sub(r'\1=""', text)
+    text = _STYLE_URL.sub('', text)
+    return text if '<' in text and '>' in text else None
+
+
+def safe_image(url):
+    """An image the stage may show: one of Dan's files (/api/v1/files/<name>) or an https URL (no credentials)."""
+    if not isinstance(url, str): return None
+    url = url.strip()
+    if re.fullmatch(r'/api/v1/files/[A-Za-z0-9._-]{1,200}', url): return url
+    if re.fullmatch(r'https://[A-Za-z0-9.-]+(:[0-9]+)?/[^\s"\'<>\\]{0,1800}', url): return url
+    return None
+
+
 INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、本人の画面に出す「図」を決めて描く係です。声は出せません。画面だけです。
 入力は、直前の会話（ユーザー＝本人、Dan＝ダン）、今の画面の札と中身、そして本人からの明示の頼み（あれば）です。
-出力は JSON だけ: {"action": "keep" | "caption" | "replace", "caption": "今の話を6〜14文字で", "program": "部品のプログラム（replace の時だけ）"}
+出力は JSON だけ: {"action": "keep" | "caption" | "replace", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL"}
+replace の時は program・html・image のどれか1つだけを入れる（内容に一番合う見せ方を選ぶ。下の「見せ方の選び方」）。
 
 action の決め方:
 - keep: 挨拶・相づち・短い返事・今の画面がまだ話に合っている時。
 - caption: 話題が少し動いたが、新しく描く構造（流れ・比較・数字・手順）が無い時。札だけ替える。
 - replace: ダンの説明に、人・物・流れ、比べる物、金額や件数、手順、時間の推移など「見た方が早い構造」が出た時。本人が「図にして」「画面に出して」と頼んだ時は必ず replace。
-- 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。
+- 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は replace して全部入れる。
+- 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。まだ何の話か分からなければ keep。
+
+見せ方の選び方（引き出しは3つ。毎回同じ型にしない）:
+- program（部品）: 人・物・流れは Flow、金額・件数・時刻は Stat、比べる話は Compare、推移は Chart、順番は Steps。構造がそのまま部品に当てはまる時。
+- html（自由な絵）: 部品では表しにくい物。場所の配置・部屋や機械の図解・時間の長さを帯で見せる予定表・大小や割合を面積で見せる絵・画面の見た目の下絵・一枚絵の説明図・言葉の対比のポスター風の見せ方など。SVG を書く（<svg viewBox="0 0 640 360" width="100%" …>）。背景は暗い色（#0a0a0a 系）で、文字は白か明るい色、文字の大きさは 18px 以上、要素は10個まで。script・外部の読み込み・リンク・フォームは書かない（消される）。中身は 12000 文字まで。
+- image（画像）: 会話に実在する画像の URL（/api/v1/files/… か https://）を見せる時だけ。URL を作らない。
 
 描き方の決まり（program は OpenUI Lang。`root = Part(...)` に加え、`name = Part(...)` の行を書いて root から名前で参照できる。引数は位置で渡し、文字は二重引用符、省略できる引数は後ろから省く。name: value の書き方はしない）:
 - 図は、声を聞いていない人が見ても何の話か分かる物にする。Heading の text は「この図が言っていること」を1文で（例: 「予約から乗るまでは4段階」「東京まで約2時間半・14,920円」）。Heading の sub に、図の読み方か要点を1行足す。
@@ -156,6 +202,7 @@ action の決め方:
 例:
 {"action": "replace", "caption": "DB の守りの仕組み", "program": "root = Column([Heading(\\"DB は許した表しか読めない\\", \\"アプリの鍵では会員の表に届かない\\"), Flow([{id: \\"app\\", label: \\"アプリ\\", icon: \\"phone\\", sub: \\"みきさんの手元\\"}, {id: \\"api\\", label: \\"ダンの鍵\\", icon: \\"key\\", sub: \\"本人の印つき\\", tone: \\"now\\"}, {id: \\"db\\", label: \\"会員の表\\", icon: \\"database\\", sub: \\"守られている\\", tone: \\"good\\"}], [{from: \\"app\\", to: \\"api\\", label: \\"渡す\\"}, {from: \\"api\\", to: \\"db\\", label: \\"読める\\"}])])"}
 {"action": "replace", "caption": "東京までの料金と時間", "program": "root = Column([Heading(\\"東京まで約2時間半・14,920円\\", \\"のぞみ指定席、新大阪から\\"), Row([Stat(\\"料金\\", 14920, \\"円\\", \\"指定席・片道\\"), Stat(\\"所要時間\\", \\"2時間30分\\", \\"\\", \\"新大阪→品川\\")])])"}
+{"action": "replace", "caption": "リビングの配置", "html": "<svg viewBox=\\"0 0 640 360\\" width=\\"100%\\" xmlns=\\"http://www.w3.org/2000/svg\\"><rect width=\\"640\\" height=\\"360\\" fill=\\"#0a0a0a\\"/><text x=\\"24\\" y=\\"40\\" fill=\\"#fff\\" font-size=\\"24\\">窓際に机、ソファは入口側</text><rect x=\\"40\\" y=\\"70\\" width=\\"560\\" height=\\"250\\" fill=\\"none\\" stroke=\\"#666\\" stroke-width=\\"2\\"/><rect x=\\"60\\" y=\\"90\\" width=\\"200\\" height=\\"80\\" fill=\\"#2b6cb0\\"/><text x=\\"160\\" y=\\"138\\" fill=\\"#fff\\" font-size=\\"20\\" text-anchor=\\"middle\\">机（窓際）</text><rect x=\\"360\\" y=\\"220\\" width=\\"220\\" height=\\"80\\" fill=\\"#b7791f\\"/><text x=\\"470\\" y=\\"268\\" fill=\\"#fff\\" font-size=\\"20\\" text-anchor=\\"middle\\">ソファ（入口側）</text></svg>"}
 """
 
 
@@ -230,23 +277,28 @@ async def ask_model(system, user):
     return (data if isinstance(data, dict) else {}), {'input_tokens': getattr(usage, 'prompt_tokens', 0) or 0, 'output_tokens': getattr(usage, 'completion_tokens', 0) or 0}
 
 
-def decision_input(turns, caption, program, request=None):
+def decision_input(turns, caption, program, request=None, html=None, image=None):
     talk = chr(10).join(('ユーザー' if t['role'] == 'user' else 'Dan') + ': ' + t['text'].strip()[:700] for t in turns if t['text'].strip())
-    text = '直前の会話（新しい物が下）:' + chr(10) + talk + chr(10) + chr(10) + '今の画面の札: ' + (caption or '（まだ無い）') + chr(10) + '今の画面の中身: ' + (program or '（まだ無い）')
+    shown = program or (('（自由な絵）' + chr(10) + html[:1500]) if html else '') or (('（画像）' + image) if image else '') or '（まだ無い）'
+    text = '直前の会話（新しい物が下）:' + chr(10) + talk + chr(10) + chr(10) + '今の画面の札: ' + (caption or '（まだ無い）') + chr(10) + '今の画面の中身: ' + shown
     if request: text += chr(10) + chr(10) + '本人からの明示の頼み（必ず replace で描く）: ' + request
     return text
 
 
 class Stage:
-    """One call's stage: the listener, the file the screen reads, and the scenes shown (for the record after the call)."""
+    """One call's stage: the listener, the file the screen reads, and the scenes shown (for the record after the call).
 
-    def __init__(self, room_id, session_id, dialogue, record, ask=None):
-        self.room_id, self.session_id, self.dialogue, self.record = room_id, session_id, dialogue, record
+    A scene is one of three things: a parts program (the chat's parts), a free drawing (SVG/HTML the model wrote,
+    cleaned here, drawn by the screen in a sandboxed frame) or an image (one of Dan's files or an https URL, including a
+    photograph of a page taken for the owner: show_page)."""
+
+    def __init__(self, room_id, session_id, dialogue, record, ask=None, user_id=None):
+        self.room_id, self.session_id, self.dialogue, self.record, self.user_id = room_id, session_id, dialogue, record, user_id
         self.ask = ask or ask_model
         # The version counts on from the room's previous call: the screen long-polls for a version above the last one
         # it saw, so a new call restarting at 1 never reached it (2026-10-25 3rd test call: 5 scenes drawn, none shown).
         self.version = int((read_state(room_id) or {}).get('version') or 0)
-        self.caption, self.program, self.at = '', '', None
+        self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
         self._timer = None
@@ -261,7 +313,8 @@ class Stage:
     # -- what the screen reads --------------------------------------------------------------------------------
     def state(self, active=True):
         return {'room_id': self.room_id, 'session_id': self.session_id, 'version': self.version, 'caption': self.caption,
-                'program': self.program, 'at': self.at, 'active': active, 'scenes': len(self.scenes)}
+                'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'at': self.at,
+                'active': active, 'scenes': len(self.scenes)}
 
     def write(self, active=True):
         try:
@@ -275,12 +328,17 @@ class Stage:
 
     # -- the listener -----------------------------------------------------------------------------------------
     def heard(self, role, delta):
-        """A transcript delta arrived. Dan's words are decided on at a pause or a sentence end; the owner's words a
-        moment after they settle (a request to draw is theirs)."""
+        """A transcript delta arrived. Dan's words are decided on at a clause end, a sentence end or a pause; the owner's
+        words a moment after they settle (a request to draw is theirs), and Dan's first words do not push that moment
+        back (2026-10-26: the owner's question set a decision, Dan's answer kept rescheduling it, so the drawing waited
+        for the end of Dan's sentence)."""
         if not delta or not delta.strip(): return
         if role == 'assistant':
             self.pending_chars += len(delta.strip())
-            wait = SENTENCE_S if re.search(r'[。！？!?]\s*$', delta) and self.pending_chars >= MIN_CHARS * 2 else QUIET_S
+            if self.user_pending and self._timer is not None: return
+            if re.search(r'[。！？!?]\s*$', delta) and self.pending_chars >= MIN_CHARS * 2: wait = SENTENCE_S
+            elif '、' in delta and self.pending_chars >= CLAUSE_CHARS: wait = CLAUSE_S
+            else: wait = QUIET_S
         else:
             self.user_pending = True
             wait = USER_S
@@ -312,30 +370,34 @@ class Stage:
         if not turns and not request: return None
         started = time.monotonic()
         try:
-            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request)), MODEL_TIMEOUT_S)
+            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image)), MODEL_TIMEOUT_S)
         except Exception as exc:
             self.record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
             return None
         elapsed = round((time.monotonic() - started) * 1000)
         action = str(data.get('action') or 'keep')
         caption = str(data.get('caption') or '').strip()[:40]
-        program = sanitize(data.get('program')) if isinstance(data.get('program'), str) else data.get('program')
-        if request and action != 'replace' and well_formed(program, self._known()): action = 'replace'
+        program = sanitize(data.get('program')) if isinstance(data.get('program'), str) else None
+        html = clean_html(data.get('html')) if data.get('html') else None
+        image = safe_image(data.get('image')) if data.get('image') else None
+        drawable = {'program': program.strip()} if well_formed(program, self._known()) else {'html': html} if html else {'image': image} if image else None
+        if request and action != 'replace' and drawable: action = 'replace'
         if mine < self._applied:
             self.record('stage_stale', action=action, elapsed_ms=elapsed)
             return None
         self._applied = mine
         if action == 'replace':
-            if not well_formed(program, self._known()):
-                self.record('stage_rejected', elapsed_ms=elapsed, chars=len(str(program or '')), **usage)
-                if caption and caption != self.caption: self._apply(caption, None)
+            if not drawable:
+                self.record('stage_rejected', elapsed_ms=elapsed, chars=len(str(program or html or image or '')), **usage)
+                if caption and caption != self.caption: self._apply(caption)
                 return 'rejected'
-            self._apply(caption or self.caption, program.strip())
+            self._apply(caption or self.caption, **drawable)
             self._last_replace = time.monotonic()
-            self.record('stage_scene', elapsed_ms=elapsed, chars=len(program), version=self.version, **usage)
+            kind = next(iter(drawable))
+            self.record('stage_scene', elapsed_ms=elapsed, kind=kind, chars=len(drawable[kind]), version=self.version, **usage)
             return 'replace'
         if action == 'caption' and caption and caption != self.caption:
-            self._apply(caption, None)
+            self._apply(caption)
             self.record('stage_caption', elapsed_ms=elapsed, **usage)
             return 'caption'
         self.record('stage_keep', elapsed_ms=elapsed, **usage)
@@ -345,13 +407,15 @@ class Stage:
         if self._names is None: self._names = part_names()
         return self._names
 
-    def _apply(self, caption, program):
+    def _apply(self, caption, program=None, html=None, image=None, page_url=''):
+        """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image)."""
         self.version += 1
         self.caption = caption
         self.at = datetime.now(timezone.utc).isoformat()
-        if program is not None:
-            self.program = program
-            self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': program})
+        if program is not None or html is not None or image is not None:
+            self.program, self.html, self.image, self.page_url = program or '', html or '', image or '', page_url or ''
+            self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': self.program,
+                                'html': self.html, 'image': self.image, 'page_url': self.page_url})
             del self.scenes[:-MAX_SCENES]
         self.write(active=True)
 
@@ -361,6 +425,26 @@ class Stage:
         result = await self.decide(request=str(what or '')[:400])
         return {'shown': result == 'replace', 'caption': self.caption, 'reason': None if result == 'replace' else (result or 'failed')}
 
+    # -- a real page on the stage -----------------------------------------------------------------------------
+    async def show_page(self, url='', artifact='', note=''):
+        """Open a page in a browser of this server and put its photograph on the stage: a URL, or one of the owner's
+        artifacts by name (the owner on 2026-10-27: the stage must show real screens, not only drawings)."""
+        started = time.monotonic()
+        target, title = await resolve_page(self.user_id, url, artifact)
+        if not target:
+            self.record('stage_page_failed', reason='not_found', elapsed_ms=round((time.monotonic() - started) * 1000))
+            return {'shown': False, 'reason': f'「{artifact or url}」という成果物やページが見つからなかった。'}
+        try:
+            path = await capture_page(target, self.user_id, self.room_id)
+        except Exception as exc:
+            self.record('stage_page_failed', reason=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            return {'shown': False, 'reason': f'ページを開けなかった（{type(exc).__name__}）。'}
+        caption = (str(note or '').strip() or title or target)[:40]
+        self._apply(caption, image=path, page_url=target)
+        self._last_replace = time.monotonic()
+        self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version)
+        return {'shown': True, 'caption': caption, 'url': target, 'image': path}
+
     # -- the end ----------------------------------------------------------------------------------------------
     def close(self):
         if self._timer is not None: self._timer.cancel(); self._timer = None
@@ -369,7 +453,8 @@ class Stage:
         if _stages.get(self.room_id) is self: _stages.pop(self.room_id, None)
 
     def summary(self, zone='Asia/Tokyo'):
-        """The one chat message that records what the call showed, scene by scene, as the parts themselves."""
+        """The one chat message that records what the call showed, scene by scene, as the parts themselves (a free
+        drawing as its markup, a page as its photograph)."""
         if not self.scenes: return ''
         from zoneinfo import ZoneInfo
         local = ZoneInfo(zone)
@@ -378,7 +463,87 @@ class Stage:
             when = datetime.fromisoformat(scene['at']).astimezone(local).strftime('%H:%M')
             lines.append('')
             lines.append(f'**{when} {scene["caption"]}**' if scene['caption'] else f'**{when}**')
-            lines.append('```openui-lang')
-            lines.append(scene['program'])
-            lines.append('```')
+            if scene.get('program'):
+                lines.append('```openui-lang'); lines.append(scene['program']); lines.append('```')
+            elif scene.get('html'):
+                lines.append('```html'); lines.append(scene['html']); lines.append('```')
+            elif scene.get('image'):
+                lines.append(f'[添付画像: {scene["image"]}]')
+                if scene.get('page_url'): lines.append(scene['page_url'])
         return chr(10).join(lines)
+
+
+# -- pages for the stage -------------------------------------------------------------------------------------------
+
+def screens_base():
+    """Where the owner's screens are served from (the artifacts' pages): the public site when configured, else the local
+    production build."""
+    from app.config import settings
+    return (os.environ.get('DAN_PUBLIC_BASE_URL') or settings.FRONTEND_URL or 'http://127.0.0.1:3000').rstrip('/')
+
+
+async def resolve_page(user_id, url='', artifact=''):
+    """The URL to photograph and a short title: an https URL as given, a path on this site under the screens' base, or
+    the owner's artifact whose title or slug matches the words (the longest common match wins)."""
+    url = str(url or '').strip()
+    if url.startswith(('http://', 'https://')): return url, ''
+    if url.startswith('/'): return screens_base() + url, ''
+    words = str(artifact or url or '').strip()
+    if not words or not user_id: return None, ''
+    try:
+        from app.services.chat_artifact_service import ChatArtifactService
+        rows = await ChatArtifactService().list(user_id, limit=200)
+    except Exception as exc:
+        logger.info('artifacts not listed for the stage: %s', type(exc).__name__)
+        rows = []
+    lowered = words.lower().replace(' ', '').replace('　', '')
+    best, score = None, 0
+    for row in rows:
+        for key in ('label', 'title', 'slug', 'name'):
+            value = str(row.get(key) or '').lower().replace(' ', '')
+            if not value: continue
+            s = len(value) if value in lowered or lowered in value else _overlap(value, lowered)
+            if s > score: best, score = row, s
+    if best is None or score < 2: return None, ''
+    path = best.get('preview_url') or ('/artifacts/' + str(best.get('slug') or ''))
+    return screens_base() + path, str(best.get('label') or best.get('title') or best.get('slug') or '')
+
+
+def _overlap(a, b):
+    """The longest run of characters the two strings share (2 or more)."""
+    longest = 0
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and a[i + k] == b[j + k]: k += 1
+            if k > longest: longest = k
+    return longest
+
+
+async def capture_page(url, user_id, room_id):
+    """Photograph a page in a headless browser of this server and save it as one of Dan's files (/api/v1/files/…).
+    Pages of this site get the owner's token (a short-lived one) in localStorage so signed-in screens show."""
+    from playwright.async_api import async_playwright
+    from app.api.file_routes import UPLOAD_DIR
+    from urllib.parse import urlparse
+    token = ''
+    if user_id and urlparse(url).netloc == urlparse(screens_base()).netloc:
+        try:
+            from datetime import timedelta
+            from app.services.auth_service import create_access_token
+            token = create_access_token(str(user_id), '', timedelta(minutes=10))
+        except Exception: token = ''
+    name = f'stage-{_name(room_id)[:24]}-{int(time.time() * 1000)}.png'
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport=PAGE_VIEWPORT, locale='ja-JP', timezone_id='Asia/Tokyo', color_scheme='dark')
+            if token: await context.add_init_script(f"localStorage.setItem('done-token', {json.dumps(token)});")
+            page = await context.new_page()
+            await page.goto(url, wait_until='load', timeout=PAGE_TIMEOUT_S * 1000)
+            await page.wait_for_timeout(900)
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(UPLOAD_DIR / name))
+        finally:
+            await browser.close()
+    return '/api/v1/files/' + name

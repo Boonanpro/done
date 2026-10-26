@@ -180,3 +180,89 @@ def test_a_new_call_counts_its_versions_on_from_the_rooms_last_call(room):
     second._apply('d', FLOW)
     state = S.read_state(room)
     assert state['version'] == 8 and state['session_id'] == 'sess-2' and state['active']
+
+
+# -- 2026-10-27: the drawing must not lag the talk; the stage draws more than the chat's parts ---------------------------
+
+@pytest.mark.asyncio
+async def test_a_clause_end_decides_before_the_sentence_ends(room, monkeypatch):
+    monkeypatch.setattr(S, 'QUIET_S', 5.0); monkeypatch.setattr(S, 'CLAUSE_S', .02)
+    stage, seen, _ = make_stage(room, [{'action': 'keep', 'caption': '予約の流れ'}])
+    stage.dialogue.add('assistant', 'まず日付と時間を決めて、予約サイトでのぞみの指定席を買って、'); stage.heard('assistant', 'まず日付と時間を決めて、予約サイトでのぞみの指定席を買って、')
+    await asyncio.sleep(.1)
+    assert len(seen) == 1   # decided at the 、 (QUIET_S would have waited 5 s)
+
+
+@pytest.mark.asyncio
+async def test_dans_first_words_do_not_push_back_the_owners_decision(room, monkeypatch):
+    monkeypatch.setattr(S, 'USER_S', .05); monkeypatch.setattr(S, 'QUIET_S', 5.0)
+    stage, seen, _ = make_stage(room, [{'action': 'keep', 'caption': '料金'}])
+    stage.dialogue.add('user', '料金と所要時間は？'); stage.heard('user', '料金と所要時間は？')
+    await asyncio.sleep(.02)
+    stage.dialogue.add('assistant', '目安ですが'); stage.heard('assistant', '目安ですが')   # would reschedule QUIET_S before
+    await asyncio.sleep(.1)
+    assert len(seen) == 1 and 'ユーザー: 料金と所要時間は？' in seen[0]
+
+
+def test_clean_html_keeps_the_drawing_and_removes_what_could_run():
+    svg = '<svg viewBox="0 0 640 360"><rect width="640" height="360" fill="#0a0a0a"/><text x="20" y="40" fill="#fff">机</text></svg>'
+    assert S.clean_html(svg) == svg
+    assert S.clean_html('```html\n' + svg + '\n```') == svg
+    out = S.clean_html(svg + '<script>alert(1)</script><iframe src="https://x"></iframe><a href="javascript:alert(1)" onclick="x()">a</a>')
+    assert 'script' not in out and 'iframe' not in out and 'onclick' not in out and 'javascript:' not in out and '<text' in out
+    assert S.clean_html('') is None and S.clean_html('no tags') is None and S.clean_html('<svg>' + 'x' * 13000 + '</svg>') is None
+
+
+def test_safe_image_takes_dans_files_and_https_only():
+    assert S.safe_image('/api/v1/files/stage-abc-1.png') == '/api/v1/files/stage-abc-1.png'
+    assert S.safe_image('https://example.com/a/b.png') == 'https://example.com/a/b.png'
+    assert S.safe_image('javascript:alert(1)') is None and S.safe_image('/api/v1/files/../x') is None and S.safe_image('http://x/y') is None
+
+
+@pytest.mark.asyncio
+async def test_a_free_drawing_and_an_image_are_scenes_too(room):
+    svg = '<svg viewBox="0 0 640 360"><text x="10" y="30" fill="#fff">配置</text></svg>'
+    stage, _, log = make_stage(room, [{'action': 'replace', 'caption': '配置', 'html': svg + '<script>x</script>'},
+                                      {'action': 'replace', 'caption': '写真', 'image': '/api/v1/files/p.png'},
+                                      {'action': 'replace', 'caption': 'だめ', 'image': 'javascript:x'}])
+    stage.dialogue.add('assistant', '窓際に机、入口側にソファです。')
+    assert await stage.decide() == 'replace'
+    state = S.read_state(room)
+    assert state['html'] == svg and state['program'] == '' and state['image'] == '' and log[-1][1]['kind'] == 'html'
+    assert await stage.decide() == 'replace'
+    state = S.read_state(room)
+    assert state['image'] == '/api/v1/files/p.png' and state['html'] == '' and log[-1][1]['kind'] == 'image'
+    assert await stage.decide() == 'rejected' and S.read_state(room)['image'] == '/api/v1/files/p.png'
+    text = stage.summary()
+    assert '```html' in text and svg in text and '[添付画像: /api/v1/files/p.png]' in text
+
+
+@pytest.mark.asyncio
+async def test_show_page_photographs_a_page_and_names_it_in_the_record(room, monkeypatch):
+    calls = []
+    async def fake_capture(url, user_id, room_id):
+        calls.append((url, user_id, room_id)); return '/api/v1/files/stage-x.png'
+    monkeypatch.setattr(S, 'capture_page', fake_capture)
+    monkeypatch.setattr(S, 'screens_base', lambda: 'https://dan.example')
+    stage, _, log = make_stage(room, [])
+    stage.user_id = 'u1'
+    out = await stage.show_page(url='/artifacts/x-ops', note='X運用室の今の記事')
+    assert out['shown'] and out['url'] == 'https://dan.example/artifacts/x-ops' and calls == [('https://dan.example/artifacts/x-ops', 'u1', room)]
+    state = S.read_state(room)
+    assert state['image'] == '/api/v1/files/stage-x.png' and state['page_url'] == 'https://dan.example/artifacts/x-ops' and state['caption'] == 'X運用室の今の記事'
+    assert log[-1][0] == 'stage_page' and '[添付画像: /api/v1/files/stage-x.png]' in stage.summary() and 'https://dan.example/artifacts/x-ops' in stage.summary()
+
+
+@pytest.mark.asyncio
+async def test_resolve_page_finds_the_owners_artifact_by_words(monkeypatch):
+    class Service:
+        async def list(self, user_id, limit=200):
+            return [{'label': 'X運用室', 'slug': 'x-operation-room', 'preview_url': '/artifacts/x-operation-room'},
+                    {'label': '台本室', 'slug': 'script-room', 'preview_url': '/artifacts/script-room'}]
+    import app.services.chat_artifact_service as cas
+    monkeypatch.setattr(cas, 'ChatArtifactService', Service)
+    monkeypatch.setattr(S, 'screens_base', lambda: 'https://dan.example')
+    assert await S.resolve_page('u1', artifact='X運用室を出して') == ('https://dan.example/artifacts/x-operation-room', 'X運用室')
+    assert await S.resolve_page('u1', artifact='台本') == ('https://dan.example/artifacts/script-room', '台本室')
+    assert await S.resolve_page('u1', url='https://example.com/a') == ('https://example.com/a', '')
+    assert await S.resolve_page('u1', artifact='全然違う物') == (None, '')
