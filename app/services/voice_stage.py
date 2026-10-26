@@ -180,6 +180,7 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - back: 新しく届いた言葉が、「これまで出した図」のどれかと同じ話題に戻った時。描き直さず、その図の version を返す。
 - 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は、今の図と同じ型のまま全部入れて replace する（Flow なら Flow のまま箱を足す）。
 - 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（流れの図と料金の数字を行ったり来たりさせない）。
+- 今の画面が本物のページの写真（（画像）で始まる）の時は、本人がそのページの話をしている間は keep。写真の中身を絵に描き直さない。
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。まだ何の話か分からなければ keep。
 - 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 質問の言葉と会話の事実だけで答えの骨組み（手順の見出しの並び、比べる物の名前）が描けるなら描く。答えの数字や中身をダンがまだ言っていないなら caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
@@ -413,6 +414,11 @@ class Stage:
             if scene is None or self._same_scene(scene):
                 self.record('stage_keep', elapsed_ms=elapsed, back=str(data.get('version'))[:12], **usage)
                 return 'keep'
+            since = time.monotonic() - self._last_replace
+            if not request and since < FLIP_HOLD_S:   # going back right after a new scene is the same flip
+                self.record('stage_flip_held', elapsed_ms=elapsed, kind='back', since_s=round(since, 1), **usage)
+                if caption and caption != self.caption: self._apply(caption)
+                return 'held'
             self._apply(caption or scene.get('caption') or self.caption, program=scene.get('program') or None, html=scene.get('html') or None,
                         image=scene.get('image') or None, page_url=scene.get('page_url') or '')
             self._last_replace = time.monotonic()
@@ -420,7 +426,7 @@ class Stage:
             return 'replace'
         if action == 'replace':
             if not drawable:
-                self.record('stage_rejected', elapsed_ms=elapsed, chars=len(str(program or html or image or '')), **usage)
+                self.record('stage_rejected', elapsed_ms=elapsed, chars=len(str(program or html or image or '')), detail=str(program or html or image or '')[:400], **usage)
                 if caption and caption != self.caption: self._apply(caption)
                 return 'rejected'
             kind = next(iter(drawable))
