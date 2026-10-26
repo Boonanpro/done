@@ -203,14 +203,13 @@ export function StageMessageCard({ card }: { card: StageCard }) {
   const lines = useMemo(() => (card.body || '').split('\n'), [card.body]);
   // the lines that differ from the version shown before (a revision by voice): they replay a short highlight, keyed on
   // the revision so the same line lights again when it changes again
-  const previous = useRef<string[] | null>(null);
-  const changed = useMemo(() => {
-    const before = previous.current;
-    previous.current = lines;
+  const [seen, setSeen] = useState<{ lines: string[]; changed: Set<number> }>({ lines, changed: new Set() });
+  if (seen.lines !== lines) {   // the previous version's lines, kept as state (derived from the prop, React's own pattern)
     const out = new Set<number>();
-    if (before) lines.forEach((line, i) => { if (before[i] !== line) out.add(i); });
-    return out;
-  }, [lines]);
+    lines.forEach((line, i) => { if (seen.lines[i] !== line) out.add(i); });
+    setSeen({ lines, changed: out });
+  }
+  const changed = seen.lines === lines ? seen.changed : new Set<number>();
   const status = card.status === 'sent' ? { text: '送りました', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
     : card.status === 'rejected' ? { text: '取り下げ', cls: 'bg-neutral-500/15 text-neutral-300 border-neutral-500/30' }
     : { text: '下書き', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
