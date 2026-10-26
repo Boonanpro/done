@@ -286,9 +286,11 @@ async def test_a_flip_right_after_a_scene_only_moves_the_caption_but_growth_pass
     assert state['program'] == FLOW and state['caption'] == '手数料' and log[-1][0] == 'stage_flip_held'
     assert await stage.decide() == 'replace'                   # the same flow with one more box: growth, drawn at once
     assert S.read_state(room)['program'] == grown
-    stage.ask = (lambda answers: (lambda system, user: _answer(answers)))([{'action': 'replace', 'caption': '手数料', 'program': 'root = Stat("手数料", 360, "円")'}])
     stage.dialogue.add('user', '手数料は？'); stage.heard('user', '手数料は？')
-    assert await stage.decide() == 'replace'                   # the owner asked something new: a real change of topic, not a flip
+    stage.ask = (lambda answers: (lambda system, user: _answer(answers)))([{'action': 'caption', 'caption': '手数料の話'},
+                                                                         {'action': 'replace', 'caption': '手数料', 'program': 'root = Stat("手数料", 360, "円")'}])
+    assert await stage.decide() == 'caption'                   # the question itself: the caption moves first
+    assert await stage.decide() == 'replace'                   # then Dan's answer: the owner asked, so it is a real change of topic, not a flip
     assert S.read_state(room)['program'] == 'root = Stat("手数料", 360, "円")'
     assert S.family('program', FLOW) == S.family('program', grown) == ('program', 'Flow')
     assert S.family('program', 'root = Stat("x", 1)') != S.family('program', FLOW) and S.family('html', '<svg/>') == ('html',)

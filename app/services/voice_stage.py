@@ -321,6 +321,7 @@ class Stage:
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
         self._fresh = []             # (role, words) since the last decision: what the model judges on
+        self._owner_asked = False    # the owner spoke since the last scene: a new scene is a real change of topic, not a flip
         self._timer = None
         self._decisions = 0          # decisions started
         self._applied = 0            # the newest decision whose answer reached the screen
@@ -363,6 +364,7 @@ class Stage:
             else: wait = QUIET_S
         else:
             self.user_pending = True
+            self._owner_asked = True
             wait = USER_S
         self._schedule(wait)
 
@@ -387,7 +389,7 @@ class Stage:
         (the newest words win; an older answer arriving late is dropped)."""
         self.pending_chars, self.user_pending = 0, False
         fresh, self._fresh = self._fresh, []
-        owner_spoke = any(role == 'user' for role, _ in fresh)   # a new question of the owner's is a real change of topic
+        owner_spoke = self._owner_asked   # the owner spoke since the last scene: a new scene is a real change of topic
         self._decisions += 1
         mine = self._decisions
         turns = self.dialogue.recent()[-8:] if self.dialogue is not None else []
@@ -467,6 +469,7 @@ class Stage:
         self.caption = caption
         self.at = datetime.now(timezone.utc).isoformat()
         if program is not None or html is not None or image is not None:
+            self._owner_asked = False
             self.program, self.html, self.image, self.page_url = program or '', html or '', image or '', page_url or ''
             self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': self.program,
                                 'html': self.html, 'image': self.image, 'page_url': self.page_url})
