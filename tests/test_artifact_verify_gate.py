@@ -266,3 +266,14 @@ def test_watched_file_of_a_common_place_needs_that_map(tmp_path):
     r = run(tmp_path, edit, env_extra=env)
     assert r and 'place_map.py check chat' in r['reason']
     assert run(tmp_path, [*shot('before', 'chat', root)] + edit + after('chat', root), env_extra=env) is None
+
+
+def test_a_removed_temporary_copy_in_a_worktree_is_not_counted(tmp_path):
+    """10-26: 作業場所に写した成果物の写しを消しただけで、地図と撮影を求めて止め続けた。"""
+    wt = tmp_path / 'wt'
+    (wt / 'frontend/src/app/artifacts').mkdir(parents=True)
+    env = {'DAN_ARTIFACT_GATE_WORKTREES': str(tmp_path)}
+    rm = [claude_tool('Bash', {'command': f'rm -rf {wt.as_posix()}/frontend/src/app/artifacts/dev-lead'}, '1')]
+    assert run(tmp_path, rm, env_extra=env) is None
+    (wt / 'frontend/src/app/artifacts/dev-lead').mkdir()
+    assert run(tmp_path, rm, env_extra=env)['decision'] == 'block'   # 写しが残っていれば数える
