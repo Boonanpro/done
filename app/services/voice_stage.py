@@ -476,10 +476,19 @@ class Stage:
 # -- pages for the stage -------------------------------------------------------------------------------------------
 
 def screens_base():
-    """Where the owner's screens are served from (the artifacts' pages): the public site when configured, else the local
-    production build."""
-    from app.config import settings
-    return (os.environ.get('DAN_PUBLIC_BASE_URL') or settings.FRONTEND_URL or 'http://127.0.0.1:3000').rstrip('/')
+    """Where the owner's screens are served from (the artifacts' pages): DAN_PUBLIC_BASE_URL when set, else the production
+    build on this machine (3000; the public site is a tunnel to it, and the photograph is taken here)."""
+    return (os.environ.get('DAN_PUBLIC_BASE_URL') or 'http://127.0.0.1:3000').rstrip('/')
+
+
+async def artifact_rows(user_id):
+    """The owner's registered artifacts (label, slug, preview_url), straight from the registry: the service's list()
+    keeps only slugs with a page folder in this checkout, which the artifacts moved to their own backends no longer have."""
+    from app.services.chat_artifact_service import ChatArtifactService
+    service = ChatArtifactService()
+    def read():
+        return service.supabase.table(service.table).select('label,slug,preview_url').eq('created_by', user_id).order('created_at', desc=True).limit(300).execute().data or []
+    return await asyncio.to_thread(read)
 
 
 async def resolve_page(user_id, url='', artifact=''):
@@ -491,8 +500,7 @@ async def resolve_page(user_id, url='', artifact=''):
     words = str(artifact or url or '').strip()
     if not words or not user_id: return None, ''
     try:
-        from app.services.chat_artifact_service import ChatArtifactService
-        rows = await ChatArtifactService().list(user_id, limit=200)
+        rows = await artifact_rows(user_id)
     except Exception as exc:
         logger.info('artifacts not listed for the stage: %s', type(exc).__name__)
         rows = []
@@ -538,7 +546,10 @@ async def capture_page(url, user_id, room_id):
         browser = await p.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport=PAGE_VIEWPORT, locale='ja-JP', timezone_id='Asia/Tokyo', color_scheme='dark')
-            if token: await context.add_init_script(f"localStorage.setItem('done-token', {json.dumps(token)});")
+            if token:   # the screens check the cookie (middleware) and the page reads localStorage
+                parsed = urlparse(url)
+                await context.add_cookies([{'name': 'done_access_token', 'value': token, 'domain': parsed.hostname, 'path': '/'}])
+                await context.add_init_script(f"localStorage.setItem('done-token', {json.dumps(token)});")
             page = await context.new_page()
             await page.goto(url, wait_until='load', timeout=PAGE_TIMEOUT_S * 1000)
             await page.wait_for_timeout(900)

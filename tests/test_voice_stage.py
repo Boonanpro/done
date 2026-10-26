@@ -255,12 +255,10 @@ async def test_show_page_photographs_a_page_and_names_it_in_the_record(room, mon
 
 @pytest.mark.asyncio
 async def test_resolve_page_finds_the_owners_artifact_by_words(monkeypatch):
-    class Service:
-        async def list(self, user_id, limit=200):
-            return [{'label': 'X運用室', 'slug': 'x-operation-room', 'preview_url': '/artifacts/x-operation-room'},
-                    {'label': '台本室', 'slug': 'script-room', 'preview_url': '/artifacts/script-room'}]
-    import app.services.chat_artifact_service as cas
-    monkeypatch.setattr(cas, 'ChatArtifactService', Service)
+    async def rows(user_id):
+        return [{'label': 'X運用室', 'slug': 'x-operation-room', 'preview_url': '/artifacts/x-operation-room'},
+                {'label': '台本室', 'slug': 'script-room', 'preview_url': '/artifacts/script-room'}]
+    monkeypatch.setattr(S, 'artifact_rows', rows)
     monkeypatch.setattr(S, 'screens_base', lambda: 'https://dan.example')
     assert await S.resolve_page('u1', artifact='X運用室を出して') == ('https://dan.example/artifacts/x-operation-room', 'X運用室')
     assert await S.resolve_page('u1', artifact='台本') == ('https://dan.example/artifacts/script-room', '台本室')
