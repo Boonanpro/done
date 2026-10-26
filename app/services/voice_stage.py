@@ -265,6 +265,7 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（流れの図と料金の数字を行ったり来たりさせない）。
 - 今の画面が本物のページの写真（（画像）で始まる）の時は、本人がそのページの話をしている間は keep。写真の中身を絵に描き直さない。
 - 今の画面が送信案（（送信案）で始まる。宛先・件名・本文）の時は、本人がその文面を直したり送るかを決めたりしている間なので keep（札も据え置き）。文面の内容を図に描き直さない。
+- 本人が「○○にメッセージ送って」「メールして」「返事して」と頼んだ時と、ダンがその文面を作っている間は keep。文面はダンが下書き（送信案）として画面に出すので、文面や宛先を図にしない。
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
 - 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 手順・流れ・段取り・比べる物を聞かれたなら、質問の言葉から見出しだけの骨組み（Steps か、箱2〜3個の Flow）を描いてよい（中身はダンの言葉で育てる）。数字・料金・時間を聞かれた時は、ダンがまだ言っていないので caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
@@ -646,13 +647,16 @@ class Stage:
         return {'revised': True, 'proposal_id': pid, 'body': card['body'], 'subject': card['subject'], 'to': card['to'],
                 'note': '画面の文面が新しい版になった。「直しました」とだけ。'}
 
-    async def send_message(self, proposal_id=''):
+    async def send_message(self, proposal_id='', speak=None):
         """Send the draft on the stage, only when the transcript shows Dan read it back and the owner's latest words
-        approve (approval_heard). The model's own belief that it heard 「いいよ」 is not enough (2026-10-27)."""
+        approve (approval_heard). The model's own belief that it heard 「いいよ」 is not enough (2026-10-27).
+        With `speak` (the call's spoken commentary) the delivery runs in the background and its result is spoken when
+        it arrives: an SMTP send took 7 s in the first test call, during which the call answered nothing."""
         started = time.monotonic()
         pid = str(proposal_id or (self.card or {}).get('proposal_id') or '').strip()
         card = self.card if self.card and self.card.get('proposal_id') == pid else None
         if not card: return {'sent': False, 'reason': 'その下書きは画面に無い。先に draft_message_on_stage で出す。'}
+        if card.get('status') == 'sending': return {'sent': 'sending', 'reason': '今送っている。結果は声で届く。'}
         if card.get('status') != 'pending': return {'sent': False, 'reason': 'この下書きはもう送ったか取り下げた。'}
         if not card.get('sendable'):
             self.record('stage_send_refused', reason='manual_channel', channel=card.get('channel'))
@@ -664,19 +668,33 @@ class Stage:
             self.record('stage_send_refused', reason=why[:80])
             return {'sent': False, 'reason': why, 'read_back': spoken_summary(card),
                     'note': '送っていない。まず read_back の内容を声で言って本人の返事を待つ。本人が「いいよ」「送って」のように答えたら、もう一度 send_message_on_stage。'}
+        self.card = dict(card, status='sending')   # no second send while this one is on its way
+        if speak is not None:
+            task = asyncio.ensure_future(self._deliver(pid, why, started, speak))
+            self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+            return {'sent': 'sending', 'proposal_id': pid, 'to': card['to'], 'to_name': card['to_name'],
+                    'note': '承認を確かめて送信を始めた。「送ります」とだけ言う。送れたかどうかは数秒後に声で本人に届くので、自分では言わない。'}
+        return await self._deliver(pid, why, started, None)
+
+    async def _deliver(self, pid, why, started, speak):
         try:
             svc = _message_service()
             row = await svc.send(pid, self.user_id, sent_by='dan')
         except Exception as exc:
             self.record('stage_send_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            if self.card and self.card.get('proposal_id') == pid: self.card['status'] = 'pending'
+            if speak is not None: await speak('送れませんでした。下書きは部屋に残っています。')
             return {'sent': False, 'reason': f'送れなかった: {str(exc)[:120]}'}
         if str(row.get('status')) != 'sent':   # a channel Dan sends by hand got locked: not sent here
             try: await asyncio.to_thread(svc.release, pid, self.user_id)
             except Exception: pass
+            if self.card and self.card.get('proposal_id') == pid: self.card['status'] = 'pending'
             self.record('stage_send_refused', reason='not_sent', status=str(row.get('status')))
+            if speak is not None: await speak('この手段は通話中には送れませんでした。下書きは部屋に残っています。')
             return {'sent': False, 'reason': 'この手段は通話中には送れない。下書きは部屋に残っている。'}
         card = self._put_card(row, caption=self.caption)
         self.record('stage_sent', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, channel=card['channel'], approved_by=why[:40])
+        if speak is not None: await speak('送りました。')
         return {'sent': True, 'proposal_id': pid, 'to': card['to'], 'to_name': card['to_name'], 'note': '送った。「送りました」とだけ。'}
 
     async def discard_message(self, proposal_id=''):

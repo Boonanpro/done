@@ -76,6 +76,8 @@ READ_STAGE = '''
           // the scene's identity (changes only when the scene itself changes: a remount) and what kind it is
           key: stage ? stage.getAttribute('data-stage-scene-key') : null,
           kind: sceneEl ? sceneEl.getAttribute('data-stage-kind') : null,
+          // a message draft on the stage (2026-10-27): its status (pending / sent / rejected) and revision
+          card: (() => { const c = stage && stage.querySelector('[data-stage-card]'); return c ? {status: c.getAttribute('data-stage-card-status'), revision: c.getAttribute('data-stage-card-revision'), lit: c.querySelectorAll('[data-stage-line="changed"]').length} : null; })(),
           orb: orb ? Math.round(orb.getBoundingClientRect().width) : null,
           connecting: !!Array.from(document.querySelectorAll('div')).find(d => d.textContent === '接続中…'),
           panel: !!document.querySelector('button[aria-label="音声モードを閉じる"]'),
@@ -127,11 +129,11 @@ async def main(base, token_file, project_id, wav, out_dir, seconds=None):
         seen = None
         while time.monotonic() - t_call < total:
             st = await page.evaluate(READ_STAGE)
-            key = (st['version'], st['caption'], st['scene'], st.get('key'), st.get('orb'))
+            key = (st['version'], st['caption'], st['scene'], st.get('key'), st.get('orb'), json.dumps(st.get('card')))
             if key != seen:
                 seen = key
                 mark('stage', version=st['version'], caption=st['caption'].replace('今の話: ', ''), scene=st['scene'],
-                     key=st.get('key'), scene_kind=st.get('kind'), orb=st.get('orb'))
+                     key=st.get('key'), scene_kind=st.get('kind'), orb=st.get('orb'), card=st.get('card'))
                 if st['scene']:
                     await page.wait_for_timeout(400)   # the fade-in
                     await page.screenshot(path=str(out / f"screen-{st['version']}.png"))

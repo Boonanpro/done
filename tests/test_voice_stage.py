@@ -465,3 +465,17 @@ async def test_the_voice_functions_reach_the_stage(room, monkeypatch):
     stage.close()
     out = await R.run_function('send_message_on_stage', {}, 'owner-1', room, [])
     assert not out['sent'] and '画面' in out['reason']
+
+
+@pytest.mark.asyncio
+async def test_with_the_calls_voice_the_delivery_runs_behind_and_the_result_is_spoken(room, monkeypatch):
+    stage, fake, log = make_message_stage(room, monkeypatch)
+    said = []
+    async def speak(text): said.append(text)
+    await stage.draft_message('email', 'dan-test@example.com', '明日は15時で。', subject='時間', to_name='田中様')
+    dan_says(stage, '田中様さん宛てのメールです。送っていいですか。'); owner_says(stage, 'いいよ')
+    out = await stage.send_message('p1', speak=speak)
+    assert out['sent'] == 'sending' and fake.sent == []
+    assert (await stage.send_message('p1', speak=speak))['sent'] == 'sending'   # not twice
+    await asyncio.sleep(.05)
+    assert fake.sent == [('p1', 'dan')] and said == ['送りました。'] and S.read_state(room)['card']['status'] == 'sent'

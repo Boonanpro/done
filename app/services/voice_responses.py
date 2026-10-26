@@ -321,7 +321,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         if name == 'revise_message_on_stage':
             return await stage.revise_message(str(args.get('proposal_id') or ''), body=args.get('body'), subject=args.get('subject'), to=args.get('to'), to_name=args.get('to_name'))
         if name == 'send_message_on_stage':
-            return await stage.send_message(str(args.get('proposal_id') or ''))
+            return await stage.send_message(str(args.get('proposal_id') or ''), speak=speak)
         return await stage.discard_message(str(args.get('proposal_id') or ''))
     if name == 'end_call':
         return {'ok': True}
