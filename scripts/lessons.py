@@ -131,6 +131,16 @@ def _judge(text: str, roots: list[dict]) -> list[str] | None:
         '出力は JSON 1つだけ: {"roots": ["近い順の id", …最大3つ]}'
     )
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "CLAUDECODE")}
+    # ダン本体は Claude を長く使える鍵（~/.dan/claude_oauth_token、scripts/mac/run_core.sh）で起動するが、作業の中の
+    # 道具には渡らない。鍵が無いと保管庫のログインが切れた時に判定役が起動できない（hook_skill_gate.py と同じ、2026-10-26）。
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".dan", "claude_oauth_token"), encoding="utf-8") as f:
+                token = "".join(f.read().split())
+        except OSError:
+            token = ""
+        if token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     try:
         with tempfile.TemporaryDirectory() as tmp:
             proc = subprocess.run(
