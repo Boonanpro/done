@@ -35,6 +35,7 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - ファイル・画像・動画・資料を「出して」「見せて」「貼って」「送って（この画面に）」と言われたら show_in_chat（1秒で本人のチャット画面に出る。画像・動画はその場に表示、資料は押せば開くリンク）。どのファイルか分からなければ room_files でこの部屋のファイル一覧（新しい順・何の資料か）を見て選ぶ。作業に渡したり、パソコンで開いたりしない。出せたら「出しました」とだけ言う。
 - パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
 - 図・表・数字を本人の通話画面に出す頼み（「図にして」「画面に出して」「表で見せて」）は show_on_stage（1〜3秒で本人の通話画面に出る。何を描くかは話の中身から画面係が決める）。出たら「出しました」とだけ。普段は頼まれなくても画面係が話に合わせて描いているので、自分から呼ばない。
+- 実際のページや成果物の画面を見せる頼み（「このページ見せて」「X運用室を出して」「サイトの今の見た目を画面に」）は show_page_on_stage（URL か成果物の名前。2〜5秒でその画面の写真が本人の通話画面に出る）。頼まれたら前置きを言わずにすぐ呼ぶ（「出しますね」と言ってから呼ぶと、その分だけ画面が遅れる）。自分が read_page で読んだ URL や、作業で作った成果物も、本人が見たがったらこれで出す。出たら「出しました」とだけ。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
@@ -75,6 +76,8 @@ TOOLS = [
                                                     'job_id': {'type': 'string', 'description': '対象の作業の id（省略時は一番新しい作業）'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'show_on_stage', 'description': '本人の通話画面に、今の話の図・表・数字を出す（本人が「図にして」「画面に出して」と頼んだ時）。描く中身は画面係が会話から決める。',
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を図にしてほしいか（本人の言葉のまま。例: 今の3つの案を比べて、支払いの流れ）'}}, 'required': ['what'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'show_page_on_stage', 'description': '実際のページの画面を本人の通話画面に写す（本人が「このページ見せて」「成果物の〇〇を出して」と頼んだ時）。URL（https://… か /artifacts/… のような道）か、本人の成果物の名前（例: X運用室、台本室）を渡す。',
+     'parameters': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'ページの URL か、このサイトの道（省略可）'}, 'artifact': {'type': 'string', 'description': '成果物の名前の一部（URL が無い時）'}, 'note': {'type': 'string', 'description': '画面の札に出す短い言葉（例: X運用室の今の記事）'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'end_call', 'description': '通話を終える。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
 ]
 
@@ -283,6 +286,11 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         stage = voice_stage.for_room(room_id)
         if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
         return await stage.show(str(args.get('what') or ''))
+    if name == 'show_page_on_stage':
+        from app.services import voice_stage
+        stage = voice_stage.for_room(room_id)
+        if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
+        return await stage.show_page(str(args.get('url') or ''), str(args.get('artifact') or ''), str(args.get('note') or ''))
     if name == 'end_call':
         return {'ok': True}
     if name == 'web_search':

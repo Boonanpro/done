@@ -666,7 +666,10 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             )}
             {!stageShown && <Text style={vstyles.callTitle}>{"Done"}</Text>}
             {!stageShown && !!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
-            <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
+            {/* a scene on the stage: the orb shrinks to a third so the scene has the screen (2026-10-26) */}
+            <View style={stageShown ? {height:76,justifyContent:'center',transform:[{scale:0.3}]} : null}>
+              <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
+            </View>
             {status === 'connected' && !!currentActivity && <ShimmerLine text={currentActivity.length > 52 ? currentActivity.slice(0, 51) + '…' : currentActivity} color={currentActivity.startsWith('Stopped') ? '#e5534b' : '#a49d92'} />}
             {status === 'error' && <Text style={vstyles.statusText}>{error}</Text>}
             {status === 'error' && <Pressable accessibilityRole="button" style={vstyles.retryButton} onPress={() => void connect()}><Text style={vstyles.retryText}>{ui("Reconnect","再接続")}</Text></Pressable>}
