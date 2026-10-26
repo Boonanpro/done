@@ -92,14 +92,45 @@ def _synthesize(payload: dict) -> list[dict]:
         return [payload]
     patch = tool_input.get("command") or tool_input.get("patch") or ""
     out = []
-    for kind, path in _PATCH_FILE_RE.findall(patch):
+    marks = list(_PATCH_FILE_RE.finditer(patch))
+    for n, m in enumerate(marks):
+        kind, path = m.group(1), m.group(2).strip()
+        body = patch[m.end():marks[n + 1].start() if n + 1 < len(marks) else len(patch)]
         # A deletion reaches only hooks whose matcher names "Delete" (the live tree guard); the others never saw it.
         name = {"Add File": "Write", "Move to": "Write", "Delete File": "Delete"}.get(kind, "Edit")
         p = dict(payload)
         p["tool_name"] = name
-        p["tool_input"] = {"file_path": path.strip()}
+        p["tool_input"] = {"file_path": path, **_patch_text(kind, body)}
         out.append(p)
     return out
+
+
+def _patch_text(kind: str, body: str) -> dict:
+    """The patch body as Claude-shaped text, so hooks that judge what is written (hook_lesson_gate) see it:
+    an added file is ``content``; each ``@@`` hunk of an update is one edit (old = context and removed lines,
+    new = context and added lines)."""
+    lines = [l for l in body.strip("\n").splitlines() if not l.startswith("*** ")]
+    if kind == "Add File":
+        return {"content": "\n".join(l[1:] for l in lines if l.startswith("+"))}
+    if kind != "Update File":
+        return {}
+    edits, old, new = [], [], []
+    for l in lines + ["@@"]:
+        if l.startswith("@@"):
+            if any(x.strip() for x in old + new):
+                edits.append({"old_string": "\n".join(old), "new_string": "\n".join(new)})
+            old, new = [], []
+        elif l.startswith("+"):
+            new.append(l[1:])
+        elif l.startswith("-"):
+            old.append(l[1:])
+        else:
+            old.append(l[1:] if l.startswith(" ") else l)
+            new.append(l[1:] if l.startswith(" ") else l)
+    if not edits:
+        return {}
+    first = edits[0]
+    return {"old_string": first["old_string"], "new_string": first["new_string"], "edits": edits}
 
 
 def _run_hook(command: str, payload: dict) -> tuple[int, str, str]:
