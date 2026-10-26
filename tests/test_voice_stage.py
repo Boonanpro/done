@@ -14,6 +14,7 @@ FLOW = 'root = Column([Heading("支払いの流れ"), Flow([{id: "a", label: "�
 @pytest.fixture
 def room(tmp_path, monkeypatch):
     monkeypatch.setattr(S, 'ROOT', tmp_path)
+    monkeypatch.setattr(S, 'CLAUSE_S', .02)   # the tests' sentences have clauses; they wait on QUIET_S / SENTENCE_S as written
     S._stages.clear()
     return 'room-1'
 
