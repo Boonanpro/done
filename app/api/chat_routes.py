@@ -652,6 +652,10 @@ async def _notify_dan_completion(
         # 👍リアクションだけのターンは通知しない（受領スタンプに通知価値はない）。
         if (final_text or "").strip() == "👍":
             return
+        # 「伝えることは無い」の印だけの返事は通知しない（app/agent/reply_text.py。保存もしていない）。
+        from app.agent.reply_text import is_silent_reply
+        if is_silent_reply(final_text):
+            return
         from app.services.push_service import get_push_service
 
         body = _compact_text(final_text, 120) if final_text else ""
@@ -2288,8 +2292,15 @@ async def send_dan_message_stream(
     request: MessageSendRequest,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
+    http_request: Request = None,
 ):
     """ダンにメッセージを送信（SSEストリーミング版）- Agent v2を使用"""
+    try:  # どの端末から書いたかを残す。話すダンが「今みきさんがどこで読んでいるか」に使う（場所の地図、2026-10-25）
+        if http_request is not None:
+            from app.agent.place_map import note_client
+            note_client(request.session_id or "", http_request.headers.get("user-agent", ""))
+    except Exception:
+        pass
     from starlette.responses import StreamingResponse
     from app.services.progress_callback import (
         ProgressCallbackRegistry,
@@ -3039,7 +3050,8 @@ async def send_dan_message_stream(
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
                         final_text = event["text"]
                         text_preview = event["text"].strip()
-                        if text_preview and len(text_preview) > 10:
+                        from app.agent.reply_text import is_silent_reply as _silent
+                        if text_preview and len(text_preview) > 10 and not _silent(text_preview):
                             # Use full text preview without truncation.
                             label = text_preview
                             reasoning_steps.append(label)
@@ -3071,8 +3083,13 @@ async def send_dan_message_stream(
                         # 割り込み終了の result は is_error=True が付くことがある（実測）ため
                         # is_error では弾かない。continuation＋本文空＝無言の中間ターン。
                         empty_continuation = is_continuation and not result_text
+                        # 「伝えることは無い」の印だけの返事は、画面にも出さず保存もしない（app/agent/reply_text.py）
+                        from app.agent.reply_text import is_silent_reply
+                        silent_reply = is_silent_reply(result_text)
                         ai_response_content = "" if empty_continuation else (final_text or "応答を生成できませんでした。もう一度お試しください。")
-                        if cli_saved_ai_message:
+                        if silent_reply:
+                            pass
+                        elif cli_saved_ai_message:
                             ai_context = {"turn_id": event.get("turn_id")} if event.get("turn_id") else None
                             # DB保存済み行の実IDをそのまま返す。合成ID(cli-saved-*)だと
                             # ポーリングで取得したDB行とキャッシュ上で別メッセージ扱いに

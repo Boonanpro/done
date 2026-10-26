@@ -1,27 +1,41 @@
 # -*- coding: utf-8 -*-
-"""Stop hook: 成果物を書き換えたら、本人の画面と裏側を確かめるまでターンを終えられない。
+"""Stop hook: 画面を書き換えたら、確かめるまでターンを終えられない。
 
-2026-10-18 本人: 「あなたが直して確認した画面と私が見る画面が一致し、『直した』と言われたものは
-ちゃんと直っている。当たり前のことを当たり前にできるようにしてください」。ダンの確認（テスト用
-アカウントのブラウザ・8001 の確認用サーバー）では直っていたのに、本人の画面では古い部品や
-再起動待ちの裏側のまま動いていた、が何度も起きた。確かめ方（scripts/artifact_seen.py）は
-手順書に書いてあったが、走らせずに報告できた。
+確かめは2つあり、対象が違う。
 
-止める条件:
-  同じ作業の記録（transcript_path。Claude も Codex も渡す）で、動いているダン（D:/done）の
-  frontend/src/app/artifacts/<slug>/ を書き換えた後に、その slug（または全部）の artifact_seen.py の
-  結果「[artifact_seen] slug=… result=…」が道具の出力に出ていない。
-  書き換えは Write/Edit/MultiEdit、Codex の apply_patch、シェルの書き込み（> ・write_text・sed -i・
-  cp/mv など）を数える。シェルは見分けが粗いので、読むだけのコマンドでも書き込みの印があれば数える
-  （確かめを1回走らせれば通る）。
-結果が NG か UNCHECKED（本人が開いていない）の時は、最後の返事に「直った」とだけ書いて終えないよう、
-一度だけ止めて、その結果をそのまま伝えるよう返す（返事が未確認・NG の理由に触れていれば止めない）。
+1. 本人の画面（2026-10-18）: 動いているダン（D:/done）の frontend/src/app/artifacts/<slug>/ を書き換えた後に、
+   artifact_seen.py の結果「[artifact_seen] slug=… result=…」が要る。本人「あなたが直して確認した画面と私が見る画面が
+   一致し、『直した』と言われたものはちゃんと直っている」。ダンの確認では直っていたのに、本人の画面では古い部品や
+   再起動待ちの裏側のまま動いていた、が何度も起きた。
+   このターンで確かめた結果が NG（作り直しや読み直しの途中）の時は、一度だけ止めて、待ってから確かめ直させる。
+   UNCHECKED（本人が開いていない）は止めない（開けば新しい版に切り替わる）。
+
+2. 場所の地図と画面の見え方（2026-10-25）: 動いているダンでも作業場所（<dan-workspace>/<名前>）でも、画面のファイル
+   （成果物の _server・MAP.md・PRODUCT.md・*.gen.json 以外、と共通の場所の地図の watches に書いたファイル）を
+   このターンで書き換えたら、その場所ごとに、同じフォルダで次の3つが要る。
+     - 書き換えの前に撮った「[place_shot] … tag=before …」
+     - 最後の書き換えの後に撮った「[place_shot] … tag=after … result=OK」（NG なら一度止めて直させる）
+     - 最後の書き換えの後の、いちばん新しい「[place_map] place=… result=FRESH」（後で STALE が出たら通さない）
+   撮った結果は covers に書かれた場所すべてに数える（dev-lead-room を撮れば artifact:dev-lead にも数える）。
+   ローレン・タンさんの講演（機能の地図）から。地図が古いと、次に直すダンが画面にたどり着けず、話すダンは画面に無い物を
+   案内する。10-25 開発室の話し合いで番号が消えていたのに、ダンは自分の返事の見え方を一度も見ていなかった。
+
+確かめた結果は本人への返事に書かせない（2026-10-25 本人: 「本人の画面を確かめた結果を足します。パソコンで開いている
+顧客管理のタブは、もう新しい版に…」は「一切いらない」「内部的な話」）。止めるとその後に書いた文だけが本人に届く返事に
+なる（Claude の result も Codex の最後の文もそう）ので、止める時は「確かめる前に書いた本人への答えを、そのまま全部
+もう一度書いて終える」よう案内する。10-25 はこの案内が無く、答えが捨てられて確かめた結果の1段落だけが届いた。
+
+書き換えは Write/Edit/MultiEdit、ダンの write_file/edit_file（Codex の exec の中の tools.mcp__…__edit_file も）、
+apply_patch、シェルの書き込み（> ・write_text・sed -i・cp/mv など）を数える。シェルは見分けが粗いので、読むだけの
+コマンドでも書き込みの印があれば数える（確かめを1回走らせれば通る）。相対パスは記録の cwd か、コマンドの cd 先で読む。
 
 同じ書き換えで止めるのは3回まで（.data/artifact_gate/ に数える）。それを超えたら通して記録だけ残す。
+直す前を撮っていなかった時は、後から撮れないので1回だけ止めて、次からは先に撮るよう伝える。
 exit 0 = 通す / stdout に {"decision":"block","reason":…} = 続けさせる（Claude と Codex で同じ形）。
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -30,62 +44,82 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STORE = Path(os.environ.get("DAN_ARTIFACT_GATE_DIR") or (Path(__file__).resolve().parent.parent / ".data" / "artifact_gate"))
-LIVE = os.environ.get("DAN_ARTIFACT_GATE_LIVE", Path(__file__).resolve().parent.parent.as_posix()).replace("\\", "/").rstrip("/").lower()
+STORE = Path(os.environ.get("DAN_ARTIFACT_GATE_DIR") or (ROOT / ".data" / "artifact_gate"))
+LIVE = os.environ.get("DAN_ARTIFACT_GATE_LIVE", ROOT.as_posix()).replace("\\", "/").rstrip("/").lower()
+WORKTREES = os.environ.get("DAN_ARTIFACT_GATE_WORKTREES", LIVE.rsplit("/", 1)[0] + "/dan-workspace").replace("\\", "/").rstrip("/").lower()
 MAX_BLOCKS = 3
-SEEN_CMD = os.environ.get("DAN_ARTIFACT_SEEN", (Path(__file__).resolve().parent.parent / "scripts/artifact_seen.py").as_posix())
+SEEN_CMD = os.environ.get("DAN_ARTIFACT_SEEN", (ROOT / "scripts/artifact_seen.py").as_posix())
 
-_live_abs = re.escape(LIVE) + r"/frontend/src/app/artifacts/([\w-]+)"
-_live_msys = "/" + re.escape(LIVE[0]) + re.escape(LIVE[2:]) + r"/frontend/src/app/artifacts/([\w-]+)" if re.match(r"^[a-z]:/", LIVE) else None
-ABS_RE = re.compile(_live_abs + (("|" + _live_msys) if _live_msys else ""), re.I)
-REL_RE = re.compile(r"(?:^|[\s'\"=(])frontend/src/app/artifacts/([\w-]+)", re.I)
-MENTIONS_LIVE = re.compile(re.escape(LIVE) + (("|" + "/" + re.escape(LIVE[0]) + re.escape(LIVE[2:])) if _live_msys else ""), re.I)
+
+def _alt(root: str) -> str:
+    """D:/done → D:/done と /d/done（Git Bash）の両方に当たる正規表現。"""
+    if re.match(r"^[a-z]:/", root):
+        return "(?:" + re.escape(root) + "|/" + re.escape(root[0]) + re.escape(root[2:]) + ")"
+    return re.escape(root)
+
+
+# 木（動いているダンか作業場所の1つ）の中のパス: (木, 木からの相対パス)
+TREE_RE = re.compile("(" + _alt(LIVE) + "|" + _alt(WORKTREES) + r"/[\w.-]+)(/[^\s'\"`;|&<>(),{}\]]*)", re.I)
+REL_RE = re.compile(r"(?:^|[\s'\"=(:])((?:frontend|mobile|app|docs|scripts)/[^\s'\"`;|&<>(),{}\]]+)")
+CD_RE = re.compile(r"(?:^|[;&|]\s*|\n\s*)cd\s+(?:/d\s+)?['\"]?([^\s'\";&|]+)")
+ART_RE = re.compile(r"^frontend/src/app/artifacts/([\w-]+)(/.*)?$", re.I)
+NOT_SCREEN_TAIL = re.compile(r"^/(?:_server/.*|MAP\.md|PRODUCT\.md|[^/]*\.gen\.json)$", re.I)
 WRITE_MARK = re.compile(
     r"(?<![<>0-9&])>{1,2}(?![>&=])|\bwrite_text\b|\bwrite_bytes\b|\.write\(|open\([^)]*['\"][wa]b?\+?['\"]|\bsed\s+-i\b|"
     r"\b(?:cp|mv|rm|rsync|tee|touch|install)\s|\bcopy(?:file|tree|2)?\(|\bshutil\.|\bSet-Content\b|\bAdd-Content\b|"
     r"\bOut-File\b|\bCopy-Item\b|\bMove-Item\b|\bRemove-Item\b|\bNew-Item\b|writeFileSync|\bunlink\(|\brename\(|"
-    r"\bos\.replace\(|apply_patch|\*\*\* (?:Add|Update|Delete) File:", re.I)
+    r"\bos\.replace\(|apply_patch|\*\*\* (?:Add|Update|Delete) File:|(?:write|edit)_file\s*\(", re.I)
 SEEN_RE = re.compile(r"\[artifact_seen\] slug=([\w*-]+) result=(OK|NG|UNCHECKED)")
+MAP_RE = re.compile(r"\[place_map\] (?:place|slug)=([\w:-]+) result=(FRESH|STALE|DRAFT|MISSING)(?: root=(\S+))?")
+SHOT_RE = re.compile(r"\[place_shot\] place=([\w:-]+)(?: covers=([\w:,-]*))? tag=(\w+) result=(OK|NG|UNREACHABLE)(?: root=(\S+))?")
 PATCH_FILE = re.compile(r"\*\*\* (?:Add|Update|Delete) File: (.+)")
-ACK_WORDS = re.compile(r"未確認|確かめ(?:て|られて)(?:い)?(?:ない|ません)|確認(?:でき)?て(?:い)?(?:ない|ません)|開いて(?:い)?(?:ない|ません|おらず)|"
-                       r"(?<![A-Za-z])NG(?![A-Za-z])|古い版|古い写し|再起動(?:待ち|が要る|を待)|読み直し(?:の途中|を待)|作り直し(?:を待|てい|中)|更新中|まだ直", re.I)
 # `cat > 先 <<'EOF' … EOF` / `tee 先 <<EOF`: 中身は「先」に書く文章で、中に成果物のパスが出ても成果物は書き換わらない
 # （10/18 試験ファイルに書いた試験用のパスを成果物の書き換えと数えた）。中身だけ除き、書き込む先は残して判定する。
 # python - <<EOF のようにコマンドへ渡す中身は、そのコードが成果物を書くことがあるので除かない。
 DATA_HEREDOC = re.compile(r"(\b(?:cat|tee(?:\s+-a)?)\b[^\n]*?<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n)(.*?)(\n\2\b)", re.S)
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "write_file", "edit_file"}
 SHELL_TOOLS = {"Bash", "PowerShell", "bash", "exec", "shell", "local_shell", "exec_command"}
+CHECK_TOOLS = ("artifact_seen.py", "place_map.py", "place_shot.py")
 
 
 def norm(p: str) -> str:
     return (p or "").replace("\\\\", "/").replace("\\", "/")
 
 
-def slugs_in_path(path: str) -> set[str]:
-    p = norm(path)
-    return {a or b for a, b in ABS_RE.findall(p)} if _live_msys else set(ABS_RE.findall(p))
+def _tree(p: str) -> str:
+    """木のパスを小文字・/区切り・D:/ 形式にそろえる（/d/done → d:/done）。"""
+    p = norm(p).rstrip("/").lower()
+    m = re.match(r"^/([a-z])(/.*)$", p)
+    if m and re.match(r"^[a-z]:/", LIVE) and p.startswith("/" + LIVE[0]):
+        p = m.group(1) + ":" + m.group(2)
+    return p
 
 
-def slugs_in_shell(cmd: str) -> set[str]:
-    c = norm(cmd)
-    found = slugs_in_path(c)
-    if MENTIONS_LIVE.search(c):
-        found |= set(REL_RE.findall(c))
-    return found
+def paths_in(text: str, cwd: str = "") -> list[tuple[str, str]]:
+    """文の中の、木の中のパス → [(木, 相対パス)]。相対パスは cwd かコマンドの cd 先の木で読む。"""
+    t = norm(text)
+    out = [(_tree(root), rel.lstrip("/")) for root, rel in TREE_RE.findall(t)]
+    base = ""
+    for d in [cwd] + CD_RE.findall(t):
+        for root, _ in TREE_RE.findall(norm(d) + "/"):
+            base = _tree(root)
+    if base:
+        out += [(base, rel) for rel in REL_RE.findall(t)]
+    return out
 
 
-def edits_of(name: str, args) -> set[str]:
-    """道具1回の呼び出しが書き換えた（かもしれない）成果物の slug。"""
+def edits_of(name: str, args, cwd: str = "") -> list[tuple[str, str]]:
+    """道具1回の呼び出しが書き換えた（かもしれない）ファイル → [(木, 相対パス)]。"""
     if isinstance(args, str):
         try:
             args = json.loads(args)
         except ValueError:
             args = {"command": args}
     if not isinstance(args, dict):
-        return set()
+        return []
     name = name.rsplit("__", 1)[-1]   # mcp__dan-tools__write_file → write_file
     if name in EDIT_TOOLS:
-        return slugs_in_path(str(args.get("file_path") or args.get("path") or args.get("notebook_path") or ""))
+        return paths_in(str(args.get("file_path") or args.get("path") or args.get("notebook_path") or ""), cwd)
     text = ""
     for key in ("command", "cmd", "input", "patch", "code"):
         v = args.get(key)
@@ -94,16 +128,60 @@ def edits_of(name: str, args) -> set[str]:
         if isinstance(v, str):
             text += "\n" + v
     if not text:
-        return set()
+        return []
     text = DATA_HEREDOC.sub(lambda m: m.group(1) + m.group(4), text)
-    out = set()
+    out = []
     for f in PATCH_FILE.findall(text):
-        out |= slugs_in_path(f.strip())
+        out += paths_in(f.strip(), cwd)
     if name in SHELL_TOOLS or name == "apply_patch" or "apply_patch" in text:
-        if "artifact_seen.py" in text and not WRITE_MARK.search(text.replace("artifact_seen.py", "")):
+        rest = text
+        for tool in CHECK_TOOLS:
+            rest = rest.replace(tool, "")
+        if any(t in text for t in CHECK_TOOLS) and not WRITE_MARK.search(rest):
             return out
         if WRITE_MARK.search(text):
-            out |= slugs_in_shell(text)
+            out += paths_in(text, cwd)
+    return out
+
+
+# --- 共通の場所の地図が見張るファイル（docs/places/<id>.md の watches） ---------------------------------------
+
+_watch_cache: dict[str, dict[str, list[str]]] = {}
+
+
+def watches(tree: str) -> dict[str, list[str]]:
+    if tree not in _watch_cache:
+        found: dict[str, list[str]] = {}
+        for f in sorted(Path(tree).glob("docs/places/*.md")):
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            m = re.search(r"^watches:\s*\n((?:\s+-\s+.+\n)+)", text, re.M)
+            if m:
+                found[f.stem] = [x.strip().strip("'\"") for x in re.findall(r"-\s+(.+)", m.group(1))]
+        _watch_cache[tree] = found
+    return _watch_cache[tree]
+
+
+def places_of(tree: str, rel: str) -> set[str]:
+    """書き換えたファイルを見せる場所（artifact:<slug> と、watches に当たる共通の場所）。"""
+    out = set()
+    m = ART_RE.match(rel)
+    if m and not NOT_SCREEN_TAIL.match(m.group(2) or "/"):
+        out.add(f"artifact:{m.group(1).lower()}")
+    for place, globs in watches(tree).items():
+        if any(fnmatch.fnmatch(rel, g) for g in globs):
+            out.add(place)
+    return out
+
+
+def live_slugs(edits: list[tuple[str, str]]) -> set[str]:
+    out = set()
+    for tree, rel in edits:
+        m = ART_RE.match(rel)
+        if tree == LIVE and m:
+            out.add(m.group(1).lower())
     return out
 
 
@@ -118,10 +196,42 @@ def _texts(obj, out: list[str]) -> None:
             _texts(v, out)
 
 
+def _results(texts: list[str], events: list[tuple]) -> None:
+    for t in texts:
+        for slug, result in SEEN_RE.findall(t):
+            events.append(("seen", slug, result))
+        for place, result, root in MAP_RE.findall(t):
+            events.append(("map", _tree(root) if root else "*", _place(place), result))
+        for place, covers, tag, result, root in SHOT_RE.findall(t):
+            cov = {_place(place)} | {_place(c) for c in covers.split(",") if c}
+            events.append(("shot", _tree(root) if root else "*", cov, tag, result))
+
+
+def _place(p: str) -> str:
+    """古い形の slug=x は artifact:x。共通の場所の id（chat など）はそのまま。"""
+    common = {"chat", "artifact-tab", "dev-lead-room", "mobile"}
+    return p if ":" in p or p in common else f"artifact:{p}"
+
+
+def _is_turn_start(content) -> bool:
+    """本人（または起こした仕組み）からの新しい言葉か。道具の結果と、止める仕組みからの案内は数えない。"""
+    texts: list[str] = []
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return False
+        texts = [b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text")]
+    joined = "\n".join(texts).lstrip()
+    return bool(joined) and not joined.startswith(("Stop hook feedback", "[成果物の確認の関所]"))
+
+
 def read_events(path: str) -> tuple[list[tuple], str]:
-    """記録を順に (種類, …) へ。('edit', slugs) / ('seen', slug, result)。最後の返事の文も返す。"""
+    """記録を順に (種類, …) へ。('edit', [(木, 相対パス)]) / ('seen', slug, result) / ('map', 木, 場所, result) /
+    ('shot', 木, {場所}, tag, result) / ('turn',)。最後の返事の文も返す。"""
     events: list[tuple] = []
     last_text = ""
+    codex_cwd = ""
     try:
         f = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -134,23 +244,25 @@ def read_events(path: str) -> tuple[list[tuple], str]:
                 continue
             if not isinstance(d, dict):
                 continue
+            cwd = str(d.get("cwd") or "")
             # Claude Code: {"type":"assistant","message":{"content":[{"type":"tool_use",...}]}} / user の tool_result
             msg = d.get("message") if isinstance(d.get("message"), dict) else None
+            if msg is not None and d.get("type") == "user" and _is_turn_start(msg.get("content")):
+                events.append(("turn",))
+                continue
             if msg is not None and isinstance(msg.get("content"), list):
                 for block in msg["content"]:
                     if not isinstance(block, dict):
                         continue
                     kind = block.get("type")
                     if kind == "tool_use":
-                        s = edits_of(str(block.get("name") or ""), block.get("input") or {})
-                        if s:
-                            events.append(("edit", s))
+                        e = edits_of(str(block.get("name") or ""), block.get("input") or {}, cwd)
+                        if e:
+                            events.append(("edit", e))
                     elif kind == "tool_result":
                         texts: list[str] = []
                         _texts(block.get("content"), texts)
-                        for t in texts:
-                            for slug, result in SEEN_RE.findall(t):
-                                events.append(("seen", slug, result))
+                        _results(texts, events)
                     elif kind == "text" and d.get("type") == "assistant":
                         last_text = block.get("text") or last_text
                 continue
@@ -158,18 +270,21 @@ def read_events(path: str) -> tuple[list[tuple], str]:
             p = d.get("payload") if isinstance(d.get("payload"), dict) else None
             if p is None:
                 continue
+            if d.get("type") in ("turn_context", "session_meta") and p.get("cwd"):
+                codex_cwd = str(p["cwd"])
+                continue
             ptype = p.get("type")
             if ptype in ("function_call", "custom_tool_call", "local_shell_call"):
                 args = p.get("arguments") if "arguments" in p else p.get("input", p.get("action") or {})
-                s = edits_of(str(p.get("name") or "exec"), args)
-                if s:
-                    events.append(("edit", s))
+                e = edits_of(str(p.get("name") or "exec"), args, codex_cwd)
+                if e:
+                    events.append(("edit", e))
             elif ptype in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
                 texts = []
                 _texts(p.get("output"), texts)
-                for t in texts:
-                    for slug, result in SEEN_RE.findall(t):
-                        events.append(("seen", slug, result))
+                _results(texts, events)
+            elif ptype == "message" and p.get("role") == "user" and _is_turn_start(p.get("content")):
+                events.append(("turn",))
             elif ptype == "message" and p.get("role") == "assistant":
                 texts = []
                 _texts(p.get("content"), texts)
@@ -180,15 +295,17 @@ def read_events(path: str) -> tuple[list[tuple], str]:
     return events, last_text
 
 
+# --- 1. 本人の画面 ------------------------------------------------------------------------------------------------
+
 def pending(events: list[tuple]) -> tuple[dict[str, int], dict[str, str]]:
-    """書き換えた後に確かめていない slug → 最後の書き換えの位置。確かめた slug → 最後の結果。"""
+    """動いているダンの成果物を書き換えた後に確かめていない slug → 最後の書き換えの位置。確かめた slug → 最後の結果。"""
     last_edit: dict[str, int] = {}
     last_seen: dict[str, tuple[int, str]] = {}
     for i, ev in enumerate(events):
         if ev[0] == "edit":
-            for s in ev[1]:
+            for s in live_slugs(ev[1]):
                 last_edit[s] = i
-        else:
+        elif ev[0] == "seen":
             last_seen[ev[1]] = (i, ev[2])
     unchecked, results = {}, {}
     for s, i in last_edit.items():
@@ -198,6 +315,55 @@ def pending(events: list[tuple]) -> tuple[dict[str, int], dict[str, str]]:
         else:
             results[s] = max(hits)[1]
     return unchecked, results
+
+
+def this_turn_start(events: list[tuple]) -> int:
+    return max((i for i, ev in enumerate(events) if ev[0] == "turn"), default=-1)
+
+
+def this_turn_results(events: list[tuple]) -> dict[str, str]:
+    """このターン（最後の本人の言葉の後）で確かめた slug → 最後の結果。前のターンの NG で次のターンを止めない
+    （10-25 前のターンの NG のまま、次の「READY」だけのターンが止められた）。"""
+    out: dict[str, str] = {}
+    for ev in events[this_turn_start(events) + 1:]:
+        if ev[0] == "seen":
+            out[ev[1]] = ev[2]
+    return out
+
+
+# --- 2. 場所の地図と画面の見え方 ----------------------------------------------------------------------------------
+
+def place_needs(events: list[tuple]) -> dict[tuple[str, str], dict]:
+    """このターンで書き換えた (木, 場所) → {first, last, need: [...], shot: 最後の after の結果}。足りている物は返さない。"""
+    start = this_turn_start(events)
+    span: dict[tuple[str, str], list[int]] = {}
+    for i, ev in enumerate(events):
+        if i > start and ev[0] == "edit":
+            for tree, rel in ev[1]:
+                for place in places_of(tree, rel):
+                    span.setdefault((tree, place), [i, i])[1] = i
+    out = {}
+    for (tree, place), (first, last) in span.items():
+        # 作業場所に一時的に写して、もう消した成果物の写しは数えない（確かめる画面が無い。10-26 写しを消しただけで止め続けた）
+        if place.startswith("artifact:") and tree != LIVE and Path(tree).is_dir() \
+                and not (Path(tree) / "frontend/src/app/artifacts" / place.split(":", 1)[1]).is_dir():
+            continue
+        here = lambda ev: ev[1] in ("*", tree)  # noqa: E731
+        shots = [(i, ev) for i, ev in enumerate(events) if ev[0] == "shot" and here(ev) and place in ev[2]]
+        maps = [(i, ev) for i, ev in enumerate(events) if ev[0] == "map" and here(ev) and ev[2] == place]
+        need = []
+        if not any(i < first and ev[3] == "before" for i, ev in shots):
+            need.append("before")
+        after = [ev for i, ev in shots if i > last and ev[3] in ("after", "now")]
+        if not after:
+            need.append("after")
+        latest_map = [ev for i, ev in maps if i > last]
+        if not latest_map or latest_map[-1][3] != "FRESH":
+            need.append("map")
+        shot = after[-1][4] if after else ""
+        if need or shot != "OK":
+            out[(tree, place)] = {"first": first, "last": last, "need": need, "shot": shot}
+    return out
 
 
 def count_block(session: str, key: str) -> int:
@@ -212,10 +378,49 @@ def count_block(session: str, key: str) -> int:
     return data[key]
 
 
+REWRITE = ("確かめた結果（版・画面・裏側・公開版・地図・撮った絵がどうだったか）は本人への返事に書かない。本人に言う話ではない。"
+           "この後に書く文が、本人に届く返事の全部になる（確かめる前に書いた文は届かない）。"
+           "確かめ終えたら、確かめる前に書いた本人への答えを、言い直さずそのまま全部もう一度書いて終えること"
+           "（「結果を足します」のような書き出しにしない）。")
+
+
 def block(reason: str) -> int:
     sys.stdout.write(json.dumps({"decision": "block", "reason": "[成果物の確認の関所] " + reason}))
     sys.stdout.flush()
     return 0
+
+
+def place_block(session: str, needs: dict) -> int | None:
+    """場所の地図と撮影の足りない所で止める。止めない時は None。"""
+    lines, keys, only_before = [], [], True
+    for (tree, place), n in sorted(needs.items()):
+        scripts = f"{tree}/scripts"
+        name = place.split(":", 1)[1] if place.startswith("artifact:") else place
+        todo = []
+        if "map" in n["need"]:
+            todo.append(f"  python {scripts}/place_map.py check {place}   # STALE なら、変わった画面に合わせて地図の説明を直してから "
+                        f"stamp {place}（説明が変わらない直しなら --unchanged \"理由\"）。無ければ draft {name}")
+        if "after" in n["need"] or n["shot"] not in ("OK", ""):
+            todo.append(f"  python {scripts}/place_shot.py {place} --tag after   # 画面のサーバーはその木の物を --base で")
+        if "before" in n["need"]:
+            todo.append(f"  （直す前の {place} を撮っていない。後からは撮れないので、次に画面を直す時は先に --tag before を撮る）")
+        if todo:
+            lines.append(f"- {place}（{tree}）\n" + "\n".join(todo))
+            keys.append(f"{tree}|{place}|{n['last']}|{'+'.join(n['need'])}|{n['shot']}")
+            only_before = only_before and n["need"] == ["before"] and n["shot"] in ("OK", "")
+    if not lines:
+        return None
+    key = "p:" + ";".join(keys)
+    if count_block(session, key) > (1 if only_before else MAX_BLOCKS):
+        return None
+    ng = [p for (t, p), n in needs.items() if n["shot"] == "NG"]
+    return block(
+        "この作業で画面のファイルを書き換えたが、その場所の地図を今の画面に合わせて直していないか、直す前と後を撮って"
+        "見え方を確かめていない。地図が古いと、次に直すダンがその画面にたどり着けず、話すダンは画面に無い物を案内する。"
+        "終える前に次を走らせること（地図の形は docs/places/README.md）:\n" + "\n".join(lines) + "\n"
+        + (f"撮った結果が NG の場所（{', '.join(sorted(ng))}）は、見えなかった物を直してから撮り直す。"
+           "直せない時だけ、本人の言葉で「〜はまだ直っていません」と1文書く。" if ng else "")
+        + REWRITE)
 
 
 def main() -> int:
@@ -229,7 +434,7 @@ def main() -> int:
     if not path:
         return 0
     events, last_text = read_events(path)
-    unchecked, results = pending(events)
+    unchecked, _ = pending(events)
     message = payload.get("last_assistant_message") or last_text or ""
     session = str(payload.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:16])
     if unchecked:
@@ -241,20 +446,21 @@ def main() -> int:
         return block(
             f"この作業で成果物（{', '.join(names)}）を書き換えたが、その後に本人の画面と本番の裏側を確かめていない。"
             "ダンのブラウザ・テスト用アカウント・8001 の確認用サーバーで見えたことは、本人の画面の証拠にならない。"
-            f"終える前に次を走らせ、出た結果どおりに報告すること:\n{cmds}\n"
-            "result=OK なら本人の画面と裏側が今の版。NG なら「直った」と書かず、NG の行の理由（入力中で読み直し待ち・"
-            "裏側の再起動待ちなど）をそのまま伝える。UNCHECKED なら本人が開いていないので「本人の画面ではまだ確かめていない"
-            "（開けば自動で新しい版に切り替わる）」と書く。")
-    bad = {s: r for s, r in results.items() if r != "OK"}
-    if bad and not payload.get("stop_hook_active") and not ACK_WORDS.search(message):
+            f"終える前に次を走らせること:\n{cmds}\n"
+            "result=NG なら、NG の行の理由（読み直し待ち・作り直し中など）が片付くまで待って、もう一度走らせる。"
+            "待っても直らない（作り直しに失敗している等）時だけ、本人の言葉で「〜はまだ直っていません」と1文書く。"
+            + REWRITE)
+    bad = {s: r for s, r in this_turn_results(events).items() if r == "NG"}
+    if bad and not payload.get("stop_hook_active"):
         key = "r:" + ",".join(f"{s}={r}" for s, r in sorted(bad.items())) + ":" + hashlib.sha1(message.encode()).hexdigest()[:8]
-        if count_block(session, key) > 1:
-            return 0
-        lines = ", ".join(f"{s}={r}" for s, r in sorted(bad.items()))
-        return block(
-            f"artifact_seen の結果が OK ではない（{lines}）のに、返事にそれが書かれていない。"
-            "NG なら直ったとは書かず理由をそのまま、UNCHECKED なら「本人の画面ではまだ確かめていない」と、返事に入れ直すこと。")
-    return 0
+        if count_block(session, key) <= 1:
+            lines = ", ".join(f"{s}={r}" for s, r in sorted(bad.items()))
+            cmds = "\n".join(f"  python {SEEN_CMD} --slug {s} --wait 90" for s in sorted(bad))
+            return block(
+                f"確かめた結果が NG のまま（{lines}）。NG の行の理由が片付くまで待って、もう一度走らせること:\n{cmds}\n"
+                "待っても直らない時だけ、本人の言葉で「〜はまだ直っていません」と1文書く。" + REWRITE)
+    stopped = place_block(session, place_needs(events))
+    return 0 if stopped is None else stopped
 
 
 if __name__ == "__main__":

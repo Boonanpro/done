@@ -678,7 +678,9 @@ def run_codex_process(
                 continue
             for ev in _item_to_events(item):
                 if ev["type"] == "text":
-                    final_text_parts.append(ev["text"])
+                    final_text_parts.append(ev["text"])   # 印だけでも返事の決め手として残す（保存の手前で捨てる）
+                    if cr._is_silent_text(ev["text"]):
+                        continue   # 印だけの文は画面・作業の記録へ流さない（app/agent/reply_text.py）
                     turn_blocks.append({"type": "text", "text": ev["text"]})
                     event_queue.put(ev)
                     if project_id and len(ev["text"].strip()) > 10:
