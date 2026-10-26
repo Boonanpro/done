@@ -3,9 +3,11 @@
 /**
  * The stage of a call: the caption 「今の話: …」 and the scene the server draws while Dan talks (app/services/voice_stage.py).
  *
- * A scene is one of three things: an answer-shapes program (the same ```openui-lang parts as the chat: Flow, Stat, Compare,
+ * A scene is one of four things: an answer-shapes program (the same ```openui-lang parts as the chat: Flow, Stat, Compare,
  * Chart…, drawn with ShapeBlock), a free drawing (SVG/HTML the server cleaned, drawn in a sandboxed frame with no scripts
- * and its own origin) or an image (one of Dan's files or an https URL; a photograph of a real page has its URL too).
+ * and its own origin), an image (one of Dan's files or an https URL; a photograph of a real page has its URL too) or a
+ * message draft (the chat's outbound card as the stage sees it: recipient, subject, body, status; revised by voice, the
+ * changed lines light up in place; sent by voice, the badge turns green. 2026-10-27).
  * It arrives by long poll (GET /api/v1/voicelog/stage/<room>?after=<version>): the server answers the moment a newer
  * version exists, when the call ends, or after ~25 s. A program that fails the parts' validation is not shown; the
  * previous scene stays (checkCompleteShape).
@@ -19,8 +21,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { ShapeBlock, checkCompleteShape } from '@/components/chat/chat-shapes';
 
+export type StageCard = {
+  proposal_id: string; status: string; channel: string; to: string; to_name?: string; subject?: string; body: string;
+  intent?: string; revision?: number; sent_at?: string; sendable?: boolean;
+};
+
 export type StageState = {
-  version: number; caption: string; program: string; html?: string; image?: string; page_url?: string;
+  version: number; caption: string; program: string; html?: string; image?: string; page_url?: string; card?: StageCard | null;
   at: string | null; active: boolean; scenes?: number; session_id?: string;
 };
 
@@ -74,7 +81,7 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
   return state;
 }
 
-type Scene = { kind: 'program'; program: string } | { kind: 'html'; html: string } | { kind: 'image'; image: string; pageUrl: string };
+type Scene = { kind: 'program'; program: string } | { kind: 'html'; html: string } | { kind: 'image'; image: string; pageUrl: string } | { kind: 'card'; card: StageCard };
 
 /** An image the stage may show: one of Dan's files or an https URL (nothing else is a URL the screen should load). */
 export function stageImageUrl(v: unknown): string | null {
@@ -92,6 +99,7 @@ export function sceneOf(s: StageState | null): Scene | null {
   if (program) return checkCompleteShape(program).ok ? { kind: 'program', program } : null;
   const html = s.html?.trim() || '';
   if (html) return { kind: 'html', html };
+  if (s.card && typeof s.card === 'object' && s.card.proposal_id) return { kind: 'card', card: s.card };
   const image = stageImageUrl(s.image);
   if (image) return { kind: 'image', image, pageUrl: s.page_url || '' };
   return null;
@@ -102,6 +110,7 @@ function sameScene(a: Scene | null, b: Scene | null): boolean {
   if (a.kind === 'program' && b.kind === 'program') return a.program === b.program;
   if (a.kind === 'html' && b.kind === 'html') return a.html === b.html;
   if (a.kind === 'image' && b.kind === 'image') return a.image === b.image;
+  if (a.kind === 'card' && b.kind === 'card') return JSON.stringify(a.card) === JSON.stringify(b.card);
   return false;
 }
 
@@ -160,6 +169,8 @@ export function VoiceStage({ roomId, active, className = '', onShown }: { roomId
         <div key={key} className="animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both" data-stage-scene data-stage-kind={scene.kind}>
           {scene.kind === 'program' ? (
             <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
+          ) : scene.kind === 'card' ? (
+            <StageMessageCard card={scene.card} />
           ) : scene.kind === 'html' ? (
             <iframe
               title="通話の画面の絵"
@@ -177,6 +188,49 @@ export function VoiceStage({ roomId, active, className = '', onShown }: { roomId
           )}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const CHANNEL_LABEL: Record<string, string> = {
+  email: 'メール', instagram_dm: 'Instagram DM', instagram_comment: 'Instagram コメント', line: 'LINE', sms: 'SMS', web_form: 'Webフォーム',
+  chatwork: 'Chatwork', slack: 'Slack', x_dm: 'X DM', collab: '窓口のチャット', other: 'メッセージ',
+};
+
+/** The message draft as the call's screen shows it: who it goes to, the subject, the body line by line. A revision
+ * (by voice) changes the lines in place and lights the changed ones for a moment; the whole card is not redrawn. */
+export function StageMessageCard({ card }: { card: StageCard }) {
+  const lines = useMemo(() => (card.body || '').split('\n'), [card.body]);
+  // the lines that differ from the version shown before (a revision by voice): they replay a short highlight, keyed on
+  // the revision so the same line lights again when it changes again
+  const previous = useRef<string[] | null>(null);
+  const changed = useMemo(() => {
+    const before = previous.current;
+    previous.current = lines;
+    const out = new Set<number>();
+    if (before) lines.forEach((line, i) => { if (before[i] !== line) out.add(i); });
+    return out;
+  }, [lines]);
+  const status = card.status === 'sent' ? { text: '送りました', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
+    : card.status === 'rejected' ? { text: '取り下げ', cls: 'bg-neutral-500/15 text-neutral-300 border-neutral-500/30' }
+    : { text: '下書き', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
+  return (
+    <div className="w-full rounded-xl border border-border bg-neutral-950/80 p-3 text-sm" data-stage-card={card.proposal_id} data-stage-card-status={card.status} data-stage-card-revision={card.revision || 1}>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">{CHANNEL_LABEL[card.channel] || card.channel}</span>
+        <span className="truncate font-medium">{card.to_name || card.to}</span>
+        {card.to_name && card.to ? <span className="truncate text-[11px] text-muted-foreground">{card.to}</span> : null}
+        <span className={`ml-auto rounded-md border px-1.5 py-0.5 text-[11px] ${status.cls}`}>{status.text}</span>
+      </div>
+      {card.subject ? <div className="mb-1.5 truncate text-[13px] text-foreground/90">{card.subject}</div> : null}
+      <div className="whitespace-pre-wrap break-words leading-6" data-stage-card-body>
+        {lines.map((line, i) => (
+          <div key={changed.has(i) ? `${i}-${card.revision || 1}` : i} className="-mx-1 rounded px-1"
+               style={changed.has(i) ? { animation: 'stage-line-flash 1.8s ease-out' } : undefined} data-stage-line={changed.has(i) ? 'changed' : undefined}>
+            {line || '\u00a0'}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -227,3 +227,10 @@
 [data-stage-scene] [data-flow-node] > div:first-of-type { font-size: 0.95rem; }
 [data-stage-scene] [data-shape="Text"] { font-size: 1rem; }
 [data-stage-scene] [data-shape="Facts"], [data-stage-scene] [data-shape="Steps"], [data-stage-scene] [data-shape="Compare"] { font-size: 1rem; text-align: left; }
+
+/* a line of the call's message draft that a voice revision changed (components/voice/voice-stage.tsx) */
+@keyframes stage-line-flash {
+  0% { background-color: rgba(251, 191, 36, 0.35); }
+  60% { background-color: rgba(251, 191, 36, 0.18); }
+  100% { background-color: transparent; }
+}

@@ -260,6 +260,49 @@ class OutboundMessageService:
             raise ValueError("原稿が更新されたか送信中です。再読み込みしてください。")
         return r.data[0]
 
+    def revise_draft(self, proposal_id: str, user_id: str, *, body: Optional[str] = None,
+                     subject: Optional[str] = None, to: Optional[str] = None, to_name: Optional[str] = None,
+                     intent: Optional[str] = None) -> dict:
+        """ダン自身の直し（通話で「もっと短く」と言われて書き直した版など）。本文を新しい版に置き換え、
+        revision を進める。ユーザーの手編集の印（user_edited）は、本人の声の頼みで直した結果なので外す。
+        update_draft（カードのオートセーブ＝ユーザーの編集）とは別の入口（2026-10-27 通話の画面から）。"""
+        row = self.get(proposal_id, user_id)
+        if not row:
+            raise ValueError("送信案が見つかりません")
+        if row["status"] == "sending":
+            raise ValueError("送信中（ダンが送信作業中）のため直せません")
+        if row["status"] != "pending":
+            raise ValueError("この送信案は既に確定しています")
+        ad = dict(row.get("action_data") or {})
+        now = _now()
+        upd: dict[str, Any] = {"updated_at": now}
+        if body is not None and body.strip():
+            upd["content"] = body
+            ad["original_body"] = body
+            ad["ack_body"] = body
+            ad["user_edited"] = False
+            ad["pending_update"] = None
+        if subject is not None:
+            ad["subject"] = subject.strip() or None
+        if to is not None and to.strip():
+            ad["to"] = to.strip()
+        if to_name is not None:
+            ad["to_name"] = to_name.strip() or None
+        if intent is not None and intent.strip():
+            ad["intent"] = intent.strip()
+        ad["revision"] = int(ad.get("revision") or 1) + 1
+        ad["dan_updated_at"] = now
+        title = f"{channel_label(ad.get('channel'))}: {ad.get('to_name') or ad.get('to')}"
+        if ad.get("subject"):
+            title += f" / {ad['subject']}"
+        upd["title"] = title[:255]
+        upd["action_data"] = ad
+        r = (self.sb.table("dan_proposals").update(upd).eq("id", proposal_id)
+             .eq("user_id", user_id).eq("status", "pending").execute())
+        if not r.data:
+            raise ValueError("送信案が更新できませんでした（送信中か確定済み）")
+        return r.data[0]
+
     # ------------------------------------------------------------------
     # collab: 1窓口=1下書き のための補助
     # ------------------------------------------------------------------

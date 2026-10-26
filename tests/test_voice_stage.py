@@ -312,3 +312,156 @@ async def test_back_shows_an_earlier_scene_again_without_drawing(room, monkeypat
     assert state['program'] == FLOW and state['caption'] == '流れに戻る' and state['version'] == 3 and log[-1][0] == 'stage_back'
     assert await stage.decide() == 'keep'                      # an unknown version: nothing changes
     assert '新しく届いた言葉（前回の判断の後）' not in seen[0]  # nothing had arrived through heard()
+
+
+# -- a message on the stage: drafted, revised and sent by voice (2026-10-27) ------------------------------------------
+
+class FakeMessages:
+    """The outbound message service as the stage uses it: one draft, revised, sent or discarded."""
+    def __init__(self):
+        self.rows, self.sent, self.released = {}, [], []
+
+    def create_draft(self, **kw):
+        row = {'id': 'p1', 'status': 'pending', 'content': kw['body'], 'source_room_id': kw['room_id'],
+               'action_data': {'channel': kw['channel'], 'to': kw['to'], 'to_name': kw.get('to_name'), 'subject': kw.get('subject'), 'intent': kw.get('intent'), 'revision': 1}}
+        self.rows['p1'] = row
+        return row
+
+    def revise_draft(self, pid, user_id, body=None, subject=None, to=None, to_name=None, intent=None):
+        row = self.rows[pid]
+        if body: row['content'] = body
+        if subject is not None: row['action_data']['subject'] = subject
+        row['action_data']['revision'] += 1
+        return row
+
+    async def send(self, pid, user_id, sent_by):
+        row = self.rows[pid]
+        if row['action_data']['channel'] == 'line':
+            row['status'] = 'sending'; return row
+        row['status'] = 'sent'; row['action_data']['sent_at'] = '2026-10-27T03:00:00+00:00'; self.sent.append((pid, sent_by))
+        return row
+
+    def release(self, pid, user_id):
+        self.rows[pid]['status'] = 'pending'; self.released.append(pid); return self.rows[pid]
+
+    def discard(self, pid, user_id, by):
+        self.rows[pid]['status'] = 'rejected'; return self.rows[pid]
+
+
+def make_message_stage(room, monkeypatch, answers=None):
+    fake = FakeMessages()
+    monkeypatch.setattr(S, '_message_service', lambda: fake)
+    stage, seen, log = make_stage(room, answers or [])
+    stage.user_id = 'owner-1'
+    return stage, fake, log
+
+
+def owner_says(stage, text): stage.dialogue.add('user', text)
+def dan_says(stage, text): stage.dialogue.add('assistant', text)
+
+
+@pytest.mark.asyncio
+async def test_a_draft_is_a_scene_the_screen_reads_and_a_revision_changes_it_in_place(room, monkeypatch):
+    stage, fake, log = make_message_stage(room, monkeypatch)
+    out = await stage.draft_message('email', 'dan-test@example.com', '田中様\n明日の打ち合わせは15時に変更でお願いします。\n本田', subject='打ち合わせの時間', to_name='田中様', intent='打ち合わせの日程変更')
+    assert out['shown'] and out['proposal_id'] == 'p1' and out['sendable_now']
+    state = S.read_state(room)
+    assert state['version'] == 1 and state['card']['proposal_id'] == 'p1' and state['card']['status'] == 'pending' and state['card']['to_name'] == '田中様'
+    assert state['caption'] == '打ち合わせの日程変更' and state['program'] == '' and len(stage.scenes) == 1
+    out = await stage.revise_message('p1', body='田中様\n明日の打ち合わせは15時でお願いします。\n本田')
+    assert out['revised'] and '15時で' in out['body']
+    state = S.read_state(room)
+    assert state['version'] == 2 and state['card']['revision'] == 2 and '15時で' in state['card']['body'] and len(stage.scenes) == 1
+    assert [p for p, _ in log] == ['stage_draft', 'stage_revise']
+    assert '✉ メール 宛先: 田中様（下書き）' in stage.summary() and '件名: 打ち合わせの時間' in stage.summary()
+
+
+@pytest.mark.asyncio
+async def test_while_a_draft_is_pending_the_listener_does_not_draw_over_it(room, monkeypatch):
+    monkeypatch.setattr(S, 'QUIET_S', .02); monkeypatch.setattr(S, 'SENTENCE_S', .01); monkeypatch.setattr(S, 'HOLD_S', 0)
+    stage, fake, log = make_message_stage(room, monkeypatch, [{'action': 'replace', 'caption': '支払いの流れ', 'program': FLOW}])
+    await stage.draft_message('email', 'dan-test@example.com', 'こんにちは。', subject='件', to_name='田中様')
+    for delta in ('まず本人がカードで払うと、', 'Stripe を通って口座に入ります。'):
+        stage.dialogue.add('assistant', delta); stage.heard('assistant', delta)
+    await asyncio.sleep(.15)
+    state = S.read_state(room)
+    assert state['card']['proposal_id'] == 'p1' and state['program'] == '' and state['version'] == 1
+    assert ('stage_keep', ) == tuple(p for p, f in log if f.get('held_for') == 'card')[:1]
+
+
+@pytest.mark.asyncio
+async def test_sending_needs_dans_read_back_and_then_the_owners_approval_in_the_transcript(room, monkeypatch):
+    stage, fake, log = make_message_stage(room, monkeypatch)
+    owner_says(stage, 'いいよ、田中さんにメール送って')   # words before the draft never count as an approval of it
+    await stage.draft_message('email', 'dan-test@example.com', '田中様\n明日は15時でお願いします。', subject='時間', to_name='田中様')
+    out = await stage.send_message('p1')
+    assert not out['sent'] and '読み上げ' in out['reason'] and '田中様さん宛てのメール' in out['read_back'] and fake.sent == []
+    dan_says(stage, '田中様さん宛てのメール。件名は「時間」。本文は「明日は15時でお願いします。」。これで送っていいですか。')
+    out = await stage.send_message('p1')
+    assert not out['sent'] and '返事' in out['reason'] and fake.sent == []
+    owner_says(stage, 'うーん、ちょっと待って')
+    out = await stage.send_message('p1')
+    assert not out['sent'] and 'ちょっと待って' in out['reason'] and fake.sent == []
+    owner_says(stage, 'やっぱりいいよ、送って')
+    out = await stage.send_message('p1')
+    assert not out['sent'] and fake.sent == []   # 「やっぱり」 leans to hesitation: a clear word is asked for
+    owner_says(stage, 'いいよ、送って')
+    out = await stage.send_message('p1')
+    assert out['sent'] and fake.sent == [('p1', 'dan')]
+    state = S.read_state(room)
+    assert state['card']['status'] == 'sent' and state['version'] == 2
+    assert [p for p, _ in log] == ['stage_draft', 'stage_send_refused', 'stage_send_refused', 'stage_send_refused', 'stage_send_refused', 'stage_sent']
+    out = await stage.send_message('p1')
+    assert not out['sent'] and 'もう送った' in out['reason']
+    assert '（送信済み）' in stage.summary()
+
+
+@pytest.mark.asyncio
+async def test_a_revision_asks_for_the_read_back_again(room, monkeypatch):
+    stage, fake, log = make_message_stage(room, monkeypatch)
+    await stage.draft_message('email', 'dan-test@example.com', '明日は15時で。', subject='時間', to_name='田中様')
+    dan_says(stage, '田中様さん宛てのメールです。送っていいですか。'); owner_says(stage, 'もっと短くして')
+    await stage.revise_message('p1', body='明日15時で。')
+    owner_says(stage, 'いいよ')   # an approval of what? the revised text was not read back
+    out = await stage.send_message('p1')
+    assert not out['sent'] and '読み上げ' in out['reason']
+    dan_says(stage, '田中様さん宛て、明日15時で、の一文です。送っていいですか。'); owner_says(stage, 'はい')
+    assert (await stage.send_message('p1'))['sent']
+
+
+@pytest.mark.asyncio
+async def test_a_channel_dan_sends_by_hand_is_not_sent_from_the_call(room, monkeypatch):
+    stage, fake, log = make_message_stage(room, monkeypatch)
+    out = await stage.draft_message('line', '田中', 'こんにちは', to_name='田中さん')
+    assert out['shown'] and not out['sendable_now']
+    dan_says(stage, '田中さん宛ての LINE です。送っていいですか。'); owner_says(stage, 'いいよ')
+    out = await stage.send_message('p1')
+    assert not out['sent'] and 'LINE' in out['reason'] and fake.sent == [] and fake.released == []
+    out = await stage.discard_message('p1')
+    assert out['discarded'] and S.read_state(room)['card']['status'] == 'rejected'
+
+
+def test_approval_and_hesitation_words():
+    card = {'to_name': '田中様', 'to': 'tanaka@example.com'}
+    hist = [{'role': 'user', 'text': 'メール送って'}, {'role': 'assistant', 'text': '田中様さん宛てのメール。送っていいですか。'}, {'role': 'user', 'text': 'いいよ'}]
+    assert S.approval_heard(hist, (1, len('メール送って')), card)[0]
+    assert not S.approval_heard(hist, (3, 3), card)[0]          # nothing after the mark
+    for words in ('まだ', 'やめて', '送らないで', 'もう一回読んで', '送っていい？', 'どうしようかな'):
+        assert not S.approval_heard(hist[:2] + [{'role': 'user', 'text': words}], (0, 0), card)[0], words
+    for words in ('OK', 'お願い', 'それで送って', 'はい', 'うん'):
+        assert S.approval_heard(hist[:2] + [{'role': 'user', 'text': words}], (0, 0), card)[0], words
+    assert S.words_since(hist, (1, 3)) == [{'role': 'user', 'text': '送って'}, hist[1], hist[2]]
+
+
+@pytest.mark.asyncio
+async def test_the_voice_functions_reach_the_stage(room, monkeypatch):
+    from app.services import voice_responses as R
+    stage, fake, log = make_message_stage(room, monkeypatch)
+    out = await R.run_function('draft_message_on_stage', {'channel': 'email', 'to': 'dan-test@example.com', 'body': 'こんにちは', 'subject': '件', 'to_name': '田中様'}, 'owner-1', room, [])
+    assert out['shown'] and out['proposal_id'] == 'p1'
+    out = await R.run_function('send_message_on_stage', {}, 'owner-1', room, [])
+    assert not out['sent'] and out['read_back']
+    assert {t['name'] for t in R.TOOLS} >= {'draft_message_on_stage', 'revise_message_on_stage', 'send_message_on_stage', 'discard_message_on_stage'}
+    stage.close()
+    out = await R.run_function('send_message_on_stage', {}, 'owner-1', room, [])
+    assert not out['sent'] and '画面' in out['reason']
