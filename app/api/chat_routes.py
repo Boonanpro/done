@@ -2292,8 +2292,15 @@ async def send_dan_message_stream(
     request: MessageSendRequest,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
+    http_request: Request = None,
 ):
     """ダンにメッセージを送信（SSEストリーミング版）- Agent v2を使用"""
+    try:  # どの端末から書いたかを残す。話すダンが「今みきさんがどこで読んでいるか」に使う（場所の地図、2026-10-25）
+        if http_request is not None:
+            from app.agent.place_map import note_client
+            note_client(request.session_id or "", http_request.headers.get("user-agent", ""))
+    except Exception:
+        pass
     from starlette.responses import StreamingResponse
     from app.services.progress_callback import (
         ProgressCallbackRegistry,
