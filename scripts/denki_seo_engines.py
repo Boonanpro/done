@@ -693,6 +693,40 @@ PAGE_MIN_IMPRESSIONS = 30
 # 「狙った語」のうち、どの分野にも付く言葉。分野の近さを測る時は数えない
 GENERIC_TERMS = {"高圧", "低圧", "受電", "点検", "使い方", "方法", "測定方法", "原因", "周期", "基準値", "低い", "高い", "違い", "とは"}
 
+# 磨き方。効かなかった（neutral / lost）ページは、次は別の直し方にする。同じ直し方は繰り返さない。
+#   rewrite: 題名・説明文・本文を見直す（従来の直し方）
+#   body:    題名と説明文は変えず、本文・確認項目・FAQ に足りない論点だけを足す
+#   meta:    本文は変えず、題名と説明文だけを検索した人の言葉に寄せる
+POLISH_METHODS = ("rewrite", "body", "meta")
+METHOD_LABEL = {"rewrite": "題名と本文", "body": "本文だけ", "meta": "題名と説明文だけ", "title-revert": "題名を元に戻す"}
+# 検索語の曖昧さを消すために付く語。題名に無くてもよい（「sog 電気」の「電気」）
+SOFT_TERMS = {"電気"}
+
+
+def _kw_terms(keyword: str) -> list[str]:
+    return [t for t in unicodedata.normalize("NFKC", keyword or "").lower().split() if t and t not in SOFT_TERMS]
+
+
+def title_missing_terms(title: str, keyword: str) -> list[str]:
+    """狙いの検索語のうち題名に入っていない言葉。磨きで題名が狙いの語から離れるのを止めるための検査。
+
+    2026-10 に「地絡継電器と漏電リレーの違い」が「LGRとは」に、「SOGとは」が「SOG電源とは」に変わり、
+    狙いの語での表示が3分の1以下に落ちた。題名は主の検索語の言葉を全部含んだままにする。
+    """
+    t = unicodedata.normalize("NFKC", title or "").lower().replace(" ", "")
+    return [w for w in _kw_terms(keyword) if w not in t and not (w.endswith("とは") and w[:-2] in t)]
+
+
+def next_polish_method(slug: str, experiments: list[dict]) -> str | None:
+    """そのページで次に使う直し方。直近の「上がった」以降に効かなかった直し方は使わない。全部試し済みなら None。"""
+    tried: set[str] = set()
+    for ex in sorted((e for e in experiments if e.get("guide_slug") == slug), key=lambda e: e.get("started_on") or ""):
+        if ex.get("status") == "won":
+            tried = set()
+        elif ex.get("status") in ("neutral", "lost"):
+            tried.add(((ex.get("baseline") or {}).get("method")) or "rewrite")
+    return next((m for m in POLISH_METHODS if m not in tried), None)
+
 
 def _guide_page_stats(days: int = 28) -> dict[str, dict]:
     """解説ページごとの検索成績（slug → 表示・クリック・順位）。Search Console が使えない時は空。"""
@@ -935,33 +969,60 @@ def cmd_evaluate(args=None) -> list[dict]:
         # ページ単位で選んだ磨きは、ページ全体の数字で判定する（検索語ごとの数字は伏せられて出ない）
         page_scope = base.get("scope") == "page"
         after = _query_stats(svc, ex["page_url"], None if page_scope else ex["query"], started + timedelta(days=1), started + timedelta(days=7))
-        bpos, apos = base.get("position"), after.get("position")
-        per_day = lambda s: (s["impressions"] / s["days"]) if s["days"] else 0  # noqa: E731
-        clicks_up = after["clicks"] > base["clicks"] * after["days"] / max(base["days"], 1)
-        verdict = "neutral"
-        if bpos is None and apos is not None:
-            verdict = "won"  # 変更前は出ていなかった語で表示され始めた
-        elif apos is None and bpos is not None:
-            verdict = "lost" if per_day(base) >= 1 else "neutral"  # 表示が消えた
-        elif bpos is not None and apos is not None:
-            if apos <= bpos - 1.0 or (clicks_up and apos <= bpos):
-                verdict = "won"
-            elif apos >= bpos + 2.0 and not (page_scope and clicks_up):
-                # ページ全体の平均順位は、新しい検索語で表示が増えるだけでも下がる。クリックが増えていれば戻さない
-                verdict = "lost"
+        verdict, reason = judge_experiment(base, after)
         reverted = False
         if verdict == "lost":
             reverted = _revert_guide(ex["guide_slug"], ex["from_revision"])
+        bpos, apos = base.get("position"), after.get("position")
+        b_day, a_day = round(_per_day(base), 1), round(_per_day(after), 1)
         sb_request(
             "PATCH",
             f"/rest/v1/denki_seo_experiment?id=eq.{ex['id']}",
-            {"status": verdict, "result": {"after": after, "reverted": reverted}, "evaluated_at": datetime.now(timezone.utc).isoformat()},
+            {"status": verdict, "result": {"after": after, "reverted": reverted, "reason": reason}, "evaluated_at": datetime.now(timezone.utc).isoformat()},
             prefer="return=minimal",
         )
-        log(f"evaluate: {ex['guide_slug']} 「{ex['query']}」 {bpos}→{apos} = {verdict}{' (元に戻した)' if reverted else ''}")
-        activity("experiment_evaluated", slug=ex["guide_slug"], query=ex["query"], before=bpos, after=apos, verdict=verdict, reverted=reverted)
+        log(f"evaluate: {ex['guide_slug']} 「{ex['query']}」 {bpos}→{apos}位 表示{b_day}→{a_day}/日 = {verdict}（{reason}）{' (元に戻した)' if reverted else ''}")
+        activity(
+            "experiment_evaluated", slug=ex["guide_slug"], query=ex["query"], before=bpos, after=apos,
+            impressions_before=b_day, impressions_after=a_day, clicks_before=base.get("clicks"), clicks_after=after.get("clicks"),
+            method=base.get("method"), verdict=verdict, reason=reason, reverted=reverted,
+        )
         results.append({"slug": ex["guide_slug"], "verdict": verdict})
     return results
+
+
+def _per_day(s: dict) -> float:
+    return (s.get("impressions", 0) / s["days"]) if s.get("days") else 0.0
+
+
+def judge_experiment(base: dict, after: dict) -> tuple[str, str]:
+    """磨きの前後を比べて won / neutral / lost と、その理由を返す。
+
+    2026-10-26 まで順位だけで判定していたので、題名を狙いの言葉から離して表示が3分の1に減ったページも
+    「上がった」になっていた（順位は、残った少数の検索語だけで平均されるので上がって見える）。
+    表示回数とクリックも見る: 1日の表示が半分以下に減れば、順位が上がっていても lost。
+    """
+    bpos, apos = base.get("position"), after.get("position")
+    b_day, a_day = _per_day(base), _per_day(after)
+    page_scope = base.get("scope") == "page"
+    clicks_up = after.get("clicks", 0) > base.get("clicks", 0) * after.get("days", 7) / max(base.get("days", 14), 1)
+    impr_ratio = (a_day / b_day) if b_day else None
+    if bpos is None and apos is not None:
+        return "won", "変更前は出ていなかった語で表示され始めた"
+    if apos is None and bpos is not None:
+        return ("lost", "表示が消えた") if b_day >= 1 else ("neutral", "もともと表示がほとんど無い")
+    if bpos is None or apos is None:
+        return "neutral", "前後とも表示なし"
+    if impr_ratio is not None and b_day >= 1 and impr_ratio < 0.5 and not clicks_up:
+        return "lost", f"1日の表示が{b_day:.1f}→{a_day:.1f}回に減った（半分以下）"
+    if apos >= bpos + 2.0 and not (page_scope and clicks_up):
+        # ページ全体の平均順位は、新しい検索語で表示が増えるだけでも下がる。クリックが増えていれば戻さない
+        return "lost", f"順位が{bpos}→{apos}位に下がった"
+    if apos <= bpos - 1.0 or (clicks_up and apos <= bpos):
+        if impr_ratio is not None and impr_ratio < 0.7:
+            return "neutral", f"順位は上がったが表示が{b_day:.1f}→{a_day:.1f}回に減った"
+        return "won", f"順位{bpos}→{apos}位" + ("・クリック増" if clicks_up else "")
+    return "neutral", f"順位{bpos}→{apos}位・表示{b_day:.1f}→{a_day:.1f}回/日"
 
 
 def _revert_guide(slug: str, revision: int) -> bool:
@@ -993,18 +1054,30 @@ def cmd_polish(args=None) -> dict | None:
     start = end - timedelta(days=27)
     rows = _query(svc, start, end, ["page", "query"], row_limit=2000)
     guides = {g["slug"]: g for g in list_guides()}
-    running = sb_request("GET", "/rest/v1/denki_seo_experiment?select=guide_slug&status=eq.running") or []
-    locked = {r["guide_slug"] for r in running}
+    experiments = sb_request("GET", "/rest/v1/denki_seo_experiment?select=guide_slug,status,baseline,started_on&order=started_on.asc&limit=2000") or []
+    locked = {e["guide_slug"] for e in experiments if e.get("status") == "running"}
+    # 効かなかった直し方を全部試したページは、もう自動では触らない（同じ直し方の繰り返しを止める）
+    method_of = {slug: next_polish_method(slug, experiments) for slug in guides}
+    exhausted = {slug for slug, m in method_of.items() if m is None}
+    if exhausted:
+        log(f"polish: 直し方を使い切ったので見送るページ: {', '.join(sorted(exhausted))}")
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+    def polishable(slug: str | None) -> bool:
+        return bool(slug and slug in guides and slug not in locked and slug not in exhausted and parse_ts(guides[slug]["updated_at"]) < week_ago)
+
     cands, others = [], []
+    seen: dict[str, list[dict]] = {}  # slug → そのページで見えている検索語（副の検索語）
     for r in rows:
         page, query = r["keys"]
         pos, impr = r.get("position", 0), r.get("impressions", 0)
-        if not (1.5 < pos <= 20 and impr >= min_impr):
-            continue
         m = re.match(rf"^{re.escape(ORIGIN)}/guides/([a-z0-9-]+)$", page)
         slug = m.group(1) if m else None
-        if slug and slug in guides and slug not in locked and parse_ts(guides[slug]["updated_at"]) < week_ago:
+        if slug and pos <= 20:
+            seen.setdefault(slug, []).append({"query": query, "position": round(pos, 1), "impressions": impr})
+        if not (1.5 < pos <= 20 and impr >= min_impr):
+            continue
+        if polishable(slug):
             # 1位に近く、表示が多いほど優先
             cands.append({"slug": slug, "page": page, "query": query, "position": pos, "impressions": impr, "score": impr / pos})
         else:
@@ -1012,19 +1085,19 @@ def cmd_polish(args=None) -> dict | None:
     if others:
         activity("polish_manual_candidates", items=sorted(others, key=lambda x: -x["impressions"])[:10])
     # ページ単位: 検索語が伏せられていても、表示が多いのに上位に届いていないページを拾う。
-    # 狙う語は、そのページで見えている検索語があればそれ、無ければページを作った時の語。
-    seen_query = {c["slug"]: c["query"] for c in sorted(cands, key=lambda x: x["score"])}
+    # 狙う語はページを作った時の主の検索語。見えている検索語は副の検索語として本文・説明文で扱う
+    # （2026-10-26 まで副の検索語を狙いにして題名を書き換えていたので、主の語での表示が落ちた）。
     for r in _query(svc, start, end, ["page"], row_limit=500):
         pos, impr = r.get("position", 0), r.get("impressions", 0)
         m = re.match(rf"^{re.escape(ORIGIN)}/guides/([a-z0-9-]+)$", r["keys"][0])
         slug = m.group(1) if m else None
-        if not (slug and slug in guides and slug not in locked and parse_ts(guides[slug]["updated_at"]) < week_ago):
+        if not polishable(slug):
             continue
         if not (3.0 < pos <= 20 and impr >= PAGE_MIN_IMPRESSIONS):
             continue
         # 表示が多く、順位が上に近く、クリックされていないページほど優先
         cands.append({
-            "slug": slug, "page": r["keys"][0], "query": seen_query.get(slug) or guides[slug]["keyword"],
+            "slug": slug, "page": r["keys"][0], "query": guides[slug]["keyword"],
             "position": pos, "impressions": impr, "clicks": r.get("clicks", 0), "scope": "page",
             "score": impr / pos * (1 - min(r.get("ctr", 0), 1)),
         })
@@ -1033,33 +1106,43 @@ def cmd_polish(args=None) -> dict | None:
         fs = args.force_slug
         cands = [{"slug": fs, "page": f"{ORIGIN}/guides/{fs}", "query": args.force_query or guides[fs]["keyword"], "position": 8.0, "impressions": 0, "score": 1}]
         locked.discard(fs)
+        method_of[fs] = getattr(args, "force_method", None) or method_of.get(fs) or "rewrite"
     if not cands:
         log(f"polish: 対象なし（自動で直せるページで、表示{min_impr}回以上・2〜20位の言葉も、表示{PAGE_MIN_IMPRESSIONS}回以上・3〜20位のページもまだ無い）")
         return None
     c = max(cands, key=lambda x: x["score"])
     page_scope = c.get("scope") == "page"
     g = get_guide(c["slug"])
-    log(f"polish: {c['slug']} 「{c['query']}」 {c['position']:.1f}位 表示{c['impressions']}{'（ページ単位）' if page_scope else ''}")
+    method = method_of.get(c["slug"]) or "rewrite"
+    main_kw = g["keyword"]
+    side = sorted((q for q in seen.get(c["slug"], []) if q["query"] != main_kw), key=lambda q: -q["impressions"])[:5]
+    log(f"polish: {c['slug']} 「{c['query']}」 {c['position']:.1f}位 表示{c['impressions']}{'（ページ単位）' if page_scope else ''} 直し方={METHOD_LABEL[method]}")
     if page_scope:
         situation = (
-            f"検索語「{c['query']}」を狙った解説ページを、1位を狙って改善します。\n"
+            f"検索語「{main_kw}」を狙った解説ページを、1位を狙って改善します。\n"
             f"このページは直近28日間に検索結果へ{c['impressions']}回表示され、平均 {c['position']:.1f} 位、クリックは{c['clicks']}回です。\n"
-            "表示されてもクリックされていないので、題名と説明文は、検索した人が知りたいことの答えがあると分かる具体的な言い方に見直してください（誇張や煽りは入れない）。"
+            "表示されてもクリックされていないので、検索した人が知りたいことの答えがあると分かる具体的な言い方にします（誇張や煽りは入れない）。"
         )
     else:
-        situation = f"検索語「{c['query']}」で現在 {c['position']:.1f} 位の解説ページを、1位を狙って改善します。"
+        situation = f"検索語「{c['query']}」で現在 {c['position']:.1f} 位の解説ページを、1位を狙って改善します。このページの主の検索語は「{main_kw}」です。"
+    if side:
+        situation += "\nこのページは次の検索語でも表示されています（副の検索語）: " + "、".join(f"「{q['query']}」{q['position']}位・表示{q['impressions']}" for q in side)
+    keyword_rule = (
+        f"題名は主の検索語「{main_kw}」の言葉を全部含んだままにしてください。副の検索語は、本文・よくある質問・説明文で扱い、題名の主役にしないでください。"
+    )
 
     current = {k: g.get(k) for k in PAGE_FIELDS}
     gap = claude_json(
-        f"""WebSearch を使って、Google で「{c['query']}」と検索したときに上位に出る日本語のページを5件ほど調べてください。
+        f"""WebSearch を使って、Google で「{c['query']}」と検索したときに上位に出る日本語のページを5件ほど調べ、上位3件は WebFetch で本文を読んでください。
 上位ページが共通して扱っている論点・読者が知りたいことを整理し、下の「うちのページ」に足りない論点を挙げてください。
 足りない論点は、電気管理技術者のブログや動画で現場の実例が見つかりそうな具体的なものに絞ってください（最大4つ）。
+すでにうちのページで扱えている論点は挙げないでください（足りないものが無ければ missing は空でよい）。
 
 # うちのページ（{ORIGIN}/guides/{c['slug']}）
 {json.dumps(current, ensure_ascii=False, indent=1)[:12000]}
 
 次の JSON だけを ```json で囲んで返してください。
-{{"top_pages": [{{"title": "", "url": "", "points": [""]}}], "missing": [{{"topic": "足りない論点", "why": "上位ページでの扱われ方", "kb_query": "サイト内の記事を探すための検索文"}}], "title_hint": "検索語に合う題名の方向", "description_hint": "説明文の方向"}}""",
+{{"top_pages": [{{"title": "", "url": "", "points": [""]}}], "missing": [{{"topic": "足りない論点", "why": "上位ページでの扱われ方", "kb_query": "サイト内の記事を探すための検索文"}}], "title_hint": "主の検索語「{main_kw}」を含んだままの題名の方向", "description_hint": "説明文の方向"}}""",
         timeout=900,
     )
     if not gap:
@@ -1075,11 +1158,25 @@ def cmd_polish(args=None) -> dict | None:
     cite_map = {c_["n"]: url_to_idx.get(c_["url"]) for c_ in g.get("citations", [])}
     current = _map_text(current, lambda t: CITE_RE.sub(lambda m: f"[{cite_map.get(int(m.group(1)))}]" if cite_map.get(int(m.group(1))) else "", t))
 
+    if method == "body":
+        method_rule = (
+            "今回は本文だけを直します。title と description は現在のページのものを一字も変えずにそのまま返してください。\n"
+            "sections・checklist・faq に、資料で裏付けられる足りない論点だけを足してください。"
+        )
+    elif method == "meta":
+        method_rule = (
+            "今回は題名と説明文だけを直します。answer・sections・checklist・faq は現在のページのものを一字も変えずにそのまま返してください。\n"
+            f"題名と説明文は、検索語「{c['query']}」で検索した人が「ここに答えがある」と分かる具体的な言い方にしてください。{keyword_rule}"
+        )
+    else:
+        method_rule = (
+            "上位ページの調査で、うちのページに足りない論点が分かりました。資料で裏付けられる論点だけを足してください。\n"
+            f"題名と説明文は、検索語「{c['query']}」がそのまま、または自然に含まれるように見直してください。{keyword_rule}"
+        )
     improved = claude_json(
         f"""{situation}
-上位ページの調査で、うちのページに足りない論点が分かりました。資料で裏付けられる論点だけを足してください。
+{method_rule}
 資料で裏付けられない論点は足さないでください（足さないことは失敗ではありません）。
-題名と説明文は、検索語「{c['query']}」がそのまま、または自然に含まれるように見直してください。
 既存の本文はできるだけ残し、[番号] も資料の番号のまま使ってください。
 
 {WRITE_RULES}
@@ -1100,20 +1197,39 @@ def cmd_polish(args=None) -> dict | None:
     if not _valid_page(improved):
         log("polish: 改善案の形が崩れていた")
         return None
+    # 直し方の約束を機械的にも守らせる（モデルが「変えない」と言われた所を変えても、ここで戻す）
+    if method == "body":
+        improved["title"], improved["description"] = current["title"], current["description"]
+    elif method == "meta":
+        for k in ("answer", "sections", "checklist", "faq"):
+            improved[k] = current[k]
+    missing = title_missing_terms(improved.get("title", ""), main_kw)
+    if missing:
+        log(f"polish: 新しい題名「{improved.get('title')}」に主の検索語の{missing}が無いので題名は変えない")
+        improved["title"] = current["title"]
+    if all(improved.get(k) == current.get(k) for k in PAGE_FIELDS):
+        log("polish: 変える所が無かったので見送り")
+        activity("polish_rejected", slug=c["slug"], query=c["query"], reason="変更なし", method=method)
+        return None
     page, check = write_and_review(c["query"], "", sources, draft=improved)
     if not page:
         log(f"polish: 審査を通らず見送り {check.get('reason')}")
         activity("polish_rejected", slug=c["slug"], query=c["query"])
         return None
+    if method == "body":
+        page["title"], page["description"] = current["title"], current["description"]
+    if title_missing_terms(page.get("title", ""), main_kw):
+        page["title"] = current["title"]
     page, cites = finalize_citations(page, sources)
     if getattr(args, "dry_run", False):
         out = OUT_DIR / f"polish-draft-{c['slug']}.json"
-        out.write_text(json.dumps({"gap": gap, "page": page, "citations": cites, "check": check}, ensure_ascii=False, indent=1), encoding="utf-8")
+        out.write_text(json.dumps({"gap": gap, "method": method, "page": page, "citations": cites, "check": check}, ensure_ascii=False, indent=1), encoding="utf-8")
         log(f"polish dry-run: {out}")
         return None
     before = _query_stats(svc, c["page"], None if page_scope else c["query"], end - timedelta(days=13), end)
     if page_scope:
         before["scope"] = "page"
+    before["method"] = method
     snap ={k: g.get(k) for k in PAGE_FIELDS + ("citations",)}
     snap["revision"] = g["revision"]
     added = [m.get("topic") for m in gap.get("missing", []) if isinstance(m, dict)]
@@ -1134,7 +1250,8 @@ def cmd_polish(args=None) -> dict | None:
         prefer="return=minimal",
     )
     today = jst_today()
-    summary = f"題名「{g['title']}」→「{page['title']}」／足した論点候補: {'、'.join(filter(None, added)) or 'なし'}"
+    title_part = f"題名「{g['title']}」→「{page['title']}」" if page["title"] != g["title"] else f"題名「{g['title']}」はそのまま"
+    summary = f"[{METHOD_LABEL[method]}] {title_part}／足した論点候補: {'、'.join(filter(None, added)) or 'なし'}"
     sb_request(
         "POST",
         "/rest/v1/denki_seo_experiment",
@@ -1153,8 +1270,57 @@ def cmd_polish(args=None) -> dict | None:
         prefer="return=minimal",
     )
     log(f"polish: updated {c['slug']} rev{g['revision']}→{g['revision'] + 1}")
-    activity("guide_polished", slug=c["slug"], query=c["query"], position=round(c["position"], 1), summary=summary, url=c["page"])
+    activity("guide_polished", slug=c["slug"], query=c["query"], position=round(c["position"], 1), summary=summary, url=c["page"], method=method)
     return {"slug": c["slug"], "query": c["query"]}
+
+
+def cmd_revert_title(args) -> dict | None:
+    """磨きで変えた題名（と、指定すれば説明文）を過去の版に戻し、戻した効果も7日の実測で判定する。
+
+    2026-10-26 本人承認: 題名を狙いの語から離して表示が落ちた「継電器試験の周期」「漏れ電流（三相）」を戻す。
+    """
+    g = get_guide(args.slug)
+    if not g:
+        log(f"revert-title: {args.slug} が無い")
+        return None
+    rev = int(args.to_revision)
+    prev = next((h for h in g.get("history", []) if h.get("revision") == rev), None)
+    if not prev or not prev.get("title"):
+        log(f"revert-title: {args.slug} に rev{rev} の履歴が無い")
+        return None
+    fields = ("title", "description") if getattr(args, "with_description", False) else ("title",)
+    patch = {k: prev[k] for k in fields if prev.get(k)}
+    if all(g.get(k) == v for k, v in patch.items()):
+        log(f"revert-title: {args.slug} はすでに rev{rev} の題名")
+        return None
+    snap = {k: g.get(k) for k in PAGE_FIELDS + ("citations",)}
+    snap["revision"] = g["revision"]
+    patch.update({"revision": g["revision"] + 1, "history": (g.get("history", []) + [snap])[-10:], "updated_at": datetime.now(timezone.utc).isoformat()})
+    sb_request("PATCH", f"/rest/v1/denki_seo_guide?slug=eq.{args.slug}", patch, prefer="return=minimal")
+    summary = f"[{METHOD_LABEL['title-revert']}] 題名「{g['title']}」→「{patch['title']}」（rev{rev} の題名に戻した）"
+    log(f"revert-title: {args.slug} rev{g['revision']}→{g['revision'] + 1} {summary}")
+    activity("guide_title_reverted", slug=args.slug, summary=summary, url=f"{ORIGIN}/guides/{args.slug}", to_revision=rev)
+    # 戻した効果も、磨きと同じ仕組みで7日後に判定する（Search Console が使えない機械では記録だけ）
+    try:
+        svc = _service()
+        end = date.today() - timedelta(days=3)
+        before = _query_stats(svc, f"{ORIGIN}/guides/{args.slug}", None, end - timedelta(days=13), end)
+        before.update({"scope": "page", "method": "title-revert"})
+        today = jst_today()
+        sb_request(
+            "POST",
+            "/rest/v1/denki_seo_experiment",
+            {
+                "guide_slug": args.slug, "page_url": f"{ORIGIN}/guides/{args.slug}", "query": g["keyword"],
+                "started_on": today.isoformat(), "evaluate_on": (today + timedelta(days=10)).isoformat(),
+                "baseline": before, "change_summary": summary, "from_revision": g["revision"], "to_revision": g["revision"] + 1,
+            },
+            prefer="return=minimal",
+        )
+        log(f"revert-title: 判定の予約 {(today + timedelta(days=10)).isoformat()}（変更前14日: 表示{before['impressions']}・{before['position']}位）")
+    except Exception as e:  # noqa: BLE001
+        log(f"revert-title: Search Console が使えないので判定は予約しない: {e}")
+    return {"slug": args.slug, "title": patch["title"]}
 
 
 # ---------------------------------------------------------------- エンジン3: 通知・AIの引用チェック
@@ -1316,9 +1482,16 @@ def cmd_weekly_list(args=None) -> str:
     lines += ["", f"## 順位を磨いたページ {len(pol)}本"]
     lines += [f"- {r['url']} 「{r['query']}」{r['position']}位 → {r['summary']}" for r in pol] or ["- なし（まだ磨ける順位の言葉がない）"]
     if ev:
-        lines += ["", "## 7日後の判定"]
+        lines += ["", "## 7日後の判定（順位と、1日の表示回数）"]
         label = {"won": "上がった", "neutral": "変化なし", "lost": "下がった（元に戻した）"}
-        lines += [f"- {r['slug']} 「{r['query']}」 {r['before']}位 → {r['after']}位：{label.get(r['verdict'], r['verdict'])}" for r in ev]
+        for r in ev:
+            impr = f"、表示 {r['impressions_before']}→{r['impressions_after']}回/日" if r.get("impressions_before") is not None else ""
+            why = f"（{r['reason']}）" if r.get("reason") else ""
+            lines.append(f"- {r['slug']} 「{r['query']}」 {r['before']}位 → {r['after']}位{impr}：{label.get(r['verdict'], r['verdict'])}{why}")
+    rev_t = [r for r in recs if r["kind"] == "guide_title_reverted"]
+    if rev_t:
+        lines += ["", "## 題名を元に戻したページ"]
+        lines += [f"- {r['url']} {r['summary']}" for r in rev_t]
     if rej:
         lines += ["", f"審査で見送った案: {len(rej)}件"]
     md = "\n".join(lines) + "\n"
@@ -1421,7 +1594,12 @@ def main() -> None:
     pl.add_argument("--min-impressions", default="3")
     pl.add_argument("--force-slug")
     pl.add_argument("--force-query")
+    pl.add_argument("--force-method", choices=POLISH_METHODS)
     pl.add_argument("--dry-run", action="store_true")
+    rt = sub.add_parser("revert-title", help="磨きで変えた題名を過去の版に戻す")
+    rt.add_argument("--slug", required=True)
+    rt.add_argument("--to-revision", required=True)
+    rt.add_argument("--with-description", action="store_true")
     sub.add_parser("evaluate")
     sub.add_parser("keywords")
     i = sub.add_parser("indexnow")
@@ -1435,6 +1613,7 @@ def main() -> None:
         "new-page": cmd_new_page,
         "polish": cmd_polish,
         "evaluate": cmd_evaluate,
+        "revert-title": cmd_revert_title,
         "keywords": cmd_keywords,
         "indexnow": cmd_indexnow,
         "ai-check": cmd_ai_check,

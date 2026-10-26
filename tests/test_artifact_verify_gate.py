@@ -87,14 +87,35 @@ def test_worktree_paths_are_not_live(tmp_path):
     assert run(tmp_path, rows) is None
 
 
-def test_ng_result_must_be_reported(tmp_path):
+def test_ng_result_blocks_once_to_wait_not_to_report(tmp_path):
+    """10-25: NG は「本人に伝えさせる」ためではなく、待って確かめ直させるために1回だけ止める。書き方では通さない。"""
     ng = '[artifact_seen] slug=x-operation result=NG（まだ古い所がある）'
     rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
             claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
             claude_result('2', ng)]
-    r = run(tmp_path, rows + [claude_text('直しました。')])
-    assert r['decision'] == 'block' and 'NG' in r['reason']
-    assert run(tmp_path, rows + [claude_text('裏側が再起動待ちのため、まだ直っていません。')]) is None
+    r = run(tmp_path, rows + [claude_text('裏側が再起動待ちのため、まだ直っていません。')])
+    assert r['decision'] == 'block' and '--wait 90' in r['reason']
+    assert run(tmp_path, rows + [claude_text('はい、押すとその場で書き換えられます。')], stop_hook_active=True) is None
+
+
+def test_block_reason_keeps_the_answer_and_hides_the_check(tmp_path):
+    """止めた後の文だけが返事になるので、前の答えを全部書き直させ、確かめた結果は書かせない（10-25 答えが消えた件）。"""
+    r = run(tmp_path, [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1')])
+    assert '返事に書かない' in r['reason'] and 'そのまま全部もう一度書いて' in r['reason']
+    assert '出た結果どおりに報告' not in r['reason']
+
+
+def test_ng_from_an_earlier_turn_does_not_stop_the_next_turn(tmp_path):
+    """10-25: 前のターンの NG のまま、次の「READY」だけのターンが止められた。"""
+    rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
+            claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
+            claude_result('2', '[artifact_seen] slug=x-operation result=NG（まだ古い所がある）'),
+            claude_text('はい、押すとその場で書き換えられます。'),
+            {'type': 'user', 'message': {'role': 'user', 'content': 'Stop hook feedback: [成果物の確認の関所] …'}},
+            claude_text('はい、押すとその場で書き換えられます。'),
+            {'type': 'user', 'message': {'role': 'user', 'content': '[CONTEXT PRELOAD] READY とだけ返して'}},
+            claude_text('READY')]
+    assert run(tmp_path, rows) is None
 
 
 def test_unchecked_with_ack_passes(tmp_path):
@@ -131,11 +152,3 @@ def test_data_heredoc_body_is_not_an_edit(tmp_path):
     assert run(tmp_path, [claude_tool('Bash', {'command': into_artifact}, '1')])['decision'] == 'block'
     code = "python - <<'EOF'\nopen('D:/done/frontend/src/app/artifacts/x-operation/a.tsx','w').write('x')\nEOF"
     assert run(tmp_path, [claude_tool('Bash', {'command': code}, '1')])['decision'] == 'block'
-
-
-def test_ng_word_next_to_japanese_counts_as_reported(tmp_path):
-    rows = [claude_tool('Edit', {'file_path': LIVE + '/x-operation/a.tsx'}, '1'),
-            claude_tool('Bash', {'command': 'python D:/done/scripts/artifact_seen.py --slug x-operation'}, '2'),
-            claude_result('2', '[artifact_seen] slug=x-operation result=NG（まだ古い所がある）'),
-            claude_text('確認の結果はNGでした。')]
-    assert run(tmp_path, rows) is None

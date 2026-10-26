@@ -97,3 +97,22 @@ def tidy_reply(text: str, blocks: Optional[List[Any]], user_text: Optional[str])
             for b in blocks
         ]
     return text, blocks
+
+
+# 「本人に伝えることは無い」の印（2026-10-25）。見張りや付箋の部屋どうしの連絡で起こされたダンは、伝える新しいことが
+# 無ければこの印だけを返す。今までは保存した後で app/services/followup_poller.py が消していたので、消すまでの間に画面と
+# 通知に「WATCH_NO_CHANGE」が出た（本人「そのWATCH_NO_CHANGEもいらん」）。印の返事は、どの経路でも保存しない。
+SILENT_MARKS = ("WATCH_NO_CHANGE",)
+# 印を包むだけの飾り（コードの囲み・太字）。中身が印と完全に同じ時だけ「印だけ」と見る。印について話す普通の返事
+# （「『WATCH_NO_CHANGE』は表示されなくなりました」）は捨てない（10-25 確かめたダンの指摘）。
+_WRAP = re.compile(r"^(?:```[\w-]*\s*|`+|\*+|_+)?\s*(.*?)\s*(?:```|`+|\*+|_+)?$", re.S)
+
+
+def is_silent_reply(text: Optional[str]) -> bool:
+    """本人に何も見せない返事か。前後の空白・改行と、印を包む飾りを除いて、本文が印と完全に同じ時だけ。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    m = _WRAP.match(t)
+    inner = (m.group(1) if m else t).strip()
+    return inner in SILENT_MARKS

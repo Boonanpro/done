@@ -71,3 +71,56 @@ def test_tidy_reply_applies_to_text_blocks_only():
     assert out[0] == blocks[0]
     assert out[1]["text"] == "Checking the official pages now."
     assert out[2]["text"] == BODY
+
+
+# 「伝えることは無い」の印（10-25 本人「そのWATCH_NO_CHANGEもいらん」）
+def test_silent_reply_is_recognized():
+    from app.agent.reply_text import is_silent_reply
+    assert is_silent_reply("WATCH_NO_CHANGE")
+    assert is_silent_reply("  `WATCH_NO_CHANGE`\n")
+    assert is_silent_reply("**WATCH_NO_CHANGE**")
+    assert is_silent_reply("\n\n```\nWATCH_NO_CHANGE\n```\n")
+    assert not is_silent_reply("")
+    assert not is_silent_reply("できました。合計1,135円です。")
+    assert not is_silent_reply("WATCH_NO_CHANGE " + "あ" * 300)
+    # 印について話す普通の返事は捨てない（10-25 確かめたダンの指摘）
+    assert not is_silent_reply("「WATCH_NO_CHANGE」は表示されなくなりました。")
+    assert not is_silent_reply("WATCH_NO_CHANGE です")
+
+
+def test_silent_text_is_not_kept_as_a_work_line(monkeypatch):
+    from app.agent import cli_runner
+
+    def no_db():
+        raise AssertionError("the mark must not reach the work record")
+    monkeypatch.setattr("app.services.supabase_client.get_supabase_client", no_db)
+    assert cli_runner._save_execution_event_sync("room-1", "reasoning", project_id="p", content="  WATCH_NO_CHANGE\n") is None
+
+
+def test_silent_reply_sends_no_push(monkeypatch):
+    import asyncio
+    from app.api import chat_routes
+    from app.services import push_service
+    sent = []
+
+    class Push:
+        async def notify_room(self, **kw):
+            sent.append(kw["body"])
+    monkeypatch.setattr(push_service, "get_push_service", lambda: Push())
+    asyncio.run(chat_routes._notify_dan_completion("room-1", "u1", None, "\n WATCH_NO_CHANGE \n"))
+    assert sent == []
+    asyncio.run(chat_routes._notify_dan_completion("room-1", "u1", None, "注文できたよ。"))
+    assert sent and all("注文できたよ" in b for b in sent)
+
+
+def test_silent_reply_is_never_saved(monkeypatch):
+    from app.agent import cli_runner
+    monkeypatch.setattr(cli_runner, "_answers_withdrawn", lambda room_id: False)
+    answered = []
+    monkeypatch.setattr(cli_runner.turn_flow, "turn_answered", lambda room_id: answered.append(room_id) or 0.0)
+
+    def no_db():
+        raise AssertionError("a silent reply must not reach the database")
+    monkeypatch.setattr("app.services.supabase_client.get_supabase_client", no_db)
+    assert cli_runner._save_ai_message_sync("room-1", "WATCH_NO_CHANGE", ends_turn=True) is False
+    assert answered == ["room-1"]
