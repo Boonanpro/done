@@ -2,20 +2,20 @@
 place: dev-lead-room
 name: 開発室のボードの話し合い（枝・付箋ごとの部屋）
 open: /preview/dev-lead
-ready: '[class*="_canvas__"]'
+ready: '[class*="_canvas__"], [class$="__canvas"], [class*="__canvas "]'
 covers: [artifact:dev-lead]
 speak: |
   - PC では、ダン本体の「ダン開発室」の部屋の右の成果物タブにボード（枝と付箋の地図）が出て、その左側の一覧でこの話し合いを選んで読む。スマホではボードの公開版の写しを開いて読む。同じボードの上に、ほかの枝の話し合いと付箋の状態も見えている。
   - 返事の吹き出しは Markdown（番号・点の並び、表、太字、コード）と ```openui-lang の部品、[添付画像: …] などの印を描く。見出しは本文と同じ大きさの太字にしかならない。
   - 付箋はボードに出ている札の言葉（例「場所の地図と自分で確かめる」）で呼ぶ。全体の部屋（「ダン開発室」）は別の会話で、ここに書いたことはそちらには出ない。
-probe: {module: style, scope: app, bubble: md, real: '[class*="_md__"]'}
+probe: {module: style, scope: app, bubble: md, real: '[class*="_md__"], [class$="__md"], [class*="__md "]'}
 shows: [番号の並び, 点の並び, 表, 見出し, 太字, コード]
 watches:
   - frontend/src/app/artifacts/dev-lead/page-body.tsx
   - frontend/src/app/artifacts/dev-lead/style.module.css
   - frontend/src/app/artifacts/dev-lead/model.ts
 fingerprint: a455832e844e0868
-described: b51f0ab40acda937
+described: ffd2b2bae545405d
 ---
 # 開発室のボードの話し合い
 

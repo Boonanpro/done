@@ -142,8 +142,26 @@ def map_state(pid: str) -> tuple[str, str]:
         return "DRAFT", f"「{TODO}」が残っています。みきさんから見た中身・行き方・動かし方・落とし穴を書いてください"
     now = file_hashes(pid)
     if str(m["meta"].get("fingerprint") or "") != fingerprint_of(now):
-        return "STALE", "画面のファイルが地図を書いた後に変わっています: " + changed_summary(stamped_files(m["text"]), now)
+        old = stamped_files(m["text"])
+        absent = absent_artifacts(pid, old)
+        if absent and old and {f: h for f, h in old.items() if not _in(f, absent)} == {f: h for f, h in now.items() if not _in(f, absent)}:
+            # 成果物は done-artifacts にあり、作業場所には写さない限り無い。無い成果物のファイルは見ずに比べる
+            return "FRESH", "画面のファイルと地図が合っています（この木に無い成果物 " + "、".join(sorted(absent)) + " は見ていない）"
+        return "STALE", "画面のファイルが地図を書いた後に変わっています: " + changed_summary(old, now)
     return "FRESH", "画面のファイルと地図が合っています"
+
+
+def absent_artifacts(pid: str, files: dict[str, str]) -> set[str]:
+    """共通の場所の地図が見張る成果物のファイルのうち、この木に成果物のフォルダごと無いもの（slug の集まり）。"""
+    if pid.startswith("artifact:"):
+        return set()
+    tree = tree_of(pid)
+    slugs = {f.split("/")[4] for f in files if f.startswith("frontend/src/app/artifacts/") and f.count("/") >= 5}
+    return {s for s in slugs if not (tree / "frontend/src/app/artifacts" / s).is_dir()}
+
+
+def _in(f: str, slugs: set[str]) -> bool:
+    return any(f.startswith(f"frontend/src/app/artifacts/{s}/") for s in slugs)
 
 
 def changed_summary(old: dict[str, str], new: dict[str, str]) -> str:
