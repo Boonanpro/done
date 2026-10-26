@@ -287,9 +287,10 @@
             "query": "パソコン PC 相談 決めた 続き"
           }
         ],
-        "start_after_audio_end_s": 0.14,
+        "start_after_audio_end_s": 2.412,
         "done_after_audio_end_s": 3.214,
-        "prefetch_hits": 0
+        "prefetch_hits": 0,
+        "first_discarded_attempt_after_audio_end_s": 0.14
       },
       {
         "q": "この部屋にはどんな資料がある？",
@@ -2446,7 +2447,7 @@
       "done_after_audio_end_s": 3.212
     },
     "after": {
-      "start_after_audio_end_s": 0.715,
+      "start_after_audio_end_s": 0.745,
       "done_after_audio_end_s": 2.534
     }
   },
@@ -2819,5 +2820,11 @@
     "budget_estimate_with_contingency_jpy": 266.3708678666667,
     "limits": "DeepSeek token usage and invoice/actual exchange rate not recorded. 50 JPY is a budget allowance, not a proven upper bound. Exact total cannot be certified from these logs.",
     "additional_paid_calls_for_integration": 0
+  },
+  "measurement_correction_20261026": {
+    "reason": "previous start column counted discarded speculative history read; now start of read actually used",
+    "history_used_start_s": 2.412,
+    "old_median_s": 0.715,
+    "corrected_median_s": 0.745
   }
 }

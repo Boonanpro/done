@@ -36,6 +36,8 @@ CASES = [
 
 
 def prepare():
+    if any((OUT/f'{mode}.json').exists() for mode in ('baseline','after')):
+        raise RuntimeError('do not replace audio for an existing paid measurement')
     rate = 24000
     audio = bytearray(b'\x00\x00' * rate * 10)
     schedule = []
@@ -55,6 +57,8 @@ def prepare():
 
 
 async def main(mode):
+    if mode not in ('baseline', 'after') or (OUT/f'{mode}.json').exists():
+        raise RuntimeError('only one baseline and one after call; existing evidence is immutable')
     from dotenv import load_dotenv
     load_dotenv(Path.home() / 'done/.env')  # read existing secrets into memory, never copy to output
     from app.services import voice_prefetch as P, voice_sideband as S, voice_live as L, voice_responses as R
@@ -193,5 +197,7 @@ async def main(mode):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) != 2 or sys.argv[1] not in ('prepare', 'baseline', 'after'):
+        raise SystemExit('prepare|baseline|after')
     if sys.argv[1]=='prepare': prepare()
     else: asyncio.run(main(sys.argv[1]))
