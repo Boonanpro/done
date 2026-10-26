@@ -238,6 +238,10 @@ class SandboxManager:
         if log_path.exists() and log_path.stat().st_size > 20 * 1024 * 1024:
             log_path.replace(log_path.with_suffix(".previous.log"))
         log_file = open(log_path, "a", encoding="utf-8")
+        # Its own process group on POSIX: stop() ends the sandbox with killpg, and a sandbox left in the core's group
+        # took the core down with it (2026-10-27 on the Mac: every sandbox restart put the core into a shutdown that
+        # hung on the screens' open long polls, and chat went dark until someone killed it).
+        apart = {} if sys.platform == "win32" else {"start_new_session": True}
         return subprocess.Popen(
             cmd,
             cwd=str(self.cwd),
@@ -245,6 +249,7 @@ class SandboxManager:
             stderr=subprocess.STDOUT,
             env=env,
             creationflags=_NO_WINDOW,
+            **apart,
         )
 
     def _is_running(self) -> bool:
