@@ -560,3 +560,13 @@ async def test_words_unrelated_to_the_draft_and_a_discard(room, monkeypatch):
     owner_heard(stage, 'いいよ')   # no pending draft: nothing is asked
     await asyncio.sleep(.1)
     assert len(asked) == 2
+
+
+def test_the_announcement_of_a_draft_is_not_a_read_back():
+    card = {'to_name': '田中様', 'to': 'tanaka@example.com'}
+    assert not S.mention_of(card, '田中様さん宛てに、打ち合わせの件の文面を出しました。')
+    assert not S.mention_of(card, 'はい、今送信します。宛先 tanaka@example.com、件名「打ち合わせの時間」です。')
+    assert S.mention_of(card, '宛先 tanaka@example.com、件名「時間」、本文は「明日15時で」。今から送っていい?')
+    assert S.mention_of(card, S.spoken_summary(card | {'channel': 'email', 'body': '明日15時で。'}))
+    hist = [{'role': 'assistant', 'text': '田中様さん宛てにメールの文面を出しました。'}, {'role': 'user', 'text': '送って'}]
+    assert not S.approval_heard(hist, (0, 0), card)[0]

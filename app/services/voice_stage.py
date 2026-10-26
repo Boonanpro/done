@@ -226,13 +226,19 @@ def spoken_summary(card):
     return f'{who}さん宛ての{how}。' + (f'件名は「{what}」。' if what else '') + f'本文は「{gist}」。これで送っていいですか。'
 
 
+SEND_QUESTION = re.compile(r'(送っていい|送ってもいい|送りますか|送信していい|送信してもいい|送ってよろしい|送ってもよろしい|送信しますか|これで送|送って大丈夫|送信して大丈夫)')
+
+
 def mention_of(card, text):
-    """Dan's words mention the recipient (the read-aloud happened): the name, the address's user part, or the summary's frame."""
+    """Dan's words are the read-back: they name the recipient (the name, the address's user part, or 宛て) AND ask whether
+    to send. 「○○さん宛てに文面を出しました」 alone is the announcement of the draft, not a read-back (2026-10-27 test call 5:
+    it counted, and the owner's first 「送って」 sent the mail without the question)."""
     text = str(text or '')
+    if not SEND_QUESTION.search(text): return False
     for key in (card.get('to_name') or '', (card.get('to') or '').split('@')[0].lstrip('@')):
         key = key.replace('様', '').replace('さん', '').strip()
         if len(key) >= 2 and key in text: return True
-    return bool(re.search(r'(宛て|あて|送っていい|送ってもいい|送りますか|送っていいですか|送信していい)', text))
+    return bool(re.search(r'(宛て|あて|宛先)', text))
 
 
 def approval_heard(history, mark, card, since=None):
