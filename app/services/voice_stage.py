@@ -174,6 +174,7 @@ def safe_image(url):
 APPROVAL = re.compile(r'(いいよ|いいです|いいっす|良いよ|よいよ|送って|送信して|送っちゃって|送ろう|送る|オッケー|オーケー|おっけ|ok|okay|お願い|大丈夫|それで|はい|うん|ええ|どうぞ|ゴー|go|頼む|よろしく|やって|進めて|問題ない|承認|了解)', re.I)
 HESITATION = re.compile(r'(待って|まって|まだ|やめ|止め|とめ|ちょっと|うーん|う〜ん|えーと|えっと|直し|なおし|変え|かえ|違う|ちがう|なし|ダメ|だめ|送らない|やっぱ|考え|後で|あとで|どうしよう|どうかな|かな[。？?]?$|微妙|保留|一旦|いったん|見せて|読んで|もう一回|もう一度|\?|？)', re.I)
 FLOW_S = 1.0           # the owner's words about the draft on the stage settle this long before the server acts on them
+READ_BACK_FRESH_S = 12.0   # a read-back this recent is not said again by the backend
 FLOW_INSTRUCTIONS = """通話中、本人の画面にはダンが作ったメッセージの下書き（送信案: 宛先・件名・本文）が出ています。本人の直前の言葉が、その下書きに対して何を求めているかを判定します。出力は JSON だけ:
 {"intent": "revise" | "send" | "approve" | "stop" | "discard" | "other", "body": "直した本文全体（revise の時だけ）", "subject": "直した件名（件名を変える時だけ）", "to_name": "直した宛名（宛名を変える時だけ）"}
 - revise: 文面・件名・宛名を変える頼み（「もっと短く」「最後に日程を足して」「2行目を柔らかく」「宛名を田中様に」）。body には直した後の本文全体を書く。頼まれた所だけ変え、ほかの行は一字も変えない。本人が言った内容（日時・名前・数字）だけを使い、補わない。
@@ -439,6 +440,7 @@ class Stage:
         self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
         self.card = None             # a message draft on the stage (card_of), with the transcript's mark when it was last put there
         self._card_mark, self._card_refused = None, None
+        self._read_back_at = -1e9   # when the server itself last read the draft back
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
         self._fresh = []             # (role, words) since the last decision: what the model judges on
@@ -685,12 +687,11 @@ class Stage:
             if any(t['role'] == 'assistant' and mention_of(card, t['text']) for t in words_since(history, self._flow_mark)) or mention_of(card, dan_words):
                 self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_by_dan', detail=why[:80], **usage)
                 return 'read_back'
-            if getattr(self.dialogue, 'delegated_at', 0.0) >= getattr(self.dialogue, 'heard_at', 0.0) - .5:
-                # the speech model handed these words to the backend: its answer carries the read-back (send_message_on_stage
-                # returns read_back); saying it here too made the owner hear it twice (test call 6, 2026-10-27)
-                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_delegated', detail=why[:80], **usage)
-                return 'read_back'
+            # the server reads back at once (about 2 s after the owner's words; the backend's own read-back came 8 s
+            # later in test call 7 and collided with the owner's next words). A backend call meanwhile is told it was
+            # read already (send_message), so the owner does not hear it twice (test call 6).
             text = spoken_summary(card)
+            self._read_back_at = time.monotonic()
             self.dialogue.add('assistant', text)   # the read-back counts even when the commentary is not transcribed
             if self.speak is not None:
                 try: await self.speak(text)
@@ -772,6 +773,9 @@ class Stage:
         if not ok:
             self._card_refused = transcript_mark(history)   # these words were judged; the next answer is judged alone
             self.record('stage_send_refused', reason=why[:80])
+            if time.monotonic() - self._read_back_at < READ_BACK_FRESH_S:
+                return {'sent': False, 'reason': why, 'read_back_done': True,
+                        'note': '送っていない。宛先と要点はもう声で読み上げて本人の返事を待っている。返事は空にする（重ねて読み上げない）。本人が「いいよ」「送って」のように答えたら、もう一度 send_message_on_stage。'}
             return {'sent': False, 'reason': why, 'read_back': spoken_summary(card),
                     'note': '送っていない。まず read_back の内容を声で言って本人の返事を待つ。本人が「いいよ」「送って」のように答えたら、もう一度 send_message_on_stage。'}
         self.card = dict(card, status='sending')   # no second send while this one is on its way

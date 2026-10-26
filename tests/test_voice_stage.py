@@ -573,13 +573,14 @@ def test_the_announcement_of_a_draft_is_not_a_read_back():
 
 
 @pytest.mark.asyncio
-async def test_when_the_speech_model_handed_the_words_over_the_server_leaves_the_read_back_to_the_backend(room, monkeypatch):
-    import time as _time
+async def test_the_server_reads_back_first_and_a_backend_call_meanwhile_does_not_repeat_it(room, monkeypatch):
     stage, fake, asked, said, log = make_flow_stage(room, monkeypatch, [{'intent': 'send'}])
     await stage.draft_message('email', 'dan-test@example.com', '明日15時で。', subject='時間', to_name='田中様')
     owner_heard(stage, '送って')
-    stage.dialogue.delegated_at = _time.monotonic()   # the delegation for these words was created
     await asyncio.sleep(.1)
-    assert said == [] and [f['result'] for p, f in log if p == 'stage_flow'] == ['read_back_delegated']
-    out = await stage.send_message('p1', speak=None)   # the backend's call: not approved, it gets the read-back to say
+    assert len(said) == 1 and '送っていいですか' in said[0]
+    out = await stage.send_message('p1', speak=None)   # the backend's call for the same words: told it was read already
+    assert not out['sent'] and out.get('read_back_done') and 'read_back' not in out
+    monkeypatch.setattr(S, 'READ_BACK_FRESH_S', 0)
+    out = await stage.send_message('p1', speak=None)   # later, the backend reads back itself
     assert not out['sent'] and '送っていいですか' in out['read_back']
