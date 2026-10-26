@@ -479,3 +479,84 @@ async def test_with_the_calls_voice_the_delivery_runs_behind_and_the_result_is_s
     assert (await stage.send_message('p1', speak=speak))['sent'] == 'sending'   # not twice
     await asyncio.sleep(.05)
     assert fake.sent == [('p1', 'dan')] and said == ['送りました。'] and S.read_state(room)['card']['status'] == 'sent'
+
+
+# -- the owner's words about the draft, heard by the server itself (2026-10-27: the speech model handed nothing over) ---
+
+def make_flow_stage(room, monkeypatch, flow_answers):
+    """A stage whose model answers the flow's question from `flow_answers` and keeps everything else."""
+    fake = FakeMessages()
+    monkeypatch.setattr(S, '_message_service', lambda: fake)
+    monkeypatch.setattr(S, 'FLOW_S', .02); monkeypatch.setattr(S, 'USER_S', .5)   # the listener's own decision stays out of the way
+    asked, said, log = [], [], []
+    async def ask(system, user):
+        if system == S.FLOW_INSTRUCTIONS:
+            asked.append(user)
+            return (flow_answers.pop(0) if flow_answers else {'intent': 'other'}), {'input_tokens': 10, 'output_tokens': 5}
+        return {'action': 'keep', 'caption': ''}, {'input_tokens': 10, 'output_tokens': 5}
+    async def speak(text): said.append(text)
+    stage = S.Stage(room, 'sess-1', Dialogue(), lambda phase, **f: log.append((phase, f)), ask=ask, user_id='owner-1', speak=speak)
+    return stage, fake, asked, said, log
+
+
+def owner_heard(stage, text):
+    stage.dialogue.add('user', text); stage.heard('user', text)
+
+
+@pytest.mark.asyncio
+async def test_the_server_revises_reads_back_and_sends_on_the_owners_words_alone(room, monkeypatch):
+    stage, fake, asked, said, log = make_flow_stage(room, monkeypatch, [
+        {'intent': 'revise', 'body': '明日15時で。'},
+        {'intent': 'send'},
+        {'intent': 'stop'},
+        {'intent': 'approve'},
+    ])
+    await stage.draft_message('email', 'dan-test@example.com', '田中様\n明日は15時でお願いします。', subject='時間', to_name='田中様')
+    owner_heard(stage, 'もっと短くして')
+    await asyncio.sleep(.1)
+    assert fake.rows['p1']['content'] == '明日15時で。' and S.read_state(room)['card']['revision'] == 2
+    assert '本人の新しい言葉: もっと短くして' in asked[0] and '今の下書き:' in asked[0]
+    owner_heard(stage, '送って')
+    await asyncio.sleep(.1)
+    assert said == ['田中様さん宛てのメール。件名は「時間」。本文は「明日15時で。」。これで送っていいですか。'] and fake.sent == []
+    assert stage.dialogue.history[-1]['role'] == 'assistant' and '送っていいですか' in stage.dialogue.history[-1]['text']
+    owner_heard(stage, 'うーん、ちょっと待って')
+    await asyncio.sleep(.1)
+    assert fake.sent == [] and len(said) == 1
+    owner_heard(stage, 'いいよ')
+    await asyncio.sleep(.15)
+    assert fake.sent == [('p1', 'dan')] and said[-1] == '送りました。' and S.read_state(room)['card']['status'] == 'sent'
+    flow = [f for p, f in log if p == 'stage_flow']
+    assert [f['result'] for f in flow] == ['revised', 'read_back', 'held', 'send']
+
+
+@pytest.mark.asyncio
+async def test_an_approval_without_a_read_back_only_reads_back_and_dans_own_read_back_is_not_repeated(room, monkeypatch):
+    stage, fake, asked, said, log = make_flow_stage(room, monkeypatch, [{'intent': 'approve'}, {'intent': 'send'}, {'intent': 'approve'}])
+    await stage.draft_message('email', 'dan-test@example.com', '明日15時で。', subject='時間', to_name='田中様')
+    owner_heard(stage, 'いいよ、送って')      # nothing was read back yet: the server reads back, does not send
+    await asyncio.sleep(.1)
+    assert fake.sent == [] and len(said) == 1 and '送っていいですか' in said[0]
+    await stage.draft_message('email', 'dan-test@example.com', '明日15時で。宜しく。', subject='時間', to_name='田中様')   # a new draft: read back again
+    owner_heard(stage, '送って')
+    stage.dialogue.add('assistant', '田中様さん宛てのメールです。送っていいですか。')   # the speech model read it back itself meanwhile
+    await asyncio.sleep(.1)
+    assert len(said) == 1 and [f['result'] for p, f in log if p == 'stage_flow'][-1] == 'read_back_by_dan'
+    owner_heard(stage, 'はい')
+    await asyncio.sleep(.15)
+    assert fake.sent == [('p1', 'dan')] and said[-1] == '送りました。'
+
+
+@pytest.mark.asyncio
+async def test_words_unrelated_to_the_draft_and_a_discard(room, monkeypatch):
+    stage, fake, asked, said, log = make_flow_stage(room, monkeypatch, [{'intent': 'other'}, {'intent': 'discard'}])
+    await stage.draft_message('email', 'dan-test@example.com', '明日15時で。', subject='時間', to_name='田中様')
+    owner_heard(stage, 'ところで明日の天気は？')
+    await asyncio.sleep(.1)
+    assert fake.rows['p1']['status'] == 'pending' and said == []
+    owner_heard(stage, 'やっぱり送らないで')
+    await asyncio.sleep(.1)
+    assert fake.rows['p1']['status'] == 'rejected' and S.read_state(room)['card']['status'] == 'rejected'
+    owner_heard(stage, 'いいよ')   # no pending draft: nothing is asked
+    await asyncio.sleep(.1)
+    assert len(asked) == 2

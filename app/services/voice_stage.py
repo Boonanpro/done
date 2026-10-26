@@ -173,8 +173,30 @@ def safe_image(url):
 # calls send is not trusted to have heard an approval (the owner: 「送って」「いいよ」以外の言葉では送らない).
 APPROVAL = re.compile(r'(いいよ|いいです|いいっす|良いよ|よいよ|送って|送信して|送っちゃって|送ろう|送る|オッケー|オーケー|おっけ|ok|okay|お願い|大丈夫|それで|はい|うん|ええ|どうぞ|ゴー|go|頼む|よろしく|やって|進めて|問題ない|承認|了解)', re.I)
 HESITATION = re.compile(r'(待って|まって|まだ|やめ|止め|とめ|ちょっと|うーん|う〜ん|えーと|えっと|直し|なおし|変え|かえ|違う|ちがう|なし|ダメ|だめ|送らない|やっぱ|考え|後で|あとで|どうしよう|どうかな|かな[。？?]?$|微妙|保留|一旦|いったん|見せて|読んで|もう一回|もう一度|\?|？)', re.I)
+FLOW_S = 1.0           # the owner's words about the draft on the stage settle this long before the server acts on them
+FLOW_INSTRUCTIONS = """通話中、本人の画面にはダンが作ったメッセージの下書き（送信案: 宛先・件名・本文）が出ています。本人の直前の言葉が、その下書きに対して何を求めているかを判定します。出力は JSON だけ:
+{"intent": "revise" | "send" | "approve" | "stop" | "discard" | "other", "body": "直した本文全体（revise の時だけ）", "subject": "直した件名（件名を変える時だけ）", "to_name": "直した宛名（宛名を変える時だけ）"}
+- revise: 文面・件名・宛名を変える頼み（「もっと短く」「最後に日程を足して」「2行目を柔らかく」「宛名を田中様に」）。body には直した後の本文全体を書く。頼まれた所だけ変え、ほかの行は一字も変えない。本人が言った内容（日時・名前・数字）だけを使い、補わない。
+- send: 送ってほしいという頼み（「送って」「送信して」「それで出して」「送っちゃって」）。
+- approve: ダンが宛先と要点を読み上げて「送っていいですか」と聞いた後の、承認の返事（「いいよ」「OK」「はい」「お願い」「それで」）。
+- stop: 待ってほしい・保留（「ちょっと待って」「まだ」「うーん」「もう一回読んで」）。
+- discard: 送らない・取り下げ（「やめて」「送らないで」「消して」「なしで」）。
+- other: 下書きと関係ない話、挨拶、相づち、ダンへの質問。
+迷う時は other か stop（送る側に倒さない）。"""
+
+
+def flow_input(card, dan_words, owner_words):
+    return ('今の下書き:' + chr(10) + card_text(card) + chr(10) + chr(10) + 'ダンの直前の言葉: ' + (' '.join(str(dan_words or '').split())[:400] or '（無し）')
+            + chr(10) + '本人の新しい言葉: ' + ' '.join(str(owner_words or '').split())[:600])
+
+
 CARD_CHANNELS_SPOKEN = {'email': 'メール', 'instagram_dm': 'Instagram の DM', 'instagram_comment': 'Instagram のコメント', 'collab': '窓口のチャット',
                         'line': 'LINE', 'sms': 'SMS', 'web_form': 'フォーム', 'chatwork': 'Chatwork', 'slack': 'Slack', 'x_dm': 'X の DM'}
+
+
+async def _silent(text):
+    """Where no voice is attached (tests, a stage without a call): the result is only recorded."""
+    return None
 
 
 def _message_service():
@@ -400,9 +422,11 @@ class Stage:
     cleaned here, drawn by the screen in a sandboxed frame) or an image (one of Dan's files or an https URL, including a
     photograph of a page taken for the owner: show_page)."""
 
-    def __init__(self, room_id, session_id, dialogue, record, ask=None, user_id=None):
+    def __init__(self, room_id, session_id, dialogue, record, ask=None, user_id=None, speak=None):
         self.room_id, self.session_id, self.dialogue, self.record, self.user_id = room_id, session_id, dialogue, record, user_id
         self.ask = ask or ask_model
+        self.speak = speak               # the call's spoken commentary (voice_sideband): what the server itself says
+        self._flow_timer, self._flow_mark = None, None
         # The version counts on from the room's previous call: the screen long-polls for a version above the last one
         # it saw, so a new call restarting at 1 never reached it (2026-10-25 3rd test call: 5 scenes drawn, none shown).
         self.version = int((read_state(room_id) or {}).get('version') or 0)
@@ -457,6 +481,7 @@ class Stage:
             self.user_pending = True
             self._owner_asked = True
             wait = USER_S
+            if self.card and self.card.get('status') == 'pending': self._schedule_flow()
         self._schedule(wait)
 
     def _schedule(self, wait):
@@ -602,12 +627,82 @@ class Stage:
         self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version)
         return {'shown': True, 'caption': caption, 'url': target, 'image': path}
 
+    # -- the owner's words about the draft on the stage, heard by the server itself ----------------------------------
+    # The speech model answered 「もっと短くして」 and 「送って」 by itself and handed nothing to the backend (2026-10-27,
+    # test calls 2 and 3: the draft stayed as it was and 「送りました」 was said with nothing sent). While a draft is on the
+    # stage, the server reads the owner's words, lets a small model say what they ask for, and acts: revises the
+    # draft, reads it back, sends only through approval_heard. A backend tool doing the same thing meanwhile is
+    # harmless: a send is guarded by the card's status, a revision is the newest text either way.
+    def _schedule_flow(self):
+        if self._flow_timer is not None: self._flow_timer.cancel()
+        self._flow_timer = asyncio.get_running_loop().create_task(self._flow_after(FLOW_S))
+
+    async def _flow_after(self, wait):
+        await asyncio.sleep(wait)
+        self._flow_timer = None
+        task = asyncio.ensure_future(self.flow())
+        self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+
+    async def flow(self):
+        card = self.card
+        if not card or card.get('status') != 'pending' or self.dialogue is None: return None
+        history = self.dialogue.history
+        since = words_since(history, self._flow_mark or self._card_mark)
+        owner_words = ' '.join(t['text'] for t in since if t['role'] == 'user').strip()
+        if not owner_words: return None
+        self._flow_mark = transcript_mark(history)
+        dan_words = ' '.join(t['text'] for t in since if t['role'] == 'assistant')
+        started = time.monotonic()
+        try:
+            data, usage = await asyncio.wait_for(self.ask(FLOW_INSTRUCTIONS, flow_input(card, dan_words, owner_words)), MODEL_TIMEOUT_S)
+        except Exception as exc:
+            self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            return None
+        intent = str(data.get('intent') or 'other')
+        elapsed = round((time.monotonic() - started) * 1000)
+        if self.card is not card or card.get('status') != 'pending': return None   # changed meanwhile (the backend acted)
+        if intent == 'revise':
+            body = str(data.get('body') or '').strip()
+            subject, to_name = data.get('subject'), data.get('to_name')
+            if not body and not subject and not to_name:
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='empty', **usage); return None
+            out = await self.revise_message(card['proposal_id'], body=body or None, subject=str(subject).strip() if subject else None, to_name=str(to_name).strip() if to_name else None)
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='revised' if out.get('revised') else 'failed', **usage)
+            return out
+        if intent in ('send', 'approve'):
+            ok, why = approval_heard(history, self._card_mark, card, self._card_refused)
+            if ok:
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='send', **usage)
+                return await self.send_message(card['proposal_id'], speak=self.speak or _silent)
+            # not approved yet: the message is read back (unless Dan already did, since the owner's words), then the
+            # owner's next words decide
+            if any(t['role'] == 'assistant' and mention_of(card, t['text']) for t in words_since(history, self._flow_mark)) or mention_of(card, dan_words):
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_by_dan', detail=why[:80], **usage)
+                return 'read_back'
+            text = spoken_summary(card)
+            self.dialogue.add('assistant', text)   # the read-back counts even when the commentary is not transcribed
+            if self.speak is not None:
+                try: await self.speak(text)
+                except Exception as exc: self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back', detail=why[:80], **usage)
+            return 'read_back'
+        if intent == 'stop':
+            self._card_refused = transcript_mark(history)   # the next answer is judged alone
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='held', **usage)
+            return 'held'
+        if intent == 'discard':
+            out = await self.discard_message(card['proposal_id'])
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='discarded' if out.get('discarded') else 'failed', **usage)
+            return out
+        self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='none', **usage)
+        return None
+
     # -- a message on the stage: drafted, revised and sent by voice ------------------------------------------------
     def _put_card(self, row, caption=None):
         card = card_of(row)
         self._apply((caption or card.get('intent') or card.get('subject') or ('メッセージ: ' + (card.get('to_name') or card.get('to') or '')))[:40], card=card)
         self._card_mark = transcript_mark(self.dialogue.history if self.dialogue is not None else [])
-        self._card_refused = None
+        self._card_refused, self._flow_mark = None, None
         self._last_replace = time.monotonic()
         return card
 
@@ -714,6 +809,7 @@ class Stage:
     # -- the end ----------------------------------------------------------------------------------------------
     def close(self):
         if self._timer is not None: self._timer.cancel(); self._timer = None
+        if self._flow_timer is not None: self._flow_timer.cancel(); self._flow_timer = None
         for task in list(self._tasks): task.cancel()
         self.write(active=False)
         if _stages.get(self.room_id) is self: _stages.pop(self.room_id, None)

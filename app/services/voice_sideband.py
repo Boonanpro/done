@@ -427,7 +427,11 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     # touches the call's audio or its delegations.
                     from app.services import voice_stage
                     if voice_stage.enabled():
-                        try: stage = voice_stage.Stage(room_id, session_id, dialogue, record, user_id=user_id)
+                        async def stage_speak(text):   # what the stage itself says into the call (a message read back, 「送りました」)
+                            for part in chunks(text):
+                                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+                            record('stage_spoken', chars=len(text))
+                        try: stage = voice_stage.Stage(room_id, session_id, dialogue, record, user_id=user_id, speak=stage_speak)
                         except Exception as exc: record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
             while time.monotonic()-started < MAX_SECONDS:
                 try: event = json.loads(await socket.recv())
