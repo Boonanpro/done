@@ -52,3 +52,43 @@ async def test_client_checks_budget_before_network(ledger,monkeypatch):
         result=await client.choose({}, {'q':{'type':'choice','criteria':{'yes':'Yes','no':'No'}}})
         assert result['reason']=='approved_budget_unavailable'
         assert client.calls==0 and client._client is None
+
+@pytest.mark.asyncio
+async def test_call_recovers_later_after_timeout_but_never_auth_or_budget_denial(ledger,monkeypatch):
+    import httpx
+    from app.services.jev_decisions import Decisions
+    from unittest.mock import AsyncMock
+    ledger()
+    monkeypatch.setattr(Decisions,'_credential',AsyncMock(return_value='fixture-key'))
+    questions={'q':{'type':'choice','criteria':{'yes':'y','no':'n'}}}
+    calls=[]
+    async def respond(request):
+        calls.append(request)
+        if len(calls)==1:raise httpx.ReadTimeout('fixture')
+        return httpx.Response(200,json={'answers':{'q':{'type':'choice','choice':'yes','confidence':1,'probabilities':{'yes':1,'no':0}}}})
+    async with Decisions('owner',enabled=True,retry_transient_after=10) as client:
+        client._client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        assert not (await client.choose({},questions))['available']
+        assert not (await client.choose({},questions))['available'] and len(calls)==1
+        client.retry_at=0
+        assert (await client.choose({},questions))['available'] and len(calls)==2
+    async with Decisions('owner',enabled=True,retry_transient_after=0) as client:
+        client._client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(401)))
+        assert not (await client.choose({},questions))['available']
+        assert client.retry_at is None
+        assert not (await client.choose({},questions))['available'] and client.calls==1
+    async with Decisions('other',enabled=True,retry_transient_after=0) as client:
+        assert not (await client.choose({},questions))['available']
+        assert client.retry_at is None and client.calls==0
+
+@pytest.mark.asyncio
+async def test_transient_recovery_is_bounded_across_a_long_call(ledger,monkeypatch):
+    import httpx
+    from app.services.jev_decisions import Decisions
+    from unittest.mock import AsyncMock
+    ledger();monkeypatch.setattr(Decisions,'_credential',AsyncMock(return_value='fixture'))
+    def timeout(request):raise httpx.ReadTimeout('fixture')
+    async with Decisions('owner',enabled=True,retry_transient_after=0) as client:
+        client._client=httpx.AsyncClient(transport=httpx.MockTransport(timeout))
+        for _ in range(20):assert not (await client.choose({}, {'q':{'type':'choice','criteria':{'y':'y','n':'n'}}}))['available']
+        assert client.calls==3 and client.recoveries==2

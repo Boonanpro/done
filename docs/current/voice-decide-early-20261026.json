@@ -1,0 +1,1722 @@
+{
+  "date": "2026-10-26",
+  "baseline_commit": "d7ceeca4",
+  "implementation_commit": "1c4331fdd07b18533a7c9d4670d2da54f73b1b86",
+  "condition": "Synthetic Kyoko microphone; real Live/Responses/Jev; data tools and stage drawing model are fixtures; no production endpoints",
+  "clock": "Browser AudioContext microphone sample clock mapped to Python monotonic; non-silent sample threshold .002; conservative timing allowance +/- .1 s",
+  "runs": {
+    "baseline": {
+      "rows": [
+        {
+          "q": "今の作業はどうなってるか教えてくれるかな。",
+          "heard": "今の作業はどうなってるか教えてくれるかな",
+          "expected": "job_status",
+          "mic_end_mono": 298327.1670197285,
+          "used_read_started_mono": 298329.133596666,
+          "result_returned_mono": 298330.073940208,
+          "used_start_after_input_end_s": 1.967,
+          "result_after_input_end_s": 2.907,
+          "prefetch_hits": 0,
+          "functions": [
+            "job_status"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298326.533745166,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 8,
+              "ms": 196
+            },
+            {
+              "t": 298327.2239315,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 11,
+              "ms": 147
+            },
+            {
+              "t": 298327.536618583,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 15,
+              "ms": 159
+            },
+            {
+              "t": 298327.873272791,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 18,
+              "ms": 138
+            },
+            {
+              "t": 298329.133596666,
+              "kind": "fixture_start",
+              "name": "job_status",
+              "args": {}
+            },
+            {
+              "t": 298330.073940208,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5vykpLfdQViLi9BuPH9",
+              "name": "job_status",
+              "elapsed_ms": 940,
+              "output_chars": 73
+            }
+          ]
+        },
+        {
+          "q": "明日の予定を教えてくれるかな、お願い。",
+          "heard": "明日の予定を教えてくれるかな、お願い",
+          "expected": "get_calendar",
+          "mic_end_mono": 298344.94774889515,
+          "used_read_started_mono": 298346.882089708,
+          "result_returned_mono": 298347.684112083,
+          "used_start_after_input_end_s": 1.934,
+          "result_after_input_end_s": 2.736,
+          "prefetch_hits": 0,
+          "functions": [
+            "get_calendar"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298346.882089708,
+              "kind": "fixture_start",
+              "name": "get_calendar",
+              "args": {
+                "days": 1,
+                "from": "2026-10-27"
+              }
+            },
+            {
+              "t": 298347.684112083,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5wF7z5B5SnPwMW12BOT",
+              "name": "get_calendar",
+              "elapsed_ms": 802,
+              "output_chars": 64
+            },
+            {
+              "t": 298347.956347541,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "",
+              "chars": 6,
+              "ms": 4013
+            }
+          ]
+        },
+        {
+          "q": "今日の予定を教えてくれるかな、お願い。",
+          "heard": "今日の予定を教えてくれるかな、お願い",
+          "expected": "get_calendar",
+          "mic_end_mono": 298362.8264780618,
+          "used_read_started_mono": 298365.326859458,
+          "result_returned_mono": 298366.129044291,
+          "used_start_after_input_end_s": 2.5,
+          "result_after_input_end_s": 3.303,
+          "prefetch_hits": 0,
+          "functions": [
+            "get_calendar"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298362.908661541,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 6,
+              "ms": 933
+            },
+            {
+              "t": 298363.908751666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 14,
+              "ms": 764
+            },
+            {
+              "t": 298365.326859458,
+              "kind": "fixture_start",
+              "name": "get_calendar",
+              "args": {
+                "days": 1,
+                "from": "2026-10-26"
+              }
+            },
+            {
+              "t": 298366.129044291,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5wY74FawWPRbyuuuxTs",
+              "name": "get_calendar",
+              "elapsed_ms": 802,
+              "output_chars": 64
+            }
+          ]
+        },
+        {
+          "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+          "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+          "expected": "search_records",
+          "mic_end_mono": 298382.0610822285,
+          "used_read_started_mono": 298384.14744475,
+          "result_returned_mono": 298384.949633875,
+          "used_start_after_input_end_s": 2.086,
+          "result_after_input_end_s": 2.889,
+          "prefetch_hits": 0,
+          "functions": [
+            "search_records"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298380.963184666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "talk",
+              "chars": 7,
+              "ms": 768
+            },
+            {
+              "t": 298381.7048255,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 13,
+              "ms": 728
+            },
+            {
+              "t": 298382.818359416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 18,
+              "ms": 839
+            },
+            {
+              "t": 298384.14744475,
+              "kind": "fixture_start",
+              "name": "search_records",
+              "args": {
+                "query": "パソコン 相談 決めた 続き"
+              }
+            },
+            {
+              "t": 298384.163551666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 23,
+              "ms": 1160
+            },
+            {
+              "t": 298384.949633875,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5wrBZv4EmxrM0HbwgaJ",
+              "name": "search_records",
+              "elapsed_ms": 802,
+              "output_chars": 44
+            }
+          ]
+        },
+        {
+          "q": "この部屋にはどんな資料があるのか、教えてくれるかな。",
+          "heard": "この部屋には、どんな資料があるのか教えてくれるかな",
+          "expected": "room_files",
+          "mic_end_mono": 298400.8163947285,
+          "used_read_started_mono": 298403.087571666,
+          "result_returned_mono": 298403.887978583,
+          "used_start_after_input_end_s": 2.271,
+          "result_after_input_end_s": 3.072,
+          "prefetch_hits": 0,
+          "functions": [
+            "room_files"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298399.588165625,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 6,
+              "ms": 604
+            },
+            {
+              "t": 298400.7204085,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 12,
+              "ms": 943
+            },
+            {
+              "t": 298401.78621225,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 18,
+              "ms": 802
+            },
+            {
+              "t": 298403.087571666,
+              "kind": "fixture_start",
+              "name": "room_files",
+              "args": {}
+            },
+            {
+              "t": 298403.887978583,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5xAP0mF3lsLY411E6Hs",
+              "name": "room_files",
+              "elapsed_ms": 800,
+              "output_chars": 57
+            }
+          ]
+        },
+        {
+          "q": "テスト用のパン屋のホームページを作って。",
+          "heard": "テスト用のパン屋のホームページを作って",
+          "expected": "start_work",
+          "mic_end_mono": 298418.63831139513,
+          "used_read_started_mono": 298421.97138325,
+          "result_returned_mono": 298421.971404041,
+          "used_start_after_input_end_s": 3.333,
+          "result_after_input_end_s": 3.333,
+          "prefetch_hits": 0,
+          "functions": [
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298418.711440541,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 7,
+              "ms": 933
+            },
+            {
+              "t": 298419.732654708,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 15,
+              "ms": 954
+            },
+            {
+              "t": 298421.97138325,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用のパン屋のホームページを作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298421.971404041,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5xSme09iAG6blvVxuHw",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用の商品紹介動画を作って。",
+          "heard": "テスト用の商品紹介動画を作って",
+          "expected": "start_work",
+          "mic_end_mono": 298436.57274889515,
+          "used_read_started_mono": 298439.517059,
+          "result_returned_mono": 298439.517120583,
+          "used_start_after_input_end_s": 2.944,
+          "result_after_input_end_s": 2.944,
+          "prefetch_hits": 0,
+          "functions": [
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298436.72900175,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 7,
+              "ms": 782
+            },
+            {
+              "t": 298437.741622041,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 11,
+              "ms": 858
+            },
+            {
+              "t": 298439.517059,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用の商品紹介動画を作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298439.517120583,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5xkvNy83PL912g7vsyH",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用の売上の表をまとめた資料を作って。",
+          "heard": "テスト用の売上の表をまとめた資料を作って",
+          "expected": "start_work",
+          "mic_end_mono": 298455.0676030618,
+          "used_read_started_mono": 298457.887646583,
+          "result_returned_mono": 298457.887667333,
+          "used_start_after_input_end_s": 2.82,
+          "result_after_input_end_s": 2.82,
+          "prefetch_hits": 0,
+          "functions": [
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298454.322598416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 6,
+              "ms": 749
+            },
+            {
+              "t": 298455.315594041,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 10,
+              "ms": 978
+            },
+            {
+              "t": 298456.1526955,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 17,
+              "ms": 776
+            },
+            {
+              "t": 298457.887646583,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用の売上の表をまとめた資料を作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298457.887667333,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5y29dZlkdrZpgOa5Zki",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用の在庫管理のプログラムを作って。",
+          "heard": "テスト用の在庫管理のプログラムを作って",
+          "expected": "start_work",
+          "mic_end_mono": 298473.1074155618,
+          "used_read_started_mono": 298476.122888541,
+          "result_returned_mono": 298476.122910708,
+          "used_start_after_input_end_s": 3.015,
+          "result_after_input_end_s": 3.015,
+          "prefetch_hits": 0,
+          "functions": [
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298472.7633255,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 6,
+              "ms": 577
+            },
+            {
+              "t": 298473.889515958,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 11,
+              "ms": 683
+            },
+            {
+              "t": 298474.630016708,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 19,
+              "ms": 654
+            },
+            {
+              "t": 298476.122888541,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用の在庫管理のプログラムを作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298476.122910708,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5yLIt0MFKI8luiL4w16",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+          "heard": "テスト用のカフェのホームページを作って、それとは別に犬の紹介動画も作って",
+          "expected": "start_work",
+          "mic_end_mono": 298494.0092280618,
+          "used_read_started_mono": 298497.4153225,
+          "result_returned_mono": 298497.415347666,
+          "used_start_after_input_end_s": 3.406,
+          "result_after_input_end_s": 3.406,
+          "prefetch_hits": 0,
+          "functions": [
+            "start_work",
+            "start_work"
+          ],
+          "work_requests": 2,
+          "evidence": [
+            {
+              "t": 298490.831054458,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 8,
+              "ms": 663
+            },
+            {
+              "t": 298491.904611875,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 15,
+              "ms": 931
+            },
+            {
+              "t": 298493.234008125,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 22,
+              "ms": 1047
+            },
+            {
+              "t": 298494.251032041,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 28,
+              "ms": 913
+            },
+            {
+              "t": 298494.989564041,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 33,
+              "ms": 543
+            },
+            {
+              "t": 298497.4153225,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用のカフェのホームページを作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298497.415347666,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5ygMdT1dQIJe2psUM3d",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            },
+            {
+              "t": 298497.426651375,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "犬の紹介動画を作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298497.426679291,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5ygMdT1dQIJe2psUM3d",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        }
+      ],
+      "raw_file": ".tmp/voice-early/revision/baseline.json",
+      "raw_sha256": "0d370364ed269590b1b0902882d46d7bceb1040aa38a96968da0d0882c109602",
+      "clock_uncertainty_s": 0.000524437491549179,
+      "prefetch": {
+        "t": 298513.883551125,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 29,
+        "started": 0,
+        "hit": 0,
+        "missed": 0,
+        "jev": 4,
+        "flash": 25
+      },
+      "used_start_median_read5_s": 2.086,
+      "result_median_read5_s": 2.907
+    },
+    "after": {
+      "rows": [
+        {
+          "q": "今の作業はどうなってるか教えてくれるかな。",
+          "heard": "今の作業はどうなってるか教えてくれるかな",
+          "expected": "job_status",
+          "mic_end_mono": 298093.038841229,
+          "used_read_started_mono": 298092.441735666,
+          "result_returned_mono": 298094.925799583,
+          "used_start_after_input_end_s": -0.597,
+          "result_after_input_end_s": 1.887,
+          "prefetch_hits": 1,
+          "functions": [
+            "job_status"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298092.441644666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 8,
+              "ms": 230
+            },
+            {
+              "t": 298092.441709333,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "job_status",
+              "chars": 8
+            },
+            {
+              "t": 298092.441735666,
+              "kind": "fixture_start",
+              "name": "job_status",
+              "args": {}
+            },
+            {
+              "t": 298092.801982083,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 11,
+              "ms": 160
+            },
+            {
+              "t": 298093.415569875,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 15,
+              "ms": 168
+            },
+            {
+              "t": 298093.932448708,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 20,
+              "ms": 150
+            },
+            {
+              "t": 298094.755409083,
+              "kind": "note",
+              "phase": "prefetch_hit",
+              "name": "job_status",
+              "started_before_s": 2.31
+            },
+            {
+              "t": 298094.925799583,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5sBaf7GGWGQ6i9lxVXm",
+              "name": "job_status",
+              "elapsed_ms": 171,
+              "output_chars": 73
+            }
+          ]
+        },
+        {
+          "q": "明日の予定を教えてくれるかな、お願い。",
+          "heard": "明日の予定を教えてくれるかな?お願い",
+          "expected": "get_calendar",
+          "mic_end_mono": 298110.8222370623,
+          "used_read_started_mono": 298110.050776625,
+          "result_returned_mono": 298112.990181666,
+          "used_start_after_input_end_s": -0.771,
+          "result_after_input_end_s": 2.168,
+          "prefetch_hits": 1,
+          "functions": [
+            "get_calendar"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298110.050548041,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 6,
+              "ms": 244
+            },
+            {
+              "t": 298110.050706125,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "get_calendar",
+              "chars": 6
+            },
+            {
+              "t": 298110.050776625,
+              "kind": "fixture_start",
+              "name": "get_calendar",
+              "args": {
+                "from": "2026-10-27",
+                "days": 1
+              }
+            },
+            {
+              "t": 298110.614648833,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 9,
+              "ms": 174
+            },
+            {
+              "t": 298111.004008833,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 12,
+              "ms": 155
+            },
+            {
+              "t": 298112.182944541,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 18,
+              "ms": 246
+            },
+            {
+              "t": 298112.990161125,
+              "kind": "note",
+              "phase": "prefetch_hit",
+              "name": "get_calendar",
+              "started_before_s": 2.94
+            },
+            {
+              "t": 298112.990181666,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5sTzMtTAH5CyRNrztON",
+              "name": "get_calendar",
+              "elapsed_ms": 0,
+              "output_chars": 64
+            }
+          ]
+        },
+        {
+          "q": "今日の予定を教えてくれるかな、お願い。",
+          "heard": "今日の予定を教えてくれるかな?お願い",
+          "expected": "get_calendar",
+          "mic_end_mono": 298128.700966229,
+          "used_read_started_mono": 298127.99956,
+          "result_returned_mono": 298131.162955333,
+          "used_start_after_input_end_s": -0.701,
+          "result_after_input_end_s": 2.462,
+          "prefetch_hits": 1,
+          "functions": [
+            "get_calendar"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298127.999292583,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 6,
+              "ms": 190
+            },
+            {
+              "t": 298127.999444666,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "get_calendar",
+              "chars": 6
+            },
+            {
+              "t": 298127.99956,
+              "kind": "fixture_start",
+              "name": "get_calendar",
+              "args": {
+                "from": "2026-10-26",
+                "days": 1
+              }
+            },
+            {
+              "t": 298128.381667125,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 9,
+              "ms": 139
+            },
+            {
+              "t": 298128.787893416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 12,
+              "ms": 172
+            },
+            {
+              "t": 298129.752920833,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 18,
+              "ms": 143
+            },
+            {
+              "t": 298131.162928875,
+              "kind": "note",
+              "phase": "prefetch_hit",
+              "name": "get_calendar",
+              "started_before_s": 3.16
+            },
+            {
+              "t": 298131.162955333,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5smoun3bG1lpASz4w61",
+              "name": "get_calendar",
+              "elapsed_ms": 0,
+              "output_chars": 64
+            }
+          ]
+        },
+        {
+          "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+          "heard": "さっき相談したパソコンの話の続き、何を決めたっけ",
+          "expected": "search_records",
+          "mic_end_mono": 298147.932903729,
+          "used_read_started_mono": 298149.958396083,
+          "result_returned_mono": 298150.760651916,
+          "used_start_after_input_end_s": 2.025,
+          "result_after_input_end_s": 2.828,
+          "prefetch_hits": 0,
+          "functions": [
+            "search_records"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298146.058081416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "talk",
+              "chars": 7,
+              "ms": 213
+            },
+            {
+              "t": 298146.61689825,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 11,
+              "ms": 165
+            },
+            {
+              "t": 298147.157851666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 14,
+              "ms": 146
+            },
+            {
+              "t": 298148.011429625,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 18,
+              "ms": 165
+            },
+            {
+              "t": 298148.819268208,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 23,
+              "ms": 142
+            },
+            {
+              "t": 298149.958396083,
+              "kind": "fixture_start",
+              "name": "search_records",
+              "args": {
+                "query": "パソコン PC 相談 決めた"
+              }
+            },
+            {
+              "t": 298150.760651916,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5t4XIXchFUOS3B9JIIe",
+              "name": "search_records",
+              "elapsed_ms": 802,
+              "output_chars": 44
+            }
+          ]
+        },
+        {
+          "q": "この部屋にはどんな資料があるのか、教えてくれるかな。",
+          "heard": "この部屋にはどんな資料があるのか教えてくれるかな",
+          "expected": "room_files",
+          "mic_end_mono": 298166.68821622897,
+          "used_read_started_mono": 298166.055062958,
+          "result_returned_mono": 298168.75008625,
+          "used_start_after_input_end_s": -0.633,
+          "result_after_input_end_s": 2.062,
+          "prefetch_hits": 1,
+          "functions": [
+            "room_files"
+          ],
+          "work_requests": 0,
+          "evidence": [
+            {
+              "t": 298165.051602875,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 6,
+              "ms": 197
+            },
+            {
+              "t": 298165.359417083,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 9,
+              "ms": 150
+            },
+            {
+              "t": 298166.055006958,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 12,
+              "ms": 168
+            },
+            {
+              "t": 298166.055042166,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "room_files",
+              "chars": 12
+            },
+            {
+              "t": 298166.055062958,
+              "kind": "fixture_start",
+              "name": "room_files",
+              "args": {}
+            },
+            {
+              "t": 298166.229251916,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 15,
+              "ms": 141
+            },
+            {
+              "t": 298167.190840666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 20,
+              "ms": 148
+            },
+            {
+              "t": 298167.595068291,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "read",
+              "chars": 24,
+              "ms": 154
+            },
+            {
+              "t": 298168.750011625,
+              "kind": "note",
+              "phase": "prefetch_hit",
+              "name": "room_files",
+              "started_before_s": 2.69
+            },
+            {
+              "t": 298168.75008625,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5tNBmJ1jtrCJzXX0YSv",
+              "name": "room_files",
+              "elapsed_ms": 0,
+              "output_chars": 57
+            }
+          ]
+        },
+        {
+          "q": "テスト用のパン屋のホームページを作って。",
+          "heard": "テスト用のパン屋のホームページを作って",
+          "expected": "start_work",
+          "mic_end_mono": 298184.51013289567,
+          "used_read_started_mono": 298187.442828208,
+          "result_returned_mono": 298187.442883791,
+          "used_start_after_input_end_s": 2.933,
+          "result_after_input_end_s": 2.933,
+          "prefetch_hits": 0,
+          "functions": [
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298183.824551083,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 7,
+              "ms": 180
+            },
+            {
+              "t": 298184.61476,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "search",
+              "chars": 12,
+              "ms": 168
+            },
+            {
+              "t": 298184.6147955,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "chars": 12
+            },
+            {
+              "t": 298184.844457625,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "chars": 16
+            },
+            {
+              "t": 298187.442828208,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用のパン屋のホームページを作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298187.442883791,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5tgZa0GJAKk2AKjkUNj",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用の商品紹介動画を作って。",
+          "heard": "テスト用の商品紹介動画を作って",
+          "expected": "start_work",
+          "mic_end_mono": 298202.4445703957,
+          "used_read_started_mono": 298205.369844291,
+          "result_returned_mono": 298205.36986925,
+          "used_start_after_input_end_s": 2.925,
+          "result_after_input_end_s": 2.925,
+          "prefetch_hits": 0,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298202.041233166,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 7,
+              "ms": 235
+            },
+            {
+              "t": 298202.799651458,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 11,
+              "ms": 142
+            },
+            {
+              "t": 298202.799683208,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "list_operations",
+              "chars": 11
+            },
+            {
+              "t": 298202.799707833,
+              "kind": "fixture_start",
+              "name": "list_operations",
+              "args": {}
+            },
+            {
+              "t": 298203.56112875,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 15,
+              "ms": 142
+            },
+            {
+              "t": 298205.369844291,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用の商品紹介動画を作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298205.36986925,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5tyTN4B9I2hM9a3QwU4",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用の売上の表をまとめた資料を作って。",
+          "heard": "テスト用の売上の表をまとめた資料を作って",
+          "expected": "start_work",
+          "mic_end_mono": 298220.95942456234,
+          "used_read_started_mono": 298223.574259125,
+          "result_returned_mono": 298223.574377416,
+          "used_start_after_input_end_s": 2.615,
+          "result_after_input_end_s": 2.615,
+          "prefetch_hits": 0,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298219.62011975,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 6,
+              "ms": 180
+            },
+            {
+              "t": 298220.346779833,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 10,
+              "ms": 139
+            },
+            {
+              "t": 298220.346813333,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "list_operations",
+              "chars": 10
+            },
+            {
+              "t": 298220.346838208,
+              "kind": "fixture_start",
+              "name": "list_operations",
+              "args": {}
+            },
+            {
+              "t": 298220.800431625,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 13,
+              "ms": 167
+            },
+            {
+              "t": 298221.382953416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 17,
+              "ms": 142
+            },
+            {
+              "t": 298221.954298083,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 20,
+              "ms": 135
+            },
+            {
+              "t": 298223.574259125,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用の売上の表をまとめた資料を作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298223.574377416,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5uGrrJT9YmaxVM1tl5w",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用の在庫管理のプログラムを作って。",
+          "heard": "テスト用の在庫管理のプログラムを作って",
+          "expected": "start_work",
+          "mic_end_mono": 298239.0092370623,
+          "used_read_started_mono": 298242.176316791,
+          "result_returned_mono": 298242.176345875,
+          "used_start_after_input_end_s": 3.167,
+          "result_after_input_end_s": 3.167,
+          "prefetch_hits": 0,
+          "functions": [
+            "list_operations",
+            "start_work"
+          ],
+          "work_requests": 1,
+          "evidence": [
+            {
+              "t": 298238.254243416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 6,
+              "ms": 202
+            },
+            {
+              "t": 298238.624267625,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 9,
+              "ms": 143
+            },
+            {
+              "t": 298238.624293666,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "list_operations",
+              "chars": 9
+            },
+            {
+              "t": 298238.62431425,
+              "kind": "fixture_start",
+              "name": "list_operations",
+              "args": {}
+            },
+            {
+              "t": 298239.226808666,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 13,
+              "ms": 161
+            },
+            {
+              "t": 298239.411578208,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 16,
+              "ms": 185
+            },
+            {
+              "t": 298239.96643375,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 19,
+              "ms": 152
+            },
+            {
+              "t": 298242.176316791,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用の在庫管理のプログラムを作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298242.176345875,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5uZ1vC7OczXtxb6UUhF",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        },
+        {
+          "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+          "heard": "テスト用のカフェのホームページを作って。それとは別に犬の紹介動画も作って",
+          "expected": "start_work",
+          "mic_end_mono": 298259.91104956233,
+          "used_read_started_mono": 298262.853830416,
+          "result_returned_mono": 298262.853858458,
+          "used_start_after_input_end_s": 2.943,
+          "result_after_input_end_s": 2.943,
+          "prefetch_hits": 0,
+          "functions": [
+            "list_operations",
+            "start_work",
+            "start_work"
+          ],
+          "work_requests": 2,
+          "evidence": [
+            {
+              "t": 298256.232130208,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 8,
+              "ms": 192
+            },
+            {
+              "t": 298256.806164041,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "wait",
+              "chars": 12,
+              "ms": 156
+            },
+            {
+              "t": 298257.066098791,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 15,
+              "ms": 144
+            },
+            {
+              "t": 298257.066279708,
+              "kind": "note",
+              "phase": "prefetch_started",
+              "name": "list_operations",
+              "chars": 15
+            },
+            {
+              "t": 298257.066366791,
+              "kind": "fixture_start",
+              "name": "list_operations",
+              "args": {}
+            },
+            {
+              "t": 298257.756796458,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 19,
+              "ms": 146
+            },
+            {
+              "t": 298258.185819541,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 22,
+              "ms": 141
+            },
+            {
+              "t": 298258.758058166,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 26,
+              "ms": 148
+            },
+            {
+              "t": 298259.976211416,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 30,
+              "ms": 138
+            },
+            {
+              "t": 298260.385446083,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 33,
+              "ms": 143
+            },
+            {
+              "t": 298260.9717585,
+              "kind": "note",
+              "phase": "prefetch_judged",
+              "result": "work",
+              "chars": 36,
+              "ms": 167
+            },
+            {
+              "t": 298262.853830416,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "テスト用のカフェのホームページを作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298262.853858458,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5utV0dNhSy3OWWU51pU",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            },
+            {
+              "t": 298262.891767083,
+              "kind": "fixture_start",
+              "name": "start_work",
+              "args": {
+                "task": "犬の紹介動画を作って",
+                "kind": "make",
+                "model": "opus"
+              }
+            },
+            {
+              "t": 298262.891795708,
+              "kind": "note",
+              "phase": "function_done",
+              "delegation_id": "item_Ed5utV0dNhSy3OWWU51pU",
+              "name": "start_work",
+              "elapsed_ms": 0,
+              "output_chars": 68,
+              "detail": {
+                "accepted": "True"
+              }
+            }
+          ]
+        }
+      ],
+      "raw_file": ".tmp/voice-early/revision/after.json",
+      "raw_sha256": "07c9cc26a436b952a192bbc98dbf55f7405ad6b600ef3ffab215dd452bfe8500",
+      "clock_uncertainty_s": 0.0004087289853487164,
+      "prefetch": {
+        "t": 298279.808037416,
+        "kind": "note",
+        "phase": "prefetch_summary",
+        "judged": 47,
+        "started": 10,
+        "hit": 4,
+        "missed": 0,
+        "jev": 47,
+        "flash": 0
+      },
+      "used_start_median_read5_s": -0.633,
+      "result_median_read5_s": 2.168
+    }
+  },
+  "audio": {
+    "path": ".tmp/voice-early/revision/owner.wav",
+    "sha256": "8fedb606bdf989c56fe167714bb2225aca3de9a9e81f732437b96d6615a9c849",
+    "schedule": {
+      "schedule": [
+        {
+          "q": "今の作業はどうなってるか教えてくれるかな。",
+          "expected": "job_status",
+          "start": 10.0,
+          "end": 13.147291666666666
+        },
+        {
+          "q": "明日の予定を教えてくれるかな、お願い。",
+          "expected": "get_calendar",
+          "start": 28.147291666666668,
+          "end": 30.935291666666668
+        },
+        {
+          "q": "今日の予定を教えてくれるかな、お願い。",
+          "expected": "get_calendar",
+          "start": 45.935291666666664,
+          "end": 48.811416666666666
+        },
+        {
+          "q": "さっき相談したパソコンの話の続き、何を決めたっけ？",
+          "expected": "search_records",
+          "start": 63.811416666666666,
+          "end": 68.059375
+        },
+        {
+          "q": "この部屋にはどんな資料があるのか、教えてくれるかな。",
+          "expected": "room_files",
+          "start": 83.059375,
+          "end": 86.772
+        },
+        {
+          "q": "テスト用のパン屋のホームページを作って。",
+          "expected": "start_work",
+          "start": 101.772,
+          "end": 104.62058333333333
+        },
+        {
+          "q": "テスト用の商品紹介動画を作って。",
+          "expected": "start_work",
+          "start": 119.62058333333333,
+          "end": 122.53883333333333
+        },
+        {
+          "q": "テスト用の売上の表をまとめた資料を作って。",
+          "expected": "start_work",
+          "start": 137.53883333333334,
+          "end": 141.06079166666666
+        },
+        {
+          "q": "テスト用の在庫管理のプログラムを作って。",
+          "expected": "start_work",
+          "start": 156.06079166666666,
+          "end": 159.10675
+        },
+        {
+          "q": "テスト用のカフェのホームページを作って。それとは別に、犬の紹介動画も作って。",
+          "expected": "start_work",
+          "start": 174.10675,
+          "end": 180.00875
+        }
+      ],
+      "total": 195.00875
+    }
+  },
+  "handoff": {
+    "elapsed_s": 62.01106216700282,
+    "model_delay_s": 31,
+    "first_enqueue_delay_s": 31,
+    "summary": [
+      {
+        "at_s": 31.00359362497693,
+        "text": "32GBにする。\n\n🖼 通話中に出した画面（1枚）\n\n**12:46 メモリ**\n```openui-lang\nroot = Stat(\"メモリ\", 32, \"GB\")\n```"
+      }
+    ],
+    "handoffs": [
+      {
+        "at_s": 31.005068166996352,
+        "action": "work"
+      },
+      {
+        "at_s": 62.00804512499599,
+        "action": "work"
+      },
+      {
+        "at_s": 62.00873437500559,
+        "action": "work"
+      },
+      {
+        "at_s": 62.00937350001186,
+        "action": "work"
+      },
+      {
+        "at_s": 62.01006054197205,
+        "action": "work"
+      }
+    ],
+    "transcript_chars": 70860,
+    "received": 5,
+    "type": "wall clock measured; model, queue and chat storage mocked"
+  },
+  "ui": {
+    "source": "actual AiShapedText and ShapeBlock, synthetic message fixture, isolated port 3023",
+    "summary_messages": 1,
+    "call_log_messages": 1,
+    "viewports": [
+      1080,
+      390
+    ],
+    "errors": [],
+    "blocked_requests": [],
+    "screenshots": [
+      {
+        "path": ".tmp/voice-early/revision/summary-390.png",
+        "sha256": "7cc9ffb906d90e2394548b4379b26a3694309a710139efb90cf0e6e3ebfc7f5d"
+      },
+      {
+        "path": ".tmp/voice-early/revision/summary-1080.png",
+        "sha256": "07212bd18d8960c6c667419483099cf3fb9cb08d61b4282faca0e7202313f78e"
+      }
+    ]
+  },
+  "tests": {
+    "passed": 72,
+    "excluded_existing_failures": 2
+  },
+  "cost": {
+    "previous_usd_estimate": 1.0818543393333333,
+    "new_calls": [
+      {
+        "mode": "baseline",
+        "seconds": 199,
+        "completions": 20,
+        "input_tokens": 116364,
+        "cached_tokens": 109294,
+        "output_tokens": 611,
+        "usd_estimate": 0.20916413333333336
+      },
+      {
+        "mode": "after",
+        "seconds": 199,
+        "completions": 20,
+        "input_tokens": 121107,
+        "cached_tokens": 113732,
+        "output_tokens": 641,
+        "usd_estimate": 0.21102173333333335
+      }
+    ],
+    "new_jev_reserved_usd": 0.01284906,
+    "cumulative_usd_estimate": 1.514889266,
+    "total_live_calls": 7,
+    "conversion_assumption": 200,
+    "jpy_estimate": 302.97785319999997,
+    "allowance_for_unmetered_deepseek_jpy": 50,
+    "budget_estimate_jpy": 352.97785319999997,
+    "unmetered_deepseek_classification_calls": 59,
+    "unmetered_deepseek_summary_calls": 5,
+    "limits": "Internal unit prices and assumed FX, not invoice. 50 JPY contingency is not a measured upper bound. No new budget authorized or used."
+  },
+  "previous_measurement_correction": {
+    "reason": "previous start column counted discarded speculative history read; now start of read actually used",
+    "history_used_start_s": 2.412,
+    "old_median_s": 0.715,
+    "corrected_median_s": 0.745
+  }
+}
