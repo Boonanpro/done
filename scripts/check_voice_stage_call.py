@@ -68,9 +68,15 @@ READ_STAGE = '''
 () => {
   const stage = document.querySelector('[data-voice-stage]');
   const status = document.querySelector('[data-voice-status]');
+  const sceneEl = stage && stage.querySelector('[data-stage-scene]');
+  const orb = document.querySelector('canvas[aria-label="音声アシスタント"]');
   return {version: stage ? stage.getAttribute('data-voice-stage') : null,
           caption: stage ? (stage.querySelector('[data-stage-caption]') || {}).textContent || '' : '',
-          scene: !!(stage && stage.querySelector('[data-stage-scene]')),
+          scene: !!sceneEl,
+          // the scene's identity (changes only when the scene itself changes: a remount) and what kind it is
+          key: stage ? stage.getAttribute('data-stage-scene-key') : null,
+          kind: sceneEl ? sceneEl.getAttribute('data-stage-kind') : null,
+          orb: orb ? Math.round(orb.getBoundingClientRect().width) : null,
           connecting: !!Array.from(document.querySelectorAll('div')).find(d => d.textContent === '接続中…'),
           panel: !!document.querySelector('button[aria-label="音声モードを閉じる"]'),
           note: (Array.from(document.querySelectorAll('.text-destructive')).map(d => d.textContent).join(' | ') || '').slice(0, 200),
@@ -121,10 +127,11 @@ async def main(base, token_file, project_id, wav, out_dir, seconds=None):
         seen = None
         while time.monotonic() - t_call < total:
             st = await page.evaluate(READ_STAGE)
-            key = (st['version'], st['caption'], st['scene'])
+            key = (st['version'], st['caption'], st['scene'], st.get('key'), st.get('orb'))
             if key != seen:
                 seen = key
-                mark('stage', version=st['version'], caption=st['caption'].replace('今の話: ', ''), scene=st['scene'])
+                mark('stage', version=st['version'], caption=st['caption'].replace('今の話: ', ''), scene=st['scene'],
+                     key=st.get('key'), scene_kind=st.get('kind'), orb=st.get('orb'))
                 if st['scene']:
                     await page.wait_for_timeout(400)   # the fade-in
                     await page.screenshot(path=str(out / f"screen-{st['version']}.png"))

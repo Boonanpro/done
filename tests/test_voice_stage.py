@@ -220,7 +220,8 @@ def test_safe_image_takes_dans_files_and_https_only():
 
 
 @pytest.mark.asyncio
-async def test_a_free_drawing_and_an_image_are_scenes_too(room):
+async def test_a_free_drawing_and_an_image_are_scenes_too(room, monkeypatch):
+    monkeypatch.setattr(S, 'FLIP_HOLD_S', 0)
     svg = '<svg viewBox="0 0 640 360"><text x="10" y="30" fill="#fff">配置</text></svg>'
     stage, _, log = make_stage(room, [{'action': 'replace', 'caption': '配置', 'html': svg + '<script>x</script>'},
                                       {'action': 'replace', 'caption': '写真', 'image': '/api/v1/files/p.png'},
@@ -264,3 +265,39 @@ async def test_resolve_page_finds_the_owners_artifact_by_words(monkeypatch):
     assert await S.resolve_page('u1', artifact='台本') == ('https://dan.example/artifacts/script-room', '台本室')
     assert await S.resolve_page('u1', url='https://example.com/a') == ('https://example.com/a', '')
     assert await S.resolve_page('u1', artifact='全然違う物') == (None, '')
+
+
+@pytest.mark.asyncio
+async def test_a_flip_right_after_a_scene_only_moves_the_caption_but_growth_passes(room, monkeypatch):
+    monkeypatch.setattr(S, 'FLIP_HOLD_S', 5.0)
+    grown = FLOW.replace('{id: "c", label: "口座", icon: "bank"}', '{id: "c", label: "口座", icon: "bank"}, {id: "d", label: "明細", icon: "doc"}')
+    stage, _, log = make_stage(room, [{'action': 'replace', 'caption': '支払いの流れ', 'program': FLOW},
+                                      {'action': 'replace', 'caption': '手数料', 'program': 'root = Stat("手数料", 360, "円")'},
+                                      {'action': 'replace', 'caption': '支払いの流れ（4段階）', 'program': grown}])
+    stage.dialogue.add('assistant', 'まず本人がカードで払うと、Stripe を通って口座に入ります。')
+    assert await stage.decide() == 'replace'
+    assert await stage.decide() == 'held'                      # flow -> numbers 0 s later: the caption moves, the flow stays
+    state = S.read_state(room)
+    assert state['program'] == FLOW and state['caption'] == '手数料' and log[-1][0] == 'stage_flip_held'
+    assert await stage.decide() == 'replace'                   # the same flow with one more box: growth, drawn at once
+    assert S.read_state(room)['program'] == grown
+    assert S.family('program', FLOW) == S.family('program', grown) == ('program', 'Flow')
+    assert S.family('program', 'root = Stat("x", 1)') != S.family('program', FLOW) and S.family('html', '<svg/>') == ('html',)
+
+
+@pytest.mark.asyncio
+async def test_back_shows_an_earlier_scene_again_without_drawing(room, monkeypatch):
+    monkeypatch.setattr(S, 'FLIP_HOLD_S', 0)
+    stat = 'root = Stat("合計", 3, "案")'
+    stage, seen, log = make_stage(room, [{'action': 'replace', 'caption': '流れ', 'program': FLOW},
+                                         {'action': 'replace', 'caption': '合計', 'program': stat},
+                                         {'action': 'back', 'caption': '流れに戻る', 'version': 1},
+                                         {'action': 'back', 'version': 99}])
+    stage.dialogue.add('assistant', 'x')
+    await stage.decide(); await stage.decide()
+    assert 'これまで出した図（version: 札）: 1: 流れ' in seen[1]
+    assert await stage.decide() == 'replace'
+    state = S.read_state(room)
+    assert state['program'] == FLOW and state['caption'] == '流れに戻る' and state['version'] == 3 and log[-1][0] == 'stage_back'
+    assert await stage.decide() == 'keep'                      # an unknown version: nothing changes
+    assert '新しく届いた言葉（前回の判断の後）' not in seen[0]  # nothing had arrived through heard()

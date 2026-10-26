@@ -105,6 +105,16 @@ function sameScene(a: Scene | null, b: Scene | null): boolean {
   return false;
 }
 
+const LAYOUT_PARTS = new Set(['Column', 'Row', 'Card', 'Heading', 'Text', 'Divider', 'Badge']);
+
+/** The kind of scene, for telling growth (a flow with two more boxes) from a change (a flow -> big numbers): the parts used. */
+export function sceneFamily(s: Scene): string {
+  if (s.kind !== 'program') return s.kind;
+  const names = new Set<string>();
+  for (const m of s.program.matchAll(/\b([A-Z][A-Za-z]+)\(/g)) if (!LAYOUT_PARTS.has(m[1])) names.add(m[1]);
+  return 'program:' + [...names].sort().join(',');
+}
+
 /** The document a free drawing is shown in: dark, no margins, the SVG filling the frame. */
 export function drawingDocument(html: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#0a0a0a;color:#f5f5f5;font-family:system-ui,-apple-system,sans-serif;overflow:hidden}svg{display:block;width:100%;height:100%}img{max-width:100%}</style></head><body>${html}</body></html>`;
@@ -123,8 +133,11 @@ export function VoiceStage({ roomId, active, className = '', onShown }: { roomId
     if (!next && s.program?.trim()) console.warn('[voice-stage] scene not drawable, keeping the last one');
     setShownScene((current) => {
       if (session !== current.session) return { scene: next, key: current.key + 1, session };
-      if (next && !sameScene(next, current.scene)) return { scene: next, key: current.key + 1, session };
-      return current;
+      if (!next || sameScene(next, current.scene)) return current;
+      // the same kind of scene with more (or other) content updates in place: no entrance again (a flow growing from
+      // 4 to 6 boxes as Dan lists them, 2026-10-27); a different kind of scene slides in
+      const grows = !!current.scene && sceneFamily(next) === sceneFamily(current.scene);
+      return { scene: next, key: grows ? current.key : current.key + 1, session };
     });
   });
   const { scene, key } = shownScene;

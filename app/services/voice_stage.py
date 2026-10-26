@@ -44,6 +44,9 @@ MAX_SCENES = 40
 HOLD_S = 1.5           # after a scene was replaced, Dan's next words wait this long before another decision (2026-10-25: a
                        # flow Dan listed step by step was redrawn 4 times in 15 seconds; 6 s then, which the owner felt as
                        # the drawing lagging the talk, so 1.5 s since 2026-10-27); the owner's words are not held
+FLIP_HOLD_S = 8.0      # a replace that changes to a different kind of scene (flow -> numbers) this soon after the last one,
+                       # with no request from the owner, only changes the caption (2026-10-27 1st test call: the model
+                       # alternated between the journey's flow and the fare 6 times in 60 s while Dan said nothing new)
 HTML_MAX = 12000       # a free drawing (SVG/HTML) the model writes for the stage
 NOT_ON_STAGE = ('Choice', 'Input', 'Button')   # answers and links need a chat; the stage is looked at while talking
 PAGE_TIMEOUT_S = 15.0  # opening a page to photograph it for the stage
@@ -167,15 +170,18 @@ def safe_image(url):
 
 INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、本人の画面に出す「図」を決めて描く係です。声は出せません。画面だけです。
 入力は、直前の会話（ユーザー＝本人、Dan＝ダン）、今の画面の札と中身、そして本人からの明示の頼み（あれば）です。
-出力は JSON だけ: {"action": "keep" | "caption" | "replace", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL"}
-replace の時は program・html・image のどれか1つだけを入れる（内容に一番合う見せ方を選ぶ。下の「見せ方の選び方」）。
+出力は JSON だけ: {"action": "keep" | "caption" | "replace" | "back", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL", "version": 前に出した図の番号}
+replace の時は program・html・image のどれか1つだけを入れる（内容に一番合う見せ方を選ぶ。下の「見せ方の選び方」）。back の時は version に「これまで出した図」の番号。
 
-action の決め方:
-- keep: 挨拶・相づち・短い返事・今の画面がまだ話に合っている時。
+action の決め方。判断の材料は「新しく届いた言葉」（前回の判断の後に届いた分）で、直前の会話は文脈として読む:
+- keep: 挨拶・相づち・短い返事・今の画面がまだ話に合っている時。新しく届いた言葉が、今の画面の内容の言い直し・補足・締めの言葉の時も keep。
 - caption: 話題が少し動いたが、新しく描く構造（流れ・比較・数字・手順）が無い時。札だけ替える。
-- replace: ダンの説明に、人・物・流れ、比べる物、金額や件数、手順、時間の推移など「見た方が早い構造」が出た時。本人が「図にして」「画面に出して」と頼んだ時は必ず replace。
-- 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は replace して全部入れる。
+- replace: 新しく届いた言葉に、今の画面に無い「見た方が早い構造」（人・物・流れ、比べる物、金額や件数、手順、時間の推移）が出た時。本人が「図にして」「画面に出して」と頼んだ時は必ず replace（本人の頼みの対象を描く。直前にダンが説明した物）。
+- back: 新しく届いた言葉が、「これまで出した図」のどれかと同じ話題に戻った時。描き直さず、その図の version を返す。
+- 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は、今の図と同じ型のまま全部入れて replace する（Flow なら Flow のまま箱を足す）。
+- 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（流れの図と料金の数字を行ったり来たりさせない）。
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。まだ何の話か分からなければ keep。
+- 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 質問の言葉と会話の事実だけで答えの骨組み（手順の見出しの並び、比べる物の名前）が描けるなら描く。答えの数字や中身をダンがまだ言っていないなら caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
 見せ方の選び方（引き出しは3つ。毎回同じ型にしない）:
 - program（部品）: 人・物・流れは Flow、金額・件数・時刻は Stat、比べる話は Compare、推移は Chart、順番は Steps。構造がそのまま部品に当てはまる時。
@@ -245,6 +251,13 @@ def well_formed(program, names=None):
     return not depth and quote is None
 
 
+def family(kind, body):
+    """What kind of scene this is, for telling a flip (a flow -> big numbers) from growth (a flow with more boxes): the
+    kind and, for a parts program, the set of parts it uses."""
+    if kind != 'program': return (kind,)
+    return ('program',) + tuple(sorted(set(_WORD.findall(body or '')) - {'Column', 'Row', 'Card', 'Heading', 'Text', 'Divider', 'Badge'}))
+
+
 def _client():
     from openai import AsyncOpenAI
     from app.services import inbox
@@ -277,10 +290,15 @@ async def ask_model(system, user):
     return (data if isinstance(data, dict) else {}), {'input_tokens': getattr(usage, 'prompt_tokens', 0) or 0, 'output_tokens': getattr(usage, 'completion_tokens', 0) or 0}
 
 
-def decision_input(turns, caption, program, request=None, html=None, image=None):
+def decision_input(turns, caption, program, request=None, html=None, image=None, fresh=None, scenes=None):
     talk = chr(10).join(('ユーザー' if t['role'] == 'user' else 'Dan') + ': ' + t['text'].strip()[:700] for t in turns if t['text'].strip())
     shown = program or (('（自由な絵）' + chr(10) + html[:1500]) if html else '') or (('（画像）' + image) if image else '') or '（まだ無い）'
-    text = '直前の会話（新しい物が下）:' + chr(10) + talk + chr(10) + chr(10) + '今の画面の札: ' + (caption or '（まだ無い）') + chr(10) + '今の画面の中身: ' + shown
+    text = '直前の会話（新しい物が下）:' + chr(10) + talk
+    if fresh:
+        text += chr(10) + chr(10) + '新しく届いた言葉（前回の判断の後）:' + chr(10) + chr(10).join(('ユーザー' if r == 'user' else 'Dan') + ': ' + w.strip()[:700] for r, w in fresh if w.strip())
+    text += chr(10) + chr(10) + '今の画面の札: ' + (caption or '（まだ無い）') + chr(10) + '今の画面の中身: ' + shown
+    if scenes:
+        text += chr(10) + 'これまで出した図（version: 札）: ' + ', '.join(f"{sc['version']}: {sc['caption'] or '（札なし）'}" for sc in scenes[-8:])
     if request: text += chr(10) + chr(10) + '本人からの明示の頼み（必ず replace で描く）: ' + request
     return text
 
@@ -301,6 +319,7 @@ class Stage:
         self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
+        self._fresh = []             # (role, words) since the last decision: what the model judges on
         self._timer = None
         self._decisions = 0          # decisions started
         self._applied = 0            # the newest decision whose answer reached the screen
@@ -333,6 +352,8 @@ class Stage:
         back (2026-10-26: the owner's question set a decision, Dan's answer kept rescheduling it, so the drawing waited
         for the end of Dan's sentence)."""
         if not delta or not delta.strip(): return
+        if self._fresh and self._fresh[-1][0] == role: self._fresh[-1] = (role, self._fresh[-1][1] + delta)
+        else: self._fresh.append((role, delta))
         if role == 'assistant':
             self.pending_chars += len(delta.strip())
             if self.user_pending and self._timer is not None: return
@@ -364,13 +385,14 @@ class Stage:
         """Ask the model what the screen should show now and apply it, unless a newer decision was applied meanwhile
         (the newest words win; an older answer arriving late is dropped)."""
         self.pending_chars, self.user_pending = 0, False
+        fresh, self._fresh = self._fresh, []
         self._decisions += 1
         mine = self._decisions
         turns = self.dialogue.recent()[-8:] if self.dialogue is not None else []
         if not turns and not request: return None
         started = time.monotonic()
         try:
-            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image)), MODEL_TIMEOUT_S)
+            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image, fresh, self.scenes)), MODEL_TIMEOUT_S)
         except Exception as exc:
             self.record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
             return None
@@ -386,14 +408,30 @@ class Stage:
             self.record('stage_stale', action=action, elapsed_ms=elapsed)
             return None
         self._applied = mine
+        if action == 'back':
+            scene = next((sc for sc in self.scenes if str(sc.get('version')) == str(data.get('version'))), None)
+            if scene is None or self._same_scene(scene):
+                self.record('stage_keep', elapsed_ms=elapsed, back=str(data.get('version'))[:12], **usage)
+                return 'keep'
+            self._apply(caption or scene.get('caption') or self.caption, program=scene.get('program') or None, html=scene.get('html') or None,
+                        image=scene.get('image') or None, page_url=scene.get('page_url') or '')
+            self._last_replace = time.monotonic()
+            self.record('stage_back', elapsed_ms=elapsed, version=self.version, back=scene['version'], **usage)
+            return 'replace'
         if action == 'replace':
             if not drawable:
                 self.record('stage_rejected', elapsed_ms=elapsed, chars=len(str(program or html or image or '')), **usage)
                 if caption and caption != self.caption: self._apply(caption)
                 return 'rejected'
+            kind = next(iter(drawable))
+            since = time.monotonic() - self._last_replace
+            if not request and since < FLIP_HOLD_S and self.scenes and family(kind, drawable[kind]) != family(*self._current()):
+                # a flip to another kind of scene right after the last one: the caption follows, the scene stays
+                self.record('stage_flip_held', elapsed_ms=elapsed, kind=kind, since_s=round(since, 1), **usage)
+                if caption and caption != self.caption: self._apply(caption)
+                return 'held'
             self._apply(caption or self.caption, **drawable)
             self._last_replace = time.monotonic()
-            kind = next(iter(drawable))
             self.record('stage_scene', elapsed_ms=elapsed, kind=kind, chars=len(drawable[kind]), version=self.version, **usage)
             return 'replace'
         if action == 'caption' and caption and caption != self.caption:
@@ -406,6 +444,15 @@ class Stage:
     def _known(self):
         if self._names is None: self._names = part_names()
         return self._names
+
+    def _current(self):
+        """The kind and body of the scene on the stage now."""
+        if self.program: return 'program', self.program
+        if self.html: return 'html', self.html
+        return 'image', self.image
+
+    def _same_scene(self, scene):
+        return (scene.get('program') or '', scene.get('html') or '', scene.get('image') or '') == (self.program, self.html, self.image)
 
     def _apply(self, caption, program=None, html=None, image=None, page_url=''):
         """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image)."""
