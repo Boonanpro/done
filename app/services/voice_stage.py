@@ -44,8 +44,8 @@ MAX_SCENES = 40
 HOLD_S = 1.5           # after a scene was replaced, Dan's next words wait this long before another decision (2026-10-25: a
                        # flow Dan listed step by step was redrawn 4 times in 15 seconds; 6 s then, which the owner felt as
                        # the drawing lagging the talk, so 1.5 s since 2026-10-27); the owner's words are not held
-FLIP_HOLD_S = 8.0      # a replace that changes to a different kind of scene (flow -> numbers) this soon after the last one,
-                       # with no request from the owner, only changes the caption (2026-10-27 1st test call: the model
+FLIP_HOLD_S = 12.0     # a replace that changes to a different kind of scene (flow -> numbers) this soon after the last one,
+                       # with no request from the owner and no new words of theirs, only changes the caption (2026-10-27 1st test call: the model
                        # alternated between the journey's flow and the fare 6 times in 60 s while Dan said nothing new)
 HTML_MAX = 12000       # a free drawing (SVG/HTML) the model writes for the stage
 NOT_ON_STAGE = ('Choice', 'Input', 'Button')   # answers and links need a chat; the stage is looked at while talking
@@ -181,8 +181,8 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 同じ内容を少し言い換えただけでは replace しない（画面がちらつく）。ただし、今の図に無い段階・項目・数字が足された時は、今の図と同じ型のまま全部入れて replace する（Flow なら Flow のまま箱を足す）。
 - 今の画面の話題（札）の話が続いている間に、会話の前の方にあった別の話題の図をもう一度描かない（流れの図と料金の数字を行ったり来たりさせない）。
 - 今の画面が本物のページの写真（（画像）で始まる）の時は、本人がそのページの話をしている間は keep。写真の中身を絵に描き直さない。
-- 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。まだ何の話か分からなければ keep。
-- 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 質問の言葉と会話の事実だけで答えの骨組み（手順の見出しの並び、比べる物の名前）が描けるなら描く。答えの数字や中身をダンがまだ言っていないなら caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
+- 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
+- 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 手順・流れ・段取り・比べる物を聞かれたなら、質問の言葉から見出しだけの骨組み（Steps か、箱2〜3個の Flow）を描いてよい（中身はダンの言葉で育てる）。数字・料金・時間を聞かれた時は、ダンがまだ言っていないので caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
 見せ方の選び方（引き出しは3つ。毎回同じ型にしない）:
 - program（部品）: 人・物・流れは Flow、金額・件数・時刻は Stat、比べる話は Compare、推移は Chart、順番は Steps。構造がそのまま部品に当てはまる時。
