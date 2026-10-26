@@ -38,6 +38,10 @@ def test_well_formed_accepts_what_the_screen_can_draw_and_refuses_the_rest():
     assert S.well_formed('root = Flow([{id: "a", label: "A", tone: "now"}, {id: "b", label: "B"}], [{from: "a", to: "b", label: "x: y"}])')
 
 
+async def _answer(answers):
+    return (answers.pop(0) if answers else {'action': 'keep', 'caption': ''}), {'input_tokens': 10, 'output_tokens': 5}
+
+
 def make_stage(room, answers, record=None):
     seen = []
     async def ask(system, user):
@@ -281,6 +285,10 @@ async def test_a_flip_right_after_a_scene_only_moves_the_caption_but_growth_pass
     assert state['program'] == FLOW and state['caption'] == '手数料' and log[-1][0] == 'stage_flip_held'
     assert await stage.decide() == 'replace'                   # the same flow with one more box: growth, drawn at once
     assert S.read_state(room)['program'] == grown
+    stage.ask = (lambda answers: (lambda system, user: _answer(answers)))([{'action': 'replace', 'caption': '手数料', 'program': 'root = Stat("手数料", 360, "円")'}])
+    stage.dialogue.add('user', '手数料は？'); stage.heard('user', '手数料は？')
+    assert await stage.decide() == 'replace'                   # the owner asked something new: a real change of topic, not a flip
+    assert S.read_state(room)['program'] == 'root = Stat("手数料", 360, "円")'
     assert S.family('program', FLOW) == S.family('program', grown) == ('program', 'Flow')
     assert S.family('program', 'root = Stat("x", 1)') != S.family('program', FLOW) and S.family('html', '<svg/>') == ('html',)
 

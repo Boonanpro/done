@@ -37,7 +37,7 @@ SENTENCE_S = .25       # a sentence ended and enough was said: decide sooner
 CLAUSE_S = .3          # a clause ended (、) and enough was said: decide without waiting for the sentence (2026-10-27: Dan
                        # speaks one sentence for 10 seconds without a pause; the owner saw the drawing 9-12 s after the topic)
 MIN_CHARS = 14         # fewer new characters than this are a backchannel, not a stretch worth a decision
-CLAUSE_CHARS = 24      # a clause this long says what the topic is
+CLAUSE_CHARS = 16      # a clause this long says what the topic is
 USER_S = .6            # the owner's words settle (「それ図にして」 is a request to the listener too)
 MODEL_TIMEOUT_S = 8.0
 MAX_SCENES = 40
@@ -387,6 +387,7 @@ class Stage:
         (the newest words win; an older answer arriving late is dropped)."""
         self.pending_chars, self.user_pending = 0, False
         fresh, self._fresh = self._fresh, []
+        owner_spoke = any(role == 'user' for role, _ in fresh)   # a new question of the owner's is a real change of topic
         self._decisions += 1
         mine = self._decisions
         turns = self.dialogue.recent()[-8:] if self.dialogue is not None else []
@@ -415,7 +416,7 @@ class Stage:
                 self.record('stage_keep', elapsed_ms=elapsed, back=str(data.get('version'))[:12], **usage)
                 return 'keep'
             since = time.monotonic() - self._last_replace
-            if not request and since < FLIP_HOLD_S:   # going back right after a new scene is the same flip
+            if not request and not owner_spoke and since < FLIP_HOLD_S:   # going back right after a new scene is the same flip
                 self.record('stage_flip_held', elapsed_ms=elapsed, kind='back', since_s=round(since, 1), **usage)
                 if caption and caption != self.caption: self._apply(caption)
                 return 'held'
@@ -431,7 +432,7 @@ class Stage:
                 return 'rejected'
             kind = next(iter(drawable))
             since = time.monotonic() - self._last_replace
-            if not request and since < FLIP_HOLD_S and self.scenes and family(kind, drawable[kind]) != family(*self._current()):
+            if not request and not owner_spoke and since < FLIP_HOLD_S and self.scenes and family(kind, drawable[kind]) != family(*self._current()):
                 # a flip to another kind of scene right after the last one: the caption follows, the scene stays
                 self.record('stage_flip_held', elapsed_ms=elapsed, kind=kind, since_s=round(since, 1), **usage)
                 if caption and caption != self.caption: self._apply(caption)
