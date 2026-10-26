@@ -312,3 +312,135 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
     assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
     state = V.read_state('integration-room')
     assert not state['active'] and state['version'] == 8 and V.for_room('integration-room') is None
+
+@pytest.mark.asyncio
+async def test_combined_classification_selects_read_in_one_request():
+    class Judge:
+        calls = 0
+        async def choose(self, state, questions):
+            self.calls += 1
+            assert set(questions) == {'kind','read'}
+            return {'available':True,'answers':{'kind':{'choice':'read','probabilities':{'read':1}},
+                'read':{'choice':'job_status','probabilities':{'job_status':1}}}}
+    p = P.Prefetch('u',room_id='r');p.judge=Judge()
+    assert await p.kind('今の作業はどうなってる') == 'read'
+    assert await p.read_plan('今の作業はどうなってる') == ('job_status',{})
+    assert p.judge.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_long_phrase_does_not_repeat_expired_speculative_read(reads):
+    d,p=await ready()
+    p.searches[0].started -= P.READ_SECONDS+1
+    d.add('user','教えてください');p.heard(d)
+    await asyncio.sleep(.02)
+    assert len(reads) == 1
+    assert await p.take_read('job_status',{},d,'u','r') is None
+    await p.close()
+
+
+@pytest.mark.asyncio
+async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypatch,tmp_path):
+    from app.services import voice_stage as V
+    from app.services.chat_service import ChatService
+    from datetime import timezone
+    from app.services import command_center, command_job_state, api_job_providers, inbox
+    monkeypatch.setattr(S,'FOLLOWUP_ROOT',tmp_path/'handoff')
+    monkeypatch.setattr(V,'ROOT',tmp_path/'stage')
+    monkeypatch.setattr(command_job_state,'list_owned',lambda *a:[])
+    monkeypatch.setattr(inbox,'_env',lambda:None)
+    entered, release, model_release = asyncio.Event(),asyncio.Event(),asyncio.Event()
+    tasks, saved = [],[]
+    class Model:
+        def start(self,system,tools,messages):
+            assert '最初の依頼' in messages[0] and '最後は取り消し' in messages[0]
+            assert len(messages[0]) > 65000
+        async def step(self):
+            await model_release.wait()
+            return {'text':json.dumps({'left':[{'task':f'資料{i}を作る'} for i in range(5)],
+                'decisions':[{'text':'メモリ32GBにする。','evidence':'32GBでお願い'}]})}
+    monkeypatch.setattr(api_job_providers,'make',lambda *a:Model())
+    async def execute(spec,*a):
+        tasks.append(spec)
+        if len(tasks)==1:
+            entered.set(); await release.wait()
+        if len(tasks)==2: raise RuntimeError('one enqueue failed')
+        return {'accepted':True,'id':str(len(tasks))}
+    monkeypatch.setattr(command_center,'execute',execute)
+    monkeypatch.setattr(ChatService,'__init__',lambda self:None)
+    async def write(self,*a,**kw): saved.append((a,kw));return {'id':'fixture'}
+    monkeypatch.setattr(ChatService,'send_message',write)
+    d=S.Dialogue();d.add('user','最初の依頼。32GBでお願い')
+    for i in range(110):
+        d.add('assistant','長い相談の内容。'*80);d.add('user','続けて。')
+    d.add('user','最後は取り消し。')
+    assert d.history_complete and d.history_chars>65000
+    stage=V.Stage('r','s',d,lambda *a,**kw:None)
+    stage._apply('図','root = Stat("メモリ", 32, "GB")');stage.close()
+    finish=asyncio.create_task(S.finish_call('u','r',d,datetime.now(timezone.utc),True,stage,lambda *a,**kw:None))
+    # Model delay and enqueue delay are independent; neither is wrapped in 30s wait_for.
+    await asyncio.sleep(.02);assert not saved and not tasks
+    model_release.set();await entered.wait()
+    assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' in saved[0][0][2]
+    assert len(tasks)==1
+    release.set();await finish
+    assert len(tasks)==5 and len(saved)==1
+    paths=list((tmp_path/'handoff').rglob('*.json'));assert len(paths)==1
+    data=json.loads(paths[0].read_text());assert len(data['requests'])==5 and len(data['receipts'])==5
+    assert data['receipts'][1]['result']['accepted'] is False
+    assert data['turns'][0]['text'].startswith('最初の依頼') and '最後は取り消し' in data['turns'][-1]['text']
+    assert paths[0].stat().st_mode & 0o777 == 0o600
+    assert str(paths[0]) in tasks[0]['task'] and len(tasks[0]['task'])<=2800
+    assert '同じ条件への有効な承認が確認できたら' in tasks[0]['task']
+    assert '候補選択・予算指定だけから承認を作らない' in tasks[0]['task']
+
+@pytest.mark.asyncio
+async def test_socket_cancellation_keeps_post_call_owner_alive(monkeypatch):
+    from app.services import voice_calls,voice_stage
+    import websockets
+    entered,release,finished=asyncio.Event(),asyncio.Event(),asyncio.Event()
+    async def finish(*a): entered.set();await release.wait();finished.set()
+    monkeypatch.setattr(S,'finish_call',finish)
+    monkeypatch.setattr(P,'enabled',lambda:False)
+    monkeypatch.setattr(voice_stage,'enabled',lambda:False)
+    monkeypatch.setattr(voice_calls,'begin',lambda *a:None)
+    monkeypatch.setattr(voice_calls,'end',lambda *a:None)
+    monkeypatch.setattr(S,'note',lambda *a,**kw:None)
+    async def nothing(*a,**kw): pass
+    monkeypatch.setattr(S,'call_log',nothing)
+    async def idle(*a):await asyncio.Event().wait()
+    monkeypatch.setattr(S,'job_feed',idle);monkeypatch.setattr(S,'chat_feed',idle)
+    class Socket:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*a):pass
+        async def recv(self):return '{"type":"session.closed"}'
+        async def send(self,*a):pass
+    monkeypatch.setattr(websockets,'connect',lambda *a,**kw:Socket())
+    task=asyncio.create_task(S._run('fixture','u','r','fixture',True))
+    await entered.wait();task.cancel()
+    with pytest.raises(asyncio.CancelledError):await task
+    assert any(not t.done() for t in S._after_tasks)
+    release.set();await asyncio.wait_for(finished.wait(),1)
+    await asyncio.sleep(0)
+    assert not S._after_tasks
+
+@pytest.mark.asyncio
+async def test_bad_extraction_preserves_original_and_never_manufactures_approval(monkeypatch,tmp_path):
+    from app.services import command_center,command_job_state,api_job_providers,inbox
+    monkeypatch.setattr(S,'FOLLOWUP_ROOT',tmp_path)
+    monkeypatch.setattr(command_job_state,'list_owned',lambda *a:[])
+    monkeypatch.setattr(inbox,'_env',lambda:None)
+    class Model:
+        def start(self,*a):pass
+        async def step(self):return {'text':'{"approved":true}'}
+    monkeypatch.setattr(api_job_providers,'make',lambda *a:Model())
+    calls=[]
+    async def execute(spec,*a):calls.append(spec);return {'accepted':True}
+    monkeypatch.setattr(command_center,'execute',execute)
+    await S.after_call('u','r',[{'role':'user','text':'予算は20万円まで。まだ買わないで。'}],'now')
+    assert len(calls)==1 and calls[0]['action']=='work'
+    assert set(calls[0])=={'action','task','engine'}
+    assert '未完了の依頼があれば' in calls[0]['task']
+    state=json.loads(next(tmp_path.rglob('*.json')).read_text())
+    assert state['turns'][0]['text'].endswith('まだ買わないで。')
+    assert state['requests_source']=='automatic extraction, not authorization'

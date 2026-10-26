@@ -70,7 +70,7 @@ class Decisions:
     The existing credential service owns secrets. Use the evaluation credential
     name first, then the older editor name; do not copy or log either value.
     """
-    def __init__(self, user_id, *, timeout=1.2, max_calls=12, enabled=None):
+    def __init__(self, user_id, *, timeout=1.2, max_calls=12, enabled=None, retry_transient_after=None):
         self.user_id = user_id
         self.timeout = timeout
         self.max_calls = max_calls
@@ -78,6 +78,9 @@ class Decisions:
         self._key = None
         self._client = None
         self.unavailable = False
+        self.retry_transient_after = retry_transient_after
+        self.retry_at = None
+        self.recoveries = 0
         self.enabled = budget.enabled() if enabled is None else enabled
 
     async def __aenter__(self):
@@ -115,6 +118,9 @@ class Decisions:
     async def choose(self, state, questions):
         if not self.enabled:
             return {'available': False, 'reason': 'disabled', 'elapsed_ms': 0}
+        if self.unavailable and self.retry_at is not None and time.monotonic() >= self.retry_at:
+            self.unavailable, self.retry_at = False, None
+            self.recoveries += 1
         if self.unavailable or self.calls >= self.max_calls:
             return {'available': False, 'reason': 'decision_budget', 'elapsed_ms': 0}
         # A conservative byte bound, not an estimate that Japanese bytes=tokens.
@@ -147,13 +153,20 @@ class Decisions:
             data = response.json()
             answers = choice_answers(data, questions)
             return {'available': True, 'answers': answers, 'model': data.get('model'), 'usage': data.get('usage', {})}
+        transient = False
         try:
             result = await asyncio.wait_for(request(), timeout=self.timeout)
-        except (httpx.HTTPError, asyncio.TimeoutError, ValueError, KeyError, TypeError):
+        except (httpx.HTTPError, asyncio.TimeoutError, ValueError, KeyError, TypeError) as exc:
             # Error bodies can echo inputs. Only the category leaves this layer.
             result = {'available': False, 'reason': 'unavailable'}
+            transient = isinstance(exc, (asyncio.TimeoutError, httpx.TransportError)) or (
+                isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500)
         if not result['available']:
             self.unavailable = True
+            # Opt-in for a long call: the next utterance may probe once after a cooldown.
+            # Never retry the same request, authentication, budget denial, or indefinitely.
+            if transient and self.retry_transient_after is not None and self.recoveries < 2:
+                self.retry_at = time.monotonic() + self.retry_transient_after
         result['elapsed_ms'] = round((time.perf_counter()-started)*1000, 2)
         record_timing('decision', 'jev', result['elapsed_ms'], 'ok' if result['available'] else result['reason'])
         return result

@@ -120,6 +120,8 @@ class Prefetch:
         self.judging = None
         self.search_turn = None   # the owner's turn judged to be a search
         self.judge = None         # Jev's Decisions, opened once per call
+        self.route_answer = None
+        self.read_attempts = []   # kept across TTL pruning: no repeated stale read on a long utterance
         self.calls = []           # the owner's newest turn at each function call of the backend (newest last)
         self.counts = {'judged': 0, 'started': 0, 'hit': 0, 'missed': 0, 'jev': 0, 'flash': 0}
 
@@ -171,8 +173,8 @@ class Prefetch:
         """Choose only a fixed read, never generated tool names or arbitrary arguments."""
         if self.judge is None:
             from app.services.jev_decisions import Decisions
-            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400)
-        got = await self.judge.choose({'utterance_so_far': text}, {'read': {
+            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400, retry_transient_after=10)
+        got = self.route_answer[1] if self.route_answer and self.route_answer[0] == text else await self.judge.choose({'utterance_so_far': text}, {'read': {
             'type': 'choice', 'criteria': READS,
             'instructions': '本人の依頼に正確に合う読み取りを1つ選ぶ。推測で日付を補わない。複数の依頼や取り消しはnone。'}})
         if not got.get('available'):
@@ -184,6 +186,10 @@ class Prefetch:
             offset, days = {'calendar_today': (0, 1), 'calendar_tomorrow': (1, 1), 'calendar_week': (0, 7)}[route]
             return 'get_calendar', {'from': (today + timedelta(days=offset)).isoformat(), 'days': days}
         if route == 'search_records':
+            from app.services.voice_past import keywords
+            # Do not query the DB for an incomplete, topic-free 「さっき相談…」.
+            if not any(w not in {'相談', '続き', '状況', '決定', '記録'} for w in keywords(text, [])):
+                return None
             return route, {'query': text}
         if route in ('job_status', 'room_files') and self.room_id:
             return route, {}
@@ -193,8 +199,12 @@ class Prefetch:
         """'search' / 'read' / 'work' / 'talk' / 'wait', or '' when no judge answered."""
         from app.services.jev_decisions import Decisions
         if self.judge is None:
-            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400)
-        got = await self.judge.choose({'utterance_so_far': text}, {'kind': {'type': 'choice', 'criteria': KINDS, 'instructions': ASK}})
+            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400, retry_transient_after=10)
+        got = await self.judge.choose({'utterance_so_far': text}, {
+            'kind': {'type': 'choice', 'criteria': KINDS, 'instructions': ASK},
+            'read': {'type': 'choice', 'criteria': READS,
+                     'instructions': 'readの依頼なら正確に合う読み取りを1つ選ぶ。日付・対象が曖昧、複数の依頼、取り消し、read以外はnone。'}})
+        self.route_answer = (text, got)
         if got.get('available'):
             self.counts['jev'] += 1
             answer = got['answers']['kind']
@@ -240,6 +250,7 @@ class Prefetch:
         from app.services.voice_responses import run_function
         early = Early(text, turn, name, dict(args))
         early.context = dialogue.recent()
+        self.read_attempts = (self.read_attempts + [(turn, name)])[-40:]
         early.task = asyncio.create_task(run_function(name, args, self.user_id, self.room_id, early.context))
         # Retrieve errors even if the backend never asks for this read.
         early.task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
@@ -272,7 +283,7 @@ class Prefetch:
                 final = said_since(dialogue.turns, turn)
                 if plan and not self.closed and not any(c is turn for c in self.calls) and final is not None and only_an_ending(text, final):
                     # One read per function. An early work guess must not block a later status read.
-                    if not any(s.turn is turn and s.name == plan[0] for s in self.searches):
+                    if not any(t is turn and n == plan[0] for t, n in self.read_attempts):
                         self.start_read(text, turn, *plan, dialogue)
         self.prune()
         self.judging = None
