@@ -1076,13 +1076,18 @@ class Stage:
         self.record('stage_assist_done', result='timeout', elapsed_ms=round((time.monotonic() - started) * 1000))
         return None
 
-    async def _refresh_doc(self, doc_id, kind):
+    async def _refresh_doc(self, doc_id, kind, pending=None):
+        """Read the document back from its site and publish it when it changed. pending: the suggestions left after a
+        decision, which the site's text does not carry (the status line went on showing 「直しの案 42件」 after they were
+        all taken, 2026-10-27)."""
         from app.services import voice_stage_docs
         try:
             fresh = await voice_stage_docs.read(self.user_id, kind, doc_id)
         except Exception as exc:
             self.record('stage_doc_read_failed', error_type=type(exc).__name__, detail=str(exc)[:160]); return None
         if not self.doc or self.doc.get('id') != doc_id: return None
+        if pending is not None and (self.doc.get('assist') or {}).get('pending') != pending:
+            fresh = dict(fresh, assist=dict(self.doc.get('assist') or {}, pending=pending))
         if all(self.doc.get(k) == v for k, v in fresh.items()): return self.doc   # nothing changed on the site
         mark, refused, flow_mark = self._doc_mark, self._doc_refused, self._flow_mark
         out = self._put_doc(dict(self.doc, **fresh), caption=self.caption)
@@ -1108,7 +1113,7 @@ class Stage:
             try: left = await voice_stage_docs.pending(self.user_id, doc['kind'], doc['id'])
             except Exception: continue
             if left < before:
-                await self._refresh_doc(doc['id'], doc['kind'])
+                await self._refresh_doc(doc['id'], doc['kind'], pending=left)
                 self.record('stage_decided', accept=accept, before=before, left=left, elapsed_ms=round((time.monotonic() - started) * 1000))
                 return {'decided': True, 'left': left, 'note': '「' + ('反映しました' if accept else '取り消しました') + '」とだけ言う。'}
         self.record('stage_decide_failed', accept=accept, before=before)
