@@ -167,7 +167,7 @@ export function drawingDocument(html: string): string {
 }
 
 /** The caption and the scene. Draws nothing until a scene exists (the orb alone is the call's face until then). */
-export function VoiceStage({ roomId, active, className = '', onShown, fill = false }: { roomId: string; active: boolean; className?: string; onShown?: (shown: boolean) => void; fill?: boolean }) {
+export function VoiceStage({ roomId, active, className = '', onShown, fill = false }: { roomId: string; active: boolean; className?: string; onShown?: (shown: boolean, page: boolean) => void; fill?: boolean }) {
   // The scene on the stage and a number that changes only when the scene itself changes: the entrance animation keys
   // on it, so a caption-only version (or the same scene sent again) does not replay it. A program the checker refuses
   // (an unknown icon, a bad argument) keeps the previous scene instead of blanking the call's screen (2026-10-25).
@@ -191,19 +191,23 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
   const shown = !!state?.active && (drawable || !!state?.caption);
   const onShownRef = useRef(onShown);
   useEffect(() => { onShownRef.current = onShown; }, [onShown]);
-  useEffect(() => { onShownRef.current?.(shown && drawable); }, [shown, drawable]);
+  // A page on the stage (an artifact's own screen) is told apart: the phone then gives it the whole screen (no orb).
+  const page = scene?.kind === 'frame' || (scene?.kind === 'doc' && !!stageFramePath(scene.doc.page));
+  useEffect(() => { onShownRef.current?.(shown && drawable, shown && drawable && page); }, [shown, drawable, page]);
   const drawing = useMemo(() => (scene?.kind === 'html' ? drawingDocument(scene.html) : ''), [scene]);
   if (!shown) return null;
+  // Filling a screen with a page (the phone): the page takes all the height; the caption gives way to the page's own status.
+  const pageFill = fill && page;
   return (
-    <div className={`flex flex-col gap-2 ${className}`} data-voice-stage={state?.version} data-stage-scene-key={key}>
-      {state?.caption ? (
+    <div className={`flex flex-col gap-2 ${pageFill ? 'min-h-0 flex-1' : ''} ${className}`} data-voice-stage={state?.version} data-stage-scene-key={key}>
+      {state?.caption && !pageFill ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground" data-stage-caption>
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
           <span className="truncate">今の話: {state.caption}</span>
         </div>
       ) : null}
       {scene ? (
-        <div key={key} className="animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both" data-stage-scene data-stage-kind={scene.kind}>
+        <div key={key} className={`animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both ${pageFill ? 'flex min-h-0 flex-1 flex-col' : ''}`} data-stage-scene data-stage-kind={scene.kind}>
           {scene.kind === 'program' ? (
             <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
           ) : scene.kind === 'card' ? (
@@ -391,21 +395,23 @@ export function StageFrame({ path, command, fill, title, children }: { path: str
     return () => window.removeEventListener('message', listen);
   }, []);
   useEffect(() => { ready.current = false; setLoading(true); }, [path]);
+  // The page is opened as part of a call (call=1): it folds its own menus and shows the document itself.
+  const src = path + (path.includes('?') ? '&' : '?') + 'call=1';
   useEffect(() => {
     if (!command || command.seq <= sent.current) return;
     if (Date.now() - Date.parse(command.at) > 30000) { sent.current = Math.max(sent.current, command.seq); return; }
     if (command.action === 'reload') {   // the page itself is loaded again (a published post, a state the page does not poll)
       sent.current = command.seq; ready.current = false; setLoading(true);
-      if (frame.current) frame.current.src = path;
+      if (frame.current) frame.current.src = src;
       return;
     }
     if (ready.current) post(command); else waiting.current = command;
-  }, [command, path]);
+  }, [command, path, src]);
   return (
-    <div className="flex w-full flex-col gap-1.5" data-stage-frame={path}>
+    <div className={`flex w-full flex-col gap-1.5 ${fill ? 'min-h-0 flex-1' : ''}`} data-stage-frame={path}>
       {children}
-      <div className="relative w-full overflow-hidden rounded-xl border border-border bg-white" style={{ height: fill ? 'calc(100dvh - 5.5rem)' : 'min(72vh, 860px)' }}>
-        <iframe ref={frame} title={title} src={path} className="h-full w-full border-0 bg-white" onLoad={() => setLoading(false)} referrerPolicy="same-origin" />
+      <div className={`relative w-full overflow-hidden rounded-xl border border-border bg-white ${fill ? 'min-h-0 flex-1' : ''}`} style={fill ? undefined : { height: 'min(72vh, 860px)' }}>
+        <iframe ref={frame} title={title} src={src} className="h-full w-full border-0 bg-white" onLoad={() => setLoading(false)} referrerPolicy="same-origin" />
         {loading ? (
           <div className="absolute inset-0 flex items-center justify-center bg-white" aria-hidden>
             <span className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-700" />
