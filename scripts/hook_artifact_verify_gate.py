@@ -29,6 +29,17 @@
 apply_patch、シェルの書き込み（> ・write_text・sed -i・cp/mv など）を数える。シェルは見分けが粗いので、読むだけの
 コマンドでも書き込みの印があれば数える（確かめを1回走らせれば通る）。相対パスは記録の cwd か、コマンドの cd 先で読む。
 
+3. 不具合の知らせ（2026-10-27 付箋「不具合を先に再現する」）: みきさんの言葉が「動かない」「開けない」「番号が出ていない」
+   「画面の写真だけ」のような不具合の知らせで、このターンにダンが画面やアプリのコードを書き換えたか、返事で「直しました」と
+   言ったら、次が要る。
+     - 直す前に、みきさんの言う物を --expect-… で書いて撮った place_shot（repro=YES|NO）か、スマホのアプリなら phone で
+       見た画面。コードを読んで見当で直さない。
+     - 再現した（YES）のに画面を直したなら、最後の書き換えの後に同じく --expect-… を付けた after が OK。
+     - 再現しなかった（NO）なら artifact_seen.py でみきさんの画面の版を確かめる（「こちらでは出ません」の根拠）。
+     - 返事に前と後（再現しなかった時はこちらの画面）の絵を attach_image で貼る（[添付画像: …]）。
+   10/18 X運用室の表紙の×は、ダンの画面では出ていたのに本人の画面で出ず、ダンは見当で直して「直しました」と何度も返した。
+   10/25 番号と点が出ていない件も、ダンは自分の返事の見え方を見ずに直した。
+
 同じ書き換えで止めるのは3回まで（.data/artifact_gate/ に数える）。それを超えたら通して記録だけ残す。
 直す前を撮っていなかった時は、後から撮れないので1回だけ止めて、次からは先に撮るよう伝える。
 exit 0 = 通す / stdout に {"decision":"block","reason":…} = 続けさせる（Claude と Codex で同じ形）。
@@ -71,7 +82,8 @@ WRITE_MARK = re.compile(
     r"\bos\.replace\(|apply_patch|\*\*\* (?:Add|Update|Delete) File:|(?:write|edit)_file\s*\(", re.I)
 SEEN_RE = re.compile(r"\[artifact_seen\] slug=([\w*-]+) result=(OK|NG|UNCHECKED)")
 MAP_RE = re.compile(r"\[place_map\] (?:place|slug)=([\w:-]+) result=(FRESH|STALE|DRAFT|MISSING)(?: root=(\S+))?")
-SHOT_RE = re.compile(r"\[place_shot\] place=([\w:-]+)(?: covers=([\w:,-]*))? tag=(\w+) result=(OK|NG|UNREACHABLE)(?: root=(\S+))?")
+SHOT_RE = re.compile(r"\[place_shot\] place=([\w:-]+)(?: covers=([\w:,-]*))? tag=(\w+) result=(OK|NG|UNREACHABLE)(?: root=(\S+))?"
+                     r"(?: expect=(\d+) repro=(YES|NO))?")
 PATCH_FILE = re.compile(r"\*\*\* (?:Add|Update|Delete) File: (.+)")
 # `cat > 先 <<'EOF' … EOF` / `tee 先 <<EOF`: 中身は「先」に書く文章で、中に成果物のパスが出ても成果物は書き換わらない
 # （10/18 試験ファイルに書いた試験用のパスを成果物の書き換えと数えた）。中身だけ除き、書き込む先は残して判定する。
@@ -202,15 +214,55 @@ def _results(texts: list[str], events: list[tuple]) -> None:
             events.append(("seen", slug, result))
         for place, result, root in MAP_RE.findall(t):
             events.append(("map", _tree(root) if root else "*", _place(place), result))
-        for place, covers, tag, result, root in SHOT_RE.findall(t):
+        for place, covers, tag, result, root, expect, repro in SHOT_RE.findall(t):
             cov = {_place(place)} | {_place(c) for c in covers.split(",") if c}
-            events.append(("shot", _tree(root) if root else "*", cov, tag, result))
+            events.append(("shot", _tree(root) if root else "*", cov, tag, result, repro if expect else ""))
 
 
 def _place(p: str) -> str:
     """古い形の slug=x は artifact:x。共通の場所の id（chat など）はそのまま。"""
     common = {"chat", "artifact-tab", "dev-lead-room", "mobile"}
     return p if ":" in p or p in common else f"artifact:{p}"
+
+
+LATEST_RE = re.compile(r"<latest_user_message>((?:(?!<latest_user_message>).)*?)</latest_user_message>", re.S)
+# 仕組みが起こしたターン（文脈の読み込み・見張りの起床・ボードからの知らせ）は本人の言葉ではない
+SYSTEM_TURN = re.compile(r"\[CONTEXT PRELOAD\]|WATCH_NO_CHANGE|schedule_followup|（ここから並行作業）|^【.{1,40}からの(?:報告|知らせ)】")
+BUG_WORDS = re.compile(
+    r"動かな|動いてな|開けな|開かな|ひらけな|ひらかな|出(?:て)?(?:こ)?な(?:い|く)|出てな|表示されな|見えな|映らな|消え(?:た|て)|"
+    r"壊れ|崩れ|押せな|反応しな|効かな|できな(?:い|く)|エラー|おかしい|バグ|直ってな|なおってな|治ってな|真っ白|白紙|"
+    r"ずれ(?:て|た|る)|はみ出|重なって|切れて|読めな|固ま(?:る|った|って)|落ちる|落ちた|止まる|止まった|？？|\?\?")
+ATTACH_RE = re.compile(r"\[添付(?:画像|動画|ファイル)[:：]")
+FIX_CLAIM = re.compile(r"直しました|直りました|直してあります|直っています|直った|修正しました|修正済|解消しました|出るようにしました|"
+                       r"開けるようにしました|動くようにしました|表示されるようにしました")
+CODE_DIRS = ("frontend/", "mobile/")
+
+
+def owner_words(content) -> str:
+    """ターンの始まりの言葉のうち、本人が書いた所（ダンの部屋では <latest_user_message> の中）。仕組みの起床なら空。"""
+    texts: list[str] = []
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text")]
+    text = "\n".join(texts)
+    found = LATEST_RE.findall(text)
+    if found:
+        text = found[-1]
+    elif "<" in text and len(text) > 1500:   # 前置きの付いた長い言葉で、本人の所が分からない
+        return ""
+    text = re.sub(r"<place>.*?</place>|<room_state>.*?</room_state>", "", text, flags=re.S).strip()
+    return "" if SYSTEM_TURN.search(text) else text
+
+
+def is_bug_report(text: str) -> bool:
+    if not text:
+        return False
+    if BUG_WORDS.search(ATTACH_RE.sub("", text)):
+        return True
+    # 画面の写真だけ（字がほとんど無い）も不具合の知らせとして扱う
+    rest = re.sub(r"\[添付(?:画像|動画|ファイル)[:：][^\]]*\]", "", text).strip()
+    return bool(ATTACH_RE.search(text)) and len(re.sub(r"[\s?？!！。、]", "", rest)) <= 4
 
 
 def _is_turn_start(content) -> bool:
@@ -248,7 +300,7 @@ def read_events(path: str) -> tuple[list[tuple], str]:
             # Claude Code: {"type":"assistant","message":{"content":[{"type":"tool_use",...}]}} / user の tool_result
             msg = d.get("message") if isinstance(d.get("message"), dict) else None
             if msg is not None and d.get("type") == "user" and _is_turn_start(msg.get("content")):
-                events.append(("turn",))
+                events.append(("turn", owner_words(msg.get("content"))))
                 continue
             if msg is not None and isinstance(msg.get("content"), list):
                 for block in msg["content"]:
@@ -259,6 +311,8 @@ def read_events(path: str) -> tuple[list[tuple], str]:
                         e = edits_of(str(block.get("name") or ""), block.get("input") or {}, cwd)
                         if e:
                             events.append(("edit", e))
+                        if _phone_look(str(block.get("name") or ""), block.get("input")):
+                            events.append(("phone",))
                     elif kind == "tool_result":
                         texts: list[str] = []
                         _texts(block.get("content"), texts)
@@ -279,12 +333,14 @@ def read_events(path: str) -> tuple[list[tuple], str]:
                 e = edits_of(str(p.get("name") or "exec"), args, codex_cwd)
                 if e:
                     events.append(("edit", e))
+                if _phone_look(str(p.get("name") or ""), args):
+                    events.append(("phone",))
             elif ptype in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
                 texts = []
                 _texts(p.get("output"), texts)
                 _results(texts, events)
             elif ptype == "message" and p.get("role") == "user" and _is_turn_start(p.get("content")):
-                events.append(("turn",))
+                events.append(("turn", owner_words(p.get("content"))))
             elif ptype == "message" and p.get("role") == "assistant":
                 texts = []
                 _texts(p.get("content"), texts)
@@ -293,6 +349,21 @@ def read_events(path: str) -> tuple[list[tuple], str]:
             elif ptype == "task_complete" and p.get("last_agent_message"):
                 last_text = p["last_agent_message"]
     return events, last_text
+
+
+def _phone_look(name: str, args) -> bool:
+    """スマホ（開発用の Galaxy）の画面を見た呼び出しか。スマホのアプリの不具合は place_shot で開けないので、これを再現の証拠に数える。"""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {"command": args}
+    if not isinstance(args, dict):
+        return False
+    if name.rsplit("__", 1)[-1] == "phone":
+        return args.get("action") in ("screenshot", "read")
+    text = " ".join(str(args.get(k) or "") for k in ("command", "cmd", "input", "code"))
+    return bool(re.search(r"\badb\b[^\n]*\b(?:screencap|exec-out\s+screencap)", text))
 
 
 # --- 1. 本人の画面 ------------------------------------------------------------------------------------------------
@@ -423,6 +494,78 @@ def place_block(session: str, needs: dict) -> int | None:
         + REWRITE)
 
 
+# --- 3. 不具合の知らせ ------------------------------------------------------------------------------------------
+
+def bug_needs(events: list[tuple], message: str) -> dict | None:
+    """このターンが不具合の知らせで、直した・直したと言ったのに足りない物 → {need: [...], places, edited}。足りていれば None。"""
+    start = this_turn_start(events)
+    if start < 0 or len(events[start]) < 2 or not is_bug_report(events[start][1]):
+        return None
+    turn = list(enumerate(events))[start + 1:]
+    edits = [(i, tree, rel) for i, ev in turn if ev[0] == "edit" for tree, rel in ev[1]]
+    screen = [(i, tree, rel) for i, tree, rel in edits if places_of(tree, rel) or rel.startswith(CODE_DIRS)]
+    claimed = bool(FIX_CLAIM.search(message or ""))
+    if not screen and not claimed:
+        return None   # 答えただけ・調べただけ・画面と関係の無い直し
+    first = min((i for i, _, _ in screen), default=len(events))
+    last = max((i for i, _, _ in screen), default=-1)
+    repro = [(i, ev) for i, ev in turn if ev[0] == "shot" and len(ev) > 5 and ev[5] and i < first and ev[3] in ("before", "now")]
+    phone = [i for i, ev in turn if ev[0] == "phone" and i < first]
+    seen = [i for i, ev in turn if ev[0] == "seen"]
+    places = sorted({p for _, tree, rel in screen for p in places_of(tree, rel)})
+    need = []
+    if not repro and not phone:
+        need.append("repro")
+    reproduced = any(ev[5] == "YES" for _, ev in repro)
+    if repro and not reproduced and not seen:
+        need.append("seen")
+    if screen and (reproduced or not repro):
+        if not any(ev[0] == "shot" and len(ev) > 5 and ev[5] == "NO" and ev[4] == "OK" and ev[3] == "after" for i, ev in turn if i > last) \
+                and not (phone and any(i > last for i, ev in turn if ev[0] == "phone")):
+            need.append("after")
+    if not ATTACH_RE.search(message or ""):
+        need.append("picture")
+    if not need:
+        return None
+    return {"need": need, "places": places, "edited": bool(screen), "first": first}
+
+
+def bug_block(session: str, events: list[tuple], message: str) -> int | None:
+    n = bug_needs(events, message)
+    if not n:
+        return None
+    key = "b:" + str(n["first"]) + ":" + "+".join(n["need"])
+    # 再現が足りない時は1回だけ止める（直した後は直す前を撮れない。画面の無い直しでは再現の道具が合わないこともある）
+    limit = 1 if "repro" in n["need"] else MAX_BLOCKS
+    if count_block(session, key) > limit:
+        return None
+    where = "、".join(n["places"]) or "<場所>（docs/places/ と各成果物の MAP.md）"
+    todo = []
+    if "repro" in n["need"]:
+        if n["edited"]:
+            todo.append("- 直す前に、みきさんの言う崩れをこちらで出していない。コードを読んで見当で直した形になっている。"
+                        "直す前の画面はもう撮れないので、次の不具合の知らせからは、書き換える前に必ず撮る。今回は直した後を下のとおり撮って確かめる。")
+        else:
+            todo.append(f"- 直したと言う前に、みきさんの言う崩れをこちらで出す: python scripts/place_shot.py {where} --tag before "
+                        "[--phone]（スマホで見た話なら）--expect-shows 番号の並び / --expect-visible 'CSS' / --expect-text 字 / "
+                        "--expect-no-text 字（みきさんが見えないと言った物を書く）。スマホのアプリの話なら phone で同じ画面を開いて見る。")
+    if "seen" in n["need"]:
+        todo.append("- こちらでは再現しなかった（repro=NO）。直す前に、みきさんの画面が古い版のままでないかを確かめる: "
+                    "python scripts/artifact_seen.py --slug <slug> --wait 90。古ければ、そう返す（みきさんに再読み込みを頼む前に、まず記録で確かめる）。")
+    if "after" in n["need"]:
+        todo.append(f"- 直した後に、直す前と同じ --expect-… を付けて撮り、OK を確かめる: python scripts/place_shot.py {where} --tag after "
+                    "[--phone] --expect-…（作業場所の画面は --base）。前と後を並べた絵（compare.png）ができる。")
+    if "picture" in n["need"]:
+        todo.append("- 返事に絵を貼る。直したなら前と後を並べた絵（.data/place_shots/<場所>/compare.png）、再現しなかったなら"
+                    "こちらで見えている画面（before.png）を attach_image で貼り、返ってきた [添付画像: …] を本文に入れる。")
+    return block(
+        "みきさんの不具合の知らせ（動かない・出ていない・画面の写真）に、同じ崩れをこちらで出して確かめないまま、直した・直したと"
+        "言っている。ダンの「直しました」がみきさんの画面で直っていないこと（10/18 の表紙の×、10/25 の番号）を繰り返さないため、"
+        "終える前に次をすること:\n" + "\n".join(todo) + "\n"
+        "返事は、絵と一緒に、何が崩れていて何を直したか（再現しなかった時は「こちらでは出ています」と、みきさんの画面の版）を"
+        "人に話す短さで書く。撮った手順・道具・測った結果の字は書かない。")
+
+
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
@@ -459,6 +602,9 @@ def main() -> int:
             return block(
                 f"確かめた結果が NG のまま（{lines}）。NG の行の理由が片付くまで待って、もう一度走らせること:\n{cmds}\n"
                 "待っても直らない時だけ、本人の言葉で「〜はまだ直っていません」と1文書く。" + REWRITE)
+    stopped = bug_block(session, events, message)
+    if stopped is not None:
+        return stopped
     stopped = place_block(session, place_needs(events))
     return 0 if stopped is None else stopped
 

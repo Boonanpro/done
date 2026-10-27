@@ -4,6 +4,18 @@
   python scripts/place_shot.py artifact:dev-lead --tag after      直した後に撮る（before があれば前と後を並べた絵も作る）
   python scripts/place_shot.py dev-lead-room --base http://127.0.0.1:3012   共通の場所の地図でも開ける
   python scripts/place_shot.py x-operation                        slug だけでも artifact:<slug> になる
+  python scripts/place_shot.py x-operation --tag before --phone --expect-shows 番号の並び
+                                    みきさんの「番号が出ていない」を、スマホの幅で、直す前に出してみる（再現）
+
+不具合の知らせ（2026-10-27 付箋「不具合を先に再現する」）: みきさんが「動かない」「出ていない」と言ったら、直す前に
+みきさんが見ている物を --expect-… で書いて --tag before で撮る。見えるはずの物が見えなければ「再現した」（repro=YES）。
+直した後に同じ --expect-… で --tag after を撮り、OK なら前と後の絵（compare.png）を返事に貼る。
+再現しなければ（repro=NO）、直さずに artifact_seen.py でみきさんの画面の版を確かめる。
+  --expect-shows 名前   地図の shows の見本（番号の並び・点の並び・表・見出し・太字・コード）が見えるはず
+  --expect-visible CSS  その部品が見えるはず（×ボタンなら '[aria-label="閉じる"]' など）
+  --expect-text 字      その字が画面に出るはず
+  --expect-no-text 字   その字が画面に出ないはず（エラーの文など）
+  --phone               スマホの幅（360×780・指で触る端末）で開く。みきさんがスマホで見た話の時
 
 開くのはテスト用アカウント（dan-test@example.com）。入館証はこの場で作り（30分）、持ち主の画面や履歴には触れない。
 既定の行き先は成果物の開発サーバー（3001。成果物のファイルそのものを出す。本人の /preview/<slug> もここから来る）。
@@ -19,6 +31,7 @@
 証拠は <木>/.data/place_shots/<場所>/ に残す（片付けで消さない）:
   <tag>.png（見本の吹き出し、無ければ画面全体）、<tag>-page.png（画面全体）、<tag>.json（測った結果）、compare.png（前と後）
 最後の行: [place_shot] place=<場所> covers=<同じ画面を指す場所> tag=<tag> result=OK|NG|UNREACHABLE root=<木>
+          （--expect-… を付けた時は後ろに expect=<数> repro=YES|NO。YES は、みきさんの言う崩れがこの画面でも出た）
 終了コード: 0=OK / 1=NG / 2=開けなかった
 """
 from __future__ import annotations
@@ -200,8 +213,35 @@ def compare(out: Path) -> Path | None:
     return path
 
 
+EXPECT_JS = r"""
+({visible, texts, noTexts}) => {
+""" + SEEN_JS + r"""
+  const text = document.body ? document.body.innerText || '' : '';
+  const out = [];
+  for (const sel of visible) {
+    let els = [];
+    try { els = [...document.querySelectorAll(sel)].filter((e) => !e.closest('#__place_probe')); } catch (e) { out.push({what: sel, ok: false, why: 'CSS が読めない: ' + e.message}); continue; }
+    const vis = els.map(shown);
+    const ok = vis.some((v) => v.ok);
+    out.push({what: sel, ok, why: ok ? '' : (els.length ? vis[0].why : '無い')});
+  }
+  for (const t of texts) out.push({what: `「${t}」が出る`, ok: text.includes(t), why: text.includes(t) ? '' : '出ていない'});
+  for (const t of noTexts) out.push({what: `「${t}」が出ない`, ok: !text.includes(t), why: text.includes(t) ? '出ている' : ''});
+  return out;
+}
+"""
+
+PHONE = {"viewport": {"width": 360, "height": 780}, "device_scale_factor": 3, "is_mobile": True, "has_touch": True,
+         "user_agent": "Mozilla/5.0 (Linux; Android 14; SM-S921Q) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"}
+
+
+def expectations(a) -> list[str]:
+    return ([f"見本:{x}" for x in a.expect_shows] + [f"部品:{x}" for x in a.expect_visible]
+            + [f"字:{x}" for x in a.expect_text] + [f"無い字:{x}" for x in a.expect_no_text])
+
+
 def judge(record: dict, path: str) -> dict[str, list[str]]:
-    """測った結果 → 3つの項目ごとの NG の理由（空なら OK）。"""
+    """測った結果 → 項目ごとの NG の理由（空なら OK）。--expect-… を付けた時は「みきさんの言う所」も。"""
     reach, real, sample = [], [], []
     final = record.get("final_path") or ""
     if record.get("error"):
@@ -229,7 +269,10 @@ def judge(record: dict, path: str) -> dict[str, list[str]]:
             sample.append(f"{name}が見えない（{r['why']}）")
     if record.get("probe_blank") is not None and record["probe_blank"] < 0.01:
         sample.append("見本の吹き出しが白紙")
-    return {"着いたか": reach, "本物の画面": real, "見本": sample}
+    out = {"着いたか": reach, "本物の画面": real, "見本": sample}
+    if record.get("expect") is not None:
+        out["みきさんの言う所"] = [f"{e['what']}：{e['why']}" for e in record["expect"] if not e["ok"]]
+    return out
 
 
 def main(argv=None) -> int:
@@ -242,7 +285,16 @@ def main(argv=None) -> int:
     ap.add_argument("--width", type=int, default=1440)
     ap.add_argument("--height", type=int, default=900)
     ap.add_argument("--no-login", action="store_true", help="入館証を入れずに開く（試験用）")
+    ap.add_argument("--phone", action="store_true", help="スマホの幅（360×780・指で触る端末）で開く")
+    ap.add_argument("--expect-shows", action="append", default=[], metavar="名前", help="この見本が見えるはず（地図の shows の名前）")
+    ap.add_argument("--expect-visible", action="append", default=[], metavar="CSS", help="この部品が見えるはず")
+    ap.add_argument("--expect-text", action="append", default=[], metavar="字", help="この字が画面に出るはず")
+    ap.add_argument("--expect-no-text", action="append", default=[], metavar="字", help="この字が画面に出ないはず")
     a = ap.parse_args(argv)
+    unknown = [x for x in a.expect_shows if x not in SAMPLES]
+    if unknown:
+        ap.error(f"--expect-shows の名前は {'・'.join(SAMPLES)} のどれか（{'・'.join(unknown)} は無い）")
+    expects = expectations(a)
 
     pid = pm.place_id(a.place)
     m = pm.place_map(pid)
@@ -274,10 +326,18 @@ def main(argv=None) -> int:
     record: dict = {"place": pid, "tag": a.tag, "url": base + path, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     probe = meta.get("probe") or {}
     shows = [s for s in (meta.get("shows") or []) if s in SAMPLES]
+    shows += [s for s in a.expect_shows if s not in shows]
+    if a.expect_shows and not probe:
+        print("この場所の地図に probe（吹き出しの入れ物）が無いので、見本は入れられません。--expect-visible で部品を指してください。")
+        print(f"[place_shot] {tail} result=UNREACHABLE {root}")
+        return 2
+    if a.phone:
+        record["device"] = "phone 360x780"
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
-            ctx = browser.new_context(viewport={"width": a.width, "height": a.height}, device_scale_factor=1, locale="ja-JP")
+            ctx = browser.new_context(**(PHONE if a.phone else {"viewport": {"width": a.width, "height": a.height}, "device_scale_factor": 1}),
+                                      locale="ja-JP")
             if tok:
                 ctx.add_cookies([{"name": "done_access_token", "value": tok, "domain": host, "path": "/"}])
                 ctx.add_init_script(f"try{{localStorage.setItem('done-token',{json.dumps(tok)});localStorage.setItem('done-auth',{json.dumps(auth)});}}catch(e){{}}")
@@ -298,11 +358,17 @@ def main(argv=None) -> int:
             page.wait_for_timeout(800)
             record["final_path"] = "/" + page.url.split("://", 1)[-1].split("/", 1)[-1] if "://" in page.url else page.url
             record["page"] = page.evaluate(PAGE_JS, {"errors": ERROR_TEXTS + list(meta.get("errors") or []), "probe": probe})
+            if expects:
+                record["expect"] = page.evaluate(EXPECT_JS, {"visible": a.expect_visible, "texts": a.expect_text, "noTexts": a.expect_no_text})
             page.screenshot(path=str(out / f"{a.tag}-page.png"))
             record["blank"] = blank_ratio(out / f"{a.tag}-page.png")
             if probe and shows:
                 res = page.evaluate(PROBE_JS, {"probe": probe, "samples": [[s, *SAMPLES[s]] for s in shows]})
                 record["probe"] = res
+                if expects:
+                    for name in a.expect_shows:
+                        r = (res.get("results") or {}).get(name) or {"ok": False, "why": res.get("error") or "見本が入らなかった"}
+                        record["expect"].insert(0, {"what": f"見本の{name}", "ok": r["ok"], "why": r["why"]})
                 if res.get("rect"):
                     r = res["rect"]
                     page.screenshot(path=str(out / f"{a.tag}.png"), clip={"x": r["x"], "y": r["y"], "width": r["width"], "height": min(r["height"], 4000)})
@@ -314,6 +380,11 @@ def main(argv=None) -> int:
             browser.close()
 
     checks = judge(record, path)
+    if expects:
+        # みきさんの言う崩れがここでも出たか。出たら「見本」の欄では数えず、「みきさんの言う所」だけで数える（同じ物を2回 NG にしない）
+        record["repro"] = "YES" if checks.get("みきさんの言う所") else "NO"
+        if a.expect_shows:
+            checks["見本"] = [w for w in checks["見本"] if not any(w.startswith(n + "が見えない") for n in a.expect_shows)]
     record["checks"] = checks
     (out / f"{a.tag}.json").write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"開いた: {base}{record.get('final_path') or path}")
@@ -327,7 +398,10 @@ def main(argv=None) -> int:
         if c:
             print(f"前と後: {c}")
     bad = any(checks.values())
-    print(f"[place_shot] {tail} result={'NG' if bad else 'OK'} {root}")
+    if expects:
+        print("再現した（みきさんの言う崩れがこの画面でも出た）" if record["repro"] == "YES" else "再現しなかった（この画面ではみきさんの言う物が見えている）")
+    extra = f" expect={len(expects)} repro={record['repro']}" if expects else ""
+    print(f"[place_shot] {tail} result={'NG' if bad else 'OK'} {root}{extra}")
     return 1 if bad else 0
 
 
