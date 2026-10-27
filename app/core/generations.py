@@ -12,6 +12,23 @@ import tempfile
 import psutil
 
 ROOT = Path(os.environ.get('DAN_GENERATIONS_ROOT') or Path.home() / '.dan' / 'generations')
+TOKEN_FILE = Path.home() / '.dan' / 'claude_oauth_token'
+
+
+def core_env(**extra):
+    """The environment a new Core starts with. A release is often started from a room's own work, whose environment
+    lacks Claude's one-year key (run_core.sh gives it to the launchd Core only). Without it every Claude session that
+    generation starts used the Mac login copy, and on 2026-10-27 that copy had expired: parallel work failed at once."""
+    env = {k: v for k, v in os.environ.items() if k != 'CLAUDECODE'}
+    if not env.get('CLAUDE_CODE_OAUTH_TOKEN'):
+        try:
+            token = ''.join(TOKEN_FILE.read_text(encoding='utf-8').split())
+        except OSError:
+            token = ''
+        if token:
+            env['CLAUDE_CODE_OAUTH_TOKEN'] = token
+    env.update(extra)
+    return env
 
 
 def read(name):

@@ -198,8 +198,21 @@ async def deliver(job_id, text):
 def _kill(job_id):
     proc = _procs.get(job_id)
     if proc and proc.poll() is None:
-        subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)], capture_output=True,
-                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)], capture_output=True,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            return
+        # Mac has no taskkill: 2026-10-27 the stop itself raised FileNotFoundError and the job ended in that error.
+        import psutil
+        try:
+            root = psutil.Process(proc.pid)
+            for p in root.children(recursive=True) + [root]:
+                try:
+                    p.kill()
+                except psutil.Error:
+                    pass
+        except psutil.Error:
+            pass
 
 
 def _user_line(text):
@@ -254,7 +267,8 @@ async def _launch(job_id, s):
     cmd = cr._build_cli_cmd(claude_cmd, cli_js, str(job_mcp), launch_prompt, resume_session_id=resume,
                             fork_session=fork, model=MODELS[s['model']], extra_args=compact_args)
     cmd += ['--input-format', 'stream-json']   # --settings (the file hook) comes with _build_cli_cmd
-    env = {k: v for k, v in os.environ.items() if k not in ('CLAUDECODE', 'ANTHROPIC_API_KEY')}
+    from app.core.generations import core_env
+    env = {k: v for k, v in core_env().items() if k != 'ANTHROPIC_API_KEY'}
     env.update({'DAN_SESSION_ID': room, 'DAN_ROOM_ID': room, 'DAN_COMMAND_JOB_ID': job_id, 'DAN_WORK_DIR': work_dir,
                 'CLAUDE_CODE_ENABLE_TASKS': 'true', 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'Never',
                 'GH_PROMPT_DISABLED': '1', 'CI': '1', 'NO_COLOR': '1'})
