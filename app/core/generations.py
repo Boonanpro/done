@@ -137,3 +137,11 @@ def legacy_room_alive(room_id):
         return True  # A failed lookup cannot transfer a potentially live turn.
     if not active: (ROOT / (key('legacy', room_id) + '.json')).unlink(missing_ok=True)
     return active
+
+
+def refs(generation):
+    for prefix in ('room-', 'call-', 'voice-room-'):
+        for path in ROOT.glob(prefix + '*.json'):
+            saved = read(path.stem)
+            if saved and saved.get('generation') == generation and living(saved.get('owner')):
+                yield path.name

@@ -61,7 +61,11 @@ async def launch(row):
         creationflags=(getattr(subprocess, 'CREATE_NO_WINDOW', 0) |
                        getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)) if os.name == 'nt' else 0)
     # Waiting does not own the child: cancelling this monitor never kills work.
-    await process.wait()
+    code = await process.wait()
+    saved = state.read(job_id)
+    if code and saved and saved['state'] not in state.TERMINAL and not alive(saved):
+        state.publish(job_id, 'error', '作業の実行接続が切れました。実行済み操作の確認が必要です。',
+                      state='failed', error='Job runner exited')
 
 
 async def own(job_id, run=None):

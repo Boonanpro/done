@@ -249,4 +249,4 @@ async def health() -> dict:
             "environment": settings.APP_ENV,
             "broken_modules": SELFCHECK_FAILURES,
         }
-    return {"status": "healthy", "service": "sandbox", "environment": settings.APP_ENV}
+    return {"status": "healthy", "service": "sandbox", "environment": settings.APP_ENV, "generation": os.environ.get("DAN_GENERATION")}

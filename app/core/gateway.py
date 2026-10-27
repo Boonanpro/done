@@ -13,6 +13,7 @@ import httpx
 from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import StreamingResponse, JSONResponse
 from app.core import generations as G
+from app.core import generation_retirement as retirement
 
 HOP = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
        'te', 'trailer', 'transfer-encoding', 'upgrade', 'host'}
@@ -21,9 +22,12 @@ SERVICE_PATHS = ('/internal/', '/api/v1/chat/internal/', '/api/v1/chat/feed')
 
 @asynccontextmanager
 async def lifespan(app):
+    stop, changed = retirement.start()
+    app.state.retire_changed = changed
     async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10), trust_env=False) as client:
         app.state.client = client
-        yield
+        try: yield
+        finally: stop()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -43,7 +47,16 @@ def destination(scope, path, payload=None):
     if session and not G.owner('call', session):
         # Sessions established before the gateway still belong to legacy 8000.
         return 8000
-    return G.target(role, room, session)
+    port = G.target(role, room, session)
+    if role == 'sandbox' and not path.startswith('/api/v1/voicelog/'):
+        release = G.read('active') or {}
+        paths = release.get('sandbox_routes')
+        if paths is not None and path not in ('/health', '/openapi.json'):
+            def matches(pattern):
+                pattern = re.sub(r'\{[^}]+\}', '__PARAM__', pattern)
+                return re.fullmatch(re.escape(pattern).replace('__PARAM__', '[^/]+'), path) is not None
+            if not any(matches(pattern) for pattern in paths): return 8000
+    return port
 
 
 @app.api_route('/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'])
@@ -75,9 +88,11 @@ async def proxy(request: Request, path: str):
     client = request.app.state.client
     req = client.build_request(request.method, url, headers=headers,
                                content=body if body is not None else request.stream())
+    retirement.enter(port)
     try:
         response = await client.send(req, stream=True)
     except httpx.HTTPError:
+        retirement.leave(port)
         if reservation: G.release_room(room, reservation[1])
         # Never retry a write: the destination may have accepted it.
         return JSONResponse({'detail': '接続先に応答がありません。操作の受付状況を確認してください。'}, status_code=502)
@@ -87,6 +102,8 @@ async def proxy(request: Request, path: str):
                 yield chunk
         finally:
             await response.aclose()
+            retirement.leave(port)
+            if hasattr(request.app.state, 'retire_changed'): request.app.state.retire_changed()
             if reservation: G.release_room(room, reservation[1])
     result = StreamingResponse(contents(), status_code=response.status_code)
     result.raw_headers = [(k, v) for k, v in response.headers.raw if k.decode().lower() not in HOP]
@@ -100,6 +117,7 @@ async def websocket_proxy(socket: WebSocket, path: str):
     suffix = ('?' + socket.url.query) if socket.url.query else ''
     headers = [(k, v) for k, v in socket.headers.items()
                if k.lower() not in HOP and not k.lower().startswith('sec-websocket-')]
+    retirement.enter(port)
     try:
         async with websockets.connect(f'ws://127.0.0.1:{port}/{path}{suffix}', additional_headers=headers,
                                        subprotocols=socket.scope.get('subprotocols') or None, max_size=None, proxy=None) as upstream:
@@ -123,3 +141,6 @@ async def websocket_proxy(socket: WebSocket, path: str):
     except Exception:
         if socket.application_state.name != 'DISCONNECTED':
             await socket.close(code=1011)
+    finally:
+        retirement.leave(port)
+        if hasattr(socket.app.state, 'retire_changed'): socket.app.state.retire_changed()

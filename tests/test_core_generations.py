@@ -115,3 +115,27 @@ async def test_proxy_preserves_status_cookies_body_and_never_retries_write(regis
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url='http://localhost:9100') as client:
             assert (await client.post('/some-write')).status_code == 502
     assert seen.count('failed') == 1
+
+
+def test_retirement_waits_for_call_and_open_response(registry, monkeypatch):
+    from app.core import generation_retirement as retirement
+    old, new = registry
+    old = {**old, 'draining': True}
+    G.write('release-old', old); G.write('active', new)
+    killed = []
+    import psutil
+    monkeypatch.setattr(psutil.Process, 'terminate', lambda self: killed.append(self.pid))
+    G.track('call', 'c')
+    retirement.retire_once()
+    assert killed == []
+    G.track('call', 'c', False)
+    retirement.enter(old['core'])
+    try:
+        retirement.retire_once()
+        assert killed == []
+    finally: retirement.leave(old['core'])
+    retirement.retire_once()
+    assert killed == [os.getpid()]
+    assert G.read('release-old')['retired']
+    retirement.retire_once()
+    assert len(killed) == 1

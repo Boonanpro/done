@@ -74,7 +74,10 @@ def prepare(root):
     while time.monotonic() < deadline:
         if process.poll() is not None: raise RuntimeError('New release exited before readiness: ' + release_id)
         if healthy(core) and healthy(sandbox):
-            print(json.dumps(release)); return release
+            with urllib.request.urlopen(f'http://127.0.0.1:{sandbox}/openapi.json', timeout=10) as response:
+                release['sandbox_routes'] = list(json.load(response).get('paths', {}))
+            G.write('release-' + release_id, release)
+            print(json.dumps({k: v for k, v in release.items() if k != 'sandbox_routes'})); return release
         time.sleep(.5)
     # Leave active untouched. Keep the failed candidate for diagnosis; never
     # terminate a process by a port or accidentally touch the running release.
@@ -82,8 +85,15 @@ def prepare(root):
 
 
 def activate(release_id):
+    from app.services.job_process import lease
+    with lease(G.ROOT / 'activation.lock') as locked:
+        if not locked: raise RuntimeError('Another activation is in progress')
+        return _activate(release_id)
+
+
+def _activate(release_id):
     release = G.read('release-' + release_id)
-    if not release or not G.living(release.get('owner')) or not all(healthy(release[k]) for k in ('core', 'sandbox')):
+    if not release or release.get('retired') or not G.living(release.get('owner')) or not all(healthy(release[k]) for k in ('core', 'sandbox')):
         raise RuntimeError('Release not ready; routing was not changed')
     previous = G.read('active')
     if previous is None:
@@ -97,6 +107,9 @@ def activate(release_id):
         for room, runs in rooms.items(): G.write(G.key('legacy', room), {'runs': runs})
     if previous: G.write('previous', previous)
     G.write('active', release)
+    if previous and previous['id'] != release_id:
+        previous['draining'] = True
+        G.write('release-' + previous['id'], previous)
     print(json.dumps({'active': release_id, 'previous': (previous or {}).get('id')}))
 
 

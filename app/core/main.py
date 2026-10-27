@@ -304,4 +304,4 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "healthy", "service": "dan-core", "environment": settings.APP_ENV}
+    return {"status": "healthy", "service": "dan-core", "environment": settings.APP_ENV, "generation": os.environ.get("DAN_GENERATION")}
