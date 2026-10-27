@@ -30,8 +30,18 @@ def _dan_ws():
 
 logger = logging.getLogger(__name__)
 
-MODELS = {'opus': 'opus', 'fable': 'fable', 'astra': 'gpt-6-astra'}
-LABELS = {'opus': 'Opus', 'fable': 'Fable', 'astra': 'GPT-6'}
+MODELS = {'opus': 'opus', 'fable': 'fable', 'astra': 'gpt-6-astra'}   # 'astra' runs on the newest Astra (model_catalog.current)
+
+
+class _Labels(dict):
+    def get(self, key, default=None):
+        if key == 'astra':
+            from app.agent.model_catalog import label
+            return label(MODELS['astra'])
+        return super().get(key, default)
+
+
+LABELS = _Labels({'opus': 'Opus', 'fable': 'Fable'})
 _procs: dict[str, subprocess.Popen] = {}
 
 JOB_RULES = """

@@ -2046,20 +2046,15 @@ from app.agent import codex_runner as _codex
 from app.agent import chat_shapes as _chat_shapes
 from app.agent import turn_flow
 
-# Claude CLI models + Codex CLI (ChatGPT sign-in) models. The model decides the
-# backend: ``gpt-*`` → codex_runner, everything else → this file's Claude path.
-_ALLOWED_CLI_MODELS = {"opus", "sonnet", "haiku", "fable"} | set(_codex.CODEX_MODELS)
+# Claude CLI models + Codex CLI (ChatGPT sign-in) models, read live from what the providers offer now
+# (app/agent/model_catalog.py), so a newly released model shows up without a code change.
+# The model decides the backend: ``gpt-*`` → codex_runner, everything else → this file's Claude path.
+from app.agent import model_catalog as _model_catalog
 
-# Selectable models for the room model switcher (UI order).
-CLI_MODEL_OPTIONS = [
-    {"id": "fable", "label": "Claude Fable 5.1", "backend": "claude"},
-    {"id": "opus", "label": "Claude Opus", "backend": "claude"},
-    {"id": "sonnet", "label": "Claude Sonnet", "backend": "claude"},
-    {"id": "gpt-6-astra", "label": "GPT-6 Astra", "backend": "codex"},
-    {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "backend": "codex"},
-    {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "backend": "codex"},
-    {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna", "backend": "codex"},
-]
+_ALLOWED_CLI_MODELS = _model_catalog.AllowedModels()
+
+# Selectable models for the room model switcher (UI order). Read fresh each time it is used.
+CLI_MODEL_OPTIONS = _model_catalog.LiveOptions()
 # room_id → 保存済みの選択。モデル変更APIで必ず無効化する。
 _room_model_cache: Dict[str, str] = {}
 
@@ -2302,8 +2297,8 @@ def _resolve_cli_model(room_id: Optional[str] = None) -> str:
     許可リスト外の値は無視して次の手段にフォールバックする（--model への
     不正な引数混入を防ぐ安全弁）。
     """
-    model = _resolve_cli_model_raw(room_id)
-    if room_id and _room_model_cache.get(room_id) == model:
+    model = _model_catalog.current(_resolve_cli_model_raw(room_id))
+    if room_id and _model_catalog.current(_room_model_cache.get(room_id)) == model:
         return model
     return _apply_fable_quota_guard(model)
 
@@ -4055,7 +4050,7 @@ async def process_message_cli(
     if model_override:
         if model_override not in _ALLOWED_CLI_MODELS:
             raise ValueError(f'Unknown model: {model_override}')
-        cli_model=model_override
+        cli_model=_model_catalog.current(model_override)
         backend='codex' if _codex.is_codex_model(cli_model) else 'claude'
     else:
         cli_model, backend = resolve_room_backend(room_id)

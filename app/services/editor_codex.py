@@ -113,8 +113,9 @@ class CodexTurn:
             raise RuntimeError('CodexをChatGPT契約でログインしてください。APIキー課金では実行しません。')
         dynamic = [{'type': 'function', 'name': t['name'], 'description': t['description'],
                     'inputSchema': t['parameters']} for t in tools if t.get('type') == 'function']
+        from app.agent.model_catalog import current   # an older version of a GPT tier runs on the newest one
         started = await self.rpc('thread/start', {
-            'model': model, 'cwd': str(Path(__file__).resolve().parents[2]),
+            'model': current(model), 'cwd': str(Path(__file__).resolve().parents[2]),
             'approvalPolicy': 'never', 'sandbox': sandbox, 'ephemeral': True,
             'developerInstructions': instructions,
             'dynamicTools': dynamic,

@@ -10,9 +10,11 @@ def test_placeholder_name_is_not_the_head_of_the_instruction() -> None:
     assert runner.placeholder_name('Opusでこの部屋のログを全部読んで、問題点を洗い出して報告して') == '作業'
 
 
-def test_report_card() -> None:
+def test_report_card(monkeypatch) -> None:
+    from app.agent import model_catalog
+    monkeypatch.setattr(model_catalog, 'label', lambda m: 'GPT-6.1 Astra' if m == 'gpt-6-astra' else m)   # the newest Astra's name
     s = {'id': 'j1', 'title': '返事の短さの点検', 'task': 'x', 'model': 'astra'}
-    assert runner.report_card(s, False) == {'job_id': 'j1', 'title': '返事の短さの点検', 'state': 'done', 'model_label': 'GPT-6'}
+    assert runner.report_card(s, False) == {'job_id': 'j1', 'title': '返事の短さの点検', 'state': 'done', 'model_label': 'GPT-6.1 Astra'}
     assert runner.report_card({**s, 'title': ''}, True)['state'] == 'stopped'
 
 
