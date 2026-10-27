@@ -118,6 +118,25 @@ async def test_proxy_preserves_status_cookies_body_and_never_retries_write(regis
     assert seen.count('failed') == 1
 
 
+@pytest.mark.asyncio
+async def test_proxy_never_hands_one_visitors_login_to_another(registry):
+    import httpx
+    sent = []
+    class Bytes(httpx.AsyncByteStream):
+        async def __aiter__(self): yield b'{}'
+    async def handler(request):
+        await request.aread()
+        sent.append(request.headers.get('cookie'))
+        return httpx.Response(200, headers=[('set-cookie', 'done_refresh_token=owner; Path=/; HttpOnly')], stream=Bytes())
+    async with gateway.upstream_client(transport=httpx.MockTransport(handler)) as upstream:
+        gateway.app.state.client = upstream
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url='http://localhost:9100') as owner:
+            await owner.post('/api/v1/chat/login', content=b'{}')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url='http://localhost:9100') as stranger:
+            await stranger.post('/api/v1/chat/refresh', content=b'')
+    assert sent == [None, None] and not upstream.cookies
+
+
 def test_retirement_waits_for_call_and_open_response(registry, monkeypatch):
     from app.core import generation_retirement as retirement
     old, new = registry
