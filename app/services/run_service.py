@@ -23,6 +23,8 @@ def announce(row) -> None:
     """The run's state as just written goes to the room's screens (room_feed.publish_run). Never breaks the writer."""
     from app.services.restart_signal import notify
     notify()
+    from app.core.generations import run_changed
+    run_changed(row)
     try:
         from app.services.room_feed import publish_run
         publish_run(row)
@@ -43,6 +45,7 @@ ACTIVE_RUN_STATES = {
 
 
 
+from app.core.generations import identity as process_identity
 from app.core.standby import MACHINE as _MACHINE   # which machine started the run (app/core/standby.py)
 
 class RunService:
@@ -68,7 +71,7 @@ class RunService:
             "claude_session_id": claude_session_id,
             "parent_run_id": parent_run_id,
             "state": state,
-            "metadata": {"machine": _MACHINE, **(metadata or {})},
+            "metadata": {"machine": _MACHINE, **(metadata or {}), "process_owner": process_identity()},
         }
         query = self.supabase.table("agent_runs").insert(row)
         result = await asyncio.to_thread(query.execute)
@@ -144,7 +147,8 @@ class RunService:
         if superseded_by_run_id is not None:
             updates["superseded_by_run_id"] = superseded_by_run_id
         if metadata is not None:
-            updates["metadata"] = {"machine": _MACHINE, **metadata}   # keep the machine tag a full replacement would drop
+            previous = await self.get_run(run_id)
+            updates["metadata"] = {"machine": _MACHINE, **((previous or {}).get("metadata") or {}), **metadata}   # keep the machine tag a full replacement would drop
 
         query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
         if only_if_active:

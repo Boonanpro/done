@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import uuid
 
-ROOT = Path.home() / '.dan' / 'command-jobs'
+ROOT = Path(os.environ.get('DAN_COMMAND_JOB_ROOT') or Path.home() / '.dan' / 'command-jobs')
 TERMINAL = {'completed', 'failed', 'cancelled'}
 
 def now():

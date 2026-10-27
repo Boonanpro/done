@@ -41,7 +41,11 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
             return response
         client = AsyncMock(); client.post.side_effect = post
         client.__aenter__.return_value = client
-        with patch.object(routes, '_get_user', return_value=SimpleNamespace(user_id='owner')), \
+        with patch.object(routes.ChatService, '__init__', return_value=None), \
+             patch('app.services.dan_core.shared', return_value=''), \
+             patch('app.services.voice_tools.warm'), \
+             patch('app.services.room_files.listing', new_callable=AsyncMock, return_value=[]), \
+             patch.object(routes, '_get_user', return_value=SimpleNamespace(user_id='owner')), \
              patch.object(routes.settings, 'OPENAI_API_KEY', 'test'), \
              patch.object(routes.ChatService, 'get_room', new_callable=AsyncMock, return_value={'id': 'r'}), \
              patch.object(routes.ChatService, 'get_messages', new_callable=AsyncMock, return_value=[{'sender_type': 'ai', 'content': '14号車', 'created_at': '1'}]), \

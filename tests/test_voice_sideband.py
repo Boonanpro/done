@@ -51,7 +51,8 @@ async def test_job_feed_speaks_results_at_once_and_pushes_nothing_else(monkeypat
         assert sent == []   # a running job pushes nothing: its state is read on demand (job_status)
         jobs[0].update(seq=3, state='completed', events=jobs[0]['events']+[{'seq': 3, 'kind': 'result', 'text': 'のぞみ2号を予約可能です'}])
         await asyncio.sleep(.05)
-        assert [e['type'] for e in sent] == ['session.commentary.append'] and 'のぞみ2号' in sent[0]['content']
+        assert [e['type'] for e in sent] == ['session.thinking.append', 'session.commentary.append']
+        assert 'のぞみ2号' in sent[0]['content']
     finally:
         feed.cancel()
 

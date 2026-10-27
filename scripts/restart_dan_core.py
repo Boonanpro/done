@@ -325,6 +325,15 @@ def main():
     if unknown:   # `--help` used to fall through to a restart (Dan tried it first, 2026-10-13)
         print(__doc__)
         sys.exit(2)
+    if (Path.home() / '.dan' / 'generations' / 'enabled').exists():
+        # No idle wait: new work moves to a verified release while existing
+        # turns/calls remain on their original processes.
+        sys.path.insert(0, str(ROOT))
+        from core_release import prepare, activate
+        release = prepare(ROOT)
+        activate(release['id'])
+        print('New requests use the new release. Existing work continues.')
+        return
     if '--when-idle' in sys.argv:
         room = option('--room', asking_room())
         if not room:
