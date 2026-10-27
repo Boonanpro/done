@@ -6,6 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { MainLayout } from '@/components/layout/main-layout';
 import { RestartCover } from '@/components/layout/restart-cover';
 import { NewBuildNotice } from '@/components/layout/new-build-notice';
+import { SummonBanner } from '@/components/layout/summon-banner';
 import { OWNER_USER_ID } from '@/lib/api-client';
 import { findGuestHome } from '@/lib/guest-home';
 import { usePreviewStore } from '@/stores/preview-store';
@@ -107,6 +108,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </MainLayout>
       <RestartCover />
       <NewBuildNotice />
+      <SummonBanner />
     </>
   );
 }

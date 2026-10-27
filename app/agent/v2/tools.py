@@ -358,6 +358,40 @@ def convert_skill_to_tools(skill: "Skill") -> List[Dict[str, Any]]:
     return tools
 
 
+_BIG_ROOTS = ('~', '/', '~/done', '~/dan-workspace', '~/.dan', '~/.dan/workspace', 'd:/done', 'd:/dan-workspace')
+
+
+def _stalling_command(command: str) -> str:
+    """A command that is known to hang a job for minutes, refused before it runs with the faster way (2026-10-27: one
+    transfer job lost 120 s to osascript waiting on a permission dialog and 109 s to grep -r over the memory folder,
+    whose videos are gigabytes). '' when the command may run."""
+    import re
+    import shlex
+    if re.search(r'osascript\b', command) and re.search(r'System Events|tell application', command):
+        return ('Mac のアプリを AppleScript で動かすと許可の確認で止まり、120秒固まるので実行していない。'
+                'スマホ（LINE など）は phone、Windows の PC は desktop、サイトは browser を使う。')
+    home = os.path.expanduser('~')
+    def big(arg):
+        a = arg.strip('"\'').replace('\\', '/').rstrip('/').lower() or '/'
+        a = '~' + a[len(home.lower()):] if a.startswith(home.lower()) else a
+        return a in _BIG_ROOTS
+    for part in re.split(r'[|;&]+', command):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            continue
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        recursive = name == 'find' or (name in ('grep', 'egrep', 'fgrep') and any(
+            w.startswith('-') and not w.startswith('--') and re.search(r'[rR]', w) or w in ('--recursive', '--dereference-recursive') for w in words[1:]))
+        if recursive and any(big(w) for w in words[1:] if not w.startswith('-')):
+            return ('このフォルダの根元をまとめて探すと、録画や動画が数GBあって数分かかるので実行していない。'
+                    'rg をフォルダと種類を絞って使う（例: rg -n 語 ~/.dan/workspace/memory --type md）。'
+                    '記憶は ~/.dan/workspace/memory/MEMORY.md の索引から、ダンの会話やメールは lookup で探す。')
+    return ''
+
+
 def get_all_skill_tools() -> List[Dict[str, Any]]:
     """
     コアツールのみを返す
@@ -2065,6 +2099,9 @@ async def execute_tool(
         command = params.get("command", "")
         if not command:
             return {"success": False, "error": "command が必要です"}
+        refused = _stalling_command(command)
+        if refused:
+            return {"success": False, "command": command, "error": refused}
         try:
             import subprocess
             import sys as _sys

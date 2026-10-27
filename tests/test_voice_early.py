@@ -384,10 +384,11 @@ async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypat
     assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' in saved[0][0][2]
     assert len(tasks)==1
     release.set();await finish
-    assert len(tasks)==5 and len(saved)==1
+    # everything left by one call goes as ONE piece of work (2026-10-27: three jobs queued on the phone)
+    assert len(tasks)==1 and len(saved)==1
+    assert all(f'{i+1}. 資料{i}を作る' in tasks[0]['task'] for i in range(5))
     paths=list((tmp_path/'handoff').rglob('*.json'));assert len(paths)==1
-    data=json.loads(paths[0].read_text());assert len(data['requests'])==5 and len(data['receipts'])==5
-    assert data['receipts'][1]['result']['accepted'] is False
+    data=json.loads(paths[0].read_text());assert len(data['requests'])==5 and len(data['receipts'])==1
     assert data['turns'][0]['text'].startswith('最初の依頼') and '最後は取り消し' in data['turns'][-1]['text']
     assert paths[0].stat().st_mode & 0o777 == 0o600
     assert str(paths[0]) in tasks[0]['task'] and len(tasks[0]['task'])<=2800
@@ -444,3 +445,24 @@ async def test_bad_extraction_preserves_original_and_never_manufactures_approval
     state=json.loads(next(tmp_path.rglob('*.json')).read_text())
     assert state['turns'][0]['text'].endswith('まだ買わないで。')
     assert state['requests_source']=='automatic extraction, not authorization'
+
+
+@pytest.mark.asyncio
+async def test_left_over_goes_to_the_calls_running_work(monkeypatch,tmp_path):
+    """「今どういう状況」 about a running transfer must not start a second transfer job (2026-10-27)."""
+    from app.services import command_center, command_job_state, api_job_providers, inbox
+    monkeypatch.setattr(S,'FOLLOWUP_ROOT',tmp_path/'handoff')
+    began='2026-10-27T08:19:00+00:00'
+    monkeypatch.setattr(command_job_state,'list_owned',lambda *a:[{'id':'j1','task':'振込の準備','state':'running','created_at':'2026-10-27T08:20:09+00:00'}])
+    monkeypatch.setattr(inbox,'_env',lambda:None)
+    class Model:
+        def start(self,*a): pass
+        async def step(self): return {'text':json.dumps({'left':[{'task':'振込の状況を確認して報告する'}],'decisions':[]})}
+    monkeypatch.setattr(api_job_providers,'make',lambda *a:Model())
+    updates, created = [], []
+    monkeypatch.setattr(command_job_state,'control',lambda job,user,room,action,text='':updates.append((job,action,text)))
+    async def execute(spec,*a): created.append(spec); return {'accepted':True}
+    monkeypatch.setattr(command_center,'execute',execute)
+    left = await S.after_call('u','r',[{'role':'user','text':'今どういう状況'}],began)
+    assert left and not created
+    assert updates[0][0]=='j1' and updates[0][1]=='update' and '振込の状況' in updates[0][2]

@@ -133,6 +133,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
 
     # Parallel work in one room: the same file, the PC screen or the phone is used by one piece of work at a time
     # (work_locks). Waiting here is shown in the room's work list; still taken after the limit → this call is not made.
+    lock_key = lock_owner = ''
     if not os.environ.get('DAN_TOOL_HOST'):
         from app.services import work_locks
         lock_key = work_locks.tool_key(name, arguments)
@@ -194,6 +195,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
                 "同じ手をそのまま繰り返さない。別の道を選ぶ: ログイン済みの状態で入れる入口を試す、別の画面から入る。"
                 "それでも進めない時は、どこで止まったかと、本人に何をしてほしいかを具体的に伝えて止まる。"))]
     finally:
+        if lock_key.startswith('device:') and lock_owner:   # a device is held while used: its idle time counts from here
+            try: await asyncio.to_thread(work_locks.try_acquire, lock_key, lock_owner, work_locks.current_title())
+            except Exception: pass
         if job_id:
             def observed(s):
                 s['current_tool'] = None
