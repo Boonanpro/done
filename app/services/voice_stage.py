@@ -12,6 +12,10 @@ write no text, and a scene is text (the owner asked on 2026-10-25).
 
 The stage is one JSON file per room (next to voice_calls' files) so the screen's poll (voicelog_routes GET /stage) can be
 served by any process; the scenes shown are also kept here for the one chat message that records them after the call.
+Since 2026-10-27 the stage also carries real things the owner works on by voice: a message draft (the chat's outbound
+card), a document of one of the owner's sites (an article of the X room, a script of the script room: voice_stage_docs)
+and a generated picture (voice_stage_media). The server itself listens to the owner's words while one of them is on
+the stage (flow) and revises, reads back and publishes only on the owner's spoken approval (approval_heard).
 DAN_VOICE_STAGE=0 turns the listener off. DAN_VOICE_STAGE_MODEL picks the model. Measured on 2026-10-25 with
 scripts/check_voice_stage_latency.py (10 decisions over three explanations): gpt-5.4-mini with no reasoning 1.2 s median,
 1.5 s max, every scene drawable; gpt-5.4-nano 1.6 s / 2.5 s; deepseek-flash 4.6 s / 6.1 s (one scene with a named
@@ -191,6 +195,62 @@ def flow_input(card, dan_words, owner_words):
             + chr(10) + '本人の新しい言葉: ' + ' '.join(str(owner_words or '').split())[:600])
 
 
+PUBLISH_QUESTION = re.compile(r'(投稿していい|投稿してもいい|投稿しますか|投稿して大丈夫|公開していい|公開してもいい|公開しますか|公開して大丈夫|出していい|これで投稿|これで公開|投稿してよろしい|公開してよろしい)')
+
+
+def doc_text(doc):
+    return ('（文書）' + (doc.get('label') or doc.get('kind') or '') + (' @' + doc['account'] if doc.get('account') else '') + ' 題: ' + (doc.get('title') or '（無題）')
+            + ' 状態: ' + {'draft': '下書き', 'publishing': '投稿中', 'published': '投稿済み', 'failed': '失敗'}.get(doc.get('status'), '') + ' 本文: ' + ' '.join(str(doc.get('body') or '').split())[:600])
+
+
+def media_text(media):
+    return '（画像' + ('を作っている' if media.get('status') == 'generating' else '') + '）' + ' '.join(str(media.get('prompt') or '').split())[:200]
+
+
+def spoken_doc_summary(doc):
+    """What Dan says before publishing a document: where, what, the gist (the owner answers to this)."""
+    where = (doc.get('publish_label') or '公開') + ('、@' + doc['account'] + ' で' if doc.get('account') else '')
+    title = doc.get('title') or ''
+    body = ' '.join(str(doc.get('body') or '').split())
+    return f'{where}。' + (f'題は「{title}」。' if title else '') + f'書き出しは「{body[:50]}' + ('…' if len(body) > 50 else '') + '」。これで投稿していいですか。'
+
+
+def mention_of_doc(doc, text):
+    """Dan's read-back of a document: it names it (the title's first characters, or 記事/投稿/台本) AND asks whether to
+    publish."""
+    text = str(text or '')
+    if not PUBLISH_QUESTION.search(text): return False
+    title = str(doc.get('title') or '').strip()
+    if len(title) >= 2 and title[:6] in text: return True
+    return bool(re.search(r'(記事|投稿|台本|文書|原稿)', text))
+
+
+DOC_FLOW_INSTRUCTIONS = """通話中、本人の画面にはダンが作った文書（記事・投稿・台本など: 題と本文）が出ています。本人の直前の言葉が、その文書に対して何を求めているかを判定します。出力は JSON だけ:
+{"intent": "revise" | "publish" | "approve" | "stop" | "other", "body": "直した本文全体（revise の時だけ）", "title": "直した題（題を変える時だけ）"}
+- revise: 本文や題を変える頼み（「もっと短く」「2段落目を削って」「最後にまとめを足して」「タイトルを〜に」）。body には直した後の本文全体を書く。頼まれた所だけ変え、ほかの段落・行は一字も変えない（改行もそのまま）。本人が言った内容だけを使い、事実や数字を補わない。
+- publish: 投稿・公開してほしいという頼み（「投稿して」「公開して」「出して」「ポストして」）。
+- approve: ダンが文書の要点を読み上げて「投稿していいですか」と聞いた後の、承認の返事（「いいよ」「OK」「はい」「お願い」「それで」）。
+- stop: 待ってほしい・保留（「ちょっと待って」「まだ」「うーん」「もう一回読んで」）。
+- other: 文書と関係ない話、挨拶、相づち、ダンへの質問。
+迷う時は other か stop（投稿する側に倒さない）。"""
+
+MEDIA_FLOW_INSTRUCTIONS = """通話中、本人の画面にはダンが作った画像（と、その画像を作った時の頼み）が出ています。本人の直前の言葉が、その画像に対して何を求めているかを判定します。出力は JSON だけ:
+{"intent": "revise" | "other", "instruction": "画像をどう直すかの指示（revise の時だけ。画像生成の指示として英語でなく日本語のまま、具体的に）"}
+- revise: 画像を直す・作り直す頼み（「もっと明るく」「背景を青に」「人を入れて」「もう一枚別の構図で」）。instruction には、今の画像にどんな変更を加えるかを1〜2文で書く。
+- other: 画像と関係ない話、挨拶、相づち、感想だけ（「いいね」）、ダンへの質問。
+迷う時は other。"""
+
+
+def doc_flow_input(doc, dan_words, owner_words):
+    return ('今の文書:' + chr(10) + '題: ' + (doc.get('title') or '') + chr(10) + '本文:' + chr(10) + str(doc.get('body') or '')[:6000] + chr(10) + chr(10)
+            + 'ダンの直前の言葉: ' + (' '.join(str(dan_words or '').split())[:400] or '（無し）') + chr(10) + '本人の新しい言葉: ' + ' '.join(str(owner_words or '').split())[:600])
+
+
+def media_flow_input(media, dan_words, owner_words):
+    return ('今の画像を作った頼み: ' + str(media.get('prompt') or '')[:400] + chr(10) + 'これまでの直し: ' + ' / '.join(str(x) for x in (media.get('history') or [])[-4:]) + chr(10) + chr(10)
+            + 'ダンの直前の言葉: ' + (' '.join(str(dan_words or '').split())[:400] or '（無し）') + chr(10) + '本人の新しい言葉: ' + ' '.join(str(owner_words or '').split())[:600])
+
+
 CARD_CHANNELS_SPOKEN = {'email': 'メール', 'instagram_dm': 'Instagram の DM', 'instagram_comment': 'Instagram のコメント', 'collab': '窓口のチャット',
                         'line': 'LINE', 'sms': 'SMS', 'web_form': 'フォーム', 'chatwork': 'Chatwork', 'slack': 'Slack', 'x_dm': 'X の DM'}
 
@@ -242,15 +302,17 @@ def mention_of(card, text):
     return bool(re.search(r'(宛て|あて|宛先)', text))
 
 
-def approval_heard(history, mark, card, since=None):
+def approval_heard(history, mark, card, since=None, mention=None):
     """Whether the owner approved sending, read from the call's transcript after `mark` (where the transcript stood when
     the draft was last put on the stage): Dan must have read the message back (a turn mentioning the recipient) and the
     owner's latest words, after that, must be an approval without a hesitation. Words already judged (before `since`,
-    the last refusal) are not judged again. Returns (ok, reason)."""
+    the last refusal) are not judged again. Returns (ok, reason). `mention(card, text)` is the read-back test (a
+    document's is mention_of_doc)."""
+    mention = mention or mention_of
     turns = words_since(history, mark)
     read = -1
     for i, t in enumerate(turns):
-        if t['role'] == 'assistant' and mention_of(card, t['text']): read = i
+        if t['role'] == 'assistant' and mention(card, t['text']): read = i
     if read < 0: return False, '宛先と要点をまだ読み上げていない'
     owner = [t for t in turns[read + 1:] if t['role'] == 'user' and t['text'].strip()]
     if since is not None:
@@ -295,6 +357,7 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 今の画面が本物のページの写真（（画像）で始まる）の時は、本人がそのページの話をしている間は keep。写真の中身を絵に描き直さない。
 - 今の画面が送信案（（送信案）で始まる。宛先・件名・本文）の時は、本人がその文面を直したり送るかを決めたりしている間なので keep（札も据え置き）。文面の内容を図に描き直さない。
 - 本人が「○○にメッセージ送って」「メールして」「返事して」と頼んだ時と、ダンがその文面を作っている間は keep。文面はダンが下書き（送信案）として画面に出すので、文面や宛先を図にしない。
+- 今の画面が文書（（文書）で始まる。記事・投稿・台本の題と本文）や画像（（画像）で始まる）の時は、本人がそれを直したり投稿するかを決めたりしている間なので keep（札も据え置き）。本人が「記事を書いて」「画像を作って」と頼んだ時と、ダンがそれを作っている間も keep（記事や画像はダンが本物を画面に出す）。
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
 - 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 手順・流れ・段取り・比べる物を聞かれたなら、質問の言葉から見出しだけの骨組み（Steps か、箱2〜3個の Flow）を描いてよい（中身はダンの言葉で育てる）。数字・料金・時間を聞かれた時は、ダンがまだ言っていないので caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
@@ -405,9 +468,10 @@ async def ask_model(system, user):
     return (data if isinstance(data, dict) else {}), {'input_tokens': getattr(usage, 'prompt_tokens', 0) or 0, 'output_tokens': getattr(usage, 'completion_tokens', 0) or 0}
 
 
-def decision_input(turns, caption, program, request=None, html=None, image=None, fresh=None, scenes=None, card=None):
+def decision_input(turns, caption, program, request=None, html=None, image=None, fresh=None, scenes=None, card=None, doc=None, media=None):
     talk = chr(10).join(('ユーザー' if t['role'] == 'user' else 'Dan') + ': ' + t['text'].strip()[:700] for t in turns if t['text'].strip())
-    shown = program or (('（自由な絵）' + chr(10) + html[:1500]) if html else '') or (('（画像）' + image) if image else '') or (card_text(card) if card else '') or '（まだ無い）'
+    shown = (program or (('（自由な絵）' + chr(10) + html[:1500]) if html else '') or (('（画像）' + image) if image else '') or (card_text(card) if card else '')
+             or (doc_text(doc) if doc else '') or (media_text(media) if media else '') or '（まだ無い）')
     text = '直前の会話（新しい物が下）:' + chr(10) + talk
     if fresh:
         text += chr(10) + chr(10) + '新しく届いた言葉（前回の判断の後）:' + chr(10) + chr(10).join(('ユーザー' if r == 'user' else 'Dan') + ': ' + w.strip()[:700] for r, w in fresh if w.strip())
@@ -440,6 +504,10 @@ class Stage:
         self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
         self.card = None             # a message draft on the stage (card_of), with the transcript's mark when it was last put there
         self._card_mark, self._card_refused = None, None
+        self.doc = None              # a document of one of the owner's sites on the stage (voice_stage_docs.normal + label)
+        self._doc_mark, self._doc_refused = None, None
+        self.media = None            # a picture made for the stage (generate_image), its prompt and state
+        self._media_mark = None
         self._read_back_at = -1e9   # when the server itself last read the draft back
         self.scenes = []
         self.pending_chars, self.user_pending = 0, False
@@ -457,7 +525,8 @@ class Stage:
     # -- what the screen reads --------------------------------------------------------------------------------
     def state(self, active=True):
         return {'room_id': self.room_id, 'session_id': self.session_id, 'version': self.version, 'caption': self.caption,
-                'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'card': self.card, 'at': self.at,
+                'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'card': self.card,
+                'doc': self.doc, 'media': self.media, 'at': self.at,
                 'active': active, 'scenes': len(self.scenes)}
 
     def write(self, active=True):
@@ -489,7 +558,7 @@ class Stage:
             self.user_pending = True
             self._owner_asked = True
             wait = USER_S
-            if self.card and self.card.get('status') == 'pending': self._schedule_flow()
+            if self._live(): self._schedule_flow()
         self._schedule(wait)
 
     def _schedule(self, wait):
@@ -520,7 +589,7 @@ class Stage:
         if not turns and not request: return None
         started = time.monotonic()
         try:
-            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image, fresh, self.scenes, self.card)), MODEL_TIMEOUT_S)
+            data, usage = await asyncio.wait_for(self.ask(instructions(), decision_input(turns, self.caption, self.program, request, self.html, self.image, fresh, self.scenes, self.card, self.doc, self.media)), MODEL_TIMEOUT_S)
         except Exception as exc:
             self.record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
             return None
@@ -536,9 +605,9 @@ class Stage:
             self.record('stage_stale', action=action, elapsed_ms=elapsed)
             return None
         self._applied = mine
-        if self.card and self.card.get('status') == 'pending' and not request and action in ('replace', 'back'):
-            # the owner is revising or approving a message: the listener's drawings wait (the card is the scene)
-            self.record('stage_keep', elapsed_ms=elapsed, held_for='card', **usage)
+        if self._live() and not request and action in ('replace', 'back'):
+            # the owner is revising or approving a message / document / picture: the listener's drawings wait (it is the scene)
+            self.record('stage_keep', elapsed_ms=elapsed, held_for=self._live(), **usage)
             return 'keep'
         if action == 'back':
             scene = next((sc for sc in self.scenes if str(sc.get('version')) == str(data.get('version'))), None)
@@ -587,25 +656,45 @@ class Stage:
         if self.program: return 'program', self.program
         if self.html: return 'html', self.html
         if self.card: return 'card', self.card.get('proposal_id') or ''
+        if self.doc: return 'doc', self.doc.get('id') or ''
+        if self.media: return 'media', self.media.get('id') or ''
         return 'image', self.image
 
-    def _same_scene(self, scene):
-        return (scene.get('program') or '', scene.get('html') or '', scene.get('image') or '', (scene.get('card') or {}).get('proposal_id') or '') == (self.program, self.html, self.image, (self.card or {}).get('proposal_id') or '')
+    def _live(self):
+        """What the owner is working on by voice right now (the server listens to their words for it): 'card' while a
+        draft is pending, 'doc' while a document is a draft, 'media' while a picture is on the stage; '' otherwise."""
+        if self.card and self.card.get('status') == 'pending': return 'card'
+        if self.doc and self.doc.get('status') in ('draft', 'failed'): return 'doc'
+        if self.media: return 'media'
+        return ''
 
-    def _apply(self, caption, program=None, html=None, image=None, page_url='', card=None):
-        """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image / card).
-        A card with the same proposal as the one on the stage is a revision of that scene (one record, newest text)."""
+    def _same_scene(self, scene):
+        return ((scene.get('program') or '', scene.get('html') or '', scene.get('image') or '', (scene.get('card') or {}).get('proposal_id') or '',
+                 (scene.get('doc') or {}).get('id') or '', (scene.get('media') or {}).get('id') or '')
+                == (self.program, self.html, self.image, (self.card or {}).get('proposal_id') or '', (self.doc or {}).get('id') or '', (self.media or {}).get('id') or ''))
+
+    def _apply(self, caption, program=None, html=None, image=None, page_url='', card=None, doc=None, media=None):
+        """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image / card /
+        doc / media). A card, document or picture with the same id as the one on the stage is a revision of that scene
+        (one record, newest text)."""
         self.version += 1
         self.caption = caption
         self.at = datetime.now(timezone.utc).isoformat()
-        if program is not None or html is not None or image is not None or card is not None:
+        if program is not None or html is not None or image is not None or card is not None or doc is not None or media is not None:
             self._owner_asked = False
-            self.program, self.html, self.image, self.page_url, self.card = program or '', html or '', image or '', page_url or '', card or None
-            same = card and self.scenes and (self.scenes[-1].get('card') or {}).get('proposal_id') == card.get('proposal_id')
-            if same: self.scenes[-1].update({'version': self.version, 'at': self.at, 'caption': caption, 'card': dict(card)})
+            self.program, self.html, self.image, self.page_url = program or '', html or '', image or '', page_url or ''
+            self.card, self.doc, self.media = card or None, doc or None, media or None
+            last = self.scenes[-1] if self.scenes else {}
+            same = ((card and (last.get('card') or {}).get('proposal_id') == card.get('proposal_id'))
+                    or (doc and (last.get('doc') or {}).get('id') == doc.get('id'))
+                    or (media and (last.get('media') or {}).get('id') == media.get('id')))
+            if same:
+                last.update({'version': self.version, 'at': self.at, 'caption': caption, 'card': dict(card) if card else None,
+                             'doc': dict(doc) if doc else None, 'media': dict(media) if media else None})
             else:
                 self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': self.program,
-                                    'html': self.html, 'image': self.image, 'page_url': self.page_url, 'card': dict(card) if card else None})
+                                    'html': self.html, 'image': self.image, 'page_url': self.page_url, 'card': dict(card) if card else None,
+                                    'doc': dict(doc) if doc else None, 'media': dict(media) if media else None})
             del self.scenes[:-MAX_SCENES]
         self.write(active=True)
 
@@ -652,6 +741,9 @@ class Stage:
         self._tasks.add(task); task.add_done_callback(self._tasks.discard)
 
     async def flow(self):
+        live = self._live()
+        if live == 'doc': return await self.doc_flow()
+        if live == 'media': return await self.media_flow()
         card = self.card
         if not card or card.get('status') != 'pending' or self.dialogue is None: return None
         history = self.dialogue.history
@@ -821,6 +913,245 @@ class Stage:
         self.record('stage_discarded', version=self.version)
         return {'discarded': True, 'note': '取り下げた。「取り下げました」とだけ。'}
 
+    # -- a document of one of the owner's sites on the stage: written, revised and published by voice (2026-10-27) -------
+    # An article of the X operation room or a script of the script room is the site's own record (voice_stage_docs: the
+    # site declares how to create, revise and publish it), so what the owner sees in the call is what the room shows
+    # afterwards. Publishing goes through the site's own send path and only after the read-back and the owner's spoken
+    # approval, judged on the transcript the way a message is (approval_heard with mention_of_doc).
+    def _put_doc(self, doc, caption=None):
+        from app.services import voice_stage_docs
+        info = voice_stage_docs.kinds().get(doc.get('kind') or '', {})
+        doc = dict(doc, label=str(info.get('label') or doc.get('kind') or ''), publish_label=str(info.get('publish') or ''), publishable=bool(info.get('publishable')))
+        self._apply((caption or doc.get('title') or doc['label'] or '文書')[:40], doc=doc)
+        self._doc_mark = transcript_mark(self.dialogue.history if self.dialogue is not None else [])
+        self._doc_refused, self._flow_mark = None, None
+        self._last_replace = time.monotonic()
+        return doc
+
+    async def draft_document(self, kind, title, body, account='', note=''):
+        """A document written for the owner, as the site's own record and on the stage."""
+        from app.services import voice_stage_docs
+        started = time.monotonic()
+        if not self.user_id: return {'shown': False, 'reason': 'この通話の持ち主が分からないので文書を作れない。'}
+        if not str(body or '').strip(): return {'shown': False, 'reason': '本文が要る（あなたが書く）。'}
+        try:
+            doc = await voice_stage_docs.create(self.user_id, str(kind or '').strip(), str(title or '').strip(), str(body).strip(), str(account or '').strip(), str(note or '').strip())
+        except Exception as exc:
+            self.record('stage_doc_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            return {'shown': False, 'reason': f'文書を作れなかった: {str(exc)[:160]}'}
+        doc = self._put_doc(doc)
+        self.record('stage_doc', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, kind=doc['kind'], chars=len(doc['body']))
+        return {'shown': True, 'doc_id': doc['id'], 'kind': doc['kind'], 'title': doc['title'], 'account': doc['account'], 'publishable_now': doc['publishable'],
+                'note': '本人の通話画面に文書が出た（その成果物の中にも同じ物が残る）。本文は読み上げず、何を作ったかを一言。直しの頼みは revise_document_on_stage、「投稿して」は publish_document_on_stage（読み上げて承認の言葉を聞いてから）。'}
+
+    async def revise_document(self, body=None, title=None):
+        """The document revised by voice: the newest text replaces the record's, in place on the stage."""
+        from app.services import voice_stage_docs
+        started = time.monotonic()
+        doc = self.doc
+        if not doc: return {'revised': False, 'reason': '直す文書が画面に無い。先に draft_document_on_stage。'}
+        if doc.get('status') == 'published': return {'revised': False, 'reason': 'この文書はもう投稿した。直すなら新しく作る。'}
+        if not (body and str(body).strip()) and not (title and str(title).strip()): return {'revised': False, 'reason': '直した本文（全体）か題が要る。'}
+        try:
+            out = await voice_stage_docs.revise(self.user_id, doc['kind'], doc['id'], title=str(title).strip() if title else None, body=str(body).strip() if body else None)
+        except Exception as exc:
+            self.record('stage_doc_revise_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            return {'revised': False, 'reason': f'直せなかった: {str(exc)[:160]}'}
+        out = self._put_doc(out, caption=self.caption)
+        self.record('stage_doc_revise', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, revision=out['revision'])
+        return {'revised': True, 'doc_id': out['id'], 'title': out['title'], 'revision': out['revision'], 'note': '画面の文書が新しい版になった。「直しました」とだけ。'}
+
+    async def publish_document(self, speak=None):
+        """Publish the document on the stage, only when the transcript shows Dan read it back and the owner's latest
+        words approve (approval_heard). The site's own send path does the sending with its own checks."""
+        started = time.monotonic()
+        doc = self.doc
+        if not doc: return {'published': False, 'reason': '投稿する文書が画面に無い。先に draft_document_on_stage で出す。'}
+        if doc.get('status') == 'publishing': return {'published': 'publishing', 'reason': '今投稿している。結果は声で届く。'}
+        if doc.get('status') == 'published': return {'published': False, 'reason': 'この文書はもう投稿した。', 'url': doc.get('url')}
+        if not doc.get('publishable'):
+            self.record('stage_publish_refused', reason='not_publishable', kind=doc.get('kind'))
+            return {'published': False, 'reason': f'{doc.get("label") or doc.get("kind")} は通話からは投稿できない（作る・直すまで）。その成果物の画面から出す。'}
+        history = self.dialogue.history if self.dialogue is not None else []
+        ok, why = approval_heard(history, self._doc_mark, doc, self._doc_refused, mention=mention_of_doc)
+        if not ok:
+            self._doc_refused = transcript_mark(history)
+            self.record('stage_publish_refused', reason=why[:80])
+            if time.monotonic() - self._read_back_at < READ_BACK_FRESH_S:
+                return {'published': False, 'reason': why, 'read_back_done': True,
+                        'note': '投稿していない。要点はもう声で読み上げて本人の返事を待っている。返事は空にする（重ねて読み上げない）。本人が「いいよ」「投稿して」のように答えたら、もう一度 publish_document_on_stage。'}
+            return {'published': False, 'reason': why, 'read_back': spoken_doc_summary(doc),
+                    'note': '投稿していない。まず read_back の内容を声で言って本人の返事を待つ。本人が「いいよ」「投稿して」のように答えたら、もう一度 publish_document_on_stage。'}
+        self.doc = dict(doc, status='publishing')
+        self.write(active=True)
+        if speak is not None:
+            task = asyncio.ensure_future(self._publish(doc, why, started, speak))
+            self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+            return {'published': 'publishing', 'doc_id': doc['id'], 'note': '承認を確かめて投稿を始めた。「投稿します」とだけ言う。結果は数秒後に声で本人に届くので、自分では言わない。'}
+        return await self._publish(doc, why, started, None)
+
+    async def _publish(self, doc, why, started, speak):
+        from app.services import voice_stage_docs
+        try:
+            out = await voice_stage_docs.publish(self.user_id, doc['kind'], doc['id'])
+        except Exception as exc:
+            self.record('stage_publish_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            if self.doc and self.doc.get('id') == doc['id']: self._put_doc(dict(self.doc, status='failed', error=str(exc)[:160]), caption=self.caption)
+            if speak is not None: await speak('投稿できませんでした。' + str(exc)[:80])
+            return {'published': False, 'reason': f'投稿できなかった: {str(exc)[:160]}'}
+        if out.get('status') != 'published':
+            self.record('stage_publish_failed', reason='not_published', status=out.get('status'), detail=(out.get('error') or '')[:160])
+            self._put_doc(dict(out, status='failed'), caption=self.caption)
+            if speak is not None: await speak('投稿できませんでした。' + (out.get('error') or '')[:80])
+            return {'published': False, 'reason': '投稿できなかった: ' + (out.get('error') or '')[:160]}
+        out = self._put_doc(out, caption=self.caption)
+        self.record('stage_published', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, kind=out['kind'], approved_by=why[:40])
+        if speak is not None: await speak('投稿しました。')
+        return {'published': True, 'doc_id': out['id'], 'url': out.get('url'), 'note': '投稿した。「投稿しました」とだけ。'}
+
+    async def doc_flow(self):
+        """The owner's words about the document on the stage, acted on by the server itself (as flow does for a card)."""
+        doc = self.doc
+        if not doc or doc.get('status') not in ('draft', 'failed') or self.dialogue is None: return None
+        history = self.dialogue.history
+        since = words_since(history, self._flow_mark or self._doc_mark)
+        owner_words = ' '.join(t['text'] for t in since if t['role'] == 'user').strip()
+        if not owner_words: return None
+        self._flow_mark = transcript_mark(history)
+        dan_words = ' '.join(t['text'] for t in since if t['role'] == 'assistant')
+        started = time.monotonic()
+        try:
+            data, usage = await asyncio.wait_for(self.ask(DOC_FLOW_INSTRUCTIONS, doc_flow_input(doc, dan_words, owner_words)), MODEL_TIMEOUT_S * 3)
+        except Exception as exc:
+            self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            return None
+        intent = str(data.get('intent') or 'other')
+        elapsed = round((time.monotonic() - started) * 1000)
+        if self.doc is not doc or doc.get('status') not in ('draft', 'failed'): return None
+        if intent == 'revise':
+            body, title = str(data.get('body') or '').strip(), str(data.get('title') or '').strip()
+            if not body and not title:
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='empty', **usage); return None
+            out = await self.revise_document(body=body or None, title=title or None)
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='revised' if out.get('revised') else 'failed', **usage)
+            return out
+        if intent in ('publish', 'approve'):
+            if not doc.get('publishable'):
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='not_publishable', **usage)
+                return None
+            ok, why = approval_heard(history, self._doc_mark, doc, self._doc_refused, mention=mention_of_doc)
+            if ok:
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='publish', **usage)
+                return await self.publish_document(speak=self.speak or _silent)
+            if any(t['role'] == 'assistant' and mention_of_doc(doc, t['text']) for t in words_since(history, self._flow_mark)) or mention_of_doc(doc, dan_words):
+                self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back_by_dan', detail=why[:80], **usage)
+                return 'read_back'
+            text = spoken_doc_summary(doc)
+            self._read_back_at = time.monotonic()
+            self.dialogue.add('assistant', text)
+            if self.speak is not None:
+                try: await self.speak(text)
+                except Exception as exc: self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='read_back', detail=why[:80], **usage)
+            return 'read_back'
+        if intent == 'stop':
+            self._doc_refused = transcript_mark(history)
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='held', **usage)
+            return 'held'
+        self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='none', **usage)
+        return None
+
+    # -- a picture made for the stage, redone on the owner's words (2026-10-27) ------------------------------------------
+    # The waiting is shown too: the picture's place (or the previous picture) with 「作っています」 while the request runs;
+    # the finished picture replaces it, and a revision (「もっと明るく」) edits that picture, so the owner watches it change.
+    def _put_media(self, media, caption=None, mark=True):
+        """The picture's state on the stage. `mark` (a new request): the owner's words from here on are about this
+        picture; a result landing keeps the mark, so words said while it was made are judged once it is there."""
+        self._apply((caption or media.get('prompt') or '画像')[:40], media=media)
+        if mark:
+            self._media_mark = transcript_mark(self.dialogue.history if self.dialogue is not None else [])
+            self._flow_mark = None
+        self._last_replace = time.monotonic()
+        return media
+
+    async def generate_image(self, prompt, note='', speak=None):
+        """A picture from the owner's words: the waiting is on the stage at once, the picture when it arrives."""
+        prompt = ' '.join(str(prompt or '').split())
+        if not prompt: return {'shown': False, 'reason': '何の画像か（prompt）が要る。'}
+        if self.media and self.media.get('status') == 'generating': return {'shown': False, 'reason': '今ひとつ作っている。終わってから。'}
+        media = {'id': f'pic-{int(time.time() * 1000)}', 'prompt': prompt, 'status': 'generating', 'image': '', 'previous': '', 'revision': 1, 'history': [], 'seconds': 0, 'error': ''}
+        self._put_media(media, caption=(note or prompt))
+        self.record('stage_media_started', version=self.version)
+        task = asyncio.ensure_future(self._make_picture(media, prompt, None, speak))
+        self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+        return {'shown': True, 'media_id': media['id'], 'note': '本人の通話画面に「作っています」が出た。10〜20秒で画像に替わる（結果は声でも届くので、自分で「できました」と言わない）。直しの頼みは revise_image_on_stage。'}
+
+    async def revise_image(self, instruction, speak=None):
+        """The picture on the stage redone with the owner's instruction (an edit of that picture)."""
+        instruction = ' '.join(str(instruction or '').split())
+        media = self.media
+        if not media: return {'shown': False, 'reason': '直す画像が画面に無い。先に generate_image_on_stage。'}
+        if media.get('status') == 'generating': return {'shown': False, 'reason': '今作っている途中。終わってから。'}
+        if not instruction: return {'shown': False, 'reason': 'どう直すか（instruction）が要る。'}
+        reference = media.get('image') or None
+        history = list(media.get('history') or []) + [instruction]
+        next_media = dict(media, status='generating', previous=media.get('image') or '', revision=int(media.get('revision') or 1) + 1, history=history, error='')
+        self._put_media(next_media, caption=self.caption)
+        self.record('stage_media_started', version=self.version, revision=next_media['revision'])
+        prompt = (instruction if reference else media['prompt'] + '。' + instruction)
+        task = asyncio.ensure_future(self._make_picture(next_media, prompt, reference, speak))
+        self._tasks.add(task); task.add_done_callback(self._tasks.discard)
+        return {'shown': True, 'media_id': media['id'], 'revision': next_media['revision'], 'note': '画面が「直しています」になった。10〜20秒で直した画像に替わる（結果は声でも届く）。'}
+
+    async def _make_picture(self, media, prompt, reference, speak):
+        from app.services import voice_stage_media
+        started = time.monotonic()
+        try:
+            url, seconds, cost = await voice_stage_media.make(prompt, self.room_id, reference)
+        except Exception as exc:
+            self.record('stage_media_failed', error_type=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
+            if self.media and self.media.get('id') == media['id']:
+                self._put_media(dict(self.media, status='failed', image=self.media.get('previous') or '', error=str(exc)[:120]), caption=self.caption, mark=False)
+            if speak is not None: await speak('画像を作れませんでした。')
+            return None
+        if not self.media or self.media.get('id') != media['id']:
+            self.record('stage_media_dropped', elapsed_ms=round((time.monotonic() - started) * 1000))
+            return None
+        done = dict(self.media, status='done', image=url, seconds=seconds, error='')
+        self._put_media(done, caption=self.caption, mark=False)
+        self.record('stage_media', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, revision=done['revision'], cost_usd=cost, edit=bool(reference))
+        if speak is not None: await speak('直しました。' if reference else 'できました。')
+        if self.dialogue is not None and any(t['role'] == 'user' and t['text'].strip() for t in words_since(self.dialogue.history, self._flow_mark or self._media_mark)):
+            self._schedule_flow()   # what the owner said while the picture was made is about it
+        return done
+
+    async def media_flow(self):
+        """The owner's words about the picture on the stage: a revision is started by the server itself."""
+        media = self.media
+        if not media or self.dialogue is None: return None
+        history = self.dialogue.history
+        since = words_since(history, self._flow_mark or self._media_mark)
+        owner_words = ' '.join(t['text'] for t in since if t['role'] == 'user').strip()
+        if not owner_words: return None
+        if media.get('status') == 'generating': return None   # judged once the picture is there (_make_picture schedules it; the mark stays)
+        self._flow_mark = transcript_mark(history)
+        dan_words = ' '.join(t['text'] for t in since if t['role'] == 'assistant')
+        started = time.monotonic()
+        try:
+            data, usage = await asyncio.wait_for(self.ask(MEDIA_FLOW_INSTRUCTIONS, media_flow_input(media, dan_words, owner_words)), MODEL_TIMEOUT_S)
+        except Exception as exc:
+            self.record('stage_flow_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+            return None
+        intent = str(data.get('intent') or 'other')
+        elapsed = round((time.monotonic() - started) * 1000)
+        if self.media is not media: return None
+        if intent == 'revise' and str(data.get('instruction') or '').strip():
+            out = await self.revise_image(str(data.get('instruction')), speak=self.speak or _silent)
+            self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='revising' if out.get('shown') else 'failed', **usage)
+            return out
+        self.record('stage_flow', intent=intent, elapsed_ms=elapsed, result='none', **usage)
+        return None
+
     # -- the end ----------------------------------------------------------------------------------------------
     def close(self):
         if self._timer is not None: self._timer.cancel(); self._timer = None
@@ -853,6 +1184,16 @@ class Stage:
                 lines.append(f'✉ {CARD_CHANNELS_SPOKEN.get(card.get("channel"), "メッセージ")} 宛先: {card.get("to_name") or card.get("to")}（{state}）')
                 if card.get('subject'): lines.append('件名: ' + card['subject'])
                 lines.append('本文: ' + ' '.join(str(card.get('body') or '').split())[:300])
+            elif scene.get('doc'):
+                doc = scene['doc']
+                state = {'published': '投稿済み', 'publishing': '投稿中', 'failed': '投稿できず', 'draft': '下書き'}.get(doc.get('status'), doc.get('status') or '')
+                lines.append(f'📝 {doc.get("label") or doc.get("kind")}' + (f' @{doc["account"]}' if doc.get('account') else '') + f'（{state}）' + (f' {doc["url"]}' if doc.get('url') else ''))
+                if doc.get('title'): lines.append('題: ' + doc['title'])
+                lines.append('本文: ' + ' '.join(str(doc.get('body') or '').split())[:300])
+            elif scene.get('media'):
+                media = scene['media']
+                if media.get('image'): lines.append(f'[添付画像: {media["image"]}]')
+                lines.append('🎨 ' + str(media.get('prompt') or '')[:120] + (' → ' + ' / '.join(str(x) for x in media['history'][-3:]) if media.get('history') else ''))
         return chr(10).join(lines)
 
 

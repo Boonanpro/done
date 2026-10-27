@@ -39,6 +39,8 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 「○○さんにメッセージ送って」「○○にメールして」「○○さんに返事して」のように外の相手への文面を頼まれたら、本文を自分で書いて draft_message_on_stage（手段・宛先・本文。宛先のアドレスや相手の名前が分からなければ get_saved_information / search_records で探し、無ければその一点だけ聞く）。下書きは本人の通話画面と部屋に出る。出たら本文は読み上げず、「○○さん宛てに、△△の件の文面を出しました」のように誰宛てに何の件かを一言。
 - 出した下書きへの直しの頼み（「もっと短く」「最後に日程を足して」「2行目を柔らかく」「宛名を変えて」）は、本文全体を書き直して revise_message_on_stage に渡す（画面の文面がその場で替わる）。出たら「直しました」とだけ。
 - 「送って」「それで送って」と言われても、その場では送らない。send_message_on_stage を呼ぶと、まだ承認が聞こえていない時は sent: false と read_back（宛先と要点の読み上げ文）が返るので、その read_back を声でそのまま言って本人の返事を待つ。本人が「いいよ」「送って」「OK」のように答えたら、もう一度 send_message_on_stage を呼ぶ（送るかどうかはサーバーが本人の最後の言葉を見て決める。本人の返事を待たずに続けて2回呼ばない）。「うーん」「ちょっと待って」「まだ」「やめて」のような返事では送らない。送れたら「送りました」とだけ。本人が「やめて」「送らないで」と言ったら discard_message_on_stage。
+- 「X運用室で○○の記事を書いて」「△△のアカウントで投稿を書いて」「台本を書いて」のように、ダンの成果物の中の文書を頼まれたら、本文を自分で書いて draft_document_on_stage（kind・題・本文。出せる種類と X のアカウントは返事の kinds にある。記事の書き方は check_skill の x-operation、台本は talk-script を読んでから書く）。文書は本人の通話画面と、その成果物の中に出る。出たら本文は読み上げず「○○の記事の下書きを出しました」と一言。直しの頼み（「2段落目を短く」「タイトルを変えて」）は本文全体を書き直して revise_document_on_stage。「投稿して」「公開して」と言われても、その場では投稿しない。publish_document_on_stage を呼ぶと、承認がまだなら published: false と read_back（要点の読み上げ文）が返るので、それを声でそのまま言って本人の返事を待ち、「いいよ」「投稿して」と答えたらもう一度 publish_document_on_stage（投稿するかはサーバーが本人の最後の言葉を見て決める）。
+- 「○○の画像を作って」「絵を描いて」「○○の写真っぽいのを出して」と頼まれたら generate_image_on_stage（prompt は何を描くかを具体的に。本人の言葉に無い物を足さない）。「作っています」が本人の画面に出て、10〜20秒で画像に替わる。「もっと明るく」「背景を青に」のような直しは revise_image_on_stage（instruction にどう直すか）。できた・直したは声で本人に届くので、自分で「できました」と言わない。
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
@@ -119,6 +121,23 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'proposal_id': {'type': 'string', 'description': '下書きの id（省略時は画面の下書き）'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'discard_message_on_stage', 'description': '通話画面の下書きを取り下げる（本人が「やめて」「送らないで」と言った時）。',
      'parameters': {'type': 'object', 'properties': {'proposal_id': {'type': 'string'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'draft_document_on_stage', 'description': 'ダンの成果物の中の文書（X運用室の記事や投稿、台本室の台本）を作り、本人の通話画面とその成果物に出す（本人が「X運用室で○○の記事を書いて」「台本を書いて」と頼んだ時）。本文はあなたが書く。投稿はしない。',
+     'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'description': '文書の種類: x_article（X の記事）、x_post（X の通常投稿）、script（台本）。他に出せる種類は返事の kinds に出る'},
+                                                     'title': {'type': 'string', 'description': '題（記事のタイトル、台本の題）'},
+                                                     'body': {'type': 'string', 'description': '本文の完成形（段落は空行で区切る）'},
+                                                     'account': {'type': 'string', 'description': 'X のアカウント名（@ 無し。OYmpa7＝本人、FukurouKantoku＝ふくろうP、PornoAnti_JP＝ポルノアンチ。本人が言わなければ OYmpa7）'},
+                                                     'note': {'type': 'string', 'description': '何のための文書か一言（成果物の一覧に出る）'}},
+                    'required': ['kind', 'body'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'revise_document_on_stage', 'description': '通話画面に出ている文書を直す（本人の「2段落目を短く」「タイトルを変えて」などを反映した本文全体を渡す）。画面の本文がその場で替わる。',
+     'parameters': {'type': 'object', 'properties': {'body': {'type': 'string', 'description': '直した後の本文全体（本文を変えない時は省く）'}, 'title': {'type': 'string', 'description': '直した後の題（変える時だけ）'}},
+                    'additionalProperties': False}},
+    {'type': 'function', 'name': 'publish_document_on_stage', 'description': '通話画面の文書を投稿・公開する。本人が「投稿して」と言った時に呼ぶ。まだ読み上げと本人の承認の言葉が無ければ投稿せず、読み上げる文（read_back）を返す。本人が「いいよ」「投稿して」と答えた後にもう一度呼ぶと投稿する（投稿するかどうかはサーバーが本人の最後の言葉で決める）。',
+     'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'generate_image_on_stage', 'description': '画像を作って本人の通話画面に出す（本人が「○○の画像を作って」と頼んだ時）。「作っています」がすぐ出て、10〜20秒で画像に替わる。',
+     'parameters': {'type': 'object', 'properties': {'prompt': {'type': 'string', 'description': '何を描くか（本人の言葉を具体的に。日本語のままでよい）'}, 'note': {'type': 'string', 'description': '画面の札に出す短い言葉'}},
+                    'required': ['prompt'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'revise_image_on_stage', 'description': '通話画面の画像を直す（本人の「もっと明るく」「背景を青に」）。今の画像にその変更を加えた物に替わる。',
+     'parameters': {'type': 'object', 'properties': {'instruction': {'type': 'string', 'description': 'どう直すか（1〜2文）'}}, 'required': ['instruction'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'end_call', 'description': '通話を終える。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
 ]
 
@@ -348,6 +367,21 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         if name == 'send_message_on_stage':
             return await stage.send_message(str(args.get('proposal_id') or ''), speak=speak)
         return await stage.discard_message(str(args.get('proposal_id') or ''))
+    if name in ('draft_document_on_stage', 'revise_document_on_stage', 'publish_document_on_stage', 'generate_image_on_stage', 'revise_image_on_stage'):
+        from app.services import voice_stage, voice_stage_docs
+        stage = voice_stage.for_room(room_id)
+        if stage is None: return {'shown': False, 'published': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
+        if name == 'draft_document_on_stage':
+            out = await stage.draft_document(str(args.get('kind') or ''), str(args.get('title') or ''), str(args.get('body') or ''), str(args.get('account') or ''), str(args.get('note') or ''))
+            if not out.get('shown'): out['kinds'] = voice_stage_docs.kinds()
+            return out
+        if name == 'revise_document_on_stage':
+            return await stage.revise_document(body=args.get('body'), title=args.get('title'))
+        if name == 'publish_document_on_stage':
+            return await stage.publish_document(speak=speak)
+        if name == 'generate_image_on_stage':
+            return await stage.generate_image(str(args.get('prompt') or ''), str(args.get('note') or ''), speak=speak)
+        return await stage.revise_image(str(args.get('instruction') or ''), speak=speak)
     if name == 'end_call':
         return {'ok': True}
     if name == 'web_search':
