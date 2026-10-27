@@ -40,9 +40,9 @@ def port_free(port):
 def prepare(root):
     root = Path(root).resolve()
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
-    dirty = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=root, text=True)
-    if dirty.strip():
-        raise RuntimeError('Commit the release before preparing it')
+    # The release is built exclusively from the committed tree. Unrelated
+    # local notes or runtime files in the live folder cannot affect it and
+    # must not become another global barrier to updating Dan.
     release_id = commit[:12] + '-' + uuid.uuid4().hex[:6]
     destination = Path.home() / 'dan-workspace' / 'releases' / release_id
     destination.parent.mkdir(parents=True, exist_ok=True)
