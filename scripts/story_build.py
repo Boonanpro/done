@@ -50,7 +50,9 @@ JST = timezone(timedelta(hours=9))
 HOME = Path.home()
 WORKSPACE = Path(os.environ.get("DAN_WORKSPACE_DIR") or (HOME / ".dan" / "workspace"))
 RULES_PATH = WORKSPACE / "STORY_RULES.md"
-ARCHIVE = Path(os.environ.get("DAN_ARCHIVE_ROOT") or "D:/dan-archive")
+from app.paths import DAN_ARCHIVE_ROOT, DONE_ARTIFACTS, DONE_ROOT  # noqa: E402  Mac ではホームの下
+
+ARCHIVE = DAN_ARCHIVE_ROOT
 STORY_DIR = ARCHIVE / "story"
 WEEKS_DIR = STORY_DIR / "weeks"
 PREHISTORY = ARCHIVE / "prehistory"
@@ -62,8 +64,8 @@ FIRST_WEEK_START = date(2025, 11, 3)  # 月曜。bugsnap-ai-v2 (10/30) を含む
 MODEL = os.environ.get("DAN_STORY_MODEL", "sonnet")
 
 REPOS: Dict[str, Path] = {
-    "done": Path("D:/done"),
-    "done-artifacts": Path("D:/done-artifacts"),
+    "done": DONE_ROOT,
+    "done-artifacts": DONE_ARTIFACTS,
     "dan-workspace": WORKSPACE,
 }
 

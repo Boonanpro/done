@@ -33,7 +33,9 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 JST = timezone(timedelta(hours=9))
-SHOTS_DIR = Path(os.environ.get("DAN_ARCHIVE_ROOT") or "D:/dan-archive") / "story" / "shots"
+from app.paths import DAN_ARCHIVE_ROOT  # noqa: E402  Mac ではホームの dan-archive
+
+SHOTS_DIR = DAN_ARCHIVE_ROOT / "story" / "shots"
 PAGES_PATH = SHOTS_DIR / "pages.json"
 BASE = os.environ.get("DAN_FRONT_URL", "http://127.0.0.1:3000")
 OWNER_ID = "2582a188-ff24-4a4f-b989-6063034d90b2"

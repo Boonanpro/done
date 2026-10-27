@@ -22,14 +22,17 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.paths import DAN_ARCHIVE_ROOT, DONE_ARTIFACTS, DONE_ROOT  # noqa: E402  Mac ではホームの下
+
 HOME = Path.home()
-ARCHIVE_ROOT = Path(os.environ.get("DAN_ARCHIVE_ROOT") or "D:/dan-archive") / "backup"
+ARCHIVE_ROOT = DAN_ARCHIVE_ROOT / "backup"
 ONEDRIVE = Path(os.environ.get("OneDrive") or (HOME / "OneDrive"))
 KEEP = 4
 
 REPOS = {
-    "done": Path("D:/done"),
-    "done-artifacts": Path("D:/done-artifacts"),
+    "done": DONE_ROOT,
+    "done-artifacts": DONE_ARTIFACTS,
     "dan-workspace": HOME / ".dan" / "workspace",
 }
 CLI_DIRS = [HOME / ".claude" / "projects", HOME / ".codex" / "sessions"]
