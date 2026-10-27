@@ -67,8 +67,8 @@ def prepare(root):
     pair = next(((p, p - 1000) for p in range(9201, 9299) if port_free(p) and port_free(p - 1000)), None)
     if pair is None: raise RuntimeError('No free release ports')
     core, sandbox = pair
-    env = {**os.environ, 'DAN_GENERATION': release_id, 'DAN_SANDBOX_PORT': str(sandbox),
-           'DAN_CORE_PORT': '9000', 'PYTHONUNBUFFERED': '1'}
+    env = G.core_env(DAN_GENERATION=release_id, DAN_SANDBOX_PORT=str(sandbox),
+                     DAN_CORE_PORT='9000', PYTHONUNBUFFERED='1')
     G.ROOT.mkdir(parents=True, exist_ok=True)
     with (G.ROOT / (release_id + '.log')).open('ab') as log:
         process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'app.core.main:app',

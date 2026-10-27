@@ -35,8 +35,8 @@ async def restore(release):
     # Ports may still be held by a live Sandbox with calls. Core may attach to
     # that existing port; it must never kill a listener in order to restart.
     root = Path(release['root'])
-    env = {**os.environ, 'DAN_GENERATION': release['id'], 'DAN_CORE_PORT': '9000',
-           'DAN_SANDBOX_PORT': str(release['sandbox']), 'PYTHONUNBUFFERED': '1'}
+    env = G.core_env(DAN_GENERATION=release['id'], DAN_CORE_PORT='9000',
+                     DAN_SANDBOX_PORT=str(release['sandbox']), PYTHONUNBUFFERED='1')
     with (G.ROOT / (release['id'] + '.log')).open('ab') as log:
         process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'uvicorn', 'app.core.main:app',
             '--host', '127.0.0.1', '--port', str(release['core']), '--loop', 'app.core.event_loop:new_loop',
