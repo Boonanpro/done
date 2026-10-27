@@ -76,3 +76,8 @@ def test_codex_wrapper_reads_only_owner_words(tmp_path):
                              ensure_ascii=False) + "\n", encoding="utf-8")
     assert rc.owner_words(str(tr)) == "どうなった？"
     assert "dev-flow" in ids("PR #9 をマージしました。", ask=rc.owner_words(str(tr)))
+
+
+def test_quoted_words_in_explanations_pass():
+    assert ids("返事に、英語の文、「終わったら知らせます」、試験の件数のような言葉が入っていると、出す前に止めて書き直します。") == []
+    assert "interim" in ids("始めました。終わったら知らせます。")

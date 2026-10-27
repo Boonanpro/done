@@ -72,12 +72,13 @@ def check(reply: str, ask: str = "") -> list[dict]:
     if len(body) > 60 and english_ratio(body) > 0.5:
         hits.append({"id": "english", "name": "英語の返事", "at": body.strip()[:50].replace("\n", " "),
                      "fix": "日本語で書き直す。英語のエラー文は貼らず、何が止まったかと次にどうするかを日本語1文ずつで書く。"})
+    said = re.sub(r"「[^「」\n]{0,80}」", "「」", body)   # 決まりの説明で言葉を「」に入れて引いた所は数えない（10/27 点検自身の報告で止まった）
     for rid, name, rx, allow, fix in RULES:
-        m = rx.search(body)
+        m = rx.search(said)
         if not m or (allow and re.search(allow, ask or "")) or (ask and m.group(0) in ask):
             continue
-        s, e = max(0, m.start() - 20), min(len(body), m.end() + 20)
-        hits.append({"id": rid, "name": name, "at": body[s:e].strip().replace("\n", " "), "fix": fix})
+        s, e = max(0, m.start() - 20), min(len(said), m.end() + 20)
+        hits.append({"id": rid, "name": name, "at": said[s:e].strip().replace("\n", " "), "fix": fix})
     return hits
 
 
