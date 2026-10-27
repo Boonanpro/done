@@ -584,3 +584,216 @@ async def test_the_server_reads_back_first_and_a_backend_call_meanwhile_does_not
     monkeypatch.setattr(S, 'READ_BACK_FRESH_S', 0)
     out = await stage.send_message('p1', speak=None)   # later, the backend reads back itself
     assert not out['sent'] and '送っていいですか' in out['read_back']
+
+
+# -- a document of a site and a picture on the stage: written, revised, published / redone by voice (2026-10-27) --------
+
+class FakeDocs:
+    """A site's STAGE_DOCUMENTS as the stage reaches it: one kind that publishes, one that does not."""
+    def __init__(self):
+        self.rows, self.published = {}, []
+        self.spec = {'kinds': {'x_article': {'label': 'X の記事', 'publish': 'X に記事を投稿', 'accounts': ['OYmpa7']}},
+                     'create': self.create, 'read': self.read, 'revise': self.revise, 'publish': self.publish}
+        self.plain = {'kinds': {'script': {'label': '台本', 'publish': ''}}, 'create': self.create, 'read': self.read, 'revise': self.revise}
+
+    def create(self, uid, kind, title, body, account, note):
+        doc = {'id': 'd1', 'kind': kind, 'title': title, 'body': body, 'status': 'draft', 'revision': 1, 'account': account}
+        self.rows['d1'] = doc
+        return doc
+
+    def read(self, uid, doc_id): return self.rows[doc_id]
+
+    def revise(self, uid, doc_id, title, body):
+        doc = self.rows[doc_id]
+        if body: doc['body'] = body
+        if title: doc['title'] = title
+        doc['revision'] += 1
+        return doc
+
+    async def publish(self, uid, doc_id):   # async, like the X room's own send path
+        doc = self.rows[doc_id]
+        doc['status'], doc['url'] = 'published', 'https://x.com/OYmpa7/status/1'
+        self.published.append(doc_id)
+        return doc
+
+
+def make_doc_stage(room, monkeypatch, answers=None):
+    from app.services import voice_stage_docs as D
+    fake = FakeDocs()
+    monkeypatch.setattr(D, '_extra', {'x_article': fake.spec, 'script': fake.plain})
+    stage, seen, log = make_stage(room, answers or [])
+    stage.user_id = 'owner-1'
+    return stage, fake, log
+
+
+@pytest.mark.asyncio
+async def test_a_document_is_a_scene_revised_in_place_and_published_only_on_the_owners_spoken_approval(room, monkeypatch):
+    stage, fake, log = make_doc_stage(room, monkeypatch)
+    out = await stage.draft_document('x_article', '声だけで仕事を終わらせる', '通話で頼む。\n画面に出る。\n声で直す。', account='OYmpa7')
+    assert out['shown'] and out['doc_id'] == 'd1' and out['publishable_now']
+    state = S.read_state(room)
+    assert state['version'] == 1 and state['doc']['id'] == 'd1' and state['doc']['label'] == 'X の記事' and state['doc']['status'] == 'draft'
+    assert state['caption'] == '声だけで仕事を終わらせる' and state['card'] is None and state['program'] == ''
+    out = await stage.revise_document(body='通話で頼む。\n画面に出る。\n声で直して、投稿する。')
+    assert out['revised'] and out['revision'] == 2
+    state = S.read_state(room)
+    assert state['version'] == 2 and state['doc']['revision'] == 2 and '投稿する' in state['doc']['body'] and len(stage.scenes) == 1
+    out = await stage.publish_document()
+    assert not out['published'] and '読み上げ' in out['reason'] and 'X に記事を投稿' in out['read_back'] and fake.published == []
+    dan_says(stage, 'X に記事を投稿、@OYmpa7 で。題は「声だけで仕事を終わらせる」。これで投稿していいですか。')
+    owner_says(stage, 'うーん、ちょっと待って')
+    out = await stage.publish_document()
+    assert not out['published'] and fake.published == []
+    owner_says(stage, 'いいよ、投稿して')
+    out = await stage.publish_document()
+    assert out['published'] is True and fake.published == ['d1'] and out['url'].startswith('https://x.com/')
+    state = S.read_state(room)
+    assert state['doc']['status'] == 'published' and state['doc']['url'] and state['version'] == 3
+    assert [p for p, _ in log] == ['stage_doc', 'stage_doc_revise', 'stage_publish_refused', 'stage_publish_refused', 'stage_published']
+    assert '📝 X の記事 @OYmpa7（投稿済み）' in stage.summary() and '題: 声だけで仕事を終わらせる' in stage.summary()
+    out = await stage.publish_document()
+    assert not out['published'] and 'もう投稿した' in out['reason']
+
+
+@pytest.mark.asyncio
+async def test_a_kind_without_a_publish_path_is_written_and_revised_but_never_published(room, monkeypatch):
+    stage, fake, log = make_doc_stage(room, monkeypatch)
+    out = await stage.draft_document('script', 'LINE 特典動画', 'こんにちは。\n今日は3つ話します。')
+    assert out['shown'] and not out['publishable_now']
+    dan_says(stage, '台本を投稿していいですか。'); owner_says(stage, 'いいよ')
+    out = await stage.publish_document()
+    assert not out['published'] and '通話からは投稿できない' in out['reason'] and fake.published == []
+    out = await stage.draft_document('unknown', 'x', 'y')
+    assert not out['shown'] and '出せるのは' in out['reason']
+
+
+@pytest.mark.asyncio
+async def test_the_server_revises_reads_back_and_publishes_a_document_on_the_owners_words_alone(room, monkeypatch):
+    monkeypatch.setattr(S, 'FLOW_S', .01)
+    stage, fake, log = make_doc_stage(room, monkeypatch, [
+        {'intent': 'revise', 'body': '通話で頼む。\n声で直す。'},
+        {'intent': 'publish'},
+        {'intent': 'approve'},
+    ])
+    said = []
+    async def speak(text): said.append(text)
+    stage.speak = speak
+    await stage.draft_document('x_article', '題', '通話で頼む。\n画面に出る。\n声で直す。', account='OYmpa7')
+    owner_says(stage, '2行目を消して'); stage.heard('user', '2行目を消して')
+    await asyncio.sleep(.08)
+    assert fake.rows['d1']['body'] == '通話で頼む。\n声で直す。' and S.read_state(room)['doc']['revision'] == 2
+    owner_says(stage, '投稿して'); stage.heard('user', '投稿して')
+    await asyncio.sleep(.08)
+    assert fake.published == [] and said and '投稿していいですか' in said[-1] and stage.dialogue.history[-1]['role'] == 'assistant'
+    owner_says(stage, 'いいよ'); stage.heard('user', 'いいよ')
+    await asyncio.sleep(.08)
+    assert fake.published == ['d1'] and said[-1] == '投稿しました。' and S.read_state(room)['doc']['status'] == 'published'
+    flows = [f for p, f in log if p == 'stage_flow']
+    assert [f['result'] for f in flows] == ['revised', 'read_back', 'publish']
+
+
+@pytest.mark.asyncio
+async def test_while_a_document_is_on_the_stage_the_listener_does_not_draw_over_it(room, monkeypatch):
+    monkeypatch.setattr(S, 'QUIET_S', .02); monkeypatch.setattr(S, 'SENTENCE_S', .01); monkeypatch.setattr(S, 'HOLD_S', 0)
+    stage, fake, log = make_doc_stage(room, monkeypatch, [{'action': 'replace', 'caption': '支払いの流れ', 'program': FLOW}])
+    await stage.draft_document('x_article', '題', '本文。', account='OYmpa7')
+    for delta in ('まず本人がカードで払うと、', 'Stripe を通って口座に入ります。'):
+        stage.dialogue.add('assistant', delta); stage.heard('assistant', delta)
+    await asyncio.sleep(.15)
+    state = S.read_state(room)
+    assert state['doc']['id'] == 'd1' and state['program'] == '' and state['version'] == 1
+    assert [f.get('held_for') for p, f in log if p == 'stage_keep'] == ['doc']
+
+
+class FakePictures:
+    def __init__(self): self.calls, self.fail = [], False
+    async def make(self, prompt, room_id, reference_url=None):
+        self.calls.append((prompt, reference_url))
+        if self.fail: raise RuntimeError('image API 402: credit')
+        return f'/api/v1/files/stage-pic-{len(self.calls)}.png', 3.2, 0.011
+
+
+def make_media_stage(room, monkeypatch, answers=None):
+    from app.services import voice_stage_media as M
+    fake = FakePictures()
+    monkeypatch.setattr(M, 'make', fake.make)
+    stage, seen, log = make_stage(room, answers or [])
+    stage.user_id = 'owner-1'
+    return stage, fake, log
+
+
+@pytest.mark.asyncio
+async def test_a_picture_shows_its_waiting_first_then_the_picture_and_a_revision_edits_it(room, monkeypatch):
+    stage, fake, log = make_media_stage(room, monkeypatch)
+    said = []
+    async def speak(text): said.append(text)
+    out = await stage.generate_image('夕暮れの尼崎の駅前', speak=speak)
+    assert out['shown'] and out['media_id']
+    state = S.read_state(room)
+    assert state['media']['status'] == 'generating' and state['media']['image'] == '' and state['caption'] == '夕暮れの尼崎の駅前' and state['version'] == 1
+    out = await stage.generate_image('別の絵')
+    assert not out['shown'] and '作っている' in out['reason']
+    await asyncio.sleep(.05)
+    state = S.read_state(room)
+    assert state['media']['status'] == 'done' and state['media']['image'] == '/api/v1/files/stage-pic-1.png' and state['version'] == 2 and said == ['できました。']
+    assert fake.calls == [('夕暮れの尼崎の駅前', None)] and len(stage.scenes) == 1
+    out = await stage.revise_image('もっと明るく', speak=speak)
+    assert out['shown'] and out['revision'] == 2
+    state = S.read_state(room)
+    assert state['media']['status'] == 'generating' and state['media']['previous'] == '/api/v1/files/stage-pic-1.png' and state['media']['history'] == ['もっと明るく']
+    await asyncio.sleep(.05)
+    state = S.read_state(room)
+    assert state['media']['status'] == 'done' and state['media']['image'] == '/api/v1/files/stage-pic-2.png' and state['media']['revision'] == 2 and said[-1] == '直しました。'
+    assert fake.calls[-1] == ('もっと明るく', '/api/v1/files/stage-pic-1.png') and len(stage.scenes) == 1
+    assert [p for p, _ in log] == ['stage_media_started', 'stage_media', 'stage_media_started', 'stage_media']
+    assert '[添付画像: /api/v1/files/stage-pic-2.png]' in stage.summary() and '🎨 夕暮れの尼崎の駅前 → もっと明るく' in stage.summary()
+    fake.fail = True
+    await stage.revise_image('背景を青に', speak=speak)
+    await asyncio.sleep(.05)
+    state = S.read_state(room)
+    assert state['media']['status'] == 'failed' and state['media']['image'] == '/api/v1/files/stage-pic-2.png' and said[-1] == '画像を作れませんでした。'
+
+
+@pytest.mark.asyncio
+async def test_the_server_redoes_the_picture_on_the_owners_words_alone(room, monkeypatch):
+    monkeypatch.setattr(S, 'FLOW_S', .01)
+    stage, fake, log = make_media_stage(room, monkeypatch, [{'intent': 'other'}, {'intent': 'revise', 'instruction': '空を夕焼けの色にする'}])
+    await stage.generate_image('駅前の絵')
+    owner_says(stage, 'お、いいね'); stage.heard('user', 'お、いいね')   # while it is being made: nothing yet
+    await asyncio.sleep(.08)
+    assert len(fake.calls) == 1
+    owner_says(stage, '空を夕焼けにして'); stage.heard('user', '空を夕焼けにして')
+    await asyncio.sleep(.1)
+    assert fake.calls[-1] == ('空を夕焼けの色にする', '/api/v1/files/stage-pic-1.png') and S.read_state(room)['media']['revision'] == 2
+    assert [f['result'] for p, f in log if p == 'stage_flow'] == ['none', 'revising']
+
+
+@pytest.mark.asyncio
+async def test_the_voice_functions_reach_the_documents_and_pictures(room, monkeypatch):
+    from app.services import voice_responses as R
+    stage, fake, log = make_doc_stage(room, monkeypatch)
+    out = await R.run_function('draft_document_on_stage', {'kind': 'nope', 'body': 'x'}, 'owner-1', room, [])
+    assert not out['shown'] and set(out['kinds']) == {'x_article', 'script'} and out['kinds']['x_article']['publishable'] and not out['kinds']['script']['publishable']
+    out = await R.run_function('draft_document_on_stage', {'kind': 'x_article', 'title': '題', 'body': '本文', 'account': 'OYmpa7'}, 'owner-1', room, [])
+    assert out['shown'] and out['doc_id'] == 'd1'
+    out = await R.run_function('publish_document_on_stage', {}, 'owner-1', room, [])
+    assert not out['published'] and out['read_back']
+    out = await R.run_function('revise_document_on_stage', {'title': '新しい題'}, 'owner-1', room, [])
+    assert out['revised'] and out['title'] == '新しい題'
+    from app.services import voice_stage_media as M
+    pics = FakePictures(); monkeypatch.setattr(M, 'make', pics.make)
+    out = await R.run_function('generate_image_on_stage', {'prompt': '猫'}, 'owner-1', room, [])
+    assert out['shown']
+    assert {t['name'] for t in R.TOOLS} >= {'draft_document_on_stage', 'revise_document_on_stage', 'publish_document_on_stage', 'generate_image_on_stage', 'revise_image_on_stage'}
+    stage.close()
+    out = await R.run_function('generate_image_on_stage', {'prompt': '猫'}, 'owner-1', room, [])
+    assert not out['shown'] and '画面' in out['reason']
+
+
+def test_the_read_back_of_a_document_names_it_and_asks():
+    doc = {'title': '声だけで仕事を終わらせる', 'body': 'x', 'label': 'X の記事', 'publish_label': 'X に記事を投稿', 'account': 'OYmpa7'}
+    assert S.mention_of_doc(doc, 'X に記事を投稿、@OYmpa7 で。題は「声だけで仕事を終わらせる」。これで投稿していいですか。')
+    assert S.mention_of_doc(doc, '記事を投稿していいですか')
+    assert not S.mention_of_doc(doc, '記事の下書きを出しました')
+    assert S.mention_of_doc(doc, 'これで投稿していいですか')   # the question with the document's word is enough (the document is on the screen)
+    assert '投稿していいですか' in S.spoken_doc_summary(doc) and '@OYmpa7' in S.spoken_doc_summary(doc)

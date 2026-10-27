@@ -7,7 +7,9 @@
  * Chart…, drawn with ShapeBlock), a free drawing (SVG/HTML the server cleaned, drawn in a sandboxed frame with no scripts
  * and its own origin), an image (one of Dan's files or an https URL; a photograph of a real page has its URL too) or a
  * message draft (the chat's outbound card as the stage sees it: recipient, subject, body, status; revised by voice, the
- * changed lines light up in place; sent by voice, the badge turns green. 2026-10-27).
+ * changed lines light up in place; sent by voice, the badge turns green. 2026-10-27). Since 2026-10-27 also a document of
+ * one of the owner's sites (an article of the X room, a script: title, body, status; revised and published the same way)
+ * and a picture made for the call (its waiting shown first, the picture when it arrives, redone on the owner's words).
  * It arrives by long poll (GET /api/v1/voicelog/stage/<room>?after=<version>): the server answers the moment a newer
  * version exists, when the call ends, or after ~25 s. A program that fails the parts' validation is not shown; the
  * previous scene stays (checkCompleteShape).
@@ -26,8 +28,18 @@ export type StageCard = {
   intent?: string; revision?: number; sent_at?: string; sendable?: boolean;
 };
 
+export type StageDoc = {
+  id: string; kind: string; label?: string; title: string; body: string; status: string; revision?: number; account?: string; url?: string;
+  error?: string; publishable?: boolean; publish_label?: string;
+};
+
+export type StageMedia = {
+  id: string; prompt: string; status: string; image?: string; previous?: string; revision?: number; history?: string[]; seconds?: number; error?: string;
+};
+
 export type StageState = {
   version: number; caption: string; program: string; html?: string; image?: string; page_url?: string; card?: StageCard | null;
+  doc?: StageDoc | null; media?: StageMedia | null;
   at: string | null; active: boolean; scenes?: number; session_id?: string;
 };
 
@@ -81,7 +93,8 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
   return state;
 }
 
-type Scene = { kind: 'program'; program: string } | { kind: 'html'; html: string } | { kind: 'image'; image: string; pageUrl: string } | { kind: 'card'; card: StageCard };
+type Scene = { kind: 'program'; program: string } | { kind: 'html'; html: string } | { kind: 'image'; image: string; pageUrl: string } | { kind: 'card'; card: StageCard }
+  | { kind: 'doc'; doc: StageDoc } | { kind: 'media'; media: StageMedia };
 
 /** An image the stage may show: one of Dan's files or an https URL (nothing else is a URL the screen should load). */
 export function stageImageUrl(v: unknown): string | null {
@@ -100,6 +113,8 @@ export function sceneOf(s: StageState | null): Scene | null {
   const html = s.html?.trim() || '';
   if (html) return { kind: 'html', html };
   if (s.card && typeof s.card === 'object' && s.card.proposal_id) return { kind: 'card', card: s.card };
+  if (s.doc && typeof s.doc === 'object' && s.doc.id) return { kind: 'doc', doc: s.doc };
+  if (s.media && typeof s.media === 'object' && s.media.id) return { kind: 'media', media: s.media };
   const image = stageImageUrl(s.image);
   if (image) return { kind: 'image', image, pageUrl: s.page_url || '' };
   return null;
@@ -111,6 +126,8 @@ function sameScene(a: Scene | null, b: Scene | null): boolean {
   if (a.kind === 'html' && b.kind === 'html') return a.html === b.html;
   if (a.kind === 'image' && b.kind === 'image') return a.image === b.image;
   if (a.kind === 'card' && b.kind === 'card') return JSON.stringify(a.card) === JSON.stringify(b.card);
+  if (a.kind === 'doc' && b.kind === 'doc') return JSON.stringify(a.doc) === JSON.stringify(b.doc);
+  if (a.kind === 'media' && b.kind === 'media') return JSON.stringify(a.media) === JSON.stringify(b.media);
   return false;
 }
 
@@ -171,6 +188,10 @@ export function VoiceStage({ roomId, active, className = '', onShown }: { roomId
             <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
           ) : scene.kind === 'card' ? (
             <StageMessageCard card={scene.card} />
+          ) : scene.kind === 'doc' ? (
+            <StageDocument doc={scene.doc} />
+          ) : scene.kind === 'media' ? (
+            <StageMedia media={scene.media} />
           ) : scene.kind === 'html' ? (
             <iframe
               title="通話の画面の絵"
@@ -231,5 +252,89 @@ export function StageMessageCard({ card }: { card: StageCard }) {
         ))}
       </div>
     </div>
+  );
+}
+
+/** The lines of a text and which of them differ from the version shown before (a revision by voice): the changed ones
+ * replay a short highlight, keyed on the revision so the same line lights again when it changes again. */
+function useChangedLines(text: string, revision: number) {
+  const lines = useMemo(() => (text || '').split('\n'), [text]);
+  const [seen, setSeen] = useState<{ lines: string[]; changed: Set<number> }>({ lines, changed: new Set() });
+  if (seen.lines !== lines) {   // the previous version's lines, kept as state (derived from the prop, React's own pattern)
+    const out = new Set<number>();
+    lines.forEach((line, i) => { if (seen.lines[i] !== line) out.add(i); });
+    setSeen({ lines, changed: out });
+  }
+  const changed = seen.lines === lines ? seen.changed : new Set<number>();
+  return { lines, changed, revision };
+}
+
+function FlashLines({ lines, changed, revision }: { lines: string[]; changed: Set<number>; revision: number }) {
+  return (
+    <>
+      {lines.map((line, i) => (
+        <div key={changed.has(i) ? `${i}-${revision}` : i} className="-mx-1 rounded px-1"
+             style={changed.has(i) ? { animation: 'stage-line-flash 1.8s ease-out' } : undefined} data-stage-line={changed.has(i) ? 'changed' : undefined}>
+          {line || '\u00a0'}
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** A document of one of the owner's sites on the call's screen (an article of the X room, a script): what it is and for
+ * which account, the title, the body line by line (a revision by voice lights the changed lines), and its state. The
+ * body scrolls inside the card so a long article does not push the call's controls off the screen. */
+export function StageDocument({ doc }: { doc: StageDoc }) {
+  const { lines, changed, revision } = useChangedLines(doc.body, doc.revision || 1);
+  const status = doc.status === 'published' ? { text: '投稿しました', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
+    : doc.status === 'publishing' ? { text: '投稿しています', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' }
+    : doc.status === 'failed' ? { text: '投稿できませんでした', cls: 'bg-red-500/15 text-red-300 border-red-500/30' }
+    : { text: '下書き', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
+  return (
+    <div className="w-full rounded-xl border border-border bg-neutral-950/80 p-3 text-sm" data-stage-doc={doc.id} data-stage-doc-status={doc.status} data-stage-doc-revision={doc.revision || 1}>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">{doc.label || doc.kind}</span>
+        {doc.account ? <span className="truncate text-[11px] text-muted-foreground">@{doc.account}</span> : null}
+        <span className={`ml-auto rounded-md border px-1.5 py-0.5 text-[11px] ${status.cls}`}>{status.text}</span>
+      </div>
+      {doc.title ? <div className="mb-1.5 text-[15px] font-medium leading-snug text-foreground" data-stage-doc-title>{doc.title}</div> : null}
+      <div className="max-h-[52vh] overflow-y-auto whitespace-pre-wrap break-words leading-6" data-stage-doc-body>
+        <FlashLines lines={lines} changed={changed} revision={revision} />
+      </div>
+      {doc.status === 'failed' && doc.error ? <div className="mt-2 text-[11px] text-red-300">{doc.error}</div> : null}
+      {doc.status === 'published' && doc.url ? <div className="mt-2 truncate text-[11px] text-muted-foreground">{doc.url}</div> : null}
+    </div>
+  );
+}
+
+/** A picture made for the call: while it is being made, its place (or the previous picture, dimmed) with 「作っています」;
+ * then the picture, and the words it was made from under it. A revision shows the previous picture dimmed until the new
+ * one arrives, so the owner watches it change rather than disappear. */
+export function StageMedia({ media }: { media: StageMedia }) {
+  const making = media.status === 'generating';
+  const shown = stageImageUrl(making ? media.previous || media.image : media.image);
+  const last = media.history && media.history.length ? media.history[media.history.length - 1] : '';
+  return (
+    <figure className="m-0 w-full" data-stage-media={media.id} data-stage-media-status={media.status} data-stage-media-revision={media.revision || 1}>
+      <div className="relative w-full overflow-hidden rounded-xl border border-border bg-neutral-950">
+        {shown ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={shown} alt={media.prompt} className={`w-full ${making ? 'opacity-40 blur-[1px]' : ''}`} style={{ transition: 'opacity .4s ease' }} />
+        ) : (
+          <div className="aspect-square w-full" />
+        )}
+        {making ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-foreground/90" data-stage-media-waiting>
+            <span className="h-6 w-6 animate-spin rounded-full border-2 border-foreground/30 border-t-foreground" aria-hidden />
+            <span>{media.revision && media.revision > 1 ? '直しています…' : '作っています…'}</span>
+          </div>
+        ) : null}
+        {media.status === 'failed' ? (
+          <div className="absolute inset-x-0 bottom-0 bg-red-950/80 px-2 py-1 text-[11px] text-red-200">作れませんでした{media.error ? `: ${media.error}` : ''}</div>
+        ) : null}
+      </div>
+      <figcaption className="mt-1 truncate text-[11px] text-muted-foreground">{last ? `${media.prompt} → ${last}` : media.prompt}</figcaption>
+    </figure>
   );
 }
