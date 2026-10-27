@@ -69,6 +69,7 @@ import {
   canAnswer, useAnswerSend, type AnswerEnv, type SendState,
 } from '@/lib/chat-shapes/use-answer-send';
 import { readLook, safeImageUrl, safeLinkUrl, type Look } from '@/lib/chat-shapes/plain';
+import { openSignedIn } from '@/lib/signed-in-open';
 import { CHART_HEIGHT, chartGeometry, type ChartGeometry } from '@/lib/chat-shapes/chart-geometry';
 
 // --- 答えの経路（部屋の本人の発言と、発言を送る関数） -------------------------------------
@@ -649,7 +650,7 @@ const ButtonView: ComponentRenderer<ButtonInput> = ({ props }) => {
   const cls = 'inline-flex w-fit items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium';
   if (!url) return <span className={`${cls} border border-border text-muted-foreground`} data-shape="Button">{props.label}</span>;
   return (
-    <a href={url} target="_blank" rel="noopener noreferrer" className={`${cls} bg-primary text-primary-foreground hover:bg-primary/90`} data-shape="Button">
+    <a href={url} onClick={(event) => openSignedIn(event, url)} target="_blank" rel="noopener noreferrer" className={`${cls} bg-primary text-primary-foreground hover:bg-primary/90`} data-shape="Button">
       {props.label}<ExternalLink className="h-3.5 w-3.5" />
     </a>
   );

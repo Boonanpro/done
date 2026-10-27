@@ -6,6 +6,7 @@ import {NextRequest, NextResponse} from 'next/server';
 // ブラウザはそれを持ってここを開く。ブラウザにはダンのログイン（30日もつ更新用の記録つき）が入り、
 // 頼まれた画面へそのまま進む。入館証は60秒・1回きりで、URL の # の後ろにだけ載る（サーバーの記録に残らない）。
 // X運用室の artifacts/x-operation/open と同じ作りを、どの成果物にも使えるようにしたもの。
+// 10-27 からパソコンの画面（成果物タブの全画面・チャットのボタン）も、別のタブを開く時にここを通る（lib/signed-in-open.ts）。
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -16,7 +17,7 @@ const ACCESS_MAX_AGE = 24 * 60 * 60;        // app/config.py JWT_ACCESS_TOKEN_EX
 const REFRESH_MAX_AGE = 30 * 24 * 60 * 60;  // app/config.py JWT_REFRESH_TOKEN_EXPIRE_DAYS と同じ
 const TICKET_MS = 60_000;
 
-type Ticket = {access: string; refresh: string | null; to: string; expires: number};
+type Ticket = {access: string; refresh: string | null; to: string; user: string; expires: number};
 const tickets = new Map<string, Ticket>();
 const privateHeaders = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'};
 const fail = (status: number) => NextResponse.json({error: 'ダンのアプリからもう一度開いてください。'}, {status, headers: privateHeaders});
@@ -64,7 +65,7 @@ export async function POST(req: NextRequest) {
     }
     if (tickets.size >= 1000) return fail(429);
     const ticket = randomBytes(32).toString('base64url');
-    tickets.set(ticket, {access, refresh, to, expires: Date.now() + TICKET_MS});
+    tickets.set(ticket, {access, refresh, to, user: typeof me.id === 'string' ? me.id : '', expires: Date.now() + TICKET_MS});
     return NextResponse.json({url: `${origin}/enter#${ticket}`}, {headers: privateHeaders});
   }
 
@@ -75,7 +76,8 @@ export async function POST(req: NextRequest) {
   tickets.delete(ticket);   // 非同期の処理より先に消す。同時に使い回しても通らない
   if (!entry || entry.expires <= Date.now()) return fail(401);
   const secure = origin.startsWith('https:');
-  const response = NextResponse.json({to: entry.to}, {headers: privateHeaders});
+  // token と user は、このブラウザに残っている画面用のログイン（localStorage）を入れ替えるため。
+  const response = NextResponse.json({to: entry.to, token: entry.access, user: entry.user}, {headers: privateHeaders});
   response.cookies.set('done_access_token', entry.access, {httpOnly: true, secure, sameSite: 'lax', path: '/', maxAge: ACCESS_MAX_AGE});
   // 更新用の記録が作れなかった時は、前にこのブラウザにいた人の更新用の記録で入り直さないよう消す。
   response.cookies.set('done_refresh_token', entry.refresh || '', {
@@ -93,7 +95,13 @@ export function GET() {
     history.replaceState(null, '', location.pathname);
     fetch(location.pathname, {method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})})
       .then(r=>{if(!r.ok)throw Error();return r.json();})
-      .then(d=>{localStorage.removeItem('done-token');localStorage.removeItem('done-auth');location.replace(d.to);})
+      .then(d=>{
+        // 同じ人の画面の記録は残し、ログインだけ新しくする。別の人の記録なら消す（前にこのブラウザにいた人で動かない）。
+        let same=false;
+        try{same=!!d.user&&JSON.parse(localStorage.getItem('done-auth')||'{}').state.user.id===d.user;}catch(e){}
+        if(!same)localStorage.removeItem('done-auth');
+        if(d.token)localStorage.setItem('done-token',d.token);else localStorage.removeItem('done-token');
+        location.replace(d.to);})
       .catch(()=>{document.getElementById('status').textContent='開く期限が切れました。ダンのアプリからもう一度開いてください。';});
   }
   window.addEventListener('hashchange', connect);
