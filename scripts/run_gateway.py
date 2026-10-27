@@ -10,6 +10,8 @@ async def main():
     import uvicorn
     from app.core.job_dispatcher import start
     stop = start()
+    from app.core.generation_supervisor import start as supervise
+    stop_supervisor = supervise()
     sockets = []
     try:
         for port in (9100, 8100):
@@ -20,6 +22,7 @@ async def main():
         server = uvicorn.Server(uvicorn.Config('app.core.gateway:app', timeout_graceful_shutdown=15))
         await server.serve(sockets=sockets)
     finally:
+        stop_supervisor()
         stop()
         for sock in sockets: sock.close()
 

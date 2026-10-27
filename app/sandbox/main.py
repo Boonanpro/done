@@ -250,3 +250,6 @@ async def health() -> dict:
             "broken_modules": SELFCHECK_FAILURES,
         }
     return {"status": "healthy", "service": "sandbox", "environment": settings.APP_ENV, "generation": os.environ.get("DAN_GENERATION")}
+
+from app.core.api.generation_routes import router as generation_router
+app.include_router(generation_router)

@@ -16,6 +16,22 @@ def enter(port): connections[port] = connections.get(port, 0) + 1
 def leave(port): connections[port] = max(0, connections.get(port, 0) - 1)
 
 
+def quiescent(release):
+    import json
+    import urllib.request
+    from app.services.browser_lifecycle import _token_path
+    try:
+        token = _token_path().read_text().strip()
+        for kind in ('core', 'sandbox'):
+            request = urllib.request.Request(f"http://127.0.0.1:{release[kind]}/internal/generation/activity",
+                                             headers={'x-dan-browser-token': token})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                if not json.load(response).get('idle'): return False
+        return True
+    except Exception:
+        return False
+
+
 def retire_once():
     import psutil
     with lease(G.ROOT / 'activation.lock') as locked:
@@ -25,6 +41,7 @@ def retire_once():
             release = G.read(path.stem)
             if not release or not release.get('draining') or release['id'] == active or release.get('retired'): continue
             if any(connections.get(release[k], 0) for k in ('core', 'sandbox')) or any(G.refs(release['id'])): continue
+            if G.living(release.get('owner')) and not quiescent(release): continue
             if G.living(release.get('owner')):
                 # Core gracefully stops only its own Sandbox. Jobs are detached
                 # and browsers belong to the stable services, not this process.

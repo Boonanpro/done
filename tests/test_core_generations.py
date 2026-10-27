@@ -123,6 +123,7 @@ def test_retirement_waits_for_call_and_open_response(registry, monkeypatch):
     old = {**old, 'draining': True}
     G.write('release-old', old); G.write('active', new)
     killed = []
+    monkeypatch.setattr(retirement, 'quiescent', lambda _: True)
     import psutil
     monkeypatch.setattr(psutil.Process, 'terminate', lambda self: killed.append(self.pid))
     G.track('call', 'c')
@@ -139,3 +140,14 @@ def test_retirement_waits_for_call_and_open_response(registry, monkeypatch):
     assert G.read('release-old')['retired']
     retirement.retire_once()
     assert len(killed) == 1
+
+
+@pytest.mark.asyncio
+async def test_exit_notification_without_waiting_for_other_work():
+    import asyncio, sys
+    import psutil
+    from app.core.generation_supervisor import exited
+    process = await asyncio.create_subprocess_exec(sys.executable, '-c', 'import time; time.sleep(.1)')
+    identity = {'pid': process.pid, 'created': psutil.Process(process.pid).create_time()}
+    await asyncio.wait_for(exited(identity), timeout=3)
+    await process.wait()

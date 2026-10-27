@@ -13,6 +13,10 @@ def start():
     async def consider(job_id):
         saved = state.read(job_id)
         if not saved or saved.get('queue_owner') != 'process' or alive(saved): return
+        if saved.get('runner_started') and saved['state'] not in state.TERMINAL:
+            state.publish(job_id, 'error', '作業の実行接続が切れました。実行済み操作の確認が必要です。',
+                          state='failed', error='Job runner exited')
+            return
         if not ((saved['state'] == 'queued' and not saved.get('runner_started')) or
                 (saved['state'] == 'completed' and saved.get('delivery_pending'))): return
         from app.services.job_process import launch
