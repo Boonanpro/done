@@ -286,10 +286,16 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                 record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material))
 
 
+GREETING_SECONDS = 4.5
+
+
 async def summon_feed(send, user_id, record):
     """Dan called the owner (owner_summon) while a call is going, or the owner answered a ringing summons by starting this
     call: the call's Dan says why at once, in his own words, with every digit. Each summons is said once."""
     from app.services import owner_summon
+    # The phone opens a call with 「もしもし」 (live-greeting.ts, about 2-3 s after the session starts). Said at the same
+    # moment, the two ran into each other: 「い。今すぐやもしもし、」 (2026-10-27 22:17). A call that starts says it after.
+    await asyncio.sleep(GREETING_SECONDS)
     while True:
         try: due = [s for s in await asyncio.to_thread(owner_summon.live, user_id) if not s.get('spoken')]
         except Exception: due = []

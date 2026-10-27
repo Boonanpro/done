@@ -1370,6 +1370,8 @@ function useKeyboardShown() {
 function AppMain() {
   const language = useUiLanguage();
   const voice = useVoice();
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
   const answeredSummonsRef = useRef<Set<string>>(new Set());
   // Dan's calls for the owner ring on a channel of their own: an alarm-like sound that is heard with the screen away
   // (server: app/services/owner_summon.py sends channelId 'dan-summon'). A channel's sound is fixed once it exists.
@@ -2776,7 +2778,7 @@ function AppMain() {
       if (!id || answeredSummonsRef.current.has(id)) return;
       answeredSummonsRef.current.add(id);
       void fetch(`${API_BASE_URL}/api/v1/summon/${id}/answer`, {method:'POST', headers:{Authorization:`Bearer ${token}`}}).catch(() => null);
-      if (data?.call && typeof data.room_id === 'string') voice.start({roomId:data.room_id,chatTitle:'Dan',apiBase:API_BASE_URL,token});
+      if (data?.call && typeof data.room_id === 'string') voiceRef.current.start({roomId:data.room_id,chatTitle:'Dan',apiBase:API_BASE_URL,token});
     };
     const response = Notifications.addNotificationResponseReceivedListener((event) => {
       answerSummon(event.notification.request.content.data as Record<string, unknown> | undefined);
@@ -2796,7 +2798,7 @@ function AppMain() {
       received.remove();
       response.remove();
     };
-  }, [loadProjectMessages, openProjectFromNotificationUrl, refreshProjects, token, voice]);
+  }, [loadProjectMessages, openProjectFromNotificationUrl, refreshProjects, token]);
 
   // Restore the notification toggle state on launch. `notificationStatus` is
   // plain component state, so without this it always resets to 'Off'. The
