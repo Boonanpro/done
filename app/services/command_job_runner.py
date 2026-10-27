@@ -8,6 +8,7 @@ import time
 
 from app.services import command_job_state as state
 from app.services.editor_codex import CodexTurn
+from app.agent.model_catalog import current as _current_model
 
 def _dan_ws():
     from app.paths import DAN_WORKSPACE
@@ -345,7 +346,7 @@ async def _start_parallel_codex(owner, job_id, row, project, instructions, mcp):
     account = await owner.rpc('account/read', {})
     if (account.get('account') or {}).get('type') not in ('chatgpt', 'chatgptAuthTokens'):
         raise RuntimeError('CodexをChatGPT契約でログインしてください。APIキー課金では実行しません。')
-    common = {'model': 'gpt-6-astra', 'cwd': str(Path(__file__).resolve().parents[2]), 'approvalPolicy': 'never',
+    common = {'model': _current_model('gpt-6-astra'), 'cwd': str(Path(__file__).resolve().parents[2]), 'approvalPolicy': 'never',
               'sandbox': 'danger-full-access', 'developerInstructions': instructions,
               'config': {'model_reasoning_effort': 'high', 'web_search': 'live', 'mcp_servers': mcp}}
     fresh = [i['text'] for i in s['inputs'] if i['revision'] > s['applied_revision']]

@@ -3423,6 +3423,8 @@ async def _session_model_payload(session_id: str, project: Optional[dict]) -> di
     from app.agent import cli_runner as _cr
     meta = (project or {}).get("metadata") or {}
     selected = (meta.get("model") or "").strip().lower() if isinstance(meta, dict) else ""
+    # a choice saved on an older version of a GPT tier now runs on (and is shown as) the newest one
+    selected = _cr._model_catalog.current(selected) if selected else ""
     effective, backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
     return {
         "session_id": session_id,
@@ -3430,7 +3432,7 @@ async def _session_model_payload(session_id: str, project: Optional[dict]) -> di
         "effective_model": effective,
         "backend": backend,
         "can_switch": bool(project),
-        "options": _cr.CLI_MODEL_OPTIONS,
+        "options": _cr._model_catalog.options(),
     }
 
 

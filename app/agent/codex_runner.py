@@ -39,14 +39,9 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# ChatGPT sign-in models exposed by the local Codex CLI (models_cache.json).
-CODEX_MODELS = {
-    "gpt-6-astra",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-}
+# ChatGPT sign-in models: read live from Codex's own list (app/agent/model_catalog.py).
+from app.agent import model_catalog as _catalog
+
 
 SESSION_PREFIX = "codex:"
 
@@ -60,7 +55,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # D:/done
 
 
 def is_codex_model(model: Optional[str]) -> bool:
-    return (model or "").strip().lower() in CODEX_MODELS
+    return _catalog.is_codex_model(model)
 
 
 def backend_for_model(model: Optional[str]) -> str:
@@ -341,7 +336,8 @@ def build_codex_cmd(
         # Without this, hooks declared in the profile are silently skipped.
         "--dangerously-bypass-hook-trust",
         "-p", profile,
-        "-m", model,
+        # a saved older version of a tier runs on the newest one Codex offers
+        "-m", _catalog.current(model),
     ]
     if resume_thread_id:
         cmd += ["resume", resume_thread_id]
