@@ -11,8 +11,8 @@ watches:
   - mobile/markdown-blocks.ts
   - mobile/chat-shapes*.ts*
   - mobile/chatTimeline.ts
-fingerprint: d4fe195a8cc4cbae
-described: 66aa5e9803b91174
+fingerprint: 2699170c259e57cf
+described: c5c55a671ecdbd54
 ---
 # スマホのダンのアプリ
 
@@ -24,6 +24,7 @@ described: 66aa5e9803b91174
 - `chat` 会話。本文は `mobile/chat-markdown.tsx` が段落・見出し・表・コードに分けて描き、文中の太字・コード・斜体は `renderInlineMarkdown`（mobile/App.tsx）が描く。部品は `mobile/chat-shapes.tsx`、描けない部品は読める文章にする。
 - `live-rows` 作業中の数行（mobile/chatTimeline.ts）。
 - `voice` 通話。
+- `summon` ダンが本人を今すぐ呼ぶ通知（1.0.82〜）。チャンネル「ダンからの呼び出し」で目覚ましのような音とバイブ。最初の1回の後、30〜60秒ごとに鳴らし直す。押すと止まり、鳴らし直しの方を押すとその部屋で通話が始まって、ダンが呼んだ理由を言う。
 - `open-artifact` 成果物を、使い捨ての入館証を付けて公開版の写しで開く（/enter）。
 
 ## 行き方（みきさんから見て）
@@ -51,5 +52,5 @@ described: 66aa5e9803b91174
 
 - 見張るファイル: `mobile/App.tsx`, `mobile/chat-markdown.tsx`, `mobile/chat-shapes-answer-sends.ts`, `mobile/chat-shapes-answers.ts`, `mobile/chat-shapes-chart-geometry.ts`, `mobile/chat-shapes-job-report.ts`, `mobile/chat-shapes-live-line.ts`, `mobile/chat-shapes-plain.ts`, `mobile/chat-shapes-schema.ts`, `mobile/chat-shapes-use-answer-send.ts`, `mobile/chat-shapes.tsx`, `mobile/chatTimeline.ts`, `mobile/markdown-blocks.ts`
 
-<!-- place_map:files {"mobile/App.tsx": "fcfddbd676", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "f5e10bab52", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-plain.ts": "f00a082827", "mobile/chat-shapes-schema.ts": "e64c750f5d", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "27bc9a1ac9", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/markdown-blocks.ts": "a88af55511"} -->
+<!-- place_map:files {"mobile/App.tsx": "d47459c98b", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "f5e10bab52", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-plain.ts": "f00a082827", "mobile/chat-shapes-schema.ts": "e64c750f5d", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "27bc9a1ac9", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/markdown-blocks.ts": "a88af55511"} -->
 <!-- place_map:auto:end -->

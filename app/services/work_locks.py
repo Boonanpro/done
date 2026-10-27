@@ -3,7 +3,9 @@ the same moment: the same file, the PC screen, the phone. Whoever starts changin
 the other waits for that one thing only and keeps the rest of its work going. The owner never arranges this.
 
 Owners: 'job:<job id>' (a parallel job) or 'room:<room id>' (chat Dan's own turn in that room).
-A job holds what it touched until the job ends. A room's turn holds it until the turn ends (released at the end of the
+A job holds a file it touched until the job ends; a device (the PC screen, the phone) only while it keeps using it:
+after DEVICE_IDLE seconds without a call the device is free again. On 2026-10-27 a job that had finished with the phone
+in its first minutes held it for five more, and the job started after the call waited 297 s at its first phone step. A room's turn holds it until the turn ends (released at the end of the
 turn; a lock the turn could not release expires after ROOM_TTL without use).
 Standard library only: the Claude hook (scripts/work_lock_hook.py) imports this file directly in a short-lived process.
 """
@@ -17,6 +19,7 @@ from pathlib import Path
 ROOT = Path.home() / '.dan' / 'command-jobs'
 LOCKS = ROOT / 'locks'
 ROOM_TTL = 20 * 60
+DEVICE_IDLE = 90
 WAIT_LIMIT = 15 * 60
 TERMINAL = {'completed', 'failed', 'cancelled'}
 
@@ -90,6 +93,8 @@ def _job(job_id):
 def _alive(record):
     owner = record.get('owner', '')
     if owner.startswith('job:'):
+        if record.get('key', '').startswith('device:') and time.time() - record.get('touched', 0) >= DEVICE_IDLE:
+            return False
         job = _job(owner[4:])
         return bool(job) and job.get('state') not in TERMINAL
     return time.time() - record.get('touched', 0) < ROOM_TTL

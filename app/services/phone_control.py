@@ -114,7 +114,9 @@ TOOL = {
                     'scroll（up/down/left/right）/ key（back/home/enter/recents/delete/tab/search）/ open（アプリを package 名で起動）/ '
                     'screenshot（部品の一覧で分からない見た目を確かめる時だけ）/ follow（goal に向けて押すだけで進める所まで、モデルなしで押す）。'
                     '操作した手順は自動で記憶され、flow（host が phone: のもの）で次からモデルなしに再生できる。購入・送信・削除・確定などの取り返しのつかない押下は、'
-                    '本人がその操作を承認した時だけ confirmed=true で。'),
+                    '本人がその操作を承認した時だけ confirmed=true で。'
+                    'LINE（トーク・請求書・支払いの確認）は、つながっている Galaxy の LINE（ログイン済み）を最初からこれで開く。'
+                    'PC の LINE を先に試さない。'),
     'input_schema': {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': ['devices', 'read', 'tap', 'type', 'scroll', 'key', 'open', 'screenshot', 'follow']},
         'goal': {'type': 'string', 'description': 'follow: 行き先（例: 「設定のWi-Fiの画面」）。押すだけで行ける所まで Jev が押して進む（入力・購入・送信はしない）'},

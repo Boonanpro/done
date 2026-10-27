@@ -1370,6 +1370,22 @@ function useKeyboardShown() {
 function AppMain() {
   const language = useUiLanguage();
   const voice = useVoice();
+  const answeredSummonsRef = useRef<Set<string>>(new Set());
+  // Dan's calls for the owner ring on a channel of their own: an alarm-like sound that is heard with the screen away
+  // (server: app/services/owner_summon.py sends channelId 'dan-summon'). A channel's sound is fixed once it exists.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    void Notifications.setNotificationChannelAsync('dan-summon', {
+      name: 'ダンからの呼び出し',
+      description: '振込の承認や認証コードなど、今すぐ応じないと作業が止まる時だけ鳴ります',
+      importance: Notifications.AndroidImportance.MAX,
+      sound: 'dan_ring.wav',
+      vibrationPattern: [0, 600, 300, 600, 300, 600],
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      bypassDnd: true,
+      audioAttributes: {usage: Notifications.AndroidAudioUsage.ALARM, contentType: Notifications.AndroidAudioContentType.SONIFICATION},
+    }).catch(() => null);
+  }, []);
   const [projectQuery, setProjectQuery] = useState('');
   const safeInsets = useSafeAreaInsets();
   const keyboardShown = useKeyboardShown();
@@ -2753,13 +2769,24 @@ function AppMain() {
         }
       }
     });
+    // Dan called the owner (server: owner_summon). Tapping it answers (the ringing stops); tapping a ringing one also
+    // starts a call in that room at once, and the call's Dan says why he called.
+    const answerSummon = (data: Record<string, unknown> | undefined) => {
+      const id = typeof data?.summon_id === 'string' ? data.summon_id : '';
+      if (!id || answeredSummonsRef.current.has(id)) return;
+      answeredSummonsRef.current.add(id);
+      void fetch(`${API_BASE_URL}/api/v1/summon/${id}/answer`, {method:'POST', headers:{Authorization:`Bearer ${token}`}}).catch(() => null);
+      if (data?.call && typeof data.room_id === 'string') voice.start({roomId:data.room_id,chatTitle:'Dan',apiBase:API_BASE_URL,token});
+    };
     const response = Notifications.addNotificationResponseReceivedListener((event) => {
+      answerSummon(event.notification.request.content.data as Record<string, unknown> | undefined);
       void openProjectFromNotificationUrl(event.notification.request.content.data?.url);
     });
 
     Notifications.getLastNotificationResponseAsync()
       .then((event) => {
         if (event) {
+          answerSummon(event.notification.request.content.data as Record<string, unknown> | undefined);
           void openProjectFromNotificationUrl(event.notification.request.content.data?.url);
         }
       })
@@ -2769,7 +2796,7 @@ function AppMain() {
       received.remove();
       response.remove();
     };
-  }, [loadProjectMessages, openProjectFromNotificationUrl, refreshProjects, token]);
+  }, [loadProjectMessages, openProjectFromNotificationUrl, refreshProjects, token, voice]);
 
   // Restore the notification toggle state on launch. `notificationStatus` is
   // plain component state, so without this it always resets to 'Off'. The

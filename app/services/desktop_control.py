@@ -30,7 +30,9 @@ import time
 TOOL = {
     'name': 'desktop',
     'description': (
-        'このPCのデスクトップアプリ（LINE、Discord、設定画面、インストーラなどブラウザ以外）を操作する。'
+        '本人の Windows の PC のデスクトップアプリ（Discord、設定画面、インストーラなどブラウザ以外）を操作する。'
+        'ダンの本体（Mac mini）からの中継なので1手に約10秒かかる。LINE はまず phone（Galaxy のアプリ。ログイン済み）を使う'
+        '（2026-10-27: Windows の LINE はログインしておらず、ここで約3分を失った）。'
         'windows: 開いているウィンドウの一覧。observe(window): そのウィンドウの押せる物・入力欄の一覧(ref付き)と文字。'
         'find(window, query): 表示文字で探す。click(ref または window+label): 押す。type(ref, text): 入力欄に入れる（press_enter可）。'
         'read(window): 画面の文字を読む。screenshot(window): 画面を画像で見る（一覧に何も出ないアプリ用。その後 click(window,x,y) で座標を押せる）。'

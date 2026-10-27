@@ -39,6 +39,7 @@ from app.api.studio_routes import router as studio_router
 from app.api.collab_routes import router as collab_router
 from app.api.calendar_routes import router as calendar_router
 from app.api.push_routes import router as push_router
+from app.api.summon_routes import router as summon_router
 from app.api.dan_notion_routes import router as dan_notion_router
 from app.api.chat_artifact_routes import router as chat_artifact_router
 from app.api.image_generation_routes import router as image_generation_router
@@ -192,6 +193,7 @@ app.include_router(studio_router, prefix="/api/v1")
 app.include_router(collab_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
+app.include_router(summon_router, prefix="/api/v1")
 app.include_router(dan_notion_router, prefix="/api/v1")
 # 成果物ごとの裏側の処理は成果物フォルダ（artifacts/<slug>/_server）に置き、ここでは載せるだけにする
 # 成果物の _server を直すと、本体を再起動せずにその成果物の裏側だけ読み直す（artifact_backends.start_watcher）
