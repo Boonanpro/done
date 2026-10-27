@@ -65,7 +65,7 @@ RULES = [
 
 
 def check(reply: str, ask: str = "") -> list[dict]:
-    if re.sub(r"[\s*`_~]", "", reply or "") == QUIET:   # 「**WATCH_NO_CHANGE**」なども画面には出ない印
+    if re.sub(r"[\s*`~]", "", reply or "") == QUIET:   # 「**WATCH_NO_CHANGE**」なども画面には出ない印
         return []
     body = strip(reply)
     hits = []
