@@ -1,7 +1,9 @@
 #!/bin/zsh
 # ダッシュボード(3000)。frontend_prod.py build が記録した最新のビルドで next start する。launchd の com.dan.frontend から呼ばれる。
 # 新しいビルドに入れ替える時: python scripts/frontend_prod.py build してから launchctl kickstart -k gui/$(id -u)/com.dan.frontend
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# 成果物の受け口が起こす Python（表紙の保存・編集アシスタントなど）。PATH に python が無く、×が保存できなかった（2026-10-27）
+export PATH="$HOME/dan-venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export DAN_PYTHON="$HOME/dan-venv/bin/python"
 cd "$HOME/done/frontend"
 dist=$(/usr/bin/python3 -c "import json;print(json.load(open('$HOME/done/.tmp/frontend_prod.json'))['latest_build'])")
 export NEXT_DIST_DIR="$dist" NEXT_TELEMETRY_DISABLED=1 NODE_ENV=production \

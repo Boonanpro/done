@@ -119,3 +119,18 @@ def test_editing_only_the_map_after_the_fix_needs_no_new_shot(tmp_path):
             claude_tool('Edit', {'file_path': LIVE + '/x-operation/MAP.md'}, 'mp'), *mapcheck(), *SEEN,
             claude_text('直しました。' + PIC)]
     assert run(tmp_path, rows) is None
+
+
+def test_bug_words_cover_the_usual_ways_of_saying_it():
+    """10-27 確かめ役の指摘: 「出ていない」「動いていない」「表示されていない」を取りこぼしていた。過去の発言260件で測って広げた。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('gate', ROOT / 'scripts/hook_artifact_verify_gate.py')
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    for t in ['番号が出ていない', 'ボタンが動いていない', 'コメントが表示されていない', '押しても反映されてない', 'スマホで開けません',
+              'X運用室が開かなかった', 'まだ直っていない', 'なぜか入力欄の下に空白が出る', '最初にログイン画面が開いて一瞬で消える',
+              'ポルノアンチのアカウントが選べないのはなぜ？', '保存できないんだけど']:
+        assert g.is_bug_report(t), t
+    for t in ['この動画はマイクが映らないようにして', 'Androidならできないの？', 'パスキーを登録できるならやって', '進めて',
+              'もっと短くして', 'この記事のテーマは？']:
+        assert not g.is_bug_report(t), t
