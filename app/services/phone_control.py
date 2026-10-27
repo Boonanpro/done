@@ -213,8 +213,11 @@ def unlock(serial, tries=2):
 def _ensure_unlocked(serial):
     if time.time() - (_lock_ok.get(serial) or 0) < 30:
         return
-    if unlock(serial):
-        _lock_ok[serial] = time.time()
+    try:
+        if unlock(serial):
+            _lock_ok[serial] = time.time()
+    except Exception:
+        pass
 
 def _bounds(text):
     m = re.findall(r'\d+', text or '')
