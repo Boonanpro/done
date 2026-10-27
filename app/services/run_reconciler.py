@@ -63,7 +63,8 @@ def job_alive(job_id):
         saved = state.read(job_id)
     except Exception:
         return False
-    return bool(saved) and saved.get('state') in WAITING_FOR_OWNER
+    from app.services.job_process import alive as runner_alive
+    return bool(saved) and (runner_alive(saved) or saved.get('state') in WAITING_FOR_OWNER)
 
 
 def is_job_run(run):

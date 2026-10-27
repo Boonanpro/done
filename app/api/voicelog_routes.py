@@ -121,7 +121,7 @@ class LiveSessionRequest(BaseModel):
 
 @router.post('/live/session')
 async def create_live_session(request: Request, body: LiveSessionRequest):
-    from app.services.voice_live import MODEL, session_config, register, bind_session, close
+    from app.services.voice_live import session_config, register, bind_session, close
     from uuid import uuid4
     user = _get_user(request)
     chat = ChatService()
@@ -144,6 +144,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
     # Dan's one core brief for this room (the same as chat Dan's), built off the loop before the session config needs it
     from app.services.dan_core import shared
     await asyncio.to_thread(shared, body.room_id, user.user_id)
+    config = session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id)
     pending_id = 'pending-' + uuid4().hex
     register(pending_id, user.user_id, room_id=body.room_id)
     bound = False
@@ -151,7 +152,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         async with httpx.AsyncClient(timeout=40) as client:
             response = await client.post('https://api.openai.com/v1/live/sessions',
                 headers={'Authorization': 'Bearer ' + settings.OPENAI_API_KEY},
-                json={'session': session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id),
+                json={'session': config,
                     'transport': {'type': 'webrtc', 'sdp': body.sdp}})
         data = response.json()
         if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):
@@ -165,7 +166,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         # Dan's tools for this call start loading now (a few seconds), not when the backend first needs one
         from app.services import voice_tools
         voice_tools.warm(user.user_id, body.room_id)
-        return {'session': {'id': data['session']['id']}, 'transport': data['transport'], 'model': MODEL, 'server_delegation': owned}
+        return {'session': {'id': data['session']['id']}, 'transport': data['transport'], 'model': config['model'], 'server_delegation': owned}
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, 'Live 1への接続に失敗しました') from exc
     finally:

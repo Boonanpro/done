@@ -19,7 +19,7 @@ async def wake(body: Wake, request: Request):
     from app.services.command_job_runner import dispatch
     from app.services import command_job_state as state
     saved = state.read(body.job_id)
-    if saved and saved.get('queue_owner') == 'core':
+    if saved and saved.get('queue_owner') in ('core', 'process'):
         if saved['state'] in state.TERMINAL:
             return {'accepted':bool(saved.get('accepted_at')), 'state':saved['state']}
         def accept(s):

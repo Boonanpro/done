@@ -67,6 +67,9 @@ def recover_orphaned_runs_sync() -> int:
     for run in runs.data or []:
         if not run_is_mine(run):   # a run on the other machine (Mac / Windows) is that Core's to recover
             continue
+        from app.services.run_reconciler import is_job_run, job_alive
+        if is_job_run(run) and job_alive(run["metadata"]["watch_id"]):
+            continue
         run_id = run["id"]
         room_id = run.get("room_id")
         try:
