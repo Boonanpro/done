@@ -1,4 +1,4 @@
-"""Responses delegation: the speech model (GPT-Live) hands the turn to a backend model (GPT-5.6) that holds Dan's tools
+"""Responses delegation: the speech model (GPT-Live) hands the turn to a backend model (GPT-6.1 Terra) that holds Dan's tools
 as functions and calls them with its own understanding of the request. This server only executes the functions.
 
 Why (2026-09-22): in client delegation the delegation event carried no text, so the backend had to re-guess what the
@@ -17,8 +17,8 @@ import json
 import re
 import os
 
-BACKEND_MODEL = os.environ.get('DAN_VOICE_BACKEND_MODEL', 'gpt-5.6-terra')
-REASONING = os.environ.get('DAN_VOICE_BACKEND_REASONING', 'low')
+BACKEND_MODEL = os.environ.get('DAN_VOICE_BACKEND_MODEL', 'gpt-6.1-terra')
+REASONING = os.environ.get('DAN_VOICE_BACKEND_REASONING', 'medium')
 WORK_ENGINE = os.environ.get('DAN_VOICE_WORK_ENGINE', 'api')   # work started from a call: 'api' (Responses API worker, 2026-09-23) or 'cli' (Codex CLI)
 
 INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手は本人（このアカウントの持ち主）で、返事は声のモデルが自分の言葉で話します。
