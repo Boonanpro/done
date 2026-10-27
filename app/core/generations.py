@@ -140,7 +140,7 @@ def legacy_room_alive(room_id):
 
 
 def refs(generation):
-    for prefix in ('room-', 'call-', 'voice-room-'):
+    for prefix in ('room-', 'call-', 'voice-room-', 'call-work-', 'after-call-'):
         for path in ROOT.glob(prefix + '*.json'):
             saved = read(path.stem)
             if saved and saved.get('generation') == generation and living(saved.get('owner')):

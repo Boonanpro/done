@@ -55,7 +55,12 @@ def attach(session_id, user_id, room_id, api_key, own=False):
     except RuntimeError:
         return False
     _tasks[session_id] = task
-    task.add_done_callback(lambda _: _tasks.pop(session_id, None))
+    from app.core.generations import track
+    track('call-work', session_id)
+    def finished(_):
+        _tasks.pop(session_id, None)
+        track('call-work', session_id, False)
+    task.add_done_callback(finished)
     return bool(own)
 
 
@@ -520,7 +525,12 @@ async def _run(session_id, user_id, room_id, api_key, own):
         # deadline must not cancel execute midway through several requests.
         task = asyncio.create_task(finish_call(user_id, room_id, dialogue, began, own, stage, record))
         _after_tasks.add(task)
-        task.add_done_callback(_after_tasks.discard)
+        from app.core.generations import track
+        track('after-call', session_id)
+        def finished_after(task):
+            _after_tasks.discard(task)
+            track('after-call', session_id, False)
+        task.add_done_callback(finished_after)
         await asyncio.shield(task)
 
 
