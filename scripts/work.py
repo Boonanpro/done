@@ -398,7 +398,7 @@ def _restart_hint(changed):
     if any(p.startswith('frontend/') for p in changed):
         hints.append('画面: python scripts/frontend_prod.py restart')
     if any(p.startswith(('app/', 'main.py', 'requirements')) for p in changed):
-        hints.append('本体: python scripts/restart_dan_core.py --when-idle --then "<入れ替え後に確かめること>"')
+        hints.append('本体: python scripts/restart_dan_core.py（世代切替を導入済みなら、会話を続けたまま新しい依頼を切り替える）')
     return hints
 
 

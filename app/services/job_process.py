@@ -50,7 +50,7 @@ async def launch(row):
     if alive(saved):
         return
     # Persist before spawn. There is no stdin pipe for Core to close on exit.
-    state.change(job_id, lambda s: s.update(runner_request=row))
+    state.change(job_id, lambda s: s.update(runner_request=row, accepted_at=s.get('accepted_at') or state.now()))
     root = Path(__file__).resolve().parents[2]
     env = {**os.environ, 'DAN_COMMAND_JOB_ROOT': str(state.ROOT), 'PYTHONUNBUFFERED': '1'}
     process = await asyncio.create_subprocess_exec(
