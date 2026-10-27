@@ -292,7 +292,7 @@ export function StageDocument({ doc }: { doc: StageDoc }) {
     : doc.status === 'failed' ? { text: '投稿できませんでした', cls: 'bg-red-500/15 text-red-300 border-red-500/30' }
     : { text: '下書き', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
   return (
-    <div className="w-full rounded-xl border border-border bg-neutral-950/80 p-3 text-sm" data-stage-doc={doc.id} data-stage-doc-status={doc.status} data-stage-doc-revision={doc.revision || 1}>
+    <div className="w-full rounded-xl border border-border bg-neutral-950/80 p-3 text-left text-sm" data-stage-doc={doc.id} data-stage-doc-status={doc.status} data-stage-doc-revision={doc.revision || 1}>
       <div className="mb-2 flex items-center gap-2">
         <span className="rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">{doc.label || doc.kind}</span>
         {doc.account ? <span className="truncate text-[11px] text-muted-foreground">@{doc.account}</span> : null}

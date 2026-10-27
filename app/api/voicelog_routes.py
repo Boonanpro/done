@@ -155,7 +155,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
                     'transport': {'type': 'webrtc', 'sdp': body.sdp}})
         data = response.json()
         if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):
-            logger.error('Live session rejected: status=%s request_id=%s', response.status_code, response.headers.get('x-request-id'))
+            logger.error('Live session rejected: status=%s request_id=%s detail=%s', response.status_code, response.headers.get('x-request-id'), str((data.get('error') or {}).get('message') or data)[:200])
             raise HTTPException(502, 'Live 1への接続に失敗しました')
         bind_session(pending_id, data['session']['id'])
         bound = True
