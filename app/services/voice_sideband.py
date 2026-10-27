@@ -87,6 +87,7 @@ class Dialogue:
         self.history = []      # full transcript for this bounded (MAX_SECONDS) call; never written to logs
         self.history_chars = 0
         self.history_complete = True
+        self.failure_notices = set()
         self.delegated_at = 0.0   # when the speech model last handed the owner's words to the backend (the stage's flow yields to it)
 
     def add(self, role, delta):
@@ -144,6 +145,28 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     return {'type': 'function_call_output', 'call_id': item.get('call_id'), 'output': json.dumps(output, ensure_ascii=False)[:12000], 'name': item.get('name')}
 
 
+async def report_backend_failure(send, event, dialogue, record):
+    kind = event.get('type')
+    if kind not in ('error', 'response.failed', 'response.incomplete'):
+        return
+    error = event.get('error') or (event.get('response') or {}).get('error') or {}
+    message = str(error).lower()
+    error = error if isinstance(error, dict) else {}
+    billing = any(word in message for word in ('no credits remaining', 'credit_balance_exhausted', 'insufficient_quota'))
+    # An error in our notification must not recursively generate another notification.
+    if str(event.get('client_event_id') or error.get('event_id', '')).startswith('dan-failure-'):
+        return
+    key = 'billing' if billing else str((event.get('response') or {}).get('id') or event.get('event_id') or 'backend')
+    if key in dialogue.failure_notices:
+        return
+    dialogue.failure_notices.add(key)
+    text = ('作業を判断するAPIが残高不足で依頼を拒否しました。この依頼は先へ進められていません。'
+            if billing else '作業の判断処理が失敗しました。完了は確認できていません。')
+    await send({'type': 'session.commentary.append', 'event_id': f'dan-failure-{time.time_ns()}',
+                'delegation_id': None, 'content': text + '作業中として待たせず、この状態を本人に伝えてください。'})
+    record('backend_failure_reported', billing=billing)
+
+
 async def handle_response_event(send, session_id, user_id, room_id, envelope, dialogue, record, pending=None):
     """One response.event envelope from the backend model (responses delegation). The backend may call several functions
     in one response (parallel_tool_calls): their outputs are collected and sent together, then ONE response.create. Sending
@@ -165,6 +188,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         record('backend_message', delegation_id=delegation_id[:40], chars=len(text))
         return
     if kind in ('response.completed', 'response.failed', 'response.incomplete', 'error'):
+        await report_backend_failure(send, inner, dialogue, record)
         # the backend's tokens: billed apart from Live's per-minute rate, and half of a call's cost in a measured call (2026-09-24)
         usage = (inner.get('response') or {}).get('usage') or {}
         tokens = {'input_tokens': usage.get('input_tokens', 0), 'cached_tokens': (usage.get('input_tokens_details') or {}).get('cached_tokens', 0),
@@ -461,6 +485,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 if kind == 'session.input_transcript.delta' and dialogue.prefetch is not None:   # the owner's words so far, added above
                     try: dialogue.prefetch.heard(dialogue)
                     except Exception as exc: record('prefetch_failed', error_type=type(exc).__name__)   # the call goes on without it
+                if own and kind == 'error':
+                    await report_backend_failure(send, event, dialogue, record)
                 if own and kind == 'response.event':
                     # tasks run in creation order: a function call is registered (no await before it) before the
                     # response's completion gathers the outputs; the receive loop itself never waits on a function
