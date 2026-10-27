@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { usePreviewStore, flushInspectorEdits, type ArtifactRecord } from '@/stores/preview-store';
 import { useEditHistoryStore } from '@/stores/edit-history-store';
 import { artifactProductionUrl, artifactSharePath, KNOWN_CUSTOM_DOMAINS } from '@/lib/artifact-paths';
+import { openSignedIn } from '@/lib/signed-in-open';
 import { attachInspectorBridge, detachInspectorBridge, sendToIframe } from './inspector-bridge';
 import type { OverrideRow } from '@/lib/inspector-protocol';
 import { CommentPopover } from './comment-popover';
@@ -521,6 +522,7 @@ export function PreviewPane({ onAddComment }: { onAddComment: () => void }) {
         <ReleaseBadge artifact={artifact} url={publicShareUrl} />
         <a
           href={openUrl || undefined}
+          onClick={(event) => openSignedIn(event, openUrl)}
           aria-disabled={!openUrl}
           target="_blank"
           rel="noopener noreferrer"
