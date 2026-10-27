@@ -55,7 +55,12 @@ def attach(session_id, user_id, room_id, api_key, own=False):
     except RuntimeError:
         return False
     _tasks[session_id] = task
-    task.add_done_callback(lambda _: _tasks.pop(session_id, None))
+    from app.core.generations import track
+    track('call-work', session_id)
+    def finished(_):
+        _tasks.pop(session_id, None)
+        track('call-work', session_id, False)
+    task.add_done_callback(finished)
     return bool(own)
 
 
@@ -304,6 +309,7 @@ async def chat_feed(send, room_id, dialogue, record):
 LEFT_OVER = """通話の書き起こし（ユーザー＝本人、Dan＝ダン）と、通話中に始めた作業の一覧を渡す。
 電話が切れた時点で、本人が頼んだ・聞いたのに、ダンがまだ答えていない、またはやり終えていないことだけを挙げる。
 挙げないもの: 答え終わったこと、通話中に始めた作業が引き受けていること、本人が取り消した・自分でやる・後でいいと言ったこと、雑談やあいさつ。
+既存作業についての「まだ？」「今どういう状況」「自分で読め」は、その作業の進捗への質問で、新しい作業依頼ではないのでleftに入れない。既存作業の状況確認を名目に同じ操作を重ねない。
 相談で仕様・予算を決めただけの発言はleftに入れない。決定から購入・制作などの新しい実行依頼を推測しない。
 さらに、相談で本人が明示的に決めたことだけをdecisionsに3行まで書く。対象・名前・日付・金額は原文どおり。
 最後の訂正や取り消しを優先する。候補・提案・未回答の質問・作業開始の通知・作業結果・推測は決定にしない。
@@ -519,7 +525,12 @@ async def _run(session_id, user_id, room_id, api_key, own):
         # deadline must not cancel execute midway through several requests.
         task = asyncio.create_task(finish_call(user_id, room_id, dialogue, began, own, stage, record))
         _after_tasks.add(task)
-        task.add_done_callback(_after_tasks.discard)
+        from app.core.generations import track
+        track('after-call', session_id)
+        def finished_after(task):
+            _after_tasks.discard(task)
+            track('after-call', session_id, False)
+        task.add_done_callback(finished_after)
         await asyncio.shield(task)
 
 

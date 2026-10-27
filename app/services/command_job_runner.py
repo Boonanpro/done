@@ -20,7 +20,7 @@ _slots = asyncio.Semaphore(4)
 
 def mark_status(job_id, status):
     saved = state.read(job_id)
-    if saved and saved.get('queue_owner') == 'core':
+    if saved and saved.get('queue_owner') in ('core', 'process'):
         if saved['state']=='completed':
             state.change(job_id,lambda s:s.update(delivery_pending=status=='pending'))
         return  # Job state is authoritative; no notification worker owns it.
@@ -47,6 +47,8 @@ async def recover():
     for path in state.ROOT.glob('*.json'):
         s = state.read(path.stem)
         if not s or s['state'] in state.TERMINAL: continue
+        from app.services.job_process import alive
+        if alive(s): continue
         if s.get('engine') in ('parallel', 'make') and s['state'] != 'queued':
             # Its CLI died with the Core; what it already did is not repeated. A new instruction continues it.
             from app.services import work_locks
@@ -58,7 +60,7 @@ async def recover():
             state.publish(s['id'],'error','実行接続が切れたため停止しました。実行済み操作の確認が必要です。',state='failed',error='Core restarted')
             await RunService().update_run(s['run_id'],state='failed')
             await asyncio.to_thread(mark_status,s['id'],'failed')
-        elif s.get('queue_owner') == 'core' and s['state']=='queued':
+        elif s.get('queue_owner') in ('core', 'process') and s['state']=='queued':
             dispatch({'id':s['id'],'user_id':s['user_id'],'room_id':s['room_id'],
                 'spec':{key:s[key] for key in ('origin_room_id','origin_project_id','task')}})
 
@@ -68,7 +70,7 @@ async def dispatch_pending():
     if not state.ROOT.exists(): return
     for path in state.ROOT.glob('*.json'):
         s=state.read(path.stem)
-        if not s or s.get('queue_owner')!='core': continue
+        if not s or s.get('queue_owner') not in ('core', 'process'): continue
         if ((s['state']=='queued' and not s.get('run_id')) or
             (s['state']=='completed' and s.get('delivery_pending'))):
             dispatch({'id':s['id'],'user_id':s['user_id'],'room_id':s['room_id'],
@@ -83,7 +85,8 @@ def dispatch(row):
         # Existing tasks keep running; never cancel work to make room.
         return _tasks.get(job_id)
     if job_id not in _tasks or _tasks[job_id].done():
-        _tasks[job_id] = asyncio.create_task(run(row))
+        from app.services.job_process import launch
+        _tasks[job_id] = asyncio.create_task(launch(row))
     return _tasks[job_id]
 
 async def run(row):

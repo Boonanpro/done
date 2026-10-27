@@ -22,13 +22,13 @@ STANDBY_FILE = Path.home() / ".dan" / "standby"
 
 
 def is_standby() -> bool:
-    return os.environ.get("DAN_STANDBY", "0") == "1" or STANDBY_FILE.exists()
+    return bool(os.environ.get("DAN_GENERATION")) or os.environ.get("DAN_STANDBY", "0") == "1" or STANDBY_FILE.exists()
 
 
 # 作業の記録（agent_runs.metadata.machine）に、どの機械で始めた作業かを書く。片付けの見張り（run_reconciler・
 # run_recovery）は自分の機械の作業だけを見る。本番の Mac が、Windows の控えで動いている会話（Windows の道具が
 # 起こすもの）を「中身が無い」と見て閉じないため。印の無い古い記録は今までどおり扱う。
-MACHINE = sys.platform
+MACHINE = sys.platform + ("@" + os.environ["DAN_GENERATION"] if os.environ.get("DAN_GENERATION") else "")
 
 
 def run_is_mine(run: dict) -> bool:

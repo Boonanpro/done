@@ -17,11 +17,13 @@ async def _wake_job(job_id):
     """Retry only the idempotent durable-queue claim, never the job's actions."""
     import httpx
     from app.services.browser_lifecycle import _token_path
+    from app.core.generations import target
+    port = target('core')
     async with httpx.AsyncClient(timeout=5,trust_env=False) as client:
         for delay in (0,.3,1,2):
             if delay:await asyncio.sleep(delay)
             try:
-                response=await client.post('http://127.0.0.1:9000/internal/command-jobs/wake',
+                response=await client.post(f'http://127.0.0.1:{port}/internal/command-jobs/wake',
                     json={'job_id':job_id},headers={'x-dan-browser-token':_token_path().read_text().strip()})
                 response.raise_for_status()
                 if not response.json().get('accepted'):
@@ -256,8 +258,10 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
             extra['quiet'] = True   # asked from a site (X運用室): its result is not posted in the room's chat
     elif engine == 'api' and params.get('model'):
         extra = {'model': str(params['model'])[:60]}
+    from app.core.generations import read as generation_read
+    queue_owner = 'process' if generation_read('active') else 'core'
     command_job_state.create(job_id,user_id=user_id,room_id=target_room,origin_room_id=room_id,
-        origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner='core',engine=engine,
+        origin_project_id=source['id'],task=task,report_message_id=report_id(job_id),queue_owner=queue_owner,engine=engine,
         **extra,
         **({'replay':{'id':str(params['replay'].get('id'))[:40],'values':{str(k)[:60]:str(v)[:200] for k,v in (params['replay'].get('values') or {}).items()}}}
            if engine=='api' and isinstance(params.get('replay'),dict) else {}))

@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 
 import type { NextConfig } from 'next';
 import withPWA from 'next-pwa';
@@ -113,12 +115,13 @@ const nextConfig: NextConfig = {
     // Vercel ダッシュボード: Settings → Environment Variables で
     //   BACKEND_URL=https://xxx.trycloudflare.com
     // を設定する。tunnel URL が変わったら env 値を更新して再デプロイ。
-    const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+    const generations = !process.env.VERCEL && existsSync(path.join(homedir(), '.dan/generations/enabled'));
+    const backendUrl = process.env.BACKEND_URL || `http://127.0.0.1:${generations ? 8100 : 8000}`;
     // ダンコア(チャット・認証・ボイス) の URL。dev はデフォルトで 9000、
     // 本番は CORE_BACKEND_URL を別途設定する想定。未設定なら BACKEND_URL に
     // フォールバック（旧アーキの単一プロセスでも動くように）。
     const coreBackendUrl =
-      process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
+      process.env.CORE_BACKEND_URL || `http://127.0.0.1:${generations ? 9100 : 9000}`;
     return [
       // 成果物タブの画面が版を比べる・知らせる先（src/lib/live-version/guard.ts）。
       // 画面からは /_live/* で来るので、ダッシュボード（3000）がこの開発サーバーへ中継する。

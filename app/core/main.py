@@ -44,7 +44,8 @@ async def lifespan(app: FastAPI):
     wss_server = None
     try:
         from app.wss_proxy import start_wss_proxy
-        wss_server = await start_wss_proxy()
+        if not os.environ.get('DAN_GENERATION'):
+            wss_server = await start_wss_proxy()
     except Exception as e:
         logger.warning("WSS proxy failed to start: %s", e)
 
@@ -52,11 +53,13 @@ async def lifespan(app: FastAPI):
     # ここで「自分が core」と印を付けると、core 外のプロセスからの publish は
     # 内部APIへ転送される（送信案カード等が画面へ即時に届く）。
     from app.services.room_feed import mark_core_process
-    mark_core_process()
+    if not os.environ.get('DAN_GENERATION'):
+        mark_core_process()
     # Work state goes to the same feed the moment its file changes (the call screen's line, live).
     try:
         from app.services import job_feed
-        job_feed.start()
+        if not os.environ.get('DAN_GENERATION'):
+            job_feed.start()
     except Exception as e:
         logger.warning("job feed failed to start: %s", e)
 
@@ -107,7 +110,7 @@ async def lifespan(app: FastAPI):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("browser reaper error (non-fatal): %s", exc)
 
-        if idle_seconds > 0:
+        if idle_seconds > 0 and not os.environ.get('DAN_GENERATION'):
             browser_reaper_task = asyncio.create_task(_browser_reaper())
             logger.info(
                 "browser reaper started (idle=%ss, interval=%ss)", idle_seconds, interval
@@ -301,4 +304,7 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "healthy", "service": "dan-core", "environment": settings.APP_ENV}
+    return {"status": "healthy", "service": "dan-core", "environment": settings.APP_ENV, "generation": os.environ.get("DAN_GENERATION")}
+
+from app.core.api.generation_routes import router as generation_router
+app.include_router(generation_router)

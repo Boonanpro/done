@@ -11,6 +11,7 @@ from app.core.api import command_job_routes as routes
 @pytest.fixture
 def job(tmp_path,monkeypatch):
     monkeypatch.setattr(state,'ROOT',tmp_path)
+    monkeypatch.setattr('app.services.restart_signal.draining', lambda: False)
     key=str(uuid.uuid4())
     state.create(key,queue_owner='core',user_id='owner',room_id='target',
         origin_room_id='hub',origin_project_id='project',task='read only')
@@ -42,7 +43,8 @@ async def test_duplicate_wakes_share_one_running_task(job,monkeypatch):
     async def hold(row):
         await run(row)
         await gate.wait()
-    monkeypatch.setattr(runner,'run',hold)
+    from app.services import job_process
+    monkeypatch.setattr(job_process,'launch',hold)
     first=runner.dispatch({'id':job})
     second=runner.dispatch({'id':job})
     assert first is second
