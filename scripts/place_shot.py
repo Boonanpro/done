@@ -399,7 +399,10 @@ def main(argv=None) -> int:
             print(f"前と後: {c}")
     bad = any(checks.values())
     if expects:
-        print("再現した（みきさんの言う崩れがこの画面でも出た）" if record["repro"] == "YES" else "再現しなかった（この画面ではみきさんの言う物が見えている）")
+        if a.tag == "after":
+            print("まだ直っていない（みきさんの言う崩れが残っている）" if record["repro"] == "YES" else "直った（みきさんの言う物が見えている）")
+        else:
+            print("再現した（みきさんの言う崩れがこの画面でも出た）" if record["repro"] == "YES" else "再現しなかった（この画面ではみきさんの言う物が見えている）")
     extra = f" expect={len(expects)} repro={record['repro']}" if expects else ""
     print(f"[place_shot] {tail} result={'NG' if bad else 'OK'} {root}{extra}")
     return 1 if bad else 0
