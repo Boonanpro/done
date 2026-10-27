@@ -116,6 +116,6 @@ def test_place_shot_expect_options_parse():
 def test_editing_only_the_map_after_the_fix_needs_no_new_shot(tmp_path):
     """10-27 試し: 直して撮った後に MAP.md だけ直したら、撮り直しを求められた。"""
     rows = [owner('番号が出てない'), *shot('before', 'NG', 'YES', tid='b'), EDIT, *SEEN, *shot('after', 'OK', 'NO', tid='a'),
-            claude_tool('Edit', {'file_path': LIVE + '/x-operation/MAP.md'}, 'mp'), *mapcheck(),
+            claude_tool('Edit', {'file_path': LIVE + '/x-operation/MAP.md'}, 'mp'), *mapcheck(), *SEEN,
             claude_text('直しました。' + PIC)]
     assert run(tmp_path, rows) is None
