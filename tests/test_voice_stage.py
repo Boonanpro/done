@@ -890,6 +890,7 @@ async def test_a_revision_goes_to_the_sites_assistant_and_approval_presses_the_p
     asyncio.ensure_future(press())
     out = await stage.decide_suggestions(accept=True)
     assert out['decided'] and S.read_state(room)['command']['action'] == 'accept-all'
+    assert S.read_state(room)['doc']['assist']['pending'] == 0   # the status line no longer shows the suggestions
     out = await stage.decide_suggestions(accept=True)
     assert not out['decided'] and '無い' in out['reason']
 
