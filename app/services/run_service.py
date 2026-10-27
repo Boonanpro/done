@@ -21,6 +21,8 @@ def background(row) -> bool:
 
 def announce(row) -> None:
     """The run's state as just written goes to the room's screens (room_feed.publish_run). Never breaks the writer."""
+    from app.services.restart_signal import notify
+    notify()
     try:
         from app.services.room_feed import publish_run
         publish_run(row)

@@ -92,6 +92,8 @@ def register(session_id, user_id, room_id=None):
 
 def _drop(session_id):
     _sessions.pop(session_id, None)
+    from app.services.restart_signal import notify
+    notify()
 
 
 def close(session_id, user_id):
