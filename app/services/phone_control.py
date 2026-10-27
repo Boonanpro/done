@@ -156,6 +156,69 @@ def _serial(serial):
     raise ValueError('機器が見つからない' if not found else '複数の機器がつながっている。serial を指定する: ' + ', '.join(f"{d['serial']}({d['model']})" for d in found))
 
 
+# ---- the phone's lock -------------------------------------------------------------------------------------------------
+# The owner (2026-10-27, voice call): the Galaxy is cabled to this Mac and should sleep when nobody uses it, and the PIN
+# entry that used to need a hand on the phone should run from here. The PIN comes from Dan's credential store and stays
+# inside this function. When the phone is unlocked the check is skipped for a while, so ordinary calls stay fast.
+LOCK_PIN_SERVICE = 'galaxy_s24_dev'
+_lock_ok = {}   # serial -> when the keyguard was last seen to be away
+
+
+def _keyguard_locked(serial):
+    dump = _adb(serial, 'shell', 'dumpsys', 'window', timeout=20)
+    if 'isKeyguardShowing=true' in dump:
+        return True
+    if 'isKeyguardShowing=false' in dump:
+        return False
+    return 'mDreamingLockscreen=true' in dump
+
+
+def _stored_pin():
+    import asyncio
+    from app.services.credentials_service import get_credentials_service
+    from app.services.owner import resolve_owner_user_id
+    cred = asyncio.run(get_credentials_service().get_credential(resolve_owner_user_id(), LOCK_PIN_SERVICE))
+    pin = str((cred or {}).get('password') or '')
+    return pin if pin.isdigit() else ''
+
+
+def unlock(serial, tries=2):
+    """Wake the phone, bring up the PIN pad and enter the stored PIN. False when it stays locked (or nothing is stored)."""
+    try:
+        if not _keyguard_locked(serial):
+            return False
+        pin = _stored_pin()
+        if not pin:
+            return False
+        size = re.search(r'(\d+)x(\d+)', _adb(serial, 'shell', 'wm', 'size', timeout=10))
+        w, h = (int(size.group(1)), int(size.group(2))) if size else (1080, 2340)
+        for _ in range(max(1, tries)):
+            _adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+            time.sleep(.8)
+            focus = next((l for l in _adb(serial, 'shell', 'dumpsys', 'window', timeout=20).splitlines() if 'mCurrentFocus' in l), '')
+            if 'Bouncer' not in focus:
+                _adb(serial, 'shell', 'input', 'swipe', str(w // 2), str(int(h * .82)), str(w // 2), str(int(h * .3)), '300')
+                time.sleep(1.0)
+            _adb(serial, 'shell', 'input', 'text', pin)
+            time.sleep(.5)
+            _adb(serial, 'shell', 'input', 'keyevent', '66')
+            time.sleep(2.0)
+            if not _keyguard_locked(serial):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _ensure_unlocked(serial):
+    if time.time() - (_lock_ok.get(serial) or 0) < 30:
+        return
+    try:
+        if unlock(serial):
+            _lock_ok[serial] = time.time()
+    except Exception:
+        pass
+
 def _bounds(text):
     m = re.findall(r'\d+', text or '')
     return tuple(map(int, m[:4])) if len(m) >= 4 else (0, 0, 0, 0)
@@ -255,6 +318,7 @@ def run(params):
         found = devices()
         return '\n'.join(f"{d['serial']} {d['model']}" for d in found) or 'つながっている機器はない（USB デバッグの許可とケーブルを確かめる）'
     serial = _serial(params.get('serial'))
+    _ensure_unlocked(serial)
     if action == 'read':
         return read(serial)
     if action == 'screenshot':
