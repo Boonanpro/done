@@ -286,6 +286,23 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                 record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material))
 
 
+async def summon_feed(send, user_id, record):
+    """Dan called the owner (owner_summon) while a call is going, or the owner answered a ringing summons by starting this
+    call: the call's Dan says why at once, in his own words, with every digit. Each summons is said once."""
+    from app.services import owner_summon
+    while True:
+        try: due = [s for s in await asyncio.to_thread(owner_summon.live, user_id) if not s.get('spoken')]
+        except Exception: due = []
+        for s in due:
+            await asyncio.to_thread(owner_summon.mark_spoken, s['id'])
+            await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
+                        'content': '今すぐ本人にしてもらう必要があること（ダンが本人を呼んだ理由）:' + chr(10) + s['reason']})
+            await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
+                        'content': '本人を呼んだ理由を、今すぐ短く伝える。番号や金額は全部の桁をはっきり言う。'})
+            record('summon_spoken', summon_id=s['id'][:8])
+        await asyncio.sleep(1)
+
+
 async def chat_feed(send, room_id, dialogue, record):
     """What the owner sends to this room's chat during the call reaches the Dan on the call (voice_calls), as if said on the
     call: the speech model takes it up itself, in its own words. It went in as silent context first, and Dan said nothing
@@ -454,6 +471,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     voice_calls.begin(room_id, session_id)
                     inbox = asyncio.create_task(chat_feed(send, room_id, dialogue, record))
                     working.add(inbox); inbox.add_done_callback(working.discard)
+                    summons = asyncio.create_task(summon_feed(send, user_id, record))
+                    working.add(summons); summons.add_done_callback(working.discard)
                     # The stage: what the owner's screen shows while Dan talks (voice_stage). A failure there never
                     # touches the call's audio or its delegations.
                     from app.services import voice_stage

@@ -45,8 +45,12 @@ class PushService:
         }).execute()
 
     async def notify_room(self, room_id: str, exclude_type: str,
-                          title: str, body: str, url: Optional[str] = None) -> dict:
-        """Send push notification to all subscribers in a room except the sender's type."""
+                          title: str, body: str, url: Optional[str] = None,
+                          data: Optional[dict] = None, channel_id: Optional[str] = None,
+                          sound: Optional[str] = None) -> dict:
+        """Send push notification to all subscribers in a room except the sender's type.
+
+        data / channel_id / sound: extra payload for the phone app (owner_summon rings on its own channel)."""
         result = self.supabase.table("push_subscriptions").select("*").eq(
             "room_id", room_id
         ).neq("sender_type", exclude_type).execute()
@@ -60,6 +64,9 @@ class PushService:
                     title=title,
                     body=body,
                     url=url or "/chat",
+                    data=data,
+                    channel_id=channel_id,
+                    sound=sound,
                 )
                 if ok:
                     sent += 1
@@ -86,6 +93,7 @@ class PushService:
                     "body": body,
                     "url": sub.get("landing_url") or url or "/collab",
                     "icon": "/icon-192x192.png",
+                    **({"data": data} if data else {}),
                 })
                 webpush(
                     subscription_info=subscription_info,
@@ -107,16 +115,17 @@ class PushService:
                 logger.error("Push error: %s", e)
         return {"attempted": len(result.data), "sent": sent, "failed": failed}
 
-    async def _send_expo_push(self, token: str, title: str, body: str, url: str) -> bool:
+    async def _send_expo_push(self, token: str, title: str, body: str, url: str, data: Optional[dict] = None,
+                              channel_id: Optional[str] = None, sound: Optional[str] = None) -> bool:
         """Send a native Expo push notification."""
         payload = json.dumps({
             "to": token,
             "title": title,
             "body": body,
-            "sound": "default",
+            "sound": sound or "default",
             "priority": "high",
-            "channelId": "default",
-            "data": {"url": url},
+            "channelId": channel_id or "default",
+            "data": {**(data or {}), "url": url},
         }).encode("utf-8")
         req = urllib.request.Request(
             "https://exp.host/--/api/v2/push/send",

@@ -387,8 +387,10 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.work_progress import TOOL as PROGRESS_TOOL
     from app.services.parallel_work_tool import TOOL as PARALLEL_WORK_TOOL
     from app.services.video_analyzer import TOOL as VIDEO_TOOL
+    from app.services.owner_summon import TOOL as SUMMON_TOOL
     return [
         PARALLEL_WORK_TOOL,
+        SUMMON_TOOL,
         LOOKUP_TOOL,
         LOCATION_TOOL,
         FLOW_TOOL,
@@ -1314,6 +1316,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "get_location":
         return ("_location", "read")
 
+    if tool_name == "summon":
+        return ("_summon", "read")
+
     if tool_name == "flow":
         return ("_flow", "browser")
     if tool_name == "chrome_signin":
@@ -1425,7 +1430,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_video", "_phone", "_confirm_card", "_progress"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_video", "_phone", "_confirm_card", "_progress", "_summon"}:
             return
 
         error_type = result.get("error_type")
@@ -2540,6 +2545,10 @@ async def execute_tool(
     if skill_name == "_location":
         from app.services.user_location import tool as location_tool
         return await location_tool(user_id)
+
+    if skill_name == "_summon":
+        from app.services.owner_summon import tool as summon_tool
+        return await summon_tool(params, user_id, session_id)
 
     if skill_name == "_flow":
         from app.services.browser_flows import tool as flow_tool

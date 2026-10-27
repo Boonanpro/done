@@ -2703,6 +2703,13 @@ async def send_dan_message_stream(
                 yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
                 mark_latency("user_sse_sent")
 
+            if message is not None:
+                try:   # the owner wrote in this room: Dan's call for them here has been answered (owner_summon)
+                    from app.services import owner_summon
+                    owner_summon.answer_room(room_id, 'message')
+                except Exception as e:
+                    logger.debug("summon answer skipped (room=%s): %s", room_id, e)
+
             if _voice_call and message is not None:
                 if not _begin_processing():
                     done_sent = True
