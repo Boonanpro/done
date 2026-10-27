@@ -151,6 +151,7 @@ async def report_backend_failure(send, event, dialogue, record):
         return
     error = event.get('error') or (event.get('response') or {}).get('error') or {}
     message = str(error).lower()
+    error = error if isinstance(error, dict) else {}
     billing = any(word in message for word in ('no credits remaining', 'credit_balance_exhausted', 'insufficient_quota'))
     # An error in our notification must not recursively generate another notification.
     if str(event.get('client_event_id') or error.get('event_id', '')).startswith('dan-failure-'):

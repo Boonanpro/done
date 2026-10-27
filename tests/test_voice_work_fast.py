@@ -42,3 +42,20 @@ async def test_failed_response_notifies_without_retry():
     async def send(e): sent.append(e)
     await S.handle_response_event(send, 's', 'u', 'r', {'event': {'type': 'response.failed', 'response': {'id': 'resp', 'status': 'failed'}}}, S.Dialogue(), lambda *a, **k: None)
     assert [e['type'] for e in sent] == ['session.commentary.append']
+
+@pytest.mark.asyncio
+async def test_rejected_work_never_says_started(monkeypatch):
+    from app.services import command_center, command_job_state
+    monkeypatch.setattr(command_job_state, 'list_owned', lambda *a: [])
+    async def reject(*a, **k): return {'accepted': False}
+    monkeypatch.setattr(command_center, 'execute', reject)
+    out = await R.run_function('start_work', {'task': '確認'}, 'u', 'r', [])
+    assert out['accepted'] is False and 'error' in out
+    assert '作業は始まった' not in str(out)
+
+def test_models_unchanged_and_batch_in_assembled_delegation(monkeypatch):
+    monkeypatch.setattr(R, 'remembered', lambda: '')
+    monkeypatch.setattr(R, 'catalog', lambda: '')
+    config = R.delegation()['responses']
+    assert config['model'] == 'gpt-5.6-terra'
+    assert any(t['name'] == 'read_many' for t in config['tools'])
