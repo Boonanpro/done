@@ -42,7 +42,9 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
-- 複数の道具が要る質問（本人の住所と外の情報を比べる等）は続けて呼び、まとめて答える。
+- 入力が既に分かる独立した読み取りは read_many でまとめて同時に実行する。前の結果が必要な読み取りや変更・送信は混ぜない。
+- 道具の説明は同じ通話で一度読めば再利用する。browser_plan / fill_form など既存の一括操作を使い、既に返った画面をもう一度読むだけの呼び出しを省く。
+- 「まだ？」「どうなった？」は job_status で現在の作業状態を読み、同じ仕事を開始し直さない。失敗・未受付なら作業中と言わない。
 - 道具の結果の source は出どころ（どのアカウント・どのカレンダー・どの記録を見たか）。「何を見て言った」と聞かれた時にそれで答える。普段は言わない。
 - 取り返しのつかない確定（購入・送信・削除・支払い）の前だけ、内容と金額を言葉で伝えて本人の返事を待つ。それ以外は承認を求めず進める。
 - 「やった」と言う前に結果を読み直して確かめる。本人の画面と食い違う時は、自分が読んだ事実（どこに何が入っているか）を伝え、同期の遅れもあり得ると言う。確かめずに同じ操作を繰り返さない。
@@ -50,7 +52,26 @@ INSTRUCTIONS = """あなたは音声通話のダンの裏側です。話し手�
 - 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所（経路検索サイトなど）で確かめて答える。検索結果の断片から作らない。
 - ダンの仕組み（ブラウザの起動・プロセス・設定・コード）が原因で止まったら、その場で回避のために変えない（プロセスを止める・起動し直す・コードを書き換えるなど）。どこが原因で止まったかを報告し、直すなら直し方を添える。"""
 
+READ_MANY = ('web_search', 'get_calendar', 'get_location', 'room_files', 'job_status', 'search_records')
+
+async def read_many(requests, user_id, room_id, dialogue):
+    # Validate the entire batch before any read; mutations and recursive batches are never admitted.
+    if not isinstance(requests, list) or not 1 <= len(requests) <= 6:
+        return {'error': '読み取りは1〜6件で指定してください。'}
+    if any(not isinstance(r, dict) or r.get('name') not in READ_MANY or not isinstance(r.get('arguments', {}), dict) for r in requests):
+        return {'error': '独立した読み取り専用の道具だけを指定してください。'}
+    async def one(r):
+        try:
+            result = await run_function(r['name'], r.get('arguments', {}), user_id, room_id, dialogue)
+        except Exception as exc:
+            result = {'error': type(exc).__name__, 'note': 'この読み取りは失敗しました。'}
+        return {'name': r['name'], 'result': result}
+    return {'results': await asyncio.gather(*(one(r) for r in requests))}
+
 TOOLS = [
+    {'type': 'function', 'name': 'read_many', 'description': '入力が分かる独立した読み取りを同時実行し、1回で結果を返す。前の結果に依存する質問は別に呼ぶ。',
+     'parameters': {'type': 'object', 'properties': {'requests': {'type': 'array', 'minItems': 1, 'maxItems': 6,
+         'items': {'type': 'object', 'properties': {'name': {'type': 'string', 'enum': list(READ_MANY)}, 'arguments': {'type': 'object'}}, 'required': ['name', 'arguments'], 'additionalProperties': False}}}, 'required': ['requests'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'web_search', 'description': 'ウェブで調べる（天気・ニュース・営業時間・値段など一般の情報）。調べた要点と出どころが返る。',
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '調べたいこと（場所や日付を含めて具体的に）'}}, 'required': ['query'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_saved_information', 'description': '本人が登録してある自分の情報（名前・住所・郵便番号・電話・カード・口座・免許・会社など）を読む。',
@@ -208,6 +229,8 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
     from app.services import voice_parts as parts
     from app.services.command_job_state import list_owned
     from app.services.jev_decisions import Decisions
+    if name == 'read_many':
+        return await read_many(args.get('requests'), user_id, room_id, dialogue)
     if name == 'get_saved_information':
         what = str(args.get('what') or '')
         async with Decisions(user_id, timeout=3, max_calls=3) as judge:
@@ -268,6 +291,8 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         making = args.get('kind') == 'make'
         out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': 'make' if making else WORK_ENGINE,
                              **({'model': args['model']} if making and args.get('model') else {})}, room_id, user_id)
+        if not out.get('accepted'):
+            return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。再送前に job_status で受付状況を確認する。'}
         # It used to say 「本人に今言うことはない」: after reading two mails and handing the EX check over, the call was silent
         # for 70 s and the owner never heard what was already known or that the rest would take minutes (2026-09-26).
         others = [{'id': s['id'], '依頼': s.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:160]} for s in running]
