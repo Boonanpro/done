@@ -1,3 +1,4 @@
+from pathlib import Path
 import os
 import pytest
 from app.core import generations as G, gateway
@@ -151,3 +152,20 @@ async def test_exit_notification_without_waiting_for_other_work():
     identity = {'pid': process.pid, 'created': psutil.Process(process.pid).create_time()}
     await asyncio.wait_for(exited(identity), timeout=3)
     await process.wait()
+
+
+def test_release_links_untracked_sites_next_to_tracked_files(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('core_release', Path(__file__).resolve().parents[1] / 'scripts' / 'core_release.py')
+    release = importlib.util.module_from_spec(spec); spec.loader.exec_module(release)
+    live, dest = tmp_path / 'live', tmp_path / 'release'
+    (live / 'frontend/src/app/artifacts/x-operation/_server').mkdir(parents=True)
+    (live / 'frontend/src/app/artifacts/layout.tsx').write_text('live')
+    (live / '.data').mkdir()
+    (dest / 'frontend/src/app/artifacts').mkdir(parents=True)
+    (dest / 'frontend/src/app/artifacts/layout.tsx').write_text('tracked')
+    release.link_shared(dest, live)
+    assert (dest / 'frontend/src/app/artifacts/x-operation/_server').is_dir()
+    assert (dest / 'frontend/src/app/artifacts/x-operation').is_symlink()
+    assert (dest / 'frontend/src/app/artifacts/layout.tsx').read_text() == 'tracked'
+    assert (dest / '.data').is_symlink()

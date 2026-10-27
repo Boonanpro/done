@@ -37,6 +37,22 @@ def port_free(port):
         except OSError: return False
 
 
+def link_shared(destination, live):
+    """Runtime data/artifacts are shared, tracked Python code is immutable."""
+    for relative in ('.env', '.data', '.tmp', 'uploads', 'frontend/src/app/artifacts', 'frontend/public/artifacts'):
+        target, source = destination / relative, live / relative
+        if source.exists() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(source, target_is_directory=source.is_dir())
+        elif source.is_dir() and target.is_dir() and not target.is_symlink():
+            # The artifacts folders hold a few tracked files (layout.tsx, [slug]) next to the sites, which git does not
+            # track: link each site the release lacks, or its _server routes and files are missing from the release
+            # (2026-10-27: the call's stage found no X room).
+            for child in source.iterdir():
+                if not (target / child.name).exists():
+                    (target / child.name).symlink_to(child, target_is_directory=child.is_dir())
+
+
 def prepare(root):
     root = Path(root).resolve()
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
@@ -47,13 +63,7 @@ def prepare(root):
     destination = Path.home() / 'dan-workspace' / 'releases' / release_id
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(['git', 'worktree', 'add', '--detach', str(destination), commit], cwd=root, check=True)
-    live = Path.home() / 'done'
-    # Runtime data/artifacts are shared, tracked Python code is immutable.
-    for relative in ('.env', '.data', '.tmp', 'uploads', 'frontend/src/app/artifacts', 'frontend/public/artifacts'):
-        target, source = destination / relative, live / relative
-        if source.exists() and not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.symlink_to(source, target_is_directory=source.is_dir())
+    link_shared(destination, Path.home() / 'done')
     pair = next(((p, p - 1000) for p in range(9201, 9299) if port_free(p) and port_free(p - 1000)), None)
     if pair is None: raise RuntimeError('No free release ports')
     core, sandbox = pair
