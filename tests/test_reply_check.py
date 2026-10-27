@@ -59,3 +59,20 @@ def test_owner_word_read_from_transcript(tmp_path):
     out = _run({"hook_event_name": "Stop", "session_id": "s3", "transcript_path": str(tr),
                 "last_assistant_message": "PR #701 を出して、マージまで済みました。", "_dir": tmp_path})
     assert out == ""
+
+
+def test_decorated_quiet_and_reason_fits_codex_bridge():
+    assert ids("**WATCH_NO_CHANGE**") == [] and ids("`WATCH_NO_CHANGE`") == []
+    many = rc.check("The fixes are built and merged into main via the usual flow today. 試験は300件すべて通りました。"
+                    "PR #9 をマージしました。確かめ役が見ました。終わったら知らせます。")
+    r = rc.reason(many)
+    assert len(r) <= 600 and r.startswith("[返事の点検] この後に書く文だけ")
+
+
+def test_codex_wrapper_reads_only_owner_words(tmp_path):
+    tr = tmp_path / "t.jsonl"
+    wrapped = "<runtime_system_context>担当 GitHub PR</runtime_system_context><user_request>どうなった？</user_request>"
+    tr.write_text(json.dumps({"type": "response_item", "payload": {"role": "user", "content": [{"type": "input_text", "text": wrapped}]}},
+                             ensure_ascii=False) + "\n", encoding="utf-8")
+    assert rc.owner_words(str(tr)) == "どうなった？"
+    assert "dev-flow" in ids("PR #9 をマージしました。", ask=rc.owner_words(str(tr)))

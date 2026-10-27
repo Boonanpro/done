@@ -65,7 +65,7 @@ RULES = [
 
 
 def check(reply: str, ask: str = "") -> list[dict]:
-    if (reply or "").strip() == QUIET:
+    if re.sub(r"[\s*`_~]", "", reply or "") == QUIET:   # 「**WATCH_NO_CHANGE**」なども画面には出ない印
         return []
     body = strip(reply)
     hits = []
@@ -107,8 +107,11 @@ def owner_words(path: str) -> str:
                         last = t
     except OSError:
         return ""
-    found = re.findall(r"<latest_user_message>(.*?)</latest_user_message>", last, flags=re.S)
-    return (found[-1] if found else last)[-4000:]
+    for tag in ("latest_user_message", "user_request"):   # ダンの包み紙（Claude・Codex）の中の本人の言葉だけ
+        found = re.findall(rf"<{tag}>(.*?)</{tag}>", last, flags=re.S)
+        if found:
+            return found[-1][-4000:]
+    return "" if "<runtime_system_context>" in last else last[-4000:]
 
 
 def last_text(path: str) -> str:
@@ -128,6 +131,14 @@ def last_text(path: str) -> str:
     except OSError:
         pass
     return text
+
+
+def reason(hits: list[dict]) -> str:
+    """止めた理由。Codex の橋渡しは理由を600字で切るので、いちばん大事な「全部をもう一度書く」を先に置き、短く保つ。"""
+    head = ("[返事の点検] この後に書く文だけがみきさんに届く。下の所を直した返事の全部を、前置きなしでもう一度書いて終えること"
+            "（WATCH_NO_CHANGE だけでよい場面なら、それだけ）。みきさんに言わない約束の書き方:\n")
+    lines = "\n".join(f"- {h['name']}「{h['at'][:30]}」: {h['fix'][:60]}" for h in hits[:3])
+    return (head + lines)[:590]
 
 
 def blocked_before(session: str, key: str) -> bool:
@@ -158,13 +169,7 @@ def main() -> int:
     session = str(payload.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:16])
     if blocked_before(session, hashlib.sha1(message.encode("utf-8")).hexdigest()[:16]):
         return 0
-    lines = "\n".join(f"- {h['name']}（「{h['at']}」）: {h['fix']}" for h in hits)
-    sys.stdout.write(json.dumps({"decision": "block", "reason": (
-        "[返事の点検] この返事には、みきさんに言わない約束の書き方が入っている（2026-10-25 本人「意味分からん難しい話を"
-        "長々されるのは困る」）。\n" + lines + "\n"
-        "この後に書く文だけがみきさんに届く返事になる。該当する所を直した返事の全部を、もう一度書いて終えること"
-        "（「直します」「書き直します」などの前置きは書かない。返事が WATCH_NO_CHANGE だけでよい場面なら、それだけを書く）。")},
-        ensure_ascii=False))
+    sys.stdout.write(json.dumps({"decision": "block", "reason": reason(hits)}, ensure_ascii=False))
     sys.stdout.flush()
     return 0
 
