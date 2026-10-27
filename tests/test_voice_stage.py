@@ -244,7 +244,7 @@ async def test_a_free_drawing_and_an_image_are_scenes_too(room, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_show_page_photographs_a_page_and_names_it_in_the_record(room, monkeypatch):
+async def test_show_page_opens_this_sites_page_live_and_photographs_a_page_elsewhere(room, monkeypatch):
     calls = []
     async def fake_capture(url, user_id, room_id):
         calls.append((url, user_id, room_id)); return '/api/v1/files/stage-x.png'
@@ -253,10 +253,23 @@ async def test_show_page_photographs_a_page_and_names_it_in_the_record(room, mon
     stage, _, log = make_stage(room, [])
     stage.user_id = 'u1'
     out = await stage.show_page(url='/artifacts/x-ops', note='X運用室の今の記事')
-    assert out['shown'] and out['url'] == 'https://dan.example/artifacts/x-ops' and calls == [('https://dan.example/artifacts/x-ops', 'u1', room)]
+    assert out['shown'] and out['url'] == '/preview/x-ops' and calls == []   # the page itself, not its photograph
     state = S.read_state(room)
-    assert state['image'] == '/api/v1/files/stage-x.png' and state['page_url'] == 'https://dan.example/artifacts/x-ops' and state['caption'] == 'X運用室の今の記事'
-    assert log[-1][0] == 'stage_page' and '[添付画像: /api/v1/files/stage-x.png]' in stage.summary() and 'https://dan.example/artifacts/x-ops' in stage.summary()
+    assert state['frame'] == '/preview/x-ops' and state['image'] == '' and state['caption'] == 'X運用室の今の記事'
+    assert log[-1][0] == 'stage_page' and log[-1][1]['live'] and '🖥 /preview/x-ops' in stage.summary()
+    out = await stage.show_page(url='https://example.com/a', note='よその記事')
+    assert out['shown'] and calls == [('https://example.com/a', 'u1', room)]
+    state = S.read_state(room)
+    assert state['frame'] == '' and state['image'] == '/api/v1/files/stage-x.png' and state['page_url'] == 'https://example.com/a'
+    assert '[添付画像: /api/v1/files/stage-x.png]' in stage.summary() and 'https://example.com/a' in stage.summary()
+
+
+def test_frame_path_takes_only_this_sites_screens(monkeypatch):
+    monkeypatch.setattr(S, 'screens_base', lambda: 'http://127.0.0.1:3000')
+    assert S.frame_path('http://127.0.0.1:3000/artifacts/x-operation') == '/preview/x-operation'
+    assert S.frame_path('https://dan.paina.info/preview/script-room?script=1') == '/preview/script-room?script=1'
+    assert S.frame_path('/preview/x-operation?article=a') == '/preview/x-operation?article=a'
+    assert S.frame_path('https://example.com/preview/x') == '' and S.frame_path('/api/v1/files/a.png') == '' and S.frame_path('/preview/../api') == ''
 
 
 @pytest.mark.asyncio
@@ -797,3 +810,109 @@ def test_the_read_back_of_a_document_names_it_and_asks():
     assert not S.mention_of_doc(doc, '記事の下書きを出しました')
     assert S.mention_of_doc(doc, 'これで投稿していいですか')   # the question with the document's word is enough (the document is on the screen)
     assert '投稿していいですか' in S.spoken_doc_summary(doc) and '@OYmpa7' in S.spoken_doc_summary(doc)
+
+
+class FakeAssisted(FakeDocs):
+    """A site with its own screen and editing assistant (the X room, the script room): the call hands it the owner's words;
+    its suggestions are laid on its page, approved there."""
+    def __init__(self):
+        super().__init__()
+        self.asked, self.states, self.pending = [], [], 0
+        self.spec = dict(self.spec, page=lambda uid, doc_id: '/preview/x-operation?article=row-' + doc_id + '&assistant=open',
+                         assist=self.assist, assist_state=self.assist_state)
+
+    async def assist(self, uid, doc_id, instruction):
+        self.asked.append(instruction)
+        return {'request_id': f'r{len(self.asked)}', 'queued': False}
+
+    def assist_state(self, uid, doc_id, request_id):
+        if not request_id: return {'state': 'done', 'pending': self.pending}
+        st = self.states.pop(0) if self.states else {'state': 'running'}
+        if 'pending' in st: self.pending = st['pending']
+        if st.get('body'): self.rows[doc_id]['body'] = st['body']
+        return dict(st, pending=self.pending)
+
+
+def make_assisted_stage(room, monkeypatch, answers=None):
+    from app.services import voice_stage_docs as D
+    fake = FakeAssisted()
+    monkeypatch.setattr(D, '_extra', {'x_article': fake.spec})
+    monkeypatch.setattr(S, 'ASSIST_POLL_S', .01)
+    spoken = []
+    async def speak(text): spoken.append(text)
+    stage, seen, log = make_stage(room, answers or [])
+    stage.user_id, stage.speak = 'owner-1', speak
+    return stage, fake, log, spoken
+
+
+async def settle(stage):
+    for _ in range(200):
+        if not stage._tasks: return
+        await asyncio.sleep(.01)
+
+
+@pytest.mark.asyncio
+async def test_a_document_of_a_site_with_an_assistant_opens_its_own_screen_and_the_assistant_writes_it(room, monkeypatch):
+    stage, fake, log, spoken = make_assisted_stage(room, monkeypatch)
+    fake.states = [{'state': 'running'}, {'state': 'done', 'changes': True, 'pending': 0, 'laid': False}, {'state': 'done', 'changes': True, 'pending': 5, 'body': '書いた本文'}]
+    out = await stage.draft_document('x_article', '声で書く', request='声だけで記事を書く話を、経営者向けに', account='OYmpa7')
+    assert out['shown'] and out['writing'] and fake.asked == ['声だけで記事を書く話を、経営者向けに']
+    assert fake.rows['d1']['body'] == ''   # the call wrote no text: the room's assistant does
+    state = S.read_state(room)
+    assert state['frame'] == state['doc']['page'] == '/preview/x-operation?article=row-d1&assistant=open'
+    assert state['command']['action'] == 'open-assistant' and state['doc']['assist']['state'] == 'running'
+    await settle(stage)
+    assert spoken == ['書きました。よければ「反映して」と言ってください。']   # said once the page had laid the suggestions
+    state = S.read_state(room)
+    assert state['doc']['assist']['pending'] == 5 and state['doc']['body'] == '書いた本文' and len(stage.scenes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_revision_goes_to_the_sites_assistant_and_approval_presses_the_pages_own_button(room, monkeypatch):
+    stage, fake, log, spoken = make_assisted_stage(room, monkeypatch)
+    fake.states = [{'state': 'done', 'changes': True, 'pending': 0}]
+    await stage.draft_document('x_article', '声で書く', request='記事を書いて')
+    await settle(stage); spoken.clear()
+    out = await stage.revise_document(body='自分で書き直した本文')
+    assert not out['revised'] and 'instruction' in out['reason'] and fake.asked == ['記事を書いて']
+    fake.states = [{'state': 'running'}, {'state': 'done', 'changes': True, 'pending': 2}]
+    out = await stage.revise_document(instruction='2段落目を短く')
+    assert out['revised'] == 'asked' and fake.asked[-1] == '2段落目を短く'
+    await settle(stage)
+    assert spoken == ['直しの案が出ました。よければ「反映して」と言ってください。']
+    # publishing waits for the suggestions to be decided
+    dan_says(stage, 'X に記事を投稿していいですか。'); owner_says(stage, 'いいよ')
+    out = await stage.publish_document()
+    assert not out['published'] and '反映していない直しの案が2件' in out['reason'] and fake.published == []
+    async def press():
+        await asyncio.sleep(.05); fake.pending = 0
+    monkeypatch.setattr(S, 'DECIDE_WAIT_S', 3.0)
+    asyncio.ensure_future(press())
+    out = await stage.decide_suggestions(accept=True)
+    assert out['decided'] and S.read_state(room)['command']['action'] == 'accept-all'
+    out = await stage.decide_suggestions(accept=True)
+    assert not out['decided'] and '無い' in out['reason']
+
+
+@pytest.mark.asyncio
+async def test_the_server_hands_the_owners_words_to_the_assistant_and_approves_by_voice(room, monkeypatch):
+    monkeypatch.setattr(S, 'FLOW_S', .01)
+    stage, fake, log, spoken = make_assisted_stage(room, monkeypatch, [
+        {'intent': 'revise', 'instruction': 'タイトルをもっと短くして'},
+        {'intent': 'accept'},
+    ])
+    fake.states = [{'state': 'done', 'changes': False, 'message': '書く内容を教えてください。'}]
+    await stage.draft_document('x_article', '声で書く', request='記事を書いて')
+    await settle(stage)
+    assert spoken == ['書く内容を教えてください。']   # the assistant's own answer, when it changed nothing
+    spoken.clear()
+    fake.states = [{'state': 'done', 'changes': True, 'pending': 1}]
+    owner_says(stage, 'タイトルをもっと短くして')
+    await stage.doc_flow(); await settle(stage)
+    assert fake.asked[-1] == 'タイトルをもっと短くして' and spoken == ['直しの案が出ました。よければ「反映して」と言ってください。']
+    async def press():
+        await asyncio.sleep(.05); fake.pending = 0
+    asyncio.ensure_future(press())
+    owner_says(stage, 'それでいい、反映して')
+    out = await stage.doc_flow()
+    assert out['decided'] and spoken[-1] == '反映しました。'

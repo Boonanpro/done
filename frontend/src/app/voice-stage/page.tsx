@@ -19,7 +19,7 @@ function Stage() {
     host?.postMessage(JSON.stringify({ type: 'stage', shown }));
   }, []);
   if (!room) return null;
-  return <VoiceStage roomId={room} active className="w-full" onShown={onShown} />;
+  return <VoiceStage roomId={room} active className="w-full" onShown={onShown} fill />;
 }
 
 export default function VoiceStagePage() {
