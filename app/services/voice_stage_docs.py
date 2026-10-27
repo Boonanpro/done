@@ -11,7 +11,18 @@ app/services/artifact_backends.py mounts), a `STAGE_DOCUMENTS` dict:
         'revise':  lambda user_id, doc_id, title, body: doc,
         'read':    lambda user_id, doc_id: doc,
         'publish': lambda user_id, doc_id: doc,     # optional; a kind without it is only written and revised here
+        'page':    lambda user_id, doc_id: '/preview/<slug>?…',   # optional: the site's own screen opened on that document
+        'assist':  lambda user_id, doc_id, instruction: {...},    # optional: the request handed to the site's own assistant
+        'assist_state': lambda user_id, doc_id, request_id: {...},  # optional: how that request stands
     }
+
+The owner on 2026-10-27: everything on the stage must be the real screen, and a revision must go through the site's own
+editing assistant (the X room's reads the X writing skill), not text the call rewrote by itself. A site with `page` is
+shown on the stage as that page (a frame of this site, signed in as the owner), and a site with `assist` gets the owner's
+words as they were said; its assistant writes and lays its suggestions on that screen, where the owner approves them
+(by a tap, or by voice: the stage passes the command to the page, which runs its own approve button). assist_state
+answers {'state': 'queued'|'running'|'done'|'error', 'message': the assistant's reply, 'changes': whether it changed the
+text, 'pending': suggestions on the screen not yet approved or refused}.
 
 A doc is a plain dict: {'id', 'kind', 'title', 'body', 'status': 'draft'|'publishing'|'published'|'failed', 'revision',
 'account', 'url', 'error'}. A function may be synchronous (it talks to the database; it runs in a thread) or a coroutine
@@ -60,6 +71,7 @@ def kinds():
     for kind, spec in providers().items():
         info = dict((spec.get('kinds') or {}).get(kind) or {})
         info['publishable'] = bool(spec.get('publish')) and bool(info.get('publish'))
+        info['assistant'] = bool(spec.get('assist'))
         out[kind] = info
     return out
 
@@ -109,3 +121,39 @@ async def publish(user_id, kind, doc_id):
     if not spec.get('publish'): raise LookupError(f'{kind} は通話からは公開できない（作る・直すまで）。')
     doc = await _call(spec['publish'], user_id, doc_id)
     return normal(doc, kind)
+
+
+def can_assist(kind):
+    spec = providers().get(kind)
+    return bool(spec and spec.get('assist') and spec.get('assist_state'))
+
+
+async def page(user_id, kind, doc_id):
+    """The path of the site's own screen showing the document ('' when the site has none)."""
+    spec = providers().get(kind)
+    if not spec or not spec.get('page'): return ''
+    path = str(await _call(spec['page'], user_id, doc_id) or '')
+    return path if path.startswith('/') and not path.startswith('//') else ''
+
+
+async def assist(user_id, kind, doc_id, instruction):
+    spec = _provider(kind)
+    if not spec.get('assist'): raise LookupError(f'{kind} には編集アシスタントが無い。')
+    return dict(await _call(spec['assist'], user_id, doc_id, instruction) or {})
+
+
+async def assist_state(user_id, kind, doc_id, request_id):
+    spec = _provider(kind)
+    if not spec.get('assist_state'): raise LookupError(f'{kind} には編集アシスタントが無い。')
+    out = dict(await _call(spec['assist_state'], user_id, doc_id, request_id) or {})
+    state = str(out.get('state') or 'queued')
+    return {'state': state if state in ('queued', 'running', 'done', 'error') else 'running', 'message': str(out.get('message') or ''),
+            'changes': bool(out.get('changes')), 'pending': int(out.get('pending') or 0), 'laid': bool(out.get('laid', True))}
+
+
+async def pending(user_id, kind, doc_id):
+    """Suggestions on the site's screen not yet decided (0 when the site has no assistant)."""
+    spec = providers().get(kind)
+    if not spec or not spec.get('assist_state'): return 0
+    out = await _call(spec['assist_state'], user_id, doc_id, '')
+    return int((out or {}).get('pending') or 0)
