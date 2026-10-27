@@ -111,3 +111,11 @@ def test_place_shot_expect_options_parse():
     out = subprocess.run([sys.executable, str(ROOT / 'scripts/place_shot.py'), 'x-operation', '--expect-shows', 'ない物'],
                          capture_output=True, text=True)
     assert out.returncode == 2 and '--expect-shows の名前は' in out.stderr
+
+
+def test_editing_only_the_map_after_the_fix_needs_no_new_shot(tmp_path):
+    """10-27 試し: 直して撮った後に MAP.md だけ直したら、撮り直しを求められた。"""
+    rows = [owner('番号が出てない'), *shot('before', 'NG', 'YES', tid='b'), EDIT, *SEEN, *shot('after', 'OK', 'NO', tid='a'),
+            claude_tool('Edit', {'file_path': LIVE + '/x-operation/MAP.md'}, 'mp'), *mapcheck(),
+            claude_text('直しました。' + PIC)]
+    assert run(tmp_path, rows) is None

@@ -496,6 +496,14 @@ def place_block(session: str, needs: dict) -> int | None:
 
 # --- 3. 不具合の知らせ ------------------------------------------------------------------------------------------
 
+def _app_code(rel: str) -> bool:
+    """画面やアプリのコードか。成果物の地図・説明・作った記録（MAP.md など）は数えない（10-27 試しで地図を直しただけで撮り直させた）。"""
+    m = ART_RE.match(rel)
+    if m and NOT_SCREEN_TAIL.match(m.group(2) or "/") and not (m.group(2) or "").startswith("/_server/"):
+        return False
+    return rel.startswith(CODE_DIRS)
+
+
 def bug_needs(events: list[tuple], message: str) -> dict | None:
     """このターンが不具合の知らせで、直した・直したと言ったのに足りない物 → {need: [...], places, edited}。足りていれば None。"""
     start = this_turn_start(events)
@@ -503,7 +511,7 @@ def bug_needs(events: list[tuple], message: str) -> dict | None:
         return None
     turn = list(enumerate(events))[start + 1:]
     edits = [(i, tree, rel) for i, ev in turn if ev[0] == "edit" for tree, rel in ev[1]]
-    screen = [(i, tree, rel) for i, tree, rel in edits if places_of(tree, rel) or rel.startswith(CODE_DIRS)]
+    screen = [(i, tree, rel) for i, tree, rel in edits if places_of(tree, rel) or _app_code(rel)]
     claimed = bool(FIX_CLAIM.search(message or ""))
     if not screen and not claimed:
         return None   # 答えただけ・調べただけ・画面と関係の無い直し

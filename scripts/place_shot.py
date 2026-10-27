@@ -223,7 +223,7 @@ EXPECT_JS = r"""
     try { els = [...document.querySelectorAll(sel)].filter((e) => !e.closest('#__place_probe')); } catch (e) { out.push({what: sel, ok: false, why: 'CSS が読めない: ' + e.message}); continue; }
     const vis = els.map(shown);
     const ok = vis.some((v) => v.ok);
-    out.push({what: sel, ok, why: ok ? '' : (els.length ? vis[0].why : '無い')});
+    out.push({what: sel, ok, absent: !els.length, why: ok ? '' : (els.length ? vis[0].why : '画面に無い')});
   }
   for (const t of texts) out.push({what: `「${t}」が出る`, ok: text.includes(t), why: text.includes(t) ? '' : '出ていない'});
   for (const t of noTexts) out.push({what: `「${t}」が出ない`, ok: !text.includes(t), why: text.includes(t) ? '出ている' : ''});
@@ -399,6 +399,9 @@ def main(argv=None) -> int:
             print(f"前と後: {c}")
     bad = any(checks.values())
     if expects:
+        if any(e.get("absent") for e in record["expect"]) and a.tag != "after":
+            print("注意: 探した部品がこの画面に1つも無い。みきさんが見ていた画面と違う所を開いていないか確かめる"
+                  "（記事を開いた後の画面なら --path でその道を渡す）。違う画面なら、この「再現した」は当てにならない。")
         if a.tag == "after":
             print("まだ直っていない（みきさんの言う崩れが残っている）" if record["repro"] == "YES" else "直った（みきさんの言う物が見えている）")
         else:
