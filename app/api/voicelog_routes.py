@@ -60,7 +60,7 @@ async def call_stage(room_id: str, request: Request, after: int = 0, wait: float
         state = voice_stage.read_state(room_id)
         if not state: state = {'room_id': room_id, 'version': 0, 'caption': '', 'program': '', 'at': None, 'active': False, 'scenes': 0}
         if int(state.get('version') or 0) > after or not state.get('active') or asyncio.get_running_loop().time() >= deadline:
-            return {k: state.get(k) for k in ('room_id', 'session_id', 'version', 'caption', 'program', 'html', 'image', 'page_url', 'card', 'at', 'active', 'scenes')}
+            return {k: state.get(k) for k in ('room_id', 'session_id', 'version', 'caption', 'program', 'html', 'image', 'page_url', 'card', 'doc', 'media', 'at', 'active', 'scenes')}
         await asyncio.sleep(.15)
 
 
@@ -155,7 +155,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
                     'transport': {'type': 'webrtc', 'sdp': body.sdp}})
         data = response.json()
         if response.status_code not in (200, 201) or not data.get('session', {}).get('id') or not data.get('transport', {}).get('sdp'):
-            logger.error('Live session rejected: status=%s request_id=%s', response.status_code, response.headers.get('x-request-id'))
+            logger.error('Live session rejected: status=%s request_id=%s detail=%s', response.status_code, response.headers.get('x-request-id'), str((data.get('error') or {}).get('message') or data)[:200])
             raise HTTPException(502, 'Live 1への接続に失敗しました')
         bind_session(pending_id, data['session']['id'])
         bound = True
