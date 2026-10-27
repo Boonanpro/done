@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 from contextlib import asynccontextmanager
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket
@@ -20,11 +21,19 @@ HOP = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
 SERVICE_PATHS = ('/internal/', '/api/v1/chat/internal/', '/api/v1/chat/feed')
 
 
+def upstream_client(**options):
+    # One client serves every visitor, so it must never keep cookies: httpx would store one
+    # visitor's Set-Cookie (their login) and send it with the next request that has no Cookie.
+    jar = CookieJar(DefaultCookiePolicy(allowed_domains=[]))
+    return httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10), trust_env=False,
+                             cookies=jar, **options)
+
+
 @asynccontextmanager
 async def lifespan(app):
     stop, changed = retirement.start()
     app.state.retire_changed = changed
-    async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10), trust_env=False) as client:
+    async with upstream_client() as client:
         app.state.client = client
         try: yield
         finally: stop()
