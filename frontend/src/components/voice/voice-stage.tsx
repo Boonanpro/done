@@ -423,7 +423,7 @@ export function StageDocStatus({ doc }: { doc: StageDoc }) {
   const status = doc.status === 'published' ? { text: '投稿しました', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
     : doc.status === 'publishing' ? { text: '投稿しています', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' }
     : doc.status === 'failed' ? { text: '投稿できませんでした', cls: 'bg-red-500/15 text-red-300 border-red-500/30' }
-    : a && (a.state === 'running' || a.state === 'queued') ? { text: 'アシスタントが直しています', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' }
+    : a && (a.state === 'running' || a.state === 'queued') ? { text: doc.body ? 'アシスタントが直しています' : 'アシスタントが書いています', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' }
     : a && a.pending ? { text: `直しの案 ${a.pending}件`, cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' }
     : { text: '下書き', cls: 'bg-neutral-500/15 text-neutral-300 border-neutral-500/30' };
   return (
