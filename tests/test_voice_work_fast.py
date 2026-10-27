@@ -53,9 +53,10 @@ async def test_rejected_work_never_says_started(monkeypatch):
     assert out['accepted'] is False and 'error' in out
     assert '作業は始まった' not in str(out)
 
-def test_models_unchanged_and_batch_in_assembled_delegation(monkeypatch):
+def test_selected_model_effort_and_batch_in_assembled_delegation(monkeypatch):
     monkeypatch.setattr(R, 'remembered', lambda: '')
     monkeypatch.setattr(R, 'catalog', lambda: '')
     config = R.delegation()['responses']
-    assert config['model'] == 'gpt-5.6-terra'
+    assert config['model'] == 'gpt-6.1-terra'
+    assert config['reasoning'] == {'effort': 'medium'}
     assert any(t['name'] == 'read_many' for t in config['tools'])
