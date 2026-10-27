@@ -6,3 +6,9 @@ node_modules/
 *.tsbuildinfo
 .env*
 certificates/
+# A Windows path (D:\..., D:/...) used on the Mac makes a folder literally
+# named "D:" (or one with backslashes in its name) under the working folder.
+# Such names cannot be deployed: on 2026-10-27 a stray "D:" folder failed
+# every artifact deploy at "Deploying outputs". Never upload them.
+*:*
+*\\*
