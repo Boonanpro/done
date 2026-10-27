@@ -11,6 +11,7 @@ export const voiceCallStyles = StyleSheet.create({
   controls:{flexDirection:'row',justifyContent:'center',gap:28},
   controlItem:{alignItems:'center',gap:10},
   controlButton:{width:64,height:64,borderRadius:32,backgroundColor:'#292d2c',alignItems:'center',justifyContent:'center'},
+  controlButtonSmall:{width:48,height:48,borderRadius:24},
   controlLabel:{fontSize:13,color:'#c3ccc6'}, backgroundHint:{color:'#949e98',fontSize:12,textAlign:'center',marginTop:28},
   // 全画面表示（後ろのチャットは見せない）
   backdrop: { flex: 1, backgroundColor: '#0d0c10' },

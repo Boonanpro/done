@@ -75,7 +75,7 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
   const [muted, setMuted] = useState(false);
   const [audioRoute, setAudioRoute] = useState('');
   // The call's stage (the caption and the scene the server draws while Dan talks): the web page /voice-stage, which
-  // the PC panel also draws. It tells us when a scene is showing, and gets the room above the orb only then.
+  // the PC panel also draws. It tells us when a scene is showing, and gets the screen in place of the orb only then.
   const [stageShown, setStageShown] = useState(false);
   const availableRoutes = useRef<string[]>([]);
   const routeBusy = useRef(false);
@@ -641,20 +641,24 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onMinimize || (() => finishRef.current())} statusBarTranslucent>
       <View style={vstyles.backdrop}>
-        <View style={[vstyles.panel,{paddingTop:insets.top+12,paddingBottom:insets.bottom+24}]}>
-          <View style={vstyles.header}>
+        {/* a scene or an artifact's own screen on the stage: it gets the whole screen, the orb gives way to a dot in the
+            header that still shows the voices, and the buttons shrink to one short row (2026-10-27, the owner: the orb
+            gets in the way of a real screen) */}
+        <View style={[vstyles.panel,stageShown ? {paddingHorizontal:6,paddingTop:insets.top+2,paddingBottom:insets.bottom+8} : {paddingTop:insets.top+12,paddingBottom:insets.bottom+24}]}>
+          <View style={[vstyles.header,stageShown && {height:40}]}>
             <Pressable accessibilityRole="button" accessibilityLabel={ui("Minimize call","通話を続けたまま小さくする")} onPress={onMinimize} style={vstyles.headerButton}>
               <Ionicons name="chevron-down" size={26} color="#d9d2c8" />
             </Pressable>
-            <View accessibilityLabel={label} accessibilityRole="text">
+            <View accessibilityLabel={label} accessibilityRole="text" style={{flexDirection:'row',alignItems:'center',gap:10}}>
               {status === 'connecting' || status === 'ending' ? <ActivityIndicator size="small" color="#c7d1cc"/> :
                 <Ionicons name={status === 'error' ? 'alert-circle-outline' : 'call'} size={16} color={status === 'error' ? '#ffaaaa' : '#9de5ca'}/>}
+              {stageShown && <Animated.View style={{width:10,height:10,borderRadius:5,backgroundColor:'#bcd7fa',opacity:cloudOpacity,transform:[{scale:orbScale}]}}/>}
             </View>
             <Text style={vstyles.timer}>{status === 'connected' || status === 'ending' ? duration : '—:—'}</Text>
           </View>
           <View style={vstyles.centerArea}>
             {status === 'connected' && !!token && (
-              <View style={stageShown ? {width:'100%',flex:1,marginBottom:8,borderRadius:16,overflow:'hidden'} : {width:'100%',height:1,opacity:0}} accessibilityElementsHidden={!stageShown}>
+              <View style={stageShown ? {width:'100%',flex:1,marginBottom:4,borderRadius:12,overflow:'hidden'} : {width:'100%',height:1,opacity:0}} accessibilityElementsHidden={!stageShown}>
                 <WebView
                   source={{uri:`${apiBase}/voice-stage?room=${encodeURIComponent(roomId)}`}}
                   injectedJavaScriptBeforeContentLoaded={`try{localStorage.setItem('done-token',${JSON.stringify(token)});}catch(e){} true;`}
@@ -666,22 +670,19 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             )}
             {!stageShown && <Text style={vstyles.callTitle}>{"Done"}</Text>}
             {!stageShown && !!chatTitle && chatTitle !== 'Done' && <Text style={vstyles.roomTitle} numberOfLines={2}>{chatTitle}</Text>}
-            {/* a scene on the stage: the orb shrinks to a third so the scene has the screen (2026-10-26) */}
-            <View style={stageShown ? {height:76,justifyContent:'center',transform:[{scale:0.3}]} : null}>
-              <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>
-            </View>
+            {!stageShown && <VoiceOrb muted={muted} scale={orbScale} opacity={cloudOpacity} spin={spin} spinRev={spinRev}/>}
             {status === 'connected' && !!currentActivity && <ShimmerLine text={currentActivity.length > 52 ? currentActivity.slice(0, 51) + '…' : currentActivity} color={currentActivity.startsWith('Stopped') ? '#e5534b' : '#a49d92'} />}
             {status === 'error' && <Text style={vstyles.statusText}>{error}</Text>}
             {status === 'error' && <Pressable accessibilityRole="button" style={vstyles.retryButton} onPress={() => void connect()}><Text style={vstyles.retryText}>{ui("Reconnect","再接続")}</Text></Pressable>}
           </View>
-          <View style={vstyles.controls}>
-            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={speakerOn ? ui("Turn speaker off","スピーカーをオフ") : ui("Turn speaker on","スピーカーをオン")} accessibilityState={{selected:speakerOn,disabled:status !== 'connected'}} disabled={status !== 'connected'} onPress={() => void toggleSpeaker()} style={[vstyles.controlButton,speakerOn && {backgroundColor:'#e4e9e5'},status !== 'connected' && {opacity:0.4}]}>
+          <View style={[vstyles.controls,stageShown && {gap:36,paddingTop:2}]}>
+            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={speakerOn ? ui("Turn speaker off","スピーカーをオフ") : ui("Turn speaker on","スピーカーをオン")} accessibilityState={{selected:speakerOn,disabled:status !== 'connected'}} disabled={status !== 'connected'} onPress={() => void toggleSpeaker()} style={[vstyles.controlButton,stageShown && vstyles.controlButtonSmall,speakerOn && {backgroundColor:'#e4e9e5'},status !== 'connected' && {opacity:0.4}]}>
               <Ionicons name={speakerOn ? 'volume-high' : ['BLUETOOTH','WIRED_HEADSET'].includes(audioRoute) ? 'headset-outline' : 'ear-outline'} size={26} color={speakerOn ? '#15251f' : '#e4e9e5'} />
             </Pressable></View>
-            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={muted ? ui("Unmute","ミュート解除") : ui("Mute microphone","マイクをミュート")} accessibilityState={{selected:muted}} onPress={toggleMute} style={[vstyles.controlButton,muted && {backgroundColor:'#e4e9e5'}]}>
+            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={muted ? ui("Unmute","ミュート解除") : ui("Mute microphone","マイクをミュート")} accessibilityState={{selected:muted}} onPress={toggleMute} style={[vstyles.controlButton,stageShown && vstyles.controlButtonSmall,muted && {backgroundColor:'#e4e9e5'}]}>
               <Ionicons name={muted ? 'mic-off' : 'mic'} size={26} color={muted ? '#15251f' : '#e4e9e5'} />
             </Pressable></View>
-            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={ui("End call","通話を終了")} onPress={() => finishRef.current()} disabled={status === 'ending'} style={[vstyles.controlButton,{backgroundColor:'#b74d4d'}]}>
+            <View style={vstyles.controlItem}><Pressable accessibilityRole="button" accessibilityLabel={ui("End call","通話を終了")} onPress={() => finishRef.current()} disabled={status === 'ending'} style={[vstyles.controlButton,stageShown && vstyles.controlButtonSmall,{backgroundColor:'#b74d4d'}]}>
               <Ionicons name="call" size={27} color="#fff" style={{transform:[{rotate:'135deg'}]}} />
             </Pressable></View>
           </View>
