@@ -302,9 +302,10 @@ async def summon_feed(send, user_id, record):
         for s in due:
             await asyncio.to_thread(owner_summon.mark_spoken, s['id'])
             await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
-                        'content': '今すぐ本人にしてもらう必要があること（ダンが本人を呼んだ理由）:' + chr(10) + s['reason']})
+                        'content': '電話の相手に今すぐしてもらう必要があること（ダンが呼び出した用件）:' + chr(10) + s['reason']})
             await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
-                        'content': '本人を呼んだ理由を、今すぐ短く伝える。番号や金額は全部の桁をはっきり言う。'})
+                        'content': ('呼び出した用件を、前置きなしで今すぐ短く伝える（「本人」「呼んだ理由」とは言わない）。'
+                                    '番号や金額は全部の桁をはっきり言う。')})
             record('summon_spoken', summon_id=s['id'][:8])
         await asyncio.sleep(1)
 
