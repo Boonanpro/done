@@ -57,6 +57,8 @@ def change(job_id, fn):
             except PermissionError:
                 if time.monotonic()>=deadline:raise
                 time.sleep(.01)
+        from app.services.restart_signal import notify
+        notify()
         return state
 
 def event(state, kind, text, label=None):

@@ -76,6 +76,12 @@ async def dispatch_pending():
 
 def dispatch(row):
     job_id = row['id']
+    from app.services.restart_signal import draining
+    saved = state.read(job_id)
+    if saved and saved.get('queue_owner') == 'core' and draining():
+        # Already durable: dispatch_pending will pick it up after the hold.
+        # Existing tasks keep running; never cancel work to make room.
+        return _tasks.get(job_id)
     if job_id not in _tasks or _tasks[job_id].done():
         _tasks[job_id] = asyncio.create_task(run(row))
     return _tasks[job_id]

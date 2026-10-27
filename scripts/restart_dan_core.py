@@ -141,7 +141,7 @@ def work_in_progress():
 QUIET = 120
 
 
-WAIT = 30 * 60        # a restart Dan asked for waits this long for everyone to finish
+WAIT = 5 * 60        # a restart Dan asked for waits this long for everyone to finish
 BACK_UP = 5 * 60      # and this long for the core and sandbox to answer again
 WATCHDOG = r'\DanStackWatchdog'
 LAUNCHD_JOB = 'com.dan.core'
@@ -247,27 +247,46 @@ def restart_when_idle(room, then, asked):
 
 def _restart_when_idle(room, then, asked):
     after = '続けて確かめること: ' + then if then else ''
-    deadline = time.time() + WAIT
-    while True:
-        reason = busy() or earlier_restart()
-        if not reason:
-            break
-        if time.time() > deadline:
-            return wake(room, f'本体の再起動を{WAIT // 60}分待ったが、使用中が続いたので再起動していない（{reason}）。')
-        time.sleep(10)
-    if core_started_at() > asked:   # someone restarted it while this waited
-        return wake(room, '本体は頼んだ後に別の再起動で新しくなっていたので、もう一度は止めていない。動作確認: ' + verify() + '。' + after)
-    followed, github = follow_github()
-    folder = chr(10) + ('フォルダと GitHub: ' if followed else 'フォルダを GitHub に追いつかせられなかった（フォルダは変えていない）: ') + github
-    problem = loads()
-    if problem:
-        return wake(room, '本体を再起動していない。いまのコードが読み込めないため、止めると起き上がれない:' + chr(10) + problem + folder)
-    if not stop():
-        return wake(room, '本体を止めきれなかった（9000 / 8000 番が空かない）。再起動は終わっていない。')
-    at = time.strftime('%H:%M')
-    if not start():
-        return wake(room, f'本体を {at} に止めたが、{BACK_UP // 60}分たっても起き上がらなかった。dan_core.log の末尾を見る。')
-    wake(room, f'本体を {at} に再起動した。動作確認: ' + verify() + '。' + after + folder)
+    from app.services.restart_signal import waiting, wait
+    # Keep the hold through preflight and the actual switch; release before the
+    # verification job, which needs the normal dispatch path.
+    deadline = time.monotonic() + WAIT
+    # A later helper must not hold the earlier helper's verification job.
+    while earlier_restart():
+        if time.monotonic() >= deadline:
+            return wake(room, '先に頼まれた再起動が続いているため、この重複した待機を終了した。自動再予約はしない。')
+        time.sleep(1)
+    with waiting(WAIT + BACK_UP + 120) as signal:
+        folder = ''
+        prepared = False
+        while True:
+            reason = busy() or earlier_restart()
+            if not reason:
+                if core_started_at() > asked:
+                    note = '本体は頼んだ後に別の再起動で新しくなっていたので、もう一度は止めていない。'
+                    break
+                if not prepared:
+                    followed, github = follow_github()
+                    folder = chr(10) + ('フォルダと GitHub: ' if followed else 'フォルダを GitHub に追いつかせられなかった: ') + github
+                    problem = loads()
+                    if problem:
+                        return wake(room, '本体を再起動していない。コードが読み込めない:' + chr(10) + problem + folder)
+                    prepared = True
+                    # Work may have started during preflight. Recheck before stop.
+                    continue
+                if not stop():
+                    return wake(room, '本体を止めきれなかった（9000 / 8000 番が空かない）。再起動は終わっていない。')
+                at = time.strftime('%H:%M')
+                if not start():
+                    return wake(room, f'本体を {at} に止めたが、{BACK_UP // 60}分たっても起き上がらなかった。dan_core.log の末尾を見る。')
+                note = f'本体を {at} に再起動した。'
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return wake(room, f'本体の再起動は{WAIT // 60}分で待機を終了した。作業は止めていない（{reason}）。'
+                            '同じ待機や確認の自動再予約はしない。阻害している作業を調べ、安全な対応を判断する。')
+            wait(signal, min(30, remaining))
+    wake(room, note + '動作確認: ' + verify() + '。' + after + folder)
 
 
 def hand_over(room, then):
@@ -382,6 +401,10 @@ def stop():
         if pr.pid not in seen:
             seen.add(pr.pid)
             uniq.append(pr)
+    if '--force' not in sys.argv:
+        reason = busy()
+        if reason:
+            raise RuntimeError('再起動直前に作業が始まったため、中止した: ' + reason)
     print("terminating PIDs:", sorted(p.pid for p in uniq))
     for pr in uniq:
         try:

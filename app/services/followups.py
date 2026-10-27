@@ -387,6 +387,9 @@ def claim_due_followups(limit: int = 5) -> List[Dict[str, Any]]:
     to 'firing' so a later poll cycle won't double-fire them. Returns the claimed
     rows. (Single-poller design, so a select-then-update race is not a concern.)
     """
+    from app.services.restart_signal import draining
+    if draining():
+        return []  # Leave due watches pending until the restart attempt ends.
     sb = _sb()
     now = datetime.now(timezone.utc).isoformat()
 
