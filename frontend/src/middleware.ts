@@ -271,15 +271,17 @@ export async function middleware(request: NextRequest) {
   if (pathname.startsWith('/artifacts/')) {
     const segments = pathname.split('/').filter(Boolean);
     const slug = segments[1];
-    if (slug && PUBLIC_ARTIFACT_SLUGS.has(slug)) {
-      return markNoIndex(NextResponse.next());
-    }
-
+    const isPublic = Boolean(slug && PUBLIC_ARTIFACT_SLUGS.has(slug));
     const token = request.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
-    if (!token) {
+    if (!isPublic && !token) {
       const loginUrl = new URL('/login', request.url);
       loginUrl.searchParams.set('redirect', pathname);
       return NextResponse.redirect(loginUrl);
+    }
+    // 全画面（/artifacts/<slug>）も成果物タブと同じくファイルそのものを見せる。
+    // ビルドの写しのままだと、直した後もここだけ古い画面が出る（10/28 本人「全画面ではまだ送るのまま」）。
+    if (slug && await livePreviewAvailable()) {
+      return markNoIndex(rewriteToLive(request));
     }
     return markNoIndex(NextResponse.next());
   }
