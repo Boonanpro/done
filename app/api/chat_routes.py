@@ -3862,12 +3862,81 @@ async def _active_session_status(session_id: str) -> dict:
     except Exception:
         pass
 
+    # The turn may run in another Core than the one answering here (the send went to one, this question came through the
+    # gateway to another): none of the memory above knows it, and the screen showed nothing of work that went on for
+    # minutes (2026-10-28, 22:58). The record in the database is shared, so it decides then.
+    try:
+        recorded = await _active_from_record(session_id, active_run)
+    except Exception:
+        logger.debug("active: record check failed (room=%s)", session_id[:8], exc_info=True)
+        recorded = None
+    if recorded:
+        return {
+            "active": True,
+            "session_id": session_id,
+            "started_at": recorded["started_at"],
+            "origin_message_id": origin_message_id,
+        }
+
     return {
         "active": False,
         "session_id": session_id,
         "started_at": None,
         "origin_message_id": None,
     }
+
+
+# A turn records a step every few seconds and at most about a hundred apart (one long command); a room whose latest step is
+# older than this has no turn running, whatever the run's state says (a run left behind by a dead process stays "running").
+RECORD_ACTIVE_WINDOW = 180
+
+
+def _latest_room_events(room_id: str, limit: int = 10) -> list[dict]:
+    return (ChatService().supabase.table("execution_events").select("run_id,event_type,content,created_at")
+            .eq("room_id", room_id).order("seq", desc=True).limit(limit).execute().data or [])
+
+
+def _runs_by_id(run_ids: list[str]) -> dict[str, dict]:
+    if not run_ids:
+        return {}
+    rows = (ChatService().supabase.table("agent_runs").select("id,state,created_at,metadata")
+            .in_("id", run_ids).execute().data or [])
+    return {r["id"]: r for r in rows}
+
+
+def _seconds_ago(stamp) -> float:
+    try:
+        at = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return float("inf")
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - at).total_seconds()
+
+
+async def _active_from_record(room_id: str, active_run: Optional[dict]) -> Optional[dict]:
+    """Is a chat turn running in this room, by the shared record? {"started_at": …} or None.
+
+    - A step of the chat's own work (not a job handed to command_center) within RECORD_ACTIVE_WINDOW, not a "done": running.
+      The run's state is not asked: a run is set "paused" when its send request ends while the work goes on.
+    - A chat run started within the window that has no "done" yet: running (the gap before its first step, and the
+      new turn after a message stopped the previous one with a "cancelled" done).
+    - A "cancelled" done with no newer run: stopped by the owner (Esc), not running.
+    """
+    from app.services.run_service import background
+
+    events = await asyncio.to_thread(_latest_room_events, room_id)
+    runs = await asyncio.to_thread(_runs_by_id, sorted({e["run_id"] for e in events if e.get("run_id")}))
+    chat_events = [e for e in events if not (e.get("run_id") in runs and background(runs[e["run_id"]]))]
+    latest = chat_events[0] if chat_events else None
+    if latest and latest.get("event_type") != "done" and _seconds_ago(latest.get("created_at")) <= RECORD_ACTIVE_WINDOW:
+        run = runs.get(latest.get("run_id")) or {}
+        return {"started_at": run.get("created_at") or (active_run or {}).get("created_at")}
+    if active_run and not background(active_run) and _seconds_ago(active_run.get("created_at")) <= RECORD_ACTIVE_WINDOW:
+        ended = any(e.get("run_id") == active_run.get("id") and e.get("event_type") == "done" for e in chat_events)
+        if not ended:
+            return {"started_at": active_run.get("created_at")}
+    return None
 
 
 @router.post("/dan/cancel")

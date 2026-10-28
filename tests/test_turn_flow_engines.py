@@ -278,3 +278,47 @@ def test_the_answer_and_the_end_of_the_turn_reach_the_screens_together(monkeypat
     first, second = asyncio.run(scenario())
     assert first['message']['id'] == 'm1' and first['turn_end'] == {'run_id': RUN, 'at': 1.0}
     assert 'turn_end' not in second
+
+
+def _ago(seconds):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+@pytest.mark.parametrize("events, runs, current_run, expected", [
+    # the turn runs in another Core: this one remembers nothing, the record has a step a minute ago
+    ([{"run_id": "r1", "event_type": "tool_use", "content": None, "created_at": _ago(60)}],
+     {"r1": {"id": "r1", "state": "paused", "created_at": _ago(300), "metadata": {}}}, None, True),
+    # the turn ended
+    ([{"run_id": "r1", "event_type": "done", "content": "completed", "created_at": _ago(5)},
+      {"run_id": "r1", "event_type": "tool_use", "content": None, "created_at": _ago(8)}],
+     {"r1": {"id": "r1", "state": "completed", "created_at": _ago(300), "metadata": {}}}, None, False),
+    # the last step is ten minutes old: nothing runs, whatever the run says
+    ([{"run_id": "r1", "event_type": "tool_use", "content": None, "created_at": _ago(600)}],
+     {"r1": {"id": "r1", "state": "running", "created_at": _ago(900), "metadata": {}}},
+     {"id": "r1", "state": "running", "created_at": _ago(900), "metadata": {}}, False),
+    # a message stopped the turn ("cancelled" done) and its own turn has started, before its first step
+    ([{"run_id": "r1", "event_type": "done", "content": "cancelled", "created_at": _ago(3)}],
+     {"r1": {"id": "r1", "state": "paused", "created_at": _ago(200), "metadata": {}}},
+     {"id": "r2", "state": "running", "created_at": _ago(2), "metadata": {}}, True),
+    # the owner stopped it (Esc): a "cancelled" done and no newer turn
+    ([{"run_id": "r1", "event_type": "done", "content": "cancelled", "created_at": _ago(3)}],
+     {"r1": {"id": "r1", "state": "paused", "created_at": _ago(200), "metadata": {}}}, None, False),
+    # a job handed to command_center works in the room: not the chat's turn
+    ([{"run_id": "j1", "event_type": "tool_use", "content": None, "created_at": _ago(10)}],
+     {"j1": {"id": "j1", "state": "running", "created_at": _ago(30), "metadata": {"started_by": "command_center"}}},
+     None, False),
+])
+def test_a_turn_running_in_another_core_shows_from_the_record(monkeypatch, events, runs, current_run, expected):
+    """2026-10-28 22:58: the send went to one Core, the screen asked another through the gateway; it said "not working"
+    and the screen showed nothing for eight minutes of work."""
+    import asyncio
+    from app.api import chat_routes
+    monkeypatch.setattr('app.services.run_service.RunService.get_current_run_for_room',
+                        lambda self, room, chat_only=False: asyncio.sleep(0, result=current_run))
+    monkeypatch.setattr(chat_routes, '_latest_room_events', lambda room, limit=10: events)
+    monkeypatch.setattr(chat_routes, '_runs_by_id', lambda ids: {i: runs[i] for i in ids if i in runs})
+    status = asyncio.run(chat_routes._active_session_status(ROOM))
+    assert status["active"] is expected
+    if expected:
+        assert status["started_at"]
