@@ -6,7 +6,13 @@ declare module 'next-pwa' {
     register?: boolean;
     skipWaiting?: boolean;
     disable?: boolean;
+    runtimeCaching?: import('workbox-build').RuntimeCaching[];
   }
 
   export default function withPWA(config: PWAConfig): (nextConfig: NextConfig) => NextConfig;
+}
+
+declare module 'next-pwa/cache' {
+  const caching: import('workbox-build').RuntimeCaching[];
+  export default caching;
 }

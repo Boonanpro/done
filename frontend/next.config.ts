@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 
 import type { NextConfig } from 'next';
 import withPWA from 'next-pwa';
+import defaultRuntimeCaching from 'next-pwa/cache';
 
 import { CUSTOM_DOMAIN_REWRITES } from './src/lib/custom-domain-rewrites.generated';
 import { startLiveVersionWatcher } from './src/lib/live-version/server';
@@ -291,6 +292,13 @@ const withPwa = withPWA({
   dest: 'public',
   register: true,
   skipWaiting: true,
+  runtimeCaching: [
+    // A cached API response can replace newer, identity-scoped offline history
+    // with an older page. The chat owns that fallback in IndexedDB.
+    { urlPattern: /^https?:\/\/[^/]+\/api\/v1\/collab\/(?!files\/)/,
+      handler: 'NetworkOnly', method: 'GET' },
+    ...defaultRuntimeCaching,
+  ],
   disable: process.env.NODE_ENV === 'development',
 });
 
