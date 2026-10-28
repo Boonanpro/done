@@ -33,6 +33,10 @@ async def get_vapid_key():
 
 
 async def _subscription_identity(req: SubscribeRequest, request: Request):
+    """購読者の (通知タップで開くURL, 身元) を認証から決める。
+
+    身元はゲストなら本人の招待ID（発言の metadata.sender_id と同じ）。オーナーは
+    部屋に1人なので None（種類で区別できる）。"""
     from app.api.collab_routes import _room_access, get_collab_service, decode_access_token, ACCESS_TOKEN_COOKIE
     token = request.headers.get('Authorization', '').removeprefix('Bearer ')
     credentials = HTTPAuthorizationCredentials(scheme='Bearer', credentials=token) if token else None
@@ -40,26 +44,27 @@ async def _subscription_identity(req: SubscribeRequest, request: Request):
         owner = decode_access_token(request.cookies.get(ACCESS_TOKEN_COOKIE) or token)
         if not owner or req.room_id != f'user:{owner.user_id}' or req.sender_type != 'owner':
             raise HTTPException(status_code=403, detail='Access denied')
-        return '/chat'
+        return '/chat', None
     service = get_collab_service()
     access = await _room_access(request, credentials, service, req.room_id)
     if access is None or req.sender_type != ('owner' if access[0] else 'guest'):
         raise HTTPException(status_code=403, detail='Access denied')
     if access[0]:
-        return f'/collab/{req.room_id}'
+        return f'/collab/{req.room_id}', None
     invites = await service.list_invites(req.room_id)
     mine = next((i for i in invites if i['id'] == access[1]), None)
     if not mine:
         raise HTTPException(status_code=403, detail='Identity not found')
-    return f"/collab/join/{mine['token']}"
+    return f"/collab/join/{mine['token']}", access[1]
 
 
 @router.post("/subscribe")
 async def subscribe(req: SubscribeRequest, request: Request):
     """Save a push subscription."""
     svc = get_push_service()
-    landing = await _subscription_identity(req, request)
-    await svc.save_subscription(req.room_id, req.sender_type, req.subscription, landing_url=landing)
+    landing, sender_id = await _subscription_identity(req, request)
+    await svc.save_subscription(req.room_id, req.sender_type, req.subscription,
+                                landing_url=landing, sender_id=sender_id)
     return {"success": True}
 
 
