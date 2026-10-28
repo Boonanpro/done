@@ -77,6 +77,7 @@ export default function GuestJoinPage() {
   const loadingOlderRef = useRef(false);
   const noMoreOlderRef = useRef(false);
   const messagesRef = useRef<CollabMessageResponse[]>([]);
+  const [newCount, setNewCount] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -229,7 +230,7 @@ export default function GuestJoinPage() {
       let received = false;
       void get<CollabMessageResponse[]>(`collab-history:${inviteToken}`).then(cached => { if (!received && cached) setMessages(cached); });
       api.collab.getMessages(roomId, 50, guestToken).then((data) => {
-        received = true; setMessages(prev => mergeLatest(prev, data.messages));
+        received = true; setMessages(data.messages);
       }).catch(() => {});
     }
   }, [roomId, guestToken]);
@@ -266,6 +267,7 @@ export default function GuestJoinPage() {
   // 楽観表示の仮バブル（client_msg_id）と同一なら追加ではなく差し替え（二重表示防止）
   const handleNewMessage = useCallback((msg: CollabMessageResponse) => {
     if (msg.sender_type === 'dan_guest') setDanThinking(false);
+    if (!atBottomRef.current && !messagesRef.current.some(m => m.id === msg.id)) setNewCount(n => n + 1);
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
       const cid = (msg.metadata as { client_msg_id?: string } | undefined)?.client_msg_id;
@@ -328,7 +330,7 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken, isConnected]);
 
   // Push notifications
-  const { subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest');
+  const { subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest', guestToken);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -347,10 +349,10 @@ export default function GuestJoinPage() {
 
   // 過去を読み足す（上端に近づいた時）。読んだ分だけ下へずらして、見ていた行を動かさない
   const loadOlder = useCallback(async () => {
-    if (!roomId || !guestToken) return;
-    if (loadingOlderRef.current || noMoreOlderRef.current) return;
+    if (!roomId || !guestToken) return false;
+    if (loadingOlderRef.current || noMoreOlderRef.current) return false;
     const oldest = messagesRef.current.find((m) => !m.id.startsWith('temp-'));
-    if (!oldest) return;
+    if (!oldest) return false;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     const el = scrollRef.current;
@@ -360,15 +362,19 @@ export default function GuestJoinPage() {
       const data = await api.collab.getMessages(roomId, 50, guestToken, oldest.created_at);
       if (data.messages.length === 0) {
         noMoreOlderRef.current = true;
-        return;
+        return false;
       }
-      setMessages((prev) => mergeOlder(prev, data.messages));
+      const merged = mergeOlder(messagesRef.current, data.messages);
+      if (merged === messagesRef.current) return false;
+      messagesRef.current = merged;
+      setMessages(merged);
       requestAnimationFrame(() => {
         const cur = scrollRef.current;
         if (cur) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
       });
+      return true;
     } catch {
-      // 失敗時は次のスクロールで再試行
+      return false; // 失敗時は次のスクロールで再試行
     } finally {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
@@ -378,6 +384,7 @@ export default function GuestJoinPage() {
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     atBottomRef.current = isAtBottom(el);
+    if (atBottomRef.current) setNewCount(0);
     if (isNearTop(el)) void loadOlder();
   }, [loadOlder]);
 
@@ -387,7 +394,37 @@ export default function GuestJoinPage() {
     if (!atBottomRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, outbox.entries]);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el?.firstElementChild) return;
+    const observer = new ResizeObserver(() => { if (atBottomRef.current) el.scrollTop = el.scrollHeight; });
+    observer.observe(el.firstElementChild); observer.observe(el);
+    return () => observer.disconnect();
+  }, [roomId, guestToken]);
+
+  const [jumping, setJumping] = useState(false);
+  const jumpCancelled = useRef(false);
+  useEffect(() => () => { jumpCancelled.current = true; }, []);
+  const jumpToMessage = useCallback(async (id: string) => {
+    if (jumping) return;
+    const find = () => document.querySelector<HTMLElement>(`[data-collab-msg-id="${CSS.escape(id)}"]`);
+    atBottomRef.current = false;
+    jumpCancelled.current = false;
+    setJumping(true);
+    try {
+      while (!find() && !jumpCancelled.current) {
+        if (!await loadOlder()) break;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      if (jumpCancelled.current) return;
+      const el = find();
+      if (!el) { toast.error('引用元を読み込めませんでした。接続を確認してもう一度お試しください'); return; }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
+    } finally { setJumping(false); }
+  }, [jumping, loadOlder]);
 
   // Join room
   const handleJoin = async () => {
@@ -575,6 +612,7 @@ export default function GuestJoinPage() {
         ><Bell className="h-4 w-4" />{pushError ? "通知を登録できませんでした。押して再試行" : "新着メッセージの通知をオンにする"}</button>
       )}
       {!online && <div role="status" className="px-4 py-2 text-xs bg-amber-500/15">オフラインです。書きかけの文章は保存されています。</div>}
+      {jumping && <div role="status" className="px-4 py-2 text-xs bg-muted">引用元を読み込んでいます… <button className="underline ml-3" onClick={() => { jumpCancelled.current = true; }}>中止</button></div>}
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll}>
         <div className="space-y-3 py-4">
@@ -601,6 +639,7 @@ export default function GuestJoinPage() {
                   myName={guestName}
                   myId={myId}
                   guestToken={guestToken}
+                  onJump={jumpToMessage}
                   onReact={(m, emoji) => {
                     if (!roomId || !guestToken) return;
                     api.collab.react(roomId, m.id, emoji, guestToken)
@@ -689,6 +728,9 @@ export default function GuestJoinPage() {
         </div>
       </div>
 
+      {newCount > 0 && <button className="self-center my-1 rounded-full border bg-background px-4 py-2 text-xs shadow" onClick={() => {
+        atBottomRef.current = true; setNewCount(0); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }}>新着メッセージ {newCount}件 ↓</button>}
       {/* Name edit overlay */}
       {editingName && (
         <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -860,22 +902,17 @@ export default function GuestJoinPage() {
   );
 }
 
-function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name: string; sender_type: string; content: string } }) {
+function GuestCollabReplyQuote({ replyTo, onJump }: { onJump?: (id: string) => void; replyTo: { id: string; sender_name: string; sender_type: string; content: string } }) {
   const truncated = (replyTo.content || '').slice(0, 80);
   const label = replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name;
 
-  const handleClick = useCallback(() => {
-    const el = document.querySelector(`[data-collab-msg-id="${replyTo.id}"]`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
-      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
-    }
-  }, [replyTo.id]);
-
   return (
     <div
-      onClick={handleClick}
+      role="button"
+      tabIndex={0}
+      aria-label="引用元のメッセージを開く"
+      onClick={() => onJump?.(replyTo.id)}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onJump?.(replyTo.id); } }}
       className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden cursor-pointer hover:bg-muted/80 transition-colors"
     >
       <Reply className="h-3 w-3 mt-0.5 shrink-0 rotate-180" />
@@ -887,7 +924,7 @@ function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name
   );
 }
 
-function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, myId, guestToken, onReact }: {
+function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, myId, guestToken, onJump, onReact }: {
   message: CollabMessageResponse;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
@@ -896,6 +933,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   myName?: string;
   myId?: string;
   guestToken?: string;
+  onJump?: (id: string) => void;
   onReact?: (msg: CollabMessageResponse, emoji: string) => void;
 }) {
   const isGuest = message.sender_type === 'guest';
@@ -925,7 +963,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
 
   return (
     <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none ${isMine || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isMine || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
-      {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
+      {replyToData && <GuestCollabReplyQuote replyTo={replyToData} onJump={onJump} />}
       {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
       {!isPrivate && !isMine && (
         <span className="mb-0.5 mx-1 text-[11px] text-muted-foreground">

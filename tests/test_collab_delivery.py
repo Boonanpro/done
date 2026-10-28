@@ -78,3 +78,40 @@ def test_preview_extracts_title_and_description_without_markup():
 def test_preview_rejects_internal_or_unsafe_destinations(url):
     with pytest.raises(ValueError):
         public_target(url)
+
+
+@pytest.mark.asyncio
+async def test_explicit_guest_identity_wins_over_owner_cookie(monkeypatch):
+    from starlette.requests import Request
+    from unittest.mock import AsyncMock
+    from app.api import collab_routes as routes
+    from app.models.collab_schemas import CollabMessageSendRequest
+    request = Request({'type': 'http', 'headers': [(b'cookie', b'done_access_token=owner'), (b'x-guest-token', b'guest')]})
+    monkeypatch.setattr(routes, '_decode_guest_token', lambda value: {'sub': 'guest-id', 'guest_name': 'Test guest', 'room_id': 'room'} if value == 'guest' else None)
+    monkeypatch.setattr(routes, 'decode_access_token', lambda value: SimpleNamespace(user_id='owner-id', email='owner') if value == 'owner' else None)
+    service = SimpleNamespace(get_room=AsyncMock(return_value={'owner_id': 'owner-id'}), send_message=AsyncMock(return_value={
+        'id': 'message', 'room_id': 'room', 'sender_type': 'guest', 'sender_name': 'Test guest', 'content': 'hello',
+        'metadata': {}, 'created_at': '2026-10-28T00:00:00Z', '_replayed': True}))
+    assert await routes._room_access(request, None, service, 'room') == (False, 'guest-id')
+    await routes.send_message('room', CollabMessageSendRequest(content='hello', metadata={'sender_id': 'forged', 'client_msg_id': 'temp-test'}), request, None, service)
+    args = service.send_message.call_args.kwargs
+    assert args['sender_type'] == 'guest'
+    assert args['sender_name'] == 'Test guest'
+    assert args['metadata']['sender_id'] == 'guest-id'
+    assert args['message_id']
+
+
+@pytest.mark.asyncio
+async def test_push_destination_is_derived_from_authenticated_participant(monkeypatch):
+    from starlette.requests import Request
+    from unittest.mock import AsyncMock
+    from app.api import collab_routes, push_routes
+    request = Request({'type': 'http', 'headers': [(b'x-guest-token', b'guest')]})
+    monkeypatch.setattr(collab_routes, '_room_access', AsyncMock(return_value=(False, 'mine')))
+    monkeypatch.setattr(collab_routes, 'get_collab_service', lambda: SimpleNamespace(list_invites=AsyncMock(return_value=[{'id': 'mine', 'token': 'personal'}])))
+    req = push_routes.SubscribeRequest(room_id='room', sender_type='guest', subscription={}, landing_url='//evil.example')
+    assert await push_routes._subscription_identity(req, request) == '/collab/join/personal'
+    req.sender_type = 'owner'
+    with pytest.raises(push_routes.HTTPException) as error:
+        await push_routes._subscription_identity(req, request)
+    assert error.value.status_code == 403

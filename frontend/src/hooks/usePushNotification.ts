@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 
 const API_URL = '';
 
-export function usePushNotification(roomId: string, senderType: string) {
+export function usePushNotification(roomId: string, senderType: string, guestToken?: string | null) {
   const [permission, setPermission] = useState<NotificationPermission>('default');
   const [subscribed, setSubscribed] = useState(false);
   const inFlight = useRef(false);
@@ -58,9 +58,12 @@ export function usePushNotification(roomId: string, senderType: string) {
       });
 
       // Save to backend
+      const ownerToken = guestToken ? null : localStorage.getItem('done-token');
       const saved = await fetch(`${API_URL}/api/v1/push/subscribe`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(guestToken ? { 'X-Guest-Token': guestToken } : {}),
+          ...(ownerToken ? { Authorization: `Bearer ${ownerToken}` } : {}) },
+        credentials: 'include',
         body: JSON.stringify({
           room_id: roomId,
           sender_type: senderType,
@@ -81,7 +84,7 @@ export function usePushNotification(roomId: string, senderType: string) {
     } finally {
       inFlight.current = false;
     }
-  }, [roomId, senderType]);
+  }, [roomId, senderType, guestToken]);
 
   const sendTest = useCallback(async (): Promise<{ ok: boolean; message?: string }> => {
     const token = localStorage.getItem('done-token');
