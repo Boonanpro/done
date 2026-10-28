@@ -333,13 +333,24 @@ def _port_from_argv():
 
 
 def start_watcher():
-    """Called from the sandbox's lifespan. Only the live sandbox (8000) watches and writes the state file; a test
-    server can opt in with DAN_ARTIFACT_RELOAD=1 (and its own DAN_ARTIFACT_BACKENDS_STATE)."""
-    global _loop, _started
+    """Called from the sandbox's lifespan. The live sandbox (8000) watches and writes the state file; a test
+    server can opt in with DAN_ARTIFACT_RELOAD=1 (and its own DAN_ARTIFACT_BACKENDS_STATE).
+
+    A release worker's sandbox (DAN_GENERATION, scripts/core_release.py) watches too, into its own state file. The
+    gateway sends every route the release mounted at its start to that sandbox, a site's routes included, and a
+    site's files are shared with the live folder, not part of the release. Without its own watcher a fixed
+    `_server` reached 8000 within seconds but the page kept talking to the release's copy loaded at its start
+    (2026-10-28: the customer page's new routes never reached the owner until the next Core restart)."""
+    global _loop, _started, STATE_FILE
     if _started or _app is None:
         return False
-    if os.environ.get('DAN_ARTIFACT_RELOAD') != '1' and _port_from_argv() != str(LIVE_PORT):
+    generation = os.environ.get('DAN_GENERATION', '')
+    if os.environ.get('DAN_ARTIFACT_RELOAD') != '1' and _port_from_argv() != str(LIVE_PORT) and not generation:
         return False
+    if generation and not os.environ.get('DAN_ARTIFACT_BACKENDS_STATE'):
+        # never overwrite the live sandbox's file, which artifact_seen and the release badge read
+        safe = re.sub(r'[^\w.-]', '_', generation)
+        STATE_FILE = STATE_FILE.with_name(f'artifact-backends.{safe}.json')
     try:
         _loop = asyncio.get_running_loop()
     except RuntimeError:
