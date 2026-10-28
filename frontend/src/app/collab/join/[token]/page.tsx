@@ -18,6 +18,7 @@ import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
 import { findGuestHome, forgetGuestHome } from '@/lib/guest-home';
+import { readDraft, writeDraft } from '@/lib/collab-draft';
 import { mergeLatest, mergeOlder, isAtBottom, isNearTop } from '@/lib/collab-scroll';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
@@ -72,7 +73,7 @@ export default function GuestJoinPage() {
   const noMoreOlderRef = useRef(false);
   const messagesRef = useRef<CollabMessageResponse[]>([]);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
@@ -86,6 +87,32 @@ export default function GuestJoinPage() {
   // Reply generation state - keyed by message ID
   const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
   const [replyTo, setReplyTo] = useState<CollabMessageResponse | null>(null);
+
+  const [draftKey, setDraftKey] = useState('');
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [online, setOnline] = useState(true);
+  useEffect(() => {
+    const saved = readDraft(inviteToken);
+    setInput(saved?.text || '');
+    setReplyTo((saved?.reply || null) as CollabMessageResponse | null);
+    setDanMode(saved?.private || false);
+    setDraftKey(inviteToken);
+  }, [inviteToken]);
+  useEffect(() => {
+    if (draftKey === inviteToken) writeDraft(inviteToken, { text: input, reply: replyTo, private: danMode });
+  }, [input, replyTo, danMode, draftKey, inviteToken]);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    update();
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => { window.removeEventListener('online', update); window.removeEventListener('offline', update); };
+  }, []);
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
+  }, [input, roomId]);
 
   // Check for existing session + restore guest name
   useEffect(() => {
@@ -285,7 +312,7 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken, isConnected]);
 
   // Push notifications
-  const { permission: pushPermission, subscribe: pushSubscribe } = usePushNotification(roomId || '', 'guest');
+  const { permission: pushPermission, subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest');
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
@@ -386,7 +413,12 @@ export default function GuestJoinPage() {
 
   const handleSend = async () => {
     const content = input.trim();
-    if ((!content && pendingFiles.length === 0) || isUploading) return;
+    if ((!content && pendingFiles.length === 0) || isUploading || sendingRef.current) return;
+    if (!navigator.onLine) { toast.error('オフラインです。書きかけの文章は保存されています'); return; }
+    if (!roomId || !guestToken) return;
+    sendingRef.current = true;
+    setSending(true);
+    const savedReply = replyTo;
     atBottomRef.current = true;  // 自分が送った時は遡っていても最新へ戻る
     const finalContent = danMode && content ? `@ダン ${content}` : content;
     const metadata: Record<string, unknown> = {};
@@ -401,6 +433,7 @@ export default function GuestJoinPage() {
       } catch {
         toast.error('アップロードに失敗しました');
         setIsUploading(false);
+        sendingRef.current = false; setSending(false);
         return;
       }
       setIsUploading(false);
@@ -422,6 +455,7 @@ export default function GuestJoinPage() {
       setInput('');
       setReplyTo(null);
       inputRef.current?.focus();
+      sendingRef.current = false; setSending(false);
       return;
     }
     if (!roomId || !guestToken) return;
@@ -445,8 +479,11 @@ export default function GuestJoinPage() {
     } catch {
       toast.error('送信に失敗しました。通信環境をご確認ください');
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      setInput(savedInput);
-      if (filesToSend.length > 0) setPendingFiles(filesToSend);
+      setInput((current) => current || savedInput);
+      setReplyTo((current) => current || savedReply);
+      if (filesToSend.length > 0) setPendingFiles((current) => [...filesToSend, ...current]);
+    } finally {
+      sendingRef.current = false; setSending(false);
     }
   };
 
@@ -548,36 +585,20 @@ export default function GuestJoinPage() {
         </button>
       </div>
 
-      {/* 通知バナー:
-          - アプリ（ホーム画面追加後）で開いていて未許可 → 許可ダイアログを出すボタン
-          - ブラウザで開いている → ホーム画面追加の案内（iOSは追加後でないと許可できない） */}
-      {typeof window !== 'undefined' &&
-        (/iPad|iPhone|iPod|Android/i.test(navigator.userAgent)) && (
-        window.matchMedia('(display-mode: standalone)').matches ? (
-          pushPermission !== 'granted' && (
-            <button
-              onClick={async () => {
-                const ok = await pushSubscribe();
-                if (ok) toast.success('通知をオンにしました');
-                else toast.error('通知を許可できませんでした。端末の設定アプリから通知を許可してください');
-              }}
-              className="flex items-center gap-2 px-4 py-2 bg-violet-500/15 border-b border-violet-500/30 text-violet-300 text-xs font-medium shrink-0 hover:bg-violet-500/20 transition-colors"
-            >
-              <Bell className="h-3.5 w-3.5 shrink-0 animate-pulse" />
-              <span>タップして通知をオンにする（新着に気づけます）</span>
-            </button>
-          )
-        ) : (
-          <button
-            onClick={() => setShowInstallGuide(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 text-violet-400 text-xs shrink-0 hover:bg-violet-500/15 transition-colors"
-          >
-            <Bell className="h-3.5 w-3.5 shrink-0" />
-            <span>通知がほしい場合</span>
-          </button>
-        )
+      {!pushSubscribed && (
+        <button
+          onClick={async () => {
+            if (/iPad|iPhone|iPod/i.test(navigator.userAgent) && !window.matchMedia('(display-mode: standalone)').matches) {
+              setShowInstallGuide(true); return;
+            }
+            const ok = await pushSubscribe();
+            if (ok) toast.success('通知をオンにしました');
+            else toast.error('通知を登録できませんでした。ブラウザの通知設定を確認してください');
+          }}
+          className="flex items-center gap-2 px-4 py-2 bg-violet-500/15 border-b border-violet-500/30 text-violet-300 text-xs shrink-0"
+        ><Bell className="h-4 w-4" />{pushError ? "通知を登録できませんでした。押して再試行" : "新着メッセージの通知をオンにする"}</button>
       )}
-
+      {!online && <div role="status" className="px-4 py-2 text-xs bg-amber-500/15">オフラインです。書きかけの文章は保存されています。</div>}
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll}>
         <div className="space-y-3 py-4">
@@ -784,7 +805,7 @@ export default function GuestJoinPage() {
                 {(replyTo.content || '').slice(0, 100) || '(ファイル)'}
               </p>
             </div>
-            <button onClick={() => setReplyTo(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
+            <button aria-label="引用返信をやめる" onClick={() => setReplyTo(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -792,7 +813,7 @@ export default function GuestJoinPage() {
       <div className="flex items-center gap-2">
         <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} multiple
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip" />
-        <Button variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
+        <Button aria-label="写真・動画・ファイルを添付" variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
           <Paperclip className="h-4 w-4" />
         </Button>
         <Button
@@ -812,10 +833,19 @@ export default function GuestJoinPage() {
             </div>
           )}
           <textarea
-            ref={inputRef as any}
+            ref={inputRef}
+            aria-label={danMode ? "AIへの質問" : "メッセージ"}
             placeholder={danMode ? "AIに質問..." : "メッセージを入力..."}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              writeDraft(inviteToken, { text: e.target.value, reply: replyTo, private: danMode });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+                e.preventDefault(); void handleSend();
+              }
+            }}
             rows={1}
             className={`flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none ${danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}`}
             style={{ maxHeight: '120px', overflowY: 'auto' }}
@@ -828,11 +858,13 @@ export default function GuestJoinPage() {
         </div>
         <Button
           size="icon"
+          aria-label={sending ? "送信中" : "送信"}
+          title="送信（Ctrl / ⌘ + Enter）"
           onClick={handleSend}
-          disabled={(!input.trim() && pendingFiles.length === 0) || isUploading}
+          disabled={(!input.trim() && pendingFiles.length === 0) || isUploading || sending}
           className={`transition-transform active:scale-90 ${danMode ? "bg-violet-600 hover:bg-violet-700" : ""}`}
         >
-          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          {isUploading || sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
       </div>
@@ -877,6 +909,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   onReact?: (msg: CollabMessageResponse, emoji: string) => void;
 }) {
   const isGuest = message.sender_type === 'guest';
+  const isMine = isGuest && message.sender_name === myName;
   const isDan = message.sender_type.startsWith('dan_');
   const isOwner = message.sender_type === 'owner';
   // 絵文字1〜2個だけの発言はスタンプとして大きく表示
@@ -901,19 +934,20 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none ${isMine || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isMine || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
       {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
       {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
-      {!isPrivate && !isGuest && (
+      {!isPrivate && !isMine && (
         <span className="mb-0.5 mx-1 text-[11px] text-muted-foreground">
           {isDan ? 'ダン' : message.sender_name}
         </span>
       )}
-      <div className={`group flex items-end gap-1.5 ${isGuest || (isDan && isPrivate) ? 'flex-row' : 'flex-row-reverse'}`}>
+      <div className={`group flex items-end gap-1.5 ${isMine || (isDan && isPrivate) ? 'flex-row' : 'flex-row-reverse'}`}>
         {onReply && (
           <button
             onClick={() => onReply(message)}
-            className="self-start mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            className="self-start mt-1.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            aria-label="引用して返信"
             title="返信"
           >
             <Reply className="h-3.5 w-3.5" />
@@ -921,7 +955,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
         )}
         {/* LINE式: 時刻・既読はバブルの外側（横・下揃え） */}
         {!isPrivate && (
-          <div className={`flex flex-col justify-end pb-0.5 text-[10px] leading-tight text-muted-foreground ${isGuest ? 'items-end' : 'items-start'}`}>
+          <div className={`flex flex-col justify-end pb-0.5 text-[10px] leading-tight text-muted-foreground ${isMine ? 'items-end' : 'items-start'}`}>
             {showRead && <span>既読</span>}
             <span>{formatTime(message.created_at)}</span>
           </div>
@@ -933,7 +967,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
               ? ''
               : isPrivate
                 ? 'bg-violet-500/10 border border-dashed border-violet-500/30'
-                : isGuest
+                : isMine
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted'
           }`}
@@ -959,7 +993,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
             <ReactionBar
               reactions={message.metadata?.reactions as Record<string, string[]> | undefined}
               myName={myName}
-              align={isGuest ? 'right' : 'left'}
+              align={isMine ? 'right' : 'left'}
               compact
               onToggle={(emoji) => onReact(message, emoji)}
             />

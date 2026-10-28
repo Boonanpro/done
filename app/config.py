@@ -158,6 +158,7 @@ class Settings(BaseSettings):
     # Deploy: external frontend/CORS
     ALLOWED_ORIGINS: str = ""  # comma-separated extra origins
     FRONTEND_URL: str = ""     # e.g. https://xxx.vercel.app
+    DAN_PUBLIC_ORIGIN: str = "https://dan.paina.info"
     # One canonical, externally reachable origin for client-facing flows.
     # Never derive this from the operator's localhost browser URL.
     PUBLIC_APP_URL: str = "https://frontend-mikis-projects-86652663.vercel.app"

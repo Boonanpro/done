@@ -1,12 +1,15 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 const API_URL = '';
 
 export function usePushNotification(roomId: string, senderType: string) {
   const [permission, setPermission] = useState<NotificationPermission>('default');
   const [subscribed, setSubscribed] = useState(false);
+  const inFlight = useRef(false);
+  const attemptedRoom = useRef('');
+  const [error, setError] = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
@@ -15,11 +18,14 @@ export function usePushNotification(roomId: string, senderType: string) {
   }, []);
 
   const subscribe = useCallback(async () => {
+    if (inFlight.current || !roomId) return false;
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
       console.warn('Push not supported');
       return false;
     }
 
+    inFlight.current = true;
+    setError('');
     try {
       // Request permission
       const perm = await Notification.requestPermission();
@@ -32,25 +38,22 @@ export function usePushNotification(roomId: string, senderType: string) {
 
       // Get VAPID key
       const vapidRes = await fetch(`${API_URL}/api/v1/push/vapid-key`);
+      if (!vapidRes.ok) throw new Error('通知の準備ができませんでした');
       const { publicKey } = await vapidRes.json();
-      if (!publicKey) return false;
+      if (!publicKey) throw new Error('通知の準備ができませんでした');
 
       // Convert VAPID key
       const applicationServerKey = urlBase64ToUint8Array(publicKey) as any;
 
       const existingSubscription = await reg.pushManager.getSubscription();
-      if (existingSubscription) {
-        await existingSubscription.unsubscribe();
-      }
-
       // Subscribe
-      const subscription = await reg.pushManager.subscribe({
+      const subscription = existingSubscription || await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey,
       });
 
       // Save to backend
-      await fetch(`${API_URL}/api/v1/push/subscribe`, {
+      const saved = await fetch(`${API_URL}/api/v1/push/subscribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -62,12 +65,16 @@ export function usePushNotification(roomId: string, senderType: string) {
           landing_url: senderType === 'guest' ? window.location.pathname : `/collab/${roomId}`,
         }),
       });
+      if (!saved.ok) throw new Error('通知先を保存できませんでした');
 
       setSubscribed(true);
       return true;
     } catch (e) {
       console.error('Push subscription error:', e);
+      setError(e instanceof Error ? e.message : '通知を登録できませんでした');
       return false;
+    } finally {
+      inFlight.current = false;
     }
   }, [roomId, senderType]);
 
@@ -100,12 +107,14 @@ export function usePushNotification(roomId: string, senderType: string) {
 
   // Auto-subscribe if permission already granted
   useEffect(() => {
-    if (permission === 'granted' && roomId && senderType && !subscribed) {
-      subscribe();
+    const key = `${roomId}:${senderType}`;
+    if (permission === 'granted' && roomId && senderType && attemptedRoom.current !== key) {
+      attemptedRoom.current = key;
+      void subscribe();
     }
   }, [permission, roomId, senderType, subscribed, subscribe]);
 
-  return { permission, subscribed, subscribe, sendTest };
+  return { permission, subscribed, subscribe, sendTest, error };
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {

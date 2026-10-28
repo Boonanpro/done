@@ -2837,7 +2837,7 @@ def format_tool_result(
     Returns:
         FormattedToolResult: テキストメッセージと画像のリスト
     """
-    if skill_name in ("_command_center", "_parallel_work"):
+    if skill_name in ("_command_center", "_parallel_work", "_collab_thread", "_compose_message"):
         import json
         return FormattedToolResult(text=json.dumps(result, ensure_ascii=False, default=str), images=[])
 
@@ -4703,7 +4703,7 @@ async def _execute_collab_thread(
         return {"success": False, "error": "room_id/user_id が不明なため窓口を作れません。"}
     svc = CollabService()
     action = (params.get("action") or "").strip()
-    frontend = (_settings.FRONTEND_URL or "http://localhost:3000").rstrip("/")
+    frontend = _settings.DAN_PUBLIC_ORIGIN.rstrip("/")
 
     try:
         if action == "create":

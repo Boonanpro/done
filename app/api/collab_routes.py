@@ -269,7 +269,7 @@ async def create_invite(
     )
     # Build invite URL
     from app.config import settings as app_settings
-    frontend_url = (app_settings.FRONTEND_URL or "http://localhost:3000").rstrip("/")
+    frontend_url = app_settings.DAN_PUBLIC_ORIGIN.rstrip("/")
     invite_url = f"{frontend_url}/collab/join/{invite['token']}"
     return CollabInviteResponse(**invite, invite_url=invite_url)
 
