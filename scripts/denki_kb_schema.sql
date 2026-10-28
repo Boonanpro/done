@@ -1,7 +1,7 @@
 -- 電管ナレッジ AI一次回答の知識基盤（artifact用データ置き場）
 -- 適用は apply_sql 経由（supabase/migrations には置かない＝ダン本体機能ではないため）
 -- ・denki_kb_doc   : ブログ本文（全文・上限なし）／YouTube字幕の原文
--- ・denki_kb_chunk : 検索用に分割した断片＋埋め込みベクトル（Gemini gemini-embedding-001, 768次元）
+-- ・denki_kb_chunk : 検索用に分割した断片＋埋め込みベクトル（OpenAI text-embedding-3-large, 768次元。2026-10-28 までは Gemini gemini-embedding-001）
 -- アクセスは frontend の route handler（service_role）経由のみ。RLS有効＋ポリシー無し＝anonキーからは不可視。
 
 create extension if not exists vector;

@@ -57,9 +57,9 @@ TIMEOUT = 25
 CHUNK_SIZE = 600          # 1断片の文字数（日本語）
 CHUNK_OVERLAP = 100
 MIN_DOC_CHARS = 80        # これ未満は知識として使わない
-EMBED_MODEL = "gemini-embedding-001"
+EMBED_MODEL = "text-embedding-3-large"   # OpenAI。2026-10-28 に Gemini から置き換え（denki_seo_engines.py と同じ）
 EMBED_DIM = 768
-EMBED_BATCH = 40          # 1リクエストあたりの断片数
+EMBED_BATCH = 100         # 1リクエストあたりの断片数
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -325,20 +325,16 @@ def split_chunks(title: str, text: str) -> list[str]:
 
 
 def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
-    key = os.getenv("GOOGLE_GEMINI_API_KEY")
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{EMBED_MODEL}:batchEmbedContents?key={key}")
-    payload = {"requests": [{
-        "model": f"models/{EMBED_MODEL}",
-        "content": {"parts": [{"text": t[:8000]}]},
-        "taskType": task_type,
-        "outputDimensionality": EMBED_DIM,
-    } for t in texts]}
+    """OpenAI の埋め込み。task_type は Gemini 時代の名残で、今は使わない。"""
+    key = os.getenv("OPENAI_API_KEY")
+    url = "https://api.openai.com/v1/embeddings"
+    payload = {"model": EMBED_MODEL, "input": [(t or " ")[:6000] for t in texts], "dimensions": EMBED_DIM}
     for attempt in range(6):
-        r = requests.post(url, json=payload, timeout=180)
+        r = requests.post(url, json=payload, headers={"Authorization": f"Bearer {key}"}, timeout=180)
         if r.status_code == 200:
-            return [e["values"] for e in r.json()["embeddings"]]
-        if r.status_code in (429, 500, 503):
+            data = sorted(r.json()["data"], key=lambda d: d["index"])
+            return [d["embedding"] for d in data]
+        if r.status_code in (429, 500, 502, 503):
             wait = min(60, 5 * (attempt + 1))
             log(f"    embed {r.status_code} → {wait}s 待機")
             time.sleep(wait)

@@ -25,7 +25,7 @@
   python scripts/denki_seo_engines.py weekly-list      直近7日に出た・直したページの一覧を書き出す
 
 文章を書く・審査する AI は Claude Code CLI（定額 Max プラン）。記事の意味検索だけ既存の
-Gemini 埋め込み（AI一次回答と同じ仕組み）を使う。
+OpenAI の埋め込み（text-embedding-3-large、768次元）を使う。
 """
 
 from __future__ import annotations
@@ -68,8 +68,16 @@ STATIC_GUIDES = [
     {"slug": "nenji-tenken", "title": "年次点検（停電作業）で読んでおきたい記事まとめ", "keyword": "年次点検"},
 ]
 
-EMBED_MODEL = "gemini-embedding-001"
+# 記事を意味で探すための数値化（埋め込み）。2026-10-28 に Gemini(gemini-embedding-001) から OpenAI へ。
+# 768 次元のまま（denki_kb_chunk.embedding は vector(768)）。切り替え時に全断片を作り直した。
+# small は「絶縁抵抗」に「接地抵抗」の記事が混ざるなど日本語の専門語で外れたので large を使う。
+# 類似度の目安は Gemini と違うので、Gemini 時代の判定 82 語と突き合わせて決めた。
+EMBED_MODEL = "text-embedding-3-large"
 EMBED_DIM = 768
+EMBED_BATCH = 100
+EMBED_SIM_FLOOR = 0.30     # 検索の下限（Gemini 0.35）
+EMBED_SIM_SOURCE = 0.48    # 記事を書く資料に使う下限（Gemini 0.68）。関係ある語で中央値9.5記事、無関係な語は中央値0.5記事
+EMBED_SIM_RELATED = 0.57   # 「関係がある記事」と数える下限（Gemini 0.72）。4記事以上の判定が Gemini と約8割一致、無関係な語で4記事以上はほぼ0
 WRITER_MODEL = "opus"
 
 
@@ -200,36 +208,28 @@ def claude_json(prompt: str, timeout: int = 900):
 
 # ================================================================ 知識ベース（サイトが集めた記事・動画）
 def embed(texts: list[str], task_type: str = "RETRIEVAL_QUERY") -> list[list[float]]:
-    key = _env().get("GOOGLE_GEMINI_API_KEY")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{EMBED_MODEL}:batchEmbedContents?key={key}"
+    """OpenAI の埋め込み。task_type は Gemini 時代の名残で、今は使わない。"""
+    key = _env().get("OPENAI_API_KEY")
+    url = "https://api.openai.com/v1/embeddings"
     out: list[list[float]] = []
-    for i in range(0, len(texts), 50):
-        batch = texts[i : i + 50]
-        payload = {
-            "requests": [
-                {
-                    "model": f"models/{EMBED_MODEL}",
-                    "content": {"parts": [{"text": t[:8000]}]},
-                    "taskType": task_type,
-                    "outputDimensionality": EMBED_DIM,
-                }
-                for t in batch
-            ]
-        }
+    for i in range(0, len(texts), EMBED_BATCH):
+        batch = [(t or " ")[:6000] for t in texts[i : i + EMBED_BATCH]]
+        payload = {"model": EMBED_MODEL, "input": batch, "dimensions": EMBED_DIM}
         for attempt in range(6):
             try:
-                res = http_json(url, payload, timeout=180)
-                out.extend(e["values"] for e in res["embeddings"])
+                res = http_json(url, payload, headers={"Authorization": f"Bearer {key}"}, timeout=180)
+                data = sorted(res["data"], key=lambda d: d["index"])
+                out.extend(d["embedding"] for d in data)
                 break
             except urllib.error.HTTPError as e:
-                if e.code in (429, 500, 503) and attempt < 5:
+                if e.code in (429, 500, 502, 503) and attempt < 5:
                     time.sleep(min(60, 5 * (attempt + 1)))
                     continue
                 raise
     return out
 
 
-def kb_search_vec(vec: list[float], count: int = 12, min_sim: float = 0.35) -> list[dict]:
+def kb_search_vec(vec: list[float], count: int = 12, min_sim: float = EMBED_SIM_FLOOR) -> list[dict]:
     return (
         sb_request(
             "POST",
@@ -240,11 +240,11 @@ def kb_search_vec(vec: list[float], count: int = 12, min_sim: float = 0.35) -> l
     )
 
 
-def kb_search(query: str, count: int = 12, min_sim: float = 0.35) -> list[dict]:
+def kb_search(query: str, count: int = 12, min_sim: float = EMBED_SIM_FLOOR) -> list[dict]:
     return kb_search_vec(embed([query])[0], count, min_sim)
 
 
-def gather_sources(queries: list[str], max_docs: int = 16, per_doc: int = 2, min_sim: float = 0.68) -> list[dict]:
+def gather_sources(queries: list[str], max_docs: int = 16, per_doc: int = 2, min_sim: float = EMBED_SIM_SOURCE) -> list[dict]:
     """複数の言い換えで検索し、記事単位にまとめた資料を返す（類似度の高い順）。"""
     vecs = embed(queries)
     by_doc: dict[int, dict] = {}
@@ -374,8 +374,8 @@ def cmd_keywords(args=None) -> dict:
     if new:
         vecs = embed(new)
         for k, v in zip(new, vecs):
-            # 無関係な語でも 0.62〜0.66 は出る（実測）。0.72 以上を「関係がある記事」と数える
-            hits = kb_search_vec(v, count=15, min_sim=0.72)
+            # 無関係な語でも1件目は 0.40〜0.64 出る（実測）。EMBED_SIM_RELATED 以上を「関係がある記事」と数える
+            hits = kb_search_vec(v, count=15, min_sim=EMBED_SIM_RELATED)
             docs = {}
             for h in hits:
                 docs.setdefault(h["doc_id"], (h["similarity"], h["title"]))
@@ -1150,7 +1150,7 @@ def cmd_polish(args=None) -> dict | None:
         return None
     old_sources = (g.get("meta") or {}).get("sources") or []
     new_queries = [m["kb_query"] for m in gap.get("missing", []) if isinstance(m, dict) and m.get("kb_query")][:4]
-    extra = gather_sources(new_queries, max_docs=8, min_sim=0.72) if new_queries else []
+    extra = gather_sources(new_queries, max_docs=8, min_sim=EMBED_SIM_RELATED) if new_queries else []
     known = {s["url"] for s in old_sources}
     sources = old_sources + [s for s in extra if s["url"] not in known]
     # 既存本文の [n] は旧出典番号（citations の n）なので、資料の並び（old_sources）の番号へ戻す
