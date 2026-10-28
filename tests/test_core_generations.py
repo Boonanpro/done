@@ -188,3 +188,30 @@ def test_release_links_untracked_sites_next_to_tracked_files(tmp_path):
     assert (dest / 'frontend/src/app/artifacts/x-operation').is_symlink()
     assert (dest / 'frontend/src/app/artifacts/layout.tsx').read_text() == 'tracked'
     assert (dest / '.data').is_symlink()
+
+
+def test_gateway_sends_documented_websocket_to_the_release(registry):
+    old, new = registry
+    G.write('active', {**new, 'sandbox_routes': ['/api/v1/collab/rooms/{room_id}/messages', '/api/v1/collab/ws/{room_id}']})
+    sandbox = {'server': ('localhost', 8100)}
+    assert gateway.destination(sandbox, '/api/v1/collab/rooms/room-1/messages') == new['sandbox']
+    # 常時接続も、REST と同じ版へ（別の裏側に分かれると即時配信が届かない）
+    assert gateway.destination(sandbox, '/api/v1/collab/ws/room-1') == new['sandbox']
+    assert gateway.destination(sandbox, '/api/v1/unknown/ws/room-1') == 8000
+
+
+def test_release_routes_include_websockets_from_health(monkeypatch):
+    import io, json
+    from scripts import core_release as release
+    bodies = {
+        '/openapi.json': {'paths': {'/api/v1/collab/rooms': {}, '/health': {}}},
+        '/health': {'status': 'healthy', 'websocket_routes': ['/api/v1/collab/ws/{room_id}', '/api/v1/collab/rooms']},
+    }
+
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(release.urllib.request, 'urlopen',
+                        lambda url, timeout=0: Response(json.dumps(bodies[url.split('8201', 1)[1]]).encode()))
+    assert release.sandbox_routes(8201) == ['/api/v1/collab/rooms', '/health', '/api/v1/collab/ws/{room_id}']

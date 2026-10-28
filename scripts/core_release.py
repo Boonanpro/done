@@ -84,14 +84,25 @@ def prepare(root):
     while time.monotonic() < deadline:
         if process.poll() is not None: raise RuntimeError('New release exited before readiness: ' + release_id)
         if healthy(core) and healthy(sandbox):
-            with urllib.request.urlopen(f'http://127.0.0.1:{sandbox}/openapi.json', timeout=10) as response:
-                release['sandbox_routes'] = list(json.load(response).get('paths', {}))
+            release['sandbox_routes'] = sandbox_routes(sandbox)
             G.write('release-' + release_id, release)
             print(json.dumps({k: v for k, v in release.items() if k != 'sandbox_routes'})); return release
         time.sleep(.5)
     # Leave active untouched. Keep the failed candidate for diagnosis; never
     # terminate a process by a port or accidentally touch the running release.
     raise RuntimeError('New release did not become ready: ' + release_id)
+
+
+def sandbox_routes(port):
+    """この版の Sandbox が受ける道。openapi.json の HTTP の道に、/health が返す WebSocket の道を足す。
+
+    WebSocket は openapi.json に載らないため、足さないと入口が常時接続だけを古い 8000 へ送り、
+    REST（新しい版）と別の裏側で動いてしまう（コラボチャットの即時配信が届かない。2026-10-28）。"""
+    with urllib.request.urlopen(f'http://127.0.0.1:{port}/openapi.json', timeout=10) as response:
+        routes = list(json.load(response).get('paths', {}))
+    with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=10) as response:
+        routes += [r for r in (json.load(response).get('websocket_routes') or []) if r not in routes]
+    return routes
 
 
 def activate(release_id):
