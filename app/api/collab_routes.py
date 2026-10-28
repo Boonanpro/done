@@ -130,6 +130,29 @@ async def create_room(
     return CollabRoomResponse(**room, guest_count=0)
 
 
+def _visible_to_guest(message: dict, guest_id: Optional[str]) -> bool:
+    """そのメッセージを、このゲスト（guest_id）に見せてよいか。
+
+    owner_only（ユーザーとダンの相談）は見せない。guest_only（ゲストとダンの私的な相談）は
+    その相談をしたゲスト本人にだけ見せる。身元の無い古い相談だけは従来どおり見せる。"""
+    meta = message.get("metadata") or {}
+    visibility = meta.get("visibility")
+    if visibility == "owner_only":
+        return False
+    if visibility != "guest_only":
+        return True
+    mine = meta.get("recipient_id") or meta.get("sender_id")
+    return mine is None or mine == guest_id
+
+
+async def _send_to_side(room_id: str, sender_type: str, sender_id: Optional[str], payload: dict):
+    """発言者の側にだけ配る。オーナーはその種類全部（複数の端末）、ゲストは本人だけ。"""
+    if sender_type == "owner" or not sender_id:
+        await collab_manager.send_to_type(room_id, sender_type, payload)
+    else:
+        await collab_manager.send_to_sender(room_id, sender_id, payload)
+
+
 def _preview_text(msg: dict) -> str:
     files = (msg.get("metadata") or {}).get("files") or []
     single = (msg.get("metadata") or {}).get("file")
@@ -458,16 +481,19 @@ async def get_messages(
         owner_token = credentials.credentials
 
     has_access = False
+    guest_id = None
     if owner_token:
         # Try as owner
         token_data = decode_access_token(owner_token)
         if token_data:
             has_access = await service.verify_room_access(room_id, user_id=token_data.user_id)
+            guest_id = token_data.user_id
         # Try as guest
         if not has_access:
             guest_data = _decode_guest_token(owner_token)
             if guest_data and guest_data.get("room_id") == room_id:
                 has_access = True
+                guest_id = guest_data.get("sub")
 
     # Also check X-Guest-Token header
     if not has_access:
@@ -476,6 +502,7 @@ async def get_messages(
             guest_data = _decode_guest_token(guest_token)
             if guest_data and guest_data.get("room_id") == room_id:
                 has_access = True
+                guest_id = guest_data.get("sub")
 
     if not has_access:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -496,8 +523,7 @@ async def get_messages(
         messages = [m for m in messages
                     if m.get("metadata", {}).get("visibility") != "guest_only"]
     else:
-        messages = [m for m in messages
-                    if m.get("metadata", {}).get("visibility") != "owner_only"]
+        messages = [m for m in messages if _visible_to_guest(m, guest_id)]
 
     return CollabMessageListResponse(
         messages=[CollabMessageResponse(**m) for m in messages]
@@ -606,7 +632,7 @@ async def send_message(
     ))
 
     # 相手側へのPush通知（WS経路と同じ扱い）
-    asyncio.ensure_future(_send_push(room_id, sender_type, sender_name, preview))
+    asyncio.ensure_future(_send_push(room_id, sender_type, sender_name, preview, sender_id))
 
     # Trigger DAN (REST API path)
     if sender_type == "guest":
@@ -836,8 +862,9 @@ async def generate_reply_guest(
     guest_name = guest_data.get("guest_name", "ゲスト")
     target_content = req.content
 
-    # Get recent messages for context
-    recent = await service.get_messages(room_id, limit=20)
+    # Get recent messages for context（このゲストに見せてよい物だけ）
+    recent = [m for m in await service.get_messages(room_id, limit=20)
+              if _visible_to_guest(m, guest_data.get("sub"))]
 
     history_lines = []
     for msg in recent:
@@ -999,19 +1026,18 @@ class CollabConnectionManager:
     """WebSocket connection manager for collab rooms."""
 
     def __init__(self):
-        # room_id -> list of {ws, sender_type, sender_name}
+        # room_id -> list of {ws, sender_type, sender_name, sender_id}
         self.connections: dict[str, list[dict]] = {}
 
-    def add(self, room_id: str, ws: WebSocket, sender_type: str, sender_name: str):
+    def add(self, room_id: str, ws: WebSocket, sender_type: str, sender_name: str,
+            sender_id: Optional[str] = None):
         if room_id not in self.connections:
             self.connections[room_id] = []
-        # Remove stale connections from the same user (reconnect case)
-        self.connections[room_id] = [
-            c for c in self.connections[room_id]
-            if not (c["sender_type"] == sender_type and c["sender_name"] == sender_name)
-        ]
+        # 同じ人の別の接続（PCとスマホ、2つのタブ）は追い出さない。全部に届ける。
+        # 切れた接続は finally の remove で外れ、万一残っても送信失敗を握りつぶすだけ。
+        self.connections[room_id] = [c for c in self.connections[room_id] if c["ws"] is not ws]
         self.connections[room_id].append({
-            "ws": ws, "sender_type": sender_type, "sender_name": sender_name
+            "ws": ws, "sender_type": sender_type, "sender_name": sender_name, "sender_id": sender_id,
         })
 
     def remove(self, room_id: str, ws: WebSocket):
@@ -1036,6 +1062,17 @@ class CollabConnectionManager:
             return
         for conn in self.connections[room_id]:
             if conn["sender_type"] == sender_type:
+                try:
+                    await conn["ws"].send_json(message)
+                except Exception:
+                    pass
+
+    async def send_to_sender(self, room_id: str, sender_id: str, message: dict):
+        """Send message only to the connections of one participant (e.g. a single guest)."""
+        if room_id not in self.connections:
+            return
+        for conn in self.connections[room_id]:
+            if conn.get("sender_id") == sender_id:
                 try:
                     await conn["ws"].send_json(message)
                 except Exception:
@@ -1195,7 +1232,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
             return
 
         # Add to room
-        collab_manager.add(room_id, websocket, sender_type, sender_name)
+        collab_manager.add(room_id, websocket, sender_type, sender_name, sender_id)
         online = collab_manager.get_online_users(room_id)
         await websocket.send_json({
             "type": "auth_success",
@@ -1244,8 +1281,8 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                         content=content,
                         metadata={**metadata, "visibility": visibility},
                     )
-                    # Send only to the sender's side
-                    await collab_manager.send_to_type(room_id, sender_type, {
+                    # 本人の側にだけ配る（ゲストはその人だけ。他のゲストには見せない）
+                    await _send_to_side(room_id, sender_type, sender_id, {
                         "type": "new_message",
                         "message": {
                             "id": message["id"],
@@ -1339,7 +1376,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
 
                     # Push notification to the other side
                     asyncio.ensure_future(_send_push(
-                        room_id, sender_type, sender_name, content
+                        room_id, sender_type, sender_name, content, sender_id
                     ))
 
                     # DAN auto-assist
@@ -1634,9 +1671,12 @@ async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigge
         if not room:
             return
 
-        recent = await service.get_messages(room_id, limit=20)
         guest_name = trigger_message.get("sender_name", "ゲスト")
+        guest_id = (trigger_message.get("metadata") or {}).get("sender_id")
         content = trigger_message.get("content", "").strip()
+        # このゲストに見せてよい物だけ（ユーザーの相談や他のゲストの相談は渡さない）
+        recent = [m for m in await service.get_messages(room_id, limit=20)
+                  if _visible_to_guest(m, guest_id)]
 
         # Build conversation history
         history_lines = []
@@ -1652,8 +1692,8 @@ async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigge
                 history_lines.append(f"【DAN→ゲスト】{c}")
         history_text = "\n".join(history_lines)
 
-        # Notify guest that DAN is thinking
-        await collab_manager.send_to_type(room_id, "guest", {
+        # Notify the consulting guest that DAN is thinking
+        await _send_to_side(room_id, "guest", guest_id, {
             "type": "dan_thinking", "room_id": room_id,
         })
 
@@ -1685,21 +1725,21 @@ async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigge
         )
 
         if not response_text or response_text.strip().upper() == "SKIP":
-            await collab_manager.send_to_type(room_id, "guest", {
+            await _send_to_side(room_id, "guest", guest_id, {
                 "type": "dan_done", "room_id": room_id,
             })
             return
 
-        # Save and send to guest only
+        # Save and send to the consulting guest only
         dan_message = await service.send_message(
             room_id=room_id,
             sender_type="dan_guest",
             sender_name="DAN",
             content=response_text,
-            metadata={"visibility": "guest_only"},
+            metadata={"visibility": "guest_only", "recipient_id": guest_id},
         )
 
-        await collab_manager.send_to_type(room_id, "guest", {
+        await _send_to_side(room_id, "guest", guest_id, {
             "type": "new_message",
             "message": {
                 "id": dan_message["id"],
@@ -1720,9 +1760,9 @@ async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigge
                 sender_type="dan_guest",
                 sender_name="DAN",
                 content=f"（エラー: {str(e)[:200]}）",
-                metadata={"visibility": "guest_only"},
+                metadata={"visibility": "guest_only", "recipient_id": guest_id},
             )
-            await collab_manager.send_to_type(room_id, "guest", {
+            await _send_to_side(room_id, "guest", guest_id, {
                 "type": "new_message",
                 "message": {
                     "id": error_msg["id"],
@@ -1738,8 +1778,11 @@ async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigge
             pass  # guest DAN error fallback
 
 
-async def _send_push(room_id: str, sender_type: str, sender_name: str, content: str):
-    """Send push notification to the other side."""
+async def _send_push(room_id: str, sender_type: str, sender_name: str, content: str,
+                     sender_id: Optional[str] = None):
+    """Send push notification to everyone in the room except the sender.
+
+    sender_id（ゲストの身元）を渡すと、同じ部屋の他のゲストにも届く（本人だけ除く）。"""
     try:
         from app.services.push_service import get_push_service
         svc = get_push_service()
@@ -1750,6 +1793,7 @@ async def _send_push(room_id: str, sender_type: str, sender_name: str, content: 
             title=sender_name,
             body=body,
             url=f"/collab/{room_id}",
+            exclude_sender_id=sender_id,
         )
         # オーナー宛（相手やダンからの新着）は、APKのネイティブ通知トークン
         # （room_id="user:{owner_id}" で登録される）にも届ける

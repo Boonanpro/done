@@ -18,8 +18,11 @@ class PushService:
         self.supabase = get_supabase_client().client
 
     async def save_subscription(self, room_id: str, sender_type: str, subscription: dict,
-                                landing_url: Optional[str] = None):
-        """Save a push subscription. landing_url=通知タップで開くURL（ゲストは本人専用URL）"""
+                                landing_url: Optional[str] = None, sender_id: Optional[str] = None):
+        """Save a push subscription. landing_url=通知タップで開くURL（ゲストは本人専用URL）
+
+        sender_id=購読者の身元（ゲストは本人の招待ID）。同じ部屋の別のゲストの発言を
+        その人に届け、本人の発言だけを除くために使う。"""
         endpoint = subscription["endpoint"]
         keys = subscription.get("keys", {})
         data = {
@@ -31,6 +34,8 @@ class PushService:
         }
         if landing_url:
             data["landing_url"] = landing_url
+        if sender_id:
+            data["sender_id"] = sender_id
         # Upsert
         self.supabase.table("push_subscriptions").upsert(
             data, on_conflict="room_id,sender_type,endpoint"
@@ -44,20 +49,35 @@ class PushService:
             "endpoint": endpoint,
         }).execute()
 
+    @staticmethod
+    def _is_sender(sub: dict, exclude_type: str, exclude_sender_id: Optional[str]) -> bool:
+        """その購読が発言者本人のものか。
+
+        身元つきの購読（sender_id）は身元で比べるので、同じ種類（ゲスト同士）でも
+        別人には届く。身元の無い古い購読は従来どおり種類で比べる。"""
+        if exclude_sender_id and sub.get("sender_id"):
+            return sub["sender_id"] == exclude_sender_id
+        return sub.get("sender_type") == exclude_type
+
     async def notify_room(self, room_id: str, exclude_type: str,
                           title: str, body: str, url: Optional[str] = None,
                           data: Optional[dict] = None, channel_id: Optional[str] = None,
-                          sound: Optional[str] = None) -> dict:
-        """Send push notification to all subscribers in a room except the sender's type.
+                          sound: Optional[str] = None,
+                          exclude_sender_id: Optional[str] = None) -> dict:
+        """Send push notification to all subscribers in a room except the sender.
 
+        exclude_sender_id を渡すと発言者本人だけを除く（同じ種類の他の参加者には届く）。
+        無ければ従来どおり発言者の種類ごと除く。
         data / channel_id / sound: extra payload for the phone app (owner_summon rings on its own channel)."""
         result = self.supabase.table("push_subscriptions").select("*").eq(
             "room_id", room_id
-        ).neq("sender_type", exclude_type).execute()
+        ).execute()
+        targets = [sub for sub in (result.data or [])
+                   if not self._is_sender(sub, exclude_type, exclude_sender_id)]
 
         sent = 0
         failed = 0
-        for sub in result.data:
+        for sub in targets:
             if str(sub.get("endpoint", "")).startswith("ExponentPushToken["):
                 ok = await self._send_expo_push(
                     token=sub["endpoint"],
@@ -113,7 +133,7 @@ class PushService:
             except Exception as e:
                 failed += 1
                 logger.error("Push error: %s", e)
-        return {"attempted": len(result.data), "sent": sent, "failed": failed}
+        return {"attempted": len(targets), "sent": sent, "failed": failed}
 
     async def _send_expo_push(self, token: str, title: str, body: str, url: str, data: Optional[dict] = None,
                               channel_id: Optional[str] = None, sound: Optional[str] = None) -> bool:
