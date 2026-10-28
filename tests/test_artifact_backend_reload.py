@@ -59,6 +59,7 @@ def site(tmp_path, monkeypatch):
     monkeypatch.setattr(ab, '_mounted', {})
     monkeypatch.setattr(ab, '_state', {})
     monkeypatch.setattr(ab, '_loop', None)
+    monkeypatch.delenv('DAN_GENERATION', raising=False)   # the test runner itself may be a release worker's child
     yield tmp_path
     for name in [k for k in list(__import__('sys').modules) if k.startswith('dan_artifact_t')]:
         __import__('sys').modules.pop(name, None)
@@ -161,3 +162,38 @@ def test_watcher_reloads_and_writes_state(site, monkeypatch):
     state = json.loads((site/'state.json').read_text(encoding='utf-8'))
     assert state['sites']['tg']['state'] == 'current'
     assert state['sites']['tg']['loaded'] == ab.fingerprint('tg')
+
+
+def test_release_worker_watches_into_its_own_state(site, monkeypatch):
+    # 2026-10-28: a release worker's sandbox kept the site code it loaded at its start, so the page (sent there by the
+    # gateway) never saw a fixed _server. It now watches too, without touching the live sandbox's state file.
+    import json
+    write(site, 'th', ROUTE.format(slug='th', v=1))
+    app = app_with(site)
+    c = TestClient(app)
+    monkeypatch.setattr(ab, 'SCAN_S', 0.1)
+    monkeypatch.setattr(ab, '_started', False)
+    monkeypatch.delenv('DAN_ARTIFACT_RELOAD', raising=False)
+    monkeypatch.delenv('DAN_ARTIFACT_BACKENDS_STATE', raising=False)
+    monkeypatch.setenv('DAN_GENERATION', 'abc123-x1')
+    monkeypatch.setattr(ab.sys, 'argv', ['uvicorn', 'app.sandbox.main:app', '--port', '8207'])
+    assert ab.start_watcher()
+    assert ab.STATE_FILE == site/'artifact-backends.abc123-x1.json'
+    write(site, 'th', ROUTE.format(slug='th', v=7))
+    deadline = time.time() + 5
+    while time.time() < deadline and c.get('/api/v1/th/v').json().get('v') != 7:
+        time.sleep(0.1)
+    assert c.get('/api/v1/th/v').json() == {'v': 7}
+    time.sleep(0.3)
+    assert json.loads((site/'artifact-backends.abc123-x1.json').read_text(encoding='utf-8'))['sites']['th']['state'] == 'current'
+    assert not (site/'state.json').exists()
+
+
+def test_other_ports_without_generation_do_not_watch(site, monkeypatch):
+    write(site, 'ti', ROUTE.format(slug='ti', v=1))
+    app_with(site)
+    monkeypatch.setattr(ab, '_started', False)
+    monkeypatch.delenv('DAN_ARTIFACT_RELOAD', raising=False)
+    monkeypatch.delenv('DAN_GENERATION', raising=False)
+    monkeypatch.setattr(ab.sys, 'argv', ['uvicorn', 'app.sandbox.main:app', '--port', '8001'])
+    assert not ab.start_watcher()
