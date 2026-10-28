@@ -298,6 +298,30 @@ def _target(serial, ref, label):
     return hits[0]
 
 
+_paste_only = set()   # serials where uiautomator2's own typing failed (its input app cannot be installed)
+
+
+def _send_text(dev, serial, text, clear=False):
+    """Type any text through uiautomator2. Its send_keys falls back to installing an input app, which a phone that
+    verifies apps installed over USB refuses (2026-10-28, S24 with a Google account: INSTALL_FAILED_VERIFICATION_FAILURE,
+    so no Japanese could be typed). Then the text goes through the clipboard and the paste key instead, which needs no
+    app; the phone is remembered so the failing install is not tried on every word."""
+    if serial not in _paste_only:
+        try:
+            dev.send_keys(text, clear=clear)
+            return
+        except Exception:   # noqa: BLE001 - the install refusal surfaces as several exception types
+            _paste_only.add(serial)
+    if clear:
+        try:
+            dev.clear_text()
+        except Exception:   # noqa: BLE001
+            pass
+    dev.set_clipboard(text)
+    time.sleep(.15)
+    _adb(serial, 'shell', 'input', 'keyevent', '279')   # KEYCODE_PASTE
+
+
 def _tap(serial, x, y):
     dev = _fast(serial)
     if dev is not None:
@@ -351,7 +375,7 @@ def run(params):
             _tap(serial, *field['center'])
             time.sleep(.3)
         if dev is not None:
-            dev.send_keys(text, clear=False)
+            _send_text(dev, serial, text)
         else:
             _adb(serial, 'shell', 'input', 'text', text.replace(' ', '%s').replace("'", "\\'").replace('&', '\\&'))
         if field:
@@ -428,7 +452,7 @@ def _replay(flow, values):
                     text = str(values.get(step.get('slot')) or step.get('example') or '')
                     dev = _fast(serial)
                     if dev is not None:
-                        dev.send_keys(text, clear=True)
+                        _send_text(dev, serial, text, clear=True)
                     elif text.isascii():
                         _adb(serial, 'shell', 'input', 'text', text.replace(' ', '%s'))
                     else:
