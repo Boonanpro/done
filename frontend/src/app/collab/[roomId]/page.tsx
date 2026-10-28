@@ -19,6 +19,7 @@ import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket'
 import { usePushNotification } from '@/hooks/usePushNotification';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { CollabLinkPreview } from '@/components/collab/link-preview';
 import { LinkifyText } from '@/components/linkify-text';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -981,6 +982,7 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
             </a>
           ))}
           {bodyText && <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={bodyText} /></p>}
+          {bodyText && <CollabLinkPreview text={bodyText} roomId={message.room_id} />}
 
           {/* リアクション（ダンの🙏既読サイン＋人間の付け外し） */}
           {onReact && (

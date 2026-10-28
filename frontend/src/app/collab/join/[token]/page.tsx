@@ -4,6 +4,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
+import { get, set } from 'idb-keyval';
+import { useCollabOutbox } from '@/hooks/useCollabOutbox';
+import { guestIdentity, isOwnGuestMessage } from '@/lib/collab-identity';
 import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2, Reply, X, Bell } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
@@ -14,10 +17,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Share, MoreVertical, Download } from 'lucide-react';
 import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
+import { CollabLinkPreview } from '@/components/collab/link-preview';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
-import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
+import { PendingAttachments } from '@/components/collab/pending-attachments';
 import { findGuestHome, forgetGuestHome } from '@/lib/guest-home';
+import { readDraft, writeDraft } from '@/lib/collab-draft';
 import { mergeLatest, mergeOlder, isAtBottom, isNearTop } from '@/lib/collab-scroll';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
@@ -53,6 +58,11 @@ function formatDateSeparator(dateStr: string): string {
   return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
 }
 
+function centerQuote(container: HTMLDivElement | null, id: string) {
+  const el = container?.querySelector<HTMLElement>(`[data-collab-msg-id="${CSS.escape(id)}"]`);
+  if (container && el) container.scrollTop += el.getBoundingClientRect().top - container.getBoundingClientRect().top - Math.max(0, (container.clientHeight - el.clientHeight) / 2);
+}
+
 export default function GuestJoinPage() {
   const params = useParams();
   const router = useRouter();
@@ -60,6 +70,7 @@ export default function GuestJoinPage() {
   const [guestName, setGuestName] = useState('');
   const [guestNameLoaded, setGuestNameLoaded] = useState(false);
   const [guestToken, setGuestToken] = useState<string | null>(null);
+  const myId = guestIdentity(guestToken);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomTitle, setRoomTitle] = useState('');
   const [messages, setMessages] = useState<CollabMessageResponse[]>([]);
@@ -69,14 +80,23 @@ export default function GuestJoinPage() {
   // スクロール制御: 「下にいる時だけ」新着で下へ送る。上へ遡っている間は動かさない
   const atBottomRef = useRef(true);
   const loadingOlderRef = useRef(false);
+  const jumpingRef = useRef(false);
+  const quoteAnchor = useRef<string | null>(null);
   const noMoreOlderRef = useRef(false);
   const messagesRef = useRef<CollabMessageResponse[]>([]);
+  const [newCount, setNewCount] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isUploading, setIsUploading] = useState(false);
   // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [filesLoaded, setFilesLoaded] = useState(false);
+  useEffect(() => {
+    let active = true; setFilesLoaded(false);
+    get<File[]>(`collab-files:${inviteToken}`).then(files => { if (active) { setPendingFiles(files || []); setFilesLoaded(true); } }).catch(() => { if (active) setFilesLoaded(true); });
+    return () => { active = false; };
+  }, [inviteToken]);
+  useEffect(() => { if (filesLoaded) void set(`collab-files:${inviteToken}`, pendingFiles).catch(() => toast.error('添付を端末に保存できませんでした。画面を閉じずに送信してください')); }, [pendingFiles, filesLoaded, inviteToken]);
   const [readByOther, setReadByOther] = useState<string | null>(null);
   const [danMode, setDanMode] = useState(false);
   const [danThinking, setDanThinking] = useState(false);
@@ -86,6 +106,32 @@ export default function GuestJoinPage() {
   // Reply generation state - keyed by message ID
   const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
   const [replyTo, setReplyTo] = useState<CollabMessageResponse | null>(null);
+
+  const [draftKey, setDraftKey] = useState('');
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [online, setOnline] = useState(true);
+  useEffect(() => {
+    const saved = readDraft(inviteToken);
+    setInput(saved?.text || '');
+    setReplyTo((saved?.reply || null) as CollabMessageResponse | null);
+    setDanMode(saved?.private || false);
+    setDraftKey(inviteToken);
+  }, [inviteToken]);
+  useEffect(() => {
+    if (draftKey === inviteToken) writeDraft(inviteToken, { text: input, reply: replyTo, private: danMode });
+  }, [input, replyTo, danMode, draftKey, inviteToken]);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    update();
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => { window.removeEventListener('online', update); window.removeEventListener('offline', update); };
+  }, []);
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
+  }, [input, roomId]);
 
   // Check for existing session + restore guest name
   useEffect(() => {
@@ -187,8 +233,10 @@ export default function GuestJoinPage() {
   // Fetch messages when joined
   useEffect(() => {
     if (roomId && guestToken) {
+      let received = false;
+      void get<CollabMessageResponse[]>(`collab-history:${inviteToken}`).then(cached => { if (!received && cached) setMessages(cached); });
       api.collab.getMessages(roomId, 50, guestToken).then((data) => {
-        setMessages(data.messages);
+        received = true; setMessages(data.messages);
       }).catch(() => {});
     }
   }, [roomId, guestToken]);
@@ -204,7 +252,7 @@ export default function GuestJoinPage() {
   // 自分の既読位置を定期更新（オーナー側の「既読」表示の元になる）
   useEffect(() => {
     if (!roomId || !guestToken) return;
-    const mark = () => api.collab.markRead(roomId, guestToken).catch(() => {});
+    const mark = () => { if (document.visibilityState === 'visible' && atBottomRef.current) void api.collab.markRead(roomId, guestToken).catch(() => {}); };
     mark();
     const timer = setInterval(mark, 10_000);
     return () => clearInterval(timer);
@@ -216,7 +264,7 @@ export default function GuestJoinPage() {
   const lastReadOwnId = (() => {
     let id: string | null = null;
     for (const m of messages) {
-      if (m.sender_type === 'guest' && new Date(m.created_at).getTime() <= ownerReadTime) id = m.id;
+      if (isOwnGuestMessage(m, myId, guestName) && new Date(m.created_at).getTime() <= ownerReadTime) id = m.id;
     }
     return id;
   })();
@@ -225,6 +273,7 @@ export default function GuestJoinPage() {
   // 楽観表示の仮バブル（client_msg_id）と同一なら追加ではなく差し替え（二重表示防止）
   const handleNewMessage = useCallback((msg: CollabMessageResponse) => {
     if (msg.sender_type === 'dan_guest') setDanThinking(false);
+    if (!atBottomRef.current && !messagesRef.current.some(m => m.id === msg.id)) setNewCount(n => n + 1);
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
       const cid = (msg.metadata as { client_msg_id?: string } | undefined)?.client_msg_id;
@@ -234,6 +283,8 @@ export default function GuestJoinPage() {
       return [...prev, msg];
     });
   }, []);
+
+  const outbox = useCollabOutbox(roomId, guestToken, inviteToken, handleNewMessage);
 
   const handleDanThinking = useCallback((thinking: boolean) => {
     setDanThinking(thinking);
@@ -267,7 +318,7 @@ export default function GuestJoinPage() {
   // Send read receipt when new messages arrive from owner
   useEffect(() => {
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg && lastMsg.sender_type === 'owner') {
+    if (lastMsg && lastMsg.sender_type === 'owner' && document.visibilityState === 'visible' && atBottomRef.current) {
       sendRead(lastMsg.id);
     }
   }, [messages, sendRead]);
@@ -285,16 +336,29 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken, isConnected]);
 
   // Push notifications
-  const { permission: pushPermission, subscribe: pushSubscribe } = usePushNotification(roomId || '', 'guest');
+  const { subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest', guestToken);
 
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => {
+    messagesRef.current = messages;
+    if (messages.length) void set(`collab-history:${inviteToken}`, messages.slice(-500)).catch(() => {});
+  }, [messages, inviteToken]);
+  useEffect(() => {
+    const open = (event: MessageEvent) => {
+      if (event.data?.type !== 'collab-notification-open') return;
+      setEditingName(false); setShowInstallGuide(false); quoteAnchor.current = null; atBottomRef.current = true;
+      requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
+      if (roomId && guestToken) void api.collab.getMessages(roomId, 50, guestToken).then(data => setMessages(prev => mergeLatest(prev, data.messages)));
+    };
+    navigator.serviceWorker?.addEventListener('message', open);
+    return () => navigator.serviceWorker?.removeEventListener('message', open);
+  }, [roomId, guestToken]);
 
   // 過去を読み足す（上端に近づいた時）。読んだ分だけ下へずらして、見ていた行を動かさない
   const loadOlder = useCallback(async () => {
-    if (!roomId || !guestToken) return;
-    if (loadingOlderRef.current || noMoreOlderRef.current) return;
+    if (!roomId || !guestToken) return false;
+    if (loadingOlderRef.current || noMoreOlderRef.current) return false;
     const oldest = messagesRef.current.find((m) => !m.id.startsWith('temp-'));
-    if (!oldest) return;
+    if (!oldest) return false;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     const el = scrollRef.current;
@@ -304,15 +368,19 @@ export default function GuestJoinPage() {
       const data = await api.collab.getMessages(roomId, 50, guestToken, oldest.created_at);
       if (data.messages.length === 0) {
         noMoreOlderRef.current = true;
-        return;
+        return false;
       }
-      setMessages((prev) => mergeOlder(prev, data.messages));
+      const merged = mergeOlder(messagesRef.current, data.messages);
+      if (merged === messagesRef.current) return false;
+      messagesRef.current = merged;
+      setMessages(merged);
       requestAnimationFrame(() => {
         const cur = scrollRef.current;
-        if (cur) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
+        if (cur && !jumpingRef.current) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
       });
+      return true;
     } catch {
-      // 失敗時は次のスクロールで再試行
+      return false; // 失敗時は次のスクロールで再試行
     } finally {
       loadingOlderRef.current = false;
       setLoadingOlder(false);
@@ -320,8 +388,10 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken]);
 
   const handleScroll = useCallback(() => {
+    if (jumpingRef.current) return;
     const el = scrollRef.current;
     atBottomRef.current = isAtBottom(el);
+    if (atBottomRef.current) setNewCount(0);
     if (isNearTop(el)) void loadOlder();
   }, [loadOlder]);
 
@@ -331,7 +401,43 @@ export default function GuestJoinPage() {
     if (!atBottomRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, outbox.entries]);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el?.firstElementChild) return;
+    const observer = new ResizeObserver(() => {
+      if (quoteAnchor.current) centerQuote(el, quoteAnchor.current);
+      else if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el.firstElementChild); observer.observe(el);
+    return () => observer.disconnect();
+  }, [roomId, guestToken]);
+
+  const [jumping, setJumping] = useState(false);
+  const jumpCancelled = useRef(false);
+  useEffect(() => () => { jumpCancelled.current = true; }, []);
+  const jumpToMessage = useCallback(async (id: string) => {
+    if (jumpingRef.current) return;
+    jumpingRef.current = true;
+    const find = () => document.querySelector<HTMLElement>(`[data-collab-msg-id="${CSS.escape(id)}"]`);
+    atBottomRef.current = false;
+    jumpCancelled.current = false;
+    setJumping(true);
+    try {
+      while (!find() && !jumpCancelled.current) {
+        if (!await loadOlder()) break;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      if (jumpCancelled.current) return;
+      const el = find();
+      if (!el) { toast.error('引用元を読み込めませんでした。接続を確認してもう一度お試しください'); return; }
+      quoteAnchor.current = id;
+      centerQuote(scrollRef.current, id);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
+    } finally { jumpingRef.current = false; setJumping(false); }
+  }, [jumping, loadOlder]);
 
   // Join room
   const handleJoin = async () => {
@@ -386,68 +492,25 @@ export default function GuestJoinPage() {
 
   const handleSend = async () => {
     const content = input.trim();
-    if ((!content && pendingFiles.length === 0) || isUploading) return;
-    atBottomRef.current = true;  // 自分が送った時は遡っていても最新へ戻る
-    const finalContent = danMode && content ? `@ダン ${content}` : content;
-    const metadata: Record<string, unknown> = {};
-    // 添付は送信時にまとめてアップロード → files[] として本文と同じメッセージに載せる
-    const filesToSend = pendingFiles;
-    if (filesToSend.length > 0 && roomId && guestToken) {
-      setIsUploading(true);
-      try {
-        const uploaded = await uploadCollabFiles(roomId, filesToSend, { guestToken });
-        metadata.files = uploaded;
-        metadata.file = uploaded[0];
-      } catch {
-        toast.error('アップロードに失敗しました');
-        setIsUploading(false);
-        return;
-      }
-      setIsUploading(false);
-      setPendingFiles([]);
+    if ((!content && pendingFiles.length === 0) || sendingRef.current || !roomId || !guestToken) return;
+    if (danMode) {
+      if (!isConnected || !navigator.onLine) { toast.error('AIへの質問は接続が戻ってから送信できます'); return; }
+      if (pendingFiles.length) { toast.error('AIへの質問には添付できません。文章で質問してください'); return; }
+      wsSend(`@ダン ${content}`);
+      setInput(''); setReplyTo(null); return;
     }
-    if (replyTo) {
-      metadata.reply_to = {
-        id: replyTo.id,
-        sender_name: replyTo.sender_name,
-        sender_type: replyTo.sender_type,
-        content: replyTo.content.slice(0, 200),
-      };
-    }
-    const md = Object.keys(metadata).length > 0 ? metadata : undefined;
-    // @ダン の私的相談だけは WS 専用機能なので接続時は WS、それ以外は常に REST
-    // （確実・即時に自分の画面へ反映。WS は受信専用）。
-    if (danMode && isConnected && filesToSend.length === 0) {
-      wsSend(finalContent, md);
-      setInput('');
-      setReplyTo(null);
-      inputRef.current?.focus();
-      return;
-    }
-    if (!roomId || !guestToken) return;
-    // 楽観表示: 押した瞬間に自分のバブルを即表示。client_msg_id 焼き込みで
-    // WSエコー/REST応答のどちらが先でも handleNewMessage が1回で差し替える
-    const savedInput = content;
-    const tempId = `temp-${Date.now()}`;
-    metadata.client_msg_id = tempId;
-    const optimistic = {
-      id: tempId, room_id: roomId, sender_type: 'guest', sender_name: guestName || 'あなた',
-      content: finalContent, metadata: metadata as CollabMessageResponse['metadata'],
-      created_at: new Date().toISOString(),
-    } as CollabMessageResponse;
-    setInput('');
-    setReplyTo(null);
-    setMessages((prev) => [...prev, optimistic]);
-    inputRef.current?.focus();
+    sendingRef.current = true; setSending(true);
+    const metadata: Record<string, unknown> = { sender_id: myId };
+    if (replyTo) metadata.reply_to = { id: replyTo.id, sender_name: replyTo.sender_name,
+      sender_type: replyTo.sender_type, content: replyTo.content.slice(0, 200) };
     try {
-      const sent = await api.collab.sendMessage(roomId, finalContent, guestToken, metadata);
-      handleNewMessage(sent);
-    } catch {
-      toast.error('送信に失敗しました。通信環境をご確認ください');
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      setInput(savedInput);
-      if (filesToSend.length > 0) setPendingFiles(filesToSend);
-    }
+      await outbox.enqueue(content, metadata, pendingFiles);
+      setInput(''); setReplyTo(null); setPendingFiles([]);
+      writeDraft(inviteToken, { text: '', reply: null, private: false });
+      quoteAnchor.current = null; atBottomRef.current = true;
+      inputRef.current?.focus();
+    } catch { toast.error('端末に送信内容を保存できませんでした。文章と添付は残っています'); }
+    finally { sendingRef.current = false; setSending(false); }
   };
 
   // 添付ボタン: 送信前の一覧に積むだけ（送信は handleSend で本文と一緒に）
@@ -548,38 +611,23 @@ export default function GuestJoinPage() {
         </button>
       </div>
 
-      {/* 通知バナー:
-          - アプリ（ホーム画面追加後）で開いていて未許可 → 許可ダイアログを出すボタン
-          - ブラウザで開いている → ホーム画面追加の案内（iOSは追加後でないと許可できない） */}
-      {typeof window !== 'undefined' &&
-        (/iPad|iPhone|iPod|Android/i.test(navigator.userAgent)) && (
-        window.matchMedia('(display-mode: standalone)').matches ? (
-          pushPermission !== 'granted' && (
-            <button
-              onClick={async () => {
-                const ok = await pushSubscribe();
-                if (ok) toast.success('通知をオンにしました');
-                else toast.error('通知を許可できませんでした。端末の設定アプリから通知を許可してください');
-              }}
-              className="flex items-center gap-2 px-4 py-2 bg-violet-500/15 border-b border-violet-500/30 text-violet-300 text-xs font-medium shrink-0 hover:bg-violet-500/20 transition-colors"
-            >
-              <Bell className="h-3.5 w-3.5 shrink-0 animate-pulse" />
-              <span>タップして通知をオンにする（新着に気づけます）</span>
-            </button>
-          )
-        ) : (
-          <button
-            onClick={() => setShowInstallGuide(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 text-violet-400 text-xs shrink-0 hover:bg-violet-500/15 transition-colors"
-          >
-            <Bell className="h-3.5 w-3.5 shrink-0" />
-            <span>通知がほしい場合</span>
-          </button>
-        )
+      {!pushSubscribed && (
+        <button
+          onClick={async () => {
+            if (/iPad|iPhone|iPod/i.test(navigator.userAgent) && !window.matchMedia('(display-mode: standalone)').matches) {
+              setShowInstallGuide(true); return;
+            }
+            const ok = await pushSubscribe();
+            if (ok) toast.success('通知をオンにしました');
+            else toast.error('通知を登録できませんでした。ブラウザの通知設定を確認してください');
+          }}
+          className="flex items-center gap-2 px-4 py-2 bg-violet-500/15 border-b border-violet-500/30 text-violet-300 text-xs shrink-0"
+        ><Bell className="h-4 w-4" />{pushError ? "通知を登録できませんでした。押して再試行" : "新着メッセージの通知をオンにする"}</button>
       )}
-
+      {!online && <div role="status" className="px-4 py-2 text-xs bg-amber-500/15">オフラインです。書きかけの文章は保存されています。</div>}
+      {jumping && <div role="status" className="px-4 py-2 text-xs bg-muted">引用元を読み込んでいます… <button className="underline ml-3" onClick={() => { jumpCancelled.current = true; }}>中止</button></div>}
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll}>
+      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll} onWheel={() => { quoteAnchor.current = null; }} onTouchStart={() => { quoteAnchor.current = null; }} onPointerDown={() => { quoteAnchor.current = null; }} onKeyDown={() => { quoteAnchor.current = null; }}>
         <div className="space-y-3 py-4">
           {loadingOlder && (
             <div className="flex justify-center py-2">
@@ -602,6 +650,9 @@ export default function GuestJoinPage() {
                 <GuestMessageBubble
                   message={msg}
                   myName={guestName}
+                  myId={myId}
+                  guestToken={guestToken}
+                  onJump={jumpToMessage}
                   onReact={(m, emoji) => {
                     if (!roomId || !guestToken) return;
                     api.collab.react(roomId, m.id, emoji, guestToken)
@@ -670,6 +721,15 @@ export default function GuestJoinPage() {
               </div>
             );
           })}
+          {outbox.entries.map(entry => <div key={entry.id} className="ml-auto max-w-[80%] rounded-xl border border-primary/30 bg-primary/10 p-3 text-sm" aria-label="送信待ちのメッセージ">
+            <p className="whitespace-pre-wrap break-words">{entry.content}</p>
+            {entry.files.map((file, i) => <p key={i} className="text-xs">{file.name}</p>)}
+            <p role="status" className="mt-1 text-xs text-muted-foreground">{entry.error || (outbox.busy ? '送信しています…' : '送信待ち・接続が戻ると送信します')}</p>
+            {!outbox.busy && <div className="flex gap-4 mt-2">
+              <button className="underline" onClick={() => void outbox.retry()}>再試行</button>
+              <button className="underline" onClick={() => void outbox.remove(entry.id)}>送信を取り消す</button>
+            </div>}
+          </div>)}
           {danThinking && (
             <div className="flex justify-end">
               <div className="bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
@@ -681,6 +741,9 @@ export default function GuestJoinPage() {
         </div>
       </div>
 
+      {newCount > 0 && <button className="self-center my-1 rounded-full border bg-background px-4 py-2 text-xs shadow" onClick={() => {
+        quoteAnchor.current = null; atBottomRef.current = true; setNewCount(0); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }}>新着メッセージ {newCount}件 ↓</button>}
       {/* Name edit overlay */}
       {editingName && (
         <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -784,7 +847,7 @@ export default function GuestJoinPage() {
                 {(replyTo.content || '').slice(0, 100) || '(ファイル)'}
               </p>
             </div>
-            <button onClick={() => setReplyTo(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
+            <button aria-label="引用返信をやめる" onClick={() => setReplyTo(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -792,7 +855,7 @@ export default function GuestJoinPage() {
       <div className="flex items-center gap-2">
         <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} multiple
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip" />
-        <Button variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
+        <Button aria-label="写真・動画・ファイルを添付" variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={sending}>
           <Paperclip className="h-4 w-4" />
         </Button>
         <Button
@@ -812,10 +875,20 @@ export default function GuestJoinPage() {
             </div>
           )}
           <textarea
-            ref={inputRef as any}
+            ref={inputRef}
+            aria-label={danMode ? "AIへの質問" : "メッセージ"}
             placeholder={danMode ? "AIに質問..." : "メッセージを入力..."}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            disabled={sending}
+            onChange={(e) => {
+              setInput(e.target.value);
+              writeDraft(inviteToken, { text: e.target.value, reply: replyTo, private: danMode });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
+                e.preventDefault(); void handleSend();
+              }
+            }}
             rows={1}
             className={`flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none ${danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}`}
             style={{ maxHeight: '120px', overflowY: 'auto' }}
@@ -828,11 +901,13 @@ export default function GuestJoinPage() {
         </div>
         <Button
           size="icon"
+          aria-label={sending ? "送信中" : "送信"}
+          title="送信（Ctrl / ⌘ + Enter）"
           onClick={handleSend}
-          disabled={(!input.trim() && pendingFiles.length === 0) || isUploading}
+          disabled={(!input.trim() && pendingFiles.length === 0) || sending}
           className={`transition-transform active:scale-90 ${danMode ? "bg-violet-600 hover:bg-violet-700" : ""}`}
         >
-          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
       </div>
@@ -840,22 +915,17 @@ export default function GuestJoinPage() {
   );
 }
 
-function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name: string; sender_type: string; content: string } }) {
+function GuestCollabReplyQuote({ replyTo, onJump }: { onJump?: (id: string) => void; replyTo: { id: string; sender_name: string; sender_type: string; content: string } }) {
   const truncated = (replyTo.content || '').slice(0, 80);
   const label = replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name;
 
-  const handleClick = useCallback(() => {
-    const el = document.querySelector(`[data-collab-msg-id="${replyTo.id}"]`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
-      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
-    }
-  }, [replyTo.id]);
-
   return (
     <div
-      onClick={handleClick}
+      role="button"
+      tabIndex={0}
+      aria-label="引用元のメッセージを開く"
+      onClick={() => onJump?.(replyTo.id)}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onJump?.(replyTo.id); } }}
       className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden cursor-pointer hover:bg-muted/80 transition-colors"
     >
       <Reply className="h-3 w-3 mt-0.5 shrink-0 rotate-180" />
@@ -867,16 +937,20 @@ function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name
   );
 }
 
-function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, onReact }: {
+function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, myId, guestToken, onJump, onReact }: {
   message: CollabMessageResponse;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
   onGenerateReply?: () => void;
   onReply?: (msg: CollabMessageResponse) => void;
   myName?: string;
+  myId?: string;
+  guestToken?: string;
+  onJump?: (id: string) => void;
   onReact?: (msg: CollabMessageResponse, emoji: string) => void;
 }) {
   const isGuest = message.sender_type === 'guest';
+  const isMine = isOwnGuestMessage(message, myId || '', myName || '');
   const isDan = message.sender_type.startsWith('dan_');
   const isOwner = message.sender_type === 'owner';
   // 絵文字1〜2個だけの発言はスタンプとして大きく表示
@@ -901,19 +975,20 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
   const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none ${isGuest || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
-      {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
+    <div className={`flex flex-col animate-in fade-in slide-in-from-bottom-3 zoom-in-95 duration-200 motion-reduce:animate-none ${isMine || (isDan && isPrivate) ? 'items-end' : 'items-start'} max-w-[75%] ${isMine || (isDan && isPrivate) ? 'ml-auto' : 'mr-auto'}`}>
+      {replyToData && <GuestCollabReplyQuote replyTo={replyToData} onJump={onJump} />}
       {/* LINE式: 名前は相手側とダンだけバブルの上（自分の名前は出さない） */}
-      {!isPrivate && !isGuest && (
+      {!isPrivate && !isMine && (
         <span className="mb-0.5 mx-1 text-[11px] text-muted-foreground">
           {isDan ? 'ダン' : message.sender_name}
         </span>
       )}
-      <div className={`group flex items-end gap-1.5 ${isGuest || (isDan && isPrivate) ? 'flex-row' : 'flex-row-reverse'}`}>
+      <div className={`group flex items-end gap-1.5 ${isMine || (isDan && isPrivate) ? 'flex-row' : 'flex-row-reverse'}`}>
         {onReply && (
           <button
             onClick={() => onReply(message)}
-            className="self-start mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            className="self-start mt-1.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            aria-label="引用して返信"
             title="返信"
           >
             <Reply className="h-3.5 w-3.5" />
@@ -921,7 +996,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
         )}
         {/* LINE式: 時刻・既読はバブルの外側（横・下揃え） */}
         {!isPrivate && (
-          <div className={`flex flex-col justify-end pb-0.5 text-[10px] leading-tight text-muted-foreground ${isGuest ? 'items-end' : 'items-start'}`}>
+          <div className={`flex flex-col justify-end pb-0.5 text-[10px] leading-tight text-muted-foreground ${isMine ? 'items-end' : 'items-start'}`}>
             {showRead && <span>既読</span>}
             <span>{formatTime(message.created_at)}</span>
           </div>
@@ -933,7 +1008,7 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
               ? ''
               : isPrivate
                 ? 'bg-violet-500/10 border border-dashed border-violet-500/30'
-                : isGuest
+                : isMine
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted'
           }`}
@@ -954,12 +1029,14 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
           ))}
           {bodyText && <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={bodyText} /></p>}
 
+          {bodyText && <CollabLinkPreview text={bodyText} roomId={message.room_id} guestToken={guestToken} />}
+
           {/* リアクション（ダンの🙏既読サイン＋自分の付け外し。スマホ向けに「+」常時表示） */}
           {onReact && (
             <ReactionBar
               reactions={message.metadata?.reactions as Record<string, string[]> | undefined}
               myName={myName}
-              align={isGuest ? 'right' : 'left'}
+              align={isMine ? 'right' : 'left'}
               compact
               onToggle={(emoji) => onReact(message, emoji)}
             />

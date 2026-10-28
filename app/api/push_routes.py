@@ -4,6 +4,7 @@ Push Notification API Routes
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
+from fastapi.security import HTTPAuthorizationCredentials
 
 from app.config import settings
 from app.api.chat_routes import get_current_user, get_optional_user, TokenData
@@ -31,11 +32,33 @@ async def get_vapid_key():
     return {"publicKey": settings.VAPID_PUBLIC_KEY}
 
 
+async def _subscription_identity(req: SubscribeRequest, request: Request):
+    from app.api.collab_routes import _room_access, get_collab_service, decode_access_token, ACCESS_TOKEN_COOKIE
+    token = request.headers.get('Authorization', '').removeprefix('Bearer ')
+    credentials = HTTPAuthorizationCredentials(scheme='Bearer', credentials=token) if token else None
+    if req.room_id.startswith('user:'):
+        owner = decode_access_token(request.cookies.get(ACCESS_TOKEN_COOKIE) or token)
+        if not owner or req.room_id != f'user:{owner.user_id}' or req.sender_type != 'owner':
+            raise HTTPException(status_code=403, detail='Access denied')
+        return '/chat'
+    service = get_collab_service()
+    access = await _room_access(request, credentials, service, req.room_id)
+    if access is None or req.sender_type != ('owner' if access[0] else 'guest'):
+        raise HTTPException(status_code=403, detail='Access denied')
+    if access[0]:
+        return f'/collab/{req.room_id}'
+    invites = await service.list_invites(req.room_id)
+    mine = next((i for i in invites if i['id'] == access[1]), None)
+    if not mine:
+        raise HTTPException(status_code=403, detail='Identity not found')
+    return f"/collab/join/{mine['token']}"
+
+
 @router.post("/subscribe")
-async def subscribe(req: SubscribeRequest):
+async def subscribe(req: SubscribeRequest, request: Request):
     """Save a push subscription."""
     svc = get_push_service()
-    landing = req.landing_url if (req.landing_url or "").startswith("/") else None
+    landing = await _subscription_identity(req, request)
     await svc.save_subscription(req.room_id, req.sender_type, req.subscription, landing_url=landing)
     return {"success": True}
 
@@ -103,8 +126,9 @@ async def unsubscribe_native(
 
 
 @router.post("/unsubscribe")
-async def unsubscribe(req: SubscribeRequest):
+async def unsubscribe(req: SubscribeRequest, request: Request):
     """Remove a push subscription."""
+    await _subscription_identity(req, request)
     svc = get_push_service()
     await svc.remove_subscription(
         req.room_id, req.sender_type, req.subscription.get("endpoint", "")

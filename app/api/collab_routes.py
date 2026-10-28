@@ -269,7 +269,7 @@ async def create_invite(
     )
     # Build invite URL
     from app.config import settings as app_settings
-    frontend_url = (app_settings.FRONTEND_URL or "http://localhost:3000").rstrip("/")
+    frontend_url = app_settings.DAN_PUBLIC_ORIGIN.rstrip("/")
     invite_url = f"{frontend_url}/collab/join/{invite['token']}"
     return CollabInviteResponse(**invite, invite_url=invite_url)
 
@@ -453,8 +453,8 @@ async def get_messages(
     service: CollabService = Depends(get_collab_service),
 ):
     # Verify access (owner or guest)
-    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
-    if not owner_token and credentials:
+    owner_token = None if request.headers.get("X-Guest-Token") else request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials and not request.headers.get("X-Guest-Token"):
         owner_token = credentials.credentials
 
     has_access = False
@@ -515,10 +515,11 @@ async def send_message(
     # Determine sender
     sender_type = None
     sender_name = None
+    sender_id = None
 
     # Try owner auth
-    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
-    if not owner_token and credentials:
+    owner_token = None if request.headers.get("X-Guest-Token") else request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials and not request.headers.get("X-Guest-Token"):
         owner_token = credentials.credentials
 
     if owner_token:
@@ -528,6 +529,7 @@ async def send_message(
             if room and room["owner_id"] == token_data.user_id:
                 sender_type = "owner"
                 sender_name = await _get_display_name(token_data.user_id, token_data.email)
+                sender_id = token_data.user_id
 
     # Try guest auth
     if not sender_type:
@@ -537,6 +539,7 @@ async def send_message(
             if guest_data and guest_data.get("room_id") == room_id:
                 sender_type = "guest"
                 sender_name = guest_data.get("guest_name", "Guest")
+                sender_id = guest_data["sub"]
 
     if not sender_type:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -553,13 +556,20 @@ async def send_message(
         and ((req.metadata or {}).get("visibility") == "owner_only")
     )
 
+    metadata = {**(req.metadata or {}), "sender_id": sender_id}
+    client_id = metadata.get("client_msg_id")
+    message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(
+        [room_id, sender_type, sender_id, client_id]))) if isinstance(client_id, str) and 0 < len(client_id) <= 100 else None
     message = await service.send_message(
         room_id=room_id,
         sender_type=sender_type,
         sender_name=sender_name,
         content=req.content,
-        metadata=req.metadata,
+        metadata=metadata,
+        message_id=message_id,
     )
+    if message.pop("_replayed", False):
+        return CollabMessageResponse(**message)
 
     ws_payload = {
         "type": "new_message",
@@ -617,8 +627,8 @@ async def send_message(
 
 async def _room_access(request: Request, credentials, service: CollabService, room_id: str):
     """オーナー or ゲストのアクセス判定。(is_owner, guest_invite_id) を返す。どちらでもなければ None。"""
-    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
-    if not owner_token and credentials:
+    owner_token = None if request.headers.get("X-Guest-Token") else request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials and not request.headers.get("X-Guest-Token"):
         owner_token = credentials.credentials
     if owner_token:
         td = decode_access_token(owner_token)
@@ -656,6 +666,17 @@ async def get_participants(
         "owner": {"name": owner_name, "last_read_at": room.get("owner_last_read_at")},
         "guests": guests,
     }
+
+
+@router.get("/rooms/{room_id}/link-preview")
+async def link_preview(room_id: str, url: str, request: Request,
+                       credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+                       service: CollabService = Depends(get_collab_service)):
+    if await _room_access(request, credentials, service, room_id) is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    import asyncio
+    from app.services.collab_link_preview import preview
+    return await asyncio.to_thread(preview, url)
 
 
 @router.post("/rooms/{room_id}/messages/{message_id}/react")
@@ -873,8 +894,8 @@ async def upload_file(
     # Determine uploader
     uploaded_by = None
 
-    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
-    if not owner_token and credentials:
+    owner_token = None if request.headers.get("X-Guest-Token") else request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials and not request.headers.get("X-Guest-Token"):
         owner_token = credentials.credentials
 
     if owner_token:
@@ -938,8 +959,8 @@ async def list_files(
 ):
     # Access check (simplified - similar to messages)
     has_access = False
-    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
-    if not owner_token and credentials:
+    owner_token = None if request.headers.get("X-Guest-Token") else request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials and not request.headers.get("X-Guest-Token"):
         owner_token = credentials.credentials
     if owner_token:
         token_data = decode_access_token(owner_token)
@@ -1155,6 +1176,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
             else:
                 sender_type = "guest"
             sender_name = await _get_display_name(token_data.user_id, token_data.email)
+            sender_id = token_data.user_id
 
         elif auth_type == "auth_guest" and token:
             # Guest auth
@@ -1165,6 +1187,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 return
             sender_type = "guest"
             sender_name = guest_data.get("guest_name", "Guest")
+            sender_id = guest_data["sub"]
 
         else:
             await websocket.send_json({"type": "error", "message": "Auth required"})
@@ -1198,7 +1221,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 content = data.get("content", "").strip()
                 if not content:
                     continue
-                metadata = data.get("metadata") or {}
+                metadata = {**(data.get("metadata") or {}), "sender_id": sender_id}
 
                 # Check for @ダン mention (private message to DAN, both owner and guest)
                 import re

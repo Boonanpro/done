@@ -26,6 +26,15 @@ export function mergeLatest<T extends ScrollMessage>(prev: T[], server: T[]): T[
     server.map((m) => (m.metadata as { client_msg_id?: string } | undefined)?.client_msg_id).filter(Boolean)
   );
   const oldestServer = Math.min(...server.map(time));
+  // After a long disconnect, a full latest page may no longer touch our cached
+  // range. Keep one continuous window; older pages can then be fetched without
+  // silently skipping the messages between the two ranges.
+  const confirmed = prev.filter(m => !m.id.startsWith('temp-'));
+  if (server.length >= 50 && confirmed.length &&
+      !confirmed.some(m => serverIds.has(m.id)) &&
+      Math.max(...confirmed.map(time)) < oldestServer) {
+    return [...server, ...prev.filter(m => m.id.startsWith('temp-') && !serverCids.has(m.id))].sort(byTime);
+  }
   const kept = prev.filter((m) => {
     if (serverIds.has(m.id) || serverCids.has(m.id)) return false;
     if (m.id.startsWith('temp-')) return true;          // 送信中の仮バブル

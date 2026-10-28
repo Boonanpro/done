@@ -437,7 +437,7 @@ class CollabService:
     # ==================== Messages ====================
 
     async def send_message(self, room_id: str, sender_type: str, sender_name: str,
-                           content: str, metadata: dict = None) -> dict:
+                           content: str, metadata: dict = None, message_id: str = None) -> dict:
         data = {
             "room_id": room_id,
             "sender_type": sender_type,
@@ -445,8 +445,26 @@ class CollabService:
             "content": content,
             "metadata": metadata or {},
         }
-        result = await self._retry("send_message",
-            lambda: self.supabase.table("collab_messages").insert(data).execute())
+        if message_id:
+            data["id"] = message_id
+        insert_attempts = 0
+        def insert():
+            nonlocal insert_attempts
+            insert_attempts += 1
+            return self.supabase.table("collab_messages").insert(data).execute()
+        try:
+            result = await self._retry("send_message", insert)
+        except Exception as exc:
+            # The server may have saved the message before the connection dropped.
+            # A retry has the same primary key and must not post or notify twice.
+            if not message_id or str(getattr(exc, "code", "")) != "23505":
+                raise
+            existing = await self._retry("find_sent_message",
+                lambda: self.supabase.table("collab_messages").select("*")
+                    .eq("id", message_id).eq("room_id", room_id).execute())
+            if not existing.data:
+                raise
+            return {**existing.data[0], "_replayed": insert_attempts == 1}
 
         # Update room's updated_at
         await self._retry("touch_room",
