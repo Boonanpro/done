@@ -20,7 +20,7 @@ import { LinkifyText } from '@/components/linkify-text';
 import { CollabLinkPreview } from '@/components/collab/link-preview';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
-import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
+import { PendingAttachments } from '@/components/collab/pending-attachments';
 import { findGuestHome, forgetGuestHome } from '@/lib/guest-home';
 import { readDraft, writeDraft } from '@/lib/collab-draft';
 import { mergeLatest, mergeOlder, isAtBottom, isNearTop } from '@/lib/collab-scroll';
@@ -58,6 +58,11 @@ function formatDateSeparator(dateStr: string): string {
   return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
 }
 
+function centerQuote(container: HTMLDivElement | null, id: string) {
+  const el = container?.querySelector<HTMLElement>(`[data-collab-msg-id="${CSS.escape(id)}"]`);
+  if (container && el) container.scrollTop += el.getBoundingClientRect().top - container.getBoundingClientRect().top - Math.max(0, (container.clientHeight - el.clientHeight) / 2);
+}
+
 export default function GuestJoinPage() {
   const params = useParams();
   const router = useRouter();
@@ -75,13 +80,14 @@ export default function GuestJoinPage() {
   // スクロール制御: 「下にいる時だけ」新着で下へ送る。上へ遡っている間は動かさない
   const atBottomRef = useRef(true);
   const loadingOlderRef = useRef(false);
+  const jumpingRef = useRef(false);
+  const quoteAnchor = useRef<string | null>(null);
   const noMoreOlderRef = useRef(false);
   const messagesRef = useRef<CollabMessageResponse[]>([]);
   const [newCount, setNewCount] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isUploading, setIsUploading] = useState(false);
   // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [filesLoaded, setFilesLoaded] = useState(false);
@@ -339,7 +345,7 @@ export default function GuestJoinPage() {
   useEffect(() => {
     const open = (event: MessageEvent) => {
       if (event.data?.type !== 'collab-notification-open') return;
-      setEditingName(false); setShowInstallGuide(false); atBottomRef.current = true;
+      setEditingName(false); setShowInstallGuide(false); quoteAnchor.current = null; atBottomRef.current = true;
       requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
       if (roomId && guestToken) void api.collab.getMessages(roomId, 50, guestToken).then(data => setMessages(prev => mergeLatest(prev, data.messages)));
     };
@@ -370,7 +376,7 @@ export default function GuestJoinPage() {
       setMessages(merged);
       requestAnimationFrame(() => {
         const cur = scrollRef.current;
-        if (cur) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
+        if (cur && !jumpingRef.current) cur.scrollTop = prevTop + (cur.scrollHeight - prevHeight);
       });
       return true;
     } catch {
@@ -382,6 +388,7 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken]);
 
   const handleScroll = useCallback(() => {
+    if (jumpingRef.current) return;
     const el = scrollRef.current;
     atBottomRef.current = isAtBottom(el);
     if (atBottomRef.current) setNewCount(0);
@@ -398,7 +405,10 @@ export default function GuestJoinPage() {
   useEffect(() => {
     const el = scrollRef.current;
     if (!el?.firstElementChild) return;
-    const observer = new ResizeObserver(() => { if (atBottomRef.current) el.scrollTop = el.scrollHeight; });
+    const observer = new ResizeObserver(() => {
+      if (quoteAnchor.current) centerQuote(el, quoteAnchor.current);
+      else if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
     observer.observe(el.firstElementChild); observer.observe(el);
     return () => observer.disconnect();
   }, [roomId, guestToken]);
@@ -407,7 +417,8 @@ export default function GuestJoinPage() {
   const jumpCancelled = useRef(false);
   useEffect(() => () => { jumpCancelled.current = true; }, []);
   const jumpToMessage = useCallback(async (id: string) => {
-    if (jumping) return;
+    if (jumpingRef.current) return;
+    jumpingRef.current = true;
     const find = () => document.querySelector<HTMLElement>(`[data-collab-msg-id="${CSS.escape(id)}"]`);
     atBottomRef.current = false;
     jumpCancelled.current = false;
@@ -420,10 +431,12 @@ export default function GuestJoinPage() {
       if (jumpCancelled.current) return;
       const el = find();
       if (!el) { toast.error('引用元を読み込めませんでした。接続を確認してもう一度お試しください'); return; }
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      quoteAnchor.current = id;
+      centerQuote(scrollRef.current, id);
+      await new Promise(resolve => requestAnimationFrame(resolve));
       el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
       setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
-    } finally { setJumping(false); }
+    } finally { jumpingRef.current = false; setJumping(false); }
   }, [jumping, loadOlder]);
 
   // Join room
@@ -494,7 +507,7 @@ export default function GuestJoinPage() {
       await outbox.enqueue(content, metadata, pendingFiles);
       setInput(''); setReplyTo(null); setPendingFiles([]);
       writeDraft(inviteToken, { text: '', reply: null, private: false });
-      atBottomRef.current = true;
+      quoteAnchor.current = null; atBottomRef.current = true;
       inputRef.current?.focus();
     } catch { toast.error('端末に送信内容を保存できませんでした。文章と添付は残っています'); }
     finally { sendingRef.current = false; setSending(false); }
@@ -614,7 +627,7 @@ export default function GuestJoinPage() {
       {!online && <div role="status" className="px-4 py-2 text-xs bg-amber-500/15">オフラインです。書きかけの文章は保存されています。</div>}
       {jumping && <div role="status" className="px-4 py-2 text-xs bg-muted">引用元を読み込んでいます… <button className="underline ml-3" onClick={() => { jumpCancelled.current = true; }}>中止</button></div>}
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll}>
+      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef} onScroll={handleScroll} onWheel={() => { quoteAnchor.current = null; }} onTouchStart={() => { quoteAnchor.current = null; }} onPointerDown={() => { quoteAnchor.current = null; }} onKeyDown={() => { quoteAnchor.current = null; }}>
         <div className="space-y-3 py-4">
           {loadingOlder && (
             <div className="flex justify-center py-2">
@@ -729,7 +742,7 @@ export default function GuestJoinPage() {
       </div>
 
       {newCount > 0 && <button className="self-center my-1 rounded-full border bg-background px-4 py-2 text-xs shadow" onClick={() => {
-        atBottomRef.current = true; setNewCount(0); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        quoteAnchor.current = null; atBottomRef.current = true; setNewCount(0); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }}>新着メッセージ {newCount}件 ↓</button>}
       {/* Name edit overlay */}
       {editingName && (
@@ -842,7 +855,7 @@ export default function GuestJoinPage() {
       <div className="flex items-center gap-2">
         <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} multiple
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip" />
-        <Button aria-label="写真・動画・ファイルを添付" variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
+        <Button aria-label="写真・動画・ファイルを添付" variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={sending}>
           <Paperclip className="h-4 w-4" />
         </Button>
         <Button
@@ -891,10 +904,10 @@ export default function GuestJoinPage() {
           aria-label={sending ? "送信中" : "送信"}
           title="送信（Ctrl / ⌘ + Enter）"
           onClick={handleSend}
-          disabled={(!input.trim() && pendingFiles.length === 0) || isUploading || sending}
+          disabled={(!input.trim() && pendingFiles.length === 0) || sending}
           className={`transition-transform active:scale-90 ${danMode ? "bg-violet-600 hover:bg-violet-700" : ""}`}
         >
-          {isUploading || sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
       </div>

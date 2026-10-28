@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { get, set, update } from 'idb-keyval';
+import { get, update } from 'idb-keyval';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { uploadCollabFiles, type UploadedFile } from '@/components/collab/pending-attachments';
 
