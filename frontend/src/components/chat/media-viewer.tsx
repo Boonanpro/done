@@ -1,6 +1,6 @@
 'use client';
 
-import {useRef,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {ChevronLeft,ChevronRight,RefreshCw,X} from 'lucide-react';
 import {imageRequest,playableVideo} from '@/lib/chat-media';
@@ -22,6 +22,7 @@ export function collectChatMedia(source:Element|null, fallback:GalleryItem[]=[])
  return [...items,...fallback].filter((item,i,all)=>all.findIndex(x=>x.url===item.url)===i&&(item.kind!=='video'||playableVideo(item.url)));
 }
 export function MediaViewer({items,initialUrl,onClose,returnFocus}:{items:GalleryItem[];initialUrl:string;onClose:()=>void;returnFocus?:HTMLElement|null}){
+ useEffect(()=>{const close=(event:MessageEvent)=>{if(event.data?.type==='collab-notification-open')onClose()};navigator.serviceWorker?.addEventListener('message',close);return()=>navigator.serviceWorker?.removeEventListener('message',close)},[onClose]);
  const [index,setIndex]=useState(()=>Math.max(0,items.findIndex(x=>x.url===initialUrl)));
  const [retry,setRetry]=useState(0),[failed,setFailed]=useState(false);
  const gesture=useRef<{x:number;y:number}|null>(null);

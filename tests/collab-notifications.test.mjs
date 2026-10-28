@@ -32,7 +32,7 @@ test('a click focuses the matching room and does not open an unrelated conversat
   const focused = [];
   const w = worker([
     { url: 'https://chat.example/collab/join/other', focus: () => focused.push('other') },
-    { url: 'https://chat.example/collab/join/mine', focus: () => focused.push('mine') },
+    { url: 'https://chat.example/collab/join/mine', postMessage: (msg) => assert.equal(msg.type, 'collab-notification-open'), focus: () => focused.push('mine') },
   ]);
   await w.dispatch('notificationclick', { notification: { data: { url: 'https://chat.example/collab/join/mine' }, close() {} } });
   assert.deepEqual(focused, ['mine']); assert.deepEqual(w.opened, []);

@@ -11,6 +11,8 @@ export function usePushNotification(roomId: string, senderType: string) {
   const attemptedRoom = useRef('');
   const [error, setError] = useState('');
 
+  useEffect(() => { setSubscribed(false); setError(''); }, [roomId, senderType]);
+
   useEffect(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
       setPermission(Notification.permission);
@@ -34,7 +36,10 @@ export function usePushNotification(roomId: string, senderType: string) {
 
       // Register service worker
       const reg = await navigator.serviceWorker.register('/sw.js');
-      await navigator.serviceWorker.ready;
+      await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('通知の準備が時間内に終わりませんでした')), 20_000)),
+      ]);
 
       // Get VAPID key
       const vapidRes = await fetch(`${API_URL}/api/v1/push/vapid-key`);

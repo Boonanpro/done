@@ -21,12 +21,16 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = new URL(event.notification.data?.url || '/collab', self.location.origin);
+  let url;
+  try { url = new URL(event.notification.data?.url || '/collab', self.location.origin); } catch { return; }
   if (url.origin !== self.location.origin) return;
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const existing = windows.find((client) => client.url === url.href);
-    if (existing) return existing.focus();
+    if (existing) {
+      existing.postMessage({ type: 'collab-notification-open' });
+      return existing.focus();
+    }
     return self.clients.openWindow(url.href);
   })());
 });

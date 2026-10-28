@@ -4,6 +4,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
+import { get, set } from 'idb-keyval';
+import { useCollabOutbox } from '@/hooks/useCollabOutbox';
+import { guestIdentity, isOwnGuestMessage } from '@/lib/collab-identity';
 import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2, Reply, X, Bell } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
@@ -14,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Share, MoreVertical, Download } from 'lucide-react';
 import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
+import { CollabLinkPreview } from '@/components/collab/link-preview';
 import { ReactionBar } from '@/components/collab/reaction-bar';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
 import { PendingAttachments, uploadCollabFiles } from '@/components/collab/pending-attachments';
@@ -61,6 +65,7 @@ export default function GuestJoinPage() {
   const [guestName, setGuestName] = useState('');
   const [guestNameLoaded, setGuestNameLoaded] = useState(false);
   const [guestToken, setGuestToken] = useState<string | null>(null);
+  const myId = guestIdentity(guestToken);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomTitle, setRoomTitle] = useState('');
   const [messages, setMessages] = useState<CollabMessageResponse[]>([]);
@@ -78,6 +83,13 @@ export default function GuestJoinPage() {
   const [isUploading, setIsUploading] = useState(false);
   // 送信前の添付（添付しただけでは送らない。送信ボタンで本文と一緒に1メッセージ）
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [filesLoaded, setFilesLoaded] = useState(false);
+  useEffect(() => {
+    let active = true; setFilesLoaded(false);
+    get<File[]>(`collab-files:${inviteToken}`).then(files => { if (active) { setPendingFiles(files || []); setFilesLoaded(true); } }).catch(() => { if (active) setFilesLoaded(true); });
+    return () => { active = false; };
+  }, [inviteToken]);
+  useEffect(() => { if (filesLoaded) void set(`collab-files:${inviteToken}`, pendingFiles).catch(() => toast.error('添付を端末に保存できませんでした。画面を閉じずに送信してください')); }, [pendingFiles, filesLoaded, inviteToken]);
   const [readByOther, setReadByOther] = useState<string | null>(null);
   const [danMode, setDanMode] = useState(false);
   const [danThinking, setDanThinking] = useState(false);
@@ -214,8 +226,10 @@ export default function GuestJoinPage() {
   // Fetch messages when joined
   useEffect(() => {
     if (roomId && guestToken) {
+      let received = false;
+      void get<CollabMessageResponse[]>(`collab-history:${inviteToken}`).then(cached => { if (!received && cached) setMessages(cached); });
       api.collab.getMessages(roomId, 50, guestToken).then((data) => {
-        setMessages(data.messages);
+        received = true; setMessages(prev => mergeLatest(prev, data.messages));
       }).catch(() => {});
     }
   }, [roomId, guestToken]);
@@ -231,7 +245,7 @@ export default function GuestJoinPage() {
   // 自分の既読位置を定期更新（オーナー側の「既読」表示の元になる）
   useEffect(() => {
     if (!roomId || !guestToken) return;
-    const mark = () => api.collab.markRead(roomId, guestToken).catch(() => {});
+    const mark = () => { if (document.visibilityState === 'visible' && atBottomRef.current) void api.collab.markRead(roomId, guestToken).catch(() => {}); };
     mark();
     const timer = setInterval(mark, 10_000);
     return () => clearInterval(timer);
@@ -243,7 +257,7 @@ export default function GuestJoinPage() {
   const lastReadOwnId = (() => {
     let id: string | null = null;
     for (const m of messages) {
-      if (m.sender_type === 'guest' && new Date(m.created_at).getTime() <= ownerReadTime) id = m.id;
+      if (isOwnGuestMessage(m, myId, guestName) && new Date(m.created_at).getTime() <= ownerReadTime) id = m.id;
     }
     return id;
   })();
@@ -261,6 +275,8 @@ export default function GuestJoinPage() {
       return [...prev, msg];
     });
   }, []);
+
+  const outbox = useCollabOutbox(roomId, guestToken, inviteToken, handleNewMessage);
 
   const handleDanThinking = useCallback((thinking: boolean) => {
     setDanThinking(thinking);
@@ -294,7 +310,7 @@ export default function GuestJoinPage() {
   // Send read receipt when new messages arrive from owner
   useEffect(() => {
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg && lastMsg.sender_type === 'owner') {
+    if (lastMsg && lastMsg.sender_type === 'owner' && document.visibilityState === 'visible' && atBottomRef.current) {
       sendRead(lastMsg.id);
     }
   }, [messages, sendRead]);
@@ -312,9 +328,22 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken, isConnected]);
 
   // Push notifications
-  const { permission: pushPermission, subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest');
+  const { subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest');
 
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => {
+    messagesRef.current = messages;
+    if (messages.length) void set(`collab-history:${inviteToken}`, messages.slice(-500)).catch(() => {});
+  }, [messages, inviteToken]);
+  useEffect(() => {
+    const open = (event: MessageEvent) => {
+      if (event.data?.type !== 'collab-notification-open') return;
+      setEditingName(false); setShowInstallGuide(false); atBottomRef.current = true;
+      requestAnimationFrame(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; });
+      if (roomId && guestToken) void api.collab.getMessages(roomId, 50, guestToken).then(data => setMessages(prev => mergeLatest(prev, data.messages)));
+    };
+    navigator.serviceWorker?.addEventListener('message', open);
+    return () => navigator.serviceWorker?.removeEventListener('message', open);
+  }, [roomId, guestToken]);
 
   // 過去を読み足す（上端に近づいた時）。読んだ分だけ下へずらして、見ていた行を動かさない
   const loadOlder = useCallback(async () => {
@@ -413,78 +442,25 @@ export default function GuestJoinPage() {
 
   const handleSend = async () => {
     const content = input.trim();
-    if ((!content && pendingFiles.length === 0) || isUploading || sendingRef.current) return;
-    if (!navigator.onLine) { toast.error('オフラインです。書きかけの文章は保存されています'); return; }
-    if (!roomId || !guestToken) return;
-    sendingRef.current = true;
-    setSending(true);
-    const savedReply = replyTo;
-    atBottomRef.current = true;  // 自分が送った時は遡っていても最新へ戻る
-    const finalContent = danMode && content ? `@ダン ${content}` : content;
-    const metadata: Record<string, unknown> = {};
-    // 添付は送信時にまとめてアップロード → files[] として本文と同じメッセージに載せる
-    const filesToSend = pendingFiles;
-    if (filesToSend.length > 0 && roomId && guestToken) {
-      setIsUploading(true);
-      try {
-        const uploaded = await uploadCollabFiles(roomId, filesToSend, { guestToken });
-        metadata.files = uploaded;
-        metadata.file = uploaded[0];
-      } catch {
-        toast.error('アップロードに失敗しました');
-        setIsUploading(false);
-        sendingRef.current = false; setSending(false);
-        return;
-      }
-      setIsUploading(false);
-      setPendingFiles([]);
+    if ((!content && pendingFiles.length === 0) || sendingRef.current || !roomId || !guestToken) return;
+    if (danMode) {
+      if (!isConnected || !navigator.onLine) { toast.error('AIへの質問は接続が戻ってから送信できます'); return; }
+      if (pendingFiles.length) { toast.error('AIへの質問には添付できません。文章で質問してください'); return; }
+      wsSend(`@ダン ${content}`);
+      setInput(''); setReplyTo(null); return;
     }
-    if (replyTo) {
-      metadata.reply_to = {
-        id: replyTo.id,
-        sender_name: replyTo.sender_name,
-        sender_type: replyTo.sender_type,
-        content: replyTo.content.slice(0, 200),
-      };
-    }
-    const md = Object.keys(metadata).length > 0 ? metadata : undefined;
-    // @ダン の私的相談だけは WS 専用機能なので接続時は WS、それ以外は常に REST
-    // （確実・即時に自分の画面へ反映。WS は受信専用）。
-    if (danMode && isConnected && filesToSend.length === 0) {
-      wsSend(finalContent, md);
-      setInput('');
-      setReplyTo(null);
-      inputRef.current?.focus();
-      sendingRef.current = false; setSending(false);
-      return;
-    }
-    if (!roomId || !guestToken) return;
-    // 楽観表示: 押した瞬間に自分のバブルを即表示。client_msg_id 焼き込みで
-    // WSエコー/REST応答のどちらが先でも handleNewMessage が1回で差し替える
-    const savedInput = content;
-    const tempId = `temp-${Date.now()}`;
-    metadata.client_msg_id = tempId;
-    const optimistic = {
-      id: tempId, room_id: roomId, sender_type: 'guest', sender_name: guestName || 'あなた',
-      content: finalContent, metadata: metadata as CollabMessageResponse['metadata'],
-      created_at: new Date().toISOString(),
-    } as CollabMessageResponse;
-    setInput('');
-    setReplyTo(null);
-    setMessages((prev) => [...prev, optimistic]);
-    inputRef.current?.focus();
+    sendingRef.current = true; setSending(true);
+    const metadata: Record<string, unknown> = { sender_id: myId };
+    if (replyTo) metadata.reply_to = { id: replyTo.id, sender_name: replyTo.sender_name,
+      sender_type: replyTo.sender_type, content: replyTo.content.slice(0, 200) };
     try {
-      const sent = await api.collab.sendMessage(roomId, finalContent, guestToken, metadata);
-      handleNewMessage(sent);
-    } catch {
-      toast.error('送信に失敗しました。通信環境をご確認ください');
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      setInput((current) => current || savedInput);
-      setReplyTo((current) => current || savedReply);
-      if (filesToSend.length > 0) setPendingFiles((current) => [...filesToSend, ...current]);
-    } finally {
-      sendingRef.current = false; setSending(false);
-    }
+      await outbox.enqueue(content, metadata, pendingFiles);
+      setInput(''); setReplyTo(null); setPendingFiles([]);
+      writeDraft(inviteToken, { text: '', reply: null, private: false });
+      atBottomRef.current = true;
+      inputRef.current?.focus();
+    } catch { toast.error('端末に送信内容を保存できませんでした。文章と添付は残っています'); }
+    finally { sendingRef.current = false; setSending(false); }
   };
 
   // 添付ボタン: 送信前の一覧に積むだけ（送信は handleSend で本文と一緒に）
@@ -623,6 +599,8 @@ export default function GuestJoinPage() {
                 <GuestMessageBubble
                   message={msg}
                   myName={guestName}
+                  myId={myId}
+                  guestToken={guestToken}
                   onReact={(m, emoji) => {
                     if (!roomId || !guestToken) return;
                     api.collab.react(roomId, m.id, emoji, guestToken)
@@ -691,6 +669,15 @@ export default function GuestJoinPage() {
               </div>
             );
           })}
+          {outbox.entries.map(entry => <div key={entry.id} className="ml-auto max-w-[80%] rounded-xl border border-primary/30 bg-primary/10 p-3 text-sm" aria-label="送信待ちのメッセージ">
+            <p className="whitespace-pre-wrap break-words">{entry.content}</p>
+            {entry.files.map((file, i) => <p key={i} className="text-xs">{file.name}</p>)}
+            <p role="status" className="mt-1 text-xs text-muted-foreground">{entry.error || (outbox.busy ? '送信しています…' : '送信待ち・接続が戻ると送信します')}</p>
+            {!outbox.busy && <div className="flex gap-4 mt-2">
+              <button className="underline" onClick={() => void outbox.retry()}>再試行</button>
+              <button className="underline" onClick={() => void outbox.remove(entry.id)}>送信を取り消す</button>
+            </div>}
+          </div>)}
           {danThinking && (
             <div className="flex justify-end">
               <div className="bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
@@ -837,6 +824,7 @@ export default function GuestJoinPage() {
             aria-label={danMode ? "AIへの質問" : "メッセージ"}
             placeholder={danMode ? "AIに質問..." : "メッセージを入力..."}
             value={input}
+            disabled={sending}
             onChange={(e) => {
               setInput(e.target.value);
               writeDraft(inviteToken, { text: e.target.value, reply: replyTo, private: danMode });
@@ -899,17 +887,19 @@ function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name
   );
 }
 
-function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, onReact }: {
+function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply, myName, myId, guestToken, onReact }: {
   message: CollabMessageResponse;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
   onGenerateReply?: () => void;
   onReply?: (msg: CollabMessageResponse) => void;
   myName?: string;
+  myId?: string;
+  guestToken?: string;
   onReact?: (msg: CollabMessageResponse, emoji: string) => void;
 }) {
   const isGuest = message.sender_type === 'guest';
-  const isMine = isGuest && message.sender_name === myName;
+  const isMine = isOwnGuestMessage(message, myId || '', myName || '');
   const isDan = message.sender_type.startsWith('dan_');
   const isOwner = message.sender_type === 'owner';
   // 絵文字1〜2個だけの発言はスタンプとして大きく表示
@@ -987,6 +977,8 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, on
             <a key={f.url} href={f.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 text-sm underline opacity-80"><Paperclip className="h-3.5 w-3.5" />{f.name}</a>
           ))}
           {bodyText && <p className={`whitespace-pre-wrap break-words ${isStamp ? 'text-4xl leading-tight py-1' : 'text-sm'}`}><LinkifyText text={bodyText} /></p>}
+
+          {bodyText && <CollabLinkPreview text={bodyText} roomId={message.room_id} guestToken={guestToken} />}
 
           {/* リアクション（ダンの🙏既読サイン＋自分の付け外し。スマホ向けに「+」常時表示） */}
           {onReact && (

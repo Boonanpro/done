@@ -174,3 +174,4 @@ async def test_owner_message_does_not_create_origin_chat_proposal():
 def _no_chat(monkeypatch):
     async def say(*a, **k): return None
     monkeypatch.setattr('app.services.inbox.say', say)
+    monkeypatch.setattr('app.services.inbox.receive', say)
