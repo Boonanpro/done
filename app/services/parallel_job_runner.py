@@ -18,6 +18,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from app.services import command_job_state as state
@@ -51,7 +52,14 @@ JOB_RULES = """
 報告は日本語で書く。部屋のダンがこれを読んで本人に短く伝え、本人も開けば読めるので、仕組みの中の言葉（版・入れ替え・モデル名・試しの部屋など）は避け、何ができて何が残っているかを書く。
 途中で本人から追加の指示が届くことがある（追加の発言として届く）。
 同じファイルや、PCの画面操作・スマホ操作を別の作業が使っている時は、その部分だけ自動で順番待ちになる。待ちが長いと書き込みが断られることがあるので、その時はほかの部分を先に進めてから試し直す。
+担当（Agent）を使う時は前面で1つずつ起こす（run_in_background は使えない。返事を終えた時点でこの作業は終わった扱いになり、裏に残した担当は10分で切られる）。ScheduleWakeup で眠って何かを待たない（眠った時点で終わった扱いになる）。待つ物は wait_until や Monitor でこのターンの中で待つ。担当が終わったかをファイルの更新時刻で推測しない（担当の返事で判断する）。
 """
+# Seconds after the worker's input is closed (its answer is in): silence this long, or this much time in all, and the
+# leftover background work is cut so the answer reaches the room. 2026-10-29: a job whose worker had slept with
+# ScheduleWakeup never exited, and the room showed it as running for 40 minutes.
+AFTER_CLOSE_SILENCE = 180
+AFTER_CLOSE_LIMIT = 900
+
 
 
 def model_key(value):
@@ -215,6 +223,20 @@ def _kill(job_id):
             pass
 
 
+def job_cmd(cmd):
+    """The room's CLI command line, as a job runs it: whole messages only (one progress line per step), and no
+    ScheduleWakeup (a sleeping worker's turn end is taken as its answer; scripts/job_tool_hook.py says the same)."""
+    out = [c for c in cmd if c != '--include-partial-messages']
+    for i, c in enumerate(out):
+        if c == '--disallowedTools' and i + 1 < len(out):
+            names = [n for n in out[i + 1].split(',') if n]
+            if 'ScheduleWakeup' not in names:
+                names.append('ScheduleWakeup')
+            out[i + 1] = ','.join(names)
+            return out
+    return out + ['--disallowedTools', 'ScheduleWakeup']
+
+
 def _user_line(text):
     return (json.dumps({'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'text', 'text': text}]}},
                        ensure_ascii=False) + '\n').encode('utf-8')
@@ -289,7 +311,7 @@ async def _session(job_id, s, first):
     """One Claude Code process for this job: the first message, then any words the owner adds while it works.
     Returns the final answer. Raises on a CLI error."""
     cmd, env, first_text, job_mcp = first
-    cmd = [c for c in cmd if c != '--include-partial-messages']   # whole messages only: one progress line per step
+    cmd = job_cmd(cmd)
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, cwd=_dan_ws(), creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     _procs[job_id] = proc
@@ -343,9 +365,20 @@ async def _session(job_id, s, first):
             send_new_words()
     watcher = asyncio.create_task(watch())
     final = ''
+    closed_at = last_line = None
     try:
         while True:
-            raw = await asyncio.to_thread(lines.get)
+            try:
+                raw = await asyncio.to_thread(lines.get, True, 5)
+            except queue.Empty:
+                if closed_at is not None:
+                    now = time.monotonic()
+                    if now - last_line >= AFTER_CLOSE_SILENCE or now - closed_at >= AFTER_CLOSE_LIMIT:
+                        state.publish(job_id, 'control', '返事の後に残っていた裏の作業が終わらないので打ち切りました')
+                        _kill(job_id)
+                        break
+                continue
+            last_line = time.monotonic()
             if raw is None:
                 break
             try:
@@ -377,6 +410,7 @@ async def _session(job_id, s, first):
                 if cur['applied_revision'] >= cur['revision'] and not proc.stdin.closed:
                     # Nothing more to say: end of input. Words already sent are still answered before it exits.
                     proc.stdin.close()
+                    closed_at = last_line = time.monotonic()
         await asyncio.to_thread(proc.wait, 30)
         return final
     finally:

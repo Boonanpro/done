@@ -193,9 +193,16 @@ def wait_limit(owner):
 
 def hook_settings():
     """--settings for Dan's Claude Code processes: take a file before writing it (scripts/work_lock_hook.py)."""
-    hook = (Path(__file__).resolve().parents[2] / 'scripts' / 'work_lock_hook.py').as_posix()
-    return json.dumps({'hooks': {'PreToolUse': [{'matcher': 'Write|Edit|MultiEdit|NotebookEdit', 'hooks': [
-        {'type': 'command', 'command': f'python "{hook}"', 'timeout': WAIT_LIMIT + 60}]}]}})
+    scripts = Path(__file__).resolve().parents[2] / 'scripts'
+    hook = (scripts / 'work_lock_hook.py').as_posix()
+    # A parallel job neither hands work to a background Agent nor sleeps with ScheduleWakeup (scripts/job_tool_hook.py;
+    # does nothing in a chat room). 2026-10-29: the runner took the sleeping worker's turn end as its answer.
+    job_hook = (scripts / 'job_tool_hook.py').as_posix()
+    return json.dumps({'hooks': {'PreToolUse': [
+        {'matcher': 'Write|Edit|MultiEdit|NotebookEdit', 'hooks': [
+            {'type': 'command', 'command': f'python "{hook}"', 'timeout': WAIT_LIMIT + 60}]},
+        {'matcher': 'Agent|ScheduleWakeup', 'hooks': [{'type': 'command', 'command': f'python "{job_hook}"', 'timeout': 30}]},
+    ]}})
 
 
 def current_owner():
