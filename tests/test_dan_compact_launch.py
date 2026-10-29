@@ -161,6 +161,20 @@ def test_real_plugin_folder_is_complete():
     assert (plugin / "hooks" / "core.mjs").exists()
 
 
+def _without_debug_file(cmd):
+    """担当自身の記録（--debug-file <起動ごとの名前>）は毎回違うので、並びの比較から外す（cli_record）。"""
+    out, skip = [], False
+    for i, a in enumerate(cmd):
+        if skip:
+            skip = False
+            continue
+        if a == "--debug-file":
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
 def _wire_parallel_job(monkeypatch, tmp_path, compact):
     """parallel_job_runner._launch を DB・プロセス無しで組み立てだけ回す（並行作業も Claude Code を起こす経路）。"""
     from app.services import parallel_job_runner as runner
@@ -206,6 +220,8 @@ async def test_parallel_job_launch_gets_plugin_only_with_key(monkeypatch, tmp_pa
     job = {"room_id": "R", "user_id": "U", "task": "調べて", "model": "opus"}
     runner, calls = _wire_parallel_job(monkeypatch, tmp_path, ([], {}))
     plain_cmd, plain_env, _, _ = await runner._launch("job-0000-aaaa", job)
+    assert "--debug-file" in plain_cmd   # 並行作業の担当も自分の記録を残す（cli_record）
+    plain_cmd = _without_debug_file(plain_cmd)
     assert "--plugin-dir" not in plain_cmd
     assert "TYPESAFE_API_KEY" not in plain_env and "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS" not in plain_env
     assert "--settings" in plain_cmd and plain_cmd[-2:] == ["--input-format", "stream-json"]
@@ -213,6 +229,7 @@ async def test_parallel_job_launch_gets_plugin_only_with_key(monkeypatch, tmp_pa
     runner, calls = _wire_parallel_job(monkeypatch, tmp_path, (
         ["--plugin-dir", "P"], {"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1", "TYPESAFE_API_KEY": KEY}))
     cmd, env, _, _ = await runner._launch("job-0000-aaaa", job)
+    cmd = _without_debug_file(cmd)
     assert calls == ["U"], "部屋の利用者の鍵で判定する"
     assert cmd == plain_cmd[:-2] + ["--plugin-dir", "P", "--input-format", "stream-json"], "他の引数は不変、足すだけ"
     assert env["TYPESAFE_API_KEY"] == KEY and env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] == "1"

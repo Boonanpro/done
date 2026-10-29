@@ -264,8 +264,11 @@ async def _launch(job_id, s):
     # Long conversations shortened without summarising (dan-compact): the same rule as the room's own sessions —
     # attached only when DAN_COMPACT_JEV is not 0 and the TypeSafe key is available, else ([], {}) and nothing changes.
     compact_args, compact_env = await asyncio.to_thread(cr._dan_compact_launch, user)
+    from app.agent import cli_record
+    cli_record.prune()
     cmd = cr._build_cli_cmd(claude_cmd, cli_js, str(job_mcp), launch_prompt, resume_session_id=resume,
-                            fork_session=fork, model=MODELS[s['model']], extra_args=compact_args)
+                            fork_session=fork, model=MODELS[s['model']], extra_args=compact_args,
+                            debug_file=cli_record.debug_file_path(room, backend=f'job_{job_id[:8]}'))
     cmd += ['--input-format', 'stream-json']   # --settings (the file hook) comes with _build_cli_cmd
     from app.core.generations import core_env
     env = {k: v for k, v in core_env().items() if k != 'ANTHROPIC_API_KEY'}
@@ -287,10 +290,13 @@ async def _session(job_id, s, first):
     Returns the final answer. Raises on a CLI error."""
     cmd, env, first_text, job_mcp = first
     cmd = [c for c in cmd if c != '--include-partial-messages']   # whole messages only: one progress line per step
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, cwd=_dan_ws(), creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     _procs[job_id] = proc
     lines: queue.Queue = queue.Queue()
+    from app.agent import cli_record
+    room = env.get('DAN_ROOM_ID') or job_id
+    stray_tag = f'job_{job_id[:8]}'
 
     def reader():
         try:
@@ -299,6 +305,17 @@ async def _session(job_id, s, first):
         finally:
             lines.put(None)
     threading.Thread(target=reader, daemon=True).start()
+
+    def drain_stderr():
+        # The worker's own words outside the JSON stream (errors, retries) used to go to DEVNULL; they are the only
+        # clue left when a worker freezes, so they go to the room's record (cli_record) instead.
+        try:
+            for raw in proc.stderr:
+                cli_record.stray_line(room, stray_tag, raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else raw,
+                                      source='stderr')
+        except Exception:
+            pass
+    threading.Thread(target=drain_stderr, daemon=True).start()
     revision = state.read(job_id)['revision']
     proc.stdin.write(_user_line(first_text)); proc.stdin.flush()
     state.change(job_id, lambda x: x.update(applied_revision=max(x['applied_revision'], revision)))
@@ -334,6 +351,7 @@ async def _session(job_id, s, first):
             try:
                 event = json.loads(raw)
             except ValueError:
+                cli_record.stray_line(room, stray_tag, raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else raw)
                 continue
             kind = event.get('type')
             if kind == 'system' and event.get('session_id'):

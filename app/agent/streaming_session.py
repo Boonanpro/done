@@ -34,6 +34,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
+from app.agent import cli_record as _cli_record
+
 
 _DOTENV_FLAG_CACHE: Optional[bool] = None
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -525,6 +527,10 @@ class StreamingSession:
                 try:
                     ev = json.loads(line)
                 except Exception:
+                    # stderr はここに混ざる（stderr=STDOUT）。担当が JSON 以外で出した言葉は、
+                    # 固まる直前の手がかりになるので捨てずに部屋の記録へ残す。固まりの数え
+                    # （_last_activity）はモデルの返事（JSON）だけで進める。
+                    self._record_stray(line)
                     continue
                 self._last_activity = time.time()
                 self._dispatch(ev)
@@ -536,6 +542,12 @@ class StreamingSession:
             t = self._turn
             if t and not t.done.is_set():
                 t.done.set()
+
+    def _record_stray(self, line: str) -> None:
+        try:
+            _cli_record.stray_line(self.room_id, "claude", line)
+        except Exception:
+            pass
 
     def _dispatch(self, ev: TurnEvent) -> None:
         typ = ev.get("type")

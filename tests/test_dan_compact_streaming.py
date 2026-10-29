@@ -116,6 +116,20 @@ class _FakeSession:
         return res
 
 
+def _without_debug_file(cmd):
+    """担当自身の記録（--debug-file <起動ごとの名前>）は毎回違うので、並びの比較から外す（cli_record）。"""
+    out, skip = [], False
+    for i, a in enumerate(cmd):
+        if skip:
+            skip = False
+            continue
+        if a == "--debug-file":
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
 _TURN = [{"type": "system", "session_id": "sid-1"}, {"type": "result", "result": "ok"}]
 # 本番のストリーミング起動の引数（この並びが変わらないことを完全一致で固定する）
 _BASE_STREAMING_CMD = [
@@ -183,7 +197,7 @@ async def test_streaming_model_switch_restart_gets_plugin_and_syncs_only_its_tra
 
     assert existing.stopped, "モデルが違う生きたセッションは止めて起こし直す"
     assert captured["model"] == "fable"
-    assert captured["cmd"] == _BASE_STREAMING_CMD + ["--plugin-dir", "P"], "既存の引数はそのまま、末尾に付くだけ"
+    assert _without_debug_file(captured["cmd"]) == _BASE_STREAMING_CMD + ["--plugin-dir", "P"], "既存の引数はそのまま、末尾に付くだけ"
     assert captured["env"]["TYPESAFE_API_KEY"] == KEY
     assert captured["env"]["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"] == "1"
     assert launches == [("user-1", True)], "起き直しのターンはログ付きで解決"
@@ -207,7 +221,7 @@ async def test_streaming_reused_session_keeps_plugin_in_cmd_and_env_for_later_re
     assert not existing.stopped
     assert existing.sent == ["hello"]
     assert launches == [("user-1", False)], "再利用ターンはログ無しで解決"
-    assert captured["cmd"] == _BASE_STREAMING_CMD + ["--plugin-dir", "P"]
+    assert _without_debug_file(captured["cmd"]) == _BASE_STREAMING_CMD + ["--plugin-dir", "P"]
     assert captured["env"]["TYPESAFE_API_KEY"] == KEY
     assert [ev for ev in events if ev.get("type") == "result"][0]["text"] == "ok"
     assert sync_done.wait(5)
@@ -224,7 +238,8 @@ async def test_streaming_without_plugin_leaves_cmd_and_env_exactly_as_before(mon
 
     await _run_turn()
 
-    assert captured["cmd"] == _BASE_STREAMING_CMD
+    assert _without_debug_file(captured["cmd"]) == _BASE_STREAMING_CMD
+    assert "--debug-file" in captured["cmd"]   # 担当自身の記録は常に付く
     assert "TYPESAFE_API_KEY" not in captured["env"]
     assert "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS" not in captured["env"]
     assert captured["env"]["NO_COLOR"] == "1" and captured["env"]["GIT_TERMINAL_PROMPT"] == "0"

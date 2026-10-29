@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # ChatGPT sign-in models: read live from Codex's own list (app/agent/model_catalog.py).
+from app.agent import cli_record as _cli_record
 from app.agent import model_catalog as _catalog
 
 
@@ -546,6 +547,7 @@ def run_codex_process(
                 line = line.strip()
                 if line and "Reading additional input from stdin" not in line:
                     cr._cli_debug(f"[CODEX] stderr: {line[:800]}")
+                    _cli_record.stray_line(room_id, "codex", line, source="stderr")
                     if len(stderr_lines) < 40:
                         stderr_lines.append(line[:800])
         except Exception:  # noqa: BLE001
@@ -645,6 +647,7 @@ def run_codex_process(
             data = json.loads(line)
         except json.JSONDecodeError:
             cr._cli_debug(f"[CODEX] non-JSON line: {line[:120]}")
+            _cli_record.stray_line(room_id, "codex", line)
             continue
 
         etype = data.get("type", "")
