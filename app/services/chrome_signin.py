@@ -111,7 +111,7 @@ TOOL = {
 }
 
 
-async def tool(params):
+async def tool(params, room_id=''):
     user_id = os.environ.get('DAN_USER_ID', '')
     action = params.get('action')
     if action == 'approve':
@@ -126,6 +126,8 @@ async def tool(params):
     if action == 'failed':
         _set(user_id, failed_at=time.time())
         return {'success': True, 'output': 'ログインの失敗を記録した。1日は試さず、ログインしないまま作業を続け、失敗したことを本人に報告する。'}
-    from app.tools.browser import _executor_profile_dir
-    account = signed_in(_executor_profile_dir())
+    from app.tools.browser import _browser_room_id, _executor_profile_dir
+    from app.services.browser_lifecycle import profile_for_room
+    # Run in the core, the env names no room and _executor_profile_dir is the master profile, not this room's browser.
+    account = signed_in(profile_for_room(room_id) if room_id and not _browser_room_id() else _executor_profile_dir())
     return {'success': True, 'output': f'このブラウザは {account} で Chrome にログインしている。' if account else 'このブラウザは Chrome にログインしていない。'}
