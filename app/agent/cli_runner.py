@@ -3767,6 +3767,30 @@ async def _process_via_streaming_session(
                     "continuation": False, "turn_id": t_id,
                 })
                 state["written_file_paths"] = []
+                # 固まっている間に届いた追い連絡は、捨てた担当の待ち行列に残っている。
+                # 新しい担当を起こしてそのまま渡す（本人が送り直さなくて済む。2026-10-29）。
+                leftover = None
+                try:
+                    leftover = session.take_pending_followups()
+                except Exception:
+                    leftover = None
+                if leftover:
+                    for k in ("turn_blocks", "final_text_parts", "reasoning_steps_acc", "reasoning_full_acc", "written_file_paths"):
+                        state[k] = []
+                    state["last_block_at"] = None
+                    state["turn_start"] = None
+                    state["turn_id"] = None
+                    retry_content = leftover
+                    if "<conversation_so_far>" not in retry_content:
+                        reseed = _build_reseed_context(room_id, project_id=project_id)
+                        if reseed:
+                            retry_content = _wrap_latest_user_message(reseed, leftover)
+                    _cli_debug(f"[STREAMING] idle hang: re-running {len(leftover)} chars of queued follow-up on a fresh session (room {room_id[:8]})")
+                    try:
+                        session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
+                        session.run_turn(retry_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+                    except Exception as retry_error:  # noqa: BLE001
+                        _emit({"type": "error", "message": str(retry_error)})
             elif state.get("loop_detected"):
                 # Behavioral loop: the model repeated the same tool call until the
                 # loop guard interrupted the turn. The sink already saved a friendly
