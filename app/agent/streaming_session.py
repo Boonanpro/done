@@ -79,6 +79,13 @@ def streaming_enabled() -> bool:
 # notice a real hang or a freshly arrived result.
 _RUN_TURN_POLL_SECONDS = 2.0
 
+# 担当（CLI）が道具の結果をモデルへ返した後、次の一手が来ないまま黙っていられる上限（秒）。
+# モデルの返事待ちで10分以上黙るのは、API への接続が切れたまま戻らない固まり方
+# （2026-10-29 X顧問の部屋: 14:41 から 38 分、通信は CLOSED のまま）。
+# 道具の実行中（ffmpeg・Whisper・長い検索）は何分でも黙りうるので、そちらは run_turn の
+# timeout（既定30分）で見る。
+_MODEL_SILENCE_TIMEOUT = float(os.getenv("DAN_STREAMING_MODEL_SILENCE_TIMEOUT", "600"))
+
 
 TurnEvent = dict  # parsed JSON object from the CLI stream
 EventSink = Callable[[TurnEvent], None]
@@ -116,6 +123,13 @@ class StreamingSession:
         self._reader: Optional[threading.Thread] = None
         self._alive = False
         self._last_activity = time.time()
+        # 本人からの入力（追い連絡）の最終時刻。idle_seconds（手が空いているか）にだけ使い、
+        # 固まりの判定（_last_activity = CLI の出力）には混ぜない。追い連絡で固まりの
+        # 数えを戻していたせいで、本人が催促するほど立て直しが遅れていた（2026-10-29）。
+        self._last_input = time.time()
+        # CLI が道具を実行中（assistant の tool_use を出してから、その結果の user イベントが
+        # 戻るまで）。この間の沈黙は長くても正常なので、固まりの上限を長い方にする。
+        self._tool_in_flight = False
 
         # Current turn + a queue of pending follow-up texts.
         self._turn: Optional[_Turn] = None
@@ -203,7 +217,18 @@ class StreamingSession:
                     pass
 
     def idle_seconds(self) -> float:
-        return time.time() - self._last_activity
+        return time.time() - max(self._last_activity, self._last_input)
+
+    def silence_limit(self, timeout: float) -> float:
+        """今の状態で、CLI がこれ以上黙ったら固まりとみなす秒数。"""
+        if self._tool_in_flight:
+            return timeout
+        return min(timeout, _MODEL_SILENCE_TIMEOUT)
+
+    def take_pending_followups(self) -> Optional[str]:
+        """待ち行列に残った追い連絡を全部取り出す（固まって担当を捨てた後、新しい担当へ
+        渡し直すため）。無ければ None。"""
+        return self._drain_pending()
 
     # --- writing to the CLI --------------------------------------------
     def _write(self, obj: dict) -> None:
@@ -217,6 +242,7 @@ class StreamingSession:
         # 新しいターンが始まる = 待っていた追い連絡はここで送られる。前のターンの
         # 境界用の置き場所をこのターンへ持ち越さない。
         self._followup_anchor = None
+        self._tool_in_flight = False
         self._write({"type": "user", "message": {"role": "user", "content": text}})
 
     def _send_interrupt(self) -> None:
@@ -275,7 +301,7 @@ class StreamingSession:
                 # 呼び出し側が「復元に失敗した」と見てセッションを止め直していた（動いている
                 # 方のターンまで道連れになる）。
                 self._pending.put(content)
-                self._last_activity = time.time()
+                self._last_input = time.time()
                 release_all_turn_claims(self.room_id)
                 return {"type": "result", "subtype": "routed_as_followup", "is_error": False}
             self._running = True
@@ -347,7 +373,7 @@ class StreamingSession:
                 # this never fires while output is still flowing.
                 if not self.is_alive():
                     break
-                if time.time() - self._last_activity > timeout:
+                if time.time() - self._last_activity > self.silence_limit(timeout):
                     hung = True
                     break
             return last_result
@@ -372,7 +398,7 @@ class StreamingSession:
         if received_at and self._followup_anchor is None and self.is_turn_active():
             self._followup_anchor = received_at
         self._pending.put(content)
-        self._last_activity = time.time()
+        self._last_input = time.time()
 
     def take_followup_anchor(self) -> Optional[str]:
         """割り込まれたターンの終わりに1回だけ読む。読んだら消える。"""
@@ -514,6 +540,7 @@ class StreamingSession:
     def _dispatch(self, ev: TurnEvent) -> None:
         typ = ev.get("type")
         turn = self._turn
+        self._note_tool_state(typ, ev)
 
         # --- CLI-initiated (autonomous) turn: no run_turn loop is waiting. ---
         # The CLI woke itself (a background task finished while idle). Route the
@@ -571,6 +598,19 @@ class StreamingSession:
         if typ == "result":
             turn.result = ev
             turn.done.set()
+
+
+    def _note_tool_state(self, typ: Optional[str], ev: TurnEvent) -> None:
+        """assistant が tool_use を出したら道具の実行中、その結果（user）か result が来たら
+        終わり。固まりの上限をどちらで見るかに使う。"""
+        if typ == "assistant":
+            content = (ev.get("message") or {}).get("content")
+            self._tool_in_flight = bool(
+                isinstance(content, list)
+                and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)
+            )
+        elif typ in ("user", "result"):
+            self._tool_in_flight = False
 
 
 # --- registry -----------------------------------------------------------
