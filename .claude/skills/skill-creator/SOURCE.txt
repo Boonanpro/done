@@ -1,0 +1,2 @@
+ca45fc496a3436251f191354091d557da31c15b5 2026-10-28T12:20:38-07:00
+anthropics/skills skills/skill-creator (GitHub main, 新しい方). ダンの最初の写し(6c5ae988)とは assets/ の有無だけが違う
