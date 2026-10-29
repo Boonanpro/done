@@ -278,3 +278,6 @@ data/today_illust/
 # 成果物タブ用の開発サーバーが書く「今のファイルの版」（frontend/src/lib/live-version/server.ts）
 /frontend/src/lib/live-version/current.gen.ts
 /frontend/src/lib/live-version/*.tmp
+
+# えるさんのローンチ台本の全文（有料の教材。このリポジトリは公開なので Mac の中だけに置く）
+.claude/skills/talk-script/references/launch-scripts/
