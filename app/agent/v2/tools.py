@@ -2593,7 +2593,7 @@ async def execute_tool(
 
     if skill_name == "_chrome_signin":
         from app.services.chrome_signin import tool as chrome_signin_tool
-        return await chrome_signin_tool(params)
+        return await chrome_signin_tool(params, session_id)
 
     if skill_name == "_preference":
         from app.services.user_prefs import tool as preference_tool
