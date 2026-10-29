@@ -3,8 +3,9 @@ background Agent or go to sleep with ScheduleWakeup.
 
 Why (2026-10-29, ローレンタンの部屋「スキルクリエイター比べ」): the job's worker started two background Agents, called
 ScheduleWakeup(1800) and ended its turn. The runner takes the end of a turn as the answer and closes the worker's input;
-Claude Code then only waits for the background work, and 600 s after the turn ended all four background workers got
-「Request interrupted by user」. The parent woke 30 minutes later, judged from file timestamps that they were still
+Claude Code then only waits for the background work, and 10 minutes after the turn ended it stops them itself
+(confirmed 2026-10-29 with claude 2.1.303: stderr 「Background tasks still running 10m after the last turn …; stopping
+them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely」; the workers see 「Request interrupted by user」). The parent woke 30 minutes later, judged from file timestamps that they were still
 working, slept again, and the owner's words could no longer reach it. A job's worker therefore runs Agents in the
 foreground (one at a time, their answer comes back in the same turn) and never sleeps. Chat rooms (no job id) keep their
 input open between turns and are not touched.
