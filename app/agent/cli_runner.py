@@ -2043,6 +2043,7 @@ def run_oneshot_cli(
 
 
 from app.agent import codex_runner as _codex
+from app.agent import cli_record as _cli_record
 from app.agent import chat_shapes as _chat_shapes
 from app.agent import turn_flow
 
@@ -2347,8 +2348,10 @@ def _build_cli_cmd(
     fork_session: bool = False,
     model: str = "opus",
     extra_args: Optional[list[str]] = None,
+    debug_file: Optional[str] = None,
 ) -> list[str]:
-    """CLIコマンドライン引数を組み立てる（extra_args は末尾に足すだけ。例: --plugin-dir）"""
+    """CLIコマンドライン引数を組み立てる（extra_args は末尾に足すだけ。例: --plugin-dir）。
+    debug_file は担当自身の詳しい記録（通信のやり直し・見切り・誤り）の置き場所（cli_record）。"""
     if cli_js:
         cmd = [claude_cmd, cli_js]
     else:
@@ -2377,6 +2380,9 @@ def _build_cli_cmd(
 
     if extra_args:
         cmd.extend(extra_args)
+
+    if debug_file:
+        cmd.extend(["--debug-file", debug_file])
 
     return cmd
 
@@ -2499,6 +2505,7 @@ def _run_cli_process(
                 line = line.strip()
                 if line:
                     _cli_debug(f"CLI stderr: {line[:200]}")
+                    _cli_record.stray_line(room_id, "claude", line, source="stderr")
         except Exception:
             pass
 
@@ -2614,6 +2621,7 @@ def _run_cli_process(
             data = json.loads(line)
         except json.JSONDecodeError:
             _cli_debug(f"Non-JSON line: {line[:100]}")
+            _cli_record.stray_line(room_id, "claude", line)
             continue
 
         msg_type = data.get("type", "")
@@ -2936,7 +2944,9 @@ def _run_cli_in_thread(
         # 長い会話を要約せずに短くする Jev プラグイン（鍵が取れた時だけ付く。他の引数・env は不変）
         compact_args, compact_env = _dan_compact_launch(user_id)
         env.update(compact_env)
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model, extra_args=compact_args)
+        _cli_record.prune()
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model, extra_args=compact_args,
+                             debug_file=_cli_record.debug_file_path(room_id))
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, fork={need_fork}, prompt len={len(content)})")
 
         result_data = _run_cli_process(
@@ -2974,7 +2984,8 @@ def _run_cli_in_thread(
                 if reseed:
                     retry_content = _wrap_latest_user_message(reseed, content)
             retry_system_prompt, retry_launch_content = _prepare_cli_launch_payload(system_prompt, retry_content)
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model, extra_args=compact_args)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model, extra_args=compact_args,
+                                 debug_file=_cli_record.debug_file_path(room_id))
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(retry_content)})")
 
             result_data = _run_cli_process(
@@ -3328,6 +3339,9 @@ async def _process_via_streaming_session(
         if resume_session_id:
             c += ["--resume", resume_session_id]
         c += compact_args
+        # 担当自身の詳しい記録（通信のやり直し・見切り・誤り）。起こすたびに 1 本、部屋ごとの場所へ。
+        _cli_record.prune()
+        c += ["--debug-file", _cli_record.debug_file_path(room_id)]
         return c
 
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
