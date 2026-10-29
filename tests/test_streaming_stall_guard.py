@@ -93,3 +93,75 @@ def test_run_turn_waits_the_long_limit_while_a_tool_runs(monkeypatch):
     res = s.run_turn("やって", sink=None, timeout=0.8)
     assert res is None and s.last_turn_hung
     assert time.time() - t0 >= 0.75                   # 道具の実行中は長い方の上限まで待つ
+
+
+# --- 本体の流れ: 固まった後、残った追い連絡を新しい担当へ渡す -------------------------
+import asyncio
+
+from app.agent import cli_runner as cr
+
+
+class _FakeSession:
+    """1回目の run_turn は固まって終わる（追い連絡を待ち行列に残したまま）。2回目は普通に答える。"""
+
+    def __init__(self):
+        self.calls = []
+        self.last_turn_hung = False
+        self.model = None
+        self.background_sink = None
+        self._pending = ["まだ？"]
+
+    def is_alive(self):
+        return True
+
+    def is_turn_active(self):
+        return False
+
+    def run_turn(self, content, sink, timeout=600.0):
+        self.calls.append(content)
+        if len(self.calls) == 1:
+            self.last_turn_hung = True
+            return None
+        self.last_turn_hung = False
+        sink({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "続きです"}]}})
+        sink({"type": "result", "subtype": "success", "is_error": False, "result": "続きです", "session_id": "sess-1"})
+        return {"type": "result", "is_error": False, "result": "続きです"}
+
+    def take_pending_followups(self):
+        pending, self._pending = self._pending, []
+        return "\n".join(pending) or None
+
+    def take_followup_anchor(self):
+        return None
+
+    def stop(self):
+        pass
+
+
+def test_hang_hands_queued_followup_to_a_fresh_session(monkeypatch):
+    fake = _FakeSession()
+    monkeypatch.setattr(cr, "_resolve_claude_cli", lambda: ("claude", None))
+    monkeypatch.setattr(cr, "_resolve_cli_model", lambda room_id=None: "opus")
+    monkeypatch.setattr(ss, "get_or_create_session", lambda *a, **k: fake)
+    monkeypatch.setattr(cr, "_make_autonomous_sink", lambda *a, **k: None)
+    monkeypatch.setattr(cr, "_build_reseed_context", lambda *a, **k: "")
+    monkeypatch.setattr(cr, "_clear_cli_session", lambda room_id: None)
+    monkeypatch.setattr(cr, "_notify_achievement_poller", lambda: None)
+    monkeypatch.setattr(cr, "_transcript_soft_exceeded", lambda sid: False)
+    monkeypatch.setattr(cr.turn_flow, "record_time", lambda run_id, handed_over_at=None: None)
+
+    async def drive():
+        out = []
+        async for ev in cr._process_via_streaming_session(
+            "room-stall", "u", "やって", "sys", "mcp.json", None, None, True, None,
+        ):
+            out.append(ev)
+        return out
+
+    events = asyncio.run(drive())
+    results = [e for e in events if e.get("type") == "result"]
+    assert len(fake.calls) == 2                         # 固まった1回目 → 追い連絡で2回目
+    assert "まだ？" in fake.calls[1]
+    assert results[0]["is_error"] is True               # 区切りの知らせ
+    assert results[1]["is_error"] is False and "続きです" in results[1]["text"]
+    assert not [e for e in events if e.get("type") == "error"]
