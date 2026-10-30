@@ -26,6 +26,7 @@ from app.config import settings
 
 # 業務系ルーター（ユーザーが頻繁にいじるコード）
 from app.api.gmail_routes import router as gmail_router
+from app.api.gdoc_event_routes import router as gdoc_event_router
 from app.api.detection_routes import router as detection_router
 from app.api.content_routes import router as content_router
 from app.api.bank_account_routes import router as bank_account_router
@@ -181,6 +182,7 @@ app.add_middleware(
 
 # 業務系ルーター登録
 app.include_router(gmail_router, prefix="/api/v1")
+app.include_router(gdoc_event_router)
 app.include_router(detection_router, prefix="/api/v1")
 app.include_router(content_router, prefix="/api/v1")
 app.include_router(bank_account_router, prefix="/api/v1")
