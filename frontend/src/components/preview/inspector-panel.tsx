@@ -121,9 +121,9 @@ function TypographySection() {
         label="font-family"
         value={cs.fontFamily || ''}
         options={[
-          { value: '"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif', label: '吉川 本文' },
-          { value: '"Zen Kaku Gothic New", "Noto Sans JP", sans-serif', label: '吉川 見出し' },
-          { value: '"Space Grotesk", sans-serif', label: '吉川 英字' },
+          { value: '"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif', label: 'Noto Sans JP' },
+          { value: '"Zen Kaku Gothic New", "Noto Sans JP", sans-serif', label: 'Zen Kaku Gothic New' },
+          { value: '"Space Grotesk", sans-serif', label: 'Space Grotesk' },
           { value: 'system-ui, sans-serif', label: 'System Sans' },
           { value: 'ui-serif, Georgia, serif', label: 'Serif' },
           { value: 'ui-monospace, Menlo, monospace', label: 'Mono' },
