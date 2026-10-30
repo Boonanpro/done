@@ -275,7 +275,8 @@ async def _launch(job_id, s):
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     cfg = json.loads(Path(room_mcp).read_text(encoding='utf-8'))
     tools_env = cfg['mcpServers']['dan-tools'].setdefault('env', {})
-    tools_env.update({'DAN_COMMAND_JOB_ID': job_id, 'DAN_PARALLEL_JOB': '1', 'DAN_JOB_HARNESS': 'claude',
+    tools_env.update({'DAN_COMMAND_JOB_ID': job_id, 'DAN_COMMAND_JOB_ROOT': str(state.ROOT),
+                      'DAN_PARALLEL_JOB': '1', 'DAN_JOB_HARNESS': 'claude',
                       'DAN_BROWSER_ROOM': state.browser_room(job_id), 'DAN_BROWSER_HEADLESS': '1', 'DAN_WORK_DIR': work_dir})
     job_mcp = Path(room_mcp).with_name(f'mcp_job_{job_id[:8]}.json')
     job_mcp.write_text(json.dumps(cfg), encoding='utf-8')

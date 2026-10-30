@@ -131,6 +131,7 @@ async def test_private_job_retains_room_context_and_is_quiet(store,monkeypatch):
     monkeypatch.setattr(job_process,'launch',launch)
     await E.run_batch(doc,b)
     assert '回答しました' in E.room_context('room')
+    with E.db() as c: assert c.execute('SELECT status FROM batches').fetchone()[0]=='needs_attention'
     assert not list((store/'public-jobs').glob('*.json'))
 
 def test_renew_only_registers_no_comment_poll(store, monkeypatch):
@@ -174,3 +175,10 @@ def test_current_comment_history_reaches_both_resumed_engines(store, monkeypatch
     next_prompt=cli_runner._build_system_prompt(**args)
     assert '追加の質問にも回答済み' in next_prompt
     assert '追加の質問にも回答済み' in codex_runner.wrap_turn_content(next_prompt,'続けて')
+
+def test_both_job_tool_configs_keep_the_private_state_root():
+    from pathlib import Path
+    root=Path(__file__).resolve().parents[1]
+    for name in ('command_job_runner','parallel_job_runner'):
+        source=(root/'app/services'/f'{name}.py').read_text()
+        assert "'DAN_COMMAND_JOB_ROOT':" in source and 'str(state.ROOT)' in source
