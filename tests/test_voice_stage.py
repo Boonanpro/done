@@ -246,9 +246,12 @@ async def test_a_free_drawing_and_an_image_are_scenes_too(room, monkeypatch):
 @pytest.mark.asyncio
 async def test_show_page_opens_this_sites_page_live_and_photographs_a_page_elsewhere(room, monkeypatch):
     calls = []
-    async def fake_capture(url, user_id, room_id):
-        calls.append((url, user_id, room_id)); return '/api/v1/files/stage-x.png'
-    monkeypatch.setattr(S, 'capture_page', fake_capture)
+    from app.services import voice_tools
+    class FakeHost:
+        async def ask(self, op, **kw):
+            calls.append(kw['arguments'])
+            return {'stage_image':'/api/v1/files/stage-x.png','text':'画面'} if kw.get('with_media') else '開きました'
+    monkeypatch.setattr(voice_tools,'host',lambda *_:FakeHost())
     monkeypatch.setattr(S, 'screens_base', lambda: 'https://dan.example')
     stage, _, log = make_stage(room, [])
     stage.user_id = 'u1'
@@ -258,10 +261,10 @@ async def test_show_page_opens_this_sites_page_live_and_photographs_a_page_elsew
     assert state['frame'] == '/preview/x-ops' and state['image'] == '' and state['caption'] == 'X運用室の今の記事'
     assert log[-1][0] == 'stage_page' and log[-1][1]['live'] and '🖥 /preview/x-ops' in stage.summary()
     out = await stage.show_page(url='https://example.com/a', note='よその記事')
-    assert out['shown'] and calls == [('https://example.com/a', 'u1', room)]
+    assert out['shown'] and calls == [{'action':'open_target','url':'https://example.com/a','observation':'dom'},{'action':'screenshot'}]
     state = S.read_state(room)
-    assert state['frame'] == '' and state['image'] == '/api/v1/files/stage-x.png' and state['page_url'] == 'https://example.com/a'
-    assert '[添付画像: /api/v1/files/stage-x.png]' in stage.summary() and 'https://example.com/a' in stage.summary()
+    assert state['frame'] == '' and state['image'] == '/api/v1/files/stage-x.png' and stage._external_source == 'browser'
+    assert '[添付画像: /api/v1/files/stage-x.png]' in stage.summary()
 
 
 def test_frame_path_takes_only_this_sites_screens(monkeypatch):

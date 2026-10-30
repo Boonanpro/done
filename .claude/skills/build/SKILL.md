@@ -33,3 +33,12 @@ Dan's browser (the test account) is not the owner's screen. After changing an ar
 - the published copy, which the phone app opens. It is rebuilt about a minute after the folder stops changing and takes a few minutes.
 
 Base the report on that output. OK: the owner's screen and server run the change. NG: do not call it fixed; pass on the reason from the NG line. UNCHECKED: the owner has no screen open; say it was not checked on the owner's screen. Only the owner's path (`/preview/<slug>` on 3000, server on 8000) counts as proof; a test server such as 8001 or a worktree is an intermediate test. A turn that changed an artifact cannot end before this check runs (`scripts/hook_artifact_verify_gate.py`).
+
+## Voice is part of every artifact
+
+The common artifacts layout installs `VoiceControlsRuntime`. In a call (`call=1`) it exposes the real screen's controls to the call, highlights and scrolls to a target, performs the operation and returns the resulting screen. Do not create a second voice UI or a per-site copy of this bridge.
+
+- Use native buttons, links, inputs and selects with accessible names; use `role` and keyboard behavior for necessary custom controls. Canvas-only controls need a corresponding accessible DOM control. An unlabeled click handler is not a voice interface.
+- Give important controls stable `data-voice-action` names. Mark navigation controls `data-voice-risk="navigate"`, local edits `edit`, and outbound, payment or destructive actions `external`, `payment` or `destructive`. Never mark a submit/send/delete as navigation to suppress confirmation. Unclassified buttons require spoken confirmation.
+- Expose list search as a labeled input and results as named controls; the common `read_screen(query)` can find rendered controls. Virtual or server-paginated lists need real search that retrieves matching items, not an invented global registry. Long writing/revision still goes to the site's existing editing assistant.
+- Verify voice control through the shared frame protocol on the actual site, including navigation, searching and input; assert the visible result. Test stale targets, duplicate commands and refusal of unapproved sends. Do not call a click receipt proof of saved or sent data. No outbound messages or purchases in tests.

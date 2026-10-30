@@ -17,6 +17,29 @@ import sys
 OUTPUT_CHARS = 12000
 
 
+def screen_image(contents, tool, arguments):
+    """Persist only a tool's real screen, behind the call room's authentication."""
+    if tool not in ('browser','browser_plan','browser_flow','phone'): return ''
+    import base64, re
+    from pathlib import Path
+    from app.services.voice_screen_media import store
+    room = os.environ.get('DAN_SESSION_ID','')
+    for block in reversed(contents):
+        if getattr(block,'type','') == 'image':
+            return store(room,base64.b64decode(block.data,validate=True),getattr(block,'mimeType',''))
+    # phone's screenshot tool returns a local file, not an MCP image block.
+    if tool == 'phone' and arguments.get('action') == 'screenshot':
+        from app.paths import DONE_ROOT
+        allowed = (DONE_ROOT/'uploads').resolve()
+        for block in contents:
+            match = re.search(r'スクリーンショット: (.+?\.png)（画像として読む）', getattr(block,'text',''))
+            if not match: continue
+            source = Path(match[1]).resolve()
+            if source.parent == allowed and re.fullmatch(r'phone-\d+\.png',source.name):
+                return store(room,source.read_bytes(),'image/png')
+    return ''
+
+
 def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     out = os.fdopen(os.dup(sys.stdout.fileno()), 'w', encoding='utf-8', buffering=1)
@@ -48,10 +71,11 @@ async def serve(out):
             else:
                 contents = await call_tool(str(req.get('name') or ''), req.get('arguments') or {})
                 texts = [c.text for c in contents if getattr(c, 'type', '') == 'text']
-                images = sum(1 for c in contents if getattr(c, 'type', '') == 'image')
-                reply = {'text': ('\n'.join(texts)[:OUTPUT_CHARS] or '（出力なし）') + (f'\n（画像{images}枚は声の通話では見られない）' if images else '')}
+                try: image = screen_image(contents, str(req.get('name') or ''), req.get('arguments') or {})
+                except (OSError,ValueError): image = ''
+                reply = {'text': ('\n'.join(texts)[:OUTPUT_CHARS] or '（出力なし）'), 'stage_image': image}
         except Exception as exc:
-            reply = {'text': f'操作は実行していません: {type(exc).__name__}: {str(exc)[:300]}'}
+            reply = {'text': f'操作結果が不明です。再送せず現在の画面を確かめてください: {type(exc).__name__}: {str(exc)[:300]}'}
         out.write(json.dumps({'id': rid, **reply}, ensure_ascii=False) + '\n')
 
 
