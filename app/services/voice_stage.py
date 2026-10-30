@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -520,6 +521,7 @@ class Stage:
         self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
         self.frame = ''              # a live page of this site on the stage (a path: /preview/<slug>…), shown as the page itself
         self.cue = None
+        self.view_id = uuid.uuid4().hex
         self.command = None          # an action for that page, passed on by the screen (frame_command): {seq, action, at}
         self._command_seq = 0
         self._screen_lock = asyncio.Lock()
@@ -549,7 +551,7 @@ class Stage:
     def state(self, active=True):
         return {'room_id': self.room_id, 'session_id': self.session_id, 'version': self.version, 'caption': self.caption,
                 'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'frame': self.frame, 'card': self.card,
-                'doc': self.doc, 'media': self.media, 'cue': self.cue, 'command': self.command, 'at': self.at,
+                'doc': self.doc, 'media': self.media, 'cue': self.cue, 'view_id':self.view_id, 'command': self.command, 'at': self.at,
                 'active': active, 'scenes': len(self.scenes)}
 
     def write(self, active=True):
@@ -719,6 +721,7 @@ class Stage:
         if program is not None or html is not None or image is not None or card is not None or doc is not None or media is not None or frame is not None or cue is not None:
             self._owner_asked = False
             if not image: self._external_source = None
+            if (frame or '') != self.frame: self.view_id = uuid.uuid4().hex
             if (frame or '') != self.frame and not (doc and (self.doc or {}).get('id') == doc.get('id')): self.command = None   # a command was for the page that leaves
             self.program, self.html, self.image, self.page_url, self.frame = program or '', html or '', image or '', page_url or '', frame or ''
             self.card, self.doc, self.media = card or None, doc or None, media or None

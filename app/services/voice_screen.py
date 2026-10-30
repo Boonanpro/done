@@ -28,11 +28,11 @@ def same_artifact(frame, url):
 
 def accept(room, state, body):
     """Called after room authorization. Refuse old sessions and unrelated pages."""
-    if not state.get('active') or body.get('session_id') != state.get('session_id'): return False
+    if not state.get('active') or body.get('session_id') != state.get('session_id') or body.get('view_id') != state.get('view_id'): return False
     screen = body.get('screen') or {}
     if not same_artifact(state.get('frame'), screen.get('url')): return False
     now = time.time(); old = read(room)
-    if old.get('session_id') == body['session_id'] and old.get('client_id') != body.get('client_id') and now - old.get('received_at', 0) < 8: return False
+    if old.get('session_id') == body['session_id'] and old.get('view_id') == body['view_id'] and old.get('client_id') != body.get('client_id') and now - old.get('received_at', 0) < 8: return False
     # Keep the latest receipt through heartbeat snapshots, until another request finishes.
     receipt = body.get('receipt') or (old.get('receipt') if old.get('session_id') == body['session_id'] else None)
     value = {**body, 'receipt': receipt, 'received_at': now}
@@ -44,7 +44,7 @@ def accept(room, state, body):
 
 def current(stage):
     data = read(stage.room_id)
-    if data.get('session_id') != stage.session_id or time.time()-data.get('received_at',0) > 12: return None
+    if data.get('session_id') != stage.session_id or data.get('view_id') != stage.view_id or time.time()-data.get('received_at',0) > 12: return None
     screen = data.get('screen') or {}
     if not same_artifact(stage.frame, screen.get('url')): return None
     return screen
@@ -98,7 +98,7 @@ async def operate(stage, op, target='', value='', direction='down', page_id='', 
         while time.monotonic()-started < 5:
             data = read(stage.room_id)
             receipt = data.get('receipt') or {}
-            if data.get('session_id') == stage.session_id and receipt.get('request_id') == request_id:
+            if data.get('session_id') == stage.session_id and data.get('view_id') == stage.view_id and receipt.get('request_id') == request_id:
                 stage.record('stage_control',op=op,elapsed_ms=round((time.monotonic()-started)*1000),ok=bool(receipt.get('result',{}).get('ok')))
                 return {**receipt['result'],'screen':data.get('screen'), 'note':'操作後の画面です。押せたことは保存・送信の完了ではありません。画面の結果を確認してください。'}
             await asyncio.sleep(.05)

@@ -15,7 +15,7 @@ def stage(tmp_path, monkeypatch):
     s.close()
 
 def observation(stage, risk='navigate', value='hello', client='one'):
-    return {'session_id':stage.session_id,'client_id':client,'screen':{'page_id':'page','url':'/artifacts/test?call=1','title':'試験用画面','text':'試験用',
+    return {'view_id':stage.view_id,'session_id':stage.session_id,'client_id':client,'screen':{'page_id':'page','url':'/artifacts/test?call=1','title':'試験用画面','text':'試験用',
       'controls':[{'id':'c1','name':'確認','role':'button','risk':risk,'fingerprint':'observed','value':value}]}}
 
 @pytest.mark.asyncio
@@ -123,3 +123,11 @@ def test_screens_are_room_private_not_shared_uploads(tmp_path,monkeypatch):
     assert (M.directory('private-room')/url.rsplit('/',1)[-1]).read_bytes()==b'test-png'
     assert screen_image([image],'read_url',{})==''
     assert S.safe_image(url)==url
+
+@pytest.mark.asyncio
+async def test_same_site_different_document_does_not_reuse_old_snapshot(stage):
+    body=observation(stage)
+    assert C.accept(stage.room_id,stage.state(),body)
+    stage._apply('another document',frame='/preview/test?document=2')
+    assert not C.current(stage)
+    assert not C.accept(stage.room_id,stage.state(),body)

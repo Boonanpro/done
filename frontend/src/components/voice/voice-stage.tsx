@@ -50,7 +50,7 @@ export type StageMedia = {
 export type StageCue = { label: string; value: string; detail: string; choices?: string[] };
 
 export type StageState = {
-  version: number; caption: string; program: string; html?: string; image?: string; page_url?: string; frame?: string; card?: StageCard | null;
+  view_id?: string; version: number; caption: string; program: string; html?: string; image?: string; page_url?: string; frame?: string; card?: StageCard | null;
   cue?: StageCue | null; doc?: StageDoc | null; media?: StageMedia | null; command?: StageCommand | null;
   at: string | null; active: boolean; scenes?: number; session_id?: string;
 };
@@ -222,13 +222,13 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
           ) : scene.kind === 'card' ? (
             <StageMessageCard card={scene.card} />
           ) : scene.kind === 'doc' && stageFramePath(scene.doc.page) ? (
-            <StageFrame roomId={roomId} sessionId={state?.session_id || ""} path={stageFramePath(scene.doc.page)!} command={state?.command} fill={fill} title={scene.doc.label || '成果物の画面'}>
+            <StageFrame viewId={state?.view_id || ""} roomId={roomId} sessionId={state?.session_id || ""} path={stageFramePath(scene.doc.page)!} command={state?.command} fill={fill} title={scene.doc.label || '成果物の画面'}>
               <StageDocStatus doc={scene.doc} />
             </StageFrame>
           ) : scene.kind === 'doc' ? (
             <StageDocument doc={scene.doc} />
           ) : scene.kind === 'frame' ? (
-            <StageFrame roomId={roomId} sessionId={state?.session_id || ""} path={scene.path} command={state?.command} fill={fill} title={state?.caption || '成果物の画面'} />
+            <StageFrame viewId={state?.view_id || ""} roomId={roomId} sessionId={state?.session_id || ""} path={scene.path} command={state?.command} fill={fill} title={state?.caption || '成果物の画面'} />
           ) : scene.kind === 'media' ? (
             <StageMedia media={scene.media} />
           ) : scene.kind === 'html' ? (
@@ -410,7 +410,7 @@ export function StageMedia({ media }: { media: StageMedia }) {
 /** A page of this site on the call's screen, live: the owner's artifact itself, signed in (the same origin shares the
  * owner's token), usable by touch. The server's commands (approve all, reload…) are passed to the page by postMessage,
  * each once, after the page has said it listens ({type: 'dan-call-ready'}); a command older than 30 s is not replayed. */
-export function StageFrame({ roomId, sessionId, path, command, fill, title, children }: { roomId: string; sessionId: string; path: string; command?: StageCommand | null; fill: boolean; title: string; children?: ReactNode }) {
+export function StageFrame({ viewId, roomId, sessionId, path, command, fill, title, children }: { viewId: string; roomId: string; sessionId: string; path: string; command?: StageCommand | null; fill: boolean; title: string; children?: ReactNode }) {
   const frame = useRef<HTMLIFrameElement | null>(null);
   const ready = useRef(false);
   const screenReady = useRef(false);
@@ -435,7 +435,7 @@ export function StageFrame({ roomId, sessionId, path, command, fill, title, chil
       if (['dan-screen-snapshot','dan-screen-result'].includes(event.data?.type)) {
         screenReady.current = true;
         const {screen, request_id, result} = event.data;
-        const body = {session_id:sessionId, client_id:clientId.current, screen,
+        const body = {view_id:viewId,session_id:sessionId, client_id:clientId.current, screen,
           receipt:request_id ? {request_id,result} : undefined};
         feedbackQueue.current = feedbackQueue.current.catch(() => {}).then(async () => {
           if (stopped) return;
@@ -452,7 +452,7 @@ export function StageFrame({ roomId, sessionId, path, command, fill, title, chil
     };
     window.addEventListener('message', listen);
     return () => { stopped = true; window.removeEventListener('message', listen); };
-  }, [roomId, sessionId, path]);
+  }, [roomId, sessionId, viewId, path]);
   useEffect(() => { ready.current = false; screenReady.current = false; waiting.current = null; setLoading(true); }, [path]);
   // The page is opened as part of a call (call=1): it folds its own menus and shows the document itself.
   const src = path + (path.includes('?') ? '&' : '?') + 'call=1';
