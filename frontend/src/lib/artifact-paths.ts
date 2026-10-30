@@ -1,32 +1,8 @@
-import { CUSTOM_DOMAIN_SLUG_MAP } from './custom-domain-rewrites.generated';
-
-const DEFAULT_CUSTOM_DOMAINS: Record<string, string[]> = {
-  ...CUSTOM_DOMAIN_SLUG_MAP,
-  kittoku: ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app'],
-};
+import { KNOWN_CUSTOM_DOMAINS } from './artifact-hosts';
+export { KNOWN_CUSTOM_DOMAINS } from './artifact-hosts';
 
 const DELIVERY_DOMAIN_SUFFIX =
   process.env.NEXT_PUBLIC_ARTIFACT_DELIVERY_SUFFIX || '-done.vercel.app';
-
-function parseCustomDomains(): Record<string, string[]> {
-  const configured = process.env.NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS;
-  if (!configured) return DEFAULT_CUSTOM_DOMAINS;
-
-  const map: Record<string, string[]> = { ...DEFAULT_CUSTOM_DOMAINS };
-  for (const entry of configured.split(',')) {
-    const [rawSlug, rawDomains] = entry.split('=');
-    const slug = rawSlug?.trim();
-    if (!slug || !rawDomains) continue;
-    const domains = rawDomains
-      .split('|')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-    if (domains.length) map[slug] = domains;
-  }
-  return map;
-}
-
-export const KNOWN_CUSTOM_DOMAINS: Record<string, string[]> = parseCustomDomains();
 
 function isInternalVercelUrl(value?: string | null): boolean {
   if (!value) return false;
