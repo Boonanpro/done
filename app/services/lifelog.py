@@ -12,13 +12,16 @@ import json
 import os
 import struct
 import zlib
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
-AUDIO_ROOT = Path(os.environ.get("DAN_LIFELOG_AUDIO", r"\\192.168.40.236\personal_folder\dan-lifelog"))
-INDEX_ROOT = Path(os.environ.get("DAN_LIFELOG_INDEX", str(Path(__file__).resolve().parents[2] / ".data" / "lifelog")))
+# State must survive release/worktree changes. Windows keeps its NAS archive.
+STATE_ROOT = Path.home() / ".dan" / "lifelog"
+AUDIO_ROOT = Path(os.environ.get("DAN_LIFELOG_AUDIO") or (r"\\192.168.40.236\personal_folder\dan-lifelog" if os.name == "nt" else STATE_ROOT / "audio"))
+INDEX_ROOT = Path(os.environ.get("DAN_LIFELOG_INDEX") or STATE_ROOT / "index")
 KEEP_DAYS = 180
 
 
@@ -107,7 +110,13 @@ def store_segment(user_id: str, data: bytes) -> dict:
     day.mkdir(parents=True, exist_ok=True)
     path = day / f"{start:%H%M%S}_{start_ms % 1000:03d}_{user_id[:8]}.ogg"
     if not path.exists():
-        path.write_bytes(ogg_opus(frames, frame_ms))
+        # The worker must never see a partially written Ogg.
+        with tempfile.NamedTemporaryFile(dir=day, suffix=".pending", delete=False) as f:
+            temp = Path(f.name)
+            f.write(ogg_opus(frames, frame_ms))
+            f.flush()
+            os.fsync(f.fileno())
+        temp.replace(path)
     return {"audio": str(path), "start": start.isoformat(), "seconds": round(seconds, 2)}
 
 

@@ -1,12 +1,9 @@
-"""Writes down the Dan pin's lifelog segments (app/services/lifelog.py) with Whisper on this PC's GPU.
+"""Persistent lifelog transcription worker; restart with launchd/Task Scheduler on exit.
 
-Watches the NAS lifelog folders of the last two days for .ogg files without a .json beside them, transcribes each
-(Japanese, large-v3, VAD on), writes <file>.json and appends the text to the day's local index. Files older than
-KEEP_DAYS are removed. One process; started hidden by the DanLifelogWorker task (scripts/run_hidden.vbs).
-Log: .tmp/lifelog_worker.log
+Audio and text live outside releases. Failed audio remains pending, with bounded
+retry delay. New speech is processed before the historical backlog.
 """
 from __future__ import annotations
-
 import glob
 import json
 import os
@@ -16,83 +13,113 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-LOG = ROOT / ".tmp" / "lifelog_worker.log"
+from app.services import lifelog
+LOG = lifelog.STATE_ROOT / 'worker.log'
 
 
-def log(msg: str) -> None:
+def log(msg):
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as f:
-        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+    with LOG.open('a', encoding='utf-8') as f:
+        f.write(f'{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n')
 
 
-def cuda_dlls() -> None:
-    # cuBLAS / cuDNN come from the nvidia-*-cu12 wheels; Windows needs their bin folders on the DLL path
+def cuda_dlls():
+    if os.name != 'nt':
+        return
     for sp in site.getsitepackages() + [site.getusersitepackages()]:
-        for d in glob.glob(os.path.join(sp, "nvidia", "*", "bin")):
+        for d in glob.glob(os.path.join(sp, 'nvidia', '*', 'bin')):
             os.add_dll_directory(d)
-            os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+            os.environ['PATH'] = d + os.pathsep + os.environ['PATH']
 
 
-def main() -> None:
-    from app.services import lifelog
+def process_audio(audio, model):
+    out = audio.with_suffix('.json')
+    entry = None
+    if out.exists():
+        try:
+            entry = json.loads(out.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            pass
+    if not entry or entry.get('error'):
+        segments, info = model.transcribe(str(audio), language='ja', vad_filter=True,
+                                         beam_size=5, condition_on_previous_text=False)
+        parts = [{'start': round(s.start, 2), 'end': round(s.end, 2), 'text': s.text.strip()} for s in segments]
+        n = audio.name
+        start = datetime.fromisoformat(f'{audio.parent.name}T{n[:2]}:{n[2:4]}:{n[4:6]}').replace(tzinfo=lifelog.JST)
+        entry = {'start': start.isoformat(), 'seconds': round(info.duration, 2),
+                 'text': ''.join(p['text'] for p in parts).strip(), 'audio': str(audio), 'parts': parts}
+        tmp = out.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(out)
+    # Rebuild a missing index even after a crash between result and index writes.
+    if entry.get('text'):
+        rows = lifelog.read_day(entry['start'][:10])
+        if not any(Path(r.get('audio', '').replace('\\', '/')).name == audio.name for r in rows):
+            lifelog.add_transcript({k: entry[k] for k in ('start', 'seconds', 'text', 'audio')})
+    return entry
+
+
+def run_pass(model, completed, retries):
+    now = time.time()
+    pending = [p for p in lifelog.AUDIO_ROOT.glob('20??-??-??/*.ogg')
+               if str(p) not in completed and retries.get(str(p), 0) <= now]
+    # A bounded batch lets fresh uploads take priority on the next pass.
+    for audio in sorted(pending, reverse=True)[:50]:
+        try:
+            entry = process_audio(audio, model)
+            completed.add(str(audio))
+            retries.pop(str(audio), None)
+            log(f'{audio.parent.name}/{audio.name}: {len(entry.get("text", ""))} chars')
+        except Exception:
+            # Never write an error marker to the failed storage, or mark it done.
+            retries[str(audio)] = time.time() + 60
+            log(f'{audio.name}: retry in 60s: {traceback.format_exc(limit=2)}')
+    return len(pending)
+
+
+def cleanup_audio():
+    cutoff = (datetime.now(lifelog.JST) - timedelta(days=lifelog.KEEP_DAYS)).strftime('%Y-%m-%d')
+    for folder in lifelog.AUDIO_ROOT.glob('20??-??-??'):
+        if folder.name < cutoff:
+            for f in folder.iterdir():
+                if f.is_file():
+                    f.unlink(missing_ok=True)
+            folder.rmdir()
+
+
+def main():
+    lifelog.STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    lock = (lifelog.STATE_ROOT / 'worker.lock').open('w')
+    if os.name == 'nt':
+        import msvcrt
+        lock.write('0'); lock.flush(); lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     cuda_dlls()
     from faster_whisper import WhisperModel
-    try:
-        model = WhisperModel("large-v3", device="cuda", compute_type="int8_float16")   # shares the 8 GB GPU with other work
-        log("model on GPU")
-    except Exception as exc:  # no GPU: slower, still works
-        log(f"GPU unavailable ({exc}); CPU int8")
-        model = WhisperModel("large-v3", device="cpu", compute_type="int8")
-    last_cleanup = 0.0
+    name = os.environ.get('DAN_LIFELOG_MODEL', 'large-v3')
+    device = os.environ.get('DAN_LIFELOG_DEVICE', 'cuda' if os.name == 'nt' else 'cpu')
+    model = WhisperModel(name, device=device, compute_type='int8_float16' if device == 'cuda' else 'int8',
+                         cpu_threads=4, num_workers=1)
+    log(f'model loaded: {name} {device}')
+    completed, retries = set(), {}
+    last_cleanup = 0
     while True:
-        done = 0
-        for back in (1, 0):
-            day = (datetime.now(lifelog.JST) - timedelta(days=back)).strftime("%Y-%m-%d")
-            folder = lifelog.AUDIO_ROOT / day
-            if not folder.exists():
-                continue
-            for audio in sorted(folder.glob("*.ogg")):
-                out = audio.with_suffix(".json")
-                if out.exists():
-                    continue
-                try:
-                    started = time.time()
-                    segments, info = model.transcribe(str(audio), language="ja", vad_filter=True, beam_size=5,
-                                                      condition_on_previous_text=False)
-                    parts = [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()} for s in segments]
-                    text = "".join(p["text"] for p in parts).strip()
-                    hh, mm, ss = audio.name[0:2], audio.name[2:4], audio.name[4:6]
-                    start = datetime.fromisoformat(f"{day}T{hh}:{mm}:{ss}").replace(tzinfo=lifelog.JST)
-                    entry = {"start": start.isoformat(), "seconds": round(info.duration, 2), "text": text,
-                             "audio": str(audio), "parts": parts}
-                    out.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
-                    if text:
-                        lifelog.add_transcript({k: entry[k] for k in ("start", "seconds", "text", "audio")})
-                    done += 1
-                    log(f"{audio.name} {info.duration:.1f}s -> {len(text)} chars in {time.time() - started:.1f}s")
-                except Exception:
-                    log(f"{audio.name} failed: {traceback.format_exc(limit=2)}")
-                    out.write_text(json.dumps({"error": True}), encoding="utf-8")
-        if time.time() - last_cleanup > 6 * 3600:
-            last_cleanup = time.time()
-            cutoff = (datetime.now(lifelog.JST) - timedelta(days=lifelog.KEEP_DAYS)).strftime("%Y-%m-%d")
-            for folder in lifelog.AUDIO_ROOT.glob("20??-??-??"):
-                if folder.name < cutoff:
-                    for f in folder.iterdir():
-                        f.unlink(missing_ok=True)
-                    folder.rmdir()
-                    log(f"removed {folder.name}")
-        if not done:
-            time.sleep(5)
+        try:
+            if time.time() - last_cleanup > 21600:
+                cleanup_audio()
+                last_cleanup = time.time()
+            count = run_pass(model, completed, retries)
+            (lifelog.STATE_ROOT / 'worker-status.json').write_text(json.dumps({'at': time.time(), 'pending': count, 'retrying': len(retries)}))
+            time.sleep(1 if count else 5)
+        except Exception:
+            log('scan failed; retrying: ' + traceback.format_exc(limit=2))
+            time.sleep(30)
 
 
-if __name__ == "__main__":
-    log("start")
-    try:
-        main()
-    except Exception:
-        log("crashed: " + traceback.format_exc())
-        raise
+if __name__ == '__main__':
+    main()
