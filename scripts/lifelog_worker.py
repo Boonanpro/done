@@ -11,7 +11,7 @@ import site
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -79,6 +79,16 @@ def run_pass(model, completed, retries):
     return len(pending)
 
 
+def cleanup_audio():
+    cutoff = (datetime.now(lifelog.JST) - timedelta(days=lifelog.KEEP_DAYS)).strftime('%Y-%m-%d')
+    for folder in lifelog.AUDIO_ROOT.glob('20??-??-??'):
+        if folder.name < cutoff:
+            for f in folder.iterdir():
+                if f.is_file():
+                    f.unlink(missing_ok=True)
+            folder.rmdir()
+
+
 def main():
     lifelog.STATE_ROOT.mkdir(parents=True, exist_ok=True)
     lock = (lifelog.STATE_ROOT / 'worker.lock').open('w')
@@ -97,8 +107,12 @@ def main():
                          cpu_threads=4, num_workers=1)
     log(f'model loaded: {name} {device}')
     completed, retries = set(), {}
+    last_cleanup = 0
     while True:
         try:
+            if time.time() - last_cleanup > 21600:
+                cleanup_audio()
+                last_cleanup = time.time()
             count = run_pass(model, completed, retries)
             (lifelog.STATE_ROOT / 'worker-status.json').write_text(json.dumps({'at': time.time(), 'pending': count, 'retrying': len(retries)}))
             time.sleep(1 if count else 5)

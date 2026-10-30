@@ -12,6 +12,7 @@ import json
 import os
 import struct
 import zlib
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -109,7 +110,13 @@ def store_segment(user_id: str, data: bytes) -> dict:
     day.mkdir(parents=True, exist_ok=True)
     path = day / f"{start:%H%M%S}_{start_ms % 1000:03d}_{user_id[:8]}.ogg"
     if not path.exists():
-        path.write_bytes(ogg_opus(frames, frame_ms))
+        # The worker must never see a partially written Ogg.
+        with tempfile.NamedTemporaryFile(dir=day, suffix=".pending", delete=False) as f:
+            temp = Path(f.name)
+            f.write(ogg_opus(frames, frame_ms))
+            f.flush()
+            os.fsync(f.fileno())
+        temp.replace(path)
     return {"audio": str(path), "start": start.isoformat(), "seconds": round(seconds, 2)}
 
 
