@@ -1,3 +1,4 @@
+import { VoiceControlsRuntime } from '@/components/artifacts/voice-controls-runtime';
 import { DedicatedArtifactProvider } from '@/components/artifacts/artifact-link';
 import { LiveVersionMark } from '@/components/artifacts/live-version-mark';
 import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loader';
@@ -160,6 +161,7 @@ export default function ArtifactsLayout({ children }: { children: React.ReactNod
       <DedicatedArtifactProvider slug={dedicatedArtifactSlug}>{children}</DedicatedArtifactProvider>
       <InspectorRuntimeLoader fallbackSlug={dedicatedArtifactSlug} />
       <LiveVersionMark />
+      <VoiceControlsRuntime />
     </>
   );
 }

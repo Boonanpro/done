@@ -60,8 +60,58 @@ async def call_stage(room_id: str, request: Request, after: int = 0, wait: float
         state = voice_stage.read_state(room_id)
         if not state: state = {'room_id': room_id, 'version': 0, 'caption': '', 'program': '', 'at': None, 'active': False, 'scenes': 0}
         if int(state.get('version') or 0) > after or not state.get('active') or asyncio.get_running_loop().time() >= deadline:
-            return {k: state.get(k) for k in ('room_id', 'session_id', 'version', 'caption', 'program', 'html', 'image', 'page_url', 'frame', 'card', 'doc', 'media', 'command', 'at', 'active', 'scenes')}
+            return {k: state.get(k) for k in ('room_id', 'session_id', 'version', 'caption', 'program', 'html', 'image', 'page_url', 'frame', 'card', 'doc', 'media', 'cue', 'view_id', 'command', 'at', 'active', 'scenes')}
         await asyncio.sleep(.15)
+
+
+@router.get('/stage/{room_id}/image/{filename}')
+async def call_screen_image(room_id: str, filename: str, request: Request):
+    import re
+    from fastapi.responses import FileResponse
+    from app.services.voice_screen_media import directory
+    user = _get_user(request)
+    if not await ChatService().get_room(room_id,user.user_id): raise HTTPException(status_code=403,detail='No access to this room')
+    if not re.fullmatch(r'[a-f0-9]{32}\.(png|jpg|webp)',filename): raise HTTPException(status_code=404)
+    path = directory(room_id)/filename
+    if not path.is_file(): raise HTTPException(status_code=404)
+    return FileResponse(path,headers={'Cache-Control':'private, no-store'})
+
+
+class ScreenControl(BaseModel):
+    id: str = Field(max_length=80)
+    name: str = Field(max_length=160)
+    role: str = Field(max_length=80)
+    action: str | None = Field(default=None, max_length=160)
+    risk: Literal['confirm', 'navigate', 'edit']
+    fingerprint: str = Field(max_length=2000)
+    value: str | None = Field(default=None, max_length=1000)
+    options: list[str] | None = Field(default=None, max_length=80)
+
+class ScreenObservation(BaseModel):
+    page_id: str = Field(max_length=80)
+    url: str = Field(max_length=2000)
+    title: str = Field(max_length=300)
+    controls: list[ScreenControl] = Field(max_length=300)
+    text: str = Field(max_length=8000)
+
+class ScreenFeedback(BaseModel):
+    view_id: str = Field(max_length=100)
+    session_id: str = Field(max_length=100)
+    client_id: str = Field(max_length=100)
+    screen: ScreenObservation
+    receipt: dict | None = None
+
+@router.post('/stage/{room_id}/screen')
+async def call_screen(room_id: str, request: Request, feedback: ScreenFeedback):
+    from app.services import voice_stage, voice_screen
+    user = _get_user(request)
+    if not await ChatService().get_room(room_id, user.user_id):
+        raise HTTPException(status_code=403, detail='No access to this room')
+    body = feedback.model_dump()
+    import json
+    if len(json.dumps(body)) > 180000:
+        raise HTTPException(status_code=413, detail='Screen too large')
+    return {'accepted': voice_screen.accept(room_id, voice_stage.read_state(room_id), body)}
 
 
 _EDITOR_TOOLS = [   # the editor assistant's shared definitions (the phone/web voice tools retired 2026-09-23)

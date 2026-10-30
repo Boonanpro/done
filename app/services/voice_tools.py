@@ -58,16 +58,16 @@ class Host:
                 continue
             future = self.waiting.pop(reply.get('id'), None)
             if future and not future.done():
-                future.set_result(reply.get('text') or '')
+                future.set_result(reply)
         for future in self.waiting.values():
             if not future.done():
-                future.set_result('操作は実行していません: ダンの道具の実行係が止まった')
+                future.set_result({'text':'操作の結果が不明です: ダンの道具の実行係が止まった。再送せず結果を確かめてください。'})
         self.waiting.clear()
 
     def alive(self):
         return self.process is not None and self.process.returncode is None
 
-    async def ask(self, op, **fields):
+    async def ask(self, op, with_media=False, **fields):
         if not self.alive():
             if not self.starting or self.starting.done():
                 self.starting = asyncio.create_task(self.start())
@@ -79,7 +79,8 @@ class Host:
         self.process.stdin.write((json.dumps({'id': rid, 'op': op, **fields}, ensure_ascii=False) + '\n').encode('utf-8'))
         await self.process.stdin.drain()
         try:
-            return await asyncio.wait_for(future, CALL_SECONDS)
+            reply = await asyncio.wait_for(future, CALL_SECONDS)
+            return reply if with_media else reply.get('text','')
         finally:
             self.used = time.monotonic()
 

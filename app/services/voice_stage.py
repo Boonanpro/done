@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,8 +54,6 @@ FLIP_HOLD_S = 12.0     # a replace that changes to a different kind of scene (fl
                        # alternated between the journey's flow and the fare 6 times in 60 s while Dan said nothing new)
 HTML_MAX = 12000       # a free drawing (SVG/HTML) the model writes for the stage
 NOT_ON_STAGE = ('Choice', 'Input', 'Button')   # answers and links need a chat; the stage is looked at while talking
-PAGE_TIMEOUT_S = 15.0  # opening a page to photograph it for the stage
-PAGE_VIEWPORT = {'width': 960, 'height': 600}
 
 _stages = {}   # room_id -> Stage, for the backend tool show_on_stage (voice_responses)
 
@@ -167,6 +166,8 @@ def safe_image(url):
     """An image the stage may show: one of Dan's files (/api/v1/files/<name>) or an https URL (no credentials)."""
     if not isinstance(url, str): return None
     url = url.strip()
+    from app.services.voice_screen_media import URL
+    if URL.fullmatch(url): return url
     if re.fullmatch(r'/api/v1/files/[A-Za-z0-9._-]{1,200}', url): return url
     if re.fullmatch(r'https://[A-Za-z0-9.-]+(:[0-9]+)?/[^\s"\'<>\\]{0,1800}', url): return url
     return None
@@ -357,10 +358,10 @@ def words_since(history, mark):
     return out
 
 
-INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、本人の画面に出す「図」を決めて描く係です。声は出せません。画面だけです。
+INSTRUCTIONS = """あなたは、本人がダン（音声アシスタント）と通話している間、画面を選んで描く係です。見せ方は本物の画面・短い札・説明の図の3つ。操作中の本物の画面を図で置き換えない。番号・短い選択・単一の数字は cue={label,value,detail,choices} の札。確認番号は 483920 のような数字で大きく、漢数字や Flow にはしない。説明が要るときだけ図。声は出せません。画面だけです。
 入力は、直前の会話（ユーザー＝本人、Dan＝ダン）、今の画面の札と中身、そして本人からの明示の頼み（あれば）です。
-出力は JSON だけ: {"action": "keep" | "caption" | "replace" | "back", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL", "version": 前に出した図の番号}
-replace の時は program・html・image のどれか1つだけを入れる（内容に一番合う見せ方を選ぶ。下の「見せ方の選び方」）。back の時は version に「これまで出した図」の番号。
+出力は JSON だけ: {"action": "keep" | "caption" | "replace" | "back", "caption": "今の話を6〜14文字で", "program": "部品のプログラム", "html": "自由な絵（SVG/HTML）", "image": "画像の URL", "cue": {"label":"何の数字・選択か", "value":"483920", "detail":"次にすること", "choices":[]}, "version": 前に出した図の番号}
+replace の時は cue・program・html・image のどれか1つだけを入れる（内容に一番合う見せ方を選ぶ。下の「見せ方の選び方」）。back の時は version に「これまで出した図」の番号。
 
 action の決め方。判断の材料は「新しく届いた言葉」（前回の判断の後に届いた分）で、直前の会話は文脈として読む:
 - keep: 挨拶・相づち・短い返事・今の画面がまだ話に合っている時。新しく届いた言葉が、今の画面の内容の言い直し・補足・締めの言葉の時も keep。
@@ -376,7 +377,8 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
 - 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 手順・流れ・段取り・比べる物を聞かれたなら、質問の言葉から見出しだけの骨組み（Steps か、箱2〜3個の Flow）を描いてよい（中身はダンの言葉で育てる）。数字・料金・時間を聞かれた時は、ダンがまだ言っていないので caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
 
-見せ方の選び方（引き出しは3つ。毎回同じ型にしない）:
+描く時の選び方（本物の画面はツールが開く。ここでは札か図を作る）:
+- cue（短い札）: 単一の番号・金額・日時や、2〜4個の短い選択肢。label は何の値か、value は表示用の数字・文字、detail は次にすることを1つだけ、choices は選択肢の文字列配列。番号を漢数字にしない。
 - program（部品）: 人・物・流れは Flow、金額・件数・時刻は Stat、比べる話は Compare、推移は Chart、順番は Steps。構造がそのまま部品に当てはまる時。
 - html（自由な絵）: 部品では表しにくい物。場所の配置・部屋や機械の図解・時間の長さを帯で見せる予定表・大小や割合を面積で見せる絵・画面の見た目の下絵・一枚絵の説明図・言葉の対比のポスター風の見せ方など。SVG を書く（<svg viewBox="0 0 640 360" width="100%" …>）。背景は暗い色（#0a0a0a 系）で、文字は白か明るい色、文字の大きさは 18px 以上、要素は10個まで。script・外部の読み込み・リンク・フォームは書かない（消される）。中身は 12000 文字まで。
 - image（画像）: 会話に実在する画像の URL（/api/v1/files/… か https://）を見せる時だけ。URL を作らない。
@@ -385,7 +387,7 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 図は、声を聞いていない人が見ても何の話か分かる物にする。Heading の text は「この図が言っていること」を1文で（例: 「予約から乗るまでは4段階」「東京まで約2時間半・14,920円」）。Heading の sub に、図の読み方か要点を1行足す。
 - 文字だけの表・箇条書きにしない。人・物・流れは Flow（アイコン＋矢印の図）、今どこかは Flow の tone "now"、金額・件数・時刻は Stat で大きく1つ、比べる話は Compare、推移は Chart、順番は Steps。
 - Flow の箱の label は、それが何かが分かる言葉（「公開鍵」ではなく「アプリの鍵」、「表」ではなく「会員の表」）。箱の sub に役割や状態を短く。矢印の label は「持つ」「読める」のような動き（動詞）。名詞を3つ並べただけの Flow は描かない。
-- 数字が出た話は、その数字を Stat にして何の数字かを label に書き、note に条件（いつ・どの区間・税込かなど）を書く。
+- 単一の数字は cue の value、条件は detail に書く。複数の数字を比較する時だけ Stat や Compare を使う。
 - Flow の icon は一覧にある名前だけ（ticket・gate・map は無い。きっぷは doc、改札は check、場所は pin）。無い名前を書くと図ごと出ない。
 - replace の時は、Heading も新しい図に合わせて書き直す（前の画面の見出しを残さない。料金の見出しの下に流れの図、のような食い違いを作らない）。
 - ダンが口で挙げた段階・項目は、図にも全部入れる（「予約→駅→改札→ホーム→乗車→到着」と言ったら6個全部。6個を超える時だけまとめる）。
@@ -518,8 +520,12 @@ class Stage:
         self.version = int((read_state(room_id) or {}).get('version') or 0)
         self.caption, self.program, self.html, self.image, self.page_url, self.at = '', '', '', '', '', None
         self.frame = ''              # a live page of this site on the stage (a path: /preview/<slug>…), shown as the page itself
+        self.cue = None
+        self.view_id = uuid.uuid4().hex
         self.command = None          # an action for that page, passed on by the screen (frame_command): {seq, action, at}
         self._command_seq = 0
+        self._screen_lock = asyncio.Lock()
+        self._screen_pending = None
         self._doc_pages = {}         # doc id -> the site's own screen for it (voice_stage_docs.page)
         self.card = None             # a message draft on the stage (card_of), with the transcript's mark when it was last put there
         self._card_mark, self._card_refused = None, None
@@ -545,7 +551,7 @@ class Stage:
     def state(self, active=True):
         return {'room_id': self.room_id, 'session_id': self.session_id, 'version': self.version, 'caption': self.caption,
                 'program': self.program, 'html': self.html, 'image': self.image, 'page_url': self.page_url, 'frame': self.frame, 'card': self.card,
-                'doc': self.doc, 'media': self.media, 'command': self.command, 'at': self.at,
+                'doc': self.doc, 'media': self.media, 'cue': self.cue, 'view_id':self.view_id, 'command': self.command, 'at': self.at,
                 'active': active, 'scenes': len(self.scenes)}
 
     def write(self, active=True):
@@ -565,6 +571,13 @@ class Stage:
         back (2026-10-26: the owner's question set a decision, Dan's answer kept rescheduling it, so the drawing waited
         for the end of Dan's sentence)."""
         if not delta or not delta.strip(): return
+        if role == 'assistant' and not self._live():
+            from app.services.voice_stage_cue import from_words
+            self._cue_words = (getattr(self, '_cue_words', '') + delta)[-400:]
+            cue = from_words(self._cue_words)
+            if cue and cue != self.cue:
+                self._apply(cue['label'], cue=cue)
+                self._cue_words = ''
         if self._fresh and self._fresh[-1][0] == role: self._fresh[-1] = (role, self._fresh[-1][1] + delta)
         else: self._fresh.append((role, delta))
         if role == 'assistant':
@@ -618,7 +631,9 @@ class Stage:
         program = sanitize(data.get('program')) if isinstance(data.get('program'), str) else None
         html = clean_html(data.get('html')) if data.get('html') else None
         image = safe_image(data.get('image')) if data.get('image') else None
-        drawable = {'program': program.strip()} if well_formed(program, self._known()) else {'html': html} if html else {'image': image} if image else None
+        from app.services.voice_stage_cue import clean as clean_cue
+        cue = clean_cue(data.get('cue'))
+        drawable = {'cue': cue} if cue else {'program': program.strip()} if well_formed(program, self._known()) else {'html': html} if html else {'image': image} if image else None
         if request and action != 'replace' and drawable: action = 'replace'
         if mine < self._applied:
             self.record('stage_stale', action=action, elapsed_ms=elapsed)
@@ -639,7 +654,7 @@ class Stage:
                 if caption and caption != self.caption: self._apply(caption)
                 return 'held'
             self._apply(caption or scene.get('caption') or self.caption, program=scene.get('program') or None, html=scene.get('html') or None,
-                        image=scene.get('image') or None, page_url=scene.get('page_url') or '', frame=scene.get('frame') or None)
+                        image=scene.get('image') or None, page_url=scene.get('page_url') or '', frame=scene.get('frame') or None, cue=scene.get('cue'))
             self._last_replace = time.monotonic()
             self.record('stage_back', elapsed_ms=elapsed, version=self.version, back=scene['version'], **usage)
             return 'replace'
@@ -672,6 +687,7 @@ class Stage:
 
     def _current(self):
         """The kind and body of the scene on the stage now."""
+        if self.cue: return 'cue', json.dumps(self.cue,ensure_ascii=False)
         if self.program: return 'program', self.program
         if self.html: return 'html', self.html
         if self.card: return 'card', self.card.get('proposal_id') or ''
@@ -686,25 +702,30 @@ class Stage:
         if self.card and self.card.get('status') == 'pending': return 'card'
         if self.doc and self.doc.get('status') in ('draft', 'failed'): return 'doc'
         if self.media: return 'media'
+        if self.frame: return 'frame'
+        if self.image and getattr(self,'_external_source',None): return 'external'
         return ''
 
     def _same_scene(self, scene):
         return ((scene.get('program') or '', scene.get('html') or '', scene.get('image') or '', (scene.get('card') or {}).get('proposal_id') or '',
-                 (scene.get('doc') or {}).get('id') or '', (scene.get('media') or {}).get('id') or '', scene.get('frame') or '')
-                == (self.program, self.html, self.image, (self.card or {}).get('proposal_id') or '', (self.doc or {}).get('id') or '', (self.media or {}).get('id') or '', self.frame))
+                 (scene.get('doc') or {}).get('id') or '', (scene.get('media') or {}).get('id') or '', scene.get('frame') or '', scene.get('cue'))
+                == (self.program, self.html, self.image, (self.card or {}).get('proposal_id') or '', (self.doc or {}).get('id') or '', (self.media or {}).get('id') or '', self.frame, self.cue))
 
-    def _apply(self, caption, program=None, html=None, image=None, page_url='', card=None, doc=None, media=None, frame=None):
+    def _apply(self, caption, program=None, html=None, image=None, page_url='', card=None, doc=None, media=None, frame=None, cue=None):
         """A new version for the screen: a caption alone, or a new scene (exactly one of program / html / image / card /
         doc / media). A card, document or picture with the same id as the one on the stage is a revision of that scene
         (one record, newest text)."""
         self.version += 1
         self.caption = caption
         self.at = datetime.now(timezone.utc).isoformat()
-        if program is not None or html is not None or image is not None or card is not None or doc is not None or media is not None or frame is not None:
+        if program is not None or html is not None or image is not None or card is not None or doc is not None or media is not None or frame is not None or cue is not None:
             self._owner_asked = False
+            if not image: self._external_source = None
+            if (frame or '') != self.frame: self.view_id = uuid.uuid4().hex
             if (frame or '') != self.frame and not (doc and (self.doc or {}).get('id') == doc.get('id')): self.command = None   # a command was for the page that leaves
             self.program, self.html, self.image, self.page_url, self.frame = program or '', html or '', image or '', page_url or '', frame or ''
             self.card, self.doc, self.media = card or None, doc or None, media or None
+            self.cue = cue
             last = self.scenes[-1] if self.scenes else {}
             same = ((card and (last.get('card') or {}).get('proposal_id') == card.get('proposal_id'))
                     or (doc and (last.get('doc') or {}).get('id') == doc.get('id'))
@@ -712,11 +733,11 @@ class Stage:
                     or (frame and not doc and last.get('frame') == frame and not last.get('doc')))
             if same:
                 last.update({'version': self.version, 'at': self.at, 'caption': caption, 'card': dict(card) if card else None,
-                             'doc': dict(doc) if doc else None, 'media': dict(media) if media else None})
+                             'doc': dict(doc) if doc else None, 'media': dict(media) if media else None, 'cue': cue})
             else:
                 self.scenes.append({'version': self.version, 'at': self.at, 'caption': caption, 'program': self.program,
                                     'html': self.html, 'image': self.image, 'page_url': self.page_url, 'frame': self.frame, 'card': dict(card) if card else None,
-                                    'doc': dict(doc) if doc else None, 'media': dict(media) if media else None})
+                                    'doc': dict(doc) if doc else None, 'media': dict(media) if media else None, 'cue': cue})
             del self.scenes[:-MAX_SCENES]
         self.write(active=True)
 
@@ -743,21 +764,31 @@ class Stage:
             self._last_replace = time.monotonic()
             self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=True)
             return {'shown': True, 'caption': caption, 'url': own, 'note': '本人の通話画面にその画面そのものが開いた（本人が押して操作もできる）。「出しました」とだけ。'}
-        try:
-            path = await capture_page(target, self.user_id, self.room_id)
-        except Exception as exc:
-            self.record('stage_page_failed', reason=type(exc).__name__, detail=str(exc)[:160], elapsed_ms=round((time.monotonic() - started) * 1000))
-            return {'shown': False, 'reason': f'ページを開けなかった（{type(exc).__name__}）。'}
-        self._apply(caption, image=path, page_url=target)
-        self._last_replace = time.monotonic()
-        self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version)
-        return {'shown': True, 'caption': caption, 'url': target, 'image': path}
+        # Use the same authenticated browser the call operates, never a new anonymous browser.
+        from app.services import voice_tools
+        host = voice_tools.host(self.user_id,self.room_id)
+        opened = await host.ask('call',name='browser',arguments={'action':'open_target','url':target,'observation':'dom'})
+        out = await self.show_external('browser')
+        if not out.get('shown'): out['browser_result'] = opened
+        return out
 
-    def _command(self, action):
+    async def show_external(self, source='browser', serial=''):
+        from app.services import voice_tools
+        if source not in ('browser','phone'): return {'shown':False,'reason':'browser か phone を指定してください。'}
+        args = {'action':'screenshot'}
+        if source == 'phone' and serial: args['serial'] = serial
+        out = await voice_tools.host(self.user_id,self.room_id).ask('call',with_media=True,name=source,arguments=args)
+        path = safe_image(out.get('stage_image'))
+        if not path: return {'shown':False,'reason':out.get('text') or '画面を取得できませんでした。'}
+        self._apply('スマホの画面' if source=='phone' else 'ブラウザの画面',image=path)
+        self._external_source = source
+        return {'shown':True,'note':'実際の操作画面を表示しました。操作のたびに更新します。静止画なので本人が直接押すことはできません。'}
+
+    def _command(self, action, screen_command=None):
         """An action for the page on the stage (the page's own button: approve all suggestions, reload…). The screen passes
         it to the page (frame_command in voice-stage.tsx), which runs it as if pressed; the result is read back from the site."""
         self._command_seq += 1
-        self.command = {'seq': self._command_seq, 'action': action, 'at': datetime.now(timezone.utc).isoformat()}
+        self.command = {'seq': self._command_seq, 'action': action, 'at': datetime.now(timezone.utc).isoformat(), 'screen_command': screen_command}
         self.version += 1
         self.write(active=True)
         self.record('stage_command', action=action, version=self.version)
@@ -1375,12 +1406,14 @@ class Stage:
             when = datetime.fromisoformat(scene['at']).astimezone(local).strftime('%H:%M')
             lines.append('')
             lines.append(f'**{when} {scene["caption"]}**' if scene['caption'] else f'**{when}**')
-            if scene.get('program'):
+            if scene.get('cue'):
+                cue = scene['cue']; lines.append(cue.get('value','') + ' ' + cue.get('detail','') + ' / '.join(cue.get('choices',[])))
+            elif scene.get('program'):
                 lines.append('```openui-lang'); lines.append(scene['program']); lines.append('```')
             elif scene.get('html'):
                 lines.append('```html'); lines.append(scene['html']); lines.append('```')
             elif scene.get('image'):
-                lines.append(f'[添付画像: {scene["image"]}]')
+                lines.append(f'[操作画面]({scene["image"]})' if scene['image'].startswith('/api/v1/voicelog/stage/') else f'[添付画像: {scene["image"]}]')
                 if scene.get('page_url'): lines.append(scene['page_url'])
             elif scene.get('card'):
                 card = scene['card']
@@ -1474,33 +1507,3 @@ def _overlap(a, b):
     return longest
 
 
-async def capture_page(url, user_id, room_id):
-    """Photograph a page in a headless browser of this server and save it as one of Dan's files (/api/v1/files/…).
-    Pages of this site get the owner's token (a short-lived one) in localStorage so signed-in screens show."""
-    from playwright.async_api import async_playwright
-    from app.api.file_routes import UPLOAD_DIR
-    from urllib.parse import urlparse
-    token = ''
-    if user_id and urlparse(url).netloc == urlparse(screens_base()).netloc:
-        try:
-            from datetime import timedelta
-            from app.services.auth_service import create_access_token
-            token = create_access_token(str(user_id), '', timedelta(minutes=10))
-        except Exception: token = ''
-    name = f'stage-{_name(room_id)[:24]}-{int(time.time() * 1000)}.png'
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        try:
-            context = await browser.new_context(viewport=PAGE_VIEWPORT, locale='ja-JP', timezone_id='Asia/Tokyo', color_scheme='dark')
-            if token:   # the screens check the cookie (middleware) and the page reads localStorage
-                parsed = urlparse(url)
-                await context.add_cookies([{'name': 'done_access_token', 'value': token, 'domain': parsed.hostname, 'path': '/'}])
-                await context.add_init_script(f"localStorage.setItem('done-token', {json.dumps(token)});")
-            page = await context.new_page()
-            await page.goto(url, wait_until='load', timeout=PAGE_TIMEOUT_S * 1000)
-            await page.wait_for_timeout(900)
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            await page.screenshot(path=str(UPLOAD_DIR / name))
-        finally:
-            await browser.close()
-    return '/api/v1/files/' + name

@@ -26,6 +26,8 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
+import type { ScreenCommand } from '@/components/artifacts/voice-controls';
+
 import { ShapeBlock, checkCompleteShape } from '@/components/chat/chat-shapes';
 
 export type StageCard = {
@@ -39,15 +41,17 @@ export type StageDoc = {
   assist?: { state: string; instruction?: string; message?: string; pending?: number } | null;
 };
 
-export type StageCommand = { seq: number; action: string; at: string };
+export type StageCommand = { seq: number; action: string; at: string; screen_command?: ScreenCommand };
 
 export type StageMedia = {
   id: string; prompt: string; status: string; image?: string; previous?: string; revision?: number; history?: string[]; seconds?: number; error?: string;
 };
 
+export type StageCue = { label: string; value: string; detail: string; choices?: string[] };
+
 export type StageState = {
-  version: number; caption: string; program: string; html?: string; image?: string; page_url?: string; frame?: string; card?: StageCard | null;
-  doc?: StageDoc | null; media?: StageMedia | null; command?: StageCommand | null;
+  view_id?: string; version: number; caption: string; program: string; html?: string; image?: string; page_url?: string; frame?: string; card?: StageCard | null;
+  cue?: StageCue | null; doc?: StageDoc | null; media?: StageMedia | null; command?: StageCommand | null;
   at: string | null; active: boolean; scenes?: number; session_id?: string;
 };
 
@@ -101,7 +105,7 @@ export function useVoiceStage(roomId: string, active: boolean, onState?: (s: Sta
   return state;
 }
 
-type Scene = { kind: 'program'; program: string } | { kind: 'html'; html: string } | { kind: 'image'; image: string; pageUrl: string } | { kind: 'card'; card: StageCard }
+type Scene = {kind:'cue'; cue:StageCue} | { kind: 'program'; program: string } | { kind: 'html'; html: string } | { kind: 'image'; image: string; pageUrl: string } | { kind: 'card'; card: StageCard }
   | { kind: 'doc'; doc: StageDoc } | { kind: 'media'; media: StageMedia } | { kind: 'frame'; path: string };
 
 /** A page of this site the stage may open live: a path under /preview/ (the owner's artifacts), nothing else. */
@@ -115,6 +119,7 @@ export function stageFramePath(v: unknown): string | null {
 export function stageImageUrl(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const s = v.trim();
+  if (/^\/api\/v1\/voicelog\/stage\/[A-Za-z0-9_-]{1,100}\/image\/[a-f0-9]{32}\.(png|jpg|webp)$/.test(s)) return s;
   if (/^\/api\/v1\/files\/[A-Za-z0-9._-]{1,200}$/.test(s)) return s;
   if (/^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s"'<>\\]{0,1800}$/.test(s)) return s;
   return null;
@@ -123,6 +128,7 @@ export function stageImageUrl(v: unknown): string | null {
 /** The scene a state describes, or null when it has none the screen can draw. */
 export function sceneOf(s: StageState | null): Scene | null {
   if (!s) return null;
+  if (s.cue && (s.cue.value || s.cue.choices?.length)) return {kind:'cue',cue:s.cue};
   const program = s.program?.trim() || '';
   if (program) return checkCompleteShape(program).ok ? { kind: 'program', program } : null;
   const html = s.html?.trim() || '';
@@ -139,6 +145,7 @@ export function sceneOf(s: StageState | null): Scene | null {
 
 function sameScene(a: Scene | null, b: Scene | null): boolean {
   if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === 'cue' && b.kind === 'cue') return JSON.stringify(a.cue) === JSON.stringify(b.cue);
   if (a.kind === 'program' && b.kind === 'program') return a.program === b.program;
   if (a.kind === 'html' && b.kind === 'html') return a.html === b.html;
   if (a.kind === 'image' && b.kind === 'image') return a.image === b.image;
@@ -192,12 +199,12 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
   const onShownRef = useRef(onShown);
   useEffect(() => { onShownRef.current = onShown; }, [onShown]);
   // A page on the stage (an artifact's own screen) is told apart: the phone then gives it the whole screen (no orb).
-  const page = scene?.kind === 'frame' || (scene?.kind === 'doc' && !!stageFramePath(scene.doc.page));
+  const page = (scene?.kind === 'image' && scene.image.startsWith('/api/v1/voicelog/stage/')) || scene?.kind === 'frame' || (scene?.kind === 'doc' && !!stageFramePath(scene.doc.page));
   useEffect(() => { onShownRef.current?.(shown && drawable, shown && drawable && page); }, [shown, drawable, page]);
   const drawing = useMemo(() => (scene?.kind === 'html' ? drawingDocument(scene.html) : ''), [scene]);
   if (!shown) return null;
   // Filling a screen with a page (the phone): the page takes all the height; the caption gives way to the page's own status.
-  const pageFill = fill && page;
+  const pageFill = fill && (page || scene?.kind === 'cue');
   return (
     <div className={`flex flex-col gap-2 ${pageFill ? 'min-h-0 flex-1' : ''} ${className}`} data-voice-stage={state?.version} data-stage-scene-key={key}>
       {state?.caption && !pageFill ? (
@@ -208,18 +215,20 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
       ) : null}
       {scene ? (
         <div key={key} className={`animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both ${pageFill ? 'flex min-h-0 flex-1 flex-col' : ''}`} data-stage-scene data-stage-kind={scene.kind}>
-          {scene.kind === 'program' ? (
+          {scene.kind === 'cue' ? (
+            <StageFact cue={scene.cue} />
+          ) : scene.kind === 'program' ? (
             <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
           ) : scene.kind === 'card' ? (
             <StageMessageCard card={scene.card} />
           ) : scene.kind === 'doc' && stageFramePath(scene.doc.page) ? (
-            <StageFrame path={stageFramePath(scene.doc.page)!} command={state?.command} fill={fill} title={scene.doc.label || '成果物の画面'}>
+            <StageFrame viewId={state?.view_id || ""} roomId={roomId} sessionId={state?.session_id || ""} path={stageFramePath(scene.doc.page)!} command={state?.command} fill={fill} title={scene.doc.label || '成果物の画面'}>
               <StageDocStatus doc={scene.doc} />
             </StageFrame>
           ) : scene.kind === 'doc' ? (
             <StageDocument doc={scene.doc} />
           ) : scene.kind === 'frame' ? (
-            <StageFrame path={scene.path} command={state?.command} fill={fill} title={state?.caption || '成果物の画面'} />
+            <StageFrame viewId={state?.view_id || ""} roomId={roomId} sessionId={state?.session_id || ""} path={scene.path} command={state?.command} fill={fill} title={state?.caption || '成果物の画面'} />
           ) : scene.kind === 'media' ? (
             <StageMedia media={scene.media} />
           ) : scene.kind === 'html' ? (
@@ -233,7 +242,7 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
           ) : (
             <figure className="m-0 w-full">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={scene.image} alt={state?.caption || 'ページの画面'} className="w-full rounded-xl border border-border bg-neutral-950" />
+              <StageScreenImage src={scene.image} alt={state?.caption || 'ページの画面'} />
               {scene.pageUrl ? <figcaption className="mt-1 truncate text-[11px] text-muted-foreground">{scene.pageUrl}</figcaption> : null}
             </figure>
           )}
@@ -241,6 +250,35 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
       ) : null}
     </div>
   );
+}
+
+function StageScreenImage({src,alt}: {src:string;alt:string}) {
+  const [loaded,setLoaded] = useState<{src:string;blob:string}|null>(null);
+  const privateScreen = src.startsWith('/api/v1/voicelog/stage/');
+  useEffect(() => {
+    if (!privateScreen) return;
+    let stopped=false, url='';
+    const abort = new AbortController();
+    void fetch(src,{headers:stageHeaders(),cache:'no-store',signal:abort.signal}).then(async r => {
+      if (!r.ok) return;
+      const blob=await r.blob();
+      if (stopped) return;
+      url=URL.createObjectURL(blob);setLoaded({src,blob:url});
+    }).catch(() => {});
+    return () => {stopped=true;abort.abort();if(url)URL.revokeObjectURL(url);};
+  },[src,privateScreen]);
+  const image = privateScreen ? (loaded?.src===src ? loaded.blob : '') : src;
+  // eslint-disable-next-line @next/next/no-img-element
+  return image ? <img src={image} alt={alt} className="mx-auto max-h-[85dvh] w-full object-contain rounded-xl border border-border bg-neutral-950" /> : <div role="status" className="p-8 text-center text-sm text-neutral-400">画面を読み込んでいます</div>;
+}
+
+export function StageFact({cue}: {cue:StageCue}) {
+  return <section className="flex min-h-[65dvh] w-full flex-1 flex-col items-center justify-center gap-6 px-4 text-center" data-stage-cue>
+    <div className="text-base text-neutral-400">{cue.label}</div>
+    {cue.value ? <div className="w-full break-words font-semibold tabular-nums leading-tight tracking-tight" style={{fontSize:cue.value.length <= 8 ? 'clamp(48px, 16vw, 112px)' : 'clamp(24px, 7vw, 64px)'}}>{cue.value}</div> : null}
+    {cue.choices?.length ? <div className="grid w-full max-w-2xl gap-3">{cue.choices.map((choice,i) => <div className="flex items-center gap-4 rounded-2xl bg-neutral-900 px-5 py-4 text-left text-xl" key={i}><span className="text-neutral-500">{i+1}</span>{choice}</div>)}</div> : null}
+    {cue.detail ? <div className="max-w-xl text-lg text-neutral-300">{cue.detail}</div> : null}
+  </section>;
 }
 
 const CHANNEL_LABEL: Record<string, string> = {
@@ -372,29 +410,50 @@ export function StageMedia({ media }: { media: StageMedia }) {
 /** A page of this site on the call's screen, live: the owner's artifact itself, signed in (the same origin shares the
  * owner's token), usable by touch. The server's commands (approve all, reload…) are passed to the page by postMessage,
  * each once, after the page has said it listens ({type: 'dan-call-ready'}); a command older than 30 s is not replayed. */
-export function StageFrame({ path, command, fill, title, children }: { path: string; command?: StageCommand | null; fill: boolean; title: string; children?: ReactNode }) {
+export function StageFrame({ viewId, roomId, sessionId, path, command, fill, title, children }: { viewId: string; roomId: string; sessionId: string; path: string; command?: StageCommand | null; fill: boolean; title: string; children?: ReactNode }) {
   const frame = useRef<HTMLIFrameElement | null>(null);
   const ready = useRef(false);
+  const screenReady = useRef(false);
+  const clientId = useRef('');
+  const feedbackQueue = useRef(Promise.resolve());
   const sent = useRef(0);
   const waiting = useRef<StageCommand | null>(null);
   const [loading, setLoading] = useState(true);
   const post = (c: StageCommand) => {
     if (c.seq <= sent.current) return;
     sent.current = c.seq;
-    frame.current?.contentWindow?.postMessage({ type: 'dan-call', action: c.action, seq: c.seq }, window.location.origin);
+    frame.current?.contentWindow?.postMessage(c.action === 'screen' ? {type:'dan-screen-command', command:c.screen_command} : { type: 'dan-call', action: c.action, seq: c.seq }, window.location.origin);
   };
   useEffect(() => {
+    clientId.current = crypto.randomUUID();
+    let stopped = false;
     const listen = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow || event.origin !== window.location.origin) return;
+      if (event.data?.type === 'dan-screen-ready') {
+        frame.current?.contentWindow?.postMessage({type:'dan-screen-connect'},window.location.origin);
+      }
+      if (['dan-screen-snapshot','dan-screen-result'].includes(event.data?.type)) {
+        screenReady.current = true;
+        const {screen, request_id, result} = event.data;
+        const body = {view_id:viewId,session_id:sessionId, client_id:clientId.current, screen,
+          receipt:request_id ? {request_id,result} : undefined};
+        feedbackQueue.current = feedbackQueue.current.catch(() => {}).then(async () => {
+          if (stopped) return;
+          await fetch(`/api/v1/voicelog/stage/${encodeURIComponent(roomId)}/screen`, {
+            method:'POST',headers:{...stageHeaders(),'Content-Type':'application/json'},body:JSON.stringify(body),
+          });
+        });
+        if (waiting.current?.action === 'screen') {post(waiting.current); waiting.current = null;}
+      }
       if (event.data?.type === 'dan-call-ready') {
         ready.current = true;
-        if (waiting.current) { post(waiting.current); waiting.current = null; }
+        if (waiting.current && waiting.current.action !== 'screen') { post(waiting.current); waiting.current = null; }
       }
     };
     window.addEventListener('message', listen);
-    return () => window.removeEventListener('message', listen);
-  }, []);
-  useEffect(() => { ready.current = false; setLoading(true); }, [path]);
+    return () => { stopped = true; window.removeEventListener('message', listen); };
+  }, [roomId, sessionId, viewId, path]);
+  useEffect(() => { ready.current = false; screenReady.current = false; waiting.current = null; setLoading(true); }, [path]);
   // The page is opened as part of a call (call=1): it folds its own menus and shows the document itself.
   const src = path + (path.includes('?') ? '&' : '?') + 'call=1';
   useEffect(() => {
@@ -405,13 +464,13 @@ export function StageFrame({ path, command, fill, title, children }: { path: str
       if (frame.current) frame.current.src = src;
       return;
     }
-    if (ready.current) post(command); else waiting.current = command;
+    if (command.action === 'screen' ? screenReady.current : ready.current) post(command); else waiting.current = command;
   }, [command, path, src]);
   return (
     <div className={`flex w-full flex-col gap-1.5 ${fill ? 'min-h-0 flex-1' : ''}`} data-stage-frame={path}>
       {children}
       <div className={`relative w-full overflow-hidden rounded-xl border border-border bg-white ${fill ? 'min-h-0 flex-1' : ''}`} style={fill ? undefined : { height: 'min(72vh, 860px)' }}>
-        <iframe ref={frame} title={title} src={src} className="h-full w-full border-0 bg-white" onLoad={() => setLoading(false)} referrerPolicy="same-origin" />
+        <iframe ref={frame} title={title} src={src} className="h-full w-full border-0 bg-white" onLoad={() => { setLoading(false); frame.current?.contentWindow?.postMessage({type:'dan-screen-connect'},window.location.origin); }} referrerPolicy="same-origin" />
         {loading ? (
           <div className="absolute inset-0 flex items-center justify-center bg-white" aria-hidden>
             <span className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-700" />
