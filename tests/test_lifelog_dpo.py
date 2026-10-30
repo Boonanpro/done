@@ -66,7 +66,9 @@ def test_store_segment_keeps_ogg_in_day_folder(tmp_path, monkeypatch):
     frames = [b"\x78\x11\x22\x33"] * 100
     out = lifelog.store_segment("1f53bb2a-test-user", dpo(frames, start_ms=1_760_000_000_000))
     assert out["seconds"] == 1.0
-    kept = tmp_path / "audio" / out["audio"].split("\\")[-2] / out["audio"].split("\\")[-1]
+    from pathlib import Path
+    kept = Path(out["audio"])
+    assert kept.parent.parent == tmp_path / "audio"
     assert kept.exists() and kept.suffix == ".ogg" and kept.name.endswith("_1f53bb2a.ogg")
     with pytest.raises(ValueError):
         lifelog.store_segment("u", dpo([]))
