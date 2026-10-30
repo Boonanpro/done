@@ -101,7 +101,9 @@ def browser_room(job_id):
             if not previous.get('browser_room') and profile_for_room(legacy).exists():
                 previous['browser_room'] = legacy
         busy = {s.get('browser_room') for s in rows if s['state'] not in TERMINAL}
-        idle = sorted((s for s in rows if s.get('browser_room') and s['browser_room'] not in busy),key=lambda s:s['updated_at'],reverse=True)
+        idle = sorted((s for s in rows if s.get('browser_room') and s['browser_room'] not in busy
+                       and not (profile_for_room(s['browser_room']) / '.dan-reserved').exists()),
+                      key=lambda s:s['updated_at'],reverse=True)
         room = idle[0]['browser_room'] if idle else 'voice-job-'+job_id
         change(job_id,lambda s:s.update(browser_room=room))
         return room
