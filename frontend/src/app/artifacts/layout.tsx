@@ -5,6 +5,7 @@ import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loade
 import { installLiveGuard } from '@/lib/live-version/guard';
 import { readLiveVersion } from '@/lib/live-version/server';
 import type { Metadata } from 'next';
+import { KNOWN_CUSTOM_DOMAINS } from '@/lib/artifact-hosts';
 
 import { ArtifactAnalytics } from './_seo/analytics';
 import { ArtifactStructuredData } from './_seo/structured-data';
@@ -43,15 +44,6 @@ import { ArtifactStructuredData } from './_seo/structured-data';
  *    食い違わないようにする。HTML は毎回取り直されるので、部品が古くてもこの処理は新しい。
  */
 
-const publicArtifactHostMap = JSON.stringify({
-  'kittoku.vercel.app': 'kittoku',
-  'yoshikawa-tokuso.vercel.app': 'kittoku',
-});
-
-const envArtifactHostMap = JSON.stringify(
-  process.env.NEXT_PUBLIC_ARTIFACT_HOST_MAP || '',
-);
-
 export const metadata: Metadata = {
   title: '成果物プレビュー',
   description: 'DANで作成した成果物の公開プレビューです。',
@@ -67,6 +59,9 @@ function prePaintScript(fallbackSlug: string | null): string {
   // JSON serialization is intentional: this value becomes a JavaScript
   // literal inside the blocking script below, not executable source.
   const serializedFallbackSlug = JSON.stringify(fallbackSlug || '');
+  const publicArtifactHostMap = JSON.stringify(fallbackSlug ? {} : Object.fromEntries(
+    Object.entries(KNOWN_CUSTOM_DOMAINS).flatMap(([slug, hosts]) => hosts.map((host) => [host, slug])),
+  ));
   return `
 (function(){
   try {
@@ -85,17 +80,6 @@ function prePaintScript(fallbackSlug: string | null): string {
     if (!slug) {
       var hosts = ${publicArtifactHostMap};
       slug = hosts[location.host];
-    }
-    if (!slug) {
-      var rawHostMap = ${envArtifactHostMap};
-      rawHostMap.split(',').some(function(pair){
-        var parts = pair.split(':').map(function(s){ return s.trim(); });
-        if (parts[0] && parts[1] && parts[0] === location.host) {
-          slug = parts[1];
-          return true;
-        }
-        return false;
-      });
     }
     if (!slug) return;
     var raw = localStorage.getItem('dan-inspector-overrides-' + slug);
