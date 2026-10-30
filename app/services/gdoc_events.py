@@ -192,8 +192,13 @@ async def run_batch(doc, batch):
     # A surviving worker after daemon restart is handled by its state-file event.
     if saved['state'] in state.TERMINAL:
         with db() as c:
+            sent = c.execute("SELECT count(*) FROM replies WHERE event_key LIKE ? AND status='sent'",
+                             (batch['id']+':%',)).fetchone()[0]
+            status = saved['state']
+            if status == 'completed' and sent < len(json.loads(batch['payload'])):
+                status = 'needs_attention'  # a fluent final answer is not proof of a Docs reply
             c.execute('UPDATE batches SET status=?,result=? WHERE id=?',
-                      (saved['state'], saved.get('result') or saved.get('error'), batch['id']))
+                      (status, saved.get('result') or saved.get('error'), batch['id']))
 
 def reply(batch_id, comment_id, content):
     from app.services.gdoc_drive import request
