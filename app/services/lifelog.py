@@ -17,8 +17,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
-AUDIO_ROOT = Path(os.environ.get("DAN_LIFELOG_AUDIO", r"\\192.168.40.236\personal_folder\dan-lifelog"))
-INDEX_ROOT = Path(os.environ.get("DAN_LIFELOG_INDEX", str(Path(__file__).resolve().parents[2] / ".data" / "lifelog")))
+# State must survive release/worktree changes. Windows keeps its NAS archive.
+STATE_ROOT = Path.home() / ".dan" / "lifelog"
+AUDIO_ROOT = Path(os.environ.get("DAN_LIFELOG_AUDIO") or (r"\\192.168.40.236\personal_folder\dan-lifelog" if os.name == "nt" else STATE_ROOT / "audio"))
+INDEX_ROOT = Path(os.environ.get("DAN_LIFELOG_INDEX") or STATE_ROOT / "index")
 KEEP_DAYS = 180
 
 
