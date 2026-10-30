@@ -50,6 +50,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from denki_seo import OUT_DIR, SITE_URL, SITEMAP_URL, _env, _query, _service, log  # noqa: E402
 
+# Site-owned illustration policy lives with the editable artifact, also in worktree tests.
+from follow_github import live_root
+_visual_dir = ROOT / "frontend/src/app/artifacts/denki-knowledge/_server"
+if not (_visual_dir / "visual_policy.py").exists():
+    _visual_dir = live_root() / "frontend/src/app/artifacts/denki-knowledge/_server"
+sys.path.insert(0, str(_visual_dir))
+import visual_policy as visuals
+
 ORIGIN = "https://denkiouen.com"
 STATE_DIR = OUT_DIR / "state"
 ACTIVITY = OUT_DIR / "activity.jsonl"
@@ -420,6 +428,7 @@ def _page_text_fields(page: dict) -> list[str]:
     for s in page.get("sections", []):
         out.append(s.get("heading", ""))
         out.extend(s.get("paragraphs", []))
+        out.extend(visuals.text_fields(s.get("visual")))
     out.extend(page.get("checklist", []))
     for f in page.get("faq", []):
         out.extend([f.get("q", ""), f.get("a", "")])
@@ -431,7 +440,8 @@ def _map_text(page: dict, fn) -> dict:
     for k in ("title", "description", "answer"):
         p[k] = fn(p.get(k, ""))
     p["sections"] = [
-        {"heading": fn(s.get("heading", "")), "paragraphs": [fn(x) for x in s.get("paragraphs", [])]}
+        {**s, "heading": fn(s.get("heading", "")), "paragraphs": [fn(x) for x in s.get("paragraphs", [])],
+         **({"visual": visuals.map_visual(s["visual"], fn)} if s.get("visual") else {})}
         for s in page.get("sections", [])
     ]
     p["checklist"] = [fn(x) for x in page.get("checklist", [])]
@@ -499,7 +509,7 @@ def verbatim_issues(page: dict, sources: list[dict], n: int = 28) -> list[dict]:
 
 
 def structure_issues(page: dict) -> list[dict]:
-    issues = []
+    issues = visuals.validate(page)
     if not (8 <= len(page.get("title", "")) <= 40):
         issues.append({"type": "E", "quote": page.get("title", ""), "problem": "題名の長さが不適切", "fix": "32字前後にする"})
     if not (50 <= len(page.get("description", "")) <= 160):
@@ -525,6 +535,8 @@ WRITE_RULES = """絶対に守ること:
 9. 文末を単調にしない。出典番号を付けた文は「〜です」「〜しました」「〜があります」と言い切ってよい。「〜とされています」「〜が挙げられています」「〜と述べています」のような伝聞の形は、資料の意見・判断を伝える文だけに使い、2文続けて使わない。ただし4の安全に関わることは断定しない。
 10. 1文は30〜45字を目安にし、読点は1文に2個まで。長い文は、理由・順序・対比のつながりが分かるように分ける。
 11. 「誰が・何を」を省かない。「ある技術者は」「工事会社は」「試験器は」のように動作主を書く。「これ」「それ」「両者」などの指示語は、指す名詞に置き換える。"""
+
+WRITE_RULES += visuals.RULES
 
 PAGE_SCHEMA = """{
   "title": "検索語を自然に含む題名（32字前後、最大40字）",
@@ -572,10 +584,11 @@ B. 出典番号の無い文に、一般論の範囲を超えた具体的な数�
 C. 安全面で危険な断定、誤った手順の推奨が無いか
 D. 資料の文章をほぼそのまま書き写した箇所が無いか
 E. 題名・結論が検索語に対して的外れでないか
+{visuals.REVIEW}
 
 言い回しの好みなど軽微なことは挙げないでください。本当に直すべき点だけを挙げます。
 次の JSON だけを ```json で囲んで返してください。issues が空のときだけ ok を true にします。
-{{"ok": true, "issues": [{{"type": "A|B|C|D|E", "quote": "原稿の該当文をそのまま", "problem": "何が問題か", "fix": "削除または書き換え案"}}]}}
+{{"ok": true, "issues": [{{"type": "A|B|C|D|E|F", "quote": "原稿の該当文をそのまま", "problem": "何が問題か", "fix": "削除または書き換え案"}}]}}
 
 # 原稿
 {json.dumps({k: page.get(k) for k in PAGE_FIELDS}, ensure_ascii=False, indent=1)}
@@ -626,6 +639,10 @@ def write_and_review(keyword: str, angle: str, sources: list[dict], draft: dict 
     rounds = []
     for rnd in range(3):
         mech = structure_issues(page) + verbatim_issues(page, sources)
+        for section in page.get("sections", []):
+            for t in visuals.text_fields(section.get("visual")):
+                if any(not 1 <= int(n) <= len(sources) for n in CITE_RE.findall(t)):
+                    mech.append(visuals.issue("図の出典番号が資料に存在しない"))
         rev = review_page(keyword, page, sources) or {"ok": False, "issues": [{"type": "X", "quote": "", "problem": "審査の返答を読めなかった", "fix": ""}]}
         issues = mech + [i for i in rev.get("issues", []) if isinstance(i, dict)]
         rounds.append({"round": rnd + 1, "issues": issues})
@@ -651,6 +668,8 @@ def drop_flagged(page: dict, issues: list[dict]) -> dict | None:
     """指摘の quote を含む文を本文から取り除く。題名・結論に関わる指摘や、場所が特定できない指摘があれば諦める。"""
     quotes = []
     for i in issues:
+        if i.get("type") == "F":
+            return None  # 図の問題は文章を削って合格にしない
         q = _plain(i.get("quote", ""))
         if len(q) < 8 or i.get("type") == "E":
             return None
