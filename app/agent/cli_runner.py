@@ -1725,6 +1725,12 @@ def _build_system_prompt(
         ))
 
     # Artifact descriptions — injected before plan for context.
+    if room_id:
+        from app.services.gdoc_events import room_context as gdoc_room_context
+        document_history = gdoc_room_context(room_id)
+        if document_history:
+            parts.append(document_history)
+
     artifact_desc = load_artifact_descriptions(room_id=room_id)
     if artifact_desc:
         parts.append(artifact_desc)
