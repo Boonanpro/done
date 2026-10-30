@@ -27,12 +27,20 @@ Setup after shipping and activating the route:
 ```
 python scripts/install_gdoc_events.py
 python scripts/gdoc_comments.py register --file FILE --room ROOM --account shub6923
+python scripts/gdoc_comments.py browser --file FILE --room EXISTING_AUTHENTICATED_BROWSER_ROOM
 python scripts/gdoc_comments.py status
 ```
 
 OAuth credentials use the encrypted `~/.dan/gdrive_<account>_token.enc` created
 by the authorized login. Client identity uses existing app settings. No secrets
 in command arguments, logs, or SQLite. Only token hashes are stored for channels.
+
+Assign an already authenticated Dan browser for suggestion edits; its profile is
+reserved from the ordinary idle-job pool. Batches sharing a browser run serially.
+Questions answerable from the room/thread use the reply helper without browser
+login. Do not repeat Google login attempts when Google has refused them. Observed
+push delivery can be delayed by tens of seconds; this is event-driven, not a
+guarantee of instantaneous Google delivery.
 
 Administration: `pause --file FILE` stops new work and renewals; `resume --file
 FILE` retries pending work. A failed operation gets at most three bounded attempts

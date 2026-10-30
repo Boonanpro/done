@@ -87,7 +87,12 @@ def _job(job_id):
     try:
         return json.loads((ROOT / (job_id + '.json')).read_text(encoding='utf-8'))
     except (OSError, ValueError):
-        return None
+        # Silent Docs jobs use a private state directory so chat feeds never see
+        # them. Their file/device locks still participate in the shared queue.
+        try:
+            return json.loads((Path.home()/'.dan/gdoc-events/jobs'/(job_id+'.json')).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
 
 
 def _alive(record):

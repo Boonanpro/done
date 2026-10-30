@@ -182,3 +182,17 @@ def test_both_job_tool_configs_keep_the_private_state_root():
     for name in ('command_job_runner','parallel_job_runner'):
         source=(root/'app/services'/f'{name}.py').read_text()
         assert "'DAN_COMMAND_JOB_ROOT':" in source and 'str(state.ROOT)' in source
+
+def test_reserved_authenticated_browser_is_not_reused_by_other_work(store,monkeypatch):
+    from app.services import command_job_state as state, browser_lifecycle
+    import uuid
+    monkeypatch.setattr(state,'ROOT',store/'ordinary-jobs')
+    monkeypatch.setattr(browser_lifecycle,'profile_for_room',lambda room:store/'profiles'/room)
+    first=str(uuid.uuid4());second=str(uuid.uuid4())
+    state.create(first,user_id='u',room_id='r',origin_room_id='r')
+    room=state.browser_room(first)
+    state.change(first,lambda s:s.update(state='completed'))
+    profile=browser_lifecycle.profile_for_room(room);profile.mkdir(parents=True)
+    (profile/'.dan-reserved').write_text('Docs')
+    state.create(second,user_id='u',room_id='r',origin_room_id='r')
+    assert state.browser_room(second)!=room
