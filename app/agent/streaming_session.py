@@ -87,6 +87,14 @@ _RUN_TURN_POLL_SECONDS = 2.0
 # 道具の実行中（ffmpeg・Whisper・長い検索）は何分でも黙りうるので、そちらは run_turn の
 # timeout（既定30分）で見る。
 _MODEL_SILENCE_TIMEOUT = float(os.getenv("DAN_STREAMING_MODEL_SILENCE_TIMEOUT", "600"))
+# 担当が自分で始めたターン（裏の作業が終わって起きた分）の見切り（2026-10-30）。
+# run_turn の輪が無いので、沈黙の見張りは専用の糸で行う。
+#   _AUTO_INTERRUPT_GRACE: 本人の言葉で割り込みを送ったのに result が来ない時、
+#       これだけ黙ったら「ターンは終わっている」と見なして、待たせていた言葉を送る。
+#   _AUTO_TURN_SILENCE_TIMEOUT: 道具の実行中でもこれ以上黙れば固まりとみなす。
+_AUTO_INTERRUPT_GRACE = float(os.getenv("DAN_STREAMING_AUTO_INTERRUPT_GRACE", "20"))
+_AUTO_TURN_SILENCE_TIMEOUT = float(os.getenv("DAN_STREAMING_AUTO_TURN_SILENCE_TIMEOUT", "1800"))
+_AUTO_WATCH_POLL = 2.0
 
 
 TurnEvent = dict  # parsed JSON object from the CLI stream
@@ -150,6 +158,8 @@ class StreamingSession:
         self.background_sink: Optional[EventSink] = None
         # True while a CLI-initiated (autonomous) turn is streaming.
         self._auto_active = False
+        # _auto_active を見張る糸が動いている間 True（1本だけにする）。
+        self._auto_watch_running = False
         # Set True when the last run_turn ended because the CLI went silent for
         # longer than the idle timeout (a real hang), as opposed to finishing.
         self._last_turn_hung = False
@@ -559,8 +569,14 @@ class StreamingSession:
         # whole turn to the room's background sink so it is classified, saved
         # and rendered like any other turn instead of being dropped.
         if turn is None:
+            if ev.get("parent_tool_use_id"):
+                # 裏の担当（Agent）の出力。担当本体のターンではないので「仕事中」の印に
+                # しない。2026-10-30 X顧問の部屋: 返事の直後に起こした裏の手伝いの言葉で
+                # _auto_active が立ち、本体の result は来ないので解けず、その後の本人の
+                # 言葉が全部待ち行列に溜まったまま届かなかった。
+                return
             if typ == "assistant" and not self._auto_active:
-                self._auto_active = True
+                self._begin_auto_turn()
             if not self._auto_active:
                 return  # stray system chatter between turns — nothing to do
             if typ == "user" and not self._interrupt_sent and not self._pending.empty():
@@ -578,17 +594,7 @@ class StreamingSession:
                 except Exception:
                     pass
             if typ == "result":
-                self._auto_active = False
-                self._interrupt_sent = False
-                follow = self._drain_pending()
-                if follow is not None:
-                    # queued user messages continue as the next turn; its events
-                    # flow through the same background sink (saved + rendered)
-                    try:
-                        self._send_user(follow)
-                        self._auto_active = True
-                    except Exception:
-                        pass
+                self._end_auto_turn()
             return
 
         # Step boundary = a tool result came back (`user` event). If a
@@ -611,6 +617,52 @@ class StreamingSession:
             turn.result = ev
             turn.done.set()
 
+
+    # --- CLI-initiated (autonomous) turn bookkeeping ---------------------
+    def _begin_auto_turn(self) -> None:
+        self._auto_active = True
+        if not self._auto_watch_running:
+            self._auto_watch_running = True
+            threading.Thread(target=self._auto_watch, daemon=True).start()
+
+    def _end_auto_turn(self) -> None:
+        """担当が自分で始めたターンの終わり。待たせていた本人の言葉があれば、それを次の
+        ターンとして送る（出力は同じ background sink が保存・表示する）。"""
+        self._auto_active = False
+        self._interrupt_sent = False
+        follow = self._drain_pending()
+        if follow is not None:
+            try:
+                self._send_user(follow)
+                self._begin_auto_turn()
+            except Exception:
+                pass
+
+    def _auto_watch(self) -> None:
+        """自分で始めたターンの沈黙を見張る。result が来ないまま黙り続けたら終わったと
+        みなす（割り込み後は短く、それ以外は固まりの上限で）。run_turn の輪が無い間の
+        唯一の見張り。"""
+        try:
+            while self.is_alive() and self._auto_active:
+                silent = time.time() - self._last_activity
+                if self._interrupt_sent and not self._pending.empty():
+                    limit = _AUTO_INTERRUPT_GRACE
+                else:
+                    limit = self.silence_limit(_AUTO_TURN_SILENCE_TIMEOUT)
+                if silent > limit:
+                    self._record_stray(
+                        f"[auto-turn] no result for {int(silent)}s (interrupt_sent={self._interrupt_sent}, "
+                        f"pending={self._pending.qsize()}); treating the CLI-initiated turn as over"
+                    )
+                    self._end_auto_turn()
+                    continue
+                time.sleep(_AUTO_WATCH_POLL)
+        finally:
+            self._auto_watch_running = False
+            if self._auto_active and self.is_alive():
+                # _end_auto_turn が次のターンを送って _auto_active を立て直した直後に
+                # 糸が終わる場合: 見張りを張り直す
+                self._begin_auto_turn()
 
     def _note_tool_state(self, typ: Optional[str], ev: TurnEvent) -> None:
         """assistant が tool_use を出したら道具の実行中、その結果（user）か result が来たら
