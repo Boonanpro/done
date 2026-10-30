@@ -22,7 +22,7 @@ export interface HistoryEntry {
   ts: number;
   /** artifact slug。restore-file API の呼び出し対象を決める。 */
   slug: string;
-  /** PROJECT_ROOT からの相対パス。例: "frontend/src/app/artifacts/kittoku/page.tsx" */
+  /** PROJECT_ROOT からの相対パス。例: "frontend/src/app/artifacts/sample-site/page.tsx" */
   filePath: string;
   /** 編集前のファイル内容。Undo で書き戻すのに使う。 */
   before: string;
