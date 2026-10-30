@@ -22,6 +22,7 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
     queryKey,
     queryFn: () => api.dan.getSessionModel(roomId),
     staleTime: 60_000,
+    refetchInterval: 15_000,
     refetchOnWindowFocus: 'always',
   });
 
@@ -30,6 +31,12 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
     onSuccess: (res) => {
       queryClient.setQueryData(queryKey, res);
       const label = res.options.find((o) => o.id === res.effective_model)?.label ?? res.effective_model;
+      if (res.fallback_reason === 'usage_limit') {
+        toast.success(`利用上限のため ${label} で続けます`, {
+          description: '選んだモデルは保存されています。利用枠の回復後に戻ります',
+        });
+        return;
+      }
       if (res.selected_model && res.selected_model !== res.effective_model) {
         toast.error('選択したモデルと実行予定のモデルが一致していません', {
           description: `実行予定: ${label}。もう一度選択してください`,
@@ -83,6 +90,7 @@ export function ModelSwitcher({ roomId }: ModelSwitcherProps) {
         )}
       </select>
       {mutation.isPending && <span role="status">切り替え中…</span>}
+      {data.fallback_reason && <span role="status">上限のため切替</span>}
     </label>
   );
 }

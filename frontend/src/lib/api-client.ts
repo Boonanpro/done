@@ -734,6 +734,7 @@ export interface SessionModelResponse {
   session_id: string;
   selected_model: string | null;
   effective_model: string;
+  fallback_reason?: 'usage_limit' | null;
   backend: 'claude' | 'codex';
   can_switch: boolean;
   options: SessionModelOption[];

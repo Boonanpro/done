@@ -414,12 +414,13 @@ export function Sidebar({
             ) : (
               <>
               {(searchQuery ? filteredProjects : (showAllProjects ? filteredProjects : filteredProjects.slice(0, PROJECT_DISPLAY_LIMIT))).map((project) => {
-                const isActive = project.id === selectedProjectId;
+                const isActive = pathname.startsWith('/chat') && project.id === selectedProjectId;
 
                 return (
                   <Tooltip key={project.id}>
                     <TooltipTrigger asChild>
                       <motion.div
+                        aria-current={isActive ? 'page' : undefined}
                         whileHover={{ scale: 1 }}
                         whileTap={{ scale: 1 }}
                         className={cn(

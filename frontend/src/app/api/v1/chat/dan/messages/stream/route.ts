@@ -8,6 +8,8 @@
  * バッファリングなしにクライアントへストリーミングされる。
  */
 
+import { backendUrl } from '@/lib/backend-url';
+
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 // Vercel の関数実行上限。未設定だと既定値（短い）で長いターンのストリームが
@@ -19,7 +21,7 @@ export async function POST(request: Request) {
   const body = await request.text();
 
   // チャットはダンコア(port 9000)へ。CORE_BACKEND_URL で上書き可（本番tunnel等）。
-  const coreUrl = process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
+  const coreUrl = backendUrl('core');
   // バックエンドの認証は Cookie(done_access_token) を Bearer より優先して見る。
   // rewrites 経由の他の /api/v1/chat/* は Cookie がそのまま届くのに、この
   // Route Handler だけ落とすと「受信は通るのに送信だけ 401」という非対称が

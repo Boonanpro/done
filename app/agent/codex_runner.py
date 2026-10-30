@@ -899,6 +899,9 @@ def run_codex_turn_in_thread(
                     user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
                 )
 
+        if result_data and cr._defer_quota_result(result_data, room_id, project_id, run_id,
+                                                   skip_save, event_queue.put):
+            return
         if result_data:
             session_id = result_data.get("session_id")
             is_error = result_data.get("is_error", False)
