@@ -10,10 +10,19 @@ restart = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(restart)
 
 
+@pytest.fixture(autouse=True)
+def no_release_switching(monkeypatch, tmp_path):
+    """The machine running the tests may have release switching on; these tests are about the plain restart."""
+    monkeypatch.setattr(restart, 'GENERATIONS', tmp_path / 'not-enabled')
+
+
 @pytest.fixture
-def world(monkeypatch):
+def world(monkeypatch, tmp_path):
     """Everything the outside process touches, recorded in order."""
+    from app.services import restart_signal
     did, woke = [], []
+    monkeypatch.setattr(restart_signal, 'ROOT', tmp_path / 'leases')   # never hold the real Dan's followups
+    monkeypatch.setattr(restart_signal, 'wait', lambda sock, seconds: did.append('wait'))
     state = {'busy': [], 'loads': None, 'stops': True, 'starts': True, 'core_started_at': 0,
              'follows': (True, 'already on GitHub main (536ee4e7)')}
     monkeypatch.setattr(restart, 'busy', lambda: state['busy'].pop(0) if state['busy'] else None)
@@ -48,10 +57,24 @@ def test_code_that_does_not_load_is_never_stopped_for(world):
 def test_work_that_never_ends_is_not_cut_off(world, monkeypatch):
     state, did, woke = world
     state['busy'] = ['a phone call is open'] * 3
-    clock = iter([0, 10, restart.WAIT + 11, restart.WAIT + 12])
-    monkeypatch.setattr(restart.time, 'time', lambda: next(clock))
+    monkeypatch.setattr(restart, 'WAIT', 0)
     restart.restart_when_idle('room-1', '', asked=0)
-    assert 'stop' not in did and '再起動していない' in woke[0][1] and 'a phone call is open' in woke[0][1]
+    assert 'stop' not in did and '空かなかった' in woke[0][1] and 'a phone call is open' in woke[0][1]
+
+
+def test_a_long_wait_lets_automatic_work_run_and_holds_it_again_for_the_switch(world, monkeypatch):
+    """2026-10-30 本人「空いた時に瞬時に・機を逃さない」: it no longer gives up after 5 min. Past the drain time new
+    followups run again, and the moment nothing runs the hold comes back before anything is stopped."""
+    from app.services import restart_signal
+    state, did, woke = world
+    state['busy'] = ['Dan is working in: X顧問'] * 3
+    monkeypatch.setattr(restart, 'DRAIN', 0)
+    monkeypatch.setattr(restart_signal, 'wait', lambda sock, seconds: did.append(('wait', restart_signal.draining(), seconds)))
+    monkeypatch.setattr(restart, 'stop', lambda: did.append(('stop', restart_signal.draining())) or True)
+    restart.restart_when_idle('room-1', '', asked=100)
+    waits = [d for d in did if d[0] == 'wait']
+    assert len(waits) == 3 and not any(held for _, held, _ in waits) and all(s <= restart.POLL for *_, s in waits)
+    assert ('stop', True) in did and '再起動した' in woke[0][1]
 
 
 def test_a_core_someone_else_restarted_meanwhile_is_not_stopped_again(world):
@@ -172,3 +195,21 @@ def test_on_the_mac_launchd_starts_the_core(monkeypatch):
     monkeypatch.setattr(restart, 'healthy', lambda: True)
     assert restart.start()
     assert ran[0][:2] == ['launchctl', 'kickstart'] and ran[0][2].endswith('/com.dan.core') and '-k' not in ran[0]
+
+
+def test_with_release_switching_on_the_shared_core_is_still_restarted_when_idle(monkeypatch, tmp_path):
+    """2026-10-30: chat turns run on the shared core (9000); a release switch alone left fixes to chat waiting for days."""
+    import sys, types
+    switched = []
+    flag = tmp_path / 'enabled'
+    flag.write_text('')
+    monkeypatch.setattr(restart, 'GENERATIONS', flag)
+    monkeypatch.setitem(sys.modules, 'core_release', types.SimpleNamespace(
+        prepare=lambda root: {'id': 'r1'}, activate=lambda rid: switched.append(rid)))
+    monkeypatch.setattr(restart, 'hand_over', lambda room, then: ('handed', room, then))
+    monkeypatch.setattr(restart.sys, 'argv', ['restart_dan_core.py', '--when-idle', '--room', 'r', '--then', 'check'])
+    assert restart.main() == ('handed', 'r', 'check') and switched == ['r1']
+    switched.clear()
+    monkeypatch.setattr(restart.sys, 'argv', ['restart_dan_core.py'])
+    monkeypatch.setattr(restart, 'stop', lambda: pytest.fail('stopped the shared core'))
+    assert restart.main() is None and switched == ['r1']
