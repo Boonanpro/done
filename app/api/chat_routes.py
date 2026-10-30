@@ -3433,11 +3433,16 @@ async def _session_model_payload(session_id: str, project: Optional[dict]) -> di
     # a choice saved on an older version of a GPT tier now runs on (and is shown as) the newest one
     selected = _cr._model_catalog.current(selected) if selected else ""
     effective, backend = await asyncio.to_thread(_cr.resolve_room_backend, session_id)
+    from app.agent import provider_failover
+    preferred = effective
+    effective = provider_failover.preferred(preferred)
+    backend = _cr._codex.backend_for_model(effective)
     return {
         "session_id": session_id,
         "selected_model": selected or None,
         "effective_model": effective,
         "backend": backend,
+        "fallback_reason": "usage_limit" if effective != preferred else None,
         "can_switch": bool(project),
         "options": _cr._model_catalog.options(),
     }

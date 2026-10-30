@@ -369,6 +369,9 @@ class StreamingSession:
             while True:
                 if turn.done.wait(timeout=poll):
                     last_result = turn.result
+                    from app.agent.provider_failover import exhausted
+                    if last_result and exhausted(last_result):
+                        break  # the other provider will take pending follow-ups
                     # If a follow-up was queued, start the next turn for it.
                     follow = self._drain_pending()
                     if follow is None:

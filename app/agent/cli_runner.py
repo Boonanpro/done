@@ -2052,6 +2052,7 @@ from app.agent import codex_runner as _codex
 from app.agent import cli_record as _cli_record
 from app.agent import chat_shapes as _chat_shapes
 from app.agent import turn_flow
+from app.agent import provider_failover as _failover
 
 # Claude CLI models + Codex CLI (ChatGPT sign-in) models, read live from what the providers offer now
 # (app/agent/model_catalog.py), so a newly released model shows up without a code change.
@@ -2313,9 +2314,6 @@ def _resolve_cli_model(room_id: Optional[str] = None) -> str:
 def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
     # 1. ルーム単位の選択（新チャット作成時に保存された値）
     if room_id:
-        cached = _room_model_cache.get(room_id)
-        if cached:
-            return cached
         try:
             from app.services.supabase_client import get_supabase_client
             sb = get_supabase_client().client
@@ -2327,11 +2325,20 @@ def _resolve_cli_model_raw(room_id: Optional[str] = None) -> str:
                 meta = res.data[0].get("metadata") or {}
                 if isinstance(meta, dict):
                     m = (meta.get("model") or "").strip().lower()
-                    if m in _ALLOWED_CLI_MODELS:
-                        _room_model_cache[room_id] = m
-                        return m
-        except Exception as e:
-            logger.debug("resolve model failed for room %s: %s", room_id, e)
+                    if m:
+                        # A saved GPT choice must never turn into Claude just because
+                        # this worker's catalog cache has not refreshed yet.
+                        if m in _ALLOWED_CLI_MODELS or _codex.is_codex_model(m):
+                            _room_model_cache[room_id] = m
+                            return m
+                        raise ValueError(f"Saved model is unavailable: {m}")
+        except ValueError:
+            raise
+        except Exception:
+            # Do not silently answer with another provider on a database failure.
+            if room_id in _room_model_cache:
+                return _room_model_cache[room_id]
+            raise
 
     # 2. 環境変数 → .env による全ルーム一括切替
     env = (os.environ.get("DAN_CLI_MODEL") or "").strip().lower()
@@ -2841,6 +2848,22 @@ def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool)
     return False
 
 
+def _defer_quota_result(result, room_id, project_id, run_id, skip_save, emit):
+    if not _failover.exhausted(result):
+        return False
+    partial = _failover.partial_text(result)
+    blocks = [b for b in result.get("turn_blocks", [])
+              if b.get("type") != "text" or not _failover.exhausted({"text": b.get("text", ""), "is_error": True})]
+    if not skip_save and (partial or blocks):
+        _save_ai_message_sync(room_id, partial or "利用上限までの作業記録", blocks=blocks,
+                              ends_turn=False, run_id=run_id,
+                              created_at=datetime.now(timezone.utc).isoformat())
+    emit({"type": "result", "is_error": True, "quota_exhausted": True,
+          "text": result.get("result_text") or result.get("result") or "利用上限",
+          "partial_text": partial})
+    return True
+
+
 def _run_cli_in_thread(
     content: str,
     system_prompt: str,
@@ -2854,6 +2877,7 @@ def _run_cli_in_thread(
     cancel_event: Optional[threading.Event] = None,
     skip_save: bool = False,
     cwd: Optional[str] = None,
+    model: Optional[str] = None,
 ):
     """
     別スレッドでCLI subprocessを実行する。
@@ -2945,7 +2969,7 @@ def _run_cli_in_thread(
         need_fork = room_id in _interrupted_rooms
         if need_fork:
             _interrupted_rooms.discard(room_id)
-        cli_model = _resolve_cli_model(room_id)
+        cli_model = model or _resolve_cli_model(room_id)
         launch_system_prompt, launch_content = _prepare_cli_launch_payload(system_prompt, content)
         # 長い会話を要約せずに短くする Jev プラグイン（鍵が取れた時だけ付く。他の引数・env は不変）
         compact_args, compact_env = _dan_compact_launch(user_id)
@@ -3008,6 +3032,9 @@ def _run_cli_in_thread(
             )
 
         # 最終結果をキューに送る
+        if result_data and _defer_quota_result(result_data, room_id, project_id, run_id,
+                                                skip_save, event_queue.put):
+            return
         if result_data:
             session_id = result_data.get("session_id")
             is_error = result_data.get("is_error", False)
@@ -3281,6 +3308,7 @@ async def _process_via_streaming_session(
     skip_save: bool,
     cwd: Optional[str],
     resume_session_id: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """DAN_STREAMING_INPUT path (flag-gated). Runs the turn through a
     persistent stream-json session so follow-ups can be injected at the next
@@ -3307,7 +3335,7 @@ async def _process_via_streaming_session(
         yield {"type": "error", "message": "claude CLI が見つかりません"}
         return
 
-    cli_model = _resolve_cli_model(room_id)
+    cli_model = model or _resolve_cli_model(room_id)
 
     # Windows CreateProcess の約32,000文字制限対策（one-shot 経路の
     # _prepare_cli_launch_payload と同じ）。文脈が肥大した部屋では
@@ -3620,6 +3648,14 @@ async def _process_via_streaming_session(
                     _update_run_sync(run_id, claude_session_id=sid)
 
             elif rtype == "result":
+                quota_result = {**raw_ev, "final_text_parts": state["final_text_parts"],
+                                "turn_blocks": state["turn_blocks"]}
+                if _defer_quota_result(quota_result, room_id, project_id, run_id,
+                                       skip_save, _emit):
+                    state["any_result"] = True
+                    state["final_text_parts"] = []
+                    state["turn_blocks"] = []
+                    return
                 state["any_result"] = True
                 result_text = raw_ev.get("result", "") or ""
                 is_error = bool(raw_ev.get("is_error"))
@@ -3986,8 +4022,45 @@ async def _prepare_cli_inputs(room_id, user_id, credentials, system_prompt, mcp_
     return await asyncio.gather(prompt(), config())
 
 
+_message_tasks: set = set()
+
+
 @measure_browser_request
-async def process_message_cli(
+async def process_message_cli(*args, **kwargs) -> AsyncIterator[Dict[str, Any]]:
+    """Keep the complete handoff alive even when the browser closes its stream."""
+    queue = asyncio.Queue()
+    finished = object()
+    attached = True
+
+    async def pump():
+        try:
+            async for event in _process_message_cli_with_failover(*args, **kwargs):
+                if attached:
+                    await queue.put(event)
+        except Exception as exc:
+            logger.exception("CLI turn failed")
+            if attached:
+                await queue.put(exc)
+        finally:
+            if attached:
+                await queue.put(finished)
+
+    task = asyncio.create_task(pump())
+    _message_tasks.add(task)
+    task.add_done_callback(_message_tasks.discard)
+    try:
+        while True:
+            event = await queue.get()
+            if event is finished:
+                return
+            if isinstance(event, Exception):
+                raise event
+            yield event
+    finally:
+        attached = False
+
+
+async def _process_message_cli_with_failover(
     room_id: str,
     user_id: str,
     content: str,
@@ -4084,6 +4157,20 @@ async def process_message_cli(
                 timeline_draft = None
     resume_session_id = None if skip_resume else _load_session(room_id)
 
+    if run_id is None and project_id and not skip_save:
+        try:
+            from app.services.run_service import RunService
+            _auto_run = await RunService().create_run(
+                project_id=project_id,
+                room_id=room_id,
+                metadata={"started_by": "internal_auto"},
+            )
+            run_id = _auto_run["id"]
+            _cli_debug(f"auto-created run {run_id[:8]} for internal turn (room {room_id[:8]})")
+        except Exception as e:
+            _cli_debug(f"auto run creation failed (room {room_id[:8]}): {e}")
+
+
     # --- Backend selection (Claude CLI / Codex CLI) ---------------------------
     # The room's model decides the backend. A saved session that belongs to the
     # OTHER backend is dropped so this turn starts fresh and is reseeded from
@@ -4109,14 +4196,63 @@ async def process_message_cli(
         except Exception:
             _turn_claim = None
     try:
-        async for _ev in _process_message_cli_body(
+        selected_model = cli_model
+        cli_model = _failover.preferred(cli_model)
+        backend = _codex.backend_for_model(cli_model)
+        if cli_model != selected_model:
+            turn_flow.release_claim(room_id, _turn_claim)
+            _turn_claim = turn_flow.claim_new_turn(room_id, backend)
+            yield {"type": "reasoning", "text": f"利用上限のため {cli_model} で続けます。"}
+        for attempt in range(2):
+            quota = None
+            async for _ev in _process_message_cli_body(
             room_id, user_id, content, project_id, run_id, skip_save, skip_resume, cwd,
             system_prompt, mcp_config_path, setup_start, cli_model, backend,
-            resume_session_id, timeline_draft, credentials, model_override,
+            resume_session_id, timeline_draft, credentials, cli_model,
             mcp_config_override, user_messages, project_title, project_description,
             project_status, timeline_refs,
         ):
-            yield _ev
+                if _failover.exhausted(_ev):
+                    if _ev.get("type") in ("result", "error"):
+                        quota = _ev
+                    continue
+                if _ev.get("type") == "result" and not _ev.get("is_error"):
+                    quota = None  # the CLI recovered a transient rate-limit itself
+                yield _ev
+            if quota is None:
+                break
+            from app.services.cancellation import CancellationRegistry
+            if CancellationRegistry.is_cancelled(room_id):
+                yield {"type": "cancelled"}
+                break
+            _failover.mark_exhausted(backend)
+            next_model = _failover.alternative(backend)
+            next_backend = _codex.backend_for_model(next_model)
+            if attempt or not _failover.available(next_backend):
+                text = "ClaudeとGPTの両方が利用上限に達しました。途中経過は保存しています。利用枠の回復後に続けられます。"
+                saved = False if skip_save else _save_ai_message_sync(room_id, text, **turn_flow.turn_end(run_id))
+                _update_run_sync(run_id, state="failed")
+                yield {"type": "result", "text": text, "is_error": True, "cli_saved": bool(saved)}
+                break
+            notice = f"{backend} の利用上限を検知したため、{next_model} に切り替えて続けます。"
+            if project_id:
+                _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=notice)
+            yield {"type": "reasoning", "text": notice}
+            turn_flow.release_claim(room_id, _turn_claim)
+            _turn_claim = turn_flow.claim_new_turn(room_id, next_backend)
+            content = _failover.handoff_content(content, quota.get("partial_text", ""))
+            if backend == "claude":
+                from app.agent.streaming_session import get_session
+                previous = get_session(room_id)
+                if previous is not None:
+                    pending = previous.take_pending_followups()
+                    if pending:
+                        content += "\n\n" + pending
+            cli_model, backend = next_model, next_backend
+            resume_session_id = None
+            # Force reseeding from persisted messages and execution events.
+            skip_resume = False
+            _clear_cli_session(room_id)
     finally:
         if _turn_claim is not None:
             try:
@@ -4201,18 +4337,6 @@ async def _process_message_cli_body(
     # 根本原因）。project のある部屋では必ず run を作ってから処理する。
     # 完了時の state 更新は streaming/one-shot 両経路の sink が既に行う。
     # skip_save のターン（タイトル生成等のユーザー非対面処理）は対象外。
-    if run_id is None and project_id and not skip_save:
-        try:
-            from app.services.run_service import RunService
-            _auto_run = await RunService().create_run(
-                project_id=project_id,
-                room_id=room_id,
-                metadata={"started_by": "internal_auto"},
-            )
-            run_id = _auto_run["id"]
-            _cli_debug(f"auto-created run {run_id[:8]} for internal turn (room {room_id[:8]})")
-        except Exception as e:
-            _cli_debug(f"auto run creation failed (room {room_id[:8]}): {e}")
 
     # --- DAN_STREAMING_INPUT: 常駐ストリーミングセッション経路（フラグ制御） ---
     # 有効時のみ、ターンを常駐 stream-json セッションに流す（後段で「次の境界」
@@ -4229,7 +4353,7 @@ async def _process_message_cli_body(
         async for ev in _process_via_streaming_session(
             room_id, user_id, content_for_cli, system_prompt, mcp_config_path,
             project_id, run_id, skip_save, cwd,
-            resume_session_id=resume_session_id,
+            resume_session_id=resume_session_id, model=cli_model,
         ):
             if isinstance(ev, dict) and ev.get("type") in {"text", "result"}:
                 key = "text" if "text" in ev else "content"
@@ -4284,6 +4408,7 @@ async def _process_message_cli_body(
         thread_kwargs["model"] = cli_model
     else:
         thread_target = _run_cli_in_thread
+        thread_kwargs["model"] = cli_model
     cli_thread = threading.Thread(target=thread_target, kwargs=thread_kwargs, daemon=True)
     cli_thread.start()
 
