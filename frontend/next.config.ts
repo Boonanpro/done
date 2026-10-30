@@ -7,7 +7,7 @@ import withPWA from 'next-pwa';
 import defaultRuntimeCaching from 'next-pwa/cache';
 
 import { CUSTOM_DOMAIN_REWRITES, CUSTOM_DOMAIN_SLUG_MAP } from './src/lib/custom-domain-rewrites.generated';
-import { artifactRoutingDomains } from './scripts/artifact-routing-config';
+import { publicArtifactRoutingDomains } from './scripts/artifact-routing-config';
 import { startLiveVersionWatcher } from './src/lib/live-version/server';
 
 // 成果物タブ用の開発サーバー（3001）か。ここだけ「今のファイルの版」を作り、画面の部品に
@@ -64,7 +64,7 @@ const nextConfig: NextConfig = {
   },
   env: {
     NEXT_PUBLIC_ASSET_VERSION: ASSET_VERSION,
-    NEXT_PUBLIC_ARTIFACT_ROUTING_DOMAINS: JSON.stringify(artifactRoutingDomains(CUSTOM_DOMAIN_SLUG_MAP, process.env)),
+    NEXT_PUBLIC_ARTIFACT_ROUTING_DOMAINS: JSON.stringify(publicArtifactRoutingDomains(CUSTOM_DOMAIN_SLUG_MAP, process.env)),
   },
   images: {
     dangerouslyAllowSVG: true,
