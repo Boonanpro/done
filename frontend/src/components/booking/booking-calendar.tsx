@@ -10,7 +10,7 @@
  *
  * 使い方:
  *   <BookingCalendar config={{
- *     slug: 'kittoku-salon',
+ *     slug: 'sample-salon',
  *     openTime: '10:00', closeTime: '19:00', slotMinutes: 60,
  *     services: ['カット', 'カラー', 'パーマ'],
  *     staff: ['佐藤', '鈴木'],

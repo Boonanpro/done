@@ -125,7 +125,7 @@ interface PreviewState {
   inspectorMode: InspectorMode;
   /** iframe が実際に表示している成果物 slug（agent が URL から検出して ready で報告）。
    *  保存/取得はこの slug を優先する。chat_artifact レコードの slug が中身とズレていても
-   *  （例: ラベル kittoku-v2 だが中身は kittoku）、編集が正しい場所に保存され公開も通る。 */
+   *  （例: ラベル sample-site-v2 だが中身は sample-site）、編集が正しい場所に保存され公開も通る。 */
   iframeSlug: string | null;
   /** iframe 内で現在選択されているテキスト範囲（文字オフセット）。null=なし。 */
   selectedRange: SelectionRange | null;
