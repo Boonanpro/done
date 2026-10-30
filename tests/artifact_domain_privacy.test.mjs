@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { artifactRoutingDomains } from '../frontend/scripts/artifact-routing-config.ts';
+import { artifactRoutingDomains, publicArtifactRoutingDomains, artifactSlugFromServerHost } from '../frontend/scripts/artifact-routing-config.ts';
 
 const generated = { paina: ['paina.info'], kittoku: ['kittoku.vercel.app'] };
 const configured = {
@@ -22,6 +22,21 @@ test('legacy aliases and configured domains keep working in shared and own build
     assert.ok(domains.kittoku.includes('yoshikawa-tokuso.vercel.app'));
   }
   assert.deepEqual(artifactRoutingDomains(generated, configured).other, ['other.example', 'extra.example']);
+});
+
+test('shared preview browser bundles contain no customer registry', () => {
+  assert.deepEqual(publicArtifactRoutingDomains(generated, configured), {});
+  assert.deepEqual(publicArtifactRoutingDomains(generated, { ...configured, ARTIFACT_ONLY_SLUG: 'paina' }), { paina: ['paina.info', 'www.paina.info'] });
+});
+
+test('server resolves legacy roots without exposing other identities', () => {
+  for (const host of ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app']) {
+    assert.equal(artifactSlugFromServerHost(host, generated, configured), 'kittoku');
+  }
+  assert.equal(artifactSlugFromServerHost('paina.info', generated, configured), 'paina');
+  assert.equal(artifactSlugFromServerHost('new-attack-done.vercel.app', generated, configured), 'new-attack');
+  assert.equal(artifactSlugFromServerHost('127.0.0.1:3001', generated, configured), null);
+  assert.equal(artifactSlugFromServerHost('paina.info', generated, { ARTIFACT_ONLY_SLUG: 'new-attack' }), 'new-attack');
 });
 
 // Execute the actual blocking script with a browser stub. A dedicated root and
@@ -49,10 +64,21 @@ test('dedicated HTML omits the global map and still selects its own root overrid
 test('shared iframe and both legacy aliases retain override selection', () => {
   for (const host of ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app']) {
     let storageKey;
-    vm.runInNewContext(prePaint(null), {
+    vm.runInNewContext(prePaint(artifactSlugFromServerHost(host, generated, configured)), {
       window: { self: {}, top: {} }, location: { pathname: '/', host, search: '' },
       URLSearchParams, localStorage: { getItem(key) { storageKey = key; return null; } },
     });
     assert.equal(storageKey, 'dan-inspector-overrides-kittoku');
   }
+});
+
+test('shared preview HTML has no host map and resolves its path', () => {
+  const script = prePaint(null);
+  assert.doesNotMatch(script, /kittoku|yoshikawa|paina\.info/);
+  let storageKey;
+  vm.runInNewContext(script, {
+    window: { self: {}, top: {} }, location: { pathname: '/preview/new-attack', host: 'dan.paina.info', search: '' },
+    URLSearchParams, localStorage: { getItem(key) { storageKey = key; return null; } },
+  });
+  assert.equal(storageKey, 'dan-inspector-overrides-new-attack');
 });

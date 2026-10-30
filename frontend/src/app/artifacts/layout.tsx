@@ -5,7 +5,9 @@ import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loade
 import { installLiveGuard } from '@/lib/live-version/guard';
 import { readLiveVersion } from '@/lib/live-version/server';
 import type { Metadata } from 'next';
-import { KNOWN_CUSTOM_DOMAINS } from '@/lib/artifact-hosts';
+import { headers } from 'next/headers';
+import { CUSTOM_DOMAIN_SLUG_MAP } from '@/lib/custom-domain-rewrites.generated';
+import { artifactSlugFromServerHost } from '../../../scripts/artifact-routing-config';
 
 import { ArtifactAnalytics } from './_seo/analytics';
 import { ArtifactStructuredData } from './_seo/structured-data';
@@ -59,9 +61,6 @@ function prePaintScript(fallbackSlug: string | null): string {
   // JSON serialization is intentional: this value becomes a JavaScript
   // literal inside the blocking script below, not executable source.
   const serializedFallbackSlug = JSON.stringify(fallbackSlug || '');
-  const publicArtifactHostMap = JSON.stringify(fallbackSlug ? {} : Object.fromEntries(
-    Object.entries(KNOWN_CUSTOM_DOMAINS).flatMap(([slug, hosts]) => hosts.map((host) => [host, slug])),
-  ));
   return `
 (function(){
   try {
@@ -77,10 +76,6 @@ function prePaintScript(fallbackSlug: string | null): string {
     // A dedicated Vercel project serves its artifact from the root path. Its project
     // configuration is the authoritative identity in that case.
     if (!slug) slug = ${serializedFallbackSlug};
-    if (!slug) {
-      var hosts = ${publicArtifactHostMap};
-      slug = hosts[location.host];
-    }
     if (!slug) return;
     var raw = localStorage.getItem('dan-inspector-overrides-' + slug);
     if (!raw) return;
@@ -125,14 +120,15 @@ html, body {
 }
 `.trim();
 
-export default function ArtifactsLayout({ children }: { children: React.ReactNode }) {
+export default async function ArtifactsLayout({ children }: { children: React.ReactNode }) {
   // This is deliberately server-only. ARTIFACT_ONLY_SLUG is set on every
   // one-artifact Vercel project and must not be copied into a public host map.
   //
   // 公開済み編集の反映はここでは行わない。公開時に成果物ディレクトリへ焼き込まれた
   // release.gen.json を各成果物の server page が読み、EditableText が初回 HTML に
   // 描画する（lib/editable-release.ts）。配信ページに DOM 後書き換えは存在しない。
-  const dedicatedArtifactSlug = process.env.ARTIFACT_ONLY_SLUG?.trim() || null;
+  const requestHeaders = await headers();
+  const dedicatedArtifactSlug = artifactSlugFromServerHost(requestHeaders.get('host') || '', CUSTOM_DOMAIN_SLUG_MAP, process.env);
   // 開発サーバー（3001）だけが current.gen.ts を書く。本番ビルド・Vercel では空。
   const liveVersion = process.env.NODE_ENV === 'development' ? readLiveVersion() : '';
   return (

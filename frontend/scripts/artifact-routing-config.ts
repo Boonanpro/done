@@ -21,3 +21,20 @@ export function artifactRoutingDomains(
   const dedicatedSlug = env.ARTIFACT_ONLY_SLUG?.trim();
   return dedicatedSlug ? (domains[dedicatedSlug] ? { [dedicatedSlug]: domains[dedicatedSlug] } : {}) : domains;
 }
+
+/** Shared previews identify themselves by path, never by a customer directory. */
+export function publicArtifactRoutingDomains(generated: Record<string, string[]>, env: Record<string, string | undefined>) {
+  return env.ARTIFACT_ONLY_SLUG?.trim() ? artifactRoutingDomains(generated, env) : {};
+}
+
+/** Resolve legacy root domains on the server; serialize only the selected slug. */
+export function artifactSlugFromServerHost(host: string, generated: Record<string, string[]>, env: Record<string, string | undefined>): string | null {
+  const dedicated = env.ARTIFACT_ONLY_SLUG?.trim();
+  if (dedicated) return dedicated;
+  const hostname = host.toLowerCase().split(':')[0];
+  const known = Object.entries(artifactRoutingDomains(generated, env)).find(([, hosts]) => hosts.includes(hostname));
+  if (known) return known[0];
+  const suffix = env.NEXT_PUBLIC_ARTIFACT_DELIVERY_SUFFIX || '-done.vercel.app';
+  const slug = hostname.endsWith(suffix) ? hostname.slice(0, -suffix.length) : '';
+  return /^[a-z0-9][a-z0-9-]*$/.test(slug) ? slug : null;
+}
