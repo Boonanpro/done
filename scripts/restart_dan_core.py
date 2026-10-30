@@ -9,7 +9,7 @@ pushed and not only what happens to be in the folder. A folder that cannot follo
   --force        stop even then (only when the owner agreed)
   --when-idle --then "<what to check afterwards>"    for Dan itself (2026-10-13). Dan's turn runs inside the core, so
       stopping the core ends the turn that asked. This hands the whole restart to a process outside the core: it waits
-      until nothing is running (the asking turn included), brings the folder up to GitHub main, checks that the code on
+      until nothing is running (the asking turn included; up to a day, new automatic work held for the first 5 min), brings the folder up to GitHub main, checks that the code on
       disk loads, stops, has the watchdog start the core, runs verify_dan.py, and wakes Dan in the asking room with the
       outcome.
 
@@ -141,10 +141,15 @@ def work_in_progress():
 QUIET = 120
 
 
-WAIT = 5 * 60        # a restart Dan asked for waits this long for everyone to finish
+WAIT = 24 * 60 * 60  # a restart Dan asked for waits up to this long for everyone to finish (2026-10-30 本人「空いてるのに
+                     # それに気づかず機を逃すということが無いように」: it used to give up after 5 min and the core stayed old)
+DRAIN = 5 * 60       # for this long new automatic work (followups, core jobs) is held so the running work can drain;
+                     # after that it runs again and the wait only listens for the first moment nothing runs
+POLL = 5             # rechecked this often besides the change notices (a call's quiet time ends without one)
 BACK_UP = 5 * 60      # and this long for the core and sandbox to answer again
 WATCHDOG = r'\DanStackWatchdog'
 LAUNCHD_JOB = 'com.dan.core'
+GENERATIONS = Path.home() / '.dan' / 'generations' / 'enabled'   # release switching is on (2026-10-27)
 
 
 def loads():
@@ -247,10 +252,11 @@ def restart_when_idle(room, then, asked):
 
 def _restart_when_idle(room, then, asked):
     after = '続けて確かめること: ' + then if then else ''
-    from app.services.restart_signal import waiting, wait
+    from app.services.restart_signal import waiting, wait, hold
     # Keep the hold through preflight and the actual switch; release before the
     # verification job, which needs the normal dispatch path.
     deadline = time.monotonic() + WAIT
+    drained = time.monotonic() + DRAIN
     # A later helper must not hold the earlier helper's verification job.
     while earlier_restart():
         if time.monotonic() >= deadline:
@@ -259,8 +265,14 @@ def _restart_when_idle(room, then, asked):
     with waiting(WAIT + BACK_UP + 120) as signal:
         folder = ''
         prepared = False
+        held = True
         while True:
             reason = busy() or earlier_restart()
+            if not reason and not held:
+                # Hold new automatic work again for the switch, then make sure nothing slipped in meanwhile.
+                hold(signal, True)
+                held = True
+                continue
             if not reason:
                 if core_started_at() > asked:
                     note = '本体は頼んだ後に別の再起動で新しくなっていたので、もう一度は止めていない。'
@@ -281,11 +293,15 @@ def _restart_when_idle(room, then, asked):
                     return wake(room, f'本体を {at} に止めたが、{BACK_UP // 60}分たっても起き上がらなかった。dan_core.log の末尾を見る。')
                 note = f'本体を {at} に再起動した。'
                 break
+            prepared = False   # the folder is brought up to GitHub again for the moment that is idle
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return wake(room, f'本体の再起動は{WAIT // 60}分で待機を終了した。作業は止めていない（{reason}）。'
+                return wake(room, f'本体の再起動は{WAIT // 3600}時間待ったが空かなかったので終了した。作業は止めていない（{reason}）。'
                             '同じ待機や確認の自動再予約はしない。阻害している作業を調べ、安全な対応を判断する。')
-            wait(signal, min(30, remaining))
+            if held and time.monotonic() >= drained:
+                hold(signal, False)
+                held = False
+            wait(signal, min(POLL, remaining))
     wake(room, note + '動作確認: ' + verify() + '。' + after + folder)
 
 
@@ -310,8 +326,8 @@ def hand_over(room, then):
             p = subprocess.Popen(cmd, creationflags=apart | getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0), **quiet)
         except OSError:
             p = subprocess.Popen(cmd, creationflags=apart, **quiet)
-    print(f'handed over (pid {p.pid}). The core restarts once no call, turn or parallel work is running; your own turn '
-          f'counts, so finish it. You are woken in this room with the outcome (up to {WAIT // 60} min if others are working).')
+    print(f'handed over (pid {p.pid}). The core restarts the moment no call, turn or parallel work is running; your own '
+          f'turn counts, so finish it. You are woken in this room with the outcome (it waits up to {WAIT // 3600} h).')
 
 
 def option(name, default=''):
@@ -325,7 +341,7 @@ def main():
     if unknown:   # `--help` used to fall through to a restart (Dan tried it first, 2026-10-13)
         print(__doc__)
         sys.exit(2)
-    if (Path.home() / '.dan' / 'generations' / 'enabled').exists():
+    if GENERATIONS.exists():
         # No idle wait: new work moves to a verified release while existing
         # turns/calls remain on their original processes.
         sys.path.insert(0, str(ROOT))
@@ -333,7 +349,10 @@ def main():
         release = prepare(ROOT)
         activate(release['id'])
         print('New requests use the new release. Existing work continues.')
-        return
+        if '--when-idle' not in sys.argv:
+            return
+        # Chat turns still run on the shared core (9000), which a release switch leaves as it is (2026-10-30: fixes to
+        # chat waited there for days), so it is restarted too, the moment nothing runs.
     if '--when-idle' in sys.argv:
         room = option('--room', asking_room())
         if not room:

@@ -65,6 +65,7 @@ def test_the_restart_announces_before_it_stops_anything(monkeypatch):
     order = []
     monkeypatch.setattr(restart_dan_core, 'announce', lambda: order.append('announce'))
     monkeypatch.setattr(restart_dan_core, 'listeners', lambda: order.append('look for the processes') or {})
+    monkeypatch.setattr(restart_dan_core, 'busy', lambda: None)   # stop() rechecks; the real Dan is busy running this
     monkeypatch.setattr(restart_dan_core.time, 'sleep', lambda s: None)
     assert restart_dan_core.stop() is True
     assert order[0] == 'announce'
