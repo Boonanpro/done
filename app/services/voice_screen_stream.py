@@ -68,8 +68,6 @@ class BrowserStream:
 
     async def start(self, page):
         self.page = page
-        from .voice_viewport import fit
-        await fit(page, self.room)
         self.cdp = await page.context.new_cdp_session(page)
         self.cdp.on('Page.screencastFrame', self.on_frame)
         await self.cdp.send('Page.startScreencast', {'format':'jpeg','quality':75,'maxWidth':1440,'maxHeight':1200,'everyNthFrame':1})
@@ -116,10 +114,13 @@ class BrowserStream:
         frame_path(self.room, self.key).with_suffix('.watch').unlink(missing_ok=True)
 
 
-async def follow_browser(state, page):
+async def follow_browser(state, page, fit_viewport=False):
     """Called inside the existing browser executor; never launch another browser."""
     if not (os.environ.get('DAN_TOOL_HOST') == '1' or os.environ.get('DAN_COMMAND_JOB_ID')) or not os.environ.get('DAN_SESSION_ID'):
         return
+    if fit_viewport:
+        from .voice_viewport import fit
+        await fit(page, os.environ['DAN_SESSION_ID'])
     previous = state.get('voice_stream')
     if previous and previous.page is page and not previous.closed:
         return

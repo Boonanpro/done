@@ -32,6 +32,7 @@ async def main():
             await viewer.route('**/api/v1/voicelog/stage/**',serve)
             await viewer.goto('http://127.0.0.1:3036/voice-stage?room=test-room')
             await viewer.locator('img[alt="部品の接続条件"]').wait_for()
+            await asyncio.sleep(.4)
             await viewer.screenshot(path=str(output/'before.png'))
             for _ in range(60):
                 if V.current('test-room'):break
@@ -41,6 +42,7 @@ async def main():
             frames['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jpg']=await source.screenshot(type='jpeg')
             state.update(version=2,image='/api/v1/voicelog/stage/test-room/image/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jpg')
             await viewer.wait_for_function('document.querySelector("img")?.naturalWidth < 600')
+            await asyncio.sleep(.4)
             await viewer.screenshot(path=str(output/'after.png'))
             assert not await source.locator('nav').is_visible()
             assert await source.locator('input').input_value()=='見積もり待ち'

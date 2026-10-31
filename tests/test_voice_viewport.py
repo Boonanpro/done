@@ -53,7 +53,12 @@ async def test_phone_viewport_reflows_real_browser_and_retains_page_state(displa
         # An unfamiliar page: no artifact name, selectors, or site-specific zoom.
         await page.set_content('<meta name="viewport" content="width=device-width"><style>body{margin:0;font:18px sans-serif}.menu{width:260px;float:left}.article{margin-left:280px} @media(max-width:600px){.menu{display:none}.article{margin:16px}}</style><nav class="menu">Navigation</nav><main class="article"><h1>部品の接続条件</h1><p>表示部品と接続基板の仕様を確認します。</p><input aria-label="検討メモ" value="未確定"></main>')
         await page.locator('input').fill('見積もり待ち')
-        live=await stream.BrowserStream('room').start(page)
+        monkeypatch.setenv('DAN_TOOL_HOST','1');monkeypatch.setenv('DAN_SESSION_ID','room')
+        execution={}
+        await stream.follow_browser(execution,page)
+        assert page.viewport_size=={'width':1440,'height':900}  # no resize in an action
+        await stream.follow_browser(execution,page,fit_viewport=True)
+        live=execution['voice_stream']
         try:
             assert page.viewport_size=={'width':390,'height':700}
             assert not await page.locator('nav').is_visible()
