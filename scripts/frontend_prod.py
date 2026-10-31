@@ -117,7 +117,7 @@ def _validate_pwa(build_dir: Path) -> None:
     """Reject skipped worker generation and precaches from a different build."""
     worker = build_dir / 'pwa' / 'sw.js'
     if not worker.is_file():
-        raise RuntimeError('Service worker was not generated; build with webpack')
+        raise RuntimeError('Service worker was not generated; run the complete npm build script')
     source = worker.read_text(encoding='utf-8')
     assets = re.findall(r'/_next/static/[^"\s]+', source)
     if not assets:
