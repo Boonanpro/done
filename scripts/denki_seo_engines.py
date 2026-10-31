@@ -86,7 +86,6 @@ EMBED_BATCH = 100
 EMBED_SIM_FLOOR = 0.30     # 検索の下限（Gemini 0.35）
 EMBED_SIM_SOURCE = 0.48    # 記事を書く資料に使う下限（Gemini 0.68）。関係ある語で中央値9.5記事、無関係な語は中央値0.5記事
 EMBED_SIM_RELATED = 0.57   # 「関係がある記事」と数える下限（Gemini 0.72）。4記事以上の判定が Gemini と約8割一致、無関係な語で4記事以上はほぼ0
-WRITER_MODEL = "opus"
 
 
 # ================================================================ 共通
@@ -164,9 +163,12 @@ def extract_json(text: str):
             return None
 
 
-def claude(prompt: str, timeout: int = 900, model: str = WRITER_MODEL) -> str | None:
-    """Claude Code CLI（定額 Max プラン）で1回だけ生成する。"""
-    from app.agent.cli_runner import run_oneshot_cli
+def claude(prompt: str, timeout: int = 900, model: str | None = None) -> str | None:
+    """Use the room's selected subscription model, including quota failover."""
+    from app.agent.cli_runner import run_oneshot_cli, resolve_room_backend
+
+    model = model or resolve_room_backend(ROOM_ID)[0]
+    log(f"article text model: {model}")
 
     for attempt in range(2):
         out = run_oneshot_cli(prompt, model=model, timeout=timeout)
@@ -174,7 +176,6 @@ def claude(prompt: str, timeout: int = 900, model: str = WRITER_MODEL) -> str | 
             return out
         log(f"claude oneshot failed (attempt {attempt + 1})")
         time.sleep(20)
-    _log_claude_failure_reason(model)
     return None
 
 
