@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import unquote
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +123,7 @@ def _validate_pwa(build_dir: Path) -> None:
     if not assets:
         raise RuntimeError('Service worker has no build assets')
     for url in assets:
-        asset = build_dir / url.removeprefix('/_next/')
+        asset = build_dir / unquote(url.removeprefix('/_next/'))
         if not asset.is_file():
             raise RuntimeError(f'Service worker references a missing asset: {url}')
 

@@ -27,8 +27,8 @@ def test_publishes_complete_worker_without_removing_previous_dependencies(tmp_pa
     build = tmp_path / '.next-prod-test'
     (build / 'pwa').mkdir(parents=True)
     (build / 'static/chunks').mkdir(parents=True)
-    (build / 'static/chunks/new.js').write_text('chunk')
-    worker = '{url:"/_next/static/chunks/new.js"}'
+    (build / 'static/chunks/[id].js').write_text('chunk')
+    worker = '{url:"/_next/static/chunks/%5Bid%5D.js"}'
     (build / 'pwa/sw.js').write_text(worker)
     (build / 'pwa/worker-new.js').write_text('push')
     prod._publish_pwa(build)
