@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import unquote
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,7 +95,8 @@ def build() -> Path:
     config['compilerOptions']['tsBuildInfoFile'] = f'{dist}/tsconfig.tsbuildinfo'
     (FRONTEND / config_name).write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
     env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TSCONFIG=config_name, NEXT_TELEMETRY_DISABLED="1",
-               DAN_LIVE_PREVIEW_ORIGIN=LIVE_PREVIEW_ORIGIN, NEXT_PUBLIC_DASHBOARD_BUILD=dist)
+               DAN_LIVE_PREVIEW_ORIGIN=LIVE_PREVIEW_ORIGIN, NEXT_PUBLIC_DASHBOARD_BUILD=dist,
+               DAN_PWA_DEST=f'{dist}/pwa')
     log(f"build -> {dist}")
     t0 = time.time()
     logf = open(TMP / "next_build.log", "w", encoding="utf-8")
@@ -102,11 +105,38 @@ def build() -> Path:
     if p.returncode != 0:
         tail = (TMP / "next_build.log").read_text(encoding="utf-8", errors="replace")[-1500:]
         raise SystemExit(f"build failed (exit {p.returncode}):\n{tail}")
+    _validate_pwa(FRONTEND / dist)
     log(f"build ok in {time.time() - t0:.0f}s")
     st = _state()
     st["latest_build"] = dist
     _save_state(st)
     return FRONTEND / dist
+
+
+def _validate_pwa(build_dir: Path) -> None:
+    """Reject skipped worker generation and precaches from a different build."""
+    worker = build_dir / 'pwa' / 'sw.js'
+    if not worker.is_file():
+        raise RuntimeError('Service worker was not generated; build with webpack')
+    source = worker.read_text(encoding='utf-8')
+    assets = re.findall(r'/_next/static/[^"\s]+', source)
+    if not assets:
+        raise RuntimeError('Service worker has no build assets')
+    for url in assets:
+        asset = build_dir / unquote(url.removeprefix('/_next/'))
+        if not asset.is_file():
+            raise RuntimeError(f'Service worker references a missing asset: {url}')
+
+
+def _publish_pwa(build_dir: Path) -> None:
+    _validate_pwa(build_dir)
+    # Dependencies first, sw.js last. Keep old hashed workers for existing clients.
+    files = sorted((build_dir / 'pwa').glob('*.js'), key=lambda p: p.name == 'sw.js')
+    for source in files:
+        target = FRONTEND / 'public' / source.name
+        temporary = target.with_suffix('.js.tmp')
+        shutil.copyfile(source, temporary)
+        temporary.replace(target)
 
 
 def _kill_pid(pid: int) -> None:
@@ -142,6 +172,7 @@ def start() -> None:
     dist = st.get("latest_build")
     if not dist or not (FRONTEND / dist / "BUILD_ID").exists():
         raise SystemExit("no build yet: run `python scripts/frontend_prod.py build` first")
+    _validate_pwa(FRONTEND / dist)
     old_pid = st.get("pid")
     # 先に新プロセスを別ポートで上げてから入れ替える手もあるが、同一ポートで
     # 待ち受ける必要があるので「止めて→上げる」（実測 数秒の空白）。
@@ -152,6 +183,7 @@ def start() -> None:
         if not _port_open(PORT):
             break
         time.sleep(0.25)
+    _publish_pwa(FRONTEND / dist)
     env = dict(os.environ, NEXT_DIST_DIR=dist, NEXT_TELEMETRY_DISABLED="1", NODE_ENV="production",
                DAN_LIVE_PREVIEW_ORIGIN=LIVE_PREVIEW_ORIGIN, NEXT_PUBLIC_DASHBOARD_BUILD=dist)
     TMP.mkdir(exist_ok=True)

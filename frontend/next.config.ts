@@ -289,7 +289,7 @@ const nextConfig: NextConfig = {
 };
 
 const withPwa = withPWA({
-  dest: 'public',
+  dest: process.env.DAN_PWA_DEST || 'public',
   register: true,
   skipWaiting: true,
   runtimeCaching: [
