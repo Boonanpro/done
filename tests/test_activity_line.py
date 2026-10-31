@@ -9,7 +9,7 @@ def test_plain_words_for_common_tools() -> None:
     assert activity_phrase("mcp__dan-tools__web_search", {"query": "尼崎 ハンバーガー"}) == "「尼崎 ハンバーガー」を調べています"
     assert activity_phrase("WebFetch", {"url": "https://example.com/a"}) == "example.com を読んでいます"
     assert activity_phrase("mcp__dan-tools__lookup", {"source": "mail"}) == "メールを見ています"
-    assert activity_phrase("Read", {"file_path": "/x/y.py"}) == "資料を読んでいます"
+    assert activity_phrase("Read", {"file_path": "/x/y.py"}) == "「y.py」の内容を確認しています"
     assert activity_phrase("Edit", {}) == "書いています"
     assert activity_phrase("Bash", {"command": "rm -rf /tmp/x"}) == "作業しています"
 

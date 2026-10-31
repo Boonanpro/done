@@ -29,7 +29,9 @@ import logging
 import os
 import re
 import shutil
+import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -274,7 +276,8 @@ def build_codex_profile(
     # Same hooks as Claude Code (D:/dan-workspace/.claude/settings.json), run
     # through the bridge that reshapes apply_patch into Write/Edit payloads.
     if (os.environ.get("DAN_CODEX_HOOKS") or "1").strip().lower() not in ("0", "false", "off"):
-        bridge = _toml_inline_string(f"python {(_PROJECT_ROOT / 'scripts' / 'codex_hook_bridge.py').as_posix()}")
+        bridge_args = [sys.executable, str(_PROJECT_ROOT / 'scripts' / 'codex_hook_bridge.py')]
+        bridge = _toml_inline_string(subprocess.list2cmdline(bridge_args) if os.name == 'nt' else shlex.join(bridge_args))
         # PostToolUse runs after every tool: hook_progress_nudge counts the tools of a turn (MCP tools arrive as
         # mcp__dan_tools__<name>, web search as webrun). PreToolUse guards only commands and file edits.
         for event, matcher in (("PreToolUse", "Bash|apply_patch"), ("PostToolUse", ".*")):
@@ -294,7 +297,12 @@ def build_codex_profile(
         if not isinstance(cfg, dict):
             continue
         lines.append(f"[mcp_servers.{_toml_inline_string(name)}]")
-        lines.append(f"command = {_toml_inline_string(cfg.get('command', 'python'))}")
+        command = cfg.get('command', 'python')
+        # Launchd's PATH has no `python`. Use the interpreter that already has
+        # Dan's dependencies, for the progress tool and the other Python MCPs.
+        if command in ('python', 'python3', 'python.exe'):
+            command = sys.executable
+        lines.append(f"command = {_toml_inline_string(command)}")
         args = cfg.get("args") or []
         lines.append("args = [" + ", ".join(_toml_inline_string(a) for a in args) + "]")
         lines.append(f"startup_timeout_sec = {startup_timeout}")
@@ -387,7 +395,8 @@ def _item_to_events(item: Dict[str, Any]) -> list[Dict[str, Any]]:
             "type": "tool_use",
             "id": iid,
             "name": "Bash",
-            "input": {"command": item.get("command") or ""},
+            "input": {"command": item.get("command") or "",
+                      **({"description": item["description"]} if item.get("description") else {})},
         }]
     if itype == "file_change":
         events = []
@@ -405,6 +414,11 @@ def _item_to_events(item: Dict[str, Any]) -> list[Dict[str, Any]]:
         server = item.get("server") or "mcp"
         tool = item.get("tool") or ""
         args = item.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                pass
         if not isinstance(args, dict):
             args = {"arguments": args} if args is not None else {}
         return [{
@@ -857,7 +871,18 @@ def run_codex_turn_in_thread(
         profile = build_codex_profile(room_id, mcp_config_path, system_prompt)
         cmd = build_codex_cmd(codex_cmd, profile, model, resume_thread_id)
         # Current system prompt + memory index ride on the message every turn.
-        content = wrap_turn_content(system_prompt, content)
+        progress_instruction = (
+            "\n\n## 作業中の表示\n"
+            "ツールを使う作業では、最初の実作業の前と段取りが変わる時に progress を呼ぶ。"
+            "progress は遅延読み込みのツール一覧（ALL_TOOLS等）から名前で探して呼べる。"
+            "最初の一覧に名前が見えていないだけで利用不可と判断しない。"
+            "doing は対象と目的が分かる短い日本語（例：『モデル選択が送信先に反映されるか確認しています』）。"
+            "段取りを終えたら done に実際に確認・変更した結果を書く。"
+            "『考えています』『作業しています』だけにせず、読める進捗を伝える。"
+            "内部の思考過程は書かず、実行中の操作と確認済みの結果を書く。"
+            "短い返答だけの時、progress が使えない時、利用者が不要と指定した時は省く。"
+        ) if project_id and not room_id.startswith('editor_') else ''
+        content = wrap_turn_content(system_prompt + progress_instruction, content)
         cr._cli_debug(f"[CODEX] attempt 1 (resume={resume_thread_id is not None}, prompt len={len(content)})")
         result_data = run_codex_process(
             cmd, content, env, room_id, event_queue,
