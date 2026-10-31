@@ -533,7 +533,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
             from app.services.voice_interruption import Interruption
-            interruption = Interruption() if own and os.environ.get('DAN_VOICE_INTERRUPTION', '0') == '1' else None
+            interruption = Interruption() if own and os.environ.get('DAN_VOICE_INTERRUPTION', '1') != '0' else None
             # Additional requests after an accepted job have a server-owned path.
             if own and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
                 from app.services.voice_turn_intake import TurnIntake, dispatch_missing
