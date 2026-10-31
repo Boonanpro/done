@@ -24,6 +24,7 @@ class TurnIntake:
         self.owners = {}
         self.closed = False
         self.has_work = False
+        self.work_hint = False  # semantic intent can request reasoning, never authorize work
 
     def heard(self, text, end_ms, now=None):
         if self.closed or not text:
@@ -108,7 +109,7 @@ async def dispatch_missing(intake, send, record):
     """Request reasoning once, never retry an uncertain send or API refusal."""
     while not intake.closed:
         await asyncio.sleep(.2)
-        if not intake.has_work:
+        if not (intake.has_work or intake.work_hint):
             continue
         revision = intake.reserve()
         if revision is None:

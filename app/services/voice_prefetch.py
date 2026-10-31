@@ -270,6 +270,11 @@ class Prefetch:
         final = said_since(dialogue.turns, turn)
         untouched = not any(c is turn for c in self.calls)
         current = not self.closed and untouched and final is not None and only_an_ending(text, final)
+        if kind == 'work' and current and getattr(dialogue, 'intake', None) is not None:
+            # A missed first delegation must not leave an acknowledged request idle.
+            # This only enables reasoning on the settled, latest words. Tools still
+            # decide authorization and share the native/fallback admission gate.
+            dialogue.intake.work_hint = True
         if kind == 'search' and not self.closed and untouched and self.latest(dialogue.turns)[0] is turn:
             self.search_turn = turn
             self.start(text, turn)

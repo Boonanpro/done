@@ -188,3 +188,60 @@ async def test_only_confirmed_work_enables_fallback(monkeypatch):
     monkeypatch.setattr('app.services.voice_responses.run_function', success)
     await S.execute_call(item, 'u', 'r', d, lambda *a, **kw: None, 'first')
     assert d.intake.has_work and d.intake.owners == {1: 'first'}
+
+
+@pytest.mark.asyncio
+async def test_first_work_hint_dispatches_latest_words_only_once():
+    i = TurnIntake(0)
+    i.heard('案内文を短くして', 1000)
+    i.work_hint = True
+    i.heard('いや、まだ変更しないで', 2000)
+    sent = []
+    async def send(event):
+        sent.append(event)
+        i.begin('fallback', client_event_id=event['event_id'])
+        i.close()
+    await dispatch_missing(i, send, lambda *a, **kw: None)
+    assert len(sent) == 1
+    assert i.delegations['fallback'] == 2
+    assert not i.has_work  # reasoning is not execution or approval
+
+
+@pytest.mark.asyncio
+async def test_first_native_and_fallback_do_not_start_two_jobs(monkeypatch):
+    calls = []
+    async def run(*a, **kw):
+        calls.append(a)
+        return {'accepted': True, 'job_id': 'one'}
+    monkeypatch.setattr('app.services.voice_responses.run_function', run)
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.work_hint = True
+    d.intake.heard('案内文を短くして', 1000)
+    d.intake.begin('native', 1100); d.intake.begin('fallback', 1100)
+    item = {'name': 'start_work', 'arguments': '{}'}
+    out = await asyncio.gather(*(S.execute_call(dict(item, call_id=key), 'u', 'r', d,
+        lambda *a, **kw: None, key) for key in ('native', 'fallback')))
+    assert len(calls) == 1
+    assert sum(json.loads(r['output']).get('accepted') is True for r in out) == 1
+
+
+@pytest.mark.asyncio
+async def test_prefetch_work_hint_does_not_accept_stale_judgement(monkeypatch):
+    from app.services.voice_prefetch import Prefetch
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.add('user', '案内文を短くして')
+    p = Prefetch('u', room_id='r')
+    monkeypatch.setattr(p, 'heard', lambda *a: None)
+    monkeypatch.setattr(p, 'start_read', lambda *a: None)
+    async def work(text): return 'work'
+    monkeypatch.setattr(p, 'kind', work)
+    turn = d.turns[-1]
+    await p._judge_and_search(d, turn['text'], turn)
+    assert d.intake.work_hint and not d.intake.has_work
+    d.intake.work_hint = False
+    async def stale(text):
+        d.add('user', 'いや、変更しないで')
+        return 'work'
+    monkeypatch.setattr(p, 'kind', stale)
+    await p._judge_and_search(d, turn['text'], turn)
+    assert not d.intake.work_hint

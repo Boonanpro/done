@@ -133,7 +133,7 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     except ValueError: args = {}
     reads = {'read_many', 'web_search', 'get_calendar', 'get_location', 'room_files', 'job_status',
              'search_records', 'get_saved_information', 'read_page', 'list_operations'}
-    if dialogue.intake is not None and dialogue.intake.has_work and item.get('name') not in reads:
+    if dialogue.intake is not None and (dialogue.intake.has_work or dialogue.intake.work_hint) and item.get('name') not in reads:
         # Disclosed tools also pass this admission; no mutation allowlist.
         reason = await dialogue.intake.admit(delegation_id)
         if reason:
