@@ -500,6 +500,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
+    stop_control = None
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
                                       max_size=8*1024*1024, open_timeout=10) as socket:
@@ -508,6 +509,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
             async def send(event):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
+            if own and room_id:
+                from app.services.voice_stop_control import StopControl
+                stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
             if own:
                 from app.services import voice_prefetch
                 if voice_prefetch.enabled(): dialogue.prefetch = voice_prefetch.Prefetch(user_id, record, room_id=room_id)
@@ -544,7 +548,10 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     if now - spoke.get(side, 0) > 1.5: record('speech_start', side=side, at_s=round(now - started, 2))
                     spoke[side] = now
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
-                if kind == 'session.input_transcript.delta': dialogue.add('user', event.get('delta') or '')
+                if kind == 'session.input_transcript.delta':
+                    dialogue.add('user', event.get('delta') or '')
+                    if stop_control is not None:
+                        stop_control.heard(event.get('delta') or '', event.get('start_ms'), event.get('end_ms'))
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
                 if stage is not None and kind in ('session.input_transcript.delta', 'session.output_transcript.delta'):
                     try: stage.heard('user' if kind == 'session.input_transcript.delta' else 'assistant', event.get('delta') or '')
@@ -569,6 +576,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
         record('sideband_failed', error_type=type(exc).__name__, detail=str(exc)[:200])
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
+        if stop_control is not None: stop_control.close()
         for task in working: task.cancel()
         if dialogue.prefetch is not None:
             try: await dialogue.prefetch.close()

@@ -1,0 +1,208 @@
+"""One bounded real voice trial editing a dedicated local memo via production workers.
+Only the dedicated test project and memo are authorized. No external messages or phone dialing.
+Setup project and memo first. Preserve outputs; inspect jobs and stop exact residual jobs after trial.
+"""
+import asyncio
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import wave
+
+ROOT = Path(__file__).resolve().parents[1]
+BASELINE = '7ce68543'  # version tested on 2026-11-01
+sys.path.insert(0, str(ROOT))
+OUT = Path(os.environ.get('DAN_VOICE_TRIAL_DIR') or ROOT / '.tmp/voice-real-edit-proof')
+OUT.mkdir(parents=True, exist_ok=True)
+CASES = [
+ ('この案内文を半分くらいの長さに直して。', 'start_work'),
+ ('聞いてる？', ''),
+ ('参加者二十人という数字は必ず残してね。', 'steer_job'),
+ ('一旦その作業を止めて。', 'steer_job'),
+]
+
+
+
+def prepare():
+    if any((OUT/f'{mode}.json').exists() for mode in ('baseline','after')):
+        raise RuntimeError('do not replace audio for an existing paid measurement')
+    rate = 24000
+    audio = bytearray(b'\x00\x00' * rate * 10)
+    schedule = []
+    for i, (text, name) in enumerate(CASES):
+        aiff, wav = OUT / f'{i}.aiff', OUT / f'{i}.wav'
+        subprocess.run(['say', '-v', 'Kyoko', '-r', '205', '-o', str(aiff), text], check=True)
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(aiff), '-ar', str(rate), '-ac', '1', str(wav)], check=True)
+        with wave.open(str(wav), 'rb') as f: pcm = f.readframes(f.getnframes())
+        start = len(audio) / (rate * 2)
+        audio.extend(pcm)
+        end = len(audio) / (rate * 2)
+        schedule.append(dict(q=text, expected=name, start=start, end=end))
+        audio.extend(b'\x00\x00' * rate * ([6, 6, 8, 35][i]))
+    with wave.open(str(OUT / 'owner.wav'), 'wb') as f:
+        f.setnchannels(1); f.setsampwidth(2); f.setframerate(rate); f.writeframes(audio)
+    (OUT / 'schedule.json').write_text(json.dumps({'schedule': schedule, 'total': len(audio)/(rate*2)}, ensure_ascii=False, indent=2))
+
+
+async def main(mode):
+    if mode not in ('baseline', 'after') or (OUT/f'{mode}.json').exists():
+        raise RuntimeError('only one baseline and one after call; existing evidence is immutable')
+    from dotenv import load_dotenv
+    load_dotenv(Path.home() / 'done/.env')  # read existing secrets into memory, never copy to output
+    from app.services import voice_prefetch as P, voice_sideband as S, voice_live as L, voice_responses as R
+    if mode == 'baseline':
+        for module in (P, R, L, S):
+            source = subprocess.check_output(['git', 'show', BASELINE + ':' + module.__file__.removeprefix(str(ROOT) + '/')], cwd=ROOT, text=True)
+            exec(compile(source, module.__file__, 'exec'), module.__dict__)
+    from app.config import settings
+    from app.services.jev_decisions import Decisions
+    from app.services import jev_browser_budget as budget
+    from app.services.credentials_service import get_credentials_service
+    # Synthetic test user; the owner-authorized API key pays for this bounded evaluation.
+    from app.services.owner import resolve_owner_user_id
+    user = resolve_owner_user_id()
+    room = json.loads((ROOT / '.tmp/voice-response-proof/real-project.json').read_text())['room_id']
+    owner = '2582a188-ff24-4a4f-b989-6063034d90b2'
+    key = None
+    for service in ('typesafe', 'typesafe_jev'):
+        c = await get_credentials_service().get_credential(owner, service)
+        if c and c.get('password'): key = c['password']; break
+    async def credential(self): return key
+    Decisions._credential = credential
+    budget.PATH = OUT / 'jev-budget.json'
+    if not budget.PATH.exists():
+        budget.PATH.write_text(json.dumps(dict(enabled=True, publish=True, user_id=user, approved_usd=.3, reserved_usd=0, requests=0, max_requests=250)))
+    R.catalog = lambda: ''
+    R.remembered = lambda: ''
+    # Keep model instructions/tools identical except no production room context and no stage.
+    R.tools = lambda: [*R.TOOLS, {'type':'function','name':'list_operations','description':'記憶した手順の一覧を読む', 'parameters':{'type':'object','properties':{},'additionalProperties':False}}]
+    import app.services.dan_core
+    app.services.dan_core.shared = lambda *a: ''
+    from app.services import voice_stage, voice_calls
+    voice_stage.enabled = lambda: True
+    voice_stage.ROOT = OUT / ('stage-' + mode)
+    async def draw(*a): return {'action':'keep','caption':''}, {}
+    voice_stage.ask_model = draw
+    voice_calls.begin = lambda *a: None
+    voice_calls.end = lambda *a: None
+    async def idle(*a): await asyncio.Event().wait()
+    async def noop(*a, **kw): return []
+    S.chat_feed = S.summon_feed = idle
+    S.call_log = S.after_call = noop
+    log = []
+    def mark(event_kind, **fields):
+        if 'kind' in fields: fields['detail_kind'] = fields.pop('kind')
+        log.append(dict(t=time.monotonic(), kind=event_kind, **fields))
+    S.note = lambda sid, rid, phase, **kw: mark('note', phase=phase, **kw)
+    original_add = S.Dialogue.add
+    def add(self, role, delta):
+        if delta: mark('delta', role=role, text=delta)
+        original_add(self, role, delta)
+    S.Dialogue.add = add
+    actual_run = R.run_function
+    job_ids = []
+    memo = OUT / 'memo.txt'
+    async def fixture(name, args, uid, rid, dialogue, **kw):
+        mark('real_tool_start', name=name, args=args)
+        if name == 'list_operations': return {'operations': []}
+        if name not in ('start_work', 'job_status', 'steer_job'):
+            return {'error': 'この試験では文章の制作・状況確認・変更・停止だけを使います。'}
+        args = dict(args)
+        if name == 'start_work':
+            if job_ids:
+                return {'accepted':False,'note':'同じ試験の制作はすでに開始済みです。既存job_idに追加指示してください。','job_id':job_ids[0]}
+            args['kind'] = 'make'
+            args['task'] = str(args.get('task') or '') + '\n試験対象は ' + str(memo) + ' だけです。この案内文を読んで編集してください。参加者20人の事実は保持。新たな調査やスキル変更・他ファイルの変更・外部送信・公開・Git操作は不要です。完了後は短く報告。'
+        if name == 'job_status': args = {}
+        if name == 'steer_job':
+            if not job_ids: return {'accepted':False,'error':'試験の作業がまだ開始されていません。'}
+            args['job_id'] = job_ids[0]
+        result = await actual_run(name, args, uid, rid, dialogue, **kw)
+        if name == 'start_work' and result.get('accepted'):
+            job_ids.append(result['job_id'])
+            (OUT / 'jobs.json').write_text(json.dumps(job_ids))
+        mark('real_tool_end', name=name, result=result)
+        return result
+    R.run_function = fixture
+    async def no_search(*a): return {'success':False,'error':'試験にウェブ検索はない'}
+    from app.services import web_search
+    web_search.find = no_search
+    # Fail-closed fixture layer: no actual work or reads can escape via execute_call.
+    from playwright.async_api import async_playwright
+    import httpx
+    PAGE = "async () => {\n  const stream = await navigator.mediaDevices.getUserMedia({audio: true});\n  window.pc = new RTCPeerConnection();\n  stream.getTracks().forEach(t => pc.addTrack(t, stream));\n  window.dc = pc.createDataChannel('oai-events');\n  dc.onmessage = e => { const m = JSON.parse(e.data); if (m.type === 'error' || m.type === 'session.started') dcEvent(m.type, JSON.stringify(m).slice(0, 300)); };\n  await pc.setLocalDescription(await pc.createOffer());\n  if (pc.iceGatheringState !== 'complete') await new Promise(r => { pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') r(); }); });\n  return pc.localDescription.sdp;\n}"
+    plan = json.loads((OUT/'schedule.json').read_text())
+    if plan['total'] > 100: raise RuntimeError('bounded call duration exceeded')
+    if (OUT/f'{mode}.json').exists(): raise RuntimeError('existing paid run: do not overwrite or silently repeat')
+    # Bounded diagnostic under the owner's permission to resume useful audio tests.
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', f'--use-file-for-fake-audio-capture={OUT / "owner.wav"}%noloop'])
+        page = await browser.new_page()
+        await page.expose_function('dcEvent', lambda kind, body: mark('dc', type=kind))
+        mic=[]
+        await page.expose_function('micChunk', lambda data: mic.append(data))
+        await page.route('http://localhost/**', lambda route: route.fulfill(body='<html></html>', content_type='text/html'))
+        await page.goto('http://localhost/voice-early-test')
+        a=time.monotonic(); browser_ms=await page.evaluate('performance.now()'); b=time.monotonic()
+        offset=(a+b)/2-browser_ms/1000
+        uncertainty=(b-a)/2
+        PAGE = PAGE.replace("window.pc = new RTCPeerConnection();", """
+  window.audioContext = new AudioContext(); await audioContext.resume();
+  const source=audioContext.createMediaStreamSource(stream);
+  const processor=audioContext.createScriptProcessor(1024,1,1);
+  const mute=audioContext.createGain(); mute.gain.value=0;
+  source.connect(processor); processor.connect(mute); mute.connect(audioContext.destination);
+  const epoch=performance.now()/1000-audioContext.currentTime;
+  processor.onaudioprocess=e=>{
+    const x=e.inputBuffer.getChannelData(0); let first=-1,last=-1;
+    for(let i=0;i<x.length;i++){if(Math.abs(x[i])>.002){if(first<0)first=i;last=i;}}
+    if(first>=0)micChunk({start:epoch+e.playbackTime+first/audioContext.sampleRate,
+      end:epoch+e.playbackTime+last/audioContext.sampleRate,received:performance.now()/1000});
+  };
+  window.pc = new RTCPeerConnection();
+""")
+        t0 = time.monotonic()
+        sdp = await page.evaluate(PAGE)
+        async with httpx.AsyncClient(timeout=40) as client:
+            r = await client.post('https://api.openai.com/v1/live/sessions', headers={'Authorization':'Bearer '+settings.OPENAI_API_KEY}, json={'session':L.session_config(room_id=room,user_id=user,history=[{'role':'user','content':[{'text':'文章修正の試験です。今の案内文は '+str(memo)+' にあります。音声で依頼したらこのファイルだけ編集してください。外部送信はしません。'}]}]), 'transport':{'type':'webrtc','sdp':sdp}})
+        if r.status_code not in (200,201):
+            (OUT/f'{mode}.json').write_text(json.dumps({'status':r.status_code,'error':'Live session rejected; no retry'}))
+            await browser.close()
+            return
+        data=r.json()
+        await page.evaluate('sdp => pc.setRemoteDescription({type:"answer",sdp})',data['transport']['sdp'])
+        side=asyncio.create_task(S._run(data['session']['id'], user, room, settings.OPENAI_API_KEY, True))
+        try:
+            await asyncio.sleep(max(0, plan['total']+2-(time.monotonic()-t0)))
+            await page.evaluate('() => dc.send(JSON.stringify({type:"session.close"}))')
+            try: await asyncio.wait_for(side,10)
+            except asyncio.TimeoutError: side.cancel()
+        finally: await browser.close()
+    groups=[]
+    for c in mic:
+        if not groups or c['start']-groups[-1]['end']>2: groups.append({'start':c['start'],'end':c['end']})
+        else: groups[-1]['end']=c['end']
+    rows=[]
+    for i,q in enumerate(plan['schedule']):
+        end=t0+q['end']; lo=t0+q['start']; hi=t0+(plan['schedule'][i+1]['start'] if i+1<len(CASES) else plan['total']+2)
+        inside=[e for e in log if lo<=e['t']<hi]
+        calls=[e for e in inside if e['kind']=='real_tool_start']
+        matching=[e for e in calls if e['name']==q['expected']]
+        done=[e for e in inside if e['kind']=='note' and e.get('phase')=='function_done' and e.get('name')==q['expected']]
+        rows.append({**q,'heard':''.join(e['text'] for e in inside if e['kind']=='delta' and e['role']=='user'),
+            'functions':[e['name'] for e in calls], 'requests':[e['args'] for e in matching],
+            'start_after_audio_end_s':round(matching[0]['t']-end,3) if matching else None,
+            'done_after_audio_end_s':round(done[0]['t']-end,3) if done else None,
+            'prefetch_hits':len([e for e in inside if e['kind']=='note' and e.get('phase')=='prefetch_hit'])})
+    (OUT/f'{mode}.json').write_text(json.dumps({'mode':mode,'baseline_commit':BASELINE,'actual_work':True,'rows':rows,'log':log,'mic_groups':groups,'mic_chunks':mic,'browser_to_python_s':offset,'clock_uncertainty_s':uncertainty,'t0':t0,'stage':'stage drawing disabled; real start_work, job_status, steer_job and job_feed in dedicated room'},ensure_ascii=False,indent=2))
+    print(json.dumps({'rows':rows,'jobs':job_ids},ensure_ascii=False,indent=2))
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2 or sys.argv[1] not in ('prepare', 'baseline', 'after'):
+        raise SystemExit('prepare|baseline|after')
+    if sys.argv[1]=='prepare': prepare()
+    else: asyncio.run(main(sys.argv[1]))
