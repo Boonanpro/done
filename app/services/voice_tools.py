@@ -27,8 +27,9 @@ _ids = itertools.count(1)
 
 
 class Host:
-    def __init__(self, user_id, room_id):
+    def __init__(self, user_id, room_id, browser_room=None):
         self.user_id, self.room_id = user_id, room_id
+        self.browser_room = browser_room
         self.process = None
         self.waiting = {}
         self.used = time.monotonic()
@@ -38,7 +39,7 @@ class Host:
         key = hashlib.sha1(f'{self.user_id}:{self.room_id}'.encode()).hexdigest()[:10]
         env = {**os.environ, 'DAN_USER_ID': self.user_id, 'DAN_SESSION_ID': self.room_id or '', 'DAN_TOOL_HOST': '1',
                # named like a job's browser: headless, its own profile (logins seeded from the owner's), kept between calls
-               'DAN_BROWSER_ROOM': 'voice-job-call-' + key, 'DAN_BROWSER_HEADLESS': '1', 'DAN_BROWSER_OBSERVATION': 'dom',
+               'DAN_BROWSER_ROOM': self.browser_room or 'voice-job-call-' + key, 'DAN_BROWSER_HEADLESS': '1', 'DAN_BROWSER_OBSERVATION': 'dom',
                'DAN_WORK_DIR': f'{_dan_ws()}/jobs/call-{key}', 'DAN_CORE_PORT': '9000', 'PYTHONIOENCODING': 'utf-8'}
         os.makedirs(env['DAN_WORK_DIR'], exist_ok=True)
         creation = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0   # never a console window (owner's rule)
@@ -89,13 +90,13 @@ class Host:
             self.process.terminate()
 
 
-def host(user_id, room_id):
+def host(user_id, room_id, browser_room=None):
     for key, h in list(_hosts.items()):
         if time.monotonic() - h.used > IDLE_SECONDS and not h.waiting:
             h.close(); _hosts.pop(key, None)
-    key = (user_id, room_id)
+    key = (user_id, room_id, browser_room)
     if key not in _hosts:
-        _hosts[key] = Host(user_id, room_id)
+        _hosts[key] = Host(user_id, room_id, browser_room)
     return _hosts[key]
 
 

@@ -213,6 +213,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         job_state.change(job_id, lambda s:s.update(last_observation={
             'text':formatted.text[:3500], 'at':job_state.now()}))
 
+    if job_id:
+        from app.services.voice_worker_screen import observe
+        await observe(job_id, name, arguments)
+
     contents: list[types.TextContent | types.ImageContent] = []
 
     # 画像（ブラウザスクリーンショット等）

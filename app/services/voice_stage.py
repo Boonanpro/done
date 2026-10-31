@@ -720,6 +720,8 @@ class Stage:
         self.at = datetime.now(timezone.utc).isoformat()
         if program is not None or html is not None or image is not None or card is not None or doc is not None or media is not None or frame is not None or cue is not None:
             self._owner_asked = False
+            self._external_browser_room = None
+            self._external_job_id = None
             if not image: self._external_source = None
             if (frame or '') != self.frame: self.view_id = uuid.uuid4().hex
             if (frame or '') != self.frame and not (doc and (self.doc or {}).get('id') == doc.get('id')): self.command = None   # a command was for the page that leaves

@@ -10,6 +10,8 @@ async def execute(host, stage, tool, arguments):
     source = SOURCES.get(tool)
     display = stage is not None and source and arguments.get('action') not in NO_SCREEN
     version = stage.version if display else None
+    previous_room = getattr(stage, "_external_browser_room", None)
+    previous_job = getattr(stage, "_external_job_id", None)
     if display and tool == 'browser':
         arguments['observation'] = 'full'
     out = await host.ask('call', with_media=True, name=tool, arguments=arguments)
@@ -35,6 +37,9 @@ async def execute(host, stage, tool, arguments):
     elif path:
         stage._apply('スマホの画面' if source == 'phone' else 'ブラウザの画面', image=path)
         stage._external_source = source
+        browser_room = getattr(host, 'browser_room', None)
+        stage._external_job_id = previous_job if browser_room and browser_room == previous_room else None
+        stage._external_browser_room = browser_room
         stage._external_image = path
         stage._external_serial = out.get("stage_serial") or arguments.get("serial", "")
         result['screen'] = {'shown': True}
@@ -59,6 +64,15 @@ async def scroll(host, stage, direction):
     source = getattr(stage,'_external_source','')
     if source not in ('browser','phone') or not getattr(stage,'image','') or stage.image != getattr(stage,'_external_image',None):
         return {'ok':False,'error':'今表示している操作画面を確認できません。'}
+    browser_room = getattr(stage, '_external_browser_room', None)
+    if source == 'browser' and browser_room:
+        from app.services import voice_tools, command_job_state
+        job_id = getattr(stage, '_external_job_id', None)
+        if job_id:
+            job = command_job_state.owned(job_id, stage.user_id, stage.room_id)
+            if job.get('browser_room') != browser_room or job.get('current_tool'):
+                return {'ok':False,'error':'表示中のブラウザは操作中です。完了を待ってください。'}
+        host = voice_tools.host(stage.user_id, stage.room_id, browser_room=browser_room)
     args={'action':'scroll','direction':direction}
     if source=='phone':
         serial=getattr(stage,'_external_serial','')
