@@ -87,3 +87,15 @@ async def test_viewport_route_checks_room_owner(display,monkeypatch):
         await R.call_viewport('room',None,R.StageViewport(**body()))
     assert error.value.status_code==403
     assert V.current('room') is None
+
+
+@pytest.mark.asyncio
+async def test_display_size_failure_does_not_break_existing_browser(monkeypatch):
+    from app.services import voice_screen_stream as stream
+    monkeypatch.setenv('DAN_TOOL_HOST','1');monkeypatch.setenv('DAN_SESSION_ID','room')
+    async def unavailable(*args):raise RuntimeError('closed during resize')
+    monkeypatch.setattr(V,'fit',unavailable)
+    page=object();previous=SimpleNamespace(page=page,closed=False)
+    execution={'voice_stream':previous}
+    await stream.follow_browser(execution,page,fit_viewport=True)
+    assert execution['voice_stream'] is previous

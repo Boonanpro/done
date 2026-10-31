@@ -120,7 +120,10 @@ async def follow_browser(state, page, fit_viewport=False):
         return
     if fit_viewport:
         from .voice_viewport import fit
-        await fit(page, os.environ['DAN_SESSION_ID'])
+        try:
+            await fit(page, os.environ['DAN_SESSION_ID'])
+        except Exception:
+            pass  # Display sizing must not fail or repeat the user's operation.
     previous = state.get('voice_stream')
     if previous and previous.page is page and not previous.closed:
         return
