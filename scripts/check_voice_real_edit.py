@@ -61,7 +61,7 @@ async def main(mode):
     from app.services.jev_decisions import Decisions
     from app.services import jev_browser_budget as budget
     from app.services.credentials_service import get_credentials_service
-    # Synthetic test user; the owner-authorized API key pays for this bounded evaluation.
+    # Dedicated test room under the owner, using the existing authorized API credentials.
     from app.services.owner import resolve_owner_user_id
     user = resolve_owner_user_id()
     room = json.loads((ROOT / '.tmp/voice-response-proof/real-project.json').read_text())['room_id']
