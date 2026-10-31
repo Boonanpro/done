@@ -1984,6 +1984,16 @@ def run_oneshot_cli(
     timeout: int = 60,
     cwd: Optional[str] = None,
 ) -> Optional[str]:
+    from app.agent.subscription_text import generate
+    return generate(prompt, model, timeout, cwd, _run_claude_oneshot)
+
+
+def _run_claude_oneshot(
+    prompt: str,
+    model: str = "haiku",
+    timeout: int = 60,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
     """Claude CLI を1回だけ起動して短いテキストを生成する軽量ワンショット。
 
     タイトル/アイコン等の用途。Max 定額プランで動かすため ANTHROPIC_API_KEY を
@@ -2038,6 +2048,11 @@ def run_oneshot_cli(
         logger.warning("run_oneshot_cli: 起動失敗: %s", e)
         return None
 
+    from app.agent.subscription_text import UsageLimitError
+    output = (proc.stdout or "") + (proc.stderr or "")
+    event = {"type": "error", "text": output} if proc.returncode else {"text": proc.stdout or ""}
+    if _failover.exhausted(event):
+        raise UsageLimitError((proc.stdout or "") + (proc.stderr or ""))
     if proc.returncode != 0:
         logger.warning(
             "run_oneshot_cli: exit=%s stderr=%s",
@@ -4099,6 +4114,14 @@ async def _process_message_cli_with_failover(
         user_messages: ユーザーの依頼文原文（planning プロンプト用）。
         answer_shapes: この返事が部屋のチャット画面に描かれる時だけ True（部品の節を指示に足す）。
     """
+    from app.agent.turn_dispatch import remote_required, relay
+    if remote_required():
+        import inspect
+        parameters = inspect.signature(_process_message_cli_with_failover).parameters
+        values = locals().copy()
+        async for event in relay({name: values[name] for name in parameters}):
+            yield event
+        return
     note_turn_input(room_id, content)
     setup_start = time.perf_counter()
     system_prompt, mcp_config_path = await _prepare_cli_inputs(

@@ -4714,6 +4714,26 @@ async def alive() -> dict:
     return {"core": True, "sandbox": sandbox, "started": _STARTED}
 
 
+@router.post("/internal/agent/turn")
+async def internal_agent_turn(request: Request):
+    """Execute shared scheduler work using this release's room model and failover."""
+    _require_loopback(request)
+    if not os.environ.get('DAN_GENERATION'):
+        raise HTTPException(status_code=503, detail='Use an active release for agent work')
+    import inspect
+    from app.agent.cli_runner import process_message_cli, _process_message_cli_with_failover
+    from starlette.responses import StreamingResponse
+    arguments = await request.json()
+    try:
+        inspect.signature(_process_message_cli_with_failover).bind(**arguments)
+    except TypeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async def events():
+        async for event in process_message_cli(**arguments):
+            yield json.dumps(event, ensure_ascii=False) + '\n'
+    return StreamingResponse(events(), media_type='application/x-ndjson')
+
+
 @router.post("/internal/rooms/{room_id}/messages")
 async def internal_room_message(room_id: str, request: Request) -> dict:
     """部屋ログへの追記／配信の内部入口（loopback 限定）。
