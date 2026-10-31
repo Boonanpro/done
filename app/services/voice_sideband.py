@@ -542,7 +542,11 @@ async def _run(session_id, user_id, room_id, api_key, own):
             if own and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
                 from app.services.voice_turn_intake import TurnIntake, dispatch_missing
                 dialogue.intake = TurnIntake()
-                intake_task = asyncio.create_task(dispatch_missing(dialogue.intake, send, record))
+                async def conversation_only(text):
+                    if dialogue.prefetch is None:
+                        return False
+                    return await dialogue.prefetch.fallback_is_conversation(text)
+                intake_task = asyncio.create_task(dispatch_missing(dialogue.intake, send, record, conversation_only))
                 working.add(intake_task); intake_task.add_done_callback(working.discard)
             if own and room_id:
                 from app.services.voice_stop_control import StopControl

@@ -296,3 +296,96 @@ async def test_backchannel_classifier_uses_context_and_fails_closed():
     assert not await p.followup_is_backchannel('短くして', 'うん', 'start_work')
     p.judge.choose.return_value = {'available': False}
     assert not await p.followup_is_backchannel('短くして', 'うん', 'start_work')
+
+
+def test_conversation_suppression_never_consumes_next_instruction_or_native():
+    i = TurnIntake(0)
+    i.heard('短くして', 1000)
+    i.begin('first', 1100)
+    i.work_accepted('first')
+    i.finish('first')
+    i.heard('何をお願いしたか覚えてる？', 2000)
+    i.local_reply_revision = i.revision
+    assert i.reserve() is None
+    i.begin('native-question', 2100)
+    assert i.reject('native-question') is None
+    i.finish('native-question')
+    i.heard('参加費も無料にして', 3000)
+    assert i.reserve() == i.revision
+
+
+def test_conversation_hint_cannot_hide_unstarted_work():
+    i = TurnIntake(0)
+    i.work_hint = True
+    i.heard('案内文を直して', 1000)
+    i.heard('覚えてる？', 2000)
+    i.local_reply_revision = i.revision
+    assert i.reserve() == i.revision
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('local,stale,fails', [(True, False, False), (False, False, False), (True, True, False), (True, False, True)])
+async def test_dispatch_classification_is_scoped_and_failure_preserves_request(local, stale, fails):
+    i = TurnIntake(0); i.has_work = True
+    i.heard('何をお願いしたか覚えてる？', 1000)
+    calls = []; sent = []
+    async def classify(text):
+        calls.append(text)
+        if stale and len(calls) == 1:
+            i.heard('参加費を無料にして', 2000)
+            return True
+        if fails: raise OSError('unavailable')
+        return local and not stale
+    async def send(event):
+        sent.append(event); i.close()
+    task = asyncio.create_task(dispatch_missing(i, send, lambda *a, **k: None, classify))
+    await asyncio.sleep(.65)
+    i.close(); await task
+    assert bool(sent) == (not local or stale or fails)
+    assert len(calls) == (2 if stale else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('choice,probability,available,expected', [
+    ('conversation', .99, True, True), ('conversation', .6, True, False),
+    ('backend', .99, True, False), ('conversation', .99, False, False)])
+async def test_conversation_decision_requires_confidence(choice, probability, available, expected):
+    from app.services.voice_prefetch import Prefetch
+    from unittest.mock import AsyncMock
+    p = Prefetch('u', room_id='r')
+    p.judge = AsyncMock()
+    p.judge.choose.return_value = {'available': available, 'answers': {'delivery': {
+        'choice': choice, 'probabilities': {choice: probability}}}}
+    assert await p.fallback_is_conversation('覚えてる？') is expected
+
+
+@pytest.mark.asyncio
+async def test_native_arriving_during_classification_prevents_extra_dispatch():
+    i = TurnIntake(0); i.has_work = True
+    i.heard('今どうなっている？', 1000)
+    sent = []
+    async def classify(text):
+        i.begin('native', 1100)
+        return False
+    async def send(event): sent.append(event)
+    task = asyncio.create_task(dispatch_missing(i, send, lambda *a, **k: None, classify))
+    await asyncio.sleep(.3)
+    i.close(); await task
+    assert not sent
+    assert i.delegations['native'] == 1
+
+
+@pytest.mark.asyncio
+async def test_known_attention_does_not_add_classifier_round_trip():
+    i = TurnIntake(0)
+    i.heard('文章を直して', 1000); i.begin('work', 1100)
+    i.work_accepted('work'); i.finish('work')
+    i.heard('聞いてる？', 2000)
+    async def classify(text): raise AssertionError('unnecessary judgement')
+    sent = []
+    async def send(event): sent.append(event)
+    task = asyncio.create_task(dispatch_missing(i, send, lambda *a, **k: None, classify))
+    await asyncio.sleep(.3)
+    i.close(); await task
+    assert not sent
+    assert i.handled == i.revision

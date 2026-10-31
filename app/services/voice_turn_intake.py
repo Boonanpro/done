@@ -25,6 +25,7 @@ class TurnIntake:
         self.unchanged_through = {}
         self.closed = False
         self.has_work = False
+        self.local_reply_revision = 0  # exact words classified as conversation only
         self.work_hint = False  # semantic intent can request reasoning, never authorize work
 
     def heard(self, text, end_ms, now=None):
@@ -75,6 +76,8 @@ class TurnIntake:
         if (self.closed or self.active or self.reserved is not None
                 or self.revision <= self.handled or now - self.changed_at < self.quiet_seconds):
             return None
+        if self.has_work and self.local_reply_revision == self.revision:
+            return None  # do not mark handled: native delegation remains valid
         if any(self.attention_only_since(r) for r in self.owners):
             self.handled = self.revision
             return None
@@ -118,12 +121,31 @@ class TurnIntake:
         self.closed = True
 
 
-async def dispatch_missing(intake, send, record):
+async def dispatch_missing(intake, send, record, conversation_only=None):
     """Request reasoning once, never retry an uncertain send or API refusal."""
     while not intake.closed:
         await asyncio.sleep(.2)
         if not (intake.has_work or intake.work_hint):
             continue
+        # Classify only an otherwise eligible fallback after actual work. Native
+        # audio and delegations never wait for this decision. Failure preserves
+        # the fallback; a new fragment invalidates the result.
+        if (conversation_only is not None and intake.has_work and not intake.active
+                and intake.reserved is None and intake.revision > intake.handled
+                and time.monotonic() - intake.changed_at >= intake.quiet_seconds
+                and intake.local_reply_revision != intake.revision
+                and not any(intake.attention_only_since(r) for r in intake.owners)):
+            revision = intake.revision
+            try:
+                local = await asyncio.wait_for(conversation_only(
+                    ''.join(intake.fragments[intake.handled:])), timeout=1.2)
+            except Exception:
+                local = False
+            if intake.closed or intake.revision != revision:
+                continue
+            if local:
+                intake.local_reply_revision = revision
+                record('turn_dispatch_conversation_only', revision=revision)
         revision = intake.reserve()
         if revision is None:
             continue
