@@ -108,12 +108,12 @@ def _try_gemini(system: str, user_prompt: str) -> Optional[str]:
     if not settings.GOOGLE_GEMINI_API_KEY:
         return None
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GOOGLE_GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(
-            f"{system}\n\n{user_prompt}",
-            generation_config=genai.GenerationConfig(max_output_tokens=300),
+        from google import genai
+        client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=user_prompt,
+            config={"system_instruction": system, "max_output_tokens": 1000},
         )
         return response.text if response.text else None
     except Exception as e:
@@ -152,6 +152,8 @@ def get_dan_response(
 
     if not result:
         logger.error("All LLM providers failed for DAN assist")
+        if system_override:
+            raise RuntimeError("DAN assist providers unavailable")
         return None
 
     # LLM decided to skip
