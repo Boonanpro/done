@@ -51,8 +51,9 @@ async def test_job_feed_speaks_results_at_once_and_pushes_nothing_else(monkeypat
         assert sent == []   # a running job pushes nothing: its state is read on demand (job_status)
         jobs[0].update(seq=3, state='completed', events=jobs[0]['events']+[{'seq': 3, 'kind': 'result', 'text': 'のぞみ2号を予約可能です'}])
         await asyncio.sleep(.05)
-        assert [e['type'] for e in sent] == ['session.thinking.append', 'session.commentary.append']
-        assert 'のぞみ2号' in sent[0]['content']
+        assert all(e['type'] == 'session.thinking.append' for e in sent[:-1])
+        assert sent[-1]['type'] == 'session.commentary.append'
+        assert 'のぞみ2号' in ''.join(e['content'] for e in sent[:-1])
     finally:
         feed.cancel()
 
@@ -118,3 +119,66 @@ async def test_what_the_call_left_undone_becomes_work_reported_in_the_room(monke
     assert started[0][0] == 'room-1' and 'チャットに文章で報告' in started[0][1]
     started.clear()
     assert await S.after_call('u', 'room-1', [{'role': 'assistant', 'text': 'もしもし'}], '2026-10-01T00:00:00') == [] and not started
+
+
+def test_result_scope_keeps_request_and_freezes_received_changes():
+    from app.services.command_job_state import event
+    job = {'id': 'job-1', 'task': '/some/long/path/' * 15 + 'の案内文を短くする',
+           'applied_revision': 1, 'inputs': [{'revision': 1, 'text': '定員20人は残して'}]}
+    event(job, 'result', '案内文を短くして保存しました。')
+    original = job['events'][0]
+    job['applied_revision'] = 2
+    job['inputs'].append({'revision': 2, 'text': '参加費は無料にして'})
+    material = S.result_material(job, original)
+    scope = json.loads(material.split('\n', 1)[1])
+    assert scope['original_request'].endswith('の案内文を短くする')
+    assert scope['worker_received_revision'] == 1
+    assert scope['worker_received_changes'] == [{'revision': 1, 'text': '定員20人は残して'}]
+    assert '無料' not in material
+    assert scope['verified_result'] == '案内文を短くして保存しました。'
+    # A legacy result has unknown scope; never fill it from newer job state.
+    legacy = dict(original)
+    del legacy['applied_revision']; del legacy['applied_inputs']
+    scope = json.loads(S.result_material(job, legacy).split('\n', 1)[1])
+    assert scope['worker_received_revision'] is None
+    assert scope['worker_received_changes'] is None
+
+@pytest.mark.asyncio
+async def test_result_waits_for_new_words_and_decision_then_is_delivered_once(monkeypatch):
+    from app.services.voice_turn_intake import TurnIntake
+    sent = []
+    async def send(event): sent.append(event)
+    monkeypatch.setattr(S, 'RESULT_SETTLE_SECONDS', .02)
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.heard('参加費は無料にして', 100)
+    job = {'id': 'job-1', 'task': '短くする', 'state': 'completed', 'seq': 1,
+           'created_at': '2026-09-22T03:01:00+00:00',
+           'events': [{'seq': 1, 'kind': 'result', 'text': '短くしました'}]}
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda u, r: [job])
+    monkeypatch.setattr(S, 'FEED_SECONDS', .01)
+    feed = asyncio.create_task(S.job_feed(send, 'u', 'room', lambda *a, **k: None,
+                                        '2026-09-22T03:00:00+00:00', dialogue=d))
+    try:
+        await asyncio.sleep(.04)
+        assert not sent
+        d.intake.begin('d1', 100)
+        await asyncio.sleep(.04)
+        assert not sent
+        d.intake.finish('d1')
+        await asyncio.sleep(.05)
+        assert sum(e['type'] == 'session.commentary.append' for e in sent) == 1
+        await asyncio.sleep(.04)
+        assert sum(e['type'] == 'session.commentary.append' for e in sent) == 1
+    finally:
+        feed.cancel()
+        with pytest.raises(asyncio.CancelledError): await feed
+
+
+def test_result_waits_for_quiet_even_after_conversation_was_handled():
+    from app.services.voice_turn_intake import TurnIntake
+    d = S.Dialogue(); d.intake = TurnIntake(1.5)
+    d.intake.heard('うん', 100)
+    d.intake.local_reply_revision = d.intake.revision
+    assert not S.result_can_interrupt(d)
+    d.intake.changed_at -= 2
+    assert S.result_can_interrupt(d)

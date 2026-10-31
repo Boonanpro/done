@@ -301,10 +301,35 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
 ENDING = {}   # calls whose end was chosen (end_call) -> when; a closed call's id is dropped in _run's finally
 HANGUP_FALLBACK_S = 6.0   # the phone closes 3.5 s after end_call; the server closes later only for clients that don't
 FEED_SECONDS = 1.0
+RESULT_SETTLE_SECONDS = 1.5  # allow in-flight input transcripts before unsolicited speech
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
 
 
-async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
+def result_material(job, event):
+    """A result has its own scope; current conversation is not completion evidence."""
+    scope = {
+        'result_id': f"{job['id']}:{event['seq']}",
+        'completed_at': event.get('at'),
+        'original_request': job.get('task', '').split('参考の直前会話')[0][:4000],
+        'worker_received_revision': event.get('applied_revision'),
+        'worker_received_changes': event.get('applied_inputs'),
+        'verified_result': event['text'],
+    }
+    return ('今回届いた作業結果の記録です。依頼や追加条件は作業範囲の説明で、完了の証拠はverified_resultだけです。'
+            '直近の会話で新しく頼まれた変更を、この結果に足して完了と言わないでください。\n'
+            + json.dumps(scope, ensure_ascii=False))
+
+
+def result_can_interrupt(dialogue):
+    if dialogue is None or dialogue.intake is None:
+        return True
+    intake = dialogue.intake
+    return (not intake.active and intake.reserved is None
+            and time.monotonic() - intake.changed_at >= intake.quiet_seconds
+            and intake.revision <= max(intake.handled, intake.local_reply_revision))
+
+
+async def job_feed(send, user_id, room_id, record, connected_at, session_id='', dialogue=None):
     """The room's jobs, from this server (own mode): results, errors and questions to the owner go into the call as
     commentary (spoken) the moment they appear. Nothing else is pushed. The running work's STATE is read on demand by
     the backend model (job_status) when the owner's words concern it; pushing it as thinking, on a timer or at each
@@ -316,6 +341,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
     stage = for_room(room_id)
     follower = Follower(stage, user_id, room_id, connected_at) if stage else None
     seen = {}
+    result_arrivals = {}
     while True:
         await asyncio.sleep(FEED_SECONDS)
         try: jobs = await asyncio.to_thread(list_owned, user_id, room_id)
@@ -332,13 +358,25 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
         for job in jobs:
             events = job.get('events') or []
             previous = seen.get(job['id'])
-            seen[job['id']] = job.get('seq', 0)
             old = job.get('created_at', '') < connected_at
-            if previous is None and old and job['state'] in TERMINAL: continue   # finished before the call: not news
+            if previous is None and old and job['state'] in TERMINAL:
+                seen[job['id']] = job.get('seq', 0)
+                continue   # finished before the call: not news
             fresh = [e for e in events if e.get('seq', 0) > (previous or 0)]
             if previous is None and old: fresh = fresh[-1:]
             if not fresh: continue
             said = [e for e in fresh if e.get('kind') in SPOKEN]
+            # Do not inject a completed task into a new request while its words
+            # or backend decision are still arriving. Keep the event unread so
+            # it is delivered after the conversation settles, never lost.
+            if said and all(e['kind'] == 'result' for e in said) and session_id not in ENDING:
+                key = (job['id'], said[-1]['seq'])
+                arrived = result_arrivals.setdefault(key, time.monotonic())
+                if dialogue is not None and (time.monotonic() - arrived < RESULT_SETTLE_SECONDS
+                                             or not result_can_interrupt(dialogue)):
+                    continue
+                result_arrivals.pop(key, None)
+            seen[job['id']] = job.get('seq', 0)
             for e in said:
                 if session_id in ENDING:
                     # Being hung up: not said. A result that arrived before the end was chosen was kept out of the chat
@@ -355,6 +393,8 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                 task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
                 material = {'result': '作業「%s」の結果:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
                             'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
+                if e['kind'] == 'result':
+                    material = result_material(job, e)
                 try:
                     from app.services.voice_furigana import annotate
                     material = annotate(material)
@@ -362,7 +402,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                     pass
                 for part in chunks(material):
                     await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-                cue = {'result': '作業から結果が届いた。実際にできたことと未完了のことを区別し、新しく分かった結果を原則1文で伝える。判断に必要な金額・日時・相手・制約は残す。依頼の復唱や、聞かれていない確認のお願い・追加の申し出は足さず、相手に話す番を返す。詳しい説明を求められている時は必要な長さで答える。',
+                cue = {'result': '今渡した結果記録のverified_resultに書かれた事実だけを、原則1文で伝える。直近の依頼・追加条件を混ぜて完了と答えない。結果にない変更の完了は未確認です。判断に必要な金額・日時・相手・制約は残す。依頼の復唱、確認のお願い、追加の申し出は足さず、相手に話す番を返す。詳しい説明を求められている時は必要な長さで答える。',
                        'error': '今の作業で問題が起きた。何が起きて、どうするかを、本人に会話として短く伝える。',
                        'confirmation': '今の作業から本人に確認したいことがある。何を確かめたいかを、会話として短く聞く。'}[e['kind']]
                 await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': cue})
@@ -591,7 +631,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
             if own:
                 from app.services import voice_prefetch
                 if voice_prefetch.enabled(): dialogue.prefetch = voice_prefetch.Prefetch(user_id, record, room_id=room_id)
-                feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat(), session_id))
+                feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat(), session_id, dialogue))
                 working.add(feed); feed.add_done_callback(working.discard)
                 if room_id:   # from now on the room's chat goes to this call, not to a chat Dan
                     from app.services import voice_calls
