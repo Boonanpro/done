@@ -197,7 +197,9 @@ def start():
 
 
 def verify():
-    p = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'verify_dan.py')], cwd=str(ROOT), capture_output=True,
+    args = [sys.executable, str(ROOT / 'scripts' / 'verify_dan.py')]
+    if '--verify-health-only' in sys.argv: args.append('--health-only')
+    p = subprocess.run(args, cwd=str(ROOT), capture_output=True,
                        encoding='utf-8', errors='replace', creationflags=NO_WINDOW)
     return ((p.stdout or '').strip().splitlines() or ['verify_dan.py printed nothing'])[-1][:500]
 
@@ -313,6 +315,7 @@ def hand_over(room, then):
         sys.exit(2)
     cmd = [sys.executable, str(Path(__file__).resolve()), '--when-idle', '--outside', '--room', room, '--then', then,
            '--asked', str(time.time())]
+    if '--verify-health-only' in sys.argv: cmd.append('--verify-health-only')
     mine = ('DAN_SESSION_ID', 'DAN_ROOM_ID', 'DAN_LOCK_OWNER', 'DAN_PROJECT_ID', 'CLAUDECODE')   # the asking turn's, not the check's
     quiet = dict(cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                  env={k: v for k, v in os.environ.items() if k not in mine})
@@ -337,7 +340,7 @@ def option(name, default=''):
 def main():
     valued = ('--room', '--then', '--asked')
     unknown = [a for i, a in enumerate(sys.argv) if i and a.startswith('-') and sys.argv[i - 1] not in valued
-               and a not in ('--force', '--when-idle', '--outside') + valued]
+               and a not in ('--force', '--when-idle', '--outside', '--verify-health-only') + valued]
     if unknown:   # `--help` used to fall through to a restart (Dan tried it first, 2026-10-13)
         print(__doc__)
         sys.exit(2)

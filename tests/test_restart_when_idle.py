@@ -213,3 +213,18 @@ def test_with_release_switching_on_the_shared_core_is_still_restarted_when_idle(
     monkeypatch.setattr(restart.sys, 'argv', ['restart_dan_core.py'])
     monkeypatch.setattr(restart, 'stop', lambda: pytest.fail('stopped the shared core'))
     assert restart.main() is None and switched == ['r1']
+
+
+def test_health_only_mode_survives_handoff_and_verification(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    monkeypatch.setattr(restart.sys, 'argv', ['restart_dan_core.py', '--when-idle', '--verify-health-only'])
+    monkeypatch.setattr(restart, 'loads', lambda: None)
+    spawn = Mock(return_value=SimpleNamespace(pid=123))
+    monkeypatch.setattr(restart.subprocess, 'Popen', spawn)
+    restart.hand_over('room', 'check without jobs')
+    assert '--verify-health-only' in spawn.call_args.args[0]
+    run = Mock(return_value=SimpleNamespace(stdout='PASSED (health only)'))
+    monkeypatch.setattr(restart.subprocess, 'run', run)
+    assert restart.verify() == 'PASSED (health only)'
+    assert '--health-only' in run.call_args.args[0]

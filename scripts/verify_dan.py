@@ -57,13 +57,13 @@ def main():
     from dotenv import load_dotenv
     load_dotenv(ROOT / '.env')
     problems = [f'health {b}' for b in health()]
-    if not problems:
+    if not problems and '--health-only' not in sys.argv:
         failure = asyncio.run(voice_work())
         if failure: problems.append('voice work ' + failure)
     if problems:
         print('FAILED: ' + ' / '.join(problems))
         sys.exit(1)
-    print('PASSED')
+    print('PASSED (health only; work path not tested)' if '--health-only' in sys.argv else 'PASSED')
 
 
 if __name__ == '__main__':
