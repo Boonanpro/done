@@ -62,6 +62,7 @@ def test_new_request_after_completion_is_allowed():
 @pytest.mark.asyncio
 async def test_uncertain_send_is_never_retried():
     i = TurnIntake(0)
+    i.has_work = True
     i.heard('無料にして', 1000)
     sends = []
     async def send(event):
@@ -83,6 +84,7 @@ async def test_native_and_fallback_cannot_edit_twice(monkeypatch, tmp_path):
         return {'accepted': True}
     monkeypatch.setattr('app.services.voice_responses.run_function', run)
     d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.has_work = True
     d.intake.heard('参加費を無料に変えて', 1000)
     d.intake.begin('native', 1100); d.intake.begin('fallback', 1100)
     item = {'name': 'steer_job', 'call_id': 'c', 'arguments': json.dumps({'job_id': 'one', 'instruction': '参加費無料'})}
@@ -98,6 +100,7 @@ async def test_correction_during_settling_prevents_old_mutation(monkeypatch):
     async def run(*a, **kw): calls.append(a); return {}
     monkeypatch.setattr('app.services.voice_responses.run_function', run)
     d = S.Dialogue(); d.intake = TurnIntake(.05)
+    d.intake.has_work = True
     d.intake.heard('送って', 1000); d.intake.begin('old', 1100)
     task = asyncio.create_task(S.execute_call({'name': 'send_message_on_stage', 'call_id': 'c'}, 'u', 'r', d, lambda *a, **kw: None, 'old'))
     await asyncio.sleep(.01)
@@ -113,6 +116,7 @@ async def test_attention_does_not_discard_original_edit(monkeypatch):
     async def run(*a, **kw): calls.append(a); return {'accepted': True}
     monkeypatch.setattr('app.services.voice_responses.run_function', run)
     d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.has_work = True
     d.intake.heard('短くして', 1000); d.intake.begin('first', 1100)
     d.intake.heard('聞いて', 2000); d.intake.heard('る？', 2200)
     out = await S.execute_call({'name': 'start_work', 'call_id': 'c'}, 'u', 'r', d, lambda *a, **kw: None, 'first')
@@ -129,6 +133,7 @@ async def test_stale_status_read_does_not_reserve_mutation_owner(monkeypatch):
     async def run(*a, **kw): return {'work_status': []}
     monkeypatch.setattr('app.services.voice_responses.run_function', run)
     d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.has_work = True
     d.intake.heard('様子は', 1000); d.intake.begin('old', 1100)
     d.intake.heard('無料にして', 2000)
     out = await S.execute_call({'name': 'job_status', 'call_id': 'c'}, 'u', 'r', d, lambda *a, **kw: None, 'old')
@@ -155,3 +160,31 @@ def test_attention_native_cannot_repeat_an_admitted_edit():
     i.heard('聞いてる？', 2000, now=2)
     i.begin('attention', 2100)
     assert i.reject('attention') == 'already_admitted'
+
+
+@pytest.mark.asyncio
+async def test_no_extra_backend_before_a_job_was_accepted():
+    i = TurnIntake(0)
+    i.heard('こんにちは', 1000)
+    sent = []
+    async def send(event): sent.append(event)
+    task = asyncio.create_task(dispatch_missing(i, send, lambda *a, **kw: None))
+    await asyncio.sleep(.25)
+    i.close()
+    await task
+    assert not sent
+
+
+@pytest.mark.asyncio
+async def test_only_confirmed_work_enables_fallback(monkeypatch):
+    async def run(*a, **kw): return {'accepted': False}
+    monkeypatch.setattr('app.services.voice_responses.run_function', run)
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.heard('短くして', 1000); d.intake.begin('first', 1100)
+    item = {'name': 'start_work', 'call_id': 'c'}
+    await S.execute_call(item, 'u', 'r', d, lambda *a, **kw: None, 'first')
+    assert not d.intake.has_work
+    async def success(*a, **kw): return {'accepted': True, 'job_id': 'one'}
+    monkeypatch.setattr('app.services.voice_responses.run_function', success)
+    await S.execute_call(item, 'u', 'r', d, lambda *a, **kw: None, 'first')
+    assert d.intake.has_work and d.intake.owners == {1: 'first'}

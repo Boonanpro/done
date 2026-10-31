@@ -133,7 +133,7 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     except ValueError: args = {}
     reads = {'read_many', 'web_search', 'get_calendar', 'get_location', 'room_files', 'job_status',
              'search_records', 'get_saved_information', 'read_page', 'list_operations'}
-    if dialogue.intake is not None and item.get('name') not in reads:
+    if dialogue.intake is not None and dialogue.intake.has_work and item.get('name') not in reads:
         # Disclosed tools also pass this admission; no mutation allowlist.
         reason = await dialogue.intake.admit(delegation_id)
         if reason:
@@ -158,6 +158,9 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
+    if (dialogue.intake is not None and item.get('name') == 'start_work'
+            and isinstance(output, dict) and output.get('accepted')):
+        dialogue.intake.work_accepted(delegation_id)
     try:   # place names the speech model would misread get their reading (voice_furigana)
         from app.services.voice_furigana import annotate_all
         output = annotate_all(output)
@@ -529,8 +532,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
             async def send(event):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
-            # Opt-in until the real audio/edit trial establishes event association.
-            if own and os.environ.get('DAN_VOICE_TURN_INTAKE') == '1':
+            # Additional requests after an accepted job have a server-owned path.
+            if own and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
                 from app.services.voice_turn_intake import TurnIntake, dispatch_missing
                 dialogue.intake = TurnIntake()
                 intake_task = asyncio.create_task(dispatch_missing(dialogue.intake, send, record))

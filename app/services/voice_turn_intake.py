@@ -23,6 +23,7 @@ class TurnIntake:
         self.reserved_event = None
         self.owners = {}
         self.closed = False
+        self.has_work = False
 
     def heard(self, text, end_ms, now=None):
         if self.closed or not text:
@@ -54,6 +55,12 @@ class TurnIntake:
 
     def finish(self, key):
         self.active.discard(key)
+
+    def work_accepted(self, key):
+        self.has_work = True
+        revision = self.delegations.get(key, 0)
+        if revision:
+            self.owners.setdefault(revision, key)
 
     def attention_only_since(self, revision):
         tail = re.sub(r'[\s、。！？!?]', '', ''.join(self.fragments[revision:]))
@@ -101,6 +108,8 @@ async def dispatch_missing(intake, send, record):
     """Request reasoning once, never retry an uncertain send or API refusal."""
     while not intake.closed:
         await asyncio.sleep(.2)
+        if not intake.has_work:
+            continue
         revision = intake.reserve()
         if revision is None:
             continue
