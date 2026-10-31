@@ -349,7 +349,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                     pass
                 for part in chunks(material):
                     await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-                cue = {'result': '今の作業が終わった。結果を、本人に会話として自分の言葉で伝える（書かれた文を読み上げない。細かい番号などは聞かれたら答える）。',
+                cue = {'result': '作業から結果が届いた。実際にできたことと未完了のことを区別し、新しく分かった結果を原則1文で伝える。判断に必要な金額・日時・相手・制約は残す。依頼の復唱や、聞かれていない確認のお願い・追加の申し出は足さず、相手に話す番を返す。詳しい説明を求められている時は必要な長さで答える。',
                        'error': '今の作業で問題が起きた。何が起きて、どうするかを、本人に会話として短く伝える。',
                        'confirmation': '今の作業から本人に確認したいことがある。何を確かめたいかを、会話として短く聞く。'}[e['kind']]
                 await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': cue})
