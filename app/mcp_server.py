@@ -112,6 +112,15 @@ def tool_time_limit(name: str):
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent | types.ImageContent]:
+    from app.services.browser_operation_lock import operation, BrowserBusy
+    try:
+        async with operation(name):
+            return await _call_tool(name, arguments)
+    except BrowserBusy as exc:
+        return [types.TextContent(type="text", text=str(exc))]
+
+
+async def _call_tool(name: str, arguments: dict):
     """ツールを実行し、結果を MCP コンテンツとして返す"""
     from app.agent.v2.tools import execute_tool, parse_tool_name, format_tool_result, SkillRegistry
     job_id = os.environ.get('DAN_COMMAND_JOB_ID')
@@ -120,6 +129,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         from app.services.browser_script import run
         try: result=await run(job_id,str(arguments.get('code','')))
         except Exception as exc: result={'success':False,'error':str(exc)}
+        from app.services.voice_worker_screen import observe
+        await observe(job_id, 'browser', {'action': 'script'})
         return [types.TextContent(type='text',text=json.dumps(result,ensure_ascii=False))]
     if job_id:
         from app.services.command_job_tools import guard, special
@@ -212,6 +223,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
     if job_id and name=='browser' and formatted.text:
         job_state.change(job_id, lambda s:s.update(last_observation={
             'text':formatted.text[:3500], 'at':job_state.now()}))
+
+    if job_id:
+        from app.services.voice_worker_screen import observe
+        await observe(job_id, name, arguments)
 
     contents: list[types.TextContent | types.ImageContent] = []
 

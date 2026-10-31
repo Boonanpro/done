@@ -247,11 +247,24 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
     utterance, made the speech model say 「うん、もう少し待って」 unprompted (2026-09-22 17:46) or fed it into unrelated
     turns. Before, the phone polled the job list every 1.5s and appended; the phone now carries audio only."""
     from app.services.command_job_state import list_owned, TERMINAL
+    from app.services.voice_stage import for_room
+    from app.services.voice_worker_screen import Follower
+    stage = for_room(room_id)
+    follower = Follower(stage, user_id, room_id, connected_at) if stage else None
     seen = {}
     while True:
         await asyncio.sleep(FEED_SECONDS)
         try: jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         except Exception: continue
+        if follower is None:
+            stage = for_room(room_id)
+            if stage:
+                follower = Follower(stage, user_id, room_id, connected_at)
+        if follower and session_id not in ENDING:
+            try:
+                follower.update(jobs)
+            except Exception:
+                logger.exception('worker screen unavailable room=%s', room_id)
         for job in jobs:
             events = job.get('events') or []
             previous = seen.get(job['id'])
