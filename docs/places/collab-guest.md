@@ -9,8 +9,9 @@ speak: |
   - 招待された人が使うチャットです。相手への連絡は送信許可のある窓口だけで行います。
   - 試験には試験専用の窓口と参加者を使います。
 shows: []
-fingerprint: 206f5f43c68df83d
+fingerprint: 697889e48c0aab4b
 described: b1164a0a9ee558de
+last_review: "2026-10-31 説明は変えない: 添付時の送信ボタンの画面外はみ出しだけを修正。機能と名称は変更なし。"
 ---
 # 招かれた人のチャット
 
@@ -50,5 +51,5 @@ described: b1164a0a9ee558de
 - ラベル: 「送信待ちのメッセージ」、「引用返信をやめる」、「写真・動画・ファイルを添付」、「引用元のメッセージを開く」、「引用して返信」、「添付を外す」、「リアクションを追加」
 - 見出し: 「通知を受け取るには」
 
-<!-- place_map:files {"frontend/src/app/collab/join/[token]/page.tsx": "75ac025cd2", "frontend/src/components/collab/link-preview.tsx": "f229db56d5", "frontend/src/components/collab/pending-attachments.tsx": "cae79861e8", "frontend/src/components/collab/reaction-bar.tsx": "6f0b04f37b", "frontend/src/hooks/useCollabOutbox.ts": "ad174d6a0c", "frontend/src/hooks/usePushNotification.ts": "3b36d00206", "frontend/src/lib/collab-draft.ts": "3ca5c67deb", "frontend/src/lib/collab-identity.ts": "85d0078a7e", "frontend/src/lib/collab-scroll.ts": "e9631b5d10", "frontend/worker/index.js": "decdf56e94"} -->
+<!-- place_map:files {"frontend/src/app/collab/join/[token]/page.tsx": "f9d4a4d5f4", "frontend/src/components/collab/link-preview.tsx": "f229db56d5", "frontend/src/components/collab/pending-attachments.tsx": "cae79861e8", "frontend/src/components/collab/reaction-bar.tsx": "6f0b04f37b", "frontend/src/hooks/useCollabOutbox.ts": "ad174d6a0c", "frontend/src/hooks/usePushNotification.ts": "3b36d00206", "frontend/src/lib/collab-draft.ts": "3ca5c67deb", "frontend/src/lib/collab-identity.ts": "85d0078a7e", "frontend/src/lib/collab-scroll.ts": "e9631b5d10", "frontend/worker/index.js": "decdf56e94"} -->
 <!-- place_map:auto:end -->
