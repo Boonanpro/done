@@ -158,7 +158,7 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
         # Work handoff needs the full call, with the existing size rejection in
         # start_work; approval-sensitive functions still use recent speech.
         context = ([dict(turn) for turn in dialogue.history]
-                   if item.get('name') == 'start_work' else dialogue.recent())
+                   if item.get('name') in {'start_work', 'steer_job'} else dialogue.recent())
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
