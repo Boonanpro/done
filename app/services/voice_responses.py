@@ -44,7 +44,7 @@ INSTRUCTIONS = """あなたはダン。音声通話の判断と実行を受け�
 - 「送って」「それで送って」と言われても、その場では送らない。send_message_on_stage を呼ぶと、まだ承認が聞こえていない時は sent: false と read_back（宛先と要点の読み上げ文）が返るので、その read_back を声でそのまま言って本人の返事を待つ。本人が「いいよ」「送って」「OK」のように答えたら、もう一度 send_message_on_stage を呼ぶ（送るかどうかはサーバーが本人の最後の言葉を見て決める。本人の返事を待たずに続けて2回呼ばない）。「うーん」「ちょっと待って」「まだ」「やめて」のような返事では送らない。送れたら「送りました」とだけ。本人が「やめて」「送らないで」と言ったら discard_message_on_stage。
 - 「X運用室で○○の記事を書いて」「△△のアカウントで投稿を書いて」「台本を書いて」のように、ダンの成果物の中の文書を頼まれたら draft_document_on_stage（kind・題・request に本人の頼みのまま。出せる種類と X のアカウントは返事の kinds にある）。X運用室と台本室には編集アシスタントがあり（kinds の assistant が true）、本文はそのアシスタントがその成果物の書き方のルールで書くので、あなたは本文を書かない。本人の通話画面にはその成果物の本物の画面が開き、アシスタントが書いている様子と、書けた本文が直しの案として載る。直しの頼み（「2段落目を短く」「タイトルを変えて」「画像を入れて」）は revise_document_on_stage の instruction に本人の言葉のまま渡す（直した本文は書かない）。直しの案が出たら、本人の「反映して」「それでいい」は decide_suggestions_on_stage（accept: true）、「戻して」「いらない」は accept: false。書けた・直したは声で本人に届くので、自分では言わない。アシスタントの無い種類だけ、本文を自分で書いて body に入れ、直しは本文全体を書き直して revise_document_on_stage の body に入れる。「投稿して」「公開して」と言われても、その場では投稿しない。publish_document_on_stage を呼ぶと、承認がまだなら published: false と read_back（要点の読み上げ文）が返るので、それを声でそのまま言って本人の返事を待ち、「いいよ」「投稿して」と答えたらもう一度 publish_document_on_stage（投稿するかはサーバーが本人の最後の言葉を見て決める）。
 - 「○○の画像を作って」「絵を描いて」「○○の写真っぽいのを出して」と頼まれたら generate_image_on_stage（prompt は何を描くかを具体的に。本人の言葉に無い物を足さない）。「作っています」が本人の画面に出て、10〜20秒で画像に替わる。「もっと明るく」「背景を青に」のような直しは revise_image_on_stage（instruction にどう直すか）。できた・直したは声で本人に届くので、自分で「できました」と言わない。
-- 作業中の様子を聞かれたら job_status、その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
+- 作業中の様子を聞かれたら job_status（別室ならproject_idを指定）。引数なしではこの部屋から開始した作業だけで、別室の状態は分からない。その作業への指示・やり直し・中止は steer_job。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
 - 入力が既に分かる独立した読み取りは read_many でまとめて同時に実行する。前の結果が必要な読み取りや変更・送信は混ぜない。
@@ -98,7 +98,7 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'},
                                                      'kind': {'type': 'string', 'enum': ['operate', 'make']}},
                     'required': ['task', 'kind'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'job_status', 'description': '今動いている作業の様子（どの画面で何をしているか、結果）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'job_status', 'description': '作業の状態を直接読む。この通話から始めた作業は引数なし。別室の作業は既知のproject_idを指定し、その部屋を起動せず現在の実行状態と記録を読む。', 'parameters': {'type': 'object', 'properties': {'project_id': {'type': 'string', 'description': '確認したい別室のプロジェクトID。room_idではない。'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
      'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'},
                                                     'job_id': {'type': 'string', 'description': '対象の作業の id（省略時は一番新しい作業）'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
@@ -346,15 +346,24 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
                 'note': '作業は始まった（何分かかかることが多い。結果は後で別に届く）。ここまでで分かったことと、何を見に行ったかを本人がまだ知らなければ、一言で返す。無ければ空。'
                         + ('ほかに動いている作業がある。今回の依頼で置き換わった・方針が変わった作業は steer_job の cancel（job_id 指定）で止める。関係ない作業はそのまま。' if others else '')}
     if name == 'job_status':
+        if args.get('project_id'):
+            from app.services.command_center import execute
+            return await execute({'action': 'status', 'project_id': args['project_id']}, room_id, user_id)
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)
-        return parts.work_status(jobs)
+        result = parts.work_status(jobs)
+        result['note'] = result['note'].replace('作業が無ければ「今は何も作業していません」。', '作業が無い時も別室を含めて何もしていないとは判断しない。')
+        result['scope'] = 'この通話の部屋から始めた作業だけ。別室の作業はproject_id付きjob_statusで直接確認する。'
+        return result
     if name == 'steer_job':
         from app.services.command_center import execute
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         active = [s for s in jobs if s['state'] not in ('completed', 'failed', 'cancelled')]
-        if not active: return {'error': '動いている作業はありません。'}
+        if not active: return {'accepted': False, 'error': 'この部屋から始めた作業の中に、動いているものはありません。別室の停止が完了したという意味ではありません。'}
         chosen = next((s for s in active if s['id'] == args.get('job_id')), None)
         if args.get('job_id') and not chosen: return {'error': 'その id の作業は動いていません。', 'running': [s['id'] for s in active]}
+        if not chosen and len(active) > 1:
+            return {'accepted': False, 'error': '対象の作業をjob_idで指定してください。',
+                    'running': [{'id': s['id'], 'task': s.get('task', '')} for s in active]}
         out = await execute({'action': 'control_job', 'job_id': (chosen or active[0])['id'], 'operation': args.get('kind') or 'update', 'task': str(args.get('instruction') or '')}, room_id, user_id)
         job = out.get('job') if isinstance(out, dict) else None
         if not isinstance(job, dict) or not job.get('id'):
