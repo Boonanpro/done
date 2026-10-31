@@ -2,8 +2,6 @@ import path from 'node:path';
 import { backendUrl as resolveBackendUrl } from './src/lib/backend-url';
 
 import type { NextConfig } from 'next';
-import withPWA from 'next-pwa';
-import defaultRuntimeCaching from 'next-pwa/cache';
 
 import { CUSTOM_DOMAIN_REWRITES, CUSTOM_DOMAIN_SLUG_MAP } from './src/lib/custom-domain-rewrites.generated';
 import { publicArtifactRoutingDomains } from './scripts/artifact-routing-config';
@@ -288,18 +286,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-const withPwa = withPWA({
-  dest: process.env.DAN_PWA_DEST || 'public',
-  register: true,
-  skipWaiting: true,
-  runtimeCaching: [
-    // A cached API response can replace newer, identity-scoped offline history
-    // with an older page. The chat owns that fallback in IndexedDB.
-    { urlPattern: /^https?:\/\/[^/]+\/api\/v1\/collab\/(?!files\/)/,
-      handler: 'NetworkOnly', method: 'GET' },
-    ...defaultRuntimeCaching,
-  ],
-  disable: process.env.NODE_ENV === 'development',
-});
-
-export default withPwa(nextConfig);
+export default nextConfig;

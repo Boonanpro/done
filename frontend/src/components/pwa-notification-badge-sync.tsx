@@ -67,6 +67,14 @@ export function PwaNotificationBadgeSync() {
   const pathname = usePathname();
 
   useEffect(() => {
+    if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
+      void navigator.serviceWorker.register('/sw.js').catch(error => {
+        console.error('Service worker registration failed', error);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
     if (!pathname) return;
 
