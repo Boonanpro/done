@@ -9,8 +9,8 @@ speak: |
   - 招待された人が使うチャットです。相手への連絡は送信許可のある窓口だけで行います。
   - 試験には試験専用の窓口と参加者を使います。
 shows: []
-fingerprint: eea52236d4ce459c
-described: e8f8100666e52b74
+fingerprint: 206f5f43c68df83d
+described: b1164a0a9ee558de
 ---
 # 招かれた人のチャット
 
@@ -22,6 +22,7 @@ described: e8f8100666e52b74
 - 日付ごとの会話、既読、引用返信、絵文字の反応、添付ファイル。
 - 書きかけの文章・引用・添付の保持。送信待ちは端末に残り、再接続後に重複せず届きます。
 - 通知を押すと会話へ戻ります。リンクはページの見出し付きで表示します。
+- 通知の初回設定中は「通知を準備しています…」と表示し、完了するまで重ねて押せません。
 - 読み込み済みでない引用元も、過去を読み足して開きます。別の参加者は名前付きで左、自分の発言は右に表示します。
 
 ## 行き方（みきさんから見て）
@@ -49,5 +50,5 @@ described: e8f8100666e52b74
 - ラベル: 「送信待ちのメッセージ」、「引用返信をやめる」、「写真・動画・ファイルを添付」、「引用元のメッセージを開く」、「引用して返信」、「添付を外す」、「リアクションを追加」
 - 見出し: 「通知を受け取るには」
 
-<!-- place_map:files {"frontend/src/app/collab/join/[token]/page.tsx": "5a4d10bf47", "frontend/src/components/collab/link-preview.tsx": "f229db56d5", "frontend/src/components/collab/pending-attachments.tsx": "cae79861e8", "frontend/src/components/collab/reaction-bar.tsx": "6f0b04f37b", "frontend/src/hooks/useCollabOutbox.ts": "ad174d6a0c", "frontend/src/hooks/usePushNotification.ts": "9693773481", "frontend/src/lib/collab-draft.ts": "3ca5c67deb", "frontend/src/lib/collab-identity.ts": "85d0078a7e", "frontend/src/lib/collab-scroll.ts": "e9631b5d10", "frontend/worker/index.js": "decdf56e94"} -->
+<!-- place_map:files {"frontend/src/app/collab/join/[token]/page.tsx": "75ac025cd2", "frontend/src/components/collab/link-preview.tsx": "f229db56d5", "frontend/src/components/collab/pending-attachments.tsx": "cae79861e8", "frontend/src/components/collab/reaction-bar.tsx": "6f0b04f37b", "frontend/src/hooks/useCollabOutbox.ts": "ad174d6a0c", "frontend/src/hooks/usePushNotification.ts": "3b36d00206", "frontend/src/lib/collab-draft.ts": "3ca5c67deb", "frontend/src/lib/collab-identity.ts": "85d0078a7e", "frontend/src/lib/collab-scroll.ts": "e9631b5d10", "frontend/worker/index.js": "decdf56e94"} -->
 <!-- place_map:auto:end -->
