@@ -85,6 +85,22 @@ async def call_screen_image(room_id: str, filename: str, request: Request):
     return FileResponse(path,headers={'Cache-Control':'private, no-store'})
 
 
+class StageViewport(BaseModel):
+    session_id: str = Field(max_length=100)
+    client_id: str = Field(min_length=1, max_length=100)
+    width: int = Field(ge=240, le=2560)
+    height: int = Field(ge=240, le=2560)
+
+
+@router.post('/stage/{room_id}/viewport')
+async def call_viewport(room_id: str, request: Request, viewport: StageViewport):
+    from app.services import voice_stage, voice_viewport
+    user = _get_user(request)
+    if not await ChatService().get_room(room_id, user.user_id):
+        raise HTTPException(status_code=403, detail='No access to this room')
+    return {'accepted': voice_viewport.accept(room_id, voice_stage.read_state(room_id), viewport.model_dump())}
+
+
 class ScreenControl(BaseModel):
     id: str = Field(max_length=80)
     name: str = Field(max_length=160)

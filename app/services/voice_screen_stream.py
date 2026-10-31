@@ -68,6 +68,8 @@ class BrowserStream:
 
     async def start(self, page):
         self.page = page
+        from .voice_viewport import fit
+        await fit(page, self.room)
         self.cdp = await page.context.new_cdp_session(page)
         self.cdp.on('Page.screencastFrame', self.on_frame)
         await self.cdp.send('Page.startScreencast', {'format':'jpeg','quality':75,'maxWidth':1440,'maxHeight':1200,'everyNthFrame':1})

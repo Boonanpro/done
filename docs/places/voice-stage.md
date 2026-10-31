@@ -11,9 +11,9 @@ speak: |
   - 通話中は、成果物の本物の画面、番号や選択肢の大きな札、説明の図が出る。
   - 成果物の操作先を声で指定すると、画面のボタンや欄を光らせて操作する。送信などは読み上げと本人の承認を待つ。
   - 外のブラウザやスマホは操作している実画面の写真。操作ごとに更新するが、写真を指で押して操作するものではない。
-fingerprint: eb576cd33cf43261
+fingerprint: a6e1a24d111a7717
 described: da83d1da81fba8da
-last_review: "2026-10-30 説明は変えない: 古い画面の操作を拒否する条件を強化。説明済みの見え方は同じ"
+last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを画面の幅に合わせる表示修正。操作方法は同じ。"
 ---
 # 通話中の画面
 
@@ -52,5 +52,5 @@ last_review: "2026-10-30 説明は変えない: 古い画面の操作を拒否�
 
 - 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/voice-stage.tsx`
 
-<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "6c7952f98d", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/voice-stage.tsx": "1afc381621"} -->
+<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/voice-stage.tsx": "396afcf6e9"} -->
 <!-- place_map:auto:end -->
