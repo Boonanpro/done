@@ -34,3 +34,39 @@ def test_assembled_session_has_consistent_conversation_policy(monkeypatch):
     assert '返事を空にする' not in backend
     assert 'search/read/status' in backend
     assert '共通の指示' in backend
+
+@pytest.mark.asyncio
+async def test_other_room_status_reads_directly_without_starting_work(monkeypatch):
+    execute = AsyncMock(return_value={'run': {'id': 'target-run', 'state': 'running'}})
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    result = await voice_responses.run_function('job_status', {'project_id': 'target-project'}, 'owner', 'call-room', [])
+    assert result['run']['id'] == 'target-run'
+    execute.assert_awaited_once_with({'action': 'status', 'project_id': 'target-project'}, 'call-room', 'owner')
+
+@pytest.mark.asyncio
+async def test_other_room_status_preserves_access_failure(monkeypatch):
+    execute = AsyncMock(side_effect=ValueError('アクセス権がありません'))
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    with pytest.raises(ValueError, match='アクセス権'):
+        await voice_responses.run_function('job_status', {'project_id': 'not-owned'}, 'owner', 'call-room', [])
+    assert execute.await_count == 1
+
+@pytest.mark.asyncio
+async def test_stop_does_not_guess_between_two_jobs(monkeypatch):
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda *a: [
+        {'id': 'article', 'state': 'running'}, {'id': 'video', 'state': 'running'}])
+    execute = AsyncMock()
+    monkeypatch.setattr('app.services.command_center.execute', execute)
+    result = await voice_responses.run_function('steer_job', {'kind': 'cancel'}, 'owner', 'room', [])
+    assert result['accepted'] is False
+    execute.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_empty_local_jobs_does_not_claim_other_room_stopped(monkeypatch):
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda *a: [])
+    result = await voice_responses.run_function('steer_job', {'kind': 'cancel'}, 'owner', 'room', [])
+    assert result['accepted'] is False
+    assert '別室の停止が完了したという意味ではありません' in result['error']
+    result = await voice_responses.run_function('job_status', {}, 'owner', 'room', [])
+    assert 'この通話の部屋' in result['scope']
+    assert '今は何も作業していません' not in result['note']
