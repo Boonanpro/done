@@ -116,7 +116,7 @@ class BrowserStream:
 
 async def follow_browser(state, page):
     """Called inside the existing browser executor; never launch another browser."""
-    if os.environ.get('DAN_TOOL_HOST') != '1' or not os.environ.get('DAN_SESSION_ID'):
+    if not (os.environ.get('DAN_TOOL_HOST') == '1' or os.environ.get('DAN_COMMAND_JOB_ID')) or not os.environ.get('DAN_SESSION_ID'):
         return
     previous = state.get('voice_stream')
     if previous and previous.page is page and not previous.closed:

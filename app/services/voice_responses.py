@@ -94,7 +94,7 @@ TOOLS = [
     {'type': 'function', 'name': 'room_files', 'description': 'この部屋でこれまでに出た・作ったファイルの一覧（新しい順。名前・種類・日時・何の資料か）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'open_on_pc', 'description': 'このパソコンで、サイトやアプリを開く・起動する（開くだけ）。',
      'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（複数手順のもの）。結果は後で別に届く。kind=operate: ブラウザやサイトの手続き・確認・調べもの（ログインして確認する、送信する、登録する、予約する）。kind=make: ページ・動画・画像・資料・プログラムを作る・直すような重い制作（チャットのダンと同じ器で、部屋の記憶を持って作る）。',
+    {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（複数手順のもの）。結果は後で別に届く。kind=operate: ブラウザやサイトの手続き・確認・調べもの（ログインして確認する、送信する、登録する、予約する）。kind=make: 記事・台本・文章の執筆や修正、ページ・動画・画像・資料・プログラムを作る・直す制作（保存済み記事を読み、別の下書きへ書き直す依頼もmake）（チャットのダンと同じ器で、部屋の記憶を持って作る）。',
      'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'},
                                                      'kind': {'type': 'string', 'enum': ['operate', 'make']}},
                     'required': ['task', 'kind'], 'additionalProperties': False}},

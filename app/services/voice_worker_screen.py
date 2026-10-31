@@ -34,8 +34,12 @@ class Follower:
     def update(self, jobs):
         from app.services.voice_stage import safe_image
         stage = self.stage
-        if stage.user_id != self.user_id or stage.version != self.version:
-            return  # A newer scene wins, including explicit direct voice operations.
+        if stage.user_id != self.user_id:
+            return
+        if stage.version != self.version:
+            if self.seen or any(getattr(stage, field, None) for field in ('image','frame','program','html','card','doc','media','cue')):
+                return  # A newer visible scene wins; an initial caption is not a scene.
+            self.version = stage.version
         candidates = [j for j in jobs if j.get('user_id') == self.user_id
                       and j.get('origin_room_id') == self.room_id
                       and j.get('state') in {'running', 'awaiting_confirmation', 'completed'}

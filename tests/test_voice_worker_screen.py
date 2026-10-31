@@ -65,3 +65,9 @@ async def test_observe_uses_worker_executor_and_never_retries_operation(monkeypa
     assert calls==['voice_stream_url'] and row['screen']['browser_room']=='worker'
     await observe('j','browser',{'action':'session_status'})
     assert len(calls)==1
+
+def test_initial_caption_does_not_block_first_worker_screen():
+    stage=Stage();f=Follower(stage,'u','r','2026-10-31T07:00:00')
+    stage.version+=1
+    f.update([job()])
+    assert stage.image.endswith('actual.png')

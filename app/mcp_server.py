@@ -112,6 +112,15 @@ def tool_time_limit(name: str):
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent | types.ImageContent]:
+    from app.services.browser_operation_lock import operation, BrowserBusy
+    try:
+        async with operation(name):
+            return await _call_tool(name, arguments)
+    except BrowserBusy as exc:
+        return [types.TextContent(type="text", text=str(exc))]
+
+
+async def _call_tool(name: str, arguments: dict):
     """ツールを実行し、結果を MCP コンテンツとして返す"""
     from app.agent.v2.tools import execute_tool, parse_tool_name, format_tool_result, SkillRegistry
     job_id = os.environ.get('DAN_COMMAND_JOB_ID')

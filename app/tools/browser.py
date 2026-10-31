@@ -1030,6 +1030,11 @@ async def _run_page_command(pages_state: dict, context, cmd: str, args: dict):
     from app.services.voice_screen_stream import follow_browser, current_url
     await follow_browser(pages_state, page)
     if cmd == "voice_stream_url":
+        # CDP delivers the first frame asynchronously, even after startScreencast.
+        for _ in range(20):
+            if current_url(pages_state):
+                break
+            await asyncio.sleep(.05)
         return current_url(pages_state)
 
     if cmd == "window_info":
