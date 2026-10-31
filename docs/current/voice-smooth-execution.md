@@ -28,3 +28,10 @@ Implemented, still not shipped:
 - Android UI harness --phone failed once before static-frame seeding, returning still PNG. During follow-up observation phone showed pornblock app rather than expected Settings; do not assume exclusive device ownership or turn this into evidence of Settings scrolling. No settings/security changes made. No calls made.
 
 Next: verify Android actual UI and gesture continuity while dev S24 is available, exercise phone static seeding/lifecycle failure tests, run full combined suite and TypeScript with artifact fixture, review and grouped ship + production verification. Audio-through-execution evidence remains absent; no calls may be initiated without explicit authorization. scripts/check_voice_live_screen.py now accepts --phone; test ports3017/8017. No public publication yet. Tests call real fixed scroll helper without ASR/Live.
+
+## Continuation: Android screen proof and release checks
+- Actual development S24 Settings screen verified before navigation; no other recorder process was present. Opened Settings, returned from update details without changing settings, and scrolled the Settings list.
+- Actual Android -> API -> React harness passed: 32 frames during scroll, 1.09 seconds for tool completion (NOT speech latency). Screenshot phone-ui-after.png shows Settings; recording d2957f2b91bd527521183d11219eaef3.webm is uncut and has no speech.
+- Worker lifecycle checks now cover parent exit, expired viewer, decoder exit, owned child cleanup, frame cleanup and no retry on encoder failure.
+- Combined relevant Python suite: 48 passed. TypeScript passed with a local ignored sitemap type fixture for deployment-owned denki-knowledge; frame parser checks passed.
+- Remaining: production release/runtime verification and real speech-through-execution evidence. No test call authorized or placed.
