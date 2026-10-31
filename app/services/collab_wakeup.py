@@ -110,14 +110,11 @@ async def _waiter(collab_room_id: str) -> None:
                 logger.info("[collab-wake] firing origin=%s collab=%s batch=%d",
                             origin_room_id[:8], collab_room_id[:8], len(batch))
                 try:
-                    async for _ev in process_message_cli(
-                        room_id=origin_room_id,
-                        user_id=room["owner_id"],
-                        content=prompt,
-                        project_id=project_id,
-                        run_id=None,
-                    ):
-                        pass
+                    from app.services.work_continuity import execute, key_for
+                    event_key = ":".join(str(m.get("id") or m.get("created_at")) for m in batch)
+                    await execute(key=key_for("collab:" + collab_room_id, origin_room_id, event_key),
+                        room_id=origin_room_id, user_id=room["owner_id"], prompt=prompt,
+                        project_id=project_id, source="collab")
                     await _mark_handled(svc, room, batch)
                 except Exception:
                     logger.exception("[collab-wake] turn failed collab=%s", collab_room_id)

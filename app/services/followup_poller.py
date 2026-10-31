@@ -210,7 +210,11 @@ async def _fire_at(row: Dict[str, Any]) -> None:
     prompt = _SYNTH_PROMPT.format(note=note) + (_RETRY_NOTE if spec.get("empty_wakes") else "")
     landed = False
     try:
-        _, landed = await _wake_turn(row["room_id"], row.get("user_id") or "", prompt)
+        from app.services.work_continuity import execute, key_for
+        _, landed = await execute(key=key_for("followup", row["room_id"], row["id"]),
+            room_id=row["room_id"], user_id=row.get("user_id") or "", prompt=prompt, source="followup")
+        # Work is durable even if this turn did not run. The work dispatcher owns retries.
+        landed = True
         if await _discard_no_change_report(row["room_id"], wake_start_iso):
             logger.info("[watch] at no-change (silent) room=%s", row["room_id"][:8])
     except Exception as e:  # noqa: BLE001
@@ -441,6 +445,8 @@ async def _tick() -> None:
     from app.services.command_job_runner import dispatch_pending
 
     await dispatch_pending()
+    from app.services.work_continuity import dispatch as dispatch_work
+    await dispatch_work()
 
     rows = await asyncio.to_thread(claim_due_followups, MAX_PER_CYCLE)
     for row in rows:
