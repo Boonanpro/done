@@ -532,6 +532,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
             async def send(event):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
+            from app.services.voice_interruption import Interruption
+            interruption = Interruption() if own and os.environ.get('DAN_VOICE_INTERRUPTION', '1') != '0' else None
             # Additional requests after an accepted job have a server-owned path.
             if own and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
                 from app.services.voice_turn_intake import TurnIntake, dispatch_missing
@@ -583,6 +585,12 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     now = time.monotonic()
                     if now - spoke.get(side, 0) > 1.5: record('speech_start', side=side, at_s=round(now - started, 2))
                     spoke[side] = now
+                if interruption is not None:
+                    try:
+                        await interruption.handle(event, send, record)
+                    except Exception as exc:
+                        record('conversation_yield_failed', error_type=type(exc).__name__)
+                        interruption = None  # no retry of an uncertain send; preserve the call
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
                 if kind == 'session.input_transcript.delta':
                     dialogue.add('user', event.get('delta') or '')
