@@ -26,3 +26,13 @@ PR763/main0c65fc52、release0c65fc527268-c23a15（9228/8228）へ新規依頼を
 追加の修正をまだ実行していないのに音声だけで反映済みと言うことが、残る具体的な不具合。今回は完了扱いにしない。別室stop_runは経路・実子プロセス試験までで、実音声選択の証拠ではない。停止発話の時には制作が終わっていたため、この2回目を停止成功の証拠にも使わない。
 
 `voice_responses`のrevision受取時の説明を、成果反映完了から作業への配達に変更して保存したが、この文言だけの変更はまだ公開していない。次の本質的な修正とまとめる。
+
+## 発話と実行の単一受付（試験中、通常通話では無効）
+
+`voice_turn_intake.py` と sideband の `DAN_VOICE_TURN_INTAKE=1` で試験する。無言1.5秒は、指示の完結や承認と判断する条件ではなく、既存 Responses に会話の判断を依頼する契機だけ。変更は既存の道具と承認条件を通す。native の delegation.offset_ms と入力文字列の end_ms、手動 response.create の client_event_id により、どの発話を受けた判断かを固定する。同じ発話の操作は一つの delegation が所有し、遅い別の判断による操作は拒否。未知の時刻・訂正前の操作も拒否。読み取りはこの所有権を取らず、既存の権限確認を通す。外部送信承認を作り出す処理はない。
+
+公式仕様: https://developers.openai.com/api/docs/guides/live-delegation と https://developers.openai.com/api/reference/resources/live/primary-websocket （2026-11-01確認）。response.create は session に設定済みのバックエンドを開始・継続できる。transcript.delta は発話の断片であり完結した依頼ではない。
+
+1回目 `.tmp/voice-intake-proof` では500円から無料に実ファイルが変わったが、呼びかけで初回 start_work を古いと拒否し、無料条件の後に初めて制作が開始された。途中の追加入力成功の証拠にはしない。job 0c517392-1de5-4dc8-b40b-9c0d9886ade0 は停止でcancelled/revision1。追加の修正では、全体が明示的な「聞いてる？」等だけの発話は元の依頼を失効させず、同じ依頼の再実行も防ぐ。それ以外の未知の割り込みは保守的に再判断する。
+
+関連40試験合格。より広いtest_voice_earlyでは1件（通話後の図の記録）が失敗したが、変更前HEADのvoice_sidebandを読み直した同じ試験でも失敗することを確認。今回この別件は修正していない。
