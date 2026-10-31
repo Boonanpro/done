@@ -869,7 +869,7 @@ export default function GuestJoinPage() {
         >
           <Bot className="h-4 w-4" />
         </Button>
-        <div className="flex-1 relative">
+        <div className="min-w-0 flex-1 relative">
           <PendingAttachments files={pendingFiles} onRemove={(i) => setPendingFiles((p) => p.filter((_, j) => j !== i))} />
           {danMode && (
             <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] text-violet-400 font-medium pointer-events-none">
