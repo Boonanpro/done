@@ -87,3 +87,17 @@ async def test_completed_non_edit_does_not_start_work(parent, monkeypatch, opera
     assert not out.get('accepted')
     wake.assert_not_awaited()
     assert len(list(state.ROOT.glob('*.json'))) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('claimed',[False, True])
+async def test_wake_timeout_never_replays_or_fails_claimed_job(parent, monkeypatch, claimed):
+    from app.services import command_center
+    from app.services.voice_job_followup import continue_completed
+    async def wake(key):
+        if claimed: state.change(key,lambda s:s.update(accepted_at=state.now()))
+        raise TimeoutError()
+    monkeypatch.setattr(command_center,'_wake_job',wake)
+    out = await continue_completed(parent,'owner','room','Make it free.',[])
+    assert out['accepted'] == claimed
+    assert out['state'] == ('queued' if claimed else 'failed')
+    assert len(list(state.ROOT.glob('*.json'))) == 2

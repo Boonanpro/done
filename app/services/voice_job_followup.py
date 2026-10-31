@@ -52,7 +52,16 @@ async def continue_completed(job_id, user_id, room_id, instruction, dialogue):
     from app.services.command_center import _wake_job
     job = await asyncio.to_thread(prepare, job_id, user_id, room_id, instruction, dialogue)
     if job['state'] == 'queued' and not job.get('accepted_at'):
-        await _wake_job(job['id'])
+        try:
+            await _wake_job(job['id'])
+        except Exception:
+            # A timed-out wake may have been accepted. Close only an unclaimed
+            # queue item so a reported failure cannot silently start later.
+            def reject(s):
+                if s['state'] == 'queued' and not s.get('accepted_at'):
+                    s.update(state='failed', error='追加変更の受付を確認できませんでした')
+                    state.event(s, 'error', s['error'])
+            await asyncio.to_thread(state.change, job['id'], reject)
         job = state.owned(job['id'], user_id, room_id)
     return {'accepted': job['state'] not in {'failed', 'cancelled'}, 'delivered': False,
             'job_id': job['id'], 'previous_job_id': job_id, 'state': job['state'],
