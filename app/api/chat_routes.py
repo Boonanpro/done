@@ -4003,6 +4003,8 @@ async def cancel_dan_session(
                 _active_turn = getattr(_sess, "_turn", None) if _sess.is_turn_active() else None
     except Exception:
         pass
+    from app.services.work_continuity import cancel_room
+    await asyncio.to_thread(cancel_room, request.session_id, current_user.user_id)
     success = CancellationRegistry.cancel(request.session_id)
     # 「次に始まるターンを殺す予約」は、実際に送信を取り消している場合
     # （取消対象メッセージIDあり）のみ許可。空撃ちキャンセルでの武装は

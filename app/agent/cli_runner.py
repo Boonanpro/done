@@ -370,6 +370,7 @@ def _build_room_state_context(
     event_limit: int = 16,
     run_limit: int = 3,
     with_place: bool = True,
+    with_work: bool = True,
 ) -> str:
     """Build a small authoritative room state from DB.
 
@@ -483,6 +484,9 @@ def _build_room_state_context(
         tail_budget = max(0, max_chars - len(head))
         body = head + body[-tail_budget:]
     place = _place_block(room_id, project_id, sb) if with_place else ""
+    from app.services.work_continuity import context as work_context
+    if with_work:
+        body += work_context(room_id)
     return (place + "\n" + body) if place else body
 
 
@@ -592,6 +596,7 @@ def _build_reseed_context(
         event_limit=24,
         run_limit=5,
         with_place=False,
+        with_work=False,
     )
 
     chat_lines = []
@@ -637,6 +642,7 @@ def _build_reseed_context(
     if len(body) > max_chars:
         body = body[-max_chars:]
     place = _place_block(room_id, project_id, sb)
+    from app.services.work_continuity import context as work_context
     return (
         (place + "\n" if place else "")
         + "<conversation_so_far>\n"
@@ -645,6 +651,7 @@ def _build_reseed_context(
         "state and avoid replaying old work.\n\n"
         f"{body}\n"
         "</conversation_so_far>"
+        + work_context(room_id)
     )
 
 

@@ -198,40 +198,11 @@ def _fallback_proposal(detected_message: Dict[str, Any], room_id: str, reason: s
 
 
 async def _wake_task(detected_message: Dict[str, Any], room_id: str, reason: str) -> None:
-    # followup_poller と同じ busy 判定/プロジェクト解決を使う（規律を揃える）
-    from app.services.followup_poller import _resolve_project_id, _room_busy
-
-    waited = 0
-    while _room_busy(room_id):
-        if waited >= BUSY_MAX_WAIT:
-            logger.warning("[inbound-wake] room=%s busy for %ss, falling back to proposal", room_id[:8], waited)
-            await asyncio.to_thread(_fallback_proposal, detected_message, room_id, reason)
-            return
-        await asyncio.sleep(BUSY_RETRY_INTERVAL)
-        waited += BUSY_RETRY_INTERVAL
-
-    from app.agent.cli_runner import process_message_cli
-
-    prompt = _build_prompt(detected_message, reason)
-    user_id = detected_message.get("user_id") or ""
-    project_id = _resolve_project_id(room_id)
-    logger.info("[inbound-wake] firing room=%s msg=%s reason=%s", room_id[:8], detected_message.get("id"), reason)
-    try:
-        async for _ev in process_message_cli(
-            room_id=room_id,
-            user_id=user_id,
-            content=prompt,
-            project_id=project_id,
-            run_id=None,
-            answer_shapes=True,   # the report lands in the room's chat screen
-        ):
-            pass  # sink が報告を保存する。ここではターン完走を駆動するだけ
-    except Exception:
-        logger.exception("[inbound-wake] turn failed room=%s msg=%s", room_id, detected_message.get("id"))
-        try:
-            await asyncio.to_thread(_fallback_proposal, detected_message, room_id, reason)
-        except Exception:
-            logger.exception("[inbound-wake] fallback proposal also failed msg=%s", detected_message.get("id"))
+    from app.services.work_continuity import execute, key_for
+    key = key_for("inbound:" + str(detected_message.get("source") or ""), room_id, detected_message.get("id") or
+                  detected_message.get("source_id") or _build_prompt(detected_message, reason))
+    await execute(key=key, room_id=room_id, user_id=detected_message["user_id"],
+                  prompt=_build_prompt(detected_message, reason), source="inbound")
 
 
 def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reason: str) -> bool:
@@ -246,6 +217,10 @@ def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reas
     except RuntimeError:
         logger.warning("[inbound-wake] no running loop; cannot schedule wake for msg=%s", detected_message.get("id"))
         return False
+    from app.services.work_continuity import enqueue, key_for
+    prompt = _build_prompt(detected_message, reason)
+    key = key_for("inbound:" + str(detected_message.get("source") or ""), room_id, detected_message.get("id") or detected_message.get("source_id") or prompt)
+    enqueue(key=key, room_id=room_id, user_id=detected_message["user_id"], source="inbound", prompt=prompt)
     task = loop.create_task(_wake_task(detected_message, room_id, reason))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
