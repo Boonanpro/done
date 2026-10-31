@@ -7,6 +7,8 @@ description: "Finish existing footage: reframe, captions, audio, grade, redactio
 
 Finish videos after capture or generation. Prefer deterministic tools for exact changes and AI generation only when missing visual content must be invented.
 
+For presenter-led explainers, educational sales videos and LINE gift videos with real demos, also use `../talking-demo-editing/SKILL.md` for speech cleanup, demo readability and scene-boundary review. It contains project-specific references only for the matching project.
+
 ## Editing Policy
 
 Treat editing as preserving the user's intended message, not simply shortening the footage.

@@ -1,0 +1,45 @@
+{
+  "expectations": [
+    {
+      "text": "ASRの正規化で反復が欠落することを説明する",
+      "passed": true,
+      "evidence": "case1 diagnosis explicitly names ASR normalization"
+    },
+    {
+      "text": "再ASRを実聴・全編合格と呼ばない",
+      "passed": true,
+      "evidence": "case1 after_asr_rerun_claim limits claim to transcription, not listening"
+    },
+    {
+      "text": "納品時刻と素材時刻を区別する",
+      "passed": true,
+      "evidence": "case1 maps delivery 1:48 to source and checks ASR time origin"
+    },
+    {
+      "text": "指定X実演をFANZAで代用しない",
+      "passed": true,
+      "evidence": "case2 demo_revision removes FANZA substitute"
+    },
+    {
+      "text": "読める操作と結果の最終表示時間を設計する",
+      "passed": true,
+      "evidence": "case2 measures final timeline, 3s/2s initial guide, not fixed per click"
+    },
+    {
+      "text": "半透明の背景表現と不透明の端末を区別する",
+      "passed": true,
+      "evidence": "case2 visual_revision separates transparent theme and opaque device/logo layers"
+    },
+    {
+      "text": "画角を維持し不要な枠を除く",
+      "passed": true,
+      "evidence": "case2 keeps stable crop and removes stale frames"
+    }
+  ],
+  "summary": {
+    "passed": 7,
+    "failed": 0,
+    "total": 7,
+    "pass_rate": 1.0
+  }
+}

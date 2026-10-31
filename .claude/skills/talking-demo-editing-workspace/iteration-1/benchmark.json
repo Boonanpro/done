@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "skill_name": "talking-demo-editing",
+    "skill_path": "<path/to/skill>",
+    "executor_model": "<model-name>",
+    "analyzer_model": "<model-name>",
+    "timestamp": "2026-10-31T02:24:15Z",
+    "evals_run": [
+      1
+    ],
+    "runs_per_configuration": 3
+  },
+  "runs": [
+    {
+      "eval_id": 1,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 7,
+        "failed": 0,
+        "total": 7,
+        "time_seconds": 0.0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "ASR\u306e\u6b63\u898f\u5316\u3067\u53cd\u5fa9\u304c\u6b20\u843d\u3059\u308b\u3053\u3068\u3092\u8aac\u660e\u3059\u308b",
+          "passed": true,
+          "evidence": "case1 diagnosis explicitly names ASR normalization"
+        },
+        {
+          "text": "\u518dASR\u3092\u5b9f\u8074\u30fb\u5168\u7de8\u5408\u683c\u3068\u547c\u3070\u306a\u3044",
+          "passed": true,
+          "evidence": "case1 after_asr_rerun_claim limits claim to transcription, not listening"
+        },
+        {
+          "text": "\u7d0d\u54c1\u6642\u523b\u3068\u7d20\u6750\u6642\u523b\u3092\u533a\u5225\u3059\u308b",
+          "passed": true,
+          "evidence": "case1 maps delivery 1:48 to source and checks ASR time origin"
+        },
+        {
+          "text": "\u6307\u5b9aX\u5b9f\u6f14\u3092FANZA\u3067\u4ee3\u7528\u3057\u306a\u3044",
+          "passed": true,
+          "evidence": "case2 demo_revision removes FANZA substitute"
+        },
+        {
+          "text": "\u8aad\u3081\u308b\u64cd\u4f5c\u3068\u7d50\u679c\u306e\u6700\u7d42\u8868\u793a\u6642\u9593\u3092\u8a2d\u8a08\u3059\u308b",
+          "passed": true,
+          "evidence": "case2 measures final timeline, 3s/2s initial guide, not fixed per click"
+        },
+        {
+          "text": "\u534a\u900f\u660e\u306e\u80cc\u666f\u8868\u73fe\u3068\u4e0d\u900f\u660e\u306e\u7aef\u672b\u3092\u533a\u5225\u3059\u308b",
+          "passed": true,
+          "evidence": "case2 visual_revision separates transparent theme and opaque device/logo layers"
+        },
+        {
+          "text": "\u753b\u89d2\u3092\u7dad\u6301\u3057\u4e0d\u8981\u306a\u67a0\u3092\u9664\u304f",
+          "passed": true,
+          "evidence": "case2 keeps stable crop and removes stale frames"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 1,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 7,
+        "failed": 0,
+        "total": 7,
+        "time_seconds": 0.0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "ASR\u306e\u6b63\u898f\u5316\u3067\u53cd\u5fa9\u304c\u6b20\u843d\u3059\u308b\u3053\u3068\u3092\u8aac\u660e\u3059\u308b",
+          "passed": true,
+          "evidence": "case1 says transcript can omit stutters"
+        },
+        {
+          "text": "\u518dASR\u3092\u5b9f\u8074\u30fb\u5168\u7de8\u5408\u683c\u3068\u547c\u3070\u306a\u3044",
+          "passed": true,
+          "evidence": "case1 only claims ASR output, audible QC incomplete"
+        },
+        {
+          "text": "\u7d0d\u54c1\u6642\u523b\u3068\u7d20\u6750\u6642\u523b\u3092\u533a\u5225\u3059\u308b",
+          "passed": true,
+          "evidence": "case1 identifies exact delivered file and compares audio/edit mapping"
+        },
+        {
+          "text": "\u6307\u5b9aX\u5b9f\u6f14\u3092FANZA\u3067\u4ee3\u7528\u3057\u306a\u3044",
+          "passed": true,
+          "evidence": "case2 removes FANZA substitute"
+        },
+        {
+          "text": "\u8aad\u3081\u308b\u64cd\u4f5c\u3068\u7d50\u679c\u306e\u6700\u7d42\u8868\u793a\u6642\u9593\u3092\u8a2d\u8a08\u3059\u308b",
+          "passed": true,
+          "evidence": "case2 gives readable hold and normal speed review"
+        },
+        {
+          "text": "\u534a\u900f\u660e\u306e\u80cc\u666f\u8868\u73fe\u3068\u4e0d\u900f\u660e\u306e\u7aef\u672b\u3092\u533a\u5225\u3059\u308b",
+          "passed": true,
+          "evidence": "case2 keeps phones opaque but incorrectly interprets composited stills as tracked in-scene devices"
+        },
+        {
+          "text": "\u753b\u89d2\u3092\u7dad\u6301\u3057\u4e0d\u8981\u306a\u67a0\u3092\u9664\u304f",
+          "passed": true,
+          "evidence": "case2 keeps steady crop and removes yellow frames"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "tokens": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "tokens": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    "delta": {
+      "pass_rate": "+0.00",
+      "time_seconds": "+0.0",
+      "tokens": "+0"
+    }
+  },
+  "notes": []
+}
