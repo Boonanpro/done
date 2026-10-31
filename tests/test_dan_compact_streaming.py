@@ -106,7 +106,7 @@ class _FakeSession:
     def stop(self):
         self.stopped = True
 
-    def run_turn(self, content, sink, timeout=600.0):
+    def run_turn(self, content, sink, timeout=600.0, run_id=None):
         self.sent.append(content)
         res = None
         for ev in self.events:

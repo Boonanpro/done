@@ -44,7 +44,7 @@ INSTRUCTIONS = """あなたはダン。音声通話の判断と実行を受け�
 - 「送って」「それで送って」と言われても、その場では送らない。send_message_on_stage を呼ぶと、まだ承認が聞こえていない時は sent: false と read_back（宛先と要点の読み上げ文）が返るので、その read_back を声でそのまま言って本人の返事を待つ。本人が「いいよ」「送って」「OK」のように答えたら、もう一度 send_message_on_stage を呼ぶ（送るかどうかはサーバーが本人の最後の言葉を見て決める。本人の返事を待たずに続けて2回呼ばない）。「うーん」「ちょっと待って」「まだ」「やめて」のような返事では送らない。送れたら「送りました」とだけ。本人が「やめて」「送らないで」と言ったら discard_message_on_stage。
 - 「X運用室で○○の記事を書いて」「△△のアカウントで投稿を書いて」「台本を書いて」のように、ダンの成果物の中の文書を頼まれたら draft_document_on_stage（kind・題・request に本人の頼みのまま。出せる種類と X のアカウントは返事の kinds にある）。X運用室と台本室には編集アシスタントがあり（kinds の assistant が true）、本文はそのアシスタントがその成果物の書き方のルールで書くので、あなたは本文を書かない。本人の通話画面にはその成果物の本物の画面が開き、アシスタントが書いている様子と、書けた本文が直しの案として載る。直しの頼み（「2段落目を短く」「タイトルを変えて」「画像を入れて」）は revise_document_on_stage の instruction に本人の言葉のまま渡す（直した本文は書かない）。直しの案が出たら、本人の「反映して」「それでいい」は decide_suggestions_on_stage（accept: true）、「戻して」「いらない」は accept: false。書けた・直したは声で本人に届くので、自分では言わない。アシスタントの無い種類だけ、本文を自分で書いて body に入れ、直しは本文全体を書き直して revise_document_on_stage の body に入れる。「投稿して」「公開して」と言われても、その場では投稿しない。publish_document_on_stage を呼ぶと、承認がまだなら published: false と read_back（要点の読み上げ文）が返るので、それを声でそのまま言って本人の返事を待ち、「いいよ」「投稿して」と答えたらもう一度 publish_document_on_stage（投稿するかはサーバーが本人の最後の言葉を見て決める）。
 - 「○○の画像を作って」「絵を描いて」「○○の写真っぽいのを出して」と頼まれたら generate_image_on_stage（prompt は何を描くかを具体的に。本人の言葉に無い物を足さない）。「作っています」が本人の画面に出て、10〜20秒で画像に替わる。「もっと明るく」「背景を青に」のような直しは revise_image_on_stage（instruction にどう直すか）。できた・直したは声で本人に届くので、自分で「できました」と言わない。
-- 作業中の様子を聞かれたら job_status（別室なら既知のproject_id、IDが不明ならqueryに部屋名を指定）。引数なしではこの部屋から開始した作業だけで、別室の状態は分からない。この部屋から開始した作業への指示・やり直し・中止は steer_job。別室のチャット実行にはsteer_jobは使えない。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
+- 作業中の様子を聞かれたら job_status（別室なら既知のproject_id、IDが不明ならqueryに部屋名を指定）。引数なしではこの部屋から開始した作業だけで、別室の状態は分からない。この部屋から開始した作業への指示・やり直し・中止は steer_job。別室のチャット実行にはsteer_jobは使えない。停止はjob_statusで確認したproject_idとrun.idをstop_runに渡して直接届ける。受付と実停止を区別し、stopped=falseなら停止済みと言わない。進行中の作業と無関係な新しい依頼は start_work（作業は並行して動く。順番待ちにしない）。通話を終える依頼は end_call。
 - サイトでの作業を頼まれたら、まず list_operations（瞬時）で一度やった手順の記憶を見る。合う手順があれば start_work より先に replay_operation で再生する（数秒。結果のページの文が返る）。記憶は通話中にも増える。
 - 話し方の頼み（英語で・ゆっくり）や雑談、ダン自身のできることの質問には道具を使わずに答える。
 - 入力が既に分かる独立した読み取りは read_many でまとめて同時に実行する。前の結果が必要な読み取りや変更・送信は混ぜない。
@@ -98,7 +98,8 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'},
                                                      'kind': {'type': 'string', 'enum': ['operate', 'make']}},
                     'required': ['task', 'kind'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'job_status', 'description': '作業の状態を直接読む。この通話から始めた作業は引数なし。別室の作業は既知のproject_idを指定し、その部屋を起動せず現在の実行状態と記録を読む。', 'parameters': {'type': 'object', 'properties': {'project_id': {'type': 'string', 'description': '確認したい別室のプロジェクトID。room_idではない。'}, 'query': {'type': 'string', 'maxLength': 120, 'description': 'IDが分からない場合の部屋名。検索と状態確認を一度に行う。複数候補なら対象を確認する。'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'job_status', 'description': '作業の状態を直接読む。この通話から始めた作業は引数なし。別室の作業は既知のproject_idを指定し、その部屋を起動せず現在の実行状態と記録を読む。', 'parameters': {'type': 'object', 'properties': {'project_id': {'type': 'string', 'description': '確認したい別室のプロジェクトID。room_idではない。'}, 'run_id': {'type': 'string', 'description': '停止を届けた対象のrun.id。'}, 'query': {'type': 'string', 'maxLength': 120, 'description': 'IDが分からない場合の部屋名。検索と状態確認を一度に行う。複数候補なら対象を確認する。'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'stop_run', 'description': '通常チャットの対象作業へ直接停止を届ける。別室への伝言や新しい作業の開始は行わない。job_statusで観測したproject_idとrun.idを指定。受付は実停止の確認ではない。', 'parameters': {'type': 'object', 'properties': {'project_id': {'type': 'string'}, 'run_id': {'type': 'string'}}, 'required': ['project_id', 'run_id'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
      'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'},
                                                     'job_id': {'type': 'string', 'description': '対象の作業の id（動いている作業が1つだけの時に限り省略できる）'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
@@ -345,11 +346,15 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return {'accepted': bool(out.get('accepted')), 'job_id': (out.get('receipt') or {}).get('id'), 'other_running_jobs': others,
                 'note': '作業は始まった（何分かかかることが多い。結果は後で別に届く）。ここまでで分かったことと、何を見に行ったかを本人がまだ知らなければ、一言で返す。無ければ空。'
                         + ('ほかに動いている作業がある。今回の依頼で置き換わった・方針が変わった作業は steer_job の cancel（job_id 指定）で止める。関係ない作業はそのまま。' if others else '')}
+    if name == 'stop_run':
+        from app.services.command_center import execute
+        return await execute({'action': 'stop_run', 'project_id': args.get('project_id'),
+                              'run_id': args.get('run_id')}, room_id, user_id)
     if name == 'job_status':
         if args.get('project_id') or args.get('query'):
             from app.services.command_center import execute
             target = {'project_id': args['project_id']} if args.get('project_id') else {'query': args['query']}
-            return await execute({'action': 'status', **target}, room_id, user_id)
+            return await execute({'action': 'status', **target, **({'run_id': args['run_id']} if args.get('run_id') else {})}, room_id, user_id)
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         result = parts.work_status(jobs)
         result['note'] = result['note'].replace('作業が無ければ「今は何も作業していません」。', '作業が無い時も別室を含めて何もしていないとは判断しない。')

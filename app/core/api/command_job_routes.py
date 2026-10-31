@@ -8,6 +8,26 @@ router = APIRouter()
 class Wake(BaseModel):
     job_id: str
 
+class StopRun(BaseModel):
+    run_id: str
+    user_id: str
+
+
+@router.post('/internal/runs/stop')
+async def stop_run(body: StopRun, request: Request):
+    if (not request.client or request.client.host not in {'127.0.0.1', '::1'} or request.headers.get('origin')
+        or not browser_lifecycle.authorized(request.headers.get('x-dan-browser-token', ''))):
+        raise HTTPException(403, 'Local authentication required')
+    from app.services.run_service import RunService
+    from app.services.run_stop import local_stop
+    run = await RunService().get_run(body.run_id)
+    if not run:
+        return {'accepted': False, 'stopped': False, 'note': '対象の作業が見つかりません。'}
+    try:
+        return await local_stop(run, body.user_id)
+    except PermissionError:
+        raise HTTPException(403, 'Run access denied')
+
 @router.post('/internal/command-jobs/wake')
 async def wake(body: Wake, request: Request):
     if (not request.client or request.client.host not in {'127.0.0.1','::1'} or request.headers.get('origin')

@@ -117,7 +117,7 @@ class _FakeSession:
     def is_turn_active(self):
         return False
 
-    def run_turn(self, content, sink, timeout=600.0):
+    def run_turn(self, content, sink, timeout=600.0, run_id=None):
         self.calls.append(content)
         if len(self.calls) == 1:
             self.last_turn_hung = True

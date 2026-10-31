@@ -4,6 +4,7 @@ Agent run persistence for project chat.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -146,17 +147,35 @@ class RunService:
             updates["active_proposal_id"] = active_proposal_id
         if superseded_by_run_id is not None:
             updates["superseded_by_run_id"] = superseded_by_run_id
-        if metadata is not None:
-            previous = await self.get_run(run_id)
-            updates["metadata"] = {"machine": _MACHINE, **((previous or {}).get("metadata") or {}), **metadata}   # keep the machine tag a full replacement would drop
+        for attempt in range(4):
+            previous_metadata = None
+            if metadata is not None:
+                previous = await self.get_run(run_id)
+                if not previous or (only_if_active and previous.get("state") not in ACTIVE_RUN_STATES):
+                    return None
+                previous_metadata = previous.get("metadata")
+                updates["metadata"] = {"machine": _MACHINE, **(previous_metadata or {}), **metadata}
+                # Stop receipt belongs to this run permanently. A stale caller
+                # must not erase it by supplying an older metadata snapshot.
+                if (previous_metadata or {}).get("stop_request"):
+                    updates["metadata"]["stop_request"] = previous_metadata["stop_request"]
 
-        query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
-        if only_if_active:
-            query = query.in_("state", list(ACTIVE_RUN_STATES))
-        result = await asyncio.to_thread(query.execute)
-        if state is not None and result.data:
-            await asyncio.to_thread(announce, result.data[0])
-        return result.data[0] if result.data else None
+            query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
+            if metadata is not None:
+                # Compare the JSONB value in the UPDATE itself, across workers
+                # and processes; an in-process lock cannot protect this merge.
+                query = (query.is_("metadata", "null") if previous_metadata is None else
+                         query.eq("metadata", json.dumps(previous_metadata, ensure_ascii=False)))
+            if only_if_active:
+                query = query.in_("state", list(ACTIVE_RUN_STATES))
+            result = await asyncio.to_thread(query.execute)
+            if result.data:
+                if state is not None:
+                    await asyncio.to_thread(announce, result.data[0])
+                return result.data[0]
+            if metadata is None:
+                return None
+        raise RuntimeError("作業記録の更新が重なったため、保存を確認できませんでした")
 
     async def attach_claude_session(self, run_id: str, claude_session_id: str) -> Optional[dict]:
         return await self.update_run(run_id, claude_session_id=claude_session_id)
