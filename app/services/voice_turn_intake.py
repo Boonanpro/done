@@ -59,6 +59,17 @@ class TurnIntake:
     def finish(self, key):
         self.active.discard(key)
 
+    def refreshed(self, key, revision):
+        """The next reasoning round has received these exact words in a tool result.
+
+        Called only after every tool in the preceding round has settled and its
+        outputs were sent. Never advance to words arriving during the send.
+        This grants no execution or consent; normal admission still applies.
+        """
+        if not self.closed and key in self.delegations:
+            self.delegations[key] = revision
+            self.handled = max(self.handled, revision)
+
     def work_accepted(self, key):
         self.has_work = True
         revision = self.delegations.get(key, 0)

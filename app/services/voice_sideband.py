@@ -254,8 +254,32 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
                 asyncio.ensure_future(fallback_close())
                 return
             # per the guide: every function_call_output of the response, then response.create (no delegation_id field)
+            refresh_revision = None
+            stale = [out for out in outputs if isinstance(result := json.loads(out['output']), dict)
+                     and result.get('reason') == 'newer_or_unassociated_speech']
+            if stale and dialogue.intake is not None and not dialogue.intake.closed:
+                # A speculative round may have seen only the start of a sentence.
+                # Return the complete request to its next reasoning round rather
+                # than treating rejection of that old call as withdrawal by the user.
+                revision = dialogue.intake.revision
+                context = {'caller_fragments_in_order': list(dialogue.intake.fragments),
+                           'conversation': dialogue.recent()}
+                if len(json.dumps(context, ensure_ascii=False)) <= 12000:
+                    for out in stale:
+                        result = json.loads(out['output'])
+                        result['latest_conversation'] = context
+                        result['note'] = ('この呼出しは未実行です。以下は今回受け取った本人の言葉です。'
+                            '先に頼まれた未受付の仕事も含め、最後まで聞いた内容で次の操作を判断し直してください。'
+                            '語尾や会話の質問だけで元の依頼を取り消さないでください。'
+                            '変更・撤回・承認は文脈どおりに扱い、古い引数をそのまま再実行しないでください。'
+                            '外部送信などの承認条件は変わりません。必要な道具を改めて選び、未実行を完了と答えないでください。')
+                        out['output'] = json.dumps(result, ensure_ascii=False)
+                    refresh_revision = revision
             for out in outputs:
                 await send({'type': 'response.item.create', 'event_id': f'dan-{time.time_ns()}', 'item': {k: out[k] for k in ('type', 'call_id', 'output')}})
+            if refresh_revision is not None:
+                dialogue.intake.refreshed(delegation_id, refresh_revision)
+                record('turn_context_refreshed', revision=refresh_revision)
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
         elif dialogue.intake is not None:
             dialogue.intake.finish(delegation_id)
