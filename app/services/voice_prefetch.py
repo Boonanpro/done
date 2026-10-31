@@ -187,8 +187,8 @@ class Prefetch:
                 'instructions': '新しい言葉が、先の依頼を保つ相づちだけかを会話の文脈で判断する。「うん」「はい」でも、確認への承認や許可ならother。文字の短さだけで判断しない。'}})
         answer = (got.get('answers') or {}).get('relation') or {}
         unchanged = bool(got.get('available') and answer.get('choice') == 'backchannel'
-                         and (answer.get('probabilities') or {}).get('backchannel', 0) >= .9)
-        self.record('followup_classified', unchanged=unchanged)
+                         and (answer.get('probabilities') or {}).get('backchannel', 0) >= .7)
+        self.record('followup_classified', unchanged=unchanged, choice=answer.get('choice'), probability=(answer.get('probabilities') or {}).get('backchannel'))
         return unchanged
 
     async def read_plan(self, text):
