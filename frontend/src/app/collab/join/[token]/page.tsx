@@ -336,7 +336,7 @@ export default function GuestJoinPage() {
   }, [roomId, guestToken, isConnected]);
 
   // Push notifications
-  const { subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError } = usePushNotification(roomId || '', 'guest', guestToken);
+  const { subscribed: pushSubscribed, subscribe: pushSubscribe, error: pushError, pending: pushPending } = usePushNotification(roomId || '', 'guest', guestToken);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -613,6 +613,8 @@ export default function GuestJoinPage() {
 
       {!pushSubscribed && (
         <button
+          disabled={pushPending}
+          aria-busy={pushPending}
           onClick={async () => {
             if (/iPad|iPhone|iPod/i.test(navigator.userAgent) && !window.matchMedia('(display-mode: standalone)').matches) {
               setShowInstallGuide(true); return;
@@ -622,7 +624,7 @@ export default function GuestJoinPage() {
             else toast.error('通知を登録できませんでした。ブラウザの通知設定を確認してください');
           }}
           className="flex items-center gap-2 px-4 py-2 bg-violet-500/15 border-b border-violet-500/30 text-violet-300 text-xs shrink-0"
-        ><Bell className="h-4 w-4" />{pushError ? "通知を登録できませんでした。押して再試行" : "新着メッセージの通知をオンにする"}</button>
+        ><Bell className="h-4 w-4" />{pushPending ? "通知を準備しています…" : pushError ? "通知を登録できませんでした。押して再試行" : "新着メッセージの通知をオンにする"}</button>
       )}
       {!online && <div role="status" className="px-4 py-2 text-xs bg-amber-500/15">オフラインです。書きかけの文章は保存されています。</div>}
       {jumping && <div role="status" className="px-4 py-2 text-xs bg-muted">引用元を読み込んでいます… <button className="underline ml-3" onClick={() => { jumpCancelled.current = true; }}>中止</button></div>}

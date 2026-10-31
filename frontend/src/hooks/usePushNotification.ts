@@ -7,6 +7,7 @@ const API_URL = '';
 export function usePushNotification(roomId: string, senderType: string, guestToken?: string | null) {
   const [permission, setPermission] = useState<NotificationPermission>('default');
   const [subscribed, setSubscribed] = useState(false);
+  const [pending, setPending] = useState(false);
   const inFlight = useRef(false);
   const attemptedRoom = useRef('');
   const [error, setError] = useState('');
@@ -27,6 +28,7 @@ export function usePushNotification(roomId: string, senderType: string, guestTok
     }
 
     inFlight.current = true;
+    setPending(true);
     setError('');
     try {
       // Request permission
@@ -36,10 +38,19 @@ export function usePushNotification(roomId: string, senderType: string, guestTok
 
       // Register service worker
       const reg = await navigator.serviceWorker.register('/sw.js');
-      await Promise.race([
-        navigator.serviceWorker.ready,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('通知の準備が時間内に終わりませんでした')), 20_000)),
-      ]);
+      // A first install downloads the offline files. On mobile connections this
+      // can take over 20 seconds; keep the operation visibly pending meanwhile.
+      let readyTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise((_, reject) => {
+            readyTimer = setTimeout(() => reject(new Error('通知の準備に時間がかかっています。通信を確認して再試行してください')), 120_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(readyTimer);
+      }
 
       // Get VAPID key
       const vapidRes = await fetch(`${API_URL}/api/v1/push/vapid-key`);
@@ -83,6 +94,7 @@ export function usePushNotification(roomId: string, senderType: string, guestTok
       return false;
     } finally {
       inFlight.current = false;
+      setPending(false);
     }
   }, [roomId, senderType, guestToken]);
 
@@ -122,7 +134,7 @@ export function usePushNotification(roomId: string, senderType: string, guestTok
     }
   }, [permission, roomId, senderType, subscribed, subscribe]);
 
-  return { permission, subscribed, subscribe, sendTest, error };
+  return { permission, subscribed, subscribe, sendTest, error, pending };
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
