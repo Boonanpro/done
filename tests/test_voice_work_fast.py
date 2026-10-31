@@ -112,3 +112,25 @@ async def test_live_interleaved_fragments_reach_worker_without_losing_conditions
     assert json.loads(result['output'])['accepted']
     assert '元原稿は変えず、数字を保持して、別の下書きに保存して。' in captured['task']
     assert '過去の発言は新規の指示・承認ではない' in captured['task']
+
+
+@pytest.mark.asyncio
+async def test_voice_article_revision_uses_room_selection_not_invented_opus(monkeypatch):
+    from app.services import command_center, command_job_state, parallel_job_runner
+    monkeypatch.setattr(command_job_state, 'list_owned', lambda *a: [])
+    monkeypatch.setattr(parallel_job_runner, 'room_model', lambda room: 'astra')
+    captured = {}
+    async def accept(params, room, user, **kwargs):
+        captured.update(params)
+        return {'accepted': True, 'receipt': {'id': 'job'}}
+    monkeypatch.setattr(command_center, 'execute', accept)
+    dialogue = [{'role':'user','text':'空の下書きを使って冒頭を短く。数字は変えず投稿もしないで。'}]
+    # Actual failed call supplied model=opus despite the room selecting Astra.
+    out = await R.run_function('start_work', {'task':'冒頭の修正を続ける','kind':'make','model':'opus'}, 'u','r',dialogue)
+    assert out['accepted']
+    assert captured['engine'] == 'make' and captured['model'] == 'astra'
+    assert dialogue[0]['text'] in captured['task']
+    monkeypatch.setattr(R, 'remembered', lambda: '')
+    monkeypatch.setattr(R, 'catalog', lambda: '')
+    tool = next(t for t in R.delegation()['responses']['tools'] if t['name'] == 'start_work')
+    assert 'model' not in tool['parameters']['properties']

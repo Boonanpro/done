@@ -96,8 +96,7 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'target': {'type': 'string', 'description': 'サイト名・アプリ名・URL（例: YouTube, メモ帳, https://...）'}}, 'required': ['target'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'start_work', 'description': 'ダン本体に作業を頼む（複数手順のもの）。結果は後で別に届く。kind=operate: ブラウザやサイトの手続き・確認・調べもの（ログインして確認する、送信する、登録する、予約する）。kind=make: ページ・動画・画像・資料・プログラムを作る・直すような重い制作（チャットのダンと同じ器で、部屋の記憶を持って作る）。',
      'parameters': {'type': 'object', 'properties': {'task': {'type': 'string', 'description': '本人の言葉のまま、何をしてほしいか'},
-                                                     'kind': {'type': 'string', 'enum': ['operate', 'make']},
-                                                     'model': {'type': 'string', 'enum': ['opus', 'fable', 'astra'], 'description': 'kind=make の時だけ。本人がモデルを指定した時だけ入れる（既定は opus）'}},
+                                                     'kind': {'type': 'string', 'enum': ['operate', 'make']}},
                     'required': ['task', 'kind'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'job_status', 'description': '今動いている作業の様子（どの画面で何をしているか、結果）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
@@ -330,8 +329,12 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
             return {'accepted': False, 'error': '会話が長いため、条件を省略せず作業へ渡せませんでした。',
                     'note': '開始したと言わない。条件を勝手に削らず、部屋の記録を参照できる形で引き継ぐ。'}
         making = args.get('kind') == 'make'
+        # The room's selected model is authoritative. Live used to invent
+        # model=opus from the tool's default, overriding the owner's selection.
+        from app.services.parallel_job_runner import room_model
+        model_params = {'model': await asyncio.to_thread(room_model, room_id)} if making else {}
         out = await execute({'action': 'work', 'task': task+parts.VOICE_TASK, 'engine': 'make' if making else WORK_ENGINE,
-                             **({'model': args['model']} if making and args.get('model') else {})}, room_id, user_id, voice_handoff=True)
+                             **model_params}, room_id, user_id, voice_handoff=True)
         if not out.get('accepted'):
             return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。再送前に job_status で受付状況を確認する。'}
         # It used to say 「本人に今言うことはない」: after reading two mails and handing the EX check over, the call was silent
