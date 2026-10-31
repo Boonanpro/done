@@ -185,7 +185,11 @@ class Prefetch:
                 'backchannel': '聞いていることを示す相づち・呼びかけだけ。先の依頼内容も許可も変更せず、新しい質問や指示もない。',
                 'other': '新しい質問・追加条件・訂正・停止・承認・拒否、または判断が曖昧。'},
                 'instructions': '新しい言葉が、先の依頼を保つ相づちだけかを会話の文脈で判断する。「うん」「はい」でも、確認への承認や許可ならother。文字の短さだけで判断しない。'}})
-        return bool(got.get('available') and (got.get('answers') or {}).get('relation') == 'backchannel')
+        answer = (got.get('answers') or {}).get('relation') or {}
+        unchanged = bool(got.get('available') and answer.get('choice') == 'backchannel'
+                         and (answer.get('probabilities') or {}).get('backchannel', 0) >= .9)
+        self.record('followup_classified', unchanged=unchanged)
+        return unchanged
 
     async def read_plan(self, text):
         """Choose only a fixed read, never generated tool names or arbitrary arguments."""

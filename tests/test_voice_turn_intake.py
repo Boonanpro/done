@@ -287,10 +287,10 @@ async def test_backchannel_classifier_uses_context_and_fails_closed():
     p = Prefetch('u', room_id='r'); d = S.Dialogue(); d.add('assistant', '送っていいですか？'); p.dialogue = d
     class Judge: pass
     p.judge = Judge()
-    p.judge.choose = AsyncMock(return_value={'available': True, 'answers': {'relation': 'other'}})
+    p.judge.choose = AsyncMock(return_value={'available': True, 'answers': {'relation': {'choice': 'other', 'probabilities': {'other': .99}} }})
     assert not await p.followup_is_backchannel('送って', 'はい', 'send_message_on_stage')
     assert p.judge.choose.call_args.args[0]['conversation'][-1]['text'] == '送っていいですか？'
-    p.judge.choose.return_value = {'available': True, 'answers': {'relation': 'backchannel'}}
+    p.judge.choose.return_value = {'available': True, 'answers': {'relation': {'choice': 'backchannel', 'probabilities': {'backchannel': .99}} }}
     assert await p.followup_is_backchannel('短くして', 'うん', 'start_work')
     p.judge.choose.return_value = {'available': False}
     assert not await p.followup_is_backchannel('短くして', 'うん', 'start_work')
