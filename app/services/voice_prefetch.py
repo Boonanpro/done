@@ -191,6 +191,23 @@ class Prefetch:
         self.record('followup_classified', unchanged=unchanged, choice=answer.get('choice'), probability=(answer.get('probabilities') or {}).get('backchannel'))
         return unchanged
 
+    async def fallback_is_conversation(self, text):
+        """Only suppress duplicate reasoning; never authorize or block tools."""
+        if self.judge is None:
+            from app.services.jev_decisions import Decisions
+            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400, retry_transient_after=10)
+        got = await self.judge.choose({'caller_words': text,
+            'conversation': self.dialogue.turns[-8:] if self.dialogue else []}, {
+            'delivery': {'type': 'choice', 'criteria': {
+                'conversation': 'この通話で今話した内容の確認・聞いているかの確認・雑談だけ。作業の実行も最新の状態や保存記録の取得も必要ない。',
+                'backend': '作業依頼・追加変更・停止・承認・拒否・訂正、実際の進捗確認、過去の記録や外部情報の取得、または判断が曖昧。'},
+                'instructions': '短い返事でも承認・変更・停止の可能性があればbackend。今お願いした内容を覚えているかだけならconversation。完了したか・今どうなっているかはbackend。'}})
+        answer = (got.get('answers') or {}).get('delivery') or {}
+        self.record('turn_delivery_classified', available=bool(got.get('available')),
+                    choice=answer.get('choice'), probability=(answer.get('probabilities') or {}).get('conversation'))
+        return bool(got.get('available') and answer.get('choice') == 'conversation'
+                    and (answer.get('probabilities') or {}).get('conversation', 0) >= .8)
+
     async def read_plan(self, text):
         """Choose only a fixed read, never generated tool names or arbitrary arguments."""
         if self.judge is None:
