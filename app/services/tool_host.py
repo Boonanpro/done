@@ -74,6 +74,12 @@ async def serve(out):
                 try: image = screen_image(contents, str(req.get('name') or ''), req.get('arguments') or {})
                 except (OSError,ValueError): image = ''
                 reply = {'text': ('\n'.join(texts)[:OUTPUT_CHARS] or '（出力なし）'), 'stage_image': image}
+                if str(req.get('name') or '') in ('browser','browser_plan','browser_flow') and image:
+                    try:
+                        from app.tools.browser import _send_executor_command
+                        reply['stage_stream'] = await asyncio.to_thread(_send_executor_command, 'voice_stream_url')
+                    except Exception:
+                        pass
         except Exception as exc:
             reply = {'text': f'操作結果が不明です。再送せず現在の画面を確かめてください: {type(exc).__name__}: {str(exc)[:300]}'}
         out.write(json.dumps({'id': rid, **reply}, ensure_ascii=False) + '\n')

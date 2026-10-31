@@ -20,14 +20,14 @@ async def execute(host, stage, tool, arguments):
     if stage.version != version:
         result['screen'] = {'shown': False, 'reason': '別の画面に切り替わりました。'}
         return result
-    path = safe_image(out.get('stage_image'))
+    path = safe_image(out.get('stage_stream')) or safe_image(out.get('stage_image'))
     if not path:
         capture = {'action': 'screenshot'}
         if source == 'phone' and arguments.get('serial'):
             capture['serial'] = arguments['serial']
         try:
             observed = await host.ask('call', with_media=True, name=source, arguments=capture)
-            path = safe_image(observed.get('stage_image'))
+            path = safe_image(observed.get('stage_stream')) or safe_image(observed.get('stage_image'))
         except Exception:
             path = ''
     if stage.version != version:

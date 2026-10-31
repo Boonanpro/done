@@ -24,6 +24,7 @@
  *
  * Used by the PC voice panel (voice-session.tsx) and, as its own page, by the phone app's WebView (app/voice-stage/page.tsx).
  */
+import { readScreenFrames } from './screen-stream';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { ScreenCommand } from '@/components/artifacts/voice-controls';
@@ -119,7 +120,7 @@ export function stageFramePath(v: unknown): string | null {
 export function stageImageUrl(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const s = v.trim();
-  if (/^\/api\/v1\/voicelog\/stage\/[A-Za-z0-9_-]{1,100}\/image\/[a-f0-9]{32}\.(png|jpg|webp)$/.test(s)) return s;
+  if (/^\/api\/v1\/voicelog\/stage\/[A-Za-z0-9_-]{1,100}\/image\/[a-f0-9]{32}\.(png|jpg|webp|mjpeg)$/.test(s)) return s;
   if (/^\/api\/v1\/files\/[A-Za-z0-9._-]{1,200}$/.test(s)) return s;
   if (/^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s"'<>\\]{0,1800}$/.test(s)) return s;
   return null;
@@ -254,20 +255,39 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
 
 function StageScreenImage({src,alt}: {src:string;alt:string}) {
   const [loaded,setLoaded] = useState<{src:string;blob:string}|null>(null);
+  const [failed,setFailed] = useState(false);
   const privateScreen = src.startsWith('/api/v1/voicelog/stage/');
   useEffect(() => {
     if (!privateScreen) return;
-    let stopped=false, url='';
+    let stopped=false, current='', pending='';
     const abort = new AbortController();
-    void fetch(src,{headers:stageHeaders(),cache:'no-store',signal:abort.signal}).then(async r => {
-      if (!r.ok) return;
-      const blob=await r.blob();
+    setFailed(false);
+    const display = (blob:Blob) => {
       if (stopped) return;
-      url=URL.createObjectURL(blob);setLoaded({src,blob:url});
-    }).catch(() => {});
-    return () => {stopped=true;abort.abort();if(url)URL.revokeObjectURL(url);};
+      if (pending) URL.revokeObjectURL(pending);
+      const url=URL.createObjectURL(blob);pending=url;
+      const preload=new window.Image();
+      preload.onload=() => {
+        if(stopped || pending!==url) {URL.revokeObjectURL(url);return;}
+        const old=current;current=url;pending='';
+        setLoaded({src,blob:url});
+        if(old) requestAnimationFrame(()=>URL.revokeObjectURL(old));
+      };
+      preload.onerror=()=>{URL.revokeObjectURL(url);if(pending===url)pending='';};
+      preload.src=url;
+    };
+    void fetch(src,{headers:stageHeaders(),cache:'no-store',signal:abort.signal}).then(async r => {
+      if (!r.ok) throw new Error('Screen unavailable');
+      if (src.endsWith('.mjpeg')) {
+        if(!r.body) throw new Error('No screen stream');
+        await readScreenFrames(r.body,display);
+        if(!stopped)setFailed(true);
+      } else display(await r.blob());
+    }).catch(() => {if(!stopped)setFailed(true);});
+    return () => {stopped=true;abort.abort();if(current)URL.revokeObjectURL(current);if(pending)URL.revokeObjectURL(pending);};
   },[src,privateScreen]);
   const image = privateScreen ? (loaded?.src===src ? loaded.blob : '') : src;
+  if(failed)return <div role="status" className="p-8 text-center text-sm text-neutral-400">画面の配信が止まりました</div>;
   // eslint-disable-next-line @next/next/no-img-element
   return image ? <img src={image} alt={alt} className="mx-auto max-h-[85dvh] w-full object-contain rounded-xl border border-border bg-neutral-950" /> : <div role="status" className="p-8 text-center text-sm text-neutral-400">画面を読み込んでいます</div>;
 }

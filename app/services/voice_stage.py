@@ -778,7 +778,7 @@ class Stage:
         args = {'action':'screenshot'}
         if source == 'phone' and serial: args['serial'] = serial
         out = await voice_tools.host(self.user_id,self.room_id).ask('call',with_media=True,name=source,arguments=args)
-        path = safe_image(out.get('stage_image'))
+        path = safe_image(out.get('stage_stream')) or safe_image(out.get('stage_image'))
         if not path: return {'shown':False,'reason':out.get('text') or '画面を取得できませんでした。'}
         self._apply('スマホの画面' if source=='phone' else 'ブラウザの画面',image=path)
         self._external_source = source

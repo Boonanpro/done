@@ -807,8 +807,9 @@ async def _executor_worker():
         # コマンドループ
         while not _executor_shutdown.is_set():
             try:
-                cmd, args, request = _executor_command_queue.get(timeout=0.1)
+                cmd, args, request = _executor_command_queue.get(timeout=0.01 if pages_state.get("voice_stream") else 0.1)
             except queue.Empty:
+                await asyncio.sleep(0.01)  # allow CDP events while no agent command is pending
                 continue
 
             reply = request["reply"] if request else _executor_result_queue
@@ -1011,6 +1012,10 @@ async def _run_page_command(pages_state: dict, context, cmd: str, args: dict):
     await _follow_windows(pages_state, context)
     await _note_current_tab(pages_state, context)
     page = pages_state["current"]
+    from app.services.voice_screen_stream import follow_browser, current_url
+    await follow_browser(pages_state, page)
+    if cmd == "voice_stream_url":
+        return current_url(pages_state)
 
     if cmd == "window_info":
         notice, pages_state["notice"] = pages_state["notice"], None
