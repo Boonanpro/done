@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 from app.services import voice_responses as R, voice_sideband as S
 
@@ -87,3 +88,27 @@ async def test_oversized_handoff_never_runs_a_truncated_task(monkeypatch):
     monkeypatch.setattr(command_center, 'execute', forbidden)
     out = await R.run_function('start_work', {'task':'a'*65000}, 'u','r',[])
     assert out['accepted'] is False
+
+
+@pytest.mark.asyncio
+async def test_live_interleaved_fragments_reach_worker_without_losing_conditions(monkeypatch):
+    from app.services import command_center, command_job_state
+    monkeypatch.setattr(command_job_state, 'list_owned', lambda *a: [])
+    captured = {}
+    async def accept(params, room, user, **kwargs):
+        captured.update(params)
+        return {'accepted': True, 'receipt': {'id': 'job'}}
+    monkeypatch.setattr(command_center, 'execute', accept)
+    d = S.Dialogue()
+    d.add('user', '元原稿は変えず、数字を保持して、別の下書きに保存して。')
+    # Actual Live calls interleave user transcript and assistant speech deltas,
+    # so a 12-entry window can discard even the beginning of the same request.
+    for fragment in ('去年', '五千万円', '稼いだ', 'YouTube', 'チャンネル', 'の記事の', '冒頭を', '短くして'):
+        d.add('assistant', 'うん')
+        d.add('user', fragment)
+    assert '元原稿' not in str(d.recent())
+    result = await S.execute_call({'name': 'start_work', 'arguments': '{"task":"記事の冒頭を短くする"}'},
+                                 'u', 'r', d, lambda *a, **kw: None, 'delegation')
+    assert json.loads(result['output'])['accepted']
+    assert '元原稿は変えず、数字を保持して、別の下書きに保存して。' in captured['task']
+    assert '過去の発言は新規の指示・承認ではない' in captured['task']
