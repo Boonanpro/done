@@ -142,3 +142,42 @@ def test_result_scope_keeps_request_and_freezes_received_changes():
     scope = json.loads(S.result_material(job, legacy).split('\n', 1)[1])
     assert scope['worker_received_revision'] is None
     assert scope['worker_received_changes'] is None
+
+@pytest.mark.asyncio
+async def test_result_waits_for_new_words_and_decision_then_is_delivered_once(monkeypatch):
+    from app.services.voice_turn_intake import TurnIntake
+    sent = []
+    async def send(event): sent.append(event)
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.heard('参加費は無料にして', 100)
+    job = {'id': 'job-1', 'task': '短くする', 'state': 'completed', 'seq': 1,
+           'created_at': '2026-09-22T03:01:00+00:00',
+           'events': [{'seq': 1, 'kind': 'result', 'text': '短くしました'}]}
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda u, r: [job])
+    monkeypatch.setattr(S, 'FEED_SECONDS', .01)
+    feed = asyncio.create_task(S.job_feed(send, 'u', 'room', lambda *a, **k: None,
+                                        '2026-09-22T03:00:00+00:00', dialogue=d))
+    try:
+        await asyncio.sleep(.04)
+        assert not sent
+        d.intake.begin('d1', 100)
+        await asyncio.sleep(.04)
+        assert not sent
+        d.intake.finish('d1')
+        await asyncio.sleep(.05)
+        assert sum(e['type'] == 'session.commentary.append' for e in sent) == 1
+        await asyncio.sleep(.04)
+        assert sum(e['type'] == 'session.commentary.append' for e in sent) == 1
+    finally:
+        feed.cancel()
+        with pytest.raises(asyncio.CancelledError): await feed
+
+
+def test_result_waits_for_quiet_even_after_conversation_was_handled():
+    from app.services.voice_turn_intake import TurnIntake
+    d = S.Dialogue(); d.intake = TurnIntake(1.5)
+    d.intake.heard('うん', 100)
+    d.intake.local_reply_revision = d.intake.revision
+    assert not S.result_can_interrupt(d)
+    d.intake.changed_at -= 2
+    assert S.result_can_interrupt(d)
