@@ -65,6 +65,13 @@ def event(state, kind, text, label=None):
     seq = state.get('seq', 0) + 1
     state['seq'] = seq
     item = {'seq': seq, 'kind': kind, 'text': text[:3000], 'at': now()}
+    if kind == 'result':
+        # Preserve which instructions the worker had received when this result
+        # was produced. Later controls must not relabel an earlier result.
+        revision = state.get('applied_revision', 0)
+        item['applied_revision'] = revision
+        item['applied_inputs'] = [dict(i) for i in state.get('inputs', [])
+                                  if i.get('revision', 0) <= revision]
     if label: item['label'] = label[:300]
     state.setdefault('events', []).append(item)
     state['events'] = state['events'][-300:]   # 40 lost the first minutes of a 75-step job (2026-09-23): the start is where the cause usually is

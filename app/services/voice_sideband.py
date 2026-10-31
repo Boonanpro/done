@@ -304,6 +304,21 @@ FEED_SECONDS = 1.0
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
 
 
+def result_material(job, event):
+    """A result has its own scope; current conversation is not completion evidence."""
+    scope = {
+        'result_id': f"{job['id']}:{event['seq']}",
+        'completed_at': event.get('at'),
+        'original_request': job.get('task', '').split('参考の直前会話')[0][:4000],
+        'worker_received_revision': event.get('applied_revision'),
+        'worker_received_changes': event.get('applied_inputs'),
+        'verified_result': event['text'],
+    }
+    return ('今回届いた作業結果の記録です。依頼や追加条件は作業範囲の説明で、完了の証拠はverified_resultだけです。'
+            '直近の会話で新しく頼まれた変更を、この結果に足して完了と言わないでください。\n'
+            + json.dumps(scope, ensure_ascii=False))
+
+
 async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
     """The room's jobs, from this server (own mode): results, errors and questions to the owner go into the call as
     commentary (spoken) the moment they appear. Nothing else is pushed. The running work's STATE is read on demand by
@@ -355,6 +370,8 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                 task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
                 material = {'result': '作業「%s」の結果:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
                             'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
+                if e['kind'] == 'result':
+                    material = result_material(job, e)
                 try:
                     from app.services.voice_furigana import annotate
                     material = annotate(material)
@@ -362,7 +379,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id=''):
                     pass
                 for part in chunks(material):
                     await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-                cue = {'result': '作業から結果が届いた。実際にできたことと未完了のことを区別し、新しく分かった結果を原則1文で伝える。判断に必要な金額・日時・相手・制約は残す。依頼の復唱や、聞かれていない確認のお願い・追加の申し出は足さず、相手に話す番を返す。詳しい説明を求められている時は必要な長さで答える。',
+                cue = {'result': '今渡した結果記録のverified_resultに書かれた事実だけを、原則1文で伝える。直近の依頼・追加条件を混ぜて完了と答えない。結果にない変更の完了は未確認です。判断に必要な金額・日時・相手・制約は残す。依頼の復唱、確認のお願い、追加の申し出は足さず、相手に話す番を返す。詳しい説明を求められている時は必要な長さで答える。',
                        'error': '今の作業で問題が起きた。何が起きて、どうするかを、本人に会話として短く伝える。',
                        'confirmation': '今の作業から本人に確認したいことがある。何を確かめたいかを、会話として短く聞く。'}[e['kind']]
                 await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': cue})
