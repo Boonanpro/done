@@ -156,6 +156,16 @@ def _executor_window_position(room_id: Optional[str] = None) -> tuple[int, int]:
 _pending_cookie_import = False
 
 
+def _may_use_master_login() -> bool:
+    """The legacy master profile belongs only to the installation owner."""
+    user_id = os.environ.get("DAN_USER_ID", "").strip()
+    if not user_id:
+        return False
+    from app.services.owner import resolve_owner_user_id
+    owner_id = resolve_owner_user_id()
+    return bool(owner_id and user_id == owner_id)
+
+
 def _seed_profile_from_master(profile_dir: Path) -> None:
     """部屋プロファイル初回作成時にマスタープロファイルからログイン状態を引き継ぐ。
 
@@ -167,6 +177,8 @@ def _seed_profile_from_master(profile_dir: Path) -> None:
     import shutil
 
     if profile_dir.exists():
+        return
+    if not _may_use_master_login():
         return
     master = _master_profile_dir()
     if not master.exists() or profile_dir == master:
@@ -625,6 +637,9 @@ async def _import_master_cookies(context) -> None:
     """稼働中マスターブラウザからCookieを取得して部屋コンテキストへ注入する。
     失敗しても（再ログインが必要になるだけなので）起動は続行。"""
     global _pending_cookie_import
+    if not _may_use_master_login():
+        _pending_cookie_import = False
+        return
     if not _port_listening(_LEGACY_CDP_PORT):
         _write_browser_recovery_log("cookie_import_skipped_master_offline")
         _pending_cookie_import = False
