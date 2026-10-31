@@ -100,7 +100,7 @@ TOOLS = [
                     'required': ['task', 'kind'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'job_status', 'description': '作業の状態を直接読む。この通話から始めた作業は引数なし。別室の作業は既知のproject_idを指定し、その部屋を起動せず現在の実行状態と記録を読む。', 'parameters': {'type': 'object', 'properties': {'project_id': {'type': 'string', 'description': '確認したい別室のプロジェクトID。room_idではない。'}, 'run_id': {'type': 'string', 'description': '停止を届けた対象のrun.id。'}, 'query': {'type': 'string', 'maxLength': 120, 'description': 'IDが分からない場合の部屋名。検索と状態確認を一度に行う。複数候補なら対象を確認する。'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'stop_run', 'description': '通常チャットの対象作業へ直接停止を届ける。別室への伝言や新しい作業の開始は行わない。job_statusで観測したproject_idとrun.idを指定。受付は実停止の確認ではない。', 'parameters': {'type': 'object', 'properties': {'project_id': {'type': 'string'}, 'run_id': {'type': 'string'}}, 'required': ['project_id', 'run_id'], 'additionalProperties': False}},
-    {'type': 'function', 'name': 'steer_job', 'description': '動いている作業に指示する（内容の変更・一時停止・取り消し）。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
+    {'type': 'function', 'name': 'steer_job', 'description': '作業に指示する（内容の変更・一時停止・取り消し）。完了直後の追加変更は元のjob_idを指定すると同じ成果物への新作業として続ける。停止・失敗した作業は再開しない。作業が複数ある時は job_id（job_status や start_work の返事にある id）で選ぶ。',
      'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['update', 'pause', 'cancel']}, 'instruction': {'type': 'string'},
                                                     'job_id': {'type': 'string', 'description': '対象の作業の id（動いている作業が1つだけの時に限り省略できる）'}}, 'required': ['kind', 'instruction'], 'additionalProperties': False}},
     {'type':'function','name':'show_fact_on_stage','description':'すでに分かった番号・日時・金額・短い選択肢を大きな札ですぐ出す。valueは表示用のアラビア数字、detailは次にすることを1つ。推測した数字は入れない。',
@@ -364,6 +364,10 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         from app.services.command_center import execute
         jobs = await asyncio.to_thread(list_owned, user_id, room_id)
         active = [s for s in jobs if s['state'] not in ('completed', 'failed', 'cancelled')]
+        selected = next((s for s in jobs if s['id'] == args.get('job_id')), None)
+        if selected and selected['state'] == 'completed' and (args.get('kind') or 'update') == 'update':
+            from app.services.voice_job_followup import continue_completed
+            return await continue_completed(selected['id'], user_id, room_id, str(args.get('instruction') or ''), dialogue)
         if not active: return {'accepted': False, 'error': 'この部屋から始めた作業の中に、動いているものはありません。別室の停止が完了したという意味ではありません。'}
         chosen = next((s for s in active if s['id'] == args.get('job_id')), None)
         if args.get('job_id') and not chosen: return {'error': 'その id の作業は動いていません。', 'running': [s['id'] for s in active]}
