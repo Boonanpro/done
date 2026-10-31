@@ -49,7 +49,7 @@ TOOL = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["overview", "list", "search", "read", "status", "requests", "delegate", "report"]},
-            "query": {"type": "string", "description": "一覧の絞り込み、または会話の検索語。"},
+            "query": {"type": "string", "description": "一覧の絞り込み、会話の検索語、またはstatusで確認する部屋名。"},
             "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 6, "description": "search用。説明された話の内容から検索語や言い換えを選ぶ。部屋名は不要。一致した会話を読んで対象を判断できる。"},
             "days": {"type": "integer", "minimum": 1, "maximum": 3650, "description": "overviewの対象期間。既定30日。"},
             "offset": {"type": "integer", "minimum": 0, "description": "overview/searchの続き。next_offsetを指定。"},
@@ -186,6 +186,13 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         return {"projects": [summary(p) for p in rows], "count": len(rows)}
     if action not in ("read", "status", "delegate", "report", "work"):
         raise ValueError("未対応の操作です")
+    if action == "status" and not params.get("project_id"):
+        candidates = await projects.find_status_projects(user_id, str(params.get("query") or ""))
+        if len(candidates) != 1:
+            return {"projects": [summary(p) for p in candidates[:10]], "count": len(candidates),
+                    "resolved": False,
+                    "note": "部屋を一つに特定できません。候補を確認してください。作業が停止したという意味ではありません。"}
+        params = {**params, "project_id": candidates[0]["id"]}
     target = (await projects.get_project_by_room_id(room_id) if action == 'work'
               else await projects.get_project(str(params.get("project_id") or ""), user_id))
     if not target or not target.get("room_id"):

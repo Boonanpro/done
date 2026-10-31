@@ -315,6 +315,18 @@ class ProjectService:
         project["last_message_preview"] = room.get("last_message_preview") if room else None
         return project
 
+    async def find_status_projects(self, user_id: str, query: str) -> list[dict]:
+        """Find owned rooms, including board branches, without list enrichment."""
+        query = query.strip().casefold()
+        if not query or len(query) > 120:
+            raise ValueError("部屋名は1〜120文字で指定してください")
+        result = await asyncio.to_thread(lambda: self.supabase.table("projects")
+            .select("id,title,room_id,user_id").eq("user_id", user_id).execute())
+        rows = [p for p in (result.data or []) if p.get("user_id") == user_id
+                and p.get("room_id") and query in str(p.get("title") or "").casefold()]
+        exact = [p for p in rows if str(p.get("title") or "").casefold() == query]
+        return exact or rows
+
     async def list_projects(
         self,
         user_id: str,
