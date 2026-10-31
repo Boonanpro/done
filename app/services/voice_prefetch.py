@@ -169,6 +169,24 @@ class Prefetch:
             if s.task and not s.task.done(): s.task.cancel()
         self.searches = keep[-40:]
 
+    async def followup_is_backchannel(self, earlier, latest, operation):
+        """Classify only whether new words leave a pending request unchanged.
+
+        This cannot supply consent. Unknown or failed classification keeps the
+        mutation blocked so the normal backend can reconsider the new words.
+        """
+        if self.judge is None:
+            from app.services.jev_decisions import Decisions
+            self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400, retry_transient_after=10)
+        got = await self.judge.choose(
+            {'earlier_caller_words': earlier, 'new_caller_words': latest,
+             'pending_operation': operation, 'conversation': (self.dialogue.turns[-8:] if self.dialogue else [])},
+            {'relation': {'type': 'choice', 'criteria': {
+                'backchannel': '聞いていることを示す相づち・呼びかけだけ。先の依頼内容も許可も変更せず、新しい質問や指示もない。',
+                'other': '新しい質問・追加条件・訂正・停止・承認・拒否、または判断が曖昧。'},
+                'instructions': '新しい言葉が、先の依頼を保つ相づちだけかを会話の文脈で判断する。「うん」「はい」でも、確認への承認や許可ならother。文字の短さだけで判断しない。'}})
+        return bool(got.get('available') and (got.get('answers') or {}).get('relation') == 'backchannel')
+
     async def read_plan(self, text):
         """Choose only a fixed read, never generated tool names or arbitrary arguments."""
         if self.judge is None:

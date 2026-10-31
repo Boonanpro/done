@@ -22,6 +22,7 @@ class TurnIntake:
         self.reserved = None
         self.reserved_event = None
         self.owners = {}
+        self.unchanged_through = {}
         self.closed = False
         self.has_work = False
         self.work_hint = False  # semantic intent can request reasoning, never authorize work
@@ -64,6 +65,8 @@ class TurnIntake:
             self.owners.setdefault(revision, key)
 
     def attention_only_since(self, revision):
+        if self.unchanged_through.get(revision) == self.revision:
+            return True
         tail = re.sub(r'[\s、。！？!?]', '', ''.join(self.fragments[revision:]))
         return tail in {'聞いてる', '聞いてますか', '聞こえてる', '聞こえますか'}
 
@@ -94,11 +97,21 @@ class TurnIntake:
         self.owners[revision] = key
         return None
 
-    async def admit(self, key):
+    async def admit(self, key, followup=None):
         # Do not mutate while further fragments of the request are arriving.
         remaining = self.quiet_seconds - (time.monotonic() - self.changed_at)
         if remaining > 0:
             await asyncio.sleep(remaining)
+        base = self.delegations.get(key, 0)
+        latest = self.revision
+        if followup is not None and base and base != latest and not self.attention_only_since(base):
+            try:
+                unchanged = await followup(''.join(self.fragments[:base]), ''.join(self.fragments[base:]))
+            except Exception:
+                unchanged = False
+            # A late classification must never cover words it did not see.
+            if unchanged and not self.closed and self.revision == latest:
+                self.unchanged_through[base] = latest
         return self.reject(key)
 
     def close(self):

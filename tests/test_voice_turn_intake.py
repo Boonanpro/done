@@ -245,3 +245,52 @@ async def test_prefetch_work_hint_does_not_accept_stale_judgement(monkeypatch):
     monkeypatch.setattr(p, 'kind', stale)
     await p._judge_and_search(d, turn['text'], turn)
     assert not d.intake.work_hint
+
+
+@pytest.mark.asyncio
+async def test_contextual_backchannel_keeps_request_and_deduplicates():
+    i = TurnIntake(0)
+    i.heard('案内文を短くして', 1000); i.begin('original', 1100)
+    i.heard('うん', 2000)
+    async def backchannel(earlier, latest):
+        assert earlier == '案内文を短くして' and latest == 'うん'
+        return True
+    assert await i.admit('original', backchannel) is None
+    i.finish('original')
+    assert i.reserve() is None
+    i.begin('native-late', 2100)
+    assert i.reject('native-late') == 'already_admitted'
+    i.heard('参加費は無料にして', 3000)
+    assert i.reject('original') == 'newer_or_unassociated_speech'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['approval', 'failed', 'new_words'])
+async def test_followup_cannot_promote_approval_failure_or_unseen_words(outcome):
+    i = TurnIntake(0)
+    i.heard('送って', 1000); i.begin('old', 1100)
+    i.heard('はい', 2000)
+    async def classify(*a):
+        if outcome == 'failed': raise OSError('offline')
+        if outcome == 'new_words':
+            i.heard('いや送らないで', 3000)
+            return True
+        return False
+    assert await i.admit('old', classify) == 'newer_or_unassociated_speech'
+    assert not i.owners
+
+
+@pytest.mark.asyncio
+async def test_backchannel_classifier_uses_context_and_fails_closed():
+    from app.services.voice_prefetch import Prefetch
+    from unittest.mock import AsyncMock
+    p = Prefetch('u', room_id='r'); d = S.Dialogue(); d.add('assistant', '送っていいですか？'); p.dialogue = d
+    class Judge: pass
+    p.judge = Judge()
+    p.judge.choose = AsyncMock(return_value={'available': True, 'answers': {'relation': 'other'}})
+    assert not await p.followup_is_backchannel('送って', 'はい', 'send_message_on_stage')
+    assert p.judge.choose.call_args.args[0]['conversation'][-1]['text'] == '送っていいですか？'
+    p.judge.choose.return_value = {'available': True, 'answers': {'relation': 'backchannel'}}
+    assert await p.followup_is_backchannel('短くして', 'うん', 'start_work')
+    p.judge.choose.return_value = {'available': False}
+    assert not await p.followup_is_backchannel('短くして', 'うん', 'start_work')
