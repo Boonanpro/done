@@ -25,9 +25,14 @@ class Interruption:
             return False
         if self.input_end is not None and end <= self.input_end:
             return False
-        if self.input_end is None or start - self.input_end > 700:
+        new_utterance = self.input_end is None or start - self.input_end > 700
+        if new_utterance:
             self.signalled = False
         self.input_end = end
+        # Decide against the answer present when this utterance began. A late
+        # transcript tail must not interrupt the new answer to that same question.
+        if not new_utterance:
+            return False
         if self.signalled or self.output_end is None or not -400 <= start - self.output_end <= 700:
             return False
         self.signalled = True
