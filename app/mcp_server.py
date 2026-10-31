@@ -120,6 +120,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         from app.services.browser_script import run
         try: result=await run(job_id,str(arguments.get('code','')))
         except Exception as exc: result={'success':False,'error':str(exc)}
+        from app.services.voice_worker_screen import observe
+        await observe(job_id, 'browser', {'action': 'script'})
         return [types.TextContent(type='text',text=json.dumps(result,ensure_ascii=False))]
     if job_id:
         from app.services.command_job_tools import guard, special
