@@ -119,6 +119,7 @@ TOOL = {
                     'PC の LINE を先に試さない。'),
     'input_schema': {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': ['devices', 'read', 'tap', 'type', 'scroll', 'key', 'open', 'screenshot', 'follow']},
+        'query': {'type':'string','description':'read: 必要な文字を含む部品だけ返す。参照番号は全体の一覧と同じ。省略すると全体。'},
         'goal': {'type': 'string', 'description': 'follow: 行き先（例: 「設定のWi-Fiの画面」）。押すだけで行ける所まで Jev が押して進む（入力・購入・送信はしない）'},
         'max_steps': {'type': 'integer', 'minimum': 1, 'maximum': 8},
         'serial': {'type': 'string', 'description': '機器のシリアル（1台だけなら省略）'},
@@ -226,7 +227,7 @@ def _bounds(text):
     return tuple(map(int, m[:4])) if len(m) >= 4 else (0, 0, 0, 0)
 
 
-def read(serial):
+def read(serial, query=""):
     """The current screen as parts with refs; remembered for tap/type by ref."""
     dev = _fast(serial)
     xml, focus = '', None
@@ -278,6 +279,9 @@ def read(serial):
             lines.append(f'{ref} [{kind}] {name[:80]}{extra}')
     _screens[serial] = items
     head = f'画面: {focus.group(1) if focus else "?"}（部品{len(items)}個）'
+    if query and lines:
+        found = [line for line in lines if str(query).casefold() in line.casefold()]
+        return head + f'、一致{len(found)}個（表示中の部品だけを検索）\n' + ('\n'.join(found) or '一致なし。画面全体のreadまたはスクロールで確認してください。')
     return head + '\n' + ('\n'.join(lines) if lines else '（部品を読めなかった。画面が切り替わり中か、読めない画面。少し待って read、または screenshot）')
 
 
@@ -346,7 +350,7 @@ def run(params):
     serial = _serial(params.get('serial'))
     _ensure_unlocked(serial)
     if action == 'read':
-        return read(serial)
+        return read(serial, params.get('query') or '')
     if action == 'screenshot':
         path = (_DONE_ROOT/'uploads')/f'phone-{int(time.time())}.png'
         path.write_bytes(_adb(serial, 'exec-out', 'screencap', '-p', binary=True))

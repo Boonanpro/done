@@ -69,11 +69,37 @@ async def serve(out):
             elif op == 'help':
                 reply = {'text': dan_tools.help_text(mcp, str(req.get('name') or ''))}
             else:
-                contents = await call_tool(str(req.get('name') or ''), req.get('arguments') or {})
+                tool = str(req.get('name') or '')
+                arguments = dict(req.get('arguments') or {})
+                phone_serial = None
+                if tool == 'phone' and arguments.get('action') != 'devices':
+                    # Resolve once: operation and capture must use the same device.
+                    from app.services.phone_control import _serial
+                    phone_serial = await asyncio.to_thread(_serial, arguments.get('serial'))
+                    arguments['serial'] = phone_serial
+                    try:
+                        from app.services.voice_phone_stream import follow
+                        await follow(phone_serial)
+                    except Exception:
+                        pass
+                contents = await call_tool(tool, arguments)
                 texts = [c.text for c in contents if getattr(c, 'type', '') == 'text']
                 try: image = screen_image(contents, str(req.get('name') or ''), req.get('arguments') or {})
                 except (OSError,ValueError): image = ''
                 reply = {'text': ('\n'.join(texts)[:OUTPUT_CHARS] or '（出力なし）'), 'stage_image': image}
+                if phone_serial:
+                    reply["stage_serial"] = phone_serial
+                    try:
+                        from app.services.voice_phone_stream import follow
+                        reply['stage_stream'] = await follow(phone_serial)
+                    except Exception:
+                        pass
+                if str(req.get('name') or '') in ('browser','browser_plan','browser_flow') and image:
+                    try:
+                        from app.tools.browser import _send_executor_command
+                        reply['stage_stream'] = await asyncio.to_thread(_send_executor_command, 'voice_stream_url')
+                    except Exception:
+                        pass
         except Exception as exc:
             reply = {'text': f'操作結果が不明です。再送せず現在の画面を確かめてください: {type(exc).__name__}: {str(exc)[:300]}'}
         out.write(json.dumps({'id': rid, **reply}, ensure_ascii=False) + '\n')

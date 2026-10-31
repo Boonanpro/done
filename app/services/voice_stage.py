@@ -778,11 +778,13 @@ class Stage:
         args = {'action':'screenshot'}
         if source == 'phone' and serial: args['serial'] = serial
         out = await voice_tools.host(self.user_id,self.room_id).ask('call',with_media=True,name=source,arguments=args)
-        path = safe_image(out.get('stage_image'))
+        path = safe_image(out.get('stage_stream')) or safe_image(out.get('stage_image'))
         if not path: return {'shown':False,'reason':out.get('text') or '画面を取得できませんでした。'}
         self._apply('スマホの画面' if source=='phone' else 'ブラウザの画面',image=path)
         self._external_source = source
-        return {'shown':True,'note':'実際の操作画面を表示しました。操作のたびに更新します。静止画なので本人が直接押すことはできません。'}
+        self._external_image = path
+        self._external_serial = out.get("stage_serial") or serial
+        return {'shown':True,'note':'実際の操作画面を表示しました。映像の上を本人が直接押して操作することはできません。'}
 
     def _command(self, action, screen_command=None):
         """An action for the page on the stage (the page's own button: approve all suggestions, reload…). The screen passes

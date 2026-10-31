@@ -71,6 +71,14 @@ async def call_screen_image(room_id: str, filename: str, request: Request):
     from app.services.voice_screen_media import directory
     user = _get_user(request)
     if not await ChatService().get_room(room_id,user.user_id): raise HTTPException(status_code=403,detail='No access to this room')
+    if re.fullmatch(r'[a-f0-9]{32}\.mjpeg', filename):
+        from fastapi.responses import StreamingResponse
+        from app.services.voice_screen_stream import frames, frame_path
+        key = filename.split('.')[0]
+        if not frame_path(room_id,key).is_file(): raise HTTPException(status_code=404)
+        return StreamingResponse(frames(room_id,key,request.is_disconnected),
+            media_type='multipart/x-mixed-replace; boundary=frame',
+            headers={'Cache-Control':'private, no-store','X-Accel-Buffering':'no'})
     if not re.fullmatch(r'[a-f0-9]{32}\.(png|jpg|webp)',filename): raise HTTPException(status_code=404)
     path = directory(room_id)/filename
     if not path.is_file(): raise HTTPException(status_code=404)

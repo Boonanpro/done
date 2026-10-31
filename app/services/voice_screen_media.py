@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from app.services.voice_calls import ROOT, _name
 
-URL = re.compile(r'^/api/v1/voicelog/stage/[A-Za-z0-9_-]{1,100}/image/[a-f0-9]{32}\.(png|jpg|webp)$')
+URL = re.compile(r'^/api/v1/voicelog/stage/[A-Za-z0-9_-]{1,100}/image/[a-f0-9]{32}\.(png|jpg|webp|mjpeg)$')
 
 def directory(room): return ROOT / (_name(room)+'.screens')
 
