@@ -381,7 +381,10 @@ async def test_known_attention_does_not_add_classifier_round_trip():
     i.heard('文章を直して', 1000); i.begin('work', 1100)
     i.work_accepted('work'); i.finish('work')
     i.heard('聞いてる？', 2000)
-    async def classify(text): raise AssertionError('unnecessary judgement')
+    classified = []
+    async def classify(text):
+        classified.append(text)
+        return False
     sent = []
     async def send(event): sent.append(event)
     task = asyncio.create_task(dispatch_missing(i, send, lambda *a, **k: None, classify))
@@ -389,3 +392,4 @@ async def test_known_attention_does_not_add_classifier_round_trip():
     i.close(); await task
     assert not sent
     assert i.handled == i.revision
+    assert not classified

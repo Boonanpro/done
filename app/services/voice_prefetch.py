@@ -206,7 +206,7 @@ class Prefetch:
         self.record('turn_delivery_classified', available=bool(got.get('available')),
                     choice=answer.get('choice'), probability=(answer.get('probabilities') or {}).get('conversation'))
         return bool(got.get('available') and answer.get('choice') == 'conversation'
-                    and (answer.get('probabilities') or {}).get('conversation', 0) >= .9)
+                    and (answer.get('probabilities') or {}).get('conversation', 0) >= .8)
 
     async def read_plan(self, text):
         """Choose only a fixed read, never generated tool names or arbitrary arguments."""
