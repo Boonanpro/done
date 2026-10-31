@@ -368,6 +368,10 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         job = out.get('job') if isinstance(out, dict) else None
         if not isinstance(job, dict) or not job.get('id'):
             return {'accepted': False, 'delivered': False, 'note': '追加指示の受付を確認できませんでした。反映したとは言わない。'}
+        if args.get('kind') in {'pause', 'cancel'}:
+            return {'accepted': True, 'delivered': False, 'stopped': False,
+                    'state': job.get('state'),
+                    'note': '停止指示を受け付けました。実行中の操作が止まったことはまだ確認できていません。停止済みとは言わない。'}
         applied = (job.get('applied_revision') is not None and job.get('revision') is not None
                    and job['applied_revision'] >= job['revision'])
         return {'accepted': True, 'delivered': applied, 'state': job.get('state'),

@@ -40,3 +40,13 @@ DB chat_messages（room 5e43d6b8-0f68-4113-a576-01bb39b84933）の08:07〜08:10U
 未完了: 別室のチャット実行を作業IDで直接止める経路。既存chat/dan/cancelは部屋全体の継続作業取消と対象なしabort_executor_sessionを伴うため再利用しない。command_job_state.controlのpause/cancelはapplied_revisionを受付時に進めており、実行主体の停止確認とは別である。この状態遷移と実行主体の確認を合わせて改修する必要がある。
 
 17:43時点の共有Core/Sandbox起動は16:39、PR757より古い。17:37:52からの安全な再起動待機PID94294が存在。再起動を重複発行せず、この待機の完了後に反映を確認する。通話試験は再開していない。
+
+## 停止受付の虚偽報告を防ぐ追加修正
+
+command_job_state.control の pause/cancel 受付で applied_revision を進める処理を削除。未反映の追加条件まで反映済みになる問題も防止。イベント文は停止受付・実停止未確認と明記。voice_responses.steer_job は pause/cancel の応答で accepted=true / delivered=false / stopped=false を返す。旧実行主体が applied_revision を進めた記録を返しても停止完了とは解釈しない。
+
+音声・モデルAPI・仕事の起動なしで30件合格、既存4件skip。試験用暗号鍵は毎回メモリ内で生成（実認証情報は使わない）。停止受付を停止完了として報告する局所修正であり、停止の確認機構全体の完成ではない。
+
+残る構造変更: 通常チャットは CancellationRegistry と kill_cli_process が部屋ID単位。世代の所有記録には run_id があるが、ID照合後に部屋単位停止を呼ぶだけでは新ターン開始との競合が残る。実行主体側で対象runとターンを同時に固定する停止APIが必要。共有Coreと世代Core双方、Claude常駐とCodex経路を確認してから公開すること。無引数browser abort、cancel_room、pause_active_runs_for_roomは流用しない。停止受付と実行終了確認を別に保持し、状況読取・音声job feedにも伝える必要がある。
+
+前回の安全な再起動待機96960は引き続き生存。ログ上の直近の完了は16:39で、今回の修正の共有Core反映は未確認。health-only以外の起動後試験を行わない。

@@ -70,3 +70,16 @@ async def test_empty_local_jobs_does_not_claim_other_room_stopped(monkeypatch):
     result = await voice_responses.run_function('job_status', {}, 'owner', 'room', [])
     assert 'この通話の部屋' in result['scope']
     assert '今は何も作業していません' not in result['note']
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind,state', [('pause', 'paused'), ('cancel', 'cancelled')])
+async def test_stop_receipt_cannot_claim_worker_stopped(monkeypatch, kind, state):
+    # Legacy records can have their revision advanced at intake.
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda *a: [{'id': 'job', 'state': 'running'}])
+    monkeypatch.setattr('app.services.command_center.execute', AsyncMock(return_value={
+        'job': {'id': 'job', 'state': state, 'revision': 4, 'applied_revision': 4}}))
+    result = await voice_responses.run_function('steer_job', {'kind': kind}, 'owner', 'room', [])
+    assert result['accepted'] is True
+    assert result['delivered'] is False
+    assert result['stopped'] is False
+    assert '停止済みとは言わない' in result['note']
