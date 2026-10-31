@@ -63,13 +63,13 @@ async def test_phone_viewport_reflows_real_browser_and_retains_page_state(displa
             assert page.viewport_size=={'width':390,'height':700}
             assert not await page.locator('nav').is_visible()
             assert await page.locator('input').input_value()=='見積もり待ち'
+            from PIL import Image
+            import io
             for _ in range(40):
-                if live.data:break
+                if live.data and Image.open(io.BytesIO(live.data)).size==(390,700):break
                 import asyncio
                 await asyncio.sleep(.05)
             assert live.data
-            from PIL import Image
-            import io
             assert Image.open(io.BytesIO(live.data)).size==(390,700)
         finally:
             await live.close();await browser.close()
