@@ -188,3 +188,111 @@ async def test_only_confirmed_work_enables_fallback(monkeypatch):
     monkeypatch.setattr('app.services.voice_responses.run_function', success)
     await S.execute_call(item, 'u', 'r', d, lambda *a, **kw: None, 'first')
     assert d.intake.has_work and d.intake.owners == {1: 'first'}
+
+
+@pytest.mark.asyncio
+async def test_first_work_hint_dispatches_latest_words_only_once():
+    i = TurnIntake(0)
+    i.heard('案内文を短くして', 1000)
+    i.work_hint = True
+    i.heard('いや、まだ変更しないで', 2000)
+    sent = []
+    async def send(event):
+        sent.append(event)
+        i.begin('fallback', client_event_id=event['event_id'])
+        i.close()
+    await dispatch_missing(i, send, lambda *a, **kw: None)
+    assert len(sent) == 1
+    assert i.delegations['fallback'] == 2
+    assert not i.has_work  # reasoning is not execution or approval
+
+
+@pytest.mark.asyncio
+async def test_first_native_and_fallback_do_not_start_two_jobs(monkeypatch):
+    calls = []
+    async def run(*a, **kw):
+        calls.append(a)
+        return {'accepted': True, 'job_id': 'one'}
+    monkeypatch.setattr('app.services.voice_responses.run_function', run)
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.intake.work_hint = True
+    d.intake.heard('案内文を短くして', 1000)
+    d.intake.begin('native', 1100); d.intake.begin('fallback', 1100)
+    item = {'name': 'start_work', 'arguments': '{}'}
+    out = await asyncio.gather(*(S.execute_call(dict(item, call_id=key), 'u', 'r', d,
+        lambda *a, **kw: None, key) for key in ('native', 'fallback')))
+    assert len(calls) == 1
+    assert sum(json.loads(r['output']).get('accepted') is True for r in out) == 1
+
+
+@pytest.mark.asyncio
+async def test_prefetch_work_hint_does_not_accept_stale_judgement(monkeypatch):
+    from app.services.voice_prefetch import Prefetch
+    d = S.Dialogue(); d.intake = TurnIntake(0)
+    d.add('user', '案内文を短くして')
+    p = Prefetch('u', room_id='r')
+    monkeypatch.setattr(p, 'heard', lambda *a: None)
+    monkeypatch.setattr(p, 'start_read', lambda *a: None)
+    async def work(text): return 'work'
+    monkeypatch.setattr(p, 'kind', work)
+    turn = d.turns[-1]
+    await p._judge_and_search(d, turn['text'], turn)
+    assert d.intake.work_hint and not d.intake.has_work
+    d.intake.work_hint = False
+    async def stale(text):
+        d.add('user', 'いや、変更しないで')
+        return 'work'
+    monkeypatch.setattr(p, 'kind', stale)
+    await p._judge_and_search(d, turn['text'], turn)
+    assert not d.intake.work_hint
+
+
+@pytest.mark.asyncio
+async def test_contextual_backchannel_keeps_request_and_deduplicates():
+    i = TurnIntake(0)
+    i.heard('案内文を短くして', 1000); i.begin('original', 1100)
+    i.heard('うん', 2000)
+    async def backchannel(earlier, latest):
+        assert earlier == '案内文を短くして' and latest == 'うん'
+        return True
+    assert await i.admit('original', backchannel) is None
+    i.finish('original')
+    assert i.reserve() is None
+    i.begin('native-late', 2100)
+    assert i.reject('native-late') == 'already_admitted'
+    i.heard('参加費は無料にして', 3000)
+    assert i.reject('original') == 'newer_or_unassociated_speech'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['approval', 'failed', 'new_words'])
+async def test_followup_cannot_promote_approval_failure_or_unseen_words(outcome):
+    i = TurnIntake(0)
+    i.heard('送って', 1000); i.begin('old', 1100)
+    i.heard('はい', 2000)
+    async def classify(*a):
+        if outcome == 'failed': raise OSError('offline')
+        if outcome == 'new_words':
+            i.heard('いや送らないで', 3000)
+            return True
+        return False
+    assert await i.admit('old', classify) == 'newer_or_unassociated_speech'
+    assert not i.owners
+
+
+@pytest.mark.asyncio
+async def test_backchannel_classifier_uses_context_and_fails_closed():
+    from app.services.voice_prefetch import Prefetch
+    from unittest.mock import AsyncMock
+    p = Prefetch('u', room_id='r'); d = S.Dialogue(); d.add('assistant', '送っていいですか？'); p.dialogue = d
+    class Judge: pass
+    p.judge = Judge()
+    p.judge.choose = AsyncMock(return_value={'available': True, 'answers': {'relation': {'choice': 'other', 'probabilities': {'other': .99}} }})
+    assert not await p.followup_is_backchannel('送って', 'はい', 'send_message_on_stage')
+    assert p.judge.choose.call_args.args[0]['conversation'][-1]['text'] == '送っていいですか？'
+    p.judge.choose.return_value = {'available': True, 'answers': {'relation': {'choice': 'backchannel', 'probabilities': {'backchannel': .99}} }}
+    assert await p.followup_is_backchannel('短くして', 'うん', 'start_work')
+    p.judge.choose.return_value = {'available': True, 'answers': {'relation': {'choice': 'backchannel', 'probabilities': {'backchannel': .69}}}}
+    assert not await p.followup_is_backchannel('短くして', 'うん', 'start_work')
+    p.judge.choose.return_value = {'available': False}
+    assert not await p.followup_is_backchannel('短くして', 'うん', 'start_work')

@@ -133,9 +133,13 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     except ValueError: args = {}
     reads = {'read_many', 'web_search', 'get_calendar', 'get_location', 'room_files', 'job_status',
              'search_records', 'get_saved_information', 'read_page', 'list_operations'}
-    if dialogue.intake is not None and dialogue.intake.has_work and item.get('name') not in reads:
+    if dialogue.intake is not None and (dialogue.intake.has_work or dialogue.intake.work_hint) and item.get('name') not in reads:
         # Disclosed tools also pass this admission; no mutation allowlist.
-        reason = await dialogue.intake.admit(delegation_id)
+        followup = None
+        if dialogue.prefetch is not None:
+            async def followup(earlier, latest):
+                return await dialogue.prefetch.followup_is_backchannel(earlier, latest, item.get('name'))
+        reason = await dialogue.intake.admit(delegation_id, followup)
         if reason:
             output = {'accepted': False, 'reason': reason,
                       'note': 'この呼出しは実行していません。新しい本人の発話、または既に受け付けた処理を確認してください。完了したとは言わない。'}
