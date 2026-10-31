@@ -48,7 +48,8 @@ TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["overview", "list", "search", "read", "status", "requests", "delegate", "report"]},
+            "action": {"type": "string", "enum": ["overview", "list", "search", "read", "status", "stop_run", "requests", "delegate", "report"]},
+            "run_id": {"type": "string", "description": "statusで確認した対象のrun.id。stop_runに必須。"},
             "query": {"type": "string", "description": "一覧の絞り込み、会話の検索語、またはstatusで確認する部屋名。"},
             "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 6, "description": "search用。説明された話の内容から検索語や言い換えを選ぶ。部屋名は不要。一致した会話を読んで対象を判断できる。"},
             "days": {"type": "integer", "minimum": 1, "maximum": 3650, "description": "overviewの対象期間。既定30日。"},
@@ -184,7 +185,7 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
             str(p.get(k) or "") for k in ("title", "description", "summary")
         ).casefold()]
         return {"projects": [summary(p) for p in rows], "count": len(rows)}
-    if action not in ("read", "status", "delegate", "report", "work"):
+    if action not in ("read", "status", "stop_run", "delegate", "report", "work"):
         raise ValueError("未対応の操作です")
     if action == "status" and not params.get("project_id"):
         candidates = await projects.find_status_projects(user_id, str(params.get("query") or ""))
@@ -200,11 +201,25 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
     target_room = target["room_id"]
     if not await chat.get_room(target_room, user_id):
         raise ValueError("対象の部屋へのアクセス権がありません")
+    if action == 'stop_run':
+        from app.services.run_service import RunService
+        from app.services.run_stop import request_stop
+        run_id = str(params.get('run_id') or '')
+        if not run_id:
+            return {'accepted': False, 'stopped': False, 'note': '停止する作業のrun_idを指定してください。'}
+        run = await RunService().get_run(run_id)
+        if not run or run.get('project_id') != target['id'] or run.get('room_id') != target_room:
+            return {'accepted': False, 'stopped': False, 'note': '対象の部屋と作業が一致しません。'}
+        return await request_stop(run, user_id)
     if action == "status":
         from app.services.run_service import RunService
-        run = await RunService().get_current_run(target['id'])
+        from app.services.run_stop import status as stop_status
+        runs = RunService()
+        run = await runs.get_run(str(params['run_id'])) if params.get('run_id') else await runs.get_current_run(target['id'])
+        if run and (run.get('project_id') != target['id'] or run.get('room_id') != target_room):
+            raise ValueError('対象の部屋と作業が一致しません')
         activity = await projects.get_execution_events(target['id'], run_id=run['id'], limit=20) if run else []
-        return {'project': summary(target), 'run': run, 'activity': activity}
+        return {'project': summary(target), 'run': run, 'activity': activity, 'stop_status': stop_status(run)}
     if action == "read":
         limit = min(50, max(1, int(params.get("limit") or 4)))
         messages = await chat.get_messages(target_room, user_id, limit=limit, before=params.get("before"))

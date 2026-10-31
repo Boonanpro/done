@@ -498,6 +498,8 @@ def run_codex_process(
     static_hash: str = "",
 ) -> Optional[dict]:
     from app.agent import cli_runner as cr
+    from app.services.cancellation import CancellationRegistry
+    CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
     turn_id = turn_id or str(uuid.uuid4())
     thread_id: Optional[str] = None
@@ -529,13 +531,16 @@ def run_codex_process(
         room_id, time.perf_counter() - popen_start, cwd or cr.CLI_WORKSPACE,
     )
 
-    with cr._process_lock:
-        old_process = cr._active_processes.get(room_id)
-        cr._active_processes[room_id] = process
+    old_process = cr.register_cli_process(room_id, run_id, process)
     if old_process is not None:
         cr._cli_debug(f"[CODEX] killing orphaned process PID={old_process.pid}")
         cr._terminate_process(old_process)
     cr._cli_debug(f"[CODEX] process started: PID={process.pid}")
+
+    if CancellationRegistry.is_run_cancelled(room_id, run_id):
+        cr._terminate_process(process)
+        cr.unregister_cli_process(room_id, process)
+        CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
     try:
         process.stdin.write(content)
@@ -732,9 +737,7 @@ def run_codex_process(
                 errors.append(msg)
                 _mid_turn_error(msg)
 
-    with cr._process_lock:
-        if cr._active_processes.get(room_id) is process:
-            cr._active_processes.pop(room_id, None)
+    cr.unregister_cli_process(room_id, process)
 
     try:
         return_code = process.wait(timeout=30)
@@ -821,6 +824,7 @@ def run_codex_turn_in_thread(
     the end) so ``process_message_cli`` can drive either backend."""
     from app.agent import cli_runner as cr, turn_flow
 
+    from app.services.cancellation import CancellationRegistry, CancelledError
     cr._thread_local.room_id = room_id
     turn_id = str(uuid.uuid4())
     cr._cli_debug(f"[CODEX] thread started for room {room_id} model={model}")
@@ -888,6 +892,7 @@ def run_codex_turn_in_thread(
             cmd, content, env, room_id, event_queue,
             user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
         )
+        CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
         # Silent early death (exit != 0 within seconds, nothing produced): a
         # transient API/stream failure. Retry the same thread once before
@@ -906,6 +911,7 @@ def run_codex_turn_in_thread(
                 cmd, content, env, room_id, event_queue,
                 user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
             )
+            CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
         # Resume failure → clear the saved thread and retry fresh (DB reseed).
         if resume_thread_id and result_data is not None and result_data.get("is_error"):
@@ -923,6 +929,7 @@ def run_codex_turn_in_thread(
                     cmd, retry_content, env, room_id, event_queue,
                     user_id=user_id, project_id=project_id, run_id=run_id, turn_id=turn_id, cwd=cwd, static_hash=static_hash,
                 )
+                CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
         if result_data and cr._defer_quota_result(result_data, room_id, project_id, run_id,
                                                    skip_save, event_queue.put):
@@ -953,6 +960,7 @@ def run_codex_turn_in_thread(
 
             text, result_data["turn_blocks"] = cr._tidy_reply(text, result_data.get("turn_blocks", []), content)
             cli_saved = False
+            CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
             if not skip_save:
                 cli_saved = cr._save_ai_message_sync(
                     room_id, text,
@@ -993,6 +1001,10 @@ def run_codex_turn_in_thread(
                     room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed",
                 )
             cr._update_run_sync(run_id, state="failed" if is_error else "completed")
+    except CancelledError:
+        done_saved = True
+        cr._update_run_sync(run_id, state="paused")
+        event_queue.put({"type": "cancelled", "stopped": False})
     except Exception as e:  # noqa: BLE001
         import traceback
         from app.services.cancellation import CancellationRegistry
@@ -1014,7 +1026,8 @@ def run_codex_turn_in_thread(
         _hb_stop.set()
         if project_id and not result_data and not done_saved:
             from app.services.cancellation import CancellationRegistry
-            was_cancelled = CancellationRegistry.is_cancelled(room_id)
+            was_cancelled = (CancellationRegistry.is_run_cancelled(room_id, run_id)
+                             or (cancel_event is not None and cancel_event.is_set()))
             cr._cli_debug(f"[CODEX] safety net: exited without result (cancelled={was_cancelled})")
             if not was_cancelled:
                 cr._save_ai_message_sync(

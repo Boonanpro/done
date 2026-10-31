@@ -2691,7 +2691,7 @@ async def send_dan_message_stream(
 
             # キャンセルフラグを登録（room_idが確定してから）
             room_id_for_cancel = room_id
-            CancellationRegistry.register(room_id)
+            registered_cancel_event = CancellationRegistry.register(room_id)
             turn_flow.turn_started(room_id)   # 前のターンの「答えた」の印を外す（/active がまた作業中と答える）
 
             # ユーザーメッセージのエコー（即時保存パスのみ即送出。並列保存は cold start 起動後に送出）
@@ -2825,6 +2825,7 @@ async def send_dan_message_stream(
                         metadata=run_metadata or None,
                     )
                     run_id = run["id"]
+                    CancellationRegistry.bind_run(room_id, registered_cancel_event, run_id)
                     if should_supersede_existing_run and current_project_run:
                         await run_service.supersede_run(current_project_run["id"], run_id)
                         active_proposal_id = current_project_run.get("active_proposal_id")

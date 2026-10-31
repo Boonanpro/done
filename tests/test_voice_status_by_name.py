@@ -13,7 +13,7 @@ async def test_named_status_through_voice(monkeypatch, count):
     candidates = [{'id': f'p{i}', 'room_id': f'r{i}', 'title': '開発室'} for i in range(count)]
     projects.find_status_projects.return_value = candidates
     projects.get_project.return_value = candidates[0] if candidates else None
-    runs.get_current_run.return_value = {'id': 'actual-run', 'state': 'running'}
+    runs.get_current_run.return_value = {'id': 'actual-run', 'state': 'running', 'project_id': 'p0', 'room_id': 'r0'}
     projects.get_execution_events.return_value = [{'content': '文章を編集しています'}]
     monkeypatch.setattr(cc, 'ChatService', lambda: chat)
     monkeypatch.setattr(cc, 'ProjectService', lambda: projects)

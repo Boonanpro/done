@@ -59,6 +59,7 @@ _STREAMING_KEEPALIVE_SECONDS = 20
 
 # アクティブなCLIプロセスを追跡（room_id → Popen）
 _active_processes: Dict[str, subprocess.Popen] = {}
+_active_process_runs: Dict[str, tuple] = {}
 _process_lock = threading.Lock()
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
@@ -89,6 +90,43 @@ def is_cli_active(room_id: str) -> bool:
     """CLIサブプロセスがまだ実行中かどうかを返す"""
     with _process_lock:
         return room_id in _active_processes
+
+
+def register_cli_process(room_id, run_id, process):
+    """Capture run and process together; a later DB lookup is not sufficient."""
+    with _process_lock:
+        previous = _active_processes.get(room_id)
+        _active_processes[room_id] = process
+        _active_process_runs[room_id] = (run_id, process)
+        return previous
+
+
+def unregister_cli_process(room_id, process):
+    with _process_lock:
+        if _active_processes.get(room_id) is process:
+            _active_processes.pop(room_id, None)
+        captured = _active_process_runs.get(room_id)
+        if captured and captured[1] is process:
+            _active_process_runs.pop(room_id, None)
+
+
+def request_cli_run_stop(room_id, run_id):
+    """Stop a captured one-shot process, never the room's replacement.
+
+    The CLI may have spawned tools. Parent exit alone is deliberately not
+    reported as complete termination of the work. Streaming is handled by its
+    own turn identity, not by this process table.
+    """
+    with _process_lock:
+        captured = _active_process_runs.get(room_id)
+        if (not run_id or not captured or captured[0] != run_id
+                or _active_processes.get(room_id) is not captured[1]):
+            return {'accepted': False, 'stopped': False}
+        process = captured[1]
+    from app.services.cancellation import CancellationRegistry
+    CancellationRegistry.mark_matched_run_cancelled(room_id, run_id)
+    _terminate_process(process)
+    return {'accepted': True, 'process_exited': process.poll() is not None, 'stopped': False}
 
 
 def kill_cli_process(room_id: str, allow_arm_pending: bool = True) -> bool:
@@ -1510,6 +1548,10 @@ def _save_ai_message_sync(
     from app.services.supabase_client import get_supabase_client
     from app.services.chat_service import record_message_delivery_sync
     from app.services.artifact_url_guard import sanitize_artifact_public_urls
+    from app.services.cancellation import CancellationRegistry
+
+    if CancellationRegistry.is_run_cancelled(room_id, run_id):
+        return False
 
     if _answers_withdrawn(room_id):
         _cli_debug(f"[CANCEL] reply not saved: the message it answers was withdrawn (room {room_id[:8]})")
@@ -2470,6 +2512,8 @@ def _run_cli_process(
     Returns:
         result データ（リトライ判定用）。プロセスが結果を返さなかった場合は None。
     """
+    from app.services.cancellation import CancellationRegistry
+    CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
     session_id_captured = None
     final_text_parts = []
     result_data = None
@@ -2517,14 +2561,17 @@ def _run_cli_process(
     _latency_debug(latency_message)
 
     # プロセスを追跡dictに登録（旧プロセスがあればkill）
-    with _process_lock:
-        old_process = _active_processes.get(room_id)
-        _active_processes[room_id] = process
+    old_process = register_cli_process(room_id, run_id, process)
     if old_process is not None:
         _cli_debug(f"Killing orphaned process PID={old_process.pid} before registering new PID={process.pid}")
         _terminate_process(old_process)
 
     _cli_debug(f"CLI process started: PID={process.pid}")
+
+    if CancellationRegistry.is_run_cancelled(room_id, run_id):
+        _terminate_process(process)
+        unregister_cli_process(room_id, process)
+        CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
     try:
         process.stdin.write(content)
@@ -2821,9 +2868,7 @@ def _run_cli_process(
             _cli_debug(f"System message: session_id={session_id_captured}")
 
     # プロセスを追跡dictから削除（自分のプロセスだけ。新プロセスが既に登録されている場合は触らない）
-    with _process_lock:
-        if _active_processes.get(room_id) is process:
-            _active_processes.pop(room_id, None)
+    unregister_cli_process(room_id, process)
 
     return_code = process.wait(timeout=30)
     _cli_debug(f"CLI process exited with code {return_code}")
@@ -2908,6 +2953,7 @@ def _run_cli_in_thread(
     セッション再開が失敗した場合（セッションが見つからない等）、
     保存済みセッションIDをクリアして新規会話として自動リトライする。
     """
+    from app.services.cancellation import CancellationRegistry, CancelledError
     _thread_local.room_id = room_id
     _cli_debug(f"Thread started for room {room_id}")
     turn_id = str(uuid.uuid4())
@@ -3013,6 +3059,7 @@ def _run_cli_in_thread(
             turn_id=turn_id,
             cwd=cwd,
         )
+        CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
         # セッション再開失敗 → セッションをクリアしてリトライ
         if _should_retry_without_resume(result_data, used_resume=resume_session_id is not None):
@@ -3052,6 +3099,7 @@ def _run_cli_in_thread(
                 run_id=run_id,
                 turn_id=turn_id,
             )
+            CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
 
         # 最終結果をキューに送る
         if result_data and _defer_quota_result(result_data, room_id, project_id, run_id,
@@ -3102,6 +3150,7 @@ def _run_cli_in_thread(
             # SSEハンドラに依存せず、ここで確実にDBに書き込む
             text, result_data["turn_blocks"] = _tidy_reply(text, result_data.get("turn_blocks", []), content)
             cli_saved = False
+            CancellationRegistry.check_run_cancelled_raise(room_id, run_id)
             if not skip_save:
                 reasoning = result_data.get("reasoning_steps", [])
                 reasoning_full_list = result_data.get("reasoning_full", [])
@@ -3157,6 +3206,10 @@ def _run_cli_in_thread(
                     content="completed",
                 )
             _update_run_sync(run_id, state="failed" if is_error else "completed")
+    except CancelledError:
+        done_saved = True
+        _update_run_sync(run_id, state="paused")
+        event_queue.put({"type": "cancelled", "stopped": False})
     except Exception as e:
         import traceback
         from app.services.cancellation import CancellationRegistry
@@ -3188,7 +3241,8 @@ def _run_cli_in_thread(
         # = CLIがresultを出す前に静かに終了した場合
         if project_id and not result_data and not done_saved:
             from app.services.cancellation import CancellationRegistry
-            was_cancelled = CancellationRegistry.is_cancelled(room_id)
+            was_cancelled = (CancellationRegistry.is_run_cancelled(room_id, run_id)
+                             or (cancel_event is not None and cancel_event.is_set()))
             _cli_debug(f"Safety net: CLI exited without result (cancelled={was_cancelled})")
             # キャンセル時はSSE側(chat_routes.py)が「（中断されました）」を保存するので重複しない
             if not was_cancelled:
@@ -3670,6 +3724,17 @@ async def _process_via_streaming_session(
                     _update_run_sync(run_id, claude_session_id=sid)
 
             elif rtype == "result":
+                from app.services.cancellation import CancellationRegistry
+                if CancellationRegistry.is_run_cancelled(room_id, run_id):
+                    # A scoped stop can be followed by a late success result or
+                    # an interrupt result. Neither proves that external tools
+                    # have exited, and neither is a reply to publish as success.
+                    state["any_result"] = True
+                    if project_id:
+                        _update_run_sync(run_id, state="paused")
+                    _emit({"type": "cancelled", "session_id": state["session_id"],
+                           "stopped": False})
+                    return
                 quota_result = {**raw_ev, "final_text_parts": state["final_text_parts"],
                                 "turn_blocks": state["turn_blocks"]}
                 if _defer_quota_result(quota_result, room_id, project_id, run_id,
@@ -3803,12 +3868,20 @@ async def _process_via_streaming_session(
 
     def run() -> None:
         nonlocal session, resume_session_id, send_content
+        from app.services.cancellation import CancellationRegistry
         t0 = time.time()
         res = None
         # 無音ツール実行中も run を stale sweep から守る心拍（finallyで停止）
         _hb_stop = _start_run_heartbeat(run_id)
         try:
-            res = session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+            res = session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT, run_id=run_id)
+            if CancellationRegistry.is_run_cancelled(room_id, run_id):
+                if project_id:
+                    _update_run_sync(run_id, state="paused")
+                if not state["any_result"]:
+                    _emit({"type": "cancelled", "session_id": state["session_id"],
+                           "stopped": False})
+                return
             elapsed = time.time() - t0
             # Idle hang: the turn produced no `result`, so the sink never saved
             # or emitted one. Instead of silently closing the SSE on silence
@@ -3866,7 +3939,7 @@ async def _process_via_streaming_session(
                     _cli_debug(f"[STREAMING] idle hang: re-running {len(leftover)} chars of queued follow-up on a fresh session (room {room_id[:8]})")
                     try:
                         session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
-                        session.run_turn(retry_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+                        session.run_turn(retry_content, sink, timeout=_STREAMING_IDLE_TIMEOUT, run_id=run_id)
                     except Exception as retry_error:  # noqa: BLE001
                         _emit({"type": "error", "message": str(retry_error)})
             elif state.get("loop_detected"):
@@ -3959,7 +4032,7 @@ async def _process_via_streaming_session(
                         send_content = _wrap_latest_user_message(reseed, content)
                 try:
                     session = get_or_create_session(room_id, build_cmd, env, run_cwd, model=cli_model)
-                    session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+                    session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT, run_id=run_id)
                 except Exception as retry_error:  # noqa: BLE001
                     _emit({"type": "error", "message": str(retry_error)})
                 return
@@ -3987,6 +4060,7 @@ async def _process_via_streaming_session(
             try:
                 clean = (
                     isinstance(res, dict)
+                    and not CancellationRegistry.is_run_cancelled(room_id, run_id)
                     and res.get("type") == "result"
                     and not res.get("is_error")
                     and not getattr(session, "last_turn_hung", False)
@@ -4129,167 +4203,190 @@ async def _process_message_cli_with_failover(
         async for event in relay({name: values[name] for name in parameters}):
             yield event
         return
-    note_turn_input(room_id, content)
-    setup_start = time.perf_counter()
-    system_prompt, mcp_config_path = await _prepare_cli_inputs(
-        room_id, user_id, credentials, system_prompt, mcp_config_override,
-        dict(title=project_title, description=project_description, status=project_status,
-             user_messages=user_messages, latest_user_message=content, room_id=room_id, user_id=user_id,
-             answer_shapes=answer_shapes),
-    )
-    if skill_injection:
-        system_prompt += f"\n\n{skill_injection}"
-    timeline_draft: Optional[Dict[str, Any]] = None
-    timeline_turn_succeeded = False
-    if timeline_refs:
-        # A chat mention supplies an explicit creative artifact.  Give the same
-        # normal Dan session a draft-only timeline MCP; its other capabilities
-        # remain unchanged and the live sequence is still CAS-protected.
-        ref = timeline_refs[0]
-        content_id = str(ref.get("content_id") or "")
-        if content_id:
-            try:
-                from app.services import timeline_draft as _timeline_draft
-                timeline_draft = _timeline_draft.create_draft(
-                    room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
-                )
-                cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
-                cfg.setdefault("mcpServers", {})["timeline"] = {
-                    "command": "python",
-                    "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
-                    "env": {
-                        "DAN_ROOM_ID": room_id,
-                        "DAN_DRAFT_ID": timeline_draft["draft_id"],
-                        "DAN_JOB_ID": timeline_draft["job_id"],
-                        "DAN_CONTENT_ID": content_id,
-                        "PYTHONIOENCODING": "utf-8",
-                    },
-                }
-                Path(mcp_config_path).write_text(json.dumps(cfg), encoding="utf-8")
-                title = str(ref.get("title") or content_id)
-                system_prompt += (
-                    "\n\n## Mentioned timeline\n"
-                    f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
-                    "Use mcp__timeline__* to inspect, edit, or export it. Timeline mutations are isolated "
-                    "in a draft and are committed only after this chat turn validates successfully. "
-                    "Lanes are layers (video/audio only); blur and highlight frames are region clips "
-                    "(add_region / set_region); touch only what the user asked for; check with render_frame."
-                )
-                try:
-                    from app.services import timeline_live as _tl
-                    _ctx = _tl.context_text(room_id, content_id)
-                    if _ctx:
-                        system_prompt += "\n\n" + _ctx
-                except Exception:  # noqa: BLE001
-                    pass
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("timeline mention setup failed: %s", exc)
-                timeline_draft = None
-    resume_session_id = None if skip_resume else _load_session(room_id)
-
+    from app.services.cancellation import CancellationRegistry
     if run_id is None and project_id and not skip_save:
+        from app.services.run_service import RunService
         try:
-            from app.services.run_service import RunService
-            _auto_run = await RunService().create_run(
-                project_id=project_id,
-                room_id=room_id,
-                metadata={"started_by": "internal_auto"},
-            )
-            run_id = _auto_run["id"]
-            _cli_debug(f"auto-created run {run_id[:8]} for internal turn (room {room_id[:8]})")
-        except Exception as e:
-            _cli_debug(f"auto run creation failed (room {room_id[:8]}): {e}")
-
-
-    # --- Backend selection (Claude CLI / Codex CLI) ---------------------------
-    # The room's model decides the backend. A saved session that belongs to the
-    # OTHER backend is dropped so this turn starts fresh and is reseeded from
-    # the DB (chat_messages / execution_events / room state) — the same recovery
-    # that already runs on transcript bloat or poison. Persona, tools and memory
-    # all live outside the CLI transcript, so a mid-room switch loses nothing
-    # beyond the transcript's raw detail.
-    if model_override:
-        if model_override not in _ALLOWED_CLI_MODELS:
-            raise ValueError(f'Unknown model: {model_override}')
-        cli_model=_model_catalog.current(model_override)
-        backend='codex' if _codex.is_codex_model(cli_model) else 'claude'
-    else:
-        cli_model, backend = resolve_room_backend(room_id)
-    # 準備中の印（2026-10-14）: ここから run_turn が最初の本文を書くまで（文脈の組み立て・
-    # プロセス起動・再注入で数秒）、chat_routes は新しい発言を追い連絡として待たせる。
-    # 印は run_turn が外す。常駐経路に入らなかった時・例外の時は下の finally で外す。
-    _turn_claim = None
-    if not skip_save:
-        turn_flow.turn_started(room_id)
-        try:
-            _turn_claim = turn_flow.claim_new_turn(room_id, backend)
+            created = await RunService().create_run(
+                project_id=project_id, room_id=room_id,
+                metadata={"started_by": "internal_auto"})
+            run_id = created["id"]
         except Exception:
-            _turn_claim = None
+            yield {"type": "error", "message": "作業の記録を作成できないため、実行を開始していません。"}
+            return
+    run_event = None
+    if run_id and not skip_save:
+        try:
+            run_event = CancellationRegistry.register_run(room_id, run_id)
+        except RuntimeError as exc:
+            yield {"type": "error", "message": str(exc)}
+            return
     try:
-        selected_model = cli_model
-        cli_model = _failover.preferred(cli_model)
-        backend = _codex.backend_for_model(cli_model)
-        if cli_model != selected_model:
-            turn_flow.release_claim(room_id, _turn_claim)
-            _turn_claim = turn_flow.claim_new_turn(room_id, backend)
-            yield {"type": "reasoning", "text": f"利用上限のため {cli_model} で続けます。"}
-        for attempt in range(2):
-            quota = None
-            async for _ev in _process_message_cli_body(
-            room_id, user_id, content, project_id, run_id, skip_save, skip_resume, cwd,
-            system_prompt, mcp_config_path, setup_start, cli_model, backend,
-            resume_session_id, timeline_draft, credentials, cli_model,
-            mcp_config_override, user_messages, project_title, project_description,
-            project_status, timeline_refs,
-        ):
-                if _failover.exhausted(_ev):
-                    if _ev.get("type") in ("result", "error"):
-                        quota = _ev
-                    continue
-                if _ev.get("type") == "result" and not _ev.get("is_error"):
-                    quota = None  # the CLI recovered a transient rate-limit itself
-                yield _ev
-            if quota is None:
-                break
-            from app.services.cancellation import CancellationRegistry
-            if CancellationRegistry.is_cancelled(room_id):
-                yield {"type": "cancelled"}
-                break
-            _failover.mark_exhausted(backend)
-            next_model = _failover.alternative(backend)
-            next_backend = _codex.backend_for_model(next_model)
-            if attempt or not _failover.available(next_backend):
-                text = "ClaudeとGPTの両方が利用上限に達しました。途中経過は保存しています。利用枠の回復後に続けられます。"
-                saved = False if skip_save else _save_ai_message_sync(room_id, text, **turn_flow.turn_end(run_id))
-                _update_run_sync(run_id, state="failed")
-                yield {"type": "result", "text": text, "is_error": True, "cli_saved": bool(saved)}
-                break
-            notice = f"{backend} の利用上限を検知したため、{next_model} に切り替えて続けます。"
-            if project_id:
-                _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=notice)
-            yield {"type": "reasoning", "text": notice}
-            turn_flow.release_claim(room_id, _turn_claim)
-            _turn_claim = turn_flow.claim_new_turn(room_id, next_backend)
-            content = _failover.handoff_content(content, quota.get("partial_text", ""))
-            if backend == "claude":
-                from app.agent.streaming_session import get_session
-                previous = get_session(room_id)
-                if previous is not None:
-                    pending = previous.take_pending_followups()
-                    if pending:
-                        content += "\n\n" + pending
-            cli_model, backend = next_model, next_backend
-            resume_session_id = None
-            # Force reseeding from persisted messages and execution events.
-            skip_resume = False
-            _clear_cli_session(room_id)
-    finally:
-        if _turn_claim is not None:
+        if run_id and not skip_save:
+            from app.services.run_stop import restore_stop
             try:
-                from app.agent.streaming_session import release_turn_claim as _release
-                _release(room_id, _turn_claim)
+                stopped = await restore_stop(room_id, run_id)
             except Exception:
-                pass
+                yield {"type": "error", "message": "作業の停止記録を確認できないため、実行を開始していません。"}
+                return
+            if stopped:
+                yield {"type": "cancelled", "stopped": False}
+                return
+        note_turn_input(room_id, content)
+        setup_start = time.perf_counter()
+        system_prompt, mcp_config_path = await _prepare_cli_inputs(
+            room_id, user_id, credentials, system_prompt, mcp_config_override,
+            dict(title=project_title, description=project_description, status=project_status,
+                 user_messages=user_messages, latest_user_message=content, room_id=room_id, user_id=user_id,
+                 answer_shapes=answer_shapes),
+        )
+        if CancellationRegistry.is_run_cancelled(room_id, run_id):
+            yield {"type": "cancelled", "stopped": False}
+            return
+        if skill_injection:
+            system_prompt += f"\n\n{skill_injection}"
+        timeline_draft: Optional[Dict[str, Any]] = None
+        timeline_turn_succeeded = False
+        if timeline_refs:
+            # A chat mention supplies an explicit creative artifact.  Give the same
+            # normal Dan session a draft-only timeline MCP; its other capabilities
+            # remain unchanged and the live sequence is still CAS-protected.
+            ref = timeline_refs[0]
+            content_id = str(ref.get("content_id") or "")
+            if content_id:
+                try:
+                    from app.services import timeline_draft as _timeline_draft
+                    timeline_draft = _timeline_draft.create_draft(
+                        room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
+                    )
+                    cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+                    cfg.setdefault("mcpServers", {})["timeline"] = {
+                        "command": "python",
+                        "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
+                        "env": {
+                            "DAN_ROOM_ID": room_id,
+                            "DAN_DRAFT_ID": timeline_draft["draft_id"],
+                            "DAN_JOB_ID": timeline_draft["job_id"],
+                            "DAN_CONTENT_ID": content_id,
+                            "PYTHONIOENCODING": "utf-8",
+                        },
+                    }
+                    Path(mcp_config_path).write_text(json.dumps(cfg), encoding="utf-8")
+                    title = str(ref.get("title") or content_id)
+                    system_prompt += (
+                        "\n\n## Mentioned timeline\n"
+                        f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
+                        "Use mcp__timeline__* to inspect, edit, or export it. Timeline mutations are isolated "
+                        "in a draft and are committed only after this chat turn validates successfully. "
+                        "Lanes are layers (video/audio only); blur and highlight frames are region clips "
+                        "(add_region / set_region); touch only what the user asked for; check with render_frame."
+                    )
+                    try:
+                        from app.services import timeline_live as _tl
+                        _ctx = _tl.context_text(room_id, content_id)
+                        if _ctx:
+                            system_prompt += "\n\n" + _ctx
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("timeline mention setup failed: %s", exc)
+                    timeline_draft = None
+        resume_session_id = None if skip_resume else _load_session(room_id)
+
+        # --- Backend selection (Claude CLI / Codex CLI) ---------------------------
+        # The room's model decides the backend. A saved session that belongs to the
+        # OTHER backend is dropped so this turn starts fresh and is reseeded from
+        # the DB (chat_messages / execution_events / room state) — the same recovery
+        # that already runs on transcript bloat or poison. Persona, tools and memory
+        # all live outside the CLI transcript, so a mid-room switch loses nothing
+        # beyond the transcript's raw detail.
+        if model_override:
+            if model_override not in _ALLOWED_CLI_MODELS:
+                raise ValueError(f'Unknown model: {model_override}')
+            cli_model=_model_catalog.current(model_override)
+            backend='codex' if _codex.is_codex_model(cli_model) else 'claude'
+        else:
+            cli_model, backend = resolve_room_backend(room_id)
+        # 準備中の印（2026-10-14）: ここから run_turn が最初の本文を書くまで（文脈の組み立て・
+        # プロセス起動・再注入で数秒）、chat_routes は新しい発言を追い連絡として待たせる。
+        # 印は run_turn が外す。常駐経路に入らなかった時・例外の時は下の finally で外す。
+        _turn_claim = None
+        if not skip_save:
+            turn_flow.turn_started(room_id)
+            try:
+                _turn_claim = turn_flow.claim_new_turn(room_id, backend)
+            except Exception:
+                _turn_claim = None
+        try:
+            selected_model = cli_model
+            cli_model = _failover.preferred(cli_model)
+            backend = _codex.backend_for_model(cli_model)
+            if cli_model != selected_model:
+                turn_flow.release_claim(room_id, _turn_claim)
+                _turn_claim = turn_flow.claim_new_turn(room_id, backend)
+                yield {"type": "reasoning", "text": f"利用上限のため {cli_model} で続けます。"}
+            for attempt in range(2):
+                quota = None
+                async for _ev in _process_message_cli_body(
+                room_id, user_id, content, project_id, run_id, skip_save, skip_resume, cwd,
+                system_prompt, mcp_config_path, setup_start, cli_model, backend,
+                resume_session_id, timeline_draft, credentials, cli_model,
+                mcp_config_override, user_messages, project_title, project_description,
+                project_status, timeline_refs,
+            ):
+                    if _failover.exhausted(_ev):
+                        if _ev.get("type") in ("result", "error"):
+                            quota = _ev
+                        continue
+                    if _ev.get("type") == "result" and not _ev.get("is_error"):
+                        quota = None  # the CLI recovered a transient rate-limit itself
+                    yield _ev
+                if quota is None:
+                    break
+                from app.services.cancellation import CancellationRegistry
+                if (CancellationRegistry.is_run_cancelled(room_id, run_id) if run_id
+                        else CancellationRegistry.is_cancelled(room_id)):
+                    yield {"type": "cancelled", "stopped": False}
+                    break
+                _failover.mark_exhausted(backend)
+                next_model = _failover.alternative(backend)
+                next_backend = _codex.backend_for_model(next_model)
+                if attempt or not _failover.available(next_backend):
+                    text = "ClaudeとGPTの両方が利用上限に達しました。途中経過は保存しています。利用枠の回復後に続けられます。"
+                    saved = False if skip_save else _save_ai_message_sync(room_id, text, **turn_flow.turn_end(run_id))
+                    _update_run_sync(run_id, state="failed")
+                    yield {"type": "result", "text": text, "is_error": True, "cli_saved": bool(saved)}
+                    break
+                notice = f"{backend} の利用上限を検知したため、{next_model} に切り替えて続けます。"
+                if project_id:
+                    _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=notice)
+                yield {"type": "reasoning", "text": notice}
+                turn_flow.release_claim(room_id, _turn_claim)
+                _turn_claim = turn_flow.claim_new_turn(room_id, next_backend)
+                content = _failover.handoff_content(content, quota.get("partial_text", ""))
+                if backend == "claude":
+                    from app.agent.streaming_session import get_session
+                    previous = get_session(room_id)
+                    if previous is not None:
+                        pending = previous.take_pending_followups()
+                        if pending:
+                            content += "\n\n" + pending
+                cli_model, backend = next_model, next_backend
+                resume_session_id = None
+                # Force reseeding from persisted messages and execution events.
+                skip_resume = False
+                _clear_cli_session(room_id)
+        finally:
+            if _turn_claim is not None:
+                try:
+                    from app.agent.streaming_session import release_turn_claim as _release
+                    _release(room_id, _turn_claim)
+                except Exception:
+                    pass
+
+    finally:
+        if run_event is not None:
+            CancellationRegistry.unregister_run(room_id, run_id, run_event)
 
 
 async def _process_message_cli_body(
@@ -4449,13 +4546,19 @@ async def _process_message_cli_body(
     idle_seconds = 0
     while True:
         # キャンセル検出
-        if CancellationRegistry.is_cancelled(room_id):
+        if (CancellationRegistry.is_run_cancelled(room_id, run_id)
+                or (cancel_event is not None and cancel_event.is_set())):
             # allow_arm_pending=False: ここは「実行中の one-shot ターンを止める」
             # だけの場所。registry のフラグは sticky なので、武装を許すと
             # 直後の正当な送信を殺す地雷になる（供給経路は違うが chat_routes の
             # supersede 自爆と同型）。
-            kill_cli_process(room_id, allow_arm_pending=False)
-            yield {"type": "cancelled"}
+            if run_id:
+                # A stop can outlive this room registration. Never translate
+                # the captured run's stop into a kill of the room's NEW worker.
+                await asyncio.to_thread(request_cli_run_stop, room_id, run_id)
+            else:
+                kill_cli_process(room_id, allow_arm_pending=False)
+            yield {"type": "cancelled", "stopped": False}
             break
 
         try:

@@ -169,6 +169,7 @@ class StreamingSession:
         # such a call must NOT start a parallel loop (that double-processes the
         # CLI output and double-saves) — it is routed as a follow-up instead.
         self._running = False
+        self._run_id: Optional[str] = None
         # run_turn がこの回の最初の本文を CLI に書いた後 True（finally で戻す）。
         # それより前に届いた追い連絡は submit_room_followup が部屋の仮置きに入れ、
         # 本文を書いた直後に待ち行列へ移す（_send_user が目印を消した後に入れるため）。
@@ -272,7 +273,7 @@ class StreamingSession:
         user instead of closing the stream on silence."""
         return self._last_turn_hung
 
-    def run_turn(self, content: str, sink: EventSink, timeout: float = 600.0) -> Optional[TurnEvent]:
+    def run_turn(self, content: str, sink: EventSink, timeout: float = 600.0, run_id: Optional[str] = None) -> Optional[TurnEvent]:
         """Submit a user message and stream this turn's events to `sink`.
 
         `timeout` is the maximum *idle* gap — seconds with NO output at all from
@@ -294,6 +295,11 @@ class StreamingSession:
         `last_turn_hung` is True). Follow-ups submitted via submit_followup()
         during the turn are applied at the next step boundary and produce
         subsequent turns through the same sink."""
+        from app.services.cancellation import CancellationRegistry
+        def run_cancelled():
+            return CancellationRegistry.is_run_cancelled(self.room_id, run_id)
+        if run_cancelled():
+            return {"type": "result", "subtype": "cancelled_before_start", "is_error": False}
         if not self.is_alive():
             self.start()
 
@@ -317,6 +323,7 @@ class StreamingSession:
                 release_all_turn_claims(self.room_id)
                 return {"type": "result", "subtype": "routed_as_followup", "is_error": False}
             self._running = True
+            self._run_id = run_id
 
         self._last_turn_hung = False
         # Cancel armed BEFORE the turn started (user hit cancel in the gap
@@ -324,6 +331,7 @@ class StreamingSession:
         if self._consume_cancel_next():
             with self._lock:
                 self._running = False
+                self._run_id = None
             return {"type": "result", "subtype": "cancelled_before_start", "is_error": False}
         hung = False
         # Re-check often enough to notice a hang promptly even for small idle
@@ -331,15 +339,17 @@ class StreamingSession:
         poll = max(0.2, min(_RUN_TURN_POLL_SECONDS, timeout / 2.0))
         try:
             turn = _Turn(sink=sink)
-            self._turn = turn
+            with self._lock:
+                self._turn = turn
             self._take_discard_next(turn)
             self._interrupt_sent = False
             self._last_activity = time.time()
             # 送信直前の再確認: キャンセルが「入口チェック通過後〜ここまで」の
             # 隙間（文脈再構築などで数百msある）に届いた場合もここで拾う。
             # ターミナルのEscに効き漏れが無いのと同じ保証にするための二重化。
-            if self._consume_cancel_next():
-                self._turn = None
+            if self._consume_cancel_next() or run_cancelled():
+                with self._lock:
+                    self._turn = None
                 return {"type": "result", "subtype": "cancelled_before_start", "is_error": False}
             self._send_user(content)
             # 送信直後の再確認: kill_cli_process が「実行中ターン無し」と判定して
@@ -347,7 +357,7 @@ class StreamingSession:
             # ばかりのターンへ即座に割り込みを送って畳む。_interrupt_sent は
             # 触らない（あれは追い連絡の境界マーカー。立てると完了イベントが
             # 出なくなり、ライブ表示が畳まれない）。
-            if self._consume_cancel_next():
+            if self._consume_cancel_next() or run_cancelled():
                 try:
                     self._send_interrupt()
                 except Exception:
@@ -369,6 +379,9 @@ class StreamingSession:
             while True:
                 if turn.done.wait(timeout=poll):
                     last_result = turn.result
+                    if run_cancelled():
+                        self.clear_pending()
+                        break
                     from app.agent.provider_failover import exhausted
                     if last_result and exhausted(last_result):
                         break  # the other provider will take pending follow-ups
@@ -377,10 +390,17 @@ class StreamingSession:
                     if follow is None:
                         break
                     turn = _Turn(sink=sink)
-                    self._turn = turn
-                    self._interrupt_sent = False
-                    self._last_activity = time.time()
-                    self._send_user(follow)
+                    with self._lock:
+                        # Stop may have arrived after the completed-turn check
+                        # while pending input was being drained. The stop's
+                        # interrupt and this replacement use the same lock.
+                        if run_cancelled():
+                            self.clear_pending()
+                            break
+                        self._turn = turn
+                        self._interrupt_sent = False
+                        self._last_activity = time.time()
+                        self._send_user(follow)
                     continue
                 # Not done yet — give up only if the CLI died or has gone silent
                 # for longer than the idle timeout. An active turn keeps
@@ -393,8 +413,10 @@ class StreamingSession:
                     break
             return last_result
         finally:
-            self._turn = None
-            self._running = False
+            with self._lock:
+                self._turn = None
+                self._running = False
+                self._run_id = None
             self._turn_sent = False
             self._last_turn_hung = hung
             if hung:
@@ -460,7 +482,7 @@ class StreamingSession:
                 return
 
     # --- user cancel (Escキー相当) --------------------------------------
-    def interrupt(self) -> bool:
+    def interrupt(self, expected_run_id: Optional[str] = None) -> bool:
         """Gracefully stop the CURRENT turn (the CLI ends it with a result
         event, exactly like pressing Esc in interactive Claude Code). The
         persistent process survives — killing it mid-turn is what desynchronised
@@ -473,22 +495,35 @@ class StreamingSession:
         nudger re-sends it every 1.2s while THIS SAME turn is still alive (max
         3 nudges). Identity-guarded: the moment the turn ends or a new turn
         starts, nudging stops — a follow-up message can never be hit."""
-        if not self.is_turn_active():
-            return False
-        target = self._turn
+        with self._lock:
+            if not self.is_turn_active():
+                return False
+            if expected_run_id is not None and (not expected_run_id or self._run_id != expected_run_id):
+                return False
+            target = self._turn
+            if expected_run_id is not None and target is None:
+                return False
+            if expected_run_id is not None:
+                from app.services.cancellation import CancellationRegistry
+                CancellationRegistry.mark_matched_run_cancelled(self.room_id, expected_run_id)
+                self.clear_pending()
+            try:
+                self._send_interrupt()
+            except Exception:
+                return False
 
         def _nudge() -> None:
             for _ in range(3):
                 time.sleep(1.2)
-                if target is None or self._turn is not target or not self.is_alive():
-                    return
-                try:
-                    self._send_interrupt()
-                except Exception:
-                    return
+                with self._lock:
+                    if target is None or self._turn is not target or not self.is_alive():
+                        return
+                    try:
+                        self._send_interrupt()
+                    except Exception:
+                        return
 
         try:
-            self._send_interrupt()
             if target is not None:
                 threading.Thread(target=_nudge, daemon=True).start()
             return True
