@@ -114,10 +114,16 @@ class BrowserStream:
         frame_path(self.room, self.key).with_suffix('.watch').unlink(missing_ok=True)
 
 
-async def follow_browser(state, page):
+async def follow_browser(state, page, fit_viewport=False):
     """Called inside the existing browser executor; never launch another browser."""
     if not (os.environ.get('DAN_TOOL_HOST') == '1' or os.environ.get('DAN_COMMAND_JOB_ID')) or not os.environ.get('DAN_SESSION_ID'):
         return
+    if fit_viewport:
+        from .voice_viewport import fit
+        try:
+            await fit(page, os.environ['DAN_SESSION_ID'])
+        except Exception:
+            pass  # Display sizing must not fail or repeat the user's operation.
     previous = state.get('voice_stream')
     if previous and previous.page is page and not previous.closed:
         return

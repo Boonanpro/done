@@ -194,6 +194,33 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
       return { scene: next, key: grows ? current.key : current.key + 1, session };
     });
   });
+  const viewportRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!active || !state?.active || !state.session_id) return;
+    const clientId = crypto.randomUUID();
+    const controller = new AbortController();
+    let pending = false;
+    const report = async () => {
+      if (pending || document.visibilityState === 'hidden') return;
+      const bounds = viewportRef.current?.getBoundingClientRect();
+      const width = Math.round(bounds?.width || window.innerWidth);
+      const height = Math.round(bounds?.height || window.innerHeight);
+      if (width < 240 || height < 240) return;
+      pending = true;
+      try {
+        await fetch(`/api/v1/voicelog/stage/${encodeURIComponent(roomId)}/viewport`, {
+          method: 'POST', headers: {...stageHeaders(), 'Content-Type': 'application/json'},
+          body: JSON.stringify({session_id: state.session_id, client_id: clientId,
+            width: Math.min(2560,width), height: Math.min(2560,height)}), signal: controller.signal,
+        });
+      } catch { /* A display report must not interrupt the call. */ }
+      finally { pending = false; }
+    };
+    void report();
+    const timer = setInterval(report, 3000);
+    window.addEventListener('resize', report);
+    return () => {clearInterval(timer);window.removeEventListener('resize',report);controller.abort();};
+  }, [active, roomId, state?.active, state?.session_id]);
   const { scene, key } = shownScene;
   const drawable = !!scene;
   const shown = !!state?.active && (drawable || !!state?.caption);
@@ -207,7 +234,7 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
   // Filling a screen with a page (the phone): the page takes all the height; the caption gives way to the page's own status.
   const pageFill = fill && (page || scene?.kind === 'cue');
   return (
-    <div className={`flex flex-col gap-2 ${pageFill ? 'min-h-0 flex-1' : ''} ${className}`} data-voice-stage={state?.version} data-stage-scene-key={key}>
+    <div ref={viewportRef} className={`flex flex-col gap-2 ${pageFill ? 'min-h-0 flex-1' : ''} ${className}`} data-voice-stage={state?.version} data-stage-scene-key={key}>
       {state?.caption && !pageFill ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground" data-stage-caption>
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />

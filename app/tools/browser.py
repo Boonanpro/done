@@ -1028,7 +1028,10 @@ async def _run_page_command(pages_state: dict, context, cmd: str, args: dict):
     await _note_current_tab(pages_state, context)
     page = pages_state["current"]
     from app.services.voice_screen_stream import follow_browser, current_url
-    await follow_browser(pages_state, page)
+    # Resize only at an observation/navigation boundary, never between a target
+    # observation and a click/fill. A phone rotation is picked up on the next read.
+    await follow_browser(pages_state, page, fit_viewport=cmd in {
+        "goto", "screenshot", "screenshot_base64", "window_info", "content"})
     if cmd == "voice_stream_url":
         # CDP delivers the first frame asynchronously, even after startScreencast.
         for _ in range(20):

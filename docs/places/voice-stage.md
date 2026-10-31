@@ -10,10 +10,10 @@ watches:
 speak: |
   - 通話中は、成果物の本物の画面、番号や選択肢の大きな札、説明の図が出る。
   - 成果物の操作先を声で指定すると、画面のボタンや欄を光らせて操作する。送信などは読み上げと本人の承認を待つ。
-  - 外のブラウザやスマホは操作している実画面の写真。操作ごとに更新するが、写真を指で押して操作するものではない。
-fingerprint: eb576cd33cf43261
-described: da83d1da81fba8da
-last_review: "2026-10-30 説明は変えない: 古い画面の操作を拒否する条件を強化。説明済みの見え方は同じ"
+  - 外のブラウザやスマホは操作中の実画面を連続表示する。ブラウザは通話画面の幅に合わせて並び直す。映像を指で押す操作には未対応。
+fingerprint: a6e1a24d111a7717
+described: fb1c9554d1744cb4
+last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを画面の幅に合わせる表示修正。操作方法は同じ。"
 ---
 # 通話中の画面
 
@@ -22,7 +22,7 @@ last_review: "2026-10-30 説明は変えない: 古い画面の操作を拒否�
 - 本物の成果物。画面上の名前のあるボタン、リンク、入力欄、選択欄を共通の仕組みで操作する。
 - 番号・日時・金額・短い選択肢の札。数字を大きく表示し、次にすることは1つに絞る。
 - 説明の図。操作中の本物の画面を自動の図で置き換えない。
-- 外の画面。ダンのブラウザ、スマホが実際に見ている画面を表示する。本人の部屋の権限で読み、公開添付にはしない。
+- 外の画面。ダンのブラウザ、スマホが実際に見ている画面を表示する。本人の部屋の権限で読み、公開添付にはしない。ブラウザは表示先の幅・高さに合わせてページを並び直し、スクロール中も連続表示する。
 
 ## 行き方（みきさんから見て）
 
@@ -42,7 +42,7 @@ last_review: "2026-10-30 説明は変えない: 古い画面の操作を拒否�
 - 未分類のボタンは承認が必要。重要な操作の名前と危険度を付けると、通常の移動と確認が要る操作を区別できる。
 - 別の画面・別の通話の操作先、更新されたボタン、無効な欄、上を覆われたボタンは押さない。結果が届かなければ再送せずに画面を読む。
 - 2端末で通話画面を開いても、短い貸出時間で選ばれた片方の画面だけを操作する。
-- 表示済みの外の画面は静止画。Googleの追加認証や端末未接続があれば、その先を操作できるとは言わない。
+- 表示済みの外の画面は連続配信。固定幅のサイトや画面の向きの変更直後は、次の読み取りまで表示調整が必要な場合がある。Googleの追加認証や端末未接続があれば、その先を操作できるとは言わない。
 - 実通話の開始は本人の明示許可が必要。試験だけで「言い終わって1秒」を達成したと言わない。
 
 <!-- place_map:auto:start -->
@@ -52,5 +52,5 @@ last_review: "2026-10-30 説明は変えない: 古い画面の操作を拒否�
 
 - 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/voice-stage.tsx`
 
-<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "6c7952f98d", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/voice-stage.tsx": "1afc381621"} -->
+<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/voice-stage.tsx": "396afcf6e9"} -->
 <!-- place_map:auto:end -->
