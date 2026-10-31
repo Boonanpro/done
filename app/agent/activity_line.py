@@ -113,11 +113,20 @@ def activity_phrase(name: str, tool_input: dict | None = None) -> str:
         return {"mail": "メールを見ています", "messages": "前の会話を見ています", "message_cards": "送った連絡を見ています",
                 "inquiries": "問い合わせを見ています"}.get(src, "記録を見ています")
     if n in ("Read", "Glob", "Grep", "read_file", "glob", "grep", "LS"):
+        from app.agent.command_activity import file_subject
+        subject = file_subject(a.get("file_path") or a.get("path"))
+        if subject:
+            return f"{subject}の内容を確認しています"
         return "資料を読んでいます"
     if n in ("Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "edit_file"):
+        from app.agent.command_activity import file_subject
+        subject = file_subject(a.get("file_path") or a.get("path"))
+        if subject:
+            return f"{subject}を編集しています"
         return "書いています"
     if n in ("Bash", "bash", "command_execution", "exec_command", "shell", "execute_command", "run_command"):
-        return "作業しています"
+        from app.agent.command_activity import command_activity
+        return command_activity(a.get("command") or a.get("cmd")) or "作業しています"
     if n == "compose_message":
         return "文面を用意しています"
     if n == "confirm_card":
