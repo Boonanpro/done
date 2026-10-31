@@ -27,12 +27,19 @@ PR763/main0c65fc52、release0c65fc527268-c23a15（9228/8228）へ新規依頼を
 
 `voice_responses`のrevision受取時の説明を、成果反映完了から作業への配達に変更して保存したが、この文言だけの変更はまだ公開していない。次の本質的な修正とまとめる。
 
-## 発話と実行の単一受付（試験中、通常通話では無効）
+## 発話と実行の単一受付
 
-`voice_turn_intake.py` と sideband の `DAN_VOICE_TURN_INTAKE=1` で試験する。無言1.5秒は、指示の完結や承認と判断する条件ではなく、既存 Responses に会話の判断を依頼する契機だけ。変更は既存の道具と承認条件を通す。native の delegation.offset_ms と入力文字列の end_ms、手動 response.create の client_event_id により、どの発話を受けた判断かを固定する。同じ発話の操作は一つの delegation が所有し、遅い別の判断による操作は拒否。未知の時刻・訂正前の操作も拒否。読み取りはこの所有権を取らず、既存の権限確認を通す。外部送信承認を作り出す処理はない。
+`voice_turn_intake.py` と sideband で、同じ通話で start_work の成功受付を確認した後の追加依頼に適用する。最初の依頼・作業を頼んでいない通常会話は従来の経路。`DAN_VOICE_TURN_INTAKE=0` で無効化できる。無言1.5秒は、指示の完結や承認と判断する条件ではなく、既存 Responses に会話の判断を依頼する契機だけ。変更は既存の道具と承認条件を通す。native の delegation.offset_ms と入力文字列の end_ms、手動 response.create の client_event_id により、どの発話を受けた判断かを固定する。同じ発話の操作は一つの delegation が所有し、遅い別の判断による操作は拒否。未知の時刻・訂正前の操作も拒否。読み取りはこの所有権を取らず、既存の権限確認を通す。外部送信承認を作り出す処理はない。
 
 公式仕様: https://developers.openai.com/api/docs/guides/live-delegation と https://developers.openai.com/api/reference/resources/live/primary-websocket （2026-11-01確認）。response.create は session に設定済みのバックエンドを開始・継続できる。transcript.delta は発話の断片であり完結した依頼ではない。
 
 1回目 `.tmp/voice-intake-proof` では500円から無料に実ファイルが変わったが、呼びかけで初回 start_work を古いと拒否し、無料条件の後に初めて制作が開始された。途中の追加入力成功の証拠にはしない。job 0c517392-1de5-4dc8-b40b-9c0d9886ade0 は停止でcancelled/revision1。追加の修正では、全体が明示的な「聞いてる？」等だけの発話は元の依頼を失効させず、同じ依頼の再実行も防ぐ。それ以外の未知の割り込みは保守的に再判断する。
 
 関連40試験合格。より広いtest_voice_earlyでは1件（通話後の図の記録）が失敗したが、変更前HEADのvoice_sidebandを読み直した同じ試験でも失敗することを確認。今回この別件は修正していない。
+
+
+2回目 `.tmp/voice-intake-proof-v2` は native が追加依頼を委譲しなかったが、単一受付から response.create を1回送り、steer_job(update) が実際に走った。初期 start_work のtaskに無料は無く、job31a7aeef-ef7f-4e68-a992-9e5ffc7d679a の inputs/revision1/applied_revision1 と保存本文の参加無料が一致。呼びかけ「聞いてる」後に「聞いてます」と返声し、受信PCMの開始まで1.630秒（本人端末のスピーカー時間ではない）。
+
+最後に、作業の成功受付後だけ補完を有効にした設定で `.tmp/voice-intake-final` を確認。job4259386e-f874-4540-b2d1-5ce99af42141 は initial task に無料なし、native steer_job が新条件を配達しrevision1/applied_revision1、保存本文は参加無料。補完dispatch0回でnativeと二重実行なし。追加受付は発話音声終了から3.955秒。結果feed34.01秒の後、34.64秒から「終わりました」と発声し、受付時点で完了とは言っていない。この最後の試験では「聞いてる」に直接は答えず、元の返事を続けた。呼びかけ応答の完成条件は未達なので全体を完了扱いにしない。
+
+2回目と最後の試験は共に停止発話時点で制作が終了済み。途中停止成功の証拠に流用しない。3つの試験jobはcancelled/completed/completed、runner_processは全てNone。実制作の試験用メモ以外の編集・外部電話発信なし。関連66試験合格。残りは呼びかけが元の返事に埋もれる現象と、実音声から別室stop_runを正しく選択できるかの確認。今回の変更は追加指示の配達についての改善であり、会話全体の使い勝手の完了ではない。
