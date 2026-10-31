@@ -147,3 +147,11 @@ def test_smartex_list_navigation_is_not_final_refund():
     assert gate.needs_confirmation({**target,'onclick':"cfEXPY_doAction('OTHER');"})
     assert gate.needs_confirmation({**target,'url':'https://example.com/RSV_P/p74/ClientService'})
     assert gate.needs_confirmation({**target,'body':'払戻内容確認\n返金額10000円'})
+
+@pytest.mark.parametrize('action', ['pause', 'cancel'])
+def test_stop_receipt_does_not_apply_pending_condition(job, action):
+    s.control(job, 'owner', 'hub', 'update', '募集人数の数字はそのままで')
+    receipt = s.control(job, 'owner', 'hub', action)
+    assert receipt['revision'] == 2
+    assert receipt['applied_revision'] == 0
+    assert '実停止は未確認' in receipt['events'][-1]['text']

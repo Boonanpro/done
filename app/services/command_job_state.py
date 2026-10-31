@@ -127,10 +127,9 @@ def control(job_id, user_id, origin_room_id, action, text='', confirmation_id=No
         s['state'] = 'cancelled' if action == 'cancel' else 'paused' if action == 'pause' else 'running'
         if action in {'update', 'resume'}:
             s['inputs'].append({'revision': s['revision'], 'text': text or '作業を再開してください。確定操作は改めて本人への確認が必要です。'})
-        else:
-            s['applied_revision'] = s['revision']
-        event(s, 'control', {'update':'追加指示を受け付けました（反映待ち）', 'pause':'一時停止しました',
-                             'resume':'再開を受け付けました', 'cancel':'停止しました'}[action])
+        # Closing the tool gate is not proof that a running operation stopped.
+        event(s, 'control', {'update':'追加指示を受け付けました（反映待ち）', 'pause':'一時停止を受け付けました（実停止は未確認）',
+                             'resume':'再開を受け付けました', 'cancel':'停止を受け付けました（実停止は未確認）'}[action])
     return change(job_id, update)
 
 def public(s):
