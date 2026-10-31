@@ -16,3 +16,15 @@ Browser: existing tool-host Playwright page, CDP screencast, latest JPEG only, r
 
 ## Test setup
 Run Next from frontend cwd (not root) on an available port. 3002 belongs to another task (collab-comfort), never stop it. Generate ignored artifact-sources.css with frontend/scripts/wire-artifact-tailwind.mjs first. For this harness use BACKEND_URL=http://127.0.0.1:8017 and Next port3017. scripts/check_voice_live_screen.py runs isolated API8017 and uses existing Dan host browser. It does not use real speech. Whole-project TypeScript has missing untracked denki-knowledge/sitemap in a new worktree; resolve test fixture without committing generated unrelated files.
+
+
+## Continuation 2026-10-31 12:50 JST
+Implemented, still not shipped:
+- start_work keeps the full task and full passed dialogue, labels it as a handoff (not a fabricated verbatim utterance); internal-only command_center voice_handoff permits 64000 characters. Oversize rejects explicitly instead of executing partial instructions. Public params cannot raise limit. Durable task persistence and late constraints tested.
+- scroll_screen is a native short operation, no discovery/read roundtrip; uses current artifact page_id or exact external screen/source/phone serial. Refuses stale scene or unidentified phone. Browser ordinary scroll uses smooth behavior. Actual browser -> API -> UI test via scroll_screen helper: 12 frames, 0.88s tool completion (not speech latency).
+- Android worker binds serial, owns only its adb/ffmpeg subprocesses, stops on host death/viewer lease expiry. Initial screenshot seeds static H264 decoder; actual idle device first frame0.76s. Recording restarts only at180s limit. Child cleanup confirmed after Host termination. First actual phone capture saw10 distinct frames, but screenshot was OneUI update page, so this is not proof of successful Settings scrolling.
+- Phone read(query=...) returns only matching lines without renumbering refs, retains whole screen internally, duplicate matches visible and zero match explicit. Browser already has bounded find/locate, internal artifacts already have inspect(query).
+- tests:57 screen/work/command tests passed, plus6 phone reading/lock/paste checks. Command-center test generation source isolated from machine runtime (prior assertion depended on active generation).
+- Android UI harness --phone failed once before static-frame seeding, returning still PNG. During follow-up observation phone showed pornblock app rather than expected Settings; do not assume exclusive device ownership or turn this into evidence of Settings scrolling. No settings/security changes made. No calls made.
+
+Next: verify Android actual UI and gesture continuity while dev S24 is available, exercise phone static seeding/lifecycle failure tests, run full combined suite and TypeScript with artifact fixture, review and grouped ship + production verification. Audio-through-execution evidence remains absent; no calls may be initiated without explicit authorization. scripts/check_voice_live_screen.py now accepts --phone; test ports3017/8017. No public publication yet. Tests call real fixed scroll helper without ASR/Live.

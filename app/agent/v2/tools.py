@@ -4412,7 +4412,7 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
         elif action == "scroll":
             direction = params.get("direction", "down")
             delta = 500 if direction == "down" else -500
-            await page.evaluate(f"window.scrollBy(0, {delta})")
+            await page.evaluate("delta => window.scrollBy({top: delta, behavior: 'smooth'})", delta)
             await page.wait_for_timeout(300)
             return await _get_browser_state(page)
 

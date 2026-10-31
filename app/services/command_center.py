@@ -105,7 +105,7 @@ async def _approves(user_id, room_id, job_id, spoken):
     return bool(decision.get('available')) and answer.get('choice') == 'approve' and (answer.get('probabilities') or {}).get('approve', 0) >= .85
 
 
-async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_message_id: str | None = None) -> dict:
+async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_message_id: str | None = None, voice_handoff: bool = False) -> dict:
     """Never accept user identity from model arguments; validate both room ends."""
     if not user_id or not room_id:
         raise ValueError("利用者と会話の部屋が必要です")
@@ -215,7 +215,8 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
         result['outbound'] = await outbound_cards(target_room)
         return result
     task = str(params.get("task") or "").strip()
-    limit = 12000 if action == 'work' and params.get('engine') == 'parallel' else 2800
+    # Internal voice handoffs include the verbatim conversation. Public tool arguments cannot raise this limit.
+    limit = 64000 if action == 'work' and voice_handoff else (12000 if action == 'work' and params.get('engine') == 'parallel' else 2800)
     if not task or len(task) > limit:
         raise ValueError(f"作業・報告の本文は1〜{limit}文字で指定してください")
     source = await projects.get_project_by_room_id(room_id)

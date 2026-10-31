@@ -36,7 +36,7 @@ async def relay_request(chat, row, spec, job_id):
         return None
     from app.services.voice_parts import VOICE_TASK
     from app.services.command_center import report_id
-    text = spec['task'].replace(VOICE_TASK, '').split('\n参考の直前会話（')[0].removeprefix('今回のユーザー発言（原文）:\n')
+    text = spec['task'].replace(VOICE_TASK, '').split('\n参考の直前会話（')[0].removeprefix('今回のユーザー発言（原文）:\n').removeprefix('作業への引継ぎ:\n')
     return await chat.send_message(row['room_id'], row['user_id'], '【あなたの依頼・Done経由】\n' + text.strip(),
                                    sender_type='system', message_id=report_id(job_id + ':request'))
 

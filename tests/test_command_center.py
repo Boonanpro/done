@@ -6,6 +6,8 @@ from app.services import command_center as cc
 
 class CommandCenterTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        generation = patch("app.core.generations.read", return_value=None)
+        generation.start(); self.addCleanup(generation.stop)
         local = patch('app.services.command_job_state.create')
         self.local = local.start(); self.addCleanup(local.stop)
         network = patch('httpx.AsyncClient')
@@ -111,6 +113,17 @@ class CommandCenterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.local.call_args.kwargs['origin_project_id'],'hub')
         self.assertEqual(result['report_message_id'], cc.report_id(result['receipt']['id']))
         self.projects.get_project.assert_not_called()
+
+    async def test_long_voice_handoff_is_persisted_without_clipping(self):
+        task = '依頼' * 2500 + '最後の条件:送信しない'
+        result = await cc.execute({'action':'work','task':task}, 'hub-room','owner',voice_handoff=True)
+        self.assertTrue(result['accepted'])
+        self.assertEqual(self.local.call_args.kwargs['task'],task)
+
+    async def test_public_argument_cannot_raise_task_limit(self):
+        with self.assertRaises(ValueError):
+            await cc.execute({'action':'work','task':'x'*3000,'voice_handoff':True},'hub-room','owner')
+        self.local.assert_not_called()
 
     async def test_local_work_rejects_foreign_project_owner(self):
         self.projects.get_project_by_room_id.return_value['user_id'] = 'foreign'

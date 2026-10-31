@@ -60,3 +60,21 @@ async def test_non_screen_calls_preserve_view(tool, action):
     host = Host([{'text': 'ok'}])
     assert await E.execute(host, stage, tool, {'action': action}) == {'result':'ok'}
     assert stage.image == 'old' and len(host.calls) == 1
+
+@pytest.mark.asyncio
+async def test_scroll_uses_only_the_displayed_phone_and_one_operation():
+    stage=Stage();stage.frame='';stage.image='/api/v1/files/current.png'
+    stage._external_image=stage.image;stage._external_source='phone';stage._external_serial='exact-device'
+    host=Host([{'text':'scrolled','stage_image':'/api/v1/files/after.png','stage_serial':'exact-device'}])
+    result=await E.scroll(host,stage,'down')
+    assert result['screen']['shown']
+    assert len(host.calls)==1
+    assert host.calls[0]['arguments']=={'action':'scroll','direction':'down','serial':'exact-device'}
+
+@pytest.mark.asyncio
+async def test_scroll_never_uses_old_external_screen_after_scene_change():
+    stage=Stage();stage.frame='';stage.image='/api/v1/files/new.png'
+    stage._external_image='/api/v1/files/old.png';stage._external_source='browser'
+    host=Host([])
+    assert not (await E.scroll(host,stage,'down'))['ok']
+    assert not host.calls

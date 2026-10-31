@@ -35,9 +35,33 @@ async def execute(host, stage, tool, arguments):
     elif path:
         stage._apply('スマホの画面' if source == 'phone' else 'ブラウザの画面', image=path)
         stage._external_source = source
+        stage._external_image = path
+        stage._external_serial = out.get("stage_serial") or arguments.get("serial", "")
         result['screen'] = {'shown': True}
     else:
         # Do not leave an old photograph looking like evidence of the operation's result.
         stage._apply('操作後の画面を取得できませんでした', image='')
         result['screen'] = {'shown': False, 'reason': '操作後の画面は未確認です。操作を再送せず画面だけ確かめてください。'}
     return result
+
+
+async def scroll(host, stage, direction):
+    """One safe navigation call; no tool-discovery or second screen-read roundtrip."""
+    if direction not in ('up','down'):
+        return {'ok':False,'error':'方向は up か down です。'}
+    if stage is None:
+        return {'ok':False,'error':'操作する画面がありません。'}
+    if getattr(stage,'frame',''):
+        from app.services import voice_screen
+        screen = voice_screen.current(stage)
+        if not screen: return voice_screen.inspect(stage)
+        return await voice_screen.operate(stage,'scroll',direction=direction,page_id=screen['page_id'])
+    source = getattr(stage,'_external_source','')
+    if source not in ('browser','phone') or not getattr(stage,'image','') or stage.image != getattr(stage,'_external_image',None):
+        return {'ok':False,'error':'今表示している操作画面を確認できません。'}
+    args={'action':'scroll','direction':direction}
+    if source=='phone':
+        serial=getattr(stage,'_external_serial','')
+        if not serial: return {'ok':False,'error':'表示中のスマホを特定できません。'}
+        args['serial']=serial
+    return await execute(host,stage,source,args)

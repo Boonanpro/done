@@ -8,7 +8,7 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from dotenv import load_dotenv
 load_dotenv('/Users/mikihonda/done/.env')
 from app.services.voice_tools import Host
-from app.services.voice_external_screen import execute
+from app.services.voice_external_screen import execute, scroll
 from app.services import voice_stage as S
 from app.services.voice_sideband import Dialogue
 from app.services.owner import resolve_owner_user_id
@@ -20,6 +20,7 @@ import uvicorn
 from playwright.async_api import async_playwright
 OUT=ROOT/'.data/voice-smooth';OUT.mkdir(parents=True,exist_ok=True)
 async def main():
+ phone='--phone' in sys.argv
  room='393bf4c2-0d5c-4157-89dc-9b89592517ba';S.ROOT=OUT/'state'
  stage=S.Stage(room,'stream-proof',Dialogue(),lambda *a,**kw:None)
  host=Host(resolve_owner_user_id(),room)
@@ -47,7 +48,12 @@ async def main():
   await page.goto('http://127.0.0.1:3017/voice-stage?room='+room,wait_until='domcontentloaded')
   report=[]
   try:
-   r=await execute(host,stage,'browser',{'action':'open_target','url':'https://docs.python.org/ja/3/tutorial/','ready':{'selector':'h1'}})
+   if phone:
+    await host.ask('call',name='phone',arguments={'action':'read','serial':'RFCXB0MSSTD'})
+    await asyncio.sleep(3)
+    r=await execute(host,stage,'phone',{'action':'screenshot','serial':'RFCXB0MSSTD'})
+   else:
+    r=await execute(host,stage,'browser',{'action':'open_target','url':'https://docs.python.org/ja/3/tutorial/','ready':{'selector':'h1'}})
    assert r['screen']['shown'];assert stage.image.endswith('.mjpeg'),stage.image
    print('stream selected',flush=True)
    await page.wait_for_function('()=>Array.from(document.images).some(i=>i.complete&&i.naturalWidth>0)',timeout=60000)
@@ -55,16 +61,16 @@ async def main():
    await asyncio.sleep(1)
    # A real smooth scroll, executed through the same authenticated browser tool.
    start=time.monotonic()
-   r=await execute(host,stage,'browser',{'action':'evaluate','expression':'window.scrollBy({top:1200,behavior:"smooth"})'})
+   r=await scroll(host,stage,'down')
    await asyncio.sleep(2)
    count=await page.evaluate('window.proofFrames.length')
    assert count>=4,count
-   await page.screenshot(path=str(OUT/'after.png'))
-   report={'scope':'actual browser tool and actual screen UI; no speech recognition or call', 'frames_during_scroll':count,'operation_seconds':round(time.monotonic()-start-2,2),'screen':r['screen']}
+   await page.screenshot(path=str(OUT/('phone-ui-after.png' if phone else 'after.png')))
+   report={'scope':('Android' if phone else 'browser')+' actual tool and actual screen UI; no speech recognition or call', 'frames_during_scroll':count,'operation_seconds':round(time.monotonic()-start-2,2),'screen':r['screen']}
    print(json.dumps(report),flush=True)
    await asyncio.sleep(2)
   finally:
-   (OUT/'result.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+   (OUT/('phone-result.json' if phone else 'result.json')).write_text(json.dumps(report,ensure_ascii=False,indent=2))
    await ctx.close();await browser.close();host.close();stage.close()
    server.should_exit=True;await running
 if __name__=='__main__':asyncio.run(main())
