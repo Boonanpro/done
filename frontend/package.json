@@ -7,7 +7,7 @@
     "dev:mobile": "next dev --turbopack --experimental-https --experimental-https-key certificates/localhost-key.pem --experimental-https-cert certificates/localhost.pem --hostname 0.0.0.0",
     "predev": "node scripts/wire-artifact-tailwind.mjs",
     "prebuild": "node scripts/wire-artifact-tailwind.mjs && node scripts/sync-artifact-sitemaps.mjs",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint . && biome check .",
     "lint:fix": "eslint . --fix && biome check --write .",
