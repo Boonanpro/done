@@ -382,7 +382,7 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
                    and job['applied_revision'] >= job['revision'])
         return {'accepted': True, 'delivered': applied, 'state': job.get('state'),
                 'revision': job.get('revision'), 'applied_revision': job.get('applied_revision'),
-                'note': ('指示を反映しました。' if applied else '追加条件を受け付けました。作業への反映はまだ確認できていません。')}
+                'note': ('追加条件を実行中の作業に届けました。成果物への反映完了はまだ確認できていません。' if applied else '追加条件を受け付けました。作業への反映はまだ確認できていません。')}
     if name == 'list_operations':
         from app.services.browser_flows import all_flows, describe
         flows = all_flows()

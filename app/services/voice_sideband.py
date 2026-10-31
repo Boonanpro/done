@@ -88,6 +88,8 @@ class Dialogue:
     def __init__(self):
         self.turns = []
         self.heard_at = 0.0
+        self.intake = None
+        self.call_results = {}
         self.prefetch = None   # voice_prefetch.Prefetch while this server answers the call
         self.history = []      # full transcript for this bounded (MAX_SECONDS) call; never written to logs
         self.history_chars = 0
@@ -129,6 +131,17 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     started = time.monotonic()
     try: args = json.loads(item.get('arguments') or '{}')
     except ValueError: args = {}
+    reads = {'read_many', 'web_search', 'get_calendar', 'get_location', 'room_files', 'job_status',
+             'search_records', 'get_saved_information', 'read_page', 'list_operations'}
+    if dialogue.intake is not None and dialogue.intake.has_work and item.get('name') not in reads:
+        # Disclosed tools also pass this admission; no mutation allowlist.
+        reason = await dialogue.intake.admit(delegation_id)
+        if reason:
+            output = {'accepted': False, 'reason': reason,
+                      'note': 'この呼出しは実行していません。新しい本人の発話、または既に受け付けた処理を確認してください。完了したとは言わない。'}
+            record('turn_call_rejected', reason=reason, name=item.get('name'))
+            return {'type': 'function_call_output', 'call_id': item.get('call_id'),
+                    'output': json.dumps(output, ensure_ascii=False), 'name': item.get('name')}
     early = None
     if dialogue.prefetch is not None and (dialogue.prefetch.user_id, dialogue.prefetch.room_id) == (user_id, room_id):
         try:
@@ -145,6 +158,9 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
+    if (dialogue.intake is not None and item.get('name') == 'start_work'
+            and isinstance(output, dict) and output.get('accepted')):
+        dialogue.intake.work_accepted(delegation_id)
     try:   # place names the speech model would misread get their reading (voice_furigana)
         from app.services.voice_furigana import annotate_all
         output = annotate_all(output)
@@ -192,7 +208,12 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
             for part in chunks(text):
                 await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
             record('replay_spoken', chars=len(text))
-        pending.setdefault(delegation_id, []).append(asyncio.ensure_future(execute_call(item, user_id, room_id, dialogue, record, delegation_id, speak)))
+        key = (delegation_id, item.get('call_id'))
+        if key in dialogue.call_results:
+            return  # duplicate event, not a second result item or mutation
+        task = asyncio.ensure_future(execute_call(item, user_id, room_id, dialogue, record, delegation_id, speak))
+        dialogue.call_results[key] = task
+        pending.setdefault(delegation_id, []).append(task)
         return
     if kind == 'response.output_item.done' and item.get('type') == 'message':
         text = ''.join(c.get('text', '') for c in (item.get('content') or []) if isinstance(c, dict))
@@ -208,7 +229,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         calls = pending.pop(delegation_id, [])
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
-            if any(out['name'] == 'end_call' for out in outputs):
+            if any(out['name'] == 'end_call' and not json.loads(out['output']).get('reason') for out in outputs):
                 # From here on nothing new is pushed into the call, and the room's chat is where results go again
                 # (command_center reports while no call is active): a result finishing in these seconds is written there.
                 ENDING[session_id] = datetime.now(timezone.utc).isoformat()
@@ -232,6 +253,8 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
             for out in outputs:
                 await send({'type': 'response.item.create', 'event_id': f'dan-{time.time_ns()}', 'item': {k: out[k] for k in ('type', 'call_id', 'output')}})
             await send({'type': 'response.create', 'event_id': f'dan-{time.time_ns()}'})
+        elif dialogue.intake is not None:
+            dialogue.intake.finish(delegation_id)
 
 
 ENDING = {}   # calls whose end was chosen (end_call) -> when; a closed call's id is dropped in _run's finally
@@ -509,6 +532,12 @@ async def _run(session_id, user_id, room_id, api_key, own):
             async def send(event):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
+            # Additional requests after an accepted job have a server-owned path.
+            if own and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
+                from app.services.voice_turn_intake import TurnIntake, dispatch_missing
+                dialogue.intake = TurnIntake()
+                intake_task = asyncio.create_task(dispatch_missing(dialogue.intake, send, record))
+                working.add(intake_task); intake_task.add_done_callback(working.discard)
             if own and room_id:
                 from app.services.voice_stop_control import StopControl
                 stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
@@ -539,7 +568,14 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 except (TypeError, ValueError): continue
                 kind = str(event.get('type') or '')
                 counts[kind] = counts.get(kind, 0)+1
-                if kind == 'session.delegation.created': dialogue.delegated_at = time.monotonic()
+                if kind == 'session.delegation.created':
+                    dialogue.delegated_at = time.monotonic()
+                    if dialogue.intake is not None:
+                        dialogue.intake.begin(str((event.get('delegation') or {}).get('id') or ''), event.get('offset_ms'), event.get('client_event_id'))
+                if kind == 'response.event' and dialogue.intake is not None:
+                    inner = event.get('event') or {}
+                    if inner.get('type') == 'response.created':
+                        dialogue.intake.begin(str(event.get('delegation_id') or ''))
                 # When each side starts speaking, as times only (no words, no audio): a first delta after 1.5 s of quiet.
                 # Without it, why Dan was silent for some seconds after an answer reached it could not be told (2026-10-01).
                 if kind in ('session.output_audio.delta', 'session.input_transcript.delta'):
@@ -550,6 +586,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
                 if kind == 'session.input_transcript.delta':
                     dialogue.add('user', event.get('delta') or '')
+                    if dialogue.intake is not None:
+                        dialogue.intake.heard(event.get('delta') or '', event.get('end_ms'))
                     if stop_control is not None:
                         stop_control.heard(event.get('delta') or '', event.get('start_ms'), event.get('end_ms'))
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
@@ -576,6 +614,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
         record('sideband_failed', error_type=type(exc).__name__, detail=str(exc)[:200])
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
+        if dialogue.intake is not None: dialogue.intake.close()
         if stop_control is not None: stop_control.close()
         for task in working: task.cancel()
         if dialogue.prefetch is not None:
