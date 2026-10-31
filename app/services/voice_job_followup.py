@@ -43,7 +43,8 @@ def prepare(job_id, user_id, room_id, instruction, dialogue):
                   'origin_project_id', 'queue_owner', 'engine', 'model') if key in parent}
         from app.services.command_center import report_id
         return state.create(successor_id, **fields, task=task, previous_job_id=job_id,
-                            report_message_id=report_id(successor_id))
+                            report_message_id=report_id(successor_id),
+                            title=(parent.get('title') or '作業')[:60] + 'の追加変更')
 
 
 async def continue_completed(job_id, user_id, room_id, instruction, dialogue):
