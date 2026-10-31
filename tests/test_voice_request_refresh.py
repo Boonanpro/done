@@ -80,3 +80,29 @@ async def test_send_failure_or_new_speech_cannot_promote_unseen_revision(failure
         await coro
         assert d.intake.delegations['early'] == 2
     assert d.intake.reject('early') == 'newer_or_unassociated_speech'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name,accepted', [('start_work', True), ('steer_job', True), ('steer_job', False), ('job_status', True)])
+async def test_acceptance_receives_speech_that_arrived_during_execution(name, accepted):
+    d = S.Dialogue()
+    d.add('user', '参加費を無料にして')
+    async def result():
+        d.add('assistant', 'うん、そうします。')
+        d.add('user', '今どうなった？')
+        return {'type': 'function_call_output', 'call_id': 'c', 'name': name,
+                'output': json.dumps({'accepted': accepted, 'delivered': False})}
+    pending = {'d': [asyncio.create_task(result())]}
+    sent = []
+    async def send(event): sent.append(event)
+    await S.handle_response_event(send, 's', 'u', 'r', {'delegation_id': 'd',
+        'event': {'type': 'response.completed'}}, d, lambda *a, **kw: None, pending)
+    payload = json.loads(sent[0]['item']['output'])
+    assert payload['accepted'] is accepted and payload['delivered'] is False
+    if accepted and name in ('start_work', 'steer_job'):
+        assert payload['conversation_at_result'][-2:] == [
+            {'role': 'assistant', 'text': 'うん、そうします。'},
+            {'role': 'user', 'text': '今どうなった？'}]
+    else:
+        assert 'conversation_at_result' not in payload
+    assert [e['type'] for e in sent] == ['response.item.create', 'response.create']
