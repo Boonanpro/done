@@ -301,6 +301,7 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
 ENDING = {}   # calls whose end was chosen (end_call) -> when; a closed call's id is dropped in _run's finally
 HANGUP_FALLBACK_S = 6.0   # the phone closes 3.5 s after end_call; the server closes later only for clients that don't
 FEED_SECONDS = 1.0
+RESULT_SETTLE_SECONDS = 1.5  # allow in-flight input transcripts before unsolicited speech
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
 
 
@@ -340,6 +341,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
     stage = for_room(room_id)
     follower = Follower(stage, user_id, room_id, connected_at) if stage else None
     seen = {}
+    result_arrivals = {}
     while True:
         await asyncio.sleep(FEED_SECONDS)
         try: jobs = await asyncio.to_thread(list_owned, user_id, room_id)
@@ -367,9 +369,13 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
             # Do not inject a completed task into a new request while its words
             # or backend decision are still arriving. Keep the event unread so
             # it is delivered after the conversation settles, never lost.
-            if (said and all(e['kind'] == 'result' for e in said)
-                    and session_id not in ENDING and not result_can_interrupt(dialogue)):
-                continue
+            if said and all(e['kind'] == 'result' for e in said) and session_id not in ENDING:
+                key = (job['id'], said[-1]['seq'])
+                arrived = result_arrivals.setdefault(key, time.monotonic())
+                if dialogue is not None and (time.monotonic() - arrived < RESULT_SETTLE_SECONDS
+                                             or not result_can_interrupt(dialogue)):
+                    continue
+                result_arrivals.pop(key, None)
             seen[job['id']] = job.get('seq', 0)
             for e in said:
                 if session_id in ENDING:

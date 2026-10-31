@@ -148,6 +148,7 @@ async def test_result_waits_for_new_words_and_decision_then_is_delivered_once(mo
     from app.services.voice_turn_intake import TurnIntake
     sent = []
     async def send(event): sent.append(event)
+    monkeypatch.setattr(S, 'RESULT_SETTLE_SECONDS', .02)
     d = S.Dialogue(); d.intake = TurnIntake(0)
     d.intake.heard('参加費は無料にして', 100)
     job = {'id': 'job-1', 'task': '短くする', 'state': 'completed', 'seq': 1,
