@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 
 import httpx
+import anyio
 from fastapi import FastAPI, Request, WebSocket
 from starlette.responses import StreamingResponse, JSONResponse
 from app.core import generations as G
@@ -25,7 +26,7 @@ def upstream_client(**options):
     # One client serves every visitor, so it must never keep cookies: httpx would store one
     # visitor's Set-Cookie (their login) and send it with the next request that has no Cookie.
     jar = CookieJar(DefaultCookiePolicy(allowed_domains=[]))
-    return httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10), trust_env=False,
+    return httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10, pool=5), trust_env=False,
                              cookies=jar, **options)
 
 
@@ -33,10 +34,30 @@ def upstream_client(**options):
 async def lifespan(app):
     stop, changed = retirement.start()
     app.state.retire_changed = changed
-    async with upstream_client() as client:
+    # Notification feeds stay open for the lifetime of a tab. They must not
+    # consume the slots needed to send messages, cancel work, or check health.
+    async with upstream_client() as client, upstream_client() as feed_client:
         app.state.client = client
+        app.state.feed_client = feed_client
         try: yield
         finally: stop()
+
+
+class ProxyResponse(StreamingResponse):
+    """Own cleanup even when the visitor disconnects before iteration starts."""
+
+    def __init__(self, content, *, cleanup, **kwargs):
+        super().__init__(content, **kwargs)
+        self.cleanup = cleanup
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette cancels its streaming task when the visitor leaves.
+            # Closing inside that cancelled generator can itself be cancelled.
+            with anyio.CancelScope(shield=True):
+                await self.cleanup()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -94,27 +115,39 @@ async def proxy(request: Request, path: str):
     if request.url.query:
         url += '?' + request.url.query
     headers = [(k, v) for k, v in request.headers.items() if k.lower() not in HOP]
-    client = request.app.state.client
+    client = (request.app.state.feed_client if path == '/api/v1/chat/feed'
+              else request.app.state.client)
     req = client.build_request(request.method, url, headers=headers,
                                content=body if body is not None else request.stream())
     retirement.enter(port)
+    response = None
+    async def cleanup():
+        try:
+            if response is not None:
+                await response.aclose()
+        finally:
+            retirement.leave(port)
+            if hasattr(request.app.state, 'retire_changed'):
+                request.app.state.retire_changed()
+            if reservation:
+                G.release_room(room, reservation[1])
+
     try:
         response = await client.send(req, stream=True)
-    except httpx.HTTPError:
-        retirement.leave(port)
-        if reservation: G.release_room(room, reservation[1])
-        # Never retry a write: the destination may have accepted it.
+    except BaseException as error:
+        # ClientDisconnect and cancellation are not httpx.HTTPError. They must
+        # release the generation reference too, without retrying a write.
+        with anyio.CancelScope(shield=True):
+            await cleanup()
+        if not isinstance(error, httpx.HTTPError):
+            raise
         return JSONResponse({'detail': '接続先に応答がありません。操作の受付状況を確認してください。'}, status_code=502)
+
     async def contents():
-        try:
-            async for chunk in response.aiter_raw():
-                yield chunk
-        finally:
-            await response.aclose()
-            retirement.leave(port)
-            if hasattr(request.app.state, 'retire_changed'): request.app.state.retire_changed()
-            if reservation: G.release_room(room, reservation[1])
-    result = StreamingResponse(contents(), status_code=response.status_code)
+        async for chunk in response.aiter_raw():
+            yield chunk
+
+    result = ProxyResponse(contents(), cleanup=cleanup, status_code=response.status_code)
     result.raw_headers = [(k, v) for k, v in response.headers.raw if k.decode().lower() not in HOP]
     return result
 
