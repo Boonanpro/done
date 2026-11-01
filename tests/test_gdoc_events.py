@@ -196,3 +196,54 @@ def test_reserved_authenticated_browser_is_not_reused_by_other_work(store,monkey
     (profile/'.dan-reserved').write_text('Docs')
     state.create(second,user_id='u',room_id='r',origin_room_id='r')
     assert state.browser_room(second)!=room
+
+
+def export_comment(text='導入を台本にしてください', date='2026-11-01T13:30:46Z', ident='14'):
+    return {'id':ident,'author_label':'本人','date':date,'text':text}
+
+
+def test_suggestion_reply_enters_same_inbox_once_despite_docx_renumbering(store):
+    old=export_comment('以前のコメント', '2026-10-30T12:00:00Z','1')
+    new=export_comment()
+    payload={'export_comments':[old,new], 'threads':[], 'paragraphs':[
+        {'before':'旧導入','after':'新導入','comment_refs':['14']}]}
+    changes=E.ingest_export_comments('file',payload,[old])
+    assert len(changes)==1 and changes[0]['new'][0]['content']==new['text']
+    assert changes[0]['requires_browser_verification']
+    assert changes[0]['context'][0]['after']=='新導入'
+    new['id']='25'
+    assert E.ingest_export_comments('file',payload,[old])==[]
+    new['text']='導入は1本目からの続きにしてください'
+    assert len(E.ingest_export_comments('file',payload,[old]))==1
+    with E.db() as c: assert c.execute('SELECT count(*) FROM batches').fetchone()[0]==2
+
+
+def test_export_ignores_drive_duplicates_and_dan_but_requires_author_verification(store):
+    normal=export_comment('普通の質問')
+    dan=export_comment('ダン：直しました','2026-11-01T13:31:00Z')
+    unknown=export_comment('書き直して','2026-11-01T13:32:00Z')
+    unknown['author_label']='別の人'
+    changes=E.ingest_export_comments('file', {'export_comments':[normal,dan,unknown],
+        'threads':[thread('普通の質問')]})
+    assert len(changes)==1 and changes[0]['thread']['author_label']=='別の人'
+    assert changes[0]['requires_browser_verification'] is True
+    doc={'file_id':'file','room_id':'room'}
+    prompt=E.prompt(doc,{'id':'batch','payload':json.dumps(changes)})
+    assert '第三者・作者不明なら本文変更も返信もせず' in prompt
+    assert 'confirm-export-reply' in prompt
+
+
+def test_export_receipt_checks_current_source_and_saved_reply_without_send(store,monkeypatch):
+    from app.services import gdoc_drive, script_learning
+    source=export_comment()
+    changes=E.ingest_export_comments('file',{'export_comments':[source]})
+    with E.db() as c: b=dict(c.execute('SELECT * FROM batches').fetchone())
+    monkeypatch.setattr(gdoc_drive,'export_docx',lambda *args:b'export')
+    items=[source]
+    monkeypatch.setattr(script_learning,'parse_docx',lambda _: {'export_comments':items})
+    with pytest.raises(ValueError,match='not uniquely'): E.confirm_export_reply(b['id'],changes[0]['comment_id'],'ダン：直しました')
+    items.append(export_comment('ダン：直しました','2026-11-01T14:00:00Z'))
+    assert E.confirm_export_reply(b['id'],changes[0]['comment_id'],'ダン：直しました')['verified_export']
+    assert E.confirm_export_reply(b['id'],changes[0]['comment_id'],'ダン：直しました')['verified_export']
+    source['text']='最新の訂正'
+    with pytest.raises(ValueError,match='changed'): E.confirm_export_reply(b['id'],changes[0]['comment_id'],'ダン：直しました')
