@@ -57,3 +57,43 @@ then restart only `com.dan.gdoc-events`; Core/browser/chat continue running.
 
 References: https://developers.google.com/workspace/drive/api/guides/push
 and https://developers.google.com/workspace/drive/api/reference/rest/v3/comments/list
+
+## Opt-in script learning
+
+`python scripts/script_learning.py enable --file FILE` captures an initial baseline
+and enables collection on the existing registered document. Source documents are
+never mutated by the collector. The event worker also reconciles enabled targets
+every five minutes, even with no comments. Collection failures pause after three
+bounded attempts; `status` exposes errors and `resume --file` is explicit recovery.
+This is NOT a complete keystroke history or proof of edit authorship.
+
+Current transport is Drive DOCX export, preserving tracked insertions/deletions,
+author labels and comments, plus full Drive comment threads. The installed Google
+project has Docs API disabled; we do not silently change its configuration. Each
+export is bracketed with Drive version reads; concurrent-version exports retry
+later instead of mixing evidence. Raw ZIPs and structured evidence are kept under
+`~/.dan/gdoc-events/`, with an independent `learning.sqlite`. Identical editorial
+content is deduplicated. Direct edits have unknown per-span authorship; the last
+modifier does not identify every edit. Export IDs are not stable across snapshots.
+
+`before` / `after --file FILE` brackets Dan's own edits. Failures leave the interval
+open, so concurrent or abandoned edits are not silently attributed to the owner.
+The existing comment-job prompt and talk-script skill use these boundaries.
+
+After edits settle for 60 seconds (maximum batching window ten minutes), one quiet
+learning job across all documents reads the evidence and the skill-creator /
+talk-script learning instructions. Collection continues while the AI is busy.
+The worker requires a structured `complete` report; a runner's fluent final answer
+alone yields `needs_attention`. Crashed runs are reconciled, never replayed blindly.
+A needs-attention job blocks new skill writers, but not collection or comments.
+A deferred report preserves the candidate and the missing decision in room context.
+
+Promotion requires all assigned changes accounted for, evidence-linked lessons,
+real old/new output artifacts including a held-out example, and the committed skill
+files delivered to the live folder. Artifact checks establish provenance, not an
+objective guarantee of writing quality. The agent supplies the substantive review;
+ambiguous cases remain deferred. See `.claude/skills/talk-script/learning.md`.
+
+The worker can be restarted independently when no private runner is alive. No Core
+restart is needed for collection/learning. Existing processes' cached room-context
+code receives the new summary on their next ordinary generation/reload.

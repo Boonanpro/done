@@ -6,7 +6,7 @@ import httpx
 
 _tokens = {}
 
-def request(account, method, path, body=None, params=None):
+def request(account, method, path, body=None, params=None, *, raw=False):
     from app.config import settings
     from app.services.encryption import decrypt_data
     if not account.replace('_', '').isalnum():
@@ -25,7 +25,12 @@ def request(account, method, path, body=None, params=None):
         response = client.request(method, 'https://www.googleapis.com/drive/v3/' + path,
                                   headers={'Authorization': 'Bearer ' + cached[0]}, json=body, params=params)
         response.raise_for_status()
+        if raw: return response.content
         return response.json() if response.content else {}
+
+def export_docx(account, file_id):
+    return request(account, 'GET', f'files/{file_id}/export', params={
+        'mimeType': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}, raw=True)
 
 def comments(account, file_id, since=None):
     params = {'fields': '*', 'pageSize': 100, 'includeDeleted': 'true'}
