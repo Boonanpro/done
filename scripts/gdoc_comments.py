@@ -11,6 +11,7 @@ def main():
     sub = p.add_subparsers(dest='action', required=True)
     r = sub.add_parser('register'); r.add_argument('--file', required=True); r.add_argument('--room', required=True); r.add_argument('--account', required=True)
     r = sub.add_parser('reply'); r.add_argument('--batch', required=True); r.add_argument('--comment', required=True); r.add_argument('--text-file', required=True)
+    r = sub.add_parser('confirm-export-reply'); r.add_argument('--batch', required=True); r.add_argument('--comment', required=True); r.add_argument('--text-file', required=True)
     r = sub.add_parser('history'); r.add_argument('--room', required=True)
     r = sub.add_parser('browser'); r.add_argument('--file', required=True); r.add_argument('--room', required=True)
     for name in ('pause', 'resume'):
@@ -19,6 +20,7 @@ def main():
     a = p.parse_args()
     if a.action=='register': E.register(a.file, a.room, a.account); print('Registered')
     elif a.action=='reply': print(json.dumps(E.reply(a.batch, a.comment, Path(a.text_file).read_text()), ensure_ascii=False))
+    elif a.action=='confirm-export-reply': print(json.dumps(E.confirm_export_reply(a.batch, a.comment, Path(a.text_file).read_text()), ensure_ascii=False))
     elif a.action=='history': print(E.room_context(a.room))
     elif a.action=='browser':
         from app.services.browser_lifecycle import profile_for_room

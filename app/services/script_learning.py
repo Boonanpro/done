@@ -170,7 +170,14 @@ def _capture(doc, origin='observed', baseline=False):
     if first.get('version') != last.get('version'):
         # Do not present an export and comments from different edits as one version.
         raise ValueError('Document changed during collection')
-    return store(doc['file_id'],raw,last,threads,origin,baseline)
+    result = store(doc['file_id'],raw,last,threads,origin,baseline)
+    with db() as c:
+        first_snapshot = c.execute('SELECT payload FROM snapshots WHERE file_id=? ORDER BY created,rowid LIMIT 1', (doc['file_id'],)).fetchone()
+    payload = parse_docx(raw)
+    payload['threads'] = threads
+    E.ingest_export_comments(doc['file_id'], payload,
+                            json.loads(first_snapshot['payload'])['export_comments'] if first_snapshot else [])
+    return result
 
 
 def enable(doc):
