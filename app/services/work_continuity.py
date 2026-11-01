@@ -168,19 +168,6 @@ def cancel_room(room_id, user_id):
             (time.time(), room_id, user_id))
 
 
-async def notify_blocked():
-    from app.services.chat_service import ChatService
-    with connection() as db:
-        rows = [dict(r) for r in db.execute("SELECT * FROM work WHERE status='blocked' AND token IS NULL AND notified<updated LIMIT 5")]
-    for row in rows:
-        msg_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"work:{row['id']}:{row['updated']}"))
-        await ChatService().send_message(row['room_id'], row['user_id'],
-            f"「{row['goal'][:100]}」の作業が止まっています。{row['evidence'][:180]}\n{row['next_step'][:220]}",
-            sender_type='ai', message_id=msg_id)
-        with connection() as db:
-            db.execute('UPDATE work SET notified=? WHERE id=? AND updated=?', (row['updated'], row['id'], row['updated']))
-
-
 def command():
     from app.paths import DONE_ROOT
     return shlex.join([sys.executable, str(DONE_ROOT / 'scripts' / 'work_checkpoint.py')])
@@ -274,7 +261,6 @@ async def dispatch():
     if draining():
         return
     recover()
-    await notify_blocked()
     with connection() as db:
         db.execute("UPDATE work SET status='ready' WHERE status='waiting' AND token IS NULL AND wake_at>0 AND wake_at<=?", (time.time(),))
         rows = [dict(r) for r in db.execute("SELECT * FROM work WHERE status='ready' AND token IS NULL AND wake_at<=? ORDER BY updated LIMIT 20", (time.time(),))]

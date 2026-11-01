@@ -151,7 +151,6 @@ def test_private_work_and_timed_wait_use_same_dispatch(monkeypatch):
         yield {'type':'result','text':'準備完了'}
     runtime(monkeypatch,runner)
     monkeypatch.setattr('app.services.restart_signal.draining',lambda: False)
-    monkeypatch.setattr(w,'notify_blocked',AsyncMock())
     async def run():
         await w.dispatch()
         await asyncio.gather(*list(w._tasks.values()))
@@ -234,16 +233,19 @@ def test_new_progress_resets_no_progress_limit():
         assert w.get('one')['status'] == 'ready'
 
 
-def test_failure_notice_is_delivered_once(monkeypatch):
+def test_blocked_work_posts_nothing_to_chat(monkeypatch):
+    # 止まった仕事の内部記録を本人のチャットへ流さない（2026-11-02 本人の指摘）。
     add()
     row=w.claim('one')
     w.finish('one',row['token'],failed=True)
+    assert w.get('one')['status'] == 'blocked'
     send=AsyncMock()
     monkeypatch.setattr('app.services.chat_service.ChatService',lambda: type('S',(),{'send_message':send})())
-    asyncio.run(w.notify_blocked())
-    asyncio.run(w.notify_blocked())
-    assert send.call_count == 1
-    assert send.call_args.kwargs['message_id']
+    runtime(monkeypatch,None)
+    monkeypatch.setattr('app.services.restart_signal.draining',lambda: False)
+    asyncio.run(w.dispatch())
+    assert send.call_count == 0
+    assert not hasattr(w,'notify_blocked')
 
 
 def test_inbound_schedule_saves_before_running(monkeypatch):
