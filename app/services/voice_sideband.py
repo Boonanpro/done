@@ -90,6 +90,7 @@ class Dialogue:
         self.heard_at = 0.0
         self.intake = None
         self.call_results = {}
+        self.actions = None
         self.prefetch = None   # voice_prefetch.Prefetch while this server answers the call
         self.history = []      # full transcript for this bounded (MAX_SECONDS) call; never written to logs
         self.history_chars = 0
@@ -129,6 +130,11 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
     """One function call of the backend model, run here. Returns the function_call_output item."""
     from app.services.voice_responses import run_function, search_output
     started = time.monotonic()
+    if dialogue.actions is not None:
+        routed = await dialogue.actions.native_result(delegation_id)
+        if routed is not None:
+            return {'type': 'function_call_output', 'call_id': item.get('call_id'),
+                    'output': json.dumps(routed, ensure_ascii=False), 'name': item.get('name')}
     try: args = json.loads(item.get('arguments') or '{}')
     except ValueError: args = {}
     reads = {'read_many', 'web_search', 'get_calendar', 'get_location', 'room_files', 'job_status',
@@ -162,6 +168,8 @@ async def execute_call(item, user_id, room_id, dialogue, record, delegation_id, 
         output = (search_output(early, str(args.get('query') or '')) if item.get('name') == 'web_search' else early) if early is not None else await run_function(item.get('name'), args, user_id, room_id, context, speak=speak)
     except Exception as exc:
         output = {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
+    if dialogue.actions is not None:
+        dialogue.actions.observe(output)
     if (dialogue.intake is not None and item.get('name') == 'start_work'
             and isinstance(output, dict) and output.get('accepted')):
         dialogue.intake.work_accepted(delegation_id)
@@ -625,7 +633,13 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     return await dialogue.prefetch.fallback_is_conversation(text)
                 intake_task = asyncio.create_task(dispatch_missing(dialogue.intake, send, record, conversation_only))
                 working.add(intake_task); intake_task.add_done_callback(working.discard)
-            if own and room_id:
+            if own and room_id and dialogue.intake is not None:
+                from app.services.voice_actions import Actions, enabled as actions_enabled
+                if actions_enabled():
+                    dialogue.actions = Actions(user_id, room_id, dialogue, send, record)
+                    action_task = asyncio.create_task(dialogue.actions.run())
+                    working.add(action_task); action_task.add_done_callback(working.discard)
+            if own and room_id and dialogue.actions is None:
                 from app.services.voice_stop_control import StopControl
                 stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
             if own:
@@ -681,6 +695,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     dialogue.add('user', event.get('delta') or '')
                     if dialogue.intake is not None:
                         dialogue.intake.heard(event.get('delta') or '', event.get('end_ms'))
+                    if dialogue.actions is not None:
+                        dialogue.actions.heard(event.get('start_ms'), event.get('end_ms'))
                     if stop_control is not None:
                         stop_control.heard(event.get('delta') or '', event.get('start_ms'), event.get('end_ms'))
                 elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
@@ -707,6 +723,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
         record('sideband_failed', error_type=type(exc).__name__, detail=str(exc)[:200])
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
+        if dialogue.actions is not None: dialogue.actions.closed = True
         if dialogue.intake is not None: dialogue.intake.close()
         if stop_control is not None: stop_control.close()
         for task in working: task.cancel()
