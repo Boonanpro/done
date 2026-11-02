@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,39 @@ async def _wake_task(detected_message: Dict[str, Any], room_id: str, reason: str
                   prompt=_build_prompt(detected_message, reason), source="inbound")
 
 
+_DOCS_NOTICE = re.compile(r"docs\.google\.com/document/d/([A-Za-z0-9_-]{20,})")
+
+
+def docs_comment_file(detected_message: Dict[str, Any]) -> Optional[str]:
+    """Google ドキュメントのコメント通知メールなら、そのドキュメントの ID。"""
+    si = detected_message.get("sender_info") or {}
+    sender = f"{si.get('from') or ''} {si.get('email') or ''}".lower()
+    if "comments-noreply@docs.google.com" not in sender:
+        return None
+    found = _DOCS_NOTICE.search(detected_message.get("content") or "")
+    return found.group(1) if found else None
+
+
+def take_docs_comment_notice(detected_message: Dict[str, Any], room_id: str) -> bool:
+    """コメントへの対応はドキュメントの中だけで行う（本人はチャットに重ねて書かれるのを嫌う
+    2026-11-02）。コメントの受け口（gdoc_events）に渡せたら True。チャットは起こさない。"""
+    file_id = docs_comment_file(detected_message)
+    if not file_id or not room_id:
+        return False
+    received = None
+    try:
+        from email.utils import parsedate_to_datetime
+        received = parsedate_to_datetime((detected_message.get("sender_info") or {}).get("date") or "").timestamp()
+    except Exception:
+        pass
+    try:
+        from app.services import gdoc_events
+        return gdoc_events.take_mail_notice(file_id, room_id, received)
+    except Exception:
+        logger.exception("[inbound-wake] docs comment notice failed file=%s", file_id)
+        return False
+
+
 def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reason: str) -> bool:
     """該当ルームでダンを起動するタスクを予約する。予約できたら True。
 
@@ -212,6 +246,8 @@ def schedule_room_wakeup(detected_message: Dict[str, Any], room_id: str, *, reas
     """
     if not room_id or not detected_message.get("user_id"):
         return False
+    if take_docs_comment_notice(detected_message, room_id):
+        return True
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

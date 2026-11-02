@@ -77,7 +77,10 @@ def fingerprint(item):
     value = [item.get('content'), item.get('deleted', False), item.get('action')]
     return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
 
-def ingest(c, file_id, threads, baseline=False):
+def ingest(c, file_id, threads, baseline=False, owner_only=False, fresh_since=None):
+    """owner_only: only the owner's accounts can open the document, so a comment
+    from another of them (no `me`) is still the owner's. fresh_since: with a
+    baseline, items touched at or after it stay new (the comment a mail announced)."""
     changes = []
     for thread in threads:
         fresh = []
@@ -87,9 +90,10 @@ def ingest(c, file_id, threads, baseline=False):
             old = c.execute('SELECT fingerprint FROM items WHERE file_id=? AND item_id=?', (file_id, ident)).fetchone()
             c.execute('INSERT OR REPLACE INTO items VALUES(?,?,?)', (file_id, ident, fp))
             content = (item.get('content') or '').strip()
-            if (not baseline and (not old or old[0] != fp) and content and not item.get('deleted')
+            settled = baseline and not (fresh_since and (item.get('createdTime') or '') >= fresh_since)
+            if (not settled and (not old or old[0] != fp) and content and not item.get('deleted')
                     and not thread.get('deleted') and not thread.get('resolved')
-                    and item.get('author', {}).get('me') is True
+                    and (item.get('author', {}).get('me') is True or owner_only)
                     and not content.startswith(('ダン：', 'ダン:'))):
                 fresh.append({'id': ident, 'revision': fp, 'content': content})
         if fresh:
@@ -170,7 +174,22 @@ def renew(doc):
         c.execute('DELETE FROM channels WHERE expires<?', (time.time(),))
     # Old channel overlaps until expiry. Duplicate notifications are coalesced.
 
-def register(file_id, room_id, account):
+OWNER_EMAILS = {e.strip().lower() for e in (os.environ.get('DAN_GDOC_OWNER_EMAILS') or
+                'shub6923@gmail.com,0aw325171@gmail.com,pna64404@gmail.com').split(',') if e.strip()}
+
+def owner_only(account, file_id):
+    """Comments carry only a display name. A document only the owner's accounts
+    can open is the proof that every comment on it is the owner's."""
+    from app.services.gdoc_drive import request
+    try:
+        perms = request(account, 'GET', f'files/{file_id}/permissions',
+                        params={'fields': 'permissions(type,emailAddress)'}).get('permissions', [])
+    except Exception:
+        return False
+    return bool(perms) and all(p.get('type') == 'user' and (p.get('emailAddress') or '').lower() in OWNER_EMAILS
+                               for p in perms)
+
+def register(file_id, room_id, account, fresh_since=None):
     from app.services.supabase_client import get_supabase_client
     from app.services.gdoc_drive import comments
     project = get_supabase_client().client.table('projects').select('id,user_id').eq('room_id', room_id).single().execute().data
@@ -182,16 +201,45 @@ def register(file_id, room_id, account):
     with db() as c:
         c.execute('INSERT INTO docs(file_id,room_id,user_id,project_id,account,cursor) VALUES(?,?,?,?,?,?)',
                   (file_id, room_id, project['user_id'], project['id'], account, before))
-        ingest(c, file_id, threads, baseline=True)
+        changes = ingest(c, file_id, threads, baseline=True, owner_only=owner_only(account, file_id), fresh_since=fresh_since)
+        if changes:
+            c.execute('INSERT INTO batches(id,file_id,payload,created) VALUES(?,?,?,?)',
+                      (str(uuid.uuid4()), file_id, json.dumps(changes, ensure_ascii=False), iso()))
         c.execute('UPDATE docs SET dirty=1 WHERE file_id=?', (file_id,))
     signal()
+
+def accounts():
+    return sorted(p.name[len('gdrive_'):-len('_token.enc')] for p in (Path.home()/'.dan').glob('gdrive_*_token.enc'))
+
+def take_mail_notice(file_id, room_id, received=None):
+    """A Docs comment mail goes to the same private inbox as push, never to chat.
+    An unknown document is registered for the room; False leaves the mail to the caller."""
+    with db() as c:
+        if c.execute('SELECT 1 FROM docs WHERE file_id=?', (file_id,)).fetchone():
+            c.execute('UPDATE docs SET dirty=dirty+1 WHERE file_id=?', (file_id,))
+            signal()
+            return True
+    from app.services.gdoc_drive import request
+    since = iso((received or time.time()) - 600)
+    for account in accounts():
+        try:
+            if not request(account, 'GET', f'files/{file_id}', params={'fields': 'capabilities(canComment)'}).get(
+                    'capabilities', {}).get('canComment'):
+                continue
+            register(file_id, room_id, account, fresh_since=since)
+            return True
+        except Exception:
+            import logging
+            logging.exception('Docs mail notice could not register %s', file_id)
+    return False
 
 def collect(doc):
     from app.services.gdoc_drive import comments
     before = iso(time.time()-120)  # overlap protects concurrent edits / timestamp precision
     threads = comments(doc['account'], doc['file_id'], doc['cursor'])
+    private = owner_only(doc['account'], doc['file_id']) if threads else False
     with db() as c:
-        changes = ingest(c, doc['file_id'], threads)
+        changes = ingest(c, doc['file_id'], threads, owner_only=private)
         if changes:
             c.execute('INSERT INTO batches(id,file_id,payload,created) VALUES(?,?,?,?)',
                       (str(uuid.uuid4()), doc['file_id'], json.dumps(changes, ensure_ascii=False), iso()))
