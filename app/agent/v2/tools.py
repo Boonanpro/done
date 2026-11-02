@@ -557,8 +557,12 @@ BROWSER_TOOL['input_schema']['properties'].update({
     'question': {'type': 'string', 'description': 'read: 知りたいこと（例: 「配送予定日」「〇〇の料金」）。ページを区切って関係する箇所だけを返す（速く、短い）。'
                  'ページから情報を取り出す時は、evaluate でプログラムを書く前にまずこれ'},
     'tables': {'type': 'boolean', 'description': 'read: 範囲内の表を行ごとに「セル | セル」で返す'},
-    'path': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {'type': 'string', 'maxLength': 120},
-             'description': 'follow: 続けて押したい物の表示文字を順に並べる（例: ["口座情報", "入出金明細"]）。多少の表記ゆれは吸収される'},
+    # save_image / upload_file take a file path (string); follow takes the labels to press (list). One property serves
+    # both: with the list type alone, upload_file could not be called at all (2026-11-02).
+    'path': {'anyOf': [{'type': 'string'},
+                       {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {'type': 'string', 'maxLength': 120}}],
+             'description': 'save_image / upload_file: ファイルの絶対パス（文字列）。'
+                            'follow: 続けて押したい物の表示文字を順に並べる（例: ["口座情報", "入出金明細"]）。多少の表記ゆれは吸収される'},
     'goal': {'type': 'string', 'maxLength': 300, 'description': 'follow: 道筋が分からない時に、行き先を言葉で渡す（例: 9月の入出金明細を表示する）'},
     'max_steps': {'type': 'integer', 'minimum': 1, 'maximum': 10, 'description': 'follow(goal): 押す回数の上限（既定6）'},
 })
@@ -4454,6 +4458,8 @@ async def _execute_browser_tool_impl(action: str, params: Dict[str, Any]) -> Dic
 
         elif action == "upload_file":
             path = params.get("path")
+            if isinstance(path, list):
+                path = path[0] if path else None
             if not path:
                 return {"success": False, "error": "path（アップロードするファイルの絶対パス）が必要です"}
             import os as _os
