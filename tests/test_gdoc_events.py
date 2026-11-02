@@ -247,3 +247,63 @@ def test_export_receipt_checks_current_source_and_saved_reply_without_send(store
     assert E.confirm_export_reply(b['id'],changes[0]['comment_id'],'ダン：直しました')['verified_export']
     source['text']='最新の訂正'
     with pytest.raises(ValueError,match='changed'): E.confirm_export_reply(b['id'],changes[0]['comment_id'],'ダン：直しました')
+
+
+def test_comment_from_owner_other_account_counts_only_on_owner_only_document(store):
+    other = thread('担当コーチの段は？', author={'displayName':'投手コーチイツキ','me':False})
+    with E.db() as c:
+        assert not E.ingest(c,'file',[other])
+        other['content'] = '担当コーチの段は書いてる？'
+        assert E.ingest(c,'file',[other],owner_only=True)[0]['new'][0]['content'] == '担当コーチの段は書いてる？'
+
+
+def test_owner_only_requires_every_permission_to_be_an_owner_account(monkeypatch):
+    from app.services import gdoc_drive
+    perms = {'permissions':[{'type':'user','emailAddress':'shub6923@gmail.com'},
+                            {'type':'user','emailAddress':'0aw325171@gmail.com'}]}
+    monkeypatch.setattr(gdoc_drive,'request',lambda *a,**k: perms)
+    assert E.owner_only('test','file')
+    perms['permissions'].append({'type':'anyone'})
+    assert not E.owner_only('test','file')
+    perms['permissions'][-1] = {'type':'user','emailAddress':'client@example.com'}
+    assert not E.owner_only('test','file')
+    monkeypatch.setattr(gdoc_drive,'request',lambda *a,**k: (_ for _ in ()).throw(RuntimeError()))
+    assert not E.owner_only('test','file')
+
+
+def test_mail_notice_for_registered_document_marks_dirty_without_chat(store):
+    assert E.take_mail_notice('file','room')
+    with E.db() as c: assert c.execute('SELECT dirty FROM docs').fetchone()[0] == 1
+    assert (store/'wake').exists()
+
+
+def test_mail_notice_registers_unknown_document_and_keeps_the_announced_comment(store, monkeypatch):
+    from app.services import gdoc_drive
+    registered = []
+    monkeypatch.setattr(E,'accounts',lambda: ['nope','test'])
+    def request(account,method,path,body=None,params=None):
+        if account=='nope': raise RuntimeError('no access')
+        return {'capabilities':{'canComment':True}}
+    monkeypatch.setattr(gdoc_drive,'request',request)
+    monkeypatch.setattr(E,'register',lambda f,r,a,fresh_since=None: registered.append((f,r,a,fresh_since)))
+    assert E.take_mail_notice('newfile','room',received=1793600000)
+    assert registered == [('newfile','room','test',E.iso(1793600000-600))]
+    with E.db() as c:
+        old = thread('前からある指示', createdTime='2026-11-01T00:00:00Z')
+        new = {**thread('今の指示', createdTime='2026-11-02T06:24:00Z'), 'id':'c2'}
+        changes = E.ingest(c,'file2',[old,new],baseline=True,fresh_since='2026-11-02T06:14:35Z')
+        assert [x['comment_id'] for x in changes] == ['c2']
+
+
+def test_docs_comment_mail_does_not_wake_the_chat(monkeypatch):
+    from app.services import inbound_wakeup as W
+    from app.services import gdoc_events
+    taken = []
+    monkeypatch.setattr(gdoc_events,'take_mail_notice',lambda f,r,t=None: taken.append((f,r)) or True)
+    msg = {'user_id':'u','source':'gmail','subject':'台本',
+           'sender_info':{'from':'投手コーチイツキ (Google ドキュメント) <comments-noreply@docs.google.com>',
+                          'date':'Sun, 01 Nov 2026 22:24:35 -0800'},
+           'content':'（https://docs.google.com/document/d/1XLLtHr2XY9bFEnrxrUaL4yaENs2gGTJ2Y8hGzmNbjqc/edit?usp=comment_email_document）'}
+    assert W.schedule_room_wakeup(msg,'room',reason='content:existing')   # no running loop: would be False if it woke
+    assert taken == [('1XLLtHr2XY9bFEnrxrUaL4yaENs2gGTJ2Y8hGzmNbjqc','room')]
+    assert W.docs_comment_file({**msg,'sender_info':{'from':'someone@example.com'}}) is None

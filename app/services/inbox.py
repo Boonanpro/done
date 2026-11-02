@@ -346,6 +346,10 @@ async def deliver(user_id, item, decision, watches, room=None):
     room = room or await _room_for(user_id, decision, watches)
     line = (decision.get('line') or '').strip()
     mail = item.get('sender_info') or {}
+    from app.services.inbound_wakeup import docs_comment_file, take_docs_comment_notice
+    judged = (watch or {}).get('room_id') or decision.get('room_id')  # not the home room fallback
+    if docs_comment_file(item) and decision['decision'] in ('tell', 'act') and take_docs_comment_notice(item, judged or ''):
+        return room  # answered inside the document; nothing said in chat
     if decision['decision'] == 'act':
         from app.services.inbound_wakeup import schedule_room_wakeup
         prompt = _ACT_PROMPT.format(channel=item.get('source') or 'gmail', why=decision.get('why') or '', watch=(f'待っていた目印: 「{watch["note"]}」\n' if watch else ''),
