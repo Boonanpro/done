@@ -63,6 +63,14 @@ allprojects {
     if (!features.some(f => f.$['android:name'] === 'android.software.companion_device_setup'))
       features.push({$: {'android:name': 'android.software.companion_device_setup', 'android:required': 'false'}});
     const app = AndroidConfig.Manifest.getMainApplicationOrThrow(mod.modResults);
+    app.activity = app.activity || [];
+    if (!app.activity.some(a => a.$['android:name'] === 'app.done.dan.voice.DanVoiceShortcutActivity')) {
+      app.activity.push({$: {'android:name': 'app.done.dan.voice.DanVoiceShortcutActivity',
+        'android:exported': 'true', 'android:label': 'ダンと話す', 'android:theme': '@android:style/Theme.NoDisplay',
+        'android:excludeFromRecents': 'true'},
+        'intent-filter': [{action: [{$: {'android:name': 'android.intent.action.MAIN'}}],
+          category: [{$: {'android:name': 'android.intent.category.LAUNCHER'}}]}]});
+    }
     app.service = app.service || [];
     const existing = app.service.find(s => s.$['android:name'] === 'app.done.dan.voice.DanVoiceCallService');
     if (existing) existing.$['android:foregroundServiceType'] = 'microphone|connectedDevice'; // prebuild reuses android/
@@ -94,7 +102,7 @@ allprojects {
     require('../scripts/patch-webrtc-audio-processing.cjs').patch(root);
     const dest = path.join(root, 'android/app/src/main/java/app/done/dan/voice');
     fs.mkdirSync(dest, {recursive: true});
-    for (const file of ['DanVoiceCallModule.kt','DanVoiceCallService.kt','DanPcmQueue.java','DanExternalAudio.java','DanWebRtcAudio.kt','DanAudioLease.java','DanQuietSpeechLift.java','DanQuietSpeechProcessing.java','DanPinBle.java','DanPinSelfTest.kt','DanPinLink.kt','DanPinWake.java','DanPinPresenceService.kt','DanPinLifelog.java','DanPhoneLifelog.java']) fs.copyFileSync(path.join(root,'native/voice',file),path.join(dest,file));
+    for (const file of ['DanVoiceShortcutActivity.kt','DanVoiceCallModule.kt','DanVoiceCallService.kt','DanPcmQueue.java','DanExternalAudio.java','DanWebRtcAudio.kt','DanAudioLease.java','DanQuietSpeechLift.java','DanQuietSpeechProcessing.java','DanPinBle.java','DanPinSelfTest.kt','DanPinLink.kt','DanPinWake.java','DanPinPresenceService.kt','DanPinLifelog.java','DanPhoneLifelog.java']) fs.copyFileSync(path.join(root,'native/voice',file),path.join(dest,file));
     const rtcDest = path.join(root, 'android/app/src/main/java/com/oney/WebRTCModule');
     fs.mkdirSync(rtcDest, {recursive: true});
     fs.copyFileSync(path.join(root,'native/voice/DanWebRtcAccess.java'),path.join(rtcDest,'DanWebRtcAccess.java'));

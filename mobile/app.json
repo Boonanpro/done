@@ -2,7 +2,7 @@
   "expo": {
     "name": "Done",
     "slug": "dan-mobile",
-    "version": "1.0.82",
+    "version": "1.0.83",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -25,7 +25,7 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION"
       ],
-      "versionCode": 81,
+      "versionCode": 82,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -64,7 +64,10 @@
         {
           "savePhotosPermission": "DANで受け取った画像や動画を写真に保存するためにアクセスを許可してください。",
           "photosPermission": "DANで受け取った画像や動画を写真に保存するためにアクセスを許可してください。",
-          "granularPermissions": ["photo", "video"]
+          "granularPermissions": [
+            "photo",
+            "video"
+          ]
         }
       ],
       [

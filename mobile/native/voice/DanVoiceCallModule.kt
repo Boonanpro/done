@@ -40,6 +40,8 @@ class DanVoiceCallModule(private val context: ReactApplicationContext) : ReactCo
   /** The screen's DanPinTap listener is up (true) or gone (false). */
   @ReactMethod fun pinScreen(listening: Boolean) { DanPinLink.screenListening = listening }
   /** A tap or 「ヘイダン」 that opened the screen: true once, then false. */
+  init { DanVoiceShortcut.context = java.lang.ref.WeakReference(context) }
+  @ReactMethod fun takeVoiceShortcut(promise: Promise) { promise.resolve(DanVoiceShortcut.take()) }
   @ReactMethod fun takePinTap(promise: Promise) { promise.resolve(DanPinLink.pendingTap); DanPinLink.pendingTap = false }
   /** Registers the pin with Android once (system dialog), so Android brings the link back even with the app killed. */
   @ReactMethod fun associatePin(promise: Promise) {

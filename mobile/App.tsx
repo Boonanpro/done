@@ -1373,6 +1373,33 @@ function AppMain() {
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
   const answeredSummonsRef = useRef<Set<string>>(new Set());
+  // A physical shortcut opens the ordinary phone/headset call in the command center.
+  // Consume the native request once, only in foreground. A normal app launch does nothing.
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !NativeModules.DanVoiceCall?.takeVoiceShortcut) return;
+    let busy = false;
+    const take = async () => {
+      if (AppState.currentState !== 'active' || busy) return;
+      busy = true;
+      try {
+        if (!await NativeModules.DanVoiceCall.takeVoiceShortcut()) return;
+        const [saved, room] = await Promise.all([
+          SecureStore.getItemAsync(TOKEN_KEY), SecureStore.getItemAsync(HUB_KEY)]);
+        if (AppState.currentState !== 'active') return;
+        if (!saved || !room || !tokenFresh(saved)) {
+          Alert.alert('ダンと話す', '一度Doneにログインしてから、もう一度「ダンと話す」を開いてください。');
+          return;
+        }
+        voiceRef.current.start({roomId:room,chatTitle:'Done',apiBase:API_BASE_URL,token:saved});
+      } finally { busy = false; }
+    };
+    const attempt = () => { void take().catch(() => Alert.alert('ダンと話す', '起動できませんでした。もう一度ボタンを押してください。')); };
+    const event = DeviceEventEmitter.addListener('DanVoiceShortcut', attempt);
+    const state = AppState.addEventListener('change', value => { if (value === 'active') attempt(); });
+    attempt();
+    return () => { event.remove(); state.remove(); };
+  }, []);
+
   // Dan's calls for the owner ring on a channel of their own: an alarm-like sound that is heard with the screen away
   // (server: app/services/owner_summon.py sends channelId 'dan-summon'). A channel's sound is fixed once it exists.
   useEffect(() => {
