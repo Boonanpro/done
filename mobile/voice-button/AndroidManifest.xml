@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.done.dan.voicebutton" android:versionCode="1" android:versionName="1.0">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+  <application android:label="ダンと話す" android:icon="@android:drawable/ic_btn_speak_now" android:allowBackup="false" android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar">
+    <activity android:name=".VoiceButtonActivity" android:exported="true" android:excludeFromRecents="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>
