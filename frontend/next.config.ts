@@ -57,7 +57,7 @@ const nextConfig: NextConfig = {
     // デフォルト10MBで打ち切る（超過分は欠落→バックエンドへのproxyが
     // socket hang up で 500 になる）。チャット添付はバックエンド側が
     // 500MB 上限なので、proxy層がボトルネックにならない値にする。
-    proxyClientMaxBodySize: '550mb',
+    proxyClientMaxBodySize: process.env.ARTIFACT_ONLY_SLUG ? '1mb' : '550mb',
   },
   env: {
     NEXT_PUBLIC_ASSET_VERSION: ASSET_VERSION,
@@ -95,6 +95,14 @@ const nextConfig: NextConfig = {
     // max-age=14400 に書き換えるので、開いていたブラウザが最大4時間古い部品を使い続けた
     // （2026-10-18 実測）。no-store は書き換えられない。
     return [
+      ...(process.env.ARTIFACT_ONLY_SLUG ? [{
+        source: '/:path*',
+        headers: [
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          { key: 'Content-Security-Policy', value: "object-src 'none'; base-uri 'self'; frame-ancestors 'self' https://dan.paina.info" },
+        ],
+      }] : []),
       {
         source: '/:path((?!_next/static|_next/image|_live/|api/|ws/).*)',
         headers: [
