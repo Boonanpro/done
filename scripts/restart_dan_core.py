@@ -91,7 +91,7 @@ def busy():
                 if age < QUIET:
                     reasons.append(f'the last call activity was {age:.0f}s ago (wait {QUIET}s)')
                 break
-    jobs = [p.pid for p in psutil.process_iter(['cmdline']) if 'api_job_worker' in ' '.join(p.info.get('cmdline') or [])]
+    jobs = api_jobs()
     if jobs:
         reasons.append(f'API jobs are running (pids {jobs})')
     reasons.extend(work_in_progress())
@@ -99,6 +99,29 @@ def busy():
 
 
 WAITING_FOR_OWNER = {'paused', 'awaiting_confirmation', 'awaiting_approval'}
+
+
+def api_jobs():
+    """The API job workers doing something. A worker stays alive while its job is paused or waits for the owner, and
+    that is not running (as in work_in_progress): a job paused from a call on 10/31 kept three restarts waiting their
+    full 24 hours (11/1-11/3)."""
+    try:
+        from app.services import command_job_state as state
+    except Exception:
+        state = None
+    jobs, waiting = [], []
+    for p in psutil.process_iter(['cmdline']):
+        cmd = p.info.get('cmdline') or []
+        if not any('api_job_worker' in c for c in cmd):
+            continue
+        try:
+            saved = state.read(cmd[-1]) if state else None
+        except Exception:
+            saved = None
+        (waiting if saved and saved.get('state') in WAITING_FOR_OWNER else jobs).append(p.pid)
+    if waiting:
+        print('note: API jobs waiting for the owner (not stopping the restart): pids', waiting)
+    return jobs
 
 
 def work_in_progress():
