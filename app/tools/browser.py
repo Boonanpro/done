@@ -1014,6 +1014,34 @@ async def _note_current_tab(pages_state: dict, context) -> None:
         pass
 
 
+async def _set_files(page, target, files):
+    """Give local files to a file input. Attached to Chrome over CDP, Playwright refuses files over 50MB ("not
+    co-located"), but this Chrome runs on the same machine, so the input can take the paths themselves
+    (DOM.setFileInputFiles reads the files from disk). 2026-11-02: a 187MB video for a LINE greeting message."""
+    try:
+        await target.set_input_files(files)
+        return
+    except Exception as exc:  # noqa: BLE001
+        if "co-located" not in str(exc) and "50Mb" not in str(exc):
+            raise
+    import os as _os
+    paths = [_os.path.abspath(f) for f in files]
+    await target.evaluate("e => e.setAttribute('data-dan-upload', '1')")
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        doc = await cdp.send("DOM.getDocument", {"depth": 0})
+        node = await cdp.send("DOM.querySelector", {"nodeId": doc["root"]["nodeId"], "selector": "[data-dan-upload='1']"})
+        if not node.get("nodeId"):
+            raise RuntimeError("ファイル欄が見つかりません（shadow DOM の中かもしれません）")
+        await cdp.send("DOM.setFileInputFiles", {"files": paths, "nodeId": node["nodeId"]})
+    finally:
+        try:
+            await target.evaluate("e => e.removeAttribute('data-dan-upload')")
+        except Exception:  # noqa: BLE001
+            pass
+        await cdp.detach()
+
+
 async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
     try:
@@ -1128,7 +1156,7 @@ async def _run_page_command(pages_state: dict, context, cmd: str, args: dict):
         if not ref and not selector:
             if await file_inputs.count() == 0:
                 raise RuntimeError("input[type=file] が見つかりません。ref か selector でアップロードボタンを指定してください")
-            await file_inputs.last.set_input_files(files)
+            await _set_files(page, file_inputs.last, files)
             return {"uploaded": files, "via": "input"}
 
         if selector:
@@ -1139,7 +1167,7 @@ async def _run_page_command(pages_state: dict, context, cmd: str, args: dict):
         async with page.expect_file_chooser(timeout=timeout) as fc_info:
             await target.click()
         chooser = await fc_info.value
-        await chooser.set_files(files)
+        await _set_files(page, chooser.element, files)
         return {"uploaded": files, "via": "file_chooser"}
 
     elif cmd == "locator_count":

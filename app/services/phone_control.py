@@ -302,7 +302,23 @@ def _target(serial, ref, label):
     return hits[0]
 
 
-_paste_only = set()   # serials where uiautomator2's own typing failed (its input app cannot be installed)
+# serials where uiautomator2's own typing failed (its input app cannot be installed). Kept on disk: each tool process
+# starts empty, and on the S24 the failing install now waits on Play Protect's "blocked an unsafe app" dialog for
+# minutes instead of failing at once (2026-11-02), so every new process lost minutes on the first word.
+_PASTE_FILE = Path.home() / '.dan' / 'phone_paste_only.txt'
+try:
+    _paste_only = set(_PASTE_FILE.read_text().split())
+except OSError:
+    _paste_only = set()
+
+
+def _remember_paste_only(serial):
+    _paste_only.add(serial)
+    try:
+        _PASTE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PASTE_FILE.write_text('\n'.join(sorted(_paste_only)) + '\n')
+    except OSError:
+        pass
 
 
 def _send_text(dev, serial, text, clear=False):
@@ -315,7 +331,7 @@ def _send_text(dev, serial, text, clear=False):
             dev.send_keys(text, clear=clear)
             return
         except Exception:   # noqa: BLE001 - the install refusal surfaces as several exception types
-            _paste_only.add(serial)
+            _remember_paste_only(serial)
     if clear:
         try:
             dev.clear_text()
