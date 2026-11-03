@@ -7,6 +7,11 @@ import re
 PATH = Path.home() / '.dan' / 'voice-settings.json'
 DEFAULTS = {'model': 'gpt-live-1', 'backend_model': 'gpt-6.1-terra',
             'reasoning': 'medium', 'voice': 'shida'}
+# The plain call (voice_plain) follows OpenAI's advice for the Responses backend of GPT-Live: "Start with gpt-6-luna" and
+# "use lower reasoning effort when it completes the task reliably" (live-delegation). Terra at medium took 2.6-3.5 s a
+# round and 2-5 rounds a request: 16-32 s from a request to its answer in the 2026-11-03 13:35 call. A comparison against
+# many conditions is still Terra's (voice_responses think_carefully).
+PLAIN_DEFAULTS = {'backend_model': 'gpt-6-luna', 'reasoning': 'low'}
 ENV = {'model': 'DAN_VOICE_LIVE_MODEL', 'backend_model': 'DAN_VOICE_BACKEND_MODEL',
        'reasoning': 'DAN_VOICE_BACKEND_REASONING'}
 
@@ -23,7 +28,8 @@ def validate(values):
 
 
 def snapshot():
-    values = {**DEFAULTS, **{k: os.environ[v] for k, v in ENV.items() if v in os.environ}}
+    from app.services import voice_plain
+    values = {**DEFAULTS, **(PLAIN_DEFAULTS if voice_plain.enabled() else {}), **{k: os.environ[v] for k, v in ENV.items() if v in os.environ}}
     # Invalid configuration fails call creation explicitly; never silently uses
     # an unintended provider or model. Atomic replace prevents partial reads.
     if PATH.exists():

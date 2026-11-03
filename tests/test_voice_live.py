@@ -78,9 +78,42 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict('os.environ', {'DAN_VOICE_PLAIN': '1'}), \
              patch('app.services.dan_core.shared', side_effect=AssertionError('chat brief read')):
             config = live.session_config(room_id='r', user_id='u')
-        self.assertTrue(config['instructions'].startswith(voice_plain.INSTRUCTIONS))
+        self.assertTrue(config['instructions'].startswith(voice_plain.instructions()))
         self.assertNotIn('受付', config['instructions'])
         self.assertNotIn('声の裏側としてのきまり', config['delegation']['responses']['instructions'])
+
+    def test_plain_call_says_whose_dan_it_is_and_talks_while_working(self):
+        # 2026-11-03 13:35 「自己紹介して」 -> 「落ち着いて、必要なことを手早く手伝うアシスタント」; 29 s silent while working
+        from app.services import voice_plain
+        with patch.object(voice_plain, 'owner_names', return_value=('本田樹', 'みきさん')):
+            text = voice_plain.instructions()
+        self.assertTrue(text.startswith('あなたはダン。本田樹さん（呼び名はみきさん）専用の'))
+        self.assertIn('チャットでみきさんと話しているダンと同じダン', text)
+        self.assertIn('As verified progress arrives, give a short update', text)
+        with patch.object(voice_plain, 'owner_names', return_value=('', '')):
+            self.assertIn('持ち主専用', voice_plain.instructions())
+
+    def test_plain_backend_is_fast_and_reports_progress(self):
+        from app.services import voice_settings, voice_responses
+        with patch.dict('os.environ', {'DAN_VOICE_PLAIN': '1'}), patch.object(voice_settings, 'PATH', voice_settings.Path('/nonexistent/voice.json')):
+            settings = voice_settings.snapshot()
+            names = [t.get('name') for t in voice_responses.tools()]
+            backend = voice_responses.delegation(settings=settings)['responses']
+        self.assertEqual((settings['backend_model'], settings['reasoning']), ('gpt-6-luna', 'low'))
+        self.assertIn('share_progress', names); self.assertIn('think_carefully', names)
+        self.assertIn('show_page_on_stage の conditions', backend['instructions'])
+        with patch.dict('os.environ', {'DAN_VOICE_PLAIN': '0'}), patch.object(voice_settings, 'PATH', voice_settings.Path('/nonexistent/voice.json')):
+            self.assertEqual(voice_settings.snapshot()['backend_model'], 'gpt-6.1-terra')
+            self.assertNotIn('share_progress', [t.get('name') for t in voice_responses.tools()])
+
+    def test_share_progress_is_said_into_the_call(self):
+        import asyncio
+        from app.services import voice_responses
+        said = []
+        async def speak(text): said.append(text)
+        out = asyncio.run(voice_responses.run_function('share_progress', {'fact': '100kgのセットが3つ見つかった。在庫を見ている'}, 'u', 'r', [], speak=speak))
+        self.assertTrue(out['said'])
+        self.assertEqual(said, ['100kgのセットが3つ見つかった。在庫を見ている'])
 
     def test_local_date_crosses_utc_midnight(self):
         from datetime import datetime, timezone
