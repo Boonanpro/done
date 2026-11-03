@@ -17,6 +17,7 @@ search_list is the DeepSeek Search call itself, given to the job worker (a model
 answering step). Pages are read by read_url (Jina Reader) everywhere: DeepSeek's Fetch was about twice as slow and lost
 most of the text on a third of 12 pages (2026-10-25)."""
 import asyncio
+import contextvars
 import json
 import os
 import time
@@ -105,11 +106,24 @@ async def queries(client, question):
         return [question]
 
 
+_MARKS = contextvars.ContextVar('web_search_marks', default=None)   # find's record of how far a search got
+
+
 async def _deepseek(question):
     import httpx
+    marks = _MARKS.get()
+    marks = {} if marks is None else marks
+    began = time.perf_counter()
+    def mark(step):   # how far the search got and when (web-search-slow.jsonl)
+        marks['step'] = step
+        marks[step] = round(time.perf_counter() - began, 2)
+    mark('connect')
     async with httpx.AsyncClient() as client:
+        mark('queries')
         qs = await queries(client, question)
+        mark('search')
         lists = await asyncio.gather(*[search_list(client, q, 8, True, question) for q in qs], return_exceptions=True)
+        mark('answer')
         if all(isinstance(x, Exception) for x in lists):
             raise lists[0]
         lists = [x for x in lists if not isinstance(x, Exception)]
@@ -127,12 +141,35 @@ async def _deepseek(question):
             text = ('（ページ本文）\n' + r['content'][:3500]) if i <= 4 and r.get('content') else (r.get('summary') or r.get('snippet') or '')
             blocks.append(f'[{i}] {r.get("title") or ""} ({r.get("site_name") or ""}) 日付:{r.get("date") or "不明"}\nURL: {r.get("url")}\n{text}')
         out = await _flash(client, ANSWER.format(now=_now()), '質問: ' + question + '\n\n検索結果:\n' + '\n\n'.join(blocks), 700)
+        mark('done')
         used = [results[i - 1] for i in out.get('sources') or [] if isinstance(i, int) and 0 < i <= len(results)]
         return {'answer': str(out.get('answer') or '').strip(),
                 'sources': [{'title': r.get('site_name') or r.get('title') or '', 'url': r['url']} for r in used]}
 
 
 SECONDS = 15   # DeepSeek's whole search (queries, search, answer) takes about 3 s; a call never waits longer than this
+SLOW_SECONDS = 8
+SLOW_LOG = Path(__file__).resolve().parents[2] / '.tmp' / 'web-search-slow.jsonl'
+
+
+def _note_slow(seconds, outcome, marks, lag, query_chars):
+    """A search that took long or failed, as times only (no words): how far it got, how late this process's event loop
+    ran meanwhile, and how busy its thread pool was. In the 2026-11-03 19:15 call three searches stopped at 15 s while the
+    same searches took 3 s alone, with several at once too; which of these held them was not recorded."""
+    try:
+        loop = asyncio.get_running_loop()
+        pool = getattr(loop, '_default_executor', None)
+        row = {'at': datetime.now(ZoneInfo('Asia/Tokyo')).isoformat(timespec='seconds'), 'pid': os.getpid(), 'seconds': round(seconds, 2),
+               'outcome': outcome, 'marks': marks, 'loop_lag_max_s': round(lag, 3), 'query_chars': query_chars,
+               'tasks': len(asyncio.all_tasks(loop)),
+               'pool_threads': len(getattr(pool, '_threads', ()) or ()) if pool else 0,
+               'pool_queued': pool._work_queue.qsize() if pool is not None and hasattr(pool, '_work_queue') else 0}
+        SLOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if SLOW_LOG.exists() and SLOW_LOG.stat().st_size > 2 * 1024 * 1024: SLOW_LOG.replace(SLOW_LOG.with_suffix('.previous.jsonl'))
+        with SLOW_LOG.open('a', encoding='utf-8') as out:
+            out.write(json.dumps(row, ensure_ascii=False) + chr(10))
+    except Exception:
+        pass
 
 
 async def find(query):
@@ -140,12 +177,28 @@ async def find(query):
     {'success': False, 'error'}. Bounded (2026-10-24 review): DeepSeek's own waits add up to 80 s, which kept a call
     silent on a slow day."""
     started = time.perf_counter()
+    marks, lag = {}, [0.0]
+    async def probe():   # how late the event loop wakes a 0.1 s sleep while the search runs
+        while True:
+            before = time.perf_counter()
+            await asyncio.sleep(0.1)
+            lag[0] = max(lag[0], time.perf_counter() - before - 0.1)
+    watch = asyncio.ensure_future(probe())
+    outcome = 'ok'
+    _MARKS.set(marks)   # the search task copies this context and fills the same dict
     try:
         got = await asyncio.wait_for(_deepseek(query), SECONDS)
     except asyncio.TimeoutError:
+        outcome = 'timeout'
         return {'success': False, 'error': f'検索できなかった（{SECONDS}秒で答えが返らなかった）'}
     except Exception as exc:
+        outcome = 'error:' + type(exc).__name__
         return {'success': False, 'error': '検索できなかった（' + (str(exc)[:160] or type(exc).__name__) + '）'}
+    finally:
+        watch.cancel()
+        seconds = time.perf_counter() - started
+        if outcome != 'ok' or seconds >= SLOW_SECONDS:
+            _note_slow(seconds, outcome, marks, lag[0], len(query or ''))
     if not got['answer']:
         return {'success': False, 'error': '検索できなかった（答えが見つからなかった）'}
     return {'success': True, **got, 'seconds': round(time.perf_counter() - started, 2)}

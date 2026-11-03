@@ -17,7 +17,11 @@ patterns: who Dan is (persona: whose assistant, the same Dan as the chat, does t
 a candidate checked against the owner's conditions by the tool that shows it (voice_page_check); a fast backend
 (voice_settings.PLAIN_DEFAULTS, think_carefully for hard choices); the owner's 「切って」 heard by the server (voice_hangup).
 
-Switch: DAN_VOICE_PLAIN=0 returns to the earlier call.
+After the second call (19:15: a delegation open for 44 s, the owner's correction unanswered for 25 s), lookups run beside
+the conversation (voice_lookup): the delegation hands them over and ends at once; a page is shown first and checked
+behind it (voice_stage.show_page); a slow search leaves its times in .tmp/web-search-slow.jsonl (web_search).
+
+Switch: DAN_VOICE_PLAIN=0 returns to the earlier call; DAN_VOICE_BACKGROUND=0 keeps the lookups in the delegation.
 """
 import os
 import re

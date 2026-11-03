@@ -68,8 +68,10 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config['model'], live.MODEL)
         self.assertEqual(config['delegation']['type'], 'responses')
         tools = config['delegation']['responses']['tools']
-        self.assertIn('web_search', [t.get('name') for t in tools])
+        self.assertIn('run_in_background', [t.get('name') for t in tools])   # the plain call's lookups run beside the talk (voice_lookup)
         self.assertIn('get_saved_information', [t.get('name') for t in tools])
+        with patch.dict('os.environ', {'DAN_VOICE_BACKGROUND': '0'}):
+            self.assertIn('web_search', [t.get('name') for t in live.session_config()['delegation']['responses']['tools']])
         for heading in ('Backchannel policy:', 'Interruption policy:', 'Delegation policy:', 'Generate <|SpawnThinking|> when:'):
             self.assertIn(heading, config['instructions'])   # OpenAI's recommended structure (live-prompting)
 
@@ -97,8 +99,9 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         from app.services import voice_settings, voice_responses
         with patch.dict('os.environ', {'DAN_VOICE_PLAIN': '1'}), patch.object(voice_settings, 'PATH', voice_settings.Path('/nonexistent/voice.json')):
             settings = voice_settings.snapshot()
-            names = [t.get('name') for t in voice_responses.tools()]
-            backend = voice_responses.delegation(settings=settings)['responses']
+            with patch.dict('os.environ', {'DAN_VOICE_BACKGROUND': '0'}):
+                names = [t.get('name') for t in voice_responses.tools()]
+                backend = voice_responses.delegation(settings=settings)['responses']
         self.assertEqual((settings['backend_model'], settings['reasoning']), ('gpt-6-luna', 'low'))
         self.assertIn('share_progress', names); self.assertIn('think_carefully', names)
         self.assertIn('show_page_on_stage の conditions', backend['instructions'])

@@ -45,7 +45,8 @@ def test_the_backend_reads_the_room_conversation_and_has_a_page_reader():
     from app.services.voice_responses import delegation
     config = delegation(records='ユーザー: これ見て https://x.com/a\nDan: 投稿の中身は…')['responses']
     assert 'この部屋のこれまでの会話' in config['instructions'] and '投稿の中身は' in config['instructions']
-    names = [t['name'] for t in config['tools']]
-    assert 'read_page' in names
+    from app.services import voice_responses, voice_lookup
+    names = [t['name'] for t in config['tools']] + ([t['name'] for t in voice_lookup.tools()] if voice_responses.background() else [])
+    assert 'read_page' in names   # the backend's own, or its lookups' (voice_lookup) in the plain call
     show = next(t for t in config['tools'] if t['name'] == 'show_in_chat')
     assert 'required' not in show['parameters']   # text alone may be shown

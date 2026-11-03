@@ -178,6 +178,50 @@ PLAIN_TOOLS = [
                                                      'material': {'type': 'string', 'description': '確かめた事実（候補・値段・在庫・出どころ）'}}, 'required': ['question', 'material'], 'additionalProperties': False}},
 ]
 
+# The plain call with its lookups in the background (voice_lookup): the delegation answers in a moment and the speech model
+# is free again. The backend kept one delegation open for 44 s in the 2026-11-03 19:15 call (8 rounds: searches, a page,
+# the instructions of a tool), and the speech model answered nothing until it ended.
+MOVED = ('read_many', 'web_search', 'read_page')
+BACKGROUND_TOOLS = [
+    {'type': 'function', 'name': 'run_in_background', 'description': 'ウェブ・地図・ページを読む調べもの、店や商品の候補探しと画面に出すこと、ブラウザやスマホでの短い確認・操作を、会話を止めずに裏で進める。すぐ返る。途中で分かった事実と答えは、声で本人に届く。',
+     'parameters': {'type': 'object', 'properties': {
+         'task': {'type': 'string', 'description': '何を調べる・確かめるか。本人がこの会話で言った条件（場所・日時・重さ・予算・在庫など）を全部入れる。訂正の時は直した後の頼み全体'},
+         'label': {'type': 'string', 'description': '本人に通じる短い名前（例: 尼崎のプールのあるジム）'},
+         'replaces': {'type': 'string', 'description': '訂正・条件の追加の時、置き換える調べものの id（古い方は止まり、確かめた事実は引き継がれる）'}},
+         'required': ['task', 'label'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'cancel_background', 'description': '裏の調べものを止める（本人が「それはもういい」「やめて」と言った時）。',
+     'parameters': {'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id'], 'additionalProperties': False}},
+]
+
+# Lines of INSTRUCTIONS that name a tool the delegation no longer holds, as the background call says them (None: dropped).
+BACKGROUND_LINES = {
+    '- 過去の会話・以前の作業・メールの話は search_records。': '- 過去の会話・以前の作業・メールの話は search_records。ウェブ・地図・ページの調べもの、近くの店や商品の候補探し、ブラウザやスマホでの短い確認・操作は run_in_background で裏に回す（すぐ返り、会話は止まらない。途中で分かった事実と答えは声で本人に届く）。場所を言わない天気や「近く」は get_location の現在地を task に入れる。',
+    '- パソコンでサイトやアプリを開くだけなら open_on_pc': '- パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。保存済みの記事の表示、表示中の画面操作、過去の会話や作業状況の確認は、その情報を直接読む道具で自分で行う。他の部屋の情報は job_status の project_id や query で読む。調べものと短い操作は run_in_background、何分もかかる制作や手続きだけ start_work で作業担当に渡す（結果は後で別に届く）。',
+    '- GoogleドキュメントやLINEなど外の画面は': '- GoogleドキュメントやLINEなど外の画面の操作は run_in_background に頼む。同じ操作セッションの実画面は自動で表示される。',
+    '- 入力が既に分かる独立した読み取りは read_many': None,
+    '- 道具の説明は同じ通話で一度読めば再利用する。': None,
+    '- 時刻・料金・乗り場など正確さが要る事実は': None,   # the background's own rule (voice_lookup.INSTRUCTIONS)
+}
+
+BACKGROUND_RULES = """
+- run_in_background を呼んだら、何を調べているかを一言だけ返して終える。答えを予想しない。結果を待つために他の道具を呼ばない。
+- 調べものが動いている間に本人が条件を直した・足した時は、同じ調べものの id を replaces に入れて、直した後の頼み全体を run_in_background に渡す。関係ない新しい頼みは別に渡す（並行で動く）。「どうなった？」は job_status の background に今の状態がある。
+- 「出して」「見せて」と頼まれた知っているURLや成果物は、自分で show_page_on_stage を呼ぶ（商品・店の候補なら本人の条件を conditions に全部入れる）。探すところからなら run_in_background。"""
+
+
+def instructions_text():
+    """INSTRUCTIONS as this call's backend reads them."""
+    if not background():
+        from app.services import voice_plain
+        return INSTRUCTIONS + (PLAIN_RULES if voice_plain.enabled() else '')
+    lines = []
+    for line in INSTRUCTIONS.split(chr(10)):
+        key = next((k for k in BACKGROUND_LINES if line.startswith(k)), None)
+        if key is None: lines.append(line)
+        elif BACKGROUND_LINES[key] is not None: lines.append(BACKGROUND_LINES[key])
+    return chr(10).join(lines).replace('自分が read_page で読んだ URL や', '裏の調べもので見つけた URL や') + BACKGROUND_RULES
+
+
 CAREFUL_MODEL = os.environ.get('DAN_VOICE_CAREFUL_MODEL', 'gpt-6.1-terra')
 CAREFUL_TIMEOUT_S = 30.0
 
@@ -211,8 +255,16 @@ def tools():
                              'required': ['id', 'values', 'task'], 'additionalProperties': False}}
     from app.services import dan_tools
     every = [{'type': 'function', **dan_tools.HELP}, {'type': 'function', **dan_tools.USE}]   # the rest of Dan's tools, disclosed in steps
+    if background():   # the reading and the browser are the background's (voice_lookup); the delegation hands them over
+        return [*(t for t in TOOLS if t['name'] not in MOVED), *BACKGROUND_TOOLS, listing, replay]
     from app.services import voice_plain
     return [*TOOLS, *(PLAIN_TOOLS if voice_plain.enabled() else []), listing, replay, *every]
+
+
+def background():
+    """The plain call hands every lookup to voice_lookup (DAN_VOICE_BACKGROUND=0: the backend reads by itself again)."""
+    from app.services import voice_plain, voice_lookup
+    return voice_plain.enabled() and voice_lookup.enabled()
 
 
 _catalog = None
@@ -281,7 +333,7 @@ def delegation(room_id=None, user_id=None, title='', records='', settings=None):
                 + records[-ROOM_CHARS:] + chr(10))
     from app.services.voice_settings import snapshot
     settings = snapshot() if settings is None else settings
-    return {'type': 'responses', 'responses': {'model': settings['backend_model'], 'instructions': head + INSTRUCTIONS + (PLAIN_RULES if voice_plain.enabled() else '') + chr(10) + now_line() + chr(10) + remembered() + catalog() + room, 'tools': tools(), 'tool_choice': 'auto',
+    return {'type': 'responses', 'responses': {'model': settings['backend_model'], 'instructions': head + instructions_text() + chr(10) + now_line() + chr(10) + remembered() + ('' if background() else catalog()) + room, 'tools': tools(), 'tool_choice': 'auto',
                                               'parallel_tool_calls': True, 'reasoning': {'effort': settings['reasoning']}}}
 
 
@@ -401,6 +453,9 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         result = parts.work_status(jobs)
         result['note'] = result['note'].replace('作業が無ければ「今は何も作業していません」。', '作業が無い時も別室を含めて何もしていないとは判断しない。')
         result['scope'] = 'この通話の部屋から始めた作業だけ。別室の作業はproject_id付きjob_statusで直接確認する。'
+        from app.services import voice_lookup
+        lookups = voice_lookup.status(user_id, room_id)
+        if lookups: result['background'] = lookups   # this call's lookups (run_in_background)
         return result
     if name == 'steer_job':
         from app.services.command_center import execute
@@ -507,6 +562,9 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return await stage.revise_image(str(args.get('instruction') or ''), speak=speak)
     if name == 'end_call':
         return {'ok': True}
+    if name in ('run_in_background', 'cancel_background'):
+        from app.services import voice_lookup
+        return await voice_lookup.run_function(name, args, user_id, room_id)
     if name == 'share_progress':
         fact = ' '.join(str(args.get('fact') or '').split())[:300]
         if not fact or speak is None: return {'said': False}
