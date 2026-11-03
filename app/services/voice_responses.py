@@ -116,7 +116,8 @@ TOOLS = [
     {'type': 'function', 'name': 'show_on_stage', 'description': '本人の通話画面に、今の話の図・表・数字を出す（本人が「図にして」「画面に出して」と頼んだ時）。描く中身は画面係が会話から決める。',
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を図にしてほしいか（本人の言葉のまま。例: 今の3つの案を比べて、支払いの流れ）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'show_page_on_stage', 'description': '実際のページの画面を本人の通話画面に出す（本人が「このページ見せて」「成果物の〇〇を出して」と頼んだ時）。ダンの成果物はその画面そのもの、よそのページはその写真。URL（https://… か /artifacts/… のような道）か、本人の成果物の名前（例: X運用室、台本室）を渡す。',
-     'parameters': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'ページの URL か、このサイトの道（省略可）'}, 'artifact': {'type': 'string', 'description': '成果物の名前の一部（URL が無い時）'}, 'note': {'type': 'string', 'description': '画面の札に出す短い言葉（例: X運用室の今の記事）'}}, 'additionalProperties': False}},
+     'parameters': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'ページの URL か、このサイトの道（省略可）'}, 'artifact': {'type': 'string', 'description': '成果物の名前の一部（URL が無い時）'}, 'note': {'type': 'string', 'description': '画面の札に出す短い言葉（例: X運用室の今の記事）'},
+                                                          'conditions': {'type': 'string', 'description': '商品・店・候補のページの時、本人がこの会話で言った条件（例: 重り100kg分、在庫があって買える、5万円まで）。出す前にページと照らし、合わなければ出さずに理由が返る'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'draft_message_on_stage', 'description': '外の相手へのメッセージの下書き（送信案）を作り、本人の通話画面と部屋に出す（本人が「○○さんにメッセージ送って」「メールして」と頼んだ時）。本文はあなたが書く。送信はしない。',
      'parameters': {'type': 'object', 'properties': {'channel': {'type': 'string', 'enum': ['email', 'instagram_dm', 'collab', 'line', 'sms', 'chatwork', 'slack', 'x_dm', 'web_form', 'other'], 'description': '手段'},
                                                      'to': {'type': 'string', 'description': '宛先（メールアドレス・Instagram のユーザー名・電話番号など）'},
@@ -159,6 +160,45 @@ TOOLS = [
 ]
 
 
+# The plain call's own rules for the backend (voice_plain). Facts reach the call while the work goes on (OpenAI's chatty
+# "natural progress" pattern: "As verified progress arrives, give a short update about the new information"): with
+# nothing between 「ちょっと待って」 and the answer the call was silent for 29 s (2026-11-03 13:35). A candidate is checked
+# against the owner's conditions inside show_page_on_stage: the backend showed a 40 kg set for 「100キロ」, then a sold-out
+# page, though it had read the pages first.
+PLAIN_RULES = """
+- 調べものや操作で道具を2回以上続けて使う時は、途中で確かめて分かった新しい事実を、次の道具と同時に share_progress で1文渡す（例: 「100kgのセットが3つ見つかった。在庫を見ている」）。声で本人に伝わる。同じことを繰り返さない。予定や推測だけの事は渡さない。最後の答えはふつうの返事で返し、share_progress には入れない。
+- 商品・店・候補のページを本人の画面に出す時は、show_page_on_stage の conditions に本人がこの会話で言った条件（重さ・個数・予算・在庫・日時など）を全部入れる。道具が出す前にページと条件を照らし、合わなければ出さずに理由を返すので、その時は別の候補を探す。出す前に read_page で同じページを読み直さない。
+- 多くの条件で候補を比べて選ぶ時や、慎重な判断が要る時だけ、確かめた事実を material に入れて think_carefully に聞く。ふつうの調べものや操作には使わない。"""
+
+PLAIN_TOOLS = [
+    {'type': 'function', 'name': 'share_progress', 'description': '道具を続けて使っている途中で、確かめて分かった新しい事実を1文で本人に伝える（声で伝わる）。次の道具と同時に呼ぶ。最後の答えには使わない。',
+     'parameters': {'type': 'object', 'properties': {'fact': {'type': 'string', 'description': '確かめた事実を1文（例: 100kgのセットが3つ見つかった。在庫を見ている）'}}, 'required': ['fact'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'think_carefully', 'description': '多くの条件で候補を比べて選ぶ時や慎重な判断が要る時、確かめた事実を渡して、丁寧に考えた答えをもらう（数秒）。',
+     'parameters': {'type': 'object', 'properties': {'question': {'type': 'string', 'description': '何を決めたいか（本人の条件を全部含めて）'},
+                                                     'material': {'type': 'string', 'description': '確かめた事実（候補・値段・在庫・出どころ）'}}, 'required': ['question', 'material'], 'additionalProperties': False}},
+]
+
+CAREFUL_MODEL = os.environ.get('DAN_VOICE_CAREFUL_MODEL', 'gpt-6.1-terra')
+CAREFUL_TIMEOUT_S = 30.0
+
+
+async def think_carefully(question, material):
+    """Terra at medium over the facts the call's backend gathered, without tools: the backend runs on a fast model
+    (voice_settings.PLAIN_DEFAULTS) and asks here only for a choice among many conditions."""
+    from openai import AsyncOpenAI
+    from app.config import settings
+    from app.services import inbox
+    inbox._env()
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY or os.environ.get('OPENAI_API_KEY'), timeout=CAREFUL_TIMEOUT_S, max_retries=0)
+    try:
+        response = await client.responses.create(model=CAREFUL_MODEL, reasoning={'effort': 'medium'}, max_output_tokens=2000,
+            instructions='渡された事実だけで、問いに答える。条件に合わない候補は外し、選んだ理由を短く添える。事実に無いことは補わず、分からない点は分からないと書く。答えは数文のふつうの文で。',
+            input=f'問い: {question}' + chr(10) * 2 + '確かめた事実:' + chr(10) + str(material)[:12000])
+    except Exception as exc:
+        return {'error': type(exc).__name__, 'note': '丁寧な判断は今できなかった。自分で事実を照らして答える。'}
+    return {'answer': (response.output_text or '').strip()[:3000]}
+
+
 def tools():
     """The function list of this session. The remembered operations are NOT baked into a description: the memory grows
     during a call (a flow recorded by a job minutes ago must be replayable in the same call), so the backend lists them
@@ -171,7 +211,8 @@ def tools():
                              'required': ['id', 'values', 'task'], 'additionalProperties': False}}
     from app.services import dan_tools
     every = [{'type': 'function', **dan_tools.HELP}, {'type': 'function', **dan_tools.USE}]   # the rest of Dan's tools, disclosed in steps
-    return [*TOOLS, listing, replay, *every]
+    from app.services import voice_plain
+    return [*TOOLS, *(PLAIN_TOOLS if voice_plain.enabled() else []), listing, replay, *every]
 
 
 _catalog = None
@@ -240,7 +281,7 @@ def delegation(room_id=None, user_id=None, title='', records='', settings=None):
                 + records[-ROOM_CHARS:] + chr(10))
     from app.services.voice_settings import snapshot
     settings = snapshot() if settings is None else settings
-    return {'type': 'responses', 'responses': {'model': settings['backend_model'], 'instructions': head + INSTRUCTIONS + chr(10) + now_line() + chr(10) + remembered() + catalog() + room, 'tools': tools(), 'tool_choice': 'auto',
+    return {'type': 'responses', 'responses': {'model': settings['backend_model'], 'instructions': head + INSTRUCTIONS + (PLAIN_RULES if voice_plain.enabled() else '') + chr(10) + now_line() + chr(10) + remembered() + catalog() + room, 'tools': tools(), 'tool_choice': 'auto',
                                               'parallel_tool_calls': True, 'reasoning': {'effort': settings['reasoning']}}}
 
 
@@ -432,7 +473,8 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         from app.services import voice_stage
         stage = voice_stage.for_room(room_id)
         if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
-        return await stage.show_page(str(args.get('url') or ''), str(args.get('artifact') or ''), str(args.get('note') or ''))
+        return await stage.show_page(str(args.get('url') or ''), str(args.get('artifact') or ''), str(args.get('note') or ''),
+                                     conditions=str(args.get('conditions') or ''))
     if name in ('draft_message_on_stage', 'revise_message_on_stage', 'send_message_on_stage', 'discard_message_on_stage'):
         from app.services import voice_stage
         stage = voice_stage.for_room(room_id)
@@ -465,6 +507,13 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return await stage.revise_image(str(args.get('instruction') or ''), speak=speak)
     if name == 'end_call':
         return {'ok': True}
+    if name == 'share_progress':
+        fact = ' '.join(str(args.get('fact') or '').split())[:300]
+        if not fact or speak is None: return {'said': False}
+        await speak(fact)
+        return {'said': True, 'note': '本人に伝わる。同じ事実を最後の答えで繰り返さない。'}
+    if name == 'think_carefully':
+        return await think_carefully(str(args.get('question') or ''), str(args.get('material') or ''))
     if name == 'web_search':
         return await search_web(str(args.get('query') or ''))
     if name == 'dan_tool_help':

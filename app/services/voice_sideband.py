@@ -243,23 +243,14 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
         if kind == 'response.completed' and calls:
             outputs = await asyncio.gather(*calls)
             if any(out['name'] == 'end_call' and not json.loads(out['output']).get('reason') for out in outputs):
-                # From here on nothing new is pushed into the call, and the room's chat is where results go again
-                # (command_center reports while no call is active): a result finishing in these seconds is written there.
-                ENDING[session_id] = datetime.now(timezone.utc).isoformat()
-                try:
-                    from app.services import voice_calls
-                    voice_calls.end(room_id, session_id)
-                except Exception:
-                    pass
+                if session_id in ENDING: return   # already ending (the owner's 「切って」 heard by voice_hangup)
+                mark_ending(session_id, room_id)
                 # The owner asked to end the call. The phone hangs up itself 4 s after it sees end_call, so Dan can finish
                 # 「はい、切ります」. Closing here at once stopped Dan mid-word (2026-10-01: 「少々お待ちくだ…」, then
                 # silence until the phone hung up). The server closes only as a fallback for clients that do not.
                 async def fallback_close():
                     await asyncio.sleep(HANGUP_FALLBACK_S)
-                    try:
-                        await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
-                    except Exception:
-                        pass   # already closed by the phone
+                    await close_session(send)
                 asyncio.ensure_future(fallback_close())
                 return
             # per the guide: every function_call_output of the response, then response.create (no delegation_id field)
@@ -313,6 +304,24 @@ HANGUP_FALLBACK_S = 6.0   # the phone closes 3.5 s after end_call; the server cl
 FEED_SECONDS = 1.0
 RESULT_SETTLE_SECONDS = 1.5  # allow in-flight input transcripts before unsolicited speech
 SPOKEN = {'result', 'error', 'confirmation'}   # what the owner hears without asking; everything else is silent material
+
+
+def mark_ending(session_id, room_id):
+    """From here on nothing new is pushed into the call, and the room's chat is where results go again (command_center
+    reports while no call is active): a result finishing in these seconds is written there."""
+    ENDING[session_id] = datetime.now(timezone.utc).isoformat()
+    try:
+        from app.services import voice_calls
+        voice_calls.end(room_id, session_id)
+    except Exception:
+        pass
+
+
+async def close_session(send):
+    try:
+        await send({'type': 'session.close', 'event_id': f'dan-{time.time_ns()}'})
+    except Exception:
+        pass   # already closed by the phone
 
 
 def result_material(job, event):
@@ -636,7 +645,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
-    stop_control = None
+    stop_control = hangup = None
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
                                       max_size=8*1024*1024, open_timeout=10) as socket:
@@ -669,6 +678,16 @@ async def _run(session_id, user_id, room_id, api_key, own):
             if own and room_id and dialogue.actions is None and not plain:
                 from app.services.voice_stop_control import StopControl
                 stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
+            hangup = None
+            if own and plain:
+                from app.services import voice_hangup
+                if voice_hangup.enabled():
+                    async def end_by_words():
+                        if session_id in ENDING: return
+                        mark_ending(session_id, room_id)
+                        record('call_ending', by='owner_words')
+                        await voice_hangup.after_goodbye(lambda: spoke.get('dan', 0), lambda: close_session(send))
+                    hangup = voice_hangup.HangUp(user_id, dialogue, record, end_by_words)
             if own:
                 from app.services import voice_prefetch
                 if voice_prefetch.enabled(): dialogue.prefetch = voice_prefetch.Prefetch(user_id, record, room_id=room_id)
@@ -735,6 +754,8 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     counts['response.event:'+str(inner.get('type'))] = counts.get('response.event:'+str(inner.get('type')), 0)+1
                 if counts[kind] <= 3 or 'delegation' in kind or kind in ('session.closed', 'error'):
                     record('sideband_event', **summary(event))
+                if kind == 'session.input_transcript.delta' and hangup is not None:
+                    hangup.heard()
                 if kind == 'session.input_transcript.delta' and dialogue.prefetch is not None:   # the owner's words so far, added above
                     try: dialogue.prefetch.heard(dialogue)
                     except Exception as exc: record('prefetch_failed', error_type=type(exc).__name__)   # the call goes on without it
@@ -753,6 +774,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
         if dialogue.actions is not None: dialogue.actions.closed = True
         if dialogue.intake is not None: dialogue.intake.close()
         if stop_control is not None: stop_control.close()
+        if hangup is not None:
+            try: await hangup.close()
+            except Exception: pass
         for task in working: task.cancel()
         if dialogue.prefetch is not None:
             try: await dialogue.prefetch.close()
@@ -812,4 +836,3 @@ async def finish_call(user_id, room_id, dialogue, began, own, stage, record):
         # Extraction failure still preserves the diagram; slow execute does not
         # hold the summary because on_decisions already saved it before enqueue.
         try: await save_summary()
-        except Exception: logger.exception('stage record not written room=%s', room_id)

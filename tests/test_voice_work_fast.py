@@ -57,6 +57,7 @@ async def test_rejected_work_never_says_started(monkeypatch):
 def test_selected_model_effort_and_batch_in_assembled_delegation(monkeypatch):
     monkeypatch.setattr(R, 'remembered', lambda: '')
     monkeypatch.setattr(R, 'catalog', lambda: '')
+    monkeypatch.setenv('DAN_VOICE_PLAIN', '0')   # the earlier call; the plain call's backend is voice_settings.PLAIN_DEFAULTS
     config = R.delegation()['responses']
     assert config['model'] == 'gpt-6.1-terra'
     assert config['reasoning'] == {'effort': 'medium'}

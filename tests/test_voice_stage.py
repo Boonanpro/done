@@ -71,6 +71,17 @@ async def test_a_pause_in_dans_speech_draws_and_the_file_is_what_the_screen_read
 
 
 @pytest.mark.asyncio
+async def test_a_heading_and_a_badge_are_a_caption_not_a_scene(room):
+    # 2026-11-03 13:36: 「筋トレ器具を買う話 / まだ品目や比較は出ていないので、話題だけ切り替える」 went up as a scene.
+    empty = 'root = Column([Heading("筋トレ器具を買う話", "まだ品目や比較は出ていないので、話題だけ切り替える"), Badge("筋トレ器具", "info")])'
+    stage, _, log = make_stage(room, [{'action': 'replace', 'caption': '筋トレ器具の話', 'program': empty}])
+    stage.dialogue.add('user', '筋トレ器具を買おうと思うんだけど')
+    assert await stage.decide() == 'rejected'
+    assert stage.program in (None, '') and stage.caption == '筋トレ器具の話' and stage.scenes == []
+    assert [p for p, _ in log] == ['stage_rejected']
+
+
+@pytest.mark.asyncio
 async def test_backchannels_do_not_ask_the_model(room, monkeypatch):
     monkeypatch.setattr(S, 'QUIET_S', .02)
     stage, seen, _ = make_stage(room, [])
@@ -261,10 +272,43 @@ async def test_show_page_opens_this_sites_page_live_and_photographs_a_page_elsew
     assert state['frame'] == '/preview/x-ops' and state['image'] == '' and state['caption'] == 'X運用室の今の記事'
     assert log[-1][0] == 'stage_page' and log[-1][1]['live'] and '🖥 /preview/x-ops' in stage.summary()
     out = await stage.show_page(url='https://example.com/a', note='よその記事')
-    assert out['shown'] and calls == [{'action':'open_target','url':'https://example.com/a','observation':'dom'},{'action':'screenshot'}]
+    assert out['shown'] and calls == [{'action':'open_target','url':'https://example.com/a','observation':'dom'},{'action':'read','max_chars':7000},{'action':'screenshot'}]
     state = S.read_state(room)
     assert state['frame'] == '' and state['image'] == '/api/v1/files/stage-x.png' and stage._external_source == 'browser'
     assert '[添付画像: /api/v1/files/stage-x.png]' in stage.summary()
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_does_not_fit_the_owners_conditions_is_not_shown(room, monkeypatch):
+    # 2026-11-03 13:37: 「百キロぐらいの重り」 was answered with a 40 kg set on the screen, then a sold-out page.
+    calls = []
+    from app.services import voice_tools, voice_page_check
+    page = 'アイロテック 40kgセット 価格 19,800円 カートに入れる ' * 5
+    class FakeHost:
+        async def ask(self, op, **kw):
+            calls.append(kw['arguments'])
+            return {'stage_image':'/api/v1/files/stage-x.png','text':'画面'} if kw.get('with_media') else page
+    monkeypatch.setattr(voice_tools,'host',lambda *_:FakeHost())
+    seen = {}
+    async def judge(system, user):
+        seen['user'] = user
+        return {'fits': False, 'reason': '40kgで条件の100kgに足りない', 'facts': '40kgセット・19,800円'}, {}
+    real = voice_page_check.check
+    monkeypatch.setattr(voice_page_check, 'check', lambda text, conditions: real(text, conditions, ask=judge))
+    stage, _, log = make_stage(room, [])
+    stage.user_id = 'u1'
+    out = await stage.show_page(url='https://example.com/40kg', conditions='重り100kg分、在庫があって買える')
+    assert not out['shown'] and not out['fits'] and '100kg' in out['reason'] and out['page_facts']
+    assert {'action': 'screenshot'} not in calls and stage.image in (None, '')   # nothing was put on the owner's screen
+    assert '100kg' in seen['user'] and any(name == 'stage_page_checked' and not f['fits'] for name, f in log)
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_could_not_be_judged_is_shown_as_before():
+    from app.services import voice_page_check
+    async def broken(system, user): raise TimeoutError()
+    assert await voice_page_check.check('本文' * 100, '100kg', ask=broken) is None
+    assert await voice_page_check.check('短い', '100kg', ask=broken) is None
 
 
 def test_frame_path_takes_only_this_sites_screens(monkeypatch):

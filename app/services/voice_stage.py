@@ -375,7 +375,8 @@ action の決め方。判断の材料は「新しく届いた言葉」（前回�
 - 本人が「○○にメッセージ送って」「メールして」「返事して」と頼んだ時と、ダンがその文面を作っている間は keep。文面はダンが下書き（送信案）として画面に出すので、文面や宛先を図にしない。
 - 今の画面が文書（（文書）で始まる。記事・投稿・台本の題と本文）や画像（（画像）で始まる）の時は、本人がそれを直したり投稿するかを決めたりしている間なので keep（札も据え置き）。本人が「記事を書いて」「画像を作って」と頼んだ時と、ダンがそれを作っている間も keep（記事や画像はダンが本物を画面に出す）。
 - 入力はダンの話の途中（節の切れ目）でも届く。話の方向がもう分かるなら、文の終わりを待たずに描く（本人は図が声より遅れるのを嫌う）。ダンが手順や流れを1つ目から言い始めたら（「まず〜して、」）、その時点で最初の1〜2段階だけの Flow か Steps を描き、後の段階は同じ型のまま足していく。まだ何の話か分からない時だけ keep。
-- 新しく届いた言葉が本人の質問で、ダンがまだ答えていない時: 手順・流れ・段取り・比べる物を聞かれたなら、質問の言葉から見出しだけの骨組み（Steps か、箱2〜3個の Flow）を描いてよい（中身はダンの言葉で育てる）。数字・料金・時間を聞かれた時は、ダンがまだ言っていないので caption で札を質問の話題に替えるだけにして、前の図を描き直さない。
+- 新しく届いた言葉が本人の質問や頼みで、ダンがまだ答えていない時は、caption で札を質問の話題に替えるだけにする（図は描かない）。図はダンが言った事実か、確かめた結果から描く。本人の言葉だけから物・数字・流れを描かない。
+- 見出しや札だけの図（Heading・Text・Badge だけ）は描かない。それは caption。Heading の sub に、自分の判断の理由（「まだ〜なので」）を書かない。
 
 描く時の選び方（本物の画面はツールが開く。ここでは札か図を作る）:
 - cue（短い札）: 単一の番号・金額・日時や、2〜4個の短い選択肢。label は何の値か、value は表示用の数字・文字、detail は次にすることを1つだけ、choices は選択肢の文字列配列。番号を漢数字にしない。
@@ -633,6 +634,9 @@ class Stage:
         image = safe_image(data.get('image')) if data.get('image') else None
         from app.services.voice_stage_cue import clean as clean_cue
         cue = clean_cue(data.get('cue'))
+        # A heading and a badge are a caption, not a drawing: 「筋トレ器具を買う話 / まだ品目や比較は出ていないので、話題だけ
+        # 切り替える」 was put on the owner's screen as a scene (2026-11-03 13:36).
+        if program and well_formed(program, self._known()) and family('program', program) == ('program',): program = None
         drawable = {'cue': cue} if cue else {'program': program.strip()} if well_formed(program, self._known()) else {'html': html} if html else {'image': image} if image else None
         if request and action != 'replace' and drawable: action = 'replace'
         if mine < self._applied:
@@ -750,10 +754,11 @@ class Stage:
         return {'shown': result == 'replace', 'caption': self.caption, 'reason': None if result == 'replace' else (result or 'failed')}
 
     # -- a real page on the stage -----------------------------------------------------------------------------
-    async def show_page(self, url='', artifact='', note=''):
+    async def show_page(self, url='', artifact='', note='', conditions=''):
         """A real page on the stage: a page of this site (one of the owner's artifacts, by name or path) as the page itself,
         live and signed in as the owner, so what the owner sees and presses is the site (the owner on 2026-10-27: every
-        screen on the stage must be the real one); a page elsewhere as its photograph from a browser of this server."""
+        screen on the stage must be the real one); a page elsewhere as its photograph from a browser of this server, after
+        it was checked against the owner's conditions and found buyable (voice_page_check)."""
         started = time.monotonic()
         target, title = await resolve_page(self.user_id, url, artifact)
         if not target:
@@ -770,7 +775,17 @@ class Stage:
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
         opened = await host.ask('call',name='browser',arguments={'action':'open_target','url':target,'observation':'dom'})
+        from app.services import voice_page_check
+        try: body = await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
+        except Exception: body = opened
+        checked = await voice_page_check.check(body or opened, conditions)
+        if checked is not None:
+            self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
+        if checked is not None and not checked['fits']:
+            return {'shown': False, 'fits': False, 'reason': checked['reason'], 'page_facts': checked['facts'],
+                    'note': '条件に合わないので本人の画面には出していない。出したとは言わない。別の候補を探す。'}
         out = await self.show_external('browser')
+        if checked is not None and out.get('shown'): out['page_facts'] = checked['facts']
         if not out.get('shown'): out['browser_result'] = opened
         return out
 
