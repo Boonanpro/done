@@ -645,7 +645,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
-    stop_control = hangup = None
+    stop_control = hangup = background = None
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
                                       max_size=8*1024*1024, open_timeout=10) as socket:
@@ -691,6 +691,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
             if own:
                 from app.services import voice_prefetch
                 if voice_prefetch.enabled(): dialogue.prefetch = voice_prefetch.Prefetch(user_id, record, room_id=room_id)
+                from app.services import voice_responses, voice_lookup
+                if voice_responses.background():   # lookups run beside the conversation and speak their facts (voice_lookup)
+                    background = voice_lookup.open_call(session_id, user_id, room_id, dialogue, send, record)
                 feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat(), session_id, dialogue))
                 working.add(feed); feed.add_done_callback(working.discard)
                 if room_id:   # from now on the room's chat goes to this call, not to a chat Dan
@@ -771,6 +774,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
         record('sideband_failed', error_type=type(exc).__name__, detail=str(exc)[:200])
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
+        if background is not None:
+            from app.services import voice_lookup
+            voice_lookup.close_call(background)
         if dialogue.actions is not None: dialogue.actions.closed = True
         if dialogue.intake is not None: dialogue.intake.close()
         if stop_control is not None: stop_control.close()

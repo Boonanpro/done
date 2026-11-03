@@ -775,18 +775,26 @@ class Stage:
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
         opened = await host.ask('call',name='browser',arguments={'action':'open_target','url':target,'observation':'dom'})
+        # The page is shown as soon as it is open, and checked against the owner's conditions behind it (2026-11-03 19:15:
+        # waiting for the check before showing made the screen the last thing to arrive). A page that does not fit gets a
+        # caption saying so, and the backend shows the next candidate in its place.
         from app.services import voice_page_check
-        try: body = await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
-        except Exception: body = opened
-        checked = await voice_page_check.check(body or opened, conditions)
-        if checked is not None:
-            self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
-        if checked is not None and not checked['fits']:
-            return {'shown': False, 'fits': False, 'reason': checked['reason'], 'page_facts': checked['facts'],
-                    'note': '条件に合わないので本人の画面には出していない。出したとは言わない。別の候補を探す。'}
-        out = await self.show_external('browser')
-        if checked is not None and out.get('shown'): out['page_facts'] = checked['facts']
+        async def body():
+            try: return await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
+            except Exception: return opened
+        out, text = await asyncio.gather(self.show_external('browser'), body())
+        self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=False, shown=bool(out.get('shown')))
         if not out.get('shown'): out['browser_result'] = opened
+        checked = await voice_page_check.check(text or opened, conditions)
+        if checked is None:
+            return out
+        self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
+        out['page_facts'] = checked['facts']
+        if not checked['fits']:
+            if out.get('shown') and getattr(self, '_external_image', ''):
+                self._apply(('条件と違う: ' + checked['reason'])[:40], image=self._external_image)
+            out.update({'fits': False, 'reason': checked['reason'],
+                        'note': '画面には出たが、本人の条件に合わない（画面の札にそう出ている）。合うと言わない。次の候補を出して差し替える。合う候補が無ければそう伝える。'})
         return out
 
     async def show_external(self, source='browser', serial=''):
