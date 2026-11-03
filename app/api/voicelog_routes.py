@@ -216,8 +216,10 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
     except Exception:
         files = []
     # Dan's one core brief for this room (the same as chat Dan's), built off the loop before the session config needs it
-    from app.services.dan_core import shared
-    await asyncio.to_thread(shared, body.room_id, user.user_id)
+    from app.services import voice_plain
+    if not voice_plain.enabled():   # plain calls do not give the backend this brief (voice_plain)
+        from app.services.dan_core import shared
+        await asyncio.to_thread(shared, body.room_id, user.user_id)
     config = session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id)
     pending_id = 'pending-' + uuid4().hex
     register(pending_id, user.user_id, room_id=body.room_id)

@@ -201,8 +201,9 @@ async def report_backend_failure(send, event, dialogue, record):
     dialogue.failure_notices.add(key)
     text = ('作業を判断するAPIが残高不足で依頼を拒否しました。この依頼は先へ進められていません。'
             if billing else '作業の判断処理が失敗しました。完了は確認できていません。')
+    from app.services import voice_plain
     await send({'type': 'session.commentary.append', 'event_id': f'dan-failure-{time.time_ns()}',
-                'delegation_id': None, 'content': text + '作業中として待たせず、この状態を本人に伝えてください。'})
+                'delegation_id': None, 'content': text + ('' if voice_plain.enabled() else '作業中として待たせず、この状態を本人に伝えてください。')})
     record('backend_failure_reported', billing=billing)
 
 
@@ -283,8 +284,9 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
                             '外部送信などの承認条件は変わりません。必要な道具を改めて選び、未実行を完了と答えないでください。')
                         out['output'] = json.dumps(result, ensure_ascii=False)
                     refresh_revision = revision
+            from app.services import voice_plain
             for out in outputs:
-                if out['name'] in ('start_work', 'steer_job'):
+                if out['name'] in ('start_work', 'steer_job') and not voice_plain.enabled():
                     result = json.loads(out['output'])
                     if isinstance(result, dict) and result.get('accepted') is True:
                         # Delegation may have started before the spoken acknowledgement.
@@ -346,6 +348,8 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
     from app.services.command_job_state import list_owned, TERMINAL
     from app.services.voice_stage import for_room
     from app.services.voice_worker_screen import Follower
+    from app.services import voice_plain
+    plain = voice_plain.enabled()
     stage = for_room(room_id)
     follower = Follower(stage, user_id, room_id, connected_at) if stage else None
     seen = {}
@@ -377,7 +381,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
             # Do not inject a completed task into a new request while its words
             # or backend decision are still arriving. Keep the event unread so
             # it is delivered after the conversation settles, never lost.
-            if said and all(e['kind'] == 'result' for e in said) and session_id not in ENDING:
+            if not plain and said and all(e['kind'] == 'result' for e in said) and session_id not in ENDING:
                 key = (job['id'], said[-1]['seq'])
                 arrived = result_arrivals.setdefault(key, time.monotonic())
                 if dialogue is not None and (time.monotonic() - arrived < RESULT_SETTLE_SECONDS
@@ -399,6 +403,19 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
                 # The report is written for the chat (headings, bullets, every detail). Given as the words to say, it was
                 # read out like a script (2026-10-02). It goes in as material; what to say is Dan's own, in conversation.
                 task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
+                if plain:
+                    # The fact only: when and how to say it is the speech model's (voice_plain).
+                    material, said_now = voice_plain.job_said(e['kind'], task.replace('作業への引継ぎ:', '').strip()[:40], e['text'])
+                    try:
+                        from app.services.voice_furigana import annotate
+                        material, said_now = annotate(material) if material else '', annotate(said_now)
+                    except Exception:
+                        pass
+                    for part in chunks(material):
+                        await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+                    await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': for_speech(said_now)})
+                    record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material) + len(said_now), plain=True)
+                    continue
                 material = {'result': '作業「%s」の結果:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
                             'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
                 if e['kind'] == 'result':
@@ -418,6 +435,7 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
 
 
 GREETING_SECONDS = 4.5
+COMMENTARY_LIMIT = 450
 
 
 async def summon_feed(send, user_id, record):
@@ -432,6 +450,12 @@ async def summon_feed(send, user_id, record):
         except Exception: due = []
         for s in due:
             await asyncio.to_thread(owner_summon.mark_spoken, s['id'])
+            from app.services import voice_plain
+            if voice_plain.enabled():
+                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
+                            'content': for_speech('ダンが本人を呼び出した用件: ' + s['reason'])[:COMMENTARY_LIMIT]})
+                record('summon_spoken', summon_id=s['id'][:8], plain=True)
+                continue
             await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
                         'content': '電話の相手に今すぐしてもらう必要があること（ダンが呼び出した用件）:' + chr(10) + s['reason']})
             await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
@@ -622,9 +646,12 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 async with lock: await socket.send(json.dumps(event, ensure_ascii=False))
             pending = {}
             from app.services.voice_interruption import Interruption
-            interruption = Interruption() if own and os.environ.get('DAN_VOICE_INTERRUPTION', '1') != '0' else None
+            from app.services import voice_plain
+            plain = voice_plain.enabled()   # nothing is said into the call but facts (voice_plain)
+            record('call_mode', plain=plain)
+            interruption = Interruption() if own and not plain and os.environ.get('DAN_VOICE_INTERRUPTION', '1') != '0' else None
             # Additional requests after an accepted job have a server-owned path.
-            if own and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
+            if own and not plain and os.environ.get('DAN_VOICE_TURN_INTAKE', '1') != '0':
                 from app.services.voice_turn_intake import TurnIntake, dispatch_missing
                 dialogue.intake = TurnIntake()
                 async def conversation_only(text):
@@ -639,7 +666,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
                     dialogue.actions = Actions(user_id, room_id, dialogue, send, record)
                     action_task = asyncio.create_task(dialogue.actions.run())
                     working.add(action_task); action_task.add_done_callback(working.discard)
-            if own and room_id and dialogue.actions is None:
+            if own and room_id and dialogue.actions is None and not plain:
                 from app.services.voice_stop_control import StopControl
                 stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
             if own:

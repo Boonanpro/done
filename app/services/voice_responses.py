@@ -230,7 +230,8 @@ def delegation(room_id=None, user_id=None, title='', records='', settings=None):
     conversation comes last: the speech model had it and the backend did not, so a post chat Dan had read and answered 30 s
     before the call was 「まだ見てない」 to the backend (2026-10-01)."""
     head = ''
-    if room_id and user_id:
+    from app.services import voice_plain
+    if room_id and user_id and not voice_plain.enabled():   # plain: chat Dan's brief stays with chat Dan (start_work)
         from app.services.dan_core import shared
         head = shared(room_id, user_id, title) + chr(10) * 2 + '# 声の裏側としてのきまり' + chr(10)
     room = ''
