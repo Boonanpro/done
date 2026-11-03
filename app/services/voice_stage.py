@@ -771,6 +771,13 @@ class Stage:
             self._last_replace = time.monotonic()
             self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=True)
             return {'shown': True, 'caption': caption, 'url': own, 'note': '本人の通話画面にその画面そのものが開いた（本人が押して操作もできる）。「出しました」とだけ。'}
+        refused = getattr(self, '_refused', {})
+        key = target + chr(10) + ' '.join(str(conditions or '').split())   # the owner may change the conditions: then it is judged again
+        if key in refused:
+            # The lookup offered the same refused page three times running (2026-11-03, test call 4): about 15 s lost.
+            self.record('stage_page_refused', elapsed_ms=0, url=target[:500], again=True)
+            return {'shown': False, 'fits': False, 'reason': refused[key],
+                    'note': 'このページは前に確かめて条件に合わなかった。もう出さない。別の候補（別のURL）を探す。合う候補が無ければそう伝える。'}
         # Use the same authenticated browser the call operates, never a new anonymous browser.
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
@@ -789,6 +796,7 @@ class Stage:
         if checked is not None:
             self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
         if checked is not None and not checked['fits']:
+            self._refused = {**refused, key: checked['reason']}
             self.record('stage_page_refused', elapsed_ms=round((time.monotonic() - started) * 1000), url=target[:500])
             return {'shown': False, 'fits': False, 'reason': checked['reason'], 'page_facts': checked['facts'],
                     'note': '条件に合わないので本人の画面には出していない。出したとは言わない。別の候補を探す。合う候補が無ければそう伝える。'}

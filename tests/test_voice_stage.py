@@ -310,6 +310,9 @@ async def test_a_page_that_does_not_fit_never_reaches_the_screen_and_one_that_fi
     assert not out['shown'] and not out['fits'] and '100kg' in out['reason'] and '出していない' in out['note']
     after = S.read_state(room)
     assert after.get('image') == before.get('image') and after.get('version') == before.get('version')   # the owner never saw it
+    opened = len(calls)
+    out = await stage.show_page(url='https://example.com/40kg', conditions='重り100kg分、在庫があって買える')   # offered again
+    assert not out['shown'] and '前に確かめて' in out['note'] and len(calls) == opened   # not opened, read or judged again
     out = await stage.show_page(url='https://example.com/100kg', conditions='重り100kg分、在庫があって買える')
     assert out['shown'] and out['page_facts'] and S.read_state(room)['image'] == '/api/v1/files/stage-100kg.png'
     assert all('100kg' in u for u in seen) and [f['url'] for n, f in log if n == 'stage_page'] == ['https://example.com/100kg']
