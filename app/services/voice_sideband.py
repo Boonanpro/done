@@ -836,3 +836,4 @@ async def finish_call(user_id, room_id, dialogue, began, own, stage, record):
         # Extraction failure still preserves the diagram; slow execute does not
         # hold the summary because on_decisions already saved it before enqueue.
         try: await save_summary()
+        except Exception: logger.exception('stage record not written room=%s', room_id)
