@@ -33,7 +33,7 @@ READ = '''([BUY, SOLD]) => {
   const label = el => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim().replace(/\\s+/g, ' ');
   const controls = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], input[type=image], a, [role=button]')).filter(visible);
   const buttons = controls.map(el => ({text: label(el).slice(0, 40), disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true' || /disabled|soldout|sold-out/i.test(el.className || ''))}))
-    .filter(b => b.text && (buy.test(b.text) || sold.test(b.text)) && b.text.length <= 40);
+    .filter(b => b.text && ((buy.test(b.text) && b.text.length <= 40) || (sold.test(b.text) && b.text.length <= 16)));   // a button, not a news link that mentions 販売終了
   const offers = [];
   for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
     try { const walk = o => { if (!o || typeof o !== 'object') return; if (o.availability) offers.push(String(o.availability)); Object.values(o).forEach(walk); }; walk(JSON.parse(s.textContent)); } catch (e) {}
@@ -104,6 +104,9 @@ async def check_pages(run, rule, context):
     for page in pages:
         ok, why = judge_page(page, rule)
         rows.append({'url': page['url'], 'title': page.get('title', ''), 'fits': ok, 'why': why})
+    fit = {r['url']: r['fits'] for r in rows}
+    for shown in run.get('pages', []):   # the other checks (shown_after_ask) read whether each shown page fitted
+        shown['fits'] = fit.get(shown.get('url'), False)
     enough = len(rows) >= rule.get('at_least', 1)
     passed = enough and all(r['fits'] for r in rows)
     note = '' if enough else f"出したページが{len(rows)}件（{rule.get('at_least', 1)}件以上のはず）"
@@ -121,16 +124,34 @@ def check_hangup(run, rule):
 
 
 def reply_gaps(run):
-    """For each thing the owner said: seconds from the end of the owner's audio to Dan's next words (None: no answer)."""
+    """For each thing the owner said: seconds from the end of the owner's audio to Dan's next words (None: no answer
+    before the owner spoke again). Dan's words are timed piece by piece (dan_times), so words Dan was already saying
+    when the owner stopped count from the first piece after."""
     turns = run.get('turns', [])
+    times = run.get('dan_times') or [t['start'] for t in turns if t['role'] == 'dan']
     gaps = []
     for i, turn in enumerate(turns):
         if turn['role'] != 'owner':
             continue
-        nxt = next((t for t in turns[i + 1:] if t['role'] == 'dan'), None)
-        stop = next((t['start'] for t in turns[i + 1:] if t['role'] == 'owner'), run.get('ended_at'))
-        gaps.append(round(nxt['start'] - turn['end'], 1) if nxt and nxt['start'] <= (stop or nxt['start']) else None)
+        stop = next((t['start'] for t in turns[i + 1:] if t['role'] == 'owner'), run.get('ended_at') or float('inf'))
+        nxt = next((t for t in times if t > turn['end']), None)
+        gaps.append(round(nxt - turn['end'], 1) if nxt is not None and nxt <= stop else None)
     return gaps
+
+
+def check_shown_after_ask(run, rule):
+    """From the end of the owner's first request to see a page (rule['ask'], a pattern) to the first page shown that fits."""
+    ask = next((t for t in run.get('turns', []) if t['role'] == 'owner' and re.search(rule['ask'], t['text'])), None)
+    if ask is None:
+        return {'name': 'shown_after_ask', 'passed': True, 'note': '本人役は画面を頼まなかった（頼む前に出た）'}
+    fitting = [p for p in run.get('pages', []) if p.get('fits') and p.get('seen_at') is not None and p['seen_at'] >= ask['start']]
+    shown = [p for p in run.get('pages', []) if p.get('seen_at') is not None and p['seen_at'] < ask['start']]
+    if shown and not fitting:
+        return {'name': 'shown_after_ask', 'passed': True, 'note': '頼む前に出ていた'}
+    if not fitting:
+        return {'name': 'shown_after_ask', 'passed': False, 'note': f"頼んでから（{ask['end']:.0f}秒）ページが出なかった"}
+    took = fitting[0]['seen_at'] - ask['end']
+    return {'name': 'shown_after_ask', 'passed': took <= rule.get('max_s', 30), 'note': f'頼んでから{took:.0f}秒でページが出た'}
 
 
 def check_reply_gap(run, rule):
@@ -149,11 +170,13 @@ async def grade(run, scenario, context=None):
         if context is None:
             browser = await p.chromium.launch()
             context = await browser.new_context(locale='ja-JP', viewport={'width': 1280, 'height': 900})
-        for rule in scenario.get('checks', []):
+        rules = sorted(scenario.get('checks', []), key=lambda r: r['kind'] != 'pages')   # pages first: the others use its findings
+        for rule in rules:
             kind = rule['kind']
             if kind == 'pages': checks.append(await check_pages(run, rule, context))
             elif kind == 'hangup': checks.append(check_hangup(run, rule))
             elif kind == 'reply_gap': checks.append(check_reply_gap(run, rule))
+            elif kind == 'shown_after_ask': checks.append(check_shown_after_ask(run, rule))
             else: checks.append({'name': kind, 'passed': False, 'note': '知らない確かめ方'})
         if browser: await browser.close()
     return {'scenario': scenario.get('name'), 'passed': all(c['passed'] for c in checks), 'checks': checks}

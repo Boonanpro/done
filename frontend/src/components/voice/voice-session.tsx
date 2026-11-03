@@ -206,6 +206,7 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
     };
     flushTranscriptsRef.current = () => { flush('user'); flush('assistant'); };
     let ending = false;
+    let hangupTimer: ReturnType<typeof setTimeout> | undefined;
     // The server ends the call (backend end_call → session.close): a browser call closes the voice panel.
     const hangUp = () => {
       if (ending || !live()) return;
@@ -223,6 +224,11 @@ export function VoiceSession({ roomId, onClose }: VoiceSessionProps) {
       if (msg.type === 'session.started') {
         started = true; ready();
         pushLog('✅', 'Live 1 connected');
+      } else if (msg.type === 'response.event' && (msg.event as { item?: { type?: string; name?: string } } | undefined)?.item?.type === 'function_call'
+                 && (msg.event as { item?: { name?: string } }).item?.name === 'end_call') {
+        // The backend chose end_call: hang up 3.5 s later, as the phone app does (mobile/voice.tsx), so 「切るね」 is said
+        // in full. The server's session.close took 10 s more to reach this page (2026-11-03, voice_goal_call.py).
+        if (!hangupTimer) hangupTimer = setTimeout(hangUp, 3500);
       } else if (msg.type === 'session.closed') {
         flush('user'); flush('assistant');
         if (started) hangUp();

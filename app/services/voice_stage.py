@@ -775,37 +775,45 @@ class Stage:
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
         opened = await host.ask('call',name='browser',arguments={'action':'open_target','url':target,'observation':'dom'})
-        # The page is shown as soon as it is open, and checked against the owner's conditions behind it (2026-11-03 19:15:
-        # waiting for the check before showing made the screen the last thing to arrive). A page that does not fit gets a
-        # caption saying so, and the backend shows the next candidate in its place.
+        # The page's picture and its text are taken at the same time, the text is checked against the owner's conditions, and
+        # only a page that fits (or could not be judged) goes on the screen. 19:15 showed the page first and checked behind
+        # it, so a wrong page still reached the owner's screen with a 「条件と違う」 caption: in the 20:59 test call a
+        # domain-for-sale page and a shop's top page were shown for a 100 kg set (voice_goal_call.py). Taking the picture
+        # beside the reading keeps most of that speed: the check (about 2 s) is the only wait added.
         from app.services import voice_page_check
         async def body():
             try: return await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
             except Exception: return opened
-        out, text = await asyncio.gather(self.show_external('browser'), body())
+        (path, captured), text = await asyncio.gather(self.capture_external('browser'), body())
+        checked = await voice_page_check.check(text or opened, conditions)
+        if checked is not None:
+            self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
+        if checked is not None and not checked['fits']:
+            self.record('stage_page_refused', elapsed_ms=round((time.monotonic() - started) * 1000), url=target[:500])
+            return {'shown': False, 'fits': False, 'reason': checked['reason'], 'page_facts': checked['facts'],
+                    'note': '条件に合わないので本人の画面には出していない。出したとは言わない。別の候補を探す。合う候補が無ければそう伝える。'}
+        out = self.apply_external('browser', path, captured)
         # The address of a page from elsewhere is kept, so a check can open what the owner was shown (voice_goal_grade).
         self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=False, shown=bool(out.get('shown')),
                     url=target[:500])
         if not out.get('shown'): out['browser_result'] = opened
-        checked = await voice_page_check.check(text or opened, conditions)
-        if checked is None:
-            return out
-        self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
-        out['page_facts'] = checked['facts']
-        if not checked['fits']:
-            if out.get('shown') and getattr(self, '_external_image', ''):
-                self._apply(('条件と違う: ' + checked['reason'])[:40], image=self._external_image)
-            out.update({'fits': False, 'reason': checked['reason'],
-                        'note': '画面には出たが、本人の条件に合わない（画面の札にそう出ている）。合うと言わない。次の候補を出して差し替える。合う候補が無ければそう伝える。'})
+        if checked is not None: out['page_facts'] = checked['facts']
         return out
 
     async def show_external(self, source='browser', serial=''):
-        from app.services import voice_tools
         if source not in ('browser','phone'): return {'shown':False,'reason':'browser か phone を指定してください。'}
+        path, out = await self.capture_external(source, serial)
+        return self.apply_external(source, path, out, serial)
+
+    async def capture_external(self, source='browser', serial=''):
+        """The picture (or live stream) of Dan's browser or a phone, not yet on the screen: (path or '', the tool's answer)."""
+        from app.services import voice_tools
         args = {'action':'screenshot'}
         if source == 'phone' and serial: args['serial'] = serial
         out = await voice_tools.host(self.user_id,self.room_id).ask('call',with_media=True,name=source,arguments=args)
-        path = safe_image(out.get('stage_stream')) or safe_image(out.get('stage_image'))
+        return safe_image(out.get('stage_stream')) or safe_image(out.get('stage_image')), out
+
+    def apply_external(self, source, path, out, serial=''):
         if not path: return {'shown':False,'reason':out.get('text') or '画面を取得できませんでした。'}
         self._apply('スマホの画面' if source=='phone' else 'ブラウザの画面',image=path)
         self._external_source = source

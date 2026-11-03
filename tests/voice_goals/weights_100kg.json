@@ -6,8 +6,27 @@
  "opening": "筋トレ器具を買おうと思うんだけど、百キロぐらいの重りを家にそろえようと思ったら、どれぐらいかかるかな",
  "max_seconds": 240,
  "checks": [
-  {"kind": "pages", "pattern": "(\\d+(?:\\.\\d+)?)\\s*(?:kg|ｋｇ|KG|キロ)", "unit": "kg", "min": 95, "max": 125, "in_stock": true, "at_least": 1},
-  {"kind": "reply_gap", "max_s": 8},
-  {"kind": "hangup", "within_s": 10}
+  {
+   "kind": "pages",
+   "pattern": "(\\d+(?:\\.\\d+)?)\\s*(?:kg|ｋｇ|KG|キロ)",
+   "unit": "kg",
+   "min": 95,
+   "max": 125,
+   "in_stock": true,
+   "at_least": 1
+  },
+  {
+   "kind": "shown_after_ask",
+   "ask": "画面|ページ|見せ",
+   "max_s": 30
+  },
+  {
+   "kind": "reply_gap",
+   "max_s": 8
+  },
+  {
+   "kind": "hangup",
+   "within_s": 10
+  }
  ]
 }

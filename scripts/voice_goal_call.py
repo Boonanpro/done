@@ -46,7 +46,7 @@ TTS_MODEL, TTS_VOICE = 'gpt-4o-mini-tts', 'ash'
 VIEWPORT = {'width': 1000, 'height': 820}
 DAN_QUIET_S = 2.5        # Dan's turn has ended when no words and no sound came for this long
 FIRST_WORDS_S = 25.0     # waiting for Dan to say anything after the owner spoke
-HANGUP_WAIT_S = 15.0
+HANGUP_WAIT_S = 30.0     # long enough to measure a slow close; the grade allows less
 
 # Before any page script: the microphone is a stream this script plays into (window.__say), and the call's event channel
 # is read as it arrives (transcripts, session.closed) into window.__ev.
@@ -64,7 +64,9 @@ INIT = r'''
     return ctx;
   };
   navigator.mediaDevices.getUserMedia = async (c) => {
-    if (c && c.audio) { ensure(); await ctx.resume(); return dest.stream; }
+    // A fresh track each time, like a real microphone: the page stops the tracks of its first connect (React runs the
+    // effect twice in development), and a stopped shared track would leave the call silent.
+    if (c && c.audio) { ensure(); await ctx.resume(); return new MediaStream([dest.stream.getAudioTracks()[0].clone()]); }
     throw new Error('video is not used');
   };
   window.__say = async (b64, rate) => {
@@ -87,6 +89,7 @@ INIT = r'''
   const open = RTCPeerConnection.prototype.createDataChannel;
   RTCPeerConnection.prototype.createDataChannel = function (...args) {
     const channel = open.apply(this, args);
+    window.__pc = this;
     channel.addEventListener('message', e => {
       try {
         const m = JSON.parse(e.data);
@@ -211,6 +214,7 @@ class Transcript:
     """Both sides as the call transcribed them: deltas joined into utterances (a gap over 1.6 s starts a new one)."""
     def __init__(self, t0):
         self.t0, self.seen, self.heard = t0, 0, []   # heard: what the speech model transcribed of the owner
+        self.dan_times = []                           # the time of every piece of Dan's words (for the reply gaps)
 
     def take(self, events, turns):
         new_dan = False
@@ -222,6 +226,7 @@ class Transcript:
                     last['text'] += e['delta']; last['end'] = t
                 else:
                     turns.append({'role': 'dan', 'start': round(t, 2), 'end': t, 'text': e['delta']})
+                self.dan_times.append(round(t, 2))
                 new_dan = True
             elif e['type'] == 'session.input_transcript.delta' and e.get('delta'):
                 if self.heard and t - self.heard[-1]['end'] < 1.6:
@@ -339,6 +344,11 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
             await sync()
             run['ended_at'] = round(now(), 2)
             run['heard'] = transcript.heard
+            run['dan_times'] = transcript.dan_times
+            if any(t['role'] == 'owner' for t in turns) and not transcript.heard:
+                # Nothing the owner side said reached the call: the run says nothing about Dan (2026-11-03, the first run
+                # sent silence because the page stopped the shared microphone track).
+                run['harness_error'] = '本人役の声が通話に届いていない（文字起こしが1つも無い）'
             audio_b64 = await page.evaluate(STOP_RECORDER)
             close = page.get_by_role('button', name='音声モードを閉じる')
             if await close.count(): await close.click()
@@ -355,6 +365,9 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
         if not keep_room:
             try: await projects.delete_project(project['id'], owner)
             except Exception as exc: print('room not deleted:', exc)
+    if run.get('harness_error'):
+        print('試験そのものが失敗:', run['harness_error'])
+        return 2
     result = await grader.grade(run, scenario)
     (out / 'grade.json').write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding='utf-8')
     for t in turns:
