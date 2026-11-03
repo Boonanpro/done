@@ -346,11 +346,15 @@ async def search_web(query):
 
 
 def search_output(found, query):
-    """What the backend reads from a search (web_search.find's result, or one started early by voice_prefetch)."""
+    """What the backend reads from a search (web_search.find's result, or one started early by voice_prefetch).
+
+    The pages come with their URLs: with the titles alone, the lookup asked to show a product searched ten times in a row
+    for a page it could pass to show_page_on_stage, and then made one up (https://www.amazon.co.jp/dp/ with no product),
+    112 s from the owner's 「画面に出して」 (2026-11-03, voice_goal_call.py yoga4)."""
     if not found['success']:
         return {'error': found['error']}
-    names = '、'.join(dict.fromkeys(s['title'] for s in found['sources'] if s['title']))
-    return {'found': found['answer'][:3000] + ('\n出どころ: ' + names if names else ''), 'source': {'what': 'ウェブ検索', 'query': query}}
+    pages = [{'title': s['title'], 'url': s['url']} for s in found['sources'][:8] if s.get('url')]
+    return {'found': found['answer'][:3000], 'pages': pages, 'source': {'what': 'ウェブ検索', 'query': query}}
 
 
 async def run_function(name, args, user_id, room_id, dialogue, speak=None):

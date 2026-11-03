@@ -180,3 +180,12 @@ async def test_a_lookup_nobody_asked_to_show_answers_without_an_extra_round(monk
     assert said == ['調べもの「明日の天気」の結果: 明日の尼崎は晴れ、最高気温は18度です。']
     assert not any(p == 'lookup_show_reminded' for p, _ in log)
     voice_lookup.close_call(call)
+
+
+def test_a_search_gives_the_lookup_the_pages_urls():
+    # yoga4 (2026-11-03): with the titles alone the lookup searched ten times for a URL to show, then made one up.
+    found = {'success': True, 'answer': '厚さ10mmのNBRマットが2000円台から。',
+             'sources': [{'title': 'ヨガマット 10mm', 'url': 'https://item.rakuten.co.jp/shop/mat-10/'}, {'title': '一覧', 'url': ''}]}
+    out = voice_responses.search_output(found, 'ヨガマット 10mm')
+    assert out['pages'] == [{'title': 'ヨガマット 10mm', 'url': 'https://item.rakuten.co.jp/shop/mat-10/'}]
+    assert out['found'] == found['answer']
