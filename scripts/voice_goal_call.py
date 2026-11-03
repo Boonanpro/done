@@ -46,7 +46,7 @@ TTS_MODEL, TTS_VOICE = 'gpt-4o-mini-tts', 'ash'
 VIEWPORT = {'width': 1000, 'height': 820}
 DAN_QUIET_S = 2.5        # Dan's turn has ended when no words and no sound came for this long
 FIRST_WORDS_S = 25.0     # waiting for Dan to say anything after the owner spoke
-HANGUP_WAIT_S = 30.0     # long enough to measure a slow close; the grade allows less
+HANGUP_WAIT_S = 12.0     # then the owner side says it again (the grade allows 10 s from the first request)
 
 # Before any page script: the microphone is a stream this script plays into (window.__say), and the call's event channel
 # is read as it arrives (transcripts, session.closed) into window.__ev.
@@ -134,7 +134,7 @@ SCREEN = '''() => {
 
 OWNER_SYSTEM = """あなたは、電話でAIアシスタントの「ダン」と話している本人（みきさん）を演じます。ダンの出来を判定するのはあなたの仕事ではありません。本人ならこの場面で何を言うか、黙って待つかだけを決めます。
 - 本人の目的と話し方は渡される。目的に向かって、本物の電話のように話す。1回に話すのは1〜2文、くだけた話し言葉。
-- ダンが実際に言ったこと（通話の文字起こし。聞き間違いを含むことがある）と、画面に出たページの事実だけを根拠にする。ダンが言っていないことを、言ったことにしない。
+- ダンが実際に言ったこと（通話の文字起こし。聞き間違いを含むことがある）と、画面に出たページ（写真と、読めた時はその文字）だけを根拠にする。ダンが言っていないことを、言ったことにしない。
 - 画面に出たページの重さ・数・在庫などが本人の条件と違えば、人がするように指摘する（例「これ40キロじゃん」「売り切れてるじゃん」）。
 - ダンが「待って」「調べるね」と言って作業中なら、wait で待つ（待つ秒数も決める）。長く黙ったままなら、人がするように声をかける。
 - 目的が済んだ（条件に合う買える商品が画面で見られて、決められた）か、これ以上進まないと思ったら、お礼か一言を添えて電話を切ってと頼む（hangup=true）。
@@ -152,7 +152,10 @@ def owner_input(scenario, turns, pages, now, quiet_for, screen):
         lines.append('画面に出たページ（新しい物が下。本人が画面で見た事実）:')
         for p in pages:
             stock = {'in_stock': '買える', 'sold_out': '売り切れ', 'unknown': '買えるか不明'}.get(p.get('stock'), '不明')
-            lines.append(f"- {p.get('title') or p['url']}（{stock}）: {p.get('text_head', '')[:240]}")
+            if p.get('blocked') or p.get('error'):
+                lines.append(f"- {p['url']}（文字は読めなかった。本人が見ている物は写真のとおり）")
+            else:
+                lines.append(f"- {p.get('title') or p['url']}（{stock}）: {p.get('text_head', '')[:240]}")
     else:
         lines.append('画面に出たページ: まだ無い')
     if screen.get('caption'):
@@ -162,8 +165,13 @@ def owner_input(scenario, turns, pages, now, quiet_for, screen):
 
 
 async def owner_decides(client, scenario, turns, pages, now, quiet_for, screen):
+    content = [{'type': 'input_text', 'text': owner_input(scenario, turns, pages, now, quiet_for, screen)}]
+    latest = next((p.get('screen') for p in reversed(pages) if p.get('screen')), None)
+    if latest and Path(latest).exists():
+        content.append({'type': 'input_text', 'text': '今、本人の通話画面に出ている物の写真（一番新しいページ）:'})
+        content.append({'type': 'input_image', 'image_url': 'data:image/png;base64,' + base64.b64encode(Path(latest).read_bytes()).decode()})
     response = await client.responses.create(model=OWNER_MODEL, reasoning={'effort': 'low'}, max_output_tokens=1200,
-                                             instructions=OWNER_SYSTEM, input=owner_input(scenario, turns, pages, now, quiet_for, screen))
+                                             instructions=OWNER_SYSTEM, input=[{'role': 'user', 'content': content}])
     text = response.output_text or ''
     found = re.search(r'\{.*\}', text, re.S)
     try:
@@ -258,12 +266,13 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
     turns, page_facts, session = run['turns'], {}, {}
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(args=['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream'])
+            browser = await p.chromium.launch(args=['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream',
+                                                    '--disable-blink-features=AutomationControlled'])
             context = await browser.new_context(viewport=VIEWPORT, record_video_dir=str(out), record_video_size=VIEWPORT,
                                                 locale='ja-JP', timezone_id='Asia/Tokyo', color_scheme='dark', permissions=['microphone'])
             await context.add_init_script(INIT)
             await context.add_init_script(f"localStorage.setItem('done-token', {json.dumps(token)});")
-            reader = await browser.new_context(locale='ja-JP', viewport={'width': 1280, 'height': 900})   # opens the shown pages, as the owner sees them
+            reader = await grader.reader_context(browser)   # opens the shown pages in a plain browser
             page = await context.new_page()
 
             async def on_response(response):
@@ -295,9 +304,19 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
                 transcript.take(events, turns)
                 for shown in stage_pages(log_path, session.get('id')):
                     if shown['url'] not in page_facts:
-                        page_facts[shown['url']] = await grader.read_page(reader, shown['url'])
-                        run['pages'].append({**shown, 'seen_at': round(now(), 1), 'title': page_facts[shown['url']].get('title', ''),
-                                             'stock': page_facts[shown['url']].get('stock')})
+                        seen_at = round(now(), 1)
+                        # What the owner sees is the photograph of Dan's browser on the call's screen; a shop that refuses
+                        # the plain browser was still open there (2026-11-03: the owner side complained of 「アクセス拒否」
+                        # that the owner never saw). The photograph is kept and goes to the owner side with the page's text.
+                        await page.wait_for_timeout(1500)
+                        shot = out / f"screen-{len(page_facts) + 1}.png"
+                        try: await page.locator('[data-voice-stage]').screenshot(path=str(shot))
+                        except Exception: shot = None
+                        facts = await grader.read_page(reader, shown['url'])
+                        facts['screen'] = str(shot) if shot else None
+                        page_facts[shown['url']] = facts
+                        run['pages'].append({**shown, 'seen_at': seen_at, 'title': facts.get('title', ''), 'stock': facts.get('stock'),
+                                             'screen': facts['screen']})
                 closed = any(e['type'] == 'session.closed' for e in events) or not (await page.evaluate(SCREEN))['panel']
                 if closed and run['closed_at'] is None:
                     run['closed_at'] = round(now(), 2)
@@ -307,7 +326,7 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
                 pcm = await speech(client, text)
                 begin, end = await page.evaluate('([b, r]) => window.__say(b, r)', [pcm, 24000])
                 turns.append({'role': 'owner', 'start': round((begin - t0) / 1000, 2), 'end': round((end - t0) / 1000, 2), 'text': text})
-                if hangup: run['hangup_asked_at'] = turns[-1]['end']
+                if hangup and run['hangup_asked_at'] is None: run['hangup_asked_at'] = turns[-1]['end']
 
             async def wait_for_dan(limit):
                 """Until Dan has spoken and gone quiet, or `limit` seconds without a word. Returns seconds Dan has been quiet."""
@@ -335,9 +354,14 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
                 if decision['action'] == 'say':
                     await say(decision['text'].strip(), hangup=bool(decision.get('hangup')))
                     if decision.get('hangup'):
+                        # A person whose call did not end says so again; the grade still counts from the first request.
                         until = now() + HANGUP_WAIT_S
                         while now() < until and not await sync(): await asyncio.sleep(.25)
-                        break
+                        if run['closed_at'] is not None: break
+                        hangups = sum(1 for d in run['decisions'] if d.get('hangup'))
+                        if hangups >= 3: break
+                        limit = 5
+                        continue
                     limit = FIRST_WORDS_S
                 else:
                     limit = max(5, min(40, int(decision.get('wait_s') or 10)))

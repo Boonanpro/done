@@ -42,6 +42,15 @@ READ = '''([BUY, SOLD]) => {
 }'''
 
 
+UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+BLOCKED = re.compile(r'access denied|forbidden|アクセスが拒否|robot|captcha|ロボット', re.I)
+
+
+async def reader_context(browser):
+    """A plain browser that introduces itself as an ordinary Chrome (a headless name is refused by many shops)."""
+    return await browser.new_context(locale='ja-JP', viewport={'width': 1280, 'height': 900}, user_agent=UA)
+
+
 async def read_page(context, url):
     """What the owner sees on a page: its title and heading, and whether it can be bought (its availability or its buttons)."""
     page = await context.new_page()
@@ -68,8 +77,35 @@ async def read_page(context, url):
         stock, how = 'sold_out', '「' + sold[0] + '」'
     else:
         stock, how = 'unknown', '買うボタンが見つからない'
+    blocked = status in (401, 403, 429) or bool(BLOCKED.search(seen['title'] or ''))
     return {'url': url, 'final_url': final, 'status': status, 'title': seen['title'].strip()[:200], 'h1': seen['h1'][:200],
-            'stock': stock, 'stock_how': how, 'text_head': ' '.join(seen['text'].split())[:600]}
+            'stock': stock, 'stock_how': how, 'text_head': ' '.join(seen['text'].split())[:600], 'blocked': blocked}
+
+
+SCREEN_READ = """画像は、通話中に本人の画面に出ていたウェブのページの写真です。判断はせず、写っている文字だけを書き写してください。
+JSONだけを返す: {"title": "商品名や見出し（写っているまま）", "buttons": ["買う・カートに入れる・売り切れなど、ボタンや在庫の表示の文字（写っているまま）"], "readable": 写真が読めればtrue}"""
+
+
+async def read_screen(path):
+    """A page the plain browser could not open (the shop refuses robots) is read from the photograph of the owner's
+    screen: the title and the purchase buttons are copied out by a model, and the same rules as for a read page apply."""
+    import base64
+    from openai import AsyncOpenAI
+    from app.config import settings
+    data = base64.b64encode(Path(path).read_bytes()).decode()
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    response = await client.responses.create(model='gpt-6.1-terra', reasoning={'effort': 'low'}, max_output_tokens=800, input=[{
+        'role': 'user', 'content': [{'type': 'input_text', 'text': SCREEN_READ}, {'type': 'input_image', 'image_url': 'data:image/png;base64,' + data}]}])
+    found = re.search(r'\{.*\}', response.output_text or '', re.S)
+    try: copied = json.loads(found.group(0)) if found else {}
+    except ValueError: copied = {}
+    buttons = [str(b)[:40] for b in copied.get('buttons') or []]
+    buyable = [b for b in buttons if re.search(BUY, b, re.I) and not re.search(SOLD, b, re.I)]
+    sold = [b for b in buttons if re.search(SOLD, b, re.I)]
+    stock, how = (('in_stock', '写真に「' + buyable[0] + '」') if buyable else ('sold_out', '写真に「' + sold[0] + '」') if sold
+                  else ('unknown', '写真に買うボタンが見えない'))
+    return {'title': str(copied.get('title') or '')[:200], 'h1': '', 'status': 200 if copied.get('readable') else 0,
+            'stock': stock, 'stock_how': how, 'from_screen': True}
 
 
 def title_number(page, rule):
@@ -82,7 +118,7 @@ def title_number(page, rule):
 
 
 def judge_page(page, rule):
-    if page.get('error') or page.get('status', 200) >= 400:
+    if page.get('error') or page.get('status', 200) >= 400 or page.get('status') == 0:
         return False, f"開けなかった（{page.get('error') or page.get('status')}）"
     reasons = []
     number = title_number(page, rule)
@@ -99,11 +135,17 @@ async def check_pages(run, rule, context):
     urls = []
     for shown in run.get('pages', []):
         if shown.get('url') and shown['url'] not in urls: urls.append(shown['url'])
-    pages = [await read_page(context, u) for u in urls]
+    screens = {p['url']: p.get('screen') for p in run.get('pages', []) if p.get('url')}
+    pages = []
+    for u in urls:
+        page = await read_page(context, u)
+        if (page.get('blocked') or page.get('error')) and screens.get(u) and Path(screens[u]).exists():
+            page = {**page, **await read_screen(screens[u]), 'url': u, 'error': None}
+        pages.append(page)
     rows = []
     for page in pages:
         ok, why = judge_page(page, rule)
-        rows.append({'url': page['url'], 'title': page.get('title', ''), 'fits': ok, 'why': why})
+        rows.append({'url': page['url'], 'title': page.get('title', ''), 'fits': ok, 'why': why + ('（本人の画面の写真から）' if page.get('from_screen') else '')})
     fit = {r['url']: r['fits'] for r in rows}
     for shown in run.get('pages', []):   # the other checks (shown_after_ask) read whether each shown page fitted
         shown['fits'] = fit.get(shown.get('url'), False)
@@ -168,8 +210,8 @@ async def grade(run, scenario, context=None):
     async with async_playwright() as p:
         browser = None
         if context is None:
-            browser = await p.chromium.launch()
-            context = await browser.new_context(locale='ja-JP', viewport={'width': 1280, 'height': 900})
+            browser = await p.chromium.launch(args=['--disable-blink-features=AutomationControlled'])
+            context = await reader_context(browser)
         rules = sorted(scenario.get('checks', []), key=lambda r: r['kind'] != 'pages')   # pages first: the others use its findings
         for rule in rules:
             kind = rule['kind']
