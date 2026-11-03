@@ -319,6 +319,41 @@ async def test_a_page_that_does_not_fit_never_reaches_the_screen_and_one_that_fi
 
 
 @pytest.mark.asyncio
+async def test_candidates_handed_over_together_are_opened_one_at_a_time_and_only_one_is_shown(room, monkeypatch):
+    # 2026-11-03 22:00 test call: three show_page_on_stage ran at once in the one browser and each took 14 s; the text read
+    # for one candidate could come from the page another had opened. Now they go in turn and the first that fits is shown.
+    from app.services import voice_tools, voice_page_check
+    pages = {'https://example.com/40kg': 'アイロテック 40kgセット 価格 19,800円 カートに入れる ' * 5,
+             'https://example.com/100kg': 'アイロテック 100kgセット 価格 46,420円 カートに入れる ' * 5,
+             'https://example.com/120kg': 'アイロテック 120kgセット 価格 59,000円 カートに入れる ' * 5}
+    current, opened, busy = {}, [], [0, 0]
+    class FakeHost:
+        async def ask(self, op, **kw):
+            busy[0] += 1; busy[1] = max(busy[1], busy[0])
+            try:
+                if kw['arguments'].get('action') == 'open_target':
+                    current['url'] = kw['arguments']['url']; opened.append(current['url'])
+                await asyncio.sleep(0.01)
+                if kw.get('with_media'): return {'stage_image': '/api/v1/files/stage-' + current['url'][-5:] + '.png', 'text': '画面'}
+                return pages[current['url']]
+            finally:
+                busy[0] -= 1
+    monkeypatch.setattr(voice_tools, 'host', lambda *_: FakeHost())
+    async def judge(system, user):
+        fits = '40kgセット' not in user
+        return {'fits': fits, 'reason': '' if fits else '40kgで足りない', 'facts': ''}, {}
+    real = voice_page_check.check
+    monkeypatch.setattr(voice_page_check, 'check', lambda text, conditions: real(text, conditions, ask=judge))
+    stage, _, log = make_stage(room, [])
+    stage.user_id = 'u1'
+    outs = await asyncio.gather(*(stage.show_page(url=u, conditions='100kg以上') for u in pages))
+    assert [o['shown'] for o in outs] == [False, True, False]
+    assert opened == ['https://example.com/40kg', 'https://example.com/100kg']   # the third was never opened
+    assert busy[1] <= 2   # the picture and the text of one page at a time, never two pages
+    assert S.read_state(room)['image'] == '/api/v1/files/stage-100kg.png' and '先に条件に合い' in outs[2]['reason']
+
+
+@pytest.mark.asyncio
 async def test_a_page_that_could_not_be_judged_is_shown_as_before():
     from app.services import voice_page_check
     async def broken(system, user): raise TimeoutError()

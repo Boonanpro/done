@@ -295,6 +295,16 @@ def remembered():
             '合う手順があればウェブ検索より速く正確）:' + chr(10) + chr(10).join('- ' + describe(f) for f in flows) + chr(10))
 
 
+_browser_locks = {}
+
+
+def browser_lock(user_id, room_id):
+    """One page at a time in the call's browser: opening a page and reading it (or taking its picture) are separate steps,
+    and a lookup runs its functions side by side. In a test call (2026-11-03 22:00, voice_goal_call.py) three show_page_on_stage
+    ran at once in the one browser, each took 14 s, and a page's text could be read from the page another call had opened."""
+    return _browser_locks.setdefault((user_id, room_id), asyncio.Lock())
+
+
 async def read_page(user_id, room_id, url):
     """A page by its URL, the way chat Dan reads one: the reader first; a page it cannot get (a site that refuses fetchers,
     a page behind a login) through Dan's own logged-in browser."""
@@ -303,8 +313,9 @@ async def read_page(user_id, room_id, url):
     text = await host.ask('call', name='read_url', arguments={'url': url})
     if len((text or '').strip()) >= 400 and not re.search(r'失敗|エラー|error|denied|forbidden|403|429|ログイン|log ?in|sign ?in', (text or '')[:300], re.I):
         return {'page': text[:12000]}
-    await host.ask('call', name='browser', arguments={'action': 'open_target', 'url': url, 'login': True})
-    shown = await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 8000})
+    async with browser_lock(user_id, room_id):
+        await host.ask('call', name='browser', arguments={'action': 'open_target', 'url': url, 'login': True})
+        shown = await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 8000})
     return {'page': (shown or text or '')[:12000]}
 
 
@@ -346,11 +357,15 @@ async def search_web(query):
 
 
 def search_output(found, query):
-    """What the backend reads from a search (web_search.find's result, or one started early by voice_prefetch)."""
+    """What the backend reads from a search (web_search.find's result, or one started early by voice_prefetch).
+
+    The pages come with their URLs: with the titles alone, the lookup asked to show a product searched ten times in a row
+    for a page it could pass to show_page_on_stage, and then made one up (https://www.amazon.co.jp/dp/ with no product),
+    112 s from the owner's 「画面に出して」 (2026-11-03, voice_goal_call.py yoga4)."""
     if not found['success']:
         return {'error': found['error']}
-    names = '、'.join(dict.fromkeys(s['title'] for s in found['sources'] if s['title']))
-    return {'found': found['answer'][:3000] + ('\n出どころ: ' + names if names else ''), 'source': {'what': 'ウェブ検索', 'query': query}}
+    pages = [{'title': s['title'], 'url': s['url']} for s in found['sources'][:8] if s.get('url')]
+    return {'pages': pages, 'found': found['answer'][:3000], 'source': {'what': 'ウェブ検索', 'query': query}}
 
 
 async def run_function(name, args, user_id, room_id, dialogue, speak=None):

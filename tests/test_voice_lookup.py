@@ -180,3 +180,34 @@ async def test_a_lookup_nobody_asked_to_show_answers_without_an_extra_round(monk
     assert said == ['調べもの「明日の天気」の結果: 明日の尼崎は晴れ、最高気温は18度です。']
     assert not any(p == 'lookup_show_reminded' for p, _ in log)
     voice_lookup.close_call(call)
+
+
+def test_a_search_gives_the_lookup_the_pages_urls():
+    # yoga4 (2026-11-03): with the titles alone the lookup searched ten times for a URL to show, then made one up.
+    found = {'success': True, 'answer': '厚さ10mmのNBRマットが2000円台から。',
+             'sources': [{'title': 'ヨガマット 10mm', 'url': 'https://item.rakuten.co.jp/shop/mat-10/'}, {'title': '一覧', 'url': ''}]}
+    out = voice_responses.search_output(found, 'ヨガマット 10mm')
+    assert out['pages'] == [{'title': 'ヨガマット 10mm', 'url': 'https://item.rakuten.co.jp/shop/mat-10/'}]
+    assert out['found'] == found['answer']
+
+
+@pytest.mark.asyncio
+async def test_the_next_lookup_starts_from_what_the_answered_one_found(monkeypatch):
+    # 2026-11-03 22:20 (weights_100kg): 「画面に出して」 after the price answer searched the same things again, about 8 s.
+    client = FakeClient([response([call_item('web_search', {'query': '100kg セット'}, 'c1')]), response([], '4万920円から。'),
+                         response([], 'ページはこれ。'), response([], '合う候補は無かった。')])
+    async def execute(item, *a, **k):
+        return {'type': 'function_call_output', 'call_id': item['call_id'],
+                'output': '{"pages": [{"title": "IROTEC 100kg", "url": "https://shop.example/irotec-100"}], "found": "4万920円"}', 'name': item['name']}
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    call, sent, log = open_call(monkeypatch, client)
+    first = await voice_responses.run_function('run_in_background', {'task': '100kgの重りの値段', 'label': '値段'}, 'u', 'r', [])
+    await call.lookups[first['id']].task_handle
+    second = await voice_responses.run_function('run_in_background', {'task': '買える商品ページを画面に出す', 'label': '画面'}, 'u', 'r', [])
+    new = call.lookups[second['id']]
+    assert 'https://shop.example/irotec-100' in new.carried
+    await new.task_handle
+    began = [kw['input'][0]['content'] for kw in client.seen if 'previous_response_id' not in kw and kw.get('max_output_tokens') != 16]
+    assert len(began) == 2 and 'https://shop.example/irotec-100' in began[1]
+    voice_lookup.close_call(call)

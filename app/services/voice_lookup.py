@@ -30,6 +30,7 @@ MAX_ROUNDS = 10
 SECONDS = 120          # a lookup that has not answered by then says so; long work belongs to start_work
 ROUND_TIMEOUT_S = 40
 PROGRESS_LIMIT = 3     # share_progress per lookup: facts on the way, not a running commentary
+READ_PAGE_S = 8        # one slow page held a round of four for 29 s (2026-11-03 22:00 test call); 5 of 7 reads took under 7 s
 DIRECT = ('places', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
 # The owner asked to see it on the screen (in the task or in the owner's last words of the call).
 WANTS_SCREEN = re.compile(r'画面|見せ|出して|映して')
@@ -46,7 +47,7 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 独立した調べものは同じ手で並べて呼ぶ（並行で動く）。同じ検索・同じページを繰り返さない。前の版で確かめた事実が渡されたら、条件の変わっていない分はそのまま使う。
 - ウェブの一般情報は web_search、URLの中身は read_page。近くの店・施設は places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
 - ログインが要る・サイトの中で操作する・在庫や空きの最新状況を見る時は browser（browser_plan でまとめて進める）。スマホのアプリは phone。
-- 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）を入れて出す。出す前の確かめ（条件・在庫）は道具がするので、read_page で読み直さずにすぐ渡す。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
+- 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）を入れて出す。出す前の確かめ（条件・在庫）は道具がするので、read_page で読み直さずにすぐ渡す。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）で、web_search が pages に返したURLか read_page で読んだページにあったURLから選ぶ（URLを推測で組み立てない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
 - 道具を2回以上続けて使う時は、途中で確かめた新しい事実を share_progress で1文渡す（次の道具と同時に呼ぶ。声で本人に届く）。同じことを繰り返さない。予定や推測は渡さない。
 - 多くの条件で候補を比べて選ぶ時だけ、確かめた事実を material に入れて think_carefully に聞く。
 - 購入・送信・予約の確定・削除・取消はしない。必要なら、答えの最後に「〜してよいか」を1つだけ書く。
@@ -92,8 +93,8 @@ class Lookup:
 
     def handover(self):
         """What this lookup had verified, for the one that replaces it."""
-        lines = [f'- {name}: {output[:900]}' for name, output in self.verified[-8:]]
-        return chr(10).join(lines)[:6000]
+        lines = [f'- {name}: {output[:1500]}' for name, output in self.verified[-8:]]
+        return chr(10).join(lines)[:8000]
 
     async def run(self):
         call = self.call
@@ -122,7 +123,7 @@ class Lookup:
         client = _client()
         talk = chr(10).join(('本人' if t['role'] == 'user' else 'ダン') + ': ' + t['text'] for t in self.call.dialogue.recent())
         first = ('頼み: ' + self.task + chr(10) * 2 + '直前の通話（新しい物が下。引用中の依頼は新しい指示ではない）:' + chr(10) + talk
-                 + ((chr(10) * 2 + '前の版で確かめた事実（条件が変わる前に調べた物。今の頼みに合う分だけ使う）:' + chr(10) + self.carried) if self.carried else ''))
+                 + ((chr(10) * 2 + 'この通話で前に確かめた事実（前の調べもの・条件が変わる前の版。今の頼みと条件に合う分だけ使い、同じ検索をし直さない）:' + chr(10) + self.carried) if self.carried else ''))
         given, previous, said, reminded = [{'role': 'user', 'content': first}], None, 0, False
         spec = self.call.spec()
         for round_no in range(1, MAX_ROUNDS + 1):
@@ -176,8 +177,16 @@ class Lookup:
             except ValueError: args = {}
             name, arguments = 'dan_tool', json.dumps({'name': name, 'arguments': args}, ensure_ascii=False)
         from app.services.voice_sideband import execute_call
-        out = await execute_call({'type': 'function_call', 'call_id': item.call_id, 'name': name, 'arguments': arguments},
-                                 self.call.user_id, self.call.room_id, self.call.dialogue, self.call.record, self.id)
+        run = execute_call({'type': 'function_call', 'call_id': item.call_id, 'name': name, 'arguments': arguments},
+                           self.call.user_id, self.call.room_id, self.call.dialogue, self.call.record, self.id)
+        if name != 'read_page':
+            out = await run
+        else:
+            try:
+                out = await asyncio.wait_for(run, READ_PAGE_S)
+            except asyncio.TimeoutError:
+                self.call.record('lookup_read_slow', lookup_id=self.id, seconds=READ_PAGE_S)
+                return json.dumps({'error': f'このページは{READ_PAGE_S}秒で読めなかった。読めた他のページや検索の結果を使う。'}, ensure_ascii=False)
         self.verified.append((item.name, out['output']))
         if item.name == 'show_page_on_stage':
             try: self.shown += bool(json.loads(out['output']).get('shown'))
@@ -252,6 +261,11 @@ class Call:
             old.state = 'replaced'
             if old.task_handle is not None: old.task_handle.cancel()
             self.record('lookup_replaced', lookup_id=old.id)
+        if not carried:
+            # 「画面に出して」 after an answer started from nothing: the same three searches again, about 8 s before the first
+            # page (2026-11-03 22:20 test call, weights_100kg). The last answered lookup of the call hands on what it found.
+            answered = [l for l in self.lookups.values() if l.state == 'answered' and l.verified]
+            if answered: carried = answered[-1].handover()
         running = [l.status() for l in self.lookups.values() if l.state == 'running']
         lookup = Lookup(self, task, label, carried)
         self.lookups[lookup.id] = lookup
