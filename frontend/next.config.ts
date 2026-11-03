@@ -31,6 +31,10 @@ const nextConfig: NextConfig = {
   // 開発サーバー（3001・成果物のファイルそのまま）は部品を /_live/_next に出す。
   // 本番ビルド（3000）が /preview と /_live をそこへ中継するので、両者の /_next が混ざらない。
   assetPrefix: process.env.NEXT_ASSET_PREFIX || undefined,
+  // 成果物タブは dan.paina.info（と 127.0.0.1）から 3001 を開く。Next 16.4 は許した所以外からの
+  // HMR の接続を断り、断られると画面が動き出さない（ボードが「読み込んでいます…」のまま・
+  // ボタンが効かない。2026-11-02 の 16.1→16.4 更新から）。
+  allowedDevOrigins: ['dan.paina.info', '**.paina.info', '127.0.0.1'],
   typescript: { tsconfigPath: process.env.NEXT_TSCONFIG || 'tsconfig.json' },
   reactStrictMode: true,
   // 成果物の editorial（/api/voice-note/editorial・artifacts/<slug>/editorial）は process.cwd() で python ワーカーを spawn する
