@@ -783,7 +783,9 @@ class Stage:
             try: return await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
             except Exception: return opened
         out, text = await asyncio.gather(self.show_external('browser'), body())
-        self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=False, shown=bool(out.get('shown')))
+        # The address of a page from elsewhere is kept, so a check can open what the owner was shown (voice_goal_grade).
+        self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=False, shown=bool(out.get('shown')),
+                    url=target[:500])
         if not out.get('shown'): out['browser_result'] = opened
         checked = await voice_page_check.check(text or opened, conditions)
         if checked is None:

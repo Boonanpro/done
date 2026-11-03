@@ -1,0 +1,18 @@
+{
+ "note": "13:35 の通話で出たページの作り直し（本物の記録にURLが残っていないので、同じ店の40kgのセットと、売り切れの100kgのセットで作った）。採点の処理が不合格を出せることを確かめるための物。",
+ "pages": [
+  {"url": "https://www.super-sports.jp/view/item/002001000003"},
+  {"url": "https://originfitness.com/products/origin-barbell-set-100kg"}
+ ],
+ "turns": [
+  {"role": "owner", "start": 0.0, "end": 5.0, "text": "百キロぐらいの重りを家にそろえようと思ったらどんぐらいかかるかな"},
+  {"role": "dan", "start": 6.0, "end": 9.0, "text": "うん、ちょっと待って"},
+  {"role": "owner", "start": 60.0, "end": 62.0, "text": "これ四十キロじゃん"},
+  {"role": "dan", "start": 75.0, "end": 78.0, "text": "聞いてるよ"},
+  {"role": "owner", "start": 140.0, "end": 142.0, "text": "ちょっと電話切って"},
+  {"role": "dan", "start": 142.5, "end": 143.5, "text": "うん、切るね"}
+ ],
+ "hangup_asked_at": 142.0,
+ "closed_at": null,
+ "ended_at": 160.0
+}
