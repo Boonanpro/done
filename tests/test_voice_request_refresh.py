@@ -84,7 +84,8 @@ async def test_send_failure_or_new_speech_cannot_promote_unseen_revision(failure
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('name,accepted', [('start_work', True), ('steer_job', True), ('steer_job', False), ('job_status', True)])
-async def test_acceptance_receives_speech_that_arrived_during_execution(name, accepted):
+async def test_acceptance_receives_speech_that_arrived_during_execution(name, accepted, monkeypatch):
+    monkeypatch.setenv('DAN_VOICE_PLAIN', '0')   # the earlier call's reply guidance; a plain call adds none
     d = S.Dialogue()
     d.add('user', '参加費を無料にして')
     async def result():

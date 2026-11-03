@@ -38,6 +38,7 @@ def test_long_answers_are_cut_at_sentence_ends_under_the_append_limit():
 async def test_job_feed_speaks_results_at_once_and_pushes_nothing_else(monkeypatch):
     """Results are spoken the moment they appear. The running work's state is never pushed: the backend reads it with
     job_status when the owner asks (pushing it made the speech model say 「もう少し待って」 unprompted)."""
+    monkeypatch.setenv('DAN_VOICE_PLAIN', '0')   # the earlier call: material as thinking, then a cue
     sent, jobs = [], []
     async def send(event): sent.append(event)
     monkeypatch.setattr('app.services.command_job_state.list_owned', lambda u, r: [dict(j) for j in jobs])
@@ -145,6 +146,7 @@ def test_result_scope_keeps_request_and_freezes_received_changes():
 
 @pytest.mark.asyncio
 async def test_result_waits_for_new_words_and_decision_then_is_delivered_once(monkeypatch):
+    monkeypatch.setenv('DAN_VOICE_PLAIN', '0')   # the server-side wait belongs to the earlier call
     from app.services.voice_turn_intake import TurnIntake
     sent = []
     async def send(event): sent.append(event)
@@ -182,3 +184,37 @@ def test_result_waits_for_quiet_even_after_conversation_was_handled():
     assert not S.result_can_interrupt(d)
     d.intake.changed_at -= 2
     assert S.result_can_interrupt(d)
+
+
+@pytest.mark.asyncio
+async def test_plain_call_is_given_the_result_as_a_fact_and_says_it_itself(monkeypatch):
+    """Like ChatGPT's voice (2026-11-03): the result goes in as commentary, which GPT-Live paraphrases and says when it
+    fits; no cue on how to word it, and no wait decided by the server."""
+    monkeypatch.setenv('DAN_VOICE_PLAIN', '1')
+    sent, jobs = [], []
+    async def send(event): sent.append(event)
+    monkeypatch.setattr('app.services.command_job_state.list_owned', lambda u, r: [dict(j) for j in jobs])
+    monkeypatch.setattr(S, 'FEED_SECONDS', .01)
+    feed = asyncio.create_task(S.job_feed(send, 'u', 'room', lambda *a, **k: None, '2026-09-22T03:00:00+00:00'))
+    try:
+        jobs.append({'id': 'job-1', 'task': '作業への引継ぎ:\n24日の新幹線を調べて\n参考の直前会話: ...', 'state': 'completed', 'seq': 1,
+                     'created_at': '2026-09-22T03:01:00+00:00', 'events': [{'seq': 1, 'kind': 'result', 'text': '## 結果\n- のぞみ2号は14,320円で空席あり'}]})
+        await asyncio.sleep(.05)
+        assert [e['type'] for e in sent] == ['session.commentary.append']
+        said = sent[0]['content']
+        assert '24日の新幹線を調べて' in said and 'のぞみ2号は14320円で空席あり' in said
+        assert not any(w in said for w in ('伝える', 'ください', '##', '- '))
+        jobs.append({'id': 'job-2', 'task': '資料を作って', 'state': 'completed', 'seq': 1, 'created_at': '2026-09-22T03:02:00+00:00',
+                     'events': [{'seq': 1, 'kind': 'result', 'text': '資料を作りました。' + 'くわしい説明。' * 120}]})
+        await asyncio.sleep(.05)
+        later = sent[1:]
+        assert later[-1]['type'] == 'session.commentary.append' and len(later[-1]['content']) <= 300
+        assert all(e['type'] == 'session.thinking.append' for e in later[:-1]) and len(later) > 2
+        assert sum(e['type'] == 'session.commentary.append' for e in sent) == 2
+    finally:
+        feed.cancel()
+
+
+def test_plain_text_drops_chat_formatting():
+    from app.services.voice_plain import plain_text
+    assert plain_text('## 見出し\n- **太字**の点\n| a | b |\n|---|---|\n1. 番号') == '見出し\n太字の点\na 、 b\n番号'

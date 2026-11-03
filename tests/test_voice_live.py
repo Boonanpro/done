@@ -70,7 +70,17 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         tools = config['delegation']['responses']['tools']
         self.assertIn('web_search', [t.get('name') for t in tools])
         self.assertIn('get_saved_information', [t.get('name') for t in tools])
-        self.assertIn('本人の承認が必要', config['instructions'])
+        for heading in ('Backchannel policy:', 'Interruption policy:', 'Delegation policy:', 'Generate <|SpawnThinking|> when:'):
+            self.assertIn(heading, config['instructions'])   # OpenAI's recommended structure (live-prompting)
+
+    def test_plain_call_has_the_recommended_prompt_and_a_light_backend(self):
+        from app.services import voice_plain
+        with patch.dict('os.environ', {'DAN_VOICE_PLAIN': '1'}), \
+             patch('app.services.dan_core.shared', side_effect=AssertionError('chat brief read')):
+            config = live.session_config(room_id='r', user_id='u')
+        self.assertTrue(config['instructions'].startswith(voice_plain.INSTRUCTIONS))
+        self.assertNotIn('受付', config['instructions'])
+        self.assertNotIn('声の裏側としてのきまり', config['delegation']['responses']['instructions'])
 
     def test_local_date_crosses_utc_midnight(self):
         from datetime import datetime, timezone
