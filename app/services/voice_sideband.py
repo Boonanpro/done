@@ -451,7 +451,7 @@ async def summon_feed(send, user_id, record):
     """Dan called the owner (owner_summon) while a call is going, or the owner answered a ringing summons by starting this
     call: the call's Dan says why at once, in his own words, with every digit. Each summons is said once."""
     from app.services import owner_summon
-    # The phone opens a call with 「もしもし」 (live-greeting.ts, about 2-3 s after the session starts). Said at the same
+    # Phones before Done 1.0.84 open a call with 「もしもし」 (about 2-3 s after the session starts). Said at the same
     # moment, the two ran into each other: 「い。今すぐやもしもし、」 (2026-10-27 22:17). A call that starts says it after.
     await asyncio.sleep(GREETING_SECONDS)
     while True:
