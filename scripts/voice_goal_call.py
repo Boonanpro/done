@@ -164,11 +164,11 @@ def owner_input(scenario, turns, pages, now, quiet_for, screen):
     return '\n'.join(lines)
 
 
-async def owner_decides(client, scenario, turns, pages, now, quiet_for, screen):
+async def owner_decides(client, scenario, turns, pages, now, quiet_for, screen, photo=None):
     content = [{'type': 'input_text', 'text': owner_input(scenario, turns, pages, now, quiet_for, screen)}]
-    latest = next((p.get('screen') for p in reversed(pages) if p.get('screen')), None)
+    latest = photo   # the call's screen as it is now: Dan may have scrolled it since the page first appeared
     if latest and Path(latest).exists():
-        content.append({'type': 'input_text', 'text': '今、本人の通話画面に出ている物の写真（一番新しいページ）:'})
+        content.append({'type': 'input_text', 'text': '今、本人の通話画面に出ている物の写真:'})
         content.append({'type': 'input_image', 'image_url': 'data:image/png;base64,' + base64.b64encode(Path(latest).read_bytes()).decode()})
     response = await client.responses.create(model=OWNER_MODEL, reasoning={'effort': 'low'}, max_output_tokens=1200,
                                              instructions=OWNER_SYSTEM, input=[{'role': 'user', 'content': content}])
@@ -347,7 +347,14 @@ async def main(base, scenario_path, out_dir, keep_room=False, log_path=None):
                 if await sync(): break
                 last_dan = max((t['end'] for t in turns if t['role'] == 'dan'), default=0)
                 screen = await page.evaluate(SCREEN)
-                decision = await owner_decides(client, scenario, turns, [page_facts[u] for u in page_facts], now(), now() - last_dan if last_dan else now(), screen)
+                photo = None
+                if page_facts:   # a page has been on the screen: the owner side looks at the screen as it is now
+                    # (2026-11-03: it was shown the first photograph only, and kept saying the name was not visible after Dan scrolled)
+                    photo = out / f"now-{len(run['decisions']) + 1}.png"
+                    try: await page.locator('[data-voice-stage]').screenshot(path=str(photo))
+                    except Exception: photo = None
+                decision = await owner_decides(client, scenario, turns, [page_facts[u] for u in page_facts], now(), now() - last_dan if last_dan else now(), screen,
+                                               str(photo) if photo else None)
                 decision['at'] = round(now(), 1)
                 run['decisions'].append(decision)
                 print(json.dumps(decision, ensure_ascii=False), flush=True)

@@ -6,9 +6,28 @@
  "opening": "ヨガマット買おうと思ってるんだけど、分厚めのやつでおすすめある？",
  "max_seconds": 240,
  "checks": [
-  {"kind": "pages", "pattern": "(\\d+(?:\\.\\d+)?)\\s*(?:mm|ｍｍ|MM|ミリ)", "unit": "mm", "min": 10, "max": 30, "in_stock": true, "at_least": 1},
-  {"kind": "shown_after_ask", "ask": "画面|ページ|見せ", "max_s": 30},
-  {"kind": "reply_gap", "max_s": 8},
-  {"kind": "hangup", "within_s": 10}
+  {
+   "kind": "pages",
+   "pattern": "(\\d+(?:\\.\\d+)?)\\s*(?:mm|ｍｍ|MM|ミリ)",
+   "unit": "mm",
+   "min": 10,
+   "max": 30,
+   "in_stock": true,
+   "at_least": 1,
+   "after_said": "(10|１０|十)\\s*(mm|ｍｍ|ミリ)"
+  },
+  {
+   "kind": "shown_after_ask",
+   "ask": "画面|ページ|見せ",
+   "max_s": 30
+  },
+  {
+   "kind": "reply_gap",
+   "max_s": 8
+  },
+  {
+   "kind": "hangup",
+   "within_s": 10
+  }
  ]
 }

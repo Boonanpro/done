@@ -20,6 +20,9 @@ import re
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))   # read_screen uses Dan's settings for the model key
+
 BUY = r'カートに入れる|カートへ入れる|買い物かごに入れる|かごに入れる|購入手続き|今すぐ購入|今すぐ買う|購入する|add to cart|buy now'
 SOLD = r'売り切れ|在庫切れ|在庫なし|品切れ|SOLD\s?OUT|入荷待ち|販売終了|完売|入荷お知らせ|再入荷'
 
@@ -91,6 +94,8 @@ async def read_screen(path):
     screen: the title and the purchase buttons are copied out by a model, and the same rules as for a read page apply."""
     import base64
     from openai import AsyncOpenAI
+    from dotenv import load_dotenv
+    load_dotenv('/Users/mikihonda/done/.env')
     from app.config import settings
     data = base64.b64encode(Path(path).read_bytes()).decode()
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
@@ -132,8 +137,16 @@ def judge_page(page, rule):
 
 
 async def check_pages(run, rule, context):
+    # A page shown before the owner said the condition is not held to it (2026-11-03: a 6 mm mat shown for 「分厚めの」,
+    # before the owner said 10 mm). `after_said` is the pattern of the owner's words that state the condition.
+    since, ignored = None, []
+    if rule.get('after_said'):
+        said = next((t for t in run.get('turns', []) if t['role'] == 'owner' and re.search(rule['after_said'], t['text'])), None)
+        since = said['start'] if said else float('inf')
     urls = []
     for shown in run.get('pages', []):
+        if since is not None and shown.get('seen_at') is not None and shown['seen_at'] < since:
+            ignored.append(shown.get('url')); continue
         if shown.get('url') and shown['url'] not in urls: urls.append(shown['url'])
     screens = {p['url']: p.get('screen') for p in run.get('pages', []) if p.get('url')}
     pages = []
@@ -152,6 +165,7 @@ async def check_pages(run, rule, context):
     enough = len(rows) >= rule.get('at_least', 1)
     passed = enough and all(r['fits'] for r in rows)
     note = '' if enough else f"出したページが{len(rows)}件（{rule.get('at_least', 1)}件以上のはず）"
+    if ignored: note = (note + '、' if note else '') + f'条件を言う前に出た{len(ignored)}件は数えない'
     return {'name': 'pages', 'passed': passed, 'note': note, 'pages': rows}
 
 

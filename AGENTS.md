@@ -51,6 +51,7 @@ Keep credentials in the credential service, never in skill text, logs or source 
 - Browser sessions: `docs/current/browser-lifecycle.md` and `docs/current/browser-speed-and-verification.md`.
 - Editable artifact integration: `docs/editable-artifact-build-integration.md`.
 - What the owner sees in each place Dan talks (chat, artifact tab, the dev-lead board's rooms, the phone app) and in each artifact, how to open it and what proves a screen works: `docs/places/README.md` (place maps, `scripts/place_map.py`; open and photograph a place with `scripts/place_shot.py`, before and after a UI change; when the owner reports that something on a screen does not work, reproduce it first with `--expect-…` before touching code, as in the README's bug-report section).
+- Testing a change from the owner's goal (a check shown to fail on the known-bad case first, a reacting owner side for calls with `scripts/voice_goal_call.py`, a second case the fix was not made from): `.claude/skills/goal-test/SKILL.md`.
 - Current project documentation: `docs/current/README.md`; read only the topic relevant to the task.
 
 Report the result, verification and any actual remaining limitation concisely in the user's language. Supply the requested artifact or link. Distinguish tested, saved and published states.
