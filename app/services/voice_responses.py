@@ -365,7 +365,7 @@ def search_output(found, query):
     if not found['success']:
         return {'error': found['error']}
     pages = [{'title': s['title'], 'url': s['url']} for s in found['sources'][:8] if s.get('url')]
-    return {'found': found['answer'][:3000], 'pages': pages, 'source': {'what': 'ウェブ検索', 'query': query}}
+    return {'pages': pages, 'found': found['answer'][:3000], 'source': {'what': 'ウェブ検索', 'query': query}}
 
 
 async def run_function(name, args, user_id, room_id, dialogue, speak=None):

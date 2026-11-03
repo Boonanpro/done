@@ -795,7 +795,9 @@ class Stage:
         # Use the same authenticated browser the call operates, never a new anonymous browser.
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
+        began = time.monotonic()
         opened = await host.ask('call',name='browser',arguments={'action':'open_target','url':target,'observation':'dom'})
+        steps = {'open_ms': round((time.monotonic() - began) * 1000)}   # where the 8-14 s of a shown page go
         # The page's picture and its text are taken at the same time, the text is checked against the owner's conditions, and
         # only a page that fits (or could not be judged) goes on the screen. 19:15 showed the page first and checked behind
         # it, so a wrong page still reached the owner's screen with a 「条件と違う」 caption: in the 20:59 test call a
@@ -805,10 +807,14 @@ class Stage:
         async def body():
             try: return await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
             except Exception: return opened
+        began = time.monotonic()
         (path, captured), text = await asyncio.gather(self.capture_external('browser'), body())
+        steps['capture_ms'] = round((time.monotonic() - began) * 1000)
+        began = time.monotonic()
         checked = await voice_page_check.check(text or opened, conditions)
+        steps['check_ms'] = round((time.monotonic() - began) * 1000)
         if checked is not None:
-            self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
+            self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000), **steps)
         if checked is not None and not checked['fits']:
             self._refused = {**getattr(self, '_refused', {}), key: checked['reason']}
             self.record('stage_page_refused', elapsed_ms=round((time.monotonic() - started) * 1000), url=target[:500])

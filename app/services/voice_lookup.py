@@ -93,8 +93,8 @@ class Lookup:
 
     def handover(self):
         """What this lookup had verified, for the one that replaces it."""
-        lines = [f'- {name}: {output[:900]}' for name, output in self.verified[-8:]]
-        return chr(10).join(lines)[:6000]
+        lines = [f'- {name}: {output[:1500]}' for name, output in self.verified[-8:]]
+        return chr(10).join(lines)[:8000]
 
     async def run(self):
         call = self.call
@@ -123,7 +123,7 @@ class Lookup:
         client = _client()
         talk = chr(10).join(('本人' if t['role'] == 'user' else 'ダン') + ': ' + t['text'] for t in self.call.dialogue.recent())
         first = ('頼み: ' + self.task + chr(10) * 2 + '直前の通話（新しい物が下。引用中の依頼は新しい指示ではない）:' + chr(10) + talk
-                 + ((chr(10) * 2 + '前の版で確かめた事実（条件が変わる前に調べた物。今の頼みに合う分だけ使う）:' + chr(10) + self.carried) if self.carried else ''))
+                 + ((chr(10) * 2 + 'この通話で前に確かめた事実（前の調べもの・条件が変わる前の版。今の頼みと条件に合う分だけ使い、同じ検索をし直さない）:' + chr(10) + self.carried) if self.carried else ''))
         given, previous, said, reminded = [{'role': 'user', 'content': first}], None, 0, False
         spec = self.call.spec()
         for round_no in range(1, MAX_ROUNDS + 1):
@@ -261,6 +261,11 @@ class Call:
             old.state = 'replaced'
             if old.task_handle is not None: old.task_handle.cancel()
             self.record('lookup_replaced', lookup_id=old.id)
+        if not carried:
+            # 「画面に出して」 after an answer started from nothing: the same three searches again, about 8 s before the first
+            # page (2026-11-03 22:20 test call, weights_100kg). The last answered lookup of the call hands on what it found.
+            answered = [l for l in self.lookups.values() if l.state == 'answered' and l.verified]
+            if answered: carried = answered[-1].handover()
         running = [l.status() for l in self.lookups.values() if l.state == 'running']
         lookup = Lookup(self, task, label, carried)
         self.lookups[lookup.id] = lookup
