@@ -30,6 +30,7 @@ MAX_ROUNDS = 10
 SECONDS = 120          # a lookup that has not answered by then says so; long work belongs to start_work
 ROUND_TIMEOUT_S = 40
 PROGRESS_LIMIT = 3     # share_progress per lookup: facts on the way, not a running commentary
+READ_PAGE_S = 12       # one slow page held a round of four for 29 s (2026-11-03 22:00 test call); the others are used
 DIRECT = ('places', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
 # The owner asked to see it on the screen (in the task or in the owner's last words of the call).
 WANTS_SCREEN = re.compile(r'画面|見せ|出して|映して')
@@ -176,8 +177,16 @@ class Lookup:
             except ValueError: args = {}
             name, arguments = 'dan_tool', json.dumps({'name': name, 'arguments': args}, ensure_ascii=False)
         from app.services.voice_sideband import execute_call
-        out = await execute_call({'type': 'function_call', 'call_id': item.call_id, 'name': name, 'arguments': arguments},
-                                 self.call.user_id, self.call.room_id, self.call.dialogue, self.call.record, self.id)
+        run = execute_call({'type': 'function_call', 'call_id': item.call_id, 'name': name, 'arguments': arguments},
+                           self.call.user_id, self.call.room_id, self.call.dialogue, self.call.record, self.id)
+        if name != 'read_page':
+            out = await run
+        else:
+            try:
+                out = await asyncio.wait_for(run, READ_PAGE_S)
+            except asyncio.TimeoutError:
+                self.call.record('lookup_read_slow', lookup_id=self.id, seconds=READ_PAGE_S)
+                return json.dumps({'error': f'このページは{READ_PAGE_S}秒で読めなかった。読めた他のページや検索の結果を使う。'}, ensure_ascii=False)
         self.verified.append((item.name, out['output']))
         if item.name == 'show_page_on_stage':
             try: self.shown += bool(json.loads(out['output']).get('shown'))

@@ -778,6 +778,20 @@ class Stage:
             self.record('stage_page_refused', elapsed_ms=0, url=target[:500], again=True)
             return {'shown': False, 'fits': False, 'reason': refused[key],
                     'note': 'このページは前に確かめて条件に合わなかった。もう出さない。別の候補（別のURL）を探す。合う候補が無ければそう伝える。'}
+        # One page at a time in the call's browser (voice_responses.browser_lock). Candidates handed over together are tried
+        # in turn, and once one of them is on the screen the others are not opened: the owner sees one answer, sooner.
+        from app.services.voice_responses import browser_lock
+        asked_at = time.monotonic()
+        async with browser_lock(self.user_id, self.room_id):
+            if getattr(self, '_page_shown_at', -1e9) >= asked_at:
+                self.record('stage_page_skipped', elapsed_ms=round((time.monotonic() - started) * 1000))
+                return {'shown': False, 'reason': '同時に渡した別の候補が先に条件に合い、本人の画面に出ている。これは開いていない。',
+                        'note': '画面に出ているのは先の候補。これを出したとは言わない。'}
+            out = await self._show_external_page(target, conditions, key, started)
+            if out.get('shown'): self._page_shown_at = time.monotonic()
+            return out
+
+    async def _show_external_page(self, target, conditions, key, started):
         # Use the same authenticated browser the call operates, never a new anonymous browser.
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
@@ -796,7 +810,7 @@ class Stage:
         if checked is not None:
             self.record('stage_page_checked', fits=checked['fits'], conditions=bool(conditions.strip()), elapsed_ms=round((time.monotonic() - started) * 1000))
         if checked is not None and not checked['fits']:
-            self._refused = {**refused, key: checked['reason']}
+            self._refused = {**getattr(self, '_refused', {}), key: checked['reason']}
             self.record('stage_page_refused', elapsed_ms=round((time.monotonic() - started) * 1000), url=target[:500])
             return {'shown': False, 'fits': False, 'reason': checked['reason'], 'page_facts': checked['facts'],
                     'note': '条件に合わないので本人の画面には出していない。出したとは言わない。別の候補を探す。合う候補が無ければそう伝える。'}
