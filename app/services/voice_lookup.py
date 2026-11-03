@@ -31,6 +31,11 @@ SECONDS = 120          # a lookup that has not answered by then says so; long wo
 ROUND_TIMEOUT_S = 40
 PROGRESS_LIMIT = 3     # share_progress per lookup: facts on the way, not a running commentary
 DIRECT = ('places', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
+# The owner asked to see it on the screen (in the task or in the owner's last words of the call).
+WANTS_SCREEN = re.compile(r'画面|見せ|出して|映して')
+SHOW_FIRST = ('本人は画面で見たいと頼んでいるが、まだ本人の画面に何も出していない。答える前に、確かめた中で本人の条件に合う候補のページを '
+              'show_page_on_stage（conditions に本人の条件を全部）で出す。条件に合わないと返ったら次の候補を出す。合う候補が無ければ、出さずにそう答える。'
+              '出していないのに「出す」「出した」と答えない。')
 
 
 def enabled():
@@ -41,7 +46,7 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 独立した調べものは同じ手で並べて呼ぶ（並行で動く）。同じ検索・同じページを繰り返さない。前の版で確かめた事実が渡されたら、条件の変わっていない分はそのまま使う。
 - ウェブの一般情報は web_search、URLの中身は read_page。近くの店・施設は places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
 - ログインが要る・サイトの中で操作する・在庫や空きの最新状況を見る時は browser（browser_plan でまとめて進める）。スマホのアプリは phone。
-- 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）を入れて出す。条件に合わないと返ったら、次の候補を出して差し替える。合う候補が無ければ、そう答える。
+- 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）を入れて出す。出す前の確かめ（条件・在庫）は道具がするので、read_page で読み直さずにすぐ渡す。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
 - 道具を2回以上続けて使う時は、途中で確かめた新しい事実を share_progress で1文渡す（次の道具と同時に呼ぶ。声で本人に届く）。同じことを繰り返さない。予定や推測は渡さない。
 - 多くの条件で候補を比べて選ぶ時だけ、確かめた事実を material に入れて think_carefully に聞く。
 - 購入・送信・予約の確定・削除・取消はしない。必要なら、答えの最後に「〜してよいか」を1つだけ書く。
@@ -78,6 +83,7 @@ class Lookup:
         self.state = 'running'      # running → answered | failed | replaced | cancelled | timed_out
         self.verified = []          # (tool name, its output, cut short): handed on when a correction replaces this lookup
         self.progress = []          # the facts said on the way
+        self.shown = 0              # pages put on the owner's screen by show_page_on_stage
         self.task_handle = None
 
     def status(self):
@@ -117,7 +123,7 @@ class Lookup:
         talk = chr(10).join(('本人' if t['role'] == 'user' else 'ダン') + ': ' + t['text'] for t in self.call.dialogue.recent())
         first = ('頼み: ' + self.task + chr(10) * 2 + '直前の通話（新しい物が下。引用中の依頼は新しい指示ではない）:' + chr(10) + talk
                  + ((chr(10) * 2 + '前の版で確かめた事実（条件が変わる前に調べた物。今の頼みに合う分だけ使う）:' + chr(10) + self.carried) if self.carried else ''))
-        given, previous, said = [{'role': 'user', 'content': first}], None, 0
+        given, previous, said, reminded = [{'role': 'user', 'content': first}], None, 0, False
         spec = self.call.spec()
         for round_no in range(1, MAX_ROUNDS + 1):
             began = time.monotonic()
@@ -130,6 +136,14 @@ class Lookup:
                              cached_tokens=getattr(getattr(usage, 'input_tokens_details', None), 'cached_tokens', 0) or 0,
                              output_tokens=getattr(usage, 'output_tokens', 0) or 0)
             if not calls:
+                # A lookup answered 「商品ページを今、画面に出すよ」 without showing anything, after the owner had asked to see
+                # it; the owner had to ask again 40 s later (2026-11-03, voice_goal_call.py, weights_100kg run 2). Before the
+                # answer, a lookup asked for the screen that has shown nothing is told so once.
+                if not self.shown and not reminded and self.wants_screen():
+                    reminded = True
+                    self.call.record('lookup_show_reminded', lookup_id=self.id)
+                    given = [{'role': 'user', 'content': SHOW_FIRST}]
+                    continue
                 return (response.output_text or '').strip()
             if self.state != 'running':
                 return ''
@@ -137,6 +151,10 @@ class Lookup:
             said += sum(1 for c in calls if c.name == 'share_progress')
             given = [{'type': 'function_call_output', 'call_id': c.call_id, 'output': out} for c, out in zip(calls, outputs)]
         return ''
+
+    def wants_screen(self):
+        owner = [t['text'] for t in self.call.dialogue.recent() if t['role'] == 'user'][-3:]
+        return bool(WANTS_SCREEN.search(self.task) or any(WANTS_SCREEN.search(t) for t in owner))
 
     async def _execute(self, item, said_before):
         """One function of the lookup, run the way the call runs the backend's (voice_sideband.execute_call: the early
@@ -161,6 +179,9 @@ class Lookup:
         out = await execute_call({'type': 'function_call', 'call_id': item.call_id, 'name': name, 'arguments': arguments},
                                  self.call.user_id, self.call.room_id, self.call.dialogue, self.call.record, self.id)
         self.verified.append((item.name, out['output']))
+        if item.name == 'show_page_on_stage':
+            try: self.shown += bool(json.loads(out['output']).get('shown'))
+            except (ValueError, AttributeError): pass
         return out['output']
 
 

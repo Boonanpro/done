@@ -14,7 +14,7 @@ import re
 import time
 
 SETTLE_S = .7        # the owner's words settle before they are judged
-QUIET_S = 1.2        # Dan's goodbye has ended when his voice was quiet this long
+QUIET_S = 2.0        # Dan's goodbye has ended when no words of his came this long (his words run a little ahead of his voice)
 MAX_GOODBYE_S = 6.0  # the call closes at the latest this long after the request
 CUE = re.compile(r'切[っらりるれろ]|きって|きる[ねよ]|電話.*(終|おわ)|通話.*(終|おわ)|終わりに|おわりに|終わろ|おわろ|バイバイ|ばいばい|またね|じゃあね|失礼します')
 
@@ -74,7 +74,7 @@ class HangUp:
 
 
 async def after_goodbye(last_spoke, close, started=None):
-    """Close once Dan's voice has been quiet for QUIET_S (his 「切るね」 is not cut off), at the latest MAX_GOODBYE_S."""
+    """Close once no words of Dan came for QUIET_S (his 「切るね」 is not cut off), at the latest MAX_GOODBYE_S."""
     started = time.monotonic() if started is None else started
     await asyncio.sleep(QUIET_S)
     while time.monotonic() - started < MAX_GOODBYE_S and time.monotonic() - last_spoke() < QUIET_S:

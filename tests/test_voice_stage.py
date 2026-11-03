@@ -280,29 +280,42 @@ async def test_show_page_opens_this_sites_page_live_and_photographs_a_page_elsew
 
 
 @pytest.mark.asyncio
-async def test_a_page_is_shown_at_once_and_one_that_does_not_fit_is_marked_for_replacing(room, monkeypatch):
-    # 2026-11-03 13:37: 「百キロぐらいの重り」 was answered with a 40 kg set on the screen, then a sold-out page. At 19:15 the
-    # check before showing made the screen the last thing to arrive: the page now goes up first and is checked behind it.
+async def test_a_page_that_does_not_fit_never_reaches_the_screen_and_one_that_fits_does(room, monkeypatch):
+    # 2026-11-03 13:37: 「百キロぐらいの重り」 was answered with a 40 kg set on the screen, then a sold-out page. 19:15 put the page
+    # up first and checked it behind, and the 20:59 test call (voice_goal_call.py) still showed a domain-for-sale page and a
+    # shop's top page for a 100 kg set. The picture is taken beside the reading; only a page that fits goes on the screen.
     calls = []
     from app.services import voice_tools, voice_page_check
-    page = 'アイロテック 40kgセット 価格 19,800円 カートに入れる ' * 5
+    pages = {'https://example.com/40kg': 'アイロテック 40kgセット 価格 19,800円 カートに入れる ' * 5,
+             'https://example.com/100kg': 'アイロテック 100kgセット 価格 46,420円 カートに入れる ' * 5}
+    current = {}
     class FakeHost:
         async def ask(self, op, **kw):
             calls.append(kw['arguments'])
-            return {'stage_image':'/api/v1/files/stage-x.png','text':'画面'} if kw.get('with_media') else page
+            if kw['arguments'].get('action') == 'open_target': current['url'] = kw['arguments']['url']
+            if kw.get('with_media'): return {'stage_image': '/api/v1/files/stage-' + current['url'][-5:] + '.png', 'text': '画面'}
+            return pages[current['url']]
     monkeypatch.setattr(voice_tools,'host',lambda *_:FakeHost())
-    seen = {}
+    seen = []
     async def judge(system, user):
-        seen['user'] = user
-        return {'fits': False, 'reason': '40kgで条件の100kgに足りない', 'facts': '40kgセット・19,800円'}, {}
+        seen.append(user)
+        fits = '100kgセット' in user
+        return {'fits': fits, 'reason': '' if fits else '40kgで条件の100kgに足りない', 'facts': '100kgセット・46,420円' if fits else '40kgセット・19,800円'}, {}
     real = voice_page_check.check
     monkeypatch.setattr(voice_page_check, 'check', lambda text, conditions: real(text, conditions, ask=judge))
     stage, _, log = make_stage(room, [])
     stage.user_id = 'u1'
+    before = S.read_state(room)
     out = await stage.show_page(url='https://example.com/40kg', conditions='重り100kg分、在庫があって買える')
-    assert out['shown'] and not out['fits'] and '100kg' in out['reason'] and out['page_facts'] and '次の候補' in out['note']
-    assert {'action': 'screenshot'} in calls and S.read_state(room)['caption'].startswith('条件と違う')   # the owner sees it does not fit
-    assert '100kg' in seen['user'] and any(name == 'stage_page_checked' and not f['fits'] for name, f in log)
+    assert not out['shown'] and not out['fits'] and '100kg' in out['reason'] and '出していない' in out['note']
+    after = S.read_state(room)
+    assert after.get('image') == before.get('image') and after.get('version') == before.get('version')   # the owner never saw it
+    opened = len(calls)
+    out = await stage.show_page(url='https://example.com/40kg', conditions='重り100kg分、在庫があって買える')   # offered again
+    assert not out['shown'] and '前に確かめて' in out['note'] and len(calls) == opened   # not opened, read or judged again
+    out = await stage.show_page(url='https://example.com/100kg', conditions='重り100kg分、在庫があって買える')
+    assert out['shown'] and out['page_facts'] and S.read_state(room)['image'] == '/api/v1/files/stage-100kg.png'
+    assert all('100kg' in u for u in seen) and [f['url'] for n, f in log if n == 'stage_page'] == ['https://example.com/100kg']
 
 
 @pytest.mark.asyncio

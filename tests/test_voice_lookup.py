@@ -140,3 +140,43 @@ def test_the_delegation_hands_lookups_over_and_keeps_the_quick_tools(monkeypatch
     lookup_tools = {t['name'] for t in voice_lookup.tools()}
     assert {'web_search', 'read_page', 'places', 'browser', 'show_page_on_stage', 'share_progress'} <= lookup_tools   # given whole from the start
     assert not {'send_message_on_stage', 'start_work', 'operate_screen', 'publish_document_on_stage'} & lookup_tools
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_asked_for_the_screen_shows_a_page_before_it_answers(monkeypatch):
+    """2026-11-03 (voice_goal_call.py, 100 kg run 2): the owner asked 「商品ページ、画面に出してくれる？」, the lookup answered
+    「商品ページを今、画面に出すよ」 and showed nothing; the owner had to ask again. A lookup that would answer with nothing
+    shown is told once to show the page first."""
+    client = FakeClient([response([], 'ボディメーカーの100kgセットが在庫ありで98,000円。商品ページを画面に出すよ。'),
+                         response([call_item('show_page_on_stage', {'url': 'https://example.jp/100kg', 'conditions': '100kg・在庫あり'}, 'c1')]),
+                         response([], 'ボディメーカーの100kgセットを画面に出しました。在庫ありで98,000円です。')])
+    shown = []
+    async def execute(item, user_id, room_id, dialogue, record, delegation_id, speak=None):
+        shown.append(json.loads(item['arguments'])['url'])
+        return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"shown": true}', 'name': item['name']}
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    call, sent, log = open_call(monkeypatch, client)
+    call.dialogue.add('user', '実際に買えるセットの商品ページ、画面に出してくれる？')
+    out = await voice_responses.run_function('run_in_background', {'task': '100kgのバーベルセットの商品ページを探す', 'label': '100kgのセット'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
+    assert shown == ['https://example.jp/100kg']
+    assert said == ['調べもの「100kgのセット」の結果: ボディメーカーの100kgセットを画面に出しました。在庫ありで98000円です。']
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_nobody_asked_to_show_answers_without_an_extra_round(monkeypatch):
+    client = FakeClient([response([], '明日の尼崎は晴れ、最高気温は18度です。')])
+    async def execute(*a, **k): raise AssertionError('no tool')
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    call, sent, log = open_call(monkeypatch, client)
+    call.dialogue.add('user', '明日の天気どう？')
+    out = await voice_responses.run_function('run_in_background', {'task': '明日の尼崎の天気', 'label': '明日の天気'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
+    assert said == ['調べもの「明日の天気」の結果: 明日の尼崎は晴れ、最高気温は18度です。']
+    assert not any(p == 'lookup_show_reminded' for p, _ in log)
+    voice_lookup.close_call(call)

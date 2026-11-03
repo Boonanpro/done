@@ -1,0 +1,13 @@
+{
+ "note": "合格するはずの作り例: 100kgで買えるページだけを出し、すぐ答え、切ってと言ったら切れた。採点の処理が正しい通話を落とさないことを確かめるための物。",
+ "pages": [{"url": "https://www.super-sports.jp/view/item/002005000002"}],
+ "turns": [
+  {"role": "owner", "start": 0.0, "end": 5.0, "text": "百キロぐらいの重りを家にそろえようと思ったらどんぐらいかかるかな"},
+  {"role": "dan", "start": 6.0, "end": 9.0, "text": "調べるね"},
+  {"role": "owner", "start": 40.0, "end": 42.0, "text": "ありがとう、切って"},
+  {"role": "dan", "start": 42.6, "end": 43.2, "text": "うん、またね"}
+ ],
+ "hangup_asked_at": 42.0,
+ "closed_at": 44.0,
+ "ended_at": 45.0
+}

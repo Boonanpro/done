@@ -686,7 +686,10 @@ async def _run(session_id, user_id, room_id, api_key, own):
                         if session_id in ENDING: return
                         mark_ending(session_id, room_id)
                         record('call_ending', by='owner_words')
-                        await voice_hangup.after_goodbye(lambda: spoke.get('dan', 0), lambda: close_session(send))
+                        async def closing():
+                            record('call_close_sent', by='owner_words')
+                            await close_session(send)
+                        await voice_hangup.after_goodbye(lambda: spoke.get('dan_words', 0), closing)
                     hangup = voice_hangup.HangUp(user_id, dialogue, record, end_by_words)
             if own:
                 from app.services import voice_prefetch
@@ -748,7 +751,11 @@ async def _run(session_id, user_id, room_id, api_key, own):
                         dialogue.actions.heard(event.get('start_ms'), event.get('end_ms'))
                     if stop_control is not None:
                         stop_control.heard(event.get('delta') or '', event.get('start_ms'), event.get('end_ms'))
-                elif kind == 'session.output_transcript.delta': dialogue.add('assistant', event.get('delta') or '')
+                elif kind == 'session.output_transcript.delta':
+                    dialogue.add('assistant', event.get('delta') or '')
+                    # Dan's words, not his audio: output audio arrives without pause (silence too), so a quiet Dan was never
+                    # seen and every hang-up waited the full MAX_GOODBYE_S (2026-11-03, voice_goal_call.py).
+                    spoke['dan_words'] = time.monotonic()
                 if stage is not None and kind in ('session.input_transcript.delta', 'session.output_transcript.delta'):
                     try: stage.heard('user' if kind == 'session.input_transcript.delta' else 'assistant', event.get('delta') or '')
                     except Exception as exc: record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
