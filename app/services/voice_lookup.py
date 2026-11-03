@@ -30,7 +30,7 @@ MAX_ROUNDS = 10
 SECONDS = 120          # a lookup that has not answered by then says so; long work belongs to start_work
 ROUND_TIMEOUT_S = 40
 PROGRESS_LIMIT = 3     # share_progress per lookup: facts on the way, not a running commentary
-READ_PAGE_S = 12       # one slow page held a round of four for 29 s (2026-11-03 22:00 test call); the others are used
+READ_PAGE_S = 8        # one slow page held a round of four for 29 s (2026-11-03 22:00 test call); 5 of 7 reads took under 7 s
 DIRECT = ('places', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
 # The owner asked to see it on the screen (in the task or in the owner's last words of the call).
 WANTS_SCREEN = re.compile(r'画面|見せ|出して|映して')
