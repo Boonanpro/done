@@ -30,7 +30,6 @@ import { appendLive } from '../frontend/src/components/voice/live-backend';
 // RN's global fetch resolves through a JS timer, which pauses off-screen.
 // All call requests must use the native transport, including tools and polling.
 import { fetch } from 'expo/fetch';
-import { LiveGreeting } from '../frontend/src/components/voice/live-greeting';
 import { LiveJobs, type LiveJob } from '../frontend/src/components/voice/live-jobs';
 import { voiceQuality, voiceTransport } from './voice-quality';
 import { startVoiceBackground, stopVoiceBackground, onVoiceEnd, onVoiceTick, markVoiceConnected, playVoiceCue, playPinVoiceCue, setWorkWaiting, bindRemoteAudio, unbindRemoteAudio, audioEndpointStats, muteExternalAudio, connectPinAudio, quietSpeechInput } from './voice-background';
@@ -308,7 +307,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
       if (result.error) throw new Error(String(result.error));
       return result;
     };
-    const greeting = new LiveGreeting(dcSend, type => console.info('DanVoice greeting',type));
     const jobs = new LiveJobs();
     try {
       if (Platform.OS === 'android') {
@@ -409,7 +407,6 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         if (!message.type?.includes('transcript.delta')) console.info('DanVoice event', JSON.stringify({at:Date.now(),
           type:message.type,client_event_id:message.client_event_id,start_ms:message.start_ms,end_ms:message.end_ms,
           error:message.error ? {type:message.error.type,code:message.error.code,event_id:message.error.event_id} : undefined}));
-        greeting.observe(message);
         // The backend chose end_call: hang up here, now. The server's session.close reached OpenAI at once but the call
         // stayed open another 4-9 s while Dan said only 「少々お待ちください」 (2026-09-26, three real calls).
         const inner = message.type === 'response.event' ? message.event : null;
@@ -460,7 +457,8 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
             }
             setStatus('connected'); connectedAtRef.current = Date.now(); markVoiceConnected();
             await (audioEndpoint === 'pin' ? playPinVoiceCue('ready', pcRef.current?._pcId) : playVoiceCue('ready')).catch(() => {});
-            if (live() && !latestUserRef.current) greeting.start(`mobile-greeting-${Date.now()}`);
+            // No spoken greeting: the ready cue says the call is open and Dan answers the owner's first words. The appended
+            // 「もしもし」 instruction and its nudge left Live silent to the owner's replies in 4 of 5 calls (2026-11-02〜03).
           }).catch(error => {
             if (!live()) return;
             disconnect(); setError(error instanceof Error ? error.message : ui(`Could not connect to ${deviceName}.`,`${deviceName}に接続できませんでした`)); setStatus('error');
@@ -543,10 +541,9 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
         } finally { polling = false; }
       };
       // Work state arrives pushed (the app's feed: 'dan-job', the moment a job's file changes on the server). The list is
-      // read once when the call starts and when the app comes back on screen; the timer only drives the greeting.
+      // read once when the call starts and when the app comes back on screen.
       let seeded = false;
       timer = setInterval(() => {
-        greeting.tick();
         if (!seeded && started) { seeded = true; void pollJobs?.(); }
       }, 1500);
       const lastSeq: Record<string, number> = {};
