@@ -5,6 +5,7 @@ stream. Telephone peers never become the owner merely by calling our number.
 """
 import asyncio
 import base64
+import copy
 import json
 import os
 from pathlib import Path
@@ -143,7 +144,7 @@ class Bridge:
                 or data.get('mediaFormat') != {'encoding': 'audio/x-mulaw', 'sampleRate': 8000, 'channels': 1}):
             raise ValueError('Stream does not match authorized call')
         self.stream_id = data['streamSid']
-        config = await config_for(self.grant)
+        config = copy.deepcopy(self.grant.get('config')) or await config_for(self.grant)
         backend = config.pop('_backend', None)
         tasks = []
         try:
@@ -213,6 +214,7 @@ class Bridge:
         await after_goodbye(lambda: self.last_spoke, lambda: self.live.send(json.dumps({'type': 'session.close'})))
 
     async def from_phone(self):
+        audio_started = time.monotonic()
         while True:
             event = await self.phone.receive_json()
             kind = event.get('event')
@@ -224,7 +226,14 @@ class Bridge:
                     marker.set()
             if kind == 'media' and event.get('media', {}).get('track', 'inbound') == 'inbound':
                 payload = event['media']['payload']
-                self.received += len(base64.b64decode(payload, validate=True))
+                size = len(base64.b64decode(payload, validate=True))
+                # Twilio may deliver buffered audio in a burst after setup or a
+                # network stall. Preserve words, but never exceed Live's real-time
+                # input budget (the actual first call failed at 8 seconds/burst).
+                delay = audio_started + self.received / 8000 - .08 - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self.received += size
                 await self.live.send(json.dumps({'type': 'session.input_audio.append', 'audio': payload}))
 
     async def from_live(self):
