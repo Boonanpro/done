@@ -92,3 +92,30 @@ async def test_primary_control_adapter_receives_events_and_sends_on_same_socket(
         assert json.loads(await socket.recv())['delta'] == '切って'
         await socket.send('{"type":"session.close"}')
     assert json.loads(live.last)['type'] == 'session.close'
+
+
+def test_signed_stream_is_used_once_and_records_actual_bridge_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(T, 'ROOT', tmp_path)
+    monkeypatch.setattr(T.settings, 'TWILIO_AUTH_TOKEN', 'test-secret')
+    key = 'b'*48
+    T.save(key, {'expires':time.time()+60, 'call_sid':'authorized'})
+    class Bridge:
+        session_id='live-example'; finalized=True; received=160; sent=320; transcript=[]
+        def __init__(self, socket, grant): self.socket=socket
+        async def run(self, start):
+            assert self.grant['call_sid']=='authorized'
+            await self.socket.send_json({'started':True})
+    monkeypatch.setattr(T, 'Bridge', Bridge)
+    app = FastAPI(); app.include_router(router)
+    signature=RequestValidator('test-secret').compute_signature(T.stream_url(key), {})
+    from starlette.websockets import WebSocketDisconnect
+    with TestClient(app) as client:
+        with client.websocket_connect('/api/v1/voice/telephone/stream/'+key,headers={'x-twilio-signature':signature}) as ws:
+            ws.send_json({'event':'connected'})
+            ws.send_json({'event':'start'})
+            assert ws.receive_json()=={'started':True}
+            with pytest.raises(WebSocketDisconnect): ws.receive_json()
+        assert T.read(key)['result']['finalized']
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect('/api/v1/voice/telephone/stream/'+key,headers={'x-twilio-signature':signature}):
+                pytest.fail('Reused grant accepted')
