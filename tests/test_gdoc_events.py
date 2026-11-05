@@ -307,3 +307,20 @@ def test_docs_comment_mail_does_not_wake_the_chat(monkeypatch):
     assert W.schedule_room_wakeup(msg,'room',reason='content:existing')   # no running loop: would be False if it woke
     assert taken == [('1XLLtHr2XY9bFEnrxrUaL4yaENs2gGTJ2Y8hGzmNbjqc','room')]
     assert W.docs_comment_file({**msg,'sender_info':{'from':'someone@example.com'}}) is None
+
+
+def test_split_comment_waits_for_the_owner_and_runs_as_one(store):
+    first = {'comment_id':'c1','new':[{'id':'c:c1','revision':'a','content':'前半'}],'thread':{'id':'c1'}}
+    second = {'comment_id':'c1','new':[{'id':'r:r1','revision':'b','content':'後半の質問'}],'thread':{'id':'c1','replies':[{'id':'r1'}]}}
+    now = time.time()
+    with E.db() as c:
+        c.execute('INSERT INTO batches(id,file_id,payload,created) VALUES(?,?,?,?)',('b1','file',json.dumps([first]),E.iso(now-20)))
+        c.execute('INSERT INTO batches(id,file_id,payload,created) VALUES(?,?,?,?)',('b2','file',json.dumps([second]),E.iso(now-5)))
+    batch, wait = E.next_batch('file', now)
+    assert batch is None and wait > now
+    batch, wait = E.next_batch('file', now+60)
+    assert batch['id'] == 'b1' and not wait
+    payload = json.loads(batch['payload'])
+    assert len(payload) == 1 and [x['content'] for x in payload[0]['new']] == ['前半','後半の質問']
+    with E.db() as c: assert c.execute("SELECT status FROM batches WHERE id='b2'").fetchone()[0] == 'merged'
+    assert '発言ごと' in E.prompt({'file_id':'file','room_id':'room'}, dict(batch))
