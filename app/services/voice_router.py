@@ -135,11 +135,25 @@ class Router:
         self.stage = stage
         self.end_call = end_call
         self.judge = None
-        self.handled_at = 0         # the dialogue.history length at the last delegation: the owner's words since are the request
+        self.mark = (0, 0)          # where the call's words stood at the last delegation (turn, characters): the owner's words since are the request
         self.jobs = {}              # job id -> label, the chat Dan work started from this call
         self.targets = None         # artifact name -> path, read once
         self.tasks = set()
         self.closed = False
+        try:   # Jev's key and the owner's artifacts are read now, not on the first request (the first route took 415 ms)
+            self.warming = asyncio.ensure_future(self.warm())
+        except RuntimeError:
+            self.warming = None
+
+    async def warm(self):
+        from app.services.jev_decisions import Decisions
+        if self.judge is None:
+            self.judge = Decisions(self.user_id, timeout=JEV_TIMEOUT_S, max_calls=200, retry_transient_after=10)
+        try:
+            await self.judge._credential()
+            await self.targets_now()
+        except Exception:
+            pass
 
     # -- the delegation -------------------------------------------------------------------------------------------
     def delegated(self, delegation_id):
@@ -165,13 +179,37 @@ class Router:
         while time.monotonic() - created < SETTLE_MAX_S and time.monotonic() - self.dialogue.heard_at < SETTLE_S:
             await asyncio.sleep(.05)
 
+    def since_mark(self):
+        """The call's turns since the last delegation. A turn of the owner that went on across it (no words of Dan in
+        between, so the transcript kept it as one turn) counts from where it stood: in a backend run 「今どういう状況？」
+        said right after the request became part of the request's turn, and the router started the same work again."""
+        history = self.dialogue.history
+        index, offset = self.mark
+        out = []
+        for i, t in enumerate(history[index:], index):
+            text = t['text'][offset:] if i == index else t['text']
+            if text.strip(): out.append({'role': t['role'], 'text': text})
+        return out
+
     def request_words(self):
         """The owner's words since the last delegation (one request is often said over several turns)."""
-        history = self.dialogue.history
-        said = [t['text'].strip() for t in history[self.handled_at:] if t['role'] == 'user' and t['text'].strip()]
+        said = [t['text'].strip() for t in self.since_mark() if t['role'] == 'user']
         if not said:
-            said = [next((t['text'].strip() for t in reversed(history) if t['role'] == 'user'), '')]
+            said = [next((t['text'].strip() for t in reversed(self.dialogue.history) if t['role'] == 'user'), '')]
         return chr(10).join(said)[-1500:]
+
+    def conversation(self, limit=10):
+        """The recent turns for Jev, the owner's words since the last delegation as the last turn."""
+        history = self.dialogue.history
+        index, offset = self.mark
+        turns = []
+        for i, t in enumerate(history):
+            if i == index and offset and t['role'] == 'user':
+                turns.append({'role': 'user', 'text': t['text'][:offset]})
+                turns.append({'role': 'user', 'text': t['text'][offset:]})
+            else:
+                turns.append(t)
+        return [{'role': '本人' if t['role'] == 'user' else 'ダン', 'text': t['text'].strip()[:600]} for t in turns if t['text'].strip()][-limit:]
 
     def running(self):
         """The call's running work: lookups and chat Dan jobs, oldest first, each {'label', 'kind', 'id'}."""
@@ -211,9 +249,8 @@ class Router:
         early = self.early_route(running)
         if early is not None:
             return early
-        targets = await self.targets_now()
-        turns = [{'role': '本人' if t['role'] == 'user' else 'ダン', 'text': t['text'].strip()[:600]} for t in self.dialogue.turns[-10:] if t['text'].strip()]
-        state = {'conversation': turns, 'running_work': [w['label'] for w in running[-4:]],
+        targets = self.targets or {}   # read at the call's start (warm); a request before that has no pages to name
+        state = {'conversation': self.conversation(), 'running_work': [w['label'] for w in running[-4:]],
                  'screen': getattr(self.stage, 'caption', '') if self.stage is not None else ''}
         got = await self.judge.choose(state, questions(running, {name: f'「{name}」' for name in targets}))
         if not got.get('available'):
@@ -228,7 +265,7 @@ class Router:
         words are the ones judged and nothing is running that the words could be about."""
         prefetch = getattr(self.dialogue, 'prefetch', None)
         judged = getattr(prefetch, 'route_answer', None)
-        latest = next((t['text'].strip() for t in reversed(self.dialogue.turns) if t['role'] == 'user'), '')
+        latest = next((t['text'].strip() for t in reversed(self.conversation()) if t['role'] == '本人'), '')
         if running or not judged or judged[0] != latest or len(latest) < 12 or not (judged[1] or {}).get('available'):
             return None
         route, probability = chosen(judged[1].get('answers'), 'route')
@@ -238,7 +275,8 @@ class Router:
 
     async def run(self, route, target, span, delegation_id, created):
         words = self.request_words()
-        self.handled_at = len(self.dialogue.history)
+        history = self.dialogue.history
+        self.mark = (len(history) - 1, len(history[-1]['text'])) if history else (0, 0)
         if route == 'status':
             return await self.reply(delegation_id, created, await asyncio.to_thread(self.status_text), spoken=True)
         if route == 'calendar' and span in ('today', 'tomorrow', 'week'):
@@ -249,15 +287,15 @@ class Router:
             return await self.lookup(words, delegation_id, created)
         if route in TO_CHAT_DAN:
             return await self.to_chat_dan(words, route, delegation_id, created)
-        # document / message / rooms / other: the earlier backend, which writes on the stage and reads other rooms
         if route == 'end':
-            await self.reply(delegation_id, created, '本人は通話を終えたいと言っている。短く挨拶して終える。', spoken=True)
+            await self.reply(delegation_id, created, '通話はここで終わる。', spoken=True)
             if self.end_call is not None: await self.end_call()
             return
         if route.startswith('stop:'):
             return await self.stop(route, delegation_id, created)
         if route.startswith('change:'):
             return await self.change(route, words, delegation_id, created)
+        # document / message / rooms / other: the earlier backend, which writes on the stage and reads other rooms
         return await self.luna(delegation_id, created)
 
     async def reply(self, delegation_id, created, text, spoken=True):
@@ -397,11 +435,12 @@ class Router:
             return await self.reply(delegation_id, created, '今の頼みはうまく受け取れなかった。もう一度言ってほしい。')
         started = time.monotonic()
         try:
-            text = await asyncio.wait_for(self._luna_loop(delegation_id), LUNA_SECONDS)
+            text, ended = await asyncio.wait_for(self._luna_loop(delegation_id), LUNA_SECONDS)
         except asyncio.TimeoutError:
-            text = ''
-        self.record('route_luna', delegation_id=delegation_id[:40], seconds=round(time.monotonic() - started, 1), chars=len(text or ''))
-        await self.reply(delegation_id, created, text or '今の頼みには答えを出せなかった。')
+            text, ended = '', False
+        self.record('route_luna', delegation_id=delegation_id[:40], seconds=round(time.monotonic() - started, 1), chars=len(text or ''), ended=ended)
+        if not ended:
+            await self.reply(delegation_id, created, text or '今の頼みには答えを出せなかった。')
 
     async def _luna_loop(self, delegation_id):
         from app.services.voice_lookup import _client
@@ -420,17 +459,18 @@ class Router:
             previous = response.id
             calls = [item for item in response.output if getattr(item, 'type', '') == 'function_call']
             if not calls:
-                return (response.output_text or '').strip()
+                return (response.output_text or '').strip(), False
             outputs = await asyncio.gather(*(execute_call({'type': 'function_call', 'call_id': c.call_id, 'name': c.name, 'arguments': c.arguments or '{}'},
                                                           self.user_id, self.room_id, self.dialogue, self.record, delegation_id, speak) for c in calls))
             if any(c.name == 'end_call' for c in calls) and self.end_call is not None:
                 await self.end_call()
-                return ''
+                return '', True
             given = [{'type': 'function_call_output', 'call_id': out['call_id'], 'output': out['output']} for out in outputs]
-        return ''
+        return '', False
 
     async def close(self):
         self.closed = True
+        if self.warming is not None and not self.warming.done(): self.warming.cancel()
         for task in list(self.tasks): task.cancel()
         if self.judge is not None:
             try: await self.judge.__aexit__()
@@ -438,7 +478,14 @@ class Router:
 
 
 def job_label(job):
-    return label_of(str(job.get('title') or job.get('task') or '').split(TRANSCRIPT)[0].split('参考の直前会話')[0])
+    """The job's short name; until it has one (a job started without a name is 「作業」 for a while), the owner's words."""
+    from app.services.parallel_job_runner import placeholder_name
+    title = str(job.get('title') or '').strip()
+    words = str(job.get('task') or '').split(TRANSCRIPT)[0].split('参考の直前会話')[0]
+    words = words.replace('今回のユーザー発言（原文）:', '').replace('作業への引継ぎ:', '').strip()
+    if title and not job.get('auto_title') and title != placeholder_name(job.get('task', '')):
+        return label_of(title)
+    return label_of(words or title)
 
 
 def age(stamp):

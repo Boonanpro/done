@@ -381,6 +381,8 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
                 follower.update(jobs)
             except Exception:
                 logger.exception('worker screen unavailable room=%s', room_id)
+        if routed and told and session_id not in ENDING and not (dialogue is not None and time.monotonic() < getattr(dialogue, 'routing_until', 0)):
+            await flush_state(send, told, record)
         for job in jobs:
             events = job.get('events') or []
             previous = seen.get(job['id'])
@@ -478,18 +480,36 @@ async def tell_state(send, job, fresh, told, record):
     doing = [e for e in fresh if e.get('kind') in ('progress', 'tool') and not str(e.get('text') or '').startswith(FINDING)]
     if not doing or job.get('state') not in ('queued', 'running', 'awaiting_confirmation', 'paused'):
         return
-    last, at = told.get(job['id'], ('', 0.0))
-    if time.monotonic() - at < STATE_EVERY_S:
-        return
     where = voice_parts.where_it_is(job)
-    latest = doing[-1]
-    step = str(latest.get('label') or latest.get('text') or '')[:200]
-    now = f'作業「{title}」の今（{datetime.now().strftime("%H:%M:%S")}）: ' + '、'.join(x for x in (where, step) if x)
-    if now.split(': ', 1)[-1] == last.split(': ', 1)[-1]:
+    now = f'作業「{title}」の今（{datetime.now().strftime("%H:%M:%S")}）: ' + '、'.join(x for x in (where, step_words(doing[-1], bool(where))) if x)
+    last, at, _ = told.get(job['id'], ('', 0.0, ''))
+    if not now.split(': ', 1)[-1] or now.split(': ', 1)[-1] == last.split(': ', 1)[-1]:
         return
-    told[job['id']] = (now, time.monotonic())
-    await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': now[:COMMENTARY_LIMIT]})
-    record('job_state_told', job_id=job['id'][:8], chars=len(now))
+    told[job['id']] = (last, at, now)   # waits in told until it may be given (flush_state)
+    await flush_state(send, told, record)
+
+
+def step_words(event, placed):
+    """A job's step in plain words: its own note for a progress line; for a tool, what it does (voice_parts.DOING), not
+    the tool's name (「browser:click」「lookup」 went into the state as they were in the 2026-11-05 backend run)."""
+    from app.services import voice_parts
+    text = str(event.get('text') or '').strip()
+    if event.get('kind') == 'progress':
+        return text.splitlines()[0][:200] if text else ''
+    if placed:   # where_it_is already says what the browser does
+        return ''
+    name, _, action = str(event.get('label') or text).partition(':')
+    return voice_parts.DOING.get(action.strip(), '') or voice_parts.DOING.get(name.strip(), '')
+
+
+async def flush_state(send, told, record):
+    """Give each job's newest state, at most once every STATE_EVERY_S per job (a job's steps come seconds apart)."""
+    for job_id, (last, at, pending) in list(told.items()):
+        if not pending or time.monotonic() - at < STATE_EVERY_S:
+            continue
+        told[job_id] = (pending, time.monotonic(), '')
+        await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': pending[:COMMENTARY_LIMIT]})
+        record('job_state_told', job_id=job_id[:8], chars=len(pending))
 
 
 GREETING_SECONDS = 4.5

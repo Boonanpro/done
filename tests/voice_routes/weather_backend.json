@@ -1,0 +1,18 @@
+{
+ "about": "振り分けを直すのに使っていない別の頼み（ウェブを読むだけの調べもの）。scripts/voice_route_backend_run.py で流す。",
+ "turns": [
+  [
+   "user",
+   "ちょっと聞きたいんだけど、今日の夕方って梅田のあたり雨降りそうかな"
+  ]
+ ],
+ "success": {
+  "seconds": 40,
+  "result_has": [
+   "(雨|降水|晴|曇|くもり)"
+  ],
+  "route": [
+   "lookup"
+  ]
+ }
+}
