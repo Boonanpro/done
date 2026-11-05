@@ -290,6 +290,8 @@ app.include_router(secret_vault_router, prefix="/api/v1")
 app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(voice_router)  # /api/v1/voice prefix が router 側に
 app.include_router(voice_ws_router)
+from app.api.telephone_routes import router as telephone_router
+app.include_router(telephone_router)
 app.include_router(public_chat_router, prefix="/api/v1")
 from app.api.daily_achievements_routes import router as achievements_router  # noqa: E402
 app.include_router(achievements_router, prefix="/api/v1")
