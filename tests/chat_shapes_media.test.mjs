@@ -5,7 +5,7 @@
 // 実行: node --experimental-strip-types --test tests/chat_shapes_media.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chatImageUrl, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '../frontend/src/lib/chat-media.ts';
+import { bareDanMedia, chatImageUrl, danFileMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '../frontend/src/lib/chat-media.ts';
 import { mapOutsideTopFences, siteFilePath, splitTopFences, topLevelFences } from '../frontend/src/lib/chat-shapes/plain.ts';
 import { splitShapeSegments } from '../frontend/src/lib/chat-shapes/split.ts';
 import * as app from '../mobile/chat-shapes-plain.ts';
@@ -185,4 +185,52 @@ test('ダンのファイルの道を文字だけで確かめる siteFilePath（�
     '/api/v1/files/a.png?x=<y>', '/api/v1/chat/dan', 'https://dan.paina.info/api/v1/files/a.png', null, 3];
   for (const s of good) { assert.equal(siteFilePath(s), s, s); assert.equal(app.siteFilePath(s), s, s); }
   for (const s of bad) { assert.equal(siteFilePath(s), null, String(s)); assert.equal(app.siteFilePath(s), null, String(s)); }
+});
+
+test('ダンのファイルの画像・動画を指すリンク・裸の URL はその場に貼る物（2026-11-05 本人「直接貼れ」）。外の物・ほかの種類は今までどおりリンク', () => {
+  const v20 = 'https://dan.paina.info/api/v1/files/pornanti_line_v20_20261105.mp4';
+  for (const host of [HOST, PROD, null]) {
+    // 公開の入口・この PC の中の住所・道のどれで書いても、この画面のダンのファイルの道
+    assert.deepEqual(danFileMedia(v20, host), { url: '/api/v1/files/pornanti_line_v20_20261105.mp4', kind: 'video' });
+    assert.deepEqual(danFileMedia('http://localhost:8000/api/v1/files/a.mov', host), { url: '/api/v1/files/a.mov', kind: 'video' });
+    assert.deepEqual(danFileMedia('/api/v1/files/a.m4v', host), { url: '/api/v1/files/a.m4v', kind: 'video' });
+    assert.deepEqual(danFileMedia('/api/v1/files/b.webm', host), { url: '/api/v1/files/b.webm', kind: 'video' });
+    for (const ext of ['png', 'jpg', 'JPEG', 'gif', 'webp']) assert.deepEqual(danFileMedia('/api/v1/files/c.' + ext, host), { url: '/api/v1/files/c.' + ext, kind: 'image' });
+    assert.deepEqual(danFileMedia('/api/v1/files/%E5%86%99.png', host), { url: '/api/v1/files/%E5%86%99.png', kind: 'image' });
+    // ほかの種類・ダンのファイル以外・外のサイト（動画は再生しない、画像も今までどおりリンクの扱い）は貼らない
+    for (const href of ['/api/v1/files/q.pdf', '/api/v1/chat/dan.mp4', '/api/v1/files/../chat/a.mp4', 'https://videos.review.invalid/a.mp4',
+      EXT + '/a.png', 'https://videos.review.invalid/api/v1/files/a.mp4', 'http://dan.paina.info/api/v1/files/a.mp4', 'javascript:alert(1)//a.mp4', undefined]) {
+      assert.equal(danFileMedia(href, host), null, String(href));
+    }
+  }
+  // GFM の自動リンクは空白まで URL にする: 拡張子の直後の日本語で切って、残りは文字
+  assert.deepEqual(bareDanMedia(v20 + 'です', PROD), { media: { url: '/api/v1/files/pornanti_line_v20_20261105.mp4', kind: 'video' }, head: v20, rest: 'です' });
+  assert.deepEqual(bareDanMedia('https://dan.paina.info/api/v1/files/写真.pngを見て', HOST)?.head, 'https://dan.paina.info/api/v1/files/写真.png');
+  assert.equal(bareDanMedia('https://videos.review.invalid/a.mp4です', PROD), null);
+  assert.equal(bareDanMedia('https://dan.paina.info/api/v1/files/a.pdfです', PROD), null);
+  // parseMediaContent はリンクを抜き出さない（吹き出しが文中のその場に描く）
+  const reply = '完成しました。\n\n[ポルノアンチ LINE特典動画 v20](' + v20 + ')\n\n確認お願いします。';
+  const m = parseMediaContent(reply, PROD);
+  assert.deepEqual([m.images, m.videos, m.files, m.text], [[], [], [], reply]);
+});
+
+test('途中の文章から拾う印に、ダンの画像・動画を指すリンクと裸の URL も入る（コードブロック・`…`・外の動画・ふつうのリンクは入らない）', () => {
+  const v = 'https://dan.paina.info/api/v1/files/v.mp4';
+  const text = [
+    '作りました [見本の動画](' + v + ') と [資料](/api/v1/files/q.pdf) と [外の動画](https://videos.review.invalid/a.mp4)。',
+    '画像はこちら http://localhost:8000/api/v1/files/a.png です。裸の外の物 https://videos.review.invalid/b.mp4 も。',
+    '直後に日本語 https://dan.paina.info/api/v1/files/c.webpを見て。文末の点 https://dan.paina.info/api/v1/files/d.jpg.',
+    '`' + v + '` は書き方の説明、[ページ](https://dan.paina.info/projects/x) はページ',
+    '```\n[コードの中](' + v + ')\n' + v + '\n```',
+    '[添付画像: /api/v1/files/e.png]',
+  ].join('\n');
+  assert.deepEqual(mediaTags(text, PROD), [
+    '[見本の動画](' + v + ')',
+    'http://localhost:8000/api/v1/files/a.png',
+    'https://dan.paina.info/api/v1/files/c.webp',
+    'https://dan.paina.info/api/v1/files/d.jpg',
+    '[添付画像: /api/v1/files/e.png]',
+  ]);
+  // 部品（```openui-lang）の中のリンクも拾わない
+  assert.deepEqual(mediaTags(fence('root = Choice("[動画](' + v + ')", ["a"])'), PROD), []);
 });

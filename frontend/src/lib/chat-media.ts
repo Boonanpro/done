@@ -9,6 +9,8 @@
  * - 画像・動画の URL は、部品の縮小画像と同じ許可の境界（plain.ts safeImageUrl）を通った物だけ: ダンのファイル
  *   （/api/v1/files/<名前>）と https:// の外の物。通らない印は読みに行かず、文字のまま残す。
  * - 画面で再生する動画はダンのファイルだけ（<video> には Referer を止める属性が無い）。外の動画はファイルのリンクにする。
+ * - 本文の Markdown のリンク・裸の URL がダンのファイルの画像・動画を指す時は、吹き出しがその場で画像・動画として描く
+ *   （danFileMedia・bareDanMedia。parseMediaContent は抜き出さず文章に残す）。
  *
  * 読む時の決まり（imageRequest）: 外の画像は Cookie を送らない要求（crossOrigin=anonymous）で、Referer も送らない。
  * CORS に応じない外の画像は読めないので、使う側が枠ごと消す（壊れた画像の印を出さない）。画面の道（ダンのファイル）は
@@ -41,11 +43,13 @@ export function playableVideo(url: string): boolean {
 }
 
 const FILE_PATH = /\/api\/v1\/files\/[^?#\s)]+/;
-const LOCAL_FILE = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?=\/api\/v1\/files\/)/i;
+// ダンのファイルを指す絶対の住所: この PC の中の住所（ポートは何番でも）と、ダンの公開の入口（dan.paina.info）
+const LOCAL_FILE = /^(?:https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?|https:\/\/dan\.paina\.info(?::443)?)(?=\/api\/v1\/files\/)/i;
 
 /**
- * 本文の Markdown の画像・リンクの URL を、画面で読む URL にする（通らなければ null）。この PC の中だけで通じる住所の
- * ダンのファイル（http://localhost:8000/api/v1/files/…）は道に直す（app/services/message_media.py の portable と同じ）。
+ * 本文の Markdown の画像・リンクの URL を、画面で読む URL にする（通らなければ null）。この PC の中だけで通じる住所と
+ * 公開の入口の住所のダンのファイル（http://localhost:8000/api/v1/files/…・https://dan.paina.info/api/v1/files/…）は
+ * 道に直す（app/services/message_media.py の portable と同じ）。
  */
 export function chatImageUrl(raw: unknown, host: string | null = pageHost()): string | null {
   if (typeof raw !== 'string') return null;
@@ -110,10 +114,46 @@ export function parseMediaContent(content: string, host: string | null = pageHos
   return { images, videos, files, text };
 }
 
-// 文章の中の、ファイル・画像・動画の印（parseMediaContent と本文の Markdown が表示に変えるもの）
-const MEDIA_TAG = /!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]/g;
+export type DanMedia = { url: string; kind: 'image' | 'video' };
+const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i;
+const VIDEO_FILE = /\.(?:mp4|mov|webm|m4v)$/i;
 
-/** 文章の中の添付の印と Markdown の画像を、順に返す。一番外側のコードブロック（部品を含む）の中は見ない */
-export function mediaTags(text: string): string[] {
-  return splitTopFences(text).flatMap((p) => (p.code ? [] : p.text.match(MEDIA_TAG) || []));
+/**
+ * リンク・裸の URL がダンのファイルの画像・動画を指すなら、画面で読む道と種類（それ以外は null）。本文の Markdown の
+ * リンク（[名前](https://dan.paina.info/api/v1/files/x.mp4) など）を、添付の印と同じくその場の画像・動画にする
+ * （2026-11-05 本人「動画とか画像は基本全部チャットに直接貼れ」）。外のサイトの物は今までどおりリンク。
+ */
+export function danFileMedia(href: unknown, host: string | null = pageHost()): DanMedia | null {
+  const url = chatImageUrl(href, host);
+  if (!url || !isPagePath(url)) return null;
+  const path = url.split(/[?#]/)[0];
+  if (VIDEO_FILE.test(path)) return playableVideo(url) ? { url, kind: 'video' } : null;
+  return IMAGE_FILE.test(path) ? { url, kind: 'image' } : null;
+}
+
+/**
+ * 裸の URL（文章の中の https://…）から、ダンのファイルの画像・動画を指す頭の部分と残りの文字を分ける。GFM の自動リンクは
+ * 空白まで URL にするので「https://…/a.mp4です」の「です」も URL に入る。拡張子のすぐ後が ASCII でない文字なら、そこで切る。
+ */
+export function bareDanMedia(raw: string, host: string | null = pageHost()): { media: DanMedia; head: string; rest: string } | null {
+  const direct = danFileMedia(raw, host);
+  if (direct) return { media: direct, head: raw, rest: '' };
+  const m = /^(\S+?\.(?:png|jpe?g|gif|webp|mp4|mov|webm|m4v))(?=[^\x00-\x7f])/i.exec(raw);
+  const media = m ? danFileMedia(m[1], host) : null;
+  return m && media ? { media, head: m[1], rest: raw.slice(m[1].length) } : null;
+}
+
+// 文章の中の、ファイル・画像・動画の印（parseMediaContent と本文の Markdown が表示に変えるもの）。ふつうのリンクと裸の URL は
+// ダンのファイルの画像・動画を指す物だけ。`…` の中の物は数えない（先に読んで捨てる）
+const MEDIA_TAG = /`+[^`]*`+|!\[[^\]]*\]\([^)]+\)|\[添付(?:画像|動画|ファイル): [^\]]+\]|\[[^\]]*\]\([^)\s]+\)|https?:\/\/[^\s<>()[\]`]+/g;
+
+/** 文章の中の添付の印と Markdown の画像、ダンの画像・動画を指すリンク・裸の URL を、順に返す。一番外側のコードブロック（部品を含む）の中は見ない */
+export function mediaTags(text: string, host: string | null = pageHost()): string[] {
+  return splitTopFences(text).flatMap((p) => (p.code ? [] : (p.text.match(MEDIA_TAG) || []).flatMap((t) => {
+    if (t.startsWith('`')) return [];
+    if (t.startsWith('!') || t.startsWith('[添付')) return [t];
+    if (t.startsWith('[')) return danFileMedia(t.slice(t.indexOf('](') + 2, -1), host) ? [t] : [];
+    const bare = bareDanMedia(t.replace(/[.,;:!?*_~'"]+$/, ''), host);
+    return bare ? [bare.head] : [];
+  })));
 }

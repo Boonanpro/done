@@ -75,7 +75,7 @@ import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
-import { chatImageUrl, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '@/lib/chat-media';
+import { bareDanMedia, chatImageUrl, danFileMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
@@ -360,14 +360,46 @@ function MarkdownImage({ src, alt, onImageClick }: { src: unknown; alt?: string;
   return <button type="button" data-media-items={JSON.stringify([{url,kind:'image',name:alt}])} onClick={() => onImageClick?.(url)}><img src={url} alt={alt || '画像'} {...imageRequest(url)} onError={isPagePath(url) ? undefined : () => setFailed(url)} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" /></button>;
 }
 
-const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+// リンクの文字（自動リンクなら URL そのもの）
+function linkText(children: ReactNode): string {
+  if (typeof children === 'string' || typeof children === 'number') return String(children);
+  return Array.isArray(children) ? children.map(linkText).join('') : '';
+}
+
+// 裸の URL を GFM が自動でリンクにした物か（リンクの文字が URL そのもの。href は日本語などが %XX になっている）
+function isAutolink(href: string | undefined, label: string): boolean {
+  if (!href || !/^https?:\/\//i.test(label)) return false;
+  try { return decodeURI(href) === label || href === label; } catch { return href === label; }
+}
+
+// 本文のリンク・裸の URL が指すダンのファイルの画像・動画を、その場に貼る（2026-11-05 本人「動画とか画像は基本全部チャットに
+// 直接貼れ。クリックしたら見れるようにするんじゃなくて」）。リンクの文字は見出しとして上に残す。段落の中に置くので span で組む
+function InlineDanMedia({ media, name, onImageClick }: { media: DanMedia; name?: string; onImageClick?: (url: string) => void }) {
+  const title = name?.trim() ? <span className="mb-1 block text-sm font-medium text-foreground">{name}</span> : null;
+  return (
+    <span className="not-prose my-2 block max-w-full" data-media-items={media.kind === 'video' ? JSON.stringify([{ url: media.url, kind: 'video', name }]) : undefined}>
+      {title}
+      {media.kind === 'video'
+        ? <video src={media.url} controls playsInline preload="metadata" className="block max-h-[360px] max-w-full rounded-xl border border-border bg-black" />
+        : <MarkdownImage src={media.url} alt={name} onImageClick={onImageClick} />}
+    </span>
+  );
+}
+
+const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false, shownMedia = '' }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; shownMedia?: string }) {
   return (
     <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          // 画像・動画を指すリンクは画面の中の拡大表示で開く。開くのは境界を通った物だけで、動画はダンのファイルだけ（外の物はふつうのリンク）
-          a({ href, children }) { const url=chatImageUrl(href); const kind=url?mediaKind(url):null; return kind&&url&&(kind==='image'||playableVideo(url))?<button type="button" data-media-items={JSON.stringify([{url,kind}])} className="underline" onClick={()=>onImageClick?.(url)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
+          // ダンのファイルの画像・動画を指すリンク・裸の URL はその場に貼る（同じ物を添付の印でも貼っていれば、二重にせずリンクのまま）。
+          // ほかの画像・動画を指すリンクは画面の中の拡大表示で開く。開くのは境界を通った物だけで、動画はダンのファイルだけ（外の物はふつうのリンク）
+          a({ href, children }) {
+            const label = linkText(children);
+            const bare = isAutolink(href, label) ? bareDanMedia(label) : null;
+            const media = bare?.media ?? danFileMedia(href);
+            if (media && !shownMedia.split('\n').includes(media.url)) return <><InlineDanMedia media={media} name={bare ? undefined : label} onImageClick={onImageClick} />{bare?.rest}</>;
+            const url=chatImageUrl(href); const kind=url?mediaKind(url):null; return kind&&url&&(kind==='image'||playableVideo(url))?<button type="button" data-media-items={JSON.stringify([{url,kind}])} className="underline" onClick={()=>onImageClick?.(url)}>{children}</button>:<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
           img({ src, alt }) { return <MarkdownImage src={src} alt={alt} onImageClick={onImageClick} />; },
         }}
       >{text}</ReactMarkdown>
@@ -381,17 +413,17 @@ const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false 
 //       閉じが届いても保存されるまでは押せない。
 // messageId: 保存された返事の id。選択・入力の答え（本人の発言）は「この id のこの部品への答え」
 //       という照合情報（answer_to）で結ぶ。無ければ（ライブ枠）答えられない。
-const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = false, live = false, messageId }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; messageId?: string }) {
+const AiShapedText = memo(function AiShapedText({ text, onImageClick, muted = false, live = false, messageId, shownMedia = '' }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; live?: boolean; messageId?: string; shownMedia?: string }) {
   const segments = useMemo(() => splitShapeSegments(text, { streaming: live }), [text, live]);
   const keys = useMemo(() => partKeys(segments.filter((s) => s.kind === 'shape').map((s) => (s.kind === 'shape' ? s.code : ''))), [segments]);
   const renderFallback = useCallback((code: string) => <AiMarkdown text={'```\n' + code + '\n```'} muted={muted} />, [muted]);
   if (segments.length === 1 && segments[0].kind === 'markdown') {
-    return <AiMarkdown text={segments[0].text} onImageClick={onImageClick} muted={muted} />;
+    return <AiMarkdown text={segments[0].text} onImageClick={onImageClick} muted={muted} shownMedia={shownMedia} />;
   }
   return (
     <>
       {segments.map((s, i) => (s.kind === 'markdown'
-        ? <AiMarkdown key={`md-${i}`} text={s.text} onImageClick={onImageClick} muted={muted} />
+        ? <AiMarkdown key={`md-${i}`} text={s.text} onImageClick={onImageClick} muted={muted} shownMedia={shownMedia} />
         : <ShapeBlock key={`shape-${s.index}`} code={s.code} complete={s.complete} live={live} messageId={live ? null : (messageId || null)} part={keys[s.index] || `i${s.index}`} renderFallback={renderFallback} />))}
     </>
   );
@@ -407,7 +439,7 @@ const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, mute
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
-      {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} messageId={messageId} />}
+      {clean.trim() && <AiShapedText text={clean} onImageClick={onImageClick} muted={muted} live={live} messageId={messageId} shownMedia={[...images, ...videos].join('\n')} />}
     </>
   );
 });
@@ -742,7 +774,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply, 
           ))}
         </div>
       )}
-      {!useTimeline && aiText && <AiShapedText text={aiText} onImageClick={onImageClick} messageId={msg.id} />}
+      {!useTimeline && aiText && <AiShapedText text={aiText} onImageClick={onImageClick} messageId={msg.id} shownMedia={[...aiImages, ...aiVideos].join('\n')} />}
       {proposals.length > 0 && (
         <div className="flex flex-wrap gap-3 mt-2">
           {proposals.map((p, i) => (
