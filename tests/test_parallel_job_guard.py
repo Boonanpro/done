@@ -27,7 +27,7 @@ class HookTests(unittest.TestCase):
         job = {'DAN_COMMAND_JOB_ID': 'j1'}
         self.assertIn('前面', job_tool_hook.decide('Agent', {'run_in_background': True}, job))
         self.assertIn('眠れません', job_tool_hook.decide('ScheduleWakeup', {'delaySeconds': 1800}, job))
-        self.assertEqual('', job_tool_hook.decide('Agent', {'prompt': 'x'}, job))
+        self.assertIn('前面', job_tool_hook.decide('Agent', {'prompt': 'x'}, job))  # left out = background now
         self.assertEqual('', job_tool_hook.decide('Agent', {'run_in_background': False}, job))
         self.assertEqual('', job_tool_hook.decide('Bash', {'command': 'ls'}, job))
         room = {'DAN_LOCK_OWNER': 'room:r1'}   # a chat room keeps its input open: nothing is refused there
