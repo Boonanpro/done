@@ -119,3 +119,25 @@ def test_signed_stream_is_used_once_and_records_actual_bridge_result(tmp_path, m
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect('/api/v1/voice/telephone/stream/'+key,headers={'x-twilio-signature':signature}):
                 pytest.fail('Reused grant accepted')
+
+
+async def measure_buffered_input(bridge_class):
+    sent = []
+    payload = base64.b64encode(bytes(range(160))).decode()
+    events = [{'event':'media','media':{'payload':payload}} for _ in range(20)] + [{'event':'stop'}]
+    class Phone:
+        async def receive_json(self): return events.pop(0)
+    class Live:
+        async def send(self, raw): sent.append((time.monotonic(),json.loads(raw)['audio']))
+    bridge=bridge_class(Phone(), {})
+    bridge.live=Live()
+    await bridge.from_phone()
+    assert len(sent)==20 and all(x[1]==payload for x in sent), 'Buffered speech lost/changed'
+    elapsed=sent[-1][0]-sent[0][0]
+    assert elapsed>=.28, f'Buffered audio burst too fast: {elapsed:.4f}s for 400ms speech'
+    return elapsed
+
+
+@pytest.mark.asyncio
+async def test_buffered_phone_audio_is_paced_without_dropping_words():
+    await measure_buffered_input(T.Bridge)

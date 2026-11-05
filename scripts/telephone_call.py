@@ -54,7 +54,7 @@ async def main(args):
         grant = {'user_id': user, 'room_id': args.room, 'peer': args.action,
             'purpose': purpose, 'expires': time.time()+180, 'max_seconds': args.max_seconds}
         # Prepare room context and catch configuration/access errors before ringing.
-        await T.config_for(grant)
+        grant['config'] = await T.config_for(grant)
         T.save(key, grant)
         # No automatic retry: a timeout may mean the call was already placed.
         r = await client.post(base + '/Calls.json', auth=auth, data={

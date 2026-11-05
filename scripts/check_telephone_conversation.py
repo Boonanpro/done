@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv(Path.home() / 'done' / '.env')
 from openai import AsyncOpenAI
 from app.config import settings
-from app.services.telephone import Bridge
+from app.services.telephone import Bridge, config_for
 from app.services.owner import resolve_owner_user_id
 from app.services.project_service import ProjectService
 
@@ -56,6 +56,7 @@ async def run(case, out):
         provider_ended = True
         phone.ended = True
     grant = {'peer':'owner', 'user_id':owner, 'room_id':project['room_id'], 'call_sid':'simulated', 'max_seconds':100}
+    grant['config'] = await config_for(grant)
     bridge = Bridge(phone, grant, finish)
     task = asyncio.create_task(bridge.run({'start':{'callSid':'simulated', 'accountSid':settings.TWILIO_ACCOUNT_SID,
         'streamSid':'simulated-stream','mediaFormat':{'encoding':'audio/x-mulaw','sampleRate':8000,'channels':1}}}))
