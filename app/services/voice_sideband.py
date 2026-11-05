@@ -45,13 +45,13 @@ def enabled():
     return os.environ.get('DAN_VOICE_SIDEBAND', '1') != '0'
 
 
-def attach(session_id, user_id, room_id, api_key, own=False, backend=None):
+def attach(session_id, user_id, room_id, api_key, own=False, backend=None, connection=None):
     """Start the sideband for a call in the background. Returns True when this server owns the delegations."""
     if not enabled() or not session_id or not api_key or session_id in _tasks:
         return False
     own = bool(own) and os.environ.get('DAN_VOICE_SIDEBAND_OWN', '1') != '0'   # DAN_VOICE_SIDEBAND_OWN=0: observe only, the app answers as before
     try:
-        task = asyncio.get_running_loop().create_task(_run(session_id, user_id, room_id, api_key, own, backend))
+        task = asyncio.get_running_loop().create_task(_run(session_id, user_id, room_id, api_key, own, backend, connection))
     except RuntimeError:
         return False
     _tasks[session_id] = task
@@ -709,7 +709,7 @@ async def call_log(room_id, user_id, began, seconds, by='owner'):
                                      sender_type='system', created_at=began.isoformat())
 
 
-async def _run(session_id, user_id, room_id, api_key, own, backend=None):
+async def _run(session_id, user_id, room_id, api_key, own, backend=None, connection=None):
     import websockets
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
@@ -717,8 +717,10 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None):
     dialogue.began_iso = began.isoformat()
     stop_control = hangup = background = router = None
     try:
-        async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
-                                      max_size=8*1024*1024, open_timeout=10) as socket:
+        transport = connection if connection is not None else websockets.connect(
+            URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
+            max_size=8*1024*1024, open_timeout=10)
+        async with transport as socket:
             record('sideband_attached', elapsed_ms=round((time.monotonic()-started)*1000), own=bool(own))
             lock = asyncio.Lock()
             async def send(event):
