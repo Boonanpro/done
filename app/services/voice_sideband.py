@@ -801,6 +801,16 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None):
                 if kind == 'session.delegation.created':
                     dialogue.delegated_at = time.monotonic()
                     delegation = event.get('delegation') or {}
+                    if router is None and own and delegation.get('target') == 'client':
+                        # A call created as routed whose spec did not reach here: unanswered, its delegations would leave the
+                        # speech model waiting. The router is made now, with the earlier backend built here.
+                        from app.services import voice_router, voice_responses
+                        async def end_routed():
+                            await end_by_words('route_end')
+                        router = voice_router.Router(session_id, user_id, room_id, dialogue, send, record, spoke, stage=stage, end_call=end_routed,
+                                                     backend=voice_responses.delegation(room_id, user_id)['responses'])
+                        if background is not None: background.router = router
+                        record('router_on', late=True)
                     if router is not None and delegation.get('target') == 'client' and delegation.get('id'):
                         router.delegated(str(delegation['id']))
                     if dialogue.intake is not None:

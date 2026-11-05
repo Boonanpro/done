@@ -341,11 +341,15 @@ class Router:
             label = self.jobs.get(job['id']) or job_label(job)
             words = voice_parts.STATE_WORDS.get(job['state'], job['state'])
             if job['state'] in ('queued', 'running'):
-                last = next((e for e in reversed(job.get('events') or []) if e.get('kind') in ('progress', 'tool')), None)
+                from app.services.voice_sideband import step_words, FINDING
+                events = job.get('events') or []
+                found = [str(e.get('text') or '')[len(FINDING):].strip() for e in events if e.get('kind') == 'progress' and str(e.get('text') or '').startswith(FINDING)]
+                last = next((e for e in reversed(events) if e.get('kind') in ('progress', 'tool') and not str(e.get('text') or '').startswith(FINDING)), None)
                 where = voice_parts.where_it_is(job)
+                step = step_words(last, bool(where)) if last else ''
                 lines.append(f'作業「{label}」は{words}（{seconds(age(job.get("created_at")))}前から）。'
-                             + (where + '。' if where else '')
-                             + (f'最後の記録: {str(last.get("label") or last.get("text") or "")[:160]}' if last else ''))
+                             + (where + '。' if where else '') + (step + '。' if step else '')
+                             + ('ここまでに分かったこと: ' + ' '.join(found[-2:]) if found else ''))
             elif job['state'] == 'awaiting_confirmation':
                 lines.append(f'作業「{label}」は本人の承認を待っている: {str((job.get("confirmation") or {}).get("summary") or "")[:200]}')
             elif job['state'] == 'completed':

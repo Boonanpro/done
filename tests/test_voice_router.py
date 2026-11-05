@@ -77,13 +77,18 @@ def test_a_word_about_running_work_wins_over_a_new_route():
 @pytest.mark.asyncio
 async def test_status_is_answered_at_once_from_the_job_files_as_the_one_thing_said(monkeypatch):
     job = {'id': 'j1', 'state': 'running', 'task': '今回のユーザー発言（原文）:\nしゅんさんとみひろさんの空き' + voice_router.TRANSCRIPT + '…',
-           'created_at': '2026-11-05T00:00:00+00:00', 'events': [{'seq': 1, 'kind': 'tool', 'text': 'browser', 'label': 'ホットペッパーの予約ページを開く', 'at': ''}]}
+           'created_at': '2026-11-05T00:00:00+00:00', 'last_tool': {'name': 'browser', 'action': 'open_target'},
+           'last_observation': {'text': 'URL: https://beauty.hotpepper.jp/slnH000000/\nタイトル: LIPPS hair 梅田annex'},
+           'events': [{'seq': 1, 'kind': 'progress', 'text': '【途中】みひろさんは6日15:30から予約が入っている', 'at': ''},
+                      {'seq': 2, 'kind': 'tool', 'text': 'browser', 'label': 'browser:open_target', 'at': ''}]}
     r, sent, log = router(monkeypatch, Judge({'route': answer('status', .97), 'calendar': answer('other', .9), 'work_0': answer('status', .97)}),
                           jobs=[job], said=['今どういう状況？'])
     await r.answer('del_1', time.monotonic())
     assert [e['type'] for e in sent] == ['session.commentary.append']
     assert sent[0]['delegation_id'] == 'del_1'
-    assert 'しゅんさんとみひろさんの空き' in sent[0]['content'] and 'ホットペッパーの予約ページを開く' in sent[0]['content']
+    said = sent[0]['content']
+    assert 'しゅんさんとみひろさんの空き' in said and 'LIPPS hair 梅田annex' in said and 'みひろさんは6日15:30から' in said
+    assert 'browser' not in said and 'open_target' not in said   # no tool names in what is said
     assert ('route_chosen', ) == (log[0][0],) and log[0][1]['route'] == 'status'
 
 
