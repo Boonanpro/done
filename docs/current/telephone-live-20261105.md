@@ -9,3 +9,9 @@ Replacement: `telephone.py`, signed one-use outbound grants, permanent DAN_PUBLI
 `telephone_call.py owner --room UUID --approved` requires authorization each operation. `external` additionally needs destination and purpose-file. No retries on an uncertain dial. `status --key KEY` reads the actual provider state and bridge result. A ten-minute provider limit also bounds abandoned calls. No automatic telephone retry or unsolicited call is scheduled.
 
 Sources: https://developers.openai.com/api/docs/guides/voice-websockets ; https://www.twilio.com/docs/voice/media-streams/websocket-messages ; https://www.twilio.com/docs/usage/security .
+
+## Verification before dialing
+
+24 unit/transport/backend tests pass. Public new readiness endpoint initially returned 404 (saved `.tmp/telephone/before.json`). First real-model simulated telephone conversation correctly answered the changed color but only closed at the timeout: the initial checker incorrectly counted this as a pass; adding the bound rejects the saved 71.61-second case. Root cause: a primary Live WebSocket cannot be attached as if it were WebRTC. The existing voice backend now accepts a supplied event connection, so telephone audio and controls share one primary socket without duplicating the tool logic.
+
+After the correction: color-3/color-4 and count-1/count-2 all preserve the changed color/quantity and close the Live session plus the simulated provider leg (2/2 each). Run folders: `.tmp/telephone/` in `telephone-realtime`; `result.json` includes the actual transcript, error and terminal conditions, `dan.ulaw` the returned audio. Synthetic peer, not yet an actual PSTN call or human naturalness verdict. Hangup elapsed values include speech generation and the full goodbye utterance, not just latency after the last word. Telephone playback, ringing and provider completion still require the owner's authorized call.
