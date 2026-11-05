@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import asyncio
 import random
 import re
@@ -32,12 +33,37 @@ SALONBOARD_USER_DATA_DIR = Path.home() / ".ai_secretary" / "salonboard_data"
 SALONBOARD_NORMAL_CHROME_USER_DATA_DIR = (
     Path.home() / ".ai_secretary" / "salonboard_normal_chrome_data"
 )
-DEFAULT_CHROME_EXE = Path(
-    os.environ.get(
-        "SALONBOARD_CHROME_EXE",
+# 本物の Chrome の置き場所は OS ごとに違う（Windows から Mac mini へ移った 2026-10-23 以降、
+# Windows の住所を決め打ちしていたため Mac では「Chrome executable not found」で投稿が全部失敗した）。
+_CHROME_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "win32": (
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    )
-)
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ),
+    "darwin": (
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ),
+    "linux": (
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/opt/google/chrome/chrome",
+    ),
+}
+
+
+def _default_chrome_exe() -> Path:
+    env = os.environ.get("SALONBOARD_CHROME_EXE")
+    if env:
+        return Path(env)
+    candidates = _CHROME_CANDIDATES.get(sys.platform, ())
+    for cand in candidates:
+        if Path(cand).exists():
+            return Path(cand)
+    return Path(candidates[0]) if candidates else Path("google-chrome")
+
+
+DEFAULT_CHROME_EXE = _default_chrome_exe()
 LOGIN_URL = "https://salonboard.com/login/"
 CLP_TOP_URL = "https://salonboard.com/CLP/bt/top/"
 REFLECT_TOP_URL = "https://salonboard.com/CNB/reflect/reflectTop/"
@@ -62,6 +88,10 @@ class SalonboardRepeatedLoginBlocked(SalonboardSessionError):
 
 class SalonboardProfileLocked(SalonboardSessionError):
     """Raised when another process is using the persistent profile."""
+
+
+class SalonboardLoginRejected(SalonboardSessionError):
+    """Raised when Salonboard says the ID or password is wrong."""
 
 
 class SalonboardChromeLaunchError(SalonboardSessionError):
@@ -266,6 +296,25 @@ async def _is_login_form_visible(page: Page) -> bool:
         return False
 
 
+LOGIN_REJECTED_MESSAGE = (
+    "サロンボードにログインできませんでした（IDもしくはパスワードが正しくありません）。"
+    "サロンボードのパスワードを変えた場合は、「設定」からログイン情報を入れ直してください"
+)
+LOGIN_FAILED_MESSAGE = (
+    "サロンボードにログインできませんでした。"
+    "「設定」からログイン情報を入れ直してから、もう一度お試しください"
+)
+
+
+async def _is_login_rejected(page: Page) -> bool:
+    """ログイン送信後にサロンボードが ID/パスワード誤りを返したか。"""
+    try:
+        body = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return False
+    return "IDもしくはパスワードの入力が正しくありません" in body
+
+
 async def is_logged_in(page: Page) -> bool:
     logged_in_selectors = [
         "#cmsForwardForm",
@@ -401,6 +450,9 @@ async def login_once(
     await page.wait_for_timeout(300)
     await click_salonboard_login_button(page)
     await page.wait_for_timeout(6000)
+
+    if await _is_login_rejected(page):
+        raise SalonboardLoginRejected(LOGIN_REJECTED_MESSAGE)
 
     if await is_captcha_visible(page):
         if not allow_human_handoff:
@@ -951,12 +1003,17 @@ async def run_style_post(
         async with launch_salonboard_context(p) as ctx:
             page = await get_or_create_page(ctx)
             report("running", "ログイン済みセッションを確認しています")
-            login_status = await ensure_logged_in(
-                page,
-                creds,
-                policy=SalonboardLoginPolicy(max_login_attempts=1),
-                handoff_timeout_seconds=handoff_timeout_seconds,
-            )
+            try:
+                login_status = await ensure_logged_in(
+                    page,
+                    creds,
+                    policy=SalonboardLoginPolicy(max_login_attempts=1),
+                    handoff_timeout_seconds=handoff_timeout_seconds,
+                )
+            except SalonboardLoginRejected:
+                return {"ok": False, "login_failed": True, "message": LOGIN_REJECTED_MESSAGE}
+            except SalonboardSessionError:
+                return {"ok": False, "login_failed": True, "message": LOGIN_FAILED_MESSAGE}
             if login_status == "already_logged_in":
                 report("running", "ログイン済みセッションを再利用しています")
             elif login_status == "logged_in":
