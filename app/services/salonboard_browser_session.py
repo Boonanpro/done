@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import asyncio
 import random
 import re
@@ -32,12 +33,37 @@ SALONBOARD_USER_DATA_DIR = Path.home() / ".ai_secretary" / "salonboard_data"
 SALONBOARD_NORMAL_CHROME_USER_DATA_DIR = (
     Path.home() / ".ai_secretary" / "salonboard_normal_chrome_data"
 )
-DEFAULT_CHROME_EXE = Path(
-    os.environ.get(
-        "SALONBOARD_CHROME_EXE",
+# 本物の Chrome の置き場所は OS ごとに違う（Windows から Mac mini へ移った 2026-10-23 以降、
+# Windows の住所を決め打ちしていたため Mac では「Chrome executable not found」で投稿が全部失敗した）。
+_CHROME_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "win32": (
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    )
-)
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ),
+    "darwin": (
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ),
+    "linux": (
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/opt/google/chrome/chrome",
+    ),
+}
+
+
+def _default_chrome_exe() -> Path:
+    env = os.environ.get("SALONBOARD_CHROME_EXE")
+    if env:
+        return Path(env)
+    candidates = _CHROME_CANDIDATES.get(sys.platform, ())
+    for cand in candidates:
+        if Path(cand).exists():
+            return Path(cand)
+    return Path(candidates[0]) if candidates else Path("google-chrome")
+
+
+DEFAULT_CHROME_EXE = _default_chrome_exe()
 LOGIN_URL = "https://salonboard.com/login/"
 CLP_TOP_URL = "https://salonboard.com/CLP/bt/top/"
 REFLECT_TOP_URL = "https://salonboard.com/CNB/reflect/reflectTop/"
