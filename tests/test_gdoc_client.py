@@ -47,3 +47,17 @@ def test_changes_since_last_delivery_become_whole_phrase_suggestions():
     assert '<w:b />' in xml or '<w:b/>' in xml  # run formatting survives the rewrite
     segs = C._segments('ページと広告の数十万円だけです。', '数万円の広告費くらいです。')
     assert all(len(v) > 1 for k, v, _ in segs if k != 'eq')  # no one-character fragments
+
+
+def test_adopting_an_older_copy_makes_its_current_text_the_base(tmp_path, monkeypatch):
+    import json
+    from app.services import gdoc_events as E, gdoc_drive as G
+    monkeypatch.setattr(E, 'ROOT', tmp_path)
+    monkeypatch.setattr(G, 'comments', lambda *a: [])
+    monkeypatch.setattr(G, 'export_docx', lambda *a: docx(p(r('お客さんが赤字を入れた文'))))
+    assert C.adopt('acct', 'work', 'client')['paragraphs'] == 1
+    meta = json.loads((tmp_path/'client'/'client'/'meta.json').read_text())
+    assert meta['published_after'] == ['お客さんが赤字を入れた文'] and meta['work'] == 'work'
+    monkeypatch.setattr(G, 'export_docx', lambda *a: docx(p(ins('提案'))))
+    import pytest
+    with pytest.raises(ValueError): C.adopt('acct', 'work', 'client')

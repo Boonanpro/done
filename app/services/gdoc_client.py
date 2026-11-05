@@ -387,3 +387,18 @@ def deliver(account, work_id, client_id=None, name=None, author='株式会社パ
         raise RuntimeError('Uploaded copy does not read back as expected; see '+str(folder))
     return {'client': client_id, 'url': f'https://docs.google.com/document/d/{client_id}/edit',
             'changed_blocks': changed, 'pending_in_work': pending, 'verified': ok}
+
+
+def adopt(account, work_id, client_id, author='株式会社パイナ'):
+    """Take over a customer copy made before this tool: what the customer sees now
+    is the base, so the next delivery shows every change from there."""
+    from app.services.gdoc_drive import export_docx, comments
+    current = export_docx(account, client_id)
+    if pending_suggestions(current) or [t for t in comments(account, client_id) if not t.get('deleted') and not t.get('resolved')]:
+        raise ValueError('The copy has suggestions or open comments; bring them into the working doc first')
+    folder = _state_dir(client_id)
+    meta = {'work': work_id, 'client': client_id, 'author': author, 'published_after': texts(current, 'after'),
+            'delivered_at': None, 'adopted_at': datetime.now(timezone.utc).isoformat(), 'verified': True}
+    (folder/'meta.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    return {'client': client_id, 'paragraphs': len(meta['published_after'])}
+
