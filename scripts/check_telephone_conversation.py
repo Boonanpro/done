@@ -79,9 +79,11 @@ async def run(case, out):
                 elapsed = time.monotonic()-started
                 assistant = [t for t in bridge.transcript if t['role']=='assistant']
                 text = ''.join(t['text'] for t in assistant)
-                if stage==0 and bridge.session_id:
+                if stage==0 and bridge.session_id and not assistant and elapsed>15:
+                    raise RuntimeError('Dan did not greet the silent answering caller')
+                if stage==0 and bridge.session_id and assistant:
                     await phone.say(client, first); partner.append(first); stage=1; said_at=time.monotonic()
-                elif stage==1 and assistant and not phone.audio and time.monotonic()-said_at>8:
+                elif stage==1 and any(t['at'] > said_at-started for t in assistant) and not phone.audio and time.monotonic()-said_at>8:
                     # Respond to Dan's acknowledgement, not a replay of a failed call.
                     await phone.say(client, correction); partner.append(correction); stage=2; said_at=time.monotonic()
                 elif stage==2 and any(x in text for x in expected) and not phone.audio and time.monotonic()-said_at>7:

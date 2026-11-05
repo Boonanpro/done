@@ -64,6 +64,12 @@ def signature_ok(url, signature):
         for candidate in (url, url + '/', url.replace('wss://', 'https://'), url.replace('wss://', 'https://') + '/'))
 
 
+def greeting_for(grant):
+    if grant['peer'] == 'owner':
+        return '相手が電話に出ました。今すぐ日本語で「ダンです。声は聞こえますか？」と短く名乗って声をかけ、相手の返事を待ってください。'
+    return '相手が電話に出ました。今すぐ日本語で本田さんのAIアシスタントのダンだと名乗り、今回の用件を一文で伝え、相手の返事を待ってください。'
+
+
 async def config_for(grant):
     from app.services.voice_live import session_config
     from app.services.voice_history import room_history
@@ -90,6 +96,8 @@ async def config_for(grant):
             'delegation': {'type': 'responses', 'responses': {'model': voice['backend_model'],
                 'instructions': '電話の用件の範囲で回答を助けてください。外部操作の権限も本人の私的記録もありません。',
                 'tools': []}}}
+    config.setdefault('input', []).append({'type': 'message', 'role': 'developer',
+        'content': [{'type': 'input_text', 'text': greeting_for(grant)}]})
     config['audio']['format'] = {'type': 'audio/pcmu', 'rate': 8000}
     return config
 
@@ -173,6 +181,9 @@ class Bridge:
                         if not self.finalized:
                             raise RuntimeError('Telephone backend disconnected')
                     tasks.append(asyncio.create_task(backend_liveness()))
+                await live.send(json.dumps({'type': 'session.commentary.append',
+                    'event_id': 'telephone-greeting-' + secrets.token_hex(8), 'delegation_id': None,
+                    'content': greeting_for(self.grant)}, ensure_ascii=False))
                 done, _ = await asyncio.wait(tasks, timeout=self.grant.get('max_seconds', 600), return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     task.result()
