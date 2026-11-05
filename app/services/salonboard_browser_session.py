@@ -90,6 +90,10 @@ class SalonboardProfileLocked(SalonboardSessionError):
     """Raised when another process is using the persistent profile."""
 
 
+class SalonboardLoginRejected(SalonboardSessionError):
+    """Raised when Salonboard says the ID or password is wrong."""
+
+
 class SalonboardChromeLaunchError(SalonboardSessionError):
     """Raised when regular Chrome cannot be launched or attached over CDP."""
 
@@ -292,6 +296,25 @@ async def _is_login_form_visible(page: Page) -> bool:
         return False
 
 
+LOGIN_REJECTED_MESSAGE = (
+    "サロンボードにログインできませんでした（IDもしくはパスワードが正しくありません）。"
+    "サロンボードのパスワードを変えた場合は、「設定」からログイン情報を入れ直してください"
+)
+LOGIN_FAILED_MESSAGE = (
+    "サロンボードにログインできませんでした。"
+    "「設定」からログイン情報を入れ直してから、もう一度お試しください"
+)
+
+
+async def _is_login_rejected(page: Page) -> bool:
+    """ログイン送信後にサロンボードが ID/パスワード誤りを返したか。"""
+    try:
+        body = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return False
+    return "IDもしくはパスワードの入力が正しくありません" in body
+
+
 async def is_logged_in(page: Page) -> bool:
     logged_in_selectors = [
         "#cmsForwardForm",
@@ -427,6 +450,9 @@ async def login_once(
     await page.wait_for_timeout(300)
     await click_salonboard_login_button(page)
     await page.wait_for_timeout(6000)
+
+    if await _is_login_rejected(page):
+        raise SalonboardLoginRejected(LOGIN_REJECTED_MESSAGE)
 
     if await is_captcha_visible(page):
         if not allow_human_handoff:
@@ -977,12 +1003,17 @@ async def run_style_post(
         async with launch_salonboard_context(p) as ctx:
             page = await get_or_create_page(ctx)
             report("running", "ログイン済みセッションを確認しています")
-            login_status = await ensure_logged_in(
-                page,
-                creds,
-                policy=SalonboardLoginPolicy(max_login_attempts=1),
-                handoff_timeout_seconds=handoff_timeout_seconds,
-            )
+            try:
+                login_status = await ensure_logged_in(
+                    page,
+                    creds,
+                    policy=SalonboardLoginPolicy(max_login_attempts=1),
+                    handoff_timeout_seconds=handoff_timeout_seconds,
+                )
+            except SalonboardLoginRejected:
+                return {"ok": False, "login_failed": True, "message": LOGIN_REJECTED_MESSAGE}
+            except SalonboardSessionError:
+                return {"ok": False, "login_failed": True, "message": LOGIN_FAILED_MESSAGE}
             if login_status == "already_logged_in":
                 report("running", "ログイン済みセッションを再利用しています")
             elif login_status == "logged_in":
