@@ -239,10 +239,15 @@ class Prefetch:
         from app.services.jev_decisions import Decisions
         if self.judge is None:
             self.judge = Decisions(self.user_id, timeout=1.0, max_calls=400, retry_transient_after=10)
-        got = await self.judge.choose({'utterance_so_far': text}, {
-            'kind': {'type': 'choice', 'criteria': KINDS, 'instructions': ASK},
-            'read': {'type': 'choice', 'criteria': READS,
-                     'instructions': 'readの依頼なら正確に合う読み取りを1つ選ぶ。日付・対象が曖昧、複数の依頼、取り消し、read以外はnone。'}})
+        asked = {'kind': {'type': 'choice', 'criteria': KINDS, 'instructions': ASK},
+                 'read': {'type': 'choice', 'criteria': READS,
+                          'instructions': 'readの依頼なら正確に合う読み取りを1つ選ぶ。日付・対象が曖昧、複数の依頼、取り消し、read以外はnone。'}}
+        from app.services import voice_router
+        if voice_router.enabled():
+            # The same choice of where the request goes that the delegation makes (voice_router.ROUTES), in the same call:
+            # when the owner's finished words are these, the delegation takes this answer instead of asking again.
+            asked['route'] = {'type': 'choice', 'criteria': dict(voice_router.ROUTES), 'instructions': voice_router.ASK}
+        got = await self.judge.choose({'utterance_so_far': text}, asked)
         self.route_answer = (text, got)
         if got.get('available'):
             self.counts['jev'] += 1
@@ -321,7 +326,9 @@ class Prefetch:
             from app.services.web_search import _env
             if (_env('DAN_VOICE_PREFETCH_READ') or '1').strip() != '0':
                 try:
-                    plan = ('list_operations', {}) if kind == 'work' else await self.read_plan(text)
+                    from app.services import voice_router
+                    # Work goes to chat Dan when Jev routes the call: the remembered operations are not read for it.
+                    plan = (None if voice_router.enabled() else ('list_operations', {})) if kind == 'work' else await self.read_plan(text)
                 except Exception:
                     plan = None
                 final = said_since(dialogue.turns, turn)

@@ -32,6 +32,11 @@ async def execute(host, stage, tool, arguments):
             path = safe_image(observed.get('stage_stream')) or safe_image(observed.get('stage_image'))
         except Exception:
             path = ''
+    from app.services.voice_screen_media import blank
+    if path and blank(path):
+        path = ''   # a flat white or black picture shows nothing (2026-11-05: five of eight screens of a call)
+        result['screen'] = {'shown': False, 'reason': '操作後の画面は真っ白（または真っ黒）だったので出していない。'}
+        return result
     if stage.version != version:
         result['screen'] = {'shown': False, 'reason': '別の画面に切り替わりました。'}
     elif path:
@@ -44,8 +49,10 @@ async def execute(host, stage, tool, arguments):
         stage._external_serial = out.get("stage_serial") or arguments.get("serial", "")
         result['screen'] = {'shown': True}
     else:
-        # Do not leave an old photograph looking like evidence of the operation's result.
-        stage._apply('操作後の画面を取得できませんでした', image='')
+        # Do not leave an old photograph looking like evidence of the operation's result. With Jev routing the call
+        # (voice_router) the screen keeps what it shows instead: an empty scene with this caption is nothing to look at.
+        if getattr(stage, 'listening', True):
+            stage._apply('操作後の画面を取得できませんでした', image='')
         result['screen'] = {'shown': False, 'reason': '操作後の画面は未確認です。操作を再送せず画面だけ確かめてください。'}
     return result
 

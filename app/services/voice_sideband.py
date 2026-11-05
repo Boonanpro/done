@@ -45,13 +45,13 @@ def enabled():
     return os.environ.get('DAN_VOICE_SIDEBAND', '1') != '0'
 
 
-def attach(session_id, user_id, room_id, api_key, own=False):
+def attach(session_id, user_id, room_id, api_key, own=False, backend=None):
     """Start the sideband for a call in the background. Returns True when this server owns the delegations."""
     if not enabled() or not session_id or not api_key or session_id in _tasks:
         return False
     own = bool(own) and os.environ.get('DAN_VOICE_SIDEBAND_OWN', '1') != '0'   # DAN_VOICE_SIDEBAND_OWN=0: observe only, the app answers as before
     try:
-        task = asyncio.get_running_loop().create_task(_run(session_id, user_id, room_id, api_key, own))
+        task = asyncio.get_running_loop().create_task(_run(session_id, user_id, room_id, api_key, own, backend))
     except RuntimeError:
         return False
     _tasks[session_id] = task
@@ -97,6 +97,8 @@ class Dialogue:
         self.history_complete = True
         self.failure_notices = set()
         self.delegated_at = 0.0   # when the speech model last handed the owner's words to the backend (the stage's flow yields to it)
+        self.routing_until = 0.0  # a delegation is being routed (voice_router): silent state waits, so it cancels no acknowledgement
+        self.began_iso = ''
 
     def add(self, role, delta):
         if not delta: return
@@ -359,10 +361,13 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
     from app.services.voice_worker_screen import Follower
     from app.services import voice_plain
     plain = voice_plain.enabled()
+    from app.services import voice_router
+    routed = plain and voice_router.enabled()
     stage = for_room(room_id)
     follower = Follower(stage, user_id, room_id, connected_at) if stage else None
     seen = {}
     result_arrivals = {}
+    told = {}       # job id -> (the last state given silently, when): voice_router's calls know their work's state
     while True:
         await asyncio.sleep(FEED_SECONDS)
         try: jobs = await asyncio.to_thread(list_owned, user_id, room_id)
@@ -386,6 +391,10 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
             fresh = [e for e in events if e.get('seq', 0) > (previous or 0)]
             if previous is None and old: fresh = fresh[-1:]
             if not fresh: continue
+            if routed and session_id not in ENDING:
+                if dialogue is not None and time.monotonic() < getattr(dialogue, 'routing_until', 0):
+                    continue   # a delegation is being answered: a thinking append now would cancel its acknowledgement
+                await tell_state(send, job, fresh, told, record)
             said = [e for e in fresh if e.get('kind') in SPOKEN]
             # Do not inject a completed task into a new request while its words
             # or backend decision are still arriving. Keep the event unread so
@@ -441,6 +450,46 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
                        'confirmation': '今の作業から本人に確認したいことがある。何を確かめたいかを、会話として短く聞く。'}[e['kind']]
                 await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': cue})
                 record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material))
+
+
+STATE_EVERY_S = 6.0
+FINDING = '【途中】'
+
+
+def job_title(job):
+    from app.services import voice_router
+    return voice_router.job_label(job)
+
+
+async def tell_state(send, job, fresh, told, record):
+    """What a job of the call does now goes to the speech model silently (thinking), so 「今どう？」 is answered at once and
+    once; a fact the job marked for the owner (【途中】, voice_router.CALL_JOB_NOTE) is said (commentary). In the
+    2026-11-05 0:59 call 「今どういう状況？」 was answered twice: the speech model's own 「確認してる」, then the backend's reading."""
+    from app.services import voice_parts
+    title = job_title(job)
+    for e in fresh:
+        text = str(e.get('text') or '').strip()
+        if e.get('kind') == 'progress' and text.startswith(FINDING):
+            fact = text[len(FINDING):].strip().splitlines()[0][:COMMENTARY_LIMIT - 40] if text[len(FINDING):].strip() else ''
+            if fact:
+                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
+                            'content': for_speech(f'作業「{title}」の途中で分かったこと: {fact}')})
+                record('job_finding_spoken', job_id=job['id'][:8], chars=len(fact))
+    doing = [e for e in fresh if e.get('kind') in ('progress', 'tool') and not str(e.get('text') or '').startswith(FINDING)]
+    if not doing or job.get('state') not in ('queued', 'running', 'awaiting_confirmation', 'paused'):
+        return
+    last, at = told.get(job['id'], ('', 0.0))
+    if time.monotonic() - at < STATE_EVERY_S:
+        return
+    where = voice_parts.where_it_is(job)
+    latest = doing[-1]
+    step = str(latest.get('label') or latest.get('text') or '')[:200]
+    now = f'作業「{title}」の今（{datetime.now().strftime("%H:%M:%S")}）: ' + '、'.join(x for x in (where, step) if x)
+    if now.split(': ', 1)[-1] == last.split(': ', 1)[-1]:
+        return
+    told[job['id']] = (now, time.monotonic())
+    await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': now[:COMMENTARY_LIMIT]})
+    record('job_state_told', job_id=job['id'][:8], chars=len(now))
 
 
 GREETING_SECONDS = 4.5
@@ -640,12 +689,13 @@ async def call_log(room_id, user_id, began, seconds, by='owner'):
                                      sender_type='system', created_at=began.isoformat())
 
 
-async def _run(session_id, user_id, room_id, api_key, own):
+async def _run(session_id, user_id, room_id, api_key, own, backend=None):
     import websockets
     record = lambda phase, **fields: note(session_id, room_id, phase, **fields)
     started, began = time.monotonic(), datetime.now(timezone.utc)
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
-    stop_control = hangup = background = None
+    dialogue.began_iso = began.isoformat()
+    stop_control = hangup = background = router = None
     try:
         async with websockets.connect(URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
                                       max_size=8*1024*1024, open_timeout=10) as socket:
@@ -679,24 +729,30 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 from app.services.voice_stop_control import StopControl
                 stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
             hangup = None
-            if own and plain:
-                from app.services import voice_hangup
-                if voice_hangup.enabled():
-                    async def end_by_words():
-                        if session_id in ENDING: return
-                        mark_ending(session_id, room_id)
-                        record('call_ending', by='owner_words')
-                        async def closing():
-                            record('call_close_sent', by='owner_words')
-                            await close_session(send)
-                        await voice_hangup.after_goodbye(lambda: spoke.get('dan_words', 0), closing)
-                    hangup = voice_hangup.HangUp(user_id, dialogue, record, end_by_words)
+            from app.services import voice_hangup
+            async def end_by_words(by='owner_words'):
+                if session_id in ENDING: return
+                mark_ending(session_id, room_id)
+                record('call_ending', by=by)
+                async def closing():
+                    record('call_close_sent', by=by)
+                    await close_session(send)
+                await voice_hangup.after_goodbye(lambda: spoke.get('dan_words', 0), closing)
+            if own and plain and voice_hangup.enabled():
+                hangup = voice_hangup.HangUp(user_id, dialogue, record, end_by_words)
             if own:
                 from app.services import voice_prefetch
                 if voice_prefetch.enabled(): dialogue.prefetch = voice_prefetch.Prefetch(user_id, record, room_id=room_id)
                 from app.services import voice_responses, voice_lookup
                 if voice_responses.background():   # lookups run beside the conversation and speak their facts (voice_lookup)
                     background = voice_lookup.open_call(session_id, user_id, room_id, dialogue, send, record)
+                from app.services import voice_router
+                if voice_router.enabled() and backend:   # Jev routes each delegation; this server answers it (client delegation)
+                    async def end_routed():
+                        await end_by_words('route_end')
+                    router = voice_router.Router(session_id, user_id, room_id, dialogue, send, record, spoke, backend=backend, end_call=end_routed)
+                    if background is not None: background.router = router
+                    record('router_on')
                 feed = asyncio.create_task(job_feed(send, user_id, room_id, record, datetime.now(timezone.utc).isoformat(), session_id, dialogue))
                 working.add(feed); feed.add_done_callback(working.discard)
                 if room_id:   # from now on the room's chat goes to this call, not to a chat Dan
@@ -716,6 +772,7 @@ async def _run(session_id, user_id, room_id, api_key, own):
                             record('stage_spoken', chars=len(text))
                         try: stage = voice_stage.Stage(room_id, session_id, dialogue, record, user_id=user_id, speak=stage_speak)
                         except Exception as exc: record('stage_failed', error_type=type(exc).__name__, detail=str(exc)[:160])
+                        if router is not None: router.stage = stage
             while time.monotonic()-started < MAX_SECONDS:
                 try: event = json.loads(await socket.recv())
                 except (TypeError, ValueError): continue
@@ -723,6 +780,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
                 counts[kind] = counts.get(kind, 0)+1
                 if kind == 'session.delegation.created':
                     dialogue.delegated_at = time.monotonic()
+                    delegation = event.get('delegation') or {}
+                    if router is not None and delegation.get('target') == 'client' and delegation.get('id'):
+                        router.delegated(str(delegation['id']))
                     if dialogue.intake is not None:
                         dialogue.intake.begin(str((event.get('delegation') or {}).get('id') or ''), event.get('offset_ms'), event.get('client_event_id'))
                 if kind == 'response.event' and dialogue.intake is not None:
@@ -781,6 +841,9 @@ async def _run(session_id, user_id, room_id, api_key, own):
         record('sideband_failed', error_type=type(exc).__name__, detail=str(exc)[:200])
         logger.info('voice sideband ended: %s', type(exc).__name__)
     finally:
+        if router is not None:
+            try: await router.close()
+            except Exception: pass
         if background is not None:
             from app.services import voice_lookup
             voice_lookup.close_call(background)

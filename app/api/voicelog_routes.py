@@ -221,6 +221,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         from app.services.dan_core import shared
         await asyncio.to_thread(shared, body.room_id, user.user_id)
     config = session_config(history, timezone=body.timezone, files=files, room_id=body.room_id, user_id=user.user_id)
+    backend = config.pop('_backend', None)   # the Responses spec the server itself runs when Jev routes the delegations (voice_router)
     pending_id = 'pending-' + uuid4().hex
     register(pending_id, user.user_id, room_id=body.room_id)
     bound = False
@@ -238,7 +239,7 @@ async def create_live_session(request: Request, body: LiveSessionRequest):
         bound = True
         # The backend model's function calls arrive only on the server's own connection to the call: it always answers them.
         from app.services import voice_sideband
-        owned = voice_sideband.attach(data['session']['id'], user.user_id, body.room_id, settings.OPENAI_API_KEY, own=True)
+        owned = voice_sideband.attach(data['session']['id'], user.user_id, body.room_id, settings.OPENAI_API_KEY, own=True, backend=backend)
         # Dan's tools for this call start loading now (a few seconds), not when the backend first needs one
         from app.services import voice_tools
         voice_tools.warm(user.user_id, body.room_id)

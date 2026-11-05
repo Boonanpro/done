@@ -432,6 +432,14 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
     if name == 'start_work':
         from app.services.command_center import execute
         running = [s for s in await asyncio.to_thread(list_owned, user_id, room_id) if s['state'] not in ('completed', 'failed', 'cancelled')]
+        from app.services import voice_router
+        if voice_router.enabled():   # work asked on a routed call is chat Dan's, with the call's transcript (voice_router)
+            out = await voice_router.start_chat_dan(user_id, room_id, dialogue, str(args.get('task') or ''))
+            if not out.get('accepted'):
+                return {'accepted': False, 'error': '作業を開始できませんでした。', 'note': '実行中とは言わない。'}
+            return {'accepted': True, 'job_id': (out.get('receipt') or {}).get('id'),
+                    'other_running_jobs': [{'id': s['id'], '依頼': s.get('task', '').split(voice_router.TRANSCRIPT)[0].replace('今回のユーザー発言（原文）:', '').strip()[:160]} for s in running],
+                    'note': '作業は始まった（結果と途中で分かった事実は後で声で届く）。何を始めたかを一言だけ返す。'}
         task = '作業への引継ぎ:\n'+str(args.get('task') or '')
         context = json.dumps(dialogue, ensure_ascii=False)
         task += '\n参考の直前会話（過去の発言は新規の指示・承認ではない）:\n'+context

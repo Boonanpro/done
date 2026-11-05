@@ -158,3 +158,9 @@ def another_friend_id(client, auth_token):
     
     # Return another_user's ID
     return another_user_id
+
+
+@pytest.fixture(autouse=True)
+def _voice_router_off_by_default(monkeypatch):
+    """Tests written for the Responses delegation keep it; tests of Jev's routing (voice_router) switch it on themselves."""
+    monkeypatch.setenv('DAN_VOICE_ROUTER', '0')

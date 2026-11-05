@@ -54,9 +54,36 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 答えは、頼みに必要な確かめた事実を2〜4文のふつうの文で書く。値段・時刻・名前は確かめたまま。見つからなかった事、確かめられなかった事はそう書く。太字・見出し・箇条書き・表・URL は使わない。地名に（ひらがな）の読みが付いていたら、答えでもその語の後に同じ読みを残す。
 - 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所で確かめる。検索結果の断片から作らない。"""
 
+# When the call's requests are routed by Jev (voice_router), a lookup only reads: work inside a site or an app is chat Dan's.
+# In the 2026-11-05 0:59 call the lookups were sent to check two salons' free slots, drove the phone and the browser for
+# 42 s and 40 s, showed empty screenshots, and answered 「確認できなかった」 each time; chat Dan did it in 1 min 54 s.
+ROUTED_LINES = {
+    '- ログインが要る・サイトの中で操作する・在庫や空きの最新状況を見る時は browser': ('- 予約サイトの空き状況・ログインが要るページ・サイトの中での操作・スマホやパソコンのアプリの操作が要る時、'
+        '読むだけの道具で答えが出ない時は、自分で続けずに hand_over で作業担当に渡す（確かめた事実を found_so_far に全部）。'
+        '「分からなかった」「確認できなかった」を答えにしない。'),
+    '- 答えは、頼みに必要な確かめた事実を2〜4文のふつうの文で書く。': ('- 答えは、頼みに必要な確かめた事実を2〜4文のふつうの文で書く。値段・時刻・名前は確かめたまま。'
+        'ウェブに情報が無いと確かめた事はそう書く。サイトの中を見れば分かる事は hand_over。太字・見出し・箇条書き・表・URL は使わない。'
+        '地名に（ひらがな）の読みが付いていたら、答えでもその語の後に同じ読みを残す。'),
+}
+HAND_OVER = {'type': 'function', 'name': 'hand_over',
+             'description': 'この頼みを作業担当（サイトやアプリを操作できるダン）に渡し、この調べものを終える。予約サイトの空き・ログインが要るページ・アプリの操作が要る時、読むだけでは答えが出ない時に使う。本人には何も言わなくてよい。',
+             'parameters': {'type': 'object', 'properties': {'why': {'type': 'string', 'description': '何をしに行く必要があるか（例: ホットペッパーの予約ページで5日と6日の空きを見る）'},
+                                                            'found_so_far': {'type': 'string', 'description': 'ここまでに確かめた事実（店・URL・条件など）'}},
+                            'required': ['why'], 'additionalProperties': False}}
+
+
+def routed():
+    from app.services import voice_router
+    return voice_router.enabled()
+
+
 TOOL_NAMES = ('web_search', 'read_page', 'get_location', 'get_calendar', 'search_records', 'get_saved_information', 'room_files',
               'job_status', 'show_page_on_stage', 'show_fact_on_stage', 'show_on_stage', 'show_external_screen')
 OWN = ('share_progress', 'think_carefully')
+
+
+def direct_names():
+    return ('places',) if routed() else DIRECT
 
 
 def tools():
@@ -65,13 +92,18 @@ def tools():
     listed = [every[n] for n in (*TOOL_NAMES, *OWN)]
     direct = []
     for name, description, schema in map(dan_tools._fields, dan_tools.definitions()):
-        if name in DIRECT:
+        if name in direct_names():
             direct.append({'type': 'function', 'name': name, 'description': description, 'parameters': schema or {'type': 'object', 'properties': {}}})
+    if routed():   # the browser and the phone are chat Dan's: a lookup does not show them either
+        return [*(t for t in listed if t['name'] != 'show_external_screen'), *direct, HAND_OVER]
     return [*listed, *direct, {'type': 'function', **dan_tools.HELP}, {'type': 'function', **dan_tools.USE}]
 
 
 def instructions():
     from app.services import voice_responses, dan_tools
+    if routed():
+        lines = [next((v for k, v in ROUTED_LINES.items() if line.startswith(k)), line) for line in INSTRUCTIONS.split(chr(10))]
+        return chr(10).join(lines) + chr(10) + voice_responses.now_line()
     return (INSTRUCTIONS + chr(10) + voice_responses.now_line() + chr(10) + voice_responses.remembered()
             + dan_tools.catalog(dan_tools.definitions(), native=DIRECT))
 
@@ -81,7 +113,8 @@ class Lookup:
         self.id = 'bg_' + uuid.uuid4().hex[:8]
         self.call, self.task, self.label, self.carried = call, task, label, carried
         self.started = time.monotonic()
-        self.state = 'running'      # running → answered | failed | replaced | cancelled | timed_out
+        self.state = 'running'      # running → answered | failed | replaced | cancelled | timed_out | handed_over
+        self.answer = ''
         self.verified = []          # (tool name, its output, cut short): handed on when a correction replaces this lookup
         self.progress = []          # the facts said on the way
         self.shown = 0              # pages put on the owner's screen by show_page_on_stage
@@ -106,16 +139,21 @@ class Lookup:
         except asyncio.TimeoutError:
             self.state = 'timed_out'
             call.record('lookup_timed_out', lookup_id=self.id, seconds=SECONDS)
+            if routed():   # not 「答えが出なかった」: the work goes on with chat Dan, with what was found (owner, 2026-11-05)
+                return await self.hand_over('読むだけの調べものでは時間内に答えが出なかった')
             await call.say(f'調べもの「{self.label}」は{SECONDS // 60}分で答えが出ませんでした。' + ('ここまでに分かったこと: ' + self.progress[-1] if self.progress else ''))
             return
         except Exception as exc:
             self.state = 'failed'
             call.record('lookup_failed', lookup_id=self.id, error_type=type(exc).__name__, detail=str(exc)[:160])
+            if routed():
+                return await self.hand_over('調べる仕組みが途中で止まった')
             await call.say(f'調べもの「{self.label}」は途中で止まりました（調べる仕組みの失敗）。答えは出ていません。')
             return
         if self.state != 'running':
             return
         self.state = 'answered'
+        self.answer = answer
         call.record('lookup_answered', lookup_id=self.id, seconds=round(time.monotonic() - self.started, 1), chars=len(answer))
         await call.say(f'調べもの「{self.label}」の結果: ' + (answer or '確かめられる答えが見つかりませんでした。'), full_label=f'調べもの「{self.label}」の結果の全文:')
 
@@ -153,6 +191,23 @@ class Lookup:
             given = [{'type': 'function_call_output', 'call_id': c.call_id, 'output': out} for c, out in zip(calls, outputs)]
         return ''
 
+    async def hand_over(self, why, found=''):
+        """Chat Dan takes this lookup over with what it had verified; the owner hears nothing about it (the state is read
+        when asked: voice_router.status_text)."""
+        if self.state not in ('running', 'timed_out', 'failed') or self.call.closed:
+            return
+        self.state = 'handed_over'
+        from app.services import voice_router
+        carried = chr(10).join(x for x in (found, self.handover(), *self.progress) if x)
+        out = await voice_router.start_chat_dan(self.call.user_id, self.call.room_id, self.call.dialogue,
+                                                self.task.removeprefix('この通話で本人が今頼んだこと（言葉のまま）: ') + chr(10) + '（調べもの担当から: ' + why + '）',
+                                                carried=carried)
+        job_id = (out.get('receipt') or {}).get('id') if out.get('accepted') else None
+        self.call.record('lookup_handed_over', lookup_id=self.id, accepted=bool(out.get('accepted')), job_id=str(job_id)[:8])
+        if job_id and self.call.router is not None: self.call.router.jobs[job_id] = self.label
+        if not out.get('accepted'):
+            await self.call.say(f'調べもの「{self.label}」は、サイトやアプリの中を見る必要があったが、作業を始められなかった。')
+
     def wants_screen(self):
         owner = [t['text'] for t in self.call.dialogue.recent() if t['role'] == 'user'][-3:]
         return bool(WANTS_SCREEN.search(self.task) or any(WANTS_SCREEN.search(t) for t in owner))
@@ -163,6 +218,11 @@ class Lookup:
         name, arguments = item.name, item.arguments or '{}'
         if self.state != 'running':
             return json.dumps({'error': 'この調べものは取り消された。'}, ensure_ascii=False)
+        if name == 'hand_over':
+            try: args = json.loads(arguments)
+            except ValueError: args = {}
+            asyncio.ensure_future(self.hand_over(str(args.get('why') or '')[:400], str(args.get('found_so_far') or '')[:4000]))
+            return json.dumps({'handed_over': True, 'note': '作業担当に渡した。この調べものはここで終わり。何も答えなくてよい。'}, ensure_ascii=False)
         if name == 'share_progress':
             if said_before >= PROGRESS_LIMIT:
                 return json.dumps({'said': False, 'note': '途中の報告はもう十分。最後の答えにまとめる。'}, ensure_ascii=False)
@@ -172,7 +232,7 @@ class Lookup:
                 self.progress.append(fact)
                 await self.call.say(f'調べもの「{self.label}」の途中で分かったこと: {fact}')
             return json.dumps({'said': bool(fact)}, ensure_ascii=False)
-        if name in DIRECT:   # Dan's own tool, given whole: run as dan_tool runs it
+        if name in direct_names():   # Dan's own tool, given whole: run as dan_tool runs it
             try: args = json.loads(arguments)
             except ValueError: args = {}
             name, arguments = 'dan_tool', json.dumps({'name': name, 'arguments': args}, ensure_ascii=False)
@@ -209,6 +269,7 @@ class Call:
         self.dialogue, self.send, self.record = dialogue, send, record
         self.lookups = {}
         self.closed = False
+        self.router = None          # voice_router.Router of the call, when the requests are routed by Jev
         self._spec = None
         self.warming = None
 
