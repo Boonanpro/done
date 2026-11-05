@@ -586,6 +586,7 @@ class Stage:
                 self._cue_words = ''
         if self._fresh and self._fresh[-1][0] == role: self._fresh[-1] = (role, self._fresh[-1][1] + delta)
         else: self._fresh.append((role, delta))
+        if not self.listening: del self._fresh[:-8]   # nothing decides on them until a drawing is asked for
         if role == 'assistant':
             self.pending_chars += len(delta.strip())
             if self.user_pending and self._timer is not None: return

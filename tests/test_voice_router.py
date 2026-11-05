@@ -321,3 +321,12 @@ async def test_words_said_on_after_a_request_are_judged_alone(monkeypatch):
     assert second[-1] == {'role': '本人', 'text': '今どういう状況？'} and second[-2]['text'].startswith('しゅんさん')
     assert [f['route'] for p, f in log if p == 'route_chosen'] == ['site', 'status']
     assert sent[-1]['type'] == 'session.commentary.append' and sent[-1]['delegation_id'] == 'd2' and 'しゅんさんとみひろさん' in sent[-1]['content']
+
+
+def test_a_long_call_still_fits_in_one_request_to_jev():
+    running = [{'label': '作業', 'kind': 'job', 'id': str(i)} for i in range(4)]
+    asked = voice_router.questions(running, {f'成果物{i}' * 3: f'「成果物{i}」' for i in range(120)})
+    state = {'conversation': [{'role': '本人', 'text': 'あ' * 600}] * 9 + [{'role': '本人', 'text': '今の頼み'}], 'running_work': [], 'screen': ''}
+    voice_router.fit(state, asked)
+    assert len(json.dumps({'model': 'jev-latest', 'state': state, 'questions': asked}, ensure_ascii=False).encode()) <= 24000
+    assert state['conversation'][-1]['text'] == '今の頼み' and 'route' in asked

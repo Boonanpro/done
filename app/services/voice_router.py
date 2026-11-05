@@ -8,14 +8,14 @@ free slots of two salons on their booking sites went to the short web lookup, wh
 the backend's 「まだ確認できてない」).
 
 So the call uses client delegation (live-delegation: the application answers) and this module answers it:
-- Jev chooses where the request goes from options written by where and with what the work is done (ROUTES), plus one
-  「止める」 and one 「変える」 option for each piece of work running in the call. About 0.15 s.
+- Jev chooses where the request goes from options written by where and with what the work is done (ROUTES), and, in the
+  same call, what the words do to each piece of work running in the call (WORK: its status, stop, change). About 0.15 s.
 - The status of the call's work is answered here from the job files and the lookups at once (status_text).
 - Reading the web, a map, saved information or past records goes to the background lookup (voice_lookup).
 - Work on sites, apps, Dan's artifacts or Dan itself goes to chat Dan (a parallel job of the room, engine 'make'), with
   the call's transcript, so chat Dan reads the conditions itself and nobody rewrites them.
 - Messages, documents and pictures on the stage (writing and approving), and anything Jev is unsure of, go to the earlier
-  backend: gpt-6-luna with the call's tools, run here (luna_answer).
+  backend: gpt-6-luna with the call's tools, run here (Router.luna).
 The answer to a delegation goes back as commentary with its id before the automatic acknowledgement (ACK_DELAY_MS), so
 the speech model says one thing, not an acknowledgement and then the answer.
 
@@ -30,7 +30,8 @@ import time
 ACK_DELAY_MS = 800        # the longest wait the API allows before it asks the speech model for an acknowledgement itself
 SETTLE_S = .35            # the owner's last words may still be arriving when the delegation is created
 SETTLE_MAX_S = 1.2
-CONFIDENT = .6            # below this, the request goes to luna_answer
+CONFIDENT = .6            # below this, the request goes to Router.luna
+JEV_BYTES = 22000         # Jev takes 24,000 bytes a request (jev_decisions); ten long turns of a call are 18,000
 JEV_TIMEOUT_S = 1.5
 LUNA_ROUNDS = 8
 LUNA_SECONDS = 90
@@ -113,6 +114,18 @@ def decide(answers, running):
     if any(what == 'status' and p >= CONFIDENT for what, p in asking) and route not in ('end',):
         return 'status', max(p for what, p in asking if what == 'status')
     return (route if probability >= CONFIDENT else 'other'), probability
+
+
+def fit(state, asked):
+    """Keep the request to Jev under its size: older turns go first, then the pages to name."""
+    size = lambda: len(json.dumps({'state': state, 'questions': asked}, ensure_ascii=False).encode('utf-8'))
+    while size() > JEV_BYTES and len(state['conversation']) > 2:
+        state['conversation'].pop(0)
+    if size() > JEV_BYTES:
+        asked.pop('target', None)
+    while size() > JEV_BYTES and state['conversation'] and len(state['conversation'][0]['text']) > 100:
+        state['conversation'][0]['text'] = state['conversation'][0]['text'][-len(state['conversation'][0]['text']) // 2:]
+    return state
 
 
 def chosen(answers, name):
@@ -252,7 +265,9 @@ class Router:
         targets = self.targets or {}   # read at the call's start (warm); a request before that has no pages to name
         state = {'conversation': self.conversation(), 'running_work': [w['label'] for w in running[-4:]],
                  'screen': getattr(self.stage, 'caption', '') if self.stage is not None else ''}
-        got = await self.judge.choose(state, questions(running, {name: f'「{name}」' for name in targets}))
+        asked = questions(running, {name: f'「{name}」' for name in targets})
+        fit(state, asked)
+        got = await self.judge.choose(state, asked)
         if not got.get('available'):
             return 'other', '', '', 0.0, got.get('elapsed_ms')
         route, probability = decide(got['answers'], running)
