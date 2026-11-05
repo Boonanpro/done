@@ -21,3 +21,11 @@ After the correction: color-3/color-4 and count-1/count-2 all preserve the chang
 Authorized owner call `f8d267d675fb9ba9318dbcf905e3474a6a464f0f678cce8c` rang and was answered; Twilio duration 23 seconds, then completed. The signed public stream reached the new bridge, but the Live API rejected `input_audio_rate_limit_exceeded`: preparing room context after answer had buffered about eight seconds, then the receive loop forwarded it instantly. There was no successful conversation (empty transcript). Do not call this a working phone test.
 
 Fix: prepare the immutable, credential-free session config in the private one-use grant before dialing; the receiving loop also paces buffered audio by its sample count without dropping words. Regression check run against the committed pre-fix receiver: 400 ms of audio sent in 0.0001 s, correctly rejected. Patched receiver sends the same bytes over 0.30 s (80 ms initial allowance). This covers real transport buffering, which the earlier continuously paced fake peer did not exercise.
+
+## Opening before the peer speaks
+
+Second actual call `018a1e5697d620d2bdfb3d8750061b592a585151143db462`: provider completed after 15 s, signed stream connected and Live finalized, but no transcript in either direction. Asked the owner whether any voice was audible; no answer yet. Do not infer natural conversation from provider completion.
+
+A silent-answer scenario independently reproduced that Dan did not open the conversation (15 s, empty transcript). Follow the documented Live opening sequence: developer greeting in initial input, then one commentary append after session.started while audio input stays live. https://developers.openai.com/api/docs/guides/live-conversations#greet-before-the-caller-speaks
+
+Opening-color and opening-count both greeted in about 1.7 s without the peer speaking. Count correction plus hangup passed. Color failed: the synthetic partner counted the opening greeting as the answer to its first substantive request and sent the correction immediately; meanwhile the existing backend fetched the real calendar and Dan said the old color. Preserve this failed run; it is not a naturalness pass. The partner now waits for a response after its first request rather than counting the opening greeting. Overall naturalness and the real handset audio still need the owner, not a synthetic pass claim.
