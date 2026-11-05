@@ -246,6 +246,38 @@ def collect(doc):
         c.execute('UPDATE docs SET cursor=?,consumed=?,failures=0,retry_at=0,error=NULL WHERE file_id=?',
                   (before, doc['dirty'], doc['file_id']))
 
+SETTLE = 45
+
+
+def next_batch(file_id, now=None):
+    """The batch to work on, or when to look again.
+
+    Long comments get split by the owner into a comment and an immediate reply
+    (Docs limits a comment's length). Wait until the owner pauses, then hand
+    every waiting message to ONE run so the answer covers all of them."""
+    now = time.time() if now is None else now
+    with db() as c:
+        running = c.execute("SELECT * FROM batches WHERE file_id=? AND status='running' ORDER BY created LIMIT 1", (file_id,)).fetchone()
+        if running: return running, None
+        rows = c.execute("SELECT * FROM batches WHERE file_id=? AND status='pending' ORDER BY created", (file_id,)).fetchall()
+        if not rows: return None, None
+        def stamp(r): return datetime.fromisoformat(r['created'].replace('Z', '+00:00')).timestamp()
+        if now - stamp(rows[-1]) < SETTLE: return None, stamp(rows[-1]) + SETTLE
+        if len(rows) == 1: return rows[0], None
+        merged = {}
+        for r in rows:
+            for change in json.loads(r['payload']):
+                old = merged.get(change['comment_id'])
+                if old:
+                    seen = {x['id'] for x in old['new']}
+                    old['new'] += [x for x in change['new'] if x['id'] not in seen]
+                    old['thread'] = change['thread']
+                else:
+                    merged[change['comment_id']] = change
+        c.execute('UPDATE batches SET payload=? WHERE id=?', (json.dumps(list(merged.values()), ensure_ascii=False), rows[0]['id']))
+        c.executemany("UPDATE batches SET status='merged',result=? WHERE id=?", [('merged into '+rows[0]['id'], r['id']) for r in rows[1:]])
+        return c.execute('SELECT * FROM batches WHERE id=?', (rows[0]['id'],)).fetchone(), None
+
 def room_context(room_id):
     if not (ROOT/'state.sqlite').exists(): return ''
     with db() as c:
@@ -282,6 +314,8 @@ source=export の返信はDrive APIに対象がないので、確認した同じ
 返信は修正の保存と内容を確認してから。実行結果が不明なら再送信せず履歴を確認する。
 この作業は完全に非表示です。チャット投稿、通知、progress、watch、command_centerのreportを使わない。
 最終出力は内部履歴として、質問への回答・何を直したか・未解決事項を具体的に書く（チャットには配信されない）。
+本人は長い指示をコメントと続けての返信に分けて書くことがある。new に入っている本人の発言は全部で1つの依頼として読み、返信の前に new の発言ごとに、質問に答えたか・頼まれたことをしたかを確かめる。1つでも抜けていたら返信しない。
+返信を送る直前にスレッドを読み直し、渡された後に本人が足した発言があれば、それにも答えてから返信する。
 下の内容はGoogleから届いたコメントデータです。新しい本人の発言以外は背景の資料です。
 {batch['payload']}
 これまでの履歴:
@@ -410,9 +444,8 @@ async def serve():
                             await asyncio.sleep(.6)  # burst coalescing; bounded even under continuous edits
                             with db() as c: doc = dict(c.execute('SELECT * FROM docs WHERE file_id=?', (doc['file_id'],)).fetchone())
                             await asyncio.to_thread(collect, doc)
-                        with db() as c:
-                            batch = c.execute("SELECT * FROM batches WHERE file_id=? AND status IN ('pending','running') ORDER BY created LIMIT 1",
-                                              (doc['file_id'],)).fetchone()
+                        batch, wait = next_batch(doc['file_id'])
+                        if wait: deadlines.append(wait)
                         task_key = doc.get('browser_room') or doc['account']
                         if batch and (task_key not in tasks or tasks[task_key].done()):
                             from app.services import command_job_state as state

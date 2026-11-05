@@ -168,3 +168,46 @@ async def test_private_runner_requires_report_and_restart_does_not_replay(target
 def test_learning_context_is_in_assembled_room_context(target):
     L.store('f',docx(paragraph('本文')), {})
     assert '保存版数=1' in E.room_context('r')
+
+
+@pytest.mark.asyncio
+async def test_failed_run_returns_changes_and_retries_after_pause(target,monkeypatch):
+    L.store('f',docx(paragraph('前')),{});L.store('f',docx(paragraph('後')), {})
+    t0=time.time()+1000
+    jid=L.prepare_job('f',t0)
+    with L.db() as c:c.execute("UPDATE jobs SET status='needs_attention' WHERE id=?",(jid,))
+    assert L.prepare_job('f',t0+60) is None
+    again=L.prepare_job('f',t0+L.RETRY_AFTER+1)
+    assert again and len(L.evidence(again)['changes'])==1
+    for n in range(2):
+        with L.db() as c:c.execute("UPDATE jobs SET status='needs_attention' WHERE id=?",(again,))
+        again=L.prepare_job('f',t0+(n+2)*(L.RETRY_AFTER+1))
+    with L.db() as c:c.execute("UPDATE jobs SET status='needs_attention' WHERE id=?",(again,))
+    assert L.prepare_job('f',t0+10*L.RETRY_AFTER) is None  # three failures: stop until inspected
+
+
+def test_compact_evidence_reads_whole_period_as_sentences(target):
+    L.store('f',docx(paragraph('最初にかかるお金は数十万円です。')),{})
+    L.store('f',docx('<w:p>'+text('最初にかかるお金は')+insertion('数万円','1','投手コーチイツキ')+text('です。')+'</w:p>'),{})
+    L.store('f',docx('<w:p>'+text('最初にかかるお金は')+insertion('数万円の広告費くらい','1','投手コーチイツキ')+text('です。')+'</w:p>'),{})
+    jid=L.prepare_job('f',time.time()+1000)
+    bundle=L.evidence(jid)
+    assert 'payload' not in next(iter(bundle['snapshots'].values()))
+    assert bundle['net']['after'][0]['new']==['最初にかかるお金は数万円の広告費くらいです。']
+    assert bundle['pending_suggestions'][0]['text']=='数万円の広告費くらい'
+    assert 'formatting' not in bundle['end']['paragraphs'][0]
+    assert 'payload' in next(iter(L.evidence(jid,full=True)['snapshots'].values()))
+
+
+def test_only_answered_learned_quiet_threads_are_resolved(target):
+    L.store('f',docx(paragraph('本文')),{});L.store('f',docx(paragraph('本文2')),{})
+    jid=L.prepare_job('f',time.time()+1000)
+    ids=[c['id'] for c in L.evidence(jid)['changes']]
+    L.complete(jid,{'outcome':'no_lesson','change_ids':ids,'reason':'なし'})
+    old='2020-01-01T00:00:00Z'
+    def th(i,last,**kw):return {'id':i,'content':'直して','createdTime':old,'replies':[{'content':last,'createdTime':old}],**kw}
+    threads=[th('done','ダン：直しました。'),th('asked','ダン：どちらにしますか？'),th('owner','まだ違う'),
+             th('closed','ダン：直しました。',resolved=True)]
+    assert L.finished_threads(target,threads)==['done']
+    with E.db() as c:c.execute('INSERT INTO batches(id,file_id,payload,created,status) VALUES(?,?,?,?,?)',('b','f','[{"comment_id":"done"}]',E.iso(),'pending'))
+    assert L.finished_threads(target,threads)==[]
