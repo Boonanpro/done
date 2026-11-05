@@ -27,6 +27,9 @@ async def note_request(row):
     job_id = row['id']
     s = state.read(job_id)
     asked = words(s['task'])
-    await ChatService().send_message(row['room_id'], row['user_id'], '📞 通話からの依頼: ' + asked, sender_type='human')
+    # A request routed from a call (voice_router) carries the call's transcript for the job; the room shows the words only.
+    from app.services.voice_router import TRANSCRIPT
+    said = asked.split(TRANSCRIPT)[0].strip()
+    await ChatService().send_message(row['room_id'], row['user_id'], '📞 通話からの依頼: ' + said, sender_type='human')
     return state.change(job_id, lambda x: x.update(voice_noted=True, origin_note=ORIGIN_NOTE, task=asked,
-                                                   title=x.get('title') or asked[:58]))
+                                                   title=x.get('title') or said[:58]))

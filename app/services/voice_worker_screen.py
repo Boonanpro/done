@@ -1,6 +1,9 @@
 """Carry a worker's actual browser view into its owner's active call."""
 import asyncio
 import os
+import time
+
+HOLD_S = 12.0   # a page put on the screen (show_page) stays at least this long before the work's browser comes back
 
 
 async def observe(job_id, tool, arguments):
@@ -36,7 +39,8 @@ class Follower:
         stage = self.stage
         if stage.user_id != self.user_id:
             return
-        if stage.version != self.version:
+        routed = not getattr(stage, 'listening', True)
+        if stage.version != self.version and not routed:
             if self.seen or any(getattr(stage, field, None) for field in ('image','frame','program','html','card','doc','media','cue')):
                 return  # A newer visible scene wins; an initial caption is not a scene.
             self.version = stage.version
@@ -55,6 +59,12 @@ class Follower:
         room = screen.get('browser_room')
         if not url or not room or room != job.get('browser_room'):
             return
+        if routed and stage.image != url:
+            # With Jev routing the call (voice_router) the work's browser comes back each time the work moves on, so the
+            # screen follows chat Dan from page to page (owner, 2026-11-05: 「ポンポン画面を切り替えてほしい」). What the
+            # owner is working on (a draft, a document, a picture) and a page shown in the last seconds stay.
+            if stage._live() in ('card', 'doc', 'media') or time.monotonic() - getattr(stage, '_last_replace', -1e9) < HOLD_S:
+                return
         self.seen = key
         if stage.image != url:
             stage._apply('ブラウザの画面', image=url)

@@ -88,8 +88,19 @@ While backend work runs:
 - Never invent progress or claim changes."""
 
 
+# With Jev routing the call (voice_router) the state of the call's work reaches the speech model as it changes (thinking:
+# voice_sideband.tell_state), so 「今どう？」 needs no backend turn: in the 2026-11-05 0:59 call it was answered twice, the
+# speech model's own 「確認してる」 and then the backend's reading.
+ROUTED = ("""Do not generate <|SpawnThinking|> when:
+- You can answer from the conversation or a still-current result.""", """Do not generate <|SpawnThinking|> when:
+- You can answer from the conversation or a still-current result.
+- The question is how running work is going and the latest work state you were given answers it.""")
+
+
 def instructions():
-    return persona() + chr(10) + POLICIES
+    from app.services import voice_router
+    policies = POLICIES.replace(*ROUTED) if voice_router.enabled() else POLICIES
+    return persona() + chr(10) + policies
 
 
 def plain_text(text):

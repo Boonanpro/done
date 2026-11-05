@@ -545,6 +545,11 @@ class Stage:
         self._last_replace = -1e9    # when the scene was last replaced (monotonic)
         self._tasks = set()
         self._names = None
+        # Drawing the talk on the screen by itself (decide) is off when Jev routes the call (voice_router): in the 2026-11-05
+        # 0:59 call it ran 56 times and its three drawings only redrew what the owner had said, one with an order the owner
+        # had not chosen. The screen shows real things: pages, the work's browser, drafts, pictures, and a drawing asked for.
+        from app.services import voice_router
+        self.listening = os.environ.get('DAN_VOICE_STAGE_LISTEN', '0' if voice_router.enabled() else '1') != '0'
         _stages[room_id] = self
         self.write(active=True)
 
@@ -581,6 +586,7 @@ class Stage:
                 self._cue_words = ''
         if self._fresh and self._fresh[-1][0] == role: self._fresh[-1] = (role, self._fresh[-1][1] + delta)
         else: self._fresh.append((role, delta))
+        if not self.listening: del self._fresh[:-8]   # nothing decides on them until a drawing is asked for
         if role == 'assistant':
             self.pending_chars += len(delta.strip())
             if self.user_pending and self._timer is not None: return
@@ -592,6 +598,7 @@ class Stage:
             self._owner_asked = True
             wait = USER_S
             if self._live(): self._schedule_flow()
+        if not self.listening: return
         self._schedule(wait)
 
     def _schedule(self, wait):
@@ -843,6 +850,10 @@ class Stage:
 
     def apply_external(self, source, path, out, serial=''):
         if not path: return {'shown':False,'reason':out.get('text') or '画面を取得できませんでした。'}
+        from app.services.voice_screen_media import blank
+        if blank(path):
+            self.record('stage_blank_skipped', source=source)
+            return {'shown': False, 'reason': '画面が真っ白（または真っ黒）で、出しても何も見えないので出していない。'}
         self._apply('スマホの画面' if source=='phone' else 'ブラウザの画面',image=path)
         self._external_source = source
         self._external_image = path
