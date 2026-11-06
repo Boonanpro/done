@@ -117,7 +117,17 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を図にしてほしいか（本人の言葉のまま。例: 今の3つの案を比べて、支払いの流れ）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'show_page_on_stage', 'description': '実際のページの画面を本人の通話画面に出す（本人が「このページ見せて」「成果物の〇〇を出して」と頼んだ時）。ダンの成果物はその画面そのもの、よそのページはその写真。URL（https://… か /artifacts/… のような道）か、本人の成果物の名前（例: X運用室、台本室）を渡す。',
      'parameters': {'type': 'object', 'properties': {'url': {'type': 'string', 'description': 'ページの URL か、このサイトの道（省略可）'}, 'artifact': {'type': 'string', 'description': '成果物の名前の一部（URL が無い時）'}, 'note': {'type': 'string', 'description': '画面の札に出す短い言葉（例: X運用室の今の記事）'},
-                                                          'conditions': {'type': 'string', 'description': '商品・店・候補のページの時、本人がこの会話で言った条件（例: 重り100kg分、在庫があって買える、5万円まで）。出す前にページと照らし、合わなければ出さずに理由が返る'}}, 'additionalProperties': False}},
+                                                          'conditions': {'type': 'string', 'description': '商品・店・候補のページの時、本人がこの会話で言った条件（例: 重り100kg分、在庫があって買える、5万円まで）。出す前にページと照らし、合わなければ出さずに理由が返る'},
+                                                          'focus': {'type': 'string', 'description': '本人が聞いたことが書いてある所の言葉（例: 価格 仕様、サイズ、営業時間）。ページのその場所まで画面を送る。ページの上だけで足りる時は省く'}}, 'additionalProperties': False}},
+    {'type': 'function', 'name': 'show_search_on_stage', 'description': '本人の画面に、すぐ絵を出す: 物（商品・機材・料理など）は画像検索（kind=images）、場所・店・施設・住所は Google マップ（kind=map）。答えを調べている間に本人が見られる。',
+     'parameters': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['images', 'map']},
+                                                    'query': {'type': 'string', 'description': '検索する言葉（例: レボルワン R630、レボルワン 大阪ショールーム 大阪市阿倍野区西田辺町2-6-21）'}},
+                    'required': ['kind', 'query'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'compare_pages_on_stage', 'description': '2〜3個の物の違いを聞かれた時、それぞれのページを本人の画面に並べて出す（focus の所まで送った写真）。各ページの本文も返るので、read_page で読み直さずに違いを答える。',
+     'parameters': {'type': 'object', 'properties': {'urls': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 2, 'maxItems': 3, 'description': '比べるページの https の URL（検索結果か読んだページにあったもの）。URL が見つからない物は名前（例: R490）をそのまま入れると、ほかの URL と同じサイトから個別ページを探す'},
+                                                    'labels': {'type': 'array', 'items': {'type': 'string'}, 'description': '画面で各ページに付ける短い名前（例: R630、R490）'},
+                                                    'focus': {'type': 'string', 'description': '比べる所の言葉（例: 仕様 価格）'}},
+                    'required': ['urls'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'draft_message_on_stage', 'description': '外の相手へのメッセージの下書き（送信案）を作り、本人の通話画面と部屋に出す（本人が「○○さんにメッセージ送って」「メールして」と頼んだ時）。本文はあなたが書く。送信はしない。',
      'parameters': {'type': 'object', 'properties': {'channel': {'type': 'string', 'enum': ['email', 'instagram_dm', 'collab', 'line', 'sms', 'chatwork', 'slack', 'x_dm', 'web_form', 'other'], 'description': '手段'},
                                                      'to': {'type': 'string', 'description': '宛先（メールアドレス・Instagram のユーザー名・電話番号など）'},
@@ -552,7 +562,14 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         stage = voice_stage.for_room(room_id)
         if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
         return await stage.show_page(str(args.get('url') or ''), str(args.get('artifact') or ''), str(args.get('note') or ''),
-                                     conditions=str(args.get('conditions') or ''))
+                                     conditions=str(args.get('conditions') or ''), focus=str(args.get('focus') or ''))
+    if name in ('show_search_on_stage', 'compare_pages_on_stage'):
+        from app.services import voice_stage
+        stage = voice_stage.for_room(room_id)
+        if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
+        if name == 'show_search_on_stage':
+            return await stage.show_search(str(args.get('kind') or 'images'), str(args.get('query') or ''))
+        return await stage.compare_pages(args.get('urls') or [], args.get('labels') or [], str(args.get('focus') or ''))
     if name in ('draft_message_on_stage', 'revise_message_on_stage', 'send_message_on_stage', 'discard_message_on_stage'):
         from app.services import voice_stage
         stage = voice_stage.for_room(room_id)

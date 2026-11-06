@@ -761,7 +761,7 @@ class Stage:
         return {'shown': result == 'replace', 'caption': self.caption, 'reason': None if result == 'replace' else (result or 'failed')}
 
     # -- a real page on the stage -----------------------------------------------------------------------------
-    async def show_page(self, url='', artifact='', note='', conditions=''):
+    async def show_page(self, url='', artifact='', note='', conditions='', focus=''):
         """A real page on the stage: a page of this site (one of the owner's artifacts, by name or path) as the page itself,
         live and signed in as the owner, so what the owner sees and presses is the site (the owner on 2026-10-27: every
         screen on the stage must be the real one); a page elsewhere as its photograph from a browser of this server, after
@@ -794,17 +794,19 @@ class Stage:
                 self.record('stage_page_skipped', elapsed_ms=round((time.monotonic() - started) * 1000))
                 return {'shown': False, 'reason': '同時に渡した別の候補が先に条件に合い、本人の画面に出ている。これは開いていない。',
                         'note': '画面に出ているのは先の候補。これを出したとは言わない。'}
-            out = await self._show_external_page(target, conditions, key, started)
+            out = await self._show_external_page(target, conditions, key, started, focus)
             if out.get('shown'): self._page_shown_at = time.monotonic()
             return out
 
-    async def _show_external_page(self, target, conditions, key, started):
+    async def _show_external_page(self, target, conditions, key, started, focus=''):
         # Use the same authenticated browser the call operates, never a new anonymous browser.
         from app.services import voice_tools
         host = voice_tools.host(self.user_id,self.room_id)
         began = time.monotonic()
         opened = await host.ask('call',name='browser',arguments={'action':'open_target','url':target,'observation':'dom'})
         steps = {'open_ms': round((time.monotonic() - began) * 1000)}   # where the 8-14 s of a shown page go
+        if focus:   # the part of the page the owner asked about, not its top (11/5: R630's top is a picture of its name alone)
+            steps['focused'] = bool(await scroll_to(host, focus))
         # The page's picture and its text are taken at the same time, the text is checked against the owner's conditions, and
         # only a page that fits (or could not be judged) goes on the screen. 19:15 showed the page first and checked behind
         # it, so a wrong page still reached the owner's screen with a 「条件と違う」 caption: in the 20:59 test call a
@@ -815,7 +817,7 @@ class Stage:
             try: return await host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 7000})
             except Exception: return opened
         began = time.monotonic()
-        (path, captured), text = await asyncio.gather(self.capture_external('browser'), body())
+        (path, captured), text, links = await asyncio.gather(self.capture_external('browser'), body(), site_links(host))
         steps['capture_ms'] = round((time.monotonic() - began) * 1000)
         began = time.monotonic()
         checked = await voice_page_check.check(text or opened, conditions)
@@ -828,12 +830,89 @@ class Stage:
             return {'shown': False, 'fits': False, 'reason': checked['reason'], 'page_facts': checked['facts'],
                     'note': '条件に合わないので本人の画面には出していない。出したとは言わない。別の候補を探す。合う候補が無ければそう伝える。'}
         out = self.apply_external('browser', path, captured)
+        if out.get('shown'):
+            self.scenes[-1]['page_url'] = target   # the chat's record of the call says which page was shown, not only the stream
+            # The page's text comes back with it, so the lookup does not read the same page again (11/5 R630: read_page
+            # 6.3 s, then show_page_on_stage opened it again, 4 s).
+            out['page_text'] = str(text or '')[:6000]
+            if links: out['site_links'] = links   # a sibling product's page (11/6: R490's was in no search, but linked from R630's)
         # The address of a page from elsewhere is kept, so a check can open what the owner was shown (voice_goal_grade).
         self.record('stage_page', elapsed_ms=round((time.monotonic() - started) * 1000), version=self.version, live=False, shown=bool(out.get('shown')),
-                    url=target[:500])
+                    url=target[:500], **({'focused': steps['focused']} if 'focused' in steps else {}))
         if not out.get('shown'): out['browser_result'] = opened
         if checked is not None: out['page_facts'] = checked['facts']
         return out
+
+    async def show_search(self, kind, query):
+        """A picture for the owner's words at once, before the answer: an image search for a thing, Google Maps for a
+        place (11/5: the screen came 24-26 s after the question, as the lookup's last step; a map was never shown)."""
+        from urllib.parse import quote
+        query = ' '.join(str(query or '').split())[:200]
+        if not query: return {'shown': False, 'reason': 'query が空。'}
+        url = (f'https://www.google.com/maps/search/?api=1&query={quote(query)}' if kind == 'map'
+               else f'https://www.google.com/search?tbm=isch&hl=ja&q={quote(query)}')
+        started = time.monotonic()
+        from app.services import voice_tools
+        from app.services.voice_responses import browser_lock
+        host = voice_tools.host(self.user_id, self.room_id)
+        async with browser_lock(self.user_id, self.room_id):
+            # A condition of the page itself, not the browser's fixed ~6 s wait (measured 11/6: images 5.3 s -> 1.1 s, map 2.3 s -> 1.1 s)
+            ready = {'selector': 'div[role="main"]' if kind == 'map' else '#search img', 'state': 'visible'}
+            await host.ask('call', name='browser', arguments={'action': 'open_target', 'url': url, 'observation': 'dom', 'ready': ready})
+            path, captured = await self.capture_external('browser')
+        out = self.apply_external('browser', path, captured)
+        if out.get('shown'):
+            self.caption = ('地図: ' if kind == 'map' else '画像: ') + query[:30]
+            self.scenes[-1].update(caption=self.caption, page_url=url)
+            self.write(active=True)
+        self.record('stage_search', kind='map' if kind == 'map' else 'images', shown=bool(out.get('shown')), elapsed_ms=round((time.monotonic() - started) * 1000))
+        return {'shown': bool(out.get('shown')), **({'reason': out.get('reason')} if not out.get('shown') else {'note': '本人の画面に出した。答えはこのまま調べて続ける。'})}
+
+    async def compare_pages(self, urls, labels=None, focus=''):
+        """Two or three pages together as one picture, each at the part asked about, with their texts for the answer
+        (11/5: 「R490と何が違う？」 showed R490's page alone)."""
+        from app.services import voice_tools, voice_screen_media
+        from app.services.voice_responses import browser_lock
+        items = [str(u or '').strip() for u in (urls or []) if str(u or '').strip()][:3]
+        labels = [str(l or '').strip()[:30] for l in (labels or [])]
+        sites = [u for u in items if u.startswith('https://')]
+        if len(items) < 2 or not sites: return {'shown': False, 'reason': '比べる物を2つ以上（少なくとも1つは https の URL）渡す。'}
+        started = time.monotonic()
+        host = voice_tools.host(self.user_id, self.room_id)
+        shots, texts, urls = [], [], []
+        async with browser_lock(self.user_id, self.room_id):
+            for i, item in enumerate(items):
+                # A name instead of an address: its page is found on the same maker's site (11/6: R490's page was in no
+                # search and not linked from R630's page, but listed on revoluone.com's top page).
+                if not item.startswith('https://'):
+                    found = await find_on_site(host, sites[0], item)
+                    if not found: return {'shown': False, 'reason': f'「{item}」の個別ページが {sites[0].split("/")[2]} に見つからなかった。'}
+                    if i >= len(labels) or not labels[i]: labels = labels + [''] * (i + 1 - len(labels)); labels[i] = item[:30]
+                    item = found
+                urls.append(item)
+                url = item
+                await host.ask('call', name='browser', arguments={'action': 'open_target', 'url': url, 'observation': 'dom'})
+                if focus: await scroll_to(host, focus)
+                # A still, unlike the live page: taken at once, a site's fade-in left it dark (11/6, revoluone.com)
+                text, _ = await asyncio.gather(host.ask('call', name='browser', arguments={'action': 'read', 'max_chars': 4000}), asyncio.sleep(SETTLE_SHOT_S))
+                shot = await host.ask('call', with_media=True, name='browser', arguments={'action': 'screenshot'})
+                shots.append(voice_screen_media.local_file(safe_image(shot.get('stage_image')) or ''))
+                texts.append(str(text or '')[:3500])
+        names = [labels[i] if i < len(labels) and labels[i] else urls[i].split('//', 1)[-1][:30] for i in range(len(urls))]
+        try:
+            picture = await asyncio.to_thread(stacked, shots, names)
+        except Exception as exc:
+            self.record('stage_compare_failed', error_type=type(exc).__name__)
+            picture = None
+        url = voice_screen_media.store(self.room_id, picture, 'image/png') if picture else ''
+        if not url:
+            return {'shown': False, 'reason': 'ページの写真を撮れなかった。', 'pages': [{'url': u, 'text': t} for u, t in zip(urls, texts)]}
+        self._apply(' と '.join(names)[:40], image=url)
+        self.scenes[-1]['page_url'] = ' '.join(urls)
+        self._page_shown_at = time.monotonic()
+        self.record('stage_compare', pages=len(urls), elapsed_ms=round((time.monotonic() - started) * 1000))
+        return {'shown': True, 'pages': [{'name': n, 'url': u, 'text': t} for n, u, t in zip(names, urls, texts)],
+                'note': '本人の画面に並べて出した。本文から違いを答える。'}
 
     async def show_external(self, source='browser', serial=''):
         if source not in ('browser','phone'): return {'shown':False,'reason':'browser か phone を指定してください。'}
@@ -1570,6 +1649,129 @@ async def resolve_page(user_id, url='', artifact=''):
     if best is None or score < 2: return None, ''
     path = best.get('preview_url') or ('/artifacts/' + str(best.get('slug') or ''))
     return screens_base() + path, str(best.get('label') or best.get('title') or best.get('slug') or '')
+
+
+SCROLL_TO = """(words) => {
+  const seen = (el) => el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  for (const w of words) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      const t = n.textContent || '';
+      if (t.length > 300 || !t.includes(w)) continue;
+      const el = n.parentElement;
+      if (!seen(el)) continue;
+      el.scrollIntoView({block: 'start'});
+      window.scrollBy(0, -90);
+      return w;
+    }
+  }
+  return '';
+}"""
+
+
+LINKS = """() => {
+  const seen = new Set(), out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    let u; try { u = new URL(a.href, location.href); } catch (e) { continue; }
+    if (u.host !== location.host || u.hash || seen.has(u.pathname)) continue;
+    const t = (a.innerText || a.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ');
+    if (t.length < 2 || t.length > 40) continue;
+    seen.add(u.pathname); out.push(t + ' ' + u.origin + u.pathname);
+    if (out.length >= 40) break;
+  }
+  return out.join(' | ');
+}"""
+
+
+FIND_LINK = """(name) => {
+  const flat = (s) => (s || '').toLowerCase().replace(/[\\s\\-_]+/g, '');
+  const want = flat(name);
+  for (const a of document.querySelectorAll('a[href]')) {
+    let u; try { u = new URL(a.href, location.href); } catch (e) { continue; }
+    if (u.host !== location.host) continue;
+    if (flat(u.pathname).includes(want) || flat(a.innerText).includes(want)) return u.origin + u.pathname;
+  }
+  return '';
+}"""
+
+
+async def find_on_site(host, sibling, name):
+    """The page of a thing named on the same site as a sibling page: its top page's link that names it ('' if none)."""
+    from urllib.parse import urlparse
+    top = '{0.scheme}://{0.netloc}/'.format(urlparse(sibling))
+    try:
+        await host.ask('call', name='browser', arguments={'action': 'open_target', 'url': top, 'observation': 'dom'})
+        out = await host.ask('call', name='browser', arguments={'action': 'evaluate', 'expression': '(' + FIND_LINK + ')(' + json.dumps(str(name)[:60], ensure_ascii=False) + ')'})
+    except Exception:
+        return ''
+    found = re.search(r'evaluate result: (https://\S+)', str(out or ''))
+    return found.group(1) if found else ''
+
+
+async def site_links(host):
+    """The page's links within its own site, as 「text url | …」 ('' when none or unreadable)."""
+    try:
+        out = await host.ask('call', name='browser', arguments={'action': 'evaluate', 'expression': '(' + LINKS + ')()'})
+    except Exception:
+        return ''
+    found = re.search(r'evaluate result: (.+?)(?:\n|$)', str(out or ''))
+    return found.group(1)[:3000] if found and found.group(1) != 'None' else ''
+
+
+async def scroll_to(host, focus):
+    """Scroll the call's browser to the first visible place that says one of the focus words ('' when none is on the
+    page). The words are tried in the order given (「価格 仕様」: the price first)."""
+    words = [w for w in re.split(r'[\s、,・/]+', str(focus or '')) if 1 < len(w) <= 30][:6]
+    if not words: return ''
+    expression = '(' + SCROLL_TO + ')(' + json.dumps(words, ensure_ascii=False) + ')'
+    try:
+        out = await host.ask('call', name='browser', arguments={'action': 'evaluate', 'expression': expression})
+    except Exception:
+        return ''
+    found = re.search(r'evaluate result: (\S+)', str(out or ''))
+    return found.group(1) if found and found.group(1) != 'None' else ''
+
+
+SETTLE_SHOT_S = 1.5
+
+
+def stacked(paths, names):
+    """The pages' pictures in one PNG, one under the other, each under its name (two to three; a missing picture is a grey
+    panel saying so). Stacked, not in columns: the call is mostly seen on the phone, where two desktop pages in columns
+    are too small to read."""
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+    width, height, band, gap = 960, 720, 60, 12
+    font = None
+    for candidate in ('/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc', '/System/Library/Fonts/Hiragino Sans GB.ttc',
+                      'C:/Windows/Fonts/meiryob.ttc', 'C:/Windows/Fonts/msgothic.ttc'):
+        try: font = ImageFont.truetype(candidate, 34); break
+        except OSError: continue
+    font = font or ImageFont.load_default()
+    panels = []
+    for path in paths:
+        if path is None:
+            panels.append(None); continue
+        with Image.open(path) as shot:
+            shot = shot.convert('RGB')
+            shot.thumbnail((width, 10_000))
+            panels.append(shot.crop((0, 0, shot.width, min(shot.height, height))))
+    heights = [p.height if p is not None else 200 for p in panels]
+    canvas = Image.new('RGB', (width, sum(band + h for h in heights) + gap * (len(paths) - 1)), (10, 10, 10))
+    draw = ImageDraw.Draw(canvas)
+    y = 0
+    for panel, name, h in zip(panels, names, heights):
+        draw.text((18, y + 10), name, fill=(245, 245, 245), font=font)
+        if panel is None:
+            draw.rectangle((0, y + band, width, y + band + h), fill=(60, 60, 60))
+            draw.text((18, y + band + 18), '写真を撮れなかった', fill=(220, 220, 220), font=font)
+        else:
+            canvas.paste(panel, (0, y + band))
+        y += band + h + gap
+    out = io.BytesIO()
+    canvas.save(out, 'PNG', optimize=True)
+    return out.getvalue()
 
 
 def _overlap(a, b):

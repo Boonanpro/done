@@ -1,0 +1,23 @@
+{
+ "about": "直すのに使っていない頼み（場所）。",
+ "turns": [
+  [
+   "user",
+   "梅田でダイソンの新しいドライヤーを実際に試せるお店ってある？買う前に触ってみたいんだけど"
+  ]
+ ],
+ "success": {
+  "seconds": 90,
+  "first_screen_s": 10,
+  "route": [
+   "lookup"
+  ],
+  "result_has": [
+   "(ダイソン|Dyson)",
+   "(梅田|大阪)"
+  ],
+  "screen": [
+   "stage_search:map"
+  ]
+ }
+}
