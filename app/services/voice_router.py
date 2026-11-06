@@ -64,6 +64,15 @@ WORK = {'status': '「{label}」の様子・進み具合・結果・番号など
         'new': '「{label}」とは別の新しい頼みや話。'}
 CALENDAR = {'today': '今日の予定', 'tomorrow': '明日の予定', 'week': '今日から7日間の予定',
             'other': 'それ以外の日・期間、または日が分からない'}
+# Dan said he would do something and no request reached here: 「R630の公式ページへのリンクを入れて、先生宛てのメールを作り
+# 直すね。ちょっと待ってて」 (11/5 15:12) and nothing ran; the owner asked twice whether the mail was done, heard 「まだ」 and
+# waited 7 min. The promise is read at the end of Dan's turn, once he has been quiet PROMISE_QUIET_S.
+PROMISE = re.compile(r'(作り直す|作るね|作っとく|用意する|出すね|直すね|足すね|入れるね|調べる|調べてみる|確認する|確認してみる|探す|探してみる|見てみる|やるね|やっとく|'
+                     r'進める|取りかか|反映する|揃える|ちょっと待って|少し待って|待っててね|待ってて)')
+ASKING = re.compile(r'(？|\?|くれる|ですか|でしょうか|かな|どれ|どの|合ってる|いい[？?]?$)')
+PROMISE_QUIET_S = 2.0
+PROMISE_TAIL = 70         # the promise is among the last characters of Dan's turn (not 「確認するね。…」 followed by the answer itself)
+ANSWER_CHARS = 30         # the owner's words this short, after Dan asked back, answer that question: the earlier request goes with them
 FILLERS = re.compile(r'^(?:えっと|えーと|えー|あの|あのー|あー|なんか|ちょっと|で|じゃあ|うん|まあ|そう|ねえ|おい|ダン)[、,。\s]*')
 
 
@@ -153,10 +162,14 @@ class Router:
         self.targets = None         # artifact name -> path, read once
         self.tasks = set()
         self.closed = False
+        self.answering = {}         # delegation id -> (label, started): requests the earlier backend (luna) is working on now
+        self.last_words = ''        # the request of the last delegation (an answer to Dan's question goes on from it)
+        self.promises = set()       # Dan's turns already read for an unrouted promise
         try:   # Jev's key and the owner's artifacts are read now, not on the first request (the first route took 415 ms)
             self.warming = asyncio.ensure_future(self.warm())
+            self.watching = asyncio.ensure_future(self.watch_promises())
         except RuntimeError:
-            self.warming = None
+            self.warming = self.watching = None
 
     async def warm(self):
         from app.services.jev_decisions import Decisions
@@ -169,18 +182,54 @@ class Router:
             pass
 
     # -- the delegation -------------------------------------------------------------------------------------------
+    async def watch_promises(self):
+        while not self.closed:
+            await asyncio.sleep(.4)
+            try:
+                if self.unrouted_promise() is not None:
+                    self.start_promised('promise')
+            except Exception as exc:
+                self.record('promise_watch_failed', error_type=type(exc).__name__)
+
+    def unrouted_promise(self):
+        """The index of Dan's last turn when it ends with a promise to do something that no request carried: the owner
+        spoke since the last delegation, no delegation came after the owner's words, Dan has been quiet a while and did not
+        ask a question. None otherwise."""
+        history = self.dialogue.history
+        if not history or history[-1]['role'] != 'assistant': return None
+        index = len(history) - 1
+        if index in self.promises: return None
+        now = time.monotonic()
+        if now - self.spoke.get('dan_words', now) < PROMISE_QUIET_S or self.dialogue.routing_until > now: return None
+        self.promises.add(index)
+        tail = history[index]['text'].strip()[-PROMISE_TAIL:]
+        if not PROMISE.search(tail) or ASKING.search(tail.split('。')[-1] or tail): return None
+        if self.dialogue.delegated_at >= self.dialogue.heard_at - .5: return None
+        if not any(t['role'] == 'user' for t in self.since_mark()): return None
+        return index
+
+    def start_promised(self, why):
+        """Route the owner's words the way a delegation would be routed, without one: what is said goes in as commentary
+        with no delegation id."""
+        self.record('promise_unrouted', why=why)
+        created = time.monotonic() - ACK_DELAY_MS / 1000   # past the acknowledgement: a notice of work begun goes in silently
+        task = asyncio.ensure_future(self.answer('auto-' + str(time.time_ns()), created, auto=True))
+        self.tasks.add(task); task.add_done_callback(self.tasks.discard)
+
     def delegated(self, delegation_id):
         created = time.monotonic()
         self.dialogue.routing_until = created + ACK_DELAY_MS / 1000 + SETTLE_MAX_S
         task = asyncio.ensure_future(self.answer(delegation_id, created))
         self.tasks.add(task); task.add_done_callback(self.tasks.discard)
 
-    async def answer(self, delegation_id, created):
+    async def answer(self, delegation_id, created, auto=False):
         try:
             await self._settle(created)
             route, target, span, probability, elapsed = await self.route()
             self.record('route_chosen', delegation_id=delegation_id[:40], route=route, probability=round(probability, 2), ms=elapsed,
-                        after_ms=round((time.monotonic() - created) * 1000))
+                        after_ms=round((time.monotonic() - created) * 1000), **({'auto': True} if auto else {}))
+            if auto and route in ('status', 'end'):   # nothing to start: the promise was about something else
+                return
             await self.run(route, target, span, delegation_id, created)
         except Exception as exc:
             self.record('route_failed', delegation_id=delegation_id[:40], error_type=type(exc).__name__, detail=str(exc)[:160])
@@ -205,11 +254,17 @@ class Router:
         return out
 
     def request_words(self):
-        """The owner's words since the last delegation (one request is often said over several turns)."""
-        said = [t['text'].strip() for t in self.since_mark() if t['role'] == 'user']
+        """The owner's words since the last delegation (one request is often said over several turns). A short answer to a
+        question Dan asked goes on from the request he asked about (11/5: 「合ってる」 alone is no request)."""
+        turns = self.since_mark()
+        said = [t['text'].strip() for t in turns if t['role'] == 'user']
         if not said:
             said = [next((t['text'].strip() for t in reversed(self.dialogue.history) if t['role'] == 'user'), '')]
-        return chr(10).join(said)[-1500:]
+        words = chr(10).join(said)[-1500:]
+        asked = next((t['text'].strip() for t in reversed(turns) if t['role'] == 'assistant'), '')
+        if self.last_words and asked and len(words) <= ANSWER_CHARS and ASKING.search(asked[-60:]):
+            return ('頼み: ' + self.last_words[-1200:] + chr(10) + 'ダンの聞き返し: ' + asked[-200:] + chr(10) + '本人の答え: ' + words)
+        return words
 
     def conversation(self, limit=10):
         """The recent turns for Jev, the owner's words since the last delegation as the last turn."""
@@ -294,6 +349,7 @@ class Router:
         self.mark = (len(history) - 1, len(history[-1]['text'])) if history else (0, 0)
         if route == 'status':
             return await self.reply(delegation_id, created, await asyncio.to_thread(self.status_text), spoken=True)
+        self.last_words = words
         if route == 'calendar' and span in ('today', 'tomorrow', 'week'):
             return await self.reply(delegation_id, created, await self.calendar_text(span), spoken=True)
         if route == 'show' and target:
@@ -318,17 +374,21 @@ class Router:
         started speaking (the acknowledgement was said), a notice of work begun goes in silently instead."""
         from app.services.voice_sideband import chunks
         from app.services.voice_plain import COMMENTARY_CHARS
+        from app.services.voice_lookup import unspoken_urls
         text = ' '.join(str(text or '').split())
         # Past the acknowledgement delay the speech model has been asked to acknowledge by itself: a notice of work begun
         # then goes in silently, or Dan says 「調べるね」 and then 「調べ始めた」.
         late = (time.monotonic() - created) * 1000 >= ACK_DELAY_MS - 50
         kind = 'session.commentary.append' if spoken or not late else 'session.thinking.append'
-        if kind == 'session.commentary.append' and len(text) > COMMENTARY_CHARS:
+        target = None if delegation_id.startswith('auto-') else delegation_id   # started by a promise: no delegation to answer
+        said = unspoken_urls(text) if kind == 'session.commentary.append' else text   # an address is not read aloud
+        if kind == 'session.commentary.append' and (len(text) > COMMENTARY_CHARS or said != text):
             for part in chunks(text[:4000]):
-                await self.send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': delegation_id, 'content': part})
-            text = ''.join(re.split(r'(?<=[。！？!?])', text, maxsplit=2)[:2])[:COMMENTARY_CHARS]
+                await self.send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': target, 'content': part})
+            text = ''.join(re.split(r'(?<=[。！？!?])', said, maxsplit=2)[:2])[:COMMENTARY_CHARS]
+        if target is None and not text: return
         for part in chunks(text) if text else ['']:
-            await self.send({'type': kind, 'event_id': f'dan-{time.time_ns()}', 'delegation_id': delegation_id, 'content': part})
+            await self.send({'type': kind, 'event_id': f'dan-{time.time_ns()}', 'delegation_id': target, 'content': part})
         self.record('route_answered', delegation_id=delegation_id[:40], spoken=kind.endswith('commentary.append'), chars=len(text),
                     after_ms=round((time.monotonic() - created) * 1000))
 
@@ -371,8 +431,10 @@ class Router:
                 lines.append(f'作業「{label}」は終わった: {str(job.get("result") or "")[:240]}')
             else:
                 lines.append(f'作業「{label}」は{words}: {str(job.get("error") or "")[:120]}')
+        for label, began_at in list(self.answering.values()):
+            lines.append(f'「{label}」を今進めている（{seconds(time.monotonic() - began_at)}前から）。')
         if not lines:
-            return 'この通話で動いている作業や調べものは無い。'
+            return NOTHING_RUNNING
         return '今の作業の様子（今読んだ記録）: ' + ' '.join(lines)
 
     async def calendar_text(self, span):
@@ -453,20 +515,28 @@ class Router:
         if not self.backend:
             return await self.reply(delegation_id, created, '今の頼みはうまく受け取れなかった。もう一度言ってほしい。')
         started = time.monotonic()
+        others = [label for label, _ in self.answering.values()]
+        self.answering[delegation_id] = (label_of(self.last_words or self.request_words()), started)
         try:
-            text, ended = await asyncio.wait_for(self._luna_loop(delegation_id), LUNA_SECONDS)
+            text, ended = await asyncio.wait_for(self._luna_loop(delegation_id, others), LUNA_SECONDS)
         except asyncio.TimeoutError:
             text, ended = '', False
+        finally:
+            self.answering.pop(delegation_id, None)
         self.record('route_luna', delegation_id=delegation_id[:40], seconds=round(time.monotonic() - started, 1), chars=len(text or ''), ended=ended)
         if not ended:
             await self.reply(delegation_id, created, text or '今の頼みには答えを出せなかった。')
 
-    async def _luna_loop(self, delegation_id):
+    async def _luna_loop(self, delegation_id, others=()):
         from app.services.voice_lookup import _client
         from app.services.voice_sideband import execute_call, chunks
         spec = {k: self.backend[k] for k in ('model', 'instructions', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning') if k in self.backend}
         spec['max_output_tokens'] = 4000
-        given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + turns_text(self.dialogue.recent())}]
+        # The whole call, what it already found and drafted, and what runs now: in the 11/5 15:12 call the mail's revision
+        # asked the owner which product 「まろっぴゃくさんじゅう」 was and then for the product page's address, though both
+        # had been found in the call, and a second run drafted an Instagram message nobody had asked for.
+        given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + turns_text(self.dialogue.history, 16000)
+                  + self.call_context(others) + chr(10) * 2 + LUNA_RULES}]
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
@@ -487,8 +557,31 @@ class Router:
             given = [{'type': 'function_call_output', 'call_id': out['call_id'], 'output': out['output']} for out in outputs]
         return '', False
 
+    def call_context(self, others=()):
+        """What this call has drafted, found and shown, and the work running now, for the earlier backend."""
+        from app.services import voice_lookup
+        from app.services.voice_stage import card_text
+        parts = []
+        cards = {}
+        for scene in getattr(self.stage, 'scenes', None) or []:
+            if scene.get('card'): cards[scene['card'].get('proposal_id')] = scene['card']
+        if cards:
+            parts.append('この通話で作った下書き（直す頼みは、新しく作らずにこの proposal_id を revise_message_on_stage で直す）:' + chr(10)
+                         + chr(10).join(f'- proposal_id {pid}: ' + card_text(card)[:200] + ' / 本文全体: ' + str(card.get('body') or '')[:1500] for pid, card in cards.items()))
+        call = voice_lookup.for_call(self.user_id, self.room_id)
+        found = [f'- 調べもの「{l.label}」: {l.answer[:400]}' for l in (call.lookups.values() if call else []) if l.answer]
+        shown = [f'- {scene.get("caption") or ""}: {scene["page_url"]}' for scene in getattr(self.stage, 'scenes', None) or []
+                 if str(scene.get('page_url') or '').startswith('http')]
+        if found or shown:
+            parts.append('この通話で調べて分かったこと・本人の画面に出したページ（本人に聞き返さずに使う）:' + chr(10) + chr(10).join(found[-6:] + shown[-6:]))
+        running = [w['label'] for w in self.running()] + list(others)
+        if running:
+            parts.append('今動いている別の作業（同じ頼みの催促なら、新しく始めずに「今やっている」とだけ答える）: ' + '、'.join(running))
+        return (chr(10) * 2 + (chr(10) * 2).join(parts)) if parts else ''
+
     async def close(self):
         self.closed = True
+        if self.watching is not None and not self.watching.done(): self.watching.cancel()
         if self.warming is not None and not self.warming.done(): self.warming.cancel()
         for task in list(self.tasks): task.cancel()
         if self.judge is not None:
@@ -517,6 +610,11 @@ def seconds(value):
     value = int(max(0, value))
     return f'{value}秒' if value < 60 else f'{value // 60}分{value % 60}秒' if value < 600 else f'{value // 60}分'
 
+
+NOTHING_RUNNING = 'この通話で動いている作業や調べものは無い。'
+LUNA_RULES = ('（きまり: 本人がこの通話で頼んだことだけをする。頼まれていない相手への下書き・メッセージは作らない。'
+              '本人が前に言ったこと・この通話で調べた事実やページの URL は、本人に聞き返さずにそのまま使う。分からない事は自分で調べる。'
+              'URL は声で読み上げない（下書きや画面に入れる）。）')
 
 CALL_JOB_NOTE = ('\n\n（本人と通話しながら頼まれた作業。本人は電話の向こうで結果を待っている。'
                  '開いたページは本人の通話画面にそのまま映るので、前に使った予約ページなど行き先が分かっている所は探さずに直接開く。'

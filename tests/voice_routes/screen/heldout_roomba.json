@@ -1,0 +1,23 @@
+{
+ "about": "直すのに使っていない頼み（物の違い）。",
+ "turns": [
+  [
+   "user",
+   "ルンバ買おうか迷ってて、ルンバのj9プラスとコンボ10マックスって何が違うの？"
+  ]
+ ],
+ "success": {
+  "seconds": 90,
+  "first_screen_s": 10,
+  "route": [
+   "lookup"
+  ],
+  "result_has": [
+   "(j9|J9)",
+   "(10 ?Max|10マックス|コンボ)"
+  ],
+  "screen": [
+   "stage_compare"
+  ]
+ }
+}

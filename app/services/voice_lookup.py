@@ -47,8 +47,12 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 独立した調べものは同じ手で並べて呼ぶ（並行で動く）。同じ検索・同じページを繰り返さない。前の版で確かめた事実が渡されたら、条件の変わっていない分はそのまま使う。
 - ウェブの一般情報は web_search、URLの中身は read_page。近くの店・施設は places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
 - ログインが要る・サイトの中で操作する・在庫や空きの最新状況を見る時は browser（browser_plan でまとめて進める）。スマホのアプリは phone。
-- 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）を入れて出す。出す前の確かめ（条件・在庫）は道具がするので、read_page で読み直さずにすぐ渡す。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）で、web_search が pages に返したURLか read_page で読んだページにあったURLから選ぶ（URLを推測で組み立てない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
-- 道具を2回以上続けて使う時は、途中で確かめた新しい事実を share_progress で1文渡す（次の道具と同時に呼ぶ。声で本人に届く）。同じことを繰り返さない。予定や推測は渡さない。
+- 本人の画面は、話している間に絵が変わっていくのが良い。物（商品・機材・料理など）や場所・店・施設の頼みでは、最初の手で web_search と同じ手で show_search_on_stage を呼ぶ（物は images、場所は map）。待たずにすぐ絵が出る。考えや手続きの質問（税金・制度・やり方）には呼ばない。
+- 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）と focus（本人が聞いたことが書いてある所の言葉: 価格 仕様、サイズ、営業時間など）を入れて出す（conditions は買う・選ぶ条件だけ。「違い」などの質問は入れない）。ページの本文も返るので、そのページを read_page で読まない（見せる価値のあるページは read_page ではなく最初から show_page_on_stage で開く）。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）で、web_search が pages に返したURLか読んだページにあったURLから選ぶ（URLを推測で組み立てない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
+- 2〜3個の物の違いを聞かれたら、最初の手で物ごとに1本ずつ検索を並べ（例: 「レボルワン R630」「レボルワン R490」）、次の手で、それぞれの個別ページのURLを compare_pages_on_stage に渡す（focus に比べる所の言葉）。画面に並んで出て、各ページの本文も返るので、そこから違いを答える。片方の個別ページのURLが検索に出ない時は、その物の名前（例: R490）をそのまま urls に入れる（もう一方と同じサイトから道具が探す）。違いの質問で show_page_on_stage に片方だけを出さない。
+- 場所・住所・行き方を答える時は、その場所を show_search_on_stage（kind=map、query に名前と住所）で地図に出す。
+- 型番・商品名・店名を聞かれたら、それ自体について確かめた事実だけで答える。別の機種・別の店・別の会社の情報で代えない。答えには何の話か（メーカー名・店名・機種名）を必ず入れる（「ショールームは〜」ではなく「レボルワンのショールームは〜」）。
+- 道具を2回以上続けて使う時は、途中で確かめた新しい事実を share_progress で1文渡す（次の道具と同じ手で呼ぶ。share_progress だけの手は作らない。声で本人に届く）。同じことを繰り返さない。予定や推測は渡さない。
 - 多くの条件で候補を比べて選ぶ時だけ、確かめた事実を material に入れて think_carefully に聞く。
 - 購入・送信・予約の確定・削除・取消はしない。必要なら、答えの最後に「〜してよいか」を1つだけ書く。
 - 答えは、頼みに必要な確かめた事実を2〜4文のふつうの文で書く。値段・時刻・名前は確かめたまま。見つからなかった事、確かめられなかった事はそう書く。太字・見出し・箇条書き・表・URL は使わない。地名に（ひらがな）の読みが付いていたら、答えでもその語の後に同じ読みを残す。
@@ -78,7 +82,8 @@ def routed():
 
 
 TOOL_NAMES = ('web_search', 'read_page', 'get_location', 'get_calendar', 'search_records', 'get_saved_information', 'room_files',
-              'job_status', 'show_page_on_stage', 'show_fact_on_stage', 'show_on_stage', 'show_external_screen')
+              'job_status', 'show_page_on_stage', 'show_search_on_stage', 'compare_pages_on_stage', 'show_fact_on_stage', 'show_on_stage',
+              'show_external_screen')
 OWN = ('share_progress', 'think_carefully')
 
 
@@ -248,7 +253,7 @@ class Lookup:
                 self.call.record('lookup_read_slow', lookup_id=self.id, seconds=READ_PAGE_S)
                 return json.dumps({'error': f'このページは{READ_PAGE_S}秒で読めなかった。読めた他のページや検索の結果を使う。'}, ensure_ascii=False)
         self.verified.append((item.name, out['output']))
-        if item.name == 'show_page_on_stage':
+        if item.name in ('show_page_on_stage', 'compare_pages_on_stage'):
             try: self.shown += bool(json.loads(out['output']).get('shown'))
             except (ValueError, AttributeError): pass
         return out['output']
@@ -300,14 +305,16 @@ class Call:
         from app.services.voice_sideband import chunks
         from app.services.voice_plain import COMMENTARY_CHARS
         text = ' '.join(str(text or '').split())
-        spoken = text
+        # An address is not said aloud: 「公式ページは https://revoluone.com/r630/」 was read out to the owner, who had asked
+        # for it in the mail (11/5 15:19). The whole text, address included, still goes in as thinking.
+        spoken = unspoken_urls(text)
         try:
-            if len(text) > COMMENTARY_CHARS:
+            if len(text) > COMMENTARY_CHARS or spoken != text:
                 for part in chunks(text[:4000]):
                     await self.send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
                                      'content': (full_label + chr(10) if full_label else '') + part})
-                spoken = re.split(r'(?<=[。！？!?])', text, maxsplit=2)
-                spoken = ''.join(spoken[:2])[:COMMENTARY_CHARS] if spoken else text[:COMMENTARY_CHARS]
+                head = re.split(r'(?<=[。！？!?])', spoken, maxsplit=2)
+                spoken = ''.join(head[:2])[:COMMENTARY_CHARS] if head else spoken[:COMMENTARY_CHARS]
             for part in chunks(spoken):
                 await self.send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
             self.record('lookup_spoken', chars=len(spoken))
@@ -354,6 +361,13 @@ class Call:
 
 
 _calls = {}
+URL_TEXT = re.compile(r'\s*(?:\(|（)?https?://[^\s)）」』、。]+(?:\)|）)?')
+
+
+def unspoken_urls(text):
+    """The text without web addresses (and the 「は、」 left before one), for what is said aloud."""
+    out = URL_TEXT.sub('', str(text or ''))
+    return re.sub(r'[はが、:：\s]+(?=[。！？!?]|$)', '', out).strip()
 
 
 def open_call(session_id, user_id, room_id, dialogue, send, record):

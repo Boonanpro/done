@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SCREEN_EVENTS = ('stage_search', 'stage_page', 'stage_compare')
 sys.path.insert(0, str(ROOT))
 
 
@@ -55,11 +56,30 @@ async def main(scenario_path, out_dir, model='', keep=False):
         for role, text in scenario['turns']:
             dialogue.add(role, text + ' ')
         stage = voice_stage.Stage(room, session, dialogue, record, user_id=owner)
-        router = voice_router.Router(session, owner, room, dialogue, send, record, {}, backend=None, stage=stage)
+        # The earlier backend (gpt-6-luna with the call's tools) for routes that use it: a message, a document, 'other'.
+        backend = None
+        if scenario.get('backend'):
+            from app.services import voice_responses
+            backend = voice_responses.delegation(room, owner)['responses']
+        spoke = {}
+        router = voice_router.Router(session, owner, room, dialogue, send, record, spoke, backend=backend, stage=stage)
         call = voice_lookup.open_call(session, owner, room, dialogue, send, record)
         call.router = router
         follower = Follower(stage, owner, room, dialogue.began_iso)
-        await router.answer('item_route_run', time.monotonic())
+        for page in scenario.get('shown_pages') or []:   # pages the call had put on the screen before
+            stage.scenes.append({'caption': page['caption'], 'page_url': page['url'], 'image': '', 'at': ''})
+        for draft in scenario.get('drafts') or []:   # a draft already on the call's screen (made earlier in the call)
+            await stage.draft_message(draft['channel'], draft['to'], draft['body'], draft.get('subject', ''), draft.get('to_name', ''))
+        if scenario.get('promise'):
+            # The last turn is Dan's promise and no delegation follows (11/5 15:12): the server must start it by itself.
+            dialogue.heard_at = time.monotonic() - 3
+            dialogue.delegated_at = time.monotonic() - 60
+            spoke['dan_words'] = time.monotonic() - 2.5
+            for _ in range(40):
+                await asyncio.sleep(.25)
+                if any(e['phase'] == 'route_chosen' for e in events): break
+        else:
+            await router.answer('item_route_run', time.monotonic())
         run['route'] = next((e.get('route') for e in events if e['phase'] == 'route_chosen'), None)
         run['job_id'] = next(iter(router.jobs), None)
         seen = {}
@@ -92,10 +112,16 @@ async def main(scenario_path, out_dir, model='', keep=False):
                 run['state'] = job['state']
                 run['seconds'] = round(time.monotonic() - began, 1)
                 break
+            luna = [e for e in events if e['phase'] == 'route_luna']
+            if luna and not router.answering and not lookups_running and not run['job_id']:
+                run['result'] = ' '.join(x['content'] or '' for x in said if x['type'] == 'session.commentary.append')
+                run['seconds'], run['state'] = round(time.monotonic() - began, 1), 'answered'
+                break
             answered = [l for l in call.lookups.values() if l.state == 'answered']
             if not run['job_id'] and answered and not lookups_running:
                 run['result'], run['seconds'], run['state'] = answered[-1].answer, round(time.monotonic() - began, 1), 'answered'
                 break
+        run['cards'] = [scene['card'] for scene in stage.scenes if scene.get('card')]
         for scene in stage.scenes:
             image = scene.get('image') or ''
             run['screens'].append({'at': scene.get('at'), 'caption': scene.get('caption'), 'image': image, 'frame': scene.get('frame'),
@@ -118,10 +144,32 @@ async def main(scenario_path, out_dir, model='', keep=False):
               # each later question answered once, by the route it should take (a status: one commentary, no second answer)
               'later': all(l['route'] in (l['expect_route'] or [l['route']]) and len([r for r in l['replies'] if r['type'] == 'session.commentary.append']) == 1
                            for l in run['later'])}
-    print(json.dumps({'checks': checks, 'route': run['route'], 'seconds': run['seconds'], 'state': run.get('state'),
+    # The screen while the owner waits (2026-11-06): how soon something is on it, and what kinds were shown (a map for a
+    # place, two pages together for a difference, a product's page at the part asked about).
+    shown = [e for e in events if e['phase'] in SCREEN_EVENTS and e.get('shown', True)]
+    run['first_screen_s'] = shown[0]['at'] if shown else None
+    if 'first_screen_s' in goal:
+        checks['first_screen'] = run['first_screen_s'] is not None and run['first_screen_s'] <= goal['first_screen_s']
+    names = [e.get('name') for e in events if e['phase'] == 'function_done']
+    for name in goal.get('no_function', []):   # e.g. a second draft nobody asked for
+        checks['no ' + name] = name not in names
+    for name in goal.get('function', []):
+        checks[name] = name in names
+    spoken_text = ' '.join(x['content'] or '' for x in said if x['type'] == 'session.commentary.append')
+    for pattern in goal.get('spoken_not', []):   # e.g. asking the owner for what the call already found
+        checks['not said ' + pattern] = not re.search(pattern, spoken_text)
+    if goal.get('card_has'):
+        last = (run['cards'] or [{}])[-1]
+        checks['card'] = all(re.search(p, str(last.get('body') or '')) for p in goal['card_has']) and len({c['proposal_id'] for c in run['cards']}) == 1
+    for want in goal.get('screen', []):   # e.g. "stage_search:map", "stage_compare", "stage_page:focused"
+        phase, _, how = want.partition(':')
+        checks['screen ' + want] = any(e['phase'] == phase and (not how or e.get('kind') == how or e.get(how)) for e in shown)
+    print(json.dumps({'checks': checks, 'route': run['route'], 'seconds': run['seconds'], 'state': run.get('state'), 'first_screen_s': run['first_screen_s'],
+                      'shown': [(e['at'], e['phase'], e.get('kind') or e.get('url') or e.get('pages')) for e in shown],
                       'result': (run['result'] or '')[:600], 'screens': len(run['screens']),
                       'later': [{'say': l['say'], 'route': l['route'], 'replies': [(r['type'].split('.')[1], r['at'], r['content']) for r in l['replies']]} for l in run['later']],
-                      'spoken': [s['content'] for s in said if s['type'] == 'session.commentary.append']}, ensure_ascii=False, indent=1))
+                      'spoken': [s['content'] for s in said if s['type'] == 'session.commentary.append'],
+                      'functions': names, 'card': (run['cards'] or [{}])[-1].get('body', '')[:600]}, ensure_ascii=False, indent=1))
     if run['route'] is None:
         return 2
     return 0 if all(checks.values()) else 1

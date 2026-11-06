@@ -27,3 +27,12 @@
 - 選択肢: `python scripts/voice_route_eval.py <本人のid> [cases] --repeat 2`。`tests/voice_routes/real_requests.json`（本人が通話で言った50件、説明を直すのに使った）と `held_out.json`（使っていない15件）。11/5: 最初の説明で 38/50、問いを分けて説明を直した後 98/100、held_out 30/30。
 - 裏だけで頼みから結果まで: `python scripts/voice_route_backend_run.py tests/voice_routes/salon_backend.json <出力> --model astra`（試験用の部屋を作って消す。通話はしない。OPENAI_API_KEY は改行を含めずに渡す）。
 - 委譲の設定が受け付けられるか: WebSocket で `session.start` してすぐ閉じる（音声なし）。11/5 に client + 800ms が受け付けられた。
+
+## 11/6 の直し（本人の 15:05 の通話から）
+
+- 約束だけで頼みが出ない: 声のモデルが「作り直すね」「調べてみるね」で終わり、本人の言葉の後に委譲が来ず2秒黙ったら、サーバーが同じ振り分けで自分で始める（`Router.unrouted_promise` / `start_promised`、記録 `promise_unrouted`・`route_chosen auto`）。聞き返しで終わった番、答えを自分で言った番、委譲が来た番は起こさない。
+- 聞き返しへの短い答え（「合ってる」）は、前の頼みと聞き返しを付けて渡す（`request_words`）。
+- 裏の判断役（luna）には、通話の全文、この通話の下書き（proposal_id と本文。直す時は revise）、調べて分かったこと・画面に出したページの URL、今動いている作業を渡す（`call_context`、`LUNA_RULES`）。luna が動いている間の「できた？」は status が「今進めている」と答える。
+- URL は声に出さない（`voice_lookup.unspoken_urls`。全文は thinking で渡す）。
+- 画面: 物は画像検索、場所は Google マップを最初の手で出す（`show_search_on_stage`、ready 条件で約1秒）。ページは focus の所まで送って出し、本文と同じサイトのリンクを返す（read_page で読み直さない）。違いは `compare_pages_on_stage` で縦に並べた1枚の写真（URL が分からない物は名前で、同じサイトの一覧から探す）。
+- 確かめ: `tests/voice_routes/screen/*.json` を `scripts/voice_route_backend_run.py` で流す（first_screen_s・screen・card_has・spoken_not の判定を足した）。直す前のコードではメールの約束は何も起きず（exit 2）、R630 の最初の画面は14.9秒・見たい所に送っていなかった。

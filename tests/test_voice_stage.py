@@ -273,7 +273,7 @@ async def test_show_page_opens_this_sites_page_live_and_photographs_a_page_elsew
     assert log[-1][0] == 'stage_page' and log[-1][1]['live'] and '🖥 /preview/x-ops' in stage.summary()
     out = await stage.show_page(url='https://example.com/a', note='よその記事')
     assert out['shown'] and calls[0] == {'action':'open_target','url':'https://example.com/a','observation':'dom'}
-    assert sorted(calls[1:], key=str) == sorted([{'action':'read','max_chars':7000},{'action':'screenshot'}], key=str)   # shown while it is read
+    assert sorted((c['action'] for c in calls[1:])) == ['evaluate', 'read', 'screenshot']   # shown while it is read (and its links listed)
     state = S.read_state(room)
     assert state['frame'] == '' and state['image'] == '/api/v1/files/stage-x.png' and stage._external_source == 'browser'
     assert '[添付画像: /api/v1/files/stage-x.png]' in stage.summary()
@@ -349,7 +349,7 @@ async def test_candidates_handed_over_together_are_opened_one_at_a_time_and_only
     outs = await asyncio.gather(*(stage.show_page(url=u, conditions='100kg以上') for u in pages))
     assert [o['shown'] for o in outs] == [False, True, False]
     assert opened == ['https://example.com/40kg', 'https://example.com/100kg']   # the third was never opened
-    assert busy[1] <= 2   # the picture and the text of one page at a time, never two pages
+    assert busy[1] <= 3   # the picture, the text and the links of one page at a time, never two pages
     assert S.read_state(room)['image'] == '/api/v1/files/stage-100kg.png' and '先に条件に合い' in outs[2]['reason']
 
 
