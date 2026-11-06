@@ -7,6 +7,7 @@ session keep their owner. Health checks precede the atomic active pointer swap.
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 import psutil
@@ -27,6 +28,10 @@ def core_env(**extra):
             token = ''
         if token:
             env['CLAUDE_CODE_OAUTH_TOKEN'] = token
+    # The caller's PATH can lack Dan's Python (a Codex turn's PATH); every `python` the new Core starts (Claude's tool
+    # host, hooks) then fails. 2026-10-31〜11-06 chat Dan had no tools, so no parallel work, browser or progress.
+    head = [str(Path(sys.executable).parent), '/opt/homebrew/bin']
+    env['PATH'] = os.pathsep.join(head + [d for d in env.get('PATH', '').split(os.pathsep) if d and d not in head])
     env.update(extra)
     return env
 

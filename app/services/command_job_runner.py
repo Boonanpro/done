@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 import re
 import time
@@ -183,7 +184,7 @@ async def run(row):
             config_path = Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))) / 'config.toml'
             names = re.findall(r'^\[mcp_servers\.([^\].]+)\]', config_path.read_text(encoding='utf-8'), re.M) if config_path.exists() else []
             mcp = {n.strip('"'): {'enabled':False} for n in names}
-            mcp['dan_job'] = {'command':'python', 'args':[str(Path(__file__).resolve().parents[2]/'app/mcp_server.py')],
+            mcp['dan_job'] = {'command':sys.executable, 'args':[str(Path(__file__).resolve().parents[2]/'app/mcp_server.py')],
                 'tool_timeout_sec':3600, 'default_tools_approval_mode':'approve',
                 'env': {'DAN_USER_ID':row['user_id'], 'DAN_SESSION_ID':row['room_id'],
                     'DAN_BROWSER_ROOM':state.browser_room(job_id), 'DAN_COMMAND_JOB_ID':job_id,

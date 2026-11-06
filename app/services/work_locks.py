@@ -12,6 +12,7 @@ Standard library only: the Claude hook (scripts/work_lock_hook.py) imports this 
 import hashlib
 import json
 import os
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -203,10 +204,12 @@ def hook_settings():
     # A parallel job neither hands work to a background Agent nor sleeps with ScheduleWakeup (scripts/job_tool_hook.py;
     # does nothing in a chat room). 2026-10-29: the runner took the sleeping worker's turn end as its answer.
     job_hook = (scripts / 'job_tool_hook.py').as_posix()
+    # By path: a Core started from a room's own work has no `python` on PATH (2026-10-31〜11-06 these hooks never ran).
+    python = Path(sys.executable).as_posix()
     return json.dumps({'hooks': {'PreToolUse': [
         {'matcher': 'Write|Edit|MultiEdit|NotebookEdit', 'hooks': [
-            {'type': 'command', 'command': f'python "{hook}"', 'timeout': WAIT_LIMIT + 60}]},
-        {'matcher': 'Agent|ScheduleWakeup', 'hooks': [{'type': 'command', 'command': f'python "{job_hook}"', 'timeout': 30}]},
+            {'type': 'command', 'command': f'"{python}" "{hook}"', 'timeout': WAIT_LIMIT + 60}]},
+        {'matcher': 'Agent|ScheduleWakeup', 'hooks': [{'type': 'command', 'command': f'"{python}" "{job_hook}"', 'timeout': 30}]},
     ]}})
 
 
