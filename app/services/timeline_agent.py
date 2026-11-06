@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import shutil
 import subprocess
 import threading
@@ -213,7 +214,7 @@ def _run_session(room_id, user_id, content_id, job_id, draft, instruction, annot
     except (OSError, json.JSONDecodeError):
         pass
     mcp_cfg.setdefault("mcpServers", {})["timeline"] = {
-        "command": "python",
+        "command": sys.executable,
         "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
         "env": {
             "DAN_ROOM_ID": room_id,

@@ -6,6 +6,7 @@ subprocess.runで別プロセス実行し、FastAPIプロセスを保護する�
 """
 
 import subprocess
+import sys
 import tempfile
 import logging
 from pathlib import Path
@@ -38,7 +39,7 @@ async def execute_python(code: str) -> dict:
 
     try:
         result = subprocess.run(
-            ["python", script_path],
+            [sys.executable, script_path],
             capture_output=True,
             text=True,
             timeout=EXEC_TIMEOUT,

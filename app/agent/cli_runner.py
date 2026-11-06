@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -1865,7 +1866,9 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
     mcp_json = {
         "mcpServers": {
             "dan-tools": {
-                "command": "python",
+                # By path, as codex_runner does: `python` is not on every Core's PATH (2026-10-31〜11-06 this
+                # failed to start in every Claude room, so chat Dan had no tools and no parallel work).
+                "command": sys.executable,
                 "args": [str(PROJECT_ROOT / "app" / "mcp_server.py")],
                 # ダンの道具は最初から読み込む。後回し(ToolSearch)だと、ブラウザを使うターンの
                 # 83%が「道具の定義を取りに行くだけの往復」(約4秒)から始まっていた。
@@ -4261,7 +4264,7 @@ async def _process_message_cli_with_failover(
                     )
                     cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
                     cfg.setdefault("mcpServers", {})["timeline"] = {
-                        "command": "python",
+                        "command": sys.executable,
                         "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
                         "env": {
                             "DAN_ROOM_ID": room_id,
