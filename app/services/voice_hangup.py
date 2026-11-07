@@ -16,6 +16,9 @@ import time
 SETTLE_S = .7        # the owner's words settle before they are judged
 QUIET_S = 2.0        # Dan's goodbye has ended when no words of his came this long (his words run a little ahead of his voice)
 MAX_GOODBYE_S = 6.0  # the call closes at the latest this long after the request
+# 「電話切れ」 came out at .71 with .8 needed and the call went on (11/7 12:25); a question whether it was cut, or cutting a
+# video, stays under .2 (measured 11/7 with the criteria below).
+ENOUGH = .7
 CUE = re.compile(r'切[っらりるれろ]|きって|きる[ねよ]|電話.*(終|おわ)|通話.*(終|おわ)|終わりに|おわりに|終わろ|おわろ|バイバイ|ばいばい|またね|じゃあね|失礼します')
 
 
@@ -66,11 +69,11 @@ class HangUp:
             self._decisions = Decisions(self.user_id, timeout=1.5, max_calls=40, retry_transient_after=10)
         got = await self._decisions.choose({'caller_words': text, 'conversation': [dict(t) for t in turns]}, {'hangup': {
             'type': 'choice', 'criteria': {
-                'end': '本人が、今のこの通話（電話）を終えてほしい・切ってほしいと頼んでいる、または別れのあいさつで通話を終えようとしている。',
-                'other': 'それ以外。文章や動画を切る・短くする話、作業を終わらせる話、通話を切ったかの確認だけ、通話を終えるかの相談、または曖昧。'},
+                'end': '本人が、今のこの通話（電話）を終えてほしい・切ってほしいと頼んでいる、または別れのあいさつで通話を終えようとしている。「電話切れ」は「電話を切れ」という命令。',
+                'other': 'それ以外。文章や動画を切る・短くする話、作業を終わらせる話、通話が切れたかどうかの確認、通話を終えるかの相談、または曖昧。'},
             'instructions': '通話の文脈で、本人が今この通話を終えたいのかだけを判断する。'}})
         answer = (got.get('answers') or {}).get('hangup') or {}
-        return bool(got.get('available') and answer.get('choice') == 'end' and (answer.get('probabilities') or {}).get('end', 0) >= .8)
+        return bool(got.get('available') and answer.get('choice') == 'end' and (answer.get('probabilities') or {}).get('end', 0) >= ENOUGH)
 
 
 async def after_goodbye(last_spoke, close, started=None):

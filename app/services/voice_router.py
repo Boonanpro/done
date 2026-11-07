@@ -38,7 +38,8 @@ LUNA_SECONDS = 90
 TRANSCRIPT = '\n\n通話のここまでの文字起こし'   # the job's task head (the owner's words) is what the room's chat shows
 
 ROUTES = {
-    'status': '今動いている作業や調べものの様子・進み具合・結果を聞いている（「今どう？」「まだ？」「どうなった？」「何してる？」「どこまでできた？」）。新しい頼みは無い。',
+    'status': '今動いている・さっき終わった作業や調べものの様子・進み具合・結果やその中身を知りたい（「今どう？」「まだ？」「どうなった？」「何してる？」「どこまでできた？」「もっと詳しく」）。新しい頼みは無い。',
+    'clock': '今の時刻・日付・曜日が要る（何時か、今日は何日か、あと何分あるか）。',
     'calendar': '本人のカレンダーの予定を聞いている（今日・明日・今週・ある日の予定、空いている日）。',
     'lookup': 'ウェブ・地図・ニュース・天気・店・商品・値段・営業時間・行き方・乗り換え・病気や体の症状などを調べて答える質問や候補探し。'
               '本人について知っているか（保存した住所・番号・好きな食べ物などの好み）や、ダンとの過去の会話・作業の記録を思い出して答える質問もここ。予約サイトやログインが要るページの中を見る必要は無い。',
@@ -62,6 +63,10 @@ WORK = {'status': '「{label}」の様子・進み具合・結果・番号など
         'stop': '「{label}」を止める・取り消す・もういい・中止してと言っている。',
         'change': '「{label}」への訂正・条件の追加・やり方の指示（どこで見るか・どのページ・別の候補・画面に出して・もう一度やって）。',
         'new': '「{label}」とは別の新しい頼みや話。'}
+# The owner's words only answer what Dan asked of him (a summons, a button to press): 「はい、押したよ」 after the LINE code
+# was routed as a new site job named 「はい、押したよ」, and a second job then did the same work (11/7 12:25).
+REPLY = {'reply': '直前のダンの言葉で本人が頼まれたこと（ボタンを押す・番号を入れる・承認する）を、やった・できた・入れた・聞こえた・わかったと短く返しているだけ。',
+         'request': 'それ以外。ダンにしてほしいこと・知りたいこと・伝えたい事情や気づいたことがある。ダンの提案や質問への「お願い」「いいよ」「合ってる」「それで」もこちら。'}
 CALENDAR = {'today': '今日の予定', 'tomorrow': '明日の予定', 'week': '今日から7日間の予定',
             'other': 'それ以外の日・期間、または日が分からない'}
 # Dan said he would do something and no request reached here: 「R630の公式ページへのリンクを入れて、先生宛てのメールを作り
@@ -99,6 +104,7 @@ def questions(running, targets):
     words do to it. Asked as one more question per work: as route options, corrections such as 「ホットペッパーで確認するんだって」
     went to a new site job, and 「でもこれ四十キロじゃん」 to a lookup (scripts/voice_route_eval.py, 38 of 50 at first)."""
     out = {'route': {'type': 'choice', 'criteria': dict(ROUTES), 'instructions': ASK},
+           'reply': {'type': 'choice', 'criteria': REPLY, 'instructions': '最後の本人の言葉は、ダンにしてほしいことがあるのか、ダンに頼まれたことへの返事・報告だけか。'},
            'calendar': {'type': 'choice', 'criteria': CALENDAR, 'instructions': '予定を聞いている時、どの期間か。'}}
     for i, work in enumerate(running[-4:]):
         out[f'work_{i}'] = {'type': 'choice', 'criteria': {k: v.format(label=work['label']) for k, v in WORK.items()},
@@ -119,6 +125,9 @@ def decide(answers, running):
     if best is not None:
         return best
     route, probability = chosen(answers, 'route')
+    replied, sure = chosen(answers, 'reply')
+    if replied == 'reply' and sure >= CONFIDENT and route not in ('status', 'end', 'clock', 'calendar'):
+        return 'reply', sure
     asking = [chosen(answers, f'work_{i}') for i in range(len(running[-4:]))]
     if any(what == 'status' and p >= CONFIDENT for what, p in asking) and route not in ('end',):
         return 'status', max(p for what, p in asking if what == 'status')
@@ -349,6 +358,10 @@ class Router:
         self.mark = (len(history) - 1, len(history[-1]['text'])) if history else (0, 0)
         if route == 'status':
             return await self.reply(delegation_id, created, await asyncio.to_thread(self.status_text), spoken=True)
+        if route == 'clock':
+            return await self.reply(delegation_id, created, clock_text(), spoken=True)
+        if route == 'reply':
+            return await self.replied(words, delegation_id, created)
         self.last_words = words
         if route == 'calendar' and span in ('today', 'tomorrow', 'week'):
             return await self.reply(delegation_id, created, await self.calendar_text(span), spoken=True)
@@ -370,26 +383,15 @@ class Router:
         return await self.luna(delegation_id, created)
 
     async def reply(self, delegation_id, created, text, spoken=True):
-        """The answer to this delegation. Before the automatic acknowledgement it is the one thing said; after Dan has
-        started speaking (the acknowledgement was said), a notice of work begun goes in silently instead."""
-        from app.services.voice_sideband import chunks
-        from app.services.voice_plain import COMMENTARY_CHARS
-        from app.services.voice_lookup import unspoken_urls
-        text = ' '.join(str(text or '').split())
-        # Past the acknowledgement delay the speech model has been asked to acknowledge by itself: a notice of work begun
-        # then goes in silently, or Dan says 「調べるね」 and then 「調べ始めた」.
+        """The answer to this delegation, through the call's one entry (voice_say). Before the automatic acknowledgement it
+        is the one thing said; after Dan has started speaking (the acknowledgement was said), a notice of work begun goes
+        in quietly instead, or Dan says 「調べるね」 and then 「調べ始めた」."""
+        from app.services.voice_say import say
         late = (time.monotonic() - created) * 1000 >= ACK_DELAY_MS - 50
-        kind = 'session.commentary.append' if spoken or not late else 'session.thinking.append'
         target = None if delegation_id.startswith('auto-') else delegation_id   # started by a promise: no delegation to answer
-        said = unspoken_urls(text) if kind == 'session.commentary.append' else text   # an address is not read aloud
-        if kind == 'session.commentary.append' and (len(text) > COMMENTARY_CHARS or said != text):
-            for part in chunks(text[:4000]):
-                await self.send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': target, 'content': part})
-            text = ''.join(re.split(r'(?<=[。！？!?])', said, maxsplit=2)[:2])[:COMMENTARY_CHARS]
-        if target is None and not text: return
-        for part in chunks(text) if text else ['']:
-            await self.send({'type': kind, 'event_id': f'dan-{time.time_ns()}', 'delegation_id': target, 'content': part})
-        self.record('route_answered', delegation_id=delegation_id[:40], spoken=kind.endswith('commentary.append'), chars=len(text),
+        if target is None and not str(text or '').strip(): return
+        said = await say(self.send, 'answer' if spoken else 'started', text, None, target, quiet=not spoken and late)
+        self.record('route_answered', delegation_id=delegation_id[:40], spoken=spoken or not late, chars=len(said),
                     after_ms=round((time.monotonic() - created) * 1000))
 
     # -- the routes -----------------------------------------------------------------------------------------------
@@ -404,7 +406,7 @@ class Router:
                 lines.append(f'調べもの「{l.label}」は{seconds(time.monotonic() - l.started)}前から調べている。'
                              + (f'ここまでに分かったこと: {l.progress[-1]}' if l.progress else 'まだ答えは出ていない。'))
             elif l.state == 'answered' and l.answer:
-                lines.append(f'調べもの「{l.label}」の答え: {l.answer[:240]}')
+                lines.append(f'調べもの「{l.label}」の答え: {l.answer[:1200]}')
             elif l.state == 'handed_over':
                 lines.append(f'調べもの「{l.label}」はサイトやアプリの中を見る必要があったので、作業として続けている。')
         try: jobs = list_owned(self.user_id, self.room_id)
@@ -413,7 +415,7 @@ class Router:
         for job in jobs[:4]:
             if (job.get('created_at') or '') < began and job['state'] in ('completed', 'failed', 'cancelled'):
                 continue
-            label = self.jobs.get(job['id']) or job_label(job)
+            label = spoken_title(job) or self.jobs.get(job['id']) or job_label(job)
             words = voice_parts.STATE_WORDS.get(job['state'], job['state'])
             if job['state'] in ('queued', 'running'):
                 from app.services.voice_sideband import step_words, FINDING
@@ -428,14 +430,15 @@ class Router:
             elif job['state'] == 'awaiting_confirmation':
                 lines.append(f'作業「{label}」は本人の承認を待っている: {str((job.get("confirmation") or {}).get("summary") or "")[:200]}')
             elif job['state'] == 'completed':
-                lines.append(f'作業「{label}」は終わった: {str(job.get("result") or "")[:240]}')
+                from app.services.voice_plain import plain_text
+                lines.append(f'作業「{label}」は終わった: {plain_text(str(job.get("result") or "")).replace(chr(10), " ")[:1200]}')
             else:
                 lines.append(f'作業「{label}」は{words}: {str(job.get("error") or "")[:120]}')
         for label, began_at in list(self.answering.values()):
             lines.append(f'「{label}」を今進めている（{seconds(time.monotonic() - began_at)}前から）。')
         if not lines:
             return NOTHING_RUNNING
-        return '今の作業の様子（今読んだ記録）: ' + ' '.join(lines)
+        return ' '.join(lines)
 
     async def calendar_text(self, span):
         from datetime import datetime, timedelta
@@ -460,7 +463,7 @@ class Router:
             return await self.luna(delegation_id, created)
         label = label_of(words)
         call.start('この通話で本人が今頼んだこと（言葉のまま）: ' + words, label)
-        await self.reply(delegation_id, created, f'「{label}」を調べ始めた。', spoken=False)
+        await self.reply(delegation_id, created, '調べ始めた。', spoken=False)
 
     async def show(self, target, delegation_id, created):
         if self.stage is None:
@@ -479,7 +482,7 @@ class Router:
         job_id = (out.get('receipt') or {}).get('id')
         if job_id: self.jobs[job_id] = label
         self.record('route_job_started', route=route, job_id=str(job_id)[:8])
-        await self.reply(delegation_id, created, f'「{label}」に取りかかった。分かったことから伝える。', spoken=False)
+        await self.reply(delegation_id, created, '取りかかった。分かったことから伝える。', spoken=False)
 
     async def stop(self, route, delegation_id, created):
         _, kind, work_id = route.split(':', 2)
@@ -502,12 +505,31 @@ class Router:
             if old is None or old.state != 'running':
                 return await self.lookup(words, delegation_id, created)
             call.start(old.task + chr(10) + '本人の訂正・追加（こちらを優先）: ' + words, old.label, replaces=work_id)
-            return await self.reply(delegation_id, created, f'「{old.label}」を今の条件で調べ直している。', spoken=False)
+            return await self.reply(delegation_id, created, '今の条件で調べ直している。', spoken=False)
         from app.services.command_center import execute
         out = await execute({'action': 'control_job', 'job_id': work_id, 'operation': 'update',
                              'task': '本人が通話で言った訂正・追加（こちらを優先）: ' + words}, self.room_id, self.user_id)
         ok = isinstance(out, dict) and isinstance(out.get('job'), dict)
         await self.reply(delegation_id, created, '今の条件を作業に伝えた（反映はまだ確かめていない）。' if ok else '今の条件を作業に届けられなかった。', spoken=not ok)
+
+    async def replied(self, words, delegation_id, created):
+        """The owner only answered what Dan asked of him. A summons said in this call is answered in the room that called
+        (its work goes on from the owner's words there); otherwise the newest running work of the call gets the words.
+        No new work starts. With neither, the earlier backend reads the whole call (luna)."""
+        summons = [s for s in getattr(self.dialogue, 'summons', []) if time.monotonic() - s['at'] < SUMMON_REPLY_S]
+        if summons and summons[-1].get('room_id'):
+            s = summons[-1]
+            try:
+                from app.services.chat_service import ChatService
+                await ChatService().send_message(s['room_id'], self.user_id, words, sender_type='human')
+                self.record('reply_to_summons', summon_id=s['id'][:8], same_room=s['room_id'] == self.room_id)
+                return await self.reply(delegation_id, created, '呼び出した作業に伝えた。そこから先はその作業が続ける。')
+            except Exception as exc:
+                self.record('reply_to_summons_failed', error_type=type(exc).__name__)
+        running = [w for w in self.running() if w['kind'] == 'job']
+        if running:
+            return await self.change(f'change:job:{running[-1]["id"]}', words, delegation_id, created)
+        return await self.luna(delegation_id, created)
 
     async def luna(self, delegation_id, created):
         """The earlier backend for what has no fixed route: gpt-6-luna with the call's tools, the way the Responses
@@ -529,7 +551,7 @@ class Router:
 
     async def _luna_loop(self, delegation_id, others=()):
         from app.services.voice_lookup import _client
-        from app.services.voice_sideband import execute_call, chunks
+        from app.services.voice_sideband import execute_call
         spec = {k: self.backend[k] for k in ('model', 'instructions', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning') if k in self.backend}
         spec['max_output_tokens'] = 4000
         # The whole call, what it already found and drafted, and what runs now: in the 11/5 15:12 call the mail's revision
@@ -540,8 +562,8 @@ class Router:
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
-            for part in chunks(text):
-                await self.send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+            from app.services.voice_say import say
+            await say(self.send, 'answer', text, self.record)
         client = _client()
         for _ in range(LUNA_ROUNDS):
             response = await client.responses.create(**spec, input=given, **({'previous_response_id': previous} if previous else {}))
@@ -589,6 +611,22 @@ class Router:
             except Exception: pass
 
 
+def spoken_title(job):
+    """The job's own name, or '' while it has none: a name made from the owner's words (「はい、押したよ」) is not said."""
+    from app.services.parallel_job_runner import placeholder_name
+    title = str(job.get('title') or '').strip()
+    if title and not job.get('auto_title') and title != placeholder_name(job.get('task', '')):
+        return label_of(title)
+    return ''
+
+
+def clock_text():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo('Asia/Tokyo'))
+    return f'今は{now.month}月{now.day}日（{"月火水木金土日"[now.weekday()]}曜日）の{now.hour}時{now.minute}分。'
+
+
 def job_label(job):
     """The job's short name; until it has one (a job started without a name is 「作業」 for a while), the owner's words."""
     from app.services.parallel_job_runner import placeholder_name
@@ -612,14 +650,18 @@ def seconds(value):
 
 
 NOTHING_RUNNING = 'この通話で動いている作業や調べものは無い。'
+SUMMON_REPLY_S = 600   # a reply this long after a summons was said still answers it
 LUNA_RULES = ('（きまり: 本人がこの通話で頼んだことだけをする。頼まれていない相手への下書き・メッセージは作らない。'
               '本人が前に言ったこと・この通話で調べた事実やページの URL は、本人に聞き返さずにそのまま使う。分からない事は自分で調べる。'
+              '本人が話の中で言った場所・日時・相手は、保存してある情報（自宅の住所など）で置き換えない。'
+              '作業を頼む時は、本人の言葉と条件を書き換えずに渡す。'
               'URL は声で読み上げない（下書きや画面に入れる）。）')
 
 CALL_JOB_NOTE = ('\n\n（本人と通話しながら頼まれた作業。本人は電話の向こうで結果を待っている。'
                  '開いたページは本人の通話画面にそのまま映るので、前に使った予約ページなど行き先が分かっている所は探さずに直接開く。'
-                 '途中で本人に今すぐ伝えるべき確かな事実（空き枠・値段・見つけた候補など）が分かったら、その一文だけを「【途中】」で始めて書く（通話で本人に伝わる）。'
-                 '「まだ分からない」「確認中」のような途中経過は書かない。最後の報告は要点から短く。本人にしか分からないことは、最後に1つだけ聞く。）')
+                 '人が電話で頼まれごとをしながら一言伝えるような事（分かった確かな事実、行き先が変わった、思ったより時間がかかる、など）は、'
+                 'その一文だけを「【途中】」で始めて書く。その文はそのまま本人に話される。細かい手順や時刻は書かない。'
+                 '最後の報告は要点から短く。本人にしか分からないことは、最後に1つだけ聞く。）')
 
 
 async def start_chat_dan(user_id, room_id, dialogue, words, carried=''):

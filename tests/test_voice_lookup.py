@@ -61,8 +61,8 @@ async def test_a_lookup_returns_at_once_and_its_facts_reach_the_call(monkeypatch
     assert out['started'] and out['id'].startswith('bg_') and '一言' in out['note']   # the delegation can end now
     await call.lookups[out['id']].task_handle
     said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
-    assert said == ['調べもの「尼崎のプールのあるジム」の途中で分かったこと: プールのあるジムが2つ見つかった',
-                    '調べもの「尼崎のプールのあるジム」の結果: セントラルウェルネスクラブ24あまがさきに25mプールがあります。']
+    assert said == ['調べものの途中で分かったこと: プールのあるジムが2つ見つかった',
+                    '調べた結果: セントラルウェルネスクラブ24あまがさきに25mプールがあります。']
     assert all(e['delegation_id'] is None for e in sent)
     assert client.seen[-1]['previous_response_id'] == 'resp' and client.seen[-1]['input'][0]['type'] == 'function_call_output'
     assert '尼崎駅の近くでプールがあるジム探して' in client.seen[1]['input'][0]['content']   # the call's own words go with the task
@@ -93,7 +93,7 @@ async def test_a_correction_replaces_the_running_lookup_and_its_result_is_never_
     hold.set()
     await new.task_handle
     said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
-    assert said == ['調べもの「ジム」の結果: 新しい答え']
+    assert said == ['調べた結果: 新しい答え']
     voice_lookup.close_call(call)
 
 
@@ -114,15 +114,16 @@ async def test_the_end_of_the_call_stops_its_lookups(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_long_answer_goes_in_whole_as_thinking_and_its_start_is_said(monkeypatch):
+async def test_a_long_answer_is_not_given_whole_its_start_is_said_and_the_whole_stays_readable(monkeypatch):
     long = 'セントラルウェルネスクラブ24あまがさきは駅から徒歩1分です。' + '料金や営業時間の詳しい話。' * 40
     call, sent, log = open_call(monkeypatch, FakeClient([response([], long)]))
     out = await voice_responses.run_function('run_in_background', {'task': 'ジム', 'label': 'ジム'}, 'u', 'r', [])
     await call.lookups[out['id']].task_handle
     kinds = [e['type'] for e in sent]
-    assert 'session.thinking.append' in kinds and kinds[-1] == 'session.commentary.append'
-    assert sent[-1]['content'].startswith('調べもの「ジム」の結果: セントラルウェルネスクラブ24あまがさきは駅から徒歩1分です。')
+    assert kinds == ['session.commentary.append']   # nothing silent: whatever is given may be said (voice_say)
+    assert sent[-1]['content'].startswith('調べた結果: セントラルウェルネスクラブ24あまがさきは駅から徒歩1分です。')
     assert len(sent[-1]['content']) <= 300
+    assert call.lookups[out['id']].answer == long   # read whole when wanted (voice_router 'status')
     voice_lookup.close_call(call)
 
 
@@ -162,7 +163,7 @@ async def test_a_lookup_asked_for_the_screen_shows_a_page_before_it_answers(monk
     await call.lookups[out['id']].task_handle
     said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
     assert shown == ['https://example.jp/100kg']
-    assert said == ['調べもの「100kgのセット」の結果: ボディメーカーの100kgセットを画面に出しました。在庫ありで98000円です。']
+    assert said == ['調べた結果: ボディメーカーの100kgセットを画面に出しました。在庫ありで98000円です。']
     voice_lookup.close_call(call)
 
 
@@ -177,7 +178,7 @@ async def test_a_lookup_nobody_asked_to_show_answers_without_an_extra_round(monk
     out = await voice_responses.run_function('run_in_background', {'task': '明日の尼崎の天気', 'label': '明日の天気'}, 'u', 'r', [])
     await call.lookups[out['id']].task_handle
     said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
-    assert said == ['調べもの「明日の天気」の結果: 明日の尼崎は晴れ、最高気温は18度です。']
+    assert said == ['調べた結果: 明日の尼崎は晴れ、最高気温は18度です。']
     assert not any(p == 'lookup_show_reminded' for p, _ in log)
     voice_lookup.close_call(call)
 

@@ -103,7 +103,7 @@ async def run(row):
         task=spec['task'], report_message_id=report_id(job_id))
     parallel = s.get('engine') in ('parallel', 'make')
     if s.get('engine') == 'make' and not s.get('voice_noted'):
-        # Heavy making asked by voice: the owner's words go in the room first, then it runs as a parallel job.
+        # Heavy making asked by voice: it gets its voice note, then runs as a parallel job.
         from app.services import make_job_runner
         s = await make_job_runner.note_request(row)
     if parallel and s.get('model') != 'astra':

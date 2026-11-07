@@ -99,6 +99,7 @@ class Dialogue:
         self.delegated_at = 0.0   # when the speech model last handed the owner's words to the backend (the stage's flow yields to it)
         self.routing_until = 0.0  # a delegation is being routed (voice_router): silent state waits, so it cancels no acknowledgement
         self.began_iso = ''
+        self.summons = []         # the summonses said in this call (summon_feed): what the owner's short replies answer
 
     def add(self, role, delta):
         if not delta: return
@@ -204,8 +205,15 @@ async def report_backend_failure(send, event, dialogue, record):
     text = ('作業を判断するAPIが残高不足で依頼を拒否しました。この依頼は先へ進められていません。'
             if billing else '作業の判断処理が失敗しました。完了は確認できていません。')
     from app.services import voice_plain
-    await send({'type': 'session.commentary.append', 'event_id': f'dan-failure-{time.time_ns()}',
-                'delegation_id': None, 'content': text + ('' if voice_plain.enabled() else '作業中として待たせず、この状態を本人に伝えてください。')})
+    if voice_plain.enabled():
+        from app.services.voice_say import say
+        async def tagged(event):   # an error about this notice must not notify again
+            event['event_id'] = f'dan-failure-{time.time_ns()}'
+            await send(event)
+        await say(tagged, 'problem', text, record)
+    else:
+        await send({'type': 'session.commentary.append', 'event_id': f'dan-failure-{time.time_ns()}',
+                    'delegation_id': None, 'content': text + '作業中として待たせず、この状態を本人に伝えてください。'})
     record('backend_failure_reported', billing=billing)
 
 
@@ -220,8 +228,8 @@ async def handle_response_event(send, session_id, user_id, room_id, envelope, di
     item = inner.get('item') or {}
     if kind == 'response.output_item.done' and item.get('type') == 'function_call':
         async def speak(text):   # a later result of a function (a replay) goes into the call as spoken commentary
-            for part in chunks(text):
-                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+            from app.services.voice_say import say
+            await say(send, 'answer', text, record)
             record('replay_spoken', chars=len(text))
         key = (delegation_id, item.get('call_id'))
         if key in dialogue.call_results:
@@ -367,7 +375,6 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
     follower = Follower(stage, user_id, room_id, connected_at) if stage else None
     seen = {}
     result_arrivals = {}
-    told = {}       # job id -> (the last state given silently, when): voice_router's calls know their work's state
     while True:
         await asyncio.sleep(FEED_SECONDS)
         try: jobs = await asyncio.to_thread(list_owned, user_id, room_id)
@@ -381,8 +388,6 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
                 follower.update(jobs)
             except Exception:
                 logger.exception('worker screen unavailable room=%s', room_id)
-        if routed and told and session_id not in ENDING and not (dialogue is not None and time.monotonic() < getattr(dialogue, 'routing_until', 0)):
-            await flush_state(send, told, record)
         for job in jobs:
             events = job.get('events') or []
             previous = seen.get(job['id'])
@@ -395,8 +400,8 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
             if not fresh: continue
             if routed and session_id not in ENDING:
                 if dialogue is not None and time.monotonic() < getattr(dialogue, 'routing_until', 0):
-                    continue   # a delegation is being answered: a thinking append now would cancel its acknowledgement
-                await tell_state(send, job, fresh, told, record)
+                    continue   # a delegation is being answered: anything given now would cancel its acknowledgement
+                await tell_notes(send, job, fresh, record)
             said = [e for e in fresh if e.get('kind') in SPOKEN]
             # Do not inject a completed task into a new request while its words
             # or backend decision are still arriving. Keep the event unread so
@@ -424,17 +429,12 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
                 # read out like a script (2026-10-02). It goes in as material; what to say is Dan's own, in conversation.
                 task = job.get('task', '').split('参考の直前会話')[0].replace('今回のユーザー発言（原文）:', '').strip()[:80]
                 if plain:
-                    # The fact only: when and how to say it is the speech model's (voice_plain).
-                    material, said_now = voice_plain.job_said(e['kind'], task.replace('作業への引継ぎ:', '').strip()[:40], e['text'])
-                    try:
-                        from app.services.voice_furigana import annotate
-                        material, said_now = annotate(material) if material else '', annotate(said_now)
-                    except Exception:
-                        pass
-                    for part in chunks(material):
-                        await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-                    await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': for_speech(said_now)})
-                    record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material) + len(said_now), plain=True)
+                    # The fact only, in a sentence that may be said as it is; the full report is read when wanted
+                    # (voice_router 'status'). When and how to say it is the speech model's (voice_plain).
+                    from app.services.voice_say import say
+                    kind, said_now = voice_plain.job_said(e['kind'], spoken_title(job), e['text'])
+                    said_now = await say(send, kind, said_now, record)
+                    record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(said_now), plain=True)
                     continue
                 material = {'result': '作業「%s」の結果:\n%s', 'error': '作業「%s」で起きた問題:\n%s',
                             'confirmation': '作業「%s」から本人への確認:\n%s'}[e['kind']] % (task, e['text'][:1500])
@@ -454,7 +454,6 @@ async def job_feed(send, user_id, room_id, record, connected_at, session_id='', 
                 record('job_spoken', job_id=job['id'][:8], kind=e['kind'], chars=len(material))
 
 
-STATE_EVERY_S = 6.0
 FINDING = '【途中】'
 
 
@@ -463,30 +462,24 @@ def job_title(job):
     return voice_router.job_label(job)
 
 
-async def tell_state(send, job, fresh, told, record):
-    """What a job of the call does now goes to the speech model silently (thinking), so 「今どう？」 is answered at once and
-    once; a fact the job marked for the owner (【途中】, voice_router.CALL_JOB_NOTE) is said (commentary). In the
-    2026-11-05 0:59 call 「今どういう状況？」 was answered twice: the speech model's own 「確認してる」, then the backend's reading."""
-    from app.services import voice_parts
-    title = job_title(job)
+def spoken_title(job):
+    from app.services import voice_router
+    return voice_router.spoken_title(job)
+
+
+async def tell_notes(send, job, fresh, record):
+    """What a job of the call marked for the owner on the way (【途中】, voice_router.CALL_JOB_NOTE) is given to be said.
+    The job's steps are not given: given silently with the clock, they came out in unrelated replies (11/6 21:34,
+    11/7 12:25 three times). The speech model reads them when it wants them (voice_router 'status')."""
+    from app.services.voice_say import say
+    title = spoken_title(job)
     for e in fresh:
         text = str(e.get('text') or '').strip()
         if e.get('kind') == 'progress' and text.startswith(FINDING):
-            fact = text[len(FINDING):].strip().splitlines()[0][:COMMENTARY_LIMIT - 40] if text[len(FINDING):].strip() else ''
+            fact = text[len(FINDING):].strip().splitlines()[0] if text[len(FINDING):].strip() else ''
             if fact:
-                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
-                            'content': for_speech(f'作業「{title}」の途中で分かったこと: {fact}')})
+                await say(send, 'note', (f'{title}: ' if title else '') + fact, record)
                 record('job_finding_spoken', job_id=job['id'][:8], chars=len(fact))
-    doing = [e for e in fresh if e.get('kind') in ('progress', 'tool') and not str(e.get('text') or '').startswith(FINDING)]
-    if not doing or job.get('state') not in ('queued', 'running', 'awaiting_confirmation', 'paused'):
-        return
-    where = voice_parts.where_it_is(job)
-    now = f'作業「{title}」の今（{datetime.now().strftime("%H:%M:%S")}）: ' + '、'.join(x for x in (where, step_words(doing[-1], bool(where))) if x)
-    last, at, _ = told.get(job['id'], ('', 0.0, ''))
-    if not now.split(': ', 1)[-1] or now.split(': ', 1)[-1] == last.split(': ', 1)[-1]:
-        return
-    told[job['id']] = (last, at, now)   # waits in told until it may be given (flush_state)
-    await flush_state(send, told, record)
 
 
 def step_words(event, placed):
@@ -502,21 +495,10 @@ def step_words(event, placed):
     return voice_parts.DOING.get(action.strip(), '') or voice_parts.DOING.get(name.strip(), '')
 
 
-async def flush_state(send, told, record):
-    """Give each job's newest state, at most once every STATE_EVERY_S per job (a job's steps come seconds apart)."""
-    for job_id, (last, at, pending) in list(told.items()):
-        if not pending or time.monotonic() - at < STATE_EVERY_S:
-            continue
-        told[job_id] = (pending, time.monotonic(), '')
-        await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': pending[:COMMENTARY_LIMIT]})
-        record('job_state_told', job_id=job_id[:8], chars=len(pending))
-
-
 GREETING_SECONDS = 4.5
-COMMENTARY_LIMIT = 450
 
 
-async def summon_feed(send, user_id, record):
+async def summon_feed(send, user_id, record, dialogue=None):
     """Dan called the owner (owner_summon) while a call is going, or the owner answered a ringing summons by starting this
     call: the call's Dan says why at once, in his own words, with every digit. Each summons is said once."""
     from app.services import owner_summon
@@ -530,8 +512,10 @@ async def summon_feed(send, user_id, record):
             await asyncio.to_thread(owner_summon.mark_spoken, s['id'])
             from app.services import voice_plain
             if voice_plain.enabled():
-                await send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
-                            'content': for_speech('ダンが本人を呼び出した用件: ' + s['reason'])[:COMMENTARY_LIMIT]})
+                from app.services.voice_say import say
+                await say(send, 'summon', '呼び出した用件: ' + s['reason'], record)
+                if dialogue is not None:   # the owner's 「押したよ」 answers it (voice_router 'reply')
+                    dialogue.summons.append({'id': s['id'], 'room_id': s.get('room_id'), 'reason': s['reason'], 'at': time.monotonic()})
                 record('summon_spoken', summon_id=s['id'][:8], plain=True)
                 continue
             await send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
@@ -555,11 +539,9 @@ async def chat_feed(send, room_id, dialogue, record):
         try: texts, done = await asyncio.to_thread(voice_calls.take, room_id, done)
         except Exception: continue
         for text in texts:
-            dialogue.add('user', '（チャットに送った）' + text + chr(10))
-            parts = list(chunks('本人が通話中にこの部屋のチャットへ送ってきたもの:' + chr(10) + text))
-            for i, part in enumerate(parts):   # context first, one invitation to speak at the end (each part spoken repeated itself)
-                kind = 'session.commentary.append' if i == len(parts) - 1 else 'session.thinking.append'
-                await send({'type': kind, 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
+            dialogue.add('user', '（チャットに送った）' + text + chr(10))   # the whole of it, addresses too, is in the call's transcript the work reads
+            from app.services.voice_say import say
+            await say(send, 'chat', 'チャットに送ってきたもの: ' + text, record)
             record('chat_in_call', chars=len(text))
 
 
@@ -638,7 +620,6 @@ async def after_call(user_id, room_id, turns, began_iso, decisions_out=None, com
         try: await on_decisions()
         except Exception: logger.exception('call summary failed room=%s', room_id)
     from app.services.command_center import execute
-    from app.services.voice_responses import WORK_ENGINE
     if left:
         path = keep_handoff(user_id, room_id, talk, began_iso, left)
         state = json.loads(path.read_text(encoding='utf-8'))
@@ -659,7 +640,11 @@ async def after_call(user_id, room_id, turns, began_iso, decisions_out=None, com
                 logger.warning('call handoff to running job %s failed: %s', target['id'][:8], exc)
         if receipt is None:
             try:
-                receipt = await execute({'action': 'work', 'task': AFTER_TASK.format(task=tasks[:2000], context=path), 'engine': WORK_ENGINE}, room_id, user_id)
+                # chat Dan on the room's model, as the call's own work (voice_router.start_chat_dan): on 11/6 21:36 the left-over
+                # train request ran on DeepSeek (WORK_ENGINE 'api') and pressed an unpressable page 48 times in 3.5 min.
+                from app.services.parallel_job_runner import room_model
+                model = await asyncio.to_thread(room_model, room_id)
+                receipt = await execute({'action': 'work', 'task': AFTER_TASK.format(task=tasks[:2000], context=path), 'engine': 'make', 'model': model}, room_id, user_id)
             except Exception as exc:
                 receipt = {'accepted':False, 'error_type':type(exc).__name__}
                 logger.exception('call handoff failed room=%s', room_id)
@@ -782,7 +767,7 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
                     voice_calls.begin(room_id, session_id)
                     inbox = asyncio.create_task(chat_feed(send, room_id, dialogue, record))
                     working.add(inbox); inbox.add_done_callback(working.discard)
-                    summons = asyncio.create_task(summon_feed(send, user_id, record))
+                    summons = asyncio.create_task(summon_feed(send, user_id, record, dialogue))
                     working.add(summons); summons.add_done_callback(working.discard)
                     # The stage: what the owner's screen shows while Dan talks (voice_stage). A failure there never
                     # touches the call's audio or its delegations.

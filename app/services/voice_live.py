@@ -42,7 +42,8 @@ def session_config(history=None, timezone='Asia/Tokyo', files=None, room_id=None
     except (ZoneInfoNotFoundError, ValueError):
         zone = ZoneInfo('Asia/Tokyo')
     now = datetime.now(zone)
-    clock = f'会話開始時の現地日時: {now.isoformat(timespec="seconds")}（{"月火水木金土日"[now.weekday()]}曜日、{zone.key}）。'
+    # The day only: the time of day is read when wanted (voice_router 'clock'); given, the clock was said into replies (11/7).
+    clock = f'通話を始めた日: {now.year}年{now.month}月{now.day}日（{"月火水木金土日"[now.weekday()]}曜日、{zone.key}）。'
     records = chr(10).join(('ユーザー' if row['role'] == 'user' else 'Dan') + ': ' + row['content'][0]['text'] for row in (history or []))
     from app.services.voice_responses import delegation
     from app.services.voice_settings import snapshot

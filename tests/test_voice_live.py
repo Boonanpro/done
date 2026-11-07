@@ -126,8 +126,9 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
             tokyo = live.session_config(timezone='Asia/Tokyo')['instructions']
             la = live.session_config(timezone='America/Los_Angeles')['instructions']
             fallback = live.session_config(timezone='invalid')['instructions']
-        self.assertIn('2026-09-18T00:49:00+09:00（金曜日、Asia/Tokyo）', tokyo)
-        self.assertIn('2026-09-17T08:49:00-07:00（木曜日、America/Los_Angeles）', la)
+        self.assertIn('2026年9月18日（金曜日、Asia/Tokyo）', tokyo)
+        self.assertIn('2026年9月17日（木曜日、America/Los_Angeles）', la)
+        self.assertNotIn('00:49', tokyo)   # the time of day is read when wanted (voice_router 'clock'), not given
         self.assertEqual(tokyo, fallback)
 
     def test_registry_belongs_to_its_owner_and_closes(self):

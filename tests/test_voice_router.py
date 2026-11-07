@@ -4,6 +4,7 @@ answered twice. Here: where each request goes, what the call hears, and what it 
 import asyncio
 import io
 import json
+import re
 import time
 from types import SimpleNamespace
 
@@ -58,7 +59,8 @@ def test_the_session_hands_its_delegations_to_this_server():
     config = voice_live.session_config(room_id='r', user_id='u')
     assert config['delegation'] == {'type': 'client', 'acknowledgement_delay_ms': 800}
     assert config['_backend']['model'] and any(t['name'] == 'run_in_background' for t in config['_backend']['tools'])
-    assert 'latest work state' in config['instructions']   # 「今どう？」 is answered from the state given silently
+    # the work's state is not given: it is one of the backend's tools, read when wanted, like the time of day
+    assert 'latest work state' not in config['instructions'] and '今の日時、この通話の作業と調べものの今の様子・結果の全文' in config['instructions']
 
 
 def test_a_word_about_running_work_wins_over_a_new_route():
@@ -187,19 +189,97 @@ def test_a_lookup_only_reads_when_the_call_is_routed():
 
 
 @pytest.mark.asyncio
-async def test_job_state_reaches_the_call_silently_and_a_marked_finding_is_said():
+async def test_a_jobs_steps_are_not_given_and_what_it_marked_for_the_owner_is_said():
     from app.services import voice_sideband
-    sent, told, log = [], {}, []
+    sent, log = [], []
     async def send(event): sent.append(event)
-    job = {'id': 'j1', 'state': 'running', 'task': '今回のユーザー発言（原文）:\nしゅんさんの空き', 'events': []}
+    job = {'id': 'j1', 'state': 'running', 'task': '今回のユーザー発言（原文）:\nはい、押したよ', 'title': '作業', 'auto_title': True, 'events': []}
     fresh = [{'seq': 1, 'kind': 'tool', 'text': 'browser', 'label': 'browser:open_target'},
-             {'seq': 2, 'kind': 'progress', 'text': '【途中】しゅんさんは6日の16時と17時が空いている'}]
-    await voice_sideband.tell_state(send, job, fresh, told, lambda phase, **f: log.append(phase))
-    kinds = [(e['type'], e['content']) for e in sent]
-    assert kinds[0] == ('session.commentary.append', '作業「しゅんさんの空き」の途中で分かったこと: しゅんさんは6日の16時と17時が空いている')
-    assert kinds[1][0] == 'session.thinking.append' and 'ページを開いている' in kinds[1][1] and 'browser' not in kinds[1][1]
-    await voice_sideband.tell_state(send, job, [{'seq': 3, 'kind': 'tool', 'text': 'browser', 'label': 'browser:click'}], told, lambda *a, **k: None)
-    assert len(sent) == 2   # not more often than STATE_EVERY_S
+             {'seq': 2, 'kind': 'progress', 'text': 'まず入れたか確認してみる'},
+             {'seq': 3, 'kind': 'progress', 'text': '【途中】しゅんさんは6日の16時と17時が空いている'}]
+    await voice_sideband.tell_notes(send, job, fresh, lambda phase, **f: log.append(phase))
+    # one thing, said; no steps, no clock, and no name made of the owner's reply (11/7 12:25)
+    assert [(e['type'], e['content']) for e in sent] == [('session.commentary.append', 'しゅんさんは6日の16時と17時が空いている')]
+    job.update(title='しゅんさんの空き確認', auto_title=False)
+    sent.clear()
+    await voice_sideband.tell_notes(send, job, fresh[2:], lambda *a, **k: None)
+    assert sent[0]['content'] == 'しゅんさんの空き確認: しゅんさんは6日の16時と17時が空いている'
+
+
+@pytest.mark.asyncio
+async def test_everything_given_to_the_call_may_be_said_as_it_is():
+    from app.services import voice_say
+    sent = []
+    async def send(event): sent.append(event)
+    await voice_say.say(send, 'summon', '呼び出した用件: スマホのLINEで認証番号 802227 を入れてください（3分で切れます）')
+    assert '8・0・2・2・2・7（6桁）' in sent[-1]['content'] and '3分' in sent[-1]['content']
+    await voice_say.say(send, 'result', '「新幹線の予約」が終わった。のぞみ2号は14,320円、15:30発で空席あり（12:25:07）。詳しくは https://smart-ex.jp/x にある。')
+    said = sent[-1]['content']
+    assert '14320円' in said and '15:30発' in said and '12:25:07' not in said and 'https://' not in said and '・' not in said
+    assert all(e['type'] == 'session.commentary.append' for e in sent)
+    with pytest.raises(ValueError):
+        await voice_say.say(send, 'state', '作業の今: ページを開いている')   # not a kind the call is given
+    long = '結果の一文目です。' + '細かい話。' * 200
+    await voice_say.say(send, 'result', long)
+    assert len(sent[-1]['content']) <= voice_say.SHORT
+
+
+def test_nothing_else_in_the_plain_call_gives_the_speech_model_anything():
+    """The call's one entry (voice_say): the modules of the plain call send nothing to the speech model themselves."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / 'app' / 'services'
+    for name in ('voice_router.py', 'voice_lookup.py'):
+        assert not re.search(r"session\.(?:thinking|commentary)\.append", (root / name).read_text()), name
+    text = (root / 'voice_sideband.py').read_text()
+    plain = text[text.index('if plain:'):text.index("material = {'result'")]
+    assert 'session.' not in plain
+
+
+@pytest.mark.asyncio
+async def test_the_time_of_day_is_a_tool_not_given(monkeypatch):
+    r, sent = router_for(monkeypatch, 'clock')
+    try:
+        await r.answer('d1', time.monotonic())
+        assert re.search(r'今は\d+月\d+日（.曜日）の\d+時\d+分。', sent[-1]['content']) and sent[-1]['delegation_id'] == 'd1'
+    finally:
+        await r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_a_summons_goes_to_the_room_that_called_and_starts_no_work(monkeypatch):
+    posted, started = [], []
+    class Chat:
+        async def send_message(self, room, user, text, sender_type=''): posted.append((room, text, sender_type))
+    monkeypatch.setattr('app.services.chat_service.ChatService', Chat)
+    async def start(*a, **k): started.append(a); return {'accepted': True}
+    monkeypatch.setattr(voice_router, 'start_chat_dan', start)
+    r, sent = router_for(monkeypatch, 'site', reply=.93)
+    r.dialogue.summons.append({'id': 's1', 'room_id': 'calling-room', 'reason': 'LINEの認証番号', 'at': time.monotonic()})
+    r.dialogue.add('assistant', '認証番号を入れてください。')
+    r.dialogue.add('user', 'はい、押したよ')
+    try:
+        await r.answer('d1', time.monotonic())
+        assert posted == [('calling-room', 'はい、押したよ', 'human')] and not started
+        assert sent[-1]['delegation_id'] == 'd1' and '伝えた' in sent[-1]['content']
+    finally:
+        await r.close()
+
+
+def router_for(monkeypatch, route, reply=0.0):
+    sent = []
+    async def send(event): sent.append(event)
+    d = Dialogue()
+    r = voice_router.Router('s', 'u', 'r', d, send, lambda *a, **k: None, {'dan_words': 0.0})
+    class Judge:
+        async def choose(self, state, asked):
+            answers = {'route': answer(route, .95)}
+            if reply: answers['reply'] = answer('reply', reply)
+            return {'available': True, 'answers': answers, 'elapsed_ms': 1}
+        async def __aexit__(self, *a): pass
+    r.judge = Judge()
+    monkeypatch.setattr(r, 'running', lambda: [])
+    return r, sent
 
 
 def test_the_screen_does_not_draw_the_talk_by_itself(monkeypatch, tmp_path):
@@ -226,7 +306,7 @@ def test_a_flat_white_screenshot_is_not_shown(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_room_shows_the_owners_words_not_the_transcript(monkeypatch):
+async def test_the_room_gets_no_line_for_a_call_request(monkeypatch):
     from app.services import make_job_runner
     posted, saved = [], {}
     task = '今回のユーザー発言（原文）:\nしゅんさんの空き' + voice_router.TRANSCRIPT + '…:\n本人: …' + voice_router.CALL_JOB_NOTE
@@ -236,7 +316,7 @@ async def test_the_room_shows_the_owners_words_not_the_transcript(monkeypatch):
         async def send_message(self, room, user, text, sender_type=''): posted.append(text)
     monkeypatch.setattr('app.services.chat_service.ChatService', Chat)
     await make_job_runner.note_request({'id': 'j', 'room_id': 'r', 'user_id': 'u'})
-    assert posted == ['📞 通話からの依頼: しゅんさんの空き']
+    assert posted == []   # nothing is written in the chat for the owner (「📞 通話からの依頼」, 11/6 and 11/7)
     assert voice_router.TRANSCRIPT in saved['task'] and saved['title'] == 'しゅんさんの空き'
 
 

@@ -69,6 +69,7 @@ Interruption policy: Stop speaking when the user interrupts. Listen to what they
 
 Delegation policy:
 Backend tools:
+- 読む: 今の日時、この通話の作業と調べものの今の様子・結果の全文。
 - 調べもの: ウェブ・地図・天気、予定、本人の保存情報、過去の会話・作業・メールを読む。
 - 画面: ファイル・図・ページ・成果物を本人の画面に出す。
 - 文章と連絡: メッセージ・記事・台本の下書きと直し、送信・投稿。
@@ -88,19 +89,8 @@ While backend work runs:
 - Never invent progress or claim changes."""
 
 
-# With Jev routing the call (voice_router) the state of the call's work reaches the speech model as it changes (thinking:
-# voice_sideband.tell_state), so 「今どう？」 needs no backend turn: in the 2026-11-05 0:59 call it was answered twice, the
-# speech model's own 「確認してる」 and then the backend's reading.
-ROUTED = ("""Do not generate <|SpawnThinking|> when:
-- You can answer from the conversation or a still-current result.""", """Do not generate <|SpawnThinking|> when:
-- You can answer from the conversation or a still-current result.
-- The question is how running work is going and the latest work state you were given answers it.""")
-
-
 def instructions():
-    from app.services import voice_router
-    policies = POLICIES.replace(*ROUTED) if voice_router.enabled() else POLICIES
-    return persona() + chr(10) + policies
+    return persona() + chr(10) + POLICIES
 
 
 def plain_text(text):
@@ -114,15 +104,14 @@ def plain_text(text):
     return chr(10).join(lines)
 
 
-def job_said(kind, task, text):
-    """What the call is given when a job of the room says something: the fact, in a few words, and no instruction.
-    Returns (silent material, the commentary). A long report goes in as thinking first, so the spoken part stays short
-    and the details are there when the owner asks."""
+def job_said(kind, title, text):
+    """What the call is given when a job of the room says something: (voice_say kind, the fact in a sentence or two).
+    The full report is not given (a long one was given as silent material and came out as it was); the speech model
+    reads it when it wants it (voice_router 'status'). The job is named by its own title; one not named yet is not named
+    (「作業「はい、押したよ」」 was the owner's reply used as a name, 11/7)."""
     body = plain_text(text)
-    head = {'result': f'作業「{task}」が終わりました。', 'error': f'作業「{task}」で問題が起きました。',
-            'confirmation': f'作業「{task}」から本人に確認したいことがあります。'}[kind]
-    said = head + body
-    if len(said) <= COMMENTARY_CHARS:
-        return '', said
-    first = re.split(r'(?<=[。！？!?])', body, maxsplit=1)[0][:COMMENTARY_CHARS - len(head) - 1]
-    return f'作業「{task}」の報告の全文:' + chr(10) + body[:4000], head + first
+    named = f'「{title}」' if title else '頼まれた作業'
+    head = {'result': f'{named}が終わった。', 'error': f'{named}で問題が起きた。',
+            'confirmation': f'{named}から確認したいことがある。'}[kind]
+    first = ''.join(re.split(r'(?<=[。！？!?])', body.replace(chr(10), ' '), maxsplit=2)[:2])
+    return {'result': 'result', 'error': 'problem', 'confirmation': 'question'}[kind], head + first[:COMMENTARY_CHARS - len(head)]

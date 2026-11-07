@@ -1,7 +1,6 @@
-"""Heavy making asked for by voice (pages, videos, documents, code): the owner's words go into the room as said, then the
-work runs as a parallel job of that room on chat Dan's harness — Claude Code (Opus, the default; or Fable) or Codex
-(GPT-6) — with the room's conversation, memory and brief (parallel_job_runner / command_job_runner). The call follows it
-like any other job: the call screen's status line, 「どうなってる？」 (job_status), a change or a stop (steer_job), and the
+"""Heavy making asked for by voice (pages, videos, documents, code): the work runs as a parallel job of the room on chat
+Dan's harness — Claude Code (Opus, the default; or Fable) or Codex (GPT-6) — with the room's conversation, memory and
+brief (parallel_job_runner / command_job_runner). The call follows it like any other job: the call screen's status line, 「どうなってる？」 (job_status), a change or a stop (steer_job), and the
 result spoken in the call.
 
 Why (2026-09-30): the worker that did work asked for by voice was DeepSeek Flash with a short brief, so a voice request to
@@ -22,14 +21,14 @@ def words(task):
 
 
 async def note_request(row):
-    """Put the owner's spoken request in the room once, and give the job its voice note. Returns the job state."""
-    from app.services.chat_service import ChatService
+    """Give a job asked for on a call its voice note. Returns the job state. Nothing is written in the room's chat: the
+    job is in the room's list of parallel work, and the call's own words are the call's. 「📞 通話からの依頼: …」 was
+    written as the owner's message, and it was a backend's rewritten instruction with its notes (11/6 21:34) or a reply
+    that was no request (「はい、押したよ」, 11/7 12:25). A person taking a request on the phone writes no such line."""
     job_id = row['id']
     s = state.read(job_id)
     asked = words(s['task'])
-    # A request routed from a call (voice_router) carries the call's transcript for the job; the room shows the words only.
     from app.services.voice_router import TRANSCRIPT
     said = asked.split(TRANSCRIPT)[0].strip()
-    await ChatService().send_message(row['room_id'], row['user_id'], '📞 通話からの依頼: ' + said, sender_type='human')
     return state.change(job_id, lambda x: x.update(voice_noted=True, origin_note=ORIGIN_NOTE, task=asked,
                                                    title=x.get('title') or said[:58]))
