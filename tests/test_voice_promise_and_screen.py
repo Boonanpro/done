@@ -95,7 +95,7 @@ async def test_a_promised_run_speaks_without_a_delegation_and_reads_no_address()
         silent = [e for e in sent if e['type'] == 'session.thinking.append']
         assert spoken and all(e['delegation_id'] is None for e in sent)
         assert all('https://' not in e['content'] for e in spoken)
-        assert any('https://revoluone.com/r630/' in e['content'] for e in silent)   # the speech model still knows it
+        assert not silent   # nothing silent: the address is used by the work that writes the mail (call_context), not given to be said
     finally:
         await r.close()
 

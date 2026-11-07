@@ -146,21 +146,21 @@ class Lookup:
             call.record('lookup_timed_out', lookup_id=self.id, seconds=SECONDS)
             if routed():   # not 「答えが出なかった」: the work goes on with chat Dan, with what was found (owner, 2026-11-05)
                 return await self.hand_over('読むだけの調べものでは時間内に答えが出なかった')
-            await call.say(f'調べもの「{self.label}」は{SECONDS // 60}分で答えが出ませんでした。' + ('ここまでに分かったこと: ' + self.progress[-1] if self.progress else ''))
+            await call.say('problem', f'調べものは{SECONDS // 60}分で答えが出なかった。' + ('ここまでに分かったこと: ' + self.progress[-1] if self.progress else ''))
             return
         except Exception as exc:
             self.state = 'failed'
             call.record('lookup_failed', lookup_id=self.id, error_type=type(exc).__name__, detail=str(exc)[:160])
             if routed():
                 return await self.hand_over('調べる仕組みが途中で止まった')
-            await call.say(f'調べもの「{self.label}」は途中で止まりました（調べる仕組みの失敗）。答えは出ていません。')
+            await call.say('problem', '調べものが途中で止まった（調べる仕組みの失敗）。答えは出ていない。')
             return
         if self.state != 'running':
             return
         self.state = 'answered'
         self.answer = answer
         call.record('lookup_answered', lookup_id=self.id, seconds=round(time.monotonic() - self.started, 1), chars=len(answer))
-        await call.say(f'調べもの「{self.label}」の結果: ' + (answer or '確かめられる答えが見つかりませんでした。'), full_label=f'調べもの「{self.label}」の結果の全文:')
+        await call.say('result', '調べた結果: ' + (answer or '確かめられる答えは見つからなかった。'))
 
     async def _loop(self):
         client = _client()
@@ -211,7 +211,7 @@ class Lookup:
         self.call.record('lookup_handed_over', lookup_id=self.id, accepted=bool(out.get('accepted')), job_id=str(job_id)[:8])
         if job_id and self.call.router is not None: self.call.router.jobs[job_id] = self.label
         if not out.get('accepted'):
-            await self.call.say(f'調べもの「{self.label}」は、サイトやアプリの中を見る必要があったが、作業を始められなかった。')
+            await self.call.say('problem', 'サイトやアプリの中を見る必要があったが、その作業を始められなかった。')
 
     def wants_screen(self):
         owner = [t['text'] for t in self.call.dialogue.recent() if t['role'] == 'user'][-3:]
@@ -235,7 +235,7 @@ class Lookup:
             except ValueError: fact = ''
             if fact:
                 self.progress.append(fact)
-                await self.call.say(f'調べもの「{self.label}」の途中で分かったこと: {fact}')
+                await self.call.say('note', f'調べものの途中で分かったこと: {fact}')
             return json.dumps({'said': bool(fact)}, ensure_ascii=False)
         if name in direct_names():   # Dan's own tool, given whole: run as dan_tool runs it
             try: args = json.loads(arguments)
@@ -297,27 +297,16 @@ class Call:
         except Exception as exc:
             self.record('lookup_warm_failed', error_type=type(exc).__name__)
 
-    async def say(self, text, full_label=''):
-        """A fact into the call as commentary (GPT-Live words it and says it when it fits); a long one goes in whole as
-        thinking first, and the commentary carries its first sentence."""
+    async def say(self, kind, text):
+        """A fact into the call through its one entry (voice_say): what may be said as it is, without page addresses
+        (「公式ページは https://revoluone.com/r630/」 was read out, 11/5 15:19). The whole answer, addresses too, stays in
+        the lookup (status reads it; the stage and the earlier backend use it)."""
         if self.closed:
             return
-        from app.services.voice_sideband import chunks
-        from app.services.voice_plain import COMMENTARY_CHARS
-        text = ' '.join(str(text or '').split())
-        # An address is not said aloud: 「公式ページは https://revoluone.com/r630/」 was read out to the owner, who had asked
-        # for it in the mail (11/5 15:19). The whole text, address included, still goes in as thinking.
-        spoken = unspoken_urls(text)
+        from app.services.voice_say import say
         try:
-            if len(text) > COMMENTARY_CHARS or spoken != text:
-                for part in chunks(text[:4000]):
-                    await self.send({'type': 'session.thinking.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None,
-                                     'content': (full_label + chr(10) if full_label else '') + part})
-                head = re.split(r'(?<=[。！？!?])', spoken, maxsplit=2)
-                spoken = ''.join(head[:2])[:COMMENTARY_CHARS] if head else spoken[:COMMENTARY_CHARS]
-            for part in chunks(spoken):
-                await self.send({'type': 'session.commentary.append', 'event_id': f'dan-{time.time_ns()}', 'delegation_id': None, 'content': part})
-            self.record('lookup_spoken', chars=len(spoken))
+            said = await say(self.send, kind, text, self.record)
+            self.record('lookup_spoken', chars=len(said))
         except Exception as exc:   # the call may have ended meanwhile
             self.record('lookup_say_failed', error_type=type(exc).__name__)
 

@@ -440,7 +440,7 @@ async def test_bad_extraction_preserves_original_and_never_manufactures_approval
     monkeypatch.setattr(command_center,'execute',execute)
     await S.after_call('u','r',[{'role':'user','text':'予算は20万円まで。まだ買わないで。'}],'now')
     assert len(calls)==1 and calls[0]['action']=='work'
-    assert set(calls[0])=={'action','task','engine'}
+    assert set(calls[0])=={'action','task','engine','model'} and calls[0]['engine']=='make'   # chat Dan on the room's model
     assert '未完了の依頼があれば' in calls[0]['task']
     state=json.loads(next(tmp_path.rglob('*.json')).read_text())
     assert state['turns'][0]['text'].endswith('まだ買わないで。')

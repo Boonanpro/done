@@ -37,8 +37,9 @@ async def test_what_the_owner_sends_reaches_the_call_as_if_said_and_the_work_han
         await asyncio.sleep(.8)
     finally:
         feed.cancel()
-    assert [e['type'] for e in sent] == ['session.commentary.append'] and 'https://x.com/someone/status/1' in sent[0]['content']
-    assert d.recent()[-1]['role'] == 'user' and 'x.com/someone' in d.recent()[-1]['text']
+    # Dan is told a link came and from where, without the address to read out; the call's transcript keeps it whole
+    assert [e['type'] for e in sent] == ['session.commentary.append'] and 'x.comのリンク' in sent[0]['content'] and 'https://' not in sent[0]['content']
+    assert d.recent()[-1]['role'] == 'user' and 'https://x.com/someone/status/1' in d.recent()[-1]['text']
 
 
 def test_the_backend_reads_the_room_conversation_and_has_a_page_reader():

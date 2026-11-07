@@ -202,15 +202,15 @@ async def test_plain_call_is_given_the_result_as_a_fact_and_says_it_itself(monke
         await asyncio.sleep(.05)
         assert [e['type'] for e in sent] == ['session.commentary.append']
         said = sent[0]['content']
-        assert '24日の新幹線を調べて' in said and 'のぞみ2号は14320円で空席あり' in said
+        assert said.startswith('頼まれた作業が終わった。') and 'のぞみ2号は14320円で空席あり' in said   # a job not named yet is not named
         assert not any(w in said for w in ('伝える', 'ください', '##', '- '))
-        jobs.append({'id': 'job-2', 'task': '資料を作って', 'state': 'completed', 'seq': 1, 'created_at': '2026-09-22T03:02:00+00:00',
+        jobs.append({'id': 'job-2', 'task': '資料を作って', 'title': '提案資料づくり', 'state': 'completed', 'seq': 1, 'created_at': '2026-09-22T03:02:00+00:00',
                      'events': [{'seq': 1, 'kind': 'result', 'text': '資料を作りました。' + 'くわしい説明。' * 120}]})
         await asyncio.sleep(.05)
         later = sent[1:]
-        assert later[-1]['type'] == 'session.commentary.append' and len(later[-1]['content']) <= 300
-        assert all(e['type'] == 'session.thinking.append' for e in later[:-1]) and len(later) > 2
-        assert sum(e['type'] == 'session.commentary.append' for e in sent) == 2
+        # a long report: its start only, said; the whole is read when wanted (voice_router 'status'), never given silently
+        assert [e['type'] for e in later] == ['session.commentary.append'] and len(later[0]['content']) <= 300
+        assert later[0]['content'].startswith('「提案資料づくり」が終わった。資料を作りました。')
     finally:
         feed.cancel()
 

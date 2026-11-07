@@ -343,6 +343,7 @@
    "id": "today_date",
    "say": "今日って何日",
    "expect": [
+    "clock",
     "other",
     "lookup",
     "calendar"

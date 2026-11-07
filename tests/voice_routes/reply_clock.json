@@ -1,0 +1,98 @@
+{
+ "about": "11/7 の直し（voice_say）で足した選択肢 clock と reply の確かめ。11/7 12:22 の通話の「はい、押したよ」と、作り例（made=true）。expect は許せる行き先。",
+ "cases": [
+  {
+   "id": "line_code_pressed",
+   "context": [
+    [
+     "ダン",
+     "MacのLINEに入るには、スマホのLINEで設定、アカウント、他の端末と連携を開いて、認証番号 8・0・2・2・2・7 を入れてください。"
+    ],
+    [
+     "本人",
+     "数字、言い直せ"
+    ],
+    [
+     "ダン",
+     "8、0、2、2、2、7です。"
+    ]
+   ],
+   "say": "はい、押したよ",
+   "expect": [
+    "reply"
+   ]
+  },
+  {
+   "id": "code_entered",
+   "made": true,
+   "context": [
+    [
+     "ダン",
+     "楽天銀行の承認をスマホのアプリで押してください。番号は4・8・3・9・2・0です。"
+    ]
+   ],
+   "say": "入れた",
+   "expect": [
+    "reply"
+   ]
+  },
+  {
+   "id": "offer_accepted",
+   "made": true,
+   "context": [
+    [
+     "本人",
+     "明日の尼崎の天気どう？"
+    ],
+    [
+     "ダン",
+     "明日は晴れで最高18度。週末の分も調べようか？"
+    ]
+   ],
+   "say": "うん、お願い",
+   "expect": [
+    "lookup"
+   ]
+  },
+  {
+   "id": "what_time",
+   "made": true,
+   "say": "今何時？",
+   "expect": [
+    "clock"
+   ]
+  },
+  {
+   "id": "minutes_left",
+   "made": true,
+   "context": [
+    [
+     "本人",
+     "13時に南青山に着きたいんだけど"
+    ]
+   ],
+   "say": "あと何分くらいある？",
+   "expect": [
+    "clock",
+    "lookup",
+    "other"
+   ]
+  },
+  {
+   "id": "detail_of_result",
+   "made": true,
+   "running": [],
+   "context": [
+    [
+     "ダン",
+     "スライドの保存が終わった。258枚をPDFとパワーポイントで保存したよ。"
+    ]
+   ],
+   "say": "もっと詳しく教えて",
+   "expect": [
+    "status",
+    "other"
+   ]
+  }
+ ]
+}
