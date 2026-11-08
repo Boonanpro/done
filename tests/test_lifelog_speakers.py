@@ -42,8 +42,12 @@ def test_words_go_to_their_speaker_and_overlap_stays_with_main_speaker():
 def test_youtube_outro_over_silence_is_dropped_but_real_words_stay():
     assert sp.is_phantom("ご視聴ありがとうございました", 0.0)
     assert sp.is_phantom("ご視聴ありがとうございました。", 0.1)
-    assert not sp.is_phantom("ご視聴ありがとうございました", 0.9)      # someone really said it
+    assert not sp.is_phantom("ご視聴ありがとうございました", 0.9, 2.5, -0.3)      # someone really said it
     assert not sp.is_phantom("ありがとうございました、助かりました", 0.0)
+    # 11/7 20:45: stretched over 30 s with speech-like noise under it; 13:12: a short outro Whisper was unsure of
+    assert sp.is_phantom("ご視聴ありがとうございました", 0.8, 30.0, -0.68)
+    assert sp.is_phantom("では、次の動画でお会いしましょう。", 0.8, 2.0, -0.91)
+    assert not sp.is_phantom("では、始めましょう", 0.0, 1.0)
 
 
 def test_same_voice_keeps_its_number_new_voice_gets_next(root):
@@ -155,3 +159,34 @@ def test_real_models_tell_two_people_apart_in_one_recording():
     first = {t["local"] for t in turns if t["end"] < 11.5}
     second = {t["local"] for t in turns if t["start"] > 12.5}
     assert first and second and not (first & second)
+
+
+def test_names_from_the_talk(root, monkeypatch):
+    """The language model's answer: the owner named himself, a guest was called once, a voice is a video."""
+    day = "2026-11-07"
+    st = sp.day_state(day)
+    for k, seed in (("1", 1), ("2", 2), ("3", 3), ("4", 4)):
+        st["voices"][k] = {"c": voice(seed).tolist(), "s": 60.0}
+    sp.save_day(day, st)
+    turns = [{"voice": "1", "text": "本田です"}, {"voice": "2", "text": "どうぞ"}, {"voice": "3", "text": "中村です"},
+             {"voice": "4", "text": "皆さん筋トレ頑張っていきましょう"}]
+    lifelog.upsert_rows(day, [{"start": f"{day}T20:52:16+09:00", "seconds": 9, "audio": "/a/205216_0_u.ogg",
+                               "text": sp.render(turns, day), "turns": turns}])
+    answer = {"names": [{"voice": "1", "name": "本田さん", "sure": True, "quote": "本田です"},
+                        {"voice": "2", "name": "スヤさん", "sure": False, "quote": "スヤさん、どうぞ"},
+                        {"voice": "3", "name": "中村さん", "sure": True, "quote": "中村です"},
+                        {"voice": "4", "media": True, "quote": "皆さん筋トレ頑張っていきましょう"}]}
+
+    class Fake:
+        def __init__(self, **kw):
+            self.responses = types.SimpleNamespace(create=lambda **kw: types.SimpleNamespace(output_text=json.dumps(answer)))
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", Fake)
+    monkeypatch.setattr(sp, "_openai_key", lambda: "k")
+    monkeypatch.setattr(sp, "calendar_lines", lambda d: "")
+    sp.name_day(day)
+    assert lifelog.read_day(day)[0]["text"] == "［みきさん］本田です［スヤさん？］どうぞ［中村さん］中村です［動画・放送の音？］皆さん筋トレ頑張っていきましょう"
+    book = sp.people()["people"]
+    assert sorted(p["name"] for p in book.values()) == ["みきさん", "中村さん"]
+    assert [p for p in book.values() if p["name"] == "みきさん"][0]["owner"]
