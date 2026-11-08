@@ -269,18 +269,22 @@ def _near(vo: dict, at: float | None, minutes: float = 20) -> bool:
 
 
 def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: float | None = None,
-          short: bool | None = None, exclude: set | None = None) -> str | None:
+          short: bool | None = None, exclude: set | None = None, decided: bool = False, person: str | None = None,
+          notbook: set | None = None) -> str | None:
     """The day's voice number for one embedding; joins a person of the voice book or a numbered voice, or starts one.
 
     A short piece of speech (under SHORT_SECONDS) gives a noisy embedding: it joins only a voice heard around the same
     time that it is clearly closest to, and otherwise stays unnumbered (None, shown as ［？］) instead of starting a new
     number for every 「はい」. A speaker of a whole conversation (lifelog_sessions) says itself whether it is short
-    (its seconds in all the talk), and numbers taken by the other speakers of the same recording are `exclude`d."""
+    (its seconds in all the talk), and numbers taken by the other speakers of the same recording are `exclude`d.
+    Its name was `decided` over the whole conversation (session_people): `person`, and never one of `notbook`."""
     short = seconds < SHORT_SECONDS if short is None else short
     exclude = exclude or set()
-    pid, ps = best_person(v, book)
+    notbook = notbook or set()
+    pid, ps = ((person, 1.0) if person else (None, -1.0)) if decided else best_person(v, book)
     scores = sorted(((float(_unit(vo["c"]) @ v), key) for key, vo in state["voices"].items()
-                     if (not short or _near(vo, at)) and key not in exclude), reverse=True)
+                     if (not short or _near(vo, at)) and key not in exclude and vo.get("who") not in notbook),
+                    reverse=True)
     score, best = scores[0] if scores else (-1.0, None)
     second = scores[1][0] if len(scores) > 1 else -1.0
     if short:
@@ -307,6 +311,8 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
         state["next"] += 1
         state["voices"][key] = {"c": _round(v), "s": 0.0}
     vo = state["voices"][key]
+    if notbook:
+        vo["notbook"] = sorted(set(vo.get("notbook", [])) | notbook)
     if at is not None:
         a, b = vo.get("t", (at, at))
         vo["t"] = [min(a, at), max(b, at)]
@@ -320,7 +326,7 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
             vo["looked"] = vo["s"]
             pid, ps = best_person(_unit(vo["c"]), book)
             # one person may be two numbers in a day (home and outside sound different): both get the name
-            if pid and ps >= JOIN_PERSON_CENTRE and pid not in vo.get("not", []):
+            if pid and ps >= JOIN_PERSON_CENTRE and pid not in vo.get("not", []) + vo.get("notbook", []):
                 vo["who"] = pid
                 vo.pop("maybe", None)
                 state["renamed"] = True
@@ -333,7 +339,7 @@ def maybe_person(key: str, vo: dict, state: dict, book: dict) -> dict | None:
     """The person this unnamed voice is probably (not sure enough to name): {"who", "score"} or None."""
     if vo.get("who") or vo.get("s", 0) < MAYBE_SECONDS:
         return None
-    c, no, best = _unit(vo["c"]), set(vo.get("not", [])), None
+    c, no, best = _unit(vo["c"]), set(vo.get("not", [])) | set(vo.get("notbook", [])), None
     for pid, p in book["people"].items():
         if pid in no or not p.get("x"):
             continue
@@ -485,6 +491,7 @@ def replace_day(day: str) -> int:
         state = {"voices": {}, "next": 1, "named_at": 0, "spoken_at": time.time()}
         book = people()
         entries = []
+        names_of = session_people(folder, book)
         for f in sorted(folder.glob("*.json")):
             try:
                 e = json.loads(f.read_text(encoding="utf-8"))
@@ -499,8 +506,9 @@ def replace_day(day: str) -> int:
             order = sorted(e["voices"].items(), key=lambda kv: -kv[1].get("ss", 0)) if e.get("session") else e["voices"].items()
             for local, v in order:
                 if e.get("session"):
+                    who, nb = names_of.get(e["session"], {}).get(local, (None, set()))
                     key = place(day, _unit(v["e"]), v["s"], state, book, at, short=v.get("ss", v["s"]) < SHORT_SECONDS,
-                                exclude=taken)
+                                exclude=taken, decided=True, person=who, notbook=nb)
                     taken.add(key)
                 else:
                     key = place(day, _unit(v["e"]), v["s"], state, book, at)
@@ -526,6 +534,46 @@ def replace_day(day: str) -> int:
         lifelog._upsert(day, entries)
     rerender_day(day)
     return len(entries)
+
+
+PERSON_MIN_SECONDS = 5.0
+
+
+def session_people(folder: Path, book: dict) -> dict:
+    """The voice book's names for the speakers of each conversation split as a whole (lifelog_sessions):
+    {session: {speaker: (person or None, persons it is not)}}. A person goes to the one speaker of the conversation
+    most like them (at JOIN_PERSON or more), and is never given to its other speakers. In the Shibuya bar every
+    voice's centre was 0.6-0.8 like every other's; placed one by one, the mama's voice of the second hour (0.635 to the
+    owner) took 「みきさん」 because it spoke longest, and the owner himself (0.94) got a new number."""
+    convs = {}
+    for f in sorted(folder.glob("*.json")):
+        try:
+            e = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not e.get("session"):
+            continue
+        for s, v in (e.get("voices") or {}).items():
+            if v.get("e") is not None:
+                convs.setdefault(e["session"], {})[s] = (_unit(v["e"]), float(v.get("ss", v.get("s", 0))))
+    out = {}
+    for k, spks in convs.items():
+        best = {}
+        for s, (c, secs) in spks.items():
+            if secs < PERSON_MIN_SECONDS:
+                continue
+            for pid, p in book["people"].items():
+                if not p.get("x"):
+                    continue
+                sc = float(np.max(np.asarray(p["x"], dtype=np.float32) @ c))
+                if sc >= JOIN_PERSON and sc > best.get(pid, (-1.0, None))[0]:
+                    best[pid] = (sc, s)
+        who = {}
+        for pid, (sc, s) in sorted(best.items(), key=lambda kv: -kv[1][0]):
+            who.setdefault(s, pid)
+        named = set(who.values())
+        out[k] = {s: (who.get(s), named - {who.get(s)}) for s in spks}
+    return out
 
 
 def keep_corrections(old: dict, state: dict, close: float = 0.85) -> None:

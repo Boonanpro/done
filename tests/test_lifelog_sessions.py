@@ -152,3 +152,26 @@ def test_a_recording_with_no_words_stays_in_its_conversation_after_the_split(roo
     e.update(turns=[], voices={}, session=k)
     (lifelog.AUDIO_ROOT / day / "210100_0_u.json").write_text(json.dumps(e))
     assert ls.key(ls.conversations(day)[0]) == k
+
+
+def test_the_owners_name_goes_to_the_speaker_most_like_him_not_the_one_who_spoke_longest(root):
+    """11/7 21:17-22:46 at the bar: the mama's voice (0.635 to the owner, 755 s) spoke longer than the owner (0.94,
+    409 s) and took 「みきさん」. The name goes to the most owner-like speaker of the conversation, and only to it."""
+    day = "2026-11-07"
+    owner = voice(1)
+    sp.save_people({"people": {"p_o": {"name": "みきさん", "owner": True, "x": [owner.tolist()]}}})
+    rng = np.random.default_rng(5)
+    def towards(target, sim):   # a voice with cosine `sim` to target
+        r = rng.normal(size=192); r -= (r @ target) * target; r /= np.linalg.norm(r)
+        return (sim * target + np.sqrt(1 - sim ** 2) * r).astype(np.float32)
+    mama, him = towards(owner, 0.64), towards(owner, 0.94)
+    for n, spks in (("211706_0_u", ("A", "B")), ("211800_0_u", ("A",))):   # the second recording has only the mama
+        e = entry(day, n)
+        e.update(session="k", turns=[{"start": i * 2, "end": i * 2 + 2, "text": s + "です", "spk": s, "voice": None}
+                                     for i, s in enumerate(spks)],
+                 voices={s: {"s": 2.0, "ss": {"A": 755.0, "B": 409.0}[s], "e": {"A": mama, "B": him}[s].tolist()}
+                         for s in spks})
+        put(day, n, e)
+    sp.replace_day(day)
+    rows = [r["text"] for r in lifelog.read_day(day)]
+    assert "［みきさん］Bです" in rows[0] and "みきさん］Aです" not in rows[0] and "みきさん" not in rows[1]
