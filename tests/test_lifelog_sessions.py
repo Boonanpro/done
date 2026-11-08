@@ -138,3 +138,17 @@ def test_a_conversation_still_going_on_waits_and_a_finished_one_runs_once(root, 
     e.pop("session")
     (lifelog.AUDIO_ROOT / day / "210100_0_u.json").write_text(json.dumps(e))
     assert ls.run_day(day, now=end + ls.SESSION_GAP + 199) == 1 and ran == [2, 2]
+
+
+def test_a_recording_with_no_words_stays_in_its_conversation_after_the_split(root):
+    """11/9 night: a recording of noise had a voice but no words; once split its turns were empty, it left the
+    conversation, the conversation's key changed and the night was split again."""
+    day = "2026-11-07"
+    for n in ("210000_0_u", "210100_0_u"):
+        put(day, n, entry(day, n))
+    g = ls.conversations(day)[0]
+    k = ls.key(g)
+    e = json.loads((lifelog.AUDIO_ROOT / day / "210100_0_u.json").read_text())
+    e.update(turns=[], voices={}, session=k)
+    (lifelog.AUDIO_ROOT / day / "210100_0_u.json").write_text(json.dumps(e))
+    assert ls.key(ls.conversations(day)[0]) == k
