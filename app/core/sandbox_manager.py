@@ -227,7 +227,8 @@ class SandboxManager:
         # For dev work where you want hot-reload, set DAN_SANDBOX_RELOAD=1.
         if os.environ.get("DAN_SANDBOX_RELOAD", "").lower() in ("1", "true", "yes", "on"):
             cmd.append("--reload")
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        from app.core.generations import without_turn
+        env = without_turn(os.environ)
         env["DAN_SANDBOX_PORT"] = str(self.port)
         # restart で注入された extra env をマージ（テスト用認証バイパス等）
         for k, v in self._extra_env.items():
