@@ -4,6 +4,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { CopyBodyButton } from './copy-body-button';
+import { DraftBodyEditor } from './draft-body-editor';
 
 type Proposal = {
   id: string;
@@ -94,26 +96,43 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
   const [failed, setFailed] = useState(false);
   const [body, setBody] = useState('');
   const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
   const [busy, setBusy] = useState<'send' | 'discard' | null>(null);
   const [error, setError] = useState('');
   const loaded = useRef('');
   const status = useRef('');
+  const requestRef = useRef(request);
+  requestRef.current = request;
+  const actionInFlight = useRef(false);
+  const loadVersion = useRef(0);
+  const mounted = useRef(true);
+  const focused = useRef(false);
+  const activeId = useRef(id);
+  activeId.current = id;
 
   const load = async () => {
+    if (actionInFlight.current) return;
+    const version = ++loadVersion.current;
     try {
-      const got = await request<Proposal>(`/chat/proposals/${id}`);
+      const got = await requestRef.current<Proposal>(`/chat/proposals/${id}`);
+      if (!mounted.current || version !== loadVersion.current) return;
       setP(got); status.current = got.status;
-      if (!dirty || got.status !== 'pending') setBody(got.content || '');
+      if ((!dirtyRef.current && !focused.current) || got.status !== 'pending') setBody(got.content || '');
       loaded.current = got.content || '';
+      setFailed(false);
     } catch {
-      setFailed(true);
+      if (mounted.current && version === loadVersion.current) setFailed(true);
     }
   };
   useEffect(() => {
+    mounted.current = true;
+    setP(null); setBody(''); setDirty(false); dirtyRef.current = false;
+    focused.current = false; actionInFlight.current = false; setBusy(null);
+    loaded.current = ''; status.current = ''; setFailed(false); setError('');
     void load();
     // 送信中（ダンが手で送っている）や更新を拾う。届いた後は止める。
     const timer = setInterval(() => { if (!status.current || ['pending', 'sending'].includes(status.current)) void load(); }, 15000);
-    return () => clearInterval(timer);
+    return () => { mounted.current = false; ++loadVersion.current; clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -128,17 +147,24 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
   const state = p.status === 'sending' ? '送信中' : '';
 
   const act = async (kind: 'send' | 'discard') => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
+    ++loadVersion.current;
     setBusy(kind); setError('');
     try {
-      if (kind === 'send' && dirty) {
+      if (kind === 'send' && (dirty || body !== loaded.current)) {
         await request(`/chat/proposals/${id}/draft`, { method: 'PATCH', body: JSON.stringify({ body }) });
       }
       const next = await request<Proposal>(`/chat/proposals/${id}/${kind}`, { method: 'POST' });
-      setP(next); status.current = next.status; setDirty(false);
+      if (!mounted.current || activeId.current !== id) return;
+      setP(next); status.current = next.status; dirtyRef.current = false; setDirty(false);
     } catch (e) {
-      setError(kind === 'send' ? '送れませんでした。もう一度押すか、ダンに伝えてください' : '破棄できませんでした');
+      if (mounted.current && activeId.current === id) setError(kind === 'send' ? '送れませんでした。もう一度押すか、ダンに伝えてください' : '破棄できませんでした');
     } finally {
-      setBusy(null);
+      if (mounted.current && activeId.current === id) {
+        actionInFlight.current = false;
+        setBusy(null);
+      }
     }
   };
 
@@ -151,8 +177,10 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
       </View>
       {ad.subject ? <Text style={st.subject} numberOfLines={2}>件名: {ad.subject}</Text> : null}
       {pending ? (
-        <TextInput style={st.body} value={body} multiline editable={!busy}
-          onChangeText={(t) => { setBody(t); setDirty(t !== loaded.current); }} />
+        <DraftBodyEditor style={st.body} value={body} editable={!busy}
+          onFocus={() => { focused.current = true; }}
+          onBlur={() => { focused.current = false; void load(); }}
+          onChangeText={(t) => { setBody(t); dirtyRef.current = t !== loaded.current; setDirty(dirtyRef.current); }} />
       ) : (
         <Text style={[st.body, st.bodyRead]} selectable numberOfLines={8}>{body}</Text>
       )}
@@ -162,6 +190,7 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
       {error ? <Text style={st.error}>{error}</Text> : null}
       {pending ? (
         <View style={st.buttons}>
+          <CopyBodyButton body={body} disabled={!!busy} />
           <Pressable style={({ pressed }) => [st.btn, st.ghost, pressed && st.pressed]} disabled={!!busy} onPress={() => act('discard')}>
             <Text style={st.ghostText}>{busy === 'discard' ? '破棄しています…' : '破棄'}</Text>
           </Pressable>
@@ -184,7 +213,7 @@ const st = StyleSheet.create({
   subject: { fontSize: 13, color: '#3d4b44' },
   body: { minHeight: 80, borderWidth: 1, borderColor: '#dfe7e2', borderRadius: 10, padding: 10, fontSize: 15, lineHeight: 22, color: '#162e27', textAlignVertical: 'top', backgroundColor: '#fbfcfb' },
   bodyRead: { minHeight: 0, borderWidth: 0, padding: 0, backgroundColor: 'transparent', color: '#3d4b44' },
-  buttons: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
+  buttons: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 },
   btn: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8 },
   ghost: { borderWidth: 1, borderColor: '#cfdcd5' },
   ghostText: { color: '#59685f', fontSize: 13 },

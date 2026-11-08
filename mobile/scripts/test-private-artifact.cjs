@@ -3,7 +3,7 @@ const {AbortController,AbortSignal}=require('abort-controller');
 // Test the native URL implementation too, rather than Node's browser-compatible URL.
 const babel=require('@babel/core');
 const native={exports:{},require:name=>name==='./NativeBlobModule'?null:{URLSearchParams}};
-vm.runInNewContext(babel.transformSync(fs.readFileSync(require.resolve('react-native/Libraries/Blob/URL'),'utf8'),{babelrc:false,configFile:false,plugins:['@babel/plugin-transform-flow-strip-types','@babel/plugin-transform-modules-commonjs']}).code,native);
+vm.runInNewContext(babel.transformSync(fs.readFileSync(require.resolve('react-native/Libraries/Blob/URL'),'utf8'),{babelrc:false,configFile:false,plugins:[require.resolve('@babel/plugin-transform-flow-strip-types'),require.resolve('@babel/plugin-transform-modules-commonjs')]}).code,native);
 const source=fs.readFileSync(require('path').join(__dirname,'../private-artifact.ts'),'utf8');
 let clears=0,abortTimeout,mode='ok';
 const context={exports:{},URL:native.exports.URL,AbortController,AbortSignal,setTimeout:fn=>(abortTimeout=fn,1),clearTimeout:()=>clears++,fetch:async(url,init)=>{

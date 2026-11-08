@@ -1382,7 +1382,8 @@ function AppMain() {
       if (AppState.currentState !== 'active' || busy) return;
       busy = true;
       try {
-        if (!await NativeModules.DanVoiceCall.takeVoiceShortcut()) return;
+        const shortcut = await NativeModules.DanVoiceCall.takeVoiceShortcut();
+        if (!shortcut) return;
         const [saved, room] = await Promise.all([
           SecureStore.getItemAsync(TOKEN_KEY), SecureStore.getItemAsync(HUB_KEY)]);
         if (AppState.currentState !== 'active') return;
@@ -1390,7 +1391,8 @@ function AppMain() {
           Alert.alert('ダンと話す', '一度Doneにログインしてから、もう一度「ダンと話す」を開いてください。');
           return;
         }
-        voiceRef.current.start({roomId:room,chatTitle:'Done',apiBase:API_BASE_URL,token:saved});
+        voiceRef.current.start({roomId:room,chatTitle:'Done',apiBase:API_BASE_URL,token:saved},
+          {preserveScreen: shortcut.preserveScreen === true});
       } finally { busy = false; }
     };
     const attempt = () => { void take().catch(() => Alert.alert('ダンと話す', '起動できませんでした。もう一度ボタンを押してください。')); };
