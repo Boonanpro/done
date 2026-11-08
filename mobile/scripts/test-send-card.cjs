@@ -30,7 +30,7 @@ function find(tree, type) {
 }
 function label(tree) {return find(tree,'Text').map(n=>n.props.children).flat().join('');}
 function button(tree, text) {const result=find(tree,'Pressable').find(x=>label(x).includes(text));assert.ok(result,`button ${text}`);return result;}
-const source = process.argv.includes('--before') ? execFileSync('git',['show','HEAD:mobile/send-card.tsx'],{cwd:root,encoding:'utf8'}) : fs.readFileSync(path.join(root,'send-card.tsx'),'utf8');
+const source = process.argv.includes('--before') ? execFileSync('git',['show','084e0aef0a6e9502d1d74b52fbdc64fa178c58b2:mobile/send-card.tsx'],{cwd:root,encoding:'utf8'}) : fs.readFileSync(path.join(root,'send-card.tsx'),'utf8');
 async function card() {
   let proposal={id:'test',status:'pending',content:'Original\nhttps://example.test',action_data:{to:'test'}};
   const requests=[]; let hold=false, reject=false, rejectGet=false; const waiting=[];

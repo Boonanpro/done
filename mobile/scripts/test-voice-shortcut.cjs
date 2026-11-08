@@ -1,5 +1,5 @@
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict'), ts = require('typescript');
-const app = process.argv.includes('--baseline') ? require('node:child_process').execFileSync('git',['show','HEAD:mobile/App.tsx'],{encoding:'utf8'}) : fs.readFileSync(require('node:path').join(__dirname, '../App.tsx'), 'utf8');
+const app = process.argv.includes('--baseline') ? require('node:child_process').execFileSync('git',['show','084e0aef0a6e9502d1d74b52fbdc64fa178c58b2:mobile/App.tsx'],{encoding:'utf8'}) : fs.readFileSync(require('node:path').join(__dirname, '../App.tsx'), 'utf8');
 const start = app.indexOf('  // A physical shortcut');
 const end = app.indexOf("  // Dan's calls", start);
 const code = ts.transpileModule(app.slice(start, end), {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
