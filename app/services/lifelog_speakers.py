@@ -323,11 +323,12 @@ def label(day: str, key: str | None, state: dict | None = None, book: dict | Non
 def render(turns: list[dict], day: str, state=None, book=None) -> str:
     state = state or day_state(day)
     book = book or people()
-    out, last = [], object()
+    out, last = [], None
     for t in turns:
-        if t.get("voice") != last:
-            out.append(f"［{label(day, t.get('voice'), state, book)}］")
-            last = t.get("voice")
+        name = label(day, t.get("voice"), state, book)
+        if name != last:   # two numbers of one person (named the same) read as one speaker
+            out.append(f"［{name}］")
+            last = name
         out.append(t["text"])
     return "".join(out).strip()
 
