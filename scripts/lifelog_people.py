@@ -11,6 +11,7 @@ the same voice gets the name by itself.
   python scripts/lifelog_people.py people                     # the voice book
   python scripts/lifelog_people.py rename スヤさん 須山さん      # the person's name in the book (every day re-written)
   python scripts/lifelog_people.py names 2026-11-07           # read names out of the day's talk now
+  python scripts/lifelog_people.py redo 2026-11-07            # number the day's voices again (then: names)
 """
 from __future__ import annotations
 
@@ -83,6 +84,7 @@ def main() -> None:
     sub.add_parser("people")
     r = sub.add_parser("rename"); r.add_argument("old"); r.add_argument("new")
     a = sub.add_parser("names"); a.add_argument("day")
+    rd = sub.add_parser("redo"); rd.add_argument("day")
     o = ap.parse_args()
     if o.cmd == "day":
         show_day(o.day, o.lines)
@@ -117,6 +119,9 @@ def main() -> None:
             if any(v.get("who") == pid for v in sp.day_state(f.stem)["voices"].values()):
                 sp.rerender_day(f.stem)
         print("ok")
+    elif o.cmd == "redo":
+        print(sp.replace_day(o.day), "recordings")
+        show_day(o.day, 1)
     elif o.cmd == "names":
         for g in sp.name_day(o.day, min_seconds=5):
             print(g)

@@ -53,8 +53,11 @@ VERSION = 3   # 3: stricter outro filter (2026-11-08); recordings written by 2 a
 
 LOCAL_THRESHOLD = 0.6     # sherpa's clustering inside one recording (larger = fewer speakers)
 JOIN_DAY = 0.45           # cosine to a numbered voice's centre to be that voice
-JOIN_PERSON = 0.55        # cosine to one example in the voice book to be that person (a name is a stronger claim)
-JOIN_PERSON_CENTRE = 0.5  # the same, for the centre of a numbered voice that has talked 30 s (steadier than one piece)
+# Cosine to one example in the voice book to be that person (a name is a stronger claim than a number). Measured on
+# 11/7 17:18-17:30 against the owner's example: his own pieces 0.63-0.89, the other man's 0.12-0.47 (0.65-0.72 only
+# where the two were mixed in one piece). 0.55 let the other man, a woman and the owner's brother into 「みきさん」.
+JOIN_PERSON = 0.62
+JOIN_PERSON_CENTRE = 0.62  # the same, for the centre of a numbered voice that has talked 30 s
 MIN_VOICE_SECONDS = 0.8   # shorter speech gives no usable embedding; it keeps the label of the turn next to it
 SHORT_SECONDS = 2.5       # under this, an embedding is noisy (「はい」「そのまま」): see place()
 SHORT_JOIN = 0.35
@@ -411,6 +414,48 @@ def transcribe(model, audio: Path, old: dict | None = None) -> dict:
              "voices": {k: {"day_voice": keys[k], "s": round(secs, 1), "db": round(loud, 1), "e": _round(v)}
                         for k, (v, secs, loud) in voices.items()}}
     return entry
+
+
+# ---------------------------------------------------------------- place a whole day again
+
+def replace_day(day: str) -> int:
+    """Number the day's voices again from the voice pieces kept with each recording, in time order (after the
+    thresholds change, or the voice book learned someone). No audio is read: minutes for a whole day."""
+    folder = lifelog.AUDIO_ROOT / day
+    with _lock:
+        old = day_state(day)
+        state = {"voices": {}, "next": 1, "named_at": 0, "spoken_at": time.time()}
+        book = people()
+        entries = []
+        for f in sorted(folder.glob("*.json")):
+            try:
+                e = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if e.get("v", 1) < 3 or not e.get("voices"):
+                continue
+            n = f.name
+            at = int(n[:2]) * 3600 + int(n[2:4]) * 60 + int(n[4:6])
+            moved, size = {}, {}
+            for local, v in e["voices"].items():
+                key = place(day, _unit(v["e"]), v["s"], state, book, at)
+                old_key = v.get("day_voice")
+                if old_key is not None and v["s"] > size.get(old_key, -1):   # two pieces that were one voice: the longer
+                    moved[old_key], size[old_key] = key, v["s"]
+                v["day_voice"] = key
+            for t in e.get("turns") or []:
+                t["voice"] = moved.get(t.get("voice"))
+            e["text"] = render(e["turns"], day, state, book) if e.get("turns") else e.get("text", "")
+            tmp = f.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(e, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(f)
+            entries.append(e)
+        state.pop("renamed", None)
+        # the owner's corrections of that day are kept as far as they still point at a voice heard at that time
+        save_day(day, state)
+        lifelog._upsert(day, entries)
+    rerender_day(day)
+    return len(entries)
 
 
 # ---------------------------------------------------------------- re-render the day's index

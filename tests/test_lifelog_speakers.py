@@ -212,3 +212,24 @@ def test_written_again_reuses_one_voice_text_but_not_an_outro(root, monkeypatch)
     assert sp.transcribe(Model(), audio, old=plain_old)["plain"] == "鍵は閉めて大丈夫でしょうか" and not calls
     outro_old = {"parts": [{"start": 0.0, "end": 2.0, "text": "では、次の動画でお会いしましょう。"}]}
     assert sp.transcribe(Model(), audio, old=outro_old)["text"] == "" and calls
+
+
+def test_replace_day_numbers_again_from_kept_pieces(root):
+    """After a change of thresholds the day is numbered again without audio; the voice book's owner gets his name."""
+    day = "2026-11-07"
+    folder = lifelog.AUDIO_ROOT / day
+    folder.mkdir(parents=True)
+    owner = voice(1)
+    book = {"people": {"p_o": {"name": "みきさん", "owner": True, "x": [owner.tolist()]}}}
+    sp.save_people(book)
+    for name, pieces in (("130518_000_u", [("9", voice(1, 0.3), "鍵は"), ("12", voice(2), "そのままです")]),
+                         ("172004_000_u", [("4", voice(2, 0.3), "売り先を"), ("5", voice(1, 0.3), "なるほど")])):
+        e = {"start": f"{day}T{name[:2]}:{name[2:4]}:{name[4:6]}+09:00", "seconds": 9, "audio": str(folder / (name + ".ogg")),
+             "v": 3, "text": "x", "turns": [{"voice": dv, "text": tx} for dv, _, tx in pieces],
+             "voices": {str(i): {"day_voice": dv, "s": 5.0, "db": -30, "e": v.tolist()} for i, (dv, v, _) in enumerate(pieces)}}
+        (folder / (name + ".json")).write_text(json.dumps(e, ensure_ascii=False))
+    assert sp.replace_day(day) == 2
+    texts = [r["text"] for r in lifelog.read_day(day)]
+    assert texts[0].startswith("［みきさん］鍵は［話者") and texts[1].endswith("［みきさん］なるほど")
+    other = texts[0].split("［")[2].split("］")[0]
+    assert texts[1].startswith(f"［{other}］売り先を")
