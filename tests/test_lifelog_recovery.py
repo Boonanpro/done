@@ -11,6 +11,7 @@ def audio(tmp_path, monkeypatch):
     monkeypatch.setattr(lifelog, 'AUDIO_ROOT', tmp_path / 'audio')
     monkeypatch.setattr(lifelog, 'INDEX_ROOT', tmp_path / 'index')
     monkeypatch.setattr(worker, 'LOG', tmp_path / 'worker.log')
+    monkeypatch.setattr(worker.speakers, 'available', lambda: False)   # storage recovery, text without speakers
     p = lifelog.AUDIO_ROOT / '2026-10-30' / '123456_000_owner.ogg'
     p.parent.mkdir(parents=True)
     p.write_bytes(b'original')
@@ -41,11 +42,11 @@ def test_storage_failure_remains_pending_and_recovers(audio, monkeypatch):
 
 
 def test_index_recovery_deduplicates(audio):
-    worker.process_audio(audio, Model())
-    worker.process_audio(audio, Model())
+    worker.run_pass(Model(), set(), {})
+    worker.run_pass(Model(), set(), {})
     assert len(lifelog.read_day('2026-10-30')) == 1
     lifelog.index_file('2026-10-30').unlink()
-    worker.process_audio(audio, None)
+    worker.run_pass(None, set(), {})
     assert len(lifelog.read_day('2026-10-30')) == 1
 
 

@@ -13,6 +13,7 @@ import os
 import struct
 import zlib
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -120,6 +121,35 @@ def store_segment(user_id: str, data: bytes) -> dict:
     return {"audio": str(path), "start": start.isoformat(), "seconds": round(seconds, 2)}
 
 
+class _StateLock:
+    """One lock for the index and the speaker files, across the worker and the correction command (re-entrant)."""
+
+    def __init__(self):
+        self._thread = threading.RLock()
+        self._depth = 0
+        self._file = None
+
+    def __enter__(self):
+        self._thread.acquire()
+        if self._depth == 0 and os.name != "nt":
+            import fcntl
+            STATE_ROOT.mkdir(parents=True, exist_ok=True)
+            self._file = (STATE_ROOT / "state.lock").open("w")
+            fcntl.flock(self._file, fcntl.LOCK_EX)
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._depth -= 1
+        if self._depth == 0 and self._file:
+            self._file.close()   # closing drops the flock
+            self._file = None
+        self._thread.release()
+
+
+state_lock = _StateLock()
+
+
 def index_file(day: str) -> Path:
     return INDEX_ROOT / f"{day}.jsonl"
 
@@ -127,8 +157,46 @@ def index_file(day: str) -> Path:
 def add_transcript(entry: dict) -> None:
     INDEX_ROOT.mkdir(parents=True, exist_ok=True)
     day = entry["start"][:10]
-    with index_file(day).open("a", encoding="utf-8") as f:
+    with state_lock, index_file(day).open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+ROW_KEYS = ("start", "seconds", "text", "audio", "plain", "turns")
+
+
+def _audio_name(row: dict) -> str:
+    return Path((row.get("audio") or "").replace("\\", "/")).name
+
+
+def upsert_rows(day: str, entries: list[dict]) -> None:
+    """Put these entries into the day's index in place of the rows of the same recordings (a re-written recording
+    replaces its row; one that turned out to hold no speech loses it). One rewrite of the file for the whole batch."""
+    if not entries:
+        return
+    with state_lock:
+        _upsert(day, entries)
+
+
+def _upsert(day: str, entries: list[dict]) -> None:
+    INDEX_ROOT.mkdir(parents=True, exist_ok=True)
+    path = index_file(day)
+    fresh = {_audio_name(e): e for e in entries}
+    out = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if _audio_name(row) not in fresh:
+                out.append(line)
+    for e in entries:
+        if e.get("text"):
+            out.append(json.dumps({k: e[k] for k in ROW_KEYS if k in e}, ensure_ascii=False))
+    with tempfile.NamedTemporaryFile("w", dir=INDEX_ROOT, suffix=".tmp", delete=False, encoding="utf-8") as f:
+        f.write("\n".join(out) + ("\n" if out else ""))
+        tmp = Path(f.name)
+    tmp.replace(path)
 
 
 def read_day(day: str) -> list[dict]:
@@ -169,4 +237,5 @@ def search(query: str, days: int = 7, limit: int = 30, date: str | None = None) 
 
 
 def as_text(rows: list[dict]) -> str:
+    """「[13:05:18] ［みきさん］失礼します［話者2］どうぞ」: since 2026-11-08 the text says who spoke (lifelog_speakers)."""
     return "\n".join(f"[{r['start'][11:19]}] {r['text']}" for r in rows if r.get("text"))
