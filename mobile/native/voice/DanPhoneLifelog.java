@@ -143,6 +143,7 @@ public final class DanPhoneLifelog {
       android.util.Log.i(TAG, "phone lifelog: " + next + " (" + why + ")");
       DanVoiceCallService.refreshNotification();
     }
+    if (worker.get() != null) DanLifelogResume.withdraw(context);   // recording again: 「録音を再開」 is moot
   }
 
   private void start() {

@@ -103,6 +103,8 @@ def main() -> None:
             print(f"話者{v['voice']}: {v['label']}  {v['seconds'] / 60:.1f}分")
             for line, clip in zip(v["lines"], v["clips"]):
                 print(f"    {line['at']} 「{line['text'][:60]}」  {clip}")
+            if not v["clips"]:
+                print("    （この声だけが話している所が2.5秒以上なく、聞かせる声は作れません）")
     elif o.cmd == "name":
         name = sp.OWNER_NAME if o.owner else o.name
         if not name:
