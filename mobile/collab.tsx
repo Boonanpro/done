@@ -1,6 +1,8 @@
 import {uploadMedia, uploadError} from './resumable-upload';
 import {AttachmentCard} from './attachment-card';
 import {ui, useUiLanguage} from './ui-language';
+import {CopyBodyButton} from './copy-body-button';
+import {DraftBodyEditor} from './draft-body-editor';
 // コラボチャット（外部クライアント窓口）のネイティブ画面。
 // voice.tsx と同じ流儀: App.tsx からは import と画面分岐だけで使える自己完結モジュール。
 // 通信は REST ポーリングのみ（Web 版の Vercel フォールバックと同一経路＝確実に動く）。
@@ -845,8 +847,11 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
     } catch (e) { Alert.alert(ui("Could not send","送れませんでした"), String((e as Error).message)); } finally { setAsking(false); }
   };
   const [body, setBody] = useState(proposal.content || '');
+  const bodyFocused = useRef(false);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'send' | 'discard' | 'sender' | 'apply' | null>(null);
+  const actionInFlight = useRef(false);
+  const [actionError, setActionError] = useState('');
   const [gone, setGone] = useState(false);
   const [dismissedAt, setDismissedAt] = useState<string | null>(null);
   const [sender, setSender] = useState<'dan' | 'owner'>(proposal.action_data?.sender === 'owner' ? 'owner' : 'dan');
@@ -857,7 +862,7 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
   useEffect(() => {
     if (proposal.content !== lastContent.current) {
       lastContent.current = proposal.content || '';
-      if (!dirty) setBody(proposal.content || '');
+      if (!dirty && !bodyFocused.current) setBody(proposal.content || '');
     }
   }, [proposal.content, dirty]);
   useEffect(() => {
@@ -873,7 +878,9 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
   const attOthers = (ad.attachments || []).filter((f) => !fileMediaKind(f));
 
   const act = async (kind: 'send' | 'discard') => {
-    setBusy(kind);
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
+    setBusy(kind); setActionError('');
     try {
       if (kind === 'send' && body !== proposal.content) {
         await request(`/chat/proposals/${proposal.id}/draft`, {
@@ -884,29 +891,33 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
       await request(`/chat/proposals/${proposal.id}/${kind === 'send' ? 'send' : 'discard'}`, { method: 'POST' });
       setGone(true);
     } catch {
-      // 失敗時はカードを残す
+      setActionError(kind === 'send' ? ui('Could not send. Your draft is still here.', '送れませんでした。編集した本文は残っています。') : ui('Could not discard.', '破棄できませんでした。'));
     } finally {
+      actionInFlight.current = false;
       setBusy(null);
     }
   };
 
   const changeSender = async (next: 'dan' | 'owner') => {
-    if (next === sender || busy) return;
+    if (next === sender || busy || actionInFlight.current) return;
+    actionInFlight.current = true;
     setSender(next); setBusy('sender');
     try {
       await request(`/chat/proposals/${proposal.id}/draft`, { method: 'PATCH', body: JSON.stringify({ sender: next }) });
     } catch {
       setSender(sender);
-    } finally { setBusy(null); }
+    } finally { actionInFlight.current = false; setBusy(null); }
   };
 
   const applyUpdate = async () => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusy('apply');
     try {
       const updated = await request<Proposal>(`/chat/proposals/${proposal.id}/draft`, { method: 'PATCH', body: JSON.stringify({ apply_update: true }) });
       lastContent.current = updated.content || '';
       setBody(updated.content || ''); setDirty(false);
-    } catch { /* 次のポーリングで再表示 */ } finally { setBusy(null); }
+    } catch { /* 次のポーリングで再表示 */ } finally { actionInFlight.current = false; setBusy(null); }
   };
 
   return (
@@ -952,13 +963,17 @@ function ProposalCard({ proposal, request, apiBase, roomId }: { proposal: Propos
           ))}
         </View>
       )}
-      <TextInput
+      <DraftBodyEditor
         style={s.cardBody}
         value={body}
+        editable={!busy}
+        onFocus={() => { bodyFocused.current = true; }}
+        onBlur={() => { bodyFocused.current = false; if (!dirty) setBody(proposal.content || ''); }}
         onChangeText={(t) => { setBody(t); setDirty(t !== (proposal.content || '')); }}
-        multiline
       />
+      {actionError ? <Text style={{ color: C.danger, fontSize: 12 }} accessibilityLiveRegion="polite">{actionError}</Text> : null}
       <View style={s.cardBtns}>
+        <CopyBodyButton body={body} disabled={!!busy} color={C.muted} borderColor={C.border} />
         <Pressable style={[s.cardBtn, s.cardBtnGhost]} disabled={!!busy} onPress={() => act('discard')}>
           {busy === 'discard' ? <ActivityIndicator size="small" color={C.muted} /> : <Text style={{ color: C.muted, fontSize: 13 }}>{ui("Discard","破棄")}</Text>}
         </Pressable>
@@ -1079,7 +1094,7 @@ const s = StyleSheet.create({
   cardHead: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
   cardTitle: { color: C.text, fontSize: 12, fontWeight: '600', flex: 1 },
   cardBody: { backgroundColor: C.bg, borderWidth: 1, borderColor: C.border, borderRadius: 10, color: C.text, fontSize: 14, lineHeight: 20, padding: 10, minHeight: 80, textAlignVertical: 'top' },
-  cardBtns: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 },
+  cardBtns: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 10, marginTop: 10 },
   cardMeta: { color: C.muted, fontSize: 11 },
   cardAskRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border },
   cardAskInput: { flex: 1, backgroundColor: C.bg, borderRadius: 10, color: C.text, fontSize: 13, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: '#4c3d6e88' },

@@ -73,6 +73,11 @@ allprojects {
         'intent-filter': [{action: [{$: {'android:name': 'android.intent.action.MAIN'}}],
           category: [{$: {'android:name': 'android.intent.category.LAUNCHER'}}]}]});
     }
+    // Never reuse MainActivity's task base intent as the shortcut: Android otherwise
+    // only brings that task forward on the second launch, skipping this Activity.
+    const shortcut = app.activity.find(a => a.$['android:name'] === 'app.done.dan.voice.DanVoiceShortcutActivity');
+    shortcut.$['android:taskAffinity'] = '';
+    shortcut.$['android:noHistory'] = 'true';
     if (!app.activity.some(a => a.$['android:name'] === 'app.done.dan.voice.DanLifelogResumeActivity')) {
       app.activity.push({$: {'android:name': 'app.done.dan.voice.DanLifelogResumeActivity', 'android:exported': 'false',
         'android:theme': '@android:style/Theme.Translucent.NoTitleBar', 'android:excludeFromRecents': 'true',
@@ -99,6 +104,10 @@ allprojects {
     return mod;
   });
   config = withMainApplication(config, mod => {
+    if (!mod.modResults.contents.includes('app.done.dan.voice.DanVoiceShortcut.install(this)')) {
+      mod.modResults.contents = mod.modResults.contents.replace('super.onCreate()',
+        'super.onCreate()\n    app.done.dan.voice.DanVoiceShortcut.install(this)');
+    }
     if (!mod.modResults.contents.includes('add(app.done.dan.voice.DanVoiceCallPackage())')) {
       mod.modResults.contents = mod.modResults.contents.replace(/PackageList\(this\)\.packages\.apply \{/, '$&\n              add(app.done.dan.voice.DanVoiceCallPackage())');
     }
