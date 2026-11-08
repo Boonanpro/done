@@ -446,8 +446,8 @@ export function VoiceOverlay({ visible, onClose, roomId, chatTitle, apiBase, tok
           sessionId = message.session?.id || sessionId; started = true;
           clearTimeout(deadline);
           externalDeadline = setTimeout(() => rejectExternal(new Error(ui(`${deviceName} audio connection timed out.`,`${deviceName}への音声接続がタイムアウトしました`))), 20000);
-          dcSend({type:'session.instructions.append',event_id:`mobile-clock-${Date.now()}`,delegation_id:null,
-            content:`端末の現在日時は ${new Date().toLocaleString('ja-JP')} (${Intl.DateTimeFormat().resolvedOptions().timeZone})。この日時は既知の情報として答えられます。`});
+          // No clock is given here: given, it was said into unrelated replies (「今、午後二時二十二分に依頼内容を確認しています」,
+          // 11/6 and 11/8). The server gives the day and reads the time when wanted (voice_live, voice_router 'clock').
           void externalReady.then(async () => {
             clearTimeout(externalDeadline);
             if (!live()) return;

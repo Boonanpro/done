@@ -16,6 +16,16 @@ test('call setup and the job poll do not depend on paused global fetch; the phon
   assert.ok(h.requests.some(r=>r.body && r.body.event==='voice-job-received'));
  }finally{h.dispose();}
 });
+test('the phone gives the call no clock when it starts (it was said into replies, 11/6 and 11/8)',async()=>{
+ const h=harness();
+ try{
+  for(let i=0;i<10;i++)await tick();
+  assert.ok(h.pc,'native session setup completes');
+  const given=h.sent.filter(e=>/^session\.(instructions|commentary|thinking)\.append$/.test(e.type));
+  assert.equal(given.filter(e=>/現在日時|\d{1,2}:\d{2}:\d{2}/.test(String(e.content||''))).length,0);
+  assert.equal(given.filter(e=>String(e.event_id||'').startsWith('mobile-clock')).length,0);
+ }finally{h.dispose();}
+});
 test('completed work is recorded as activity once and never appended by the phone',async()=>{
  const job={id:'j',task:'営業時間の確認',state:'completed',created_at:new Date(Date.now()+1000).toISOString(),seq:1,
   events:[{seq:1,kind:'result',text:'公式ページで24時間営業を確認しました。'}]};
@@ -64,10 +74,11 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
     'expo-updates': {updateId:'test-update'},
     'expo-secure-store': {getItemAsync: async () => null, setItemAsync: async () => {}},   // ui-language (display language)
     react: {...React, default: React},
-    'react-native': {Animated, DeviceEventEmitter:{addListener:()=>({remove(){}})}, Easing: {linear: 0}, Platform: {OS: 'android',Version: 31}, StyleSheet: {create: x => x},
+    'react-native': {Animated, AppState: {currentState: 'active', addEventListener: () => ({remove() {}})}, DeviceEventEmitter:{addListener:()=>({remove(){}})}, Easing: {linear: 0, inOut: f => f, out: f => f, in: f => f, ease: 0, quad: 0, cubic: 0, sin: 0}, Platform: {OS: 'android',Version: 31}, StyleSheet: {create: x => x},
       PermissionsAndroid: {PERMISSIONS: {BLUETOOTH_CONNECT: 'bt'}, check: async () => true}},
     '@expo/vector-icons': {},
     'react-native-webview': {WebView: () => ({})},   // the call's stage (voice-stage page) is not exercised here
+    'react-native-svg': {default: () => null, Defs: () => null, LinearGradient: () => null, Stop: () => null, Text: () => null},   // the shimmer line
     'react-native-safe-area-context': {useSafeAreaInsets: () => ({top:0,bottom:0,left:0,right:0})},
     'react-native-webrtc': {RTCPeerConnection: PC, mediaDevices: {getUserMedia: async () => {
       track = {enabled:true,stop() {this.stopped = true;}}; return {getTracks: () => [track],getAudioTracks:()=>[track]};
@@ -78,7 +89,7 @@ function harness({pausedFetch = false, missingSession = false, jobPollResults = 
       if(!atomHeadset) return;
       cues.push(kind);
       if(kind==='standby' && holdStandby) await new Promise(resolve=>{finishCue=resolve;});
-    },muteExternalAudio() {},connectAtomAudio: async () => {if(failAtom) throw Error('Atom unreachable'); if(holdAtom) await new Promise(resolve=>{releaseAtom=resolve;});return true;},audioEndpointStats: async () => {endpointReads++; if(holdEndpointStats) await new Promise(()=>{}); return null;}, bindRemoteAudio: async (id, trackId) => {audioBindings.push(['bind',id,trackId]); return true;},
+    },quietSpeechInput: async () => false,muteExternalAudio() {},connectAtomAudio: async () => {if(failAtom) throw Error('Atom unreachable'); if(holdAtom) await new Promise(resolve=>{releaseAtom=resolve;});return true;},audioEndpointStats: async () => {endpointReads++; if(holdEndpointStats) await new Promise(()=>{}); return null;}, bindRemoteAudio: async (id, trackId) => {audioBindings.push(['bind',id,trackId]); return true;},
       unbindRemoteAudio: id => audioBindings.push(['unbind',id]),setWorkWaiting() {},markVoiceConnected() {},playVoiceCue: async kind => {
       cues.push(kind);
       if (kind === 'standby' && holdStandby) await new Promise(resolve => {finishCue = resolve;});
@@ -196,7 +207,7 @@ test('mobile uses Live with room context; delegated hangup stops microphone, pee
     for (let i=0;i<8;i++) await tick();
     const session = h.requests.find(r => r.url.endsWith('/live/session'));
     assert.equal(session.body.room_id, 'room-test'); assert.equal(session.body.device, true); assert.equal(session.body.provider, 'openai');
-    assert.ok(h.sent.some(e => e.type === 'session.instructions.append'));
+    assert.ok(!h.sent.some(e => e.type === 'session.instructions.append'));   // the server gives the day; no clock from the phone
     h.pc.event({type: 'session.input_transcript.delta',delta: '電話を切ってください',start_ms: 0,end_ms: 1000});
     h.pc.event({type: 'session.delegation.created',delegation: {id: 'end-request'}});
     h.pc.event({type: 'session.closed'});   // the server's end_call closes the session; the phone follows
