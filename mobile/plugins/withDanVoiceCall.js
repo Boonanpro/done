@@ -58,6 +58,8 @@ allprojects {
       'android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE', 'android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND',
       'android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND',
       'android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND',
+      // 「録音を再開」 after the phone was switched on (DanLifelogResume).
+      'android.permission.RECEIVE_BOOT_COMPLETED',
     ]);
     const features = mod.modResults.manifest['uses-feature'] = mod.modResults.manifest['uses-feature'] || [];
     if (!features.some(f => f.$['android:name'] === 'android.software.companion_device_setup'))
@@ -70,6 +72,17 @@ allprojects {
         'android:excludeFromRecents': 'true'},
         'intent-filter': [{action: [{$: {'android:name': 'android.intent.action.MAIN'}}],
           category: [{$: {'android:name': 'android.intent.category.LAUNCHER'}}]}]});
+    }
+    if (!app.activity.some(a => a.$['android:name'] === 'app.done.dan.voice.DanLifelogResumeActivity')) {
+      app.activity.push({$: {'android:name': 'app.done.dan.voice.DanLifelogResumeActivity', 'android:exported': 'false',
+        'android:theme': '@android:style/Theme.Translucent.NoTitleBar', 'android:excludeFromRecents': 'true',
+        'android:taskAffinity': '', 'android:noHistory': 'true'}});
+    }
+    app.receiver = app.receiver || [];
+    if (!app.receiver.some(r => r.$['android:name'] === 'app.done.dan.voice.DanLifelogResumeReceiver')) {
+      app.receiver.push({$: {'android:name': 'app.done.dan.voice.DanLifelogResumeReceiver', 'android:exported': 'true'},
+        'intent-filter': [{action: [{$: {'android:name': 'android.intent.action.BOOT_COMPLETED'}},
+          {$: {'android:name': 'android.intent.action.MY_PACKAGE_REPLACED'}}]}]});
     }
     app.service = app.service || [];
     const existing = app.service.find(s => s.$['android:name'] === 'app.done.dan.voice.DanVoiceCallService');
@@ -102,7 +115,7 @@ allprojects {
     require('../scripts/patch-webrtc-audio-processing.cjs').patch(root);
     const dest = path.join(root, 'android/app/src/main/java/app/done/dan/voice');
     fs.mkdirSync(dest, {recursive: true});
-    for (const file of ['DanVoiceShortcutActivity.kt','DanVoiceCallModule.kt','DanVoiceCallService.kt','DanPcmQueue.java','DanExternalAudio.java','DanWebRtcAudio.kt','DanAudioLease.java','DanQuietSpeechLift.java','DanQuietSpeechProcessing.java','DanPinBle.java','DanPinSelfTest.kt','DanPinLink.kt','DanPinWake.java','DanPinPresenceService.kt','DanPinLifelog.java','DanPhoneLifelog.java']) fs.copyFileSync(path.join(root,'native/voice',file),path.join(dest,file));
+    for (const file of ['DanVoiceShortcutActivity.kt','DanVoiceCallModule.kt','DanVoiceCallService.kt','DanPcmQueue.java','DanExternalAudio.java','DanWebRtcAudio.kt','DanAudioLease.java','DanQuietSpeechLift.java','DanQuietSpeechProcessing.java','DanPinBle.java','DanPinSelfTest.kt','DanPinLink.kt','DanPinWake.java','DanPinPresenceService.kt','DanPinLifelog.java','DanPhoneLifelog.java','DanLifelogResume.kt']) fs.copyFileSync(path.join(root,'native/voice',file),path.join(dest,file));
     const rtcDest = path.join(root, 'android/app/src/main/java/com/oney/WebRTCModule');
     fs.mkdirSync(rtcDest, {recursive: true});
     fs.copyFileSync(path.join(root,'native/voice/DanWebRtcAccess.java'),path.join(rtcDest,'DanWebRtcAccess.java'));
