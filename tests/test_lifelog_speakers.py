@@ -190,3 +190,25 @@ def test_names_from_the_talk(root, monkeypatch):
     book = sp.people()["people"]
     assert sorted(p["name"] for p in book.values()) == ["みきさん", "中村さん"]
     assert [p for p in book.values() if p["name"] == "みきさん"][0]["owner"]
+
+
+def test_written_again_reuses_one_voice_text_but_not_an_outro(root, monkeypatch):
+    """A past recording with one voice keeps its text (no Whisper); one whose text is only an outro is heard again."""
+    folder = lifelog.AUDIO_ROOT / "2026-11-07"
+    folder.mkdir(parents=True)
+    audio = folder / "131218_000_u.ogg"
+    monkeypatch.setattr(sp, "load_audio", lambda a: np.zeros(16000 * 3, np.float32))
+    monkeypatch.setattr(sp, "available", lambda: True)
+    monkeypatch.setattr(sp, "analyze", lambda x: ([{"start": 0.0, "end": 2.0, "local": 0}], {0: (voice(1), 2.0, -30.0)}))
+    calls = []
+
+    class Model:
+        def transcribe(self, *a, **kw):
+            calls.append(1)
+            return [types.SimpleNamespace(start=0.0, end=2.0, text="では、次の動画でお会いしましょう。", avg_logprob=-0.91,
+                                          words=[])], types.SimpleNamespace(duration=3.0)
+
+    plain_old = {"parts": [{"start": 0.0, "end": 2.0, "text": "鍵は閉めて大丈夫でしょうか"}]}
+    assert sp.transcribe(Model(), audio, old=plain_old)["plain"] == "鍵は閉めて大丈夫でしょうか" and not calls
+    outro_old = {"parts": [{"start": 0.0, "end": 2.0, "text": "では、次の動画でお会いしましょう。"}]}
+    assert sp.transcribe(Model(), audio, old=outro_old)["text"] == "" and calls

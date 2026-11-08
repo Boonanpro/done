@@ -35,6 +35,7 @@ import tempfile
 import time
 import types
 import uuid
+import functools
 from functools import lru_cache
 from pathlib import Path
 
@@ -346,7 +347,10 @@ def transcribe(model, audio: Path, old: dict | None = None) -> dict:
     samples = load_audio(audio)
     turns, voices = analyze(samples) if available() else ([], {})
     duration = len(samples) / RATE
-    if old is not None and old.get("parts") is not None and len(voices) <= 1 and len({t["local"] for t in turns}) <= 1:
+    outro = any(not re.sub(r"[\s。、．，,.!！?？]", "", functools.reduce(lambda a, b: a.replace(b, ""), PHANTOMS, p["text"]))
+                for p in (old or {}).get("parts") or [])
+    if (old is not None and old.get("parts") is not None and not outro   # an outro needs Whisper's own certainty
+            and len(voices) <= 1 and len({t["local"] for t in turns}) <= 1):
         segments = [types.SimpleNamespace(start=p["start"], end=p["end"], text=p["text"], words=None, avg_logprob=None)
                     for p in old["parts"]]
         reuse = True
