@@ -1,7 +1,7 @@
 import { registerRootComponent } from 'expo';
 import './voice-background';
 
-import App from './App';
+import App from './fixtures/send-card-preview';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,
