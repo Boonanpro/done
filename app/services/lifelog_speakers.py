@@ -48,7 +48,7 @@ EMBEDDING = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
 SPEAKERS_ROOT = lifelog.STATE_ROOT / "speakers"
 PEOPLE = lifelog.STATE_ROOT / "people.json"
 RATE = 16000
-VERSION = 2
+VERSION = 3   # 3: stricter outro filter (2026-11-08); recordings written by 2 are written again
 
 LOCAL_THRESHOLD = 0.6     # sherpa's clustering inside one recording (larger = fewer speakers)
 JOIN_DAY = 0.45           # cosine to a numbered voice's centre to be that voice
@@ -60,11 +60,13 @@ SHORT_JOIN = 0.35
 SHORT_MARGIN = 0.07
 MAX_EXAMPLES = 24
 OWNER_NAME = "みきさん"
+MEDIA = "動画・放送の音"   # TV, a video, a station announcement: shown as 「動画・放送の音？」, never put in the voice book
 
 # Whisper writes these over silence, music and noise (YouTube outros). A part made only of them, with no speech under
 # it, is dropped.
-PHANTOMS = ("ご視聴ありがとうございました", "チャンネル登録", "次の動画でお会いしましょう", "おやすみなさい",
-            "最後までご視聴", "字幕視聴ありがとうございました", "お疲れ様でした")
+PHANTOMS = ("ご視聴ありがとうございました", "ご覧いただきありがとうございます", "ご覧いただきありがとうございました",
+            "チャンネル登録", "次の動画でお会いしましょう", "おやすみなさい", "最後までご視聴",
+            "字幕視聴ありがとうございました", "お疲れ様でした", "それでは", "では")
 
 _lock = lifelog.state_lock
 
@@ -135,15 +137,21 @@ def analyze(samples: np.ndarray) -> tuple[list[dict], dict]:
     return turns, voices
 
 
-def is_phantom(text: str, covered: float) -> bool:
-    """A Whisper part that is only a YouTube outro over (almost) no speech."""
+def is_phantom(text: str, covered: float, seconds: float = 0.0, logprob: float | None = None) -> bool:
+    """A Whisper part that is only a YouTube outro written over noise, music or silence. On 11/7 these came as
+    「ご視聴ありがとうございました」 stretched over 30 s (under 1 character a second), or as a short outro Whisper
+    was unsure of (average log-probability below -0.85); someone really saying it speaks it at a normal speed."""
     t = re.sub(r"[\s。、．，,.!！?？]", "", text or "")
     if not t:
         return True
     left = t
     for p in PHANTOMS:
         left = left.replace(p, "")
-    return not left and covered < 0.3
+    if left:
+        return False
+    slow = seconds > 0 and len(t) / seconds < 2.0
+    unsure = logprob is not None and logprob < -0.85
+    return covered < 0.3 or slow or unsure
 
 
 def words_to_turns(words: list[dict], turns: list[dict]) -> list[dict]:
@@ -289,8 +297,8 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
         if not vo.get("who") and vo["s"] >= 30 and vo["s"] - vo.get("looked", 0) >= 30:
             vo["looked"] = vo["s"]
             pid, ps = best_person(_unit(vo["c"]), book)
-            if pid and ps >= JOIN_PERSON_CENTRE and pid not in vo.get("not", []) \
-                    and not any(o.get("who") == pid for o in state["voices"].values()):
+            # one person may be two numbers in a day (home and outside sound different): both get the name
+            if pid and ps >= JOIN_PERSON_CENTRE and pid not in vo.get("not", []):
                 vo["who"] = pid
                 state["renamed"] = True
     return key
@@ -339,7 +347,8 @@ def transcribe(model, audio: Path, old: dict | None = None) -> dict:
     turns, voices = analyze(samples) if available() else ([], {})
     duration = len(samples) / RATE
     if old is not None and old.get("parts") is not None and len(voices) <= 1 and len({t["local"] for t in turns}) <= 1:
-        segments = [types.SimpleNamespace(start=p["start"], end=p["end"], text=p["text"], words=None) for p in old["parts"]]
+        segments = [types.SimpleNamespace(start=p["start"], end=p["end"], text=p["text"], words=None, avg_logprob=None)
+                    for p in old["parts"]]
         reuse = True
     else:
         segments, info = model.transcribe(samples, language="ja", vad_filter=True, beam_size=5,
@@ -348,7 +357,8 @@ def transcribe(model, audio: Path, old: dict | None = None) -> dict:
     words, parts = [], []
     for s in segments:
         text = s.text.strip()
-        if is_phantom(text, speech_cover(turns, s.start, s.end) if turns else 1.0):
+        if is_phantom(text, speech_cover(turns, s.start, s.end) if turns else 1.0, s.end - s.start,
+                      getattr(s, "avg_logprob", None)):
             continue
         parts.append({"start": round(s.start, 2), "end": round(s.end, 2), "text": text})
         if reuse:   # one speaker: the part is one "word" spanning its time
@@ -503,7 +513,8 @@ NAME_RULES = """あなたは、常時録音の文字起こしを読んで、話�
 - 呼びかけ（「スヤさん」「シンちゃん」）: 呼ばれたのは、その行の話者ではなく相手。直後に返事をした話者か、話の相手。1回だけなら推測（guess）、別々の場面で2回以上合えば確か。
 - 予定表: その時間に会う人の名前。推測の手がかりにだけ使う。
 - 持ち主（みきさん）の声は、もう分かっていれば［みきさん］と出ています。
-- テレビ・動画・店内放送の声らしい番号には名前を付けない。
+- テレビ・動画・駅や店内の放送の声らしい番号（話し方がナレーション・実況・アナウンス）は、名前ではなく
+  {"voice": "8", "media": true, "quote": "根拠の行"} で返す。
 - 根拠の無い名前は付けない。分からない番号は出さない。
 
 JSONだけで答える: {"names": [{"voice": "3", "name": "スヤさん", "sure": false, "quote": "根拠の行をそのまま"}]}
@@ -581,14 +592,14 @@ def name_day(day: str, *, model: str = "gpt-6-luna", min_seconds: float = 15.0) 
         state, book = day_state(day), people()
         for n in names:
             k = str(n.get("voice", "")).replace("話者", "")
-            name = (n.get("name") or "").strip().rstrip("？?")
+            name = MEDIA if n.get("media") else (n.get("name") or "").strip().rstrip("？?")
             vo = state["voices"].get(k)
             if not vo or vo.get("who") or not name or vo.get("by_owner"):
                 continue
             pid = person_by_name(book, name)
             if pid and pid in vo.get("not", []):
                 continue
-            n = {"voice": k, "name": name, "sure": bool(n.get("sure")), "quote": (n.get("quote") or "")[:200]}
+            n = {"voice": k, "name": name, "sure": bool(n.get("sure")) and name != MEDIA, "quote": (n.get("quote") or "")[:200]}
             vo["guess"] = {"name": name, "quote": n["quote"], "at": time.time()}
             done.append(n)
         save_day(day, state)
