@@ -8,6 +8,13 @@ from __future__ import annotations
 
 import logging
 import sys
+import os
+
+# A Core serves every room: drop the room/job identity of whatever turn started it (generations.TURN_KEYS), before
+# any module reads it and before any chat turn, sandbox or job copies it.
+from app.core.generations import TURN_KEYS as _TURN_KEYS
+for _key in _TURN_KEYS:
+    os.environ.pop(_key, None)
 import asyncio
 
 # Windows: ProactorEventLoop（subprocess 生成に必須）

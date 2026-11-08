@@ -16,11 +16,27 @@ ROOT = Path(os.environ.get('DAN_GENERATIONS_ROOT') or Path.home() / '.dan' / 'ge
 TOKEN_FILE = Path.home() / '.dan' / 'claude_oauth_token'
 
 
+# What only one room's turn or one parallel job carries. A Core started from inside such a turn (a release, a restart)
+# copied them, and so did every chat turn that Core ran: on 2026-11-08 the 9215 conversation Core was started at 18:35
+# by the finished whisper job 6224154e, so every later chat turn in that room was taken for the stopped job and each Dan
+# tool answered 作業は停止済みです. Other Cores carried the room id of whichever room had started them.
+TURN_KEYS = ('DAN_COMMAND_JOB_ID', 'DAN_PARALLEL_JOB', 'DAN_JOB_HARNESS', 'DAN_WORK_DIR', 'DAN_BROWSER_ROOM',
+             'DAN_BROWSER_HEADLESS', 'DAN_BROWSER_OBSERVATION', 'DAN_TOOL_HOST', 'DAN_SESSION_ID', 'DAN_ROOM_ID',
+             'DAN_PROJECT_ID', 'DAN_LOCK_OWNER', 'DAN_USER_ID', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID',
+             'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_CHILD_SESSION',
+             'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_EFFORT', 'AI_AGENT')
+
+
+def without_turn(env):
+    """env without the keys of the turn or job it was copied from (a Core and its children serve every room)."""
+    return {k: v for k, v in env.items() if k not in TURN_KEYS}
+
+
 def core_env(**extra):
     """The environment a new Core starts with. A release is often started from a room's own work, whose environment
     lacks Claude's one-year key (run_core.sh gives it to the launchd Core only). Without it every Claude session that
     generation starts used the Mac login copy, and on 2026-10-27 that copy had expired: parallel work failed at once."""
-    env = {k: v for k, v in os.environ.items() if k != 'CLAUDECODE'}
+    env = without_turn(os.environ)
     if not env.get('CLAUDE_CODE_OAUTH_TOKEN'):
         try:
             token = ''.join(TOKEN_FILE.read_text(encoding='utf-8').split())
