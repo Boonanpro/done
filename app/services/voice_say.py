@@ -23,6 +23,8 @@ KINDS = {
     'question': 'the work needs the owner to decide or answer',
     'summon': 'why Dan called the owner',
     'chat': 'what the owner sent to the room\'s chat during the call',
+    'heard': 'the owner\'s own words the speech model did not hear itself (a whisper the server heard, voice_whisper)',
+    'unheard': 'the owner said something neither the speech model nor the server could make out (voice_whisper)',
 }
 SHORT = 300    # one append is limited to 500 tokens; Japanese runs at about a token a character
 LONG = 1200    # an answer to the owner's own question may say more, in several appends

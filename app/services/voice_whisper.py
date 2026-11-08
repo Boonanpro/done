@@ -13,7 +13,21 @@ voice coming back through the earbuds and a television or people nearby all have
 itself, as it should). The candidate is transcribed on this Mac's GPU (Whisper large-v3-turbo through MLX,
 scripts/voice_whisper_worker.py, about 0.3 s; no audio leaves the server), and if Live has not heard words of its own
 meanwhile, the owner's words are given to the speech model with session.instructions.append, the documented way to tell
-it what to do now, followed by response.create (given words alone were not answered in the first real call, 11/8). OpenAI's own transcription read the same whispers as words of other languages (2026-11-08).
+it what to do now, and at once as commentary (voice_say 'heard'), the event GPT-Live speaks after. OpenAI's own
+transcription read the same whispers as words of other languages (2026-11-08).
+
+Speed (the owner, 11/8 22:27: 「超ラグがあって会話の成立が難しく感じる」). In that call the owner's whisper reached the
+speech model 1.0〜1.2 s after the owner stopped (0.7 s of quiet, then Whisper), and Dan answered 0.6〜2 s later. The
+instructions alone were not answered (22:20); the response.create added after it is refused in a call of client delegation
+(「response.create requires a session with Responses delegation」), and the refusal was announced into the call as a failure
+of the work, whose commentary is what made Dan speak, 0.4 s later. Now: the commentary goes with the words; the end of an
+utterance is 0.6 s of quiet (0.5 s cut whispered sentences in two on the 2026-09 recordings, 0.6 s read as well as 0.7 s);
+the transcription starts at 0.3 s of quiet, so at the end its result is mostly there (DRAFT_QUIET_FRAMES). What a whisper
+still costs against an ordinary voice: Live hears an ordinary voice itself and answers about 1 s after it ends; a whisper
+waits for the quiet, the 200 ms the sideband's copy of the input comes in, and the commentary.
+A whisper Whisper read but was unsure of (on the 2026-09 calls those were the owner's real attempts: 「もしもし」,
+「明日って何より」) is not handed over as words; Dan is told the owner said something he did not catch ('unheard'), so the
+owner is not left without an answer.
 
 Switch: DAN_VOICE_WHISPER=0 turns it off. Audio is held in memory for the length of one utterance and never written.
 """
@@ -35,7 +49,8 @@ ABOVE_FLOOR_DB = 8.0         # a frame is speech this far above the input's own 
 FLOOR_FRAMES = 250           # the floor is read from the last 5 s
 MIN_LEVEL_DB = -68.0         # ...and above digital silence (dBFS of the band energy)
 START_FRAMES, START_WINDOW = 3, 5
-END_QUIET_FRAMES = 35        # 0.7 s of quiet ends an utterance
+END_QUIET_FRAMES = 30        # 0.6 s of quiet ends an utterance (0.5 s split whispered sentences, 2026-09 recordings)
+DRAFT_QUIET_FRAMES = 15      # at 0.3 s of quiet the utterance so far is transcribed ahead; used if no speech follows
 PRE_ROLL_FRAMES = 15         # 0.3 s kept before the first speech frame (a whisper starts softly)
 TAIL_FRAMES = 10             # 0.2 s of the closing quiet kept
 MIN_SPEECH_FRAMES = 12       # 0.24 s of speech at least
@@ -45,6 +60,9 @@ LIVE_GRACE_S = 1.0           # Live's own words this soon around an utterance me
 DAN_GUARD_S = 1.0            # this soon after Dan's voice, input is his voice coming back (the phone's echo arrives 0.3〜0.6 s late)
 DAN_AUDIBLE_DB = -45.0       # Dan's output this loud is heard in the in-ear mic
 ANSWER_WAIT_S = 6.0          # the speech model has answered a whisper when Dan speaks within this
+UNHEARD_MIN_S = 0.8          # a whisper this long that Whisper read unsure: Dan is told something was said
+UNHEARD_EVERY_S = 10.0       # ...at most this often
+DAN_SPEECH_CUT_MIN_S = 0.6   # what is left of an utterance after Dan's voice (and DAN_GUARD_S) is transcribed if this long
 MIN_LOGPROB = -0.8           # below this Whisper was guessing: the readings this unsure on the 2026-09 calls were wrong
 # Whisper's known inventions on quiet or empty audio (the recordings of 2026-09-24〜30 produced each of these).
 INVENTED = re.compile(r'^(ご視聴(いただき)?ありがとうございました|ありがとうございました|ご協力ありがとうございました|お疲れ様でした|'
@@ -52,6 +70,7 @@ INVENTED = re.compile(r'^(ご視聴(いただき)?ありがとうございまし
                       r'次回予告|以上で終わります|チャンネル登録.*|字幕.*|ん+|う+ん|あ+|え+)[。、.!！?？\s]*$')
 
 LOOP = re.compile(r'(.{2,8}?)[、。\s]*(?:\1[、。\s]*){2,}')   # a phrase three times over: Whisper looping on noise
+MOSHIMOSHI = re.compile(r'(?:もしもし[、。\s]*){2,}')   # 「もしもしもしもし」 is said on a call, not a loop
 
 
 def enabled():
@@ -81,9 +100,19 @@ def _features(frame, previous):
     return level, bool(corr[lo:hi].max() > 0.55)
 
 
+class Cut(tuple):
+    """(audio float32 at 24 kHz, start_wall, end_wall, voiced_ratio, speech_seconds); `uid` names the utterance and `speech`
+    counts its speech frames, so a draft (an utterance read ahead at 0.3 s of quiet) is known to be the whole of it."""
+    def __new__(cls, items, uid, speech):
+        self = super().__new__(cls, items)
+        self.uid, self.speech = uid, speech
+        return self
+
+
 class Ear:
     """Cuts the reflected input into utterances and keeps the whispered ones. Feed audio(); utterances come out of
-    take() as (audio float32 at 24 kHz, start_wall, end_wall, voiced_ratio, speech_seconds)."""
+    take() as Cut (audio float32 at 24 kHz, start_wall, end_wall, voiced_ratio, speech_seconds), and the same utterance
+    so far, when 0.3 s of quiet followed it, out of take_drafts()."""
 
     def __init__(self, clock=time.monotonic):
         self.clock = clock
@@ -98,6 +127,8 @@ class Ear:
         self.quiet = 0
         self.began = 0.0
         self.out = []
+        self.drafts = []
+        self.uid = 0
         self.samples = 0           # input samples seen: the wall time of a frame is taken from the clock at arrival
 
     def audio(self, payload):
@@ -141,19 +172,32 @@ class Ear:
         self.quiet = 0 if speech else self.quiet + 1
         if self.quiet >= END_QUIET_FRAMES or len(self.frames) >= MAX_FRAMES:
             self._close(at)
+        elif self.quiet == DRAFT_QUIET_FRAMES:
+            cut = self._cut(at)
+            if cut is not None: self.drafts.append(cut)
+
+    def _cut(self, at):
+        speech = [v for s, v in self.flags if s]
+        if len(speech) < MIN_SPEECH_FRAMES:
+            return None
+        voiced = sum(speech) / len(speech)
+        keep = len(self.frames) - max(0, self.quiet - TAIL_FRAMES)    # keep some of the closing quiet
+        return Cut((np.concatenate(self.frames[:keep]), self.began, at - 0.02 * self.quiet, round(voiced, 2),
+                    round(len(speech) * 0.02, 2)), self.uid, len(speech))
 
     def _close(self, at):
-        frames, flags = self.frames, self.flags
+        cut = self._cut(at)
         self.frames, self.flags, self.history, self.recent = None, [], [], []
-        speech = [v for s, v in flags if s]
-        if len(speech) < MIN_SPEECH_FRAMES:
-            return
-        voiced = sum(speech) / len(speech)
-        cut = len(frames) - max(0, self.quiet - TAIL_FRAMES)    # keep some of the closing quiet
-        self.out.append((np.concatenate(frames[:cut]), self.began, at - 0.02 * self.quiet, round(voiced, 2), round(len(speech) * 0.02, 2)))
+        self.uid += 1
+        if cut is not None:
+            self.out.append(cut)
 
     def take(self):
         out, self.out = self.out, []
+        return out
+
+    def take_drafts(self):
+        out, self.drafts = self.drafts, []
         return out
 
 
@@ -230,24 +274,36 @@ def warm():
         threading.Thread(target=start, daemon=True, name='voice-whisper-warm').start()
 
 
-def transcribe(audio):
-    """Words of one utterance (24 kHz float), or '' when what Whisper heard is not trustworthy."""
+def reading(audio):
+    """(words, why) of one utterance (24 kHz float): the words, or '' and why they are not trusted: 'silent' (nothing or
+    Whisper's own inventions on quiet audio), 'loop' (a phrase over and over on noise) or 'unsure' (words, read unsure: on
+    the 2026-09 calls most were the owner's real attempts, read wrong)."""
     x = to_16k(audio)
     peak = float(np.abs(x).max()) or 1.0
     x = (x / peak * 0.5).astype(np.float32)
     segments = _segments_gpu(x) if _gpu() else _segments_cpu(x)
-    words, sure = [], 0.0
+    words, sure, unsure = [], 0.0, False
     for segment in segments:
-        if segment['no_speech_prob'] > 0.6 or segment['avg_logprob'] < MIN_LOGPROB or segment['compression_ratio'] > 2.4:
+        if segment['no_speech_prob'] > 0.6:
+            continue
+        if segment['avg_logprob'] < MIN_LOGPROB or segment['compression_ratio'] > 2.4:
+            unsure = unsure or not INVENTED.match(str(segment['text']).strip())
             continue
         words.append(str(segment['text']).strip())
         sure = min(sure, segment['avg_logprob'])
-    text = ''.join(words).strip()
-    if not text or INVENTED.match(text) or LOOP.search(text):
-        return ''
+    text = MOSHIMOSHI.sub('もしもし、', ''.join(words).strip()).strip('、')
+    if not text or INVENTED.match(text):
+        return '', 'unsure' if unsure else 'silent'
+    if LOOP.search(text):
+        return '', 'loop'
     if len(re.sub(r'[。、.!！?？\s]', '', text)) <= 3 and sure < -0.5:   # a lone 「はい」 out of noise: read that unsure, it was not said
-        return ''
-    return text
+        return '', 'unsure'
+    return text, ''
+
+
+def transcribe(audio):
+    """Words of one utterance (24 kHz float), or '' when what Whisper heard is not trustworthy."""
+    return reading(audio)[0]
 
 
 def as_heard(text):
@@ -264,9 +320,12 @@ class Listener:
         self.spoke = spoke if spoke is not None else {}
         self.clock = clock
         self.ear = Ear(clock)
-        self.transcriber = transcriber or transcribe
+        self.transcriber = transcriber or reading
         self.live_heard = []         # wall times of Live's own transcript of the owner
         self.dan_until = 0.0         # Dan's voice is audible (in the earbuds, so in their mic) until then
+        self.dan_spans = []          # [start, end] of Dan's audible voice in the last 30 s
+        self.drafts = {}             # utterance uid -> (speech frames, transcription task) read ahead
+        self.unheard_at = -1e9
         self.tasks = set()
         self.closed = False
         self.warmed = False
@@ -283,8 +342,16 @@ class Listener:
         except Exception as exc:
             self.record('whisper_failed', stage='audio', error_type=type(exc).__name__)
             return
+        loop = asyncio.get_running_loop()
+        for draft in self.ear.take_drafts():
+            dan_end = self._dan_end(draft[1], draft[2])
+            if draft[3] > MAX_VOICED or (dan_end is not None and dan_end + DAN_GUARD_S > draft[1]):
+                continue   # an ordinary voice, or Dan's voice in it: not read ahead
+            task = loop.create_task(self._read(draft[0]))
+            self.drafts[draft.uid] = (draft.speech, task)
+            self.tasks.add(task); task.add_done_callback(self.tasks.discard)
         for item in self.ear.take():
-            task = asyncio.get_running_loop().create_task(self._utterance(*item))
+            task = loop.create_task(self._utterance(item))
             self.tasks.add(task); task.add_done_callback(self.tasks.discard)
 
     def dan_audio(self, payload):
@@ -295,7 +362,11 @@ class Listener:
         except Exception:
             return
         if len(pcm) and 10 * np.log10(float((pcm * pcm).mean()) + 1e-12) > DAN_AUDIBLE_DB:
-            self.dan_until = max(self.dan_until, self.clock()) + len(pcm) / RATE
+            now = self.clock()
+            if now > self.dan_until or not self.dan_spans:
+                self.dan_spans = [s for s in self.dan_spans if now - s[1] < 30] + [[now, now]]
+            self.dan_until = max(self.dan_until, now) + len(pcm) / RATE
+            self.dan_spans[-1][1] = self.dan_until
 
     def heard(self):
         """Live wrote down words of the owner: it heard them itself."""
@@ -305,28 +376,60 @@ class Listener:
     def _live_heard(self, began, ended):
         return any(began - LIVE_GRACE_S <= t <= ended + LIVE_GRACE_S for t in self.live_heard)
 
-    def _dan_speaking(self, began, ended):
+    def _dan_end(self, began, ended):
+        """When Dan's voice last ended before or within this utterance, or None; inf while he speaks at its end."""
         words = self.spoke.get('dan_words', 0)
-        return (bool(words) and words >= began - DAN_GUARD_S) or self.dan_until >= began - DAN_GUARD_S
+        ends = [e for s, e in self.dan_spans if s <= ended and e >= began - DAN_GUARD_S]
+        if words and words >= began - DAN_GUARD_S:
+            ends.append(words)
+        return max(ends) if ends else None
 
-    async def _utterance(self, audio, began, ended, voiced, speech_s):
+    def _dan_speaking(self, began, ended):
+        end = self._dan_end(began, ended)
+        return end is not None and end + DAN_GUARD_S > ended - DAN_SPEECH_CUT_MIN_S
+
+    async def _read(self, audio):
+        words = await asyncio.to_thread(self.transcriber, audio)
+        return words if isinstance(words, tuple) else (words, 'silent' if not words else '')
+
+    async def _utterance(self, item):
+        audio, began, ended, voiced, speech_s = item
         if voiced > MAX_VOICED:
+            self.drafts.pop(getattr(item, 'uid', None), None)
             self.record('whisper_skipped', why='voiced', voiced=voiced, speech_s=speech_s)
             return
         if self._dan_speaking(began, ended):
+            self.drafts.pop(getattr(item, 'uid', None), None)
             self.record('whisper_skipped', why='dan_speaking', voiced=voiced, speech_s=speech_s)
             return
+        # Dan spoke at its start (the owner went on after him): what came after his voice is the owner's. On 11/8 22:26
+        # a 4.4 s whisper that began as Dan was finishing was dropped whole.
+        dan_end = self._dan_end(began, ended)
+        trimmed = dan_end is not None and dan_end + DAN_GUARD_S > began
         t0 = time.monotonic()
+        draft = self.drafts.pop(getattr(item, 'uid', None), None)
+        ahead = not trimmed and draft is not None and draft[0] == getattr(item, 'speech', None)   # nothing said after the draft
         try:
-            text = await asyncio.to_thread(self.transcriber, audio)
+            if trimmed:
+                if draft is not None: draft[1].cancel()
+                audio = audio[int((dan_end + DAN_GUARD_S - began) * RATE):]
+                text, why = await self._read(audio)
+            elif ahead:
+                text, why = await draft[1]
+            else:
+                if draft is not None: draft[1].cancel()
+                text, why = await self._read(audio)
         except Exception as exc:
             self.record('whisper_failed', stage='transcribe', error_type=type(exc).__name__, detail=str(exc)[:160])
             return
         ms = round((time.monotonic() - t0) * 1000)
         if self.closed:
             return
+        flags = {'trimmed': True} if trimmed else {'read_ahead': True} if ahead else {}
         if not text:
-            self.record('whisper_skipped', why='no_words', voiced=voiced, speech_s=speech_s, transcribe_ms=ms)
+            self.record('whisper_skipped', why='no_words', reading=why, voiced=voiced, speech_s=speech_s, transcribe_ms=ms, **flags)
+            if why == 'unsure' and speech_s >= UNHEARD_MIN_S and not self._live_heard(began, ended) and not self._dan_speaking(began, ended):
+                await self._unheard(ended)
             return
         if self._live_heard(began, ended):
             self.record('whisper_skipped', why='live_heard', voiced=voiced, speech_s=speech_s, transcribe_ms=ms, chars=len(text))
@@ -342,18 +445,45 @@ class Listener:
         sent = self.clock()
         await self.send({'type': 'session.instructions.append', 'event_id': f'dan-whisper-{time.time_ns()}', 'delegation_id': None,
                          'content': as_heard(text)})
-        # The words alone are taken in and not answered (11/8 22:20, the first call: whisper_unanswered); Live answers
-        # once it is asked to, as it is after a tool result (voice_sideband) or an action (voice_actions).
-        try:
-            await self.send({'type': 'response.create', 'event_id': f'dan-whisper-reply-{time.time_ns()}'})
-        except Exception as exc:
-            self.record('whisper_failed', stage='response', error_type=type(exc).__name__)
+        # The instructions alone are taken in and not answered (11/8 22:20); Dan speaks after commentary (22:25, when the
+        # commentary was a failure notice). response.create is refused in this call (client delegation).
+        await self._say('heard', f'本人：「{text}」')
         self.record('whisper_heard', voiced=voiced, speech_s=speech_s, transcribe_ms=ms, chars=len(text),
-                    after_end_ms=round((sent - ended) * 1000))
-        # Whether the speech model answered: not known before a real call (2026-11-08), so the next call's log says it.
-        await asyncio.sleep(ANSWER_WAIT_S)
-        answered = max(self.spoke.get('dan_words', 0), self.dan_until) > sent
-        self.record('whisper_answered' if answered else 'whisper_unanswered')
+                    after_end_ms=round((sent - ended) * 1000), **flags)
+        await self._answered(sent, ended)
+
+    async def _unheard(self, ended):
+        now = self.clock()
+        if now - self.unheard_at < UNHEARD_EVERY_S:
+            return
+        self.unheard_at = now
+        await self._say('unheard', '本人が今何か言ったが、聞き取れなかった。')
+        self.record('whisper_unheard', after_end_ms=round((now - ended) * 1000))
+        await self._answered(now, ended)
+
+    async def _say(self, kind, text):
+        from app.services.voice_say import say
+        async def tagged(event):   # an error about this append is ours: not announced into the call as a failure
+            event['event_id'] = f'dan-whisper-{time.time_ns()}'
+            await self.send(event)
+        try:
+            await say(tagged, kind, text)
+        except Exception as exc:
+            self.record('whisper_failed', stage='say', error_type=type(exc).__name__)
+
+    async def _answered(self, sent, ended):
+        """How long Dan took to answer: his first words or voice after the words were given (whisper_reply_ms), and from
+        the owner's last sound (from_end_ms). Only times."""
+        step, waited = 0.05, 0.0
+        while waited < ANSWER_WAIT_S and not self.closed:
+            first = [t for t in [self.spoke.get('dan_words', 0)] + [s for s, _ in self.dan_spans] if t > sent]
+            if first:
+                at = min(first)
+                self.record('whisper_answered', whisper_reply_ms=round((at - sent) * 1000), from_end_ms=round((at - ended) * 1000))
+                return
+            await asyncio.sleep(step); waited += step
+        if not self.closed:
+            self.record('whisper_unanswered')
 
     def close(self):
         self.closed = True

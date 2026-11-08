@@ -71,6 +71,7 @@ async def replay(path):
     listener.audio(base64.b64encode(np.zeros(W.RATE, dtype='<i2').tobytes()).decode())
     while listener.tasks:
         await asyncio.gather(*list(listener.tasks), return_exceptions=True)
+    given = [(at, e) for at, e in given if e['type'] == 'session.instructions.append']
     words = [e['content'].split('：「', 1)[1].rstrip('」') for _, e in given]
     ms = [f['transcribe_ms'] for p, f in log if 'transcribe_ms' in f]
     return words, given, log, ms, time.monotonic() - began
