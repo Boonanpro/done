@@ -52,7 +52,9 @@ RATE = 16000
 VERSION = 3   # 3: stricter outro filter (2026-11-08); recordings written by 2 are written again
 
 LOCAL_THRESHOLD = 0.6     # sherpa's clustering inside one recording (larger = fewer speakers)
-JOIN_DAY = 0.45           # cosine to a numbered voice's centre to be that voice
+JOIN_DAY = 0.45           # cosine to a numbered voice's centre to be that voice (heard in the last 20 minutes)
+JOIN_DAY_LATER = 0.6      # the same for a voice not heard for a while: on 11/7 the bar's owner at 20:53 joined a
+                          # voice of 12:16 (a video) at 0.45 and was called 「動画・放送の音」
 # Cosine to one example in the voice book to be that person (a name is a stronger claim than a number). Measured on
 # 11/7 17:18-17:30 against the owner's example: his own pieces 0.63-0.89, the other man's 0.12-0.47 (0.65-0.72 only
 # where the two were mixed in one piece). 0.55 let the other man, a woman and the owner's brother into 「みきさん」.
@@ -247,9 +249,13 @@ def best_person(v: np.ndarray, book: dict) -> tuple[str | None, float]:
     return best, score
 
 
-def _near(vo: dict, at: float | None, minutes: float = 15) -> bool:
-    if at is None or "t" not in vo:
+def _near(vo: dict, at: float | None, minutes: float = 20) -> bool:
+    """Was this voice heard within `minutes` of `at` (seconds of the day)? Kept as 10-minute marks ("m")."""
+    if at is None or ("m" not in vo and "t" not in vo):
         return True
+    if "m" in vo:
+        here = int(at // 600)
+        return any(abs(here - m) <= minutes // 10 for m in vo["m"])
     a, b = vo["t"]
     return a - minutes * 60 <= at <= b + minutes * 60
 
@@ -283,7 +289,7 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
             key = str(state["next"])
             state["next"] += 1
             state["voices"][key] = {"c": _round(v), "s": 0.0, "who": pid}
-    elif best is not None and score >= JOIN_DAY:
+    elif best is not None and score >= (JOIN_DAY if _near(state["voices"][best], at) else JOIN_DAY_LATER):
         key = best
     else:
         key = str(state["next"])
@@ -293,6 +299,7 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
     if at is not None:
         a, b = vo.get("t", (at, at))
         vo["t"] = [min(a, at), max(b, at)]
+        vo["m"] = sorted(set(vo.get("m", [])) | {int(at // 600)})
     if not short:   # a short piece joins but does not move the centre
         total = vo["s"] + seconds
         c = _unit(vo["c"]) * vo["s"] + v * seconds
