@@ -13,7 +13,7 @@ voice coming back through the earbuds and a television or people nearby all have
 itself, as it should). The candidate is transcribed on this Mac's GPU (Whisper large-v3-turbo through MLX,
 scripts/voice_whisper_worker.py, about 0.3 s; no audio leaves the server), and if Live has not heard words of its own
 meanwhile, the owner's words are given to the speech model with session.instructions.append, the documented way to tell
-it what to do now. OpenAI's own transcription read the same whispers as words of other languages (2026-11-08).
+it what to do now, followed by response.create (given words alone were not answered in the first real call, 11/8). OpenAI's own transcription read the same whispers as words of other languages (2026-11-08).
 
 Switch: DAN_VOICE_WHISPER=0 turns it off. Audio is held in memory for the length of one utterance and never written.
 """
@@ -342,6 +342,12 @@ class Listener:
         sent = self.clock()
         await self.send({'type': 'session.instructions.append', 'event_id': f'dan-whisper-{time.time_ns()}', 'delegation_id': None,
                          'content': as_heard(text)})
+        # The words alone are taken in and not answered (11/8 22:20, the first call: whisper_unanswered); Live answers
+        # once it is asked to, as it is after a tool result (voice_sideband) or an action (voice_actions).
+        try:
+            await self.send({'type': 'response.create', 'event_id': f'dan-whisper-reply-{time.time_ns()}'})
+        except Exception as exc:
+            self.record('whisper_failed', stage='response', error_type=type(exc).__name__)
         self.record('whisper_heard', voiced=voiced, speech_s=speech_s, transcribe_ms=ms, chars=len(text),
                     after_end_ms=round((sent - ended) * 1000))
         # Whether the speech model answered: not known before a real call (2026-11-08), so the next call's log says it.
