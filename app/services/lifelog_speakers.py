@@ -268,16 +268,19 @@ def _near(vo: dict, at: float | None, minutes: float = 20) -> bool:
     return a - minutes * 60 <= at <= b + minutes * 60
 
 
-def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: float | None = None) -> str | None:
+def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: float | None = None,
+          short: bool | None = None, exclude: set | None = None) -> str | None:
     """The day's voice number for one embedding; joins a person of the voice book or a numbered voice, or starts one.
 
     A short piece of speech (under SHORT_SECONDS) gives a noisy embedding: it joins only a voice heard around the same
     time that it is clearly closest to, and otherwise stays unnumbered (None, shown as ［？］) instead of starting a new
-    number for every 「はい」."""
-    short = seconds < SHORT_SECONDS
+    number for every 「はい」. A speaker of a whole conversation (lifelog_sessions) says itself whether it is short
+    (its seconds in all the talk), and numbers taken by the other speakers of the same recording are `exclude`d."""
+    short = seconds < SHORT_SECONDS if short is None else short
+    exclude = exclude or set()
     pid, ps = best_person(v, book)
     scores = sorted(((float(_unit(vo["c"]) @ v), key) for key, vo in state["voices"].items()
-                     if not short or _near(vo, at)), reverse=True)
+                     if (not short or _near(vo, at)) and key not in exclude), reverse=True)
     score, best = scores[0] if scores else (-1.0, None)
     second = scores[1][0] if len(scores) > 1 else -1.0
     if short:
@@ -285,9 +288,9 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
             key = best
         else:
             return None
-    elif pid and ps >= JOIN_PERSON:
+    elif pid and ps >= JOIN_PERSON and not any((state["voices"].get(k) or {}).get("who") == pid for k in exclude):
         # the person's voice of today, if there is one; otherwise a new number already named
-        mine = [k for k, vo in state["voices"].items() if vo.get("who") == pid]
+        mine = [k for k, vo in state["voices"].items() if vo.get("who") == pid and k not in exclude]
         if mine:
             key = max(mine, key=lambda k: float(_unit(state["voices"][k]["c"]) @ v))
         elif best is not None and score >= JOIN_DAY and not state["voices"][best].get("who"):
@@ -464,6 +467,8 @@ def transcribe(model, audio: Path, old: dict | None = None) -> dict:
             t["voice"] = None
     entry = {"start": start, "seconds": round(duration, 2), "text": render(said, day, state, book) if voices else plain(said),
              "plain": plain(said), "audio": str(audio), "parts": parts, "turns": said, "v": VERSION,
+             # the words with their times: the conversation's second pass (lifelog_sessions) splits them by speaker
+             "words": [[round(w["start"], 2), round(w["end"], 2), w["word"]] for w in words],
              "voices": {k: {"day_voice": keys[k], "s": round(secs, 1), "db": round(loud, 1), "e": _round(v)}
                         for k, (v, secs, loud) in voices.items()}}
     return entry
@@ -489,15 +494,25 @@ def replace_day(day: str) -> int:
                 continue
             n = f.name
             at = int(n[:2]) * 3600 + int(n[2:4]) * 60 + int(n[4:6])
-            moved, size = {}, {}
-            for local, v in e["voices"].items():
-                key = place(day, _unit(v["e"]), v["s"], state, book, at)
+            moved, size, taken = {}, {}, set()
+            # a conversation's speakers (lifelog_sessions): the longest first, never two in one number
+            order = sorted(e["voices"].items(), key=lambda kv: -kv[1].get("ss", 0)) if e.get("session") else e["voices"].items()
+            for local, v in order:
+                if e.get("session"):
+                    key = place(day, _unit(v["e"]), v["s"], state, book, at, short=v.get("ss", v["s"]) < SHORT_SECONDS,
+                                exclude=taken)
+                    taken.add(key)
+                else:
+                    key = place(day, _unit(v["e"]), v["s"], state, book, at)
                 old_key = v.get("day_voice")
                 if old_key is not None and v["s"] > size.get(old_key, -1):   # two pieces that were one voice: the longer
                     moved[old_key], size[old_key] = key, v["s"]
                 v["day_voice"] = key
             for t in e.get("turns") or []:
-                t["voice"] = moved.get(t.get("voice"))
+                if "spk" in t:
+                    t["voice"] = (e["voices"].get(t["spk"]) or {}).get("day_voice") if t["spk"] is not None else None
+                else:
+                    t["voice"] = moved.get(t.get("voice"))
             e["text"] = render(e["turns"], day, state, book) if e.get("turns") else e.get("text", "")
             tmp = f.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(e, ensure_ascii=False), encoding="utf-8")
@@ -505,10 +520,29 @@ def replace_day(day: str) -> int:
             entries.append(e)
         state.pop("renamed", None)
         # the owner's corrections of that day are kept as far as they still point at a voice heard at that time
+        # (the new number whose voice is the old one's): a name given by the owner, and 「その名前違う」
+        keep_corrections(old, state)
         save_day(day, state)
         lifelog._upsert(day, entries)
     rerender_day(day)
     return len(entries)
+
+
+def keep_corrections(old: dict, state: dict, close: float = 0.85) -> None:
+    for vo in old.get("voices", {}).values():
+        if not (vo.get("by_owner") or vo.get("not")) or not state["voices"]:
+            continue
+        c = _unit(vo["c"])
+        k, s = max(((key, float(_unit(n["c"]) @ c)) for key, n in state["voices"].items()), key=lambda x: x[1])
+        if s < close:
+            continue
+        n = state["voices"][k]
+        if vo.get("not"):
+            n["not"] = sorted(set(n.get("not", [])) | set(vo["not"]))
+            if n.get("who") in n["not"]:
+                n.pop("who")
+        if vo.get("by_owner") and vo.get("who"):
+            n["who"], n["by_owner"] = vo["who"], True
 
 
 # ---------------------------------------------------------------- re-render the day's index

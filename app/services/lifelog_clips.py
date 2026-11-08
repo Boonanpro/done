@@ -115,13 +115,18 @@ def solo_candidates(day: str, voice: str, recordings: int = RECORDINGS) -> list[
             samples = sp.load_audio(audio)
         except (OSError, ValueError, subprocess.CalledProcessError):
             continue
-        turns, voices = sp.analyze(samples)
-        kept = [(sp._unit(v["e"]), v.get("day_voice")) for v in (entry.get("voices") or {}).values() if v.get("e")]
-        mine = set()
-        for local, (e, _secs, _loud) in voices.items():
-            near = max(kept, key=lambda k: float(k[0] @ e), default=None)
-            if near and near[1] == voice and float(near[0] @ e) >= 0.9:
-                mine.add(local)
+        if entry.get("session"):
+            # split again as a whole conversation (lifelog_sessions): its turns already say who speaks where
+            turns = [{"start": t["start"], "end": t["end"], "local": t.get("voice")} for t in entry.get("turns") or []]
+            mine = {voice}
+        else:
+            turns, voices = sp.analyze(samples)
+            kept = [(sp._unit(v["e"]), v.get("day_voice")) for v in (entry.get("voices") or {}).values() if v.get("e")]
+            mine = set()
+            for local, (e, _secs, _loud) in voices.items():
+                near = max(kept, key=lambda k: float(k[0] @ e), default=None)
+                if near and near[1] == voice and float(near[0] @ e) >= 0.9:
+                    mine.add(local)
         if not mine:
             continue
         at0 = by_audio[audio][0]["at"] - by_audio[audio][0]["start"]

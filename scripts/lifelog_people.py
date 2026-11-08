@@ -91,6 +91,7 @@ def main() -> None:
     r = sub.add_parser("rename"); r.add_argument("old"); r.add_argument("new")
     a = sub.add_parser("names"); a.add_argument("day")
     rd = sub.add_parser("redo"); rd.add_argument("day")
+    ss = sub.add_parser("sessions"); ss.add_argument("day"); ss.add_argument("--force", action="store_true")
     o = ap.parse_args()
     if o.cmd == "day":
         show_day(o.day, o.lines)
@@ -138,6 +139,12 @@ def main() -> None:
         print("ok")
     elif o.cmd == "redo":
         print(sp.replace_day(o.day), "recordings")
+        show_day(o.day, 1)
+    elif o.cmd == "sessions":   # split the day's conversations again as wholes (lifelog_sessions), then names
+        from app.services import lifelog_sessions
+        if not lifelog_sessions.available():
+            sys.exit(f"pyannote の Python がありません: {lifelog_sessions.PYTHON}")
+        print(lifelog_sessions.run_day(o.day, force=o.force), "conversations")
         show_day(o.day, 1)
     elif o.cmd == "names":
         for g in sp.name_day(o.day, min_seconds=5):
