@@ -60,6 +60,14 @@ JOIN_DAY_LATER = 0.6      # the same for a voice not heard for a while: on 11/7 
 # where the two were mixed in one piece). 0.55 let the other man, a woman and the owner's brother into 「みきさん」.
 JOIN_PERSON = 0.62
 JOIN_PERSON_CENTRE = 0.62  # the same, for the centre of a numbered voice that has talked 30 s
+# Close but not close enough to name: shown as 「みきさん？」 (the owner asked for a 「？」 while it is not sure, 11/8).
+# Measured on 11/6–11/8 against the voice book: voices it named came to 0.71–0.96; other people came up to 0.575
+# (the hairdresser みひろさん on 11/6, and on 11/7 at 0.552 a voice of the sushi bar that was mostly a woman). So the
+# 「？」 starts above them. Still a question for the owner, answered by listening (lifelog_clips): 「違う」 keeps the
+# name off that voice (forget_name). Today's named voices are not used: a small voice of the owner on 11/7 also held
+# スヤさん's words (0.70 to it).
+MAYBE_PERSON = 0.58
+MAYBE_SECONDS = 30
 MIN_VOICE_SECONDS = 0.8   # shorter speech gives no usable embedding; it keeps the label of the turn next to it
 SHORT_SECONDS = 2.5       # under this, an embedding is noisy (「はい」「そのまま」): see place()
 SHORT_JOIN = 0.35
@@ -311,8 +319,43 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: 
             # one person may be two numbers in a day (home and outside sound different): both get the name
             if pid and ps >= JOIN_PERSON_CENTRE and pid not in vo.get("not", []):
                 vo["who"] = pid
+                vo.pop("maybe", None)
+                state["renamed"] = True
+            elif _set_maybe(key, vo, state, book):
                 state["renamed"] = True
     return key
+
+
+def maybe_person(key: str, vo: dict, state: dict, book: dict) -> dict | None:
+    """The person this unnamed voice is probably (not sure enough to name): {"who", "score"} or None."""
+    if vo.get("who") or vo.get("s", 0) < MAYBE_SECONDS:
+        return None
+    c, no, best = _unit(vo["c"]), set(vo.get("not", [])), None
+    for pid, p in book["people"].items():
+        if pid in no or not p.get("x"):
+            continue
+        s = float(np.max(np.asarray(p["x"], dtype=np.float32) @ c))
+        if s >= MAYBE_PERSON and (best is None or s > best[1]):
+            best = (pid, s)
+    return {"who": best[0], "score": round(best[1], 3)} if best else None
+
+
+def _set_maybe(key: str, vo: dict, state: dict, book: dict) -> bool:
+    m = maybe_person(key, vo, state, book)
+    changed = (m or {}).get("who") != (vo.get("maybe") or {}).get("who")
+    if m:
+        vo["maybe"] = m
+    else:
+        vo.pop("maybe", None)
+    return changed
+
+
+def refresh_maybe(state: dict, book: dict) -> bool:
+    """Every voice of the day looked at again (the voice book or today's names changed). True if a label changed."""
+    changed = False
+    for key, vo in state["voices"].items():
+        changed = _set_maybe(key, vo, state, book) or changed
+    return changed
 
 
 def label(day: str, key: str | None, state: dict | None = None, book: dict | None = None) -> str:
@@ -327,6 +370,9 @@ def label(day: str, key: str | None, state: dict | None = None, book: dict | Non
     g = vo.get("guess")
     if g and g.get("name"):
         return g["name"] + "？"
+    m = vo.get("maybe")
+    if m and m.get("who") in book["people"]:
+        return book["people"][m["who"]]["name"] + "？"
     return f"話者{key}"
 
 
@@ -472,9 +518,11 @@ def rerender_day(day: str) -> int:
     path = lifelog.index_file(day)
     if not path.exists():
         return 0
-    state, book = day_state(day), people()
     changed, out = 0, []
     with _lock:
+        state, book = day_state(day), people()
+        if refresh_maybe(state, book):
+            save_day(day, state)
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
@@ -525,6 +573,7 @@ def remember_voice(day: str, key: str, name: str, *, owner: bool = False, by: st
         p["by"] = by
         vo["who"] = pid
         vo.pop("guess", None)
+        vo.pop("maybe", None)
         # another voice of today that is this same person (split across the day) joins too
         save_day(day, state)
         save_people(book)
@@ -547,7 +596,8 @@ def forget_name(day: str, key: str) -> None:
     with _lock:
         state, book = day_state(day), people()
         vo = state["voices"][str(key)]
-        pid = vo.pop("who", None)
+        pid = vo.pop("who", None) or (vo.pop("maybe", None) or {}).get("who")
+        vo.pop("maybe", None)
         vo.pop("guess", None)
         vo["not"] = sorted(set(vo.get("not", []) + ([pid] if pid else [])))
         if pid and pid in book["people"]:
