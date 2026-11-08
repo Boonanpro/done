@@ -102,3 +102,24 @@ def test_a_clip_is_a_short_video_with_the_voice_sound(root, tmp_path):
     kinds = {s["codec_type"]: float(s["duration"]) for s in info["streams"]}
     assert out.suffix == ".mp4" and set(kinds) == {"video", "audio"}
     assert 8 <= kinds["audio"] <= 8.6 and kinds["video"] <= 9
+
+
+def test_a_clip_is_cut_only_where_nobody_else_speaks():
+    # 11/7 21:14: the mama (local 0) and the two brothers (1, 2) in a quick exchange; her clip held all three
+    turns = [{"start": 0.0, "end": 4.0, "local": 0}, {"start": 3.5, "end": 5.0, "local": 1},
+             {"start": 5.2, "end": 9.0, "local": 0}, {"start": 9.4, "end": 10.0, "local": 2},
+             {"start": 10.2, "end": 14.0, "local": 0}, {"start": 14.3, "end": 14.6, "local": 0}]
+    spans = lc.solo_spans(turns, {0})
+    # her speech, kept SOLO_MARGIN away from the others; pieces with nobody between them are one
+    assert [tuple(round(x, 2) for x in sp_) for sp_ in spans] == [(0.0, 3.2), (5.3, 9.0), (10.3, 14.6)]
+    # nobody else at all: the whole of her speech
+    assert lc.solo_spans([{"start": 1.0, "end": 3.0, "local": 0}, {"start": 3.4, "end": 6.0, "local": 0}], {0}) == [(1.0, 6.0)]
+    # her words entirely under someone else's: nothing to play
+    assert lc.solo_spans([{"start": 0.0, "end": 9.0, "local": 1}, {"start": 2.0, "end": 4.0, "local": 0}], {0}) == []
+
+
+def test_the_card_shows_what_is_heard_and_the_most_typical_piece_first():
+    s = [{"at": 75000, "start": 0, "end": 4, "text": "テキストの言葉です", "sim": 0.55},
+         {"at": 76300, "start": 0, "end": 4, "text": "テキストの言葉です", "sim": 0.83}]
+    chosen = lc.pick(s, 1, check=lambda x: "聞こえた言葉")
+    assert [c["at"] for c in chosen] == [76300] and chosen[0]["text"] == "聞こえた言葉"
