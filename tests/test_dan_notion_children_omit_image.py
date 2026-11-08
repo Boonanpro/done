@@ -16,6 +16,7 @@ def _row(n: int, properties: dict) -> dict:
         "id": f"00000000-0000-0000-0000-00000000000{n}", "user_id": USER, "parent_id": PARENT, "type": "paragraph",
         "order_key": str(n), "properties": properties, "content": None, "is_starred": False, "tags": [],
         "created_by": "dan", "source": "manual", "version": 1,
+        "created_at": "2026-11-08T00:00:00+00:00", "updated_at": "2026-11-08T00:00:00+00:00",
     }
 
 
