@@ -96,7 +96,8 @@ async def test_a_whisper_reaches_the_speech_model_as_the_owners_words(monkeypatc
     await feed(listener, clock, np.concatenate([floor(2), whisper(1.5), floor(1.4)]))
     await settle(listener)
     assert len(asked) == 1 and 1.5 <= asked[0] <= 2.5
-    assert [e['type'] for e in sent] == ['session.instructions.append']
+    # handed over, then asked to answer: on 11/8 22:20 the words alone were taken in and left unanswered
+    assert [e['type'] for e in sent] == ['session.instructions.append', 'response.create']
     assert sent[0]['delegation_id'] is None and '「明日って何曜日？」' in sent[0]['content']
     assert dialogue.turns == [('user', '明日って何曜日？')] and heard_words == ['明日って何曜日？']
     assert [p for p, _ in log] == ['whisper_heard', 'whisper_unanswered']
