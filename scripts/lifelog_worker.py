@@ -5,7 +5,8 @@ retry delay. New speech is processed before the historical backlog.
 
 Since 2026-11-08 every recording is also split by speaker (app/services/lifelog_speakers.py): the text says who spoke,
 recordings of the last DAN_LIFELOG_BACKFILL_DAYS days written before that are written again, and after a pause in the
-talk the day's new voices are given names from the conversation.
+talk the day's new voices are given names from the conversation. Since 2026-11-09 a conversation that has ended is
+split by speaker again as a whole (app/services/lifelog_sessions.py).
 """
 from __future__ import annotations
 import glob
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from app.services import lifelog
 from app.services import lifelog_speakers as speakers
+from app.services import lifelog_sessions as sessions
 LOG = lifelog.STATE_ROOT / 'worker.log'
 BACKFILL_DAYS = int(os.environ.get('DAN_LIFELOG_BACKFILL_DAYS', '7'))
 NAME_AFTER_PAUSE = 300      # seconds without new speech before names are read from the talk
@@ -130,6 +132,21 @@ def name_voices():
         speakers.mark_named(day)
 
 
+def split_conversations():
+    """A conversation that has ended is split by speaker again as a whole (lifelog_sessions): today's and
+    yesterday's, so one that ends after midnight is done too."""
+    if not sessions.available():
+        return
+    now = datetime.now(lifelog.JST)
+    for day in ((now - timedelta(days=1)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d')):
+        try:
+            n = sessions.run_day(day)
+            if n:
+                log(f'conversations {day}: {n} split again')
+        except Exception:
+            log(f'conversations {day} failed: {traceback.format_exc(limit=2)}')
+
+
 def cleanup_audio():
     cutoff = (datetime.now(lifelog.JST) - timedelta(days=lifelog.KEEP_DAYS)).strftime('%Y-%m-%d')
     for folder in lifelog.AUDIO_ROOT.glob('20??-??-??'):
@@ -156,9 +173,10 @@ def main():
     device = os.environ.get('DAN_LIFELOG_DEVICE', 'cuda' if os.name == 'nt' else 'cpu')
     model = WhisperModel(name, device=device, compute_type='int8_float16' if device == 'cuda' else 'int8',
                          cpu_threads=4, num_workers=1)
-    log(f'model loaded: {name} {device}; speakers {"on" if speakers.available() else "off (no models)"}')
+    log(f'model loaded: {name} {device}; speakers {"on" if speakers.available() else "off (no models)"}; '
+        f'conversations {"on" if sessions.available() else "off (no pyannote)"}')
     completed, retries = set(), {}
-    last_cleanup = last_names = 0
+    last_cleanup = last_names = last_sessions = 0
     while True:
         try:
             if time.time() - last_cleanup > 21600:
@@ -166,6 +184,9 @@ def main():
                 last_cleanup = time.time()
             count = run_pass(model, completed, retries)
             (lifelog.STATE_ROOT / 'worker-status.json').write_text(json.dumps({'at': time.time(), 'pending': count, 'retrying': len(retries)}))
+            if not count and time.time() - last_sessions > 120:
+                split_conversations()   # before the names: the names are read from the voices as split again
+                last_sessions = time.time()
             if time.time() - last_names > 60:
                 name_voices()
                 last_names = time.time()
