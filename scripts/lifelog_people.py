@@ -5,6 +5,10 @@ there. Every change re-writes the day's text, and a name given here is also kept
 the same voice gets the name by itself.
 
   python scripts/lifelog_people.py day 2026-11-07            # the day's voices: label, minutes, lines they said
+  python scripts/lifelog_people.py unnamed 2026-11-07        # 「名前の無い人を出して」: voices without a sure name,
+        # longest first, a line each and a few seconds to listen to (MP4 paths: attach_image each into the chat,
+        # with the time and the line). 「みきさん？」 is a voice close to みきさん but not close enough to be sure.
+        # The owner's answer 「これは吉田さん」/「そう、みきさん」 → name; 「違う」 → not. --limit 5 --clips 1
   python scripts/lifelog_people.py name 2026-11-07 3 中村さん   # voice 3 is 中村さん (also: --owner for みきさん)
   python scripts/lifelog_people.py not 2026-11-07 3           # voice 3 is not who it says; take the name off
   python scripts/lifelog_people.py merge 2026-11-07 5 3       # voice 5 is the same person as voice 3
@@ -21,7 +25,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.services import lifelog, lifelog_speakers as sp  # noqa: E402
+from app.services import lifelog, lifelog_clips, lifelog_speakers as sp  # noqa: E402
 
 
 def show_day(day: str, lines: int = 3) -> None:
@@ -77,6 +81,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("day"); d.add_argument("day"); d.add_argument("--lines", type=int, default=3)
+    u = sub.add_parser("unnamed"); u.add_argument("day"); u.add_argument("--limit", type=int, default=5)
+    u.add_argument("--clips", type=int, default=1); u.add_argument("--min-seconds", type=float, default=20.0)
     n = sub.add_parser("name"); n.add_argument("day"); n.add_argument("voice"); n.add_argument("name", nargs="?", default="")
     n.add_argument("--owner", action="store_true")
     x = sub.add_parser("not"); x.add_argument("day"); x.add_argument("voice")
@@ -88,6 +94,15 @@ def main() -> None:
     o = ap.parse_args()
     if o.cmd == "day":
         show_day(o.day, o.lines)
+    elif o.cmd == "unnamed":
+        sp.rerender_day(o.day)   # the 「？」 of today follows the voice book as it is now
+        voices = lifelog_clips.listing(o.day, o.limit, o.clips, o.min_seconds)
+        if not voices:
+            print("名前の無い声はありません")
+        for v in voices:
+            print(f"話者{v['voice']}: {v['label']}  {v['seconds'] / 60:.1f}分")
+            for line, clip in zip(v["lines"], v["clips"]):
+                print(f"    {line['at']} 「{line['text'][:60]}」  {clip}")
     elif o.cmd == "name":
         name = sp.OWNER_NAME if o.owner else o.name
         if not name:
