@@ -134,12 +134,12 @@ def test_worker_rewrites_an_old_recording_in_place(root, monkeypatch):
     lifelog.add_transcript({k: old[k] for k in ("start", "seconds", "text", "audio")})
     monkeypatch.setattr(sp, "available", lambda: True)
     new = {**old, "text": "［みきさん］新しい", "turns": [{"voice": "1", "text": "新しい"}], "v": sp.VERSION}
-    monkeypatch.setattr(sp, "transcribe", lambda model, a: new)
+    monkeypatch.setattr(sp, "transcribe", lambda model, a, old=None: new)
     worker.run_pass(None, set(), {})
     assert [r["text"] for r in lifelog.read_day(day)] == ["［みきさん］新しい"]
     assert json.loads(audio.with_suffix(".json").read_text())["v"] == sp.VERSION
     # a second pass leaves it alone
-    monkeypatch.setattr(sp, "transcribe", lambda model, a: pytest.fail("written twice"))
+    monkeypatch.setattr(sp, "transcribe", lambda model, a, old=None: pytest.fail("written twice"))
     worker.run_pass(None, set(), {})
 
 

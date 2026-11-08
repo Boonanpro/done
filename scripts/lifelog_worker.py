@@ -69,7 +69,8 @@ def process_audio(audio, model, rows_of):
     stale = (entry and not entry.get('error') and entry.get('v', 1) < speakers.VERSION and speakers.available()
              and audio.parent.name >= backfill_from())
     if not entry or entry.get('error') or stale:
-        entry = speakers.transcribe(model, audio) if speakers.available() else write_plain(audio, model)
+        entry = (speakers.transcribe(model, audio, old=entry if stale else None) if speakers.available()
+                 else write_plain(audio, model))
         tmp = out.with_suffix('.json.tmp')
         tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding='utf-8')
         tmp.replace(out)
@@ -174,5 +175,35 @@ def main():
             time.sleep(30)
 
 
+def backfill(day, threads=6):
+    """Write one day again with speakers now, in time order (python scripts/lifelog_worker.py --day 2026-11-07).
+    Safe beside the running worker: a recording already written with speakers is left alone."""
+    from faster_whisper import WhisperModel
+    global backfill_from
+    backfill_from = lambda: '0000-00-00'   # noqa: E731 — this day even if older than the window
+    model = WhisperModel(os.environ.get('DAN_LIFELOG_MODEL', 'large-v3'), device='cpu', compute_type='int8',
+                         cpu_threads=threads, num_workers=1)
+    files = sorted((lifelog.AUDIO_ROOT / day).glob('*.ogg'))
+    rows = {}
+    def rows_of(d):
+        if d not in rows:
+            rows[d] = {Path(r.get('audio', '').replace('\\', '/')).name: bool(r.get('turns')) for r in lifelog.read_day(d)}
+        return rows[d]
+    batch = []
+    for i, audio in enumerate(files):
+        entry, changed = process_audio(audio, model, rows_of)
+        if changed:
+            batch.append(entry)
+        if len(batch) >= 25 or (i == len(files) - 1 and batch):
+            lifelog.upsert_rows(day, batch)
+            log(f'backfill {day}: {i + 1}/{len(files)}')
+            batch = []
+    speakers.name_day(day)
+    speakers.mark_named(day)
+
+
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 2 and sys.argv[1] == '--day':
+        backfill(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 6)
+    else:
+        main()

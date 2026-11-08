@@ -33,6 +33,7 @@ import os
 import re
 import tempfile
 import time
+import types
 import uuid
 from functools import lru_cache
 from pathlib import Path
@@ -52,7 +53,11 @@ VERSION = 2
 LOCAL_THRESHOLD = 0.6     # sherpa's clustering inside one recording (larger = fewer speakers)
 JOIN_DAY = 0.45           # cosine to a numbered voice's centre to be that voice
 JOIN_PERSON = 0.55        # cosine to one example in the voice book to be that person (a name is a stronger claim)
+JOIN_PERSON_CENTRE = 0.5  # the same, for the centre of a numbered voice that has talked 30 s (steadier than one piece)
 MIN_VOICE_SECONDS = 0.8   # shorter speech gives no usable embedding; it keeps the label of the turn next to it
+SHORT_SECONDS = 2.5       # under this, an embedding is noisy (「はい」「そのまま」): see place()
+SHORT_JOIN = 0.35
+SHORT_MARGIN = 0.07
 MAX_EXAMPLES = 24
 OWNER_NAME = "みきさん"
 
@@ -230,15 +235,31 @@ def best_person(v: np.ndarray, book: dict) -> tuple[str | None, float]:
     return best, score
 
 
-def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict) -> str:
-    """The day's voice number for one embedding; joins a person of the voice book or a numbered voice, or starts one."""
+def _near(vo: dict, at: float | None, minutes: float = 15) -> bool:
+    if at is None or "t" not in vo:
+        return True
+    a, b = vo["t"]
+    return a - minutes * 60 <= at <= b + minutes * 60
+
+
+def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict, at: float | None = None) -> str | None:
+    """The day's voice number for one embedding; joins a person of the voice book or a numbered voice, or starts one.
+
+    A short piece of speech (under SHORT_SECONDS) gives a noisy embedding: it joins only a voice heard around the same
+    time that it is clearly closest to, and otherwise stays unnumbered (None, shown as ［？］) instead of starting a new
+    number for every 「はい」."""
+    short = seconds < SHORT_SECONDS
     pid, ps = best_person(v, book)
-    best, score = None, -1.0
-    for key, vo in state["voices"].items():
-        s = float(_unit(vo["c"]) @ v)
-        if s > score:
-            best, score = key, s
-    if pid and ps >= JOIN_PERSON:
+    scores = sorted(((float(_unit(vo["c"]) @ v), key) for key, vo in state["voices"].items()
+                     if not short or _near(vo, at)), reverse=True)
+    score, best = scores[0] if scores else (-1.0, None)
+    second = scores[1][0] if len(scores) > 1 else -1.0
+    if short:
+        if best is not None and score >= SHORT_JOIN and score - second >= SHORT_MARGIN:
+            key = best
+        else:
+            return None
+    elif pid and ps >= JOIN_PERSON:
         # the person's voice of today, if there is one; otherwise a new number already named
         mine = [k for k, vo in state["voices"].items() if vo.get("who") == pid]
         if mine:
@@ -257,9 +278,21 @@ def place(day: str, v: np.ndarray, seconds: float, state: dict, book: dict) -> s
         state["next"] += 1
         state["voices"][key] = {"c": _round(v), "s": 0.0}
     vo = state["voices"][key]
-    total = vo["s"] + seconds
-    c = _unit(vo["c"]) * vo["s"] + v * seconds
-    vo["c"], vo["s"] = _round(_unit(c)), round(total, 1)
+    if at is not None:
+        a, b = vo.get("t", (at, at))
+        vo["t"] = [min(a, at), max(b, at)]
+    if not short:   # a short piece joins but does not move the centre
+        total = vo["s"] + seconds
+        c = _unit(vo["c"]) * vo["s"] + v * seconds
+        vo["c"], vo["s"] = _round(_unit(c)), round(total, 1)
+        # a numbered voice that has talked a while is a steadier picture of the voice: look it up in the voice book
+        if not vo.get("who") and vo["s"] >= 30 and vo["s"] - vo.get("looked", 0) >= 30:
+            vo["looked"] = vo["s"]
+            pid, ps = best_person(_unit(vo["c"]), book)
+            if pid and ps >= JOIN_PERSON_CENTRE and pid not in vo.get("not", []) \
+                    and not any(o.get("who") == pid for o in state["voices"].values()):
+                vo["who"] = pid
+                state["renamed"] = True
     return key
 
 
@@ -296,20 +329,32 @@ def plain(turns: list[dict]) -> str:
 
 # ---------------------------------------------------------------- the whole entry for one recording
 
-def transcribe(model, audio: Path) -> dict:
-    """The index entry for one recording: text with speakers, turns, voices."""
+def transcribe(model, audio: Path, old: dict | None = None) -> dict:
+    """The index entry for one recording: text with speakers, turns, voices.
+
+    old: the entry written before speakers existed. When only one voice speaks in the recording its words need no
+    times, so its old text is kept and Whisper is not run again (about half of a day's recordings; writing a past
+    day again takes half the time)."""
     samples = load_audio(audio)
-    segments, info = model.transcribe(samples, language="ja", vad_filter=True, beam_size=5,
-                                      condition_on_previous_text=False, word_timestamps=True)
-    segments = list(segments)
     turns, voices = analyze(samples) if available() else ([], {})
+    duration = len(samples) / RATE
+    if old is not None and old.get("parts") is not None and len(voices) <= 1 and len({t["local"] for t in turns}) <= 1:
+        segments = [types.SimpleNamespace(start=p["start"], end=p["end"], text=p["text"], words=None) for p in old["parts"]]
+        reuse = True
+    else:
+        segments, info = model.transcribe(samples, language="ja", vad_filter=True, beam_size=5,
+                                          condition_on_previous_text=False, word_timestamps=True)
+        segments, duration, reuse = list(segments), info.duration, False
     words, parts = [], []
     for s in segments:
         text = s.text.strip()
         if is_phantom(text, speech_cover(turns, s.start, s.end) if turns else 1.0):
             continue
         parts.append({"start": round(s.start, 2), "end": round(s.end, 2), "text": text})
-        words += [{"start": w.start, "end": w.end, "word": w.word} for w in (s.words or [])]
+        if reuse:   # one speaker: the part is one "word" spanning its time
+            words.append({"start": s.start, "end": s.end, "word": text})
+        else:
+            words += [{"start": w.start, "end": w.end, "word": w.word} for w in (s.words or [])]
     if not turns and words and words[-1]["end"] - words[0]["start"] >= 1.0:
         # Whisper heard words where the segmentation found no speaker (quiet, far speech): one speaker over the words
         a, b = words[0]["start"], words[-1]["end"]
@@ -324,23 +369,29 @@ def transcribe(model, audio: Path) -> dict:
     keys = {}
     with _lock:
         state, book = day_state(day), people()
+        at = int(n[:2]) * 3600 + int(n[2:4]) * 60 + int(n[4:6])
         for local, (v, secs, loud) in voices.items():
-            keys[local] = place(day, v, secs, state, book)
+            keys[local] = place(day, v, secs, state, book, at)
         if voices:
             state["spoken_at"] = time.time()
+        renamed = state.pop("renamed", False)
         save_day(day, state)
-    # a speaker too short for an embedding takes the label of the turn before (or after) it
+    if renamed:
+        rerender_day(day)   # earlier rows of a voice that just got its name
+    # a local speaker with too little speech for an embedding (not in voices) takes the label of the turn next to it;
+    # one whose short embedding matched nobody stays None (［？］)
+    for t in said:
+        local = t.pop("local")
+        t["voice"] = keys.get(local) if local in keys else "near"
     for i, t in enumerate(said):
-        t["voice"] = keys.get(t.pop("local"))
-    for i, t in enumerate(said):
-        if t["voice"] is None:
-            near = [u["voice"] for u in said[i - 1::-1] if u["voice"]] if i else []
-            near = near or [u["voice"] for u in said[i + 1:] if u["voice"]]
+        if t["voice"] == "near":
+            near = [u["voice"] for u in said[i - 1::-1] if u["voice"] not in (None, "near")] if i else []
+            near = near or [u["voice"] for u in said[i + 1:] if u["voice"] not in (None, "near")]
             t["voice"] = near[0] if near else None
     if not voices:
         for t in said:
             t["voice"] = None
-    entry = {"start": start, "seconds": round(info.duration, 2), "text": render(said, day, state, book) if voices else plain(said),
+    entry = {"start": start, "seconds": round(duration, 2), "text": render(said, day, state, book) if voices else plain(said),
              "plain": plain(said), "audio": str(audio), "parts": parts, "turns": said, "v": VERSION,
              "voices": {k: {"day_voice": keys[k], "s": round(secs, 1), "db": round(loud, 1), "e": _round(v)}
                         for k, (v, secs, loud) in voices.items()}}
@@ -460,16 +511,16 @@ JSONだけで答える: {"names": [{"voice": "3", "name": "スヤさん", "sure"
 
 
 def _openai_key() -> str | None:
-    key = os.environ.get("OPENAI_API_KEY")
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if key:
         return key
-    env = Path(__file__).resolve().parents[2] / ".env"
-    try:
-        for line in env.read_text(encoding="utf-8").splitlines():
-            if line.startswith("OPENAI_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"')
-    except OSError:
-        pass
+    for env in (Path(__file__).resolve().parents[2] / ".env", Path.home() / "done" / ".env"):
+        try:
+            for line in env.read_text(encoding="utf-8").splitlines():
+                if line.startswith("OPENAI_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"')
+        except OSError:
+            pass
     return None
 
 
@@ -518,7 +569,7 @@ def name_day(day: str, *, model: str = "gpt-6-luna", min_seconds: float = 15.0) 
     cal = calendar_lines(day)
     from openai import OpenAI
     prompt = (f"{day} の録音。名前を推定してほしい番号: {', '.join('話者' + k for k in open_voices)}\n"
-              + (f"\nこの日の予定表:\n{cal}\n" if cal else "") + "\n文字起こし:\n" + text)
+              + (f"\nこの日の予定表:\n{cal}\n" if cal else "") + "\n文字起こし:\n" + text + "\n\n答えは JSON で。")
     r = OpenAI(api_key=key).responses.create(model=model, instructions=NAME_RULES, input=prompt,
                                              reasoning={"effort": "low"}, text={"format": {"type": "json_object"}})
     try:
