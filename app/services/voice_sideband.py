@@ -196,7 +196,11 @@ async def report_backend_failure(send, event, dialogue, record):
     error = error if isinstance(error, dict) else {}
     billing = any(word in message for word in ('no credits remaining', 'credit_balance_exhausted', 'insufficient_quota'))
     # An error in our notification must not recursively generate another notification.
-    if str(event.get('client_event_id') or error.get('event_id', '')).startswith('dan-failure-'):
+    # Nor an error about the server's own handing over of a whisper (voice_whisper): it is not the work failing. On 11/8
+    # 22:25 each refused response.create after a whisper was announced 「作業の判断処理が失敗しました」.
+    origin = str(event.get('client_event_id') or error.get('client_event_id') or error.get('event_id', ''))
+    if origin.startswith(('dan-failure-', 'dan-whisper-')):
+        if origin.startswith('dan-whisper-'): record('whisper_failed', stage='refused', detail=str(error.get('code') or '')[:80])
         return
     key = 'billing' if billing else str((event.get('response') or {}).get('id') or event.get('event_id') or 'backend')
     if key in dialogue.failure_notices:

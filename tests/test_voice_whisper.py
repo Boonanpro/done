@@ -96,11 +96,86 @@ async def test_a_whisper_reaches_the_speech_model_as_the_owners_words(monkeypatc
     await feed(listener, clock, np.concatenate([floor(2), whisper(1.5), floor(1.4)]))
     await settle(listener)
     assert len(asked) == 1 and 1.5 <= asked[0] <= 2.5
-    # handed over, then asked to answer: on 11/8 22:20 the words alone were taken in and left unanswered
-    assert [e['type'] for e in sent] == ['session.instructions.append', 'response.create']
+    # handed over with the commentary Dan speaks after: on 11/8 22:20 the instructions alone were left unanswered, and
+    # response.create is refused in this call (client delegation)
+    assert [e['type'] for e in sent] == ['session.instructions.append', 'session.commentary.append']
     assert sent[0]['delegation_id'] is None and '「明日って何曜日？」' in sent[0]['content']
+    assert sent[1]['delegation_id'] is None and '「明日って何曜日？」' in sent[1]['content']
+    assert all(e['event_id'].startswith('dan-whisper-') for e in sent)   # an error about them is not a failure of the work
     assert dialogue.turns == [('user', '明日って何曜日？')] and heard_words == ['明日って何曜日？']
     assert [p for p, _ in log] == ['whisper_heard', 'whisper_unanswered']
+    assert log[0][1].get('read_ahead') is True      # read at 0.3 s of quiet: nothing was said after it
+
+
+@pytest.mark.asyncio
+async def test_a_whisper_that_goes_on_after_a_short_pause_is_read_whole(monkeypatch):
+    monkeypatch.setattr(W, 'ANSWER_WAIT_S', 0)
+    sent, log, asked = [], [], []
+    async def send(event): sent.append(event)
+    def transcriber(audio):
+        asked.append(round(len(audio) / RATE, 1))
+        return '前半' if len(asked) == 1 else '前半と後半'
+    clock = Clock()
+    listener = W.Listener(send, lambda phase, **f: log.append((phase, f)), clock=clock, transcriber=transcriber)
+    # 0.4 s between the two halves: past the read-ahead (0.3 s), short of the end (0.6 s)
+    await feed(listener, clock, np.concatenate([floor(2), whisper(1.2), floor(0.4), whisper(1.2), floor(1.4)]))
+    await settle(listener)
+    assert len(asked) >= 2 and asked[-1] > asked[0] + 1.0
+    given = [e['content'] for e in sent if e['type'] == 'session.instructions.append']
+    assert len(given) == 1 and '「前半と後半」' in given[0]
+
+
+@pytest.mark.asyncio
+async def test_dan_is_told_when_a_whisper_could_not_be_made_out_but_not_over_and_over(monkeypatch):
+    monkeypatch.setattr(W, 'ANSWER_WAIT_S', 0)
+    sent, log = [], []
+    async def send(event): sent.append(event)
+    clock = Clock()
+    listener = W.Listener(send, lambda phase, **f: log.append((phase, f)), clock=clock, transcriber=lambda a: ('', 'unsure'))
+    await feed(listener, clock, np.concatenate([floor(2), whisper(1.2), floor(1.4), whisper(1.2), floor(1.4)]))
+    await settle(listener)
+    spoken = [e for e in sent if e['type'] == 'session.commentary.append']
+    assert len(spoken) == 1 and '聞き取れなかった' in spoken[0]['content']
+    assert [p for p, _ in log].count('whisper_unheard') == 1
+    # breath or Whisper's inventions on quiet audio are not 「something was said」
+    sent.clear()
+    quiet = W.Listener(send, lambda *a, **k: None, clock=clock, transcriber=lambda a: ('', 'silent'))
+    await feed(quiet, clock, np.concatenate([floor(2), whisper(1.2), floor(1.4)]))
+    await settle(quiet)
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_what_the_owner_whispers_after_dan_finished_is_kept(monkeypatch):
+    monkeypatch.setattr(W, 'ANSWER_WAIT_S', 0)
+    sent, log, asked = [], [], []
+    async def send(event): sent.append(event)
+    clock = Clock()
+    listener = W.Listener(send, lambda phase, **f: log.append((phase, f)), clock=clock,
+                          transcriber=lambda a: asked.append(len(a) / RATE) or 'それで、明日は？')
+    await feed(listener, clock, floor(2))
+    loud = (np.sin(np.arange(RATE // 2) / RATE * 2 * np.pi * 200) * 0.3 * 32767).astype('<i2').tobytes()
+    listener.dan_audio(base64.b64encode(loud).decode())   # Dan's last half second
+    await feed(listener, clock, np.concatenate([whisper(3.0), floor(1.4)]))   # the owner from the same moment, on for 3 s
+    await settle(listener)
+    assert len(asked) == 1 and 1.0 <= asked[0] <= 2.3       # read from a second after Dan's voice ended
+    heard = [f for p, f in log if p == 'whisper_heard']
+    assert heard and heard[0].get('trimmed') is True
+
+
+@pytest.mark.asyncio
+async def test_how_long_dan_took_to_answer_is_recorded():
+    sent, log, spoke = [], [], {}
+    clock = Clock()
+    async def send(event):
+        sent.append(event)
+        if event['type'] == 'session.commentary.append':
+            spoke['dan_words'] = clock.t + 0.7    # Dan's first words, 0.7 s after the words were given
+    listener = W.Listener(send, lambda phase, **f: log.append((phase, f)), None, spoke, clock=clock, transcriber=lambda a: 'はい')
+    await feed(listener, clock, np.concatenate([floor(2), whisper(1.5), floor(1.4)]))
+    await settle(listener)
+    answered = [f for p, f in log if p == 'whisper_answered']
+    assert answered and answered[0]['whisper_reply_ms'] == 700 and answered[0]['from_end_ms'] > 700
 
 
 @pytest.mark.asyncio
@@ -154,6 +229,26 @@ def test_what_whisper_invents_or_guesses_is_dropped(monkeypatch):
                           (segments('電話切って', no_speech=0.9), '')]:
         monkeypatch.setattr(W, '_segments_gpu', lambda x, r=result: r)
         assert W.transcribe(audio) == words
+    # why: what was not trusted is told apart, so an unsure reading can be answered with 「聞き取れなかった」
+    for result, why in [(segments('ご視聴ありがとうございました'), 'silent'), (segments('おすすめの2つのめちゃい', logprob=-0.93), 'unsure'),
+                        (segments('ご視聴ありがとうございました', logprob=-1.2), 'silent'), (segments('次は、次は、次は、次は'), 'loop')]:
+        monkeypatch.setattr(W, '_segments_gpu', lambda x, r=result: r)
+        assert W.reading(audio) == ('', why)
+    # 「もしもしもしもし」 is how a call starts, not Whisper looping (2026-09 call: dropped as a loop)
+    monkeypatch.setattr(W, '_segments_gpu', lambda x: segments('もしもしもしもしもしもしおい'))
+    assert W.transcribe(audio) == 'もしもし、おい'
+
+
+@pytest.mark.asyncio
+async def test_an_error_about_a_handed_over_whisper_is_not_announced_as_a_failure_of_the_work():
+    from app.services import voice_sideband as S
+    sent, log = [], []
+    async def send(event): sent.append(event)
+    dialogue = SimpleNamespace(failure_notices=set())
+    error = {'type': 'error', 'event_id': 'e1', 'error': {'type': 'invalid_request_error', 'code': 'invalid_request_error',
+             'message': 'response.create requires a session with Responses delegation.', 'client_event_id': 'dan-whisper-reply-1'}}
+    await S.report_backend_failure(send, error, dialogue, lambda phase, **f: log.append(phase))
+    assert sent == [] and log == ['whisper_failed']
 
 
 @pytest.mark.asyncio
@@ -172,7 +267,7 @@ async def test_the_calls_sideband_hands_a_whisper_to_the_speech_model(monkeypatc
         monkeypatch.setattr(S, name, idle if name.endswith('feed') else (lambda *a, **k: asyncio.sleep(0)))
     monkeypatch.setattr(voice_lookup, 'open_call', lambda *a, **k: SimpleNamespace(router=None, lookups={}, closed=False, close=lambda: None, user_id='u', room_id='r'))
     monkeypatch.setattr(voice_lookup, 'close_call', lambda call: None)
-    monkeypatch.setattr(W, 'transcribe', lambda audio: '明日って何曜日？')
+    monkeypatch.setattr(W, 'reading', lambda audio: ('明日って何曜日？', ''))
     monkeypatch.setattr(W, 'ANSWER_WAIT_S', 0)
     events = [{'type': 'session.started', 'session': {'id': 'call-w'}}]
     events += [{'type': 'session.input_audio.append', 'audio': part} for part in chunks(np.concatenate([floor(2), whisper(1.5), floor(1.4)]))]
@@ -194,3 +289,6 @@ async def test_the_calls_sideband_hands_a_whisper_to_the_speech_model(monkeypatc
     await S._run('call-w', 'u', 'r', 'key', True)
     given = [e for e in out if e.get('type') == 'session.instructions.append']
     assert len(given) == 1 and '「明日って何曜日？」' in given[0]['content'] and given[0]['delegation_id'] is None
+    spoken = [e for e in out if e.get('type') == 'session.commentary.append']
+    assert len(spoken) == 1 and '「明日って何曜日？」' in spoken[0]['content']
+    assert not any(e.get('type') == 'response.create' for e in out)
