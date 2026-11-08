@@ -563,9 +563,12 @@ NAME_RULES = """あなたは、常時録音の文字起こしを読んで、話�
 - 呼びかけ（「スヤさん」「シンちゃん」）: 呼ばれたのは、その行の話者ではなく相手。直後に返事をした話者か、話の相手。1回だけなら推測（guess）、別々の場面で2回以上合えば確か。
 - 予定表: その時間に会う人の名前。推測の手がかりにだけ使う。
 - 持ち主（みきさん）の声は、もう分かっていれば［みきさん］と出ています。
-- テレビ・動画・駅や店内の放送の声らしい番号（話し方がナレーション・実況・アナウンス）は、名前ではなく
+- みきさんや他の人と受け答えしている声は、その場にいる人（動画の撮影で話している人も、その場の人）。
+- テレビ・動画・駅や店内の放送の声らしい番号（誰とも受け答えせず、話し方がナレーション・実況・アナウンス）は、名前ではなく
   {"voice": "8", "media": true, "quote": "根拠の行"} で返す。
-- 根拠の無い名前は付けない。分からない番号は出さない。
+- 「ママ」「店長」「先生」のような呼ばれ方も名前として使ってよい。
+- 2人で話している所で呼びかけられた相手が分かれば、推測（sure=false）として出す。迷う時は推測で出してよい（画面には「？」付きで出る）。
+- 文字に根拠の無い名前は付けない。分からない番号は出さない。
 
 JSONだけで答える: {"names": [{"voice": "3", "name": "スヤさん", "sure": false, "quote": "根拠の行をそのまま"}]}
 名前には「さん」等を付けて、本人の呼ばれ方に合わせる（例: スヤさん、シンちゃん、ママ）。"""
@@ -596,23 +599,68 @@ def calendar_lines(day: str) -> str:
         return ""
 
 
-def name_lines(day: str, rows: list[dict], state: dict, book: dict, limit: int = 18000) -> str:
-    """The day's speech as 「HH:MM:SS ［話者3］…」, lines with name-like words first kept whole, the rest trimmed."""
+# words that end like a name but are not one (「お客さん」「業者さん」「皆さん」)
+NOT_NAMES = re.compile(r"(お客|業者|職人|皆|みな|奥|店員|運転手|お医者|看護師|大家|オーナー|お巡り|お隣|赤|お兄|お姉|おじ|おば|"
+                       r"お父|お母|じい|ばあ|お坊|大工|美容師|先輩|後輩|編集者|視聴者|経営者|社員|担当者|お嬢|おにい|おねえ|"
+                       r"親御|息子|娘|お子|子供|お友達|友達|彼女|彼氏|旦那|嫁|農家|漁師|社長|部長|課長|先生)(さん|ちゃん|くん|様)?$")
+
+
+def has_name(text: str) -> bool:
+    for m in NAME_HINT.finditer(text):
+        word = m.group(0)
+        stem = re.sub(r"(さん|ちゃん|くん|君|様|先生|社長)$", "", word)
+        if m.group(1) and (NOT_NAMES.search(word) or NOT_NAMES.search(stem[-4:] + m.group(1))):
+            continue
+        return True
+    return False
+
+
+# a name said in a line: 「スヤさん」「シンちゃん」「ママ」, or a line that starts 「中村です」 (a self-introduction)
+NAME_HINT = re.compile(r"[一-龥ァ-ヶーぁ-んA-Za-z]{1,8}(さん|ちゃん|くん|君|様|先生|社長)|ママ|パパ|と申します|って言います"
+                       r"|］[一-龥ァ-ヶー]{1,6}です")
+
+
+def name_lines(day: str, rows: list[dict], state: dict, book: dict, voices: list[str] | None = None,
+               limit: int = 18000) -> str:
+    """The lines the language model needs to name the given voices: for each voice, the lines with a name in them
+    said within 90 s of it speaking (by anyone: 「スヤさん、…」 is said by the other person), the lines around
+    them, and some of its own back-and-forth. A whole day is several times the limit; cutting it evenly lost every
+    line that named 「スヤさん」 on 11/7."""
     lines = []
     for r in rows:
+        at = int(r["start"][11:13]) * 3600 + int(r["start"][14:16]) * 60 + int(r["start"][17:19])
         for t in r.get("turns") or []:
-            if t.get("voice"):
-                lines.append(f"{r['start'][11:19]} ［{label(day, t['voice'], state, book)}］{t['text']}")
-    if sum(len(l) for l in lines) <= limit:
-        return "\n".join(lines)
-    hint = re.compile(r"(さん|ちゃん|くん|君|様|先生|です。|と申します|って言います|社長|ママ|パパ)")
+            if t.get("voice") and t.get("text"):
+                lines.append((t["voice"], at, f"{r['start'][11:19]} ［{label(day, t['voice'], state, book)}］{t['text']}"))
+    if voices is None or sum(len(l) for *_, l in lines) <= limit:
+        return "\n".join(l for *_, l in lines)
+    named = [i for i, (_, _, l) in enumerate(lines) if has_name(l.split("］", 1)[-1])]
+    per = max(1500, limit // max(1, len(voices)))
     keep = set()
-    for i, l in enumerate(lines):
-        if hint.search(l):
-            keep.update(range(max(0, i - 2), min(len(lines), i + 3)))
-    out = [lines[i] for i in sorted(keep)]
+    for v in voices:
+        mine = [i for i, (k, _, _) in enumerate(lines) if k == v]
+        if not mine:
+            continue
+        times = [lines[i][1] for i in mine]
+        got, size = set(), 0
+        near = sorted((min(abs(lines[j][1] - t) for t in times), j) for j in named)
+        for gap, j in near:   # the closest names first
+            if gap <= 90:
+                for k in range(max(0, j - 1), min(len(lines), j + 2)):
+                    if k not in got:
+                        got.add(k)
+                        size += min(400, len(lines[k][2]))
+            if size > per * 0.6:
+                break
+        for i in mine[:: max(1, len(mine) // 6)][:6]:   # its own talk across the day, with the line before it
+            for k in (i - 1, i):
+                if k >= 0 and k not in got and size < per:
+                    got.add(k)
+                    size += min(400, len(lines[k][2]))
+        keep |= got
+    out = [lines[i][2][:400] for i in sorted(keep)]
     while sum(len(l) for l in out) > limit:
-        out.pop(len(out) // 2)
+        out.pop()
     return "\n".join(out)
 
 
@@ -626,7 +674,7 @@ def name_day(day: str, *, model: str = "gpt-6-luna", min_seconds: float = 15.0) 
     if not open_voices:
         return []
     rows = lifelog.read_day(day)
-    text = name_lines(day, rows, state, book)
+    text = name_lines(day, rows, state, book, open_voices)
     cal = calendar_lines(day)
     from openai import OpenAI
     prompt = (f"{day} の録音。名前を推定してほしい番号: {', '.join('話者' + k for k in open_voices)}\n"
