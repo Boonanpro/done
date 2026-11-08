@@ -1,4 +1,6 @@
 """子ブロック一覧で、画像の中身を外して返せること（開発室のボードを外の回線でも軽く開くため。11-08）"""
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -28,7 +30,7 @@ class _Svc:
 def _client(monkeypatch) -> TestClient:
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[routes.get_current_user] = lambda: TokenData(user_id=USER, email="t@example.com")
+    app.dependency_overrides[routes.get_current_user] = lambda: TokenData(user_id=USER, email="t@example.com", exp=datetime.now() + timedelta(hours=1))
     monkeypatch.setattr(routes, "_svc", lambda: _Svc())
     return TestClient(app)
 
