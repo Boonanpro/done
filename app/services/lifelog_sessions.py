@@ -67,7 +67,9 @@ def recordings(day: str) -> list[tuple[Path, dict]]:
         except (OSError, ValueError):
             continue
         audio = f.with_suffix(".ogg")
-        if e.get("v", 1) >= 3 and audio.exists() and (e.get("turns") or e.get("voices")):
+        # a recording split with its conversation stays in it even when no words were heard in it (its turns are
+        # then empty): otherwise the conversation's recordings change and it is split again and again (11/9 night)
+        if e.get("v", 1) >= 3 and audio.exists() and (e.get("turns") or e.get("voices") or e.get("session")):
             out.append((audio, e))
     return out
 
