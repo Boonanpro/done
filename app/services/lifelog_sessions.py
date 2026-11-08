@@ -253,8 +253,8 @@ def run_day(day: str, *, force: bool = False, now: float | None = None) -> int:
     count = 0
     for group in conversations(day):
         k = key(group)
-        if k in done and not force:
-            continue
+        if not force and k in done and (done[k].get("skipped") or all(e.get("session") == k for _, e in group)):
+            continue   # done (a recording written again since, by the live pass, takes it again)
         last = group[-1][0].name
         end = time.mktime(time.strptime(f"{day} {last[:6]}", "%Y-%m-%d %H%M%S")) + float(group[-1][1].get("seconds") or 0)
         if day == today and now - end < SESSION_GAP:

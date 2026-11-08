@@ -121,10 +121,20 @@ def test_a_conversation_still_going_on_waits_and_a_finished_one_runs_once(root, 
         put(day, n, entry(day, n))
     monkeypatch.setattr(ls, "available", lambda: True)
     ran = []
-    monkeypatch.setattr(ls, "run_conversation", lambda g: ran.append(len(g)))
+    def fake(group):
+        ran.append(len(group))
+        for audio, e in group:
+            e["session"] = ls.key(group)
+            audio.with_suffix(".json").write_text(json.dumps(e))
+    monkeypatch.setattr(ls, "run_conversation", fake)
     monkeypatch.setattr(sp, "replace_day", lambda d: None)
     import time
     end = time.mktime(time.strptime("2026-11-07 210120", "%Y-%m-%d %H%M%S"))
     assert ls.run_day(day, now=end + 60) == 0 and ran == []           # a minute after: the talk may go on
     assert ls.run_day(day, now=end + ls.SESSION_GAP + 1) == 1 and ran == [2]
     assert ls.run_day(day, now=end + ls.SESSION_GAP + 99) == 0 and ran == [2]   # done once
+    # one of its recordings written again by the live pass (no longer split as the conversation): done again
+    e = json.loads((lifelog.AUDIO_ROOT / day / "210100_0_u.json").read_text())
+    e.pop("session")
+    (lifelog.AUDIO_ROOT / day / "210100_0_u.json").write_text(json.dumps(e))
+    assert ls.run_day(day, now=end + ls.SESSION_GAP + 199) == 1 and ran == [2, 2]
