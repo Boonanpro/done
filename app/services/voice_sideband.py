@@ -700,7 +700,7 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
     started, began = time.monotonic(), datetime.now(timezone.utc)
     counts, dialogue, working, spoke, stage = {}, Dialogue(), set(), {}, None
     dialogue.began_iso = began.isoformat()
-    stop_control = hangup = background = router = None
+    stop_control = hangup = background = router = whisper = None
     try:
         transport = connection if connection is not None else websockets.connect(
             URL.format(session_id=session_id), additional_headers={'Authorization': 'Bearer '+api_key},
@@ -735,6 +735,12 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
             if own and room_id and dialogue.actions is None and not plain:
                 from app.services.voice_stop_control import StopControl
                 stop_control = StopControl(user_id, room_id, began.isoformat(), send, record)
+            from app.services import voice_whisper
+            if own and voice_whisper.enabled():   # a whisper Live does not take as speech (voice_whisper)
+                def whispered(text):
+                    if hangup is not None: hangup.heard()
+                    if stage is not None: stage.heard('user', text)
+                whisper = voice_whisper.Listener(send, record, dialogue, spoke, on_words=whispered)
             hangup = None
             from app.services import voice_hangup
             async def end_by_words(by='owner_words'):
@@ -819,8 +825,13 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
                     except Exception as exc:
                         record('conversation_yield_failed', error_type=type(exc).__name__)
                         interruption = None  # no retry of an uncertain send; preserve the call
+                if whisper is not None and kind == 'session.input_audio.append' and event.get('audio'):
+                    whisper.audio(event['audio'])
+                elif whisper is not None and kind == 'session.output_audio.delta' and event.get('delta'):
+                    whisper.dan_audio(event['delta'])
                 if 'audio' in kind: continue   # reflected audio: counted, never stored
                 if kind == 'session.input_transcript.delta':
+                    if whisper is not None: whisper.heard()
                     dialogue.add('user', event.get('delta') or '')
                     if dialogue.intake is not None:
                         dialogue.intake.heard(event.get('delta') or '', event.get('end_ms'))
@@ -864,6 +875,7 @@ async def _run(session_id, user_id, room_id, api_key, own, backend=None, connect
         if background is not None:
             from app.services import voice_lookup
             voice_lookup.close_call(background)
+        if whisper is not None: whisper.close()
         if dialogue.actions is not None: dialogue.actions.closed = True
         if dialogue.intake is not None: dialogue.intake.close()
         if stop_control is not None: stop_control.close()
