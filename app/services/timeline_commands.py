@@ -1163,11 +1163,11 @@ def validate_sequence(seq: dict[str, Any], assets: dict[str, dict[str, Any]],
         if len(starts) > 1 or len(ends) > 1:
             problems.append(f"link {lid}: A/V clips out of sync ({sorted(starts)} / {sorted(ends)})")
     # native structural check (editor's own invariants) when available
+    from app.services.timeline_context import native_exe_default, native_runnable
     exe = native_exe or os.environ.get("NATIVE_UI_EXE")
     if not exe:
-        from app.services.timeline_context import native_exe_default
         exe = native_exe_default()
-    if exe and Path(exe).exists() and asset_dir:
+    if exe and native_runnable(str(exe)) and asset_dir:
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
                 json.dump([{"title": "draft-validate", "format": seq.get("format") or "9:16", "timeline": {"format": seq.get("format") or "9:16", "sequence": seq}}], f, ensure_ascii=False)
