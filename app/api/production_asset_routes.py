@@ -5356,6 +5356,28 @@ async def list_contents(
     return _read_contents(room_id)
 
 
+@router.get("/contents/{content_id}/edit-feed")
+async def content_edit_feed(
+    content_id: str,
+    room_id: str = Query(...),
+    after: int = Query(-1),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Dan's published timeline steps after `after`, for the open editor to replay as motion.
+
+    after<0 only returns the current position (an editor that just opened does not replay
+    history). When steps exist, the live sequence comes with them so the replay ends exactly
+    on what is saved."""
+    from app.services import timeline_draft as td
+    last, rows = td.read_edit_feed(room_id, content_id, after)
+    if after < 0 or not rows:
+        return {"last": last, "entries": []}
+    content = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
+    sequence = ((content or {}).get("timeline") or {}).get("sequence")
+    return {"last": last, "entries": rows[-40:], "sequence": sequence,
+            "updated_at": (content or {}).get("updated_at")}
+
+
 @router.post("/contents", response_model=ProductionContent)
 async def create_content(
     data: CreateContentRequest,

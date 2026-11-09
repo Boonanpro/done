@@ -427,6 +427,116 @@ function parseFps(value: unknown): number | null {
 }
 
 
+const DAN_HANDS_CSS = `
+.dan-replay [data-clip-id] { transition: left .45s cubic-bezier(.2,.8,.2,1), width .45s cubic-bezier(.2,.8,.2,1); }
+.dan-touch { box-shadow: 0 0 0 2px #38bdf8, 0 0 14px 3px rgba(56,189,248,.65); z-index: 5; }
+@keyframes dan-appear { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
+.dan-appear { animation: dan-appear .45s cubic-bezier(.2,.8,.2,1); transform-origin: left center; }
+@keyframes dan-vanish { to { transform: scaleY(.15); opacity: 0; } }
+.dan-vanish { animation: dan-vanish .35s ease-in forwards; }
+.dan-hand { transition: left .42s cubic-bezier(.3,.7,.2,1), top .42s cubic-bezier(.3,.7,.2,1), opacity .3s; }
+`;
+
+// ---- Dan's published steps (edit feed) → a replay the eye can follow ----
+type DanChange = {
+  clip_id: string;
+  removed?: boolean;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+};
+type DanFeedEntry = { n: number; t?: number; tool?: string | null; changes: DanChange[] };
+type ShownClip = Record<string, unknown>;
+
+/** clip id → clip fields + `lane` (track index), the same shape the server diff uses. */
+function clipStateMap(seq: EditSequence): Map<string, ShownClip> {
+  const m = new Map<string, ShownClip>();
+  (seq.tracks || []).forEach((t, lane) => {
+    for (const c of t.clips || []) if (c.id != null) m.set(String(c.id), { ...c, lane });
+  });
+  return m;
+}
+
+const TIME_KEYS = new Set(['timeline_start', 'timeline_end']);
+/** A clip only slid along time (start and end moved by the same amount): a knock-on of a cut/insert. */
+function isShiftOnly(c: DanChange): boolean {
+  if (c.removed || !c.before || !c.after) return false;
+  const keys = Object.keys(c.after);
+  if (!keys.length || !keys.every((k) => TIME_KEYS.has(k))) return false;
+  const ds = Number(c.after.timeline_start) - Number(c.before.timeline_start);
+  const de = Number(c.after.timeline_end) - Number(c.before.timeline_end);
+  return Number.isFinite(ds) && Number.isFinite(de) && Math.abs(ds - de) < 1e-3;
+}
+
+/** One published step can touch many clips. Show the meaningful ones one by one (linked A/V
+ *  together), and clips that merely slid because of a cut/insert all at once at the end. */
+function buildDanSteps(entries: DanFeedEntry[], start: EditSequence): DanChange[][] {
+  const link = new Map<string, string>();
+  for (const t of start.tracks || []) for (const c of t.clips || []) if (c.link_id) link.set(String(c.id), String(c.link_id));
+  const steps: DanChange[][] = [];
+  for (const e of entries) {
+    const changes = e.changes || [];
+    const shifts = changes.length > 3 ? changes.filter(isShiftOnly) : [];
+    const shiftIds = new Set(shifts.map((c) => c.clip_id));
+    const main = changes.filter((c) => !shiftIds.has(c.clip_id));
+    const groups = new Map<string, DanChange[]>();
+    for (const c of main) {
+      const lid = (c.after?.link_id as string) || (c.before?.link_id as string) || link.get(String(c.clip_id));
+      const key = lid ? `link:${lid}` : `clip:${c.clip_id}`;
+      groups.set(key, [...(groups.get(key) || []), c]);
+    }
+    let own = Array.from(groups.values()).sort((a, b) => danStart(a) - danStart(b));
+    if (own.length > 10) {
+      const size = Math.ceil(own.length / 10);
+      const merged: DanChange[][] = [];
+      for (let i = 0; i < own.length; i += size) merged.push(own.slice(i, i + size).flat());
+      own = merged;
+    }
+    steps.push(...own);
+    if (shifts.length) steps.push(shifts);
+  }
+  return steps;
+}
+
+function danStart(step: DanChange[]): number {
+  let t = Infinity;
+  for (const c of step) {
+    const v = Number(c.after?.timeline_start ?? c.before?.timeline_start);
+    if (Number.isFinite(v)) t = Math.min(t, v);
+  }
+  return t;
+}
+
+/** Where the playhead goes for a step: the earliest point it touches. */
+function danStepFocus(step: DanChange[], shown: Map<string, ShownClip>): number | null {
+  let t = danStart(step);
+  if (!Number.isFinite(t)) {
+    for (const c of step) {
+      const v = Number(shown.get(String(c.clip_id))?.timeline_start);
+      if (Number.isFinite(v)) t = Math.min(t, v);
+    }
+  }
+  return Number.isFinite(t) ? Math.max(0, t) : null;
+}
+
+/** The sequence as it looks part-way through the replay: final track layout and top-level fields,
+ *  clips as shown so far (each on its lane, in time order). */
+function assembleDanSequence(shown: Map<string, ShownClip>, start: EditSequence, final: EditSequence): EditSequence {
+  const startTracks = start.tracks || [];
+  const finalTracks = final.tracks || [];
+  const n = Math.max(finalTracks.length, startTracks.length);
+  const tracks = Array.from({ length: n }, (_, i) => ({ ...(finalTracks[i] || startTracks[i]), clips: [] as SequenceClip[] }));
+  for (const c of shown.values()) {
+    const lane = Number(c.lane);
+    const tr = tracks[Number.isInteger(lane) && lane >= 0 && lane < n ? lane : 0];
+    if (!tr) continue;
+    const { lane: _lane, ...clip } = c;
+    void _lane;
+    tr.clips.push(clip as unknown as SequenceClip);
+  }
+  for (const tr of tracks) tr.clips.sort((a, b) => Number(a.timeline_start || 0) - Number(b.timeline_start || 0));
+  return { ...final, tracks };
+}
+
 export function VideoReviewEditor({
   initialPath,
   initialUrl,
@@ -446,8 +556,14 @@ export function VideoReviewEditor({
   sidePanelTop,
   previewTopLeft,
   roomId,
+  contentId,
+  onExternalEdit,
 }: {
   roomId?: string;
+  /** With roomId: Dan's published steps on this content are replayed as visible motion. */
+  contentId?: string;
+  /** Called when Dan's steps arrive, so the parent reloads assets Dan may have added. */
+  onExternalEdit?: () => void;
   initialPath?: string;
   initialUrl?: string;
   initialThumbnailUrl?: string;
@@ -867,6 +983,7 @@ export function VideoReviewEditor({
   // during the save lag. Only an incoming value that differs from lastSynced is a genuine new
   // baseline (Dan render / external change) → adopt it and reset the undo history. Canonical
   // compare ignores key order / number reformat from the round-trip.
+  const danReplayingRef = useRef(false);
   const lastSyncedSig = useRef<string>(seqSig(initialSequence));
   // Annotations (blur boxes etc.) autosave separately — the sequence sig doesn't cover them, so
   // without this a drawn blur never reaches the backend/export. Echo-safe via seqSig.
@@ -889,6 +1006,8 @@ export function VideoReviewEditor({
   useEffect(() => { rememberLocalSig(localAnnSigs, seqSig(annotations)); }, [annotations]);
   useEffect(() => {
     const sig = seqSig(initialSequence);
+    // Dan's steps are being replayed; the replay itself ends on the saved value.
+    if (danReplayingRef.current) return;
     // Skip if this is the current sync point OR any state we've held locally (a lagging poll echo).
     if (sig === lastSyncedSig.current || localSeqSigs.current.has(sig)) return;
     lastSyncedSig.current = sig;
@@ -901,6 +1020,146 @@ export function VideoReviewEditor({
     histPrevRef.current = { annotations, sequence: initialSequence || null };
     setEditSequence(initialSequence || null);
   }, [annotations, initialSequence]);
+
+  // ---- Dan's hands: every step Dan publishes on this content is replayed here as motion ----
+  // The edit itself is already saved on the server the instant Dan makes it; only the SHOWING is
+  // slowed to a pace the eye can follow: the playhead jumps to the spot, the clip is picked, and it
+  // slides / stretches / appears / disappears. The replay always ends on the saved sequence.
+  const editSequenceRef = useRef(editSequence);
+  const annotationsRef = useRef(annotations);
+  const danPlayingRef = useRef(false);
+  const onExternalEditRef = useRef(onExternalEdit);
+  useEffect(() => {
+    editSequenceRef.current = editSequence;
+    annotationsRef.current = annotations;
+    danPlayingRef.current = playing;
+    onExternalEditRef.current = onExternalEdit;
+  });
+  const [danReplay, setDanReplay] = useState(false);
+  const [danTouch, setDanTouch] = useState<{ ids: string[]; appear: string[]; vanish: string[] }>({ ids: [], appear: [], vanish: [] });
+  const [danCursor, setDanCursor] = useState<{ x: number; y: number } | null>(null);
+  const feedAfterRef = useRef(-1);
+  const danSeekRef = useRef<((t: number) => void) | null>(null);
+  const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null }>>([]);
+  const feedRunningRef = useRef(false);
+
+  const adoptShown = useCallback((seq: EditSequence | null) => {
+    // Same as adopting a new baseline from the server: no autosave, no undo step.
+    const sig = seqSig(seq);
+    lastSyncedSig.current = sig;
+    rememberLocalSig(localSeqSigs, sig);
+    histPastRef.current = [];
+    histFutureRef.current = [];
+    histCheckpointRef.current = null;
+    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
+    histPrevRef.current = { annotations: annotationsRef.current, sequence: seq };
+    setEditSequence(seq);
+  }, []);
+
+  const pointDanAt = useCallback((ids: string[]) => {
+    // Two frames: React commits the step, then the bar has its new box.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const root = timelineScrollRef.current;
+      if (!root) return;
+      for (const id of ids) {
+        const el = root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`) as HTMLElement | null;
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const box = root.getBoundingClientRect();
+        // Keep the hand inside the visible timeline even when the bar is off-screen.
+        const x = clamp(r.left + Math.min(r.width / 2, 24), box.left + 8, box.right - 24);
+        const y = clamp(r.top + r.height / 2, box.top + 8, box.bottom - 16);
+        setDanCursor({ x, y });
+        return;
+      }
+    }));
+  }, []);
+
+  const runDanFeed = useCallback(async () => {
+    if (feedRunningRef.current) return;
+    feedRunningRef.current = true;
+    const wait = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
+    try {
+      while (feedQueueRef.current.length) {
+        const batch = feedQueueRef.current.shift()!;
+        const finalSeq = batch.sequence;
+        const start = editSequenceRef.current;
+        // A manual edit not yet saved: never paint over it; the normal sync decides.
+        if (!finalSeq || !start || seqSig(start) !== lastSyncedSig.current) continue;
+        danReplayingRef.current = true;
+        setDanReplay(true);
+        const steps = buildDanSteps(batch.entries, start);
+        const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
+        const shown = clipStateMap(start);
+        for (const step of steps) {
+          const vanish = step.filter((c) => c.removed).map((c) => String(c.clip_id));
+          const ids = step.map((c) => String(c.clip_id));
+          const focus = danStepFocus(step, shown);
+          if (focus !== null && !danPlayingRef.current) danSeekRef.current?.(focus);
+          if (vanish.length) {
+            setDanTouch({ ids, appear: [], vanish });
+            pointDanAt(vanish);
+            await wait(Math.min(380, stepMs * 0.55));
+          }
+          const appear: string[] = [];
+          for (const ch of step) {
+            const id = String(ch.clip_id);
+            if (ch.removed) { shown.delete(id); continue; }
+            if (!shown.has(id)) appear.push(id);
+            shown.set(id, { ...(shown.get(id) || {}), ...(ch.after || {}) });
+          }
+          adoptShown(assembleDanSequence(shown, start, finalSeq));
+          const kept = ids.filter((id) => !vanish.includes(id));
+          setDanTouch({ ids: kept, appear, vanish: [] });
+          if (kept.length) {
+            setSelectedSequenceClipId(kept[0]);
+            setSelectedSequenceClipIds(kept);
+            pointDanAt(kept);
+          }
+          await wait(stepMs);
+        }
+        adoptShown(finalSeq);
+        await wait(250);
+        danReplayingRef.current = false;
+      }
+    } finally {
+      danReplayingRef.current = false;
+      feedRunningRef.current = false;
+      setDanReplay(false);
+      setDanTouch({ ids: [], appear: [], vanish: [] });
+      window.setTimeout(() => { if (!feedRunningRef.current) setDanCursor(null); }, 900);
+    }
+  }, [adoptShown, pointDanAt]);
+
+  useEffect(() => {
+    if (!roomId || !contentId) return;
+    let stopped = false;
+    let timer: number | undefined;
+    feedAfterRef.current = -1;
+    const tick = async () => {
+      try {
+        const res = await fetch(
+          `/api/v1/production-assets/contents/${encodeURIComponent(contentId)}/edit-feed?room_id=${encodeURIComponent(roomId)}&after=${feedAfterRef.current}`,
+          { credentials: 'include' },
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { last?: number; entries?: DanFeedEntry[]; sequence?: EditSequence | null };
+          const opened = feedAfterRef.current < 0;
+          feedAfterRef.current = Math.max(feedAfterRef.current, Number(data.last || 0));
+          if (!opened && data.entries?.length) {
+            feedQueueRef.current.push({ entries: data.entries, sequence: data.sequence || null });
+            onExternalEditRef.current?.();
+            void runDanFeed();
+          }
+        }
+      } catch {
+        // next tick retries (sandbox reload etc.)
+      }
+      if (!stopped) timer = window.setTimeout(tick, document.hidden ? 4000 : 800);
+    };
+    void tick();
+    return () => { stopped = true; if (timer) window.clearTimeout(timer); };
+  }, [roomId, contentId, runDanFeed]);
 
   const sequenceDuration = useMemo(
     () => Number(editSequence?.duration || Math.max(0, ...sequenceVideoClips.map((clip) => clip.timeline_end || 0))),
@@ -962,6 +1221,14 @@ export function VideoReviewEditor({
   // HW decoder re-inits; a free wall-clock bar would run ahead during those stalls (the desync).
   // Following the engine keeps the bar locked to the picture — it stalls when the picture stalls.
   const engPosRef = useRef({ pos: 0, wall: 0 });
+  // Dan's replay moves the playhead the same way a click on the ruler does (no snapping).
+  useEffect(() => {
+    danSeekRef.current = (t: number) => {
+      setCurrentTime(t);
+      engPosRef.current = { pos: t, wall: performance.now() };
+      if (nativeShell) nativeSend({ cmd: 'seek', pos: t });
+    };
+  }, [nativeShell, nativeSend]);
   // The thin playhead bar is moved DIRECTLY via this ref at 60Hz (no React re-render), so the heavy
   // 324-clip editor doesn't re-render every frame just to nudge the bar (that 60Hz full re-render
   // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
@@ -2780,6 +3047,17 @@ export function VideoReviewEditor({
 
   return (
     <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
+      <style>{DAN_HANDS_CSS}</style>
+      {danCursor ? (
+        <div
+          aria-hidden
+          className="dan-hand pointer-events-none fixed z-[60]"
+          style={{ left: danCursor.x, top: danCursor.y, opacity: danReplay ? 1 : 0 }}
+        >
+          <MousePointer2 className="h-5 w-5 fill-sky-400 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]" />
+          <span className="ml-3 mt-[-2px] block w-fit rounded-full bg-sky-500 px-1.5 py-[1px] text-[10px] font-semibold leading-tight text-white shadow">ダン</span>
+        </div>
+      ) : null}
       {marquee ? (
         <div
           className="pointer-events-none fixed z-50 border border-sky-400 bg-sky-400/15"
@@ -3237,7 +3515,7 @@ export function VideoReviewEditor({
                   </button>
                 </div>
               ) : null}
-              <div ref={timelineScrollRef} className="mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2" onWheel={handleTimelineWheel}>
+              <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`} onWheel={handleTimelineWheel}>
                 <div className="flex gap-x-2 text-[11px]">
                   <div className="flex w-[82px] shrink-0 flex-col">
                     {timelineLanes.map((lane, i) => (
@@ -3367,6 +3645,8 @@ export function VideoReviewEditor({
                                   key={item.key}
                                   data-clip-id={clip.id}
                                   className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
+                                    danTouch.ids.includes(clip.id) ? 'dan-touch' : ''} ${danTouch.appear.includes(clip.id) ? 'dan-appear' : ''} ${
+                                    danTouch.vanish.includes(clip.id) ? 'dan-vanish' : ''} ${
                                     selected
                                       ? 'border-yellow-300 ring-2 ring-yellow-300/70'
                                       : linkedSelected

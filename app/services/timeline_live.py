@@ -147,21 +147,7 @@ def apply_edit(room_id: str, content_id: str, op: str, args: dict[str, Any],
             "note": "エディタに反映します。再生して結果を確認できます"}
 
 
-def describe_changes(before, after):
-    def indexed(seq):
-        return {c['id']: dict(c, lane=n) for n,t in enumerate(seq.get('tracks', [])) for c in t.get('clips', [])}
-    old, new = indexed(before), indexed(after)
-    result = []
-    for cid in sorted(old.keys() | new.keys()):
-        a, b = old.get(cid, {}), new.get(cid, {})
-        if a == b:
-            continue
-        c = b or a
-        keys = [k for k in a.keys() | b.keys() if a.get(k) != b.get(k)]
-        result.append({'clip_id': cid, 'text': c.get('text'), 'start': c.get('timeline_start'),
-                       'end': c.get('timeline_end'), 'removed': not bool(b),
-                       'before': {k:a.get(k) for k in keys}, 'after': {k:b.get(k) for k in keys}})
-    return result
+describe_changes = td.describe_changes
 
 
 def _bake_caption_png(room_id: str, seq: dict[str, Any], args: dict[str, Any]) -> None:
