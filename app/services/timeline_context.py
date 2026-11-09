@@ -24,7 +24,8 @@ def probe_timeline_audio(sequence, asset_dir, t0, t1):
     if not all(math.isfinite(t) for t in (t0, t1)) or t0 < 0 or t1 <= t0:
         return {'ok': False, 'error': 'Use a finite positive timeline range.'}
     if not native_runnable(native_exe_default()):
-        return {'ok': False, 'error': 'The native editor engine does not run on this machine.'}
+        from app.services.sequence_window import probe_audio
+        return probe_audio(Path(asset_dir).name, sequence, t0, t1)
     with tempfile.TemporaryDirectory(prefix='dan-audio-probe-') as folder:
         path = Path(folder) / 'contents.json'
         path.write_text(json.dumps([{'id': 'probe', 'timeline': {'sequence': sequence}}]), encoding='utf-8')
@@ -157,11 +158,13 @@ def render_timeline_frames(sequence: dict[str, Any], asset_dir: str, ts: list[fl
     little more than a single frame). Returns {ok, paths|error} with paths in the
     same order as ts."""
     exe = os.environ.get("NATIVE_UI_EXE") or native_exe_default()
-    if not native_runnable(exe):
-        return {"ok": False, "error": f"native engine not found: {exe}"}
     ts = [float(t) for t in ts][:12] or [0.0]
     odir = Path(out_dir) if out_dir else Path(tempfile.gettempdir())
     odir.mkdir(parents=True, exist_ok=True)
+    if not native_runnable(exe):
+        # the Mac: the same FFmpeg compositor as its MP4 export, one frame per time
+        from app.services.sequence_window import render_frames
+        return render_frames(Path(asset_dir).name, sequence, ts, odir)
     stem = odir / f"frame_{int(ts[0] * 1000)}_{int(time.time() * 1000) % 100000}"
     png = Path(f"{stem}.png")
     tspec = ",".join(f"{t:.3f}" for t in ts)

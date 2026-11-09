@@ -70,3 +70,65 @@ def test_windowed_export_matches_single_pass_frame_for_frame(room, tmp_path, mon
     snd = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_name',
                           '-of', 'csv=p=0', chunked['output_path']], capture_output=True, text=True).stdout.strip()
     assert snd == 'aac'
+
+
+def _png_gray(path) -> np.ndarray:
+    out = subprocess.run(['ffmpeg', '-v', 'error', '-i', str(path), '-vf', 'scale=64:36,format=gray',
+                          '-f', 'rawvideo', '-'], capture_output=True, check=True).stdout
+    return np.frombuffer(out, np.uint8).reshape(36, 64).astype(int)
+
+
+def _with_pip(room):
+    """A video picture-in-picture that starts before the frames looked at (source 2 s ahead)."""
+    seq = room['timeline']['sequence']
+    pip = {'id': 'pip', 'asset_id': 'v', 'composition': 'pip', 'timeline_start': 0.2, 'timeline_end': 2.9,
+           'source_start': 0.9, 'source_end': 3.6, 'position': {'x': 0.5, 'y': 0.5, 'width': 0.5, 'height': 0.5}}
+    seq['tracks'].insert(1, {'id': 'pip', 'type': 'video', 'clips': [pip]})
+    return room
+
+
+def test_frame_and_range_render_match_the_whole_export(room, tmp_path, monkeypatch):
+    """render_frame on the Mac and watch_render's range export draw only their frames, and each
+    frame is the whole export's frame (sources, overlays and a PiP cut mid-clip re-based)."""
+    from app.services import sequence_window as sw
+    monkeypatch.setenv('DAN_EXPORT_DISABLE_NATIVE', '1')
+    monkeypatch.setattr(r, '_native_export_canvas', lambda fmt: (64, 36))
+    registered = []
+    monkeypatch.setattr(r, '_add_generated_video_asset', lambda *a, **k: registered.append(a) or {'id': 'x'})
+    monkeypatch.setattr(r, '_attach_output_asset', lambda *a, **k: None)
+    monkeypatch.setattr(r, '_read_contents', lambda room_id: [])
+    room = _with_pip(room)
+    seq = room['timeline']['sequence']
+    (tmp_path / 's').mkdir()
+    monkeypatch.setenv('DAN_EXPORT_SINGLE_PASS', '1')
+    whole = _frames(Path(r._render_sequence_job('room', 's', 'c', room, tmp_path / 's')['output_path']))
+    times = [0.05, 0.6, 1.15, 1.2, 1.45, 2.0, 2.95]
+    res = sw.render_frames('room', seq, times, tmp_path / 'frames')
+    assert res['ok'], res
+    for t, png in zip(times, res['paths']):
+        k = sw.frame_of(t, FPS)
+        diffs = [np.abs(_png_gray(png) - whole[j]).mean() for j in (k - 1, k, k + 1) if 0 <= j < len(whole)]
+        assert np.abs(_png_gray(png) - whole[k]).mean() < 1.5, (t, diffs)
+    assert not list((tmp_path / 'frames').glob('*.txt'))   # no scratch left next to the frames
+    (tmp_path / 'g').mkdir()
+    registered.clear()
+    ranged = dict(room, export_ranges=[[0.5, 1.5], [2.0, 2.5]], no_register=True)
+    out = r._render_sequence_job('room', 'g', 'c', ranged, tmp_path / 'g')
+    got = _frames(Path(out['output_path']))
+    assert len(got) == 30 + 15 and not registered
+    want = np.concatenate([whole[15:45], whole[60:75]])
+    assert np.abs(got - want).mean((1, 2)).max() < 2
+
+
+def test_cut_caption_keeps_its_animation_phase():
+    """A caption cut by a window keeps its own span; its first drawing sits on the export's grid."""
+    from app.services import sequence_window as sw
+    seq = {'frame_rate': 30, 'tracks': [{'type': 'caption', 'clips': [
+        {'id': 'c', 'text': 'x', 'timeline_start': 1.0, 'timeline_end': 4.0, 'style': {'animation': 'pop'}}]}]}
+    cut = sw.trim_sequence(seq, {}, 60, 61, 30.0)['tracks'][0]['clips'][0]
+    assert cut['_caption_span'] == [1.0, 4.0]
+    assert cut['timeline_start'] == 0 and abs(cut['timeline_end'] - 1 / 30) < 1e-9
+    # export: drawing i (shown from 1.0 + i/20 - half a frame) at frame 60 (2.0 s) is i = 20
+    assert abs(cut['_caption_sample'][0] - 2.0) < 1e-9 and abs(cut['_caption_at']) < 1e-9
+    untouched = sw.trim_sequence(seq, {}, 0, 150, 30.0)['tracks'][0]['clips'][0]
+    assert '_caption_span' not in untouched and untouched['timeline_start'] == 1.0

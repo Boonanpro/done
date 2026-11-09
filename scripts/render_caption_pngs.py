@@ -11,6 +11,7 @@ spec.json = {
     # static caption -> single PNG
     {"png": "C:/abs/cap0.png", "text": "...", "time": 0.0, "design": {...}, "words": [...]},
     # animated caption -> PNG sequence 00000.png.. in seq_dir, sampled at fps over [start,end]
+    # (or over [sample_start,sample_end] inside it when given)
     {"seq_dir": "C:/abs/cap1_seq", "text": "...", "start": 1.0, "end": 3.5, "fps": 20,
      "design": {...}, "words": [...]}
   ]
@@ -21,6 +22,7 @@ timeline. Prints one line per item: "OK ..." or "FAIL ...". Exit 0 if all succee
 """
 import base64
 import json
+import math
 import os
 import sys
 import time
@@ -86,7 +88,13 @@ def main() -> int:
                     start = float(item.get("start") or 0.0)
                     end = max(start + 0.05, float(item.get("end") or start + 1.0))
                     fps = float(item.get("fps") or 20)
-                    n = max(1, round((end - start) * fps))
+                    # sample_start/sample_end: draw only part of the caption's span (a cut window)
+                    if "sample_start" in item:
+                        s0 = float(item["sample_start"])
+                        n = max(1, math.ceil((float(item["sample_end"]) - s0) * fps - 1e-6))
+                    else:
+                        s0 = start
+                        n = max(1, round((end - start) * fps))
                     seq = Path(item["seq_dir"])
                     seq.mkdir(parents=True, exist_ok=True)
                     page.goto(payload_url(web_base, out_w, out_h, item, start),
@@ -97,7 +105,7 @@ def main() -> int:
                     except Exception:
                         pass
                     for f in range(n):
-                        t = start + (f + 0.5) / fps  # sample mid-frame
+                        t = s0 + (f + 0.5) / fps  # sample mid-frame
                         try:
                             page.evaluate("(t) => window.__renderCaptionAt(t)", t)
                         except Exception:
