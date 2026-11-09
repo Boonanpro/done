@@ -68,20 +68,20 @@ def pending_suggestions(data):
     return sum(1 for tag in ('ins', 'del', 'moveFrom', 'moveTo') for _ in root.iter(W+tag))
 
 
-def clean(data):
-    """Confirmed text only: suggestions rejected in the copy, comments removed."""
+def clean(data, accept=False):
+    """Confirmed text only: suggestions rejected in the copy, comments removed.
+    With accept, every suggestion is applied instead (the working doc itself is untouched)."""
     parts, root = _read(data)
-    split = [p for p in paragraphs(root) if p.find(W+'pPr/'+W+'rPr/'+W+'ins') is not None]
+    drop, keep = (('del', 'moveFrom'), ('ins', 'moveTo')) if accept else (('ins', 'moveTo'), ('del', 'moveFrom'))
+    split = [p for p in paragraphs(root) if p.find(W+'pPr/'+W+'rPr/'+W+drop[0]) is not None]
     parent = _parents(root)
-    for tag in ('ins', 'moveTo'):
+    for tag in drop:
         for el in list(root.iter(W+tag)):
             holder = parent.get(el)
             if holder is None: continue
-            if holder.tag == W+'rPr':  # an inserted paragraph mark
-                holder.remove(el); continue
-            holder.remove(el)
+            holder.remove(el)  # in rPr this is the paragraph mark, handled with split below
     parent = _parents(root)
-    for tag in ('del', 'moveFrom'):
+    for tag in keep:
         for el in list(root.iter(W+tag)):
             holder = parent.get(el)
             if holder is None: continue
@@ -92,7 +92,8 @@ def clean(data):
             for i, child in enumerate(list(el)): holder.insert(at+i, child)
     for t in list(root.iter(W+'delText')):
         t.tag = W+'t'
-    # A paragraph whose break was suggested did not exist before: join it to the next one.
+    # A paragraph whose break goes away (suggested insertion rejected, or suggested
+    # deletion accepted) joins the next one.
     parent = _parents(root)
     for p in split:
         holder = parent.get(p)
@@ -111,7 +112,7 @@ def clean(data):
             old = change.find(W+prop)
             grand = parent.get(holder)
             if grand is None: continue
-            if old is None:
+            if old is None or accept:
                 holder.remove(change); continue
             replacement = copy.deepcopy(old)
             if prop == 'pPr':
@@ -352,14 +353,20 @@ def status(account, client_id):
             'last_delivery': meta.get('delivered_at')}
 
 
-def deliver(account, work_id, client_id=None, name=None, author='株式会社パイナ', allow_pending=False, force=False, dry_run=False):
+def deliver(account, work_id, client_id=None, name=None, author='株式会社パイナ', allow_pending=False, force=False, dry_run=False,
+            with_pending=False):
+    """with_pending sends the text as if every suggestion in the working doc were accepted,
+    while the working doc keeps them as suggestions (the owner reviews them later)."""
     from app.services.gdoc_drive import export_docx
     work = export_docx(account, work_id)
     pending = pending_suggestions(work)
-    if pending and not allow_pending:
-        raise ValueError(f'The working doc still has {pending} unresolved suggestion marks; accept or reject them, or pass allow_pending to send only the confirmed text')
-    fresh = clean(work)
+    if pending and not (allow_pending or with_pending):
+        raise ValueError(f'The working doc still has {pending} unresolved suggestion marks; accept or reject them, '
+                         'pass with_pending to send them as accepted, or allow_pending to send only the confirmed text')
+    fresh = clean(work, accept=with_pending)
     new_texts = texts(fresh, 'after')
+    if with_pending and ''.join(_norm(new_texts)) != ''.join(_norm(texts(work, 'after'))):  # joined: texts keeps deleted breaks
+        raise RuntimeError('Applying the working doc suggestions did not give the suggested text')
     if client_id:
         folder = _state_dir(client_id)
         meta = json.loads((folder/'meta.json').read_text())
