@@ -1053,7 +1053,8 @@ def _import_media(draft: dict, path: str, name: str) -> dict:
 
 def _ffmpeg() -> str:
     import shutil as _sh
-    for c in (_sh.which("ffmpeg"), r"C:\Users\Owner\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"):
+    for c in (_sh.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
+              r"C:\Users\Owner\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"):
         if c and Path(c).exists():
             return c
     raise RuntimeError("ffmpeg not found")
@@ -1063,7 +1064,7 @@ def _ffprobe() -> str:
     """Find ffprobe next to the selected ffmpeg binary when possible."""
     ffmpeg = _ffmpeg()
     candidates = (
-        str(Path(ffmpeg).with_name("ffprobe.exe")),
+        str(Path(ffmpeg).with_name("ffprobe.exe" if ffmpeg.lower().endswith(".exe") else "ffprobe")),
         shutil.which("ffprobe"),
         r"C:\Users\Owner\ffmpeg\bin\ffprobe.exe",
         r"C:\ffmpeg\bin\ffprobe.exe",

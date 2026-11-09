@@ -120,6 +120,8 @@ class CreateJobRequest(BaseModel):
 def _ffmpeg() -> str:
     candidates = [
         shutil.which("ffmpeg"),
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
         r"C:\Users\Owner\ffmpeg\bin\ffmpeg.exe",
         r"C:\ffmpeg\bin\ffmpeg.exe",
     ]
@@ -156,6 +158,8 @@ def _filter_script_args(exe: str, path: Path) -> list[str]:
 def _ffprobe() -> str:
     candidates = [
         shutil.which("ffprobe"),
+        "/opt/homebrew/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
         r"C:\Users\Owner\ffmpeg\bin\ffprobe.exe",
         r"C:\ffmpeg\bin\ffprobe.exe",
     ]
@@ -660,8 +664,15 @@ def _render_caption_overlays(
         animated = str(style.get("animation") or "") in _ANIMATED_CAPTIONS
         if animated:
             seq_dir = job_dir / f"caption_{i:03d}_seq"
-            items.append({"seq_dir": str(seq_dir), "text": text, "start": start, "end": end,
-                          "fps": _CAPTION_ANIM_FPS, "design": style, "words": words})
+            item = {"seq_dir": str(seq_dir), "text": text, "start": start, "end": end,
+                    "fps": _CAPTION_ANIM_FPS, "design": style, "words": words}
+            if isinstance(cap.get("_caption_span"), list):
+                # a caption cut by a window (sequence_window): animate on its own span, draw
+                # only the part inside the window; the first drawing may start before the window
+                item["start"], item["end"] = cap["_caption_span"]
+                item["sample_start"], item["sample_end"] = cap["_caption_sample"]
+                start = float(cap["_caption_at"])
+            items.append(item)
             specs.append({"kind": "anim", "seq_dir": seq_dir, "fps": _CAPTION_ANIM_FPS, "start": start, "end": end})
         else:
             png = job_dir / f"caption_{i:03d}.png"
@@ -1797,7 +1808,10 @@ def _render_sequence_chunked(room_id: str, job_id: str, instruction: dict[str, A
             if en > w0 and st < w1:
                 anns.append({**a, "start": st - shift, "end": en - shift})
         sub = {**instruction, "timeline": {**timeline, "sequence": _window_sequence(sequence, w0, w1, shift), "annotations": anns}}
-        return _render_sequence_pass(room_id, job_id, sub, parts, parts / f"v{i:03d}.mp4",
+        # each window draws its captions into its own folder (the names are per-pass indices)
+        scratch = parts / f"w{i:03d}"
+        scratch.mkdir(parents=True, exist_ok=True)
+        return _render_sequence_pass(room_id, job_id, sub, scratch, parts / f"v{i:03d}.mp4",
                                      video_only=True, segment=True)
 
     decoded: dict[str, Path] = {}
@@ -1835,9 +1849,10 @@ def _render_sequence_chunked(room_id: str, job_id: str, instruction: dict[str, A
 
 def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any], job_dir: Path,
                           out_path: Path, *, video_only: bool = False,
-                          segment: bool = False) -> tuple[int, int, int] | None:
+                          segment: bool = False, still: bool = False) -> tuple[int, int, int] | None:
     """One FFmpeg filtergraph over the given timeline -> out_path. Returns
-    (rendered_base_clips, width, height), or None when there is nothing to draw."""
+    (rendered_base_clips, width, height), or None when there is nothing to draw.
+    still: out_path is a PNG of the first frame (video_only)."""
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
@@ -2435,16 +2450,9 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             *command,
             *_filter_script_args(command[0], fg_path),
             *maps,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "22",
-            "-pix_fmt",
-            "yuv420p",
-            *audio_args,
-            *([] if segment else ["-movflags", "+faststart"]),
+            *(["-frames:v", "1", "-update", "1"] if still else [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
+                *audio_args, *([] if segment else ["-movflags", "+faststart"])]),
             str(out_path),
         ],
         stdout=subprocess.DEVNULL,
@@ -2454,6 +2462,24 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         check=True,
     )
     return rendered_count, output_width, output_height
+
+
+def _requested_ranges(instruction: dict[str, Any]) -> list[tuple[float, float]]:
+    """Timeline ranges to export instead of the whole sequence: export_ranges [[a,b],...]
+    (selected clips) or the editor's in/out export_range [a,b]. Same reading as the native path."""
+    out: list[tuple[float, float]] = []
+    rngs = instruction.get("export_ranges")
+    if not (isinstance(rngs, list) and rngs):
+        rng = instruction.get("export_range")
+        rngs = [rng] if isinstance(rng, list) and len(rng) == 2 else []
+    for r in rngs:
+        try:
+            r0, r1 = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if 0 <= r0 < r1:
+            out.append((r0, r1))
+    return out
 
 
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
@@ -2470,19 +2496,25 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     if not isinstance(sequence, dict):
         return None
     out_path = job_dir / f"{job_id}_sequence.mp4"
-    windows = _export_windows(sequence, instruction)
-    if len(windows) > 1:
-        passed = _render_sequence_chunked(room_id, job_id, instruction, job_dir, out_path, windows)
+    ranges = _requested_ranges(instruction)
+    if ranges:
+        from app.services.sequence_window import render_ranges
+        passed = render_ranges(room_id, job_id, instruction, job_dir, out_path, ranges)
     else:
-        passed = _render_sequence_pass(room_id, job_id, instruction, job_dir, out_path)
+        windows = _export_windows(sequence, instruction)
+        if len(windows) > 1:
+            passed = _render_sequence_chunked(room_id, job_id, instruction, job_dir, out_path, windows)
+        else:
+            passed = _render_sequence_pass(room_id, job_id, instruction, job_dir, out_path)
     if not passed:
         return None
     rendered_count, output_width, output_height = passed
 
     # Privacy: bake in screen-recording blur (credentials/sensitive text) as a post-pass on the
     # final video, if the content has it enabled. Reads the authoritative stored spec.
+    # Its times are whole-timeline times, so a range export (cut and moved to 0) skips it.
     try:
-        _content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
+        _content = None if ranges else next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
         _tl = (_content or {}).get("timeline") or {}
         # spec can live on the timeline (set directly) OR on the assembled sequence (Dan-driven).
         _sb = _tl.get("screen_blur") or (_tl.get("sequence") or {}).get("screen_blur")
@@ -2495,6 +2527,9 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     except Exception as exc:  # noqa: BLE001
         logger.warning("screen blur post-pass skipped: %s", exc)
 
+    if instruction.get("no_register"):
+        return {"output_path": str(out_path), "render_engine": "ffmpeg",
+                "render_size": f"{output_width}x{output_height}"}
     output_asset = _add_generated_video_asset(
         room_id,
         out_path,
