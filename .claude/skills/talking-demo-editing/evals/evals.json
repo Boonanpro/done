@@ -23,6 +23,43 @@
         "半透明の背景表現と不透明の端末を区別する",
         "画角を維持し不要な枠を除く"
       ]
+    },
+    {
+      "id": 3,
+      "prompt": "中村さん LINE 特典 v12（17分48秒）を、本人が見る前に全編見直し、本人が直させるであろう所と直し方を計画せよ（材料: /Users/mikihonda/dan-workspace/video-edit-learning/eval/inputs/t1/）。",
+      "expected_output": "本人の 11/9 15:57 の17項目（/Users/mikihonda/dan-workspace/video-edit-learning/eval/judge/t1/truth.md）を先に拾う。決まった条件を壊さない。",
+      "files": [
+        "/Users/mikihonda/dan-workspace/video-edit-learning/eval/inputs/t1/brief.md"
+      ],
+      "assertions": [
+        "答えの17項目で旧版より点が高い",
+        "本人が決めた条件（寄りは一文だけ等）を変える提案が無い",
+        "合わない絵は外すより差し替える"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "新アタック紹介映像の改訂版（3分9秒）を、本人が見る前に見直し、直す所と直し方を計画せよ（材料: /Users/mikihonda/dan-workspace/video-edit-learning/eval/inputs/t2/）。",
+      "expected_output": "本人の後の指摘12項目（/Users/mikihonda/dan-workspace/video-edit-learning/eval/judge/t2/truth.md）を先に拾い、ほかの案件のテイストを持ち込まない。",
+      "files": [
+        "/Users/mikihonda/dan-workspace/video-edit-learning/eval/inputs/t2/brief.md"
+      ],
+      "assertions": [
+        "答えの12項目で旧版以上",
+        "中村さん・ポルノアンチの書体・効果音・寄りの頻度を持ち込まない"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "スヤさん YouTube 1本目の撮影素材、冒頭15分の編集計画を書け（材料: /Users/mikihonda/dan-workspace/video-edit-learning/eval/inputs/t3/）。",
+      "expected_output": "実物を先に、声と重複する文字を出さず、強調を1か所に絞り、札の読まれ方を考える。ほかの案件のテイストを持ち込まない。",
+      "files": [
+        "/Users/mikihonda/dan-workspace/video-edit-learning/eval/inputs/t3/brief.md"
+      ],
+      "assertions": [
+        "物差し（/Users/mikihonda/dan-workspace/video-edit-learning/eval/judge/t3/rubric.md）の9項目で旧版より点が高い",
+        "持ち込み0件"
+      ]
     }
   ]
 }
