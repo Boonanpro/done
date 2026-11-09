@@ -1,7 +1,7 @@
 """The customer's copy of a working Google Doc (see app/services/gdoc_client.py).
 
   deliver --work <作業用ID> [--client <お客さん用ID>] [--name <新しく作る時の名前>]
-          [--allow-pending] [--force] [--dry-run <出力DOCX>]
+          [--allow-pending | --with-pending] [--force] [--dry-run <出力DOCX>]
   status  --client <お客さん用ID>
   adopt   --work <作業用ID> --client <前からあるお客さん用ID>
 """
@@ -19,6 +19,7 @@ def main():
     d.add_argument('--work', required=True); d.add_argument('--client'); d.add_argument('--name')
     d.add_argument('--account', default='shub6923'); d.add_argument('--author', default='株式会社パイナ')
     d.add_argument('--allow-pending', action='store_true', help='作業用に残る提案を除いて、確定した本文だけを渡す')
+    d.add_argument('--with-pending', action='store_true', help='作業用の提案は残したまま、全部入れた後の本文を渡す')
     d.add_argument('--force', action='store_true', help='お客さんの直し・コメントを取り込み済みの時だけ')
     d.add_argument('--dry-run', metavar='DOCX')
     s = sub.add_parser('status'); s.add_argument('--client', required=True); s.add_argument('--account', default='shub6923')
@@ -30,7 +31,7 @@ def main():
     if a.action == 'status':
         print(json.dumps(C.status(a.account, a.client), ensure_ascii=False, indent=1)); return
     if not a.client and not a.name: raise SystemExit('--name is required for a new customer copy')
-    result = C.deliver(a.account, a.work, a.client, a.name, a.author, a.allow_pending, a.force, bool(a.dry_run))
+    result = C.deliver(a.account, a.work, a.client, a.name, a.author, a.allow_pending, a.force, bool(a.dry_run), a.with_pending)
     if a.dry_run:
         Path(a.dry_run).write_bytes(result.pop('output'))
     print(json.dumps(result, ensure_ascii=False))

@@ -36,6 +36,17 @@ def test_clean_keeps_confirmed_text_only_and_drops_comments():
     assert C.texts(raw, 'before') == ['見出し', '最初の文です。'] and C.texts(raw, 'after') == ['見出し', '最初の文章。', '足した段落']
 
 
+
+def test_accept_applies_every_suggestion_and_joins_deleted_paragraph_breaks():
+    gone = '<w:pPr><w:rPr><w:del w:id="4" w:author="ダン"/></w:rPr></w:pPr>'
+    raw = docx(p(r('見出し', True)) + p(r('最初の'), dele('文です。'), ins('文章。'))
+               + p(ins('足した段落'), mark='<w:pPr><w:rPr><w:ins w:id="3" w:author="本人"/></w:rPr></w:pPr>')
+               + p(dele('消す段落'), mark=gone) + p(r('前半'), mark=gone) + p(r('後半')), comments=True)
+    out = C.clean(raw, accept=True)
+    assert C.pending_suggestions(out) == 0 and 'word/comments.xml' not in zipfile.ZipFile(io.BytesIO(out)).namelist()
+    assert C.texts(out) == ['見出し', '最初の文章。', '足した段落', '前半後半']
+    assert ''.join(C.texts(out)) == ''.join(C.texts(raw, 'after'))
+
 def test_changes_since_last_delivery_become_whole_phrase_suggestions():
     base = ['見出し', '最初にかかるお金は、ページと広告の数十万円だけです。', '消える段落', '残る段落']
     new = docx(p(r('見出し', True)) + p(r('最初にかかるお金は、'), r('数万円の広告費くらいです。', True)) + p(r('残る段落')) + p(r('新しい段落')))
