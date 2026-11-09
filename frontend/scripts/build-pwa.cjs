@@ -29,7 +29,8 @@ async function build() {
     runtimeCaching: [
       { urlPattern: /^https?:\/\/[^/]+\/api\/v1\/collab\/(?!files\/)/,
         handler: 'NetworkOnly', method: 'GET' },
-      ...runtimeCaching,
+      // 動画・音声は貯めない（worker/index.js が Service Worker を通さずに読ませる）
+      ...runtimeCaching.filter(rule => !['static-video-assets', 'static-audio-assets'].includes(rule.options?.cacheName)),
     ],
   });
   if (!result.count) throw new Error('No assets were included in the service worker');
