@@ -238,7 +238,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (track.type === 'caption') {
         for (const clip of track.clips || []) {
           if (!clip.asset_id) continue;
-          out.push({ clip, kind: 'overlay', layer: clip.layer ?? 2, position: (clip.position as VisualClip['position']) || null });
+          out.push({ clip, kind: 'overlay', layer: clip.layer ?? Math.max(2, visualIndex), position: (clip.position as VisualClip['position']) || null });
         }
         continue;
       }

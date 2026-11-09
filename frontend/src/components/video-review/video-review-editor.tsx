@@ -751,7 +751,7 @@ export function VideoReviewEditor({
           layer = clip.layer ?? audioRoleLayer(clip.role);
         } else if (track.type === 'caption') {
           itemType = 'caption';
-          layer = clip.layer ?? 2;
+          layer = clip.layer ?? Math.max(2, visualIndex);
         } else if (track.type === 'effect') {
           itemType = 'effect';
           layer = clip.layer ?? 3;
