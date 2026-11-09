@@ -78,7 +78,8 @@ export function MediaViewer({items,initialUrl,onClose}:{items:GalleryItem[];init
  // The player belongs to the gallery, not a virtualized page: resizing a long
  // list can temporarily recycle the selected page without interrupting playback.
  const videoSource=items[index]?.kind==='video'?items[index].url:null;
- const player=useVideoPlayer(videoSource,p=>{p.loop=false;if(videoSource)p.play()});
+ // 倍速にしても声の高さを変えない（Android の初期値は速さと一緒に高さも上がる）
+ const player=useVideoPlayer(videoSource,p=>{p.loop=false;p.preservesPitch=true;if(videoSource)p.play()});
  const selectedIndex=useRef(index);selectedIndex.current=index;
  const list=useRef<FlatList<GalleryItem>>(null);
  // Recreate only the paging surface when its width changes. The player above
