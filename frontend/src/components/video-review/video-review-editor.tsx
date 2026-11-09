@@ -506,18 +506,6 @@ function danStart(step: DanChange[]): number {
   return t;
 }
 
-/** Where the playhead goes for a step: the earliest point it touches. */
-function danStepFocus(step: DanChange[], shown: Map<string, ShownClip>): number | null {
-  let t = danStart(step);
-  if (!Number.isFinite(t)) {
-    for (const c of step) {
-      const v = Number(shown.get(String(c.clip_id))?.timeline_start);
-      if (Number.isFinite(v)) t = Math.min(t, v);
-    }
-  }
-  return Number.isFinite(t) ? Math.max(0, t) : null;
-}
-
 /** The sequence as it looks part-way through the replay: final track layout and top-level fields,
  *  clips as shown so far (each on its lane, in time order). */
 function assembleDanSequence(shown: Map<string, ShownClip>, start: EditSequence, final: EditSequence): EditSequence {
@@ -1023,8 +1011,10 @@ export function VideoReviewEditor({
 
   // ---- Dan's hands: every step Dan publishes on this content is replayed here as motion ----
   // The edit itself is already saved on the server the instant Dan makes it; only the SHOWING is
-  // slowed to a pace the eye can follow: the playhead jumps to the spot, the clip is picked, and it
+  // slowed to a pace the eye can follow: Dan's hand points at the clip, which glows and
   // slides / stretches / appears / disappears. The replay always ends on the saved sequence.
+  // The playhead and the owner's own selection are the owner's: the replay never moves them
+  // (11/10 owner: "自分のUIを奪われてしまうのは避けたい"). Dan checks frames server-side.
   const editSequenceRef = useRef(editSequence);
   const annotationsRef = useRef(annotations);
   const danPlayingRef = useRef(false);
@@ -1039,7 +1029,6 @@ export function VideoReviewEditor({
   const [danTouch, setDanTouch] = useState<{ ids: string[]; appear: string[]; vanish: string[] }>({ ids: [], appear: [], vanish: [] });
   const [danCursor, setDanCursor] = useState<{ x: number; y: number } | null>(null);
   const feedAfterRef = useRef(-1);
-  const danSeekRef = useRef<((t: number) => void) | null>(null);
   const danViewRef = useRef<{ duration: number; zoom: number; maxZoom: number }>({ duration: 0, zoom: 1, maxZoom: 8 });
   const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null }>>([]);
   const feedRunningRef = useRef(false);
@@ -1124,8 +1113,6 @@ export function VideoReviewEditor({
         // Zoom in (never out) so a touched clip is wide enough to watch: about 40 s across the view.
         const view = danViewRef.current;
         if (view.duration > 0 && view.duration / view.zoom > 90) {
-          const first = steps.length ? danStepFocus(steps[0], clipStateMap(start)) : null;
-          if (first !== null && !danPlayingRef.current) danSeekRef.current?.(first);
           setTimelineZoom(Number(Math.min(view.maxZoom, view.duration / 40).toFixed(2)));
           await wait(450);
         }
@@ -1134,8 +1121,6 @@ export function VideoReviewEditor({
         for (const step of steps) {
           const vanish = step.filter((c) => c.removed).map((c) => String(c.clip_id));
           const ids = step.map((c) => String(c.clip_id));
-          const focus = danStepFocus(step, shown);
-          if (focus !== null && !danPlayingRef.current) danSeekRef.current?.(focus);
           if (vanish.length) {
             await pointDanAt(vanish);
             setDanTouch({ ids, appear: [], vanish });
@@ -1151,11 +1136,7 @@ export function VideoReviewEditor({
           adoptShown(assembleDanSequence(shown, start, finalSeq));
           const kept = ids.filter((id) => !vanish.includes(id));
           setDanTouch({ ids: kept, appear, vanish: [] });
-          if (kept.length) {
-            setSelectedSequenceClipId(kept[0]);
-            setSelectedSequenceClipIds(kept);
-            await pointDanAt(kept);
-          }
+          if (kept.length) await pointDanAt(kept);
           await wait(stepMs);
         }
         adoptShown(finalSeq);
@@ -1267,14 +1248,6 @@ export function VideoReviewEditor({
   useEffect(() => {
     danViewRef.current = { duration: timelineDuration || 0, zoom: timelineZoom, maxZoom: maxTimelineZoom };
   });
-  // Dan's replay moves the playhead the same way a click on the ruler does (no snapping).
-  useEffect(() => {
-    danSeekRef.current = (t: number) => {
-      setCurrentTime(t);
-      engPosRef.current = { pos: t, wall: performance.now() };
-      if (nativeShell) nativeSend({ cmd: 'seek', pos: t });
-    };
-  }, [nativeShell, nativeSend]);
   // The thin playhead bar is moved DIRECTLY via this ref at 60Hz (no React re-render), so the heavy
   // 324-clip editor doesn't re-render every frame just to nudge the bar (that 60Hz full re-render
   // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
