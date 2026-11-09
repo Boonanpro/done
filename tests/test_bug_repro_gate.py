@@ -134,3 +134,31 @@ def test_bug_words_cover_the_usual_ways_of_saying_it():
     for t in ['この動画はマイクが映らないようにして', 'Androidならできないの？', 'パスキーを登録できるならやって', '進めて',
               'もっと短くして', 'この記事のテーマは？']:
         assert not g.is_bug_report(t), t
+
+
+CARD = ('【外部宛メッセージ（送信案カード）の更新。あなたが前回見た後に起きたこと】\n'
+        '- 送信案 4076（Webフォーム → 日本ゴア合同会社）: あなた（ダン）が送信済み 11/09 17:48。実際に送った本文:\n'
+        '雨・汗・しぶき程度（IPX4相当）で壊れないようにしたいと考えています。\n'
+        '【更新ここまで。以下が今回のメッセージ】\n\n')
+
+
+def test_sent_mail_in_card_update_is_not_the_owners_words(tmp_path):
+    """11/9: 送ったメールの「壊れないように」を不具合の知らせと取り違え、関所に答えた一言でエディターの返事が消えた。"""
+    rows = [owner(CARD + '正確さが落ちず早さはむしろ上がるって本当かな。エディターとか無いのかな。'),
+            claude_text('指摘どおりに直ったかを比べます。')]
+    assert run(tmp_path, rows) is None
+    # 本人の言葉の側に不具合の知らせがあれば、これまでどおり止める
+    rows = [owner(CARD + '表紙の×が出ない'), claude_text('直りました。')]
+    assert run(tmp_path, rows)['decision'] == 'block'
+
+
+def test_block_reason_offers_the_keep_mark(tmp_path):
+    r = run(tmp_path, [owner('表紙の×が出ない'), claude_text('直りました。')])
+    assert 'REPLY_UNCHANGED' in r['reason']
+
+
+def test_keep_mark_is_checked_against_the_reply_before_it(tmp_path):
+    """印で関所を素通りできない: 印の時は、止められる前の返事（直りました・絵なし）で判断する。"""
+    rows = [owner('表紙の×が出ない'), claude_text('直りました。'), claude_text('REPLY_UNCHANGED')]
+    r = run(tmp_path, rows, last_assistant_message='REPLY_UNCHANGED')
+    assert r and r['decision'] == 'block' and 'attach_image' in r['reason']

@@ -225,6 +225,8 @@ def _place(p: str) -> str:
     return p if ":" in p or p in common else f"artifact:{p}"
 
 
+CARD_UPDATE_END = "【更新ここまで。以下が今回のメッセージ】"
+KEEP_MARK = "REPLY_UNCHANGED"   # app/agent/reply_text.py: 止められる前に書いた返事がそのまま届く印
 LATEST_RE = re.compile(r"<latest_user_message>((?:(?!<latest_user_message>).)*?)</latest_user_message>", re.S)
 # 仕組みが起こしたターン（文脈の読み込み・見張りの起床・ボードからの知らせ）は本人の言葉ではない
 SYSTEM_TURN = re.compile(r"\[CONTEXT PRELOAD\]|WATCH_NO_CHANGE|schedule_followup|（ここから並行作業）|^【.{1,40}からの(?:報告|知らせ)】")
@@ -264,6 +266,10 @@ def owner_words(content) -> str:
     elif "<" in text and len(text) > 1500:   # 前置きの付いた長い言葉で、本人の所が分からない
         return ""
     text = re.sub(r"<place>.*?</place>|<room_state>.*?</room_state>", "", text, flags=re.S).strip()
+    # 送信案カードの更新（app/services/outbound_message_service.py）は本人の言葉の前に付く。送ったメールの本文は本人の言葉
+    # ではない（11/9 ゴアへの問い合わせの「壊れないように」を不具合の知らせと取り違え、エディターの返事が消えた）
+    if CARD_UPDATE_END in text:
+        text = text.rsplit(CARD_UPDATE_END, 1)[1].strip()
     return "" if SYSTEM_TURN.search(text) else text
 
 
@@ -287,7 +293,7 @@ def _is_turn_start(content) -> bool:
             return False
         texts = [b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") in ("text", "input_text")]
     joined = "\n".join(texts).lstrip()
-    return bool(joined) and not joined.startswith(("Stop hook feedback", "[成果物の確認の関所]"))
+    return bool(joined) and not joined.startswith(("Stop hook feedback", "[成果物の確認の関所]", "[動画の関所]", "[返事の点検]"))
 
 
 def read_events(path: str) -> tuple[list[tuple], str]:
@@ -330,7 +336,8 @@ def read_events(path: str) -> tuple[list[tuple], str]:
                         _texts(block.get("content"), texts)
                         _results(texts, events)
                     elif kind == "text" and d.get("type") == "assistant":
-                        last_text = block.get("text") or last_text
+                        if KEEP_MARK not in (block.get("text") or ""):
+                            last_text = block.get("text") or last_text
                 continue
             # Codex rollout: {"type":"response_item","payload":{"type":"function_call"|"custom_tool_call"|..._output}}
             p = d.get("payload") if isinstance(d.get("payload"), dict) else None
@@ -356,9 +363,9 @@ def read_events(path: str) -> tuple[list[tuple], str]:
             elif ptype == "message" and p.get("role") == "assistant":
                 texts = []
                 _texts(p.get("content"), texts)
-                if texts:
+                if texts and KEEP_MARK not in "\n".join(texts):
                     last_text = "\n".join(texts)
-            elif ptype == "task_complete" and p.get("last_agent_message"):
+            elif ptype == "task_complete" and p.get("last_agent_message") and KEEP_MARK not in p["last_agent_message"]:
                 last_text = p["last_agent_message"]
     return events, last_text
 
@@ -461,10 +468,12 @@ def count_block(session: str, key: str) -> int:
     return data[key]
 
 
+KEEP = (f"止めた理由がこのターンに当てはまらず、返事を一字も変えない時は、本文を正確に「{KEEP_MARK}」とだけ書いて終える"
+        "（止められる前に書いた返事がそのまま本人に届く）。当てはまらない理由を本文に書かない。")
 REWRITE = ("確かめた結果（版・画面・裏側・公開版・地図・撮った絵がどうだったか）は本人への返事に書かない。本人に言う話ではない。"
            "この後に書く文が、本人に届く返事の全部になる（確かめる前に書いた文は届かない）。"
            "確かめ終えたら、確かめる前に書いた本人への答えを、言い直さずそのまま全部もう一度書いて終えること"
-           "（「結果を足します」のような書き出しにしない）。")
+           "（「結果を足します」のような書き出しにしない）。" + KEEP)
 
 
 def block(reason: str) -> int:
@@ -583,7 +592,7 @@ def bug_block(session: str, events: list[tuple], message: str) -> int | None:
         "言っている。ダンの「直しました」がみきさんの画面で直っていないこと（10/18 の表紙の×、10/25 の番号）を繰り返さないため、"
         "終える前に次をすること:\n" + "\n".join(todo) + "\n"
         "返事は、絵と一緒に、何が崩れていて何を直したか（再現しなかった時は「こちらでは出ています」と、みきさんの画面の版）を"
-        "人に話す短さで書く。撮った手順・道具・測った結果の字は書かない。")
+        "人に話す短さで書く。撮った手順・道具・測った結果の字は書かない。この後に書く文が、本人に届く返事の全部になる。" + KEEP)
 
 
 def main() -> int:
@@ -599,6 +608,8 @@ def main() -> int:
     events, last_text = read_events(path)
     unchecked, _ = pending(events)
     message = payload.get("last_assistant_message") or last_text or ""
+    if KEEP_MARK in message:   # 印だけなら、本人に届くのは止められる前の返事。その返事で確かめる
+        message = last_text
     session = str(payload.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:16])
     if unchecked:
         key = "u:" + ",".join(f"{s}@{i}" for s, i in sorted(unchecked.items()))

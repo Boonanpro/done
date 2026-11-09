@@ -116,3 +116,38 @@ def is_silent_reply(text: Optional[str]) -> bool:
     m = _WRAP.match(t)
     inner = (m.group(1) if m else t).strip()
     return inner in SILENT_MARKS
+
+
+# 「前に書いた返事のままでよい」の印（2026-11-09）。終わり際の関所（scripts/hook_*.py の Stop hook）に止められた後に
+# 書いた文が、本人に届く返事の全部になる（Claude の result も Codex の最後の agent_message も最後の文だけ）。
+# 11/9 17:55、関所の取り違えに「上の返事のままにします」とだけ答え、その一言がエディターの調べ結果の返事の代わりに
+# 保存された。関所に止められて返事を変えない時は、この印だけを書く。保存の手前で、印の前に書いた最後の返事に戻す。
+KEEP_MARK = "REPLY_UNCHANGED"
+
+
+def _inner(text: Optional[str]) -> str:
+    t = (text or "").strip()
+    m = _WRAP.match(t)
+    return (m.group(1) if m else t).strip()
+
+
+def is_keep_reply(text: Optional[str]) -> bool:
+    """本文が「前の返事のまま」の印だけか（印を包む飾りは除く）。"""
+    return _inner(text) == KEEP_MARK
+
+
+def is_marker_only(text: Optional[str]) -> bool:
+    """画面へ流さない印だけの文か（伝えることは無い・前の返事のまま）。"""
+    return is_silent_reply(text) or is_keep_reply(text)
+
+
+def resolve_reply(text: Optional[str], parts: Optional[List[str]]) -> str:
+    """本文が「前の返事のまま」の印なら、印の前に書いた最後の返事に戻す。前に返事が無ければ「伝えることは無い」の印。
+    それ以外はそのまま。どのモデルの経路も、保存と画面への result の手前でこれを通す。"""
+    if not is_keep_reply(text):
+        return text or ""
+    for part in reversed(parts or []):
+        if part and part.strip() and not is_marker_only(part):
+            # 印が前の文の末尾に続けて書かれた時（同じ文の塊）も、印の行は落とす
+            return re.sub(r"\n*\s*`*\*?" + KEEP_MARK + r"\*?`*\s*$", "", part).rstrip() or part
+    return SILENT_MARKS[0]

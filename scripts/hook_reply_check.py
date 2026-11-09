@@ -28,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STORE = Path(os.environ.get("DAN_REPLY_CHECK_DIR") or (ROOT / ".data" / "reply_check"))
 QUIET = "WATCH_NO_CHANGE"
+KEEP_MARK = "REPLY_UNCHANGED"   # app/agent/reply_text.py: 止められる前に書いた返事がそのまま届く印
 
 
 def strip(text: str) -> str:
@@ -158,7 +159,7 @@ def last_text(path: str) -> str:
                 msg = row.get("message") if isinstance(row.get("message"), dict) else {}
                 if row.get("type") == "assistant" and isinstance(msg.get("content"), list):
                     t = _text_of(msg["content"])
-                    if t.strip():
+                    if t.strip() and KEEP_MARK not in t:
                         text = t
     except OSError:
         pass
@@ -195,6 +196,8 @@ def main() -> int:
         return 0
     path = payload.get("transcript_path") or ""
     message = payload.get("last_assistant_message") or (last_text(path) if path else "")
+    if KEEP_MARK in message and path:   # 印だけなら、本人に届くのは止められる前の返事。その返事を点検する
+        message = last_text(path)
     hits = check(message, owner_words(path) if path else "")
     if payload.get("stop_hook_active"):
         hits = [h for h in hits if h['id'] == 'local-delivery-link']

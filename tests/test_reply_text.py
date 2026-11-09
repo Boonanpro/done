@@ -124,3 +124,20 @@ def test_silent_reply_is_never_saved(monkeypatch):
     monkeypatch.setattr("app.services.supabase_client.get_supabase_client", no_db)
     assert cli_runner._save_ai_message_sync("room-1", "WATCH_NO_CHANGE", ends_turn=True) is False
     assert answered == ["room-1"]
+
+
+def test_keep_mark_restores_the_reply_written_before_the_gate():
+    """11/9: 関所に止められた後の一言が、エディターの調べ結果の返事の代わりに保存された。印ならその前の返事に戻す。"""
+    from app.agent.reply_text import is_marker_only, resolve_reply
+    parts = ["調べています。", BODY, "REPLY_UNCHANGED"]
+    assert resolve_reply("REPLY_UNCHANGED", parts) == BODY
+    assert resolve_reply("**REPLY_UNCHANGED**", parts) == BODY
+    assert resolve_reply("`REPLY_UNCHANGED`", parts) == BODY
+    assert is_marker_only("REPLY_UNCHANGED") and is_marker_only("WATCH_NO_CHANGE")
+    # 印の前に返事が無ければ、伝えることは無い
+    assert resolve_reply("REPLY_UNCHANGED", ["REPLY_UNCHANGED"]) == "WATCH_NO_CHANGE"
+    # 普通の返事・印について話す返事はそのまま
+    assert resolve_reply(BODY, parts) == BODY
+    assert resolve_reply("「REPLY_UNCHANGED」の印を足しました。", parts) == "「REPLY_UNCHANGED」の印を足しました。"
+    # 同じ文の塊の末尾に印が続いた時は、印の行を落として返事だけ
+    assert resolve_reply("REPLY_UNCHANGED", ["答えです。\n\nREPLY_UNCHANGED"]) == "答えです。"

@@ -695,12 +695,22 @@ def _build_reseed_context(
 
 
 def _is_silent_text(text: Optional[str]) -> bool:
-    """「伝えることは無い」の印だけの文か（app/agent/reply_text.py）。失敗したら印ではない扱い。"""
+    """画面へ流さない印だけの文か（伝えることは無い・前の返事のまま。app/agent/reply_text.py）。失敗したら印ではない扱い。"""
     try:
-        from app.agent.reply_text import is_silent_reply
-        return is_silent_reply(text)
+        from app.agent.reply_text import is_marker_only
+        return is_marker_only(text)
     except Exception:  # noqa: BLE001
         return False
+
+
+def _resolve_reply(text: str, parts: Optional[list]) -> str:
+    """本文が「前の返事のまま」の印なら、関所に止められる前に書いた返事に戻す（app/agent/reply_text.py）。"""
+    try:
+        from app.agent.reply_text import resolve_reply
+        return resolve_reply(text, parts)
+    except Exception as exc:  # noqa: BLE001
+        _cli_debug(f"[REPLY] resolve failed: {exc}")
+        return text
 
 
 def _tidy_reply(text: str, blocks: Optional[list], user_text: Optional[str]) -> tuple:
@@ -3121,7 +3131,7 @@ def _run_cli_in_thread(
                 _update_run_sync(run_id, claude_session_id=session_id)
 
             # エラー時はerrorsの内容をテキストに含める
-            text = result_text or "\n".join(final_text_parts)
+            text = _resolve_reply(result_text or "\n".join(final_text_parts), final_text_parts)
             # parse-error poison / thinking-desync: replace the CLI's cryptic
             # English with a localized recovery notice AND drop the poisoned
             # session so the NEXT turn starts fresh (reseeded from the DB),
@@ -3350,7 +3360,7 @@ def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str],
                 if sid:
                     _save_session(room_id, sid)
             elif rtype == "result":
-                text = (raw_ev.get("result") or "") or "\n".join(state["final_text_parts"])
+                text = _resolve_reply((raw_ev.get("result") or "") or "\n".join(state["final_text_parts"]), state["final_text_parts"])
                 # ghost-bubble guard: an empty autonomous turn saves nothing
                 if text.strip() or state["turn_blocks"]:
                     _save_ai_message_sync(
@@ -3762,7 +3772,7 @@ async def _process_via_streaming_session(
                         continuation = not session._pending.empty()
                     except Exception:
                         pass
-                text = result_text or "\n".join(state["final_text_parts"])
+                text = _resolve_reply(result_text or "\n".join(state["final_text_parts"]), state["final_text_parts"])
                 user_cancelled = bool(getattr(session, "_user_cancelled", False))
                 if user_cancelled:
                     try:
