@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import logging
 import mimetypes
 import os
@@ -126,6 +127,30 @@ def _ffmpeg() -> str:
         if candidate and Path(candidate).exists():
             return candidate
     raise RuntimeError("ffmpeg not found")
+
+
+_FFMPEG_MAJOR: dict[str, int] = {}
+
+
+def _ffmpeg_major(exe: str) -> int:
+    if exe not in _FFMPEG_MAJOR:
+        major = 0
+        try:
+            out = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=20).stdout
+            m = re.match(r"ffmpeg version n?(\d+)", out.strip())
+            major = int(m.group(1)) if m else 0
+        except (OSError, subprocess.SubprocessError, ValueError):
+            major = 0
+        _FFMPEG_MAJOR[exe] = major
+    return _FFMPEG_MAJOR[exe]
+
+
+def _filter_script_args(exe: str, path: Path) -> list[str]:
+    """Filtergraph read from a file. FFmpeg 7 added `-/filter_complex <file>` and 8 removed
+    `-filter_complex_script`; older builds (and unknown versions) keep the old spelling."""
+    if _ffmpeg_major(exe) >= 7:
+        return ["-/filter_complex", str(path)]
+    return ["-filter_complex_script", str(path)]
 
 
 def _ffprobe() -> str:
@@ -1492,21 +1517,338 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
     }
 
 
-def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
-    # HARD GUARD: every caller lands on the preview-parity native exporter whenever it
-    # is applicable — Dan once imported this function directly (bypassing the jobs API
-    # and the skill rule) and spent hours on the legacy filtergraph producing a
-    # preview-mismatched video. The legacy renderer below survives ONLY as the
-    # fallback for non-9:16 timelines or machines without the native exe.
-    native = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
-    if native:
-        return native
+def _frame_index(t: float, fps: float) -> int:
+    """First frame whose centre (k+0.5)/fps is at or after t."""
+    return math.ceil(t * fps - 0.5 - 1e-6)
+
+
+def _clip_frame_count(clip: dict[str, Any], fps: float) -> int:
+    a = float(clip.get("timeline_start") or 0)
+    b = float(clip.get("timeline_end") or 0)
+    return max(1, _frame_index(b, fps) - _frame_index(a, fps))
+
+
+def _key_box_at(keys: list[dict[str, Any]], rel: float) -> dict[str, float]:
+    """Same interpolation as the editor preview (boxKeyAt)."""
+    if rel <= float(keys[0]["t"]):
+        return {k: float(keys[0][k]) for k in "xywh"}
+    for a, b in zip(keys, keys[1:]):
+        if rel < float(b["t"]):
+            f = (rel - float(a["t"])) / max(1e-6, float(b["t"]) - float(a["t"]))
+            return {k: float(a[k]) + (float(b[k]) - float(a[k])) * f for k in "xywh"}
+    return {k: float(keys[-1][k]) for k in "xywh"}
+
+
+def _image_key_frames(clip: dict[str, Any], img_path: Any, its: float, ite: float, fps: float,
+                      out_w: int, out_h: int, kdir: Path):
+    """Full-canvas PNGs for the frames of an image clip whose box is still moving.
+    Returns (dir, first_frame_index, frame_count, last_key_box) or None (no motion)."""
+    raw = clip.get("transform_keys")
+    if not isinstance(raw, list):
+        return None
+    try:
+        keys = sorted(({k: float(x[k]) for k in ("t", "x", "y", "w", "h")} for x in raw if isinstance(x, dict)),
+                      key=lambda x: x["t"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not keys:
+        return None
+    last = keys[-1]
+    moving = len(keys) > 1 or any(abs(last[k] - v) > 1e-6 for k, v in (("x", 0), ("y", 0), ("w", 1), ("h", 1)))
+    if not moving:
+        return None
+    k_first, k_end = _frame_index(its, fps), _frame_index(ite, fps)
+    frames = [k for k in range(k_first, k_end) if k / fps - its < last["t"]]
+    if not frames:
+        return (kdir, k_first, 0, last) if len(keys) == 1 else None
+    from PIL import Image
+    kdir.mkdir(parents=True, exist_ok=True)
+    src = Image.open(str(img_path)).convert("RGBA")
+    pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+    bx0 = float(pos.get("x") or 0.05) * out_w
+    by0 = float(pos.get("y") or 0.05) * out_h
+    bw0 = float(pos.get("width") or 0.3) * out_w
+    bh0 = float(pos.get("height") or 0.15) * out_h
+    for n, k in enumerate(frames):
+        b = _key_box_at(keys, k / fps - its)
+        bx, by, bw, bh = bx0 + b["x"] * bw0, by0 + b["y"] * bh0, bw0 * b["w"], bh0 * b["h"]
+        r = min(bw / src.width, bh / src.height)  # contain, centred — the still path's fit
+        nw, nh = max(1, round(src.width * r)), max(1, round(src.height * r))
+        im = src if (nw, nh) == src.size else src.resize((nw, nh), Image.BILINEAR)
+        canvas = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
+        canvas.paste(im, (round(bx + (bw - nw) / 2), round(by + (bh - nh) / 2)))  # empty canvas: a plain copy
+        canvas.save(kdir / f"{n:05d}.png", compress_level=1)
+    return kdir, k_first, len(frames), last
+
+
+def _meta_has_audio(metadata: dict[str, Any], source_path: Any) -> bool:
+    """Asset metadata comes in two shapes (probe: audio_codec; editor import: has_audio /
+    streams). Only when neither says anything is the file probed."""
+    if metadata.get("audio_codec"):
+        return True
+    if "has_audio" in metadata:
+        return bool(metadata.get("has_audio"))
+    streams = metadata.get("streams")
+    if isinstance(streams, list) and streams:
+        return any(isinstance(st, dict) and st.get("codec_type") == "audio" for st in streams)
+    try:
+        return bool(_probe_video(Path(source_path)).get("audio_codec"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# A long timeline in ONE filtergraph opens a decoder per clip at once (a 17-minute video with
+# 1,361 clips stops with "Resource temporarily unavailable"). Above this size the export is
+# drawn in windows of about _EXPORT_WINDOW_SEC and joined; every picture clip lies wholly
+# inside one window, so each window draws exactly what the whole graph would.
+_EXPORT_CHUNK_MIN_CLIPS = 150
+_EXPORT_WINDOW_SEC = 40.0
+
+
+def _export_windows(sequence: dict[str, Any], instruction: dict[str, Any]) -> list[tuple[float, float]]:
+    """[(start, end)] export windows. One window = the old single pass."""
+    tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
+    n_clips = sum(len(t.get("clips") or []) for t in tracks)
+    base, z_items = _sequence_z_items(sequence)
+    if not base:
+        return [(0.0, 0.0)]
+    end = float(base[-1].get("timeline_end") or 0)
+    if n_clips < _EXPORT_CHUNK_MIN_CLIPS or os.environ.get("DAN_EXPORT_SINGLE_PASS"):
+        return [(0.0, end)]
+    eps = 1e-3
+    # The base lane is concatenated, so a window may only start where it is contiguous from 0.
+    if abs(float(base[0].get("timeline_start") or 0)) > eps:
+        return [(0.0, end)]
+    spans = [(float(c.get("timeline_start") or 0), float(c.get("timeline_end") or 0)) for _, c in z_items]
+    spans += [(float(a.get("start") or 0), float(a.get("end") or (float(a.get("start") or 0) + 0.5)))
+              for a in _blur_annotations(instruction)]
+    spans.sort()
+    cuts: list[float] = []
+    for prev, clip in zip(base, base[1:]):
+        t = float(clip.get("timeline_start") or 0)
+        if abs(float(prev.get("timeline_end") or 0) - t) > eps:
+            return [(0.0, end)]  # a gap: the concat would not keep timeline time
+        cuts.append(t)
+    import bisect
+    starts = [a for a, _ in spans]
+    # prefix max of span ends: "does any picture clip cross t" in O(log n)
+    ends_max: list[float] = []
+    m = float("-inf")
+    for _, b in spans:
+        m = max(m, b)
+        ends_max.append(m)
+    def crossed_fast(t: float) -> bool:
+        k = bisect.bisect_left(starts, t - eps)
+        return k > 0 and ends_max[k - 1] > t + eps
+    windows: list[tuple[float, float]] = []
+    w0 = 0.0
+    for t in cuts:
+        if t - w0 >= _EXPORT_WINDOW_SEC and end - t > _EXPORT_WINDOW_SEC / 4 and not crossed_fast(t):
+            windows.append((w0, t))
+            w0 = t
+    windows.append((w0, end))
+    return windows
+
+
+def _window_sequence(sequence: dict[str, Any], w0: float, w1: float, shift: float) -> dict[str, Any]:
+    """Picture lanes of one window, moved back by `shift` (the window's first frame time, so frame
+    indices move by a whole number), audio lanes left empty."""
+    eps = 1e-3
+    tracks = []
+    for t in sequence.get("tracks") or []:
+        if not isinstance(t, dict):
+            continue
+        clips = []
+        if t.get("type") != "audio":
+            for c in t.get("clips") or []:
+                if not isinstance(c, dict):
+                    continue
+                a, b = float(c.get("timeline_start") or 0), float(c.get("timeline_end") or 0)
+                if a >= w0 - eps and b <= w1 + eps and b > a:
+                    clips.append({**c, "timeline_start": a - shift, "timeline_end": b - shift})
+        tracks.append({**t, "clips": clips})
+    return {**sequence, "tracks": tracks, "duration": w1 - shift}
+
+
+def _export_audio_clips(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """What is heard: the audio lanes, or — when there are none — the base clips' own sound."""
+    clips = _sequence_audio_clips(sequence)
+    if clips:
+        return clips
+    base, _ = _sequence_z_items(sequence)
+    out = []
+    for c in base:
+        asset = assets.get(str(c.get("asset_id") or ""))
+        if asset and asset.get("kind") == "video" and not c.get("muted"):
+            out.append(c)
+    return out
+
+
+def _decoded_audio_sources(clips: list[dict[str, Any]], assets: dict[str, dict[str, Any]], folder: Path) -> dict[str, Path]:
+    """Each sound source decoded once to 48 kHz WAV. Seeking inside a compressed file
+    (movie=seek_point on mp4/AAC) can land on the wrong samples; in a WAV it is exact."""
+    from concurrent.futures import ThreadPoolExecutor
+    paths = {}
+    for clip in clips:
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset:
+            continue
+        src = str(_asset_source_path(asset))
+        paths.setdefault(src, folder / f"src_{hashlib.sha1(src.encode()).hexdigest()[:12]}.wav")
+    exe = _ffmpeg()
+
+    def decode(item):
+        src, dest = item
+        r = subprocess.run([exe, "-y", "-v", "error", "-i", src, "-vn", "-ac", "2", "-ar", "48000",
+                            "-c:a", "pcm_f32le", str(dest)], capture_output=True, text=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return src if r.returncode == 0 and dest.exists() else None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ok = set(filter(None, pool.map(decode, paths.items())))
+    return {src: dest for src, dest in paths.items() if src in ok}
+
+
+def _render_audio_window(room_id: str, sequence: dict[str, Any], w0: float, w1: float, out_wav: Path,
+                         decoded: dict[str, Path] | None = None) -> None:
+    """What is heard over [w0, w1): the same mix as the single pass (1x, volume, summed), each
+    clip trimmed to the window, sample-exact. Exactly round(w1*SR)-round(w0*SR) samples."""
+    sr = 48000
+    n_samples = round(w1 * sr) - round(w0 * sr)
+    assets = _assets_by_id(room_id)
+    decoded = decoded or {}
+    filters: list[str] = []
+    labels: list[str] = []
+    for clip in _export_audio_clips(sequence, assets):
+        a, b = float(clip.get("timeline_start") or 0), float(clip.get("timeline_end") or 0)
+        if b <= w0 or a >= w1:
+            continue
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset or asset.get("kind") not in {"video", "audio"}:
+            continue
+        source_path = _asset_source_path(asset)
+        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
+        if not _meta_has_audio(metadata, source_path):
+            continue
+        source_start, source_end, _dur, _src, au_freeze = _clip_source_range(clip, metadata)
+        if au_freeze:
+            continue
+        source_path = decoded.get(str(source_path), source_path)
+        ts, te = max(a, w0), min(b, w1)
+        s0 = round((source_start + ts - a) * sr)
+        n = min(round((te - ts) * sr), round(source_end * sr) - s0)
+        if n <= 0:
+            continue
+        delay = max(0, round(ts * sr) - round(w0 * sr))
+        try:
+            vol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
+        except Exception:
+            vol = 1.0
+        vol_filt = f",volume={vol:.3f}" if abs(vol - 1.0) > 1e-3 else ""
+        label = f"au{len(labels)}"
+        filters.append(
+            # atrim start_sample counts samples from wherever the seek landed; seconds follow the
+            # timestamps. So: cut by time, reset to 0, then trim to the exact sample count.
+            _movie_input(source_path, max(0.0, s0 / sr - 0.5), audio=True) + f",aresample={sr},"
+            f"atrim=start={s0 / sr:.7f},asetpts=PTS-STARTPTS,atrim=end_sample={n},"
+            f"aformat=channel_layouts=stereo{vol_filt},"
+            f"adelay=delays={delay}S:all=1[{label}]"
+        )
+        labels.append(label)
+    tail = f"apad,atrim=end_sample={n_samples},aformat=sample_fmts=flt:channel_layouts=stereo"
+    if not labels:
+        filters.append(f"anullsrc=r={sr}:cl=stereo,{tail}[aout]")
+    elif len(labels) == 1:
+        filters.append(f"[{labels[0]}]{tail}[aout]")
+    else:
+        filters.append("".join(f"[{l}]" for l in labels)
+                       + f"amix=inputs={len(labels)}:duration=longest:normalize=0,{tail}[aout]")
+    fg = out_wav.with_suffix(".filtergraph.txt")
+    fg.write_text(";".join(filters), encoding="utf-8")
+    exe = _ffmpeg()
+    subprocess.run([exe, "-y", "-v", "error", *_filter_script_args(exe, fg), "-map", "[aout]",
+                    "-c:a", "pcm_f32le", str(out_wav)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _render_sequence_chunked(room_id: str, job_id: str, instruction: dict[str, Any], job_dir: Path,
+                             out_path: Path, windows: list[tuple[float, float]]) -> tuple[int, int, int] | None:
+    from concurrent.futures import ThreadPoolExecutor
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline["sequence"]
+    assets = _assets_by_id(room_id)
+    sound = _export_audio_clips(sequence, assets)
+    parts = job_dir / f"{job_id}_parts"
+    parts.mkdir(parents=True, exist_ok=True)
+    _append_job_event(room_id, job_id, {"type": "status", "text": f"{len(windows)}区間に分けて書き出しています…"})
+
+    fps = _sequence_frame_rate(sequence)
+
+    def video(i: int):
+        w0, w1 = windows[i]
+        shift = _frame_index(w0, fps) / fps
+        anns = []
+        for a in ((timeline.get("annotations") or []) if isinstance(timeline, dict) else []):
+            if not isinstance(a, dict):
+                continue
+            st = float(a.get("start") or 0)
+            en = float(a.get("end") or (st + 0.5))
+            if en > w0 and st < w1:
+                anns.append({**a, "start": st - shift, "end": en - shift})
+        sub = {**instruction, "timeline": {**timeline, "sequence": _window_sequence(sequence, w0, w1, shift), "annotations": anns}}
+        return _render_sequence_pass(room_id, job_id, sub, parts, parts / f"v{i:03d}.mp4",
+                                     video_only=True, segment=True)
+
+    decoded: dict[str, Path] = {}
+
+    def audio(i: int):
+        _render_audio_window(room_id, sequence, *windows[i], parts / f"a{i:03d}.wav", decoded)
+
+    workers = max(1, min(4, (os.cpu_count() or 4) // 3))
+    if sound:
+        decoded.update(_decoded_audio_sources(sound, assets, parts))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(video, range(len(windows))))
+        if sound:
+            list(pool.map(audio, range(len(windows))))
+    if any(r is None for r in results):
+        raise RuntimeError("区間の書き出しで描く物が見つかりませんでした")
+    exe = _ffmpeg()
+    vlist = parts / "video.txt"
+    vlist.write_text("".join(f"file '{parts / f'v{i:03d}.mp4'}'\n" for i in range(len(windows))), encoding="utf-8")
+    cmd = [exe, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(vlist)]
+    if sound:
+        alist = parts / "audio.txt"
+        alist.write_text("".join(f"file '{parts / f'a{i:03d}.wav'}'\n" for i in range(len(windows))), encoding="utf-8")
+        cmd += ["-f", "concat", "-safe", "0", "-i", str(alist), "-map", "0:v", "-map", "1:a",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-c", "copy"]
+    cmd += ["-movflags", "+faststart", str(out_path)]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    shutil.rmtree(parts, ignore_errors=True)
+    _, w, h = results[0]
+    return sum(r[0] for r in results), w, h
+
+
+def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any], job_dir: Path,
+                          out_path: Path, *, video_only: bool = False,
+                          segment: bool = False) -> tuple[int, int, int] | None:
+    """One FFmpeg filtergraph over the given timeline -> out_path. Returns
+    (rendered_base_clips, width, height), or None when there is nothing to draw."""
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
         return None
     timeline_fps = _sequence_frame_rate(sequence)
     fps_filter = f"{timeline_fps:g}"
+    # Frame k belongs to the clip whose span holds the CENTRE of the frame, (k+0.5)/fps, and
+    # shows source frame round(source time * fps) — the editor preview's rule. Overlay gates and
+    # offsets are moved half a frame earlier so frame starts k/fps follow the same rule.
+    half = 0.5 / timeline_fps
+    norm_tail = lambda n: f",tpad=stop_mode=clone:stop=-1,trim=end_frame={n},setpts=N/({fps_filter}*TB)"
 
     # Role-free lanes: base = the first visual lane's spine; EVERYTHING else (videos,
     # region effects, designed captions — whatever lane they sit on) composites in
@@ -1515,12 +1857,13 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     if not base_clips:
         return None
 
-    audio_clips = _sequence_audio_clips(sequence)
-    has_audio_track = len(audio_clips) > 0
+    audio_clips = [] if video_only else _sequence_audio_clips(sequence)
+    # video_only: picture only (the audio is mixed separately); never fall back to base audio
+    has_audio_track = video_only or len(audio_clips) > 0
 
     assets = _assets_by_id(room_id)
-    output_width, output_height = _output_size(str(sequence.get("format") or timeline.get("format") or "9:16"))
-    out_path = job_dir / f"{job_id}_sequence.mp4"
+    # The export is the delivered file: same full size as the native compositor (16:9 = 1920x1080).
+    output_width, output_height = _native_export_canvas(str(sequence.get("format") or timeline.get("format") or "9:16"))
 
     command = [_ffmpeg(), "-y"]
     filters: list[str] = []
@@ -1534,18 +1877,19 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             # STILL IMAGE base clip (generated CTA art etc.): loop the picture for the
             # clip's duration, cover-cropped to the canvas — parity with the preview.
             img_path = _asset_source_path(asset)
-            out_dur = max(0.05, float(clip.get("timeline_end") or 0) - float(clip.get("timeline_start") or 0))
+            nfr = _clip_frame_count(clip, timeline_fps)
+            out_dur = nfr / timeline_fps
             filters.append(
-                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.3f},"
+                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.6f},"
                 f"setpts=PTS-STARTPTS,fps={fps_filter},"
                 f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-                f"crop={output_width}:{output_height},setsar=1,format=yuv420p[v{rendered_count}]"
+                f"crop={output_width}:{output_height},setsar=1,format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
             )
             if has_audio_track:
                 concat_parts.append(f"[v{rendered_count}]")
             else:
                 filters.append(
-                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.3f},asetpts=PTS-STARTPTS"
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.6f},asetpts=PTS-STARTPTS"
                     f"[a{rendered_count}]"
                 )
                 concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
@@ -1556,7 +1900,15 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         source_path = _asset_source_path(asset)
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
         source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
-        pad_needed = 0.0 if is_freeze else max(0.0, out_dur - src_dur)
+        a_ss, a_se = source_start, source_end  # the clip's own sound keeps its source seconds
+        nfr = _clip_frame_count(clip, timeline_fps)
+        out_dur = nfr / timeline_fps
+        if not is_freeze:
+            first = _frame_index(float(clip.get("timeline_start") or 0), timeline_fps)
+            sframe = round((source_start + first / timeline_fps - float(clip.get("timeline_start") or 0)) * timeline_fps)
+            source_start = max(0.0, (sframe - 0.5) / timeline_fps)
+            source_end = (sframe + nfr - 0.5) / timeline_fps
+        pad_needed = 0.0  # every base chain ends padded/trimmed to exactly nfr frames (norm_tail)
         bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
         is_full_pos = (not bpos) or (
             float(bpos.get("x") or 0) <= 0.001 and float(bpos.get("y") or 0) <= 0.001
@@ -1578,7 +1930,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         if not _clip_video_enabled(clip):
             # Picture is disabled but the slot and its linked audio remain on the timeline.
             filters.append(
-                f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur:.3f}[v{rendered_count}]"
+                f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}{norm_tail(nfr)}[v{rendered_count}]"
             )
         elif identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
@@ -1590,8 +1942,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
             filters.append(
                 _movie_input(source_path, source_start) + ","
-                f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"{setpts},format=yuv420p{base_shape}"
+                f"trim=start={source_start:.4f}:end={source_end:.4f},"
+                f"{setpts},format=yuv420p{base_shape}{norm_tail(nfr)}"
                 f"[v{rendered_count}]"
             )
         else:
@@ -1625,30 +1977,30 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 tpad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
             filters.append(
                 _movie_input(source_path, source_start) + ","
-                f"trim=start={source_start:.3f}:end={source_end:.3f},"
+                f"trim=start={source_start:.4f}:end={source_end:.4f},"
                 f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad},format=yuv420p"
                 f"[src{rendered_count}]"
             )
-            filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur:.3f}[bg{rendered_count}]")
+            filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
             filters.append(
-                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p{base_shape}[v{rendered_count}]"
+                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:eof_action=repeat,format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
             )
         if not has_audio_track:
-            if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze:
+            if _meta_has_audio(metadata, source_path) and not clip.get("muted") and not is_freeze:
                 try:
                     vol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
                 except Exception:
                     vol = 1.0
                 vol_filt = f",volume={vol:.3f}" if abs(vol - 1.0) > 1e-3 else ""
                 filters.append(
-                    _movie_input(source_path, source_start, audio=True) + ","
-                    f"atrim=start={source_start:.3f}:end={source_end:.3f},"
-                    f"asetpts=PTS-STARTPTS,apad,atrim=duration={out_dur:.3f},aresample=48000,aformat=channel_layouts=stereo{vol_filt}"
+                    _movie_input(source_path, a_ss, audio=True) + ","
+                    f"atrim=start={a_ss:.4f}:end={a_se:.4f},"
+                    f"asetpts=PTS-STARTPTS,aresample=48000,apad,atrim=duration={out_dur:.6f},aformat=channel_layouts=stereo{vol_filt}"
                     f"[a{rendered_count}]"
                 )
             else:
                 filters.append(
-                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.3f},asetpts=PTS-STARTPTS"
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.6f},asetpts=PTS-STARTPTS"
                     f"[a{rendered_count}]"
                 )
             concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
@@ -1660,10 +2012,13 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         return None
 
     if has_audio_track:
-        filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=0[vcat]")
+        # concat gives a one-frame clip no length (the next clip reuses its stamp), so every
+        # overlay after it drifted a frame: the base is restamped on the frame grid right here.
+        filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=0,settb=1/{fps_filter},setpts=N[vcat]")
         base_audio_out: str | None = None
     else:
-        filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=1[vcat][acat]")
+        filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=1[vcat0][acat]")
+        filters.append(f"[vcat0]settb=1/{fps_filter},setpts=N[vcat]")
         base_audio_out = "acat"
     video_out = "vcat"
 
@@ -1780,13 +2135,13 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 pattern = str(ov["seq_dir"] / "%05d.png")
                 filters.append(
                     _movie_input(pattern, 0.0, fmt="image2")
-                    + f",format=rgba,setpts=N/({fps:g}*TB)+{cs:.3f}/TB[capsrc{ci}]"
+                    + f",format=rgba,settb=AVTB,setpts=N/({fps:g}*TB)+{cs - half:.5f}/TB[capsrc{ci}]"
                 )
             else:
                 # single frame: overlay's default eof_action=repeat holds it, enable= gates it
                 filters.append(_movie_input(ov["png"], 0.0) + f",format=rgba[capsrc{ci}]")
             filters.append(
-                f"[{video_out}][capsrc{ci}]overlay=0:0:enable='gte(t\\,{cs:.3f})*lt(t\\,{ce:.3f})'[vcap{ci}]"
+                f"[{video_out}][capsrc{ci}]overlay=0:0:enable='gte(t\\,{cs - half:.5f})*lt(t\\,{ce - half:.5f})'[vcap{ci}]"
             )
             video_out = f"vcap{ci}"
             continue
@@ -1803,14 +2158,42 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             ipy = round(float(pos.get("y") or 0.05) * output_height)
             its = max(0.0, float(clip.get("timeline_start") or 0))
             ite = max(its + 0.05, float(clip.get("timeline_end") or (its + 3.0)))
+            # Motion keys (pop-in etc.): the moving frames are drawn as a full-canvas PNG
+            # sequence, the rest of the clip is the still at the last key's box.
+            moving = _image_key_frames(clip, img_path, its, ite, timeline_fps, output_width, output_height,
+                                       out_path.with_name(f"{out_path.stem}_keys{oi}"))
+            if moving and moving[2] == 0:
+                ipx, ipy = round(ipx + moving[3]["x"] * iow), round(ipy + moving[3]["y"] * ioh)
+                iow, ioh = max(2, round(iow * moving[3]["w"])), max(2, round(ioh * moving[3]["h"]))
+            elif moving:
+                kdir, k_first, k_count, last = moving
+                filters.append(
+                    _movie_input(str(kdir / "%05d.png"), 0.0, fmt="image2")
+                    + f",format=rgba,settb=AVTB,setpts=(N+{k_first}-0.5)/({fps_filter}*TB)[kimg{oi}]"
+                )
+                filters.append(
+                    f"[{video_out}][kimg{oi}]overlay=0:0:enable='gte(t\\,{(k_first - 0.5) / timeline_fps:.5f})"
+                    f"*lt(t\\,{(k_first + k_count - 0.5) / timeline_fps:.5f})':eof_action=repeat[vkimg{oi}]"
+                )
+                video_out = f"vkimg{oi}"
+                its = (k_first + k_count) / timeline_fps
+                if k_first + k_count >= _frame_index(ite, timeline_fps):
+                    continue
+                ipx = round(ipx + last["x"] * iow)
+                ipy = round(ipy + last["y"] * ioh)
+                iow = max(2, round(iow * last["w"]))
+                ioh = max(2, round(ioh * last["h"]))
+            # One picture per output frame on the exact frame grid (half a frame early, like
+            # every overlay here); the gate decides the first and last frame.
+            k_a, k_b = _frame_index(its, timeline_fps), _frame_index(ite, timeline_fps)
             filters.append(
-                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={ite - its:.3f},"
-                f"setpts=PTS-STARTPTS+{its:.3f}/TB,fps={fps_filter},format=rgba,"
+                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=end_frame={max(1, k_b - k_a)},"
+                f"settb=AVTB,setpts=(N+{k_a}-0.5)/({fps_filter}*TB),format=rgba,"
                 f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease[img{oi}]"
             )
             filters.append(
                 f"[{video_out}][img{oi}]overlay=x={ipx}+({iow}-w)/2:y={ipy}+({ioh}-h)/2"
-                f":enable='gte(t\\,{its:.3f})*lt(t\\,{ite:.3f})':eof_action=pass[vimg{oi}]"
+                f":enable='gte(t\\,{(k_a - 0.5) / timeline_fps:.5f})*lt(t\\,{(k_b - 0.5) / timeline_fps:.5f})':eof_action=repeat[vimg{oi}]"
             )
             video_out = f"vimg{oi}"
             continue
@@ -1819,13 +2202,14 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         source_path = _asset_source_path(asset)
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
         source_start, source_end, ov_dur, ov_src, ov_freeze = _clip_source_range(clip, metadata)
-        pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+        # No box = the whole picture, as the editor preview draws it.
+        pos = clip.get("position") if isinstance(clip.get("position"), dict) else {"x": 0, "y": 0, "width": 1, "height": 1}
         ow = max(2, round(float(pos.get("width") or 0.46) * output_width))
         oh = max(2, round(float(pos.get("height") or 0.145) * output_height))
         # No clamp: a wipe may sit partly/fully off-screen; ffmpeg overlay accepts negative
         # offsets and windows the overflow against the frame.
-        px = round(float(pos.get("x") or 0.27) * output_width)
-        py = round(float(pos.get("y") or 0.835) * output_height)
+        px = round(float(pos.get("x") or 0) * output_width)
+        py = round(float(pos.get("y") or 0) * output_height)
         # Manual per-edge crop = MASK: the wipe stays at its box size/position; we only cut the
         # trimmed strips away (cut edges reveal the main video behind). The picture does NOT move or
         # resize. Computed here (in box pixels), applied after the cover scale below. Mirrors the
@@ -1907,11 +2291,11 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                                             max(2, _dh - round(_dh * _ct) - round(_dh * _cb)))
                     _chain.append(f"crop={_pkw}:{_pkh}:{_pl}:{_pt}")
                     _dx, _dy = _dx + _pl, _dy + _pt
-                _chain.append(f"setpts=PTS-STARTPTS+{ts:.3f}/TB")
+                _chain.append(f"setpts=PTS-STARTPTS+{ts - half:.5f}/TB")
                 filters.append(",".join(_chain) + f"[pov{oi}]")
                 filters.append(
                     f"[{video_out}][pov{oi}]overlay={_dx}:{_dy}:format=auto:"
-                    f"enable='gte(t\\,{ts:.3f})*lt(t\\,{te:.3f})'[vov{oi}]"
+                    f"enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'[vov{oi}]"
                 )
                 video_out = f"vov{oi}"
                 continue
@@ -1938,17 +2322,24 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         else:
             _maskcrop = ""
             _mx, _my = px, py
+        # Frame k shows source frame round((source_start + k/fps - ts) * fps): keep frames from the
+        # first one needed and place each half a frame early (overlay takes the latest frame <= t).
+        ov_offset = ts - half
+        if not ov_freeze:
+            s_first = max(0, round((source_start + _frame_index(ts, timeline_fps) / timeline_fps - ts) * timeline_fps))
+            ov_offset = ts + s_first / timeline_fps - source_start - half
+            source_start = max(0.0, (s_first - 0.5) / timeline_fps)
         filters.append(
             _movie_input(source_path, source_start) + ","
-            f"trim=start={source_start:.3f}:end={source_end:.3f},"
+            f"trim=start={source_start:.4f}:end={source_end:.4f},"
             f"{ov_pre}"
-            f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
+            f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ov_offset:.5f}/TB,format=yuv420p"
             f"{shape_filt}"
             f"{_maskcrop}"
             f"[ov{oi}]"
         )
         filters.append(
-            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='gte(t\\,{ts:.3f})*lt(t\\,{te:.3f})'[vov{oi}]"
+            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'[vov{oi}]"
         )
         video_out = f"vov{oi}"
 
@@ -1989,7 +2380,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 continue
             source_path = _asset_source_path(asset)
             metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
-            if not metadata.get("audio_codec"):
+            if not _meta_has_audio(metadata, source_path):
                 continue
             source_start, source_end, _dur, _src, au_freeze = _clip_source_range(clip, metadata)
             if au_freeze:
@@ -2022,6 +2413,12 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     elif hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
 
+    # Output frame n is timeline frame n: restamp on the exact grid so the muxer's constant-rate
+    # conversion has nothing to drop or repeat (a stamp a hair early or late moved a cut by a frame).
+    # One output format whatever the layers were (an RGBA overlay otherwise turns a window into
+    # full-range yuvj420p, and joined windows of both kinds play back with the wrong brightness).
+    filters.append(f"[{video_out}]scale=out_range=tv,format=yuv420p,settb=1/{fps_filter},setpts=N[vgrid]")
+    video_out = "vgrid"
     maps = ["-map", f"[{video_out}]"]
     audio_args = ["-an"]
     if audio_out:
@@ -2031,13 +2428,12 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     # Pass the filtergraph via a SCRIPT FILE, not the command line: with hundreds of clips the
     # graph is tens of KB and a single -filter_complex arg blows past Windows' command-line limit
     # (surfaces as WinError 206 "filename or extension too long").
-    fg_path = job_dir / f"{job_id}_filtergraph.txt"
+    fg_path = out_path.with_suffix(".filtergraph.txt")
     fg_path.write_text(";".join(filters), encoding="utf-8")
     subprocess.run(
         [
             *command,
-            "-filter_complex_script",
-            str(fg_path),
+            *_filter_script_args(command[0], fg_path),
             *maps,
             "-c:v",
             "libx264",
@@ -2048,8 +2444,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             "-pix_fmt",
             "yuv420p",
             *audio_args,
-            "-movflags",
-            "+faststart",
+            *([] if segment else ["-movflags", "+faststart"]),
             str(out_path),
         ],
         stdout=subprocess.DEVNULL,
@@ -2058,6 +2453,31 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         creationflags=creationflags,
         check=True,
     )
+    return rendered_count, output_width, output_height
+
+
+def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
+    # HARD GUARD: every caller lands on the preview-parity native exporter whenever it
+    # is applicable — Dan once imported this function directly (bypassing the jobs API
+    # and the skill rule) and spent hours on the legacy filtergraph producing a
+    # preview-mismatched video. The legacy renderer below survives ONLY as the
+    # fallback for non-9:16 timelines or machines without the native exe.
+    native = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+    if native:
+        return native
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+    if not isinstance(sequence, dict):
+        return None
+    out_path = job_dir / f"{job_id}_sequence.mp4"
+    windows = _export_windows(sequence, instruction)
+    if len(windows) > 1:
+        passed = _render_sequence_chunked(room_id, job_id, instruction, job_dir, out_path, windows)
+    else:
+        passed = _render_sequence_pass(room_id, job_id, instruction, job_dir, out_path)
+    if not passed:
+        return None
+    rendered_count, output_width, output_height = passed
 
     # Privacy: bake in screen-recording blur (credentials/sensitive text) as a post-pass on the
     # final video, if the content has it enabled. Reads the authoritative stored spec.
@@ -5354,6 +5774,28 @@ async def list_contents(
     current_user: TokenData = Depends(get_current_user),
 ):
     return _read_contents(room_id)
+
+
+@router.get("/contents/{content_id}/edit-feed")
+async def content_edit_feed(
+    content_id: str,
+    room_id: str = Query(...),
+    after: int = Query(-1),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Dan's published timeline steps after `after`, for the open editor to replay as motion.
+
+    after<0 only returns the current position (an editor that just opened does not replay
+    history). When steps exist, the live sequence comes with them so the replay ends exactly
+    on what is saved."""
+    from app.services import timeline_draft as td
+    last, rows = td.read_edit_feed(room_id, content_id, after)
+    if after < 0 or not rows:
+        return {"last": last, "entries": []}
+    content = next((c for c in _read_contents(room_id) if str(c.get("id")) == str(content_id)), None)
+    sequence = ((content or {}).get("timeline") or {}).get("sequence")
+    return {"last": last, "entries": rows[-40:], "sequence": sequence,
+            "updated_at": (content or {}).get("updated_at")}
 
 
 @router.post("/contents", response_model=ProductionContent)

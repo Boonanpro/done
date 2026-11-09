@@ -220,12 +220,14 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
                 ],
             }
         # single-writer swap
+        before_seq = live_seq or {}
         content.setdefault("timeline", {})["sequence"] = draft["sequence"]
         fmt = draft['sequence'].get('format') or content['timeline'].get('format') or content.get('format')
         if fmt:
             content['timeline']['format'] = fmt
             content['format'] = fmt
         _write_contents_raw(room_id, contents)
+        _append_edit_feed(room_id, draft, before_seq)
     if checkpoint:
         draft['base_hash'] = sequence_hash(draft['sequence'])
         draft['published_sequence'] = json.loads(json.dumps(draft['sequence']))
@@ -234,6 +236,77 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
         draft["committed_at"] = time.time()
     save_draft(draft)
     return {"ok": True, "conflict": False, "problems": []}
+
+
+def describe_changes(before, after):
+    """Per-clip difference: changed keys only, with the lane (track index) the clip sits on."""
+    def indexed(seq):
+        return {c['id']: dict(c, lane=n) for n, t in enumerate((seq or {}).get('tracks', []))
+                for c in t.get('clips', []) if c.get('id') is not None}
+    old, new = indexed(before), indexed(after)
+    result = []
+    for cid in sorted(old.keys() | new.keys(), key=str):
+        a, b = old.get(cid, {}), new.get(cid, {})
+        if a == b:
+            continue
+        c = b or a
+        keys = [k for k in a.keys() | b.keys() if a.get(k) != b.get(k)]
+        result.append({'clip_id': cid, 'text': c.get('text'), 'start': c.get('timeline_start'),
+                       'end': c.get('timeline_end'), 'removed': not bool(b),
+                       'before': {k: a.get(k) for k in keys}, 'after': {k: b.get(k) for k in keys}})
+    return result
+
+
+_FEED_KEEP = 60
+
+
+def edit_feed_path(room_id: str, content_id: str) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(content_id))
+    return _room_dir(room_id) / "edit_feed" / f"{safe}.jsonl"
+
+
+def _append_edit_feed(room_id: str, draft: dict[str, Any], before: dict[str, Any]) -> None:
+    """Record each published AI step so an open editor can replay it as visible motion.
+
+    Called under ContentsLock right after the live write, so entries are in commit order.
+    Display-only: a failure here must never fail the commit."""
+    try:
+        changes = describe_changes(before, draft["sequence"])
+        if not changes:
+            return
+        log = draft.get("log") or []
+        p = edit_feed_path(room_id, draft["content_id"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+        last = 0
+        if lines:
+            try:
+                last = int(json.loads(lines[-1]).get("n") or 0)
+            except ValueError:
+                last = 0
+        entry = {"n": max(last + 1, int(time.time() * 1000)), "t": time.time(),
+                 "job_id": draft.get("job_id"), "tool": (log[-1] or {}).get("tool") if log else None,
+                 "changes": changes}
+        lines = (lines + [json.dumps(entry, ensure_ascii=False)])[-_FEED_KEEP:]
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def read_edit_feed(room_id: str, content_id: str, after: int) -> tuple[int, list[dict[str, Any]]]:
+    p = edit_feed_path(room_id, content_id)
+    if not p.exists():
+        return 0, []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    last = int(rows[-1].get("n") or 0) if rows else 0
+    return last, [r for r in rows if int(r.get("n") or 0) > after]
 
 
 def publish_checkpoint(room_id: str, draft_id: str) -> dict[str, Any]:

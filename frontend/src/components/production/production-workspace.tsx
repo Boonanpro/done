@@ -931,6 +931,8 @@ export function ProductionWorkspace({
         key={primaryVideo.id}
         embedded
         roomId={roomId}
+        contentId={selectedContent.id}
+        onExternalEdit={() => void loadAll()}
         initialPath={mediaUrl ? undefined : assetMediaPath(primaryVideo)}
         initialUrl={mediaUrl}
         initialThumbnailUrl={primaryVideo.thumbnail_url || undefined}
