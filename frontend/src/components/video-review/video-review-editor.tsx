@@ -1066,7 +1066,7 @@ export function VideoReviewEditor({
       const box = root.getBoundingClientRect();
       // Keep the hand inside the visible timeline even when the bar is partly off-screen.
       const x = clamp(r.left + Math.min(r.width / 2, 24), box.left + 8, box.right - 24);
-      const y = clamp(r.top + r.height / 2, box.top + 8, box.bottom - 16);
+      const y = clamp(r.top + r.height / 2, Math.max(box.top, 0) + 8, Math.min(box.bottom, window.innerHeight) - 16);
       setDanCursor({ x, y });
     };
     // Two frames: React commits the step, then the bar has its new box.
@@ -1080,15 +1080,27 @@ export function VideoReviewEditor({
       const r = el.getBoundingClientRect();
       const box = root.getBoundingClientRect();
       const offX = r.left < box.left + 40 || r.left > box.right - 80;
-      const offY = r.top < box.top || r.bottom > box.bottom;
+      // The visible part of the lanes: the panel can reach past the bottom of the window.
+      const visTop = Math.max(box.top, 0);
+      const visBottom = Math.min(box.bottom, window.innerHeight);
+      const offY = r.top < visTop || r.bottom > visBottom;
       if (offX || offY) {
         // Pan like a camera to the spot (sideways and/or down to the lane), then point.
-        root.scrollTo({
-          left: offX ? root.scrollLeft + (r.left - box.left) - box.width * 0.35 : root.scrollLeft,
-          top: offY ? root.scrollTop + (r.top - box.top) - box.height * 0.45 : root.scrollTop,
-          behavior: 'smooth',
-        });
-        window.setTimeout(() => place(el, root), 420);
+        // Our own eased pan (a browser smooth scroll is cancelled by any other scroll write).
+        const l0 = root.scrollLeft;
+        const t0 = root.scrollTop;
+        const l1 = offX ? l0 + (r.left - box.left) - box.width * 0.35 : l0;
+        const t1 = offY ? t0 + (r.top + r.height / 2) - (visTop + visBottom) / 2 : t0;
+        const began = performance.now();
+        const step = (now: number) => {
+          const k = Math.min(1, (now - began) / 380);
+          const e = 1 - Math.pow(1 - k, 3);
+          root.scrollLeft = l0 + (l1 - l0) * e;
+          root.scrollTop = t0 + (t1 - t0) * e;
+          if (k < 1) window.requestAnimationFrame(step);
+          else place(el, root);
+        };
+        window.requestAnimationFrame(step);
       } else {
         place(el, root);
       }
@@ -2284,6 +2296,7 @@ export function VideoReviewEditor({
     const scroller = timelineScrollRef.current;
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
+    if (danReplayingRef.current) return; // Dan's replay pans the view itself
     const playX = track.offsetLeft + (currentTime / timelineDuration) * track.offsetWidth;
     const margin = 40;
     const left = scroller.scrollLeft;

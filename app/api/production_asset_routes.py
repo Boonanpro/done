@@ -2415,7 +2415,9 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
 
     # Output frame n is timeline frame n: restamp on the exact grid so the muxer's constant-rate
     # conversion has nothing to drop or repeat (a stamp a hair early or late moved a cut by a frame).
-    filters.append(f"[{video_out}]settb=1/{fps_filter},setpts=N[vgrid]")
+    # One output format whatever the layers were (an RGBA overlay otherwise turns a window into
+    # full-range yuvj420p, and joined windows of both kinds play back with the wrong brightness).
+    filters.append(f"[{video_out}]scale=out_range=tv,format=yuv420p,settb=1/{fps_filter},setpts=N[vgrid]")
     video_out = "vgrid"
     maps = ["-map", f"[{video_out}]"]
     audio_args = ["-an"]
