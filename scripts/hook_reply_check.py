@@ -64,11 +64,41 @@ RULES = [
 ]
 
 
+def local_delivery_links(reply: str) -> list[str]:
+    """Reject machine addresses used as clickable destinations, not code examples.
+
+    A local path cannot be repaired by prefixing the chat origin. Never copy the
+    target automatically: it may be a private file that was not meant to publish.
+    """
+    from urllib.parse import unquote, urlsplit
+    visible = re.sub(r"(?ms)^([`~]{3,})([^\n]*)\n.*?^\1[ \t]*$",
+                     lambda m: m.group(0) if m.group(2).strip() == 'openui-lang' else '', reply)
+    visible = re.sub(r"`[^`\n]+`", '', visible)
+    targets = re.findall(r"!?\[[^\]\n]*\]\(<?([^)>\n]+)>?\)", visible)
+    targets += re.findall(r"(?m)^ {0,3}\[[^\]\n]+\]:\s*<?([^>\s]+)", visible)
+    targets += re.findall(r'Button\(\s*"[^"\n]*"\s*,\s*"([^"\n]+)"', visible)
+    targets += re.findall(r'https?://[^\s<>"\)\]]+', visible)
+    bad = []
+    for raw in targets:
+        value = unquote(raw.strip())
+        try:
+            parsed = urlsplit(value)
+            path = parsed.path if parsed.scheme in ('http', 'https') else value
+            local = parsed.scheme == 'file' or parsed.hostname in ('localhost', '127.0.0.1', '::1')
+        except ValueError:
+            path, local = value, False
+        if local or re.match(r'(?i)^(?:[a-z]:[\\/]|~[\\/]|/(?:Users|home|tmp|private|Volumes|var|opt|etc|mnt)(?:/|$))', path):
+            bad.append(raw)
+    return list(dict.fromkeys(bad))
+
+
 def check(reply: str, ask: str = "") -> list[dict]:
     if re.sub(r"[\s*`~]", "", reply or "") == QUIET:   # 「**WATCH_NO_CHANGE**」なども画面には出ない印
         return []
     body = strip(reply)
-    hits = []
+    hits = [{"id": "local-delivery-link", "name": "本人の画面で開けない保存場所へのリンク",
+             "at": target, "fix": "成果物は公開して本文まで開けるURLへ直す。ファイルはattach_imageで添付する。リンクを消すだけで納品済みにしない。"}
+            for target in local_delivery_links(reply)]
     if len(body) > 60 and english_ratio(body) > 0.5:
         hits.append({"id": "english", "name": "英語の返事", "at": body.strip()[:50].replace("\n", " "),
                      "fix": "日本語で書き直す。英語のエラー文は貼らず、何が止まったかと次にどうするかを日本語1文ずつで書く。"})
@@ -160,15 +190,17 @@ def main() -> int:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
     except ValueError:
         return 0
-    if payload.get("hook_event_name") not in (None, "Stop") or payload.get("stop_hook_active"):
+    if payload.get("hook_event_name") not in (None, "Stop"):
         return 0
     path = payload.get("transcript_path") or ""
     message = payload.get("last_assistant_message") or (last_text(path) if path else "")
     hits = check(message, owner_words(path) if path else "")
+    if payload.get("stop_hook_active"):
+        hits = [h for h in hits if h['id'] == 'local-delivery-link']
     if not hits:
         return 0
     session = str(payload.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:16])
-    if blocked_before(session, hashlib.sha1(message.encode("utf-8")).hexdigest()[:16]):
+    if not any(h["id"] == "local-delivery-link" for h in hits) and blocked_before(session, hashlib.sha1(message.encode("utf-8")).hexdigest()[:16]):
         return 0
     sys.stdout.write(json.dumps({"decision": "block", "reason": reason(hits)}, ensure_ascii=False))
     sys.stdout.flush()
