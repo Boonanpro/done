@@ -1040,6 +1040,7 @@ export function VideoReviewEditor({
   const [danCursor, setDanCursor] = useState<{ x: number; y: number } | null>(null);
   const feedAfterRef = useRef(-1);
   const danSeekRef = useRef<((t: number) => void) | null>(null);
+  const danViewRef = useRef<{ duration: number; zoom: number; maxZoom: number }>({ duration: 0, zoom: 1, maxZoom: 8 });
   const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null }>>([]);
   const feedRunningRef = useRef(false);
 
@@ -1056,24 +1057,43 @@ export function VideoReviewEditor({
     setEditSequence(seq);
   }, []);
 
-  const pointDanAt = useCallback((ids: string[]) => {
+  /** Pan the timeline to the clip if needed and move the hand onto it; resolves once it points. */
+  const pointDanAt = useCallback((ids: string[]) => new Promise<void>((done) => {
+    const place = (el: HTMLElement, root: HTMLElement) => {
+      done();
+      if (!el.isConnected) return;
+      const r = el.getBoundingClientRect();
+      const box = root.getBoundingClientRect();
+      // Keep the hand inside the visible timeline even when the bar is partly off-screen.
+      const x = clamp(r.left + Math.min(r.width / 2, 24), box.left + 8, box.right - 24);
+      const y = clamp(r.top + r.height / 2, box.top + 8, box.bottom - 16);
+      setDanCursor({ x, y });
+    };
     // Two frames: React commits the step, then the bar has its new box.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       const root = timelineScrollRef.current;
-      if (!root) return;
-      for (const id of ids) {
-        const el = root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`) as HTMLElement | null;
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        const box = root.getBoundingClientRect();
-        // Keep the hand inside the visible timeline even when the bar is off-screen.
-        const x = clamp(r.left + Math.min(r.width / 2, 24), box.left + 8, box.right - 24);
-        const y = clamp(r.top + r.height / 2, box.top + 8, box.bottom - 16);
-        setDanCursor({ x, y });
-        return;
+      if (!root) { done(); return; }
+      const el = ids
+        .map((id) => root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`) as HTMLElement | null)
+        .find(Boolean);
+      if (!el) { done(); return; }
+      const r = el.getBoundingClientRect();
+      const box = root.getBoundingClientRect();
+      const offX = r.left < box.left + 40 || r.left > box.right - 80;
+      const offY = r.top < box.top || r.bottom > box.bottom;
+      if (offX || offY) {
+        // Pan like a camera to the spot (sideways and/or down to the lane), then point.
+        root.scrollTo({
+          left: offX ? root.scrollLeft + (r.left - box.left) - box.width * 0.35 : root.scrollLeft,
+          top: offY ? root.scrollTop + (r.top - box.top) - box.height * 0.45 : root.scrollTop,
+          behavior: 'smooth',
+        });
+        window.setTimeout(() => place(el, root), 420);
+      } else {
+        place(el, root);
       }
     }));
-  }, []);
+  }), []);
 
   const runDanFeed = useCallback(async () => {
     if (feedRunningRef.current) return;
@@ -1089,6 +1109,14 @@ export function VideoReviewEditor({
         danReplayingRef.current = true;
         setDanReplay(true);
         const steps = buildDanSteps(batch.entries, start);
+        // Zoom in (never out) so a touched clip is wide enough to watch: about 40 s across the view.
+        const view = danViewRef.current;
+        if (view.duration > 0 && view.duration / view.zoom > 90) {
+          const first = steps.length ? danStepFocus(steps[0], clipStateMap(start)) : null;
+          if (first !== null && !danPlayingRef.current) danSeekRef.current?.(first);
+          setTimelineZoom(Number(Math.min(view.maxZoom, view.duration / 40).toFixed(2)));
+          await wait(450);
+        }
         const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
         const shown = clipStateMap(start);
         for (const step of steps) {
@@ -1097,8 +1125,8 @@ export function VideoReviewEditor({
           const focus = danStepFocus(step, shown);
           if (focus !== null && !danPlayingRef.current) danSeekRef.current?.(focus);
           if (vanish.length) {
+            await pointDanAt(vanish);
             setDanTouch({ ids, appear: [], vanish });
-            pointDanAt(vanish);
             await wait(Math.min(380, stepMs * 0.55));
           }
           const appear: string[] = [];
@@ -1114,7 +1142,7 @@ export function VideoReviewEditor({
           if (kept.length) {
             setSelectedSequenceClipId(kept[0]);
             setSelectedSequenceClipIds(kept);
-            pointDanAt(kept);
+            await pointDanAt(kept);
           }
           await wait(stepMs);
         }
@@ -1171,6 +1199,9 @@ export function VideoReviewEditor({
   // drop/move clips (otherwise the last clip is flush against the right edge = cramped).
   // Every px<->sec mapping uses this, so clips, drags and scrub all stay consistent.
   const timelineDuration = contentDuration > 0 ? contentDuration + Math.max(3, contentDuration * 0.08) : contentDuration;
+  // Long timelines need a deeper zoom: at most ~20 seconds across the view (8x was a few px per
+  // second on a 17-minute video).
+  const maxTimelineZoom = Math.max(8, Math.ceil((timelineDuration || 0) / 20));
   const previewAspect = useMemo(() => {
     const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
     return `${Number(a) || 9} / ${Number(b) || 16}`;
@@ -1221,6 +1252,9 @@ export function VideoReviewEditor({
   // HW decoder re-inits; a free wall-clock bar would run ahead during those stalls (the desync).
   // Following the engine keeps the bar locked to the picture — it stalls when the picture stalls.
   const engPosRef = useRef({ pos: 0, wall: 0 });
+  useEffect(() => {
+    danViewRef.current = { duration: timelineDuration || 0, zoom: timelineZoom, maxZoom: maxTimelineZoom };
+  });
   // Dan's replay moves the playhead the same way a click on the ruler does (no snapping).
   useEffect(() => {
     danSeekRef.current = (t: number) => {
@@ -2233,7 +2267,7 @@ export function VideoReviewEditor({
     if (!event.shiftKey) return;
     event.preventDefault();
     const direction = event.deltaY > 0 ? -1 : 1;
-    setTimelineZoom((value) => Number(clamp(value + direction * 0.2, 1, 8).toFixed(2)));
+    setTimelineZoom((value) => Number(clamp(value * (direction > 0 ? 1.15 : 1 / 1.15), 1, maxTimelineZoom).toFixed(2)));
     window.requestAnimationFrame(() => {
       const scroller = timelineScrollRef.current;
       const track = timelineRef.current;
@@ -2241,7 +2275,7 @@ export function VideoReviewEditor({
       const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
       scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     });
-  }, [currentTime, timelineDuration]);
+  }, [currentTime, timelineDuration, maxTimelineZoom]);
 
   // Edge-scroll on playhead MOVEMENT: only scroll when the playhead reaches the viewport edge —
   // staying put for fine adjustments in the middle (centering on every move made the whole timeline
@@ -3489,11 +3523,11 @@ export function VideoReviewEditor({
                   <input
                     type="range"
                     min={1}
-                    max={8}
+                    max={maxTimelineZoom}
                     step={0.1}
                     value={timelineZoom}
                     aria-label="タイムラインズーム"
-                    onChange={(event) => setTimelineZoom(Number(clamp(Number(event.target.value), 1, 8).toFixed(2)))}
+                    onChange={(event) => setTimelineZoom(Number(clamp(Number(event.target.value), 1, maxTimelineZoom).toFixed(2)))}
                     onDoubleClick={() => setTimelineZoom(1)}
                     // Drop focus after dragging so a following Space goes to play/pause, not the
                     // slider (a focused range input eats Space/arrow keys).
