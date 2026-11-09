@@ -187,6 +187,8 @@ def tool_definitions() -> list[types.Tool]:
               {"clip_id": _STR, "edge": _STR, "new_time": _NUM}, ["clip_id", "edge", "new_time"]),
         _tool("move_clip", "クリップ（とリンク相手）をnew_start秒へ移動。移動先が塞がっていれば失敗する。",
               {"clip_id": _STR, "new_start": _NUM}, ["clip_id", "new_start"]),
+        _tool("ripple_delete", "時間の範囲[timeline_start,timeline_end)を全レーンから切り取り、後ろを全部その分だけ前へ詰める（言い間違い・間を切る）。映像と音は境目で分けて同期を保ち、字幕・画像・効果は重なった分だけ短くする。",
+              {"timeline_start": _NUM, "timeline_end": _NUM}, ["timeline_start", "timeline_end"]),
         _tool("add_overlay", "PiP映像または画像（ロゴ等）を正規化座標(x,y,width,height 0-1)でオーバーレイ。画像はアスペクト維持で枠内に収まる。",
               {"asset_id": _STR, "timeline_start": _NUM, "timeline_end": _NUM,
                "x": _NUM, "y": _NUM, "width": _NUM, "height": _NUM, "source_start": _NUM},
@@ -367,7 +369,7 @@ async def _dispatch(name: str, a: dict) -> list:
             result['note'] = '元コードを保存済み。新規はadd_clip、対象場面の更新はset_clip_props(asset_id)。別場面・画面比率を変更せず、配置後の実物を確認する。'
         return _ok(result)
     if name=='apply_edits':
-        allowed={'animate_clip','add_caption','set_clip','add_region','set_region','set_clip_props','add_clip','append_clip','insert_clip','remove_clip','trim_clip','move_clip','add_overlay','insert_freeze','add_audio','split_clip'}
+        allowed={'animate_clip','add_caption','set_clip','add_region','set_region','set_clip_props','add_clip','append_clip','insert_clip','remove_clip','trim_clip','move_clip','ripple_delete','add_overlay','insert_freeze','add_audio','split_clip'}
         operations=a.get('operations')
         if not isinstance(operations,list) or not 1<=len(operations)<=100 or any(not isinstance(op,dict) or op.get('name') not in allowed or not isinstance(op.get('args'),dict) for op in operations):
             return _ok({'ok':False,'error':'タイムラインの編集操作を1〜100件指定してください。生成・保存・外部操作は含められません。'})
@@ -643,6 +645,8 @@ async def _dispatch(name: str, a: dict) -> list:
         "trim_clip": lambda: tc.trim_clip(seq, assets, clip_id=str(a["clip_id"]),
                                           edge=str(a["edge"]), new_time=float(a["new_time"])),
         "move_clip": lambda: tc.move_clip(seq, clip_id=str(a["clip_id"]), new_start=float(a["new_start"])),
+        "ripple_delete": lambda: tc.ripple_delete(seq, timeline_start=float(a["timeline_start"]),
+                                                  timeline_end=float(a["timeline_end"])),
         "add_overlay": lambda: tc.add_overlay(seq, assets, asset_id=str(a["asset_id"]),
                                               timeline_start=float(a["timeline_start"]),
                                               timeline_end=float(a["timeline_end"]),

@@ -24,7 +24,7 @@ from app.services import timeline_context as tcx
 from app.services import timeline_draft as td
 
 FAST_OPS = {
-    "move_clip", "trim_clip", "remove_clip", "split_clip", "set_clip", "set_clip_props",
+    "move_clip", "trim_clip", "remove_clip", "split_clip", "ripple_delete", "set_clip", "set_clip_props",
     "add_region", "set_region", "add_caption", "add_clip", "add_audio", "add_overlay", "insert_freeze",
 }
 
@@ -111,7 +111,7 @@ def apply_edit(room_id: str, content_id: str, op: str, args: dict[str, Any],
     baseline = set(tc.validate_sequence(seq, assets, asset_dir=str(td._room_dir(room_id))))
     fn = getattr(tc, op)
     try:
-        if op in {"remove_clip", "move_clip", "split_clip", "set_clip", "set_region", "add_region", "add_caption"}:
+        if op in {"remove_clip", "move_clip", "split_clip", "ripple_delete", "set_clip", "set_region", "add_region", "add_caption"}:
             result = fn(seq, **args)
         else:
             result = fn(seq, assets, **args)

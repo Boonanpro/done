@@ -31,6 +31,8 @@ from typing import Any
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"}
 MIN_CLIP = 0.05
+_TOUCH = 0.001  # two clips closer than this are touching, not overlapping
+MIN_FRAME_CLIP = 1 / 60  # shorter than half a frame = no picture at all
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -83,7 +85,9 @@ def _span_free(track: dict[str, Any], ts: float, te: float, ignore: set[str] | N
     for c in track.get("clips") or []:
         if ignore and str(c.get("id")) in ignore:
             continue
-        if _f(c.get("timeline_start")) < te - 1e-6 and _f(c.get("timeline_end")) > ts + 1e-6:
+        # Times are stored to the millisecond, so a frame-exact neighbour (n/30 s) can sit up to
+        # half a millisecond "inside" after rounding. Overlaps that small are not overlaps.
+        if _f(c.get("timeline_start")) < te - _TOUCH and _f(c.get("timeline_end")) > ts + _TOUCH:
             return False
     return True
 
@@ -1015,6 +1019,84 @@ def clips_at(seq: dict[str, Any], assets: dict, *, t: float) -> list[dict[str, A
     return rows
 
 
+def ripple_delete(seq: dict[str, Any], *, timeline_start: float, timeline_end: float) -> dict[str, Any]:
+    """Cut the span [timeline_start, timeline_end) out of the WHOLE timeline (a ripple delete):
+    every lane loses that span and everything after it moves earlier by its length, so picture,
+    linked sound, captions, stills and effects stay in sync. Media crossing an edge is split so
+    its source keeps playing in step; stills, captions and effects crossing the span get shorter."""
+    a, b = _f(timeline_start), _f(timeline_end)
+    d = b - a
+    if d < 1 / 240:
+        return {"ok": False, "error": "span too short"}
+    eps = _TOUCH
+    new_links: dict[str, str] = {}
+    removed: list[str] = []
+    split: list[str] = []
+    moved = 0
+    for t in _tracks(seq):
+        out = []
+        for c in t.get("clips") or []:
+            ts, te = _f(c.get("timeline_start")), _f(c.get("timeline_end"))
+            if te <= a + eps:
+                out.append(c)
+                continue
+            if ts >= b - eps:
+                c["timeline_start"], c["timeline_end"] = round(ts - d, 4), round(te - d, 4)
+                out.append(c)
+                moved += 1
+                continue
+            left, right = ts < a - eps, te > b + eps
+            has_src = c.get("source_end") is not None and not c.get("freeze") and str(c.get("kind")) != "image"
+            if has_src:
+                spd = _f(c.get("speed"), 1.0) or 1.0
+                ss = _f(c.get("source_start"))
+                if not left and not right:
+                    removed.append(str(c.get("id")))
+                    continue
+                if left and right:
+                    second = json.loads(json.dumps(c))
+                    second["id"] = _new_id("clip_ag_s")
+                    if c.get("link_id"):
+                        second["link_id"] = new_links.setdefault(str(c["link_id"]), _new_id("lk_ag"))
+                    for key_field in ("region_keys", "transform_keys"):
+                        if isinstance(c.get(key_field), list) and c[key_field]:
+                            c[key_field], _ = _rebase_keys(c[key_field], a - ts)
+                            _, second[key_field] = _rebase_keys(second[key_field], b - ts)
+                    c["timeline_end"], c["source_end"] = round(a, 4), round(ss + (a - ts) * spd, 4)
+                    second["timeline_start"], second["timeline_end"] = round(a, 4), round(te - d, 4)
+                    second["source_start"] = round(ss + (b - ts) * spd, 4)
+                    out += [c, second]
+                    split.append(str(c.get("id")))
+                elif left:
+                    c["timeline_end"], c["source_end"] = round(a, 4), round(ss + (a - ts) * spd, 4)
+                    out.append(c)
+                else:
+                    for key_field in ("region_keys", "transform_keys"):
+                        if isinstance(c.get(key_field), list) and c[key_field]:
+                            _, c[key_field] = _rebase_keys(c[key_field], b - ts)
+                    c["timeline_start"], c["timeline_end"] = round(a, 4), round(te - d, 4)
+                    c["source_start"] = round(ss + (b - ts) * spd, 4)
+                    out.append(c)
+                continue
+            overlap = min(te, b) - max(ts, a)
+            if te - ts - overlap < MIN_CLIP:
+                removed.append(str(c.get("id")))
+                continue
+            if not left:
+                for key_field in ("region_keys", "transform_keys"):
+                    if isinstance(c.get(key_field), list) and c[key_field]:
+                        _, c[key_field] = _rebase_keys(c[key_field], b - ts)
+            nts = ts if left else a
+            c["timeline_start"], c["timeline_end"] = round(nts, 4), round(nts + te - ts - overlap, 4)
+            if str(c.get("kind")) == "image":
+                c["source_start"], c["source_end"] = 0.0, round(te - ts - overlap, 4)
+            out.append(c)
+        t["clips"] = out
+        _sorted(t)
+    _recompute_duration(seq)
+    return {"ok": True, "removed": removed, "split": split, "moved": moved, "shift": round(-d, 4)}
+
+
 def _recompute_duration(seq: dict[str, Any]) -> None:
     dur = 0.0
     for _, _, c in _all_clips(seq):
@@ -1044,7 +1126,7 @@ def validate_sequence(seq: dict[str, Any], assets: dict[str, dict[str, Any]],
         ts, te = _f(c.get("timeline_start")), _f(c.get("timeline_end"))
         if ts < -1e-6:
             problems.append(f"{cid}: negative timeline_start {ts}")
-        if te - ts < MIN_CLIP - 1e-6:
+        if te - ts < MIN_FRAME_CLIP:   # one 30fps frame is a real clip (frame-exact cuts make them)
             problems.append(f"{cid}: zero/negative length ({ts}-{te})")
         if c.get("link_id"):
             links.setdefault(str(c.get("link_id")), []).append(c)
