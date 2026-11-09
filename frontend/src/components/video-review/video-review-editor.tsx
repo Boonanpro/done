@@ -3085,7 +3085,7 @@ export function VideoReviewEditor({
             ...(danCursor.edge === 'left' || danCursor.edge === 'right'
               ? { left: danCursor.x - 28, top: danCursor.y - 70, width: 56, height: 140 }
               : { left: danCursor.x - 70, top: danCursor.y - 28, width: 140, height: 56 }),
-            background: 'radial-gradient(closest-side, rgba(56,189,248,.75), rgba(56,189,248,.28) 55%, rgba(56,189,248,0))',
+            background: 'radial-gradient(closest-side, rgba(56,189,248,.9), rgba(56,189,248,.35) 55%, rgba(56,189,248,0))',
             filter: 'blur(6px)',
             opacity: danReplay ? undefined : 0,
           }}
