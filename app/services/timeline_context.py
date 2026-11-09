@@ -23,6 +23,8 @@ def probe_timeline_audio(sequence, asset_dir, t0, t1):
     import math
     if not all(math.isfinite(t) for t in (t0, t1)) or t0 < 0 or t1 <= t0:
         return {'ok': False, 'error': 'Use a finite positive timeline range.'}
+    if not native_runnable(native_exe_default()):
+        return {'ok': False, 'error': 'The native editor engine does not run on this machine.'}
     with tempfile.TemporaryDirectory(prefix='dan-audio-probe-') as folder:
         path = Path(folder) / 'contents.json'
         path.write_text(json.dumps([{'id': 'probe', 'timeline': {'sequence': sequence}}]), encoding='utf-8')
@@ -34,6 +36,16 @@ def probe_timeline_audio(sequence, asset_dir, t0, t1):
             'coverage': 'Samples up to 0.5 seconds at the start of each overlapping audio clip in the requested range. Checks native decoding and nonzero signal, not speech quality, synchronization, or the entire range.'}
 
 _NATIVE_DIR = r"D:\done-desktop\scripts\poc\production_desktop\native_ui\target\release"
+
+
+def native_runnable(path: str) -> bool:
+    """The native editor is a Windows build. On the Mac a copied native_ui.exe exists but cannot
+    run ("Exec format error"), which used to fail every timeline edit's validation."""
+    if not path or not os.path.isfile(path):
+        return False
+    if os.name != "nt" and path.lower().endswith(".exe"):
+        return False
+    return os.access(path, os.X_OK)
 
 
 def native_exe_default() -> str:
@@ -53,9 +65,10 @@ def native_exe_default() -> str:
                  os.path.join(here, "native_ui.exe"),
                  os.path.join(_NATIVE_DIR, "native_ui_headless.exe"),
                  os.path.join(_NATIVE_DIR, "native_ui.exe")):
-        if cand and os.path.exists(cand):
+        if native_runnable(cand):
             return cand
-    return os.path.join(_NATIVE_DIR, "native_ui.exe")
+    # nothing this machine can run: a path that does not exist, so callers skip the native step
+    return os.path.join(_NATIVE_DIR, "native_ui.unavailable")
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -144,7 +157,7 @@ def render_timeline_frames(sequence: dict[str, Any], asset_dir: str, ts: list[fl
     little more than a single frame). Returns {ok, paths|error} with paths in the
     same order as ts."""
     exe = os.environ.get("NATIVE_UI_EXE") or native_exe_default()
-    if not Path(exe).exists():
+    if not native_runnable(exe):
         return {"ok": False, "error": f"native engine not found: {exe}"}
     ts = [float(t) for t in ts][:12] or [0.0]
     odir = Path(out_dir) if out_dir else Path(tempfile.gettempdir())
