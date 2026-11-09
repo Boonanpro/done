@@ -32,6 +32,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { TimelinePreview } from './timeline-preview';
 import { CaptionLayer, type RenderCaption } from './caption-layer';
+import { applyOwnStep, type HistSnapshot, type HistStep } from './undo-history';
 
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
@@ -630,15 +631,35 @@ export function VideoReviewEditor({
       wv?.postMessage(JSON.stringify({ x: -10000, y: -10000, w: 1, h: 1 }));
     };
   }, [nativeShell]);
-  // Unified undo/redo: one stack of combined {annotations, sequence} snapshots so Ctrl+Z
-  // steps back through ALL edits (clip moves/cuts/deletes AND annotation changes) in the
-  // order they happened. Rapid bursts (a drag, a slider sweep) coalesce into one entry.
-  type HistEntry = { annotations: ReviewAnnotation[]; sequence: EditSequence | null };
-  const histPastRef = useRef<HistEntry[]>([]);
-  const histFutureRef = useRef<HistEntry[]>([]);
+  // Unified undo/redo of the OWNER's edits: each step keeps the {annotations, sequence} state
+  // before and after one burst (a drag, a slider sweep coalesce into one step), so Ctrl+Z steps
+  // back through clip moves/cuts/deletes AND annotation changes in order. Dan's edits are not
+  // steps and never clear the stacks: undo reverts only what the owner changed, on top of the
+  // timeline as it is now (undo-history.ts), like a shared document.
+  type HistEntry = HistSnapshot;
+  const histPastRef = useRef<HistStep[]>([]);
+  const histFutureRef = useRef<HistStep[]>([]);
   const histPrevRef = useRef<HistEntry | null>(null);   // last observed state (baseline for the next diff)
   const histCheckpointRef = useRef<HistEntry | null>(null); // pre-burst state pending a coalesced push
   const histTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Close the open burst of owner edits into one undo step (before = state when the burst began,
+  // after = the latest state the owner made). Called when the coalesce window ends, before
+  // undo/redo, and before a change from Dan is adopted, so the step holds only the owner's edits.
+  const closeOwnBurst = () => {
+    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
+    const before = histCheckpointRef.current;
+    const after = histPrevRef.current;
+    histCheckpointRef.current = null;
+    if (!before || !after) return;
+    if (before.annotations === after.annotations && before.sequence === after.sequence) return;
+    histPastRef.current = [...histPastRef.current.slice(-79), { before, after }];
+    histFutureRef.current = [];
+  };
+  // Another video in the same editor: the owner's steps belong to the previous one.
+  useEffect(() => {
+    histPastRef.current = [];
+    histFutureRef.current = [];
+  }, [contentId]);
   // Right-drag rubber-band selection over the timeline (left-drag is reserved for scrub/move).
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -1001,12 +1022,9 @@ export function VideoReviewEditor({
     // Skip if this is the current sync point OR any state we've held locally (a lagging poll echo).
     if (sig === lastSyncedSig.current || localSeqSigs.current.has(sig)) return;
     lastSyncedSig.current = sig;
-    // genuine new baseline: reset undo history and pre-sync histPrevRef so the resulting
-    // setEditSequence isn't itself recorded as an undoable step.
-    histPastRef.current = [];
-    histFutureRef.current = [];
-    histCheckpointRef.current = null;
-    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
+    // genuine new baseline (Dan or another screen): keep the owner's undo history, close any
+    // open burst first, and pre-sync histPrevRef so the change isn't recorded as an owner step.
+    closeOwnBurst();
     histPrevRef.current = { annotations, sequence: initialSequence || null };
     setEditSequence(initialSequence || null);
   }, [annotations, initialSequence]);
@@ -1039,14 +1057,12 @@ export function VideoReviewEditor({
   const feedRunningRef = useRef(false);
 
   const adoptShown = useCallback((seq: EditSequence | null) => {
-    // Same as adopting a new baseline from the server: no autosave, no undo step.
+    // Same as adopting a new baseline from the server: no autosave, no undo step, and the
+    // owner's own undo history stays.
     const sig = seqSig(seq);
     lastSyncedSig.current = sig;
     rememberLocalSig(localSeqSigs, sig);
-    histPastRef.current = [];
-    histFutureRef.current = [];
-    histCheckpointRef.current = null;
-    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
+    closeOwnBurst();
     histPrevRef.current = { annotations: annotationsRef.current, sequence: seq };
     setEditSequence(seq);
   }, []);
@@ -1452,14 +1468,7 @@ export function VideoReviewEditor({
 
   // Push the pending pre-burst checkpoint into the undo stack (called when the coalesce
   // window closes, or eagerly right before an undo/redo so nothing in-flight is lost).
-  const flushHistory = useCallback(() => {
-    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
-    if (histCheckpointRef.current) {
-      histPastRef.current = [...histPastRef.current.slice(-79), histCheckpointRef.current];
-      histFutureRef.current = [];
-      histCheckpointRef.current = null;
-    }
-  }, []);
+  const flushHistory = useCallback(() => closeOwnBurst(), []);
 
   useEffect(() => {
     const cur: HistEntry = { annotations, sequence: editSequence };
@@ -1475,11 +1484,7 @@ export function VideoReviewEditor({
     if (histTimerRef.current) clearTimeout(histTimerRef.current);
     histTimerRef.current = setTimeout(() => {
       histTimerRef.current = null;
-      if (histCheckpointRef.current) {
-        histPastRef.current = [...histPastRef.current.slice(-79), histCheckpointRef.current];
-        histFutureRef.current = [];
-        histCheckpointRef.current = null;
-      }
+      closeOwnBurst();
     }, 300);
   }, [annotations, editSequence]);
 
@@ -1516,9 +1521,7 @@ export function VideoReviewEditor({
       // 0.3s" in-flight case.)
       const nextSig = seqSig(nextAnnotations);
       if (nextSig === lastSyncedAnnSig.current || localAnnSigs.current.has(nextSig)) return;
-      histPastRef.current = [];
-      histFutureRef.current = [];
-      histCheckpointRef.current = null;
+      closeOwnBurst();
       // pre-sync the baseline so this load isn't recorded as an undoable edit
       histPrevRef.current = { annotations: nextAnnotations, sequence: histPrevRef.current?.sequence ?? null };
       lastSyncedAnnSig.current = seqSig(nextAnnotations); // adopted from parent -> not our edit to re-save
@@ -1979,24 +1982,27 @@ export function VideoReviewEditor({
 
   const undo = useCallback(() => {
     flushHistory();
-    const previous = histPastRef.current.pop();
-    if (!previous) return;
-    histFutureRef.current = [{ annotations, sequence: editSequence }, ...histFutureRef.current].slice(0, 80);
-    histPrevRef.current = previous; // pre-sync so restoring doesn't record a new entry
-    setAnnotations(previous.annotations);
-    setEditSequence(previous.sequence);
+    const step = histPastRef.current.pop();
+    if (!step) return;
+    histFutureRef.current = [step, ...histFutureRef.current].slice(0, 80);
+    const restored = applyOwnStep({ annotations, sequence: editSequence }, step, 'undo');
+    histPrevRef.current = restored; // pre-sync so restoring doesn't record a new entry
+    setAnnotations(restored.annotations);
+    setEditSequence(restored.sequence);
     clearSelection();
   }, [annotations, editSequence, flushHistory, clearSelection]);
 
   const redo = useCallback(() => {
-    const next = histFutureRef.current.shift();
-    if (!next) return;
-    histPastRef.current = [...histPastRef.current.slice(-79), { annotations, sequence: editSequence }];
-    histPrevRef.current = next;
-    setAnnotations(next.annotations);
-    setEditSequence(next.sequence);
+    flushHistory();
+    const step = histFutureRef.current.shift();
+    if (!step) return;
+    histPastRef.current = [...histPastRef.current.slice(-79), step];
+    const restored = applyOwnStep({ annotations, sequence: editSequence }, step, 'redo');
+    histPrevRef.current = restored;
+    setAnnotations(restored.annotations);
+    setEditSequence(restored.sequence);
     clearSelection();
-  }, [annotations, editSequence, clearSelection]);
+  }, [annotations, editSequence, flushHistory, clearSelection]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
