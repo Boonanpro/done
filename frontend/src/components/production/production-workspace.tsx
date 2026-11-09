@@ -80,14 +80,28 @@ function assetMediaUrl(asset: ProductionAsset): string | undefined {
 }
 
 function sequenceAssetForEditor(asset: ProductionAsset) {
+  // Stills are served by the room's media route (the review route only streams video files).
+  const stillUrl = asset.kind === 'image' && !asset.proxy_url
+    ? `/api/v1/production-assets/media?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}&variant=original`
+    : undefined;
   return {
     id: asset.id,
-    url: asset.proxy_url || undefined,
-    path: asset.proxy_url ? undefined : assetMediaPath(asset),
+    url: asset.proxy_url || stillUrl,
+    path: asset.proxy_url || stillUrl ? undefined : assetMediaPath(asset),
     thumbnail_url: asset.thumbnail_url || undefined,
     label: asset.filename || asset.original_uri,
     fps: asset.metadata?.fps as string | number | undefined,
+    kind: asset.kind,
   };
+}
+
+// Every picture the timeline draws: the content's own videos plus any video/image a clip points
+// at (Dan adds generated or imported pictures to the room without adding them to asset_ids).
+function sequencePictureAssets(content: ProductionContent, assets: ProductionAsset[]) {
+  const sequence = (content.timeline?.sequence || {}) as { tracks?: Array<{ clips?: Array<{ asset_id?: string }> }> };
+  const used = new Set(content.asset_ids);
+  for (const track of sequence.tracks || []) for (const clip of track.clips || []) if (clip.asset_id) used.add(clip.asset_id);
+  return assets.filter((asset) => (asset.kind === 'video' || asset.kind === 'image') && used.has(asset.id));
 }
 
 function makeUniqueTitle(baseTitle: string, existingTitles: string[]): string {
@@ -923,7 +937,7 @@ export function ProductionWorkspace({
         initialFps={primaryVideo.metadata?.fps as string | number | undefined}
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
-        sequenceAssets={selectedContentAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
+        sequenceAssets={sequencePictureAssets(selectedContent, assets).map(sequenceAssetForEditor)}
         previewTopLeft={
           assetsOpen ? (
             <div className="w-72 rounded-md border border-border bg-background/95 shadow-lg backdrop-blur">

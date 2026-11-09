@@ -126,6 +126,22 @@ function drawSource(
   ctx.restore();
 }
 
+// Box motion at a clip-relative time: linear between keys, held before/after.
+function boxKeyAt(keys: unknown, rel: number): { x: number; y: number; w: number; h: number } | null {
+  if (!Array.isArray(keys) || keys.length === 0) return null;
+  const ks = keys as Array<{ t: number; x: number; y: number; w: number; h: number }>;
+  if (rel <= ks[0].t) return ks[0];
+  for (let i = 1; i < ks.length; i += 1) {
+    const a = ks[i - 1];
+    const b = ks[i];
+    if (rel < b.t) {
+      const f = (rel - a.t) / Math.max(1e-6, b.t - a.t);
+      return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, w: a.w + (b.w - a.w) * f, h: a.h + (b.h - a.h) * f };
+    }
+  }
+  return ks[ks.length - 1];
+}
+
 function isFrozen(clip: SequenceClip): boolean {
   return clip.source_end != null && Number(clip.source_end) <= Number(clip.source_start || 0);
 }
@@ -173,7 +189,26 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   const [loadProgress, setLoadProgress] = useState({ ready: 0, total: 0 });
   const readyUrlsRef = useRef<Set<string>>(new Set());
 
-  const videoAssets = useMemo(() => (assets || []).filter((a) => assetSrc(a)), [assets]);
+  const videoAssets = useMemo(() => (assets || []).filter((a) => assetSrc(a) && a.kind !== 'image'), [assets]);
+  // Still pictures (generated art, imported logos, Dan-made caption plates) are drawn from an
+  // <img>, loaded on first use; the canvas repaints when one arrives.
+  const imageSrcByAssetId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of assets || []) { const s = assetSrc(a); if (s && a.kind === 'image') m.set(a.id, s); }
+    return m;
+  }, [assets]);
+  const imagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const imageFor = useCallback((url: string): HTMLImageElement | null => {
+    let img = imagesRef.current.get(url);
+    if (!img) {
+      img = new Image();
+      img.decoding = 'async';
+      img.onload = () => setReadyTick((v) => v + 1);
+      img.src = url;
+      imagesRef.current.set(url, img);
+    }
+    return img.complete && img.naturalWidth ? img : null;
+  }, []);
 
   const assetById = useMemo(() => {
     const m = new Map<string, SequenceAsset>();
@@ -196,7 +231,17 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // flat visual clips (base + overlay), with layer + position
   const visualClips = useMemo<VisualClip[]>(() => {
     const out: VisualClip[] = [];
+    let visualIndex = -1;
     for (const track of sequence?.tracks || []) {
+      if (track.type !== 'audio') visualIndex += 1;
+      // A picture placed on a caption lane (a designed caption plate) draws like an overlay.
+      if (track.type === 'caption') {
+        for (const clip of track.clips || []) {
+          if (!clip.asset_id) continue;
+          out.push({ clip, kind: 'overlay', layer: clip.layer ?? 2, position: (clip.position as VisualClip['position']) || null });
+        }
+        continue;
+      }
       if (track.type !== 'video' && track.type !== 'overlay') continue;
       for (const clip of track.clips || []) {
         const overlay = isOverlayClip(clip, track.type);
@@ -207,7 +252,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         out.push({
           clip,
           kind: overlay ? 'overlay' : 'base',
-          layer: clip.layer ?? (overlay ? 1 : 0),
+          // no own layer → its lane's place in the stack (same rule as the exporter)
+          layer: clip.layer ?? (overlay ? 1 : visualIndex),
           position: (clip.position as VisualClip['position']) || null,
         });
       }
@@ -397,6 +443,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // (play-start transition) and for frozen clips (a single held frame is cheap to cache).
   const frameFor = useCallback(
     (clip: SequenceClip, t: number): { src: CanvasImageSource; vw: number; vh: number } | null => {
+      const imageUrl = imageSrcByAssetId.get(String(clip.asset_id || ''));
+      if (imageUrl) {
+        const img = imageFor(imageUrl);
+        return img ? { src: img, vw: img.naturalWidth, vh: img.naturalHeight } : null;
+      }
       const url = srcByAssetId.get(String(clip.asset_id || ''));
       if (!url) return null;
       // Prefer the hardware <video> element when it's available AND already sitting on the
@@ -426,7 +477,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (!frame) return null;
       return { src: frame, vw: frame.width || fs.width, vh: frame.height || fs.height };
     },
-    [srcByAssetId, supported],
+    [srcByAssetId, imageSrcByAssetId, imageFor, supported],
   );
 
   const drawFrame = useCallback(
@@ -467,10 +518,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       for (const { vc, got } of layers) {
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
-        const px = vc.position ? vc.position.x * w : 0;
-        const py = vc.position ? vc.position.y * h : 0;
-        const pw = vc.position ? vc.position.width * w : w;
-        const ph = vc.position ? vc.position.height * h : h;
+        let px = vc.position ? vc.position.x * w : 0;
+        let py = vc.position ? vc.position.y * h : 0;
+        let pw = vc.position ? vc.position.width * w : w;
+        let ph = vc.position ? vc.position.height * h : h;
+        // Motion (transform_keys): the clip's box moves/scales over time, relative to its box.
+        const k = boxKeyAt(vc.clip.transform_keys, t - vc.clip.timeline_start);
+        if (k) { px += k.x * pw; py += k.y * ph; pw *= k.w; ph *= k.h; }
         // Wipe shape (circle / rounded "photo") clips ANY video clip to that box.
         const shape = (vc.clip as { shape?: string }).shape;
         if (shape === 'circle' || shape === 'rounded') {

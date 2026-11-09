@@ -214,6 +214,7 @@ export type SequenceAsset = {
   thumbnail_url?: string | null;
   label?: string | null;
   fps?: number | string | null;
+  kind?: string | null;
 };
 
 // A drawn region is given a TYPE after you draw it (popover on the shape) — not pre-selected.
@@ -734,7 +735,12 @@ export function VideoReviewEditor({
     const audioRoleLayer = (role?: string | null) => (role === 'sfx' ? 1 : role === 'music' ? 2 : 0);
 
     let counter = 0;
+    let visualIndex = -1;
     for (const track of tracks) {
+      // A clip without its own layer sits at its lane's place in the stack (lane array order =
+      // stacking, the same rule as the exporter), so Dan's extra picture lanes don't collapse
+      // onto the base lane.
+      if (track.type !== 'audio') visualIndex += 1;
       for (const clip of track.clips || []) {
         let zone: 'visual' | 'audio' = 'visual';
         let itemType = 'video';
@@ -755,7 +761,7 @@ export function VideoReviewEditor({
         } else {
           const overlay = clip.composition === 'pip' || clip.composition === 'overlay';
           itemType = 'video';
-          layer = clip.layer ?? (overlay ? 1 : 0);
+          layer = clip.layer ?? (overlay ? 1 : visualIndex);
         }
         aggs.push({
           zone,
