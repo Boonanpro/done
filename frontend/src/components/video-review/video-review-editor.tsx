@@ -435,6 +435,8 @@ const DAN_HANDS_CSS = `
 @keyframes dan-vanish { to { transform: scaleY(.15); opacity: 0; } }
 .dan-vanish { animation: dan-vanish .35s ease-in forwards; }
 .dan-hand { transition: left .42s cubic-bezier(.3,.7,.2,1), top .42s cubic-bezier(.3,.7,.2,1), opacity .3s; }
+@keyframes dan-glow { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+.dan-glow { animation: dan-glow 1.6s ease-in-out infinite; transition: left .35s ease, top .35s ease; }
 `;
 
 // ---- Dan's published steps (edit feed) → a replay the eye can follow ----
@@ -1027,9 +1029,12 @@ export function VideoReviewEditor({
   });
   const [danReplay, setDanReplay] = useState(false);
   const [danTouch, setDanTouch] = useState<{ ids: string[]; appear: string[]; vanish: string[] }>({ ids: [], appear: [], vanish: [] });
-  const [danCursor, setDanCursor] = useState<{ x: number; y: number } | null>(null);
+  // Where Dan's hand is, in screen coordinates. `edge` set = the clip Dan touches is outside the
+  // owner's view: no hand, a soft glow on that side of the timeline instead (11/10 owner: "画面外で
+  // 編集を行っているなら、その方向にぼんやりとした光をセンサーのように出せ").
+  const [danCursor, setDanCursor] = useState<{ x: number; y: number; edge: 'left' | 'right' | 'top' | 'bottom' | null } | null>(null);
+  const danTargetRef = useRef<string[]>([]);
   const feedAfterRef = useRef(-1);
-  const danViewRef = useRef<{ duration: number; zoom: number; maxZoom: number }>({ duration: 0, zoom: 1, maxZoom: 8 });
   const feedQueueRef = useRef<Array<{ entries: DanFeedEntry[]; sequence: EditSequence | null }>>([]);
   const feedRunningRef = useRef(false);
 
@@ -1046,55 +1051,68 @@ export function VideoReviewEditor({
     setEditSequence(seq);
   }, []);
 
-  /** Pan the timeline to the clip if needed and move the hand onto it; resolves once it points. */
-  const pointDanAt = useCallback((ids: string[]) => new Promise<void>((done) => {
-    const place = (el: HTMLElement, root: HTMLElement) => {
-      done();
-      if (!el.isConnected) return;
-      const r = el.getBoundingClientRect();
-      const box = root.getBoundingClientRect();
+  /** Where the hand goes for the clips Dan touches: on the clip when the owner can see it, else
+   *  a glow on the timeline's edge toward it. Never scrolls or zooms the owner's view. */
+  const placeDanHand = useCallback(() => {
+    const root = timelineScrollRef.current;
+    const ids = danTargetRef.current;
+    if (!root || !ids.length) return;
+    const el = ids
+      .map((id) => root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`) as HTMLElement | null)
+      .find(Boolean);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const box = root.getBoundingClientRect();
+    // The visible part of the lanes: the panel can reach past the bottom of the window.
+    const visTop = Math.max(box.top, 0);
+    const visBottom = Math.min(box.bottom, window.innerHeight);
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    let edge: 'left' | 'right' | 'top' | 'bottom' | null = null;
+    if (r.right < box.left + 8) edge = 'left';
+    else if (r.left > box.right - 8) edge = 'right';
+    else if (r.bottom < visTop + 4) edge = 'top';
+    else if (r.top > visBottom - 4) edge = 'bottom';
+    let x: number;
+    let y: number;
+    if (edge === 'left' || edge === 'right') {
+      x = edge === 'left' ? box.left : box.right;
+      y = clamp(cy, visTop + 40, visBottom - 40);
+    } else if (edge) {
+      x = clamp(cx, box.left + 60, box.right - 60);
+      y = edge === 'top' ? visTop : visBottom;
+    } else {
       // Keep the hand inside the visible timeline even when the bar is partly off-screen.
-      const x = clamp(r.left + Math.min(r.width / 2, 24), box.left + 8, box.right - 24);
-      const y = clamp(r.top + r.height / 2, Math.max(box.top, 0) + 8, Math.min(box.bottom, window.innerHeight) - 16);
-      setDanCursor({ x, y });
-    };
+      x = clamp(r.left + Math.min(r.width / 2, 24), Math.max(r.left, box.left) + 4, box.right - 24);
+      y = clamp(cy, visTop + 8, visBottom - 16);
+    }
+    x = Math.round(x);
+    y = Math.round(y);
+    setDanCursor((cur) => (cur && cur.x === x && cur.y === y && cur.edge === edge ? cur : { x, y, edge }));
+  }, []);
+
+  /** Point the hand at these clips; resolves once it points (the owner's view stays put). */
+  const pointDanAt = useCallback((ids: string[]) => new Promise<void>((done) => {
+    danTargetRef.current = ids;
     // Two frames: React commits the step, then the bar has its new box.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-      const root = timelineScrollRef.current;
-      if (!root) { done(); return; }
-      const el = ids
-        .map((id) => root.querySelector(`[data-clip-id="${CSS.escape(id)}"]`) as HTMLElement | null)
-        .find(Boolean);
-      if (!el) { done(); return; }
-      const r = el.getBoundingClientRect();
-      const box = root.getBoundingClientRect();
-      const offX = r.left < box.left + 40 || r.left > box.right - 80;
-      // The visible part of the lanes: the panel can reach past the bottom of the window.
-      const visTop = Math.max(box.top, 0);
-      const visBottom = Math.min(box.bottom, window.innerHeight);
-      const offY = r.top < visTop || r.bottom > visBottom;
-      if (offX || offY) {
-        // Pan like a camera to the spot (sideways and/or down to the lane), then point.
-        // Our own eased pan (a browser smooth scroll is cancelled by any other scroll write).
-        const l0 = root.scrollLeft;
-        const t0 = root.scrollTop;
-        const l1 = offX ? l0 + (r.left - box.left) - box.width * 0.35 : l0;
-        const t1 = offY ? t0 + (r.top + r.height / 2) - (visTop + visBottom) / 2 : t0;
-        const began = performance.now();
-        const step = (now: number) => {
-          const k = Math.min(1, (now - began) / 380);
-          const e = 1 - Math.pow(1 - k, 3);
-          root.scrollLeft = l0 + (l1 - l0) * e;
-          root.scrollTop = t0 + (t1 - t0) * e;
-          if (k < 1) window.requestAnimationFrame(step);
-          else place(el, root);
-        };
-        window.requestAnimationFrame(step);
-      } else {
-        place(el, root);
-      }
+      placeDanHand();
+      done();
     }));
-  }), []);
+  }), [placeDanHand]);
+
+  // While Dan works, follow the owner's own scrolling/zooming and the bars' slide animation: the
+  // hand stays on the clip, and turns into the edge glow (or back) as the clip leaves/enters view.
+  useEffect(() => {
+    if (!danReplay) return;
+    let raf = 0;
+    const loop = () => {
+      placeDanHand();
+      raf = window.requestAnimationFrame(loop);
+    };
+    raf = window.requestAnimationFrame(loop);
+    return () => window.cancelAnimationFrame(raf);
+  }, [danReplay, placeDanHand]);
 
   const runDanFeed = useCallback(async () => {
     if (feedRunningRef.current) return;
@@ -1110,12 +1128,6 @@ export function VideoReviewEditor({
         danReplayingRef.current = true;
         setDanReplay(true);
         const steps = buildDanSteps(batch.entries, start);
-        // Zoom in (never out) so a touched clip is wide enough to watch: about 40 s across the view.
-        const view = danViewRef.current;
-        if (view.duration > 0 && view.duration / view.zoom > 90) {
-          setTimelineZoom(Number(Math.min(view.maxZoom, view.duration / 40).toFixed(2)));
-          await wait(450);
-        }
         const stepMs = steps.length > 14 ? Math.max(260, Math.round(9000 / steps.length)) : 700;
         const shown = clipStateMap(start);
         for (const step of steps) {
@@ -1148,7 +1160,7 @@ export function VideoReviewEditor({
       feedRunningRef.current = false;
       setDanReplay(false);
       setDanTouch({ ids: [], appear: [], vanish: [] });
-      window.setTimeout(() => { if (!feedRunningRef.current) setDanCursor(null); }, 900);
+      window.setTimeout(() => { if (!feedRunningRef.current) { danTargetRef.current = []; setDanCursor(null); } }, 900);
     }
   }, [adoptShown, pointDanAt]);
 
@@ -1245,9 +1257,6 @@ export function VideoReviewEditor({
   // HW decoder re-inits; a free wall-clock bar would run ahead during those stalls (the desync).
   // Following the engine keeps the bar locked to the picture — it stalls when the picture stalls.
   const engPosRef = useRef({ pos: 0, wall: 0 });
-  useEffect(() => {
-    danViewRef.current = { duration: timelineDuration || 0, zoom: timelineZoom, maxZoom: maxTimelineZoom };
-  });
   // The thin playhead bar is moved DIRECTLY via this ref at 60Hz (no React re-render), so the heavy
   // 324-clip editor doesn't re-render every frame just to nudge the bar (that 60Hz full re-render
   // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
@@ -3068,7 +3077,21 @@ export function VideoReviewEditor({
   return (
     <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
       <style>{DAN_HANDS_CSS}</style>
-      {danCursor ? (
+      {danCursor?.edge ? (
+        <div
+          aria-hidden
+          className="dan-glow pointer-events-none fixed z-[60] rounded-full"
+          style={{
+            ...(danCursor.edge === 'left' || danCursor.edge === 'right'
+              ? { left: danCursor.x - 28, top: danCursor.y - 70, width: 56, height: 140 }
+              : { left: danCursor.x - 70, top: danCursor.y - 28, width: 140, height: 56 }),
+            background: 'radial-gradient(closest-side, rgba(56,189,248,.75), rgba(56,189,248,.28) 55%, rgba(56,189,248,0))',
+            filter: 'blur(6px)',
+            opacity: danReplay ? undefined : 0,
+          }}
+        />
+      ) : null}
+      {danCursor && !danCursor.edge ? (
         <div
           aria-hidden
           className="dan-hand pointer-events-none fixed z-[60]"
