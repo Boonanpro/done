@@ -226,3 +226,13 @@ def test_changing_the_body_needs_a_comparison_on_another_case(ledger, monkeypatc
         V.complete(job, report)
     with pytest.raises(ValueError, match='layer'):
         V.complete(job, {**report, 'lessons': [{**lesson, 'layer': 'everywhere'}]})
+
+
+def test_gate_keeps_the_turn_across_image_notes_and_task_notices(gate, monkeypatch):
+    monkeypatch.setattr(G, 'open_feedback', lambda room: [])
+    note = {'type': 'user', 'isMeta': True, 'turnCompanion': True,
+            'message': {'content': [{'type': 'text', 'text': '[Image: original 2400x2700, displayed at 1817x2044.]'}]}}
+    notice = {'type': 'user', 'origin': {'kind': 'task-notification'},
+              'message': {'content': '<task-notification><status>stopped</status></task-notification>'}}
+    lines = [_turn('直して'), *_tool('1', 'mcp__dan-tools__attach_image', {}, VIDEO), note, notice]
+    assert '"block"' in _run(monkeypatch, _transcript(gate, lines))

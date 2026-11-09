@@ -67,7 +67,9 @@ def read_transcript(path: str) -> tuple[str, list[str]]:
             msg = d.get("message") if isinstance(d.get("message"), dict) else None
             if msg is not None and t == "user":
                 content = msg.get("content")
-                if _is_turn_start(content):
+                # 画像を読んだ時の添え書き（isMeta）と、裏の仕事の知らせは、同じターンの途中に入る。ターンの始まりにしない
+                companion = d.get("isMeta") or d.get("turnCompanion") or (d.get("origin") or {}).get("kind") == "task-notification"
+                if not companion and _is_turn_start(content):
                     delivered = []
                     continue
                 for b in content if isinstance(content, list) else []:
@@ -190,7 +192,7 @@ def main() -> int:
             return block(
                 "編集した動画を渡す前に、その種類の動画の手順書を読むこと。話す人（本人・お客さん・声を当てた人物）と、"
                 "実画面・実物・図・イラストで見せる動画は /Users/mikihonda/done/.claude/skills/talking-demo-editing/SKILL.md"
-                "（案件の決まりとみきさんの好みの references も）。ほかの種類なら post-production・explainer-video など合う物。"
+                "（今作っている案件の決まりの references も）。ほかの種類なら post-production・explainer-video など合う物。"
                 "読んだら、手順書の「渡す前の点検」と、本人の指摘の後なら「指摘を受けた時」に照らして動画を見直し、"
                 "合わない所を直してから渡す。" + REWRITE)
     rows = open_feedback(room)
