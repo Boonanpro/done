@@ -24,7 +24,7 @@ def test_reference_and_button_are_rejected():
 
 
 def test_public_attachment_and_code_are_preserved():
-    for reply in ['[集計](https://denkiouen.com/reports/traffic)', '[資料](/api/v1/files/report.pdf)', '[画面](/preview/denki-knowledge)', '場所は `/Users/name/report.json` です。', '```md\n[例](/Users/name/report.json)\n```']:
+    for reply in ['[集計](https://denkiouen.com/reports/traffic)', '[外部のページ](https://example.com/home/report)', '[資料](/api/v1/files/report.pdf)', '[画面](/preview/denki-knowledge)', '場所は `/Users/name/report.json` です。', '```md\n[例](/Users/name/report.json)\n```']:
         assert not any(h['id']=='local-delivery-link' for h in mod.check(reply)), reply
 
 

@@ -83,7 +83,8 @@ def local_delivery_links(reply: str) -> list[str]:
         value = unquote(raw.strip())
         try:
             parsed = urlsplit(value)
-            path = parsed.path if parsed.scheme in ('http', 'https') else value
+            # External sites can legitimately have /home/ or /Users/ routes.
+            path = (parsed.path if parsed.hostname in ('dan.paina.info', 'localhost', '127.0.0.1', '::1') else '') if parsed.scheme in ('http', 'https') else value
             local = parsed.scheme == 'file' or parsed.hostname in ('localhost', '127.0.0.1', '::1')
         except ValueError:
             path, local = value, False
