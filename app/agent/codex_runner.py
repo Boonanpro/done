@@ -950,6 +950,7 @@ def run_codex_turn_in_thread(
             text = (result_data.get("result_text") or "").strip() or "\n\n".join(
                 t for t in final_text_parts if t.strip()
             )
+            text = cr._resolve_reply(text, final_text_parts)   # 関所の後の「前の返事のまま」の印（app/agent/reply_text.py）
             if not is_error and cr._has_tool_call_leak(text):
                 cr._clear_cli_session(room_id)
                 cr._cli_debug(f"[CODEX] tool-call text leak; session cleared (room {room_id[:8]})")

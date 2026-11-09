@@ -81,3 +81,14 @@ def test_codex_wrapper_reads_only_owner_words(tmp_path):
 def test_quoted_words_in_explanations_pass():
     assert ids("返事に、英語の文、「終わったら知らせます」、試験の件数のような言葉が入っていると、出す前に止めて書き直します。") == []
     assert "interim" in ids("始めました。終わったら知らせます。")
+
+
+def test_keep_mark_checks_the_reply_before_it(tmp_path):
+    """印だけの返事なら、本人に届く止められる前の返事を点検する（印で点検を素通りしない）。"""
+    t = tmp_path / "t.jsonl"
+    rows = [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "D:/done/x.md に置きました。WATCH_NO_CHANGE の印です。"}]}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "REPLY_UNCHANGED"}]}}]
+    t.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    out = _run({"_dir": tmp_path / "store", "hook_event_name": "Stop", "transcript_path": str(t),
+                "session_id": "k1", "last_assistant_message": "REPLY_UNCHANGED"})
+    assert out and json.loads(out).get("decision") == "block"
