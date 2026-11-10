@@ -420,8 +420,8 @@ def _docs_comment(item):
         return False
     try:
         from app.services.gdoc_events import room_for_file
-        room = room_for_file(file_id)
-        if room and take_docs_comment_notice(item, room):
+        room = room_for_file(file_id)   # None: the inbox still takes a document only the owner can open
+        if take_docs_comment_notice(item, room):
             _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': 'docs comment inbox', 'room': room, 'at': time.time()})
             return True
     except Exception:

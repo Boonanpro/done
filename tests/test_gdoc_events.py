@@ -340,12 +340,12 @@ def test_fresh_window_ignores_dan_on_new_document(store):
                        fresh_since='2026-11-10T07:00:00Z', fresh_mine=False)
     assert [n['id'] for n in got[0]['new']] == ['r:r1']
 
-def test_adopt_registers_a_private_document_shown_in_a_room(store, monkeypatch):
+def test_adopt_watches_every_private_document_room_or_not(store, monkeypatch):
     import app.services.gdoc_drive as D
     monkeypatch.setattr(E, 'accounts', lambda: ['shub'])
-    monkeypatch.setattr(D, 'request', lambda *a, **k: {'files':[{'id':'file'},{'id':'new'},{'id':'shared'},{'id':'stray'}]})
-    monkeypatch.setattr(E, 'room_for_file', lambda f: {'new':'room','shared':'room'}.get(f))
-    monkeypatch.setattr(E, 'owner_only', lambda a, f: f == 'new')
+    monkeypatch.setattr(D, 'request', lambda *a, **k: {'files':[{'id':'file'},{'id':'new'},{'id':'orphan'},{'id':'shared'}]})
+    monkeypatch.setattr(E, 'room_for_file', lambda f: {'new':'room'}.get(f))
+    monkeypatch.setattr(E, 'owner_only', lambda a, f: f in ('new', 'orphan'))
     calls = []
     def register(*a, **k):
         calls.append((a, k))
@@ -353,10 +353,92 @@ def test_adopt_registers_a_private_document_shown_in_a_room(store, monkeypatch):
             c.execute('INSERT INTO docs(file_id,room_id,account) VALUES(?,?,?)', (a[0], a[1], a[2]))
     monkeypatch.setattr(E, 'register', register)
     E._adopt_seen.clear()
-    assert E.adopt_new_docs(now=1000.0) == ['new']
-    assert calls[0][0] == ('new', 'room', 'shub') and calls[0][1]['fresh_mine'] is False
-    assert E.adopt_new_docs(now=1100.0) == []                 # not-ready ones wait before a recheck
-    assert set(E._adopt_seen) == {'shared', 'stray'}
+    assert E.adopt_new_docs(now=1000.0) == ['new', 'orphan']
+    assert [c[0] for c in calls] == [('new', 'room', 'shub'), ('orphan', None, 'shub')]
+    assert calls[0][1]['fresh_mine'] is False
+    assert E.adopt_new_docs(now=1100.0) == []                 # the customer copy waits before a recheck
+    assert set(E._adopt_seen) == {'shared'}
+
+def feed_store(store):
+    with E.db() as c:
+        c.execute("INSERT INTO feeds(account,page_token) VALUES('shub','10')")
+        c.execute('INSERT INTO channels VALUES(?,?,?,?,?)',
+                  ('feedch', E.FEED+'shub', hashlib.sha256(b'feed').hexdigest(), 'res2', time.time()+100))
+
+def test_change_feed_push_marks_the_account(store):
+    feed_store(store)
+    h = headers(**{'X-Goog-Channel-Id':'feedch','X-Goog-Channel-Token':'feed','X-Goog-Resource-Id':'res2',
+                   'X-Goog-Resource-State':'change'})
+    assert E.accept(h)
+    with E.db() as c:
+        assert c.execute("SELECT dirty FROM feeds WHERE account='shub'").fetchone()[0] == 1
+        assert c.execute('SELECT dirty FROM docs').fetchone()[0] == 0
+
+def test_drain_feed_returns_changed_documents_and_moves_cursor(store, monkeypatch):
+    import app.services.gdoc_drive as D
+    feed_store(store)
+    pages = {'10': {'nextPageToken':'11', 'changes':[
+                {'fileId':'a','file':{'mimeType':E.DOC_MIME}},
+                {'fileId':'sheet','file':{'mimeType':'application/vnd.google-apps.spreadsheet'}},
+                {'fileId':'gone','removed':True}]},
+             '11': {'newStartPageToken':'12', 'changes':[{'fileId':'a','file':{'mimeType':E.DOC_MIME}},
+                {'fileId':'b','file':{'mimeType':E.DOC_MIME,'trashed':False}}]}}
+    monkeypatch.setattr(D, 'request', lambda acc, m, path, body=None, params=None: pages[params['pageToken']])
+    with E.db() as c:
+        c.execute("UPDATE feeds SET dirty=3"); feed = dict(c.execute('SELECT * FROM feeds').fetchone())
+    assert E.drain_feed(feed) == ['a', 'b']
+    with E.db() as c:
+        assert tuple(c.execute('SELECT page_token,consumed FROM feeds').fetchone()) == ('12', 3)
+
+def orphan(store, payload):
+    with E.db() as c:
+        c.execute("INSERT INTO docs(file_id,room_id,account,cursor) VALUES('orph',NULL,'shub',?)", (E.iso(),))
+        c.execute("INSERT INTO batches(id,file_id,payload,created) VALUES('b1','orph',?,?)",
+                  (json.dumps(payload, ensure_ascii=False), E.iso()))
+
+def test_unclaimed_document_asks_once_then_waits(store, monkeypatch):
+    import app.services.gdoc_drive as D
+    orphan(store, [{'comment_id':'c1','new':[{'id':'c:c1','content':'ここ直して'}],'thread':{}}])
+    sent = []
+    monkeypatch.setattr(D, 'request', lambda acc, m, path, body=None, params=None: sent.append((path, body)) or {'id':'r9'})
+    monkeypatch.setattr(E, 'room_for_file', lambda f: None)
+    monkeypatch.setattr(E, 'room_by_title', lambda t: 'never')   # an instruction is not a room name
+    E._room_tried.clear()
+    assert E.resolve_room('orph', now=1000.0) is None
+    assert sent == [('files/orph/comments/c1/replies', {'content': E.ROOM_ASK})]
+    with E.db() as c: assert c.execute("SELECT status FROM batches").fetchone()[0] == 'needs_room'
+    assert E.resolve_room('orph', now=1010.0) is None and len(sent) == 1   # held, not asked again
+
+def test_room_found_later_releases_the_comment(store, monkeypatch):
+    import app.services.gdoc_drive as D
+    orphan(store, [{'comment_id':'c1','new':[{'id':'c:c1','content':'ここ直して'}],'thread':{}}])
+    with E.db() as c: c.execute("UPDATE batches SET status='needs_room'")
+    monkeypatch.setattr(E, 'room_for_file', lambda f: 'room9')
+    monkeypatch.setattr(E, 'project_of', lambda r: {'id':'p9','user_id':'u9'})
+    E._room_tried.clear()
+    assert E.resolve_room('orph', now=2000.0) == 'room9'
+    with E.db() as c:
+        assert tuple(c.execute("SELECT room_id,project_id FROM docs WHERE file_id='orph'").fetchone()) == ('room9','p9')
+        assert c.execute("SELECT status FROM batches").fetchone()[0] == 'pending'
+
+def test_room_named_in_the_thread_is_not_an_instruction(store, monkeypatch):
+    orphan(store, [{'comment_id':'c1','new':[{'id':'c:c1','content':'ここ直して'},
+                                            {'id':'r:r2','content':'中村さんの台本の部屋'}],'thread':{}}])
+    monkeypatch.setattr(E, 'room_for_file', lambda f: None)
+    monkeypatch.setattr(E, 'room_by_title', lambda t: 'room7' if '中村' in t else None)
+    monkeypatch.setattr(E, 'project_of', lambda r: {'id':'p7','user_id':'u7'})
+    E._room_tried.clear()
+    assert E.resolve_room('orph', now=3000.0) == 'room7'
+    with E.db() as c:
+        row = c.execute("SELECT status,payload FROM batches").fetchone()
+    assert row[0] == 'pending' and [x['id'] for x in json.loads(row[1])[0]['new']] == ['c:c1']
+
+def test_mail_for_unclaimed_document_is_taken(store, monkeypatch):
+    orphan(store, [])
+    assert E.take_mail_notice('orph', None)
+    monkeypatch.setattr(E, 'project_of', lambda r: {'id':'p1','user_id':'u1'})
+    assert E.take_mail_notice('orph', 'room1')
+    with E.db() as c: assert c.execute("SELECT room_id FROM docs WHERE file_id='orph'").fetchone()[0] == 'room1'
 
 def test_documents_settle_quickly(store):
     assert E.SETTLE <= 20

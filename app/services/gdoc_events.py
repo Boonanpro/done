@@ -41,6 +41,9 @@ def db():
         status TEXT DEFAULT 'pending', result TEXT, created TEXT);
       CREATE TABLE IF NOT EXISTS replies(event_key TEXT PRIMARY KEY, file_id TEXT, comment_id TEXT,
         content TEXT, status TEXT, reply_id TEXT);
+      CREATE TABLE IF NOT EXISTS feeds(account TEXT PRIMARY KEY, page_token TEXT, dirty INTEGER DEFAULT 0,
+        consumed INTEGER DEFAULT 0, renew_at REAL DEFAULT 0, retry_at REAL DEFAULT 0,
+        failures INTEGER DEFAULT 0, error TEXT);
     ''')
     if 'browser_room' not in {r[1] for r in con.execute('PRAGMA table_info(docs)')}:
         con.execute('ALTER TABLE docs ADD COLUMN browser_room TEXT')
@@ -52,6 +55,10 @@ def signal():
     ROOT.mkdir(parents=True, exist_ok=True)
     (ROOT/'wake').touch()
 
+# A channel on an account's change feed is stored with file_id = FEED + account.
+FEED = 'changes:'
+DOC_MIME = 'application/vnd.google-apps.document'
+
 def accept(headers):
     """Commit before ACK; reordered message numbers are deliberately not discarded."""
     h = {k.lower(): v for k, v in headers.items()}
@@ -62,12 +69,16 @@ def accept(headers):
             return False
         resource = h.get('x-goog-resource-id', '')
         if not resource or (row['resource'] and row['resource'] != resource): return False
-        if h.get('x-goog-resource-state') not in ('sync', 'update', 'add', 'remove', 'trash', 'untrash'):
+        state = h.get('x-goog-resource-state')
+        if state not in ('sync', 'update', 'add', 'remove', 'trash', 'untrash', 'change'):
             return False
         # sync can precede the watch response. Only a valid token can bind it.
         c.execute('UPDATE channels SET resource=? WHERE id=?', (resource, row['id']))
-        if h.get('x-goog-resource-state') != 'sync':
-            c.execute('UPDATE docs SET dirty=dirty+1 WHERE file_id=?', (row['file_id'],))
+        if state != 'sync':
+            if row['file_id'].startswith(FEED):
+                c.execute('UPDATE feeds SET dirty=dirty+1 WHERE account=?', (row['file_id'][len(FEED):],))
+            else:
+                c.execute('UPDATE docs SET dirty=dirty+1 WHERE file_id=?', (row['file_id'],))
     signal()
     return True
 
@@ -196,10 +207,15 @@ def owner_only(account, file_id):
     return bool(perms) and all(p.get('type') == 'user' and (p.get('emailAddress') or '').lower() in OWNER_EMAILS
                                for p in perms)
 
-def register(file_id, room_id, account, fresh_since=None, fresh_mine=True):
+def project_of(room_id):
     from app.services.supabase_client import get_supabase_client
+    return get_supabase_client().client.table('projects').select('id,user_id').eq('room_id', room_id).single().execute().data
+
+def register(file_id, room_id, account, fresh_since=None, fresh_mine=True):
+    """room_id may be None: the document is watched from the start, and its room is
+    found when a comment arrives (resolve_room)."""
     from app.services.gdoc_drive import comments
-    project = get_supabase_client().client.table('projects').select('id,user_id').eq('room_id', room_id).single().execute().data
+    project = project_of(room_id) if room_id else {'id': None, 'user_id': None}
     with db() as c:
         if c.execute('SELECT 1 FROM docs WHERE file_id=?', (file_id,)).fetchone():
             raise ValueError('Document already registered; use status rather than resetting the cursor')
@@ -224,61 +240,209 @@ def room_for_file(file_id):
     chat names it (Dan shows the documents it makes as links in the room)."""
     with db() as c:
         row = c.execute('SELECT room_id FROM docs WHERE file_id=?', (file_id,)).fetchone()
-    if row: return row['room_id']
+    if row and row['room_id']: return row['room_id']
     from app.services.supabase_client import get_supabase_client
-    rows = (get_supabase_client().client.table('chat_messages').select('room_id')
-            .gte('created_at', iso(time.time() - 30*86400)).ilike('content', f'%{file_id}%')
-            .order('created_at', desc=True).limit(1).execute().data)
-    return rows[0]['room_id'] if rows else None
+    sb = get_supabase_client().client
+    # The chat first; then the room's own work record (Dan opened or wrote the document
+    # there even when it never showed the link).
+    for table in ('chat_messages', 'execution_events'):
+        rows = (sb.table(table).select('room_id')
+                .gte('created_at', iso(time.time() - 30*86400)).ilike('content', f'%{file_id}%')
+                .order('created_at', desc=True).limit(1).execute().data)
+        if rows and rows[0].get('room_id'): return rows[0]['room_id']
+    return None
 
-ADOPT_EVERY = 120
+ADOPT_EVERY = 600      # the change feed adopts at once; this sweep is the backstop
 ADOPT_RECHECK = 600
-_adopt_seen = {}   # file_id -> when it was last found not ready (no room yet / not private)
+ADOPT_DAYS = 30
+_adopt_seen = {}   # file_id -> when it was last found not private
+
+def adopt(account, file_id, now=None):
+    """Watch a document the owner's accounts alone can open (on those every comment is
+    the owner's), whether or not any room has shown it yet: 2026-11-10 a new LINE
+    script was never registered and the owner's comment sat unanswered. Customer
+    copies (anyone else can open them) stay out, Dan's answers would show to them.
+    Already-written comments are the baseline, except the owner's (another account)
+    since the previous sweep. True when registered."""
+    import logging
+    now = time.time() if now is None else now
+    with db() as c:
+        if c.execute('SELECT 1 FROM docs WHERE file_id=?', (file_id,)).fetchone(): return False
+    if now - _adopt_seen.get(file_id, 0) < ADOPT_RECHECK: return False
+    try:
+        if not owner_only(account, file_id):
+            _adopt_seen[file_id] = now; return False
+        register(file_id, room_for_file(file_id), account,
+                 fresh_since=iso(now - ADOPT_EVERY - ADOPT_RECHECK - 60), fresh_mine=False)
+        logging.info('Docs adopted %s', file_id)
+        return True
+    except ValueError:
+        return False   # registered meanwhile
+    except Exception:
+        _adopt_seen[file_id] = now
+        logging.exception('Docs adoption failed for %s', file_id)
+        return False
 
 def adopt_new_docs(now=None):
-    """A document Dan made and showed in a room joins the inbox by itself, before anyone
-    comments (2026-11-10: a new LINE script was never registered and the owner's comment
-    sat unanswered). Only documents just the owner's accounts can open: on those every
-    comment is the owner's. Already-written comments are the baseline, except the owner's
-    (another account) since the previous sweep."""
+    """Backstop sweep: every recently changed document the accounts can open."""
     from app.services.gdoc_drive import request
     import logging
     now = time.time() if now is None else now
-    with db() as c: known = {r[0] for r in c.execute('SELECT file_id FROM docs')}
     adopted = []
     for account in accounts():
         try:
             files = request(account, 'GET', 'files', params={
-                'q': "mimeType='application/vnd.google-apps.document' and 'me' in owners and trashed=false "
-                     f"and modifiedTime > '{iso(now - 3*86400)}'",
-                'fields': 'files(id)', 'pageSize': 100, 'orderBy': 'modifiedTime desc'}).get('files', [])
+                'q': f"mimeType='{DOC_MIME}' and trashed=false and modifiedTime > '{iso(now - ADOPT_DAYS*86400)}'",
+                'fields': 'files(id)', 'pageSize': 200, 'orderBy': 'modifiedTime desc'}).get('files', [])
         except Exception:
             logging.exception('Docs adoption could not list %s', account); continue
-        for f in files:
-            fid = f['id']
-            if fid in known or now - _adopt_seen.get(fid, 0) < ADOPT_RECHECK: continue
-            try:
-                room = room_for_file(fid)
-                if not room or not owner_only(account, fid):
-                    _adopt_seen[fid] = now; continue
-                register(fid, room, account, fresh_since=iso(now - ADOPT_EVERY - ADOPT_RECHECK - 60), fresh_mine=False)
-                known.add(fid); adopted.append(fid)
-                logging.info('Docs adopted %s for room %s', fid, room)
-            except ValueError:
-                known.add(fid)   # registered meanwhile
-            except Exception:
-                _adopt_seen[fid] = now
-                logging.exception('Docs adoption failed for %s', fid)
+        adopted += [f['id'] for f in files if adopt(account, f['id'], now)]
     return adopted
+
+def renew_feed(account):
+    """Account-wide push: Google tells Dan as soon as any document of the account is
+    made or edited, so a new document is watched before anyone comments on it.
+    Comments themselves never reach this feed (checked 2026-11-10); each document's
+    own channel carries them."""
+    from app.services.gdoc_drive import request
+    with db() as c:
+        c.execute('INSERT OR IGNORE INTO feeds(account) VALUES(?)', (account,))
+        token = c.execute('SELECT page_token FROM feeds WHERE account=?', (account,)).fetchone()[0]
+    if not token:
+        token = request(account, 'GET', 'changes/startPageToken')['startPageToken']
+        with db() as c: c.execute('UPDATE feeds SET page_token=? WHERE account=?', (token, account))
+    ident, secret = str(uuid.uuid4()), secrets.token_urlsafe(32)
+    expires = time.time() + 86400
+    with db() as c:
+        c.execute('INSERT INTO channels VALUES(?,?,?,?,?)',
+                  (ident, FEED + account, hashlib.sha256(secret.encode()).hexdigest(), '', expires))
+    response = request(account, 'POST', 'changes/watch', {
+        'id': ident, 'type': 'web_hook', 'address': CALLBACK, 'token': secret,
+        'expiration': int(expires * 1000)}, {'pageToken': token})
+    expires = int(response['expiration'])/1000
+    with db() as c:
+        c.execute('UPDATE channels SET resource=?,expires=? WHERE id=?', (response['resourceId'], expires, ident))
+        c.execute('UPDATE feeds SET renew_at=?,failures=0,retry_at=0,error=NULL WHERE account=?', (expires-3600, account))
+        c.execute('DELETE FROM channels WHERE expires<?', (time.time(),))
+
+def drain_feed(feed):
+    """The documents changed since the feed's cursor; the cursor moves past them."""
+    from app.services.gdoc_drive import request
+    token, found = feed['page_token'], []
+    while True:
+        page = request(feed['account'], 'GET', 'changes', params={
+            'pageToken': token, 'pageSize': 100,
+            'fields': 'nextPageToken,newStartPageToken,changes(fileId,removed,file(mimeType,trashed))'})
+        for ch in page.get('changes', []):
+            f = ch.get('file') or {}
+            if not ch.get('removed') and f.get('mimeType') == DOC_MIME and not f.get('trashed') and ch['fileId'] not in found:
+                found.append(ch['fileId'])
+        if page.get('nextPageToken'): token = page['nextPageToken']; continue
+        token = page.get('newStartPageToken') or token; break
+    with db() as c:
+        c.execute('UPDATE feeds SET page_token=?,consumed=? WHERE account=?', (token, feed['dirty'], feed['account']))
+    return found
+
+ROOM_ASK = ('ダン：この文書がどの部屋（案件）の物か分からず、まだ対応できていません。'
+            '部屋の名前をこのスレッドに返信してください。その部屋のチャットにこの文書のリンクを貼っても伝わります。'
+            '分かったらすぐに対応します。')
+ROOM_RETRY = 60
+ROOM_GIVE_UP = 3*86400
+_room_tried = {}
+
+def assign_room(file_id, room_id):
+    project = project_of(room_id)
+    with db() as c:
+        c.execute('UPDATE docs SET room_id=?,user_id=?,project_id=? WHERE file_id=?',
+                  (room_id, project['user_id'], project['id'], file_id))
+        c.execute("UPDATE batches SET status='pending' WHERE file_id=? AND status='needs_room'", (file_id,))
+    signal()
+
+def room_by_title(text):
+    """The owner answered the question with a room's name (the title in the room list)."""
+    from app.services.supabase_client import get_supabase_client
+    with db() as c:
+        row = c.execute('SELECT user_id FROM docs WHERE user_id IS NOT NULL LIMIT 1').fetchone()
+    if not row: return None
+    name = ''.join(text.split()).strip('「」『』"\'。.')
+    for tail in ('の部屋です', 'の部屋', '部屋です', 'です'):
+        if name.endswith(tail): name = name[:-len(tail)]
+    if len(name) < 2: return None
+    projects = (get_supabase_client().client.table('projects').select('title,room_id')
+                .eq('user_id', row['user_id']).execute().data)
+    hits = {p['room_id'] for p in projects if p.get('room_id') and p.get('title')
+            and (name in ''.join(p['title'].split()) or ''.join(p['title'].split()) in name)}
+    return hits.pop() if len(hits) == 1 else None
+
+def resolve_room(file_id, now=None):
+    """A comment arrived on a document no room has claimed yet. The room is the one
+    whose chat or work record names the document, or the one the owner names in the
+    thread. Otherwise ask once in the thread (the document is the owner's alone) and
+    hold the comment until the room is known. Returns the room or None."""
+    from app.services.gdoc_drive import request
+    now = time.time() if now is None else now
+    with db() as c:
+        waiting = c.execute("SELECT * FROM batches WHERE file_id=? AND status IN ('pending','needs_room') ORDER BY created",
+                            (file_id,)).fetchall()
+    if not waiting: return None
+    fresh = [b for b in waiting if b['status'] == 'pending']
+    if not fresh and now - _room_tried.get(file_id, 0) < ROOM_RETRY: return None
+    _room_tried[file_id] = now
+    room = room_for_file(file_id)
+    if room:
+        assign_room(file_id, room); return room
+    for b in fresh:
+        changes = json.loads(b['payload'])
+        for change in changes:
+            for item in change['new']:
+                # Only an answer in the thread, short like a name; never the instruction itself.
+                if not item['id'].startswith('r:') or len(item['content']) > 40: continue
+                room = room_by_title(item['content'])
+                if not room: continue
+                # The name answered Dan's question; it is not an instruction for the work.
+                with db() as c:
+                    for row in c.execute("SELECT * FROM batches WHERE file_id=? AND status IN ('pending','needs_room')",
+                                         (file_id,)).fetchall():
+                        kept = []
+                        for ch in json.loads(row['payload']):
+                            ch['new'] = [x for x in ch['new'] if x['id'] != item['id']]
+                            if ch['new']: kept.append(ch)
+                        if kept: c.execute('UPDATE batches SET payload=? WHERE id=?', (json.dumps(kept, ensure_ascii=False), row['id']))
+                        else: c.execute("UPDATE batches SET status='merged',result='room named' WHERE id=?", (row['id'],))
+                assign_room(file_id, room); return room
+    with db() as c:
+        doc = c.execute('SELECT * FROM docs WHERE file_id=?', (file_id,)).fetchone()
+    for b in fresh:
+        for change in json.loads(b['payload']):
+            if change.get('source') == 'export': continue
+            key = f"ask:{file_id}:{change['comment_id']}"
+            with db() as c:
+                if c.execute('SELECT 1 FROM replies WHERE event_key=?', (key,)).fetchone(): continue
+                c.execute('INSERT INTO replies VALUES(?,?,?,?,?,?)', (key, file_id, change['comment_id'], ROOM_ASK, 'sending', None))
+            result = request(doc['account'], 'POST', f"files/{file_id}/comments/{change['comment_id']}/replies",
+                             {'content': ROOM_ASK}, {'fields': 'id'})
+            with db() as c: c.execute('UPDATE replies SET status=?,reply_id=? WHERE event_key=?', ('sent', result['id'], key))
+    with db() as c:
+        c.execute("UPDATE batches SET status='needs_room' WHERE file_id=? AND status='pending'", (file_id,))
+        c.execute("UPDATE batches SET status='no_room',result='no room within 3 days' WHERE file_id=? "
+                  "AND status='needs_room' AND created<?", (file_id, iso(now - ROOM_GIVE_UP)))
+    return None
 
 def take_mail_notice(file_id, room_id, received=None):
     """A Docs comment mail goes to the same private inbox as push, never to chat.
     An unknown document is registered for the room; False leaves the mail to the caller."""
     with db() as c:
-        if c.execute('SELECT 1 FROM docs WHERE file_id=?', (file_id,)).fetchone():
+        known = c.execute('SELECT room_id FROM docs WHERE file_id=?', (file_id,)).fetchone()
+        if known:
             c.execute('UPDATE docs SET dirty=dirty+1 WHERE file_id=?', (file_id,))
-            signal()
-            return True
+    if known:
+        if room_id and not known['room_id']: assign_room(file_id, room_id)
+        signal()
+        return True
+    if not room_id:
+        for account in accounts():
+            if adopt(account, file_id, received): return True
+        return False
     from app.services.gdoc_drive import request
     since = iso((received or time.time()) - 600)
     for account in accounts():
@@ -505,6 +669,14 @@ async def serve():
                             await asyncio.sleep(.6)  # burst coalescing; bounded even under continuous edits
                             with db() as c: doc = dict(c.execute('SELECT * FROM docs WHERE file_id=?', (doc['file_id'],)).fetchone())
                             await asyncio.to_thread(collect, doc)
+                        if not doc['room_id']:
+                            if not await asyncio.to_thread(resolve_room, doc['file_id']):
+                                with db() as c:
+                                    held = c.execute("SELECT 1 FROM batches WHERE file_id=? AND status='needs_room'",
+                                                     (doc['file_id'],)).fetchone()
+                                if held: deadlines.append(time.time() + ROOM_RETRY)
+                                continue
+                            with db() as c: doc = dict(c.execute('SELECT * FROM docs WHERE file_id=?', (doc['file_id'],)).fetchone())
                         batch, wait = next_batch(doc['file_id'])
                         if wait: deadlines.append(wait)
                         task_key = doc.get('browser_room') or doc['file_id']   # each job has its own browser tab
@@ -530,6 +702,29 @@ async def serve():
                             c.execute('UPDATE docs SET failures=?,retry_at=?,error=? WHERE file_id=?',
                                       (failure, delay, type(exc).__name__, doc['file_id']))
                         if failure < 3: deadlines.append(delay)
+                for account in accounts():
+                    with db() as c:
+                        c.execute('INSERT OR IGNORE INTO feeds(account) VALUES(?)', (account,))
+                        feed = dict(c.execute('SELECT * FROM feeds WHERE account=?', (account,)).fetchone())
+                    if feed['retry_at'] > time.time():
+                        deadlines.append(feed['retry_at']); continue
+                    try:
+                        if feed['renew_at'] <= time.time() or not feed['page_token']:
+                            await asyncio.to_thread(renew_feed, account)
+                            with db() as c: feed = dict(c.execute('SELECT * FROM feeds WHERE account=?', (account,)).fetchone())
+                        deadlines.append(feed['renew_at'])
+                        if feed['dirty'] > feed['consumed']:
+                            found = await asyncio.to_thread(drain_feed, feed)
+                            if [f for f in found if await asyncio.to_thread(adopt, account, f)]: wake.set()
+                    except Exception as exc:
+                        import logging
+                        logging.exception('Docs change feed failed for %s', account)
+                        failure = feed['failures'] + 1
+                        delay = time.time() + (30*failure if failure < 3 else 3600)   # the sweep covers meanwhile
+                        with db() as c:
+                            c.execute('UPDATE feeds SET failures=?,retry_at=?,error=? WHERE account=?',
+                                      (failure, delay, type(exc).__name__, account))
+                        deadlines.append(delay)
                 if time.time() >= next_adopt:
                     next_adopt = time.time() + ADOPT_EVERY
                     try:
@@ -540,7 +735,7 @@ async def serve():
                 deadlines.append(next_adopt)
                 from app.services import script_learning
                 try:
-                    deadlines.extend(await script_learning.tick(docs, learning_tasks))
+                    deadlines.extend(await script_learning.tick([d for d in docs if d['room_id']], learning_tasks))
                 except Exception:
                     import logging
                     logging.exception('Script learning tick failed')
