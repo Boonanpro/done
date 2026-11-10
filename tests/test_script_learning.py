@@ -114,7 +114,15 @@ def test_missed_push_reconciles_and_failures_are_bounded(target,monkeypatch):
         L.collect_due(target)
     with L.db() as c:
         t=c.execute('SELECT * FROM targets').fetchone()
-        assert t['failures']==3 and t['error']=='RuntimeError'
+        assert t['failures']==4 and t['error']=='RuntimeError'
+        assert t['due']>time.time()+L.COOLDOWN-60  # waits hours, does not stop for good
+    # not retried during the cool-down, retried after it, and success clears the count
+    monkeypatch.setattr(L,'capture',lambda *a,**kw:called.append(kw))
+    assert L.collect_due(target)>time.time()+L.COOLDOWN-60 and len(called)==2
+    with L.db() as c:c.execute('UPDATE targets SET due=0')
+    L.collect_due(target)
+    assert len(called)==3
+    with L.db() as c:assert c.execute('SELECT failures FROM targets').fetchone()[0]==0
 
 
 def test_dan_edit_boundaries_and_serial_learning(target,monkeypatch):
@@ -183,7 +191,9 @@ async def test_failed_run_returns_changes_and_retries_after_pause(target,monkeyp
         with L.db() as c:c.execute("UPDATE jobs SET status='needs_attention' WHERE id=?",(again,))
         again=L.prepare_job('f',t0+(n+2)*(L.RETRY_AFTER+1))
     with L.db() as c:c.execute("UPDATE jobs SET status='needs_attention' WHERE id=?",(again,))
-    assert L.prepare_job('f',t0+10*L.RETRY_AFTER) is None  # three failures: stop until inspected
+    last=t0+2*(L.RETRY_AFTER+1)   # the third failed run was created here
+    assert L.prepare_job('f',last+L.RETRY_AFTER+1) is None   # three failures: a longer pause
+    assert L.prepare_job('f',last+L.COOLDOWN+1)               # then it tries again by itself
 
 
 def test_compact_evidence_reads_whole_period_as_sentences(target):
