@@ -4769,6 +4769,27 @@ async def internal_room_message(room_id: str, request: Request) -> dict:
     return {"ok": True, "saved": True, "message": _slim_message(row)}
 
 
+@router.post("/internal/rooms/{room_id}/work-note")
+async def internal_room_work_note(room_id: str, request: Request) -> dict:
+    """部屋の受け口（room_receiver）が、作業中のダンに「届いた連絡で作業の前提が変わった」と伝える内部入口（loopback 限定）。
+    作業中のターンに追い連絡として入り、次の区切りで作業中のダンが読んで向きを変える。作業中でなければ何もしない
+    （受け口の報告が部屋に出るので、それで足りる）。"""
+    _require_loopback(request)
+    payload = await request.json()
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    from app.agent.streaming_session import is_turn_active_or_preparing, submit_room_followup
+    if not is_turn_active_or_preparing(room_id):
+        return {"ok": True, "delivered": False, "reason": "idle"}
+    where = await asyncio.to_thread(
+        submit_room_followup, room_id,
+        "[作業中に届いた連絡で、今の作業の前提が変わりました（部屋の受け口から。本人の発言ではありません）]\n"
+        + text[:2000] + "\n今の作業の区切りでこれを取り込み、必要なら向きを変えて作業を続ける。本人への連絡の報告は受け口が済ませている。")
+    logger.info("[receiver] work note -> room=%s (%s)", room_id[:8], where)
+    return {"ok": True, "delivered": where}
+
+
 @router.post("/internal/artifacts/register")
 async def internal_register_artifacts(request: Request) -> dict:
     """書かれた page.tsx のパスから成果物カードを登録し、専用サイトの公開を予約する。"""

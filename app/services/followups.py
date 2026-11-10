@@ -436,6 +436,27 @@ def claim_due_followups(limit: int = 5) -> List[Dict[str, Any]]:
     return claimed
 
 
+def pending_room_rows(room_id: str, until_iso: str) -> List[Dict[str, Any]]:
+    """A room's pending follow-ups due by until_iso, soonest first (best-effort; [] on a failed lookup)."""
+    try:
+        return (_sb().table(TABLE).select("*").eq("room_id", room_id).eq("status", "pending")
+                .lte("fire_at", until_iso).order("fire_at", desc=False).limit(20).execute().data or [])
+    except Exception as e:
+        logger.warning("pending_room_rows(%s) failed: %s", room_id, e)
+        return []
+
+
+def claim_row(followup_id: str) -> bool:
+    """Flip one pending row to 'firing'; True when this caller got it."""
+    try:
+        res = _sb().table(TABLE).update({"status": "firing", "updated_at": datetime.now(timezone.utc).isoformat()}) \
+            .eq("id", followup_id).eq("status", "pending").execute()
+        return bool(res.data)
+    except Exception as e:
+        logger.warning("claim_row(%s) failed: %s", followup_id, e)
+        return False
+
+
 def mark_status(followup_id: str, status: str) -> None:
     try:
         _sb().table(TABLE).update({

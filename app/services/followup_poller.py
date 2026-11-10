@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -146,25 +146,31 @@ async def _wake_turn(room_id: str, user_id: str, content: str) -> Tuple[str, boo
     so the work the wake was for did not run. (2026-09-25: a monthly watch's
     turn ended 2 seconds in with nothing done and the watch moved on a month.)"""
     from app.agent.cli_runner import process_message_cli
+    from app.services import room_receiver
 
+    # Never a follow-up into the owner's running work (2026-11-10: an hourly watch stopped 中村さん's script twice).
+    if await room_receiver.wait_turn(room_id) == "receiver":
+        await room_receiver.hand_over(room_id, user_id, content)
+        return "", True
     project_id = _resolve_project_id(room_id)
     result = ""
     landed = False
-    async for _ev in process_message_cli(
-        room_id=room_id,
-        user_id=user_id,
-        content=content,
-        project_id=project_id,
-        run_id=None,
-        answer_shapes=True,   # the report lands in the room's chat screen
-    ):
-        if _ev.get("type") == "result":
-            result = _ev.get("text") or result
-            landed = True
-        elif _ev.get("type") == "cancelled":
-            landed = True   # stopped by the user: their decision, not a lost wake
-        elif _ev.get("type") == "error":
-            result = "作業中にエラーが発生しました: " + str(_ev.get("message") or "詳細不明")
+    with room_receiver.background(room_id):
+        async for _ev in process_message_cli(
+            room_id=room_id,
+            user_id=user_id,
+            content=content,
+            project_id=project_id,
+            run_id=None,
+            answer_shapes=True,   # the report lands in the room's chat screen
+        ):
+            if _ev.get("type") == "result":
+                result = _ev.get("text") or result
+                landed = True
+            elif _ev.get("type") == "cancelled":
+                landed = True   # stopped by the user: their decision, not a lost wake
+            elif _ev.get("type") == "error":
+                result = "作業中にエラーが発生しました: " + str(_ev.get("message") or "詳細不明")
     return result, landed
 
 
@@ -440,6 +446,72 @@ async def _fire_reply(row: Dict[str, Any]) -> None:
         logger.exception("[watch] reply end note failed")
 
 
+BURST_QUIET = 60     # seconds: a one-shot wake waits while another one for the same room is due this soon
+BURST_LIMIT = 180    # seconds: but never longer than this after it was due
+
+_BURST_HEAD = (
+    "[続けて届いた知らせ: {n}件]\n"
+    "同じ部屋に、続けて{n}件の知らせが届きました。全部を読んでから動き、本人への報告は1つにまとめます。"
+    "1件ごとに報告しません。\n\n"
+)
+
+
+def _is_one_shot(row: Dict[str, Any]) -> bool:
+    from app.services.followups import decode_watch_row
+    d = decode_watch_row(row)
+    spec = d.get("spec") or {}
+    return d.get("kind") == "at" and spec.get("engine") != "steerable_cli" and not spec.get("command_center")
+
+
+def _seconds_ago(iso: str) -> float:
+    import re
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], str(iso or "").replace("Z", "+00:00"))
+    try:   # Supabase gives 1–6 fraction digits; Python 3.10's fromisoformat takes only 3 or 6
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(text)).total_seconds()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _hold_for_burst(row: Dict[str, Any]) -> bool:
+    """Put a one-shot wake back while another one for the same room is due within BURST_QUIET, so a burst of
+    notices (2026-11-10: five Chatwork messages from 中村さん in five minutes) is read in one turn."""
+    from app.services.followups import mark_status, pending_room_rows
+    if _seconds_ago(row.get("fire_at")) > BURST_LIMIT:
+        return False
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=BURST_QUIET)).isoformat()
+    now = datetime.now(timezone.utc)
+    later = [r for r in await asyncio.to_thread(pending_room_rows, row["room_id"], soon)
+             if r["id"] != row["id"] and _is_one_shot(r) and _seconds_ago(r.get("fire_at")) < 0]
+    if not later:
+        return False
+    logger.info("[watch] at held for a burst room=%s (%d more due soon)", row["room_id"][:8], len(later))
+    await asyncio.to_thread(mark_status, row["id"], "pending")
+    return True
+
+
+async def _merge_burst(row: Dict[str, Any], raw: Dict[str, Any], cycle: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """One wake for all the one-shot wakes of this room that are due now: the others are folded into this one's note
+    and closed. Returns the row to fire."""
+    from app.services.followups import claim_row, decode_watch_row, encode_watch_note, mark_status, pending_room_rows
+    if not _is_one_shot(raw):
+        return raw
+    now_iso = datetime.now(timezone.utc).isoformat()
+    others = [r for r in (cycle or []) if r["id"] != raw["id"] and r["room_id"] == raw["room_id"] and _is_one_shot(r)]
+    for r in await asyncio.to_thread(pending_room_rows, raw["room_id"], now_iso):
+        if r["id"] != raw["id"] and _is_one_shot(r) and await asyncio.to_thread(claim_row, r["id"]):
+            others.append(r)
+    if not others:
+        return raw
+    notes = [row.get("plain_note") or ""] + [decode_watch_row(r).get("plain_note") or "" for r in others]
+    body = _BURST_HEAD.format(n=len(notes)) + "\n\n".join(f"【{i}】\n{n}" for i, n in enumerate(notes, 1))
+    for r in others:
+        await asyncio.to_thread(mark_status, r["id"], "done")
+        if cycle is not None and r in cycle:
+            cycle.remove(r)
+    logger.info("[watch] %d one-shot wakes merged room=%s", len(notes), raw["room_id"][:8])
+    return {**raw, "note": encode_watch_note("at", body, row.get("spec") or {})}
+
+
 async def _tick() -> None:
     from app.services.followups import claim_due_followups, mark_status
     from app.services.command_job_runner import dispatch_pending
@@ -449,14 +521,21 @@ async def _tick() -> None:
     await dispatch_work()
 
     rows = await asyncio.to_thread(claim_due_followups, MAX_PER_CYCLE)
-    for row in rows:
+    for row in list(rows):
+        if row not in rows:
+            continue   # folded into an earlier wake of the same room (_merge_burst)
         from app.services.followups import decode_watch_row
         decoded = decode_watch_row(row)
-        if (decoded.get("kind") != "command_report" and decoded.get('spec',{}).get('engine') != 'steerable_cli'
-            and _room_busy(row["room_id"])):
-            # Put it back; retry on a later cycle when the room is idle.
-            await asyncio.to_thread(mark_status, row["id"], "pending")
-            continue
+        if decoded.get("kind") != "command_report" and decoded.get('spec',{}).get('engine') != 'steerable_cli':
+            from app.services import room_receiver
+            # The room's own check (_room_busy) cannot see a turn running in a release core; lane() can. The owner's
+            # running work is not waited for: the wake goes to the room's receiver (_wake_turn / work_continuity).
+            if await room_receiver.lane(row["room_id"]) == "wait":
+                await asyncio.to_thread(mark_status, row["id"], "pending")
+                continue
+            if _is_one_shot(row) and await _hold_for_burst(decoded):
+                continue
+            row = await _merge_burst(decoded, row, rows)
         await _fire(row)
 
 

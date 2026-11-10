@@ -225,26 +225,47 @@ async def room_busy(room_id):
     return bool(run and run.get('state') in ACTIVE_RUN_STATES)
 
 
+# Notices that do not belong to the owner's running work: while that work runs they go to the room's receiver
+# (room_receiver) instead of waiting for it. Other work (a resumed task of the room itself) waits for the room.
+RECEIVER_SOURCES = {'inbound', 'followup'}
+
+
+async def _to_receiver(key, room_id, user_id):
+    from app.services import room_receiver
+    row = get(key)
+    if not row or row['token'] or row['status'] != 'ready':
+        return False
+    job = await room_receiver.hand_over(room_id, user_id, row['prompt'])
+    checkpoint(key, room_id, status='done',
+               evidence=f'本人の作業中に届いたので、部屋の受け口（並行作業 {job}）に渡した。結果は受け口が部屋に出す。')
+    return True
+
+
 async def execute(*, key, room_id, user_id, prompt, source='event', project_id=None):
     from app.agent.cli_runner import process_message_cli
     from app.services.followup_poller import _resolve_project_id
+    from app.services import room_receiver
     enqueue(key=key, room_id=room_id, user_id=user_id, source=source, prompt=prompt)
-    if await room_busy(room_id):
+    current = await room_receiver.lane(room_id)
+    if current == 'receiver' and source in RECEIVER_SOURCES:
+        return '', await _to_receiver(key, room_id, user_id)
+    if current != 'turn':
         return '', False
     row = claim(key)
     if not row:
         return '', False
     text, landed, failed, cancelled = '', False, False, False
     try:
-        async for event in process_message_cli(room_id=room_id, user_id=user_id,
-                content=turn_prompt(row), project_id=project_id or _resolve_project_id(room_id),
-                run_id=None, answer_shapes=True):
-            if event.get('type') == 'result':
-                landed, text = True, event.get('text') or text
-            elif event.get('type') == 'error':
-                failed = True
-            elif event.get('type') == 'cancelled':
-                cancelled = True
+        with room_receiver.background(room_id):
+            async for event in process_message_cli(room_id=room_id, user_id=user_id,
+                    content=turn_prompt(row), project_id=project_id or _resolve_project_id(room_id),
+                    run_id=None, answer_shapes=True):
+                if event.get('type') == 'result':
+                    landed, text = True, event.get('text') or text
+                elif event.get('type') == 'error':
+                    failed = True
+                elif event.get('type') == 'cancelled':
+                    cancelled = True
     except asyncio.CancelledError:
         # Process shutdown is different from an explicit owner stop event.
         raise
@@ -267,7 +288,11 @@ async def dispatch():
     for row in rows:
         if len([t for t in _tasks.values() if not t.done()]) >= 2:
             break
-        if row['id'] in _tasks or await room_busy(row['room_id']):
+        if row['id'] in _tasks:
+            continue
+        from app.services import room_receiver
+        current = await room_receiver.lane(row['room_id'])
+        if current == 'wait' or (current == 'receiver' and row['source'] not in RECEIVER_SOURCES):
             continue
         task = asyncio.create_task(execute(key=row['id'], room_id=row['room_id'], user_id=row['user_id'],
                                           prompt=row['prompt'], source=row['source']))
