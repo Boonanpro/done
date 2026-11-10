@@ -219,11 +219,11 @@ def docs_comment_file(detected_message: Dict[str, Any]) -> Optional[str]:
     return found.group(1) if found else None
 
 
-def take_docs_comment_notice(detected_message: Dict[str, Any], room_id: str) -> bool:
+def take_docs_comment_notice(detected_message: Dict[str, Any], room_id: Optional[str]) -> bool:
     """コメントへの対応はドキュメントの中だけで行う（本人はチャットに重ねて書かれるのを嫌う
     2026-11-02）。コメントの受け口（gdoc_events）に渡せたら True。チャットは起こさない。"""
     file_id = docs_comment_file(detected_message)
-    if not file_id or not room_id:
+    if not file_id:
         return False
     received = None
     try:
