@@ -324,3 +324,39 @@ def test_split_comment_waits_for_the_owner_and_runs_as_one(store):
     assert len(payload) == 1 and [x['content'] for x in payload[0]['new']] == ['前半','後半の質問']
     with E.db() as c: assert c.execute("SELECT status FROM batches WHERE id='b2'").fetchone()[0] == 'merged'
     assert '発言ごと' in E.prompt({'file_id':'file','room_id':'room'}, dict(batch))
+
+
+def test_dan_reason_notes_do_not_wake(store):
+    with E.db() as c:
+        assert not E.ingest(c, 'file', [thread('【変えた所】1文足しました。\n【根拠】えるさん')])
+        assert E.ingest(c, 'file', [thread('ここ直して', id='c2')])
+
+def test_fresh_window_ignores_dan_on_new_document(store):
+    mine = {'id':'c1','content':'理由のメモ','author':{'me':True},'createdTime':'2026-11-10T07:05:00Z',
+            'replies':[{'id':'r1','content':'先ず否定する答えを変えて','author':{'me':False},
+                        'createdTime':'2026-11-10T07:16:00Z'}]}
+    with E.db() as c:
+        got = E.ingest(c, 'new', [mine], baseline=True, owner_only=True,
+                       fresh_since='2026-11-10T07:00:00Z', fresh_mine=False)
+    assert [n['id'] for n in got[0]['new']] == ['r:r1']
+
+def test_adopt_registers_a_private_document_shown_in_a_room(store, monkeypatch):
+    import app.services.gdoc_drive as D
+    monkeypatch.setattr(E, 'accounts', lambda: ['shub'])
+    monkeypatch.setattr(D, 'request', lambda *a, **k: {'files':[{'id':'file'},{'id':'new'},{'id':'shared'},{'id':'stray'}]})
+    monkeypatch.setattr(E, 'room_for_file', lambda f: {'new':'room','shared':'room'}.get(f))
+    monkeypatch.setattr(E, 'owner_only', lambda a, f: f == 'new')
+    calls = []
+    def register(*a, **k):
+        calls.append((a, k))
+        with E.db() as c:
+            c.execute('INSERT INTO docs(file_id,room_id,account) VALUES(?,?,?)', (a[0], a[1], a[2]))
+    monkeypatch.setattr(E, 'register', register)
+    E._adopt_seen.clear()
+    assert E.adopt_new_docs(now=1000.0) == ['new']
+    assert calls[0][0] == ('new', 'room', 'shub') and calls[0][1]['fresh_mine'] is False
+    assert E.adopt_new_docs(now=1100.0) == []                 # not-ready ones wait before a recheck
+    assert set(E._adopt_seen) == {'shared', 'stray'}
+
+def test_documents_settle_quickly(store):
+    assert E.SETTLE <= 20

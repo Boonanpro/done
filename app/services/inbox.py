@@ -410,9 +410,30 @@ def _mark(item_id, result):
         logger.warning('inbox: could not mark %s', item_id)
 
 
+def _docs_comment(item):
+    """A Google Docs comment mail goes straight to the document inbox when its room is known from the
+    document itself (registered, or named in a room's chat), not from the judge's guess: the judge once
+    dropped one (2026-11-10, the new LINE script)."""
+    from app.services.inbound_wakeup import docs_comment_file, take_docs_comment_notice
+    file_id = docs_comment_file(item)
+    if not file_id:
+        return False
+    try:
+        from app.services.gdoc_events import room_for_file
+        room = room_for_file(file_id)
+        if room and take_docs_comment_notice(item, room):
+            _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': 'docs comment inbox', 'room': room, 'at': time.time()})
+            return True
+    except Exception:
+        logger.exception('inbox: docs comment %s could not be routed', file_id)
+    return False
+
+
 async def handle(user_id, item, own, prepare=None):
     """One item through the sieve, Dan's judgement and the outlet. prepare(room): what the caller makes in the room the
     item goes to before it is said there (a site inquiry's reply card); it may return a line added to the item."""
+    if await asyncio.to_thread(_docs_comment, item):   # answered inside the document, never judged or said in chat
+        return 'docs'
     reason = sieve(item, own)
     if reason:
         _mark(item['id'], {'decision': 'ignore', 'by': 'rule', 'why': reason, 'at': time.time()})
