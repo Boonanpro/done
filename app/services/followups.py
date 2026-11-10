@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -382,11 +382,15 @@ def held_room_ids(*, strict: bool = False) -> List[str]:
     return sorted(out)
 
 
-def claim_due_followups(limit: int = 5) -> List[Dict[str, Any]]:
+def claim_due_followups(limit: int = 5, skip_rooms: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
     """Atomically-ish claim due pending follow-ups: select due rows and flip them
     to 'firing' so a later poll cycle won't double-fire them. Returns the claimed
     rows. (Single-poller design, so a select-then-update race is not a concern.)
+
+    skip_rooms: rooms the poller is waking right now. Their due rows are left pending (not claimed, so they do not
+    take the cycle's slots from other rooms), and their 'firing' rows are not reclaimed as stuck (the wake is alive).
     """
+    skip = set(skip_rooms or ())
     from app.services.restart_signal import draining
     if draining():
         return []  # Leave due watches pending until the restart attempt ends.
@@ -399,11 +403,13 @@ def claim_due_followups(limit: int = 5) -> List[Dict[str, Any]]:
     try:
         stale_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
         stuck = (
-            sb.table(TABLE).select("id")
+            sb.table(TABLE).select("id,room_id")
             .eq("status", "firing").lt("updated_at", stale_cutoff)
             .limit(10).execute()
         )
         for row in stuck.data or []:
+            if row.get("room_id") in skip:
+                continue   # still being woken by this process (a long turn), not left behind by a dead core
             sb.table(TABLE).update({
                 "status": "pending", "updated_at": now,
             }).eq("id", row["id"]).eq("status", "firing").execute()
@@ -415,12 +421,12 @@ def claim_due_followups(limit: int = 5) -> List[Dict[str, Any]]:
         due = (
             sb.table(TABLE).select("*")
             .eq("status", "pending").lte("fire_at", now)
-            .order("fire_at", desc=False).limit(limit).execute()
+            .order("fire_at", desc=False).limit(limit * 4 + len(skip)).execute()
         )
     except Exception as e:
         logger.error("claim_due_followups select failed: %s", e)
         return []
-    rows = due.data or []
+    rows = [r for r in (due.data or []) if r.get("room_id") not in skip][:limit]
     claimed = []
     for row in rows:
         try:
