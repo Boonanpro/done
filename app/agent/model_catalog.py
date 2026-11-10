@@ -12,6 +12,9 @@ were usable in Codex for days while the picker still offered GPT-5.6).
   the newest model of their family, so a room needs no change. Anthropic's ``/v1/models`` tells which
   version that is (for the label) and shows a family that has no alias yet (offered by its full id).
   It is read in the background at most every few hours; the last answer is kept on disk.
+  An alias only reaches a model the installed Claude Code knows, so the label shows the newest one the
+  CLI has, and each read also keeps the CLIs current (cli_versions: daily, sooner while a listed model
+  is unknown to the CLI). 2026-11-10: the picker said Fable 5.2 while every room ran 5.1.
 """
 
 from __future__ import annotations
