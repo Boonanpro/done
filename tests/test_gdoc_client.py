@@ -72,3 +72,14 @@ def test_adopting_an_older_copy_makes_its_current_text_the_base(tmp_path, monkey
     monkeypatch.setattr(G, 'export_docx', lambda *a: docx(p(ins('提案'))))
     import pytest
     with pytest.raises(ValueError): C.adopt('acct', 'work', 'client')
+
+
+def test_customer_copy_keeps_the_premise_section(monkeypatch):
+    # 2026-11-10 本人「お客さん用の写しを作る時も『◎前提と狙い』は外すな」
+    from app.services import gdoc_drive as G
+    raw = docx(p(r('◎前提と狙い', True)) + p(r('狙い：ローンチの開始を渇望させる')) + p(r('見る人：LINEに登録した人'))
+               + p(r('◎タイトルとサムネ', True)) + p(r('タイトル案')) + p(r('◎台本', True)) + p(r('こんにちは。')))
+    monkeypatch.setattr(G, 'export_docx', lambda *a: raw)
+    out = C.deliver('acct', 'work', dry_run=True)['output']
+    assert C.texts(out) == ['◎前提と狙い', '狙い：ローンチの開始を渇望させる', '見る人：LINEに登録した人',
+                            '◎タイトルとサムネ', 'タイトル案', '◎台本', 'こんにちは。']
