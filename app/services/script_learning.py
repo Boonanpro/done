@@ -191,7 +191,7 @@ def enable(doc):
 
 def collect_due(doc):
     with db() as c: target=c.execute('SELECT * FROM targets WHERE file_id=?',(doc['file_id'],)).fetchone()
-    if not target or not target['enabled'] or target['failures']>=3: return None
+    if not target or not target['enabled']: return None
     now=time.time()
     if target['failures'] and target['due']>now: return target['due']
     if target['due']>now and target['consumed']>=doc['dirty']: return target['due']
@@ -201,10 +201,12 @@ def collect_due(doc):
         with db() as c:
             c.execute('UPDATE targets SET due=?,consumed=?,failures=0,error=NULL WHERE file_id=?', (due,doc['dirty'],doc['file_id']))
     except Exception as exc:
-        due=time.time()+30*(target['failures']+1)
+        # Short retries first; after MAX_FAILED in a row the cause is rarely
+        # momentary, so wait COOLDOWN and try again instead of stopping for good
+        # (11/5: three failed exports stopped a document until 11/10 unnoticed).
+        due=time.time()+(COOLDOWN if target['failures']+1>=MAX_FAILED else 30*(target['failures']+1))
         with db() as c:
             c.execute('UPDATE targets SET due=?,failures=failures+1,error=? WHERE file_id=?',(due,type(exc).__name__,doc['file_id']))
-        if target['failures']>=2: return None
     return due
 
 
@@ -222,6 +224,7 @@ def edit_boundary(doc, phase):
 
 RETRY_AFTER = 1800
 MAX_FAILED = 3
+COOLDOWN = 3*3600
 RESOLVE_AFTER = 12*3600
 
 
@@ -230,17 +233,17 @@ def prepare_job(file_id, now=None):
     with db() as c:
         # A single writer of common skills across all documents. A run that ended
         # without a validated report gives its changes back to the next run after
-        # a pause; repeated failures stop that document until inspected.
+        # a pause; after repeated failures that document waits COOLDOWN, then retries.
         if c.execute("SELECT 1 FROM jobs WHERE status IN ('pending','running')").fetchone(): return None
         c.execute("UPDATE changes SET status='pending',job_id=NULL WHERE status='assigned' AND job_id IN "
                   "(SELECT id FROM jobs WHERE status='needs_attention')")
         target=c.execute('SELECT * FROM targets WHERE file_id=?',(file_id,)).fetchone()
-        if not target or not target['enabled'] or target['writing'] or target['failures']>=3: return None
+        if not target or not target['enabled'] or target['writing'] or target['failures']>=MAX_FAILED: return None
         last_ok=c.execute("SELECT max(created) FROM jobs WHERE file_id=? AND status NOT IN ('needs_attention','pending','running')",
                           (file_id,)).fetchone()[0] or 0
         failed=c.execute("SELECT count(*),max(created) FROM jobs WHERE file_id=? AND status='needs_attention' AND created>?",
                          (file_id,last_ok)).fetchone()
-        if failed[0]>=MAX_FAILED or (failed[1] and now-failed[1]<RETRY_AFTER): return None
+        if failed[1] and now-failed[1]<(COOLDOWN if failed[0]>=MAX_FAILED else RETRY_AFTER): return None
         changes=c.execute("SELECT * FROM changes WHERE file_id=? AND status='pending' ORDER BY created",(file_id,)).fetchall()
         if not changes: return None
         if now-changes[-1]['created']<60 and now-changes[0]['created']<600: return None

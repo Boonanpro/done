@@ -658,7 +658,6 @@ async def serve():
                 with db() as c: docs = [dict(x) for x in c.execute('SELECT * FROM docs')]
                 deadlines = []
                 for doc in docs:
-                    if doc['failures'] >= 3: continue
                     if doc['retry_at'] > time.time():
                         deadlines.append(doc['retry_at']); continue
                     try:
@@ -698,11 +697,13 @@ async def serve():
                             task.add_done_callback(finished)
                     except Exception as exc:
                         failure = doc['failures'] + 1
-                        delay = time.time() + 30*failure
+                        # After three in a row, keep trying every few hours instead of
+                        # dropping the document's comments for good.
+                        delay = time.time() + (30*failure if failure < 3 else 3*3600)
                         with db() as c:
                             c.execute('UPDATE docs SET failures=?,retry_at=?,error=? WHERE file_id=?',
                                       (failure, delay, type(exc).__name__, doc['file_id']))
-                        if failure < 3: deadlines.append(delay)
+                        deadlines.append(delay)
                 for account in accounts():
                     with db() as c:
                         c.execute('INSERT OR IGNORE INTO feeds(account) VALUES(?)', (account,))
