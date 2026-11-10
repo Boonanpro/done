@@ -99,3 +99,17 @@ def test_codes_are_dropped_and_the_same_notice_is_said_once_a_day():
     assert inbox.repeat_key(one) == inbox.repeat_key(two)
     told = {inbox.repeat_key(one): 1000.0}
     assert inbox.repeated(told, inbox.repeat_key(two), 1000.0 + 3600) and not inbox.repeated(told, inbox.repeat_key(two), 1000.0 + 25*3600)
+
+
+def test_a_docs_comment_mail_goes_to_the_document_without_the_model(monkeypatch):
+    from app.services import inbox, gdoc_events, inbound_wakeup
+    taken = []
+    monkeypatch.setattr(gdoc_events, 'room_for_file', lambda f: 'room-doc' if f == 'D' * 30 else None)
+    monkeypatch.setattr(inbound_wakeup, 'take_docs_comment_notice', lambda item, room: taken.append(room) or True)
+    monkeypatch.setattr(inbox, '_mark', lambda *a: None)
+    async def judge(*a, **k): raise AssertionError('the model is not asked')
+    monkeypatch.setattr(inbox, 'judge', judge)
+    item = {'id': None, 'sender_info': {'from': 'X (Google ドキュメント) <comments-noreply@docs.google.com>'},
+            'content': 'https://docs.google.com/document/d/' + 'D' * 30 + '/edit?disco=1'}
+    import asyncio
+    assert asyncio.run(inbox.handle('u', item, set())) == 'docs' and taken == ['room-doc']

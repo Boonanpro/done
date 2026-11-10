@@ -22,6 +22,17 @@ remain in `state.sqlite`; the shared room system prompt loads recent history for
 both Claude and Codex. No chat message, unread mark, push, work card or progress
 event is created. Older messages are available using the history helper.
 
+Documents join by themselves (2026-11-10): every two minutes the worker lists
+Docs the connected accounts own and modified in the last three days. One that a
+room's chat names (Dan shows the documents it makes as links) and that only the
+owner's accounts can open is registered for that room. Comments already there are
+the baseline, except the owner's other-account comments since the previous sweep.
+A Docs comment mail goes straight to this inbox when the document's room is known
+(registered or named in chat), before the mail judge. Dan's own notes start with
+`ダン：` or `【変えた所】`/`【根拠】` and never wake a job. Owner bursts settle for 20
+seconds; different documents run in parallel (one at a time per document, or per
+assigned browser).
+
 Setup after shipping and activating the route:
 
 ```

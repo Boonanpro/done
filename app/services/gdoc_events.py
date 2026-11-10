@@ -77,10 +77,16 @@ def fingerprint(item):
     value = [item.get('content'), item.get('deleted', False), item.get('action')]
     return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
 
-def ingest(c, file_id, threads, baseline=False, owner_only=False, fresh_since=None):
+# Dan's own comments: replies start with ダン：, the reason notes Dan leaves beside
+# its suggestions start with 【変えた所】/【根拠】 (same Google account as the owner).
+DAN_MARKS = ('ダン：', 'ダン:', '【変えた所】', '【根拠】')
+
+def ingest(c, file_id, threads, baseline=False, owner_only=False, fresh_since=None, fresh_mine=True):
     """owner_only: only the owner's accounts can open the document, so a comment
     from another of them (no `me`) is still the owner's. fresh_since: with a
-    baseline, items touched at or after it stay new (the comment a mail announced)."""
+    baseline, items touched at or after it stay new (the comment a mail announced).
+    fresh_mine=False: of those, only the owner's other accounts count (Dan writes as `me`
+    on a document it has just made; the owner's own comments come from another account)."""
     changes = []
     for thread in threads:
         fresh = []
@@ -90,11 +96,12 @@ def ingest(c, file_id, threads, baseline=False, owner_only=False, fresh_since=No
             old = c.execute('SELECT fingerprint FROM items WHERE file_id=? AND item_id=?', (file_id, ident)).fetchone()
             c.execute('INSERT OR REPLACE INTO items VALUES(?,?,?)', (file_id, ident, fp))
             content = (item.get('content') or '').strip()
-            settled = baseline and not (fresh_since and (item.get('createdTime') or '') >= fresh_since)
+            settled = baseline and not (fresh_since and (item.get('createdTime') or '') >= fresh_since
+                                        and (fresh_mine or item.get('author', {}).get('me') is not True))
             if (not settled and (not old or old[0] != fp) and content and not item.get('deleted')
                     and not thread.get('deleted') and not thread.get('resolved')
                     and (item.get('author', {}).get('me') is True or owner_only)
-                    and not content.startswith(('ダン：', 'ダン:'))):
+                    and not content.startswith(DAN_MARKS)):
                 fresh.append({'id': ident, 'revision': fp, 'content': content})
         if fresh:
             changes.append({'comment_id': thread['id'], 'new': fresh, 'thread': thread})
@@ -189,7 +196,7 @@ def owner_only(account, file_id):
     return bool(perms) and all(p.get('type') == 'user' and (p.get('emailAddress') or '').lower() in OWNER_EMAILS
                                for p in perms)
 
-def register(file_id, room_id, account, fresh_since=None):
+def register(file_id, room_id, account, fresh_since=None, fresh_mine=True):
     from app.services.supabase_client import get_supabase_client
     from app.services.gdoc_drive import comments
     project = get_supabase_client().client.table('projects').select('id,user_id').eq('room_id', room_id).single().execute().data
@@ -201,7 +208,8 @@ def register(file_id, room_id, account, fresh_since=None):
     with db() as c:
         c.execute('INSERT INTO docs(file_id,room_id,user_id,project_id,account,cursor) VALUES(?,?,?,?,?,?)',
                   (file_id, room_id, project['user_id'], project['id'], account, before))
-        changes = ingest(c, file_id, threads, baseline=True, owner_only=owner_only(account, file_id), fresh_since=fresh_since)
+        changes = ingest(c, file_id, threads, baseline=True, owner_only=owner_only(account, file_id),
+                         fresh_since=fresh_since, fresh_mine=fresh_mine)
         if changes:
             c.execute('INSERT INTO batches(id,file_id,payload,created) VALUES(?,?,?,?)',
                       (str(uuid.uuid4()), file_id, json.dumps(changes, ensure_ascii=False), iso()))
@@ -210,6 +218,58 @@ def register(file_id, room_id, account, fresh_since=None):
 
 def accounts():
     return sorted(p.name[len('gdrive_'):-len('_token.enc')] for p in (Path.home()/'.dan').glob('gdrive_*_token.enc'))
+
+def room_for_file(file_id):
+    """The room a document belongs to: the registered one, else the latest room whose
+    chat names it (Dan shows the documents it makes as links in the room)."""
+    with db() as c:
+        row = c.execute('SELECT room_id FROM docs WHERE file_id=?', (file_id,)).fetchone()
+    if row: return row['room_id']
+    from app.services.supabase_client import get_supabase_client
+    rows = (get_supabase_client().client.table('chat_messages').select('room_id')
+            .gte('created_at', iso(time.time() - 30*86400)).ilike('content', f'%{file_id}%')
+            .order('created_at', desc=True).limit(1).execute().data)
+    return rows[0]['room_id'] if rows else None
+
+ADOPT_EVERY = 120
+ADOPT_RECHECK = 600
+_adopt_seen = {}   # file_id -> when it was last found not ready (no room yet / not private)
+
+def adopt_new_docs(now=None):
+    """A document Dan made and showed in a room joins the inbox by itself, before anyone
+    comments (2026-11-10: a new LINE script was never registered and the owner's comment
+    sat unanswered). Only documents just the owner's accounts can open: on those every
+    comment is the owner's. Already-written comments are the baseline, except the owner's
+    (another account) since the previous sweep."""
+    from app.services.gdoc_drive import request
+    import logging
+    now = time.time() if now is None else now
+    with db() as c: known = {r[0] for r in c.execute('SELECT file_id FROM docs')}
+    adopted = []
+    for account in accounts():
+        try:
+            files = request(account, 'GET', 'files', params={
+                'q': "mimeType='application/vnd.google-apps.document' and 'me' in owners and trashed=false "
+                     f"and modifiedTime > '{iso(now - 3*86400)}'",
+                'fields': 'files(id)', 'pageSize': 100, 'orderBy': 'modifiedTime desc'}).get('files', [])
+        except Exception:
+            logging.exception('Docs adoption could not list %s', account); continue
+        for f in files:
+            fid = f['id']
+            if fid in known or now - _adopt_seen.get(fid, 0) < ADOPT_RECHECK: continue
+            try:
+                room = room_for_file(fid)
+                if not room or not owner_only(account, fid):
+                    _adopt_seen[fid] = now; continue
+                register(fid, room, account, fresh_since=iso(now - ADOPT_EVERY - ADOPT_RECHECK - 60), fresh_mine=False)
+                known.add(fid); adopted.append(fid)
+                logging.info('Docs adopted %s for room %s', fid, room)
+            except ValueError:
+                known.add(fid)   # registered meanwhile
+            except Exception:
+                _adopt_seen[fid] = now
+                logging.exception('Docs adoption failed for %s', fid)
+    return adopted
 
 def take_mail_notice(file_id, room_id, received=None):
     """A Docs comment mail goes to the same private inbox as push, never to chat.
@@ -246,7 +306,7 @@ def collect(doc):
         c.execute('UPDATE docs SET cursor=?,consumed=?,failures=0,retry_at=0,error=NULL WHERE file_id=?',
                   (before, doc['dirty'], doc['file_id']))
 
-SETTLE = 45
+SETTLE = 20
 
 
 def next_batch(file_id, now=None):
@@ -426,6 +486,7 @@ async def serve():
         observer = Observer(); observer.schedule(Changed(), str(ROOT), recursive=True); observer.start()
         tasks = {}
         learning_tasks = {}
+        next_adopt = 0
         try:
             while True:
                 wake.clear()
@@ -446,7 +507,7 @@ async def serve():
                             await asyncio.to_thread(collect, doc)
                         batch, wait = next_batch(doc['file_id'])
                         if wait: deadlines.append(wait)
-                        task_key = doc.get('browser_room') or doc['account']
+                        task_key = doc.get('browser_room') or doc['file_id']   # each job has its own browser tab
                         if batch and (task_key not in tasks or tasks[task_key].done()):
                             from app.services import command_job_state as state
                             from app.services.job_process import alive
@@ -469,6 +530,14 @@ async def serve():
                             c.execute('UPDATE docs SET failures=?,retry_at=?,error=? WHERE file_id=?',
                                       (failure, delay, type(exc).__name__, doc['file_id']))
                         if failure < 3: deadlines.append(delay)
+                if time.time() >= next_adopt:
+                    next_adopt = time.time() + ADOPT_EVERY
+                    try:
+                        if await asyncio.to_thread(adopt_new_docs): continue
+                    except Exception:
+                        import logging
+                        logging.exception('Docs adoption failed')
+                deadlines.append(next_adopt)
                 from app.services import script_learning
                 try:
                     deadlines.extend(await script_learning.tick(docs, learning_tasks))
