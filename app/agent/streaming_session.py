@@ -123,6 +123,9 @@ class StreamingSession:
     ):
         self.room_id = room_id
         self.model: Optional[str] = None
+        # The executable this process was started from (cli_versions.fingerprint). When the CLI is
+        # updated, the next turn restarts the session on the new binary (2026-11-10).
+        self.binary: Optional[tuple] = None
         self._build_cmd = build_cmd
         self._env = env
         self._cwd = cwd
@@ -190,6 +193,11 @@ class StreamingSession:
             if self.is_alive():
                 return
             cmd = self._build_cmd()
+            try:
+                from app.agent.cli_versions import fingerprint
+                self.binary = fingerprint(cmd[0])
+            except Exception:
+                self.binary = None
             self._proc = subprocess.Popen(
                 cmd,
                 cwd=self._cwd,
@@ -228,6 +236,16 @@ class StreamingSession:
                     proc.kill()
                 except Exception:
                     pass
+
+    def binary_changed(self) -> bool:
+        """True when the executable this session started from has since been replaced (an updated CLI)."""
+        if self.binary is None:
+            return False
+        try:
+            from app.agent.cli_versions import fingerprint
+            return fingerprint(self.binary[0]) != self.binary
+        except Exception:
+            return False
 
     def idle_seconds(self) -> float:
         return time.time() - max(self._last_activity, self._last_input)
@@ -820,7 +838,10 @@ def get_or_create_session(
     with _registry_lock:
         s = _sessions.get(room_id)
         if s and s.is_alive():
-            if model is None or s.model == model:
+            # An updated CLI: the next turn starts on the new binary (--resume keeps the talk). A running
+            # turn is never cut; it keeps its process until it ends.
+            stale = s.binary_changed() and not s.is_turn_active()
+            if not stale and (model is None or s.model == model):
                 return s
             if s.is_turn_active():
                 raise RuntimeError("Cannot switch model during an active turn")
