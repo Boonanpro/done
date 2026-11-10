@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 20          # seconds between poll cycles
 MAX_PER_CYCLE = 5           # cap fires per cycle so one busy cycle can't pile up
+MAX_INFLIGHT = 4            # wakes running at once (each in its own room); the rest wait for a later cycle
 MAIL_ERROR_LIMIT = 30       # consecutive check failures before a mail watch gives up
 EMPTY_WAKE_RETRY_SECONDS = 300  # a wake that never ran is tried again this much later
 EMPTY_WAKE_LIMIT = 3        # wakes in a row that never ran before the room is told instead
@@ -512,6 +513,32 @@ async def _merge_burst(row: Dict[str, Any], raw: Dict[str, Any], cycle: Optional
     return {**raw, "note": encode_watch_note("at", body, row.get("spec") or {})}
 
 
+# Wakes the poller started, room -> task. A wake is a whole Dan turn and can run for many minutes; the poller does not
+# wait for it (2026-11-10: a 20-minute follow-up turn in one room held every room's watches past due, because _tick
+# awaited each fire in turn). One wake per room at a time; the room's other due rows stay pending until it ends.
+_inflight: Dict[str, "asyncio.Task"] = {}
+
+
+def _waking_rooms() -> set:
+    from app.services import room_receiver
+    return {r for r, t in _inflight.items() if not t.done()} | set(room_receiver._background)
+
+
+async def _fire_logged(row: Dict[str, Any]) -> None:
+    try:
+        await _fire(row)
+    except Exception as e:  # noqa: BLE001
+        logger.error("[watch] fire failed room=%s: %s", str(row.get("room_id"))[:8], e)
+
+
+def _launch(row: Dict[str, Any]) -> "asyncio.Task":
+    room = row["room_id"]
+    task = asyncio.create_task(_fire_logged(row))
+    _inflight[room] = task
+    task.add_done_callback(lambda t, room=room: _inflight.pop(room, None) if _inflight.get(room) is t else None)
+    return task
+
+
 async def _tick() -> None:
     from app.services.followups import claim_due_followups, mark_status
     from app.services.command_job_runner import dispatch_pending
@@ -520,10 +547,16 @@ async def _tick() -> None:
     from app.services.work_continuity import dispatch as dispatch_work
     await dispatch_work()
 
-    rows = await asyncio.to_thread(claim_due_followups, MAX_PER_CYCLE)
+    running = len([t for t in _inflight.values() if not t.done()])
+    if running >= MAX_INFLIGHT:
+        return
+    rows = await asyncio.to_thread(claim_due_followups, min(MAX_PER_CYCLE, MAX_INFLIGHT - running), _waking_rooms())
     for row in list(rows):
         if row not in rows:
             continue   # folded into an earlier wake of the same room (_merge_burst)
+        if row["room_id"] in _waking_rooms():
+            await asyncio.to_thread(mark_status, row["id"], "pending")   # this cycle already woke the room
+            continue
         from app.services.followups import decode_watch_row
         decoded = decode_watch_row(row)
         if decoded.get("kind") != "command_report" and decoded.get('spec',{}).get('engine') != 'steerable_cli':
@@ -536,7 +569,7 @@ async def _tick() -> None:
             if _is_one_shot(row) and await _hold_for_burst(decoded):
                 continue
             row = await _merge_burst(decoded, row, rows)
-        await _fire(row)
+        _launch(row)
 
 
 async def poller_loop() -> None:
