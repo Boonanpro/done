@@ -3482,6 +3482,12 @@ async def _process_via_streaming_session(
             return
         existing.stop()
         existing = None
+    # Claude Code was updated since this session started (cli_versions): start this turn on the new
+    # binary so the room runs the model the picker shows. A running turn keeps its process.
+    if existing is not None and existing.is_alive() and not existing.is_turn_active() and getattr(existing, "binary_changed", lambda: False)():
+        _cli_debug(f"[STREAMING] Claude Code updated; restarting session on the new CLI (room {room_id[:8]})")
+        existing.stop()
+        existing = None
     # 履歴肥大ガード（one-shot 経路 2213行付近と同じ掃除をこの常駐経路にも適用）。
     # 常駐化(2026-07)以降ここが素通りだったため transcript が無制限に育ち
     # （電管ルームで実測 24MB / 画像56枚 ≒ 閾値1.5MBの16倍）、巨大 prefill で

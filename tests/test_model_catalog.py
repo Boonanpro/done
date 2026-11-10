@@ -11,6 +11,8 @@ def codex_list(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "_codex_cached", (-1.0, []))
     monkeypatch.setattr(mc, "_CLAUDE_STORE", tmp_path / "claude.json")
     monkeypatch.setattr(mc, "_claude_state", {"loaded": True, "data": None, "next_try": float("inf"), "running": False})
+    from app.agent import cli_versions
+    monkeypatch.setattr(cli_versions, "claude_cli_models", lambda: {})   # labels from the API list only
 
     def write(models):
         path = tmp_path / "models_cache.json"

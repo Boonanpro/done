@@ -228,6 +228,14 @@ def _refresh_claude() -> None:
     finally:
         with _claude_lock:
             _claude_state["running"] = False
+            families_now = dict(((_claude_state["data"] or {}).get("families")) or {})
+        # Keep the CLIs current: once a day, or sooner while Anthropic lists a model the installed
+        # Claude Code does not know yet (2026-11-10: Fable 5.2 was listed, the CLI still ran 5.1).
+        try:
+            from app.agent import cli_versions
+            cli_versions.ensure_current_in_background(force=cli_versions.cli_behind(families_now))
+        except Exception as e:  # noqa: BLE001
+            logger.info("[MODELS] CLI update not started: %s", e)
 
 
 def _claude_families(wait: bool = False) -> dict[str, dict[str, str]]:
@@ -259,10 +267,27 @@ def known_claude_models() -> set[str]:
     return set(CLAUDE_ALIASES) | {v["id"] for v in _claude_families().values()}
 
 
+def alias_label(alias: str, families: Optional[dict[str, dict[str, str]]] = None) -> str:
+    """The model an alias runs on the next turn. Anthropic may list a newer one than the installed Claude
+    Code knows; until the CLI is updated the alias runs the CLI's newest, so that is what is shown."""
+    families = _claude_families() if families is None else families
+    api = families.get(alias) or {}
+    api_label = api.get("label") or _CLAUDE_FALLBACK_LABELS.get(alias, alias)
+    try:
+        from app.agent import cli_versions
+        known = cli_versions.claude_cli_models().get(alias)
+    except Exception:  # noqa: BLE001
+        known = None
+    hit = _CLAUDE_ID.match(_norm(api.get("id")))
+    if known and (not hit or (int(hit.group(2)), int(hit.group(3) or 0)) > known[0]):
+        return cli_versions.label_for_id(known[1])
+    return api_label
+
+
 def claude_options() -> list[dict[str, str]]:
     families = _claude_families()
     options = [
-        {"id": alias, "label": (families.get(alias) or {}).get("label") or _CLAUDE_FALLBACK_LABELS[alias], "backend": "claude"}
+        {"id": alias, "label": alias_label(alias, families), "backend": "claude"}
         for alias in CLAUDE_OFFERED
     ]
     for family, entry in families.items():
