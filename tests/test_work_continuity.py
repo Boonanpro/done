@@ -249,14 +249,27 @@ def test_blocked_work_posts_nothing_to_chat(monkeypatch):
 
 
 def test_inbound_schedule_saves_before_running(monkeypatch):
+    """Saved before anything runs. While the room runs another notice's turn it waits (ready); while it runs the owner's
+    work it goes to the room's receiver (room_receiver, 2026-11-10) instead of interrupting."""
     from app.services import inbound_wakeup as inbound
+    from app.services import room_receiver as rr
     runtime(monkeypatch,None)
     monkeypatch.setattr('app.services.followup_poller._room_busy',lambda room: True)
+    handed = []
+    async def hand_over(room_id, user_id, prompt):
+        handed.append(prompt)
+        return 'job1'
+    monkeypatch.setattr(rr, 'hand_over', hand_over)
     message={'id':'receipt','user_id':'owner','source':'email','content':'依頼の素材が届きました'}
+    key=w.key_for('inbound:email','room','receipt')
     async def run():
-        assert inbound.schedule_room_wakeup(message,'room',reason='案件一致')
-        key=w.key_for('inbound:email','room','receipt')
-        assert w.get(key)['status'] == 'ready'
+        with rr.background('room'):
+            assert inbound.schedule_room_wakeup(message,'room',reason='案件一致')
+            assert w.get(key)['status'] == 'ready'
+            await asyncio.gather(*list(inbound._tasks))
+            assert w.get(key)['status'] == 'ready' and handed == []
+        assert inbound.schedule_room_wakeup({**message, 'id': 'receipt2'},'room',reason='案件一致')
         await asyncio.gather(*list(inbound._tasks))
-        assert w.get(key)['status'] == 'ready'
+        assert len(handed) == 1 and '依頼の素材が届きました' in handed[0]
+        assert w.get(w.key_for('inbound:email','room','receipt2'))['status'] == 'done'
     asyncio.run(run())

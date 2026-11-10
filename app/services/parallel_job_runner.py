@@ -188,6 +188,14 @@ async def deliver(job_id, text):
         # Dan reads it on his next turn (chat_routes._fetch_unseen_voice_digest); nothing is posted in the chat.
         state.change(job_id, lambda x: x.update(delivered_revision=revision, quiet_delivered_at=state.now()))
         return None
+    if s.get('receiver'):
+        # The receiver already wrote its answer for the owner (room_receiver.rules); waking the room's Dan to retell it
+        # would wake the busy room again. Said once in the room, nothing when there is nothing to tell.
+        state.change(job_id, lambda x: x.update(delivered_revision=revision))
+        if not is_silent_reply(text) and str(text or '').strip():
+            from app.services import inbox
+            await inbox.say(s['user_id'], s['room_id'], str(text).strip())
+        return None
     if voice_calls.active(s['room_id']):
         return None
     await ensure_named(job_id)
@@ -509,13 +517,14 @@ def room_jobs(user_id, room_id, hours=24, include_quiet=True):
             + sorted(done, key=lambda s: s.get('updated_at') or '', reverse=True))[:20]
 
 
-async def start(room_id, user_id, task, model='', title='', quiet=False):
+async def start(room_id, user_id, task, model='', title='', quiet=False, receiver=False):
     """Start a parallel job in this room (from chat Dan's tool or the room's work list).
-    quiet: asked from a site; the result is not posted in the room's chat (see deliver)."""
+    quiet: asked from a site; the result is not posted in the room's chat (see deliver).
+    receiver: the room's receiver of notices while the owner's work runs (room_receiver); its answer is posted as it is."""
     from app.services.command_center import execute
     model = model_key(model) or room_model(room_id)
-    out = await execute({'action': 'work', 'engine': 'parallel', 'model': model, 'task': task, 'title': title, 'quiet': quiet},
-                        room_id, user_id)
+    out = await execute({'action': 'work', 'engine': 'parallel', 'model': model, 'task': task, 'title': title, 'quiet': quiet,
+                         'receiver': receiver}, room_id, user_id)
     if not out.get('accepted'):
         raise ValueError(out.get('error') or '作業を始められませんでした')
     return state.read(out['receipt']['id'])

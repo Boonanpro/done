@@ -279,6 +279,8 @@ async def execute(params: dict[str, Any], room_id: str, user_id: str, *, report_
             extra['auto_title'] = True   # 作業を走らせる Core が短い名前を付ける（parallel_job_runner.name_job）
         if engine == 'parallel' and params.get('quiet'):
             extra['quiet'] = True   # asked from a site (X運用室): its result is not posted in the room's chat
+        if engine == 'parallel' and params.get('receiver'):
+            extra['receiver'] = True   # the room's receiver of notices while the owner's work runs (room_receiver)
     elif engine == 'api' and params.get('model'):
         extra = {'model': str(params['model'])[:60]}
     from app.core.generations import read as generation_read
