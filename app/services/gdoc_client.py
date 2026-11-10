@@ -139,6 +139,27 @@ def clean(data, accept=False):
     return _write(parts, root)
 
 
+INTERNAL_HEADING = '◎前提と狙い'
+
+
+def drop_internal(data):
+    """The customer never sees the working doc's own notes: the ◎前提と狙い section
+    (from that heading to the next ◎ heading) stays in the working doc only."""
+    parts, root = _read(data)
+    body = root.find(W+'body')
+    if body is None: return data
+    dropping, gone = False, []
+    for el in list(body):
+        if el.tag == W+'p':
+            text = paragraph_text(el).strip()
+            if text.startswith(INTERNAL_HEADING): dropping = True
+            elif text.startswith('◎'): dropping = False
+        if dropping and el.tag != W+'sectPr': gone.append(el)
+    if not gone: return data
+    for el in gone: body.remove(el)
+    return _write(parts, root)
+
+
 def texts(data, view='after'):
     """Body paragraph texts with every suggestion applied (after) or rejected (before)."""
     if view == 'before':
@@ -367,6 +388,8 @@ def deliver(account, work_id, client_id=None, name=None, author='株式会社パ
     new_texts = texts(fresh, 'after')
     if with_pending and ''.join(_norm(new_texts)) != ''.join(_norm(texts(work, 'after'))):  # joined: texts keeps deleted breaks
         raise RuntimeError('Applying the working doc suggestions did not give the suggested text')
+    fresh = drop_internal(fresh)
+    new_texts = texts(fresh, 'after')
     if client_id:
         folder = _state_dir(client_id)
         meta = json.loads((folder/'meta.json').read_text())
