@@ -15,6 +15,29 @@ import { EDITOR_SPLASH_BG } from '@/lib/open-editor-window';
 
 const roomCache = new Map<string, string>();   // `${roomId}:${contentId}` → 制作の部屋の project id
 
+// 制作の窓のライブラリとエディターは、ログインのクッキー（短い寿命）だけで API を呼んでいて、クッキーが切れると
+// 「Not authenticated」で何も出なくなっていた。この窓（この部品を読むのは制作の窓だけ）では、ダン本体の画面と同じ
+// 端末に残したログインの印を、印を付けていない自分の API の呼び出しに付ける。
+if (typeof window !== 'undefined' && !(window as unknown as { __danEditorFetch?: boolean }).__danEditorFetch) {
+  (window as unknown as { __danEditorFetch?: boolean }).__danEditorFetch = true;
+  const original = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    try {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const sameOriginApi = url.startsWith('/api/') || url.startsWith(window.location.origin + '/api/');
+      const token = localStorage.getItem('done-token');
+      if (sameOriginApi && token && typeof input === 'string') {
+        const headers = new Headers(init?.headers || undefined);
+        if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
+        return original(input, { ...init, headers });
+      }
+    } catch {
+      /* 付けられない時はそのまま */
+    }
+    return original(input, init);
+  };
+}
+
 function authHeaders(): Record<string, string> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
   return token ? { Authorization: `Bearer ${token}` } : {};

@@ -2320,7 +2320,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'production'>(() => {
-    if (typeof window === 'undefined') return 'chat';
+    // エディターの窓の「ダンと制作」では、窓の住所の production=1 / content_id はエディターの物で、欄はいつも会話
+    if (typeof window === 'undefined' || editorChat) return 'chat';
     const params = new URLSearchParams(window.location.search);
     return params.get('production') === '1' || params.has('content_id') ? 'production' : 'chat';
   });

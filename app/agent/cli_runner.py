@@ -4268,6 +4268,15 @@ async def _process_message_cli_with_failover(
             system_prompt += f"\n\n{skill_injection}"
         timeline_draft: Optional[Dict[str, Any]] = None
         timeline_turn_succeeded = False
+        if not timeline_refs:
+            # 作品の部屋（エディターの中の「ダンと制作」）は、どの経路の番（声・見張り・続きの仕事）でもその作品を直せる
+            try:
+                from app.services.editor_rooms import room_info as _editor_room_info
+                _info = await asyncio.to_thread(_editor_room_info, room_id)
+                if _info and _info.get("content_id"):
+                    timeline_refs = [{"content_id": _info["content_id"], "room_id": _info["asset_room_id"]}]
+            except Exception:  # noqa: BLE001
+                pass
         if timeline_refs:
             # A chat mention supplies an explicit creative artifact.  Give the same
             # normal Dan session a draft-only timeline MCP; its other capabilities

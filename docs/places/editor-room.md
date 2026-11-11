@@ -13,6 +13,8 @@ watches:
   - frontend/src/components/production/production-workspace.tsx
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
+fingerprint: 5e3da83633dc3e5a
+described: 55e1d232e275bcd7
 ---
 # エディターの中の「ダンと制作」
 
@@ -33,3 +35,15 @@ watches:
 
 - 前提: 本体の部屋に素材（uploads/production-assets/<本体の部屋>）がある
 - 作品の部屋で「ここの字幕消して」→ timeline の道具で直す → 左のタイムラインがその場で変わり、ダンの手（青い光と矢印）が見える
+
+<!-- place_map:auto:start -->
+## コードから（自動）
+
+`python scripts/place_map.py stamp editor-room` が書き直す。手で直さない。
+
+- 見張るファイル: `frontend/src/app/production-workspace/page.tsx`, `frontend/src/components/production/editor-dan-chat.tsx`, `frontend/src/components/production/production-workspace.tsx`
+- ラベル: 「ダンと制作」
+- 見出し: 「制作」、「AIで新しい動画を作る」
+
+<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "e65a8f6c81", "frontend/src/components/production/editor-dan-chat.tsx": "3501c0fdf5", "frontend/src/components/production/production-workspace.tsx": "328c00c295"} -->
+<!-- place_map:auto:end -->
