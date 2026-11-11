@@ -18,6 +18,8 @@ from typing import Any, Optional
 _CACHE_SECONDS = 30.0
 _info_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
 _children_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# 同じ部屋（本体の部屋＋作品）を同時に2回頼まれても1つしか作らない（窓をすぐ開き直した時に2つできていた。2026-11-12）
+_ensure_locks: dict[tuple[str, str, Optional[str]], Any] = {}
 
 
 def _sb():
@@ -45,15 +47,24 @@ def _content_title(asset_room_id: str, content_id: str) -> str:
 async def ensure_room(user_id: str, asset_room_id: str, content_id: Optional[str] = None, sb=None) -> dict[str, Any]:
     """本体の部屋（と作品）の制作の部屋を返す。無ければ作る。{project_id, room_id, title, kind}。"""
     import asyncio
-    from app.services.project_service import ProjectService
 
     sb = sb or _sb()
     content_id = (content_id or "").strip() or None
+    lock = _ensure_locks.setdefault((user_id, asset_room_id, content_id), asyncio.Lock())
+    async with lock:
+        return await _ensure_room(user_id, asset_room_id, content_id, sb)
+
+
+async def _ensure_room(user_id: str, asset_room_id: str, content_id: Optional[str], sb) -> dict[str, Any]:
+    import asyncio
+    from app.services.project_service import ProjectService
+
     kind = "content" if content_id else "library"
 
     def _find():
-        rows = (sb.table("projects").select("id,room_id,title,metadata")
+        rows = (sb.table("projects").select("id,room_id,title,metadata,created_at")
                 .eq("origin_room_id", asset_room_id).eq("user_id", user_id).execute()).data or []
+        rows.sort(key=lambda r: str(r.get("created_at") or ""))   # 2つある時はいつも古い方
         for r in rows:
             ed = _editor_meta(r)
             if ed and (ed.get("content_id") or None) == content_id and r.get("room_id"):
