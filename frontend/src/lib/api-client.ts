@@ -304,7 +304,7 @@ export interface StateMachineMessageRequest {
   timeline_refs?: { content_id: string; title: string }[];
   client_message_id?: string;
   /** この発言がダンの返事の部品（選択・入力）への答えなら、どの返事のどの部品か（chat-shapes） */
-  answer_to?: { message_id: string; part: string; kind: 'choice' | 'input'; value: string; question?: string };
+  answer_to?: { message_id: string; part: string; kind: 'choice' | 'input' | 'point'; value: string; question?: string };
 }
 
 export interface StateMachineConfirmRequest {

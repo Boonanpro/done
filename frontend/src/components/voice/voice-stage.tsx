@@ -26,11 +26,11 @@
  */
 import { readScreenFrames } from './screen-stream';
 import { useStageDraft } from './stage-message-editor';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { ScreenCommand } from '@/components/artifacts/voice-controls';
 
-import { ShapeBlock, checkCompleteShape } from '@/components/chat/chat-shapes';
+import { ShapeBlock, ShapePointContext, checkCompleteShape } from '@/components/chat/chat-shapes';
 
 export type StageCard = {
   proposal_id: string; status: string; channel: string; to: string; to_name?: string; subject?: string; body: string;
@@ -231,6 +231,13 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
   const page = (scene?.kind === 'image' && scene.image.startsWith('/api/v1/voicelog/stage/')) || scene?.kind === 'frame' || (scene?.kind === 'doc' && !!stageFramePath(scene.doc.page));
   useEffect(() => { onShownRef.current?.(shown && drawable, shown && drawable && page); }, [shown, drawable, page]);
   const drawing = useMemo(() => (scene?.kind === 'html' ? drawingDocument(scene.html) : ''), [scene]);
+  // What the owner presses on a part (a pin, a photo card, a frame) reaches the Dan on the call (2026-11-12)
+  const touch = useCallback(async (title: string, value: string) => {
+    const r = await fetch(`/api/v1/voicelog/stage/${encodeURIComponent(roomId)}/touch`, {
+      method: 'POST', headers: { ...stageHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ title, value }),
+    });
+    if (!r.ok) throw new Error(String(r.status));
+  }, [roomId]);
   if (!shown) return null;
   // Filling a screen with a page (the phone): the page takes all the height; the caption gives way to the page's own status.
   const pageFill = fill && (page || scene?.kind === 'cue');
@@ -247,7 +254,9 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
           {scene.kind === 'cue' ? (
             <StageFact cue={scene.cue} />
           ) : scene.kind === 'program' ? (
-            <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
+            <ShapePointContext.Provider value={touch}>
+              <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
+            </ShapePointContext.Provider>
           ) : scene.kind === 'card' ? (
             <StageMessageCard key={scene.card.proposal_id} card={scene.card} />
           ) : scene.kind === 'doc' && stageFramePath(scene.doc.page) ? (

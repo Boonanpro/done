@@ -138,6 +138,25 @@ async def call_screen(room_id: str, request: Request, feedback: ScreenFeedback):
     return {'accepted': voice_screen.accept(room_id, voice_stage.read_state(room_id), body)}
 
 
+class StageTouch(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    value: str = Field(min_length=1, max_length=200)
+
+
+@router.post('/stage/{room_id}/touch')
+async def call_touch(room_id: str, request: Request, touch: StageTouch):
+    """The owner pressed something on the call's screen (a pin of a Map, an Item, a frame of Frames; 2026-11-12): it
+    reaches the Dan on the call as the owner pointing at it, the way a chat message during the call does (voice_calls)."""
+    from app.services import voice_calls
+    user = _get_user(request)
+    if not await ChatService().get_room(room_id, user.user_id):
+        raise HTTPException(status_code=403, detail='No access to this room')
+    if not voice_calls.active(room_id):
+        return {'delivered': False, 'reason': 'no call'}
+    voice_calls.deliver(room_id, f'{touch.title} → {touch.value}', kind='touch')
+    return {'delivered': True}
+
+
 _EDITOR_TOOLS = [   # the editor assistant's shared definitions (the phone/web voice tools retired 2026-09-23)
     {
         "type": "function",

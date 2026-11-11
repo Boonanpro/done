@@ -21,7 +21,8 @@
 
 export const ANSWER_ARROW = ' → ';
 
-export type AnswerKind = 'choice' | 'input';
+/** point: 地図のピン・写真の札・動画のコマを押した（2026-11-12。何度でも押せる。答えではなく「これの話」という指し示し） */
+export type AnswerKind = 'choice' | 'input' | 'point';
 
 export type AnswerTo = {
   message_id: string;
@@ -121,6 +122,21 @@ export function findInputAnswer(
   return null;
 }
 
+/** 押した物を部屋へ送る文面: 「<題> → <押した物>」（選択ボタンと同じ形） */
+export function pointText(title: string, value: string): string {
+  return `${norm(title)}${ANSWER_ARROW}${norm(value)}`;
+}
+
+/** その部品で本人が最後に押した物（無ければ null）。utterances は古い順 */
+export function findLastPoint(utterances: readonly UserUtterance[], messageId: string, part: string): string | null {
+  let last: string | null = null;
+  for (const u of utterances) {
+    const a = answerFor(u, messageId, part, 'point');
+    if (a && a.value) last = a.value;
+  }
+  return last;
+}
+
 /** 部屋の記録（MessageResponse 相当）から照合情報を読む。無ければ null。 */
 export function readAnswerTo(aiContext: unknown): AnswerTo | null {
   if (!aiContext || typeof aiContext !== 'object') return null;
@@ -128,7 +144,7 @@ export function readAnswerTo(aiContext: unknown): AnswerTo | null {
   if (!a || typeof a !== 'object') return null;
   const o = a as Record<string, unknown>;
   if (typeof o.message_id !== 'string' || typeof o.part !== 'string') return null;
-  if (o.kind !== 'choice' && o.kind !== 'input') return null;
+  if (o.kind !== 'choice' && o.kind !== 'input' && o.kind !== 'point') return null;
   return {
     message_id: o.message_id,
     part: o.part,

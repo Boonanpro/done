@@ -24,7 +24,7 @@ def test_section_is_generated_file_content() -> None:
     # 3.3KB (was 2.3KB); the cap moved from 2500 to 3400 with them. 2026-10-23: the eleven small parts to compose a
     # layout with, the composition rules and a Card example made it 5.1KB; the cap moved to 5400
     # 2026-10-25: Flow (the arrow diagram, with its icon names) and its sentence made it 6.4KB; the cap moved to 7000
-    assert len(section) <= 7000
+    assert len(section) <= 8500   # 2026-11-12: 本物の中身の部品6つ
 
 
 def test_section_asks_for_the_real_thing_and_a_table_for_comparisons() -> None:

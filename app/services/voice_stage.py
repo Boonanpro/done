@@ -754,6 +754,21 @@ class Stage:
             del self.scenes[:-MAX_SCENES]
         self.write(active=True)
 
+    def show_parts(self, program, caption=''):
+        """Parts built from verified facts (a Map, Items, a Quote, Sources, Frames...; 2026-11-12) put on the stage at once:
+        no model draws them, so the screen changes the moment the facts are there (the old drawer redrew the talk as boxes
+        and arrows, late and unrelated). Refused, with the reason, when the screen could not draw it."""
+        program = sanitize(str(program or '').strip())
+        if program.startswith('```'):
+            program = re.sub(r'^```[A-Za-z-]*\s*|\s*```$', '', program).strip()
+        if not well_formed(program):
+            self.record('stage_parts_refused', chars=len(program))
+            return {'shown': False, 'reason': '画面が描けない書き方（root = で始め、部品の一覧にある名前だけ・名前つき引数なし）。'}
+        if self._timer is not None: self._timer.cancel(); self._timer = None
+        self._apply(str(caption or self.caption or '')[:60], program=program)
+        self.record('stage_parts', chars=len(program), version=self.version)
+        return {'shown': True}
+
     async def show(self, what):
         """The owner asked (through the call's backend) for a drawing: decided now, with the request."""
         if self._timer is not None: self._timer.cancel(); self._timer = None

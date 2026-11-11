@@ -9,20 +9,21 @@
 // 写しは frontend/scripts/sync-mobile-chat-shapes.mjs が作る。
 // - 写真はダンのファイル（/api/v1/files/…）と https:// の画像だけ（PC の safeImageUrl と同じ範囲。アプリの URL 読みは
 //   ブラウザと違うので、ここで同じ範囲を確かめる）。ボタンの行き先は safeLinkUrl を通った物だけ
-import { createContext, useContext, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import Svg, { Circle, G, Line, Path, Rect, Text as SvgText } from 'react-native-svg';
 
 import { ShapeNode, readLook, safeColor, safeLinkUrl, siteFilePath } from './chat-shapes-plain';
-import { ANSWER_VALUE_MAX, SHAPE_SPECS, checkShapeProgram, choiceOptions, flowEdges } from './chat-shapes-schema';
+import { ANSWER_VALUE_MAX, POINT_TITLE, SHAPE_SPECS, checkShapeProgram, choiceOptions, flowEdges, timeSeconds } from './chat-shapes-schema';
+import { mapView, pinLabels } from './chat-shapes-map-geometry';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, type UserUtterance,
+  choiceAnswerText, findChoiceAnswer, findInputAnswer, findLastPoint, inputAnswerText, inputAnswerValue, pointText, type UserUtterance,
 } from './chat-shapes-answers';
 import type { AskSaved, SubmitAnswer } from './chat-shapes-answer-sends';
 import {
   CHECK_BUTTON, CHECKING_TEXT, SEND_FAILED, SEND_UNKNOWN_AGAIN, SEND_UNKNOWN_TEXT, SEND_VERIFYING, SENDING_TEXT, START_UNSURE, TOO_LONG,
-  canAnswer, useAnswerSend, type AnswerEnv, type SendState,
+  canAnswer, newSendId, useAnswerSend, type AnswerEnv, type SendState,
 } from './chat-shapes-use-answer-send';
 import { CHART_HEIGHT, chartGeometry } from './chat-shapes-chart-geometry';
 
@@ -98,7 +99,7 @@ function Box({ children, flat, framed }: { children: ReactNode; flat?: boolean; 
 }
 
 /** 横並びの中で幅を分け合う部品（Web の chat-shapes.tsx WIDE と同じ） */
-const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow']);
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow', 'Map', 'Item', 'Quote', 'Sources', 'Frames', 'BeforeAfter']);
 
 function Children({ items, row = false }: { items: unknown; row?: boolean }) {
   const list = Array.isArray(items) ? items : [];
@@ -379,6 +380,229 @@ function FlowNodeView({ p }: { p: Record<string, unknown> }) {
   );
 }
 
+
+// --- 本物の中身を見せる部品（2026-11-12。PC の chat-shapes.tsx と同じ形・同じ届き方）--------------------------
+const NAVY = '#1f4e79';
+const MARK_BG = 'rgba(255, 200, 0, 0.45)';
+
+/** 押せる物（ピン・札・コマ）: 押すと本人の発言「<題> → <押した物>」として部屋へ（answer_to.kind 'point'。何度でも押せる） */
+function usePoint(title: string) {
+  const env = useAnswerEnv();
+  const [mine, setMine] = useState<{ value: string; status: 'sending' | 'sent' | 'failed' } | null>(null);
+  const recorded = env.messageId ? findLastPoint(env.utterances, env.messageId, env.part) : null;
+  const can = !!env.submit && !!env.messageId && !!env.ownerId && !!env.roomId;
+  const press = useCallback(async (value: string) => {
+    if (!env.submit || !env.messageId) return;
+    setMine({ value, status: 'sending' });
+    try {
+      await env.submit(pointText(title, value), { message_id: env.messageId, part: env.part, kind: 'point', value: value.slice(0, ANSWER_VALUE_MAX), question: title.slice(0, 200) }, newSendId());
+      setMine({ value, status: 'sent' });
+    } catch { setMine({ value, status: 'failed' }); }
+  }, [env.submit, env.messageId, env.part, title]);
+  const selected = mine?.value ?? recorded;
+  const note = mine?.status === 'failed' ? '伝えられませんでした。もう一度押してください'
+    : mine?.status === 'sending' ? '伝えています…' : selected ? `ダンに伝えました: ${selected}` : null;
+  return { selected, note, failed: mine?.status === 'failed', press: can ? (v: string) => { void press(v); } : null };
+}
+
+function PointNote({ note, failed }: { note: string | null; failed: boolean }) {
+  return note ? <Text style={failed ? styles.problem : styles.small}>{note}</Text> : null;
+}
+
+function hostOf(url: string | null): string {
+  const m = url ? url.match(/^https?:\/\/([^/?#]+)/i) : null;
+  return m ? m[1].replace(/^www\./, '') : '';
+}
+
+function SourceLine({ url, label }: { url: unknown; label: string }) {
+  const { openUrl } = useContext(ShapeRoomContext);
+  const safe = safeLinkUrl(url);
+  return (
+    <Pressable disabled={!safe} onPress={() => safe && openUrl(safe)} style={styles.sourceLine}>
+      <Ionicons name="link-outline" size={14} color="#6b7a72" />
+      {hostOf(safe) ? <Text style={styles.sourceHost}>{hostOf(safe)}</Text> : null}
+      <Text numberOfLines={1} style={[styles.small, { flexShrink: 1 }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function Marked({ text, marks }: { text: string; marks: unknown }) {
+  const words = (Array.isArray(marks) ? marks : []).map(str).map((m) => m.trim()).filter((m) => m && text.includes(m));
+  const out: ReactNode[] = [];
+  let rest = text, k = 0;
+  for (;;) {
+    let best = -1, word = '';
+    for (const w of words) { const i = rest.indexOf(w); if (i >= 0 && (best < 0 || i < best)) { best = i; word = w; } }
+    if (best < 0) break;
+    out.push(rest.slice(0, best), <Text key={k++} style={{ backgroundColor: MARK_BG }}>{word}</Text>);
+    rest = rest.slice(best + word.length); words.splice(words.indexOf(word), 1);
+  }
+  out.push(rest);
+  return <Text selectable style={styles.quoteText}>{out}</Text>;
+}
+
+/** 地図: PC と同じ計算（chat-shapes-map-geometry）でタイルを並べ、ピンを立てる。指でずらす代わりに ＋ − で寄る・引く */
+function MapNode({ p }: { p: Record<string, unknown> }) {
+  const places = (Array.isArray(p.places) ? p.places : []).filter((x): x is { label: string; lat: number; lng: number; sub?: string } =>
+    !!x && typeof x === 'object' && typeof (x as { lat?: unknown }).lat === 'number' && typeof (x as { lng?: unknown }).lng === 'number');
+  const h = p.here && typeof p.here === 'object' ? p.here as { lat?: unknown; lng?: unknown; label?: unknown } : null;
+  const here = h && typeof h.lat === 'number' && typeof h.lng === 'number' ? { lat: h.lat, lng: h.lng } : null;
+  const title = str(p.title).trim() || POINT_TITLE.Map;
+  const point = usePoint(title);
+  const [width, setWidth] = useState(0);
+  const [zoomDelta, setZoomDelta] = useState(0);
+  const height = Math.round(Math.min(320, Math.max(220, width * 0.72)));
+  const view = width > 0 && places.length ? mapView(places, here, width, height, zoomDelta) : null;
+  const labels = pinLabels(places.length);
+  return (
+    <Box>
+      {str(p.title) ? <Text style={styles.question}>{str(p.title)}</Text> : null}
+      <View onLayout={(e) => setWidth(Math.round(e.nativeEvent.layout.width))} style={[styles.map, { height }]}>
+        {view ? view.tiles.map((t) => <Image key={t.key} source={{ uri: t.url }} style={{ position: 'absolute', left: t.left, top: t.top, width: 256, height: 256, opacity: 0.85 }} />) : null}
+        {view?.here ? <View style={[styles.here, { left: view.here.left - 8, top: view.here.top - 8 }]} /> : null}
+        {view ? places.map((pl, i) => {
+          const at = view.points[i];
+          const sel = point.selected === pl.label;
+          const flip = at.left > width * 0.6;
+          return (
+            <Pressable key={i} disabled={!point.press} onPress={() => point.press?.(pl.label)}
+              style={[styles.pin, sel && styles.pinOn, flip ? { right: width - at.left - 11, flexDirection: 'row-reverse' } : { left: at.left - 11 }, { top: at.top - 13 }]}>
+              <View style={styles.pinNo}><Text style={styles.pinNoText}>{i + 1}</Text></View>
+              {labels ? <Text numberOfLines={1} style={styles.pinText}>{pl.label}</Text> : null}
+            </Pressable>
+          );
+        }) : null}
+        <View style={styles.zoom}>
+          <Pressable onPress={() => setZoomDelta((z) => z + 1)} style={styles.zoomBtn}><Ionicons name="add" size={18} color="#333" /></Pressable>
+          <Pressable onPress={() => setZoomDelta((z) => z - 1)} style={[styles.zoomBtn, { borderTopWidth: 1, borderColor: '#dbe2da' }]}><Ionicons name="remove" size={18} color="#333" /></Pressable>
+        </View>
+        {view ? <Text style={styles.credit}>{view.credit}</Text> : null}
+      </View>
+      {places.map((pl, i) => (
+        <Pressable key={i} disabled={!point.press} onPress={() => point.press?.(pl.label)} style={[styles.placeRow, point.selected === pl.label && { backgroundColor: MARK_BG }]}>
+          <View style={styles.pinNo}><Text style={styles.pinNoText}>{i + 1}</Text></View>
+          <Text style={[styles.text, { flexShrink: 1 }]}>{pl.label}{str(pl.sub) ? <Text style={styles.small}>{'　' + str(pl.sub)}</Text> : null}</Text>
+        </Pressable>
+      ))}
+      <PointNote note={point.note} failed={point.failed} />
+    </Box>
+  );
+}
+
+function ItemNode({ p }: { p: Record<string, unknown> }) {
+  const point = usePoint(POINT_TITLE.Item);
+  const uri = useImageUrl(p.image);
+  const [broken, setBroken] = useState(false);
+  const title = str(p.title);
+  const lines = (Array.isArray(p.lines) ? p.lines : []).map(str).filter((l) => l.trim());
+  return (
+    <View style={{ gap: 4, alignSelf: 'stretch' }}>
+      <Pressable disabled={!point.press} onPress={() => point.press?.(title)} style={[styles.item, point.selected === title && styles.itemOn]}>
+        {uri && !broken ? <Image source={{ uri }} onError={() => setBroken(true)} style={styles.itemPhoto} resizeMode="cover" /> : null}
+        <View style={styles.itemBody}>
+          <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+            {str(p.num) ? <View style={styles.pinNo}><Text style={styles.pinNoText}>{str(p.num)}</Text></View> : null}
+            <Text style={[styles.cardTitle, { fontSize: 15, flexShrink: 1 }]}>{title}</Text>
+          </View>
+          {str(p.sub) ? <Text style={styles.small}>{str(p.sub)}</Text> : null}
+          {lines.map((l, i) => <Text key={i} style={[styles.text, { fontSize: 13, lineHeight: 19 }]}>{l}</Text>)}
+        </View>
+      </Pressable>
+      {safeLinkUrl(p.url) ? <SourceLine url={p.url} label="ページを開く" /> : null}
+      <PointNote note={point.note} failed={point.failed} />
+    </View>
+  );
+}
+
+function QuoteNode({ p }: { p: Record<string, unknown> }) {
+  const uri = useImageUrl(p.image);
+  const [broken, setBroken] = useState(false);
+  const [ratio, setRatio] = useState(3);
+  return (
+    <Box>
+      {uri && !broken ? (
+        <View style={styles.quoteImageBox}>
+          <Image source={{ uri }} onError={() => setBroken(true)} onLoad={(e) => { const s = e.nativeEvent.source; if (s?.width && s?.height) setRatio(s.width / s.height); }}
+            style={{ width: '100%', aspectRatio: ratio }} resizeMode="contain" />
+        </View>
+      ) : <View style={styles.quoteBar}><Marked text={str(p.text)} marks={p.mark} /></View>}
+      <SourceLine url={p.url} label={str(p.source)} />
+    </Box>
+  );
+}
+
+function SourcesNode({ p }: { p: Record<string, unknown> }) {
+  const { openUrl } = useContext(ShapeRoomContext);
+  const items = (Array.isArray(p.items) ? p.items : []).filter((x): x is Record<string, unknown> => !!x && typeof x === 'object');
+  return (
+    <Box>
+      <Text style={styles.small}>出どころ</Text>
+      {items.map((x, i) => {
+        const url = safeLinkUrl(x.url);
+        return (
+          <Pressable key={i} disabled={!url} onPress={() => url && openUrl(url)} style={styles.sourceRow}>
+            <Text style={styles.sourceNo}>{i + 1}</Text>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={[styles.text, { fontSize: 14, fontWeight: '600' }]}>{str(x.title)}</Text>
+              <Text numberOfLines={1} style={styles.small}>{hostOf(url)}{str(x.note) ? `・${str(x.note)}` : ''}</Text>
+            </View>
+          </Pressable>
+        );
+      })}
+    </Box>
+  );
+}
+
+function FramesNode({ p }: { p: Record<string, unknown> }) {
+  const title = str(p.title).trim() || POINT_TITLE.Frames;
+  const point = usePoint(title);
+  const { siteUrl } = useContext(ShapeRoomContext);
+  const frames = (Array.isArray(p.frames) ? p.frames : []).filter((f): f is Record<string, unknown> => !!f && typeof f === 'object');
+  const total = timeSeconds(p.length);
+  const value = (f: Record<string, unknown>) => (str(f.label) ? `${str(f.time)}（${str(f.label)}）` : str(f.time));
+  return (
+    <Box>
+      {str(p.title) ? <Text style={styles.question}>{str(p.title)}</Text> : null}
+      <View style={styles.frameGrid}>
+        {frames.map((f, i) => {
+          const uri = imageUrl(f.src, siteUrl);
+          const sel = point.selected === value(f);
+          return (
+            <Pressable key={i} disabled={!point.press} onPress={() => point.press?.(value(f))} style={[styles.frame, sel && styles.itemOn]}>
+              {uri ? <Image source={{ uri }} style={{ width: '100%', aspectRatio: 16 / 9, backgroundColor: '#eef2ee' }} resizeMode="cover" /> : <View style={{ width: '100%', aspectRatio: 16 / 9, backgroundColor: '#eef2ee' }} />}
+              <Text style={styles.frameTime}>{str(f.time)}</Text>
+              {str(f.label) ? <Text numberOfLines={2} style={[styles.small, { padding: 6 }]}>{str(f.label)}</Text> : null}
+            </Pressable>
+          );
+        })}
+      </View>
+      {total ? (
+        <View style={styles.frameBar}>
+          {frames.map((f, i) => { const t = timeSeconds(f.time); return t === null ? null : <View key={i} style={[styles.frameTick, { left: `${Math.min(100, (t / total) * 100)}%` }, point.selected === value(f) && { backgroundColor: '#e0a800', width: 4 }]} />; })}
+        </View>
+      ) : null}
+      <PointNote note={point.note} failed={point.failed} />
+    </Box>
+  );
+}
+
+function BeforeAfterNode({ p }: { p: Record<string, unknown> }) {
+  const labels = Array.isArray(p.labels) && p.labels.length === 2 ? p.labels.map(str) : ['前', '後'];
+  return (
+    <Box>
+      <View style={{ flexDirection: 'row', gap: 8 }}>
+        {[p.before, p.after].map((src, i) => (
+          <View key={i} style={{ flex: 1, gap: 4 }}>
+            <Text style={[styles.small, i ? { color: '#fff', backgroundColor: NAVY, alignSelf: 'flex-start', paddingHorizontal: 6, borderRadius: 4 } : null]}>{labels[i]}</Text>
+            <Photo src={src} ratio={4 / 3} />
+          </View>
+        ))}
+      </View>
+      {str(p.caption) ? <Text style={styles.text}>{str(p.caption)}</Text> : null}
+    </Box>
+  );
+}
+
 function Node({ node }: { node: ShapeNode }) {
   const p = propsOf(node);
   const { openUrl } = useContext(ShapeRoomContext);
@@ -474,6 +698,18 @@ function Node({ node }: { node: ShapeNode }) {
       return <ChartNode p={p} />;
     case 'Flow':
       return <FlowNodeView p={p} />;
+    case 'Map':
+      return <MapNode p={p} />;
+    case 'Item':
+      return <ItemNode p={p} />;
+    case 'Quote':
+      return <QuoteNode p={p} />;
+    case 'Sources':
+      return <SourcesNode p={p} />;
+    case 'Frames':
+      return <FramesNode p={p} />;
+    case 'BeforeAfter':
+      return <BeforeAfterNode p={p} />;
     default:
       return null;
   }
@@ -568,4 +804,31 @@ const styles = StyleSheet.create({
   step: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
   stepNo: { width: 20, height: 20, borderRadius: 10, backgroundColor: 'rgba(36,94,73,0.12)', alignItems: 'center', justifyContent: 'center', marginTop: 1 },
   stepNoText: { fontSize: 11, fontWeight: '700', color: '#245e49' },
+  map: { alignSelf: 'stretch', overflow: 'hidden', borderRadius: 10, borderWidth: 1, borderColor: '#dbe2da', backgroundColor: '#f4f3ef' },
+  here: { position: 'absolute', width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#fff', backgroundColor: '#1f7a4d' },
+  pin: { position: 'absolute', flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#fff', borderWidth: 1, borderColor: 'rgba(0,0,0,0.2)', borderRadius: 999, paddingVertical: 2, paddingHorizontal: 3, maxWidth: 170 },
+  pinOn: { borderColor: '#e0a800', borderWidth: 3 },
+  pinNo: { width: 20, height: 20, borderRadius: 10, backgroundColor: NAVY, alignItems: 'center', justifyContent: 'center' },
+  pinNoText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  pinText: { fontSize: 13, fontWeight: '600', color: '#1a1a1a', paddingRight: 5, flexShrink: 1 },
+  zoom: { position: 'absolute', right: 8, top: 8, backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 6, borderWidth: 1, borderColor: '#dbe2da', overflow: 'hidden' },
+  zoomBtn: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
+  credit: { position: 'absolute', right: 6, bottom: 3, fontSize: 9, color: '#6b746e', backgroundColor: 'rgba(255,255,255,0.75)', paddingHorizontal: 3 },
+  placeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2, borderRadius: 6 },
+  item: { flexDirection: 'row', borderWidth: 1, borderColor: '#dbe2da', borderRadius: 12, overflow: 'hidden', backgroundColor: '#fbfcfa', alignSelf: 'stretch' },
+  itemOn: { borderColor: '#e0a800', borderWidth: 3 },
+  itemPhoto: { width: 96, minHeight: 96, backgroundColor: '#eef2ee' },
+  itemBody: { flex: 1, paddingHorizontal: 12, paddingVertical: 10, gap: 3 },
+  sourceLine: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  sourceHost: { fontSize: 12, fontWeight: '600', color: '#3d4a43' },
+  quoteBar: { borderLeftWidth: 3, borderLeftColor: 'rgba(0,0,0,0.18)', paddingLeft: 10 },
+  quoteText: { fontSize: 15, lineHeight: 24, color: '#1f2724' },
+  quoteImageBox: { borderWidth: 1, borderColor: '#dbe2da', borderRadius: 8, overflow: 'hidden', backgroundColor: '#fff' },
+  sourceRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', paddingVertical: 4 },
+  sourceNo: { width: 20, height: 20, borderRadius: 4, backgroundColor: '#eef2ee', textAlign: 'center', fontSize: 11, lineHeight: 20, color: '#6b7a72' },
+  frameGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  frame: { width: '48%', borderWidth: 1, borderColor: '#dbe2da', borderRadius: 8, overflow: 'hidden', backgroundColor: '#fff' },
+  frameTime: { position: 'absolute', left: 6, top: 6, backgroundColor: 'rgba(0,0,0,0.65)', color: '#fff', fontSize: 12, paddingHorizontal: 5, borderRadius: 4, overflow: 'hidden' },
+  frameBar: { height: 22, borderRadius: 4, backgroundColor: '#eef2ee', marginTop: 4 },
+  frameTick: { position: 'absolute', top: 4, bottom: 4, width: 3, borderRadius: 2, backgroundColor: NAVY },
 });

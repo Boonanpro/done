@@ -540,11 +540,19 @@ async def chat_feed(send, room_id, dialogue, record):
     done = 0
     while True:
         await asyncio.sleep(.5)
-        try: texts, done = await asyncio.to_thread(voice_calls.take, room_id, done)
+        try: items, done = await asyncio.to_thread(voice_calls.take_items, room_id, done)
         except Exception: continue
-        for text in texts:
+        from app.services.voice_say import say
+        for item in items:
+            text = item['text']
+            if item['kind'] == 'touch':
+                # the owner pressed something on the call's screen (a pin, a photo card, a frame; 2026-11-12): they are
+                # pointing at it. It goes in as their words, so the lookups and the work that read the transcript see it too
+                dialogue.add('user', '（画面で押した）' + text + chr(10))
+                await say(send, 'touch', '本人が通話の画面で押したもの（「これの話」という指し示し）: ' + text, record)
+                record('touch_in_call', chars=len(text))
+                continue
             dialogue.add('user', '（チャットに送った）' + text + chr(10))   # the whole of it, addresses too, is in the call's transcript the work reads
-            from app.services.voice_say import say
             await say(send, 'chat', 'チャットに送ってきたもの: ' + text, record)
             record('chat_in_call', chars=len(text))
 
