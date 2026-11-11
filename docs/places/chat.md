@@ -15,9 +15,9 @@ watches:
   - frontend/src/components/chat/chat-shapes.tsx
   - frontend/src/lib/chat-shapes/*.ts
   - frontend/src/app/globals.css
-fingerprint: 6b18af09b413e2dc
-described: 66ccf8065a51442d
-last_review: "2026-11-12 説明は変えない: チャットの吹き出しの見え方は変わらない。エディターの窓に置く時だけ上の帯を細くする editorChat を足した"
+fingerprint: af20a6c746d15f92
+described: 7d633233ae39b4ec
+last_review: "2026-11-12 説明は変えない: 制作の窓の会話が空の時の案内文だけ。本体のチャットの見え方は変わらない"
 ---
 # ダンのチャット
 
@@ -26,7 +26,7 @@ last_review: "2026-11-12 説明は変えない: チャットの吹き出しの�
 ## 中にある物
 
 - `room-list` 左の部屋の一覧。司令塔（Done）を開いた時は前の部屋の選択表示を消す。作業中の部屋には印が出る。開発室の枝の部屋のような隠れた部屋は出ない。
-- `chat-bubble` 会話。ダンの返事は Markdown と部品（表・選択ボタン・数字・流れの図など）、添付の印（[添付画像: …] [添付動画: …] [添付ファイル: …]）を描く。
+- `chat-bubble` 会話。ダンの返事は Markdown と部品（表・選択ボタン・数字・流れの図、本物の中身の地図・写真の札・ページの引用・出どころ・動画のコマ・前後の画像など）、添付の印（[添付画像: …] [添付動画: …] [添付ファイル: …]）を描く。地図のピン・写真の札・動画のコマを押すと「<題> → <押した物>」が本人の発言として届く（何度でも押せる）。
 - `live-rows` 作業中に、ダンが progress で書いた数行と、道具の説明の行が出る。GPTも作業の対象・目的と確認した結果を伝える。説明がない操作でも、ファイル確認・編集・テスト・ビルドなど実際の操作を表示する。終わるとたたまれる。
 - `summon-banner` ダンが本人を今すぐ呼んでいる間（振込の承認・認証コードなど。summon の道具）、どのページでも画面の上に琥珀色の帯で理由が出て、3秒ごとに音が鳴る。押すとその部屋が開き、呼び出しが止まる。
 - `model-switcher` 選択したモデルで実行する。利用上限時はClaudeとGPTの間で作業記録を引き継いで切り替え、切替中の表示を出す。両方が上限の場合は停止理由を表示する。
@@ -58,8 +58,8 @@ last_review: "2026-11-12 説明は変えない: チャットの吹き出しの�
 
 `python scripts/place_map.py stamp chat` が書き直す。手で直さない。
 
-- 見張るファイル: `frontend/src/app/globals.css`, `frontend/src/components/chat/chat-shapes.tsx`, `frontend/src/components/layout/project-chat-panel.tsx`, `frontend/src/lib/chat-shapes/answer-sends.ts`, `frontend/src/lib/chat-shapes/answers.ts`, `frontend/src/lib/chat-shapes/chart-geometry.ts`, `frontend/src/lib/chat-shapes/job-report.ts`, `frontend/src/lib/chat-shapes/live-line.ts`, `frontend/src/lib/chat-shapes/no-openui-devtools.ts`, `frontend/src/lib/chat-shapes/plain.ts`, `frontend/src/lib/chat-shapes/schema.ts`, `frontend/src/lib/chat-shapes/split.ts`, `frontend/src/lib/chat-shapes/use-answer-send.ts`
-- ラベル: 「部品を準備中」、「このコメントを外す」、「タイムライン参照を外す」
+- 見張るファイル: `frontend/src/app/globals.css`, `frontend/src/components/chat/chat-shapes.tsx`, `frontend/src/components/layout/project-chat-panel.tsx`, `frontend/src/lib/chat-shapes/answer-sends.ts`, `frontend/src/lib/chat-shapes/answers.ts`, `frontend/src/lib/chat-shapes/chart-geometry.ts`, `frontend/src/lib/chat-shapes/job-report.ts`, `frontend/src/lib/chat-shapes/live-line.ts`, `frontend/src/lib/chat-shapes/map-geometry.ts`, `frontend/src/lib/chat-shapes/no-openui-devtools.ts`, `frontend/src/lib/chat-shapes/plain.ts`, `frontend/src/lib/chat-shapes/schema.ts`, `frontend/src/lib/chat-shapes/split.ts`, `frontend/src/lib/chat-shapes/use-answer-send.ts`
+- ラベル: 「近づける」、「遠ざける」、「部品を準備中」、「このコメントを外す」、「タイムライン参照を外す」
 
-<!-- place_map:files {"frontend/src/app/globals.css": "18079a7ca6", "frontend/src/components/chat/chat-shapes.tsx": "dbfb90dc36", "frontend/src/components/layout/project-chat-panel.tsx": "ab0ff04ba2", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "be1dd2effa", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "c93fc29f64", "frontend/src/lib/chat-shapes/schema.ts": "d5afefe4b8", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
+<!-- place_map:files {"frontend/src/app/globals.css": "68ed154c46", "frontend/src/components/chat/chat-shapes.tsx": "f8d1bfbadd", "frontend/src/components/layout/project-chat-panel.tsx": "3d8dc69a81", "frontend/src/lib/chat-shapes/answer-sends.ts": "4ca1a9be51", "frontend/src/lib/chat-shapes/answers.ts": "7da7099871", "frontend/src/lib/chat-shapes/chart-geometry.ts": "87ea9350f3", "frontend/src/lib/chat-shapes/job-report.ts": "9a154596f2", "frontend/src/lib/chat-shapes/live-line.ts": "a2cb48aa00", "frontend/src/lib/chat-shapes/map-geometry.ts": "b207ed80e8", "frontend/src/lib/chat-shapes/no-openui-devtools.ts": "33b9df7e21", "frontend/src/lib/chat-shapes/plain.ts": "5eecbe35bb", "frontend/src/lib/chat-shapes/schema.ts": "53b0916b25", "frontend/src/lib/chat-shapes/split.ts": "c2502ef5b0", "frontend/src/lib/chat-shapes/use-answer-send.ts": "ac6f99f5f5"} -->
 <!-- place_map:auto:end -->

@@ -217,7 +217,7 @@ class AnswerToLink(BaseModel):
 
     message_id: str = Field(..., pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
     part: str = Field(..., pattern=_chat_shapes.PART_KEY_RE.pattern)
-    kind: Literal["choice", "input"]
+    kind: Literal["choice", "input", "point"]   # point: a pin / photo card / frame pressed (2026-11-12)
     value: str = Field(..., min_length=1, max_length=_chat_shapes.ANSWER_VALUE_MAX)
     question: Optional[str] = Field(None, min_length=1, max_length=_chat_shapes.ANSWER_QUESTION_MAX)
 

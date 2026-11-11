@@ -268,6 +268,103 @@ export function flowEdges(v: { nodes: { id: string }[]; edges?: FlowEdgeInput[] 
   return { between, others };
 }
 
+// --- 本物の中身を見せる部品（2026-11-12）-------------------------------------------------------------
+// 省ける引数は null でもよい（位置引数なので、後ろを書くために途中を null で飛ばす書き方をモデルがする）。
+// 本人（11/11）: 箱と矢印や文字にアイコンを付けただけの部品は理解の助けにならない。地図・写真・ページの言葉・動画のコマ
+// といった本物の中身を出す。どれも調べた結果をそのまま入れられる形で、1つの件に合わせた部品にしない。
+// 押せる物（地図のピン・写真つきの札・コマ）は押すとダンに届く: チャットでは本人の発言「<題> → <押した物>」として、
+// 通話の画面では通話のダンへ（answers.ts の kind 'point'。選択ボタンと違い、何度でも押せる）。
+const LAT = z.number().min(-90).max(90);
+const LNG = z.number().min(-180).max(180);
+export const MAP_PLACE_MAX = 12;
+const MapPlace = z.object({
+  label: z.string().max(60).describe('場所の名前（ピンの横に出る。押すとこれが届く）'),
+  lat: LAT.describe('緯度'),
+  lng: LNG.describe('経度'),
+  sub: z.string().max(80).nullish().describe('下の一覧に出す補足（距離・住所など）'),
+});
+export const MapProps = z
+  .object({
+    places: z.array(MapPlace).describe(`ピンを立てる場所。1〜${MAP_PLACE_MAX}個。番号はこの順`),
+    title: z.string().max(60).nullish().describe('地図の題（例: 尼崎駅の近くの鍼灸院）'),
+    here: z.object({ lat: LAT, lng: LNG, label: z.string().max(30).nullish() }).nullish().describe('本人の今いる所・起点（緑の点）'),
+  })
+  .refine((v) => v.places.length >= 1 && v.places.length <= MAP_PLACE_MAX, { message: `場所は1〜${MAP_PLACE_MAX}個` })
+  .refine((v) => v.places.every((p) => nonEmpty(p.label)), { message: '場所の名前が空' });
+
+export const ItemProps = z
+  .object({
+    title: z.string().max(80).describe('人・店・物の名前（押すとこれが届く）'),
+    sub: z.string().max(120).nullish().describe('名前の下の一行（肩書き・場所・値段など）'),
+    image: z.string().nullish().describe('その人・店・物の写真: /api/v1/files/… か https://'),
+    lines: z.array(z.string().max(120)).max(4).nullish().describe('確かめた事実を短く（4行まで）'),
+    url: z.string().nullish().describe('その人・店・物のページ'),
+    num: z.string().max(4).nullish().describe('地図のピンの番号と合わせる時の番号'),
+  })
+  .refine((v) => nonEmpty(v.title), { message: '名前が空' });
+
+export const QuoteProps = z
+  .object({
+    text: z.string().max(400).describe('ページに書いてある文をそのまま（言い換えない）'),
+    source: z.string().max(80).describe('どこに書いてあったか（ページの題やサイト名）'),
+    url: z.string().nullish().describe('そのページ'),
+    mark: z.array(z.string().max(40)).max(4).nullish().describe('文の中で蛍光ペンを引く言葉（今の話で大事な所だけ）'),
+    image: z.string().nullish().describe('ページのその所を切り抜いた画像: /api/v1/files/… か https://'),
+  })
+  .refine((v) => nonEmpty(v.text) && nonEmpty(v.source), { message: '文か出どころが空' });
+
+export const SOURCES_MAX = 6;
+export const SourcesProps = z
+  .object({
+    items: z.array(z.object({
+      title: z.string().max(80).describe('ページの題'),
+      url: z.string().describe('ページの https:// の URL'),
+      note: z.string().max(80).nullish().describe('そのページで確かめたこと（短く）'),
+    })).describe(`出どころのページ。1〜${SOURCES_MAX}個`),
+  })
+  .refine((v) => v.items.length >= 1 && v.items.length <= SOURCES_MAX && v.items.every((x) => nonEmpty(x.title) && nonEmpty(x.url)), { message: `出どころは1〜${SOURCES_MAX}個、題と URL が要る` });
+
+export const FRAMES_MAX = 8;
+export const FramesProps = z
+  .object({
+    frames: z.array(z.object({
+      src: z.string().describe('コマの画像: /api/v1/files/… か https://'),
+      time: z.string().max(12).describe('動画の中の時刻（例: 9:41。押すとこれが届く）'),
+      label: z.string().max(40).nullish().describe('そのコマで何が映っているか'),
+    })).describe(`コマ。1〜${FRAMES_MAX}個、時刻の順`),
+    title: z.string().max(60).nullish().describe('動画の名前'),
+    length: z.string().max(12).nullish().describe('動画の長さ（例: 17:47。あれば下に位置の帯を出す）'),
+  })
+  .refine((v) => v.frames.length >= 1 && v.frames.length <= FRAMES_MAX && v.frames.every((f) => nonEmpty(f.src) && nonEmpty(f.time)), { message: `コマは1〜${FRAMES_MAX}個、画像と時刻が要る` });
+
+export const BeforeAfterProps = z
+  .object({
+    before: z.string().describe('前の画像: /api/v1/files/… か https://'),
+    after: z.string().describe('後の画像: /api/v1/files/… か https://'),
+    caption: z.string().max(120).nullish().describe('何が変わったか（一行）'),
+    labels: z.array(z.string().max(20)).length(2).nullish().describe('2つの札（既定 前・後）'),
+  })
+  .refine((v) => nonEmpty(v.before) && nonEmpty(v.after), { message: '前か後の画像が空' });
+
+/** 時刻の文字（9:41・1:02:03・581.9）を秒に。読めなければ null */
+export function timeSeconds(t: unknown): number | null {
+  if (typeof t !== 'string') return null;
+  const s = t.trim();
+  if (/^\d+(\.\d+)?$/.test(s)) return Number(s);
+  const m = s.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.\d+)?$/);
+  return m ? Number(m[1] || 0) * 3600 + Number(m[2]) * 60 + Number(m[3]) : null;
+}
+
+/** 押した物がダンに届く時の文: 「<題> → <押した物>」の題（部品の題が無ければ部品の種類） */
+export const POINT_TITLE: Record<string, string> = { Map: '地図', Item: '写真の札', Frames: '動画のコマ' };
+
+export type MapInput = z.infer<typeof MapProps>;
+export type ItemInput = z.infer<typeof ItemProps>;
+export type QuoteInput = z.infer<typeof QuoteProps>;
+export type SourcesInput = z.infer<typeof SourcesProps>;
+export type FramesInput = z.infer<typeof FramesProps>;
+export type BeforeAfterInput = z.infer<typeof BeforeAfterProps>;
+
 export type ChoiceInput = z.infer<typeof ChoiceProps>;
 export type InputInput = z.infer<typeof InputProps>;
 export type CompareInput = z.infer<typeof CompareProps>;
@@ -323,6 +420,12 @@ export const SHAPE_SPECS = [
   { name: 'Button', description: 'リンクを開くボタン', props: ButtonProps },
   { name: 'Divider', description: '区切り線', props: DividerProps },
   { name: 'Flow', description: '矢印でつなぐ図（人・物・流れ）。箱は流れの順、edges を省くと順につなぐ。tone now=今ここ', props: FlowProps },
+  { name: 'Map', description: '本物の地図にピン（番号つき）。場所・店・施設の話で、どこにあるかを見せる時。座標は places や検索で確かめた物だけ。ピンを押すとダンに届く', props: MapProps },
+  { name: 'Item', description: '写真つきの人・店・物の札。候補を写真で見せる時（地図と並べる時は num をピンの番号に合わせる）。押すとダンに届く', props: ItemProps },
+  { name: 'Quote', description: 'ページに書いてある文をそのまま引く。名前・値段・条件など、間違えると困る事実の根拠を見せる時。mark の言葉に蛍光ペン', props: QuoteProps },
+  { name: 'Sources', description: '出どころのページの一覧。調べて答えた文の最後に付ける', props: SourcesProps },
+  { name: 'Frames', description: '動画のコマの並び（時刻つき）。動画のどこの話かを見せる時。押すとダンに届く', props: FramesProps },
+  { name: 'BeforeAfter', description: '前と後の画像を並べる。直した所・変わった所を見せる時', props: BeforeAfterProps },
 ] as const;
 
 export const SHAPE_NAMES: readonly string[] = SHAPE_SPECS.map((s) => s.name);

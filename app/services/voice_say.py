@@ -23,6 +23,7 @@ KINDS = {
     'question': 'the work needs the owner to decide or answer',
     'summon': 'why Dan called the owner',
     'chat': 'what the owner sent to the room\'s chat during the call',
+    'touch': 'what the owner pressed on the call\'s screen (a pin, a photo card, a frame; 2026-11-12)',
     'heard': 'the owner\'s own words the speech model did not hear itself (a whisper the server heard, voice_whisper)',
     'unheard': 'the owner said something neither the speech model nor the server could make out (voice_whisper)',
 }
