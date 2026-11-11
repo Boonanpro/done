@@ -224,6 +224,9 @@
 [data-stage-scene] [data-shape="Stat"] > div:nth-child(2) > span { font-size: 1rem; }
 [data-stage-scene] [data-shape="Stat"] > div:first-child, [data-stage-scene] [data-shape="Stat"] > div:nth-child(3) { font-size: 0.85rem; }
 [data-stage-scene] [data-flow-node] { padding: 0.7rem 0.9rem; min-width: 6.5rem; }
+/* 本物の中身の部品（地図・写真の札・引用・出どころ・コマ・前後。2026-11-12）は、通話の画面でも幅いっぱいに左寄せで（中央寄せは図と数字のため） */
+[data-stage-scene] :is([data-shape="Map"], [data-shape="Item"], [data-shape="Quote"], [data-shape="Sources"], [data-shape="Frames"], [data-shape="BeforeAfter"]) { text-align: left; align-self: stretch; }
+[data-stage-scene] [data-shape="Column"]:has(> div > :is([data-shape="Map"], [data-shape="Item"], [data-shape="Quote"], [data-shape="Sources"], [data-shape="Frames"], [data-shape="BeforeAfter"])) { align-items: stretch; text-align: left; }
 [data-stage-scene] [data-flow-node] > div:first-of-type { font-size: 0.95rem; }
 [data-stage-scene] [data-shape="Text"] { font-size: 1rem; }
 [data-stage-scene] [data-shape="Facts"], [data-stage-scene] [data-shape="Steps"], [data-stage-scene] [data-shape="Compare"] { font-size: 1rem; text-align: left; }

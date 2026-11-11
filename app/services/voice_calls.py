@@ -61,20 +61,31 @@ def active(room_id):
     return call if alive else None
 
 
-def deliver(room_id, text):
-    """Hand what the owner sent to the call in this room."""
+def deliver(room_id, text, kind='chat'):
+    """Hand what the owner sent to the call in this room. kind: 'chat' (typed into the room's chat) or 'touch' (pressed
+    on the call's screen: a pin of a map, a photo card, a frame; 2026-11-12)."""
+    item = {'at': time.time(), 'text': text}
+    if kind != 'chat': item['kind'] = kind
     with _inbox(room_id).open('a', encoding='utf-8') as out:
-        out.write(json.dumps({'at': time.time(), 'text': text}, ensure_ascii=False)+chr(10))
+        out.write(json.dumps(item, ensure_ascii=False)+chr(10))
 
 
 def take(room_id, done):
     """What arrived after the first `done` lines. Returns (new texts, new count)."""
+    items, count = take_items(room_id, done)
+    return [i['text'] for i in items], count
+
+
+def take_items(room_id, done):
+    """Like take, with each item's kind: [{'text', 'kind'}] ('chat' or 'touch')."""
     try:
         lines = _inbox(room_id).read_text(encoding='utf-8').splitlines()
     except OSError:
         return [], done
-    texts = []
+    items = []
     for line in lines[done:]:
-        try: texts.append(json.loads(line)['text'])
-        except (ValueError, KeyError): continue
-    return texts, len(lines)
+        try:
+            row = json.loads(line)
+            items.append({'text': row['text'], 'kind': row.get('kind') or 'chat'})
+        except (ValueError, KeyError, TypeError): continue
+    return items, len(lines)

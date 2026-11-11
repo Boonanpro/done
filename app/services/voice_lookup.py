@@ -45,7 +45,7 @@ WRAP_UP = ('（調べ始めて{seconds}秒。もうすぐ打ち切られる。�
            '確かめきれなかった所は、何が分かっていないかを一言で言う。）')
 PROGRESS_LIMIT = 3     # share_progress per lookup: facts on the way, not a running commentary
 READ_PAGE_S = 8        # one slow page held a round of four for 29 s (2026-11-03 22:00 test call); 5 of 7 reads took under 7 s
-DIRECT = ('places', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
+DIRECT = ('places', 'page_clip', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
 # The owner asked to see it on the screen (in the task or in the owner's last words of the call).
 WANTS_SCREEN = re.compile(r'画面|見せ|出して|映して')
 SHOW_FIRST = ('本人は画面で見たいと頼んでいるが、まだ本人の画面に何も出していない。答える前に、確かめた中で本人の条件に合う候補のページを '
@@ -61,10 +61,17 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 独立した調べものは同じ手で並べて呼ぶ（並行で動く）。同じ検索・同じページを繰り返さない。前の版で確かめた事実が渡されたら、条件の変わっていない分はそのまま使う。
 - ウェブの一般情報は web_search、URLの中身は read_page。近くの店・施設は places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
 - ログインが要る・サイトの中で操作する・在庫や空きの最新状況を見る時は browser（browser_plan でまとめて進める）。スマホのアプリは phone。
-- 本人の画面は、話している間に絵が変わっていくのが良い。物（商品・機材・料理など）や場所・店・施設の頼みでは、最初の手で web_search と同じ手で show_search_on_stage を呼ぶ（物は images、場所は map）。待たずにすぐ絵が出る。考えや手続きの質問（税金・制度・やり方）には呼ばない。
+- 本人の画面には、話している物の本物を出す（文字にアイコンを付けた図は出さない）。答えの最後に ```openui-lang の部品のブロックを1つ付けると、声で答え始めるのと同時に本人の画面に出る（声では読まれない）。途中で候補が分かった時は show_parts_on_stage で先に出してよい。使う部品:
+  - 場所・店・施設: Map（places や読んだページで確かめた座標だけ。本人の今いる所は here）。下に Item を並べ、num をピンの番号に合わせる。
+  - 人・店・物: Item（写真は page_clip の photo=true で取った /api/v1/files/… か、ページで見た画像の https URL。無ければ写真なし）。
+  - 名前・値段・条件など、間違えると困る事実: Quote（ページの文をそのまま。mark に大事な言葉。page_clip の find で切り抜いた画像を image に）。
+  - 調べたページ: 最後に Sources。
+  - 部品の書き方: root = Column([...]) のように位置で引数を並べる。名前つき引数（title: …）は書かない。省く引数は null。
+{parts}
+- 物（商品・機材・料理など）の頼みで写真がまだ無い時は、最初の手で web_search と同じ手で show_search_on_stage（kind=images）を呼んでよい。場所は座標が分かれば Map を出し、Google マップの写真（kind=map）は座標が分からない時だけ。考えや手続きの質問（税金・制度・やり方）には呼ばない。
 - 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）と focus（本人が聞いたことが書いてある所の言葉: 価格 仕様、サイズ、営業時間など）を入れて出す（conditions は買う・選ぶ条件だけ。「違い」などの質問は入れない）。ページの本文も返るので、そのページを read_page で読まない（見せる価値のあるページは read_page ではなく最初から show_page_on_stage で開く）。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）で、web_search が pages に返したURLか読んだページにあったURLから選ぶ（URLを推測で組み立てない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
 - 2〜3個の物の違いを聞かれたら、最初の手で物ごとに1本ずつ検索を並べ（例: 「レボルワン R630」「レボルワン R490」）、次の手で、それぞれの個別ページのURLを compare_pages_on_stage に渡す（focus に比べる所の言葉）。画面に並んで出て、各ページの本文も返るので、そこから違いを答える。片方の個別ページのURLが検索に出ない時は、その物の名前（例: R490）をそのまま urls に入れる（もう一方と同じサイトから道具が探す）。違いの質問で show_page_on_stage に片方だけを出さない。
-- 場所・住所・行き方を答える時は、その場所を show_search_on_stage（kind=map、query に名前と住所）で地図に出す。
+- 場所・住所・行き方を答える時は、その場所を Map で出す（座標が分からなければ show_search_on_stage の kind=map）。
 - 本人や本人の会社のこと（法人か個人か・所在地・契約しているサービスなど）で答えが変わる時は、本人に聞く前に get_saved_information と search_records で読む。どちらにも無い事だけを、まとめて1回で聞く。
 - 本人の言葉は、声を文字に起こしたもの。人名・店名・地名の漢字やカタカナは、聞こえた音に機械が当てた推測で、本人が思っている字とは限らない（「さいとうけんじ」が「斎藤健二」と書かれても、本当は「齋藤賢治」かもしれない）。検索で字の違う候補が出たら、字が違うことは理由にせず、地域・仕事・やっている事・本人が話した経緯など手がかり全体で、本人の言う相手かを判断する。手がかりが合えば、その候補として答え、本人が言った字と違うことを一言添える。手がかりが割れて決めきれない時は、いちばん合う候補を画面に出し、「〇〇市の△△整骨院の□□さんですか？」のように、どこの誰かを入れた問いで本人に確かめる。「特定できなかった」で終えない。
 - 急いで答えなくてよい（会話は止まっていない）。答えの中心になる事実（人・店・物がどれか、値段、時刻）は、検索の断片で済ませず、その人や店のページを読んで確かめてから答える。
@@ -99,13 +106,13 @@ def routed():
 
 
 TOOL_NAMES = ('web_search', 'read_page', 'get_location', 'get_calendar', 'search_records', 'get_saved_information', 'room_files',
-              'job_status', 'show_page_on_stage', 'show_search_on_stage', 'compare_pages_on_stage', 'show_fact_on_stage', 'show_on_stage',
+              'job_status', 'show_page_on_stage', 'show_search_on_stage', 'compare_pages_on_stage', 'show_fact_on_stage', 'show_on_stage', 'show_parts_on_stage',
               'show_external_screen')
 OWN = ('share_progress', 'think_carefully')
 
 
 def direct_names():
-    return ('places',) if routed() else DIRECT
+    return ('places', 'page_clip') if routed() else DIRECT
 
 
 def tools():
@@ -121,12 +128,20 @@ def tools():
     return [*listed, *direct, {'type': 'function', **dan_tools.HELP}, {'type': 'function', **dan_tools.USE}]
 
 
+def parts_lines():
+    """The real-content parts a lookup builds the screen from (their signatures, from the chat screen's own list)."""
+    from app.services import voice_stage
+    keep = ('Map(', 'Item(', 'Quote(', 'Sources(', 'Frames(', 'Column(', 'Row(', 'Stat(', 'Facts(', 'Compare(')
+    return chr(10).join('  ' + l for l in voice_stage.part_lines() if l[2:].startswith(keep))
+
+
 def instructions():
     from app.services import voice_responses, dan_tools
+    text = INSTRUCTIONS.replace('{parts}', parts_lines())
     if routed():
-        lines = [next((v for k, v in ROUTED_LINES.items() if line.startswith(k)), line) for line in INSTRUCTIONS.split(chr(10))]
+        lines = [next((v for k, v in ROUTED_LINES.items() if line.startswith(k)), line) for line in text.split(chr(10))]
         return chr(10).join(lines) + chr(10) + voice_responses.now_line()
-    return (INSTRUCTIONS + chr(10) + voice_responses.now_line() + chr(10) + voice_responses.remembered()
+    return (text + chr(10) + voice_responses.now_line() + chr(10) + voice_responses.remembered()
             + dan_tools.catalog(dan_tools.definitions(), native=DIRECT))
 
 
@@ -175,8 +190,15 @@ class Lookup:
         if self.state != 'running':
             return
         self.state = 'answered'
+        answer, parts = split_parts(answer)
         self.answer = answer
-        call.record('lookup_answered', lookup_id=self.id, seconds=round(time.monotonic() - self.started, 1), chars=len(answer))
+        call.record('lookup_answered', lookup_id=self.id, seconds=round(time.monotonic() - self.started, 1), chars=len(answer), parts=len(parts))
+        if parts:   # the screen changes as the answer is handed to the voice: they start together (2026-11-12)
+            from app.services import voice_stage
+            stage = voice_stage.for_room(call.room_id)
+            if stage is not None:
+                shown = stage.show_parts(parts, self.label)
+                call.record('lookup_parts', lookup_id=self.id, shown=bool(shown.get('shown')))
         await call.say('result', '調べた結果: ' + (answer or '確かめられる答えは見つからなかった。'))
 
     async def _loop(self):
@@ -295,6 +317,17 @@ class Lookup:
 
 
 MARKUP = re.compile(r'<[｜|]{1,2}DSML[｜|]{1,2}tool_calls>.*?(</[｜|]{1,2}DSML[｜|]{1,2}tool_calls>|$)', re.S)
+
+
+PARTS = re.compile(r'```(?:openui-lang|openui)\s*\n(.*?)(?:\n```|$)', re.S)
+
+
+def split_parts(text):
+    """The spoken answer and the parts block written after it (the last one), apart."""
+    text = str(text or '')
+    blocks = PARTS.findall(text)
+    spoken = PARTS.sub('', text).strip()
+    return spoken, (blocks[-1].strip() if blocks else '')
 
 
 def without_markup(text):
