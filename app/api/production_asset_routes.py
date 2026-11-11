@@ -7870,3 +7870,53 @@ def read_editor_state(room_id: str, max_age_s: float = 600.0) -> dict[str, Any] 
 def get_editor_state(room_id: str, current_user: TokenData = Depends(get_current_user)):
     """What the native editor has open right now (None when it is closed / stale)."""
     return {"state": read_editor_state(room_id)}
+
+
+class EditorStateRequest(BaseModel):
+    room_id: str
+    content_id: str | None = None
+    screen: Literal["library", "editor"] = "library"
+    playhead: float | None = None
+    playing: bool = False
+    selected: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.post("/editor-state")
+def post_editor_state(data: EditorStateRequest, current_user: TokenData = Depends(get_current_user)):
+    """The web editor tells where the owner is (same file the native editor writes), so chat / voice Dan
+    resolve "here" / "this clip" to the playhead and the selection."""
+    d = _room_dir(data.room_id)
+    d.mkdir(parents=True, exist_ok=True)
+    state = {"content_id": data.content_id or "", "editor": data.screen, "playhead": data.playhead,
+             "playing": data.playing, "selected": data.selected[:20], "source": "web"}
+    tmp = d / "editor_state.json.tmp"
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(d / "editor_state.json")
+    return {"ok": True}
+
+
+@router.get("/library-stamp")
+def library_stamp(room_id: str, current_user: TokenData = Depends(get_current_user)):
+    """When the room's assets / contents last changed. The open library polls this (a few bytes) and reloads the
+    full lists only when Dan (or anyone) changed them, so what Dan adds from 「ダンと制作」 shows up at once."""
+    d = _room_dir(room_id)
+    out = {}
+    for name in ("assets.json", "contents.json"):
+        try:
+            out[name.split(".")[0]] = (d / name).stat().st_mtime_ns
+        except OSError:
+            out[name.split(".")[0]] = 0
+    return out
+
+
+class EditorRoomRequest(BaseModel):
+    room_id: str
+    content_id: str | None = None
+
+
+@router.post("/editor-room")
+async def editor_room(data: EditorRoomRequest, current_user: TokenData = Depends(get_current_user)):
+    """The room of the editor's 「ダンと制作」 chat: one for the library, one per content (app/services/editor_rooms.py)."""
+    _room_dir(data.room_id)  # 400 on malformed room_id
+    from app.services import editor_rooms
+    return await editor_rooms.ensure_room(current_user.user_id, data.room_id, data.content_id)

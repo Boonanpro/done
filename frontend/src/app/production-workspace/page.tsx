@@ -3,7 +3,7 @@
 import { Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 
-import { ProductionWorkspace } from '@/components/production/production-workspace';
+import { EditorSplash, ProductionStudio } from '@/components/production/editor-dan-chat';
 
 function ProductionWorkspaceInner() {
   const params = useSearchParams();
@@ -18,15 +18,13 @@ function ProductionWorkspaceInner() {
   }
 
   return (
-    <div className="h-screen">
-      <ProductionWorkspace roomId={roomId} />
-    </div>
+    <ProductionStudio roomId={roomId} />
   );
 }
 
 export default function ProductionWorkspacePage() {
   return (
-    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading workspace...</div>}>
+    <Suspense fallback={<EditorSplash />}>
       <ProductionWorkspaceInner />
     </Suspense>
   );

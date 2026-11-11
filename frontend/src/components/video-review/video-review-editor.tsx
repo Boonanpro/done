@@ -1180,6 +1180,28 @@ export function VideoReviewEditor({
     }
   }, [adoptShown, pointDanAt]);
 
+  // 「ここ」「この字幕」をダンが分かるよう、再生位置と選んだクリップを知らせる（0.4秒まとめて。ネイティブ版と同じ
+  // editor_state.json。読むのは「ダンと制作」と本体のチャットと通話のダン: app/services/timeline_live.py）
+  useEffect(() => {
+    if (!roomId || !contentId) return;
+    const timer = window.setTimeout(() => {
+      const ids = new Set(selectedSequenceClipIds.length ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+      const selected: Array<Record<string, unknown>> = [];
+      (editSequence?.tracks || []).forEach((track, lane) => {
+        for (const clip of track.clips || []) {
+          if (ids.has(clip.id)) selected.push({ id: clip.id, lane, timeline_start: clip.timeline_start, timeline_end: clip.timeline_end, text: clip.text || undefined });
+        }
+      });
+      void fetch('/api/v1/production-assets/editor-state', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room_id: roomId, content_id: contentId, screen: 'editor', playhead: Math.round(currentTime * 100) / 100, playing, selected }),
+      }).catch(() => {});
+    }, playing ? 2000 : 400);
+    return () => window.clearTimeout(timer);
+  }, [roomId, contentId, currentTime, playing, selectedSequenceClipId, selectedSequenceClipIds, editSequence]);
+
   useEffect(() => {
     if (!roomId || !contentId) return;
     let stopped = false;

@@ -1917,6 +1917,8 @@ def _commit_mentioned_timeline_draft(room_id: str, draft: Optional[Dict[str, Any
     """Commit the timeline draft attached to one normal chat turn, if changed."""
     if not draft:
         return None
+    # 制作の部屋（エディターの中の「ダンと制作」）の下書きは本体の部屋の素材と作品にある
+    room_id = str(draft.get("room_id") or room_id)
     try:
         from app.services import timeline_commands as _timeline_commands
         from app.services import timeline_draft as _timeline_draft
@@ -4266,6 +4268,15 @@ async def _process_message_cli_with_failover(
             system_prompt += f"\n\n{skill_injection}"
         timeline_draft: Optional[Dict[str, Any]] = None
         timeline_turn_succeeded = False
+        if not timeline_refs:
+            # 作品の部屋（エディターの中の「ダンと制作」）は、どの経路の番（声・見張り・続きの仕事）でもその作品を直せる
+            try:
+                from app.services.editor_rooms import room_info as _editor_room_info
+                _info = await asyncio.to_thread(_editor_room_info, room_id)
+                if _info and _info.get("content_id"):
+                    timeline_refs = [{"content_id": _info["content_id"], "room_id": _info["asset_room_id"]}]
+            except Exception:  # noqa: BLE001
+                pass
         if timeline_refs:
             # A chat mention supplies an explicit creative artifact.  Give the same
             # normal Dan session a draft-only timeline MCP; its other capabilities
@@ -4275,15 +4286,18 @@ async def _process_message_cli_with_failover(
             if content_id:
                 try:
                     from app.services import timeline_draft as _timeline_draft
+                    from app.services.editor_rooms import asset_room as _asset_room
+                    # 制作の部屋では素材と作品は本体の部屋の物（app/services/editor_rooms.py）
+                    asset_room_id = str(ref.get("room_id") or "") or _asset_room(room_id)
                     timeline_draft = _timeline_draft.create_draft(
-                        room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
+                        asset_room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
                     )
                     cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
                     cfg.setdefault("mcpServers", {})["timeline"] = {
                         "command": sys.executable,
                         "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
                         "env": {
-                            "DAN_ROOM_ID": room_id,
+                            "DAN_ROOM_ID": asset_room_id,
                             "DAN_DRAFT_ID": timeline_draft["draft_id"],
                             "DAN_JOB_ID": timeline_draft["job_id"],
                             "DAN_CONTENT_ID": content_id,
@@ -4302,7 +4316,7 @@ async def _process_message_cli_with_failover(
                     )
                     try:
                         from app.services import timeline_live as _tl
-                        _ctx = _tl.context_text(room_id, content_id)
+                        _ctx = _tl.context_text(asset_room_id, content_id)
                         if _ctx:
                             system_prompt += "\n\n" + _ctx
                     except Exception:  # noqa: BLE001
