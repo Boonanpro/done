@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Loader2, Mail, MessageCircle, Send, Trash2, RefreshCw, FileText } from 'lucide-react';
+import { Check, Circle, CircleCheck, Copy, Loader2, Mail, MessageCircle, Send, Trash2, RefreshCw, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type ProposalResponse } from '@/lib/api-client';
 import { MediaGrid, collabMediaItems } from '@/components/chat/media-grid';
@@ -517,15 +517,17 @@ export function ConfirmCard({ proposalId, onAnswer }: { proposalId: string; onAn
       ? <div className="my-2 text-xs text-muted-foreground">確認カードを読み込めませんでした</div>
       : <div className="my-2 h-28 max-w-[560px] animate-pulse rounded-xl border border-border bg-muted/40" />;
   }
-  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; choices?: string[]; confirm_label?: string };
-  const choices = ad.choices || [];
+  const ad = (p.action_data || {}) as { items?: { label: string; value: string }[]; choices?: string[]; confirm_label?: string; chosen?: string };
   const pending = p.status === 'pending';
+  // 答えた後は選んだ候補だけを残す（どれで承認したかが一目で分かるように）
+  const picked = pending ? choice : (ad.chosen || choice);
+  const choices = pending ? (ad.choices || []) : (picked && p.status === 'approved' ? [picked] : []);
   const answer = async (approve: boolean) => {
     if (approve && choices.length > 0 && !choice) { setError('どれにするか選んでください'); return; }
     setBusy(true); setError('');
     try {
-      const next = await api.proposals.respond(proposalId, approve ? 'approve' : 'reject');
-      queryClient.setQueryData(queryKey, { ...p, status: next.status });
+      const next = await api.proposals.respond(proposalId, approve ? 'approve' : 'reject', undefined, approve && choice ? choice : undefined);
+      queryClient.setQueryData(queryKey, { ...p, status: next.status, action_data: next.action_data ?? p.action_data });
       onAnswer?.(approve ? `承認: ${p.title}${choice ? `（${choice}）` : ''}` : `やめる: ${p.title}`);
     } catch {
       setError('答えを送れませんでした。もう一度押すか、チャットで伝えてください');
@@ -551,13 +553,19 @@ export function ConfirmCard({ proposalId, onAnswer }: { proposalId: string; onAn
         </dl>
       )}
       {choices.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1.5">
-          {choices.map((c) => (
-            <button key={c} type="button" disabled={!pending || busy} onClick={() => setChoice(c)}
-              className={`rounded-lg border px-3 py-1.5 text-left text-sm transition-colors ${choice === c ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted'}`}>
-              {c}
-            </button>
-          ))}
+        <div className="mt-2 flex flex-col gap-1.5" role="radiogroup">
+          {choices.map((c) => {
+            const on = picked === c;
+            return (
+              <button key={c} type="button" role="radio" aria-checked={on} disabled={!pending || busy} onClick={() => setChoice(c)}
+                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${on
+                  ? 'border-primary bg-primary font-medium text-primary-foreground'
+                  : 'border-border text-muted-foreground hover:border-foreground/40 hover:text-foreground'}`}>
+                {on ? <CircleCheck className="h-4 w-4 shrink-0" /> : <Circle className="h-4 w-4 shrink-0 opacity-60" />}
+                <span>{c}</span>
+              </button>
+            );
+          })}
         </div>
       )}
       {error ? <div className="mt-2 text-xs text-red-600">{error}</div> : null}

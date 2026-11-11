@@ -1169,13 +1169,15 @@ export const api = {
     respond: (
       proposalId: string,
       action: 'approve' | 'reject' | 'edit',
-      editedContent?: string
+      editedContent?: string,
+      choice?: string
     ) =>
       request<ProposalResponse>(`/chat/proposals/${proposalId}/respond`, {
         method: 'POST',
         body: JSON.stringify({
           action,
           edited_content: editedContent,
+          choice,
         }),
       }),
 
