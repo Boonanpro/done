@@ -420,3 +420,4 @@ class ProposalActionRequest(BaseModel):
     """提案アクションリクエスト"""
     action: str = Field(..., pattern="^(approve|reject|edit)$")
     edited_content: Optional[str] = None  # action="edit"の場合に使用
+    choice: Optional[str] = None  # 確認カードで本人が選んだ候補（答えた後もカードにどれを選んだか残す）
