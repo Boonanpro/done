@@ -104,7 +104,7 @@ function EditorDanChat({ roomId, contentId }: { roomId: string; contentId: strin
 const OPEN_KEY = 'dan-editor-chat-open';
 const WIDTH = 420;
 
-/** 制作の窓の中身: 左にライブラリか作品のタイムライン、右に「ダンと制作」。 */
+/** 制作の窓の中身: ライブラリは左に作品と素材、真ん中に大きく「ダンと制作」。作品を開くとタイムラインと右に「ダンと制作」。 */
 export function ProductionStudio({ roomId }: { roomId: string }) {
   useRoomFeed(true);   // ダンの返事と作業中の表示をすぐ届ける（ダン本体の画面と同じ受け口）
   const [contentId, setContentId] = useState<string | null>(() =>
@@ -119,12 +119,19 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
     try { localStorage.setItem(OPEN_KEY, v ? '1' : '0'); } catch {}
   };
 
+  // 作品を開いても閉じても ProductionWorkspace は同じ場所に置いたまま（読み直さない）。
   return (
     <div className="flex h-screen min-h-0 w-full overflow-hidden bg-background">
       <div className="min-h-0 min-w-0 flex-1">
-        <ProductionWorkspace roomId={roomId} onContentChange={setContentId} />
+        <ProductionWorkspace
+          roomId={roomId}
+          onContentChange={setContentId}
+          libraryChat={contentId ? undefined : (
+            <section className="h-full" aria-label="ダンと制作"><EditorDanChat roomId={roomId} contentId={null} /></section>
+          )}
+        />
       </div>
-      {open ? (
+      {!contentId ? null : open ? (
         <aside className="relative flex h-full shrink-0 flex-col border-l border-border" style={{ width: WIDTH }} aria-label="ダンと制作">
           <button
             type="button"

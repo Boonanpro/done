@@ -1,6 +1,7 @@
 ﻿'use client';
 
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AI_VIDEO_MODELS, aiDurationFor, aiModelFor, aiModelsForLength } from '@/lib/ai-video-models';
 import {
   CAPTION_DESIGN_PRESETS,
   CAPTION_FONTS,
@@ -1714,6 +1715,27 @@ export function VideoReviewEditor({
     },
     [contentDuration, effectiveDrawStart, makeDraftAnnotation]
   );
+
+  // 「+ クリップ」: 再生位置に5秒の空のクリップを足し、選んだ状態にする。右の欄で、AIで作る時のモデルと指示を決める
+  // （2026-11-12 本人「クリップを追加した時に、その長さの動画を作れるモデルを選んでプロンプトを打つと AI 動画が生成される」）。
+  const addAiClip = useCallback(() => {
+    const start = Number(Math.max(0, currentTime).toFixed(2));
+    const next: ReviewAnnotation = {
+      id: makeId(),
+      kind: 'note',
+      intent: 'generate',
+      label: null,
+      note: '',
+      start,
+      end: Number((start + 5).toFixed(2)),
+      data: { model: AI_VIDEO_MODELS[0].id },
+      created_at: new Date().toISOString(),
+    };
+    setAnnotations((prev) => [...prev, next]);
+    setSelectedId(next.id);
+    setSelectedIds([next.id]);
+    setPendingAnnotation(null);
+  }, [currentTime]);
 
   const updateSelected = useCallback((patch: Partial<ReviewAnnotation>) => {
     if (!selectedId) return;
@@ -3537,6 +3559,17 @@ export function VideoReviewEditor({
                 >
                   + 音声段
                 </Button>
+                {onGenerateClip ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    title="再生位置にクリップを足す。右の欄で指示とモデルを決めると、そのクリップの長さの映像をAIで作れます"
+                    onClick={addAiClip}
+                  >
+                    + クリップ
+                  </Button>
+                ) : null}
                 <Button
                   variant="outline"
                   size="sm"
@@ -3978,8 +4011,31 @@ export function VideoReviewEditor({
                   value={selected.note || ''}
                   onChange={(e) => updateSelected({ note: e.target.value })}
                   rows={3}
-                  placeholder={selected.intent === 'blur' ? 'メモ（任意）' : 'この範囲でDanにやってほしいこと（例: ここに商品のアップ映像を生成して）'}
+                  placeholder={selected.intent === 'blur' ? 'メモ（任意）' : selected.intent === 'generate' ? 'このクリップに映したいもの（例: 朝の光の入るサロンで、スタイリストが笑顔で髪を整える。カメラはゆっくり寄る）' : 'この範囲でDanにやってほしいこと'}
                 />
+                {selected.intent === 'generate' ? (() => {
+                  const span = Math.max(0.1, (selected.end ?? selected.start + 5) - selected.start);
+                  const fit = aiModelsForLength(span);
+                  const model = aiModelFor(span, (selected.data as { model?: string } | undefined)?.model);
+                  const makes = aiDurationFor(model, span);
+                  return (
+                    <div className="space-y-1">
+                      <select
+                        value={model.id}
+                        onChange={(e) => updateSelected({ data: { ...(selected.data || {}), model: e.target.value } })}
+                        className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                        aria-label="AIのモデル"
+                      >
+                        {fit.map((m) => (
+                          <option key={m.id} value={m.id}>{m.label}（{m.note}・{m.durations[m.durations.length - 1]}秒まで）</option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-muted-foreground">
+                        クリップの長さ {span.toFixed(1)}秒 → {model.label}で{makes}秒の映像を作り、このクリップの長さで置きます。
+                      </p>
+                    </div>
+                  );
+                })() : null}
                 {(selected.intent === 'generate' ? onGenerateClip : onExecuteClip) ? (
                   <Button
                     size="sm"
@@ -3987,7 +4043,7 @@ export function VideoReviewEditor({
                     disabled={executingId === selected.id}
                     onClick={() => runExecuteClip(selected)}
                   >
-                    {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ Higgsfieldで生成' : '▶ 実行（Danに反映）'}
+                    {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ AIで映像を作る' : '▶ 実行（Danに反映）'}
                   </Button>
                 ) : null}
               </div>
