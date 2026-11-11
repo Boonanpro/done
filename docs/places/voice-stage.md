@@ -15,8 +15,8 @@ speak: |
   - 通話中は、成果物の本物の画面、番号や選択肢の大きな札、説明の図が出る。
   - 成果物の操作先を声で指定すると、画面のボタンや欄を光らせて操作する。送信などは読み上げと本人の承認を待つ。
   - 外のブラウザやスマホは操作中の実画面を連続表示する。ブラウザは通話画面の幅に合わせて並び直す。映像を指で押す操作には未対応。
-fingerprint: fd6b8ce9a137539a
-described: e6d193750d4fcc9c
+fingerprint: 0ed3e88087a39889
+described: 9341020829e7f400
 last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを画面の幅に合わせる表示修正。操作方法は同じ。"
 ---
 # 通話中の画面
@@ -62,5 +62,5 @@ last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを�
 - 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/app/voice-stage/page.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/stage-message-editor.tsx`, `frontend/src/components/voice/voice-stage.tsx`
 - ラベル: 「送信案の本文」
 
-<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/stage-message-editor.tsx": "fc6b037dcc", "frontend/src/components/voice/voice-stage.tsx": "4d2378c2cd"} -->
+<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/stage-message-editor.tsx": "fc6b037dcc", "frontend/src/components/voice/voice-stage.tsx": "8701d9c7ec"} -->
 <!-- place_map:auto:end -->

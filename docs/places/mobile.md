@@ -13,8 +13,8 @@ watches:
   - mobile/chatTimeline.ts
   - mobile/send-card.tsx
   - mobile/draft-body-editor.tsx
-fingerprint: 024db694abf69c6e
-described: 22c6d35eb04e6f11
+fingerprint: 12b4b4da84e434ee
+described: ae77ae258153228a
 ---
 # スマホのダンのアプリ
 
@@ -23,7 +23,7 @@ described: 22c6d35eb04e6f11
 ## 中にある物
 
 - `rooms` 部屋の一覧。
-- `chat` 会話。本文は `mobile/chat-markdown.tsx` が段落・見出し・表・コードに分けて描き、文中の太字・コード・斜体は `renderInlineMarkdown`（mobile/App.tsx）が描く。部品は `mobile/chat-shapes.tsx`、描けない部品は読める文章にする。
+- `chat` 会話。本文は `mobile/chat-markdown.tsx` が段落・見出し・表・コードに分けて描き、文中の太字・コード・斜体は `renderInlineMarkdown`（mobile/App.tsx）が描く。部品は `mobile/chat-shapes.tsx`、描けない部品は読める文章にする。地図（タイルの計算は `mobile/chat-shapes-map-geometry.ts`）・写真の札・引用・出どころ・動画のコマ・前後の画像も描き、ピン・札・コマを押すと「<題> → <押した物>」が本人の発言として届く（1.0.90 から）。
 - `live-rows` 作業中の数行（mobile/chatTimeline.ts）。
 - `send-card` 送信案。本文は省略せず、会話をスクロールして最後まで読める。本文を押すと編集画面が開き、キーボードの上に収まる入力欄の中をスクロールして編集する。
 - `voice` 通話。
@@ -53,7 +53,7 @@ described: 22c6d35eb04e6f11
 
 `python scripts/place_map.py stamp mobile` が書き直す。手で直さない。
 
-- 見張るファイル: `mobile/App.tsx`, `mobile/chat-markdown.tsx`, `mobile/chat-shapes-answer-sends.ts`, `mobile/chat-shapes-answers.ts`, `mobile/chat-shapes-chart-geometry.ts`, `mobile/chat-shapes-job-report.ts`, `mobile/chat-shapes-live-line.ts`, `mobile/chat-shapes-plain.ts`, `mobile/chat-shapes-schema.ts`, `mobile/chat-shapes-use-answer-send.ts`, `mobile/chat-shapes.tsx`, `mobile/chatTimeline.ts`, `mobile/draft-body-editor.tsx`, `mobile/markdown-blocks.ts`, `mobile/send-card.tsx`
+- 見張るファイル: `mobile/App.tsx`, `mobile/chat-markdown.tsx`, `mobile/chat-shapes-answer-sends.ts`, `mobile/chat-shapes-answers.ts`, `mobile/chat-shapes-chart-geometry.ts`, `mobile/chat-shapes-job-report.ts`, `mobile/chat-shapes-live-line.ts`, `mobile/chat-shapes-map-geometry.ts`, `mobile/chat-shapes-plain.ts`, `mobile/chat-shapes-schema.ts`, `mobile/chat-shapes-use-answer-send.ts`, `mobile/chat-shapes.tsx`, `mobile/chatTimeline.ts`, `mobile/draft-body-editor.tsx`, `mobile/markdown-blocks.ts`, `mobile/send-card.tsx`
 
-<!-- place_map:files {"mobile/App.tsx": "8d824114d7", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "f5e10bab52", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-plain.ts": "f00a082827", "mobile/chat-shapes-schema.ts": "e64c750f5d", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "27bc9a1ac9", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/draft-body-editor.tsx": "38639d86f5", "mobile/markdown-blocks.ts": "a88af55511", "mobile/send-card.tsx": "d56539e528"} -->
+<!-- place_map:files {"mobile/App.tsx": "8d824114d7", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "627b924799", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-map-geometry.ts": "126abfee3c", "mobile/chat-shapes-plain.ts": "3904066682", "mobile/chat-shapes-schema.ts": "f0a3fdb9aa", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "c9625f0dd7", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/draft-body-editor.tsx": "38639d86f5", "mobile/markdown-blocks.ts": "a88af55511", "mobile/send-card.tsx": "d56539e528"} -->
 <!-- place_map:auto:end -->
