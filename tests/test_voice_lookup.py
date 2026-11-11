@@ -56,6 +56,7 @@ async def test_a_lookup_returns_at_once_and_its_facts_reach_the_call(monkeypatch
         return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"found": "2件"}', 'name': item['name']}
     from app.services import voice_sideband
     monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'gpt-6-luna')   # OpenAI keeps the rounds: previous_response_id
     call, sent, log = open_call(monkeypatch, client)
     out = await voice_responses.run_function('run_in_background', {'task': '尼崎駅の近くでプールがあるジム', 'label': '尼崎のプールのあるジム'}, 'u', 'r', [])
     assert out['started'] and out['id'].startswith('bg_') and '一言' in out['note']   # the delegation can end now
@@ -202,6 +203,7 @@ async def test_the_next_lookup_starts_from_what_the_answered_one_found(monkeypat
                 'output': '{"pages": [{"title": "IROTEC 100kg", "url": "https://shop.example/irotec-100"}], "found": "4万920円"}', 'name': item['name']}
     from app.services import voice_sideband
     monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'gpt-6-luna')
     call, sent, log = open_call(monkeypatch, client)
     first = await voice_responses.run_function('run_in_background', {'task': '100kgの重りの値段', 'label': '値段'}, 'u', 'r', [])
     await call.lookups[first['id']].task_handle
@@ -211,4 +213,49 @@ async def test_the_next_lookup_starts_from_what_the_answered_one_found(monkeypat
     await new.task_handle
     began = [kw['input'][0]['content'] for kw in client.seen if 'previous_response_id' not in kw and kw.get('max_output_tokens') != 16]
     assert len(began) == 2 and 'https://shop.example/irotec-100' in began[1]
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_on_deepseek_every_round_carries_the_whole_lookup(monkeypatch):
+    # DeepSeek keeps no responses: previous_response_id was refused with 「No tool call found for tool output」 (2026-11-12).
+    client = FakeClient([response([call_item('web_search', {'query': 'なかえ 鍼灸'}, 'c1')]), response([], '仲江鍼灸院の仲江政史さんですか？')])
+    async def execute(item, *a, **k):
+        return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"found": "仲江鍼灸院"}', 'name': item['name']}
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-v4-pro')
+    call, sent, log = open_call(monkeypatch, client)
+    out = await voice_responses.run_function('run_in_background', {'task': '北九州の中江先生', 'label': '先生'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    rounds = [kw for kw in client.seen if kw.get('max_output_tokens') != 16]
+    assert all('previous_response_id' not in kw for kw in rounds)
+    second = rounds[1]['input']
+    assert second[0]['role'] == 'user' and second[1]['type'] == 'function_call' and second[1]['call_id'] == 'c1'
+    assert second[2] == {'type': 'function_call_output', 'call_id': 'c1', 'output': '{"found": "仲江鍼灸院"}'}
+    assert [e['content'] for e in sent if e['type'] == 'session.commentary.append'] == ['調べた結果: 仲江鍼灸院の仲江政史さんですか？']
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_near_its_end_answers_from_what_it_has_without_tools(monkeypatch):
+    # 2026-11-12, nakae_first: V4 Pro searched the second half of the request until the time ran out and the call heard nothing.
+    client = FakeClient([response([call_item('web_search', {'query': '大阪 鍼灸'}, 'c1')]),
+                         response([], '先生は仲江政史さん。<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="web_search"></｜｜DSML｜｜tool_calls>')])
+    async def execute(item, *a, **k):
+        return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"found": "候補"}', 'name': item['name']}
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-v4-pro')
+    monkeypatch.setattr(voice_lookup, 'ANSWER_BY', 0)
+    call, sent, log = open_call(monkeypatch, client)
+    monkeypatch.setattr(voice_lookup, 'tools', lambda: [{'type': 'function', 'name': 'web_search'}])
+    call._spec = None
+    out = await voice_responses.run_function('run_in_background', {'task': '先生と大阪の候補', 'label': '先生'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    first, last = [kw for kw in client.seen if kw.get('max_output_tokens') != 16]
+    assert first['tools'] and 'tools' not in last and last['reasoning'] == {'effort': 'low'}
+    assert '今答える' in last['input'][-1]['content']
+    assert any(phase == 'lookup_wrap_up' for phase, _ in log)
+    assert [e['content'] for e in sent if e['type'] == 'session.commentary.append'] == ['調べた結果: 先生は仲江政史さん。']
     voice_lookup.close_call(call)
