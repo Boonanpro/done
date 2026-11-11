@@ -39,7 +39,7 @@
  * - 描画で例外が起きても、その部品だけを元のコードブロック（文章）に戻し、画面全体は落とさない。
  */
 import {
-  Component, createContext, memo, useCallback, useContext, useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNode,
+  Component, createContext, memo, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode,
 } from 'react';
 // react-lang より先に読む（開発用画面の「OpenUI Inspect」小窓を付けさせない）
 import '@/lib/chat-shapes/no-openui-devtools';
@@ -50,24 +50,27 @@ import {
   AlertCircle, AlertTriangle, ArrowRight, BarChart3, Bot, Calendar, Camera, Car, Check, CheckCircle2, Clock, Cloud, Coins, CreditCard,
   Database, Ear, ExternalLink, Eye, File, FileText, Flag, Folder, Glasses, Globe, HelpCircle, Heart, Home, Image as ImageIcon, Key, Landmark,
   Link as LinkIcon, Loader2, Lock, Mail, MapPin, MessageSquare, Mic, Monitor, Package, Search, Send, Server, Settings, Shield, Smartphone, Star,
-  Store, TrainFront, Truck, User, Users, Video, Wrench, Zap, type LucideIcon,
+  Store, TrainFront, Truck, User, Users, Video, Wrench, Zap, Minus, Plus, type LucideIcon,
 } from 'lucide-react';
 
 import {
   ANSWER_VALUE_MAX, BadgeProps, ButtonProps, CardProps, ChartProps, ChoiceProps, ColumnProps, CompareProps, DividerProps, FactsProps,
   FlowProps, HeadingProps, ImageProps, InputProps, RowProps, StatProps, StepsProps, TextProps, checkShapeProgram, choiceOptions, flowEdges,
+  BeforeAfterProps, FramesProps, ItemProps, MapProps, QuoteProps, SourcesProps, POINT_TITLE, timeSeconds,
+  type BeforeAfterInput, type FramesInput, type ItemInput, type MapInput, type QuoteInput, type SourcesInput,
   type BadgeInput, type ButtonInput, type CardInput, type ChartInput, type ChoiceInput, type ColumnInput, type CompareInput,
   type FactsInput, type FlowInput, type HeadingInput, type ImageInput, type InputInput, type RowInput, type StatInput, type StepsInput, type TextInput,
 } from '@/lib/chat-shapes/schema';
 import {
-  choiceAnswerText, findChoiceAnswer, findInputAnswer, inputAnswerText, inputAnswerValue, readAnswerTo,
+  choiceAnswerText, findChoiceAnswer, findInputAnswer, findLastPoint, inputAnswerText, inputAnswerValue, pointText, readAnswerTo,
   type AnswerTo, type UserUtterance,
 } from '@/lib/chat-shapes/answers';
 import { SEND_BUSY, SEND_UNKNOWN, type AskSaved, type SubmitAnswer } from '@/lib/chat-shapes/answer-sends';
 import {
   CHECK_BUTTON, CHECKING_TEXT, SEND_FAILED, SEND_UNKNOWN_AGAIN, SEND_UNKNOWN_TEXT, SEND_VERIFYING, SENDING_TEXT, START_UNSURE, TOO_LONG,
-  canAnswer, useAnswerSend, type AnswerEnv, type SendState,
+  canAnswer, newSendId, useAnswerSend, type AnswerEnv, type SendState,
 } from '@/lib/chat-shapes/use-answer-send';
+import { mapView, pinLabels } from '@/lib/chat-shapes/map-geometry';
 import { readLook, safeImageUrl, safeLinkUrl, type Look } from '@/lib/chat-shapes/plain';
 import { openSignedIn } from '@/lib/signed-in-open';
 import { CHART_HEIGHT, chartGeometry, type ChartGeometry } from '@/lib/chat-shapes/chart-geometry';
@@ -715,6 +718,318 @@ const FlowView: ComponentRenderer<FlowInput> = ({ props }) => {
   );
 };
 
+
+// --- 本物の中身を見せる部品（2026-11-12）------------------------------------------------------
+// 地図・写真つきの札・ページの文の引用・出どころ・動画のコマ・前後の画像。見た目は unslop の方向（落ち着いた・確か・
+// 手元の紙）: 飾りは置かず、色と細かさは本物の中身（地図・写真・ページ・コマ）だけに置く。しるしは蛍光ペンの帯（今の話の言葉）。
+
+/**
+ * 押した物をダンに届ける先。通話の画面（voice-stage.tsx）が通話へ届ける関数を置く。無ければチャットの部屋へ
+ * 本人の発言「<題> → <押した物>」として送る（answer_to.kind 'point'）。
+ */
+export type ShapePointSink = (title: string, value: string) => Promise<unknown> | unknown;
+export const ShapePointContext = createContext<ShapePointSink | null>(null);
+
+type PointState = { selected: string | null; note: string | null; failed: boolean; press: ((value: string) => void) | null };
+
+/** 押せる物（ピン・札・コマ）の共通: 最後に押した物・届いたかの一言・押す関数（押せない所では null） */
+function usePoint(title: string): PointState {
+  const sink = useContext(ShapePointContext);
+  const { utterances, submit, ownerId, roomId } = useContext(ShapeAnswerContext);
+  const { messageId, part, complete, live } = useContext(ShapeMetaContext);
+  const streaming = useIsStreaming();
+  const [mine, setMine] = useState<{ value: string; status: 'sending' | 'sent' | 'failed' } | null>(null);
+  const recorded = messageId ? findLastPoint(utterances, messageId, part) : null;
+  const send = useCallback(async (value: string) => {
+    setMine({ value, status: 'sending' });
+    try {
+      if (sink) await sink(title, value);
+      else if (submit && messageId) {
+        await submit(pointText(title, value), { message_id: messageId, part, kind: 'point', value: value.slice(0, ANSWER_VALUE_MAX), question: title.slice(0, 200) }, newSendId());
+      }
+      setMine({ value, status: 'sent' });
+    } catch {
+      setMine({ value, status: 'failed' });
+    }
+  }, [sink, submit, messageId, part, title]);
+  const can = complete && !streaming && (!!sink || (!!submit && !!messageId && !!ownerId && !!roomId && !live));
+  const selected = mine?.value ?? recorded;
+  const note = mine?.status === 'sending' ? '伝えています…' : mine?.status === 'sent' || (!mine && recorded) ? `ダンに伝えました: ${selected}` : null;
+  return { selected, note, failed: mine?.status === 'failed', press: can ? (v) => { void send(v); } : null };
+}
+
+function PointNote({ point }: { point: PointState }) {
+  if (point.failed) return <Failed text="伝えられませんでした。もう一度押してください" />;
+  if (!point.note) return null;
+  return (
+    <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground" data-point-note>
+      <Send className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />{point.note}
+    </div>
+  );
+}
+
+/** 蛍光ペンの帯: 文の中の mark の言葉に（最初の1か所ずつ。言葉の無い所には引かない） */
+function Marked({ text, marks }: { text: string; marks?: string[] | null }) {
+  const words = (marks || []).map((m) => m.trim()).filter((m) => m && text.includes(m));
+  if (!words.length) return <>{text}</>;
+  const pieces: ReactNode[] = [];
+  let rest = text;
+  let k = 0;
+  for (;;) {
+    let best = -1, word = '';
+    for (const w of words) { const i = rest.indexOf(w); if (i >= 0 && (best < 0 || i < best)) { best = i; word = w; } }
+    if (best < 0) break;
+    pieces.push(rest.slice(0, best));
+    pieces.push(<mark key={k++} className="rounded-sm bg-[linear-gradient(transparent_42%,rgba(255,214,10,.6)_42%,rgba(255,214,10,.6)_94%,transparent_94%)] px-0.5 text-inherit" data-mark>{word}</mark>);
+    rest = rest.slice(best + word.length);
+    words.splice(words.indexOf(word), 1);
+  }
+  pieces.push(rest);
+  return <>{pieces}</>;
+}
+
+const hostOf = (url: string | null) => { try { return url ? new URL(url, 'https://x').host.replace(/^www\./, '') : ''; } catch { return ''; } };
+
+function SourceLine({ url, label }: { url?: string | null; label: string }) {
+  const { complete } = useContext(ShapeMetaContext);
+  const safe = complete && url ? safeLinkUrl(url) : null;
+  const host = hostOf(safe);
+  const body = <><LinkIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />{host ? <span className="font-medium text-foreground/80">{host}</span> : null}<span className="truncate">{label}</span></>;
+  const cls = 'flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground';
+  return safe
+    ? <a href={safe} onClick={(e) => openSignedIn(e, safe)} target="_blank" rel="noopener noreferrer" className={`${cls} hover:underline`} data-source>{body}</a>
+    : <div className={cls} data-source>{body}</div>;
+}
+
+const MapViewPart: ComponentRenderer<MapInput> = ({ props }) => {
+  const box = useBox('flex flex-col gap-2');
+  const places = (Array.isArray(props.places) ? props.places : []).filter((p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  const here = props.here && Number.isFinite(props.here.lat) && Number.isFinite(props.here.lng) ? props.here : null;
+  const title = (props.title || '').trim() || POINT_TITLE.Map;
+  const point = usePoint(title);
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [zoomDelta, setZoomDelta] = useState(0);
+  const [shift, setShift] = useState({ x: 0, y: 0 });
+  const drag = useRef<{ x: number; y: number; sx: number; sy: number; moved: boolean } | null>(null);
+  const height = Math.round(Math.min(340, Math.max(220, width * 0.72)));
+  const view = width > 0 && places.length ? mapView(places, here, width, height, zoomDelta, shift) : null;
+  const labels = pinLabels(places.length);
+  const showList = places.some((p) => p.sub) || !labels;
+  const zoomBy = (d: number) => { setZoomDelta((z) => z + d); setShift((s) => ({ x: s.x * (d > 0 ? 2 : 0.5), y: s.y * (d > 0 ? 2 : 0.5) })); };
+  return (
+    <div className={box} data-shape="Map">
+      {props.title ? <div className="text-sm font-semibold">{props.title}</div> : null}
+      <div
+        ref={ref} className="relative w-full touch-none select-none overflow-hidden rounded-lg border border-border bg-[#f4f3ef]" style={{ height }}
+        onPointerDown={(e) => { drag.current = { x: e.clientX, y: e.clientY, sx: shift.x, sy: shift.y, moved: false }; }}
+        onPointerMove={(e) => {
+          const d = drag.current; if (!d) return;
+          const dx = e.clientX - d.x, dy = e.clientY - d.y;
+          if (Math.abs(dx) + Math.abs(dy) > 4) { d.moved = true; (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId); }
+          if (d.moved) setShift({ x: d.sx + dx, y: d.sy + dy });
+        }}
+        onPointerUp={() => { setTimeout(() => { drag.current = null; }, 0); }}
+        onPointerCancel={() => { drag.current = null; }}
+        data-map-zoom={view?.zoom ?? ''}
+      >
+        {view ? (
+          <>
+            {view.tiles.map((t) => (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img key={t.key} src={t.url} alt="" draggable={false} referrerPolicy="no-referrer" className="pointer-events-none absolute h-64 w-64 max-w-none opacity-80" style={{ left: t.left, top: t.top, width: 256, height: 256 }} />
+            ))}
+            {view.here ? (
+              <span className="absolute z-10 -translate-x-1/2 -translate-y-1/2" style={{ left: view.here.left, top: view.here.top }} data-map-here>
+                <span className="block h-4 w-4 rounded-full border-2 border-white bg-emerald-600 shadow" />
+                {here?.label ? <span className="absolute left-5 top-0 whitespace-nowrap rounded bg-white/90 px-1 text-[11px] text-emerald-800">{here.label}</span> : null}
+              </span>
+            ) : null}
+            {places.map((p, i) => {
+              const at = view.points[i];
+              const sel = point.selected === p.label;
+              const flip = at.left > width * 0.62;
+              return (
+                <button
+                  key={i} type="button" disabled={!point.press}
+                  onClick={() => { if (!drag.current?.moved) point.press?.(p.label); }}
+                  className={`absolute z-20 flex -translate-y-1/2 items-center gap-1 rounded-full border bg-white py-0.5 text-[13px] font-medium text-neutral-900 shadow-sm transition ${flip ? '-translate-x-full flex-row-reverse pl-2 pr-0.5' : 'pl-0.5 pr-2'} ${labels ? '' : '!p-0.5'} ${sel ? 'border-amber-400 ring-[3px] ring-amber-300/80' : 'border-neutral-900/20'} disabled:cursor-default`}
+                  style={{ left: at.left + (flip ? 11 : -11), top: at.top }}
+                  aria-label={`${i + 1} ${p.label}`} data-map-pin={i + 1}
+                >
+                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#1f4e79] text-[11px] text-white tabular-nums">{i + 1}</span>
+                  {labels ? <span className="max-w-[9rem] truncate">{p.label}</span> : null}
+                </button>
+              );
+            })}
+            <div className="absolute right-2 top-2 z-30 flex flex-col overflow-hidden rounded-md border border-border bg-white/95 shadow-sm">
+              <button type="button" aria-label="近づける" onClick={() => zoomBy(1)} className="grid h-8 w-8 place-items-center text-neutral-700 hover:bg-neutral-100"><Plus className="h-4 w-4" /></button>
+              <button type="button" aria-label="遠ざける" onClick={() => zoomBy(-1)} className="grid h-8 w-8 place-items-center border-t border-border text-neutral-700 hover:bg-neutral-100"><Minus className="h-4 w-4" /></button>
+            </div>
+            <span className="absolute bottom-1 right-1.5 z-30 rounded bg-white/75 px-1 text-[9px] text-neutral-500">{view.credit}</span>
+          </>
+        ) : null}
+      </div>
+      {showList ? (
+        <ol className="flex flex-col gap-1 text-sm">
+          {places.map((p, i) => (
+            <li key={i}>
+              <button type="button" disabled={!point.press} onClick={() => point.press?.(p.label)} className={`flex w-full items-baseline gap-2 rounded-md px-1 py-0.5 text-left disabled:cursor-default ${point.selected === p.label ? 'bg-amber-200/50' : 'hover:bg-muted/60'}`}>
+                <span className="grid h-5 w-5 shrink-0 translate-y-0.5 place-items-center rounded-full bg-[#1f4e79] text-[11px] text-white tabular-nums">{i + 1}</span>
+                <span className="min-w-0"><span className="font-medium">{p.label}</span>{p.sub ? <span className="ml-1.5 text-xs text-muted-foreground">{p.sub}</span> : null}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      <PointNote point={point} />
+    </div>
+  );
+};
+
+const ItemView: ComponentRenderer<ItemInput> = ({ props }) => {
+  const inside = useContext(InsideContext);
+  const point = usePoint(POINT_TITLE.Item);
+  const { complete } = useContext(ShapeMetaContext);
+  const onClient = useOnClient();
+  const img = complete && onClient ? safeImageUrl(props.image, siteHost()) : null;
+  const [broken, setBroken] = useState(false);
+  const link = complete && props.url ? safeLinkUrl(props.url) : null;
+  const sel = point.selected === props.title;
+  const lines = (props.lines || []).filter((l) => typeof l === 'string' && l.trim());
+  return (
+    <div className={inside ? 'w-full' : 'my-2 w-full'} data-shape="Item">
+      <div className={`flex w-full overflow-hidden rounded-xl border bg-card shadow-sm ${sel ? 'border-amber-400 ring-[3px] ring-amber-300/70' : 'border-border'}`}>
+        <button type="button" disabled={!point.press} onClick={() => point.press?.(props.title)} className="flex min-w-0 flex-1 text-left disabled:cursor-default" data-item-press>
+          {img && !broken ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={img} alt={props.title} loading="lazy" referrerPolicy="no-referrer" crossOrigin={img.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(true)}
+              className="h-auto min-h-[6rem] w-24 shrink-0 self-stretch bg-muted object-cover sm:w-28" />
+          ) : null}
+          <div className="flex min-w-0 flex-1 flex-col gap-1 px-3 py-2.5">
+            <div className="flex items-baseline gap-1.5">
+              {props.num ? <span className="grid h-5 w-5 shrink-0 translate-y-0.5 place-items-center rounded-full bg-[#1f4e79] text-[11px] text-white tabular-nums">{props.num}</span> : null}
+              <span className="text-[15px] font-semibold leading-snug">{props.title}</span>
+            </div>
+            {props.sub ? <div className="text-xs text-muted-foreground">{props.sub}</div> : null}
+            {lines.length ? <ul className="flex flex-col gap-0.5 text-[13px] leading-relaxed text-foreground/85">{lines.map((l, i) => <li key={i}>{l}</li>)}</ul> : null}
+          </div>
+        </button>
+      </div>
+      {link ? <div className="mt-1 px-1"><SourceLine url={props.url} label="ページを開く" /></div> : null}
+      <PointNote point={point} />
+    </div>
+  );
+};
+
+const QuoteView: ComponentRenderer<QuoteInput> = ({ props }) => {
+  const box = useBox('flex flex-col gap-2');
+  return (
+    <figure className={box} data-shape="Quote">
+      <ShapeImage src={props.image} alt={props.source} className="!object-contain" />
+      <blockquote className="border-l-[3px] border-foreground/15 pl-3 text-[15px] leading-relaxed">
+        <Marked text={props.text || ''} marks={props.mark} />
+      </blockquote>
+      <figcaption><SourceLine url={props.url} label={props.source} /></figcaption>
+    </figure>
+  );
+};
+
+const SourcesView: ComponentRenderer<SourcesInput> = ({ props }) => {
+  const box = useBox('flex flex-col gap-1');
+  const { complete } = useContext(ShapeMetaContext);
+  const items = Array.isArray(props.items) ? props.items : [];
+  return (
+    <div className={box} data-shape="Sources">
+      <div className="text-xs font-medium text-muted-foreground">出どころ</div>
+      <ol className="flex flex-col divide-y divide-border">
+        {items.map((x, i) => {
+          const url = complete ? safeLinkUrl(x.url) : null;
+          const inner = (
+            <>
+              <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded bg-muted text-[11px] text-muted-foreground tabular-nums">{i + 1}</span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">{x.title}</span>
+                <span className="block truncate text-xs text-muted-foreground">{hostOf(url || x.url)}{x.note ? `・${x.note}` : ''}</span>
+              </span>
+              {url ? <ExternalLink className="mt-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden /> : null}
+            </>
+          );
+          return (
+            <li key={i}>
+              {url
+                ? <a href={url} onClick={(e) => openSignedIn(e, url)} target="_blank" rel="noopener noreferrer" className="flex items-start gap-2 py-1.5 hover:bg-muted/40">{inner}</a>
+                : <div className="flex items-start gap-2 py-1.5">{inner}</div>}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+};
+
+const FramesView: ComponentRenderer<FramesInput> = ({ props }) => {
+  const box = useBox('flex flex-col gap-2');
+  const title = (props.title || '').trim() || POINT_TITLE.Frames;
+  const point = usePoint(title);
+  const { complete } = useContext(ShapeMetaContext);
+  const onClient = useOnClient();
+  const frames = Array.isArray(props.frames) ? props.frames : [];
+  const total = timeSeconds(props.length);
+  const value = (f: { time: string; label?: string | null }) => (f.label ? `${f.time}（${f.label}）` : f.time);
+  return (
+    <div className={box} data-shape="Frames">
+      {props.title ? <div className="text-sm font-semibold">{props.title}</div> : null}
+      <div className="grid grid-cols-2 gap-2">
+        {frames.map((f, i) => {
+          const src = complete && onClient ? safeImageUrl(f.src, siteHost()) : null;
+          const sel = point.selected === value(f);
+          return (
+            <button key={i} type="button" disabled={!point.press} onClick={() => point.press?.(value(f))}
+              className={`relative overflow-hidden rounded-lg border bg-card text-left disabled:cursor-default ${sel ? 'border-amber-400 ring-[3px] ring-amber-300/80' : 'border-border'}`} data-frame={f.time}>
+              {src
+                // eslint-disable-next-line @next/next/no-img-element
+                ? <img src={src} alt={f.label || f.time} loading="lazy" referrerPolicy="no-referrer" crossOrigin={src.startsWith('/') ? undefined : 'anonymous'} className="block aspect-video w-full bg-muted object-cover" />
+                : <div className="aspect-video w-full bg-muted" />}
+              <span className="absolute left-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-xs text-white tabular-nums">{f.time}</span>
+              {f.label ? <span className="block px-2 py-1.5 text-xs leading-snug text-muted-foreground">{f.label}</span> : null}
+            </button>
+          );
+        })}
+      </div>
+      {total ? (
+        <div className="relative mt-1 h-6 rounded bg-muted" aria-hidden data-frames-bar>
+          {frames.map((f, i) => {
+            const t = timeSeconds(f.time);
+            if (t === null) return null;
+            const sel = point.selected === value(f);
+            return <i key={i} className={`absolute top-1 bottom-1 rounded-sm ${sel ? 'w-1 bg-amber-500' : 'w-[3px] bg-[#1f4e79]'}`} style={{ left: `${Math.min(100, (t / total) * 100)}%` }} />;
+          })}
+          <span className="absolute -bottom-4 right-0 text-[10px] text-muted-foreground tabular-nums">{props.length}</span>
+        </div>
+      ) : null}
+      <div className={total ? 'mt-2' : ''}><PointNote point={point} /></div>
+    </div>
+  );
+};
+
+const BeforeAfterView: ComponentRenderer<BeforeAfterInput> = ({ props }) => {
+  const box = useBox('flex flex-col gap-2');
+  const [a, b] = props.labels && props.labels.length === 2 ? props.labels : ['前', '後'];
+  return (
+    <div className={box} data-shape="BeforeAfter">
+      <div className="grid grid-cols-2 gap-2">
+        {[[a, props.before], [b, props.after]].map(([label, src], i) => (
+          <figure key={i} className="m-0 flex flex-col gap-1">
+            <figcaption className={`w-fit rounded px-1.5 text-xs font-medium ${i ? 'bg-[#1f4e79] text-white' : 'bg-muted text-muted-foreground'}`}>{label}</figcaption>
+            <ShapeImage src={src} alt={String(label)} className="!object-contain" />
+          </figure>
+        ))}
+      </div>
+      {props.caption ? <div className="text-sm">{props.caption}</div> : null}
+    </div>
+  );
+};
+
 // --- 部品一覧（OpenUI の library） ----------------------------------------------------------
 
 export const shapeLibrary = createLibrary({
@@ -736,6 +1051,12 @@ export const shapeLibrary = createLibrary({
     defineComponent({ name: 'Button', description: 'ボタン', props: ButtonProps, component: ButtonView }),
     defineComponent({ name: 'Divider', description: '区切り線', props: DividerProps, component: DividerView }),
     defineComponent({ name: 'Flow', description: '矢印でつなぐ図', props: FlowProps, component: FlowView }),
+    defineComponent({ name: 'Map', description: '地図', props: MapProps, component: MapViewPart }),
+    defineComponent({ name: 'Item', description: '写真つきの札', props: ItemProps, component: ItemView }),
+    defineComponent({ name: 'Quote', description: '引用', props: QuoteProps, component: QuoteView }),
+    defineComponent({ name: 'Sources', description: '出どころ', props: SourcesProps, component: SourcesView }),
+    defineComponent({ name: 'Frames', description: '動画のコマ', props: FramesProps, component: FramesView }),
+    defineComponent({ name: 'BeforeAfter', description: '前と後', props: BeforeAfterProps, component: BeforeAfterView }),
   ],
 });
 

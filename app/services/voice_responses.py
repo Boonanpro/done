@@ -113,6 +113,10 @@ TOOLS = [
      'parameters':{'type':'object','properties':{'direction':{'type':'string','enum':['up','down']}},'required':['direction'],'additionalProperties':False}},
     {'type':'function','name':'operate_screen','description':'read_screenで見たpage_id・操作先id・fingerprintをそのまま渡して押す・入力する・選ぶ・スクロールする。requires_approvalならread_backを読み、本人の次の承認を待つ。結果不明時は再送しない。',
      'parameters':{'type':'object','properties':{'op':{'type':'string','enum':['click','fill','select','scroll']},'page_id':{'type':'string'},'fingerprint':{'type':'string'},'target':{'type':'string'},'value':{'type':'string'},'direction':{'type':'string','enum':['up','down']}},'required':['op','page_id']}},
+    {'type': 'function', 'name': 'show_parts_on_stage', 'description': '確かめた事実を、本物の中身の部品（地図のピン・写真の札・ページの文の引用・出どころ・動画のコマ）で本人の通話画面にすぐ出す。program は ```openui-lang の中身（root = …）。',
+     'parameters': {'type': 'object', 'properties': {'program': {'type': 'string', 'description': '部品のプログラム（root = Column([...]) など）'},
+                                                    'caption': {'type': 'string', 'description': '画面の上の短い札（例: 尼崎駅の近くの鍼灸院）'}},
+                    'required': ['program'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'show_on_stage', 'description': '本人の通話画面に、今の話の図・表・数字を出す（本人が「図にして」「画面に出して」と頼んだ時）。描く中身は画面係が会話から決める。',
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を図にしてほしいか（本人の言葉のまま。例: 今の3つの案を比べて、支払いの流れ）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'show_page_on_stage', 'description': '実際のページの画面を本人の通話画面に出す（本人が「このページ見せて」「成果物の〇〇を出して」と頼んだ時）。ダンの成果物はその画面そのもの、よそのページはその写真。URL（https://… か /artifacts/… のような道）か、本人の成果物の名前（例: X運用室、台本室）を渡す。',
@@ -552,6 +556,11 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         if stage is None: return {'ok':False,'error':'通話画面がありません。'}
         if name == 'read_screen': return voice_screen.inspect(stage, str(args.get('query') or ''))
         return await voice_screen.operate(stage, str(args.get('op') or ''), str(args.get('target') or ''), str(args.get('value') or ''), str(args.get('direction') or 'down'), str(args.get('page_id') or ''), str(args.get('fingerprint') or ''))
+    if name == 'show_parts_on_stage':
+        from app.services import voice_stage
+        stage = voice_stage.for_room(room_id)
+        if stage is None: return {'shown': False, 'reason': 'この通話に画面はついていない（スマホのアプリか PC の通話画面で見える）。'}
+        return stage.show_parts(str(args.get('program') or ''), str(args.get('caption') or ''))
     if name == 'show_on_stage':
         from app.services import voice_stage
         stage = voice_stage.for_room(room_id)

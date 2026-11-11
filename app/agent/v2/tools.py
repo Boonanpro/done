@@ -416,6 +416,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     from app.services.feeds import TOOL as FEED_TOOL
     from app.services.web_search import TOOL as WEB_SEARCH_TOOL
     from app.services.places import TOOL as PLACES_TOOL
+    from app.services.page_clip import TOOL as PAGE_CLIP_TOOL
     from app.services.phone_control import TOOL as PHONE_TOOL
     from app.services.confirm_cards import TOOL as CONFIRM_CARD_TOOL
     from app.services.work_progress import TOOL as PROGRESS_TOOL
@@ -433,6 +434,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         FEED_TOOL,
         WEB_SEARCH_TOOL,
         PLACES_TOOL,
+        PAGE_CLIP_TOOL,
         VIDEO_TOOL,
         PHONE_TOOL,
         CONFIRM_CARD_TOOL,
@@ -1372,6 +1374,8 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         return ("_web_search", "read")
     if tool_name == "places":
         return ("_places", "read")
+    if tool_name == "page_clip":
+        return ("_page_clip", "read")
     if tool_name == "video":
         return ("_video", "read")
     if tool_name == "phone":
@@ -1471,7 +1475,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_video", "_phone", "_confirm_card", "_progress", "_summon"}:
+        if skill_name in {"_jina", "_lookup", "_wait_until", "_desktop", "_location", "_flow", "_chrome_signin", "_preference", "_feed", "_web_search", "_places", "_page_clip", "_video", "_phone", "_confirm_card", "_progress", "_summon"}:
             return
 
         error_type = result.get("error_type")
@@ -2617,6 +2621,10 @@ async def execute_tool(
     if skill_name == "_places":
         from app.services.places import tool as places_tool
         return await places_tool(params)
+
+    if skill_name == "_page_clip":
+        from app.services.page_clip import tool as page_clip_tool
+        return await page_clip_tool(params)
 
     if skill_name == "_video":
         from app.services.video_analyzer import tool as video_tool

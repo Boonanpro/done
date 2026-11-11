@@ -1154,6 +1154,7 @@ export function readLook(v: unknown, siteHost?: string | null): Look | null {
 
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+const objs = (v: unknown): Record<string, unknown>[] => (Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === 'object' && !(x instanceof ShapeNode)) : []);
 const cell = (s: string) => s.replace(/\|/g, '｜').replace(/\n/g, ' ');
 /** 選択肢・表のセルの文章: 名前と、色見本があれば後ろに括弧で色の値（画像は名前だけ。読めない値は空） */
 const lookText = (v: unknown): string => {
@@ -1183,7 +1184,7 @@ function childrenPlain(v: unknown): string[] | null {
 }
 
 function nodeToPlain(call: ShapeNode): string | null {
-  const [a0, a1, a2, a3, a4] = call.args;
+  const [a0, a1, a2, a3, a4, a5] = call.args;
   switch (call.name) {
     case 'Card': {
       const kids = childrenPlain(a0);
@@ -1272,6 +1273,34 @@ function nodeToPlain(call: ShapeNode): string | null {
       const body = labels.map((l, i) => `| ${cell(l)} | ${series.map((s) => fmt(s.values[i])).join(' | ')} |`);
       return [`**${title}**`, '', head, rule, ...body].join('\n');
     }
+    case 'Map': {
+      const places = objs(a0).filter((p) => str(p.label));
+      if (!places.length) return null;
+      return [...(str(a1) ? [`**${str(a1)}**`] : []), ...places.map((p, i) => `${i + 1}. ${str(p.label)}${str(p.sub) ? `（${str(p.sub)}）` : ''}`)].join('\n');
+    }
+    case 'Item': {
+      if (!str(a0)) return null;
+      const url = safeLinkUrl(a4);
+      const name = `${str(a5) ? `${str(a5)}. ` : ''}**${str(a0)}**`;
+      return [url ? `${name}（[ページ](${url})）` : name, ...(str(a1) ? [str(a1)] : []), ...strs(a3).map((l) => `- ${l}`)].join('\n');
+    }
+    case 'Quote': {
+      if (!str(a0) || !str(a1)) return null;
+      const url = safeLinkUrl(a2);
+      return [`> ${str(a0).replace(/\n/g, '\n> ')}`, '', `— ${url ? `[${str(a1).replace(/[[\]]/g, '')}](${url})` : str(a1)}`].join('\n');
+    }
+    case 'Sources': {
+      const items = objs(a0).filter((x) => str(x.title));
+      if (!items.length) return null;
+      return ['出どころ:', ...items.map((x, i) => { const url = safeLinkUrl(x.url); return `${i + 1}. ${url ? `[${str(x.title).replace(/[[\]]/g, '')}](${url})` : str(x.title)}${str(x.note) ? `（${str(x.note)}）` : ''}`; })].join('\n');
+    }
+    case 'Frames': {
+      const frames = objs(a0).filter((f) => str(f.time));
+      if (!frames.length) return null;
+      return [...(str(a1) ? [`**${str(a1)}**`] : []), ...frames.map((f) => `- ${str(f.time)}${str(f.label) ? ` ${str(f.label)}` : ''}`)].join('\n');
+    }
+    case 'BeforeAfter':
+      return str(a2) ? `前と後: ${str(a2)}` : '';
     default:
       return null;
   }
