@@ -77,11 +77,14 @@ import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
 import { bareDanMedia, chatImageUrl, danFileMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
 import { VoiceSession } from '@/components/voice/voice-session';
+import { openEditorWindow } from '@/lib/open-editor-window';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
 interface ProjectChatPanelProps {
   projectId: string;
   commandCenter?: boolean;
+  /** エディターの中の「ダンと制作」の欄（app/services/editor_rooms.py の部屋）。上の帯を細くし、部屋の操作を出さない */
+  editorChat?: boolean;
 }
 
 const INITIAL_CHAT_RENDER_COUNT = 80;
@@ -2267,7 +2270,7 @@ function mergeFreshMessages(
   return { messages: merged };
 }
 
-export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectChatPanelProps) {
+export function ProjectChatPanel({ projectId, commandCenter = false, editorChat = false }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const isMobile = useIsMobile();
@@ -2317,7 +2320,8 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'production'>(() => {
-    if (typeof window === 'undefined') return 'chat';
+    // エディターの窓の「ダンと制作」では、窓の住所の production=1 / content_id はエディターの物で、欄はいつも会話
+    if (typeof window === 'undefined' || editorChat) return 'chat';
     const params = new URLSearchParams(window.location.search);
     return params.get('production') === '1' || params.has('content_id') ? 'production' : 'chat';
   });
@@ -3075,9 +3079,15 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
       }`}
       style={!isMobile && isPreviewOpenForProject ? { width: chatWidth } : undefined}
     >
-      <div className={`flex shrink-0 items-center border-b border-border py-3 ${commandCenter ? 'flex-wrap gap-2 px-4 [&>button]:min-h-11' : 'gap-3 pl-12 pr-16 md:pl-4 md:pr-16'}`}>
-        {!commandCenter && <FolderKanban className="h-5 w-5 shrink-0 text-primary" />}
-        {artifacts.length > 0 && (
+      <div className={`flex shrink-0 items-center border-b border-border ${editorChat ? 'gap-2 px-3 py-2' : commandCenter ? 'flex-wrap gap-2 px-4 py-3 [&>button]:min-h-11' : 'gap-3 py-3 pl-12 pr-16 md:pl-4 md:pr-16'}`}>
+        {!commandCenter && !editorChat && <FolderKanban className="h-5 w-5 shrink-0 text-primary" />}
+        {editorChat && (
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold">ダンと制作</div>
+            <div className="truncate text-[11px] text-muted-foreground">{project?.title?.replace(/^制作(ライブラリ)?: /, '') || '読み込み中…'}</div>
+          </div>
+        )}
+        {artifacts.length > 0 && !editorChat && (
           <div className="relative shrink-0">
             <button
               onClick={() => {
@@ -3128,45 +3138,15 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
             )}
           </div>
         )}
-        {project?.room_id && (
+        {project?.room_id && !editorChat && (
           <button
-            onClick={async () => {
-              // 制作 = launch the desktop production app for this room ONLY (no inline browser
-              // workspace, no chat toggle). First choice: ask the backend (same machine as the
-              // editor) to spawn the app directly — no browser "open this app?" dialog, no
-              // silent no-op. The done:// deep link stays as a fallback for when the backend
-              // is unreachable.
-              const rid = project?.room_id;
-              if (!rid) return;
-              const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
-              try {
-                const res = await fetch('/api/v1/production-assets/launch-editor', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                  },
-                  body: JSON.stringify({ room_id: rid }),
-                });
-                if (res.ok) {
-                  const j = await res.json().catch(() => null);
-                  if (j?.launched) return;
-                }
-              } catch {
-                /* backend unreachable — fall through to the protocol link */
-              }
-              try {
-                const a = document.createElement('a');
-                a.href = `done://production?room_id=${rid}&token=${encodeURIComponent(token)}`;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-              } catch {
-                /* app not installed */
-              }
+            onClick={() => {
+              // 制作 = この部屋のエディターを別の窓で開く。押した瞬間に起動画面が出る（lib/open-editor-window.ts）。
+              // 2026-11-11 まで開いていた Windows のエディター（launch-editor / done://）は本体とつながっていなかった。
+              if (project?.room_id) openEditorWindow(project.room_id);
             }}
             className="flex shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
-            title="制作アプリで開く"
+            title="エディターを開く"
           >
             <Clapperboard className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">制作</span>
@@ -3201,7 +3181,7 @@ export function ProjectChatPanel({ projectId, commandCenter = false }: ProjectCh
           </button>
         )}
         {project?.room_id && <ModelSwitcher roomId={project.room_id} />}
-        <div className={`min-w-0 flex-1 ${commandCenter ? 'hidden' : ''}`}>
+        <div className={`min-w-0 flex-1 ${commandCenter || editorChat ? 'hidden' : ''}`}>
           {isLoading ? (
             <div className="flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
