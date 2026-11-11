@@ -381,7 +381,7 @@ async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypat
     # Model delay and enqueue delay are independent; neither is wrapped in 30s wait_for.
     await asyncio.sleep(.02);assert not saved and not tasks
     model_release.set();await entered.wait()
-    assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' in saved[0][0][2]
+    assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' not in saved[0][0][2]
     assert len(tasks)==1
     release.set();await finish
     # everything left by one call goes as ONE piece of work (2026-10-27: three jobs queued on the phone)
@@ -394,6 +394,35 @@ async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypat
     assert str(paths[0]) in tasks[0]['task'] and len(tasks[0]['task'])<=2800
     assert '同じ条件への有効な承認が確認できたら' in tasks[0]['task']
     assert '候補選択・予算指定だけから承認を作らない' in tasks[0]['task']
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('own,fail', [(True, False), (True, True), (False, False)])
+async def test_call_end_does_not_post_shown_screens(monkeypatch, tmp_path, own, fail):
+    """Shown screens must not become chat posts, even on extraction failure."""
+    from app.services import voice_stage as V
+    from app.services.chat_service import ChatService
+    from datetime import timezone
+    monkeypatch.setattr(V, 'ROOT', tmp_path / 'stage')
+    saved = []
+    monkeypatch.setattr(ChatService, '__init__', lambda self: None)
+    async def write(self, *args, **kwargs):
+        saved.append(args[2])
+    monkeypatch.setattr(ChatService, 'send_message', write)
+    async def after(*args, **kwargs):
+        if fail:
+            raise RuntimeError('extraction unavailable')
+        await kwargs['on_decisions']()
+        return []
+    monkeypatch.setattr(S, 'after_call', after)
+    dialogue = S.Dialogue()
+    stage = V.Stage('screen-recap-test', 'test-session', dialogue, lambda *a, **k: None)
+    stage._apply('料金', 'root = Stat("料金", 1000, "円")')
+    assert V.read_state(stage.room_id)['active']
+    stage.close()
+    await S.finish_call('u', stage.room_id, dialogue, datetime.now(timezone.utc), own, stage, lambda *a, **k: None)
+    assert not V.read_state(stage.room_id)['active']
+    assert saved == []
+
 
 @pytest.mark.asyncio
 async def test_socket_cancellation_keeps_post_call_owner_alive(monkeypatch):
