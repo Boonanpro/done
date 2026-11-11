@@ -4,7 +4,9 @@ import { FlatList, Text, TextInput, View, Pressable } from 'react-native';
 import { SendCard } from '../send-card';
 import { setUiLanguage } from '../ui-language';
 void setUiLanguage('ja');
-const original = 'しゅんさんへ\n\nスマホのアプリで操作できます。\nhttps://example.test/mobile\nよろしくお願いします。😀';
+const original = Array.from({ length: 35 }, (_, i) =>
+  `${i + 1}行目：スマホで返信案の全文を読み、日本語で編集できるか確認します。`
+).join('\n') + '\n本文の最後：よろしくお願いします。';
 let saved = original;
 let status = 'pending';
 let fail = false;
