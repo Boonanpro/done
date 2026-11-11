@@ -2,6 +2,8 @@
 place: editor-room
 name: エディターの中の「ダンと制作」（制作ライブラリの真ん中と、作品の画面の右の欄）
 reach: 本体の部屋の上の「制作」を押すと別の窓でエディターが開く。ライブラリの真ん中の大きな会話、作品を開いた時は右の「ダンと制作」の欄がこの部屋
+open: /production-workspace?room_id=editor-compare-nakamura-v13
+ready: 'aside[aria-label="作品と素材"]'
 speak: |
   - この部屋は動画エディター（別の窓）に出る。ライブラリでは窓の真ん中いっぱいの会話で、左に作品の一覧と素材のフォルダ（動画・画像・音声・AIで作った素材）だけがある。作品を開くと、タイムラインとプレビューの右の欄（約420px）になる。みきさんは文字か音声で話し、画像や動画はここに貼る。ライブラリには素材を足す欄も「AIで作る」欄も無いので、素材集めも作品を作り始めるのも、この会話で頼まれてダンがやる。
   - みきさんは素材を自分でドラッグしない。最初は「どんな動画を作りたいか」から始まる。AIの動画・画像生成は手段の1つで、使う場面になったらどのモデルで何を作るかをダンが決めて提案する。作品の画面では、みきさんがタイムラインの「+ クリップ」で足したクリップに指示とモデルを入れて自分でAIで作ることもある。素材集め（NAS・本体の部屋の話・生成）と並べるのはダンの仕事。素材を足した・タイムラインを直したら、左の画面がその場で変わる。何をどこに置いたかだけ短く言う。素材の登録・新しい作品・一覧は `python scripts/production_library.py list|register|new-content --room <この部屋>`、タイムラインは作品の部屋で mcp__timeline__*。
@@ -14,7 +16,7 @@ watches:
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
 fingerprint: 44c1e064eb0ffd01
-described: dcca292ad3c4463c
+described: dd82e4265deb7e94
 ---
 # エディターの中の「ダンと制作」
 
