@@ -43,3 +43,60 @@ def test_context_lines_link_both_ways(monkeypatch):
     assert "制作: v1 (room_id=c1)" not in child   # 自分は兄弟の一覧に入れない
     parent = "\n".join(er.context_lines("A"))
     assert "制作: v1 (room_id=c1)" in parent and "字幕を直しました" in parent
+
+
+def test_ensure_room_makes_one_room_when_asked_twice_at_once(monkeypatch):
+    # 窓をすぐ開き直すと「ダンと制作」の部屋の作成が同時に2回届き、部屋が2つできていた（2026-11-12）。
+    import asyncio
+    from app.services import editor_rooms as er
+    from app.services import project_service as ps
+
+    rows: list[dict] = []
+
+    class Q:
+        def __init__(self, table):
+            self.table = table
+            self.filters = {}
+            self.n = None
+
+        def select(self, *_a):
+            return self
+
+        def eq(self, k, v):
+            self.filters[k] = v
+            return self
+
+        def limit(self, n):
+            self.n = n
+            return self
+
+        def execute(self):
+            if self.table != "projects":
+                return type("R", (), {"data": []})()
+            data = [r for r in rows if all(r.get(k) == v for k, v in self.filters.items())]
+            return type("R", (), {"data": data[: self.n] if self.n else data})()
+
+    class SB:
+        def table(self, name):
+            return Q(name)
+
+    made = []
+
+    class FakeProjects:
+        async def create_project(self, user_id, title, description="", origin_room_id=None, metadata=None):
+            await asyncio.sleep(0.05)   # 本物も作るのに時間がかかる。その間に2回目が来る
+            row = {"id": f"p{len(made)}", "room_id": f"r{len(made)}", "title": title, "metadata": metadata,
+                   "origin_room_id": origin_room_id, "user_id": user_id, "created_at": f"2026-11-12T00:00:0{len(made)}"}
+            made.append(row)
+            rows.append(row)
+            return row
+
+    monkeypatch.setattr(ps, "ProjectService", FakeProjects)
+
+    async def both():
+        sb = SB()
+        return await asyncio.gather(er.ensure_room("u", "asset", None, sb=sb), er.ensure_room("u", "asset", None, sb=sb))
+
+    a, b = asyncio.run(both())
+    assert len(made) == 1
+    assert a["room_id"] == b["room_id"]
