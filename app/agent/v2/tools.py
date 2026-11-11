@@ -685,13 +685,14 @@ COMPOSE_MESSAGE_TOOL = {
 
 【使い方】
 - propose: 文面を出す。ユーザーに「これで良ければ送ります」と言う代わりにこれを呼ぶ。呼んだ後は本文をチャットに繰り返さず、一言添えるだけでよい。件名が要るのは「メールの新規送信」だけ。
-- send: 既に出した送信案を送る（ユーザーが「送って」「それでいい」と言った時）。proposal_id だけ渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
+- send: 既に出した送信案を送る（本人の最新の発言が「送って」のように送ることを名指して許した時だけ）。proposal_id と approval（その本人の言葉をそのまま）を渡す。本文は渡さない。ユーザーがカード上で本文を直していれば、その直した版が送られる。サーバー送信できないチャネル（LINE 等）では送信の代わりにカードが「送信中」にロックされ、送るべき本文が返る → あなたが browser でその本文を送り、mark_sent で確定する。
 - mark_sent: あなたが browser 等で自力送信した後、送信済みとして確定する（本文は DB の現在の版）。
 - release: 手動送信に失敗した時、「送信中」ロックを解除して下書きに戻す。
 - discard: 送信案を取り下げる。
 - list: この部屋の送信案（未送信/送信済み）を確認する。
 
-【カードを出すか】カードはユーザーがまだ文面か送ること自体を確かめていない時のためのもの。ユーザーが会話で既に送ってよいと言っていて（「送っておいて」「投稿し直していいよ」「固定ポストも調整して」等）、文面がその話の通りか作り方を任されているなら、approved=true で propose し、同じターン内で send する。カードは出ず、記録だけ残る。報告は自分の言葉で一言とリンク程度にし、本文を繰り返さない。迷う時（初めての相手・言い方が大事な連絡・話していない内容を足した）はカードを出す。
+【カードを出すか】既定はカードを出して本人の返事を待つ。カードを出さずに送るのは、本人の最新の発言がこの送信を名指して許していて（「送っておいて」「投稿し直していいよ」等）、文面がその話の通りか作り方を任されている時だけ。その時は approved=true と approval で propose し、同じターン内で send する。報告は一言とリンク程度にし、本文を繰り返さない。
+【承認が効く範囲】承認は、その時に本人に見えていた中身（本文・宛先・時期・文の中で触れている資料や台本の状態）にだけ効く。承認の後にどれかが変わったら（自分の作業・本人の書き換え・相手からの新しい連絡）、変わった所を見せて聞き直す。「進めて」「やって」「いいよ」は、別の作業と一緒に頼まれていれば送る許可ではない。文の中で触れている作業（台本を直した等）が終わっていないうちは送らない。先に終えて本人に見せ、そのあとで聞く。道具が通さなかった時は、裏の処理を直接呼ぶ・別の画面から押すなどで回り込まない。
 【規律】外部宛の送信は必ずこのツールを通すこと。カードを無視して記憶の本文を browser で送ってはいけない（ユーザーの編集が反映されず、カードも未送信のまま残って二重送信の原因になる）。相手の返事を待つなら送信後に watch を登録する。""",
     "input_schema": {
         "type": "object",
@@ -716,7 +717,8 @@ COMPOSE_MESSAGE_TOOL = {
             "intent": {"type": "string", "description": "何のための連絡か一言（例: 見積依頼への返信）。カードの見出しに使う"},
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
             "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
-            "approved": {"type": "boolean", "description": "propose用: ユーザーが会話で既に送ってよいと言っている時 true。カードを出さず、続けて send する"},
+            "approved": {"type": "boolean", "description": "propose用: 本人の最新の発言が、この送信を名指して許している時だけ true（approval も渡す）。カードを出さず、続けて send する"},
+            "approval": {"type": "string", "description": "send と approved=true の時に必須: この送信を許した本人の最新の発言から、その言葉をそのまま写す（例:「それで送って」）。「進めて」「いいよ」など送ることを名指していない言葉、前の発言、承認の後に中身が変わった下書きでは送れない"},
             "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
         },
         "required": ["action"],
@@ -4902,6 +4904,15 @@ async def _execute_compose_message(
                 "url": (params.get("target_url") or "").strip() or None,
                 "note": (params.get("target_note") or "").strip() or None,
             }
+            gate_note = ""
+            if params.get("approved"):
+                from app.services import send_authorization as _auth
+                pre = {"action_data": {"channel": channel, "reply_to": reply_to}}
+                gate = await _auth.authorize(approval=params.get("approval") or "", room_id=room_id,
+                                             user_id=user_id, proposal=pre)
+                if not gate["ok"]:
+                    params = {**params, "approved": False}
+                    gate_note = "approved=true は通りませんでした（" + gate["reason"] + "）。カードを出したので、本人の返事を待つこと。"
             atts = params.get("attachments")
             if isinstance(atts, str):
                 atts = [a.strip() for a in atts.split(",") if a.strip()]
@@ -4953,7 +4964,7 @@ async def _execute_compose_message(
             )
             return {
                 "success": True, "proposal_id": row["id"],
-                "message": (
+                "message": gate_note + (
                     "送信案カードをこの部屋に出しました。本文はチャットに繰り返さないこと。"
                     "ユーザーはカード上で本文を直して送信ボタンを押せます（あなたを起こさずに送られます）。"
                     + tail
@@ -4964,6 +4975,12 @@ async def _execute_compose_message(
             pid = (params.get("proposal_id") or "").strip()
             if not pid:
                 return {"success": False, "error": "proposal_id が必要です。"}
+            from app.services import send_authorization as _auth
+            cur = await _aio.to_thread(svc.get, pid, user_id)
+            gate = await _auth.authorize(approval=params.get("approval") or "", room_id=room_id,
+                                         user_id=user_id, proposal=cur)
+            if not gate["ok"]:
+                return {"success": False, "sent": False, "error": "送っていません。" + gate["reason"]}
             row = await svc.send(pid, user_id, sent_by="dan")
             if row.get("status") == "sending":
                 # 手動チャネル: 送信の代わりにカードをロックして本文を渡した。
