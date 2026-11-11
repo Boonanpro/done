@@ -253,7 +253,7 @@ async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(mo
     await S._run('test','u','r','fake',True)
     assert len(sent)==2
     assert sent[0][2].startswith('📞 ダンと通話')
-    assert sent[1][2]=='メモリ32GBにする。\n\n図の記録'
+    assert sent[1][2]=='メモリ32GBにする。'
     assert datetime.fromisoformat(sent[1][3]['created_at'])-datetime.fromisoformat(sent[0][3]['created_at'])==timedelta(seconds=1)
 
 
@@ -304,12 +304,12 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
             return json.dumps({'type':'session.closed'})
     monkeypatch.setattr(websockets, 'connect', lambda *a, **kw: Socket())
     await S._run('integration-call','test-user','integration-room','fixture',True)
-    assert len(sent) == 2 and sent[0][0].startswith('📞 ダンと通話')
-    assert sent[1][0].count('```openui-lang') == 1
-    assert ('メモリ32GBにする。' in sent[1][0]) is not summary_fails
-    assert 'icon: "doc"' in sent[1][0] and 'icon: "check"' in sent[1][0]
-    assert '前の通話' not in sent[1][0]
-    assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
+    assert len(sent) == (1 if summary_fails else 2)
+    assert sent[0][0].startswith('📞 ダンと通話')
+    assert all('```openui-lang' not in text and '通話中に出した画面' not in text for text, _ in sent)
+    if not summary_fails:
+        assert sent[1][0] == 'メモリ32GBにする。'
+        assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
     state = V.read_state('integration-room')
     assert not state['active'] and state['version'] == 8 and V.for_room('integration-room') is None
 
