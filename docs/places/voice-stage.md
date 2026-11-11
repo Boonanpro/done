@@ -3,41 +3,63 @@ place: voice-stage
 name: 通話中の画面
 open: /voice-stage
 ready: '[data-stage-card]'
+reach: スマホの通話画面、またはPCの通話パネル。電話を発信しない確認は scripts/check_voice_common_controls.py で通話画面の通信だけを試験用に差し替える
 watches:
   - frontend/src/components/voice/voice-stage.tsx
   - frontend/src/components/voice/stage-message-editor.tsx
   - frontend/src/app/voice-stage/page.tsx
-fingerprint: fa7152e6f02e24f4
-described: ff4c37fcaed9a52e
+  - frontend/src/components/artifacts/voice-controls.ts
+  - frontend/src/components/artifacts/voice-controls-runtime.tsx
+  - frontend/src/app/artifacts/layout.tsx
+speak: |
+  - 通話中は、成果物の本物の画面、番号や選択肢の大きな札、説明の図が出る。
+  - 成果物の操作先を声で指定すると、画面のボタンや欄を光らせて操作する。送信などは読み上げと本人の承認を待つ。
+  - 外のブラウザやスマホは操作中の実画面を連続表示する。ブラウザは通話画面の幅に合わせて並び直す。映像を指で押す操作には未対応。
+fingerprint: fd6b8ce9a137539a
+described: e6d193750d4fcc9c
+last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを画面の幅に合わせる表示修正。操作方法は同じ。"
 ---
 # 通話中の画面
 
-スマホの通話画面とPCの通話パネルに、同じ送信案を表示する。
-
 ## 中にある物
 
-- 送信案の宛先、本文、下書きの状態。
-- 未送信の本文を通話画面で直接編集し、「保存」で同じ送信案に反映する。保存に失敗しても入力した文章は残る。保存済みの本文は画面を開き直しても表示される。
+- 送信案の本文をその場で直接編集し、「保存」で同じ送信案に反映する。保存失敗時も入力は残り、再試行できる。開き直すと保存済みの本文を表示する。送信の操作は含まない。
 
-## 行き方
+- 本物の成果物。画面上の名前のあるボタン、リンク、入力欄、選択欄を共通の仕組みで操作する。
+- 番号・日時・金額・短い選択肢の札。数字を大きく表示し、次にすることは1つに絞る。
+- 説明の図。操作中の本物の画面を自動の図で置き換えない。
+- 外の画面。ダンのブラウザ、スマホが実際に見ている画面を表示する。本人の部屋の権限で読み、公開添付にはしない。ブラウザは表示先の幅・高さに合わせてページを並び直し、スクロール中も連続表示する。
 
-通話で送信案を作ると通話画面に表示される。
+## 行き方（みきさんから見て）
+
+スマホ・PCからダンと通話し、「開発室を出して」などと頼む。同じ成果物の画面が開く。
 
 ## 道具で動かす
 
-確認用アカウントの部屋と未送信の送信案を用意し、`/voice-stage?room=<部屋ID>` を開く。電話は発信しない。
+- 送信案の確認: `python scripts/check_voice_draft_editor.py`。確認用アカウントの専用部屋・送信案を使い、スマホ幅の長文LINEとPC幅のメールで編集・保存・再読み込み・保存失敗後の再試行を確認する。電話は発信しない。`place_shot.py voice-stage --path "/voice-stage?room=<確認用部屋ID>" --phone --expect-visible 'textarea[aria-label="送信案の本文"]'` で画面を撮る。本人の送信案を書き換えない。
+
+- `show_page_on_stage` → 本物の成果物。`read_screen` で今の画面の `page_id` と各操作先の `id`・`fingerprint` を読む。`operate_screen` でその3つをそのまま渡す。結果の画面を読み、保存・送信はその表示で確認する。
+- `read_screen(query)` は現在描画された操作先を名前で絞る。仮想リストや別ページのデータは、そのサイトの検索欄で検索する。全体の台帳はない。
+- `show_fact_on_stage` → 分かっている数字・短い選択肢の札。確認番号の発話は、漢数字を表示用の数字へ直す。
+- `show_external_screen(source=browser|phone)` → 同じ操作セッションの写真。その後の browser/phone 操作でも更新する。
+- 試験: `python scripts/check_voice_common_controls.py` は実際の3サイトの画面を、試験用の通話状態と結び付けて5操作ずつ行い、`.data/voice-proof/operations.json`、動画、写真へ残す。外部送信・実データ書込・電話発信は禁止した試験。数値は操作命令から結果までで、音声認識とモデル判断時間を含まない。
 
 ## 落とし穴
 
-本人の送信案を試験で書き換えない。確認用の写しで編集・保存・再読み込みを確認し、送信経路は呼ばない。
+- 共通の操作はDOMの名前を使う。ラベルのない部品、canvasだけの操作、未描画のリスト項目、複雑なcontenteditableの編集にはそのまま使えない。新しい成果物はbuildスキルの声の操作条件に従う。
+- 未分類のボタンは承認が必要。重要な操作の名前と危険度を付けると、通常の移動と確認が要る操作を区別できる。
+- 別の画面・別の通話の操作先、更新されたボタン、無効な欄、上を覆われたボタンは押さない。結果が届かなければ再送せずに画面を読む。
+- 2端末で通話画面を開いても、短い貸出時間で選ばれた片方の画面だけを操作する。
+- 表示済みの外の画面は連続配信。固定幅のサイトや画面の向きの変更直後は、次の読み取りまで表示調整が必要な場合がある。Googleの追加認証や端末未接続があれば、その先を操作できるとは言わない。
+- 実通話の開始は本人の明示許可が必要。試験だけで「言い終わって1秒」を達成したと言わない。
 
 <!-- place_map:auto:start -->
 ## コードから（自動）
 
 `python scripts/place_map.py stamp voice-stage` が書き直す。手で直さない。
 
-- 見張るファイル: `frontend/src/app/voice-stage/page.tsx`, `frontend/src/components/voice/stage-message-editor.tsx`, `frontend/src/components/voice/voice-stage.tsx`
+- 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/app/voice-stage/page.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/stage-message-editor.tsx`, `frontend/src/components/voice/voice-stage.tsx`
 - ラベル: 「送信案の本文」
 
-<!-- place_map:files {"frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/voice/stage-message-editor.tsx": "fc6b037dcc", "frontend/src/components/voice/voice-stage.tsx": "4d2378c2cd"} -->
+<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/stage-message-editor.tsx": "fc6b037dcc", "frontend/src/components/voice/voice-stage.tsx": "4d2378c2cd"} -->
 <!-- place_map:auto:end -->
