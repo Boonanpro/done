@@ -129,8 +129,11 @@ const WORKFLOW_PRESETS = [
 
 export function ProductionWorkspace({
   roomId,
+  onContentChange,
 }: {
   roomId: string;
+  /** 開いている作品が替わった（null = ライブラリ）。エディターの窓の「ダンと制作」が部屋を替える */
+  onContentChange?: (contentId: string | null) => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [assets, setAssets] = useState<ProductionAsset[]>([]);
@@ -255,6 +258,48 @@ export function ProductionWorkspace({
     const timer = window.setInterval(() => void loadAll(), 4000);
     return () => window.clearInterval(timer);
   }, [hasProcessing, loadAll]);
+
+  const selectedContentId = selectedContent?.id ?? null;
+  useEffect(() => {
+    if (!booting) onContentChange?.(selectedContentId);
+  }, [booting, selectedContentId, onContentChange]);
+
+  // ライブラリを見ている間、素材と作品が変わったら（ダンが「ダンと制作」から足した時など）すぐ読み直す。
+  // 一覧そのもの（大きい部屋で1MB超）は変わった時だけ取り、毎回は数バイトの印だけを見る。
+  const libraryStampRef = useRef('');
+  useEffect(() => {
+    if (!roomId || selectedContentId) return;
+    let stopped = false;
+    const tick = async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch(`/api/v1/production-assets/library-stamp?room_id=${encodeURIComponent(roomId)}`, { credentials: 'include' });
+        if (!res.ok || stopped) return;
+        const stamp = JSON.stringify(await res.json());
+        if (libraryStampRef.current && libraryStampRef.current !== stamp) void loadAll();
+        libraryStampRef.current = stamp;
+      } catch {
+        /* 次の回で読み直す */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 3000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [roomId, selectedContentId, loadAll]);
+
+  // ライブラリを見ている時は、ダンに「今はライブラリ」と知らせる（作品の画面ではエディターが再生位置ごと知らせる）
+  useEffect(() => {
+    if (!roomId || booting || selectedContentId || !onContentChange) return;
+    void fetch('/api/v1/production-assets/editor-state', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room_id: roomId, screen: 'library' }),
+    }).catch(() => {});
+  }, [roomId, booting, selectedContentId, onContentChange]);
 
   const loadJobs = useCallback(async () => {
     if (!roomId || !selectedContent) {

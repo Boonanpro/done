@@ -4660,11 +4660,18 @@ def _auto_timeline_refs(room_id: str, explicit: list | None) -> list:
     if explicit:
         return list(explicit)
     try:
+        from app.services import editor_rooms as _er
         from app.services import timeline_live as _tl
 
+        info = _er.room_info(room_id)
+        if info:
+            # 作品の部屋（エディターで作品を開いた画面の「ダンと制作」）は、いつもその作品を直せる
+            if info.get("content_id"):
+                return [{"content_id": str(info["content_id"]), "room_id": info["asset_room_id"]}]
+            room_id = info["asset_room_id"]   # ライブラリの部屋: 本体の部屋のエディターの状態を見る
         st = _tl.editor_state(room_id, max_age_s=600.0)
         if st and st.get("content_id"):
-            return [{"content_id": str(st["content_id"])}]
+            return [{"content_id": str(st["content_id"]), "room_id": room_id}]
     except Exception:  # noqa: BLE001
         pass
     return []
