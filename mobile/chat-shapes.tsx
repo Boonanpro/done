@@ -454,6 +454,24 @@ function MapNode({ p }: { p: Record<string, unknown> }) {
   const height = Math.round(Math.min(320, Math.max(220, width * 0.72)));
   const view = width > 0 && places.length ? mapView(places, here, width, height, zoomDelta) : null;
   const labels = pinLabels(places.length);
+  // 札の置き場所は PC と同じ決め方: 右、重なるなら左、それも重なるなら番号だけ（＋−のボタンにも重ねない）
+  const placement = useMemo(() => {
+    if (!view) return [];
+    type B = { l: number; t: number; r: number; b: number };
+    const taken: B[] = [{ l: width - 46, t: 0, r: width, b: 80 }];
+    const hits = (a: B) => a.l < 2 || a.r > width - 2 || taken.some((q) => a.l < q.r && a.r > q.l && a.t < q.b && a.b > q.t);
+    return places.map((pl, i) => {
+      const at = view.points[i];
+      const w = Math.min(170, 38 + [...pl.label].length * 14);
+      const right = { l: at.left - 11, t: at.top - 14, r: at.left - 11 + w, b: at.top + 14 };
+      const left = { l: at.left + 11 - w, t: at.top - 14, r: at.left + 11, b: at.top + 14 };
+      const small = { l: at.left - 11, t: at.top - 14, r: at.left + 11, b: at.top + 14 };
+      const pick = labels && !hits(right) ? { flip: false, label: true, box: right }
+        : labels && !hits(left) ? { flip: true, label: true, box: left } : { flip: false, label: false, box: small };
+      taken.push(pick.box);
+      return pick;
+    });
+  }, [view, places, labels, width]);
   return (
     <Box>
       {str(p.title) ? <Text style={styles.question}>{str(p.title)}</Text> : null}
@@ -463,12 +481,13 @@ function MapNode({ p }: { p: Record<string, unknown> }) {
         {view ? places.map((pl, i) => {
           const at = view.points[i];
           const sel = point.selected === pl.label;
-          const flip = at.left > width * 0.6;
+          const flip = !!placement[i]?.flip;
+          const named = !!placement[i]?.label;
           return (
             <Pressable key={i} disabled={!point.press} onPress={() => point.press?.(pl.label)}
               style={[styles.pin, sel && styles.pinOn, flip ? { right: width - at.left - 11, flexDirection: 'row-reverse' } : { left: at.left - 11 }, { top: at.top - 13 }]}>
               <View style={styles.pinNo}><Text style={styles.pinNoText}>{i + 1}</Text></View>
-              {labels ? <Text numberOfLines={1} style={styles.pinText}>{pl.label}</Text> : null}
+              {named ? <Text numberOfLines={1} style={styles.pinText}>{pl.label}</Text> : null}
             </Pressable>
           );
         }) : null}
