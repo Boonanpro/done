@@ -3523,6 +3523,17 @@ export function VideoReviewEditor({
                   <MessageSquare className="h-4 w-4" />
                   <span className="hidden sm:inline">コメント</span>
                 </Button>
+                {onGenerateClip ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    title="再生位置にクリップを足す。右の欄で指示とモデルを決めると、そのクリップの長さの映像をAIで作れます"
+                    onClick={addAiClip}
+                  >
+                    + クリップ
+                  </Button>
+                ) : null}
                 <Button
                   variant={snapEnabled ? 'default' : 'outline'}
                   size="sm"
@@ -3559,17 +3570,6 @@ export function VideoReviewEditor({
                 >
                   + 音声段
                 </Button>
-                {onGenerateClip ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 px-2 text-xs"
-                    title="再生位置にクリップを足す。右の欄で指示とモデルを決めると、そのクリップの長さの映像をAIで作れます"
-                    onClick={addAiClip}
-                  >
-                    + クリップ
-                  </Button>
-                ) : null}
                 <Button
                   variant="outline"
                   size="sm"

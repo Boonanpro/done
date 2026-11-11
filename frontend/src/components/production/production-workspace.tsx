@@ -959,7 +959,8 @@ export function ProductionWorkspace({
           ) : (
             <ul className="px-2" aria-label="作品">
               {sortedContents.map((content) => {
-                const thumb = assets.find((asset) => content.asset_ids.includes(asset.id) && asset.thumbnail_url)?.thumbnail_url;
+                const cover = assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'video')
+                  || assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'image');
                 return (
                   <li key={content.id} className="group relative">
                     <button
@@ -968,7 +969,7 @@ export function ProductionWorkspace({
                       className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left hover:bg-muted"
                     >
                       <span className="flex h-9 w-14 shrink-0 items-center justify-center overflow-hidden rounded bg-muted">
-                        {thumb ? <img src={thumb} alt="" className="h-full w-full object-cover" /> : <Film className="h-4 w-4 text-muted-foreground" />}
+                        {cover ? <AssetThumb asset={cover} fallback={<Film className="h-4 w-4 text-muted-foreground" />} /> : <Film className="h-4 w-4 text-muted-foreground" />}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] font-medium">{content.title}</span>
@@ -1024,12 +1025,10 @@ export function ProductionWorkspace({
                             className="overflow-hidden rounded border border-border bg-background text-left hover:border-primary"
                           >
                             <span className="relative flex aspect-video items-center justify-center bg-muted">
-                              {asset.thumbnail_url ? (
-                                <img src={asset.thumbnail_url} alt="" className="h-full w-full object-cover" />
-                              ) : asset.status === 'processing' ? (
+                              {asset.status === 'processing' ? (
                                 <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
                               ) : (
-                                <folder.icon className="h-4 w-4 text-muted-foreground" />
+                                <AssetThumb asset={asset} fallback={<folder.icon className="h-4 w-4 text-muted-foreground" />} />
                               )}
                               {asset.kind === 'video' && asset.metadata?.duration ? (
                                 <span className="absolute bottom-0.5 right-0.5 rounded bg-black/70 px-1 text-[9px] text-white">{formatDuration(asset.metadata.duration)}</span>
@@ -1107,4 +1106,14 @@ const ASSET_FOLDERS: Array<{ key: string; label: string; icon: typeof Film; test
 function assetPreviewUrl(asset: ProductionAsset): string {
   if (asset.kind === 'video' && asset.proxy_url) return asset.proxy_url;
   return `/api/v1/production-assets/media?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}&variant=original`;
+}
+
+// 素材の小さな絵。サムネイルが無い動画は最初の方の1コマを、画像はその画像を（見えた時だけ）読む。
+function AssetThumb({ asset, fallback }: { asset: ProductionAsset; fallback: ReactNode }) {
+  if (asset.thumbnail_url) return <img src={asset.thumbnail_url} alt="" loading="lazy" className="h-full w-full object-cover" />;
+  if (asset.kind === 'image') return <img src={assetPreviewUrl(asset)} alt="" loading="lazy" className="h-full w-full object-cover" />;
+  if (asset.kind === 'video') {
+    return <video src={`${assetPreviewUrl(asset)}#t=1`} preload="metadata" muted playsInline className="pointer-events-none h-full w-full object-cover" />;
+  }
+  return <>{fallback}</>;
 }

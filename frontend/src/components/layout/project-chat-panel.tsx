@@ -3323,7 +3323,9 @@ export function ProjectChatPanel({ projectId, commandCenter = false, editorChat 
         ) : !hasAnyContent && !isActiveExecution ? (
           <div className="flex h-full flex-col items-center justify-center p-6">
             <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
-            <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
+            <p className="text-base text-muted-foreground md:text-[17px]">
+              {editorChat ? 'どんな動画を作りたいか、ここに書くか、上の「音声」で話してください。' : 'メッセージを送信して開始してください。'}
+            </p>
           </div>
         ) : (
           <ShapeAnswerProvider messages={messages} ownerId={ownerId} roomId={initialRoomId} submit={answerShapeInRoom} recheck={recheckAnswer}>
