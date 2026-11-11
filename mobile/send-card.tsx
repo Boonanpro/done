@@ -182,7 +182,7 @@ export function SendCard({ id, request }: { id: string; request: Request }) {
           onBlur={() => { focused.current = false; void load(); }}
           onChangeText={(t) => { setBody(t); dirtyRef.current = t !== loaded.current; setDirty(dirtyRef.current); }} />
       ) : (
-        <Text style={[st.body, st.bodyRead]} selectable numberOfLines={8}>{body}</Text>
+        <Text style={[st.body, st.bodyRead]} selectable>{body}</Text>
       )}
       {ad.attachments?.length ? (
         <View style={{ gap: 2 }}>{ad.attachments.map((f) => <Text key={f.url} style={st.muted}>📎 {f.name}</Text>)}</View>
