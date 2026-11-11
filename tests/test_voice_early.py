@@ -253,7 +253,7 @@ async def test_call_end_writes_one_decision_message_under_log_and_keeps_stage(mo
     await S._run('test','u','r','fake',True)
     assert len(sent)==2
     assert sent[0][2].startswith('📞 ダンと通話')
-    assert sent[1][2]=='メモリ32GBにする。\n\n図の記録'
+    assert sent[1][2]=='メモリ32GBにする。'
     assert datetime.fromisoformat(sent[1][3]['created_at'])-datetime.fromisoformat(sent[0][3]['created_at'])==timedelta(seconds=1)
 
 
@@ -304,12 +304,12 @@ async def test_merged_stage_survives_call_end_and_decision_extraction_failure(mo
             return json.dumps({'type':'session.closed'})
     monkeypatch.setattr(websockets, 'connect', lambda *a, **kw: Socket())
     await S._run('integration-call','test-user','integration-room','fixture',True)
-    assert len(sent) == 2 and sent[0][0].startswith('📞 ダンと通話')
-    assert sent[1][0].count('```openui-lang') == 1
-    assert ('メモリ32GBにする。' in sent[1][0]) is not summary_fails
-    assert 'icon: "doc"' in sent[1][0] and 'icon: "check"' in sent[1][0]
-    assert '前の通話' not in sent[1][0]
-    assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
+    assert len(sent) == (1 if summary_fails else 2)
+    assert sent[0][0].startswith('📞 ダンと通話')
+    assert all('```openui-lang' not in text and '通話中に出した画面' not in text for text, _ in sent)
+    if not summary_fails:
+        assert sent[1][0] == 'メモリ32GBにする。'
+        assert datetime.fromisoformat(sent[1][1]['created_at']) - datetime.fromisoformat(sent[0][1]['created_at']) == timedelta(seconds=1)
     state = V.read_state('integration-room')
     assert not state['active'] and state['version'] == 8 and V.for_room('integration-room') is None
 
@@ -381,7 +381,7 @@ async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypat
     # Model delay and enqueue delay are independent; neither is wrapped in 30s wait_for.
     await asyncio.sleep(.02);assert not saved and not tasks
     model_release.set();await entered.wait()
-    assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' in saved[0][0][2]
+    assert len(saved)==1 and 'メモリ32GB' in saved[0][0][2] and '```openui-lang' not in saved[0][0][2]
     assert len(tasks)==1
     release.set();await finish
     # everything left by one call goes as ONE piece of work (2026-10-27: three jobs queued on the phone)
@@ -394,6 +394,35 @@ async def test_slow_handoff_cannot_hold_summary_or_drop_later_requests(monkeypat
     assert str(paths[0]) in tasks[0]['task'] and len(tasks[0]['task'])<=2800
     assert '同じ条件への有効な承認が確認できたら' in tasks[0]['task']
     assert '候補選択・予算指定だけから承認を作らない' in tasks[0]['task']
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('own,fail', [(True, False), (True, True), (False, False)])
+async def test_call_end_does_not_post_shown_screens(monkeypatch, tmp_path, own, fail):
+    """Shown screens must not become chat posts, even on extraction failure."""
+    from app.services import voice_stage as V
+    from app.services.chat_service import ChatService
+    from datetime import timezone
+    monkeypatch.setattr(V, 'ROOT', tmp_path / 'stage')
+    saved = []
+    monkeypatch.setattr(ChatService, '__init__', lambda self: None)
+    async def write(self, *args, **kwargs):
+        saved.append(args[2])
+    monkeypatch.setattr(ChatService, 'send_message', write)
+    async def after(*args, **kwargs):
+        if fail:
+            raise RuntimeError('extraction unavailable')
+        await kwargs['on_decisions']()
+        return []
+    monkeypatch.setattr(S, 'after_call', after)
+    dialogue = S.Dialogue()
+    stage = V.Stage('screen-recap-test', 'test-session', dialogue, lambda *a, **k: None)
+    stage._apply('料金', 'root = Stat("料金", 1000, "円")')
+    assert V.read_state(stage.room_id)['active']
+    stage.close()
+    await S.finish_call('u', stage.room_id, dialogue, datetime.now(timezone.utc), own, stage, lambda *a, **k: None)
+    assert not V.read_state(stage.room_id)['active']
+    assert saved == []
+
 
 @pytest.mark.asyncio
 async def test_socket_cancellation_keeps_post_call_owner_alive(monkeypatch):

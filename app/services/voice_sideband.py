@@ -921,19 +921,18 @@ async def finish_call(user_id, room_id, dialogue, began, own, stage, record):
     decisions, saved = [], False
     async def save_summary():
         nonlocal saved
-        if saved or not (decisions or (stage is not None and stage.scenes)):
+        if saved or not decisions:
             return
         from app.services.chat_service import ChatService
         from uuid import uuid5, NAMESPACE_URL
-        parts = ['\n\n'.join(decisions)] if decisions else []
-        if stage is not None and stage.scenes: parts.append(stage.summary())
-        # Idempotent if a save response was lost; only one combined record.
+        # The owner does not want shown screens reposted after a call (2026-11-11).
+        # Idempotent if a save response was lost; only the decisions are posted.
         identity = f'voice-summary:{user_id}:{room_id}:{began.isoformat()}'
-        await ChatService().send_message(room_id, user_id, '\n\n'.join(parts), sender_type='ai',
+        await ChatService().send_message(room_id, user_id, '\n\n'.join(decisions), sender_type='ai',
             message_id=str(uuid5(NAMESPACE_URL, identity)),
             created_at=datetime.fromtimestamp(began.timestamp() + 1, timezone.utc).isoformat())
         saved = True
-        record('stage_recorded', scenes=len(stage.scenes) if stage is not None else 0, decisions=len(decisions))
+        record('decisions_recorded', decisions=len(decisions))
     try:
         if own:
             left = await after_call(user_id, room_id, dialogue.history, began.isoformat(),
@@ -942,7 +941,6 @@ async def finish_call(user_id, room_id, dialogue, began, own, stage, record):
     except Exception:
         logger.exception('after-call check failed room=%s', room_id)
     finally:
-        # Extraction failure still preserves the diagram; slow execute does not
-        # hold the summary because on_decisions already saved it before enqueue.
+        # Slow execute does not hold decisions: on_decisions saves before enqueue.
         try: await save_summary()
-        except Exception: logger.exception('stage record not written room=%s', room_id)
+        except Exception: logger.exception('decisions not written room=%s', room_id)
