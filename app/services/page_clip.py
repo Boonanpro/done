@@ -52,7 +52,12 @@ CLIP_JS = r"""
   if (!el) return null;
   // grow a one-line hit to its paragraph-sized block so the crop has context
   while (el.parentElement && el.getBoundingClientRect().height < 60 && el.parentElement !== document.body
-         && el.parentElement.getBoundingClientRect().height < 360) el = el.parentElement;
+         && el.parentElement.getBoundingClientRect().height < 260) el = el.parentElement;
+  // only the block is photographed: everything beside it (menus, the next column, headers pinned to the screen) is
+  // hidden, so a crop of a page built for a PC does not carry pieces of other parts
+  for (const n of document.querySelectorAll('body *')) {
+    if (!n.contains(el) && !el.contains(n)) n.style.visibility = 'hidden';
+  }
   el.scrollIntoView({block: 'center'});
   let first = null;
   const strokes = [];
@@ -72,31 +77,52 @@ CLIP_JS = r"""
           pointerEvents: 'none', borderRadius: '2px', mixBlendMode: 'multiply'});
         document.body.appendChild(d);
         strokes.push(m);
-        if (!first) first = {y: b.top + scrollY, h: b.height};
+        if (!first) first = {y: b.top + scrollY, h: b.height, right: b.right + scrollX};
       }
       break;
     }
   }
   const b = el.getBoundingClientRect();
   const box = {x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height};
-  if (first && box.h > 320) { box.y = Math.max(box.y, first.y - 120); box.h = 300; }
+  // across, only as wide as the words in it (a table row of a page built for a PC is mostly empty)
+  const cr = document.createRange(); cr.selectNodeContents(el);
+  const t = cr.getBoundingClientRect();
+  if (t.width > 20 && t.width < b.width - 40) { box.x = Math.max(b.left, t.left - 14) + scrollX; box.w = Math.min(b.right, t.right + 14) + scrollX - box.x; }
+  // one line (a row of a table: 院長 ... 仲江 政史 ... ): end just after the marked words, so the words come out large
+  if (first && box.h < 70 && first.right + 24 < box.x + box.w) box.w = first.right + 24 - box.x;
+  if (first && box.h > 320) {
+    // a long block: five lines around the stroke, cut on the lines (not through them)
+    const cs = getComputedStyle(el);
+    const fs = parseFloat(cs.fontSize) || 16;
+    const lh = parseFloat(cs.lineHeight) || fs * 1.6;
+    const top0 = box.y + (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.borderTopWidth) || 0);
+    const k = Math.max(0, Math.floor((first.y + first.h / 2 - top0) / lh));
+    const y = top0 + Math.max(0, k - 2) * lh;
+    box.h = Math.min(5 * lh, box.y + box.h - y); box.y = y;
+  }
   return {box, marked: strokes, page_width: document.documentElement.scrollWidth};
 }
 """
 
 PHOTO_JS = r"""
 () => {
-  const og = document.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]');
+  // the page's own photo of the person, shop or product: the largest picture near the top that is not a logo or an
+  // icon (small sites give their logo as og:image: Personal Care's was a 512x512 mark), else og:image if it is not one
+  const logo = /logo|icon|favicon|sprite|cropped-|banner|btn|button|line_|instagram|twitter|facebook|youtube/i;
   const abs = (u) => { try { return new URL(u, location.href).href; } catch { return null; } };
-  if (og && og.content) return abs(og.content);
   let best = null, area = 0;
   for (const img of document.images) {
     const r = img.getBoundingClientRect();
-    if (r.top + scrollY > 2400 || r.width < 120 || r.height < 90) continue;
+    const src = img.currentSrc || img.src;
+    if (!src || logo.test(src) || logo.test(img.alt || '') || r.top + scrollY > 3000 || r.width < 160 || r.height < 110) continue;
+    const ratio = r.width / r.height;
+    if (ratio > 4 || ratio < 0.4) continue;
     const a = r.width * r.height;
-    if (a > area && img.currentSrc) { best = img.currentSrc; area = a; }
+    if (a > area) { best = src; area = a; }
   }
-  return best && abs(best);
+  if (best) return abs(best);
+  const og = document.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]');
+  return og && og.content && !logo.test(og.content) ? abs(og.content) : null;
 }
 """
 
@@ -143,10 +169,10 @@ async def clip(url: str, find: str = '', mark=None, photo: bool = False) -> dict
                 else:
                     await page.wait_for_timeout(200)
                     b, pw = found['box'], found['page_width']
-                    x0 = 0 if pw <= WIDTH + 4 else max(0, b['x'] - 12)
-                    w = WIDTH if pw <= WIDTH + 4 else min(pw - x0, max(b['w'] + 24, 360))
-                    top = max(0, b['y'] - 24)
-                    png = await page.screenshot(clip={'x': x0, 'y': top, 'width': w, 'height': min(b['h'] + 48, 900)}, full_page=True)
+                    x0 = max(0, b['x'] - 6)
+                    w = min(pw - x0, b['w'] + 12)
+                    top = max(0, b['y'] - 12)
+                    png = await page.screenshot(clip={'x': x0, 'y': top, 'width': w, 'height': min(b['h'] + 24, 900)}, full_page=True)
                     out['crop'] = _save(png, 'png')
                     out['marked'] = found['marked']
                     missing = [m for m in marks if m not in found['marked']]

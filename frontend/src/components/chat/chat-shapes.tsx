@@ -528,7 +528,7 @@ const ChartView: ComponentRenderer<ChartInput> = ({ props }) => {
 /** 子の部品の名前（lang-core の要素なら typeName） */
 const childName = (c: unknown): string => (c && typeof c === 'object' && typeof (c as { typeName?: unknown }).typeName === 'string' ? (c as { typeName: string }).typeName : '');
 /** 横並びの中で幅を分け合う部品（カード・縦並び・表・グラフ）。ほかの部品（数字・札・ボタン）は中身の幅のまま */
-const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow']);
+const WIDE = new Set(['Card', 'Column', 'Compare', 'Chart', 'Steps', 'Facts', 'Flow', 'Map', 'Item', 'Quote', 'Sources', 'Frames', 'BeforeAfter']);
 
 function ChildList({ items, row = false }: { items: unknown; row?: boolean }) {
   const renderNode = useRenderNode();
@@ -768,6 +768,8 @@ function PointNote({ point }: { point: PointState }) {
   );
 }
 
+const MARK_STYLE = { background: 'linear-gradient(transparent 50%, rgba(255, 200, 0, .55) 50%, rgba(255, 200, 0, .55) 92%, transparent 92%)', color: 'inherit' } as const;
+
 /** 蛍光ペンの帯: 文の中の mark の言葉に（最初の1か所ずつ。言葉の無い所には引かない） */
 function Marked({ text, marks }: { text: string; marks?: string[] | null }) {
   const words = (marks || []).map((m) => m.trim()).filter((m) => m && text.includes(m));
@@ -780,7 +782,7 @@ function Marked({ text, marks }: { text: string; marks?: string[] | null }) {
     for (const w of words) { const i = rest.indexOf(w); if (i >= 0 && (best < 0 || i < best)) { best = i; word = w; } }
     if (best < 0) break;
     pieces.push(rest.slice(0, best));
-    pieces.push(<mark key={k++} className="rounded-sm bg-[linear-gradient(transparent_42%,rgba(255,214,10,.6)_42%,rgba(255,214,10,.6)_94%,transparent_94%)] px-0.5 text-inherit" data-mark>{word}</mark>);
+    pieces.push(<mark key={k++} className="rounded-sm px-0.5 text-inherit" style={MARK_STYLE} data-mark>{word}</mark>);
     rest = rest.slice(best + word.length);
     words.splice(words.indexOf(word), 1);
   }
@@ -794,7 +796,7 @@ function SourceLine({ url, label }: { url?: string | null; label: string }) {
   const { complete } = useContext(ShapeMetaContext);
   const safe = complete && url ? safeLinkUrl(url) : null;
   const host = hostOf(safe);
-  const body = <><LinkIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />{host ? <span className="font-medium text-foreground/80">{host}</span> : null}<span className="truncate">{label}</span></>;
+  const body = <><LinkIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />{host ? <span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">{host}</span> : null}<span className="min-w-0 truncate">{label}</span></>;
   const cls = 'flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground';
   return safe
     ? <a href={safe} onClick={(e) => openSignedIn(e, safe)} target="_blank" rel="noopener noreferrer" className={`${cls} hover:underline`} data-source>{body}</a>
@@ -814,7 +816,25 @@ const MapViewPart: ComponentRenderer<MapInput> = ({ props }) => {
   const height = Math.round(Math.min(340, Math.max(220, width * 0.72)));
   const view = width > 0 && places.length ? mapView(places, here, width, height, zoomDelta, shift) : null;
   const labels = pinLabels(places.length);
-  const showList = places.some((p) => p.sub) || !labels;
+  // ピンの札の置き場所: 右に出して、ほかの札・地図の端・＋−のボタンに重なるなら左、それも重なるなら番号だけ
+  const placement = useMemo(() => {
+    if (!view) return [];
+    type Box = { l: number; t: number; r: number; b: number };
+    const taken: Box[] = [{ l: width - 46, t: 0, r: width, b: 76 }];
+    const hits = (a: Box) => a.l < 2 || a.r > width - 2 || taken.some((q) => a.l < q.r && a.r > q.l && a.t < q.b && a.b > q.t);
+    return places.map((p, i) => {
+      const at = view.points[i];
+      const w = Math.min(160, 36 + [...p.label].length * 13.5);
+      const right = { l: at.left - 11, t: at.top - 13, r: at.left - 11 + w, b: at.top + 13 };
+      const left = { l: at.left + 11 - w, t: at.top - 13, r: at.left + 11, b: at.top + 13 };
+      const small = { l: at.left - 11, t: at.top - 13, r: at.left + 11, b: at.top + 13 };
+      const pick = labels && !hits(right) ? { flip: false, label: true, box: right }
+        : labels && !hits(left) ? { flip: true, label: true, box: left } : { flip: false, label: false, box: small };
+      taken.push(pick.box);
+      return pick;
+    });
+  }, [view, places, labels, width]);
+  const showList = places.some((p) => p.sub) || !labels || placement.some((x) => !x.label);
   const zoomBy = (d: number) => { setZoomDelta((z) => z + d); setShift((s) => ({ x: s.x * (d > 0 ? 2 : 0.5), y: s.y * (d > 0 ? 2 : 0.5) })); };
   return (
     <div className={box} data-shape="Map">
@@ -847,17 +867,18 @@ const MapViewPart: ComponentRenderer<MapInput> = ({ props }) => {
             {places.map((p, i) => {
               const at = view.points[i];
               const sel = point.selected === p.label;
-              const flip = at.left > width * 0.62;
+              const flip = !!placement[i]?.flip;
+              const named = !!placement[i]?.label;
               return (
                 <button
                   key={i} type="button" disabled={!point.press}
                   onClick={() => { if (!drag.current?.moved) point.press?.(p.label); }}
-                  className={`absolute z-20 flex -translate-y-1/2 items-center gap-1 rounded-full border bg-white py-0.5 text-[13px] font-medium text-neutral-900 shadow-sm transition ${flip ? '-translate-x-full flex-row-reverse pl-2 pr-0.5' : 'pl-0.5 pr-2'} ${labels ? '' : '!p-0.5'} ${sel ? 'border-amber-400 ring-[3px] ring-amber-300/80' : 'border-neutral-900/20'} disabled:cursor-default`}
+                  className={`absolute z-20 flex -translate-y-1/2 items-center gap-1 rounded-full border bg-white py-0.5 text-[13px] font-medium text-neutral-900 shadow-sm transition ${flip ? '-translate-x-full flex-row-reverse pl-2 pr-0.5' : 'pl-0.5 pr-2'} ${named ? '' : '!p-0.5'} ${sel ? 'border-amber-400 ring-[3px] ring-amber-300/80' : 'border-neutral-900/20'} disabled:cursor-default`}
                   style={{ left: at.left + (flip ? 11 : -11), top: at.top }}
                   aria-label={`${i + 1} ${p.label}`} data-map-pin={i + 1}
                 >
                   <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#1f4e79] text-[11px] text-white tabular-nums">{i + 1}</span>
-                  {labels ? <span className="max-w-[9rem] truncate">{p.label}</span> : null}
+                  {named ? <span className="max-w-[9rem] truncate">{p.label}</span> : null}
                 </button>
               );
             })}
@@ -923,12 +944,24 @@ const ItemView: ComponentRenderer<ItemInput> = ({ props }) => {
 
 const QuoteView: ComponentRenderer<QuoteInput> = ({ props }) => {
   const box = useBox('flex flex-col gap-2');
+  const { complete } = useContext(ShapeMetaContext);
+  const onClient = useOnClient();
+  const [broken, setBroken] = useState(false);
+  const url = complete && onClient ? safeImageUrl(props.image, siteHost()) : null;
+  const img = url && !broken ? url : null;
   return (
     <figure className={box} data-shape="Quote">
-      <ShapeImage src={props.image} alt={props.source} className="!object-contain" />
-      <blockquote className="border-l-[3px] border-foreground/15 pl-3 text-[15px] leading-relaxed">
-        <Marked text={props.text || ''} marks={props.mark} />
-      </blockquote>
+      {/* ページの切り抜きがあればそれ（本物のページ。帯は切り抜きの中に引いてある）、無ければ文を引いて帯を引く。両方は出さない */}
+      {img ? (
+        <div className="overflow-hidden rounded-lg border border-border bg-white" data-quote-image>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={img} alt={props.text} loading="lazy" referrerPolicy="no-referrer" crossOrigin={img.startsWith('/') ? undefined : 'anonymous'} onError={() => setBroken(true)} className="block h-auto w-full" />
+        </div>
+      ) : (
+        <blockquote className="border-l-[3px] border-foreground/20 pl-3 text-[15px] leading-relaxed">
+          <Marked text={props.text || ''} marks={props.mark} />
+        </blockquote>
+      )}
       <figcaption><SourceLine url={props.url} label={props.source} /></figcaption>
     </figure>
   );
