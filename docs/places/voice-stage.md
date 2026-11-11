@@ -1,9 +1,13 @@
 ---
 place: voice-stage
 name: 通話中の画面
+open: /voice-stage
+ready: '[data-stage-card]'
 reach: スマホの通話画面、またはPCの通話パネル。電話を発信しない確認は scripts/check_voice_common_controls.py で通話画面の通信だけを試験用に差し替える
 watches:
   - frontend/src/components/voice/voice-stage.tsx
+  - frontend/src/components/voice/stage-message-editor.tsx
+  - frontend/src/app/voice-stage/page.tsx
   - frontend/src/components/artifacts/voice-controls.ts
   - frontend/src/components/artifacts/voice-controls-runtime.tsx
   - frontend/src/app/artifacts/layout.tsx
@@ -11,13 +15,15 @@ speak: |
   - 通話中は、成果物の本物の画面、番号や選択肢の大きな札、説明の図が出る。
   - 成果物の操作先を声で指定すると、画面のボタンや欄を光らせて操作する。送信などは読み上げと本人の承認を待つ。
   - 外のブラウザやスマホは操作中の実画面を連続表示する。ブラウザは通話画面の幅に合わせて並び直す。映像を指で押す操作には未対応。
-fingerprint: a6e1a24d111a7717
-described: fb1c9554d1744cb4
+fingerprint: fd6b8ce9a137539a
+described: e6d193750d4fcc9c
 last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを画面の幅に合わせる表示修正。操作方法は同じ。"
 ---
 # 通話中の画面
 
 ## 中にある物
+
+- 送信案の本文をその場で直接編集し、「保存」で同じ送信案に反映する。保存失敗時も入力は残り、再試行できる。開き直すと保存済みの本文を表示する。送信の操作は含まない。
 
 - 本物の成果物。画面上の名前のあるボタン、リンク、入力欄、選択欄を共通の仕組みで操作する。
 - 番号・日時・金額・短い選択肢の札。数字を大きく表示し、次にすることは1つに絞る。
@@ -29,6 +35,8 @@ last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを�
 スマホ・PCからダンと通話し、「開発室を出して」などと頼む。同じ成果物の画面が開く。
 
 ## 道具で動かす
+
+- 送信案の確認: `python scripts/check_voice_draft_editor.py`。確認用アカウントの専用部屋・送信案を使い、スマホ幅の長文LINEとPC幅のメールで編集・保存・再読み込み・保存失敗後の再試行を確認する。電話は発信しない。`place_shot.py voice-stage --path "/voice-stage?room=<確認用部屋ID>" --phone --expect-visible 'textarea[aria-label="送信案の本文"]'` で画面を撮る。本人の送信案を書き換えない。
 
 - `show_page_on_stage` → 本物の成果物。`read_screen` で今の画面の `page_id` と各操作先の `id`・`fingerprint` を読む。`operate_screen` でその3つをそのまま渡す。結果の画面を読み、保存・送信はその表示で確認する。
 - `read_screen(query)` は現在描画された操作先を名前で絞る。仮想リストや別ページのデータは、そのサイトの検索欄で検索する。全体の台帳はない。
@@ -50,7 +58,8 @@ last_review: "2026-10-31 説明は変えない: 通話中の実ブラウザを�
 
 `python scripts/place_map.py stamp voice-stage` が書き直す。手で直さない。
 
-- 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/voice-stage.tsx`
+- 見張るファイル: `frontend/src/app/artifacts/layout.tsx`, `frontend/src/app/voice-stage/page.tsx`, `frontend/src/components/artifacts/voice-controls-runtime.tsx`, `frontend/src/components/artifacts/voice-controls.ts`, `frontend/src/components/voice/stage-message-editor.tsx`, `frontend/src/components/voice/voice-stage.tsx`
+- ラベル: 「送信案の本文」
 
-<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/voice-stage.tsx": "396afcf6e9"} -->
+<!-- place_map:files {"frontend/src/app/artifacts/layout.tsx": "7b34687887", "frontend/src/app/voice-stage/page.tsx": "79db203460", "frontend/src/components/artifacts/voice-controls-runtime.tsx": "9d91ec619c", "frontend/src/components/artifacts/voice-controls.ts": "7441aa719a", "frontend/src/components/voice/stage-message-editor.tsx": "fc6b037dcc", "frontend/src/components/voice/voice-stage.tsx": "4d2378c2cd"} -->
 <!-- place_map:auto:end -->

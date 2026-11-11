@@ -25,6 +25,7 @@
  * Used by the PC voice panel (voice-session.tsx) and, as its own page, by the phone app's WebView (app/voice-stage/page.tsx).
  */
 import { readScreenFrames } from './screen-stream';
+import { useStageDraft } from './stage-message-editor';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { ScreenCommand } from '@/components/artifacts/voice-controls';
@@ -248,7 +249,7 @@ export function VoiceStage({ roomId, active, className = '', onShown, fill = fal
           ) : scene.kind === 'program' ? (
             <ShapeBlock code={scene.program} complete live messageId={null} part="stage" renderFallback={() => null} />
           ) : scene.kind === 'card' ? (
-            <StageMessageCard card={scene.card} />
+            <StageMessageCard key={scene.card.proposal_id} card={scene.card} />
           ) : scene.kind === 'doc' && stageFramePath(scene.doc.page) ? (
             <StageFrame viewId={state?.view_id || ""} roomId={roomId} sessionId={state?.session_id || ""} path={stageFramePath(scene.doc.page)!} command={state?.command} fill={fill} title={scene.doc.label || '成果物の画面'}>
               <StageDocStatus doc={scene.doc} />
@@ -335,7 +336,8 @@ const CHANNEL_LABEL: Record<string, string> = {
 
 /** The message draft as the call's screen shows it: who it goes to, the subject, the body line by line. A revision
  * (by voice) changes the lines in place and lights the changed ones for a moment; the whole card is not redrawn. */
-export function StageMessageCard({ card }: { card: StageCard }) {
+export function StageMessageCard({ card: snapshot }: { card: StageCard }) {
+  const { current: card, editor } = useStageDraft(snapshot);
   const lines = useMemo(() => (card.body || '').split('\n'), [card.body]);
   // the lines that differ from the version shown before (a revision by voice): they replay a short highlight, keyed on
   // the revision so the same line lights again when it changes again
@@ -358,14 +360,14 @@ export function StageMessageCard({ card }: { card: StageCard }) {
         <span className={`ml-auto rounded-md border px-1.5 py-0.5 text-[11px] ${status.cls}`}>{status.text}</span>
       </div>
       {card.subject ? <div className="mb-1.5 truncate text-[13px] text-foreground/90">{card.subject}</div> : null}
-      <div className="whitespace-pre-wrap break-words leading-6" data-stage-card-body>
+      {editor || <div className="whitespace-pre-wrap break-words leading-6" data-stage-card-body>
         {lines.map((line, i) => (
           <div key={changed.has(i) ? `${i}-${card.revision || 1}` : i} className="-mx-1 rounded px-1"
                style={changed.has(i) ? { animation: 'stage-line-flash 1.8s ease-out' } : undefined} data-stage-line={changed.has(i) ? 'changed' : undefined}>
             {line || '\u00a0'}
           </div>
         ))}
-      </div>
+      </div>}
     </div>
   );
 }
