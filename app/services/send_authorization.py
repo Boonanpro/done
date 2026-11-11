@@ -9,7 +9,8 @@
 - ダンが本人の言葉をそのまま `approval` に写し、それが「この部屋の本人の最新の発言」の中にあり、
   送る・返す・投稿する等の、その操作を名指した言葉を含む。
   さらに、その発言より前からあった下書きを、発言の後に誰かが書き換えていない。
-- 本人が見張り（watch）の note に「承認不要」等で前もって任せた定期の送信で、approval がその note にある。
+- 本人が前もって任せた予約・定期の送信（「明日9時に送っておいて」「承認不要・報告のみ」）で、その本人の言葉が
+  この部屋の見張り（watch）の note に写してあり、approval がそれと同じ。
 - 外部窓口（collab）で本人が自動返信を許した（autonomy=auto）窓口への送信。範囲の判断はモデル側。
 
 本人がカードの送信ボタンを押す経路（sent_by="user"）はここを通らない。
@@ -73,7 +74,7 @@ def check(
     # 前もって任された定期の送信（見張りの note）
     for note in watch_notes or []:
         n = _norm(note)
-        if quote in n and _STANDING_WORDS.search(note or ""):
+        if quote in n and (_STANDING_WORDS.search(note or "") or _EXEC_WORDS.search(approval)):
             return {"ok": True, "basis": "watch_note", "reason": "見張りで前もって任された送信"}
 
     msg_text = (latest_owner_message or {}).get("content") or ""

@@ -718,7 +718,7 @@ COMPOSE_MESSAGE_TOOL = {
             "from_name": {"type": "string", "description": "email用: 差出人名（省略時は既定の会社名）"},
             "proposal_id": {"type": "string", "description": "send / mark_sent / discard 用: 対象の送信案ID"},
             "approved": {"type": "boolean", "description": "propose用: 本人の最新の発言が、この送信を名指して許している時だけ true（approval も渡す）。カードを出さず、続けて send する"},
-            "approval": {"type": "string", "description": "send と approved=true の時に必須: この送信を許した本人の最新の発言から、その言葉をそのまま写す（例:「それで送って」）。「進めて」「いいよ」など送ることを名指していない言葉、前の発言、承認の後に中身が変わった下書きでは送れない"},
+            "approval": {"type": "string", "description": "send と approved=true の時に必須: この送信を許した本人の最新の発言から、その言葉をそのまま写す（例:「それで送って」）。「進めて」「いいよ」など送ることを名指していない言葉、前の発言、承認の後に中身が変わった下書きでは送れない。予約・定期の送信（「明日9時に送っておいて」）は、見張りを立てる時に本人の言葉を note にそのまま写しておき、その言葉を渡す"},
             "note": {"type": "string", "description": "mark_sent用: どう送ったか（任意）"},
         },
         "required": ["action"],

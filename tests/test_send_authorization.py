@@ -74,3 +74,9 @@ def test_collab_auto_policy():
 
 def test_empty_approval_refused():
     assert not check(approval="", latest_owner_message=msg("送って"), watch_notes=[], proposal=prop())["ok"]
+
+
+def test_scheduled_send_with_owner_words_in_watch_note():
+    note = "明日の朝9時に吉田さんへ請求書メールを送る。本人の言葉「明日の朝9時に吉田さんへ送っておいて」"
+    assert check(approval="明日の朝9時に吉田さんへ送っておいて", latest_owner_message=msg("おはよう"),
+                 watch_notes=[note], proposal=prop())["ok"]
