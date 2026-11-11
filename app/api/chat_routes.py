@@ -4180,6 +4180,7 @@ async def respond_to_proposal(
             current_user.user_id,
             request.action,
             request.edited_content,
+            choice=request.choice,
         )
         return ProposalResponse(**proposal)
     except ValueError as e:

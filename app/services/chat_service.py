@@ -1920,6 +1920,7 @@ class ChatService:
         user_id: str,
         action: str,
         edited_content: Optional[str] = None,
+        choice: Optional[str] = None,
     ) -> dict:
         """
         提案に対応（承認/却下/編集）
@@ -1950,6 +1951,11 @@ class ChatService:
         
         if action == "edit" and edited_content:
             update_data["content"] = edited_content
+
+        # 確認カードは、どの候補で承認したかをカードに残す（答えた後に見返しても分かるように）
+        action_data = proposal.get("action_data") or {}
+        if choice and action_data.get("kind") == "confirm" and choice in (action_data.get("choices") or []):
+            update_data["action_data"] = {**action_data, "chosen": choice}
         
         result = self.supabase.table("dan_proposals").update(update_data).eq("id", proposal_id).execute()
         
