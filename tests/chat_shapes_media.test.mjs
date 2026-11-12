@@ -5,7 +5,7 @@
 // 実行: node --experimental-strip-types --test tests/chat_shapes_media.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bareDanMedia, chatImageUrl, danFileMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '../frontend/src/lib/chat-media.ts';
+import { bareDanMedia, chatImageUrl, danFileMedia, earlierTurnMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo } from '../frontend/src/lib/chat-media.ts';
 import { mapOutsideTopFences, siteFilePath, splitTopFences, topLevelFences } from '../frontend/src/lib/chat-shapes/plain.ts';
 import { splitShapeSegments } from '../frontend/src/lib/chat-shapes/split.ts';
 import * as app from '../mobile/chat-shapes-plain.ts';
@@ -233,4 +233,21 @@ test('途中の文章から拾う印に、ダンの画像・動画を指すリ�
   ]);
   // 部品（```openui-lang）の中のリンクも拾わない
   assert.deepEqual(mediaTags(fence('root = Choice("[動画](' + v + ')", ["a"])'), PROD), []);
+});
+
+// 2026-11-12 本人「何でさっきから全く同じ動画2本出すん」: 返事を書いた後に関所で書き直すと、下書きの動画と最後の返事の
+// 動画が2本並んでいた（部屋 a588ca6f の 07:19・08:45 は同じ動画、06:09 は声を直す前の版）
+test('書き直した返事: 最後の返事に動画があれば、下書きの動画は上に出さない', () => {
+  const v3 = '[添付動画: pin_cut_v3.mp4 (/api/v1/files/3e79952e-cdb6-4ae3-9ed9-3767a5dd901f.mp4)]';
+  const draft = '**コマ数について**\n…\n' + v3 + '\n**ポルノブロッカー**…';
+  const final = '**コマ数について**\n…（書き直し）\n' + v3 + '\n…';
+  assert.deepEqual(earlierTurnMedia([draft], final, PROD), []);
+  const older = '[添付動画: pin_cut_v1.mp4 (/api/v1/files/2ccdf1ed-cd3d-4c7e-a8cb-f6d95c123ab3.mp4)]';
+  const v1g = '[添付動画: pin_cut_v1g.mp4 (/api/v1/files/1246cca1-66d2-4864-85f5-50a0fab46e41.mp4)]';
+  assert.deepEqual(earlierTurnMedia(['音も映像も…\n' + older], '音も映像も…\n' + v1g, PROD), []);
+});
+
+test('最後の返事に添付が無い時は、途中で貼った物を1回ずつ出す', () => {
+  const img = '[添付画像: /api/v1/files/a.png]';
+  assert.deepEqual(earlierTurnMedia(['途中\n' + img, '下書き\n' + img], 'できました。', PROD), [img]);
 });

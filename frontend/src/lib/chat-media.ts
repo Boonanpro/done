@@ -157,3 +157,14 @@ export function mediaTags(text: string, host: string | null = pageHost()): strin
     return bare ? [bare.head] : [];
   })));
 }
+
+/**
+ * 返事が出て止まった吹き出しで、最後の返事より前の文章から上に出す画像・動画・ファイルの印。
+ * 最後の返事に印が1つでもあれば何も出さない。前の文章に印があるのは、返事を書いた後に関所に止められて書き直した時の
+ * 下書きがほとんどで、同じ動画（や直す前の版）が最後の返事の動画と2本並んでいた（2026-11-12 本人「何で全く同じ動画2本出すん」）。
+ * 最後の返事に印が無い時だけ、途中で貼った物を同じ印は1回だけ出す（アプリ mobile/App.tsx AiTurnBlocks も同じ決まり）。
+ */
+export function earlierTurnMedia(earlierTexts: string[], finalText: string, host: string | null = pageHost()): string[] {
+  if (mediaTags(finalText, host).length > 0) return [];
+  return [...new Set(earlierTexts.flatMap((t) => mediaTags(t, host)))];
+}

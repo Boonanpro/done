@@ -1056,14 +1056,17 @@ function AiTurnBlocks({
   if (settled && lastTextIndex >= 0) {
     // 回答が出て止まった後: 途中の宣言は作業ログに畳み、見えるのは最後の文章と、途中で出したファイル・画像・動画だけ。
     const log: TurnBlock[] = [];
-    const media: string[] = [];
+    const earlier: string[] = [];
     grouped.forEach((g, i) => {
       if (i === lastTextIndex) return;
       if (g.kind === 'tools') { log.push(...g.items); return; }
       log.push({ type: 'reasoning', text: g.text } as TurnBlock);
-      media.push(...mediaTags(g.text));
+      earlier.push(...mediaTags(g.text));
     });
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
+    // 途中の文章の添付は、最後の返事に添付が無い時だけ、同じ物は1回だけ出す（書き直す前の下書きの動画が2本並んでいた。
+    // PC の frontend/src/lib/chat-media.ts earlierTurnMedia と同じ決まり）
+    const media = mediaTags(final).length > 0 ? [] : [...new Set(earlier)];
     return (
       <View>
         {SHOW_WORK && log.length > 0 ? <TurnToolGroup items={log} defaultOpen={false} /> : null}
