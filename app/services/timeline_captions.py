@@ -277,6 +277,9 @@ def auto_captions(sequence: dict[str, Any], assets: dict[str, dict[str, Any]], w
     replace=True removes existing captions inside the covered ranges first."""
     if not segments:
         return {"ok": False, "error": "segments required: [{t0,t1,text}]"}
+    font_err = tc.caption_font_error(style)
+    if font_err:
+        return {"ok": False, "error": font_err}
     lo = min(_f(s.get("t0")) for s in segments)
     hi = max(_f(s.get("t1")) for s in segments)
     supplied = words is not None

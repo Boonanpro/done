@@ -132,7 +132,7 @@ _STR = {"type": "string"}
 
 
 _CAPTION_STYLE = {'type':'object','additionalProperties':False,'properties':{
-    'font':{'type':'string'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
+    'font':{'type':'string','enum':list(tc.CAPTION_FONT_IDS),'description':'字幕フォントのID。noto-sans(標準)/dela-gothic(極太)/zen-maru(角丸)/reggae/mplus-rounded(丸ポップ)/rocknroll/mincho(明朝)。省略でnoto-sans。'},'fontSize':{'type':'number','description':'相対倍率。1が標準、1.25で25%大きい。'},
     'color':{'type':'string'},'outlineColor':{'type':'string'},'outlineWidth':{'type':'number'},
     'maxWidth':{'type':'number','description':'画面幅に対する比率。'},
     'textAlign':{'type':'string','enum':['left','center','right']},
@@ -285,7 +285,7 @@ def tool_definitions() -> list[types.Tool]:
         _tool("auto_captions", "全文字幕: segments=[{t0,t1,text}] に『その範囲で話している正確な台本』を渡すと、"
               "発話の単語時刻に合わせて24文字以下に分割した字幕クリップを置く（範囲内の既存字幕は置き換え）。"
               "台本はテロップに出したい表記そのもの。合成音声や既存の計測に単語時刻があればwords=[開始秒,終了秒,文字]の配列で渡すと再文字起こしなしで配置する。時刻はタイムライン基準。文節で区切る。words省略時は音声を文字起こしする。",
-              {"segments": {"type": "array", "items": {"type": "object"}}, "style": {"type": "object"},
+              {"segments": {"type": "array", "items": {"type": "object"}}, "style": {"type": "object", "properties": {"font": _CAPTION_STYLE['properties']['font']}},
                "replace": {"type": "boolean"}, "words": {"type":"array","items":{"type":"array"}}}, ["segments"]),
         _tool("watch_render", "指定範囲を『合成後の完成映像として』書き出してGeminiに視聴させる（ぼかし・枠・字幕・重ね全部込み、音声込み）。"
               "watch_videoは素材だけを見るが、こちらは視聴者が見るものそのもの。仕上がり検品に使う。1分の範囲で約1〜2分。",
