@@ -6,6 +6,7 @@
   python scripts/production_library.py list --room <部屋>
   python scripts/production_library.py register --room <部屋> --path <ファイル> [--path …] [--source nas_path]
   python scripts/production_library.py new-content --room <部屋> --title "題" [--format 16:9] [--asset <素材id> …]
+  python scripts/production_library.py rename --room <部屋> --content <作品id> --title "題"
 
 --room は本体の部屋でも制作の部屋（ライブラリ・作品の部屋）でもよい。制作の部屋なら本体の部屋に置く。
 作品を作った後のタイムラインの編集は、作品の部屋（エディターでその作品を開いた画面の右の欄）で mcp__timeline__* を使う。
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.parse
 import urllib.request
 from datetime import timedelta
 from pathlib import Path
@@ -68,6 +70,8 @@ def main() -> None:
     p = sub.add_parser("new-content"); p.add_argument("--room", required=True)
     p.add_argument("--title", required=True); p.add_argument("--format", default="16:9")
     p.add_argument("--asset", action="append", default=[])
+    p = sub.add_parser("rename"); p.add_argument("--room", required=True)
+    p.add_argument("--content", required=True); p.add_argument("--title", required=True)
     a = ap.parse_args()
     room = _asset_room(a.room)
     if a.cmd == "list":
@@ -77,8 +81,13 @@ def main() -> None:
             r = _call("POST", "/register", {"room_id": room, "uri": path, "source_type": a.source})
             print(json.dumps({k: r.get(k) for k in ("id", "kind", "status", "filename")}, ensure_ascii=False))
     elif a.cmd == "new-content":
-        r = _call("POST", "/contents", {"room_id": room, "title": a.title, "format": a.format, "asset_ids": a.asset})
+        # 空のタイムラインつきで作る: 作品の画面がすぐ開き、ダンがその上で組み立てられる
+        r = _call("POST", "/contents", {"room_id": room, "title": a.title, "format": a.format, "asset_ids": a.asset,
+                                        "timeline": {"sequence": {"format": a.format, "frame_rate": 30, "duration": 0, "tracks": []}}})
         print(json.dumps({k: r.get(k) for k in ("id", "title", "format", "asset_ids")}, ensure_ascii=False))
+    elif a.cmd == "rename":
+        r = _call("PATCH", f"/contents/{a.content}?room_id={urllib.parse.quote(room)}", {"title": a.title})
+        print(json.dumps({k: r.get(k) for k in ("id", "title")}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

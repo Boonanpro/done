@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 import os
 import time
 import uuid
@@ -127,6 +128,25 @@ def _content_sequence(content: dict[str, Any]) -> dict[str, Any] | None:
     return seq if isinstance(seq, dict) else None
 
 
+def empty_sequence(fmt: str | None = None) -> dict[str, Any]:
+    """A blank timeline: what a newly created work starts with, so Dan's tools can build on it."""
+    return {"format": fmt or "16:9", "frame_rate": 30, "duration": 0.0, "tracks": []}
+
+
+def ensure_sequence(room_id: str, content_id: str) -> bool:
+    """Give a work that has no timeline yet an empty one. True when one was added."""
+    with ContentsLock(room_id):
+        contents = _read_contents_raw(room_id)
+        content = _find_content(contents, content_id)
+        if content is None or _content_sequence(content) is not None:
+            return False
+        timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else {}
+        timeline["sequence"] = empty_sequence(timeline.get("format") or content.get("format"))
+        content["timeline"] = timeline
+        _write_contents_raw(room_id, contents)
+        return True
+
+
 def draft_path(room_id: str, draft_id: str) -> Path:
     return _drafts_dir(room_id) / f"{draft_id}.json"
 
@@ -222,6 +242,8 @@ def commit_draft(room_id: str, draft_id: str, validate, *, checkpoint=False) -> 
         # single-writer swap
         before_seq = live_seq or {}
         content.setdefault("timeline", {})["sequence"] = draft["sequence"]
+        # 開いている画面が作品の読み直しに気づけるように（ダンが足した素材の絵・使用素材が出る）
+        content["updated_at"] = datetime.now(timezone.utc).isoformat()
         fmt = draft['sequence'].get('format') or content['timeline'].get('format') or content.get('format')
         if fmt:
             content['timeline']['format'] = fmt

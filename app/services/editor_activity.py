@@ -6,7 +6,7 @@ logger=logging.getLogger(__name__)
 
 def start(room,job,tool,args):
     if not job:return None
-    category=('generation' if tool.startswith('generate_') else 'review' if tool in {'watch_render','watch_video','validate_draft','render_frame'} else 'editing' if tool in {'add_clip','add_audio','append_clip','remove_clip','trim_clip','set_clip_props','move_clip','auto_captions','add_overlay'} else 'inspect')
+    category=('generation' if tool.startswith('generate_') else 'review' if tool in {'watch_render','watch_video','validate_draft','render_frame'} else 'editing' if tool in {'add_clip','add_audio','append_clip','append_clips','remove_clip','trim_clip','set_clip_props','move_clip','auto_captions','add_overlay'} else 'inspect')
     if tool in {'prepare_motion_project', 'write_motion_file', 'render_motion_project','apply_edits','set_clip','animate_clip','Write','Edit'}:
         category = 'editing'
     row={'id':uuid.uuid4().hex,'tool':tool,'category':category,'state':'running','started_at':time.time(),
