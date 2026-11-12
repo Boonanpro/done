@@ -600,6 +600,24 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     let cancelled = false;
     const active = visualClips.filter((vc) => currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end);
     drawFrame(currentTime); // paint best-available immediately (previous frame, no black flash)
+    // PARK: once the head settles, seek the paused playback elements (muted video + audio) to the
+    // head too, so pressing Play just resumes them instead of starting a fresh seek (that seek was
+    // the ~0.3s local / ~1s+ remote delay before sound and picture moved, 2026-11-12).
+    const park = window.setTimeout(() => {
+      if (cancelled) return;
+      for (const vc of active) {
+        if (isFrozen(vc.clip)) continue;
+        const v = videosRef.current.get(String(vc.clip.id));
+        const want = clipSourceTime(vc.clip, currentTime);
+        if (v && v.paused && Math.abs(v.currentTime - want) > 0.04) { try { v.currentTime = want; } catch { /* not ready */ } }
+      }
+      for (const c of audioClips) {
+        if (!(currentTime >= c.timeline_start && currentTime < c.timeline_end)) continue;
+        const a = audiosRef.current.get(String(c.id));
+        const want = Number(c.source_start || 0) + (currentTime - c.timeline_start);
+        if (a && a.paused && Math.abs(a.currentTime - want) > 0.04) { try { a.currentTime = want; } catch { /* not ready */ } }
+      }
+    }, 120);
     if (supported) {
       const seeks = active.map((vc) => {
         const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
@@ -609,7 +627,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         return fs.ready.then(() => fs.seekTo(clipSourceTime(vc.clip, currentTime)));
       });
       void Promise.all(seeks).then(() => { if (!cancelled) drawFrame(currentTime); });
-      return () => { cancelled = true; };
+      return () => { cancelled = true; window.clearTimeout(park); };
     }
     // Fallback (no WebCodecs): seek the muted <video> elements and redraw once they land.
     for (const vc of active) {
@@ -618,8 +636,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (v) { if (!v.paused) v.pause(); try { v.currentTime = clipSourceTime(vc.clip, currentTime); } catch { /* not ready */ } }
     }
     const timer = window.setTimeout(() => { if (!cancelled) drawFrame(currentTime); }, 140);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [currentTime, playing, supported, visualClips, drawFrame, srcByAssetId, readyTick]);
+    return () => { cancelled = true; window.clearTimeout(timer); window.clearTimeout(park); };
+  }, [currentTime, playing, supported, visualClips, audioClips, drawFrame, srcByAssetId, readyTick]);
 
   // PLAYBACK: a wall-clock timeline drives muted VIDEO <video> elements and unmuted AUDIO <video>
   // elements, all playing in real time at rate 1, each seeked to its source offset when its clip
@@ -672,7 +690,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const expected = clipSourceTime(vc.clip, t);
         // Seek on activation or on big drift only; re-seeking a playing element every frame is
         // what made audio warble in the old code. Video re-seeks aren't audible.
-        if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.15) {
+        // An element already parked on this spot (scrub PARK / pre-roll) is not re-seeked.
+        const drift = Math.abs(v.currentTime - expected);
+        if ((!prevActiveVideoRef.current.has(id) && drift > 0.04) || drift > 0.15) {
           try { v.currentTime = expected; } catch { /* not ready */ }
         }
         if (v.paused) void v.play().catch(() => {});
@@ -721,7 +741,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (!a) continue;
         activeAudioClips.add(id);
         const expected = Number(c.source_start || 0) + (t - c.timeline_start);
-        if (!prevActiveAudioRef.current.has(id) || Math.abs(a.currentTime - expected) > 0.3) a.currentTime = expected;
+        const aDrift = Math.abs(a.currentTime - expected);
+        if ((!prevActiveAudioRef.current.has(id) && aDrift > 0.04) || aDrift > 0.3) a.currentTime = expected;
         a.muted = false;
         a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
         if (a.paused) void a.play().catch(() => {});
