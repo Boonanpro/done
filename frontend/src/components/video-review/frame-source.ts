@@ -344,6 +344,12 @@ export class AssetFrameSource {
     return pos < 0 ? -1 : this.presOrder[pos];
   }
 
+  /** True when the decoder's current run already covers up to (at least) the frame before `key`,
+   *  so feeding on from fedThrough+1 reaches `key`'s GOP without decoding a gap. */
+  private runReaches(key: number): boolean {
+    return this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= key - 1;
+  }
+
   private keyframeFor(decodeIndex: number): number {
     for (let i = decodeIndex; i >= 0; i--) if (this.samples[i].isSync) return i;
     return 0;
@@ -431,27 +437,32 @@ export class AssetFrameSource {
     // decode-only (closed immediately) — cheap.
     const REORDER = 12;
     const end = Math.min(this.samples.length - 1, target + REORDER);
-    // Bring in the encoded bytes for the whole run first (Range blocks); a run may restart at an
-    // earlier keyframe than fedFrom, so cover from the keyframe.
-    try { await this.ensureData(Math.min(key, this.fedFrom >= 0 ? this.fedFrom : key), end); } catch (e) {
-      console.warn('[frame-source] range fetch failed', this.url, e); return;
-    }
-    if (this.closed || this.decoder !== dec || !this.configured) return;
     // Decide the feed range without ever re-feeding chunks already in the current run (duplicate
-    // timestamps stall the decoder). Three cases:
+    // timestamps stall the decoder). The current run is only worth continuing when it already
+    // reaches this GOP's keyframe; any further back (a jump forward across a gap) we start a fresh
+    // run at the keyframe instead. (2026-11-12: "continue" used to also cover big gaps, so a jump
+    // from 3:00 to 40:00 fetched and decoded every frame in between — ~100MB and 1.3-2s even
+    // locally, far worse through the tunnel.)
     //  - target already inside the fed run  -> feed only the tail past fedThrough (for REORDER)
     //  - contiguous forward extension        -> continue from fedThrough+1
     //  - backward / gap seek                 -> start a fresh run at the keyframe (IDR resync)
-    let start: number;
-    if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= target) {
-      start = this.fedThrough + 1; // already fed through target; just top up the reorder tail
-    } else if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough < target) {
-      start = this.fedThrough + 1; // contiguous forward
-    } else {
-      start = key; this.fedFrom = key; // new run
+    const continues = this.runReaches(key);
+    const start = continues ? this.fedThrough + 1 : key;
+    // Bring in only the encoded bytes this run needs (Range blocks).
+    try { await this.ensureData(Math.min(start, end), end); } catch (e) {
+      console.warn('[frame-source] range fetch failed', this.url, e); return;
     }
-    for (let i = start; i <= end; i++) this.feed(i);
-    this.fedThrough = Math.max(this.fedThrough, end);
+    if (this.closed || this.decoder !== dec || !this.configured) return;
+    // State may have moved while bytes were in flight (prefetch fed more): re-check.
+    let from: number;
+    if (this.runReaches(key)) from = this.fedThrough + 1;
+    else { from = key; this.fedFrom = key; this.fedThrough = key - 1; }
+    if (from < start) { try { await this.ensureData(from, end); } catch { return; } }
+    if (this.closed || this.decoder !== dec || !this.configured) return;
+    const start2 = from;
+    let fedTo = start2 - 1;
+    for (let i = start2; i <= end; i++) { if (!this.feed(i)) break; fedTo = i; }
+    this.fedThrough = Math.max(this.fedThrough, fedTo);
     // The waiter resolves the instant onFrame() caches the target.
     await Promise.race([this.waitForFrame(target), delay(450)]);
     // STALL RECOVERY: hardware (GPU) decoders sometimes wedge mid-scrub — input drained but the
@@ -489,18 +500,18 @@ export class AssetFrameSource {
     const key = this.keyframeFor(from);
     if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= target) return; // already fed
     this.prefetching = true;
-    const lo = this.fedFrom >= 0 && this.fedFrom <= key ? this.fedThrough + 1 : key;
-    this.ensureData(Math.min(lo, key), Math.min(target, lo + 60))
+    const lo = this.runReaches(key) ? this.fedThrough + 1 : key;
+    this.ensureData(lo, Math.min(target, lo + 60))
       .then(() => {
         // State may have moved while bytes were in flight: decide the range NOW.
         if (this.closed || this.draining || !this.decoder || !this.configured) return;
         let start: number;
-        if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough < target) {
+        if (this.runReaches(key) && this.fedThrough < target) {
           start = this.fedThrough + 1; // contiguous forward extension
-        } else if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= target) {
+        } else if (this.runReaches(key) && this.fedThrough >= target) {
           return; // already fed past the window (no duplicate feeds)
         } else {
-          start = key; this.fedFrom = key; // new run at the keyframe (IDR resync)
+          start = key; this.fedFrom = key; this.fedThrough = key - 1; // new run at the keyframe (IDR resync)
         }
         // Cap in-flight work so we never queue thousands of chunks at once.
         const end = Math.min(target, start + 60);
