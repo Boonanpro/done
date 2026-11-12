@@ -26,6 +26,15 @@ export const CAPTION_FONTS: Record<CaptionFontId, { label: string; css: string; 
   'mincho':        { label: '明朝',     css: '"ShipporiMincho"',weight: 800 },
 };
 
+// Look up a font by id, falling back to the default for anything unknown. Stored designs can
+// carry ids the registry doesn't have (an agent once saved font:"Hiragino Sans"); indexing
+// CAPTION_FONTS directly then crashed the whole /caption-frame export page.
+export function captionFont(id: unknown): { label: string; css: string; weight: number } {
+  return (typeof id === 'string' && Object.prototype.hasOwnProperty.call(CAPTION_FONTS, id))
+    ? CAPTION_FONTS[id as CaptionFontId]
+    : CAPTION_FONTS['noto-sans'];
+}
+
 // [cssFamily, url, weight] for every bundled face. FULL .ttf files (not unicode-range subsets —
 // those drop uncommon kanji, leaving captions blank). Used to load fonts deterministically via
 // the FontFace JS API (the export route MUST await these before screenshotting; @font-face in
@@ -167,7 +176,7 @@ export function captionBoxStyle(design: CaptionDesign, outH: number): CSSPropert
 export function captionTextStyle(design: CaptionDesign, outH: number): CSSProperties {
   const base = outH * 0.052;
   const fs = base * num(design.fontSize, 1);
-  const fontDef = CAPTION_FONTS[design.font || 'noto-sans'];
+  const fontDef = captionFont(design.font);
   const strokeW = fs * 0.085 * num(design.outlineWidth, 1);
   const style: CSSProperties = {
     margin: 0,

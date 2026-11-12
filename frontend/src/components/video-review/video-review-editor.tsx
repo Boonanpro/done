@@ -5,6 +5,7 @@ import { AI_VIDEO_MODELS, aiDurationFor, aiModelFor, aiModelsForLength } from '@
 import {
   CAPTION_DESIGN_PRESETS,
   CAPTION_FONTS,
+  captionFont,
   CAPTION_FONT_FACE_CSS,
   type CaptionAnimation,
   type CaptionDesign,
@@ -4381,7 +4382,7 @@ export function VideoReviewEditor({
                               <div className="grid grid-cols-4 gap-1">
                                 {CAPTION_DESIGN_PRESETS.map((p) => {
                                   const d = p.design;
-                                  const fnt = CAPTION_FONTS[d.font ?? 'noto-sans'];
+                                  const fnt = captionFont(d.font);
                                   const active = captionMatchesPreset(st, d);
                                   return (
                                     <button

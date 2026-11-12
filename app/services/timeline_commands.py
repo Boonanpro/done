@@ -417,6 +417,23 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
 
 _CAPTION_STYLE_KEYS = {"font", "fontSize", "maxWidth", "textAlign", "color", "outlineColor", "outlineWidth", "x", "y"}
 
+# Font ids the caption renderer knows. Mirrors the keys of CAPTION_FONTS in
+# frontend/src/components/video-review/caption-design.ts (tests/test_caption_font_ids.py
+# fails if the two drift). A font outside this list (e.g. "Hiragino Sans") once crashed the
+# /caption-frame renderer and every exported frame came out as an error screen.
+CAPTION_FONT_IDS = ("noto-sans", "dela-gothic", "zen-maru", "reggae", "mplus-rounded", "rocknroll", "mincho")
+
+
+def caption_font_error(style: Any) -> str | None:
+    """Error message when style.font is not a bundled caption font id, else None."""
+    if not isinstance(style, dict) or "font" not in style:
+        return None
+    font = style.get("font")
+    if isinstance(font, str) and font in CAPTION_FONT_IDS:
+        return None
+    return (f"Unknown caption font {font!r}. Use one of: {', '.join(CAPTION_FONT_IDS)} "
+            "(or omit font for the default noto-sans). No changes applied.")
+
 
 def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | None:
     """The caption renderer uses RELATIVE units (fontSize ~1.0) and a fixed key set.
@@ -457,6 +474,9 @@ def add_caption(seq: dict[str, Any], *, text: str, timeline_start: float, timeli
     ts, te = _f(timeline_start), _f(timeline_end)
     if te - ts < MIN_CLIP:
         return {"ok": False, "error": "caption span too short"}
+    font_err = caption_font_error(style)
+    if font_err:
+        return {"ok": False, "error": font_err}
     if lane is None:
         lane_obj = _place_on_lane(seq, "caption", ts, te)
     else:
@@ -505,6 +525,9 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
     if style is not None:
         if not isinstance(style, dict) or set(style) - _CAPTION_STYLE_KEYS:
             return {"ok": False, "error": "Invalid caption style. Use fontSize (number, normalized scale), not font_size."}
+        font_err = caption_font_error(style)
+        if font_err:
+            return {"ok": False, "error": font_err}
         for key in ('fontSize', 'maxWidth', 'outlineWidth', 'x', 'y'):
             if key in style:
                 try:
