@@ -26,6 +26,8 @@ type Props = {
   // at the same instant as the video frame (no lag = no peeking).
   blurRegionsAt?: (t: number) => Array<{ x: number; y: number; width: number; height: number }>;
   currentTime: number;
+  /** 利用者が再生位置を動かすたびに増える。再生中に増えたら、その位置から再生を続ける。 */
+  seekRev?: number;
   playing: boolean;
   format: string;
   onTimeChange: (t: number) => void;
@@ -149,7 +151,34 @@ function clipSourceTime(clip: SequenceClip, t: number): number {
   return Number(clip.source_start || 0) + (isFrozen(clip) ? 0 : t - clip.timeline_start);
 }
 
-export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
+// 字幕だけを毎コマ動かす（再生中、エディター本体は 8回/秒しか時刻を受け取らないため）。
+function LiveCaptionLayer({ playing, currentTime, clockRef, outW, outH, captions }: {
+  playing: boolean;
+  currentTime: number;
+  clockRef: React.MutableRefObject<{ wall: number; t: number } | null>;
+  outW: number;
+  outH: number;
+  captions: RenderCaption[];
+}) {
+  const [liveT, setLiveT] = useState(currentTime);
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    const loop = () => {
+      const c = clockRef.current;
+      if (c) setLiveT((prev) => (Math.abs(prev - c.t) > 0.008 ? c.t : prev));
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, clockRef]);
+  return <CaptionLayer outW={outW} outH={outH} captions={captions} time={playing ? liveT : currentTime} />;
+}
+
+// プレビューを描く画素の倍率の上限: 長い辺 1920px まで（書き出しの 1080p と同じ細かさ）
+const MAX_CANVAS_LONG_SIDE = 1920;
+
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, seekRev = 0, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   // WebCodecs frame decoders, one per asset URL (shared across all clips of that asset). Used
@@ -173,6 +202,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
 
   const supported = useMemo(() => webCodecsSupported(), []);
   const dims = useMemo(() => canvasDims(format), [format]);
+  // キャンバスは画面に出ている大きさ×画面の細かさで描く（前は長い辺 900px 固定を引き伸ばしていて、ぼやけていた）。
+  // 座標は今までどおり dims（900 基準）で計算し、描く時だけ倍率をかける。
+  const [pxScale, setPxScale] = useState(1);
+  const pxScaleRef = useRef(1);
+  pxScaleRef.current = pxScale;
   // Opt-in on-screen diagnostic (append ?previewdiag=1 to the URL). Shows the playhead time, whether
   // the last paint was LIVE (drew a fresh frame) or HOLD (kept the previous frame because the new one
   // wasn't decoded yet), and the source time on screen — so playback/scrub can be judged on real
@@ -310,6 +344,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       let h = cw / aspect;
       if (h > ch) { h = ch; w = ch * aspect; }
       setContentRect({ left: (cw - w) / 2, top: (ch - h) / 2, width: w, height: h });
+      const dpr = window.devicePixelRatio || 1;
+      const cap = MAX_CANVAS_LONG_SIDE / Math.max(dims.w, dims.h);
+      const want = Math.min(cap, Math.max(1, (w * dpr) / dims.w));
+      setPxScale(Math.round(want * 4) / 4 || 1);
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -490,6 +528,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       const { w, h } = dims;
+      const ps = pxScaleRef.current;
 
       const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
       // Resolve every active clip's frame up front (null = not decoded yet).
@@ -515,6 +554,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         return; // keep the last good frame on screen
       }
 
+      ctx.setTransform(ps, 0, 0, ps, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
 
@@ -560,7 +602,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         ctx.beginPath();
         ctx.rect(rx, ry, rw, rh);
         ctx.clip();
-        ctx.filter = style.includes('mosaic') ? 'blur(8px)' : 'blur(14px)';
+        ctx.filter = style.includes('mosaic') ? `blur(${8 * ps}px)` : `blur(${14 * ps}px)`;
         drawCover(ctx, baseGot.src, baseGot.vw, baseGot.vh, 0, 0, w, h);
         ctx.restore();
       }
@@ -576,7 +618,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         ctx.beginPath();
         ctx.rect(rx, ry, rw, rh);
         ctx.clip();
-        ctx.filter = 'blur(14px)';
+        ctx.filter = `blur(${14 * ps}px)`;
         drawCover(ctx, baseGot.src, baseGot.vw, baseGot.vh, 0, 0, w, h);
         ctx.restore();
       }
@@ -637,7 +679,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     }
     const timer = window.setTimeout(() => { if (!cancelled) drawFrame(currentTime); }, 140);
     return () => { cancelled = true; window.clearTimeout(timer); window.clearTimeout(park); };
-  }, [currentTime, playing, supported, visualClips, audioClips, drawFrame, srcByAssetId, readyTick]);
+  }, [currentTime, playing, supported, visualClips, audioClips, drawFrame, srcByAssetId, readyTick, pxScale]);
 
   // PLAYBACK: a wall-clock timeline drives muted VIDEO <video> elements and unmuted AUDIO <video>
   // elements, all playing in real time at rate 1, each seeked to its source offset when its clip
@@ -764,6 +806,20 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded, srcByAssetId]);
 
+  // 再生中に利用者が位置を動かした（目盛りを押した・クリップをダブルクリックした・矢印キー）:
+  // 再生の時計をその位置に付け替え、映像と音の要素を新しい位置へ合わせ直す。止めずに続ける。
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  const seekRevSeenRef = useRef(seekRev);
+  useEffect(() => {
+    if (seekRevSeenRef.current === seekRev) return;
+    seekRevSeenRef.current = seekRev;
+    if (!playingRef.current || !playClockRef.current) return;
+    playClockRef.current = { wall: performance.now(), t: currentTimeRef.current };
+    prevActiveVideoRef.current = new Set();
+    prevActiveAudioRef.current = new Set();
+  }, [seekRev]);
+
   // Selection box for the active selected clip. PiP/overlay uses its `position` window; a base
   // clip uses its SOURCE rectangle (locked to the footage aspect via `transform`) so shrinking
   // it reveals the whole source — no 9:16 crop. The box may overflow the frame.
@@ -861,8 +917,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }}>
       <canvas
         ref={canvasRef}
-        width={dims.w}
-        height={dims.h}
+        width={Math.round(dims.w * pxScale)}
+        height={Math.round(dims.h * pxScale)}
         style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
       />
       {showDiag ? (
@@ -887,7 +943,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
         >
           <div style={{ transformOrigin: 'top left', transform: `scale(${contentRect.width / dims.w})` }}>
-            <CaptionLayer outW={dims.w} outH={dims.h} captions={renderCaptions} time={currentTime} />
+            <LiveCaptionLayer playing={playing} currentTime={currentTime} clockRef={playClockRef} outW={dims.w} outH={dims.h} captions={renderCaptions} />
           </div>
         </div>
       ) : null}

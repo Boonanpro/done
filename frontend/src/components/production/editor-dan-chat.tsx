@@ -5,7 +5,7 @@
 // （文字・音声・画像や動画の貼り付け）。部屋は本体のチャットと分かれ、ダンは本体の部屋の話と記憶を読める
 // （app/services/editor_rooms.py）。
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronRight, Loader2, MessageSquare } from 'lucide-react';
 
 import { ProjectChatPanel } from '@/components/layout/project-chat-panel';
@@ -102,7 +102,10 @@ function EditorDanChat({ roomId, contentId }: { roomId: string; contentId: strin
 }
 
 const OPEN_KEY = 'dan-editor-chat-open';
+const WIDTH_KEY = 'dan-editor-chat-width';
 const WIDTH = 420;
+const MIN_WIDTH = 280;
+const maxWidth = () => Math.max(MIN_WIDTH, Math.round((typeof window === 'undefined' ? 1600 : window.innerWidth) * 0.7));
 
 /** 制作の窓の中身: ライブラリは作品と素材と「新規作成」だけ。作品を開くとタイムラインと右に「ダンと制作」
  *  （2026-11-12 本人「ライブラリではチャットいらない。新規作成でタイムラインを開いてそこで会話する」）。 */
@@ -111,10 +114,51 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
   const [contentId, setContentId] = useState<string | null>(() =>
     typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('content_id'));
   const [open, setOpen] = useState(true);
+  // 欄の幅: 境目をつかんで左右に動かす（2026-11-13 本人「チャットとタイムライン・プレビューの大きさを調整したい」）。
+  const [width, setWidth] = useState(WIDTH);
+  const asideRef = useRef<HTMLElement | null>(null);
+  const [resizing, setResizing] = useState(false);
   useEffect(() => {
     if (localStorage.getItem(OPEN_KEY) === '0') setOpen(false);
+    const saved = Number(localStorage.getItem(WIDTH_KEY));
+    if (saved >= MIN_WIDTH) setWidth(Math.min(saved, maxWidth()));
     document.title = 'ダン 制作';
   }, []);
+  // 引きずっている間は React を通さず欄の幅だけを直接変える（重いエディターを描き直さない）。離した時に覚える。
+  const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const el = asideRef.current;
+    if (!el) return;
+    const startX = event.clientX;
+    const startW = el.getBoundingClientRect().width;
+    let next = startW;
+    let raf = 0;
+    const handle = event.currentTarget;
+    const pid = event.pointerId;
+    // つかんだ印の上に指を留める（右のチャットや映像の上に来ても引きずりが切れない）
+    try { handle.setPointerCapture(pid); } catch {}
+    setResizing(true);
+    const move = (ev: PointerEvent) => {
+      next = Math.min(maxWidth(), Math.max(MIN_WIDTH, startW + (startX - ev.clientX)));
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; el.style.width = `${next}px`; });
+    };
+    const up = () => {
+      try { handle.releasePointerCapture(pid); } catch {}
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      if (raf) cancelAnimationFrame(raf);
+      el.style.width = `${next}px`;
+      setResizing(false);
+      if (Math.abs(next - startW) < 1) return; // 押しただけ（ダブルクリックの1回目など）は幅を覚え直さない
+      setWidth(Math.round(next));
+      try { localStorage.setItem(WIDTH_KEY, String(Math.round(next))); } catch {}
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
   const toggle = (v: boolean) => {
     setOpen(v);
     try { localStorage.setItem(OPEN_KEY, v ? '1' : '0'); } catch {}
@@ -130,11 +174,20 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
         />
       </div>
       {!contentId ? null : open ? (
-        <aside className="relative flex h-full shrink-0 flex-col border-l border-border" style={{ width: WIDTH }} aria-label="ダンと制作">
+        <aside ref={asideRef} className="relative flex h-full shrink-0 flex-col border-l border-border" style={{ width }} aria-label="ダンと制作">
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="欄の幅を変える"
+            title="左右に引きずって幅を変える（ダブルクリックで元の幅）"
+            onPointerDown={startResize}
+            onDoubleClick={() => { setWidth(WIDTH); if (asideRef.current) asideRef.current.style.width = `${WIDTH}px`; try { localStorage.setItem(WIDTH_KEY, String(WIDTH)); } catch {} }}
+            className={`absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize ${resizing ? 'bg-sky-500/60' : 'hover:bg-sky-500/40'}`}
+          />
           <button
             type="button"
             onClick={() => toggle(false)}
-            className="absolute -left-3 top-1/2 z-20 flex h-12 w-3 items-center justify-center rounded-l border border-r-0 border-border bg-background text-muted-foreground hover:text-foreground"
+            className="absolute -left-4 top-1/2 z-20 flex h-12 w-3 items-center justify-center rounded-l border border-r-0 border-border bg-background text-muted-foreground hover:text-foreground"
             title="ダンと制作を閉じる"
           >
             <ChevronRight className="h-3 w-3" />

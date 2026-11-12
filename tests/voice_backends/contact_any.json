@@ -1,0 +1,23 @@
+{
+ "note": "作った例（直しの元にしていない言い方）。11/12 22:44 の通話の頼み。答えの中身は 11/13 時点の Chatwork（中村ひろきさんの最新は 11/12 16:21 の血液検査の用紙）。中身が変わったら answer_all を今の最新に合わせる。",
+ "turns": [
+  {
+   "role": "user",
+   "text": "メッセージ来てるか確認して"
+  }
+ ],
+ "expect": {
+  "route": "contact",
+  "tools_none": [
+   "start_work",
+   "run_in_background"
+  ],
+  "answer_all": [
+   "中村"
+  ],
+  "answer_none": [
+   "確認できな",
+   "分からな"
+  ]
+ }
+}

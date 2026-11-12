@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from pathlib import Path
 
-SOURCES = ('messages', 'mail', 'message_cards', 'artifacts', 'watches', 'inquiries', 'addresses')
+SOURCES = ('messages', 'mail', 'message_cards', 'artifacts', 'watches', 'inquiries', 'addresses', 'chatwork')
 
 LOOKUP_TOOL = {
     'name': 'lookup',
@@ -29,7 +29,8 @@ LOOKUP_TOOL = {
         'artifacts=登録済みの成果物と公開URL（room_id省略時は全部）／'
         'watches=見張り・続報の予約の詳細（room_id省略時はこの部屋。all_rooms=trueで全部屋）／'
         'inquiries=公開サイトのフォームに届いた問い合わせ（scope=サイトの識別子）／'
-        'addresses=本人が使っているメールアドレスの一覧（どのサービスの登録に使っているか、ダンが受信箱を読めるか）。新規登録でどのアドレスを使うか本人に選んでもらう時に使う。'
+        'addresses=本人が使っているメールアドレスの一覧（どのサービスの登録に使っているか、ダンが受信箱を読めるか）。新規登録でどのアドレスを使うか本人に選んでもらう時に使う。／'
+        'chatwork=本人の Chatwork に届いたメッセージを API で今読む（数秒。ブラウザで開かない）。query に相手か部屋の名前（例: 中村）を入れるとその部屋とその人の発言、省くと最近7日に動いた部屋の最新（1対1を先に）。id に Chatwork の room_id で1部屋の最新を limit 件（最大100）。送信はしない（返事は送信案カード）。'
         '本文は長いと切り詰める。id を指定すると1件を全文で返す（messages, mail, message_cards, inquiries）。'
     ),
     'input_schema': {'type': 'object', 'properties': {
@@ -325,10 +326,22 @@ async def _addresses(p, user_id, room_id):
     return _result('本人のメールアドレス', rows, '新規登録に使うアドレスとパスワードの決め方（自動生成して保存／本人が指定）は、必ず本人に確認する。')
 
 
+async def _chatwork(p, user_id, room_id):
+    """The owner's Chatwork, read through its API (chatwork_read). Read only."""
+    from app.services import chatwork_read
+    try:
+        found = await chatwork_read.read(user_id, who=p.get('query') or '', room_id=p.get('id') or None,
+                                         messages=p.get('limit') or (20 if p.get('id') else 5))
+    except chatwork_read.Unavailable as exc:
+        return {'success': False, 'error': str(exc)}
+    return {'success': True, 'count': len(found['rooms']),
+            'output': chatwork_read.spoken_digest(found, limit=12000) + chr(10) * 2 + str(found.get('note') or '')}
+
+
 async def lookup(params, user_id, room_id):
     source = params.get('source')
     handler = {'messages': _messages, 'mail': _mail, 'message_cards': _message_cards, 'artifacts': _artifacts,
-               'watches': _watches, 'inquiries': _inquiries, 'addresses': _addresses}.get(source)
+               'watches': _watches, 'inquiries': _inquiries, 'addresses': _addresses, 'chatwork': _chatwork}.get(source)
     if not handler:
         return {'success': False, 'error': 'source は '+' / '.join(SOURCES)+' のいずれか'}
     try:

@@ -1562,6 +1562,200 @@ def _key_box_at(keys: list[dict[str, Any]], rel: float) -> dict[str, float]:
     return {k: float(keys[-1][k]) for k in "xywh"}
 
 
+# --- colour grade (clip.grade) — the native compositor's apply_grade() for the plain mode:
+# c = clamp(c * 2^ev); c = (c - pivot) * contrast + pivot; c = mix(luma(c), c, sat);
+# c *= (1 + .22 temp + .10 tint, 1 - .12 tint, 1 - .22 temp + .10 tint); clamp.
+_GRADE_LUMA = (0.2126, 0.7152, 0.0722)
+_GRADE_PIVOT = 0.4135
+
+
+def _grade_values(clip: dict[str, Any]) -> tuple[float, float, float, float, float] | None:
+    """(ev, contrast, sat, temp, tint), or None when the clip has no (non-neutral) grade."""
+    g = clip.get("grade")
+    if not isinstance(g, dict):
+        return None
+
+    def f(k: str, d: float) -> float:
+        try:
+            v = float(g[k]) if g.get(k) is not None else d
+        except (TypeError, ValueError):
+            return d
+        return v if math.isfinite(v) else d
+
+    vals = (f("ev", 0.0), f("contrast", 1.0), f("sat", 1.0), f("temp", 0.0), f("tint", 0.0))
+    if all(abs(v - n) < 1e-4 for v, n in zip(vals, (0.0, 1.0, 1.0, 0.0, 0.0))):
+        return None
+    return vals
+
+
+def _grade_filter(clip: dict[str, Any]) -> str:
+    """',format=rgba,...' that applies clip.grade (output stays rgba, alpha kept), or ''.
+    Exposure above 1x is a clamped per-channel LUT; contrast, saturation and the warm/tint
+    gains fold into one 3x3 colour matrix whose constant term rides on the alpha column
+    (alpha = 1 for video frames, so ra*A is the contrast pivot offset)."""
+    vals = _grade_values(clip)
+    if vals is None:
+        return ""
+    ev, ct, sat, temp, tint = vals
+    ct = max(0.0, ct)
+    sat = max(0.0, sat)
+    k = 2.0 ** max(-8.0, min(8.0, ev))
+    gains = (1 + 0.22 * temp + 0.10 * tint, 1 - 0.12 * tint, 1 - 0.22 * temp + 0.10 * tint)
+    out = ",format=rgba"
+    pre = 1.0
+    if k > 1 + 1e-6:
+        lut = f"'clip(val*{k:.6f}\\,0\\,maxval)'"
+        out += f",lutrgb=r={lut}:g={lut}:b={lut}"
+    else:
+        pre = k  # <= 1x never leaves 0..1, so it folds into the matrix
+
+    def mixer(rows: list[list[float]]) -> str:
+        names = ("r", "g", "b")
+        parts = []
+        for i, row in enumerate(rows):
+            for j, n in enumerate((*names, "a")):
+                v = max(-2.0, min(2.0, row[j]))  # the filter's coefficient range
+                parts.append(f"{names[i]}{n}={v:.6f}")
+        return ",colorchannelmixer=" + ":".join(parts)
+
+    def sat_row(i: int) -> list[float]:
+        return [(1 - sat) * _GRADE_LUMA[j] + (sat if i == j else 0.0) for j in range(3)]
+
+    one = [[gains[i] * ct * pre * c for c in sat_row(i)] + [gains[i] * _GRADE_PIVOT * (1 - ct)] for i in range(3)]
+    peak = max(abs(v) for row in one for v in row)
+    if peak <= 2.0:
+        return out + mixer(one)
+    # Beyond the mixer's coefficient range (strong contrast × saturation): the same matrix
+    # divided down, then multiplied back up — in float, so nothing clamps in between.
+    out += ",format=gbrapf32le" + mixer([[v * 2.0 / peak for v in row] for row in one])
+    n = peak / 2.0
+    while n > 1 + 1e-9:
+        step = min(2.0, n)
+        out += mixer([[step if i == j else 0.0 for j in range(3)] + [0.0] for i in range(3)])
+        n /= step
+    return out + ",format=rgba"
+
+
+def _pos_box(pos: dict[str, Any] | None) -> tuple[float, float, float, float]:
+    """A clip's static box (canvas fractions); no box = the whole canvas."""
+    if not isinstance(pos, dict):
+        return 0.0, 0.0, 1.0, 1.0
+    def f(k: str, d: float) -> float:
+        try:
+            return float(pos[k]) if pos.get(k) is not None else d
+        except (TypeError, ValueError):
+            return d
+    return f("x", 0.0), f("y", 0.0), f("width", 1.0), f("height", 1.0)
+
+
+def _is_full_box(pos: dict[str, Any] | None) -> bool:
+    """The box is (about) exactly the canvas — not larger, not smaller, not shifted."""
+    x, y, w, h = _pos_box(pos)
+    return abs(x) <= 0.001 and abs(y) <= 0.001 and abs(w - 1) <= 0.001 and abs(h - 1) <= 0.001
+
+
+def _clip_box_keys(clip: dict[str, Any]) -> list[dict[str, float]] | None:
+    """transform_keys sorted by t, each {t,x,y,w,h} relative to the clip's box (the editor
+    preview's boxKeyAt: x/y move by box fractions, w/h scale it). Missing x/y = 0, w/h = 1."""
+    raw = clip.get("transform_keys")
+    if not isinstance(raw, list):
+        return None
+    keys = []
+    for x in raw:
+        if not isinstance(x, dict):
+            continue
+        try:
+            k = {"t": float(x["t"]), "x": float(x.get("x") or 0.0), "y": float(x.get("y") or 0.0),
+                 "w": float(x["w"]) if x.get("w") is not None else 1.0,
+                 "h": float(x["h"]) if x.get("h") is not None else 1.0}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if all(math.isfinite(v) for v in k.values()) and k["w"] > 0 and k["h"] > 0:
+            keys.append(k)
+    keys.sort(key=lambda k: k["t"])
+    return keys or None
+
+
+def _keys_move(keys: list[dict[str, float]]) -> bool:
+    """True when the keys change the box over time (more than one distinct key)."""
+    return any(abs(a[n] - b[n]) > 1e-6 for a, b in zip(keys, keys[1:]) for n in "xywh")
+
+
+def _keyed_box(box: tuple[float, float, float, float], k: dict[str, float]) -> tuple[float, float, float, float]:
+    bx, by, bw, bh = box
+    return bx + k["x"] * bw, by + k["y"] * bh, bw * k["w"], bh * k["h"]
+
+
+def _pl_expr(points: list[tuple[float, float]], tv: str) -> str:
+    """Piecewise-linear float expression of `tv` through (t, v) points, ends held. Commas are
+    escaped for a quoted filter option."""
+    def num(v: float) -> str:
+        return f"{v:.4f}"
+    if len(points) == 1 or all(abs(v - points[0][1]) < 1e-9 for _, v in points):
+        return num(points[0][1])
+    expr = num(points[-1][1])
+    for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:]))):
+        dt = max(t1 - t0, 1e-6)
+        seg = f"{num(v0)}+({num(v1 - v0)})*({tv}-{t0:.4f})/{dt:.4f}"
+        expr = f"if(lt({tv}\\,{t1:.4f})\\,{seg}\\,{expr})"
+    return f"if(lt({tv}\\,{points[0][0]:.4f})\\,{num(points[0][1])}\\,{expr})"
+
+
+def _moving_video_layer(src: str, idx: int | str, keys: list[dict[str, float]],
+                        box: tuple[float, float, float, float], sw: float, sh: float,
+                        out_w: int, out_h: int, fps_filter: str, dur: float, rel0: float,
+                        *, tf: tuple[float, float, float] = (1.0, 0.0, 0.0),
+                        crop: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
+                        stretch: bool = False) -> tuple[list[str], str]:
+    """A video clip whose box moves (transform_keys): `src` is a filter chain whose frames run
+    from t=0 (layer time); the result is a full-canvas RGBA layer of `dur` seconds at the
+    timeline rate, transparent outside the box — drawn like the preview's drawSource at clip
+    time t + rel0: the source covers the keyed box (scaled by transform), panned, clipped to
+    the box and masked by crop. Returns (filter lines, layer label)."""
+    tv = f"(t+{rel0:.5f})" if abs(rel0) > 1e-7 else "t"
+    pts = [(k["t"], _keyed_box(box, k)) for k in keys]
+    bx = _pl_expr([(t, b[0]) for t, b in pts], tv)
+    by = _pl_expr([(t, b[1]) for t, b in pts], tv)
+    bw = _pl_expr([(t, b[2]) for t, b in pts], tv)
+    bh = _pl_expr([(t, b[3]) for t, b in pts], tv)
+    s, tx, ty = tf
+    if stretch:
+        dw, dh = f"({bw})", f"({bh})"
+    else:
+        cov = f"max(({bw})/{sw:.4f}\\,({bh})/{sh:.4f})"
+        dw, dh = f"({sw * s:.4f}*{cov})", f"({sh * s:.4f}*{cov})"
+    # where the scaled picture sits (overlay's w/h = the size scale actually produced)
+    dx = f"({bx})+(({bw})-w)/2+{tx * out_w:.4f}" if not stretch else f"({bx})"
+    dy = f"({by})+(({bh})-h)/2+{ty * out_h:.4f}" if not stretch else f"({by})"
+    d = f"{dur + 2 / float(fps_filter):.6f}"
+    lines = [
+        f"{src},scale=w='max(2\\,round({dw}))':h='max(2\\,round({dh}))':eval=frame,setsar=1[mvs{idx}]",
+        f"color=c=black@0.0:s={out_w}x{out_h}:r={fps_filter}:d={d},format=rgba[mvc{idx}]",
+        f"[mvc{idx}][mvs{idx}]overlay=x='round({dx})':y='round({dy})':eval=frame:eof_action=repeat:format=rgb,format=rgba[mvl{idx}]",
+    ]
+    cl, ct_, cr, cb = crop
+    aspect_differs = (not stretch) and any(
+        abs(b[2] / max(b[3], 1e-9) - sw / sh) > 0.005 * (sw / sh) for _, b in pts)
+    needs_clip = aspect_differs or (cl + ct_ + cr + cb) > 1e-4 or (not stretch and not _is_identity_transform(s, tx, ty))
+    if not needs_clip:
+        return lines, f"mvl{idx}"
+    # visible = box ∩ the crop-kept part of the placed picture, as a white-on-black alpha mask
+    px = f"(({bx})+(({bw})-{dw})/2+{tx * out_w:.4f})" if not stretch else f"({bx})"
+    py = f"(({by})+(({bh})-{dh})/2+{ty * out_h:.4f})" if not stretch else f"({by})"
+    x0 = f"max(0\\,max({bx}\\,{px}+{dw}*{cl:.4f}))"
+    x1 = f"min({out_w}\\,min(({bx})+({bw})\\,{px}+{dw}*{1 - cr:.4f}))"
+    y0 = f"max(0\\,max({by}\\,{py}+{dh}*{ct_:.4f}))"
+    y1 = f"min({out_h}\\,min(({by})+({bh})\\,{py}+{dh}*{1 - cb:.4f}))"
+    lines += [
+        f"color=c=white:s=16x16:r={fps_filter}:d={d},format=gray,"
+        f"scale=w='max(2\\,round({x1}-{x0}))':h='max(2\\,round({y1}-{y0}))':eval=frame[mvw{idx}]",
+        f"color=c=black:s={out_w}x{out_h}:r={fps_filter}:d={d},format=gray[mvb{idx}]",
+        f"[mvb{idx}][mvw{idx}]overlay=x='round({x0})':y='round({y0})':eval=frame:eof_action=repeat,format=gray[mvm{idx}]",
+        f"[mvl{idx}][mvm{idx}]alphamerge[mva{idx}]",
+    ]
+    return lines, f"mva{idx}"
+
+
 def _image_key_frames(clip: dict[str, Any], img_path: Any, its: float, ite: float, fps: float,
                       out_w: int, out_h: int, kdir: Path):
     """Full-canvas PNGs for the frames of an image clip whose box is still moving.
@@ -1910,7 +2104,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.6f},"
                 f"setpts=PTS-STARTPTS,fps={fps_filter},"
                 f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-                f"crop={output_width}:{output_height},setsar=1,format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
+                f"crop={output_width}:{output_height},setsar=1{_grade_filter(clip)},format=yuv420p{norm_tail(nfr)}[v{rendered_count}]"
             )
             if has_audio_track:
                 concat_parts.append(f"[v{rendered_count}]")
@@ -1937,10 +2131,15 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             source_end = (sframe + nfr - 0.5) / timeline_fps
         pad_needed = 0.0  # every base chain ends padded/trimmed to exactly nfr frames (norm_tail)
         bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
-        is_full_pos = (not bpos) or (
-            float(bpos.get("x") or 0) <= 0.001 and float(bpos.get("y") or 0) <= 0.001
-            and float(bpos.get("width") or 1) >= 0.999 and float(bpos.get("height") or 1) >= 0.999
-        )
+        bkeys = _clip_box_keys(clip)
+        b_moving = bool(bkeys) and _keys_move(bkeys)
+        if bkeys and not b_moving:
+            # one box for the whole clip: fold the (single) key into the static box
+            fx, fy, fw, fh = _keyed_box(_pos_box(bpos), bkeys[0])
+            bpos = {"x": fx, "y": fy, "width": fw, "height": fh}
+        # Only the exact canvas box is "full": a box that covers the canvas with overflow
+        # (negative x/y, width > 1) is a punch-in and goes through the placement path.
+        is_full_pos = _is_full_box(bpos)
         b_scale, b_tx, b_ty = _clip_transform(clip)
         sw = float(metadata.get("width") or 0)
         sh = float(metadata.get("height") or 0)
@@ -1954,10 +2153,30 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty) and not has_crop
         # Wipe shape on a BASE clip: black outside the cutout (this layer has no alpha).
         base_shape = _shape_cut_filter(clip.get("shape"), output_width, output_height, alpha=False)
+        grade = _grade_filter(clip)
         if not _clip_video_enabled(clip):
             # Picture is disabled but the slot and its linked audio remain on the timeline.
             filters.append(
                 f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}{norm_tail(nfr)}[v{rendered_count}]"
+            )
+        elif b_moving and sw > 0 and sh > 0:
+            # MOVING box (transform_keys): the placement below, recomputed every frame.
+            tpad = f",tpad=stop_mode=clone:stop_duration={out_dur:.3f}" if is_freeze else ""
+            ts_clip = float(clip.get("timeline_start") or 0)
+            bx0, by0, bw0, bh0 = _pos_box(bpos)
+            layer_lines, layer = _moving_video_layer(
+                _movie_input(source_path, source_start) + ","
+                f"trim=start={source_start:.4f}:end={source_end:.4f},"
+                f"setpts=PTS-STARTPTS,fps={fps_filter}{tpad}{grade}",
+                rendered_count, bkeys,
+                (bx0 * output_width, by0 * output_height, bw0 * output_width, bh0 * output_height),
+                sw, sh, output_width, output_height, fps_filter, out_dur,
+                _frame_index(ts_clip, timeline_fps) / timeline_fps - ts_clip,
+                tf=(b_scale, b_tx, b_ty), crop=(c_l, c_t, c_r, c_b))
+            filters.extend(layer_lines)
+            filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
+            filters.append(
+                f"[bg{rendered_count}][{layer}]overlay=0:0:eof_action=repeat,format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
             )
         elif identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
@@ -1970,48 +2189,52 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             filters.append(
                 _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.4f}:end={source_end:.4f},"
-                f"{setpts},format=yuv420p{base_shape}{norm_tail(nfr)}"
+                f"{setpts}{grade},format=yuv420p{base_shape}{norm_tail(nfr)}"
                 f"[v{rendered_count}]"
             )
         else:
-            # NON-DESTRUCTIVE placement: scale the FULL source aspect-preserved to cover the
-            # box × transform.scale, overlay onto a black W×H canvas at a (possibly negative)
-            # offset so the frame windows it — no crop, overflow pixels preserved.
+            # PLACEMENT (the preview's drawSource): scale the FULL source aspect-preserved to
+            # cover the box × transform.scale, centre it on the box, pan by transform — then
+            # keep only what lies inside the box (the preview clips to it), inside the crop
+            # mask and on the canvas, and overlay that onto a black W×H canvas. A box larger
+            # than the canvas (negative x/y) is a punch-in: the canvas windows its middle.
             # Placement (transform) uses the FULL source — crop does NOT change cover/scale.
-            bw = output_width if is_full_pos else max(2, round(float(bpos.get("width") or 1) * output_width))
-            bh = output_height if is_full_pos else max(2, round(float(bpos.get("height") or 1) * output_height))
-            bx = 0 if is_full_pos else round(float(bpos.get("x") or 0) * output_width)
-            by = 0 if is_full_pos else round(float(bpos.get("y") or 0) * output_height)
+            bxf, byf, bwf, bhf = _pos_box(bpos)
+            bw = output_width if is_full_pos else max(2, round(bwf * output_width))
+            bh = output_height if is_full_pos else max(2, round(bhf * output_height))
+            bx = 0 if is_full_pos else round(bxf * output_width)
+            by = 0 if is_full_pos else round(byf * output_height)
             cover = max(bw / sw, bh / sh)
             cw = max(2, round(sw * cover * b_scale))
             ch = max(2, round(sh * cover * b_scale))
             ox = round(bx + (bw - cw) / 2 + b_tx * output_width)
             oy = round(by + (bh - ch) / 2 + b_ty * output_height)
-            # crop = MASK: after scaling the full source to its placed size, keep only the
-            # inner region and overlay it at the offset shifted by the crop — the trimmed
-            # edges are left as the black canvas (no zoom, position/size unchanged).
-            crop_filt = ""
-            if has_crop:
-                kw = max(2, round(cw * (1 - c_l - c_r)))
-                kh = max(2, round(ch * (1 - c_t - c_b)))
-                crop_filt = f"crop={kw}:{kh}:{round(cw * c_l)}:{round(ch * c_t)},"
-                ox = ox + round(cw * c_l)
-                oy = oy + round(ch * c_t)
+            # kept part of the scaled source, in its own pixels: crop ∩ box ∩ canvas
+            kx0 = max(round(cw * c_l), bx - ox, -ox, 0)
+            kx1 = min(cw - round(cw * c_r), bx + bw - ox, output_width - ox, cw)
+            ky0 = max(round(ch * c_t), by - oy, -oy, 0)
+            ky1 = min(ch - round(ch * c_b), by + bh - oy, output_height - oy, ch)
             tpad = ""
             if is_freeze:
                 tpad = f",tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
             elif pad_needed > 0.02:
                 tpad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
-            filters.append(
-                _movie_input(source_path, source_start) + ","
-                f"trim=start={source_start:.4f}:end={source_end:.4f},"
-                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad},format=yuv420p"
-                f"[src{rendered_count}]"
-            )
             filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur + 1 / timeline_fps:.6f}[bg{rendered_count}]")
-            filters.append(
-                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:eof_action=repeat,format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
-            )
+            if kx1 - kx0 < 2 or ky1 - ky0 < 2:
+                # nothing of the picture is on the canvas
+                filters.append(f"[bg{rendered_count}]format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]")
+            else:
+                # 4:4:4 until the overlay: an odd crop / offset would otherwise shift the chroma a pixel
+                crop_filt = "" if (kx0, ky0, kx1, ky1) == (0, 0, cw, ch) else f"format=yuv444p,crop={kx1 - kx0}:{ky1 - ky0}:{kx0}:{ky0}:exact=1,"
+                filters.append(
+                    _movie_input(source_path, source_start) + ","
+                    f"trim=start={source_start:.4f}:end={source_end:.4f},"
+                    f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad}{grade},format=yuv444p"
+                    f"[src{rendered_count}]"
+                )
+                filters.append(
+                    f"[bg{rendered_count}][src{rendered_count}]overlay={ox + kx0}:{oy + ky0}:eof_action=repeat:format=yuv444,format=yuv420p{base_shape}{norm_tail(nfr)}[v{rendered_count}]"
+                )
         if not has_audio_track:
             if _meta_has_audio(metadata, source_path) and not clip.get("muted") and not is_freeze:
                 try:
@@ -2196,7 +2419,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
                 kdir, k_first, k_count, last = moving
                 filters.append(
                     _movie_input(str(kdir / "%05d.png"), 0.0, fmt="image2")
-                    + f",format=rgba,settb=AVTB,setpts=(N+{k_first}-0.5)/({fps_filter}*TB)[kimg{oi}]"
+                    + f",format=rgba{_grade_filter(clip)},settb=AVTB,setpts=(N+{k_first}-0.5)/({fps_filter}*TB)[kimg{oi}]"
                 )
                 filters.append(
                     f"[{video_out}][kimg{oi}]overlay=0:0:enable='gte(t\\,{(k_first - 0.5) / timeline_fps:.5f})"
@@ -2216,7 +2439,7 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             filters.append(
                 f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=end_frame={max(1, k_b - k_a)},"
                 f"settb=AVTB,setpts=(N+{k_a}-0.5)/({fps_filter}*TB),format=rgba,"
-                f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease[img{oi}]"
+                f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease{_grade_filter(clip)}[img{oi}]"
             )
             filters.append(
                 f"[{video_out}][img{oi}]overlay=x={ipx}+({iow}-w)/2:y={ipy}+({ioh}-h)/2"
@@ -2231,6 +2454,11 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
         source_start, source_end, ov_dur, ov_src, ov_freeze = _clip_source_range(clip, metadata)
         # No box = the whole picture, as the editor preview draws it.
         pos = clip.get("position") if isinstance(clip.get("position"), dict) else {"x": 0, "y": 0, "width": 1, "height": 1}
+        okeys = _clip_box_keys(clip)
+        o_moving = bool(okeys) and _keys_move(okeys)
+        if okeys and not o_moving:
+            fx, fy, fw, fh = _keyed_box(_pos_box(pos), okeys[0])
+            pos = {"x": fx, "y": fy, "width": fw, "height": fh}
         ow = max(2, round(float(pos.get("width") or 0.46) * output_width))
         oh = max(2, round(float(pos.get("height") or 0.145) * output_height))
         # No clamp: a wipe may sit partly/fully off-screen; ffmpeg overlay accepts negative
@@ -2356,17 +2584,47 @@ def _render_sequence_pass(room_id: str, job_id: str, instruction: dict[str, Any]
             s_first = max(0, round((source_start + _frame_index(ts, timeline_fps) / timeline_fps - ts) * timeline_fps))
             ov_offset = ts + s_first / timeline_fps - source_start - half
             source_start = max(0.0, (s_first - 0.5) / timeline_fps)
+        sw_o = float(metadata.get("width") or 0)
+        sh_o = float(metadata.get("height") or 0)
+        if o_moving and sw_o > 0 and sh_o > 0:
+            # MOVING box (transform_keys): a full-canvas layer drawn in its own time (frame j =
+            # timeline frame k_a + j), moved onto the timeline and gated like any overlay.
+            # (A circle/rounded shape is not drawn on a moving box.)
+            k_a, k_b = _frame_index(ts, timeline_fps), _frame_index(te, timeline_fps)
+            t0 = (k_a - 0.5) / timeline_fps
+            layer_lines, layer = _moving_video_layer(
+                _movie_input(source_path, source_start) + ","
+                f"trim=start={source_start:.4f}:end={source_end:.4f},"
+                f"{ov_pre.rstrip(',')}{_grade_filter(clip)},setpts=PTS-STARTPTS{ov_offset - t0:+.5f}/TB",
+                f"o{oi}", okeys, (_pos_box(pos)[0] * output_width, _pos_box(pos)[1] * output_height,
+                                  _pos_box(pos)[2] * output_width, _pos_box(pos)[3] * output_height),
+                sw_o, sh_o, output_width, output_height, fps_filter, max(1, k_b - k_a) / timeline_fps,
+                k_a / timeline_fps - ts,
+                crop=(_cl, _ct, _cr, _cb) if _mask else (0.0, 0.0, 0.0, 0.0),
+                stretch=str(clip.get("fit") or "cover") == "stretch")
+            filters.extend(layer_lines)
+            filters.append(f"[{layer}]setpts=PTS{t0:+.5f}/TB[ovm{oi}]")
+            filters.append(
+                f"[{video_out}][ovm{oi}]overlay=0:0:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'[vov{oi}]"
+            )
+            video_out = f"vov{oi}"
+            continue
+        # An odd x/y (a box hanging off the left/top edge, a punch-in) would be rounded to an
+        # even pixel by a 4:2:0 overlay, moving the picture a pixel: place it in 4:4:4 then.
+        _odd = (_mx % 2 or _my % 2) and not shape_filt
+        _ov_fmt = "yuv444p" if _odd else "yuv420p"
+        _ov_mode, _ov_back = (":format=yuv444", ",format=yuv420p") if _odd else ("", "")
         filters.append(
             _movie_input(source_path, source_start) + ","
             f"trim=start={source_start:.4f}:end={source_end:.4f},"
             f"{ov_pre}"
-            f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ov_offset:.5f}/TB,format=yuv420p"
+            f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ov_offset:.5f}/TB{_grade_filter(clip)},format={_ov_fmt}"
             f"{shape_filt}"
             f"{_maskcrop}"
             f"[ov{oi}]"
         )
         filters.append(
-            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'[vov{oi}]"
+            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}{_ov_mode}:enable='gte(t\\,{ts - half:.5f})*lt(t\\,{te - half:.5f})'{_ov_back}[vov{oi}]"
         )
         video_out = f"vov{oi}"
 
@@ -5163,6 +5421,8 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
 # local_path/proxy_path, so the finished video's quality is unchanged.
 VIEW_COPY_MIN_SECONDS = 600.0          # only recordings of 10 minutes or longer
 VIEW_COPY_MIN_PROXY_BYTES = 1_500_000_000  # ...or whose proxy is already huge
+VIEW_COPY_LONG_SIDE = 1280
+VIEW_COPY_CRF = 23
 
 
 def _needs_view_copy(asset: dict[str, Any]) -> bool:
@@ -5176,8 +5436,11 @@ def _needs_view_copy(asset: dict[str, Any]) -> bool:
 
 
 def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path | None:
-    """Encode {asset_id}_view.mp4 (960 long side, short GOP, no B-frames) from the proxy and
-    record view_path/view_url on the asset. Returns the path, or None when not needed."""
+    """Encode {asset_id}_view.mp4 (1280 long side, short GOP, no B-frames) from the proxy and
+    record view_path/view_url on the asset. Returns the path, or None when not needed.
+
+    2026-11-13: 960・CRF26 では画面で見てぼやけた（本人「プレビューの画質が若干微妙」）。1280・CRF23 にした。
+    作り直した時に古い写しの一部をブラウザが覚えたまま混ぜないよう、view_url に作った時刻を付ける。"""
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset or not (force or _needs_view_copy(asset)):
         return None
@@ -5189,8 +5452,8 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
     cmd = [
         _ffmpeg(), "-y", "-i", str(src),
-        "-vf", f"scale=w=960:h=960:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-vf", f"scale=w={VIEW_COPY_LONG_SIDE}:h={VIEW_COPY_LONG_SIDE}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIEW_COPY_CRF),
         "-g", str(max(1, round(fps * 0.5))), "-bf", "0", *cfr,
         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(tmp),
     ]
@@ -5203,7 +5466,7 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     tmp.replace(view)
     _update_asset(room_id, asset_id, {
         "view_path": str(view),
-        "view_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=view",
+        "view_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=view&v={int(view.stat().st_mtime)}",
     })
     return view
 
