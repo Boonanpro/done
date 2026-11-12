@@ -25,7 +25,7 @@ def ensure_browser():
         return _page
     
     _playwright = sync_playwright().start()
-    _browser = _playwright.chromium.launch(headless=False)
+    _browser = _playwright.chromium.launch(headless=False, args=["--mute-audio"])
     
     user_data_dir = os.path.join(os.path.expanduser("~"), ".ai_secretary", "browser_data")
     os.makedirs(user_data_dir, exist_ok=True)
