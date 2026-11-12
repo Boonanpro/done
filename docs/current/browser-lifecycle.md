@@ -76,3 +76,26 @@ was performed.
 Implementation: `app/services/browser_lifecycle.py`,
 `app/core/api/browser_routes.py`, `app/tools/browser.py`, and the shared
 `app/agent/v2/tools.py` / `app/agent/cli_runner.py` contracts.
+
+## Silent inspection (2026-11-12)
+
+Dedicated inspection browsers, including the legacy worker, start with
+`--mute-audio` on macOS and Windows. This suppresses speaker output without
+changing media tracks, playback time or the owner's system volume. Owner-facing
+playback uses the owner's player, not the silent inspection browser. Authorized
+acoustic tests must use a separate, explicitly audible player; this change does
+not authorize calls or tests.
+
+Already-running browsers keep their launch flags. Do not interrupt active rooms
+to replace them. Until their next normal launch, mute the player and read its
+state before playback, as required by the shared bootstrap instruction. Native
+players and ad-hoc scripts are governed by that instruction, not intercepted by
+this browser flag; prefer decoding files over sending them to an output device.
+
+Validation: the new launch check failed before the flag was added. The three
+policy checks pass. `scripts/check_silent_media_browser.py` launches a fresh real
+Chromium profile, reads its actual command line and checks both audio and video
+elements advance with the mute flag enabled (Mac mini). It does not measure the
+physical speaker signal. Windows execution was not tested here. An unrelated
+Windows-shaped process-scan fixture in `test_browser_recovery.py` fails on macOS;
+the remaining five checks passed.
