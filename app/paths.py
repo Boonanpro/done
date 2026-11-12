@@ -48,3 +48,15 @@ def localize(text: str) -> str:
     ):
         text = text.replace(win, here)
     return text
+
+
+def local_file(value: str | None) -> str | None:
+    """Windows の頃に記録したファイルの場所（D:\\done\\uploads\\…）を、今の機械の場所にする。
+
+    2026-11-12: Mac に移った後、制作ライブラリの画像とAIで作った素材が全部エラーになっていた。
+    素材の台帳が「D:\\done\\uploads\\production-assets\\…」のまま残っていて、ファイル自体は
+    Mac の同じ場所にあるのに見つけられなかった。読み替えられない場所（C:/Users/… など）はそのまま返す。
+    """
+    if _WINDOWS or not value or len(value) < 3 or value[1] != ":" or value[2] not in "\\/":
+        return value
+    return localize(value.replace("\\", "/"))
