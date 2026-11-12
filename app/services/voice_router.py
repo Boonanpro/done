@@ -564,7 +564,7 @@ class Router:
         async def speak(text):   # a later result of a function goes into the call as spoken commentary
             from app.services.voice_say import say
             await say(self.send, 'answer', text, self.record)
-        client = _client()
+        client = _client(spec.get('model'))
         for _ in range(LUNA_ROUNDS):
             response = await client.responses.create(**spec, input=given, **({'previous_response_id': previous} if previous else {}))
             previous = response.id

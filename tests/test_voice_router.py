@@ -149,11 +149,13 @@ async def test_without_jev_or_when_unsure_the_earlier_backend_answers(monkeypatc
         async def create(self, **kw):
             calls.append(kw)
             return SimpleNamespace(id='resp', output=[], output_text='郵便番号は660-0807です。')
-    monkeypatch.setattr(voice_lookup, '_client', lambda: Client())
+    asked = []
+    monkeypatch.setattr(voice_lookup, '_client', lambda model=None: asked.append(model) or Client())
     backend = {'model': 'gpt-6-luna', 'instructions': 'i', 'tools': [], 'tool_choice': 'auto', 'parallel_tool_calls': True, 'reasoning': {'effort': 'low'}}
     r, sent, log = router(monkeypatch, Judge(available=False), backend=backend, said=['郵便番号なんだっけ'])
     await r.answer('del_5', time.monotonic())
     assert calls[0]['model'] == 'gpt-6-luna' and '郵便番号なんだっけ' in calls[0]['input'][0]['content']
+    assert asked == ['gpt-6-luna']   # the connection is chosen by the backend's own model, not by the lookup's
     assert sent[-1] == {**sent[-1], 'type': 'session.commentary.append', 'delegation_id': 'del_5', 'content': '郵便番号は660-0807です。'}
 
 
@@ -410,3 +412,12 @@ def test_a_long_call_still_fits_in_one_request_to_jev():
     voice_router.fit(state, asked)
     assert len(json.dumps({'model': 'jev-latest', 'state': state, 'questions': asked}, ensure_ascii=False).encode()) <= 24000
     assert state['conversation'][-1]['text'] == '今の頼み' and 'route' in asked
+
+
+def test_the_connection_follows_the_model_named_not_the_lookups_model(monkeypatch):
+    """2026-11-12 22:14: six requests in one call were refused because gpt-6-luna was sent to DeepSeek."""
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-v4-pro')
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'k'); monkeypatch.setenv('OPENAI_API_KEY', 'k')
+    assert 'deepseek' in str(voice_lookup._client().base_url)
+    assert 'deepseek' in str(voice_lookup._client('deepseek-v4-pro').base_url)
+    assert 'openai.com' in str(voice_lookup._client('gpt-6-luna').base_url)
