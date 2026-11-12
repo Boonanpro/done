@@ -731,6 +731,7 @@ export function ProductionWorkspace({
           )
         }
         sidePanelTop={
+          latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
           <div className="mb-3 space-y-3">
             {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
               <div className="rounded-md border border-border p-3">
@@ -749,12 +750,9 @@ export function ProductionWorkspace({
                   </div>
                 ) : null}
               </div>
-            ) : latestJob?.status === 'failed' ? (
-              <div className="rounded-md border border-destructive/40 p-3 text-xs text-destructive">
-                前回の制作が失敗しました。{latestJob.error || ''}
-              </div>
             ) : null}
           </div>
+          ) : null
         }
         onBack={() => {
           setSelectedContent(null);

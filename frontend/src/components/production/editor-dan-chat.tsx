@@ -134,18 +134,24 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
     const startW = el.getBoundingClientRect().width;
     let next = startW;
     let raf = 0;
+    const handle = event.currentTarget;
+    const pid = event.pointerId;
+    // つかんだ印の上に指を留める（右のチャットや映像の上に来ても引きずりが切れない）
+    try { handle.setPointerCapture(pid); } catch {}
     setResizing(true);
     const move = (ev: PointerEvent) => {
       next = Math.min(maxWidth(), Math.max(MIN_WIDTH, startW + (startX - ev.clientX)));
       if (!raf) raf = requestAnimationFrame(() => { raf = 0; el.style.width = `${next}px`; });
     };
     const up = () => {
+      try { handle.releasePointerCapture(pid); } catch {}
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
       if (raf) cancelAnimationFrame(raf);
       el.style.width = `${next}px`;
       setResizing(false);
+      if (Math.abs(next - startW) < 1) return; // 押しただけ（ダブルクリックの1回目など）は幅を覚え直さない
       setWidth(Math.round(next));
       try { localStorage.setItem(WIDTH_KEY, String(Math.round(next))); } catch {}
     };
@@ -178,7 +184,6 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
             onDoubleClick={() => { setWidth(WIDTH); if (asideRef.current) asideRef.current.style.width = `${WIDTH}px`; try { localStorage.setItem(WIDTH_KEY, String(WIDTH)); } catch {} }}
             className={`absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize ${resizing ? 'bg-sky-500/60' : 'hover:bg-sky-500/40'}`}
           />
-          {resizing ? <div className="fixed inset-0 z-50 cursor-col-resize" /> : null}
           <button
             type="button"
             onClick={() => toggle(false)}
