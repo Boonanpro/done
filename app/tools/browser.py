@@ -547,6 +547,7 @@ def _spawn_detached_browser(executable: str, user_data_dir: str, cdp_port: int) 
         f"--window-position={OFF_SCREEN[0]},{OFF_SCREEN[1]}",
         "--window-size=1440,900",
         "--no-first-run",
+        "--mute-audio",  # Inspection browser: never emit speaker audio.
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
         "--hide-crash-restore-bubble",
