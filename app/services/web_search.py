@@ -20,6 +20,7 @@ import asyncio
 import contextvars
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -210,6 +211,40 @@ async def search(query):
         return {'success': False, 'error': found['error']}
     lines = [found['answer']] + (['', '出どころ:'] + [f'- {s["title"]} {s["url"]}' for s in found['sources'][:8]] if found['sources'] else [])
     return {'success': True, 'output': '\n'.join(lines)}
+
+
+TAGS = re.compile(r'<[^>]{1,80}>')
+
+
+def _plain(text, limit):
+    return ' '.join(TAGS.sub(' ', str(text or '')).split())[:limit]
+
+
+async def listing(query, count=8, full=3):
+    """The ranked results themselves, for a model that reads them (the call's lookup, 2026-11-13): no query rewriting and
+    no answering step. The whole search took 2.7-4.5 s, of which the list is 0.4-0.6 s; a lookup ran about eight per
+    request and then read pages to check what the summary had said. Each result keeps its URL, site, date and a short
+    text; the first `full` results carry part of the page itself, so the person, shop or price can be checked without
+    reading the page. {'success', 'results': [...], 'seconds'} or {'success': False, 'error'}."""
+    import httpx
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient() as client:
+            rows = await asyncio.wait_for(search_list(client, query, count, True, query), SECONDS)
+    except asyncio.TimeoutError:
+        return {'success': False, 'error': f'検索できなかった（{SECONDS}秒で答えが返らなかった）'}
+    except Exception as exc:
+        return {'success': False, 'error': '検索できなかった（' + (str(exc)[:160] or type(exc).__name__) + '）'}
+    results = []
+    for i, r in enumerate(rows):
+        if not r.get('url'):
+            continue
+        body = r.get('content') if i < full and r.get('content') else (r.get('summary') or r.get('snippet'))
+        results.append({'title': _plain(r.get('title'), 120), 'site': r.get('site_name') or '', 'date': r.get('date') or '',
+                        'url': r['url'], 'text': _plain(body, 1500 if i < full else 300)})
+    if not results:
+        return {'success': False, 'error': '検索できなかった（結果が無かった）'}
+    return {'success': True, 'results': results, 'seconds': round(time.perf_counter() - started, 2)}
 
 
 async def tool(params):

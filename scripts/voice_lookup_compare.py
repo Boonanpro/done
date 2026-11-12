@@ -26,13 +26,14 @@ PRICES = {'deepseek-v4-pro': (1.32, 0.044, 3.96), 'deepseek-flash': (0.3, 0.006,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('tree'); ap.add_argument('case'); ap.add_argument('out')
-    ap.add_argument('--model'); ap.add_argument('--reasoning')
+    ap.add_argument('--model'); ap.add_argument('--reasoning'); ap.add_argument('--search')
     a = ap.parse_args()
     from dotenv import dotenv_values
     for k, v in dotenv_values('/Users/mikihonda/done/.env').items():
         if v is not None: os.environ.setdefault(k, v.strip())
     if a.model: os.environ['DAN_VOICE_LOOKUP_MODEL'] = a.model
     if a.reasoning: os.environ['DAN_VOICE_LOOKUP_REASONING'] = a.reasoning
+    if a.search: os.environ['DAN_VOICE_LOOKUP_SEARCH'] = a.search
     os.environ.setdefault('DAN_VOICE_ROUTER', '1')
     tree = Path(a.tree).resolve()
     os.chdir(tree); sys.path.insert(0, str(tree))
@@ -61,11 +62,24 @@ async def run(case, out):
     from app.services import voice_sideband
     real, steps = voice_sideband.execute_call, []
     async def execute_call(item, *a, **k):   # what the lookup asked and a little of what came back, to read a run later
+        t0 = time.monotonic()
+        step = {'name': item.get('name'), 'at': round(t0 - began, 1), 'seconds': None, 'arguments': str(item.get('arguments'))[:300]}
+        steps.append(step)   # before it runs: a page read the lookup stops waiting for stays listed (seconds None)
         out_item = await real(item, *a, **k)
-        steps.append({'name': item.get('name'), 'arguments': str(item.get('arguments'))[:300], 'output': str(out_item.get('output'))[:600]})
+        step.update(seconds=round(time.monotonic() - t0, 1), output=str(out_item.get('output'))[:600])
         return out_item
-    voice_sideband.execute_call = execute_call
     began = time.monotonic()
+    voice_sideband.execute_call = execute_call
+    from app.services import web_search
+    real_listing = web_search.listing
+    async def listing(query, *a, **k):
+        t0 = time.monotonic()
+        step = {'name': 'web_search', 'at': round(t0 - began, 1), 'seconds': None, 'arguments': query[:300]}
+        steps.append(step)
+        found = await real_listing(query, *a, **k)
+        step.update(seconds=round(time.monotonic() - t0, 1), output=str(found)[:600])
+        return found
+    web_search.listing = listing
     try:
         answer = await asyncio.wait_for(lookup._loop(), voice_lookup.SECONDS)
         state = 'answered' if lookup.state == 'running' else lookup.state
@@ -87,7 +101,7 @@ async def run(case, out):
         usd = round(((tokens['input_tokens'] - tokens['cached_tokens']) * price[0] + tokens['cached_tokens'] * price[1]
                      + tokens['output_tokens'] * price[2]) / 1e6, 5)
     tools = [n for r in rounds for n in r.get('calls', [])]
-    result = {'model': model, 'reasoning': voice_lookup.REASONING, 'state': state, 'seconds': seconds, 'rounds': len(rounds),
+    result = {'model': model, 'reasoning': voice_lookup.REASONING, 'search': getattr(voice_lookup, 'SEARCH', 'answer'), 'state': state, 'seconds': seconds, 'rounds': len(rounds),
               'tools': tools, 'round_detail': [{k: r.get(k) for k in ('elapsed_ms', 'calls', 'output_tokens')} for r in rounds], 'tokens': tokens, 'usd': usd, 'answer': answer, 'progress': lookup.progress, 'steps': steps, 'events': events, 'handed_over': handed,
               'missing': missing, 'banned': banned, 'passed': not missing and not banned}
     out.parent.mkdir(parents=True, exist_ok=True)

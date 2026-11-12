@@ -1,7 +1,13 @@
 """Places near a point, anywhere (owner, 2026-10-03): 「近くの〇〇」 and lists such as 「〇〇市の工務店」 without a browser.
 Japan: OpenPOI API (3.37M facilities: Overture Maps + food business permits; free, no key). Elsewhere, and as a second
 source in Japan when OpenPOI finds little: Photon (komoot's OpenStreetMap search; free, no key). Place names are turned
-into coordinates with Photon too. Neither has opening hours or reviews: check the few that matter with web_search.
+into coordinates with Nominatim (OpenStreetMap's own search). Neither has opening hours or reviews: check the few that
+matter with web_search.
+
+Photon's public server stopped answering its API on 2026-11-13 (the home page loads, /api/ times out) and every places
+call waited the client's 20 s for it, three in a row in one call lookup: 20.9 s, 41.8 s, 62.7 s. Place names now go to
+Nominatim (0.5 s; its policy: at most one request a second, an identifying User-Agent), and each Photon request has a
+short limit of its own, so a dead Photon costs PHOTON_S and the results come from the sources that answered.
 
 Attribution the sources ask for is returned with the results (OpenPOI: a link to OpenPOI API; OSM: © OpenStreetMap)."""
 import math
@@ -11,6 +17,21 @@ import httpx
 
 OPENPOI = 'https://api.openpoiapi.com/v1/search'
 PHOTON = 'https://photon.komoot.io/api/'
+NOMINATIM = 'https://nominatim.openstreetmap.org/search'
+GSI = 'https://msearch.gsi.go.jp/address-search/AddressSearch'   # 国土地理院: Japanese place names and addresses
+PHOTON_S = 3          # Photon answers in under a second when it is up
+PHOTON_REST_S = 600   # after Photon has not answered, it is left alone this long (a dead Photon would cost PHOTON_S each call)
+_photon_down = [0.0]
+
+
+def photon_up():
+    import time
+    return time.monotonic() >= _photon_down[0]
+
+
+def photon_failed():
+    import time
+    _photon_down[0] = time.monotonic() + PHOTON_REST_S
 UA = {'User-Agent': 'Dan/1.0 (personal assistant; places lookup)'}
 
 TOOL = {
@@ -41,14 +62,72 @@ def distance_m(lat1, lng1, lat2, lng2):
     return round(2*r*math.asin(math.sqrt(a)))
 
 
+_nominatim_gate = [0.0]
+
+
+async def nominatim(client, params):
+    """One Nominatim request, at most one a second from this process (its usage policy)."""
+    import asyncio, time
+    wait = _nominatim_gate[0] + 1.05 - time.monotonic()
+    _nominatim_gate[0] = time.monotonic() + max(0.0, wait)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    r = await client.get(NOMINATIM, params={'format': 'jsonv2', 'accept-language': 'ja', **params}, headers=UA, timeout=8)
+    return r.json() if r.status_code == 200 else []
+
+
+async def gsi(client, text):
+    r = await client.get(GSI, params={'q': text}, headers=UA, timeout=4)
+    return r.json() if r.status_code == 200 else []
+
+
 async def geocode(client, text):
-    r = await client.get(PHOTON, params={'q': text, 'limit': 1}, headers=UA)
-    feats = r.json().get('features') or []
+    # Nominatim takes 0.3-5 s; the 国土地理院 search, asked at the same time, answers Japanese names when it is slow.
+    import asyncio
+    backup = asyncio.ensure_future(gsi(client, text))
+    try:
+        found = await asyncio.wait_for(nominatim(client, {'q': text, 'limit': 1}), 4)
+    except Exception:
+        found = []
+    if not found:
+        try:
+            rows = await backup
+        except Exception:
+            rows = []
+        if rows:
+            lng, lat = rows[0]['geometry']['coordinates']
+            return lat, lng, rows[0]['properties'].get('title') or text
+    else:
+        backup.cancel()
+    if found:
+        x = found[0]
+        name = x.get('name') or ''
+        return float(x['lat']), float(x['lon']), ', '.join(v for v in (name, x.get('display_name', '').split(', ')[-1]) if v)
+    if not photon_up():
+        return None
+    try:   # Photon, when it is up, knows a few names Nominatim does not
+        r = await client.get(PHOTON, params={'q': text, 'limit': 1}, headers=UA, timeout=PHOTON_S)
+        feats = r.json().get('features') or []
+    except Exception:
+        photon_failed()
+        return None
     if not feats:
         return None
     lng, lat = feats[0]['geometry']['coordinates']
     p = feats[0]['properties']
     return lat, lng, ', '.join(x for x in (p.get('name'), p.get('city'), p.get('country')) if x)
+
+
+async def nominatim_near(client, query, lat, lng, radius, limit):
+    """OpenStreetMap places by name inside the circle's box (one request, the whole query)."""
+    d_lat = radius/111000
+    d_lng = radius/(111000*max(.1, math.cos(math.radians(lat))))
+    rows = []
+    for x in await nominatim(client, {'q': query, 'viewbox': f'{lng-d_lng},{lat+d_lat},{lng+d_lng},{lat-d_lat}', 'bounded': 1,
+                                      'limit': min(40, limit*2)}):
+        rows.append({'name': x.get('name') or '', 'kind': f"{x.get('category', '')}:{x.get('type', '')}",
+                     'address': x.get('display_name') or '', 'lat': float(x['lat']), 'lng': float(x['lon']), 'source': 'OpenStreetMap'})
+    return rows
 
 
 async def openpoi(client, query, lat, lng, radius, limit):
@@ -68,7 +147,13 @@ async def photon(client, query, lat, lng, radius, limit, osm_tag=''):
     params = {'q': query, 'lat': lat, 'lon': lng, 'bbox': bbox, 'limit': min(50, limit*2)}
     if osm_tag:
         params['osm_tag'] = osm_tag
-    r = await client.get(PHOTON, params=params, headers=UA)
+    if not photon_up():
+        return []
+    try:
+        r = await client.get(PHOTON, params=params, headers=UA, timeout=PHOTON_S)
+    except httpx.TimeoutException:
+        photon_failed()
+        raise
     rows = []
     for f in (r.json().get('features') or []):
         p = f['properties']
@@ -108,6 +193,7 @@ async def find(query, lat=None, lng=None, near='', radius_m=1000, limit=20, user
         jobs = [safe(photon(client, w, lat, lng, radius_m, limit)) for w in words]
         if osm_tag:
             jobs.append(safe(photon(client, words[0], lat, lng, radius_m, limit, osm_tag)))
+        jobs.append(safe(nominatim_near(client, query, lat, lng, radius_m, limit)))
         if in_japan(lat, lng):
             jobs.insert(0, safe(openpoi(client, query, lat, lng, radius_m, limit)))
         rows = [x for part in await asyncio.gather(*jobs) for x in part]
