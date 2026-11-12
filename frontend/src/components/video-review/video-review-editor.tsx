@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AI_VIDEO_MODELS, aiDurationFor, aiModelFor, aiModelsForLength } from '@/lib/ai-video-models';
 import {
   CAPTION_DESIGN_PRESETS,
@@ -13,6 +13,7 @@ import {
 import {
   ArrowLeft,
   Check,
+  Maximize2,
   MessageSquare,
   MousePointer2,
   Pause,
@@ -26,6 +27,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { TimelineRuler } from './timeline-ruler';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -678,6 +680,8 @@ export function VideoReviewEditor({
   const [videoUrl, setVideoUrl] = useState(initialUrl || '');
   const [duration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  // 利用者が再生位置を動かすたびに増える。プレビューは再生中でもこれを見て新しい位置から続ける。
+  const [seekRev, setSeekRev] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
   const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
@@ -1294,7 +1298,59 @@ export function VideoReviewEditor({
   }, [editSequence]);
   // Stable callbacks: passing inline arrows would change every render and re-run the
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
-  const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
+  // 再生中の時刻は毎コマここに入る。赤線・時刻の表示・タイムラインの送りはこの値で直接動かし、
+  // エディター全体（React の currentTime）は 8回/秒だけ更新する。毎コマ全体を描き直すと、
+  // クリップの多い作品・全体表示で再生がカクついていた（2026-11-13 本人「ズームアウトすると一気にカクつく」）。
+  const liveTimeRef = useRef(0);
+  const playingRef = useRef(false);
+  const scrubbingRef = useRef(false);
+  const timelineDurationRef = useRef(0);
+  const trackWidthRef = useRef(0);
+  const timeReadoutRef = useRef<HTMLSpanElement>(null);
+  const lastTimeStateRef = useRef(0);
+  const timeFlushRef = useRef<number | null>(null);
+  timelineDurationRef.current = timelineDuration || 0;
+  playingRef.current = playing;
+  const placePlayhead = useCallback((t: number) => {
+    const bar = playheadBarRef.current;
+    const td = timelineDurationRef.current;
+    const w = trackWidthRef.current || timelineRef.current?.offsetWidth || 0;
+    const tf = `translate3d(${td && w ? (t / td) * w : 0}px,0,0)`;
+    if (bar) bar.style.transform = tf;
+    if (playheadHeadRef.current) playheadHeadRef.current.style.transform = tf;
+  }, []);
+  // 再生中の送り: 赤線が右端に来たら1画面めくる（Premiere の「ページスクロール」と同じ）。
+  // 少しずつ送ると、毎コマ全部のクリップを描き直すことになる。
+  const followPlayhead = useCallback((t: number) => {
+    const scroller = timelineScrollRef.current;
+    const track = timelineRef.current;
+    const td = timelineDurationRef.current;
+    const w = trackWidthRef.current;
+    if (!scroller || !track || !td || !w || danReplayingRef.current) return;
+    const playX = track.offsetLeft + (t / td) * w;
+    const left = scroller.scrollLeft;
+    const right = left + scroller.clientWidth;
+    if (playX > right - 24 || playX < left) scroller.scrollLeft = Math.max(0, playX - 40);
+  }, []);
+  const handlePreviewTime = useCallback((t: number) => {
+    liveTimeRef.current = t;
+    placePlayhead(t);
+    if (timeReadoutRef.current) timeReadoutRef.current.textContent = fmtTime(t);
+    if (!playingRef.current) { setCurrentTime(t); return; }
+    if (!scrubbingRef.current) followPlayhead(t);
+    const now = performance.now();
+    if (now - lastTimeStateRef.current >= 125) {
+      lastTimeStateRef.current = now;
+      setCurrentTime(t);
+    } else if (timeFlushRef.current == null) {
+      // 最後の値を必ず届ける（再生の終わり・止めた瞬間の位置がずれないように）
+      timeFlushRef.current = window.setTimeout(() => {
+        timeFlushRef.current = null;
+        lastTimeStateRef.current = performance.now();
+        setCurrentTime(liveTimeRef.current);
+      }, 130);
+    }
+  }, [placePlayhead, followPlayhead]);
   const handlePreviewEnded = useCallback(() => setPlaying(false), []);
   // The playhead FOLLOWS the engine's real playback position (engPosRef = last reported position +
   // the wall-clock time it arrived). The picture stalls ~150-650ms at each clip boundary while the
@@ -1306,6 +1362,7 @@ export function VideoReviewEditor({
   // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
   // at ~12Hz only for the reactive bits (captions / annotations / time readout) which don't need 60Hz.
   const playheadBarRef = useRef<HTMLDivElement>(null);
+  const playheadHeadRef = useRef<HTMLDivElement>(null);
   // Magnet for the PLAYHEAD: the clip-join times (every clip's start AND end, plus 0) that the
   // scrubbing red line snaps onto when 🧲 is ON, so it clicks precisely onto cut points.
   const playheadSnapPoints = useMemo(() => {
@@ -1340,11 +1397,30 @@ export function VideoReviewEditor({
       // follow-clock at the seek target so the bar jumps there and then stays put until the engine
       // confirms it actually resumed there (the engine keeps reporting the target while it re-prerolls).
       setCurrentTime(nextTime);
+      liveTimeRef.current = nextTime;
+      placePlayhead(nextTime);
+      if (timeReadoutRef.current) timeReadoutRef.current.textContent = fmtTime(nextTime);
+      setSeekRev((v) => v + 1);
       engPosRef.current = { pos: nextTime, wall: performance.now() };
       if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
-    [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints]
+    [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints, placePlayhead]
   );
+
+  // P キーの全画面: プレビューの欄（映像と字幕・ぼかしの枠）を画面いっぱいに出す
+  const previewAreaRef = useRef<HTMLDivElement | null>(null);
+  const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  const togglePreviewFullscreen = useCallback(() => {
+    const el = previewAreaRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    else void el.requestFullscreen().catch(() => {});
+  }, []);
+  useEffect(() => {
+    const on = () => setPreviewFullscreen(!!document.fullscreenElement && document.fullscreenElement === previewAreaRef.current);
+    document.addEventListener('fullscreenchange', on);
+    return () => document.removeEventListener('fullscreenchange', on);
+  }, []);
 
   // Native transport bridge: in the desktop shell the GES engine is the playback source.
   // Drive it from the editor's transport, and take the engine's position back for the playhead.
@@ -1368,8 +1444,8 @@ export function VideoReviewEditor({
       const elapsed = Math.min(Math.max((performance.now() - e.wall) / 1000, 0), 0.08);
       const pos = max > 0 ? Math.min(e.pos + elapsed, max) : e.pos + elapsed;
       // 60Hz: move ONLY the thin bar via the ref — no React re-render of the heavy editor.
-      const bar = playheadBarRef.current;
-      if (bar && timelineDuration) bar.style.left = `${(pos / timelineDuration) * 100}%`;
+      liveTimeRef.current = pos;
+      placePlayhead(pos);
       // ~12Hz: update React currentTime for the reactive bits (captions/annotations/time readout).
       if (now - lastState > 80) {
         lastState = now;
@@ -1379,7 +1455,7 @@ export function VideoReviewEditor({
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [nativeShell, playing, timelineDuration, duration]);
+  }, [nativeShell, playing, timelineDuration, duration, placePlayhead]);
   useEffect(() => {
     if (!nativeShell) return;
     const wv = (window as unknown as { chrome?: { webview?: { addEventListener(t: string, h: (e: { data: unknown }) => void): void; removeEventListener(t: string, h: (e: { data: unknown }) => void): void } } }).chrome?.webview;
@@ -2077,6 +2153,25 @@ export function VideoReviewEditor({
         setPlaying((p) => !p);
         return;
       }
+      // P: プレビューを全画面に／戻す（前のエディターと同じ。Esc でも戻る）
+      if (!modKey && !event.altKey && (event.key === 'p' || event.key === 'P')) {
+        event.preventDefault();
+        togglePreviewFullscreen();
+        return;
+      }
+      // Home / End: 先頭・最後へ
+      if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault();
+        seekTimeline(event.key === 'Home' ? 0 : contentDuration || 0);
+        return;
+      }
+      // + / -: 再生位置を中心に拡大・縮小
+      if (!modKey && (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '_')) {
+        event.preventDefault();
+        const dir = event.key === '-' || event.key === '_' ? -1 : 1;
+        setTimelineZoom((value) => Number(clamp(value * (dir > 0 ? 1.25 : 0.8), 1, maxTimelineZoom).toFixed(2)));
+        return;
+      }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
         if (event.shiftKey) rippleDelete(); // close the gap
@@ -2094,13 +2189,13 @@ export function VideoReviewEditor({
         setPlaying(false);
         const unit = (event.shiftKey ? 10 : 1) / fps;
         const direction = event.key === 'ArrowRight' ? 1 : -1;
-        const nextTime = Number(clamp(currentTime + direction * unit, 0, timelineDuration || duration || 0).toFixed(3));
+        const nextTime = Number(clamp(liveTimeRef.current + direction * unit, 0, timelineDuration || duration || 0).toFixed(3));
         seekTimeline(nextTime);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo]);
+  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -2283,33 +2378,87 @@ export function VideoReviewEditor({
     };
   }, [pendingAnnotation, pendingTimelineDrag, timelineDuration, updatePendingTime]);
 
+  // 再生位置をつかんで動かす。再生中につかんだら、つかんでいる間だけ止めて、離したらその位置から再生を続ける
+  // （2026-11-13 本人「再生中でも普通に動かせるようにしたい」）。
+  // つかんだまま枠の左右の端へ寄せると、指を止めていてもその向きへ流れ続ける（端からの距離で速くなる）。
+  const scrubPointerXRef = useRef<number | null>(null);
+  const resumeAfterScrubRef = useRef(false);
+  const timeAtVisibleX = useCallback((clientX: number): number => {
+    const sc = timelineScrollRef.current;
+    const track = timelineRef.current;
+    const td = timelineDurationRef.current;
+    if (!track || !td) return 0;
+    const sr = sc?.getBoundingClientRect();
+    const tr = track.getBoundingClientRect();
+    // 枠の外へ出たら、見えている端の位置にとどめる（赤線が画面の外へ飛ばない）
+    const x = sr ? clamp(clientX, Math.max(sr.left, tr.left), Math.min(sr.right - 1, tr.right)) : clientX;
+    return Number(clamp(((x - tr.left) / tr.width) * td, 0, td).toFixed(3));
+  }, []);
+  const beginScrub = useCallback((clientX: number) => {
+    if (playingRef.current) {
+      resumeAfterScrubRef.current = true;
+      setPlaying(false);
+    }
+    scrubbingRef.current = true;
+    scrubPointerXRef.current = clientX;
+    seekTimeline(timeAtVisibleX(clientX));
+    setIsTimelineScrubbing(true);
+  }, [seekTimeline, timeAtVisibleX]);
   useEffect(() => {
     if (!isTimelineScrubbing) return;
+    let lastT = -1;
     const moveScrub = (event: PointerEvent) => {
-      const nextTime = getTimelineTime(event);
-      seekTimeline(nextTime);
+      scrubPointerXRef.current = event.clientX;
+      const t = timeAtVisibleX(event.clientX);
+      if (t !== lastT) { lastT = t; seekTimeline(t); }
     };
-    const stopScrub = () => setIsTimelineScrubbing(false);
+    let raf = 0;
+    const edgeLoop = () => {
+      raf = requestAnimationFrame(edgeLoop);
+      const x = scrubPointerXRef.current;
+      const sc = timelineScrollRef.current;
+      if (x == null || !sc || sc.scrollWidth <= sc.clientWidth) return;
+      const r = sc.getBoundingClientRect();
+      const ZONE = 36;
+      let v = 0;
+      if (x > r.right - ZONE) v = Math.min(80, 4 + (x - (r.right - ZONE)) * 0.6);
+      else if (x < r.left + ZONE) v = -Math.min(80, 4 + (r.left + ZONE - x) * 0.6);
+      if (!v) return;
+      const before = sc.scrollLeft;
+      sc.scrollLeft = clamp(before + v, 0, sc.scrollWidth - sc.clientWidth);
+      if (sc.scrollLeft === before) return;
+      const t = timeAtVisibleX(x);
+      if (t !== lastT) { lastT = t; seekTimeline(t); }
+    };
+    raf = requestAnimationFrame(edgeLoop);
+    const stopScrub = () => {
+      scrubbingRef.current = false;
+      scrubPointerXRef.current = null;
+      setIsTimelineScrubbing(false);
+      if (resumeAfterScrubRef.current) {
+        resumeAfterScrubRef.current = false;
+        setPlaying(true);
+      }
+    };
     window.addEventListener('pointermove', moveScrub);
     window.addEventListener('pointerup', stopScrub);
     window.addEventListener('pointercancel', stopScrub);
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', moveScrub);
       window.removeEventListener('pointerup', stopScrub);
       window.removeEventListener('pointercancel', stopScrub);
     };
-  }, [getTimelineTime, isTimelineScrubbing, seekTimeline]);
+  }, [isTimelineScrubbing, seekTimeline, timeAtVisibleX]);
 
   const handleTimelinePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) return; // right-drag is rubber-band select, not scrub
       event.preventDefault();
       clearSelection();
-      const nextTime = getTimelineTime(event);
-      seekTimeline(nextTime);
-      setIsTimelineScrubbing(true);
+      beginScrub(event.clientX);
     },
-    [clearSelection, getTimelineTime, seekTimeline]
+    [clearSelection, beginScrub]
   );
 
   const handleTimelineWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
@@ -2321,10 +2470,10 @@ export function VideoReviewEditor({
       const scroller = timelineScrollRef.current;
       const track = timelineRef.current;
       if (!scroller || !track || !timelineDuration) return;
-      const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
+      const redlineX = (liveTimeRef.current / timelineDuration) * track.offsetWidth;
       scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     });
-  }, [currentTime, timelineDuration, maxTimelineZoom]);
+  }, [timelineDuration, maxTimelineZoom]);
 
   // Edge-scroll on playhead MOVEMENT: only scroll when the playhead reaches the viewport edge —
   // staying put for fine adjustments in the middle (centering on every move made the whole timeline
@@ -2334,20 +2483,51 @@ export function VideoReviewEditor({
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
     if (danReplayingRef.current) return; // Dan's replay pans the view itself
+    if (playing || isTimelineScrubbing) return; // 再生中は followPlayhead、つかんでいる間は端の自動送りが受け持つ
     const playX = track.offsetLeft + (currentTime / timelineDuration) * track.offsetWidth;
     const margin = 40;
     const left = scroller.scrollLeft;
     const right = left + scroller.clientWidth;
     if (playX < left + margin) scroller.scrollLeft = Math.max(0, playX - margin);
     else if (playX > right - margin) scroller.scrollLeft = playX - scroller.clientWidth + margin;
-  }, [currentTime, timelineDuration]);
+  }, [currentTime, timelineDuration, playing, isTimelineScrubbing]);
+
+  // 赤線の位置合わせ: 止まっている時は currentTime、再生中は毎コマの値。タイムラインの幅は覚えておき、毎コマ測らない。
+  useLayoutEffect(() => {
+    if (timelineRef.current) trackWidthRef.current = timelineRef.current.offsetWidth;
+    placePlayhead(liveTimeRef.current);
+  }, [timelineDuration, timelineZoom, placePlayhead]);
+  const wasPlayingRef = useRef(false);
+  useLayoutEffect(() => {
+    if (playing) { wasPlayingRef.current = true; return; }
+    if (wasPlayingRef.current) {
+      // 止めた瞬間: 8回/秒の値は少し古いので、毎コマの最新の位置で止める
+      wasPlayingRef.current = false;
+      if (timeFlushRef.current != null) { window.clearTimeout(timeFlushRef.current); timeFlushRef.current = null; }
+      if (Math.abs(liveTimeRef.current - currentTime) > 0.0005) { setCurrentTime(liveTimeRef.current); return; }
+    }
+    liveTimeRef.current = currentTime;
+    placePlayhead(currentTime);
+    if (timeReadoutRef.current) timeReadoutRef.current.textContent = fmtTime(currentTime);
+  }, [currentTime, playing, placePlayhead]);
+  useEffect(() => {
+    const track = timelineRef.current;
+    if (!track) return;
+    const ro = new ResizeObserver(() => {
+      trackWidthRef.current = track.offsetWidth;
+      placePlayhead(liveTimeRef.current);
+    });
+    trackWidthRef.current = track.offsetWidth;
+    ro.observe(track);
+    return () => ro.disconnect();
+  }, [placePlayhead]);
 
   // On ZOOM, centre the playhead (zoom is an explicit action that zooms AROUND the red line).
   useEffect(() => {
     const scroller = timelineScrollRef.current;
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
-    const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
+    const redlineX = (liveTimeRef.current / timelineDuration) * track.offsetWidth;
     scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timelineZoom]);
@@ -2591,8 +2771,6 @@ export function VideoReviewEditor({
   // bake_start), because the bake covers a padded window. No per-frame matting, no VP9.
   const popoutVideoRef = useRef<HTMLVideoElement | null>(null);
   const popoutAlphaRef = useRef<HTMLVideoElement | null>(null);
-  const playingRef = useRef(playing);
-  playingRef.current = playing;
   const activePopout = useMemo(() => {
     const popClips = allSequenceClips.filter((c) => (c.effects || []).some((e) => e.type === 'popout'));
     for (const c of popClips) {
@@ -3129,6 +3307,195 @@ export function VideoReviewEditor({
     };
   }, [marqueeActive]);
 
+  // タイムラインの段とクリップ。再生位置（currentTime）が変わっても作り直さない。
+  // 押した時の処理は laneFns から最新の物を呼ぶので、ここは見た目の中身が変わった時だけ描き直す。
+  const laneFns = useRef({ handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag });
+  laneFns.current = { handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag };
+  const lanesView = useMemo(() => (
+    timelineLanes.map((lane, laneIndex) => {
+                        const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
+                        const showPending =
+                          !!pendingAnnotation &&
+                          lane.zone === trackForIntent(pendingAnnotation.intent) &&
+                          timelineLanes.findIndex((l) => l.zone === lane.zone) === laneIndex;
+                        return (
+                          <div
+                            key={lane.key}
+                            className={`relative w-full overflow-hidden rounded border ${
+                              lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
+                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
+                            style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
+                            onPointerDown={(event) => {
+                              if (event.target === event.currentTarget) laneFns.current.handleTimelinePointerDown(event);
+                            }}
+                            onPointerUp={() => setTimelineDrag(null)}
+                            onPointerCancel={() => setTimelineDrag(null)}
+                            onDragOver={(event) => laneFns.current.handleLaneDragOver(event, lane)}
+                            onDrop={(event) => laneFns.current.handleLaneDrop(event, lane)}
+                          >
+                            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
+                            {dropPreview && dropPreview.zone === lane.zone && dropPreview.layer === lane.layer && timelineDuration ? (
+                              <div
+                                className="pointer-events-none absolute top-0.5 bottom-0.5 z-10 rounded border-2 border-dashed border-sky-300 bg-sky-400/25"
+                                style={{
+                                  left: `${(dropPreview.start / timelineDuration) * 100}%`,
+                                  width: `${Math.max(0.8, (dropPreview.len / timelineDuration) * 100)}%`,
+                                }}
+                              >
+                                <span className="px-1 text-[9px] text-sky-100">ここに追加</span>
+                              </div>
+                            ) : null}
+                            {lane.items.map((item) => {
+                              const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
+                              // accurate width (% of timeline); a pixel minWidth keeps short clips
+                              // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
+                              // timeline, drew short clips seconds-wide and overlapped neighbours.
+                              const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
+                              if (item.kind === 'annotation' && item.annotation) {
+                                const a = item.annotation;
+                                return (
+                                  <div
+                                    key={item.key}
+                                    data-annotation-id={a.id}
+                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
+                                    style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
+                                    onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'move')}
+                                    onDoubleClick={() => {
+                                      laneFns.current.selectAnnotation(a.id);
+                                      laneFns.current.seekTimeline(a.start);
+                                    }}
+                                    title={`${a.intent}: ${fmtTime(a.start)} - ${fmtTime(a.end)} ${a.note || ''}`}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="h-full w-2 cursor-ew-resize bg-black/25"
+                                      onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'start')}
+                                      aria-label="Resize start"
+                                    />
+                                    <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
+                                    {a.note ? (
+                                      <button
+                                        type="button"
+                                        className="h-full shrink-0 px-1 text-[9px] hover:bg-black/25"
+                                        title="メモを読む"
+                                        aria-label="メモ"
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setOpenNoteKey((cur) => (cur === a.note ? null : a.note || null));
+                                        }}
+                                      >
+                                        ▼
+                                      </button>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="h-full w-2 cursor-ew-resize bg-black/25"
+                                      onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'end')}
+                                      aria-label="Resize end"
+                                    />
+                                  </div>
+                                );
+                              }
+                              const clip = item.clip;
+                              if (!clip) return null;
+                              const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
+                              const selected = selectedSequenceClipIds.includes(clip.id);
+                              const linkedSelected = !selected && highlightedClipIds.has(clip.id);
+                              const isVideo = item.itemType === 'video';
+                              const labelText =
+                                item.itemType === 'caption'
+                                  ? clip.text || 'テロップ'
+                                  : item.itemType === 'audio'
+                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
+                                    : clip.label || '素材';
+                              return (
+                                <div
+                                  key={item.key}
+                                  data-clip-id={clip.id}
+                                  className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
+                                    danTouch.ids.includes(clip.id) ? 'dan-touch' : ''} ${danTouch.appear.includes(clip.id) ? 'dan-appear' : ''} ${
+                                    danTouch.vanish.includes(clip.id) ? 'dan-vanish' : ''} ${
+                                    selected
+                                      ? 'border-yellow-300 ring-2 ring-yellow-300/70'
+                                      : linkedSelected
+                                        ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
+                                        : 'border-white/30'
+                                  }`}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
+                                    if (rightDragRef.current) return;
+                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
+                                  }}
+                                  style={{
+                                    left: `${left}%`,
+                                    width: `${width}%`,
+                                    minWidth: '3px',
+                                    top: 3,
+                                    bottom: 3,
+                                    ...(isVideo && clipAsset?.thumbnail_url
+                                      ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
+                                      : {}),
+                                  }}
+                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
+                                >
+                                  <button
+                                    type="button"
+                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'start')}
+                                    aria-label="Resize clip start"
+                                  />
+                                  <div
+                                    className="flex h-full min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
+                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'move')}
+                                    onDoubleClick={(event) => {
+                                      event.stopPropagation();
+                                      laneFns.current.selectSequenceClip(clip.id);
+                                      laneFns.current.seekTimeline(clip.timeline_start);
+                                    }}
+                                  >
+                                    <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{itemTypeBadge(item.itemType)}</span>
+                                    <span className="truncate">{labelText}</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'end')}
+                                    aria-label="Resize clip end"
+                                  />
+                                </div>
+                              );
+                            })}
+                            {showPending && pendingAnnotation ? (
+                              <div
+                                className="absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border border-orange-300 bg-orange-400/65 text-[10px] text-black active:cursor-grabbing"
+                                style={{
+                                  left: `${timelineDuration ? (pendingAnnotation.start / timelineDuration) * 100 : 0}%`,
+                                  width: `${timelineDuration ? Math.max(0.8, (((pendingAnnotation.end ?? pendingAnnotation.start + 0.2) - pendingAnnotation.start) / timelineDuration) * 100) : 1}%`,
+                                }}
+                                onPointerDown={(event) => laneFns.current.startPendingTimelineDrag(event, 'move')}
+                              >
+                                <button
+                                  type="button"
+                                  className="h-full w-2 cursor-ew-resize bg-black/25"
+                                  onPointerDown={(event) => laneFns.current.startPendingTimelineDrag(event, 'start')}
+                                  aria-label="Resize pending start"
+                                />
+                                <span className="min-w-0 flex-1 truncate px-1">未確定</span>
+                                <button
+                                  type="button"
+                                  className="h-full w-2 cursor-ew-resize bg-black/25"
+                                  onPointerDown={(event) => laneFns.current.startPendingTimelineDrag(event, 'end')}
+                                  aria-label="Resize pending end"
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })
+  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch]);
+
   return (
     <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
       <style>{DAN_HANDS_CSS}</style>
@@ -3217,8 +3584,12 @@ export function VideoReviewEditor({
 
         <div className="flex flex-1 overflow-hidden">
           <div className={`flex min-w-0 flex-1 flex-col ${nativeShell ? '' : 'bg-neutral-950'}`}>
-            <div className="relative flex min-h-0 flex-1 items-center justify-center p-4">
-              {previewTopLeft ? (
+            <div
+              ref={previewAreaRef}
+              className={`relative flex min-h-0 flex-1 items-center justify-center ${previewFullscreen ? 'bg-black p-0' : 'p-4'}`}
+              onDoubleClick={(event) => { if (event.target === event.currentTarget) togglePreviewFullscreen(); }}
+            >
+              {previewTopLeft && !previewFullscreen ? (
                 <div className="absolute left-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
                   {previewTopLeft}
                 </div>
@@ -3247,6 +3618,7 @@ export function VideoReviewEditor({
                     assets={sequenceAssets || []}
                     blurRegionsAt={blurRegionsAt}
                     currentTime={currentTime}
+                    seekRev={seekRev}
                     playing={playing}
                     format={editSequence?.format || initialSequence?.format || '9:16'}
                     onTimeChange={handlePreviewTime}
@@ -3593,6 +3965,15 @@ export function VideoReviewEditor({
                 >
                   <Scissors className="h-4 w-4" />
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  title="プレビューを全画面 (P)"
+                  onClick={togglePreviewFullscreen}
+                >
+                  <Maximize2 className="h-4 w-4" />
+                </Button>
                 <div className="flex items-center gap-2" title="タイムラインの拡大率（左端＝全体表示）">
                   <span className="text-[10px] text-muted-foreground">ズーム</span>
                   <input
@@ -3613,7 +3994,7 @@ export function VideoReviewEditor({
                   <span className="w-9 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(timelineZoom * 100)}%</span>
                 </div>
                 <div className="text-sm tabular-nums text-muted-foreground">
-                  {fmtTime(currentTime)} / {fmtTime(contentDuration)}
+                  <span ref={timeReadoutRef}>{fmtTime(currentTime)}</span> / {fmtTime(contentDuration)}
                 </div>
               </div>
               {openNoteKey ? (
@@ -3627,6 +4008,7 @@ export function VideoReviewEditor({
               <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`} onWheel={handleTimelineWheel}>
                 <div className="flex gap-x-2 text-[11px]">
                   <div className="flex w-[82px] shrink-0 flex-col">
+                    <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-muted/40" />
                     {timelineLanes.map((lane, i) => (
                       <div
                         key={lane.key}
@@ -3638,6 +4020,16 @@ export function VideoReviewEditor({
                     ))}
                   </div>
                   <div className="min-w-0 flex-1">
+                    <div className="sticky top-0 z-20 mb-1">
+                      <TimelineRuler
+                        scrollRef={timelineScrollRef}
+                        trackRef={timelineRef}
+                        headRef={playheadHeadRef}
+                        duration={timelineDuration || 0}
+                        zoom={timelineZoom}
+                        onScrubStart={beginScrub}
+                      />
+                    </div>
                     <div
                       ref={timelineRef}
                       className="relative"
@@ -3652,192 +4044,13 @@ export function VideoReviewEditor({
                       }}
                       onContextMenu={(event) => event.preventDefault()}
                     >
-                      {timelineLanes.map((lane, laneIndex) => {
-                        const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
-                        const showPending =
-                          !!pendingAnnotation &&
-                          lane.zone === trackForIntent(pendingAnnotation.intent) &&
-                          timelineLanes.findIndex((l) => l.zone === lane.zone) === laneIndex;
-                        return (
-                          <div
-                            key={lane.key}
-                            className={`relative w-full overflow-hidden rounded border ${
-                              lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
-                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
-                            style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
-                            onPointerDown={(event) => {
-                              if (event.target === event.currentTarget) handleTimelinePointerDown(event);
-                            }}
-                            onPointerUp={() => setTimelineDrag(null)}
-                            onPointerCancel={() => setTimelineDrag(null)}
-                            onDragOver={(event) => handleLaneDragOver(event, lane)}
-                            onDrop={(event) => handleLaneDrop(event, lane)}
-                          >
-                            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
-                            {dropPreview && dropPreview.zone === lane.zone && dropPreview.layer === lane.layer && timelineDuration ? (
-                              <div
-                                className="pointer-events-none absolute top-0.5 bottom-0.5 z-10 rounded border-2 border-dashed border-sky-300 bg-sky-400/25"
-                                style={{
-                                  left: `${(dropPreview.start / timelineDuration) * 100}%`,
-                                  width: `${Math.max(0.8, (dropPreview.len / timelineDuration) * 100)}%`,
-                                }}
-                              >
-                                <span className="px-1 text-[9px] text-sky-100">ここに追加</span>
-                              </div>
-                            ) : null}
-                            {lane.items.map((item) => {
-                              const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
-                              // accurate width (% of timeline); a pixel minWidth keeps short clips
-                              // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
-                              // timeline, drew short clips seconds-wide and overlapped neighbours.
-                              const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
-                              if (item.kind === 'annotation' && item.annotation) {
-                                const a = item.annotation;
-                                return (
-                                  <div
-                                    key={item.key}
-                                    data-annotation-id={a.id}
-                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
-                                    style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
-                                    onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
-                                    onDoubleClick={() => {
-                                      selectAnnotation(a.id);
-                                      seekTimeline(a.start);
-                                    }}
-                                    title={`${a.intent}: ${fmtTime(a.start)} - ${fmtTime(a.end)} ${a.note || ''}`}
-                                  >
-                                    <button
-                                      type="button"
-                                      className="h-full w-2 cursor-ew-resize bg-black/25"
-                                      onPointerDown={(event) => startTimelineDrag(event, a, 'start')}
-                                      aria-label="Resize start"
-                                    />
-                                    <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
-                                    {a.note ? (
-                                      <button
-                                        type="button"
-                                        className="h-full shrink-0 px-1 text-[9px] hover:bg-black/25"
-                                        title="メモを読む"
-                                        aria-label="メモ"
-                                        onPointerDown={(event) => event.stopPropagation()}
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setOpenNoteKey((cur) => (cur === a.note ? null : a.note || null));
-                                        }}
-                                      >
-                                        ▼
-                                      </button>
-                                    ) : null}
-                                    <button
-                                      type="button"
-                                      className="h-full w-2 cursor-ew-resize bg-black/25"
-                                      onPointerDown={(event) => startTimelineDrag(event, a, 'end')}
-                                      aria-label="Resize end"
-                                    />
-                                  </div>
-                                );
-                              }
-                              const clip = item.clip;
-                              if (!clip) return null;
-                              const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
-                              const selected = selectedSequenceClipIds.includes(clip.id);
-                              const linkedSelected = !selected && highlightedClipIds.has(clip.id);
-                              const isVideo = item.itemType === 'video';
-                              const labelText =
-                                item.itemType === 'caption'
-                                  ? clip.text || 'テロップ'
-                                  : item.itemType === 'audio'
-                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
-                                    : clip.label || '素材';
-                              return (
-                                <div
-                                  key={item.key}
-                                  data-clip-id={clip.id}
-                                  className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
-                                    danTouch.ids.includes(clip.id) ? 'dan-touch' : ''} ${danTouch.appear.includes(clip.id) ? 'dan-appear' : ''} ${
-                                    danTouch.vanish.includes(clip.id) ? 'dan-vanish' : ''} ${
-                                    selected
-                                      ? 'border-yellow-300 ring-2 ring-yellow-300/70'
-                                      : linkedSelected
-                                        ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
-                                        : 'border-white/30'
-                                  }`}
-                                  onContextMenu={(event) => {
-                                    event.preventDefault();
-                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
-                                    if (rightDragRef.current) return;
-                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
-                                  }}
-                                  style={{
-                                    left: `${left}%`,
-                                    width: `${width}%`,
-                                    minWidth: '3px',
-                                    top: 3,
-                                    bottom: 3,
-                                    ...(isVideo && clipAsset?.thumbnail_url
-                                      ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
-                                      : {}),
-                                  }}
-                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
-                                >
-                                  <button
-                                    type="button"
-                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
-                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'start')}
-                                    aria-label="Resize clip start"
-                                  />
-                                  <div
-                                    className="flex h-full min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
-                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'move')}
-                                    onDoubleClick={(event) => {
-                                      event.stopPropagation();
-                                      selectSequenceClip(clip.id);
-                                      seekTimeline(clip.timeline_start);
-                                    }}
-                                  >
-                                    <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{itemTypeBadge(item.itemType)}</span>
-                                    <span className="truncate">{labelText}</span>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
-                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'end')}
-                                    aria-label="Resize clip end"
-                                  />
-                                </div>
-                              );
-                            })}
-                            {showPending && pendingAnnotation ? (
-                              <div
-                                className="absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border border-orange-300 bg-orange-400/65 text-[10px] text-black active:cursor-grabbing"
-                                style={{
-                                  left: `${timelineDuration ? (pendingAnnotation.start / timelineDuration) * 100 : 0}%`,
-                                  width: `${timelineDuration ? Math.max(0.8, (((pendingAnnotation.end ?? pendingAnnotation.start + 0.2) - pendingAnnotation.start) / timelineDuration) * 100) : 1}%`,
-                                }}
-                                onPointerDown={(event) => startPendingTimelineDrag(event, 'move')}
-                              >
-                                <button
-                                  type="button"
-                                  className="h-full w-2 cursor-ew-resize bg-black/25"
-                                  onPointerDown={(event) => startPendingTimelineDrag(event, 'start')}
-                                  aria-label="Resize pending start"
-                                />
-                                <span className="min-w-0 flex-1 truncate px-1">未確定</span>
-                                <button
-                                  type="button"
-                                  className="h-full w-2 cursor-ew-resize bg-black/25"
-                                  onPointerDown={(event) => startPendingTimelineDrag(event, 'end')}
-                                  aria-label="Resize pending end"
-                                />
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
+                      {lanesView}
+                      {/* 位置は placePlayhead が transform で直接動かす（自分だけの層で動くので、クリップを描き直さない） */}
                       <div
                         ref={playheadBarRef}
-                        className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-destructive"
-                        style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
+                        data-playhead-bar
+                        className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 w-px bg-destructive"
+                        style={{ willChange: 'transform' }}
                       />
                     </div>
                   </div>
