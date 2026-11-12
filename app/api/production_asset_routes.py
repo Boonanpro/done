@@ -5421,6 +5421,8 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
 # local_path/proxy_path, so the finished video's quality is unchanged.
 VIEW_COPY_MIN_SECONDS = 600.0          # only recordings of 10 minutes or longer
 VIEW_COPY_MIN_PROXY_BYTES = 1_500_000_000  # ...or whose proxy is already huge
+VIEW_COPY_LONG_SIDE = 1280
+VIEW_COPY_CRF = 23
 
 
 def _needs_view_copy(asset: dict[str, Any]) -> bool:
@@ -5434,8 +5436,11 @@ def _needs_view_copy(asset: dict[str, Any]) -> bool:
 
 
 def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path | None:
-    """Encode {asset_id}_view.mp4 (960 long side, short GOP, no B-frames) from the proxy and
-    record view_path/view_url on the asset. Returns the path, or None when not needed."""
+    """Encode {asset_id}_view.mp4 (1280 long side, short GOP, no B-frames) from the proxy and
+    record view_path/view_url on the asset. Returns the path, or None when not needed.
+
+    2026-11-13: 960・CRF26 では画面で見てぼやけた（本人「プレビューの画質が若干微妙」）。1280・CRF23 にした。
+    作り直した時に古い写しの一部をブラウザが覚えたまま混ぜないよう、view_url に作った時刻を付ける。"""
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset or not (force or _needs_view_copy(asset)):
         return None
@@ -5447,8 +5452,8 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
     cmd = [
         _ffmpeg(), "-y", "-i", str(src),
-        "-vf", f"scale=w=960:h=960:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-vf", f"scale=w={VIEW_COPY_LONG_SIDE}:h={VIEW_COPY_LONG_SIDE}:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIEW_COPY_CRF),
         "-g", str(max(1, round(fps * 0.5))), "-bf", "0", *cfr,
         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(tmp),
     ]
@@ -5461,7 +5466,7 @@ def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path
     tmp.replace(view)
     _update_asset(room_id, asset_id, {
         "view_path": str(view),
-        "view_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=view",
+        "view_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=view&v={int(view.stat().st_mtime)}",
     })
     return view
 
