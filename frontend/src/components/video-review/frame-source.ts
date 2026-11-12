@@ -13,7 +13,7 @@
 // which cached frame is drawn where — it never reloads media, so no black, no stall, and
 // scrubbing is frame-accurate.
 
-import { createFile, DataStream, type MP4File, type MP4Sample, type MP4ArrayBuffer } from 'mp4box';
+import { createFile, DataStream, type MP4File, type MP4ArrayBuffer } from 'mp4box';
 
 export function webCodecsSupported(): boolean {
   return typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined';
@@ -25,10 +25,24 @@ type Sample = {
   dur: number;        // seconds
   ctsUs: number;      // presentation time, microseconds (matches VideoFrame.timestamp)
   isSync: boolean;
-  data: Uint8Array;   // encoded frame bytes (decode order)
+  offset: number;     // byte offset of the encoded frame in the file
+  size: number;       // encoded frame size in bytes
 };
 
 const MAX_CACHED_FRAMES = 96; // ~3s at 30fps; bounded so a 13-min proxy never blows memory
+
+// RANGE LOADING (2026-11-12): the proxy used to be fetched WHOLE into memory before the first
+// frame. That was fine for an 18MB proxy, but an 83-min recording's proxy is 14GB — the tab sat
+// on "素材を準備中" forever and Chrome died of out-of-memory, taking other tabs with it. Now we
+// read only the index (moov, a few MB) up front and fetch encoded frames by HTTP Range in
+// ~3-second blocks around the playhead, keeping a bounded number of blocks. Memory no longer
+// depends on the recording's length.
+const BLOCK_SAMPLES = 90;                      // ~3s at 30fps per Range request
+const MAX_BLOCK_BYTES = 96 * 1024 * 1024;      // encoded bytes kept in memory per asset
+const HEAD_BYTES = 64 * 1024;                  // first request: top-level box headers
+const WHOLE_FILE_LIMIT = 160 * 1024 * 1024;    // server ignored Range: accept only small files
+
+type Block = { data: Uint8Array; lo: number; bytes: number };
 
 export class AssetFrameSource {
   readonly url: string;
@@ -38,7 +52,7 @@ export class AssetFrameSource {
   duration = 0;
   failed = false;
 
-  // Samples in DECODE order (as mp4box delivers them). For B-frames, decode order ≠
+  // Samples in DECODE order (as mp4box lists them). For B-frames, decode order ≠
   // presentation order, so we keep a separate cts-sorted index for time lookups, and we map
   // decoder outputs back to a sample by their (unique) cts in microseconds.
   private samples: Sample[] = [];
@@ -46,6 +60,13 @@ export class AssetFrameSource {
   private ctsToIndex = new Map<number, number>();
   private codec = '';
   private description?: Uint8Array;
+
+  // Encoded bytes: either the whole (small) file when the server ignored Range, or blocks.
+  private wholeFile: Uint8Array | null = null;
+  private blocks = new Map<number, Block>();          // block number -> bytes (Map order = LRU)
+  private blockLoads = new Map<number, Promise<void>>();
+  private blockBytes = 0;
+  private pinnedBlocks = new Set<number>();           // blocks the current decode run needs
 
   private decoder: VideoDecoder | null = null;
   private cache = new Map<number, ImageBitmap>(); // decodeIndex -> decoded frame (GPU bitmap)
@@ -66,6 +87,7 @@ export class AssetFrameSource {
   private pendingTargets = new Set<number>();
   private draining = false;
   private drainPromise: Promise<void> = Promise.resolve();
+  private prefetching = false;
 
   constructor(url: string) {
     this.url = url;
@@ -76,12 +98,56 @@ export class AssetFrameSource {
     });
   }
 
-  private async init(): Promise<void> {
-    const res = await fetch(this.url);
+  private async fetchRange(lo: number, hi: number): Promise<{ buf: ArrayBuffer; total: number; partial: boolean }> {
+    const ctl = new AbortController();
+    const res = await fetch(this.url, { headers: { Range: `bytes=${lo}-${hi}` }, signal: ctl.signal });
     if (!res.ok) throw new Error(`fetch ${res.status}`);
-    const buf = (await res.arrayBuffer()) as MP4ArrayBuffer;
-    buf.fileStart = 0;
+    if (res.status === 206) {
+      const m = /\/(\d+)\s*$/.exec(res.headers.get('Content-Range') || '');
+      return { buf: await res.arrayBuffer(), total: m ? Number(m[1]) : 0, partial: true };
+    }
+    // 200: the server sent the whole file. Only acceptable when it's small.
+    const len = Number(res.headers.get('Content-Length') || 0);
+    if (!len || len > WHOLE_FILE_LIMIT) { ctl.abort(); throw new Error(`no range support (size ${len || '?'})`); }
+    const buf = await res.arrayBuffer();
+    return { buf, total: buf.byteLength, partial: false };
+  }
 
+  private async init(): Promise<void> {
+    // 1) Find ftyp + moov by walking top-level box headers (moov may sit before or after mdat).
+    const head = await this.fetchRange(0, HEAD_BYTES - 1);
+    if (!head.partial) this.wholeFile = new Uint8Array(head.buf);
+    const total = head.total;
+    const headBytes = new Uint8Array(head.buf);
+    const readAt = async (pos: number, len: number): Promise<Uint8Array> => {
+      if (this.wholeFile) return this.wholeFile.subarray(pos, pos + len);
+      if (pos + len <= headBytes.byteLength) return headBytes.subarray(pos, pos + len);
+      return new Uint8Array((await this.fetchRange(pos, pos + len - 1)).buf);
+    };
+    let ftyp: Uint8Array | null = null;
+    let moov: Uint8Array | null = null;
+    let pos = 0;
+    for (let guard = 0; guard < 64 && pos + 8 <= total && !moov; guard++) {
+      const h = await readAt(pos, 16);
+      const dv = new DataView(h.buffer, h.byteOffset, h.byteLength);
+      let size = dv.getUint32(0);
+      const type = String.fromCharCode(h[4], h[5], h[6], h[7]);
+      if (size === 1) size = Number(dv.getBigUint64(8));
+      else if (size === 0) size = total - pos;
+      if (size < 8) throw new Error('bad box');
+      if (type === 'ftyp') ftyp = (await readAt(pos, size)).slice();
+      else if (type === 'moov') moov = (await readAt(pos, size)).slice();
+      pos += size;
+    }
+    if (!moov) throw new Error('no moov');
+
+    // 2) Parse only ftyp+moov with mp4box (sample offsets in stco/co64 are absolute file offsets,
+    //    so the synthetic buffer's layout doesn't matter).
+    const idx = new Uint8Array((ftyp?.byteLength || 0) + moov.byteLength);
+    if (ftyp) idx.set(ftyp, 0);
+    idx.set(moov, ftyp?.byteLength || 0);
+    const ab = idx.buffer as MP4ArrayBuffer;
+    ab.fileStart = 0;
     const file: MP4File = createFile();
     const trackInfo = await new Promise<{ id: number; codec: string }>((resolve, reject) => {
       file.onError = (e) => reject(new Error(String(e)));
@@ -94,28 +160,18 @@ export class AssetFrameSource {
         this.description = extractDescription(file, vt.id);
         resolve({ id: vt.id, codec: vt.codec });
       };
-      file.appendBuffer(buf);
+      file.appendBuffer(ab);
       file.flush();
+      setTimeout(() => reject(new Error('moov parse timeout')), 5000);
     });
     this.codec = trackInfo.codec;
-
-    // Pull every sample's metadata + encoded bytes (one pass; the proxy is small, ~18MB).
-    await new Promise<void>((resolve) => {
-      file.onSamples = (_id, _user, samples: MP4Sample[]) => {
-        for (const s of samples) {
-          const cts = s.cts / s.timescale;
-          const ctsUs = Math.round((s.cts / s.timescale) * 1e6);
-          this.samples.push({ cts, dur: s.duration / s.timescale, ctsUs, isSync: s.is_sync, data: s.data });
-        }
-        if (this.samples.length >= 0 && samples.length === 0) resolve();
-      };
-      file.setExtractionOptions(trackInfo.id, null, { nbSamples: Number.POSITIVE_INFINITY });
-      file.start();
-      file.flush();
-      // mp4box delivers all samples synchronously within start()/flush() for a fully-appended
-      // file; resolve on the next microtask once they've landed.
-      Promise.resolve().then(resolve);
-    });
+    for (const s of file.getTrackSamplesInfo(trackInfo.id) || []) {
+      this.samples.push({
+        cts: s.cts / s.timescale, dur: s.duration / s.timescale,
+        ctsUs: Math.round((s.cts / s.timescale) * 1e6), isSync: s.is_sync,
+        offset: s.offset, size: s.size,
+      });
+    }
 
     if (!this.samples.length) throw new Error('no samples');
     this.presOrder = this.samples.map((_, i) => i).sort((a, b) => this.samples[a].cts - this.samples[b].cts);
@@ -125,6 +181,67 @@ export class AssetFrameSource {
       this.duration = last.cts + last.dur;
     }
     this.configureDecoder();
+  }
+
+  // --- encoded bytes on demand ------------------------------------------------
+
+  private loadBlock(b: number): Promise<void> {
+    if (this.wholeFile || this.blocks.has(b)) {
+      const blk = this.blocks.get(b);
+      if (blk) { this.blocks.delete(b); this.blocks.set(b, blk); } // touch (LRU)
+      return Promise.resolve();
+    }
+    const inflight = this.blockLoads.get(b);
+    if (inflight) return inflight;
+    const from = b * BLOCK_SAMPLES;
+    const to = Math.min(this.samples.length, from + BLOCK_SAMPLES) - 1;
+    let lo = Infinity, hi = -1;
+    for (let i = from; i <= to; i++) {
+      const s = this.samples[i];
+      if (s.offset < lo) lo = s.offset;
+      if (s.offset + s.size > hi) hi = s.offset + s.size;
+    }
+    const p = (async () => {
+      try {
+        const { buf } = await this.fetchRange(lo, hi - 1);
+        if (this.closed) return;
+        this.blocks.set(b, { data: new Uint8Array(buf), lo, bytes: buf.byteLength });
+        this.blockBytes += buf.byteLength;
+        this.evictBlocks();
+      } finally {
+        this.blockLoads.delete(b);
+      }
+    })();
+    this.blockLoads.set(b, p);
+    return p;
+  }
+
+  private evictBlocks() {
+    for (const [b, blk] of this.blocks) {
+      if (this.blockBytes <= MAX_BLOCK_BYTES) break;
+      if (this.pinnedBlocks.has(b)) continue;
+      this.blocks.delete(b);
+      this.blockBytes -= blk.bytes;
+    }
+  }
+
+  /** Make sure encoded bytes for decode-order samples [from..to] are in memory. */
+  private async ensureData(from: number, to: number): Promise<void> {
+    if (this.wholeFile) return;
+    const b0 = Math.floor(from / BLOCK_SAMPLES), b1 = Math.floor(to / BLOCK_SAMPLES);
+    const need: number[] = [];
+    for (let b = b0; b <= b1; b++) need.push(b);
+    this.pinnedBlocks = new Set(need);
+    await Promise.all(need.map((b) => this.loadBlock(b)));
+  }
+
+  private sampleData(i: number): Uint8Array | null {
+    const s = this.samples[i];
+    if (!s) return null;
+    if (this.wholeFile) return this.wholeFile.subarray(s.offset, s.offset + s.size);
+    const blk = this.blocks.get(Math.floor(i / BLOCK_SAMPLES));
+    if (!blk) return null;
+    return blk.data.subarray(s.offset - blk.lo, s.offset - blk.lo + s.size);
   }
 
   private configureDecoder() {
@@ -314,6 +431,12 @@ export class AssetFrameSource {
     // decode-only (closed immediately) — cheap.
     const REORDER = 12;
     const end = Math.min(this.samples.length - 1, target + REORDER);
+    // Bring in the encoded bytes for the whole run first (Range blocks); a run may restart at an
+    // earlier keyframe than fedFrom, so cover from the keyframe.
+    try { await this.ensureData(Math.min(key, this.fedFrom >= 0 ? this.fedFrom : key), end); } catch (e) {
+      console.warn('[frame-source] range fetch failed', this.url, e); return;
+    }
+    if (this.closed || this.decoder !== dec || !this.configured) return;
     // Decide the feed range without ever re-feeding chunks already in the current run (duplicate
     // timestamps stall the decoder). Three cases:
     //  - target already inside the fed run  -> feed only the tail past fedThrough (for REORDER)
@@ -351,37 +474,50 @@ export class AssetFrameSource {
   status(): string {
     if (this.failed) return 'FAILED';
     if (!this.samples.length) return 'loading';
-    return `cache=${this.cache.size} q=${this.decoder?.decodeQueueSize ?? '?'} dec=${this.decoder?.state ?? '?'}${this.draining ? ' drain' : ''} shown=${this.lastShownTime >= 0 ? this.lastShownTime.toFixed(2) : '—'}`;
+    const mb = (this.wholeFile ? this.wholeFile.byteLength : this.blockBytes) / 1048576;
+    return `cache=${this.cache.size} q=${this.decoder?.decodeQueueSize ?? '?'} dec=${this.decoder?.state ?? '?'}${this.draining ? ' drain' : ''} shown=${this.lastShownTime >= 0 ? this.lastShownTime.toFixed(2) : '—'} mem=${mb.toFixed(0)}MB`;
   }
 
   /** Keep decoding forward from the playhead so upcoming frames are ready during playback.
    *  Non-blocking; feeds a window ahead without flushing (frames emit as refs arrive). */
   prefetch(timeSec: number, aheadSec: number): void {
     if (this.failed || !this.decoder || !this.configured) return;
-    if (this.draining) return; // don't fight an in-flight scrub decode for the same decoder
+    if (this.draining || this.prefetching) return; // don't fight an in-flight scrub decode for the same decoder
     const target = this.indexAtTime(timeSec + aheadSec);
     if (target < 0) return;
     const from = this.indexAtTime(timeSec);
     const key = this.keyframeFor(from);
-    let start: number;
-    if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough < target) {
-      start = this.fedThrough + 1; // contiguous forward extension
-    } else if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= target) {
-      return; // already fed past the window (no duplicate feeds)
-    } else {
-      start = key; this.fedFrom = key; // new run at the keyframe (IDR resync)
-    }
-    // Cap in-flight work so we never queue thousands of chunks at once.
-    const end = Math.min(target, start + 60);
-    if (end < start) return;
-    for (let i = start; i <= end; i++) this.feed(i);
-    this.fedThrough = Math.max(this.fedThrough, end);
+    if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= target) return; // already fed
+    this.prefetching = true;
+    const lo = this.fedFrom >= 0 && this.fedFrom <= key ? this.fedThrough + 1 : key;
+    this.ensureData(Math.min(lo, key), Math.min(target, lo + 60))
+      .then(() => {
+        // State may have moved while bytes were in flight: decide the range NOW.
+        if (this.closed || this.draining || !this.decoder || !this.configured) return;
+        let start: number;
+        if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough < target) {
+          start = this.fedThrough + 1; // contiguous forward extension
+        } else if (this.fedFrom >= 0 && this.fedFrom <= key && this.fedThrough >= target) {
+          return; // already fed past the window (no duplicate feeds)
+        } else {
+          start = key; this.fedFrom = key; // new run at the keyframe (IDR resync)
+        }
+        // Cap in-flight work so we never queue thousands of chunks at once.
+        const end = Math.min(target, start + 60);
+        if (end < start) return;
+        for (let i = start; i <= end; i++) if (!this.feed(i)) { this.fedThrough = i - 1; return; }
+        this.fedThrough = Math.max(this.fedThrough, end);
+      })
+      .catch((e) => console.warn('[frame-source] prefetch fetch failed', this.url, e))
+      .finally(() => { this.prefetching = false; });
   }
 
-  private feed(i: number) {
+  private feed(i: number): boolean {
     const dec = this.decoder;
     const s = this.samples[i];
-    if (!dec || !s || dec.state !== 'configured') return;
+    if (!dec || !s || dec.state !== 'configured') return false;
+    const data = this.sampleData(i);
+    if (!data) return false; // bytes not loaded (evicted) — caller stops the run here
     // Always feed in a contiguous run (never skip a cached frame) — the decoder needs every
     // chunk in sequence to produce the frames that follow. onFrame() de-dupes the output.
     try {
@@ -389,9 +525,10 @@ export class AssetFrameSource {
         type: s.isSync ? 'key' : 'delta',
         timestamp: s.ctsUs,
         duration: Math.round(s.dur * 1e6),
-        data: s.data,
+        data,
       }));
     } catch { /* decoder reset under us */ }
+    return true;
   }
 
   close() {
@@ -401,6 +538,9 @@ export class AssetFrameSource {
     this.cache.clear();
     this.lru = [];
     this.frameWaiters.clear();
+    this.blocks.clear();
+    this.blockBytes = 0;
+    this.wholeFile = null;
   }
 }
 

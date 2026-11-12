@@ -56,6 +56,8 @@ declare module 'mp4box' {
     flush(): void;
     setExtractionOptions(id: number, user?: unknown, options?: { nbSamples?: number; rapAlignement?: boolean }): void;
     getTrackById(id: number): MP4Track;
+    /** Sample table built from moov (no data): offsets/sizes/timing. */
+    getTrackSamplesInfo(id: number): Array<{ offset: number; size: number; cts: number; dts: number; duration: number; timescale: number; is_sync: boolean }> | undefined;
   }
   export function createFile(): MP4File;
 
