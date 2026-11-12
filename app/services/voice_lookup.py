@@ -76,6 +76,7 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）と focus（本人が聞いたことが書いてある所の言葉: 価格 仕様、サイズ、営業時間など）を入れて出す（conditions は買う・選ぶ条件だけ。「違い」などの質問は入れない）。ページの本文も返るので、そのページを read_page で読まない（見せる価値のあるページは read_page ではなく最初から show_page_on_stage で開く）。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）で、web_search が pages に返したURLか読んだページにあったURLから選ぶ（URLを推測で組み立てない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
 - 2〜3個の物の違いを聞かれたら、最初の手で物ごとに1本ずつ検索を並べ（例: 「レボルワン R630」「レボルワン R490」）、次の手で、それぞれの個別ページのURLを compare_pages_on_stage に渡す（focus に比べる所の言葉）。画面に並んで出て、各ページの本文も返るので、そこから違いを答える。片方の個別ページのURLが検索に出ない時は、その物の名前（例: R490）をそのまま urls に入れる（もう一方と同じサイトから道具が探す）。違いの質問で show_page_on_stage に片方だけを出さない。
 - 場所・住所・行き方を答える時は、その場所を Map で出す（座標が分からなければ show_search_on_stage の kind=map）。
+- 人からの連絡（「〇〇さんから連絡来た？」「メッセージの中身は？」）は read_chatwork で Chatwork を今読んで答える（hand_over しない）。
 - 本人や本人の会社のこと（法人か個人か・所在地・契約しているサービスなど）で答えが変わる時は、本人に聞く前に get_saved_information と search_records で読む。どちらにも無い事だけを、まとめて1回で聞く。
 - 本人の言葉は、声を文字に起こしたもの。人名・店名・地名の漢字やカタカナは、聞こえた音に機械が当てた推測で、本人が思っている字とは限らない（「さいとうけんじ」が「斎藤健二」と書かれても、本当は「齋藤賢治」かもしれない）。検索で字の違う候補が出たら、字が違うことは理由にせず、地域・仕事・やっている事・本人が話した経緯など手がかり全体で、本人の言う相手かを判断する。手がかりが合えば、その候補として答え、本人が言った字と違うことを一言添える。手がかりが割れて決めきれない時は、いちばん合う候補を画面に出し、「〇〇市の△△整骨院の□□さんですか？」のように、どこの誰かを入れた問いで本人に確かめる。「特定できなかった」で終えない。
 - 急いで答えなくてよい（会話は止まっていない）。答えの中心になる事実（人・店・物がどれか、値段、時刻）は、検索の断片で済ませず、その人や店のページを読んで確かめてから答える。
@@ -109,7 +110,7 @@ def routed():
     return voice_router.enabled()
 
 
-TOOL_NAMES = ('web_search', 'read_page', 'get_location', 'get_calendar', 'search_records', 'get_saved_information', 'room_files',
+TOOL_NAMES = ('web_search', 'read_page', 'get_location', 'get_calendar', 'search_records', 'read_chatwork', 'get_saved_information', 'room_files',
               'job_status', 'show_page_on_stage', 'show_search_on_stage', 'compare_pages_on_stage', 'show_fact_on_stage', 'show_on_stage', 'show_parts_on_stage',
               'show_external_screen')
 OWN = ('share_progress', 'think_carefully')
