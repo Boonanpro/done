@@ -40,6 +40,7 @@ def open_call(monkeypatch, client):
     monkeypatch.setattr(voice_lookup, '_client', lambda: client)
     monkeypatch.setattr(voice_lookup, 'instructions', lambda: 'instructions')
     monkeypatch.setattr(voice_lookup, 'tools', lambda: [])
+    monkeypatch.setattr(voice_lookup, 'SEARCH', 'answer')   # the searches below go through execute_call (faked per test)
     dialogue = Dialogue()
     dialogue.add('user', '尼崎駅の近くでプールがあるジム探して')
     call = voice_lookup.open_call('s', 'u', 'r', dialogue, send, lambda phase, **f: log.append((phase, f)))
@@ -99,15 +100,23 @@ async def test_a_correction_replaces_the_running_lookup_and_its_result_is_never_
 
 
 @pytest.mark.asyncio
-async def test_the_end_of_the_call_stops_its_lookups(monkeypatch):
+async def test_a_lookup_goes_on_after_the_call_and_its_answer_reaches_the_chat(monkeypatch):
+    # 2026-11-13, the owner: work that is moving should not be thrown away. On 11-12 22:44 the owner hung up after 2 min 27 s
+    # and still wanted the answer; the lookup used to be cancelled with the call.
     hold = asyncio.Event()
-    call, sent, log = open_call(monkeypatch, FakeClient([response([], '答え')], hold=hold))
-    out = await voice_responses.run_function('run_in_background', {'task': '天気', 'label': '天気'}, 'u', 'r', [])
+    call, sent, log = open_call(monkeypatch, FakeClient([response([], '仲江鍼灸院は香春町です。')], hold=hold))
+    posted = []
+    from app.services import room_files
+    async def show(room_id, user_id, files, text=''):
+        posted.append((room_id, user_id, files, text)); return {'shown': [], 'missing': []}
+    monkeypatch.setattr(room_files, 'show', show)
+    out = await voice_responses.run_function('run_in_background', {'task': '中江先生', 'label': '中江先生'}, 'u', 'r', [])
     lookup = call.lookups[out['id']]
     voice_lookup.close_call(call)
     hold.set()
-    await asyncio.sleep(0.01)
-    assert lookup.state == 'cancelled' and not [e for e in sent if e['type'] == 'session.commentary.append']
+    await lookup.task_handle
+    assert lookup.state == 'answered' and not [e for e in sent if e['type'] == 'session.commentary.append']
+    assert len(posted) == 1 and posted[0][:2] == ('r', 'u') and '仲江鍼灸院は香春町です。' in posted[0][3] and '中江先生' in posted[0][3]
     assert (await voice_responses.run_function('cancel_background', {'id': lookup.id}, 'u', 'r', []))['started'] is False
     # a call this server does not hold: the lookup is answered inline, as the delegation did before
     monkeypatch.setattr(voice_lookup, '_client', lambda: FakeClient([response([], '晴れ')]))
@@ -238,24 +247,99 @@ async def test_on_deepseek_every_round_carries_the_whole_lookup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_lookup_near_its_end_answers_from_what_it_has_without_tools(monkeypatch):
-    # 2026-11-12, nakae_first: V4 Pro searched the second half of the request until the time ran out and the call heard nothing.
-    client = FakeClient([response([call_item('web_search', {'query': '大阪 鍼灸'}, 'c1')]),
+async def test_a_lookup_that_only_repeats_itself_answers_from_what_it_has_without_tools(monkeypatch):
+    # No time limit since 2026-11-13: a lookup stops searching when its rounds ask only for what it already had.
+    same = lambda cid: response([call_item('web_search', {'query': '大阪 鍼灸'}, cid)])
+    client = FakeClient([same('c1'), same('c2'), same('c3'),
                          response([], '先生は仲江政史さん。<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="web_search"></｜｜DSML｜｜tool_calls>')])
     async def execute(item, *a, **k):
         return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"found": "候補"}', 'name': item['name']}
     from app.services import voice_sideband
     monkeypatch.setattr(voice_sideband, 'execute_call', execute)
     monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-v4-pro')
-    monkeypatch.setattr(voice_lookup, 'ANSWER_BY', 0)
     call, sent, log = open_call(monkeypatch, client)
     monkeypatch.setattr(voice_lookup, 'tools', lambda: [{'type': 'function', 'name': 'web_search'}])
     call._spec = None
     out = await voice_responses.run_function('run_in_background', {'task': '先生と大阪の候補', 'label': '先生'}, 'u', 'r', [])
     await call.lookups[out['id']].task_handle
-    first, last = [kw for kw in client.seen if kw.get('max_output_tokens') != 16]
-    assert first['tools'] and 'tools' not in last and last['reasoning'] == {'effort': 'low'}
+    rounds = [kw for kw in client.seen if kw.get('max_output_tokens') != 16]
+    assert len(rounds) == 4 and all(kw['tools'] for kw in rounds[:3])
+    last = rounds[-1]
+    assert 'tools' not in last and last['reasoning'] == {'effort': 'low'}
     assert '今答える' in last['input'][-1]['content']
     assert any(phase == 'lookup_wrap_up' for phase, _ in log)
     assert [e['content'] for e in sent if e['type'] == 'session.commentary.append'] == ['調べた結果: 先生は仲江政史さん。']
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_new_searches_keep_a_lookup_going_past_the_old_time_limit(monkeypatch):
+    # Different searches each round are progress: no wrap-up, however long it has run (it was cut at 150 s, told at 110 s).
+    rounds = [response([call_item('web_search', {'query': f'検索{i}'}, f'c{i}')]) for i in range(6)] + [response([], '見つかった。')]
+    client = FakeClient(rounds)
+    async def execute(item, *a, **k):
+        return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"found": "x"}', 'name': item['name']}
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    monkeypatch.setattr(voice_lookup, 'KEEP_POSTED_S', 10 ** 6)
+    call, sent, log = open_call(monkeypatch, client)
+    out = await voice_responses.run_function('run_in_background', {'task': 'x', 'label': 'x'}, 'u', 'r', [])
+    lookup = call.lookups[out['id']]
+    lookup.started -= 400   # as if it had been running for minutes
+    await lookup.task_handle
+    assert lookup.state == 'answered' and not any(phase == 'lookup_wrap_up' for phase, _ in log)
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_has_said_nothing_for_a_while_is_asked_once_to_pass_on_what_it_has(monkeypatch):
+    client = FakeClient([response([call_item('web_search', {'query': 'a'}, 'c1')]), response([call_item('web_search', {'query': 'b'}, 'c2')]),
+                         response([], '答え')])
+    async def execute(item, *a, **k):
+        return {'type': 'function_call_output', 'call_id': item['call_id'], 'output': '{"found": "x"}', 'name': item['name']}
+    from app.services import voice_sideband
+    monkeypatch.setattr(voice_sideband, 'execute_call', execute)
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-flash')
+    monkeypatch.setattr(voice_lookup, 'KEEP_POSTED_S', 0)
+    call, sent, log = open_call(monkeypatch, client)
+    out = await voice_responses.run_function('run_in_background', {'task': 'x', 'label': 'x'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    rounds = [kw for kw in client.seen if kw.get('max_output_tokens') != 16]
+    asked = [i for i in rounds[1]['input'] if i.get('role') == 'user' and 'share_progress' in i.get('content', '')]
+    assert len(asked) == 1 and not any('share_progress' in str(i.get('content', '')) for i in rounds[2]['input'][len(rounds[1]['input']):])
+    assert [phase for phase, _ in log].count('lookup_keep_posted') == 1
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_written_as_text_is_not_said_and_the_lookup_is_told_once(monkeypatch):
+    # 2026-11-13 nakae_first run 4 (deepseek-flash low): the answer was <｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="share_progress">...
+    dsml = ('<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="share_progress">\n<｜｜DSML｜｜ parameter name="message" string="true">'
+            '仲江政史先生でした。</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+    client = FakeClient([response([], dsml), response([], '仲江政史先生でした。')])
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-flash')
+    call, sent, log = open_call(monkeypatch, client)
+    out = await voice_responses.run_function('run_in_background', {'task': 'x', 'label': 'x'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    said = [e['content'] for e in sent if e['type'] == 'session.commentary.append']
+    assert said == ['調べた結果: 仲江政史先生でした。'] and any(phase == 'lookup_dsml_retold' for phase, _ in log)
+    voice_lookup.close_call(call)
+
+
+@pytest.mark.asyncio
+async def test_a_list_search_gives_the_lookup_the_results_themselves(monkeypatch):
+    from app.services import web_search
+    async def listing(query, *a, **k):
+        return {'success': True, 'results': [{'title': '仲江鍼灸院', 'site': '健康にはり', 'date': '', 'url': 'https://x/15681', 'text': '院長 仲江政史'}]}
+    monkeypatch.setattr(web_search, 'listing', listing)
+    client = FakeClient([response([call_item('web_search', {'query': '仲江鍼灸院'}, 'c1')]), response([], '仲江政史さんです。')])
+    monkeypatch.setattr(voice_lookup, 'MODEL', 'deepseek-flash')
+    call, sent, log = open_call(monkeypatch, client)
+    monkeypatch.setattr(voice_lookup, 'SEARCH', 'list')
+    out = await voice_responses.run_function('run_in_background', {'task': 'x', 'label': 'x'}, 'u', 'r', [])
+    await call.lookups[out['id']].task_handle
+    second = [kw for kw in client.seen if kw.get('max_output_tokens') != 16][1]['input']
+    given = json.loads(next(i for i in second if i.get('type') == 'function_call_output')['output'])
+    assert given['results'][0]['url'] == 'https://x/15681' and '仲江政史' in given['results'][0]['text']
+    assert any(phase == 'function_done' and f['name'] == 'web_search' for phase, f in log)
     voice_lookup.close_call(call)

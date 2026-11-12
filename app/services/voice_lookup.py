@@ -34,19 +34,40 @@ import uuid
 # right 16/16 with a median of 82 s; V4 Pro high 11/16 and 108 s (four runs ended at the time limit with nothing said),
 # V4 Pro low 14/16 and 85 s; luna low 17/24 and 30 s (the 仲江 request 1/6); a quarter of V4 Pro's price
 # (docs/current/voice-backend-compare-20261112.md). The notes on V4 Pro below are from the morning's measurements.
+# reasoning low since 2026-11-13, with the list search (SEARCH) and places fixed: 16/16 right, median 35 s (high 8/8, 56 s;
+# medium 8/8, 43 s); the time went to rounds of searching, not to thinking (docs/current/voice-lookup-fast-20261113.md).
 MODEL = os.environ.get('DAN_VOICE_LOOKUP_MODEL', 'deepseek-flash')
-REASONING = os.environ.get('DAN_VOICE_LOOKUP_REASONING', 'high')
-MAX_ROUNDS = 12
-SECONDS = 150          # a lookup that has not answered by then is handed to chat Dan (routed) or says so; long work belongs
-                       # to start_work. 120 until 2026-11-12: V4 Pro reads pages before it answers (40-110 s measured)
-ROUND_TIMEOUT_S = 60   # one round of V4 Pro thinking over a dozen search results: 3-20 s measured, 60 s is a stall
-# A lookup is told, once, to answer from what it has when another round of searching would end past this point; that last
-# round has no tools and thinks briefly. V4 Pro on a two-part request (who the teacher is, and a clinic like his in Osaka)
-# searched until SECONDS in 3 runs of 3 and the call heard nothing at all (2026-11-12, tests/voice_lookups/nakae_first.json);
-# a round with its tools took up to 40 s, and a last round thinking hard over all of it more than 38 s.
-ANSWER_BY = SECONDS - 40
-WRAP_UP = ('（調べ始めて{seconds}秒。もうすぐ打ち切られる。ここで調べるのをやめ、ここまでに確かめた事実で今答える。'
+REASONING = os.environ.get('DAN_VOICE_LOOKUP_REASONING', 'low')
+# No time limit (2026-11-13, the owner: 「正しく速く作業できていて、無駄なエラーを繰り返さないのであれば、その作業は続けるべき」).
+# Until then a lookup was cut at 150 s (SECONDS) and told to answer at 110 s (ANSWER_BY): V4 Pro high ended four runs of
+# sixteen at the limit with nothing said, while it was still finding things. A lookup now goes on while it moves and is
+# stopped only when it is stuck:
+# - a round of the model that does not answer in ROUND_TIMEOUT_S is a stall (the round fails; the work goes to chat Dan);
+# - rounds that only repeat searches and pages it already had (REPEATS of them) mean it found nothing new: it answers;
+# - MAX_ROUNDS guards against a loop that never ends (16 rounds measured at most; the deciding was never near it).
+# A long lookup tells the call what it has found (KEEP_POSTED_S), and one that answers after the owner has hung up puts
+# the answer in the room's chat.
+MAX_ROUNDS = 40
+REPEATS = 2
+KEEP_POSTED_S = 30     # nothing said yet by then: the lookup is asked once to pass on what it has verified
+KEEP_POSTED = ('（本人は{seconds}秒待っている。ここまでに頼みの中心（どの人・店・物か、値段、時刻など）が1つでも確かめられていれば、'
+               '次の道具と同じ手で share_progress に1文で渡す。まだ何も確かめていなければ、そのまま調べ続ける。）')
+SECONDS = 600          # outside a call only (run_function without a call, the comparison script): a ceiling, not a target
+# How a lookup searches (2026-11-13). 'list': the ranked results themselves (web_search.listing, 0.4-0.6 s), read by the
+# lookup's own model. 'answer': Dan's whole search (a model writes the queries, another sums the results up: 2.7-4.5 s),
+# what every lookup used until then; with the summary alone, a lookup read pages to check it.
+SEARCH = os.environ.get('DAN_VOICE_LOOKUP_SEARCH', 'list')
+LIST_SEARCH = {'type': 'function', 'name': 'web_search',
+               'description': ('ウェブを検索する（1秒弱）。検索結果の一覧（題・サイト・日付・URL・本文の抜き出し）がそのまま返る。上位3件には'
+                               'そのページの本文の一部が付くので、そこで確かめられた事実はページを読み直さずに使ってよい。'
+                               '言い方や切り口の違う検索は同じ手で並べて呼ぶ。'),
+               'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '検索語（固有名詞・地名・日付を入れて具体的に。長い文より語の並び）'}},
+                              'required': ['query'], 'additionalProperties': False}}
+ROUND_TIMEOUT_S = 60   # one round thinking over a dozen search results: 2-12 s measured (deepseek-flash), 60 s is a stall
+WRAP_UP = ('（ここ{repeats}回の手は、もう調べた検索やページの繰り返しだった。調べるのをやめ、ここまでに確かめた事実で今答える。'
            '確かめきれなかった所は、何が分かっていないかを一言で言う。）')
+DSML_AGAIN = ('（今の返事には、道具の呼び出しが文字で書かれていた。それは本人に読み上げられてしまう。道具を使うなら道具として呼び、'
+              '答えるなら普通の文だけで書く。）')
 PROGRESS_LIMIT = 3     # share_progress per lookup: facts on the way, not a running commentary
 READ_PAGE_S = 8        # one slow page held a round of four for 29 s (2026-11-03 22:00 test call); 5 of 7 reads took under 7 s
 DIRECT = ('places', 'page_clip', 'browser', 'browser_plan', 'phone')   # Dan's tools a lookup uses most, given whole from the start
@@ -75,10 +96,10 @@ INSTRUCTIONS = """あなたはダンの調べもの担当です。通話中の�
 - 物（商品・機材・料理など）の頼みで写真がまだ無い時は、最初の手で web_search と同じ手で show_search_on_stage（kind=images）を呼んでよい。場所は座標が分かれば Map を出し、Google マップの写真（kind=map）は座標が分からない時だけ。考えや手続きの質問（税金・制度・やり方）には呼ばない。
 - 商品・店・予約の候補のページを見せると本人の判断に役立つ時は、候補が見つかった時点で show_page_on_stage に conditions（本人が言った条件を全部）と focus（本人が聞いたことが書いてある所の言葉: 価格 仕様、サイズ、営業時間など）を入れて出す（conditions は買う・選ぶ条件だけ。「違い」などの質問は入れない）。ページの本文も返るので、そのページを read_page で読まない（見せる価値のあるページは read_page ではなく最初から show_page_on_stage で開く）。渡すのは商品や店そのものの個別ページのURL（店のトップ・検索結果の一覧・別の商品のページは渡さない）で、web_search が pages に返したURLか読んだページにあったURLから選ぶ（URLを推測で組み立てない）。条件に合わないと返ったら、別のURLの候補を出す。合う候補が無ければ、そう答える。商品を探す時は、最初の手で言い方の違う検索を2〜3本並べて呼ぶ。
 - 2〜3個の物の違いを聞かれたら、最初の手で物ごとに1本ずつ検索を並べ（例: 「レボルワン R630」「レボルワン R490」）、次の手で、それぞれの個別ページのURLを compare_pages_on_stage に渡す（focus に比べる所の言葉）。画面に並んで出て、各ページの本文も返るので、そこから違いを答える。片方の個別ページのURLが検索に出ない時は、その物の名前（例: R490）をそのまま urls に入れる（もう一方と同じサイトから道具が探す）。違いの質問で show_page_on_stage に片方だけを出さない。
-- 場所・住所・行き方を答える時は、その場所を Map で出す（座標が分からなければ show_search_on_stage の kind=map）。
+- 場所・住所・行き方を答える時は、その場所を Map で出す（座標が分からなければ show_search_on_stage の kind=map）。画面に出す座標を探すためだけに何手も使わない（places で1回で出なければ kind=map にする）。
 - 人からの連絡（「〇〇さんから連絡来た？」「メッセージの中身は？」）は read_chatwork で Chatwork を今読んで答える（hand_over しない）。
 - 本人や本人の会社のこと（法人か個人か・所在地・契約しているサービスなど）で答えが変わる時は、本人に聞く前に get_saved_information と search_records で読む。どちらにも無い事だけを、まとめて1回で聞く。
-- 本人の言葉は、声を文字に起こしたもの。人名・店名・地名の漢字やカタカナは、聞こえた音に機械が当てた推測で、本人が思っている字とは限らない（「さいとうけんじ」が「斎藤健二」と書かれても、本当は「齋藤賢治」かもしれない）。検索で字の違う候補が出たら、字が違うことは理由にせず、地域・仕事・やっている事・本人が話した経緯など手がかり全体で、本人の言う相手かを判断する。手がかりが合えば、その候補として答え、本人が言った字と違うことを一言添える。手がかりが割れて決めきれない時は、いちばん合う候補を画面に出し、「〇〇市の△△整骨院の□□さんですか？」のように、どこの誰かを入れた問いで本人に確かめる。「特定できなかった」で終えない。
+- 本人の言葉は、声を文字に起こしたもの。人名・店名・地名の漢字やカタカナは、聞こえた音に機械が当てた推測で、本人が思っている字とは限らない（「さいとうけんじ」が「斎藤健二」と書かれても、本当は「齋藤賢治」かもしれない）。検索で字の違う候補が出たら、字が違うことは理由にせず、地域・仕事・やっている事・本人が話した経緯など手がかり全体で、本人の言う相手かを判断する。手がかりが合えば、その候補として答え、本人が言った字と違うことを一言添える。読みは本人が言った音のまま使う（「なかえまさし」と聞こえたなら、字が「政史」でも「まさし」。ページに読みが書いてあればそれに従う）。手がかりが割れて決めきれない時は、いちばん合う候補を画面に出し、「〇〇市の△△整骨院の□□さんですか？」のように、どこの誰かを入れた問いで本人に確かめる。「特定できなかった」で終えない。
 - 急いで答えなくてよい（会話は止まっていない）。答えの中心になる事実（人・店・物がどれか、値段、時刻）は、検索の断片で済ませず、その人や店のページを読んで確かめてから答える。
 - 型番・商品名・店名を聞かれたら、それ自体について確かめた事実だけで答える。別の機種・別の店・別の会社の情報で代えない。答えには何の話か（メーカー名・店名・機種名）を必ず入れる（「ショールームは〜」ではなく「レボルワンのショールームは〜」）。
 - 本人は通話で答えを待っている。頼みの中心（どの人・店・物か、値段、時刻など）が1つ確かめられたら、続きを調べる前に、次の道具と同じ手で share_progress に1文で渡す（share_progress だけの手は作らない。声で本人に届く）。頼みが2つ以上あれば、1つ目が分かった時点で渡してから次を調べる。同じことを繰り返さない。予定や推測は渡さない。
@@ -123,7 +144,7 @@ def direct_names():
 def tools():
     from app.services import voice_responses, dan_tools
     every = {t['name']: t for t in [*voice_responses.TOOLS, *voice_responses.PLAIN_TOOLS]}
-    listed = [every[n] for n in (*TOOL_NAMES, *OWN)]
+    listed = [LIST_SEARCH if n == 'web_search' and SEARCH == 'list' else every[n] for n in (*TOOL_NAMES, *OWN)]
     direct = []
     for name, description, schema in map(dan_tools._fields, dan_tools.definitions()):
         if name in direct_names():
@@ -155,7 +176,7 @@ class Lookup:
         self.id = 'bg_' + uuid.uuid4().hex[:8]
         self.call, self.task, self.label, self.carried = call, task, label, carried
         self.started = time.monotonic()
-        self.state = 'running'      # running → answered | failed | replaced | cancelled | timed_out | handed_over
+        self.state = 'running'      # running → answered | failed | replaced | cancelled | handed_over
         self.answer = ''
         self.verified = []          # (tool name, its output, cut short): handed on when a correction replaces this lookup
         self.progress = []          # the facts said on the way
@@ -175,36 +196,47 @@ class Lookup:
         call = self.call
         call.record('lookup_started', lookup_id=self.id, carried=bool(self.carried))
         try:
-            answer = await asyncio.wait_for(self._loop(), SECONDS)
+            answer = await self._loop()
         except asyncio.CancelledError:
             raise
-        except asyncio.TimeoutError:
-            self.state = 'timed_out'
-            call.record('lookup_timed_out', lookup_id=self.id, seconds=SECONDS)
-            if routed():   # not 「答えが出なかった」: the work goes on with chat Dan, with what was found (owner, 2026-11-05)
-                return await self.hand_over('読むだけの調べものでは時間内に答えが出なかった')
-            await call.say('problem', f'調べものは{SECONDS // 60}分で答えが出なかった。' + ('ここまでに分かったこと: ' + self.progress[-1] if self.progress else ''))
-            return
-        except Exception as exc:
+        except Exception as exc:   # a round that did not answer in ROUND_TIMEOUT_S lands here too: that is a stall
             self.state = 'failed'
             call.record('lookup_failed', lookup_id=self.id, error_type=type(exc).__name__, detail=str(exc)[:160])
-            if routed():
+            if routed():   # not 「答えが出なかった」: the work goes on with chat Dan, with what was found (owner, 2026-11-05)
                 return await self.hand_over('調べる仕組みが途中で止まった')
-            await call.say('problem', '調べものが途中で止まった（調べる仕組みの失敗）。答えは出ていない。')
+            await self.deliver('problem', '調べものが途中で止まった（調べる仕組みの失敗）。答えは出ていない。'
+                               + ('ここまでに分かったこと: ' + self.progress[-1] if self.progress else ''))
             return
         if self.state != 'running':
             return
         self.state = 'answered'
         answer, parts = split_parts(answer)
         self.answer = answer
-        call.record('lookup_answered', lookup_id=self.id, seconds=round(time.monotonic() - self.started, 1), chars=len(answer), parts=len(parts))
-        if parts:   # the screen changes as the answer is handed to the voice: they start together (2026-11-12)
+        call.record('lookup_answered', lookup_id=self.id, seconds=round(time.monotonic() - self.started, 1), chars=len(answer), parts=len(parts),
+                    after_call=call.closed)
+        if parts and not call.closed:   # the screen changes as the answer is handed to the voice: they start together (2026-11-12)
             from app.services import voice_stage
             stage = voice_stage.for_room(call.room_id)
             if stage is not None:
                 shown = stage.show_parts(parts, self.label)
                 call.record('lookup_parts', lookup_id=self.id, shown=bool(shown.get('shown')))
-        await call.say('result', '調べた結果: ' + (answer or '確かめられる答えは見つからなかった。'))
+        await self.deliver('result', '調べた結果: ' + (answer or '確かめられる答えは見つからなかった。'), parts)
+
+    async def deliver(self, kind, text, parts=''):
+        """Into the call while it lasts; after the owner has hung up, into the room's chat (2026-11-13: a lookup is no
+        longer stopped when the call ends, so its answer must reach the owner some other way)."""
+        if not self.call.closed:
+            return await self.call.say(kind, text)
+        if not self.call.room_id:
+            return
+        from app.services import room_files
+        head = f'通話で頼まれた「{self.label}」を調べ終わりました（通話はもう切れていました）。' if kind == 'result' else f'通話で頼まれた「{self.label}」:'
+        try:
+            body = head + chr(10) + text.removeprefix('調べた結果: ') + ((chr(10) * 2 + '```openui-lang' + chr(10) + parts + chr(10) + '```') if parts else '')
+            await room_files.show(self.call.room_id, self.call.user_id, [], body)
+            self.call.record('lookup_posted_to_chat', lookup_id=self.id)
+        except Exception as exc:
+            self.call.record('lookup_post_failed', lookup_id=self.id, error_type=type(exc).__name__)
 
     async def _loop(self):
         client = _client()
@@ -213,7 +245,10 @@ class Lookup:
                  + ((chr(10) * 2 + 'この通話で前に確かめた事実（前の調べもの・条件が変わる前の版。今の頼みと条件に合う分だけ使い、同じ検索をし直さない）:' + chr(10) + self.carried) if self.carried else ''))
         given, previous, said, reminded = [{'role': 'user', 'content': first}], None, 0, False
         history = []                # stateless(): every round sends the whole lookup so far
-        wrapped = False             # told to answer now (ANSWER_BY)
+        wrapped = False             # told to answer now (it only repeated itself, or MAX_ROUNDS is near)
+        posted = False              # asked once to pass on what it has (KEEP_POSTED_S)
+        retold = False              # asked once to call its tools as tools (DSML)
+        seen, repeats = set(), 0    # the searches and pages asked so far, and the rounds in a row that asked nothing new
         spec = self.call.spec()
         for round_no in range(1, MAX_ROUNDS + 1):
             began = time.monotonic()
@@ -236,6 +271,14 @@ class Lookup:
                              cached_tokens=getattr(getattr(usage, 'input_tokens_details', None), 'cached_tokens', 0) or 0,
                              output_tokens=getattr(usage, 'output_tokens', 0) or 0)
             if not calls:
+                text = response.output_text or ''
+                # DeepSeek wrote a tool call as text instead of calling it (<｜｜DSML｜｜ calls>..., 2026-11-13, one run of
+                # sixteen, and one in the evening of 11-12): it would have been read aloud. It is told so once.
+                if 'DSML' in text and not retold and not wrapped:
+                    retold = True
+                    self.call.record('lookup_dsml_retold', lookup_id=self.id)
+                    given = [{'role': 'user', 'content': DSML_AGAIN}]
+                    continue
                 # A lookup answered 「商品ページを今、画面に出すよ」 without showing anything, after the owner had asked to see
                 # it; the owner had to ask again 40 s later (2026-11-03, voice_goal_call.py, weights_100kg run 2). Before the
                 # answer, a lookup asked for the screen that has shown nothing is told so once.
@@ -244,24 +287,31 @@ class Lookup:
                     self.call.record('lookup_show_reminded', lookup_id=self.id)
                     given = [{'role': 'user', 'content': SHOW_FIRST}]
                     continue
-                return without_markup(response.output_text)
-            if self.state != 'running':
+                return without_markup(text)
+            if self.state not in ('running',):
                 return ''
+            asked = {(c.name, _norm(c.arguments)) for c in calls if c.name in REPEATABLE}
+            fresh = asked - seen
+            seen |= asked
+            repeats = repeats + 1 if asked and not fresh else 0
             outputs = await asyncio.gather(*(self._execute(c, said) for c in calls))
             said += sum(1 for c in calls if c.name == 'share_progress')
             given = [{'type': 'function_call_output', 'call_id': c.call_id, 'output': out} for c, out in zip(calls, outputs)]
             spent = time.monotonic() - self.started
-            # the next round of searching would take about as long as this one did
-            if not wrapped and (spent + (time.monotonic() - began) >= ANSWER_BY or round_no == MAX_ROUNDS - 1):
+            if not wrapped and (repeats >= REPEATS or round_no >= MAX_ROUNDS - 1):
                 wrapped = True
-                self.call.record('lookup_wrap_up', lookup_id=self.id, seconds=round(spent))
-                given.append({'role': 'user', 'content': WRAP_UP.format(seconds=round(spent))})
+                self.call.record('lookup_wrap_up', lookup_id=self.id, seconds=round(spent), round=round_no, repeats=repeats)
+                given.append({'role': 'user', 'content': WRAP_UP.format(repeats=repeats or round_no)})
+            elif not posted and not said and not self.call.closed and spent >= KEEP_POSTED_S:
+                posted = True
+                self.call.record('lookup_keep_posted', lookup_id=self.id, seconds=round(spent))
+                given.append({'role': 'user', 'content': KEEP_POSTED.format(seconds=round(spent))})
         return ''
 
     async def hand_over(self, why, found=''):
         """Chat Dan takes this lookup over with what it had verified; the owner hears nothing about it (the state is read
         when asked: voice_router.status_text)."""
-        if self.state not in ('running', 'timed_out', 'failed') or self.call.closed:
+        if self.state not in ('running', 'failed'):
             return
         self.state = 'handed_over'
         from app.services import voice_router
@@ -273,7 +323,7 @@ class Lookup:
         self.call.record('lookup_handed_over', lookup_id=self.id, accepted=bool(out.get('accepted')), job_id=str(job_id)[:8])
         if job_id and self.call.router is not None: self.call.router.jobs[job_id] = self.label
         if not out.get('accepted'):
-            await self.call.say('problem', 'サイトやアプリの中を見る必要があったが、その作業を始められなかった。')
+            await self.deliver('problem', 'サイトやアプリの中を見る必要があったが、その作業を始められなかった。')
 
     def wants_screen(self):
         owner = [t['text'] for t in self.call.dialogue.recent() if t['role'] == 'user'][-3:]
@@ -299,6 +349,8 @@ class Lookup:
                 self.progress.append(fact)
                 await self.call.say('note', f'調べものの途中で分かったこと: {fact}')
             return json.dumps({'said': bool(fact)}, ensure_ascii=False)
+        if name == 'web_search' and SEARCH == 'list':
+            return await self._search(arguments)
         if name in direct_names():   # Dan's own tool, given whole: run as dan_tool runs it
             try: args = json.loads(arguments)
             except ValueError: args = {}
@@ -319,6 +371,35 @@ class Lookup:
             try: self.shown += bool(json.loads(out['output']).get('shown'))
             except (ValueError, AttributeError): pass
         return out['output']
+
+
+    async def _search(self, arguments):
+        from app.services import web_search
+        try: query = str(json.loads(arguments).get('query') or '').strip()
+        except ValueError: query = ''
+        if not query:
+            return json.dumps({'error': 'query が空。'}, ensure_ascii=False)
+        started = time.monotonic()
+        found = await web_search.listing(query)
+        out = json.dumps({'results': found['results']} if found['success'] else {'error': found['error']}, ensure_ascii=False)
+        try:   # place names the speech model would misread get their reading, as every function's output does
+            from app.services.voice_furigana import annotate_all
+            out = json.dumps(annotate_all(json.loads(out)), ensure_ascii=False)
+        except Exception:
+            pass
+        self.call.record('function_done', delegation_id=self.id, name='web_search', prefetched=False,
+                         elapsed_ms=round((time.monotonic() - started) * 1000), output_chars=len(out))
+        self.verified.append(('web_search', out))
+        return out
+
+
+REPEATABLE = ('web_search', 'read_page', 'places', 'page_clip', 'search_records')   # what a stuck lookup asks again
+
+
+def _norm(arguments):
+    try: value = json.loads(arguments or '{}')
+    except ValueError: return str(arguments or '')
+    return json.dumps(value, ensure_ascii=False, sort_keys=True).lower()
 
 
 MARKUP = re.compile(r'<[｜|]{1,2}DSML[｜|]{1,2}tool_calls>.*?(</[｜|]{1,2}DSML[｜|]{1,2}tool_calls>|$)', re.S)
@@ -438,12 +519,9 @@ class Call:
         return True
 
     def close(self):
+        """The call ended. A running lookup goes on and puts its answer in the room's chat (deliver): the owner who hung up
+        after 2 min 27 s on 2026-11-12 22:44 still wanted the answer."""
         self.closed = True
-        for lookup in self.lookups.values():
-            if lookup.state == 'running':
-                lookup.state = 'cancelled'
-            if lookup.task_handle is not None and not lookup.task_handle.done():
-                lookup.task_handle.cancel()
         if self.warming is not None and not self.warming.done():
             self.warming.cancel()
 
