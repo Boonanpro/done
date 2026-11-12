@@ -53,10 +53,10 @@ def test_make_view_copy_and_serve_with_range(room):
     assert out and out.exists()
     row = r._read_assets(ROOM)[0]
     assert row["view_path"] == str(out)
-    assert row["view_url"].endswith("&asset_id=b&variant=view")
+    assert "&asset_id=b&variant=view&v=" in row["view_url"]  # 作り直すと住所が変わる（古い写しを混ぜない）
     w = subprocess.run([r._ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
                         "stream=width", "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.strip()
-    assert w == "960"
+    assert w == "1280"
 
     app = FastAPI()
     app.include_router(r.router, prefix="/api/v1")

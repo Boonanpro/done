@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AI_VIDEO_MODELS, aiDurationFor, aiModelFor, aiModelsForLength } from '@/lib/ai-video-models';
 import {
   CAPTION_DESIGN_PRESETS,
@@ -13,6 +13,7 @@ import {
 import {
   ArrowLeft,
   Check,
+  Maximize2,
   MessageSquare,
   MousePointer2,
   Pause,
@@ -26,6 +27,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { TimelineRuler } from './timeline-ruler';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -678,6 +680,8 @@ export function VideoReviewEditor({
   const [videoUrl, setVideoUrl] = useState(initialUrl || '');
   const [duration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  // 利用者が再生位置を動かすたびに増える。プレビューは再生中でもこれを見て新しい位置から続ける。
+  const [seekRev, setSeekRev] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
   const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
@@ -1294,7 +1298,63 @@ export function VideoReviewEditor({
   }, [editSequence]);
   // Stable callbacks: passing inline arrows would change every render and re-run the
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
-  const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
+  // 再生中の時刻は毎コマここに入る。赤線・時刻の表示・タイムラインの送りはこの値で直接動かし、
+  // エディター全体（React の currentTime）は 8回/秒だけ更新する。毎コマ全体を描き直すと、
+  // クリップの多い作品・全体表示で再生がカクついていた（2026-11-13 本人「ズームアウトすると一気にカクつく」）。
+  const liveTimeRef = useRef(0);
+  const playingRef = useRef(false);
+  const scrubbingRef = useRef(false);
+  const timelineDurationRef = useRef(0);
+  const trackWidthRef = useRef(0);
+  const timeReadoutRef = useRef<HTMLSpanElement>(null);
+  const lastTimeStateRef = useRef(0);
+  const timeFlushRef = useRef<number | null>(null);
+  timelineDurationRef.current = timelineDuration || 0;
+  playingRef.current = playing;
+  const placePlayhead = useCallback((t: number) => {
+    const bar = playheadBarRef.current;
+    const td = timelineDurationRef.current;
+    const w = trackWidthRef.current || timelineRef.current?.offsetWidth || 0;
+    const tf = `translate3d(${td && w ? (t / td) * w : 0}px,0,0)`;
+    if (bar) bar.style.transform = tf;
+    if (playheadHeadRef.current) playheadHeadRef.current.style.transform = tf;
+  }, []);
+  // 再生中の送り: 赤線が右端に来たら1画面めくる（Premiere の「ページスクロール」と同じ）。
+  // 少しずつ送ると、毎コマ全部のクリップを描き直すことになる。
+  const followPlayhead = useCallback((t: number) => {
+    const scroller = timelineScrollRef.current;
+    const track = timelineRef.current;
+    const td = timelineDurationRef.current;
+    const w = trackWidthRef.current;
+    if (!scroller || !track || !td || !w || danReplayingRef.current) return;
+    const playX = track.offsetLeft + (t / td) * w;
+    const left = scroller.scrollLeft;
+    const right = left + scroller.clientWidth;
+    if (playX > right - 24 || playX < left) scroller.scrollLeft = Math.max(0, playX - 40);
+  }, []);
+  const handlePreviewTime = useCallback((t: number) => {
+    liveTimeRef.current = t;
+    // 読む（送りの判定）→書く（赤線・時刻）の順にして、毎コマの強制レイアウトを避ける
+    if (playingRef.current && !scrubbingRef.current) followPlayhead(t);
+    placePlayhead(t);
+    // 表示は 0.1秒単位なので、文字が変わる時だけ書く（毎コマ書くと毎コマ組み直し・塗り直しが起きる）
+    const label = fmtTime(t);
+    const ro = timeReadoutRef.current;
+    if (ro && ro.textContent !== label) ro.textContent = label;
+    if (!playingRef.current) { setCurrentTime(t); return; }
+    const now = performance.now();
+    if (now - lastTimeStateRef.current >= 125) {
+      lastTimeStateRef.current = now;
+      setCurrentTime(t);
+    } else if (timeFlushRef.current == null) {
+      // 最後の値を必ず届ける（再生の終わり・止めた瞬間の位置がずれないように）
+      timeFlushRef.current = window.setTimeout(() => {
+        timeFlushRef.current = null;
+        lastTimeStateRef.current = performance.now();
+        setCurrentTime(liveTimeRef.current);
+      }, 130);
+    }
+  }, [placePlayhead, followPlayhead]);
   const handlePreviewEnded = useCallback(() => setPlaying(false), []);
   // The playhead FOLLOWS the engine's real playback position (engPosRef = last reported position +
   // the wall-clock time it arrived). The picture stalls ~150-650ms at each clip boundary while the
@@ -1306,6 +1366,7 @@ export function VideoReviewEditor({
   // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
   // at ~12Hz only for the reactive bits (captions / annotations / time readout) which don't need 60Hz.
   const playheadBarRef = useRef<HTMLDivElement>(null);
+  const playheadHeadRef = useRef<HTMLDivElement>(null);
   // Magnet for the PLAYHEAD: the clip-join times (every clip's start AND end, plus 0) that the
   // scrubbing red line snaps onto when 🧲 is ON, so it clicks precisely onto cut points.
   const playheadSnapPoints = useMemo(() => {
@@ -1340,11 +1401,30 @@ export function VideoReviewEditor({
       // follow-clock at the seek target so the bar jumps there and then stays put until the engine
       // confirms it actually resumed there (the engine keeps reporting the target while it re-prerolls).
       setCurrentTime(nextTime);
+      liveTimeRef.current = nextTime;
+      placePlayhead(nextTime);
+      if (timeReadoutRef.current) timeReadoutRef.current.textContent = fmtTime(nextTime);
+      setSeekRev((v) => v + 1);
       engPosRef.current = { pos: nextTime, wall: performance.now() };
       if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
-    [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints]
+    [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints, placePlayhead]
   );
+
+  // P キーの全画面: プレビューの欄（映像と字幕・ぼかしの枠）を画面いっぱいに出す
+  const previewAreaRef = useRef<HTMLDivElement | null>(null);
+  const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  const togglePreviewFullscreen = useCallback(() => {
+    const el = previewAreaRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    else void el.requestFullscreen().catch(() => {});
+  }, []);
+  useEffect(() => {
+    const on = () => setPreviewFullscreen(!!document.fullscreenElement && document.fullscreenElement === previewAreaRef.current);
+    document.addEventListener('fullscreenchange', on);
+    return () => document.removeEventListener('fullscreenchange', on);
+  }, []);
 
   // Native transport bridge: in the desktop shell the GES engine is the playback source.
   // Drive it from the editor's transport, and take the engine's position back for the playhead.
@@ -1368,8 +1448,8 @@ export function VideoReviewEditor({
       const elapsed = Math.min(Math.max((performance.now() - e.wall) / 1000, 0), 0.08);
       const pos = max > 0 ? Math.min(e.pos + elapsed, max) : e.pos + elapsed;
       // 60Hz: move ONLY the thin bar via the ref — no React re-render of the heavy editor.
-      const bar = playheadBarRef.current;
-      if (bar && timelineDuration) bar.style.left = `${(pos / timelineDuration) * 100}%`;
+      liveTimeRef.current = pos;
+      placePlayhead(pos);
       // ~12Hz: update React currentTime for the reactive bits (captions/annotations/time readout).
       if (now - lastState > 80) {
         lastState = now;
@@ -1379,7 +1459,7 @@ export function VideoReviewEditor({
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [nativeShell, playing, timelineDuration, duration]);
+  }, [nativeShell, playing, timelineDuration, duration, placePlayhead]);
   useEffect(() => {
     if (!nativeShell) return;
     const wv = (window as unknown as { chrome?: { webview?: { addEventListener(t: string, h: (e: { data: unknown }) => void): void; removeEventListener(t: string, h: (e: { data: unknown }) => void): void } } }).chrome?.webview;
@@ -2077,6 +2157,25 @@ export function VideoReviewEditor({
         setPlaying((p) => !p);
         return;
       }
+      // P: プレビューを全画面に／戻す（前のエディターと同じ。Esc でも戻る）
+      if (!modKey && !event.altKey && (event.key === 'p' || event.key === 'P')) {
+        event.preventDefault();
+        togglePreviewFullscreen();
+        return;
+      }
+      // Home / End: 先頭・最後へ
+      if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault();
+        seekTimeline(event.key === 'Home' ? 0 : contentDuration || 0);
+        return;
+      }
+      // + / -: 再生位置を中心に拡大・縮小
+      if (!modKey && (event.key === '+' || event.key === '=' || event.key === '-' || event.key === '_')) {
+        event.preventDefault();
+        const dir = event.key === '-' || event.key === '_' ? -1 : 1;
+        setTimelineZoom((value) => Number(clamp(value * (dir > 0 ? 1.25 : 0.8), 1, maxTimelineZoom).toFixed(2)));
+        return;
+      }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
         if (event.shiftKey) rippleDelete(); // close the gap
@@ -2094,13 +2193,13 @@ export function VideoReviewEditor({
         setPlaying(false);
         const unit = (event.shiftKey ? 10 : 1) / fps;
         const direction = event.key === 'ArrowRight' ? 1 : -1;
-        const nextTime = Number(clamp(currentTime + direction * unit, 0, timelineDuration || duration || 0).toFixed(3));
+        const nextTime = Number(clamp(liveTimeRef.current + direction * unit, 0, timelineDuration || duration || 0).toFixed(3));
         seekTimeline(nextTime);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo]);
+  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo, togglePreviewFullscreen, contentDuration, maxTimelineZoom]);
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -2283,33 +2382,87 @@ export function VideoReviewEditor({
     };
   }, [pendingAnnotation, pendingTimelineDrag, timelineDuration, updatePendingTime]);
 
+  // 再生位置をつかんで動かす。再生中につかんだら、つかんでいる間だけ止めて、離したらその位置から再生を続ける
+  // （2026-11-13 本人「再生中でも普通に動かせるようにしたい」）。
+  // つかんだまま枠の左右の端へ寄せると、指を止めていてもその向きへ流れ続ける（端からの距離で速くなる）。
+  const scrubPointerXRef = useRef<number | null>(null);
+  const resumeAfterScrubRef = useRef(false);
+  const timeAtVisibleX = useCallback((clientX: number): number => {
+    const sc = timelineScrollRef.current;
+    const track = timelineRef.current;
+    const td = timelineDurationRef.current;
+    if (!track || !td) return 0;
+    const sr = sc?.getBoundingClientRect();
+    const tr = track.getBoundingClientRect();
+    // 枠の外へ出たら、見えている端の位置にとどめる（赤線が画面の外へ飛ばない）
+    const x = sr ? clamp(clientX, Math.max(sr.left, tr.left), Math.min(sr.right - 1, tr.right)) : clientX;
+    return Number(clamp(((x - tr.left) / tr.width) * td, 0, td).toFixed(3));
+  }, []);
+  const beginScrub = useCallback((clientX: number) => {
+    if (playingRef.current) {
+      resumeAfterScrubRef.current = true;
+      setPlaying(false);
+    }
+    scrubbingRef.current = true;
+    scrubPointerXRef.current = clientX;
+    seekTimeline(timeAtVisibleX(clientX));
+    setIsTimelineScrubbing(true);
+  }, [seekTimeline, timeAtVisibleX]);
   useEffect(() => {
     if (!isTimelineScrubbing) return;
+    let lastT = -1;
     const moveScrub = (event: PointerEvent) => {
-      const nextTime = getTimelineTime(event);
-      seekTimeline(nextTime);
+      scrubPointerXRef.current = event.clientX;
+      const t = timeAtVisibleX(event.clientX);
+      if (t !== lastT) { lastT = t; seekTimeline(t); }
     };
-    const stopScrub = () => setIsTimelineScrubbing(false);
+    let raf = 0;
+    const edgeLoop = () => {
+      raf = requestAnimationFrame(edgeLoop);
+      const x = scrubPointerXRef.current;
+      const sc = timelineScrollRef.current;
+      if (x == null || !sc || sc.scrollWidth <= sc.clientWidth) return;
+      const r = sc.getBoundingClientRect();
+      const ZONE = 36;
+      let v = 0;
+      if (x > r.right - ZONE) v = Math.min(80, 4 + (x - (r.right - ZONE)) * 0.6);
+      else if (x < r.left + ZONE) v = -Math.min(80, 4 + (r.left + ZONE - x) * 0.6);
+      if (!v) return;
+      const before = sc.scrollLeft;
+      sc.scrollLeft = clamp(before + v, 0, sc.scrollWidth - sc.clientWidth);
+      if (sc.scrollLeft === before) return;
+      const t = timeAtVisibleX(x);
+      if (t !== lastT) { lastT = t; seekTimeline(t); }
+    };
+    raf = requestAnimationFrame(edgeLoop);
+    const stopScrub = () => {
+      scrubbingRef.current = false;
+      scrubPointerXRef.current = null;
+      setIsTimelineScrubbing(false);
+      if (resumeAfterScrubRef.current) {
+        resumeAfterScrubRef.current = false;
+        setPlaying(true);
+      }
+    };
     window.addEventListener('pointermove', moveScrub);
     window.addEventListener('pointerup', stopScrub);
     window.addEventListener('pointercancel', stopScrub);
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener('pointermove', moveScrub);
       window.removeEventListener('pointerup', stopScrub);
       window.removeEventListener('pointercancel', stopScrub);
     };
-  }, [getTimelineTime, isTimelineScrubbing, seekTimeline]);
+  }, [isTimelineScrubbing, seekTimeline, timeAtVisibleX]);
 
   const handleTimelinePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) return; // right-drag is rubber-band select, not scrub
       event.preventDefault();
       clearSelection();
-      const nextTime = getTimelineTime(event);
-      seekTimeline(nextTime);
-      setIsTimelineScrubbing(true);
+      beginScrub(event.clientX);
     },
-    [clearSelection, getTimelineTime, seekTimeline]
+    [clearSelection, beginScrub]
   );
 
   const handleTimelineWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
@@ -2321,10 +2474,10 @@ export function VideoReviewEditor({
       const scroller = timelineScrollRef.current;
       const track = timelineRef.current;
       if (!scroller || !track || !timelineDuration) return;
-      const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
+      const redlineX = (liveTimeRef.current / timelineDuration) * track.offsetWidth;
       scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     });
-  }, [currentTime, timelineDuration, maxTimelineZoom]);
+  }, [timelineDuration, maxTimelineZoom]);
 
   // Edge-scroll on playhead MOVEMENT: only scroll when the playhead reaches the viewport edge —
   // staying put for fine adjustments in the middle (centering on every move made the whole timeline
@@ -2334,20 +2487,51 @@ export function VideoReviewEditor({
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
     if (danReplayingRef.current) return; // Dan's replay pans the view itself
+    if (playing || isTimelineScrubbing) return; // 再生中は followPlayhead、つかんでいる間は端の自動送りが受け持つ
     const playX = track.offsetLeft + (currentTime / timelineDuration) * track.offsetWidth;
     const margin = 40;
     const left = scroller.scrollLeft;
     const right = left + scroller.clientWidth;
     if (playX < left + margin) scroller.scrollLeft = Math.max(0, playX - margin);
     else if (playX > right - margin) scroller.scrollLeft = playX - scroller.clientWidth + margin;
-  }, [currentTime, timelineDuration]);
+  }, [currentTime, timelineDuration, playing, isTimelineScrubbing]);
+
+  // 赤線の位置合わせ: 止まっている時は currentTime、再生中は毎コマの値。タイムラインの幅は覚えておき、毎コマ測らない。
+  useLayoutEffect(() => {
+    if (timelineRef.current) trackWidthRef.current = timelineRef.current.offsetWidth;
+    placePlayhead(liveTimeRef.current);
+  }, [timelineDuration, timelineZoom, placePlayhead]);
+  const wasPlayingRef = useRef(false);
+  useLayoutEffect(() => {
+    if (playing) { wasPlayingRef.current = true; return; }
+    if (wasPlayingRef.current) {
+      // 止めた瞬間: 8回/秒の値は少し古いので、毎コマの最新の位置で止める
+      wasPlayingRef.current = false;
+      if (timeFlushRef.current != null) { window.clearTimeout(timeFlushRef.current); timeFlushRef.current = null; }
+      if (Math.abs(liveTimeRef.current - currentTime) > 0.0005) { setCurrentTime(liveTimeRef.current); return; }
+    }
+    liveTimeRef.current = currentTime;
+    placePlayhead(currentTime);
+    if (timeReadoutRef.current) timeReadoutRef.current.textContent = fmtTime(currentTime);
+  }, [currentTime, playing, placePlayhead]);
+  useEffect(() => {
+    const track = timelineRef.current;
+    if (!track) return;
+    const ro = new ResizeObserver(() => {
+      trackWidthRef.current = track.offsetWidth;
+      placePlayhead(liveTimeRef.current);
+    });
+    trackWidthRef.current = track.offsetWidth;
+    ro.observe(track);
+    return () => ro.disconnect();
+  }, [placePlayhead]);
 
   // On ZOOM, centre the playhead (zoom is an explicit action that zooms AROUND the red line).
   useEffect(() => {
     const scroller = timelineScrollRef.current;
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
-    const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
+    const redlineX = (liveTimeRef.current / timelineDuration) * track.offsetWidth;
     scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timelineZoom]);
@@ -2591,8 +2775,6 @@ export function VideoReviewEditor({
   // bake_start), because the bake covers a padded window. No per-frame matting, no VP9.
   const popoutVideoRef = useRef<HTMLVideoElement | null>(null);
   const popoutAlphaRef = useRef<HTMLVideoElement | null>(null);
-  const playingRef = useRef(playing);
-  playingRef.current = playing;
   const activePopout = useMemo(() => {
     const popClips = allSequenceClips.filter((c) => (c.effects || []).some((e) => e.type === 'popout'));
     for (const c of popClips) {
@@ -3129,6 +3311,198 @@ export function VideoReviewEditor({
     };
   }, [marqueeActive]);
 
+  // 右の調整欄は、選んだ物・書きかけの指示・制作中の知らせがある時だけ出す（空の欄を常に置かない）
+  const showInspector = !!sidePanelTop || !!pendingAnnotation || !!selected || !!selectedSequenceClip;
+
+  // タイムラインの段とクリップ。再生位置（currentTime）が変わっても作り直さない。
+  // 押した時の処理は laneFns から最新の物を呼ぶので、ここは見た目の中身が変わった時だけ描き直す。
+  const laneFns = useRef({ handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag });
+  laneFns.current = { handleTimelinePointerDown, handleLaneDragOver, handleLaneDrop, startTimelineDrag, selectAnnotation, seekTimeline, startSequenceClipDrag, selectSequenceClip, startPendingTimelineDrag };
+  const lanesView = useMemo(() => (
+    timelineLanes.map((lane, laneIndex) => {
+                        const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
+                        const showPending =
+                          !!pendingAnnotation &&
+                          lane.zone === trackForIntent(pendingAnnotation.intent) &&
+                          timelineLanes.findIndex((l) => l.zone === lane.zone) === laneIndex;
+                        return (
+                          <div
+                            key={lane.key}
+                            className={`relative w-full overflow-hidden rounded border ${
+                              lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
+                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
+                            style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
+                            onPointerDown={(event) => {
+                              if (event.target === event.currentTarget) laneFns.current.handleTimelinePointerDown(event);
+                            }}
+                            onPointerUp={() => setTimelineDrag(null)}
+                            onPointerCancel={() => setTimelineDrag(null)}
+                            onDragOver={(event) => laneFns.current.handleLaneDragOver(event, lane)}
+                            onDrop={(event) => laneFns.current.handleLaneDrop(event, lane)}
+                          >
+                            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
+                            {dropPreview && dropPreview.zone === lane.zone && dropPreview.layer === lane.layer && timelineDuration ? (
+                              <div
+                                className="pointer-events-none absolute top-0.5 bottom-0.5 z-10 rounded border-2 border-dashed border-sky-300 bg-sky-400/25"
+                                style={{
+                                  left: `${(dropPreview.start / timelineDuration) * 100}%`,
+                                  width: `${Math.max(0.8, (dropPreview.len / timelineDuration) * 100)}%`,
+                                }}
+                              >
+                                <span className="px-1 text-[9px] text-sky-100">ここに追加</span>
+                              </div>
+                            ) : null}
+                            {lane.items.map((item) => {
+                              const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
+                              // accurate width (% of timeline); a pixel minWidth keeps short clips
+                              // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
+                              // timeline, drew short clips seconds-wide and overlapped neighbours.
+                              const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
+                              if (item.kind === 'annotation' && item.annotation) {
+                                const a = item.annotation;
+                                return (
+                                  <div
+                                    key={item.key}
+                                    data-annotation-id={a.id}
+                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
+                                    style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
+                                    onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'move')}
+                                    onDoubleClick={() => {
+                                      laneFns.current.selectAnnotation(a.id);
+                                      laneFns.current.seekTimeline(a.start);
+                                    }}
+                                    title={`${a.intent}: ${fmtTime(a.start)} - ${fmtTime(a.end)} ${a.note || ''}`}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="h-full w-2 cursor-ew-resize bg-black/25"
+                                      onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'start')}
+                                      aria-label="Resize start"
+                                    />
+                                    <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
+                                    {a.note ? (
+                                      <button
+                                        type="button"
+                                        className="h-full shrink-0 px-1 text-[9px] hover:bg-black/25"
+                                        title="メモを読む"
+                                        aria-label="メモ"
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setOpenNoteKey((cur) => (cur === a.note ? null : a.note || null));
+                                        }}
+                                      >
+                                        ▼
+                                      </button>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="h-full w-2 cursor-ew-resize bg-black/25"
+                                      onPointerDown={(event) => laneFns.current.startTimelineDrag(event, a, 'end')}
+                                      aria-label="Resize end"
+                                    />
+                                  </div>
+                                );
+                              }
+                              const clip = item.clip;
+                              if (!clip) return null;
+                              const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
+                              const selected = selectedSequenceClipIds.includes(clip.id);
+                              const linkedSelected = !selected && highlightedClipIds.has(clip.id);
+                              const isVideo = item.itemType === 'video';
+                              const labelText =
+                                item.itemType === 'caption'
+                                  ? clip.text || 'テロップ'
+                                  : item.itemType === 'audio'
+                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
+                                    : clip.label || '素材';
+                              return (
+                                <div
+                                  key={item.key}
+                                  data-clip-id={clip.id}
+                                  className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
+                                    danTouch.ids.includes(clip.id) ? 'dan-touch' : ''} ${danTouch.appear.includes(clip.id) ? 'dan-appear' : ''} ${
+                                    danTouch.vanish.includes(clip.id) ? 'dan-vanish' : ''} ${
+                                    selected
+                                      ? 'border-yellow-300 ring-2 ring-yellow-300/70'
+                                      : linkedSelected
+                                        ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
+                                        : 'border-white/30'
+                                  }`}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
+                                    if (rightDragRef.current) return;
+                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
+                                  }}
+                                  style={{
+                                    left: `${left}%`,
+                                    width: `${width}%`,
+                                    minWidth: '3px',
+                                    top: 3,
+                                    bottom: 3,
+                                    ...(isVideo && clipAsset?.thumbnail_url
+                                      ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
+                                      : {}),
+                                  }}
+                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
+                                >
+                                  <button
+                                    type="button"
+                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'start')}
+                                    aria-label="Resize clip start"
+                                  />
+                                  <div
+                                    className="flex h-full min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
+                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'move')}
+                                    onDoubleClick={(event) => {
+                                      event.stopPropagation();
+                                      laneFns.current.selectSequenceClip(clip.id);
+                                      laneFns.current.seekTimeline(clip.timeline_start);
+                                    }}
+                                  >
+                                    <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{itemTypeBadge(item.itemType)}</span>
+                                    <span className="truncate">{labelText}</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+                                    onPointerDown={(event) => laneFns.current.startSequenceClipDrag(event, clip, 'end')}
+                                    aria-label="Resize clip end"
+                                  />
+                                </div>
+                              );
+                            })}
+                            {showPending && pendingAnnotation ? (
+                              <div
+                                className="absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border border-orange-300 bg-orange-400/65 text-[10px] text-black active:cursor-grabbing"
+                                style={{
+                                  left: `${timelineDuration ? (pendingAnnotation.start / timelineDuration) * 100 : 0}%`,
+                                  width: `${timelineDuration ? Math.max(0.8, (((pendingAnnotation.end ?? pendingAnnotation.start + 0.2) - pendingAnnotation.start) / timelineDuration) * 100) : 1}%`,
+                                }}
+                                onPointerDown={(event) => laneFns.current.startPendingTimelineDrag(event, 'move')}
+                              >
+                                <button
+                                  type="button"
+                                  className="h-full w-2 cursor-ew-resize bg-black/25"
+                                  onPointerDown={(event) => laneFns.current.startPendingTimelineDrag(event, 'start')}
+                                  aria-label="Resize pending start"
+                                />
+                                <span className="min-w-0 flex-1 truncate px-1">未確定</span>
+                                <button
+                                  type="button"
+                                  className="h-full w-2 cursor-ew-resize bg-black/25"
+                                  onPointerDown={(event) => laneFns.current.startPendingTimelineDrag(event, 'end')}
+                                  aria-label="Resize pending end"
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })
+  ), [timelineLanes, pendingAnnotation, isTimelineScrubbing, dropPreview, timelineDuration, selectedIds, sequenceAssetMap, selectedSequenceClipIds, highlightedClipIds, danTouch]);
+
   return (
     <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
       <style>{DAN_HANDS_CSS}</style>
@@ -3217,8 +3591,14 @@ export function VideoReviewEditor({
 
         <div className="flex flex-1 overflow-hidden">
           <div className={`flex min-w-0 flex-1 flex-col ${nativeShell ? '' : 'bg-neutral-950'}`}>
-            <div className="relative flex min-h-0 flex-1 items-center justify-center p-4">
-              {previewTopLeft ? (
+            {/* 上の段: プレビューと、選んだ物の調整欄。調整欄は選んだ時だけ出て、タイムラインの幅は変えない */}
+            <div className="flex min-h-0 flex-1">
+            <div
+              ref={previewAreaRef}
+              className={`relative flex min-h-0 min-w-0 flex-1 items-center justify-center ${previewFullscreen ? 'bg-black p-0' : 'p-4'}`}
+              onDoubleClick={(event) => { if (event.target === event.currentTarget) togglePreviewFullscreen(); }}
+            >
+              {previewTopLeft && !previewFullscreen ? (
                 <div className="absolute left-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
                   {previewTopLeft}
                 </div>
@@ -3247,6 +3627,7 @@ export function VideoReviewEditor({
                     assets={sequenceAssets || []}
                     blurRegionsAt={blurRegionsAt}
                     currentTime={currentTime}
+                    seekRev={seekRev}
                     playing={playing}
                     format={editSequence?.format || initialSequence?.format || '9:16'}
                     onTimeChange={handlePreviewTime}
@@ -3500,6 +3881,744 @@ export function VideoReviewEditor({
                 </div>
               </div>
             </div>
+            {showInspector ? (
+            <aside className="flex w-[360px] shrink-0 flex-col overflow-y-auto border-l border-border bg-background" aria-label="選んだ物の調整">
+              <div className={sidePanelTop || pendingAnnotation ? 'p-3' : 'hidden'}>
+                {sidePanelTop}
+                {pendingAnnotation ? (
+                  <div className="mb-3 rounded-md border border-orange-300 bg-orange-50 p-3 text-sm text-orange-950">
+                    <div className="mb-2 flex items-center justify-between">
+                      <div className="font-medium">未確定指示</div>
+                      <Button variant="ghost" size="sm" onClick={() => setPendingAnnotation(null)}>
+                        取消
+                      </Button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <Label className="text-xs text-orange-950">Start</Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={pendingAnnotation.start}
+                          onChange={(e) => updatePending({ start: Number(e.target.value) })}
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs text-orange-950">End</Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={pendingAnnotation.end ?? pendingAnnotation.start}
+                          onChange={(e) => updatePending({ end: Number(e.target.value) })}
+                        />
+                      </div>
+                    </div>
+                    <select
+                      value={pendingAnnotation.intent}
+                      onChange={(e) => updatePending({ intent: e.target.value })}
+                      className="mt-2 h-9 w-full rounded-md border border-orange-200 bg-white px-2 text-sm"
+                    >
+                      {INTENTS.map((it) => (
+                        <option key={it.value} value={it.value}>{it.label}</option>
+                      ))}
+                    </select>
+                    {pendingAnnotation.intent === 'blur' && pendingAnnotation.kind === 'rect' ? (
+                      <label className="mt-2 flex items-center gap-2 rounded-md border border-orange-200 bg-white p-2 text-xs text-orange-950">
+                        <input
+                          type="checkbox"
+                          checked={!!(pendingAnnotation.data as { track?: boolean } | undefined)?.track}
+                          onChange={(e) => updatePending({ data: { ...((pendingAnnotation.data as object) || {}), track: e.target.checked } })}
+                        />
+                        追従ぼかし（動く対象を追いかける／OFF＝静止のまま）
+                      </label>
+                    ) : null}
+                    {pendingAnnotation.intent === 'blur' ? null : (
+                      <Textarea
+                        className="mt-2 bg-white"
+                        value={pendingAnnotation.note || ''}
+                        onChange={(e) => updatePending({ note: e.target.value })}
+                        rows={3}
+                        placeholder="この範囲でDanにやってほしいこと"
+                      />
+                    )}
+                    <Button className="mt-2 w-full" size="sm" onClick={confirmPendingAnnotation}>
+                      <Check className="mr-1 h-4 w-4" />
+                      {pendingAnnotation.intent === 'blur' ? 'ぼかしを追加' : 'タイムラインに追加'}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+
+              {selected && (
+                <div className="space-y-2 border-t border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium">選択中</div>
+                    <Button variant="ghost" size="sm" onClick={deleteSelected}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                        <span>開始（秒）</span>
+                        <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="開始を再生位置（赤線）に" onClick={() => updateSelected({ start: Number(currentTime.toFixed(2)) })}>
+                          ＝再生位置
+                        </button>
+                      </div>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={selected.start}
+                        onChange={(e) => updateSelected({ start: Number(e.target.value) })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                        <span>終了（秒）</span>
+                        <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="終了を再生位置（赤線）に" onClick={() => updateSelected({ end: Number(currentTime.toFixed(2)) })}>
+                          ＝再生位置
+                        </button>
+                      </div>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={selected.end ?? selected.start}
+                        onChange={(e) => updateSelected({ end: Number(e.target.value) })}
+                      />
+                    </div>
+                  </div>
+                  <select
+                    value={selected.intent}
+                    onChange={(e) => updateSelected({ intent: e.target.value })}
+                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  >
+                    {INTENTS.map((it) => (
+                      <option key={it.value} value={it.value}>{it.label}</option>
+                    ))}
+                  </select>
+                  {selected.intent === 'blur' && selected.kind === 'rect' ? (() => {
+                    const sd = (selected.data || {}) as { track?: boolean; track_text?: string; kfMode?: boolean; keyframes?: Keyframe[]; x?: number; y?: number; width?: number; height?: number };
+                    const analyzed = typeof sd.track_text === 'string';
+                    const tracked = !!sd.track_text;
+                    const isTracking = trackingId === selected.id;
+                    const kfs = Array.isArray(sd.keyframes) ? sd.keyframes : [];
+                    const mode = sd.kfMode ? 'kf' : sd.track ? 'track' : 'static';
+                    const curBox = () => (kfs.length ? (keyframeBoxAt(kfs, currentTime) || { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) }) : { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) });
+                    const tab = (active: boolean) => `flex-1 rounded px-2 py-1 text-xs ${active ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`;
+                    return (
+                      <div className="space-y-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
+                        <div className="flex gap-1">
+                          <button type="button" className={tab(mode === 'static')} onClick={() => updateSelected({ data: { ...sd, track: false, kfMode: false } })}>静止</button>
+                          <button type="button" className={tab(mode === 'track')} onClick={() => updateSelected({ data: { ...sd, track: true, kfMode: false } })}>追従</button>
+                          <button type="button" className={tab(mode === 'kf')} onClick={() => updateSelected({ data: kfs.length ? { ...sd, kfMode: true, track: false } : { ...sd, kfMode: true, track: false, keyframes: [{ t: Number(currentTime.toFixed(2)), ...curBox() }] } })}>キーフレーム</button>
+                        </div>
+                        {mode === 'kf' ? (
+                          <div className="space-y-1">
+                            <Button size="sm" className="w-full" onClick={() => upsertKeyframe(selected.id, curBox())}>◆ 赤線にキーフレームを打つ</Button>
+                            <p className="text-[10px] text-muted-foreground">プレビューの枠をドラッグ（右下角でサイズ変更）すると、赤線の位置にキーフレームが打たれます。2点以上で間は自動補間。</p>
+                            {kfs.length ? (
+                              <div className="max-h-24 space-y-0.5 overflow-y-auto rounded border border-border bg-background/60 p-1">
+                                {kfs.map((k) => (
+                                  <div key={k.t} className="flex items-center justify-between px-1 text-[10px]">
+                                    <button type="button" className="tabular-nums hover:underline" onClick={() => seekTimeline(k.t)}>◆ {fmtTime(k.t)}</button>
+                                    <button type="button" className="text-red-400 hover:text-red-300" onClick={() => removeKeyframe(selected.id, k.t)}>削除</button>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : <p className="text-[10px] text-muted-foreground">まだキーフレームがありません。</p>}
+                          </div>
+                        ) : mode === 'track' ? (
+                          <div className="space-y-1">
+                            <Button size="sm" className="w-full" disabled={isTracking || !onTrackBlur} onClick={() => runTrackBlur(selected)}>
+                              {isTracking ? '解析中…' : analyzed ? '再解析' : '▶ 解析（文字を追跡）'}
+                            </Button>
+                            <p className="text-[10px] text-muted-foreground">
+                              {isTracking
+                                ? '解析中…文字を探して追跡しています。'
+                                : tracked
+                                  ? `✓「${sd.track_text}」を追跡（${fmtTime(selected.start)}〜${fmtTime(selected.end)}）。クリップ尺はこの範囲に自動調整。`
+                                  : analyzed
+                                    ? '文字が見つかりませんでした。枠を文字に合わせて再解析（任意物体の追従は近日対応）。'
+                                    : '隠したい文字を枠で囲んで「解析」を押すと、その文字を追ってぼかし、クリップ尺も自動で決まります。'}
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-muted-foreground">この枠で静止ぼかし（機械処理・即時）。</p>
+                        )}
+                      </div>
+                    );
+                  })() : null}
+                  <Textarea
+                    value={selected.note || ''}
+                    onChange={(e) => updateSelected({ note: e.target.value })}
+                    rows={3}
+                    placeholder={selected.intent === 'blur' ? 'メモ（任意）' : selected.intent === 'generate' ? 'このクリップに映したいもの（例: 朝の光の入るサロンで、スタイリストが笑顔で髪を整える。カメラはゆっくり寄る）' : 'この範囲でDanにやってほしいこと'}
+                  />
+                  {selected.intent === 'generate' ? (() => {
+                    const span = Math.max(0.1, (selected.end ?? selected.start + 5) - selected.start);
+                    const fit = aiModelsForLength(span);
+                    const model = aiModelFor(span, (selected.data as { model?: string } | undefined)?.model);
+                    const makes = aiDurationFor(model, span);
+                    return (
+                      <div className="space-y-1">
+                        <select
+                          value={model.id}
+                          onChange={(e) => updateSelected({ data: { ...(selected.data || {}), model: e.target.value } })}
+                          className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                          aria-label="AIのモデル"
+                        >
+                          {fit.map((m) => (
+                            <option key={m.id} value={m.id}>{m.label}（{m.note}・{m.durations[m.durations.length - 1]}秒まで）</option>
+                          ))}
+                        </select>
+                        <p className="text-[10px] text-muted-foreground">
+                          クリップの長さ {span.toFixed(1)}秒 → {model.label}で{makes}秒の映像を作り、このクリップの長さで置きます。
+                        </p>
+                      </div>
+                    );
+                  })() : null}
+                  {(selected.intent === 'generate' ? onGenerateClip : onExecuteClip) ? (
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      disabled={executingId === selected.id}
+                      onClick={() => runExecuteClip(selected)}
+                    >
+                      {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ AIで映像を作る' : '▶ 実行（Danに反映）'}
+                    </Button>
+                  ) : null}
+                </div>
+              )}
+
+              {selectedSequenceClip && (
+                <div className="space-y-2 border-t border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium">選択中クリップ</div>
+                    <div className="flex items-center gap-1">
+                      <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" title="詰めて削除（後続を前へ・Shift+Delete）" onClick={rippleDelete}>
+                        詰めて削除
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="削除（穴あき・Delete）" onClick={deleteSelected}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                  <Input
+                    value={selectedSequenceClip.label || ''}
+                    onChange={(e) => updateSelectedSequenceClip({ label: e.target.value })}
+                    placeholder="クリップ名"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={selectedSequenceClip.timeline_start}
+                      onChange={(e) => updateSelectedSequenceClip({ timeline_start: Number(e.target.value) })}
+                    />
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={selectedSequenceClip.timeline_end}
+                      onChange={(e) => updateSelectedSequenceClip({ timeline_end: Number(e.target.value) })}
+                    />
+                  </div>
+                  {(selectedSequenceClip.track === 'video' || selectedSequenceClip.asset_id) ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={selectedSequenceClip.source_start || 0}
+                        onChange={(e) => updateSelectedSequenceClip({ source_start: Number(e.target.value) })}
+                      />
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={selectedSequenceClip.source_end || 0}
+                        onChange={(e) => updateSelectedSequenceClip({ source_end: Number(e.target.value) })}
+                      />
+                    </div>
+                  ) : null}
+                  {selectedSequenceClip.asset_id && (selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') ? (
+                    // Unified サイズ/左右/上下 for EVERY video/overlay clip (no clip-specific
+                    // panel). A PiP/wipe (position box) and a base clip (transform) both expose
+                    // the same three controls; we map them to whichever field the clip uses.
+                    (() => {
+                      const pos = selectedSequenceClip.position;
+                      // A pop-out is an alpha overlay positioned by its `position` box, so it's always a
+                      // PiP even at full-frame — otherwise the size/move sliders would (wrongly) write
+                      // `transform`, which the native overlay path ignores → edits do nothing. Treat any
+                      // clip carrying the pop-out effect as PiP so the sliders drive `position` (which
+                      // the engine applies instantly, no re-bake).
+                      const isPopoutClip = (selectedSequenceClip.effects || []).some((e) => e.type === 'popout');
+                      const isPip = !!pos && (isPopoutClip
+                        || !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999));
+                      let size: number, lr: number, ud: number;
+                      if (isPip && pos) {
+                        size = (pos.width + pos.height) / 2;
+                        lr = pos.x + pos.width / 2 - 0.5;
+                        ud = pos.y + pos.height / 2 - 0.5;
+                      } else {
+                        const tf = selectedSequenceClip.transform || { scale: 1, x: 0, y: 0 };
+                        size = tf.scale; lr = tf.x; ud = tf.y;
+                      }
+                      const apply = (nextSize: number, nextLr: number, nextUd: number) => {
+                        if (isPip && pos) {
+                          const aspect = pos.height > 0 ? pos.width / pos.height : 1;
+                          const h = Math.max(0.05, Math.min(1, nextSize * 2 / (1 + aspect)));
+                          const w = Math.max(0.05, Math.min(1, h * aspect));
+                          const cx = 0.5 + nextLr, cy = 0.5 + nextUd;
+                          // allow off-screen placement (no [0,1-w] clamp): the frame just windows it
+                          updateSelectedSequenceClip({ position: {
+                            x: Number((cx - w / 2).toFixed(4)),
+                            y: Number((cy - h / 2).toFixed(4)),
+                            width: Number(w.toFixed(4)), height: Number(h.toFixed(4)) } });
+                        } else {
+                          updateSelectedSequenceClip({ transform: { scale: Number(nextSize.toFixed(4)), x: Number(nextLr.toFixed(4)), y: Number(nextUd.toFixed(4)) } });
+                        }
+                      };
+                      return (
+                        <div className="space-y-2 rounded-md border border-border p-2">
+                          <div className="text-xs font-medium text-muted-foreground">映像のサイズ・位置（プレビュー上でドラッグも可）</div>
+                          <label className="block text-[10px] text-muted-foreground">
+                            サイズ {Math.round(size * 100)}%
+                            <input type="range" min={isPip ? '0.05' : '0.2'} max={isPip ? '1' : '3'} step="0.01" value={size}
+                              onChange={(e) => apply(Number(e.target.value), lr, ud)} className="w-full" />
+                          </label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                              左右 {Math.round(lr * 100)}%
+                              <input type="range" min="-2" max="2" step="0.01" value={lr}
+                                onChange={(e) => apply(size, Number(e.target.value), ud)} />
+                            </label>
+                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                              上下 {Math.round(ud * 100)}%
+                              <input type="range" min="-2" max="2" step="0.01" value={ud}
+                                onChange={(e) => apply(size, lr, Number(e.target.value))} />
+                            </label>
+                          </div>
+                          {(
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-muted-foreground">くり抜きの形</div>
+                              <div className="grid grid-cols-3 gap-1">
+                                {([['rect', '四角'], ['circle', '丸'], ['rounded', '写真風']] as const).map(([val, label]) => {
+                                  const cur = (selectedSequenceClip.shape as string) || 'rect';
+                                  return (
+                                    <button key={val} type="button"
+                                      className={`rounded px-1 py-1 text-[10px] ${cur === val ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                                      onClick={() => updateSelectedSequenceClip({ shape: val })}>
+                                      {label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-[9px] text-muted-foreground">人型のくり抜きは近日対応（人物の自動切り抜きにはAIが要るため）。</p>
+                            </div>
+                          )}
+                          {(selectedSequenceClip.transform || isPip) ? (
+                            <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
+                              onClick={() => updateSelectedSequenceClip(isPip ? { position: null } : { transform: null })}>
+                              サイズ・位置をリセット
+                            </Button>
+                          ) : null}
+                        </div>
+                      );
+                    })()
+                  ) : null}
+                  {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                    (() => {
+                      // Live crop uses dragCrop (local, cheap) while dragging; falls back to the saved
+                      // value. onChange only touches local state + throttled native — NOT editSequence
+                      // — so the heavy editor doesn't re-render per tick. Commit on release.
+                      const clipId = String(selectedSequenceClip.id);
+                      const cr = dragCrop || selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
+                      const commitCrop = () => {
+                        if (dragCrop) {
+                          updateSelectedSequenceClip({ crop: dragCrop });
+                          setDragCrop(null);
+                        }
+                      };
+                      return (
+                        <div className="space-y-2 rounded-md border border-border p-2">
+                          <div className="text-xs font-medium text-muted-foreground">クロップ（端を切り取る）</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {([['top', '上'], ['bottom', '下'], ['left', '左'], ['right', '右']] as const).map(([key, label]) => (
+                              <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                                {label} {Math.round((cr[key] ?? 0) * 100)}%
+                                <input type="range" min="0" max="0.9" step="0.01" value={cr[key] ?? 0}
+                                  onChange={(e) => {
+                                    const next = { ...cr, [key]: Number(e.target.value) };
+                                    setDragCrop(next);
+                                    sendLiveCrop(clipId, next);
+                                  }}
+                                  onPointerUp={commitCrop}
+                                  onPointerCancel={commitCrop}
+                                  onBlur={commitCrop} />
+                              </label>
+                            ))}
+                          </div>
+                          {selectedSequenceClip.crop ? (
+                            <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
+                              onClick={() => updateSelectedSequenceClip({ crop: null })}>クロップをリセット</Button>
+                          ) : null}
+                        </div>
+                      );
+                    })()
+                  ) : null}
+                  {(selectedSequenceClip.track === 'audio' || selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                    (() => {
+                      const vol = selectedSequenceClip.volume ?? 1;
+                      return (
+                        <label className="block rounded-md border border-border p-2 text-[10px] text-muted-foreground">
+                          音量 {Math.round(vol * 100)}%
+                          <input type="range" min="0" max="2" step="0.05" value={vol}
+                            onChange={(e) => updateSelectedSequenceClip({ volume: Number(e.target.value) })} className="w-full" />
+                        </label>
+                      );
+                    })()
+                  ) : null}
+                  {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                    (() => {
+                      const effects = selectedSequenceClip.effects || [];
+                      const popout = effects.find((e) => e.type === 'popout') || null;
+                      const intensity = (popout?.params?.intensity as string) || 'mid';
+                      const shadow = (popout?.params?.shadow as boolean | undefined) ?? true;
+                      const prep = popoutPreviews[selectedSequenceClip.id];
+                      // Apply/remove on EVERY selected clip, but PER CLIP: each captures ITS OWN
+                      // current position as the baked card box and keeps its own other effects
+                      // (a shared patch would bake every card at the primary clip's box). The
+                      // auto-scheduler then bakes the needy clips one by one (progress bar each).
+                      const setPopout = (patch: Record<string, unknown> | null) => {
+                        const ids = new Set(
+                          selectedSequenceClipIds.length > 0
+                            ? selectedSequenceClipIds
+                            : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+                        setEditSequence((current) => {
+                          if (!current) return current;
+                          const tracks = (current.tracks || []).map((track) => ({
+                            ...track,
+                            clips: (track.clips || []).map((c) => {
+                              if (!ids.has(String(c.id))) return c;
+                              if (c.track !== 'video' && c.track !== 'overlay') return c;
+                              if (!c.asset_id) return c;
+                              const own = (c.effects || []).filter((e) => e.type !== 'popout');
+                              const cur = (c.effects || []).find((e) => e.type === 'popout');
+                              if (patch === null) {
+                                // remove: drop the effect, put the clip back at its card box (a normal wipe)
+                                const box = cur?.params?.box as Box | undefined;
+                                return { ...c, effects: own.length ? own : null, ...(box ? { position: box, crop: null } : {}) };
+                              }
+                              // The card box a pop-out is baked with = THIS clip's current position at
+                              // apply (captured once into params.box). On FIRST apply the clip becomes a
+                              // full-frame alpha overlay the user then moves/scales/crops; a later param
+                              // tweak must NOT reset that display position.
+                              const box = (cur?.params?.box as Box | undefined) || c.position || POPOUT_DEFAULT_BOX;
+                              const next: ClipEffect = { type: 'popout', params: { intensity, shadow, box, ...(cur?.params || {}), ...patch } };
+                              return { ...c, effects: [...own, next], ...(cur ? {} : { position: POPOUT_FULL_FRAME, crop: null }) };
+                            }),
+                          }));
+                          return { ...current, tracks };
+                        });
+                        // removal leaves no bake to do; applying is picked up by the auto-scheduler,
+                        // which prioritizes the clip under the playhead and runs serially.
+                        if (patch === null) {
+                          setPopoutPreviews((m) => { const n = { ...m }; ids.forEach((id) => delete n[id]); return n; });
+                        }
+                      };
+                      return (
+                        <div className="space-y-2 rounded-md border border-border p-2">
+                          <div className="text-xs font-medium text-muted-foreground">エフェクト</div>
+                          <div className="grid grid-cols-2 gap-1">
+                            <button type="button"
+                              className={`rounded px-1 py-1 text-[10px] ${!popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                              onClick={() => setPopout(null)}>なし</button>
+                            <button type="button"
+                              className={`rounded px-1 py-1 text-[10px] ${popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                              onClick={() => setPopout({})}>飛び出し</button>
+                          </div>
+                          {popout ? (
+                            <div className="space-y-1">
+                              {prep?.preparing ? (
+                                <div className="space-y-1">
+                                  <p className="text-[10px] text-amber-500">生成中… {Math.max(0, Math.min(100, prep.progress ?? 0))}%（人物を切り抜いています）</p>
+                                  <div className="h-1 w-full overflow-hidden rounded bg-muted">
+                                    <div className="h-full rounded bg-amber-500 transition-[width] duration-500" style={{ width: `${Math.max(0, Math.min(100, prep.progress ?? 0))}%` }} />
+                                  </div>
+                                </div>
+                              ) : prep?.error ? (
+                                <div className="flex items-center gap-2">
+                                  <p className="text-[10px] text-red-500">{prep.error}</p>
+                                  <button type="button" className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                                    onClick={() => preparePopout(selectedSequenceClip)}>再試行</button>
+                                </div>
+                              ) : prep?.url ? (
+                                <p className="text-[10px] text-emerald-500">飛び出し適用済み</p>
+                              ) : null}
+                              <p className="text-[9px] text-muted-foreground">人物を切り抜いてカードの上辺から飛び出させます。トリム・分割・移動は待ちなしで編集できます（大きく尺を伸ばした時だけ自動で作り直します）。</p>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })()
+                  ) : null}
+                  {selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string' ? (
+                    <>
+                      <Textarea
+                        value={selectedSequenceClip.text || ''}
+                        onChange={(e) => updateSelectedSequenceClip({ text: e.target.value })}
+                        rows={3}
+                        placeholder="テロップ本文"
+                      />
+                      {(() => {
+                        const st = selectedSequenceClip.style || {};
+                        const setStyle = (patch: Partial<CaptionStyle>) =>
+                          updateSelectedSequenceClip({ style: { ...st, ...patch } });
+                        return (
+                          <div className="space-y-2 rounded-md border border-border p-2">
+                            <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
+                            <style>{CAPTION_FONT_FACE_CSS}</style>
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-muted-foreground">プリセット（クリックで適用・プレビュー＝書き出しと同じ見た目）</div>
+                              <div className="grid grid-cols-4 gap-1">
+                                {CAPTION_DESIGN_PRESETS.map((p) => {
+                                  const d = p.design;
+                                  const fnt = CAPTION_FONTS[d.font ?? 'noto-sans'];
+                                  const active = captionMatchesPreset(st, d);
+                                  return (
+                                    <button
+                                      key={p.id}
+                                      type="button"
+                                      title={`${p.label}${d.animation && d.animation !== 'none' ? '（動き）' : ''}`}
+                                      onClick={() => updateSelectedSequenceClip({
+                                        // Apply the preset's LOOK but keep the user's manual LAYOUT
+                                        // (size / position / nudge) — changing the design shouldn't
+                                        // reset where/how big the caption is.
+                                        style: {
+                                          ...d,
+                                          ...(st.fontSize !== undefined ? { fontSize: st.fontSize } : {}),
+                                          ...(st.position !== undefined ? { position: st.position } : {}),
+                                          ...(st.x !== undefined ? { x: st.x } : {}),
+                                          ...(st.y !== undefined ? { y: st.y } : {}),
+                                        },
+                                      })}
+                                      className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1.5 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
+                                    >
+                                      <span
+                                        className="leading-none"
+                                        style={{
+                                          fontFamily: `${fnt.css}, sans-serif`,
+                                          fontWeight: fnt.weight,
+                                          fontSize: '0.95rem',
+                                          WebkitTextStroke: `${0.5 * (d.outlineWidth ?? 1)}px ${d.outlineColor || '#000'}`,
+                                          paintOrder: 'stroke fill',
+                                          ...(d.gradient
+                                            ? { backgroundImage: `linear-gradient(180deg, ${d.gradient[0]}, ${d.gradient[1]})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
+                                            : { color: d.color || '#fff' }),
+                                        }}
+                                      >
+                                        あA
+                                      </span>
+                                      <span className="text-[8px] leading-tight text-muted-foreground">{p.label}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-6 w-full text-[10px]"
+                                disabled={!st || Object.keys(st).length === 0}
+                                onClick={() => {
+                                  const capIds = new Set(
+                                    allSequenceClips
+                                      .filter((c) => c.track === 'caption' || typeof c.text === 'string')
+                                      .map((c) => String(c.id)),
+                                  );
+                                  if (st && Object.keys(st).length > 0) updateSequenceClips(capIds, { style: { ...st } });
+                                }}
+                              >
+                                この見た目を全テロップに適用
+                              </Button>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
+                                フォント
+                                <select
+                                  value={(st.font as CaptionFontId) || 'noto-sans'}
+                                  onChange={(e) => setStyle({ font: e.target.value as CaptionFontId })}
+                                  className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
+                                >
+                                  {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).map((id) => (
+                                    <option key={id} value={id}>{CAPTION_FONTS[id].label}</option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
+                                動き
+                                <select
+                                  value={st.animation || 'none'}
+                                  onChange={(e) => setStyle({ animation: e.target.value as CaptionAnimation })}
+                                  className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
+                                >
+                                  {CAPTION_ANIM_OPTIONS.map((o) => (
+                                    <option key={o.value} value={o.value}>{o.label}</option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
+                            {st.animation === 'karaoke' ? (
+                              <label className="flex items-center justify-between text-[10px] text-muted-foreground">
+                                ハイライト色（喋っている単語）
+                                <input
+                                  type="color"
+                                  value={st.highlightColor || '#ff3b6b'}
+                                  onChange={(e) => setStyle({ highlightColor: e.target.value })}
+                                  className="h-6 w-8 rounded border border-input bg-background"
+                                />
+                              </label>
+                            ) : null}
+                            {st.animation === 'karaoke' || st.animation === 'typewriter' ? (
+                              <div className="text-[9px] text-muted-foreground">🔊 実際の声に自動で追従します</div>
+                            ) : null}
+                            <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="checkbox"
+                                  checked={!!st.bg}
+                                  onChange={(e) => setStyle({ bg: e.target.checked ? { color: st.bg?.color || '#000000', opacity: st.bg?.opacity ?? 0.6, radius: 0.18, padX: 0.45, padY: 0.16 } : undefined })}
+                                />
+                                背景箱
+                              </label>
+                              {st.bg ? (
+                                <input
+                                  type="color"
+                                  value={st.bg.color || '#000000'}
+                                  onChange={(e) => setStyle({ bg: { ...st.bg, color: e.target.value } })}
+                                  className="h-5 w-7 rounded border border-input bg-background"
+                                />
+                              ) : null}
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="checkbox"
+                                  checked={!!st.shadow}
+                                  onChange={(e) => setStyle({ shadow: e.target.checked ? { color: 'rgba(0,0,0,0.55)', blur: 16, dy: 6 } : undefined })}
+                                />
+                                影
+                              </label>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="flex items-center gap-2 text-xs">
+                                文字色
+                                <input
+                                  type="color"
+                                  value={st.color || '#ffffff'}
+                                  onChange={(e) => setStyle({ color: e.target.value })}
+                                  className="h-6 w-8 rounded border border-input bg-background"
+                                />
+                              </label>
+                              <label className="flex items-center gap-2 text-xs">
+                                フチ色
+                                <input
+                                  type="color"
+                                  value={st.outlineColor || '#000000'}
+                                  onChange={(e) => setStyle({ outlineColor: e.target.value })}
+                                  className="h-6 w-8 rounded border border-input bg-background"
+                                />
+                              </label>
+                            </div>
+                            <label className="block text-xs">
+                              大きさ {Math.round((st.fontSize ?? 1) * 100)}%
+                              <input
+                                type="range"
+                                min="0"
+                                max="2.5"
+                                step="0.1"
+                                value={st.fontSize ?? 1}
+                                onChange={(e) => setStyle({ fontSize: Number(e.target.value) })}
+                                className="w-full"
+                              />
+                            </label>
+                            <label className="block text-xs">
+                              横幅 {Math.round((st.maxWidth ?? 0.88) * 100)}%
+                              <input
+                                type="range"
+                                min="0.05"
+                                max="1.5"
+                                step="0.01"
+                                value={st.maxWidth ?? 0.88}
+                                onChange={(e) => setStyle({ maxWidth: Number(e.target.value) })}
+                                className="w-full"
+                              />
+                            </label>
+                            <div className="flex items-center gap-1 text-xs">
+                              <span className="mr-1">文字揃え</span>
+                              {(['left', 'center', 'right'] as const).map((align) => (
+                                <button
+                                  key={align}
+                                  type="button"
+                                  onClick={() => setStyle({ textAlign: align })}
+                                  className={`rounded border px-2 py-1 ${(st.textAlign ?? 'center') === align ? 'bg-accent' : 'bg-background'}`}
+                                >
+                                  {align === 'left' ? '左' : align === 'center' ? '中央' : '右'}
+                                </button>
+                              ))}
+                            </div>
+                            <label className="block text-xs">
+                              フチの太さ {Math.round((st.outlineWidth ?? 1) * 100)}%
+                              <input
+                                type="range"
+                                min="0"
+                                max="3"
+                                step="0.25"
+                                value={st.outlineWidth ?? 1}
+                                onChange={(e) => setStyle({ outlineWidth: Number(e.target.value) })}
+                                className="w-full"
+                              />
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <label className="flex items-center gap-1 text-xs">
+                                <input
+                                  type="checkbox"
+                                  checked={st.bold !== false}
+                                  onChange={(e) => setStyle({ bold: e.target.checked })}
+                                />
+                                太字
+                              </label>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                                左右 {Math.round((st.x ?? 0) * 100)}%
+                                <input type="range" min="-0.3" max="0.3" step="0.01" value={st.x ?? 0}
+                                  onChange={(e) => setStyle({ x: Number(e.target.value) })} />
+                              </label>
+                              <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                                上下 {Math.round((st.y ?? 0.08) * 100)}%（下0〜上92）
+                                <input type="range" min="0" max="0.92" step="0.01" value={st.y ?? 0.08}
+                                  onChange={(e) => setStyle({ y: Number(e.target.value) })} />
+                              </label>
+                            </div>
+                            {selectedSequenceClip.style ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 w-full text-[10px]"
+                                onClick={() => updateSelectedSequenceClip({ style: null })}
+                              >
+                                デザインをリセット
+                              </Button>
+                            ) : null}
+                          </div>
+                        );
+                      })()}
+                    </>
+                  ) : null}
+                  <p className="pt-1 text-[10px] text-muted-foreground">
+                    クリップを掴んで左右で移動、端でトリミング、上下の段へドラッグで重ね順（レイヤー）を変更。Deleteで削除。
+                  </p>
+                </div>
+              )}
+            </aside>
+            ) : null}
+            </div>
 
             <div
               className="h-1.5 shrink-0 cursor-row-resize bg-border hover:bg-primary"
@@ -3593,8 +4712,16 @@ export function VideoReviewEditor({
                 >
                   <Scissors className="h-4 w-4" />
                 </Button>
-                <div className="flex items-center gap-2" title="タイムラインの拡大率（左端＝全体表示）">
-                  <span className="text-[10px] text-muted-foreground">ズーム</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  title="プレビューを全画面 (P)"
+                  onClick={togglePreviewFullscreen}
+                >
+                  <Maximize2 className="h-4 w-4" />
+                </Button>
+                <div className="flex shrink-0 items-center gap-1" title={`タイムラインの拡大率 ${Math.round(timelineZoom * 100)}%（左端＝全体表示・＋／－キーでも変わる）`}>
                   <input
                     type="range"
                     min={1}
@@ -3608,12 +4735,11 @@ export function VideoReviewEditor({
                     // slider (a focused range input eats Space/arrow keys).
                     onPointerUp={(event) => event.currentTarget.blur()}
                     onMouseUp={(event) => event.currentTarget.blur()}
-                    className="h-1 w-28 cursor-pointer accent-sky-500"
+                    className="h-1 w-24 cursor-pointer accent-sky-500"
                   />
-                  <span className="w-9 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(timelineZoom * 100)}%</span>
                 </div>
-                <div className="text-sm tabular-nums text-muted-foreground">
-                  {fmtTime(currentTime)} / {fmtTime(contentDuration)}
+                <div className="shrink-0 whitespace-nowrap text-sm tabular-nums text-muted-foreground">
+                  <span ref={timeReadoutRef}>{fmtTime(currentTime)}</span> / {fmtTime(contentDuration)}
                 </div>
               </div>
               {openNoteKey ? (
@@ -3627,6 +4753,7 @@ export function VideoReviewEditor({
               <div ref={timelineScrollRef} className={`mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2 ${danReplay ? 'dan-replay' : ''}`} onWheel={handleTimelineWheel}>
                 <div className="flex gap-x-2 text-[11px]">
                   <div className="flex w-[82px] shrink-0 flex-col">
+                    <div className="sticky top-0 z-20 mb-1 h-5 shrink-0 bg-muted/40" />
                     {timelineLanes.map((lane, i) => (
                       <div
                         key={lane.key}
@@ -3638,6 +4765,16 @@ export function VideoReviewEditor({
                     ))}
                   </div>
                   <div className="min-w-0 flex-1">
+                    <div className="sticky top-0 z-20 mb-1">
+                      <TimelineRuler
+                        scrollRef={timelineScrollRef}
+                        trackRef={timelineRef}
+                        headRef={playheadHeadRef}
+                        duration={timelineDuration || 0}
+                        zoom={timelineZoom}
+                        onScrubStart={beginScrub}
+                      />
+                    </div>
                     <div
                       ref={timelineRef}
                       className="relative"
@@ -3652,192 +4789,13 @@ export function VideoReviewEditor({
                       }}
                       onContextMenu={(event) => event.preventDefault()}
                     >
-                      {timelineLanes.map((lane, laneIndex) => {
-                        const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
-                        const showPending =
-                          !!pendingAnnotation &&
-                          lane.zone === trackForIntent(pendingAnnotation.intent) &&
-                          timelineLanes.findIndex((l) => l.zone === lane.zone) === laneIndex;
-                        return (
-                          <div
-                            key={lane.key}
-                            className={`relative w-full overflow-hidden rounded border ${
-                              lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
-                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
-                            style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
-                            onPointerDown={(event) => {
-                              if (event.target === event.currentTarget) handleTimelinePointerDown(event);
-                            }}
-                            onPointerUp={() => setTimelineDrag(null)}
-                            onPointerCancel={() => setTimelineDrag(null)}
-                            onDragOver={(event) => handleLaneDragOver(event, lane)}
-                            onDrop={(event) => handleLaneDrop(event, lane)}
-                          >
-                            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
-                            {dropPreview && dropPreview.zone === lane.zone && dropPreview.layer === lane.layer && timelineDuration ? (
-                              <div
-                                className="pointer-events-none absolute top-0.5 bottom-0.5 z-10 rounded border-2 border-dashed border-sky-300 bg-sky-400/25"
-                                style={{
-                                  left: `${(dropPreview.start / timelineDuration) * 100}%`,
-                                  width: `${Math.max(0.8, (dropPreview.len / timelineDuration) * 100)}%`,
-                                }}
-                              >
-                                <span className="px-1 text-[9px] text-sky-100">ここに追加</span>
-                              </div>
-                            ) : null}
-                            {lane.items.map((item) => {
-                              const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
-                              // accurate width (% of timeline); a pixel minWidth keeps short clips
-                              // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
-                              // timeline, drew short clips seconds-wide and overlapped neighbours.
-                              const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
-                              if (item.kind === 'annotation' && item.annotation) {
-                                const a = item.annotation;
-                                return (
-                                  <div
-                                    key={item.key}
-                                    data-annotation-id={a.id}
-                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
-                                    style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
-                                    onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
-                                    onDoubleClick={() => {
-                                      selectAnnotation(a.id);
-                                      seekTimeline(a.start);
-                                    }}
-                                    title={`${a.intent}: ${fmtTime(a.start)} - ${fmtTime(a.end)} ${a.note || ''}`}
-                                  >
-                                    <button
-                                      type="button"
-                                      className="h-full w-2 cursor-ew-resize bg-black/25"
-                                      onPointerDown={(event) => startTimelineDrag(event, a, 'start')}
-                                      aria-label="Resize start"
-                                    />
-                                    <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
-                                    {a.note ? (
-                                      <button
-                                        type="button"
-                                        className="h-full shrink-0 px-1 text-[9px] hover:bg-black/25"
-                                        title="メモを読む"
-                                        aria-label="メモ"
-                                        onPointerDown={(event) => event.stopPropagation()}
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          setOpenNoteKey((cur) => (cur === a.note ? null : a.note || null));
-                                        }}
-                                      >
-                                        ▼
-                                      </button>
-                                    ) : null}
-                                    <button
-                                      type="button"
-                                      className="h-full w-2 cursor-ew-resize bg-black/25"
-                                      onPointerDown={(event) => startTimelineDrag(event, a, 'end')}
-                                      aria-label="Resize end"
-                                    />
-                                  </div>
-                                );
-                              }
-                              const clip = item.clip;
-                              if (!clip) return null;
-                              const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
-                              const selected = selectedSequenceClipIds.includes(clip.id);
-                              const linkedSelected = !selected && highlightedClipIds.has(clip.id);
-                              const isVideo = item.itemType === 'video';
-                              const labelText =
-                                item.itemType === 'caption'
-                                  ? clip.text || 'テロップ'
-                                  : item.itemType === 'audio'
-                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
-                                    : clip.label || '素材';
-                              return (
-                                <div
-                                  key={item.key}
-                                  data-clip-id={clip.id}
-                                  className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
-                                    danTouch.ids.includes(clip.id) ? 'dan-touch' : ''} ${danTouch.appear.includes(clip.id) ? 'dan-appear' : ''} ${
-                                    danTouch.vanish.includes(clip.id) ? 'dan-vanish' : ''} ${
-                                    selected
-                                      ? 'border-yellow-300 ring-2 ring-yellow-300/70'
-                                      : linkedSelected
-                                        ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
-                                        : 'border-white/30'
-                                  }`}
-                                  onContextMenu={(event) => {
-                                    event.preventDefault();
-                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
-                                    if (rightDragRef.current) return;
-                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
-                                  }}
-                                  style={{
-                                    left: `${left}%`,
-                                    width: `${width}%`,
-                                    minWidth: '3px',
-                                    top: 3,
-                                    bottom: 3,
-                                    ...(isVideo && clipAsset?.thumbnail_url
-                                      ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
-                                      : {}),
-                                  }}
-                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
-                                >
-                                  <button
-                                    type="button"
-                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
-                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'start')}
-                                    aria-label="Resize clip start"
-                                  />
-                                  <div
-                                    className="flex h-full min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
-                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'move')}
-                                    onDoubleClick={(event) => {
-                                      event.stopPropagation();
-                                      selectSequenceClip(clip.id);
-                                      seekTimeline(clip.timeline_start);
-                                    }}
-                                  >
-                                    <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{itemTypeBadge(item.itemType)}</span>
-                                    <span className="truncate">{labelText}</span>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
-                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'end')}
-                                    aria-label="Resize clip end"
-                                  />
-                                </div>
-                              );
-                            })}
-                            {showPending && pendingAnnotation ? (
-                              <div
-                                className="absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border border-orange-300 bg-orange-400/65 text-[10px] text-black active:cursor-grabbing"
-                                style={{
-                                  left: `${timelineDuration ? (pendingAnnotation.start / timelineDuration) * 100 : 0}%`,
-                                  width: `${timelineDuration ? Math.max(0.8, (((pendingAnnotation.end ?? pendingAnnotation.start + 0.2) - pendingAnnotation.start) / timelineDuration) * 100) : 1}%`,
-                                }}
-                                onPointerDown={(event) => startPendingTimelineDrag(event, 'move')}
-                              >
-                                <button
-                                  type="button"
-                                  className="h-full w-2 cursor-ew-resize bg-black/25"
-                                  onPointerDown={(event) => startPendingTimelineDrag(event, 'start')}
-                                  aria-label="Resize pending start"
-                                />
-                                <span className="min-w-0 flex-1 truncate px-1">未確定</span>
-                                <button
-                                  type="button"
-                                  className="h-full w-2 cursor-ew-resize bg-black/25"
-                                  onPointerDown={(event) => startPendingTimelineDrag(event, 'end')}
-                                  aria-label="Resize pending end"
-                                />
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
+                      {lanesView}
+                      {/* 位置は placePlayhead が transform で直接動かす（自分だけの層で動くので、クリップを描き直さない） */}
                       <div
                         ref={playheadBarRef}
-                        className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-destructive"
-                        style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
+                        data-playhead-bar
+                        className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 w-px bg-destructive"
+                        style={{ willChange: 'transform' }}
                       />
                     </div>
                   </div>
@@ -3846,741 +4804,6 @@ export function VideoReviewEditor({
             </div>
           </div>
 
-          <aside className="flex w-[390px] shrink-0 flex-col border-l border-border bg-background">
-            <div className="min-h-0 flex-1 overflow-y-auto p-3">
-              {sidePanelTop}
-              {pendingAnnotation ? (
-                <div className="mb-3 rounded-md border border-orange-300 bg-orange-50 p-3 text-sm text-orange-950">
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="font-medium">未確定指示</div>
-                    <Button variant="ghost" size="sm" onClick={() => setPendingAnnotation(null)}>
-                      取消
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <Label className="text-xs text-orange-950">Start</Label>
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={pendingAnnotation.start}
-                        onChange={(e) => updatePending({ start: Number(e.target.value) })}
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs text-orange-950">End</Label>
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={pendingAnnotation.end ?? pendingAnnotation.start}
-                        onChange={(e) => updatePending({ end: Number(e.target.value) })}
-                      />
-                    </div>
-                  </div>
-                  <select
-                    value={pendingAnnotation.intent}
-                    onChange={(e) => updatePending({ intent: e.target.value })}
-                    className="mt-2 h-9 w-full rounded-md border border-orange-200 bg-white px-2 text-sm"
-                  >
-                    {INTENTS.map((it) => (
-                      <option key={it.value} value={it.value}>{it.label}</option>
-                    ))}
-                  </select>
-                  {pendingAnnotation.intent === 'blur' && pendingAnnotation.kind === 'rect' ? (
-                    <label className="mt-2 flex items-center gap-2 rounded-md border border-orange-200 bg-white p-2 text-xs text-orange-950">
-                      <input
-                        type="checkbox"
-                        checked={!!(pendingAnnotation.data as { track?: boolean } | undefined)?.track}
-                        onChange={(e) => updatePending({ data: { ...((pendingAnnotation.data as object) || {}), track: e.target.checked } })}
-                      />
-                      追従ぼかし（動く対象を追いかける／OFF＝静止のまま）
-                    </label>
-                  ) : null}
-                  {pendingAnnotation.intent === 'blur' ? null : (
-                    <Textarea
-                      className="mt-2 bg-white"
-                      value={pendingAnnotation.note || ''}
-                      onChange={(e) => updatePending({ note: e.target.value })}
-                      rows={3}
-                      placeholder="この範囲でDanにやってほしいこと"
-                    />
-                  )}
-                  <Button className="mt-2 w-full" size="sm" onClick={confirmPendingAnnotation}>
-                    <Check className="mr-1 h-4 w-4" />
-                    {pendingAnnotation.intent === 'blur' ? 'ぼかしを追加' : 'タイムラインに追加'}
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-
-            {selected && (
-              <div className="space-y-2 border-t border-border p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium">選択中</div>
-                  <Button variant="ghost" size="sm" onClick={deleteSelected}>
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                      <span>開始（秒）</span>
-                      <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="開始を再生位置（赤線）に" onClick={() => updateSelected({ start: Number(currentTime.toFixed(2)) })}>
-                        ＝再生位置
-                      </button>
-                    </div>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={selected.start}
-                      onChange={(e) => updateSelected({ start: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                      <span>終了（秒）</span>
-                      <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="終了を再生位置（赤線）に" onClick={() => updateSelected({ end: Number(currentTime.toFixed(2)) })}>
-                        ＝再生位置
-                      </button>
-                    </div>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={selected.end ?? selected.start}
-                      onChange={(e) => updateSelected({ end: Number(e.target.value) })}
-                    />
-                  </div>
-                </div>
-                <select
-                  value={selected.intent}
-                  onChange={(e) => updateSelected({ intent: e.target.value })}
-                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                >
-                  {INTENTS.map((it) => (
-                    <option key={it.value} value={it.value}>{it.label}</option>
-                  ))}
-                </select>
-                {selected.intent === 'blur' && selected.kind === 'rect' ? (() => {
-                  const sd = (selected.data || {}) as { track?: boolean; track_text?: string; kfMode?: boolean; keyframes?: Keyframe[]; x?: number; y?: number; width?: number; height?: number };
-                  const analyzed = typeof sd.track_text === 'string';
-                  const tracked = !!sd.track_text;
-                  const isTracking = trackingId === selected.id;
-                  const kfs = Array.isArray(sd.keyframes) ? sd.keyframes : [];
-                  const mode = sd.kfMode ? 'kf' : sd.track ? 'track' : 'static';
-                  const curBox = () => (kfs.length ? (keyframeBoxAt(kfs, currentTime) || { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) }) : { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) });
-                  const tab = (active: boolean) => `flex-1 rounded px-2 py-1 text-xs ${active ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`;
-                  return (
-                    <div className="space-y-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
-                      <div className="flex gap-1">
-                        <button type="button" className={tab(mode === 'static')} onClick={() => updateSelected({ data: { ...sd, track: false, kfMode: false } })}>静止</button>
-                        <button type="button" className={tab(mode === 'track')} onClick={() => updateSelected({ data: { ...sd, track: true, kfMode: false } })}>追従</button>
-                        <button type="button" className={tab(mode === 'kf')} onClick={() => updateSelected({ data: kfs.length ? { ...sd, kfMode: true, track: false } : { ...sd, kfMode: true, track: false, keyframes: [{ t: Number(currentTime.toFixed(2)), ...curBox() }] } })}>キーフレーム</button>
-                      </div>
-                      {mode === 'kf' ? (
-                        <div className="space-y-1">
-                          <Button size="sm" className="w-full" onClick={() => upsertKeyframe(selected.id, curBox())}>◆ 赤線にキーフレームを打つ</Button>
-                          <p className="text-[10px] text-muted-foreground">プレビューの枠をドラッグ（右下角でサイズ変更）すると、赤線の位置にキーフレームが打たれます。2点以上で間は自動補間。</p>
-                          {kfs.length ? (
-                            <div className="max-h-24 space-y-0.5 overflow-y-auto rounded border border-border bg-background/60 p-1">
-                              {kfs.map((k) => (
-                                <div key={k.t} className="flex items-center justify-between px-1 text-[10px]">
-                                  <button type="button" className="tabular-nums hover:underline" onClick={() => seekTimeline(k.t)}>◆ {fmtTime(k.t)}</button>
-                                  <button type="button" className="text-red-400 hover:text-red-300" onClick={() => removeKeyframe(selected.id, k.t)}>削除</button>
-                                </div>
-                              ))}
-                            </div>
-                          ) : <p className="text-[10px] text-muted-foreground">まだキーフレームがありません。</p>}
-                        </div>
-                      ) : mode === 'track' ? (
-                        <div className="space-y-1">
-                          <Button size="sm" className="w-full" disabled={isTracking || !onTrackBlur} onClick={() => runTrackBlur(selected)}>
-                            {isTracking ? '解析中…' : analyzed ? '再解析' : '▶ 解析（文字を追跡）'}
-                          </Button>
-                          <p className="text-[10px] text-muted-foreground">
-                            {isTracking
-                              ? '解析中…文字を探して追跡しています。'
-                              : tracked
-                                ? `✓「${sd.track_text}」を追跡（${fmtTime(selected.start)}〜${fmtTime(selected.end)}）。クリップ尺はこの範囲に自動調整。`
-                                : analyzed
-                                  ? '文字が見つかりませんでした。枠を文字に合わせて再解析（任意物体の追従は近日対応）。'
-                                  : '隠したい文字を枠で囲んで「解析」を押すと、その文字を追ってぼかし、クリップ尺も自動で決まります。'}
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-[10px] text-muted-foreground">この枠で静止ぼかし（機械処理・即時）。</p>
-                      )}
-                    </div>
-                  );
-                })() : null}
-                <Textarea
-                  value={selected.note || ''}
-                  onChange={(e) => updateSelected({ note: e.target.value })}
-                  rows={3}
-                  placeholder={selected.intent === 'blur' ? 'メモ（任意）' : selected.intent === 'generate' ? 'このクリップに映したいもの（例: 朝の光の入るサロンで、スタイリストが笑顔で髪を整える。カメラはゆっくり寄る）' : 'この範囲でDanにやってほしいこと'}
-                />
-                {selected.intent === 'generate' ? (() => {
-                  const span = Math.max(0.1, (selected.end ?? selected.start + 5) - selected.start);
-                  const fit = aiModelsForLength(span);
-                  const model = aiModelFor(span, (selected.data as { model?: string } | undefined)?.model);
-                  const makes = aiDurationFor(model, span);
-                  return (
-                    <div className="space-y-1">
-                      <select
-                        value={model.id}
-                        onChange={(e) => updateSelected({ data: { ...(selected.data || {}), model: e.target.value } })}
-                        className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                        aria-label="AIのモデル"
-                      >
-                        {fit.map((m) => (
-                          <option key={m.id} value={m.id}>{m.label}（{m.note}・{m.durations[m.durations.length - 1]}秒まで）</option>
-                        ))}
-                      </select>
-                      <p className="text-[10px] text-muted-foreground">
-                        クリップの長さ {span.toFixed(1)}秒 → {model.label}で{makes}秒の映像を作り、このクリップの長さで置きます。
-                      </p>
-                    </div>
-                  );
-                })() : null}
-                {(selected.intent === 'generate' ? onGenerateClip : onExecuteClip) ? (
-                  <Button
-                    size="sm"
-                    className="w-full"
-                    disabled={executingId === selected.id}
-                    onClick={() => runExecuteClip(selected)}
-                  >
-                    {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ AIで映像を作る' : '▶ 実行（Danに反映）'}
-                  </Button>
-                ) : null}
-              </div>
-            )}
-
-            {selectedSequenceClip && (
-              <div className="space-y-2 border-t border-border p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium">選択中クリップ</div>
-                  <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" title="詰めて削除（後続を前へ・Shift+Delete）" onClick={rippleDelete}>
-                      詰めて削除
-                    </Button>
-                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="削除（穴あき・Delete）" onClick={deleteSelected}>
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
-                <Input
-                  value={selectedSequenceClip.label || ''}
-                  onChange={(e) => updateSelectedSequenceClip({ label: e.target.value })}
-                  placeholder="クリップ名"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={selectedSequenceClip.timeline_start}
-                    onChange={(e) => updateSelectedSequenceClip({ timeline_start: Number(e.target.value) })}
-                  />
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={selectedSequenceClip.timeline_end}
-                    onChange={(e) => updateSelectedSequenceClip({ timeline_end: Number(e.target.value) })}
-                  />
-                </div>
-                {(selectedSequenceClip.track === 'video' || selectedSequenceClip.asset_id) ? (
-                  <div className="grid grid-cols-2 gap-2">
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={selectedSequenceClip.source_start || 0}
-                      onChange={(e) => updateSelectedSequenceClip({ source_start: Number(e.target.value) })}
-                    />
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={selectedSequenceClip.source_end || 0}
-                      onChange={(e) => updateSelectedSequenceClip({ source_end: Number(e.target.value) })}
-                    />
-                  </div>
-                ) : null}
-                {selectedSequenceClip.asset_id && (selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') ? (
-                  // Unified サイズ/左右/上下 for EVERY video/overlay clip (no clip-specific
-                  // panel). A PiP/wipe (position box) and a base clip (transform) both expose
-                  // the same three controls; we map them to whichever field the clip uses.
-                  (() => {
-                    const pos = selectedSequenceClip.position;
-                    // A pop-out is an alpha overlay positioned by its `position` box, so it's always a
-                    // PiP even at full-frame — otherwise the size/move sliders would (wrongly) write
-                    // `transform`, which the native overlay path ignores → edits do nothing. Treat any
-                    // clip carrying the pop-out effect as PiP so the sliders drive `position` (which
-                    // the engine applies instantly, no re-bake).
-                    const isPopoutClip = (selectedSequenceClip.effects || []).some((e) => e.type === 'popout');
-                    const isPip = !!pos && (isPopoutClip
-                      || !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999));
-                    let size: number, lr: number, ud: number;
-                    if (isPip && pos) {
-                      size = (pos.width + pos.height) / 2;
-                      lr = pos.x + pos.width / 2 - 0.5;
-                      ud = pos.y + pos.height / 2 - 0.5;
-                    } else {
-                      const tf = selectedSequenceClip.transform || { scale: 1, x: 0, y: 0 };
-                      size = tf.scale; lr = tf.x; ud = tf.y;
-                    }
-                    const apply = (nextSize: number, nextLr: number, nextUd: number) => {
-                      if (isPip && pos) {
-                        const aspect = pos.height > 0 ? pos.width / pos.height : 1;
-                        const h = Math.max(0.05, Math.min(1, nextSize * 2 / (1 + aspect)));
-                        const w = Math.max(0.05, Math.min(1, h * aspect));
-                        const cx = 0.5 + nextLr, cy = 0.5 + nextUd;
-                        // allow off-screen placement (no [0,1-w] clamp): the frame just windows it
-                        updateSelectedSequenceClip({ position: {
-                          x: Number((cx - w / 2).toFixed(4)),
-                          y: Number((cy - h / 2).toFixed(4)),
-                          width: Number(w.toFixed(4)), height: Number(h.toFixed(4)) } });
-                      } else {
-                        updateSelectedSequenceClip({ transform: { scale: Number(nextSize.toFixed(4)), x: Number(nextLr.toFixed(4)), y: Number(nextUd.toFixed(4)) } });
-                      }
-                    };
-                    return (
-                      <div className="space-y-2 rounded-md border border-border p-2">
-                        <div className="text-xs font-medium text-muted-foreground">映像のサイズ・位置（プレビュー上でドラッグも可）</div>
-                        <label className="block text-[10px] text-muted-foreground">
-                          サイズ {Math.round(size * 100)}%
-                          <input type="range" min={isPip ? '0.05' : '0.2'} max={isPip ? '1' : '3'} step="0.01" value={size}
-                            onChange={(e) => apply(Number(e.target.value), lr, ud)} className="w-full" />
-                        </label>
-                        <div className="grid grid-cols-2 gap-2">
-                          <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                            左右 {Math.round(lr * 100)}%
-                            <input type="range" min="-2" max="2" step="0.01" value={lr}
-                              onChange={(e) => apply(size, Number(e.target.value), ud)} />
-                          </label>
-                          <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                            上下 {Math.round(ud * 100)}%
-                            <input type="range" min="-2" max="2" step="0.01" value={ud}
-                              onChange={(e) => apply(size, lr, Number(e.target.value))} />
-                          </label>
-                        </div>
-                        {(
-                          <div className="space-y-1">
-                            <div className="text-[10px] text-muted-foreground">くり抜きの形</div>
-                            <div className="grid grid-cols-3 gap-1">
-                              {([['rect', '四角'], ['circle', '丸'], ['rounded', '写真風']] as const).map(([val, label]) => {
-                                const cur = (selectedSequenceClip.shape as string) || 'rect';
-                                return (
-                                  <button key={val} type="button"
-                                    className={`rounded px-1 py-1 text-[10px] ${cur === val ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
-                                    onClick={() => updateSelectedSequenceClip({ shape: val })}>
-                                    {label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                            <p className="text-[9px] text-muted-foreground">人型のくり抜きは近日対応（人物の自動切り抜きにはAIが要るため）。</p>
-                          </div>
-                        )}
-                        {(selectedSequenceClip.transform || isPip) ? (
-                          <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
-                            onClick={() => updateSelectedSequenceClip(isPip ? { position: null } : { transform: null })}>
-                            サイズ・位置をリセット
-                          </Button>
-                        ) : null}
-                      </div>
-                    );
-                  })()
-                ) : null}
-                {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
-                  (() => {
-                    // Live crop uses dragCrop (local, cheap) while dragging; falls back to the saved
-                    // value. onChange only touches local state + throttled native — NOT editSequence
-                    // — so the heavy editor doesn't re-render per tick. Commit on release.
-                    const clipId = String(selectedSequenceClip.id);
-                    const cr = dragCrop || selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
-                    const commitCrop = () => {
-                      if (dragCrop) {
-                        updateSelectedSequenceClip({ crop: dragCrop });
-                        setDragCrop(null);
-                      }
-                    };
-                    return (
-                      <div className="space-y-2 rounded-md border border-border p-2">
-                        <div className="text-xs font-medium text-muted-foreground">クロップ（端を切り取る）</div>
-                        <div className="grid grid-cols-2 gap-2">
-                          {([['top', '上'], ['bottom', '下'], ['left', '左'], ['right', '右']] as const).map(([key, label]) => (
-                            <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                              {label} {Math.round((cr[key] ?? 0) * 100)}%
-                              <input type="range" min="0" max="0.9" step="0.01" value={cr[key] ?? 0}
-                                onChange={(e) => {
-                                  const next = { ...cr, [key]: Number(e.target.value) };
-                                  setDragCrop(next);
-                                  sendLiveCrop(clipId, next);
-                                }}
-                                onPointerUp={commitCrop}
-                                onPointerCancel={commitCrop}
-                                onBlur={commitCrop} />
-                            </label>
-                          ))}
-                        </div>
-                        {selectedSequenceClip.crop ? (
-                          <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
-                            onClick={() => updateSelectedSequenceClip({ crop: null })}>クロップをリセット</Button>
-                        ) : null}
-                      </div>
-                    );
-                  })()
-                ) : null}
-                {(selectedSequenceClip.track === 'audio' || selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
-                  (() => {
-                    const vol = selectedSequenceClip.volume ?? 1;
-                    return (
-                      <label className="block rounded-md border border-border p-2 text-[10px] text-muted-foreground">
-                        音量 {Math.round(vol * 100)}%
-                        <input type="range" min="0" max="2" step="0.05" value={vol}
-                          onChange={(e) => updateSelectedSequenceClip({ volume: Number(e.target.value) })} className="w-full" />
-                      </label>
-                    );
-                  })()
-                ) : null}
-                {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
-                  (() => {
-                    const effects = selectedSequenceClip.effects || [];
-                    const popout = effects.find((e) => e.type === 'popout') || null;
-                    const intensity = (popout?.params?.intensity as string) || 'mid';
-                    const shadow = (popout?.params?.shadow as boolean | undefined) ?? true;
-                    const prep = popoutPreviews[selectedSequenceClip.id];
-                    // Apply/remove on EVERY selected clip, but PER CLIP: each captures ITS OWN
-                    // current position as the baked card box and keeps its own other effects
-                    // (a shared patch would bake every card at the primary clip's box). The
-                    // auto-scheduler then bakes the needy clips one by one (progress bar each).
-                    const setPopout = (patch: Record<string, unknown> | null) => {
-                      const ids = new Set(
-                        selectedSequenceClipIds.length > 0
-                          ? selectedSequenceClipIds
-                          : selectedSequenceClipId ? [selectedSequenceClipId] : []);
-                      setEditSequence((current) => {
-                        if (!current) return current;
-                        const tracks = (current.tracks || []).map((track) => ({
-                          ...track,
-                          clips: (track.clips || []).map((c) => {
-                            if (!ids.has(String(c.id))) return c;
-                            if (c.track !== 'video' && c.track !== 'overlay') return c;
-                            if (!c.asset_id) return c;
-                            const own = (c.effects || []).filter((e) => e.type !== 'popout');
-                            const cur = (c.effects || []).find((e) => e.type === 'popout');
-                            if (patch === null) {
-                              // remove: drop the effect, put the clip back at its card box (a normal wipe)
-                              const box = cur?.params?.box as Box | undefined;
-                              return { ...c, effects: own.length ? own : null, ...(box ? { position: box, crop: null } : {}) };
-                            }
-                            // The card box a pop-out is baked with = THIS clip's current position at
-                            // apply (captured once into params.box). On FIRST apply the clip becomes a
-                            // full-frame alpha overlay the user then moves/scales/crops; a later param
-                            // tweak must NOT reset that display position.
-                            const box = (cur?.params?.box as Box | undefined) || c.position || POPOUT_DEFAULT_BOX;
-                            const next: ClipEffect = { type: 'popout', params: { intensity, shadow, box, ...(cur?.params || {}), ...patch } };
-                            return { ...c, effects: [...own, next], ...(cur ? {} : { position: POPOUT_FULL_FRAME, crop: null }) };
-                          }),
-                        }));
-                        return { ...current, tracks };
-                      });
-                      // removal leaves no bake to do; applying is picked up by the auto-scheduler,
-                      // which prioritizes the clip under the playhead and runs serially.
-                      if (patch === null) {
-                        setPopoutPreviews((m) => { const n = { ...m }; ids.forEach((id) => delete n[id]); return n; });
-                      }
-                    };
-                    return (
-                      <div className="space-y-2 rounded-md border border-border p-2">
-                        <div className="text-xs font-medium text-muted-foreground">エフェクト</div>
-                        <div className="grid grid-cols-2 gap-1">
-                          <button type="button"
-                            className={`rounded px-1 py-1 text-[10px] ${!popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
-                            onClick={() => setPopout(null)}>なし</button>
-                          <button type="button"
-                            className={`rounded px-1 py-1 text-[10px] ${popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
-                            onClick={() => setPopout({})}>飛び出し</button>
-                        </div>
-                        {popout ? (
-                          <div className="space-y-1">
-                            {prep?.preparing ? (
-                              <div className="space-y-1">
-                                <p className="text-[10px] text-amber-500">生成中… {Math.max(0, Math.min(100, prep.progress ?? 0))}%（人物を切り抜いています）</p>
-                                <div className="h-1 w-full overflow-hidden rounded bg-muted">
-                                  <div className="h-full rounded bg-amber-500 transition-[width] duration-500" style={{ width: `${Math.max(0, Math.min(100, prep.progress ?? 0))}%` }} />
-                                </div>
-                              </div>
-                            ) : prep?.error ? (
-                              <div className="flex items-center gap-2">
-                                <p className="text-[10px] text-red-500">{prep.error}</p>
-                                <button type="button" className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
-                                  onClick={() => preparePopout(selectedSequenceClip)}>再試行</button>
-                              </div>
-                            ) : prep?.url ? (
-                              <p className="text-[10px] text-emerald-500">飛び出し適用済み</p>
-                            ) : null}
-                            <p className="text-[9px] text-muted-foreground">人物を切り抜いてカードの上辺から飛び出させます。トリム・分割・移動は待ちなしで編集できます（大きく尺を伸ばした時だけ自動で作り直します）。</p>
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })()
-                ) : null}
-                {selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string' ? (
-                  <>
-                    <Textarea
-                      value={selectedSequenceClip.text || ''}
-                      onChange={(e) => updateSelectedSequenceClip({ text: e.target.value })}
-                      rows={3}
-                      placeholder="テロップ本文"
-                    />
-                    {(() => {
-                      const st = selectedSequenceClip.style || {};
-                      const setStyle = (patch: Partial<CaptionStyle>) =>
-                        updateSelectedSequenceClip({ style: { ...st, ...patch } });
-                      return (
-                        <div className="space-y-2 rounded-md border border-border p-2">
-                          <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
-                          <style>{CAPTION_FONT_FACE_CSS}</style>
-                          <div className="space-y-1">
-                            <div className="text-[10px] text-muted-foreground">プリセット（クリックで適用・プレビュー＝書き出しと同じ見た目）</div>
-                            <div className="grid grid-cols-4 gap-1">
-                              {CAPTION_DESIGN_PRESETS.map((p) => {
-                                const d = p.design;
-                                const fnt = CAPTION_FONTS[d.font ?? 'noto-sans'];
-                                const active = captionMatchesPreset(st, d);
-                                return (
-                                  <button
-                                    key={p.id}
-                                    type="button"
-                                    title={`${p.label}${d.animation && d.animation !== 'none' ? '（動き）' : ''}`}
-                                    onClick={() => updateSelectedSequenceClip({
-                                      // Apply the preset's LOOK but keep the user's manual LAYOUT
-                                      // (size / position / nudge) — changing the design shouldn't
-                                      // reset where/how big the caption is.
-                                      style: {
-                                        ...d,
-                                        ...(st.fontSize !== undefined ? { fontSize: st.fontSize } : {}),
-                                        ...(st.position !== undefined ? { position: st.position } : {}),
-                                        ...(st.x !== undefined ? { x: st.x } : {}),
-                                        ...(st.y !== undefined ? { y: st.y } : {}),
-                                      },
-                                    })}
-                                    className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1.5 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
-                                  >
-                                    <span
-                                      className="leading-none"
-                                      style={{
-                                        fontFamily: `${fnt.css}, sans-serif`,
-                                        fontWeight: fnt.weight,
-                                        fontSize: '0.95rem',
-                                        WebkitTextStroke: `${0.5 * (d.outlineWidth ?? 1)}px ${d.outlineColor || '#000'}`,
-                                        paintOrder: 'stroke fill',
-                                        ...(d.gradient
-                                          ? { backgroundImage: `linear-gradient(180deg, ${d.gradient[0]}, ${d.gradient[1]})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
-                                          : { color: d.color || '#fff' }),
-                                      }}
-                                    >
-                                      あA
-                                    </span>
-                                    <span className="text-[8px] leading-tight text-muted-foreground">{p.label}</span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-6 w-full text-[10px]"
-                              disabled={!st || Object.keys(st).length === 0}
-                              onClick={() => {
-                                const capIds = new Set(
-                                  allSequenceClips
-                                    .filter((c) => c.track === 'caption' || typeof c.text === 'string')
-                                    .map((c) => String(c.id)),
-                                );
-                                if (st && Object.keys(st).length > 0) updateSequenceClips(capIds, { style: { ...st } });
-                              }}
-                            >
-                              この見た目を全テロップに適用
-                            </Button>
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
-                              フォント
-                              <select
-                                value={(st.font as CaptionFontId) || 'noto-sans'}
-                                onChange={(e) => setStyle({ font: e.target.value as CaptionFontId })}
-                                className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
-                              >
-                                {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).map((id) => (
-                                  <option key={id} value={id}>{CAPTION_FONTS[id].label}</option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
-                              動き
-                              <select
-                                value={st.animation || 'none'}
-                                onChange={(e) => setStyle({ animation: e.target.value as CaptionAnimation })}
-                                className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
-                              >
-                                {CAPTION_ANIM_OPTIONS.map((o) => (
-                                  <option key={o.value} value={o.value}>{o.label}</option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                          {st.animation === 'karaoke' ? (
-                            <label className="flex items-center justify-between text-[10px] text-muted-foreground">
-                              ハイライト色（喋っている単語）
-                              <input
-                                type="color"
-                                value={st.highlightColor || '#ff3b6b'}
-                                onChange={(e) => setStyle({ highlightColor: e.target.value })}
-                                className="h-6 w-8 rounded border border-input bg-background"
-                              />
-                            </label>
-                          ) : null}
-                          {st.animation === 'karaoke' || st.animation === 'typewriter' ? (
-                            <div className="text-[9px] text-muted-foreground">🔊 実際の声に自動で追従します</div>
-                          ) : null}
-                          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
-                            <label className="flex items-center gap-1">
-                              <input
-                                type="checkbox"
-                                checked={!!st.bg}
-                                onChange={(e) => setStyle({ bg: e.target.checked ? { color: st.bg?.color || '#000000', opacity: st.bg?.opacity ?? 0.6, radius: 0.18, padX: 0.45, padY: 0.16 } : undefined })}
-                              />
-                              背景箱
-                            </label>
-                            {st.bg ? (
-                              <input
-                                type="color"
-                                value={st.bg.color || '#000000'}
-                                onChange={(e) => setStyle({ bg: { ...st.bg, color: e.target.value } })}
-                                className="h-5 w-7 rounded border border-input bg-background"
-                              />
-                            ) : null}
-                            <label className="flex items-center gap-1">
-                              <input
-                                type="checkbox"
-                                checked={!!st.shadow}
-                                onChange={(e) => setStyle({ shadow: e.target.checked ? { color: 'rgba(0,0,0,0.55)', blur: 16, dy: 6 } : undefined })}
-                              />
-                              影
-                            </label>
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <label className="flex items-center gap-2 text-xs">
-                              文字色
-                              <input
-                                type="color"
-                                value={st.color || '#ffffff'}
-                                onChange={(e) => setStyle({ color: e.target.value })}
-                                className="h-6 w-8 rounded border border-input bg-background"
-                              />
-                            </label>
-                            <label className="flex items-center gap-2 text-xs">
-                              フチ色
-                              <input
-                                type="color"
-                                value={st.outlineColor || '#000000'}
-                                onChange={(e) => setStyle({ outlineColor: e.target.value })}
-                                className="h-6 w-8 rounded border border-input bg-background"
-                              />
-                            </label>
-                          </div>
-                          <label className="block text-xs">
-                            大きさ {Math.round((st.fontSize ?? 1) * 100)}%
-                            <input
-                              type="range"
-                              min="0"
-                              max="2.5"
-                              step="0.1"
-                              value={st.fontSize ?? 1}
-                              onChange={(e) => setStyle({ fontSize: Number(e.target.value) })}
-                              className="w-full"
-                            />
-                          </label>
-                          <label className="block text-xs">
-                            横幅 {Math.round((st.maxWidth ?? 0.88) * 100)}%
-                            <input
-                              type="range"
-                              min="0.05"
-                              max="1.5"
-                              step="0.01"
-                              value={st.maxWidth ?? 0.88}
-                              onChange={(e) => setStyle({ maxWidth: Number(e.target.value) })}
-                              className="w-full"
-                            />
-                          </label>
-                          <div className="flex items-center gap-1 text-xs">
-                            <span className="mr-1">文字揃え</span>
-                            {(['left', 'center', 'right'] as const).map((align) => (
-                              <button
-                                key={align}
-                                type="button"
-                                onClick={() => setStyle({ textAlign: align })}
-                                className={`rounded border px-2 py-1 ${(st.textAlign ?? 'center') === align ? 'bg-accent' : 'bg-background'}`}
-                              >
-                                {align === 'left' ? '左' : align === 'center' ? '中央' : '右'}
-                              </button>
-                            ))}
-                          </div>
-                          <label className="block text-xs">
-                            フチの太さ {Math.round((st.outlineWidth ?? 1) * 100)}%
-                            <input
-                              type="range"
-                              min="0"
-                              max="3"
-                              step="0.25"
-                              value={st.outlineWidth ?? 1}
-                              onChange={(e) => setStyle({ outlineWidth: Number(e.target.value) })}
-                              className="w-full"
-                            />
-                          </label>
-                          <div className="flex items-center gap-2">
-                            <label className="flex items-center gap-1 text-xs">
-                              <input
-                                type="checkbox"
-                                checked={st.bold !== false}
-                                onChange={(e) => setStyle({ bold: e.target.checked })}
-                              />
-                              太字
-                            </label>
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                              左右 {Math.round((st.x ?? 0) * 100)}%
-                              <input type="range" min="-0.3" max="0.3" step="0.01" value={st.x ?? 0}
-                                onChange={(e) => setStyle({ x: Number(e.target.value) })} />
-                            </label>
-                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                              上下 {Math.round((st.y ?? 0.08) * 100)}%（下0〜上92）
-                              <input type="range" min="0" max="0.92" step="0.01" value={st.y ?? 0.08}
-                                onChange={(e) => setStyle({ y: Number(e.target.value) })} />
-                            </label>
-                          </div>
-                          {selectedSequenceClip.style ? (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 w-full text-[10px]"
-                              onClick={() => updateSelectedSequenceClip({ style: null })}
-                            >
-                              デザインをリセット
-                            </Button>
-                          ) : null}
-                        </div>
-                      );
-                    })()}
-                  </>
-                ) : null}
-                <p className="pt-1 text-[10px] text-muted-foreground">
-                  クリップを掴んで左右で移動、端でトリミング、上下の段へドラッグで重ね順（レイヤー）を変更。Deleteで削除。
-                </p>
-              </div>
-            )}
-          </aside>
         </div>
       </main>
     </div>
