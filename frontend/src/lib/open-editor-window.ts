@@ -18,8 +18,26 @@ html,body{margin:0;height:100%;background:${EDITOR_SPLASH_BG};color:#e8eaf0;font
 </style></head><body><div class="w"><div class="t">ダン <span>制作</span></div><div class="bar"><i></i></div><div class="s">エディターを開いています…</div></div></body></html>`;
 }
 
-export function openEditorWindow(roomId: string): void {
-  const url = `/production-workspace?room_id=${encodeURIComponent(roomId)}`;
+/**
+ * チャットの本文のリンクが制作エディターの作品を指すか（/production-workspace?room_id=…&content_id=…、
+ * 住所つきの https://dan.paina.info/production-workspace?… も）。指していれば部屋と作品、それ以外は null。
+ * チャットはこのリンクを、押すとエディターの窓でその作品のタイムラインを開くサムネにする
+ * （2026-11-12 本人「書き出して動画をそのまま貼るんじゃなくて、タイムラインへのリンク、タップしたら開くサムネ」）。
+ */
+export function editorWorkLink(href: unknown): { roomId: string; contentId: string | null } | null {
+  if (typeof href !== 'string') return null;
+  const m = /^(?:https:\/\/dan\.paina\.info|https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?)?\/production-workspace\/?\?([^#\s]*)$/i.exec(href.trim());
+  if (!m) return null;
+  const q = new URLSearchParams(m[1]);
+  const roomId = q.get('room_id') || '';
+  if (!/^[0-9a-f-]{8,}$/i.test(roomId)) return null;
+  const contentId = q.get('content_id');
+  return { roomId, contentId: contentId && /^[0-9a-f-]{8,}$/i.test(contentId) ? contentId : null };
+}
+
+/** エディターの窓を開く。contentId を渡すとその作品のタイムラインを開く（同じ部屋の窓が別の作品やライブラリなら、その窓で開き直す） */
+export function openEditorWindow(roomId: string, contentId?: string | null): void {
+  const url = `/production-workspace?room_id=${encodeURIComponent(roomId)}${contentId ? `&content_id=${encodeURIComponent(contentId)}` : ''}`;
   const name = `dan-editor-${roomId.slice(0, 8)}`;
   const w = Math.max(1100, window.screen.availWidth || 1440);
   const h = Math.max(700, window.screen.availHeight || 900);
@@ -31,14 +49,17 @@ export function openEditorWindow(roomId: string): void {
   }
   let alreadyOpen = false;
   try {
-    alreadyOpen = win.location.pathname === '/production-workspace';
+    alreadyOpen = win.location.pathname === '/production-workspace'
+      && (!contentId || new URLSearchParams(win.location.search).get('content_id') === contentId);
   } catch {
     alreadyOpen = false;
   }
   if (!alreadyOpen) {
-    win.document.open();
-    win.document.write(editorSplashHtml());
-    win.document.close();
+    if (win.location.href === 'about:blank') {
+      win.document.open();
+      win.document.write(editorSplashHtml());
+      win.document.close();
+    }
     win.location.replace(url);
   }
   win.focus();

@@ -10,6 +10,8 @@ import {
   ChevronDown,
   ChevronRight,
   Clapperboard,
+  Film,
+  Play,
   File,
   FileText,
   FolderKanban,
@@ -77,7 +79,7 @@ import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
 import { bareDanMedia, chatImageUrl, danFileMedia, earlierTurnMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
 import { VoiceSession } from '@/components/voice/voice-session';
-import { openEditorWindow } from '@/lib/open-editor-window';
+import { editorWorkLink, openEditorWindow } from '@/lib/open-editor-window';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
 
 interface ProjectChatPanelProps {
@@ -389,6 +391,39 @@ function InlineDanMedia({ media, name, onImageClick }: { media: DanMedia; name?:
   );
 }
 
+// 制作エディターの作品へのリンク（[![題](最初のコマ)](/production-workspace?room_id=…&content_id=…)）。サムネを押すと
+// エディターの窓でその作品のタイムラインを開く（2026-11-12 本人「書き出した動画を貼るんじゃなくて、タップしたら開くサムネ」）。
+// 絵が無いリンクは、同じ動きの「エディターで開く」の札にする
+function EditorWorkThumb({ roomId, contentId, image, title }: { roomId: string; contentId: string | null; image?: string | null; title: string }) {
+  const url = image ? chatImageUrl(image) : null;
+  const [failed, setFailed] = useState(false);
+  return (
+    <button type="button" data-editor-work={contentId || ''} onClick={() => openEditorWindow(roomId, contentId)}
+      className="not-prose group my-2 block w-full max-w-[420px] overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-colors hover:border-primary/60">
+      {url && !failed && (
+        <span className="relative block aspect-video w-full bg-black">
+          <img src={url} alt={title} {...imageRequest(url)} onError={() => setFailed(true)} className="h-full w-full object-cover" />
+          <span className="absolute inset-0 flex items-center justify-center bg-black/20 transition-colors group-hover:bg-black/35">
+            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white/90 text-black shadow"><Play className="ml-0.5 h-6 w-6" fill="currentColor" /></span>
+          </span>
+        </span>
+      )}
+      <span className="flex items-center gap-2 px-3 py-2">
+        <Film className="h-4 w-4 shrink-0 text-primary" />
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title || '作品'}</span>
+        <span className="shrink-0 text-xs text-primary">エディターで開く</span>
+      </span>
+    </button>
+  );
+}
+
+// リンクの中の画像（![…](…)）の住所と文字。サムネのリンクで使う
+function linkImage(node: unknown): { src: string | null; alt: string } {
+  const kids = ((node as { children?: unknown[] } | undefined)?.children || []) as Array<{ type?: string; tagName?: string; properties?: { src?: unknown; alt?: unknown } }>;
+  const img = kids.find((k) => k?.type === 'element' && k.tagName === 'img');
+  return { src: typeof img?.properties?.src === 'string' ? img.properties.src : null, alt: typeof img?.properties?.alt === 'string' ? img.properties.alt : '' };
+}
+
 const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false, shownMedia = '' }: { text: string; onImageClick?: (url: string) => void; muted?: boolean; shownMedia?: string }) {
   return (
     <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
@@ -397,7 +432,9 @@ const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false,
         components={{
           // ダンのファイルの画像・動画を指すリンク・裸の URL はその場に貼る（同じ物を添付の印でも貼っていれば、二重にせずリンクのまま）。
           // ほかの画像・動画を指すリンクは画面の中の拡大表示で開く。開くのは境界を通った物だけで、動画はダンのファイルだけ（外の物はふつうのリンク）
-          a({ href, children }) {
+          a({ href, children, node }) {
+            const work = editorWorkLink(href);
+            if (work) { const pic = linkImage(node); return <EditorWorkThumb roomId={work.roomId} contentId={work.contentId} image={pic.src} title={pic.alt || linkText(children)} />; }
             const label = linkText(children);
             const bare = isAutolink(href, label) ? bareDanMedia(label) : null;
             const media = bare?.media ?? danFileMedia(href);
