@@ -2,7 +2,7 @@
 name: talk-script
 description: "Write or revise a script the owner speaks on camera (YouTube video, LINE gift video, launch video). The premise and goal are defined before writing, the type is chosen by the video's role, and revision requests align every dependent part."
 display_name: 話す動画の台本
-updated: 2026-11-07
+updated: 2026-11-12
 ---
 
 # 本人が話す動画の台本
@@ -57,6 +57,8 @@ updated: 2026-11-07
 - それ以外で型がまだ無い種類：売れている同じ種類の動画を2本以上、字幕（`video` の captions）か台本の文書で読み、共通する話の順番を抜き出す。冒頭に「すでに知っていること」と「見た後の行動」を書いて、本人に見せてから使う。合格したら references に足す。
 
 選んだ型の段だけを使う。書く前に、段ごとに「その段で見る人が何を信じ、何を期待するようになるか」を作業メモで確かめ、それが型の「すでに知っていること」に入っている段は省く。別の型の段を持ってきたくなった時も、同じように照らして、入っていれば入れない（例：LINE特典にYouTubeの「冒頭で昔の失敗と実績」を入れると、見る人がもう信じていることをもう一度言うことになり、④の体験と重なる）。この確かめは台本には書かない（3の「台本に載る言葉は、読む人が普段使う言葉で書く」）。
+
+YouTubeに出す動画は、ネタ・題名・サムネ・冒頭を決める前に [youtube-growth.md](youtube-growth.md) を読む（押されて最後まで見られる動画にする、どの案件でも使う決まり。冒頭の最初の5秒はサムネと同じ絵で約束をそのまま言う、など）。
 
 YouTube動画とLINE特典動画は、台本の前にサムネとタイトルを決める：[thumbnail.md](thumbnail.md)。LINE特典動画も受け取りページや動画の一覧にサムネが出て、押されるかどうかで見る人の数が決まる（2026-10-30 本人「タイトルとサムネをちゃんと決めることが大事」）。
 

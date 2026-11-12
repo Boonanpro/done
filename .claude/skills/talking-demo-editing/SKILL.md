@@ -12,6 +12,7 @@ description: "Edit videos where a speaker (the owner, a client, or voiced charac
 ## 始める前に読む
 
 - 案件の決まり（その案件のテイストと決定）: ポルノアンチは [pornanti-line-gift.md](references/pornanti-line-gift.md)、中村さんは [nakamura-line-gift.md](references/nakamura-line-gift.md)、新アタックの紹介映像は [new-attack-video.md](references/new-attack-video.md)。読むのは、今作っている案件の物だけ。ほかの案件の書体・音・演出を持ち込まない。新しい案件なら references/<案件>.md を作り、テイストは本人の指摘と手本から決めていく。
+- YouTubeに出す動画なら、[../talk-script/youtube-growth.md](../talk-script/youtube-growth.md) の3〜4（最初の5秒はサムネと同じ絵・字幕・約束をそのまま言う、最初の30秒は絵を多く変える、同じ画角を10秒続けない、退屈な区間を全部消す、長い動画は途中に引き込む山）。案件のテイストより先に読む物ではなく、テイストと一緒に使う。
 - 本人の指摘を受けた後なら、下の「指摘を受けた時」と [learning.md](learning.md)。
 
 ## 一番の物差し：見る人の目で1つずつ決める

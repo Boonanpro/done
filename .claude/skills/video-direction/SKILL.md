@@ -54,6 +54,8 @@ This is an optional working aid. Include fields that help this project; an empty
 
 ## Direction Rules
 
+- For any YouTube video, read `../talk-script/youtube-growth.md` first: plan thumbnail → first 5 seconds → first 30 seconds before the script and the shoot, and plan a payoff at the end plus re-engagement beats for videos over 10 minutes.
+
 - Choose an opening that serves the intended viewing experience. An immediate outcome or emotional hook is useful for some short promotions, not mandatory for every film or explanation.
 - Show one complete task for demos instead of listing features.
 - Keep generated clips short and purposeful; 4-8 seconds is usually easier to control.

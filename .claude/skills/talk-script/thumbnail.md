@@ -4,6 +4,8 @@ YouTube動画とLINE特典動画の台本を書く前に、テーマを決める
 
 元にした物：える会員サイト「6. クリック率が爆上がりするサムネ設計方法」（`dan-workspace/marketing-reference/youtube-producer-l/master_kit/lessons/48〜63`）、たいき（@taiki007）の再生上位20枚とそのタイトル（`dan-workspace/fukurou-clients/xenomagic/thumbs-v4/taiki_sheet.jpg`・`taiki_list.tsv`）、YouTubeの中の人の動画 `jdYNSpXdxF4`（2026秋版）、スヤさんの1本目で本人がA案を選んだ理由（2026-10-29）。まとめは `dan-workspace/script-craft/サムネ_ルール.md`。読み取りの記録は `sources/generalization-log.md` の 2026-10-29 の項。「保留」は出どころが1か所だけの技で、本人の判定で確かめたら外す。
 
+YouTubeのサムネと題名なら、先に [youtube-growth.md](youtube-growth.md) の2（撮る前に決める・題名の長さと強さ・サムネに写る物すべてに役がある・明るい）も読む。
+
 大前提として、サムネは動画の中身を正しく伝える物にする。動画に無いことを言うと、一度は押されても、見る人は「このチャンネルは釣りだ」と覚えて次から押さなくなる（える「クリック率の高いサムネの要素」）。
 
 ## 技
