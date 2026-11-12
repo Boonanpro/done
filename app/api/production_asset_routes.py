@@ -94,6 +94,7 @@ class CreateContentRequest(BaseModel):
 
 
 class SaveContentRequest(BaseModel):
+    title: str | None = None
     timeline: dict[str, Any] | None = None
     asset_ids: list[str] | None = None
     status: Literal["draft", "running", "ready", "failed"] | None = None
@@ -5879,6 +5880,8 @@ async def update_content(
     now = datetime.now(timezone.utc).isoformat()
     for content in contents:
         if content.get("id") == content_id:
+            if data.title is not None and data.title.strip():
+                content["title"] = data.title.strip()
             if data.timeline is not None:
                 content["timeline"] = data.timeline
             if data.asset_ids is not None:

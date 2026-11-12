@@ -1,7 +1,7 @@
 ﻿'use client';
 
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ChevronDown, ChevronRight, Clapperboard, Film, Folder, FolderOpen, Image as ImageIcon, Loader2, Music, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Clapperboard, Film, Folder, FolderOpen, Image as ImageIcon, Loader2, Music, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -105,11 +105,9 @@ function sequencePictureAssets(content: ProductionContent, assets: ProductionAss
 export function ProductionWorkspace({
   roomId,
   onContentChange,
-  libraryChat,
 }: {
   roomId: string;
   /** ライブラリの真ん中に大きく置く「ダンと制作」の会話（制作の窓だけが渡す） */
-  libraryChat?: ReactNode;
   /** 開いている作品が替わった（null = ライブラリ）。エディターの窓の「ダンと制作」が部屋を替える */
   onContentChange?: (contentId: string | null) => void;
 }) {
@@ -145,6 +143,7 @@ export function ProductionWorkspace({
   );
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [previewAsset, setPreviewAsset] = useState<ProductionAsset | null>(null);
+  const [creating, setCreating] = useState(false);
   const videoAssets = useMemo(() => selectedSourceAssets.filter((asset) => asset.kind === 'video'), [selectedSourceAssets]);
   const primaryVideo = videoAssets.find((asset) => asset.id === activeVideoAssetId) || videoAssets[0] || null;
 
@@ -696,19 +695,22 @@ export function ProductionWorkspace({
     );
   }
 
-  if (selectedContent && primaryVideo) {
-    const mediaUrl = assetMediaUrl(primaryVideo);
+  // 新規作成した作品は映像が無くても空のタイムラインで開き、ダンが目の前で組み立てていく
+  const hasTimeline = !!selectedContent && !!(selectedContent.timeline as { sequence?: unknown } | undefined)?.sequence;
+  if (selectedContent && (primaryVideo || hasTimeline)) {
+    const mediaUrl = primaryVideo ? assetMediaUrl(primaryVideo) : undefined;
     return (
       <VideoReviewEditor
-        key={primaryVideo.id}
+        key={primaryVideo ? primaryVideo.id : `content-${selectedContent.id}`}
         embedded
         roomId={roomId}
         contentId={selectedContent.id}
+        title={selectedContent.title}
         onExternalEdit={() => void loadAll()}
-        initialPath={mediaUrl ? undefined : assetMediaPath(primaryVideo)}
+        initialPath={mediaUrl || !primaryVideo ? undefined : assetMediaPath(primaryVideo)}
         initialUrl={mediaUrl}
-        initialThumbnailUrl={primaryVideo.thumbnail_url || undefined}
-        initialFps={primaryVideo.metadata?.fps as string | number | undefined}
+        initialThumbnailUrl={primaryVideo?.thumbnail_url || undefined}
+        initialFps={primaryVideo?.metadata?.fps as string | number | undefined}
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
         sequenceAssets={sequencePictureAssets(selectedContent, assets).map(sequenceAssetForEditor)}
@@ -938,6 +940,34 @@ export function ProductionWorkspace({
     setSelectedContent(content);
     setUrlContentId(content.id);
   };
+  // 「新規作成」: 空のタイムラインの作品を作ってすぐ開く。右の「ダンと制作」で話しながら組み立てる
+  // （2026-11-12 本人「新規作成ボタンを押したらタイムラインを開いて、そこで会話する。喋りながら動画が出来ていく」）。
+  const createContent = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      const now = new Date();
+      const res = await fetch('/api/v1/production-assets/contents', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          room_id: roomId,
+          title: `新しい作品 ${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+          format: '16:9',
+          timeline: { sequence: { format: '16:9', frame_rate: 30, duration: 0, tracks: [] } },
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const created = (await res.json()) as ProductionContent;
+      setContents((prev) => [...prev, created]);
+      openContent(created);
+    } catch (error) {
+      toast.error('作品を作れませんでした', { description: String(error).slice(0, 160) });
+    } finally {
+      setCreating(false);
+    }
+  };
   const sortedContents = [...contents].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
   // ライブラリ: 左に作品と素材のフォルダ、真ん中に大きく「ダンと制作」（2026-11-12 本人「左のサイドバーに
@@ -952,10 +982,16 @@ export function ProductionWorkspace({
             <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
         </div>
+        <div className="shrink-0 px-3 pb-2">
+          <Button className="w-full" size="sm" onClick={() => void createContent()} disabled={creating}>
+            {creating ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
+            新規作成
+          </Button>
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-4">
           <div className="px-4 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">作品</div>
           {sortedContents.length === 0 ? (
-            <p className="px-4 py-2 text-xs text-muted-foreground">まだありません。ダンに作りたい動画を話すと、ここに並びます。</p>
+            <p className="px-4 py-2 text-xs text-muted-foreground">まだありません。「新規作成」から始めます。</p>
           ) : (
             <ul className="px-2" aria-label="作品">
               {sortedContents.map((content) => {
@@ -997,7 +1033,7 @@ export function ProductionWorkspace({
 
           <div className="px-4 pb-1 pt-4 text-[11px] font-semibold text-muted-foreground">素材</div>
           {folders.length === 0 ? (
-            <p className="px-4 py-2 text-xs text-muted-foreground">まだありません。会話に画像や動画を貼るか、「〇〇の素材を集めて」と頼むと入ります。</p>
+            <p className="px-4 py-2 text-xs text-muted-foreground">まだありません。作品の画面の「ダンと制作」に貼るか、集めてと頼むと入ります。</p>
           ) : (
             <ul className="px-2" aria-label="素材のフォルダ">
               {folders.map((folder) => {
@@ -1047,12 +1083,39 @@ export function ProductionWorkspace({
         </div>
       </aside>
 
-      <main className="min-h-0 min-w-0 flex-1">
-        {libraryChat || (
-          <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
-            制作は、チャットの上の「制作」から開く窓で、ダンと話しながら進めます。
-          </div>
-        )}
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="作品の一覧">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+          <button
+            type="button"
+            onClick={() => void createContent()}
+            disabled={creating}
+            className="flex aspect-video flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary/50 text-primary hover:bg-primary/5"
+          >
+            {creating ? <Loader2 className="h-7 w-7 animate-spin" /> : <Plus className="h-7 w-7" />}
+            <span className="text-sm font-semibold">新規作成</span>
+            <span className="text-[11px] text-muted-foreground">タイムラインを開いて、ダンと話しながら作ります</span>
+          </button>
+          {sortedContents.map((content) => {
+            const cover = assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'video')
+              || assets.find((asset) => content.asset_ids.includes(asset.id) && asset.kind === 'image');
+            return (
+              <button
+                key={content.id}
+                type="button"
+                onClick={() => openContent(content)}
+                className="overflow-hidden rounded-lg border border-border text-left hover:border-primary"
+              >
+                <span className="flex aspect-video items-center justify-center overflow-hidden bg-muted">
+                  {cover ? <AssetThumb asset={cover} fallback={<Film className="h-6 w-6 text-muted-foreground" />} /> : <Film className="h-6 w-6 text-muted-foreground" />}
+                </span>
+                <span className="block truncate px-2.5 pt-2 text-[13px] font-medium">{content.title}</span>
+                <span className="block px-2.5 pb-2 text-[11px] text-muted-foreground">
+                  {content.format}・{new Date(content.updated_at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </main>
 
       {previewAsset ? (

@@ -104,7 +104,8 @@ function EditorDanChat({ roomId, contentId }: { roomId: string; contentId: strin
 const OPEN_KEY = 'dan-editor-chat-open';
 const WIDTH = 420;
 
-/** 制作の窓の中身: ライブラリは左に作品と素材、真ん中に大きく「ダンと制作」。作品を開くとタイムラインと右に「ダンと制作」。 */
+/** 制作の窓の中身: ライブラリは作品と素材と「新規作成」だけ。作品を開くとタイムラインと右に「ダンと制作」
+ *  （2026-11-12 本人「ライブラリではチャットいらない。新規作成でタイムラインを開いてそこで会話する」）。 */
 export function ProductionStudio({ roomId }: { roomId: string }) {
   useRoomFeed(true);   // ダンの返事と作業中の表示をすぐ届ける（ダン本体の画面と同じ受け口）
   const [contentId, setContentId] = useState<string | null>(() =>
@@ -126,9 +127,6 @@ export function ProductionStudio({ roomId }: { roomId: string }) {
         <ProductionWorkspace
           roomId={roomId}
           onContentChange={setContentId}
-          libraryChat={contentId ? undefined : (
-            <section className="h-full" aria-label="ダンと制作"><EditorDanChat roomId={roomId} contentId={null} /></section>
-          )}
         />
       </div>
       {!contentId ? null : open ? (

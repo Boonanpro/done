@@ -4292,9 +4292,15 @@ async def _process_message_cli_with_failover(
                     from app.services.editor_rooms import asset_room as _asset_room
                     # 制作の部屋では素材と作品は本体の部屋の物（app/services/editor_rooms.py）
                     asset_room_id = str(ref.get("room_id") or "") or _asset_room(room_id)
+                    # 作ったばかりの作品（中身がまだ空）にも道具を渡す: 空のタイムラインを先に置く
+                    _timeline_draft.ensure_sequence(asset_room_id, content_id)
                     timeline_draft = _timeline_draft.create_draft(
                         asset_room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
                     )
+                    # 道具1回ごとに本番へ出し、開いているエディターに手の動きで見せる（2026-11-12 本人
+                    # 「喋りながら動画が出来ていく」）。本人の手の編集とぶつかったら上書きせず止まる（CAS）。
+                    timeline_draft["live_updates"] = True
+                    _timeline_draft.save_draft(timeline_draft)
                     cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
                     cfg.setdefault("mcpServers", {})["timeline"] = {
                         "command": sys.executable,
@@ -4312,8 +4318,12 @@ async def _process_message_cli_with_failover(
                     system_prompt += (
                         "\n\n## Mentioned timeline\n"
                         f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
-                        "Use mcp__timeline__* to inspect, edit, or export it. Timeline mutations are isolated "
-                        "in a draft and are committed only after this chat turn validates successfully. "
+                        "Use mcp__timeline__* to inspect, edit, or export it. Each successful mutating tool call is "
+                        "validated and published at once, so the owner watches the timeline change in the open editor; "
+                        "build and edit the video ON this timeline (clips that point at source ranges), never by rendering "
+                        "a cut file yourself and attaching it. Export a file only when the owner asks or for delivery. "
+                        "For a rough cut with many ranges from one recording use append_clips (it lays them out in "
+                        "visible one-minute steps). "
                         "Lanes are layers (video/audio only); blur and highlight frames are region clips "
                         "(add_region / set_region); touch only what the user asked for; check with render_frame."
                     )

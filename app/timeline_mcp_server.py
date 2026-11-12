@@ -178,6 +178,14 @@ def tool_definitions() -> list[types.Tool]:
         _tool("append_clip", "ベースレーン末尾（またはat秒）に映像/画像クリップを追加。映像は音声も自動リンク。",
               {"asset_id": _STR, "source_start": _NUM, "duration": _NUM, "at": _NUM},
               ["asset_id", "duration"]),
+        _tool("append_clips", "粗編集用: 1本の録画から使う区間を順にベースレーン末尾へまとめて並べる（映像と音声をリンク）。"
+              "約1分ぶん並べるごとにエディターへ出すので、本人の画面ではタイムラインが伸びていくのが見える。"
+              "切った動画ファイルを作らず、元の録画の区間をクリップとして並べる。",
+              {"asset_id": _STR, "ranges": {"type": "array", "items": {"type": "object", "properties": {
+                  "source_start": _NUM, "source_end": _NUM, "asset_id": _STR}, "required": ["source_start", "source_end"]},
+                  "description": "使う区間 [{source_start, source_end}] を並べる順に。asset_id を区間ごとに変えてもよい"},
+               "step_seconds": {"type": "number", "description": "何秒ぶんごとに画面へ出すか（既定60）"}},
+              ["asset_id", "ranges"]),
         _tool("insert_clip", "ベースレーンのat秒に挿入。mode=ripple(以降を後ろへずらす)|overwrite(空きが必要)。",
               {"asset_id": _STR, "source_start": _NUM, "duration": _NUM, "at": _NUM, "mode": _STR},
               ["asset_id", "duration", "at"]),
@@ -588,6 +596,9 @@ async def _dispatch(name: str, a: dict) -> list:
         return _ok(_generate_speech(draft, str(a.get("text") or ""), str(a.get("voice") or "owner"),
                                     a.get("readings") if isinstance(a.get("readings"), dict) else None,
                                     str(a.get("name") or "")))
+
+    if name == "append_clips":
+        return _ok(_append_clips(draft, seq, assets, a))
 
     if name == "auto_captions":
         segs = [s for s in (a.get("segments") or []) if isinstance(s, dict)]
@@ -1135,6 +1146,65 @@ def _generate_speech(draft: dict, text: str, voice: str, readings: dict | None, 
             "seconds": res.get("seconds"), "gpu_wait": res.get("gpu_wait"),
             "backend":res.get('backend'), "pod_id":res.get('pod_id'),
             "note": "add_audio(asset_id, duration, at, volume=1.0, role='narration') で置く"}
+
+
+def _publish_step(draft: dict) -> dict:
+    """Publish what is in the draft now (one visible step) and carry the new base into the in-memory draft."""
+    td.save_draft(draft)
+    res = td.publish_checkpoint(ROOM_ID, DRAFT_ID)
+    if res.get('published'):
+        fresh = td.load_draft(ROOM_ID, DRAFT_ID)
+        for key in ('base_hash', 'published_sequence', 'published_at'):
+            if key in fresh:
+                draft[key] = fresh[key]
+    return res
+
+
+def _append_clips(draft: dict, seq: dict, assets: dict, a: dict) -> dict:
+    default_asset = str(a.get("asset_id") or "")
+    ranges = [r for r in (a.get("ranges") or []) if isinstance(r, dict)]
+    if not ranges:
+        return {"ok": False, "error": "ranges=[{source_start, source_end}] が必要"}
+    step = max(5.0, float(a.get("step_seconds") or 60.0))
+    live = bool(draft.get('live_updates'))
+    placed, skipped, since_step, steps = 0, [], 0.0, 0
+    first = last = None
+    for i, r in enumerate(ranges):
+        try:
+            s0, s1 = float(r["source_start"]), float(r["source_end"])
+        except (KeyError, TypeError, ValueError):
+            skipped.append({"index": i, "error": "source_start/source_end が数でない"})
+            continue
+        if s1 - s0 < tc.MIN_CLIP:
+            skipped.append({"index": i, "error": "短すぎる区間"})
+            continue
+        res = tc.append_clip(seq, assets, asset_id=str(r.get("asset_id") or default_asset),
+                             source_start=s0, duration=s1 - s0)
+        if not res.get("ok"):
+            skipped.append({"index": i, "error": res.get("error")})
+            if str(res.get("error", "")).startswith("asset not found"):
+                break
+            continue
+        placed += 1
+        first = res["clip_id"] if first is None else first
+        last = res
+        since_step += s1 - s0
+        if live and since_step >= step:
+            draft.setdefault("log", []).append({"t": time.time(), "tool": "append_clips", "args": {"upto": i + 1}})
+            pub = _publish_step(draft)
+            if not pub.get("ok"):
+                return {"ok": False, "placed": placed, "error": " / ".join(pub.get("problems") or []),
+                        "conflict": pub.get("conflict", False), "saved_in_draft": True}
+            steps += 1
+            since_step = 0.0
+            time.sleep(0.9)   # エディターは0.8秒ごとに読む: 1歩ずつ見えるように間を置く
+    if placed == 0:
+        return {"ok": False, "error": "1つも並べられなかった", "skipped": skipped[:10]}
+    draft.setdefault("log", []).append({"t": time.time(), "tool": "append_clips", "args": {"ranges": len(ranges)}})
+    td.save_draft(draft)
+    return {"ok": True, "placed": placed, "visible_steps": steps + 1, "first_clip_id": first,
+            "timeline_end": last["timeline_end"] if last else None,
+            "skipped": skipped[:20], "skipped_count": len(skipped)}
 
 
 def _auto_captions(draft: dict, seq: dict, assets: dict, segments: list, style: dict | None, replace: bool, words=None) -> dict:

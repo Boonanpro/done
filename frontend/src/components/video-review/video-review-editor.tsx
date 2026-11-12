@@ -550,7 +550,10 @@ export function VideoReviewEditor({
   roomId,
   contentId,
   onExternalEdit,
+  title,
 }: {
+  /** 作品の題（制作の窓では上に出す） */
+  title?: string;
   roomId?: string;
   /** With roomId: Dan's published steps on this content are replayed as visible motion. */
   contentId?: string;
@@ -3182,8 +3185,8 @@ export function VideoReviewEditor({
             </Button>
           ) : null}
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold">Dan Review Editor</div>
-            <div className="truncate text-xs text-muted-foreground">{videoPath || videoUrl || 'No video selected'}</div>
+            <div className="truncate text-sm font-semibold">{title || 'Dan Review Editor'}</div>
+            {title ? null : <div className="truncate text-xs text-muted-foreground">{videoPath || videoUrl || 'No video selected'}</div>}
           </div>
           <Button variant="ghost" size="sm" onClick={undo} title="元に戻す (Ctrl+Z)">
             <Undo2 className="h-4 w-4" />
