@@ -550,10 +550,20 @@ class Router:
             await self.reply(delegation_id, created, text or '今の頼みには答えを出せなかった。')
 
     async def _luna_loop(self, delegation_id, others=()):
-        from app.services.voice_lookup import _client
+        from app.services.voice_lookup import _client, _item, without_markup
         from app.services.voice_sideband import execute_call
         spec = {k: self.backend[k] for k in ('model', 'instructions', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning') if k in self.backend}
         spec['max_output_tokens'] = 4000
+        # Kept on the call's own backend model (gpt-6-luna low) after the comparison of 2026-11-12, 8 requests from the owner's
+        # calls (scripts/voice_backend_compare.py, docs/current/voice-backend-compare-20261112.md): luna 43/44 right, median
+        # 6.4 s; deepseek-flash high 35/36, 6.3 s: its message drafts took 10-15 s and opened with 「はじめまして」 to a
+        # person the owner knows; deepseek-v4-pro 8-11 s. The switch below runs the same requests on another model.
+        model = os.environ.get('DAN_VOICE_ROUTER_BACKEND_MODEL', '').strip()
+        if model:
+            spec['model'] = model
+            spec['reasoning'] = {'effort': os.environ.get('DAN_VOICE_ROUTER_BACKEND_REASONING', '').strip() or 'low'}
+        stateless = str(spec.get('model') or '').startswith('deepseek')   # DeepSeek keeps no responses: the whole exchange each round
+        history = []
         # The whole call, what it already found and drafted, and what runs now: in the 11/5 15:12 call the mail's revision
         # asked the owner which product 「まろっぴゃくさんじゅう」 was and then for the product page's address, though both
         # had been found in the call, and a second run drafted an Instagram message nobody had asked for.
@@ -566,11 +576,22 @@ class Router:
             await say(self.send, 'answer', text, self.record)
         client = _client(spec.get('model'))
         for _ in range(LUNA_ROUNDS):
-            response = await client.responses.create(**spec, input=given, **({'previous_response_id': previous} if previous else {}))
-            previous = response.id
+            began = time.monotonic()
+            if stateless:
+                history += given
+                response = await client.responses.create(**spec, input=history)
+                history += [_item(o) for o in response.output]
+            else:
+                response = await client.responses.create(**spec, input=given, **({'previous_response_id': previous} if previous else {}))
+                previous = response.id
             calls = [item for item in response.output if getattr(item, 'type', '') == 'function_call']
+            usage = getattr(response, 'usage', None)
+            self.record('route_luna_round', model=spec.get('model'), elapsed_ms=round((time.monotonic() - began) * 1000), calls=[c.name for c in calls][:8],
+                        input_tokens=getattr(usage, 'input_tokens', 0) or 0,
+                        cached_tokens=getattr(getattr(usage, 'input_tokens_details', None), 'cached_tokens', 0) or 0,
+                        output_tokens=getattr(usage, 'output_tokens', 0) or 0)
             if not calls:
-                return (response.output_text or '').strip(), False
+                return without_markup(response.output_text), False
             outputs = await asyncio.gather(*(execute_call({'type': 'function_call', 'call_id': c.call_id, 'name': c.name, 'arguments': c.arguments or '{}'},
                                                           self.user_id, self.room_id, self.dialogue, self.record, delegation_id, speak) for c in calls))
             if any(c.name == 'end_call' for c in calls) and self.end_call is not None:
