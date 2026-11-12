@@ -93,7 +93,8 @@ def test_complete_rejects_prose_and_missing_evidence(ledger, monkeypatch):
     with pytest.raises(ValueError, match='候補版が勝った'):
         V.complete(job, {'outcome': 'promoted', 'feedback_ids': ['h3'], 'reason': 'x', 'commit': 'abc1234',
                          'skill_paths': [V.LOG], 'lessons': [{'rule': 'r', 'why': 'w', 'layer': 'skill', 'layer_reason': 'x',
-                                                             'basis': 'inferred', 'evidence_ids': ['h3']}]})
+                                                             'basis': 'inferred', 'evidence_ids': ['h3'],
+                                                             'elsewhere': '別の案件の札'}], 'scene_fixes': []})
     assert V.complete(job, {'outcome': 'deferred', 'feedback_ids': ['h3'], 'reason': '比べで差が出ない'})['status'] == 'deferred'
 
 
@@ -115,7 +116,8 @@ def test_complete_checks_the_skill_was_saved_and_delivered(ledger, monkeypatch, 
     commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, capture_output=True, text=True).stdout.strip()
     monkeypatch.setenv('DAN_LIVE_TREE', str(live))
     report = {'outcome': 'case_only', 'feedback_ids': ['h3'], 'reason': '案件の札だけ', 'commit': commit,
-              'repository': str(repo), 'skill_paths': [V.LOG, V.SKILL + 'references/nakamura-line-gift.md']}
+              'repository': str(repo), 'skill_paths': [V.LOG, V.SKILL + 'references/nakamura-line-gift.md'],
+              'scene_fixes': []}
     with pytest.raises(ValueError, match='references'):
         V.complete(job, {**report, 'skill_paths': [V.LOG, V.SKILL + 'SKILL.md']})
     (live / V.LOG).write_text('古いまま')
@@ -222,11 +224,13 @@ def test_changing_the_body_needs_a_comparison_on_another_case(ledger, monkeypatc
     files = {k: tmp_path / f'{k}.md' for k in ('req', 'old', 'new')}
     for f in files.values():
         f.write_text('x')
-    lesson = {'rule': 'r', 'why': 'w', 'layer': 'skill', 'layer_reason': '2案件', 'basis': 'inferred', 'evidence_ids': ['h3']}
+    lesson = {'rule': 'r', 'why': 'w', 'layer': 'skill', 'layer_reason': '2案件', 'basis': 'inferred', 'evidence_ids': ['h3'],
+              'elsewhere': '料理の動画の材料の札'}
     same_case = {'held_out': True, 'winner': 'candidate', 'reason': 'r', 'request_path': str(files['req']),
                  'old_output_path': str(files['old']), 'new_output_path': str(files['new'])}
     report = {'outcome': 'promoted', 'feedback_ids': ['h3'], 'reason': 'x', 'commit': 'abc1234', 'repository': str(tmp_path),
-              'skill_paths': [V.SKILL + 'SKILL.md', V.LOG], 'lessons': [lesson], 'evaluations': [same_case]}
+              'skill_paths': [V.SKILL + 'SKILL.md', V.LOG], 'lessons': [lesson], 'evaluations': [same_case],
+              'scene_fixes': []}
     with pytest.raises(ValueError, match='別の案件'):
         V.complete(job, report)
     with pytest.raises(ValueError, match='layer'):
@@ -321,3 +325,43 @@ def test_gate_starts_a_sweep_in_editor_rooms_without_blocking(gate, monkeypatch)
     lines = [_turn('このテロップ要らない')]
     assert _run(monkeypatch, _transcript(gate, lines), room='ed-1') == '' and started == ['ed-1']
     assert _run(monkeypatch, _transcript(gate, lines), room='room-1') == '' and started == ['ed-1']
+
+
+def test_scene_fixes_are_not_written_as_rules(ledger, monkeypatch, tmp_path):
+    """2026-11-12: 「沖縄に着いた絵を4秒」「中性脂肪にマーカーを引かない」が中村さんの決まりとして書かれた件。"""
+    monkeypatch.setattr(V, '_job_alive', lambda job: False)
+    job = _job(ledger)
+    repo, live = tmp_path / 'repo', tmp_path / 'live'
+    for d in (repo, live):
+        (d / V.SKILL / 'references').mkdir(parents=True)
+        (d / V.SKILL / 'sources').mkdir(parents=True)
+    log = f'## 11/12 絵の長さ\n- 種類: 指摘の学習（仕事 {job}）\n'
+
+    def commit(ref):
+        for d in (repo, live):
+            (d / V.LOG).write_text(log)
+            (d / V.SKILL / 'references/nakamura-line-gift.md').write_text(ref)
+        if not (repo / '.git').exists():
+            subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+        subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
+        subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x'], cwd=repo, check=True)
+        return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+    monkeypatch.setenv('DAN_LIVE_TREE', str(live))
+    lesson = {'rule': '絵は4秒以上', 'why': '見えない', 'layer': 'case', 'layer_reason': '中村さんのテイスト',
+              'basis': 'explicit', 'evidence_ids': ['h3']}
+    fix = {'feedback_id': 'h3', 'fix': '沖縄に着いた絵を4秒見せた', 'why_not_rule': '裏の判断は本文の「読める長さ」にある'}
+    sha = commit('- 沖縄に着いた絵は v14 で一瞬だったので4秒以上見せる\n')
+    report = {'outcome': 'case_only', 'feedback_ids': ['h3'], 'reason': 'x', 'commit': sha, 'repository': str(repo),
+              'skill_paths': [V.LOG, V.SKILL + 'references/nakamura-line-gift.md'], 'lessons': [lesson]}
+    with pytest.raises(ValueError, match='elsewhere'):                 # 別の場面を挙げられない決まり
+        V.complete(job, {**report, 'scene_fixes': [fix]})
+    lesson['elsewhere'] = '次の動画の場所の話の絵'
+    with pytest.raises(ValueError, match='scene_fixes'):                # 場面の直しを分けていない
+        V.complete(job, report)
+    with pytest.raises(ValueError, match='scene_fixes'):
+        V.complete(job, {**report, 'scene_fixes': [{**fix, 'feedback_id': 'other'}]})
+    with pytest.raises(ValueError, match='版の名前'):                     # 版を名指す行は場面の直し
+        V.complete(job, {**report, 'scene_fixes': [fix]})
+    sha = commit('- 場所の話では、その場所と分かる実物の写真を、読める長さで出す\n- 書き出しは build_full_v15.py の形\n')
+    assert V.complete(job, {**report, 'commit': sha, 'scene_fixes': [fix]})['status'] == 'case_only'

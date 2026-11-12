@@ -400,6 +400,17 @@ def complete(job_id: str, report: dict) -> dict:
             raise ValueError('lessons の basis か evidence_ids が違う')
         if lesson['layer'] not in ('case', 'skill') or not str(lesson['layer_reason']).strip():
             raise ValueError('lessons の layer は case か skill、layer_reason にその層の理由')
+        if not str(lesson.get('elsewhere') or '').strip():
+            raise ValueError('lessons の各項目に elsewhere（この決まりで判断が変わる、まだ作っていない別の場面）。'
+                             '挙げられないなら、それは場面の直しなので scene_fixes へ')
+    if report['outcome'] in ('promoted', 'case_only'):
+        fixes = report.get('scene_fixes')
+        if not isinstance(fixes, list):
+            raise ValueError('scene_fixes（決まりにしなかった場面の直しの並び。無ければ []）が要る')
+        for fix in fixes:
+            if (not isinstance(fix, dict) or fix.get('feedback_id') not in ids
+                    or not str(fix.get('fix') or '').strip() or not str(fix.get('why_not_rule') or '').strip()):
+                raise ValueError('scene_fixes の各項目に feedback_id（この仕事の指摘）・fix・why_not_rule')
     if (report['outcome'] == 'promoted' and SKILL + 'SKILL.md' in (report.get('skill_paths') or [])
             and not any(e.get('other_case') and e.get('winner') in ('candidate', 'tie')
                         for e in report.get('evaluations') or [])):
@@ -445,12 +456,39 @@ def complete(job_id: str, report: dict) -> dict:
                 raise ValueError('本番の手順書に届いていない（work.py ship の後に follow_github）: ' + rel)
             if rel == LOG and job_id not in committed.decode('utf-8', 'replace'):
                 raise ValueError('変更記録の項目に、この仕事の id を書く')
+            if rel != LOG:
+                scene = scene_lines(repo, report['commit'], rel, job.get('created'), committed)
+                if scene:
+                    raise ValueError('手順書に足した行に版の名前が入っている。言われた場面の直しは手順書に書かず '
+                                     'scene_fixes へ（learning.md「最初に、その版の直しと、次からの決まりを分ける」）: '
+                                     + ' / '.join(scene[:3]))
             files.append({'path': rel, 'sha256': hashlib.sha256(committed).hexdigest()})
     with editing() as data:
         data['jobs'][job_id].update(status=report['outcome'], finished=now().isoformat(),
                                     result={**report, 'files': files})
     next_job = maybe_start()
     return {'status': report['outcome'], 'next_job': next_job}
+
+
+VERSION_MARK = re.compile(r'(?<![A-Za-z0-9_])v\d+(?![\d.])')
+
+
+def scene_lines(repo: Path, commit: str, rel: str, since: str | None, committed: bytes) -> list[str]:
+    """仕事が始まった時の手順書から増えた行のうち、版（v14 など）を名指す物。
+
+    版を名指す決まりは、その版の場面への直しを決まりとして書いた物（2026-11-12 中村さんの「沖縄の絵を4秒」）。"""
+    import subprocess
+    before = b''
+    if since:   # git の時刻は秒まで。仕事が始まった同じ秒の保存を「前から有った」と数えない
+        since = (datetime.fromisoformat(since) - timedelta(seconds=1)).isoformat()
+        base = subprocess.run(['git', 'rev-list', '-1', f'--before={since}', commit, '--', rel], cwd=repo,
+                              capture_output=True, text=True, check=False).stdout.strip()
+        if base:
+            before = subprocess.run(['git', 'show', f'{base}:{rel}'], cwd=repo, capture_output=True,
+                                    check=False).stdout
+    old = set(before.decode('utf-8', 'replace').splitlines())
+    return [line.strip() for line in committed.decode('utf-8', 'replace').splitlines()
+            if line not in old and VERSION_MARK.search(line)]
 
 
 def prompt(job_id: str) -> str:
@@ -462,8 +500,8 @@ def prompt(job_id: str) -> str:
 1. /Users/mikihonda/done/.claude/skills/talking-demo-editing/learning.md と /Users/mikihonda/done/.claude/skills/skill-creator/SKILL.md を全部読む。手順はそこに従う。
 2. 証拠を取る: {py} {tool} evidence --job {job_id} --output <作業用JSON>
    指摘の全文、その部屋の担当が全編に当てはめた所（applied）、前の学習の結果、部屋がどの案件か（rooms。エディターの部屋なら本体の部屋 case_room と名前）が入っている。
-   records の feedback の各項目の kind が direction の物は、作る前の指示・参考（参考動画・サムネの見本など）。案件の決まり（references/<案件>.md。無ければ作る）に、作る人がそのまま使える具体で書く。参考動画・画像が貼られていれば（[添付動画: …(/api/v1/files/…)] や URL）、実物を見て（video の ask、フレームの書き出し）、サムネ・字幕・テンポ・寄り・効果音・BGM・色のどこを参考にするかを、言われた範囲で書き出す。言われていない所まで真似させない。
-3. 指摘ごとに、見る人に何が起きていたかを言い、置く層を決める（learning.md の「指摘をどの層に置くか」）。まず案件の決まり（references/<案件>.md）に置く。本文（SKILL.md）へ上げるのは、同じ判断の誤りが2つ以上の別案件で起きた物か、見る人の理解に関わる理由がテイストに依らない物だけ。字幕の色・書体・効果音の種類・寄りの頻度・BGM の曲調のようなテイストは、2案件で同じでも案件側に残す。既にある決まりで足りるなら足さず、なぜ効かなかったかを考える。
+   records の feedback の各項目の kind が direction の物は、作る前の指示・参考（参考動画・サムネの見本など）。案件の次の動画にも効く所は案件の決まり（references/<案件>.md。無ければ作る）に、作る人がそのまま使える具体で書く。その1本だけの計画（場面ごとの絵・話に出る物の表）は書かない。参考動画・画像が貼られていれば（[添付動画: …(/api/v1/files/…)] や URL）、実物を見て（video の ask、フレームの書き出し）、サムネ・字幕・テンポ・寄り・効果音・BGM・色のどこを参考にするかを、言われた範囲で書き出す。言われていない所まで真似させない。
+3. 指摘ごとに、まずその版の直しと次からの決まりを分ける（learning.md の「最初に、その版の直しと、次からの決まりを分ける」）。言われた場面への直し（この絵を何秒・この行に印を引かない・この映像は1回だけ）は部屋の担当が組み立てに入れてあるので、手順書のどの層にも書かず、scene_fixes に入れる。決まりにするのは、場面の中身（話題・固有名・台詞・版・時刻）を消しても通り、まだ作っていない別の場面で判断が変わる物だけ。その上で、見る人に何が起きていたかを言い、置く層を決める（learning.md の「指摘をどの層に置くか」）。まず案件の決まり（references/<案件>.md）に置く。本文（SKILL.md）へ上げるのは、同じ判断の誤りが2つ以上の別案件で起きた物か、見る人の理解に関わる理由がテイストに依らない物だけ。字幕の色・書体・効果音の種類・寄りの頻度・BGM の曲調のようなテイストは、2案件で同じでも案件側に残す。既にある決まりで足りるなら足さず、なぜ効かなかったかを考える。
 4. 独立した作業場所（{py} /Users/mikihonda/done/scripts/work.py new <名前>）で手順書を直し、sources/generalization-log.md に、この仕事の id を書いた項目を足す。
 5. 法則を取り出していない動画（同じ案件のまだ指摘されていない区間と、本文を直したなら別の案件の動画）で、旧版と候補版の手順書にそれぞれ編集方針を立てさせ、どちらの版か伏せて比べる。別の案件の動画に、指摘を受けた案件のテイストが持ち込まれていたら、その版の負け。依頼・2つの出力・判定をファイルに残す。候補版が勝たなければ直してやり直すか、deferred にする。案件の決まりだけを足した時は比べなくてよい（case_only）。
 6. 勝ったら work.py save → work.py test → work.py ship（GitHub への送り出しはこの1回だけ。認証・権限で断られたら繰り返さず deferred にして理由を書く）。
