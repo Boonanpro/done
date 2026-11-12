@@ -880,7 +880,9 @@ export function VideoReviewEditor({
           zone = 'audio';
           itemType = 'audio';
           layer = clip.layer ?? audioRoleLayer(clip.role);
-        } else if (track.type === 'caption') {
+        } else if (track.type === 'caption' || clip.track === 'caption') {
+          // A caption is what the clip is (track field / text), not its lane: Dan's add_caption may
+          // put it on a picture lane (timeline_commands: "text → caption, never from the lane").
           itemType = 'caption';
           layer = clip.layer ?? Math.max(2, visualIndex);
         } else if (track.type === 'effect') {
