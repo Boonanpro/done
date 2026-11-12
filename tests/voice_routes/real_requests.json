@@ -1,5 +1,5 @@
 {
- "about": "本人が通話で実際に言った頼み（2026-10-23〜11-04）と、その時に正しかった行き先。voice_router の Jev の選択肢を確かめる（scripts/voice_route_eval.py）。expect は許せる行き先の一覧。running はその時に動いていた作業の名前（change_0 / stop_0 はその1つ目）。 made=true の3件は実際の通話に無かった種類（LINEの送信・ダンの直し・成果物の直し）を補うために作った例。",
+ "about": "本人が通話で実際に言った頼み（2026-10-23〜11-04）と、その時に正しかった行き先。voice_router の Jev の選択肢を確かめる（scripts/voice_route_eval.py）。expect は許せる行き先の一覧。running はその時に動いていた作業の名前（change_0 / stop_0 はその1つ目）。 made=true の3件は実際の通話に無かった種類（LINEの送信・ダンの直し・成果物の直し）を補うために作った例。 contact_* は 11/12 22:44 の通話の頼み（contact_reply だけ作った例）。",
  "cases": [
   {
    "id": "salon_first",
@@ -503,6 +503,51 @@
     "make"
    ],
    "made": true
+  },
+  {
+   "id": "contact_check",
+   "say": "中村さんからなんか連絡ありましたか",
+   "expect": [
+    "contact"
+   ]
+  },
+  {
+   "id": "contact_content",
+   "context": [
+    [
+     "本人",
+     "中村さんから連絡ありましたか"
+    ],
+    [
+     "ダン",
+     "うん、確認するね。"
+    ]
+   ],
+   "say": "なんかあのLINE来た、あのチャットワークでメッセージ来たんでしょ、中村さんから。どういう内容だった",
+   "expect": [
+    "contact"
+   ]
+  },
+  {
+   "id": "contact_any",
+   "say": "メッセージ来てるか確認して",
+   "expect": [
+    "contact"
+   ]
+  },
+  {
+   "id": "contact_reply",
+   "made": true,
+   "context": [
+    [
+     "ダン",
+     "中村さんから昨日の16時に、血液検査の用紙を作ったので確認してほしいと来ていたよ。"
+    ]
+   ],
+   "say": "じゃあ中村さんに、その用紙で大丈夫ですって返事しといて",
+   "expect": [
+    "message"
+   ]
   }
  ]
 }

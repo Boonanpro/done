@@ -52,6 +52,8 @@ ROUTES = {
     'dan': 'ダン自身を直す・変える: ダンの通話や通話の画面・チャットの見え方、ダンの設定・動き方・話し方、ダンにつないだカレンダーやアカウントの扱い（つなぐ・外す・表示しない）。',
     'message': '人へのメッセージやメールの下書きを作る・直す、画面に出ている下書きや画像を直す、送信の承認や取り消し（「送って」「いいよ」「やめて」）、'
                '画像を作る、話を図や表にする、画面を上下に送る。',
+    'contact': '人（〜さん・取引先・お客さん）から連絡・メッセージ・返事が来ているか、届いたメッセージの中身・何の件かを知りたい（Chatwork・メール・LINEなど）。'
+               'その人への返事を書く・送るのは message。',
     'rooms': '別の部屋（〜室・別のチャット）で動いている作業やテストの様子を聞く・止める。',
     'end': 'この通話（電話）そのものを終える（「切って」「通話を終わります」「また後で」「忙しいから切って」）。作業やテストを止める話は end ではない。',
     'other': '相談・雑談・考えや意見を聞きたい、ダンのできることや自己紹介、上のどれにも当てはまらない、いくつかの頼みが混ざっている、判断に迷う。',
@@ -369,6 +371,8 @@ class Router:
             return await self.show(target, delegation_id, created)
         if route in ('lookup', 'calendar', 'show'):   # a page not known yet is found by the lookup, which shows it
             return await self.lookup(words, delegation_id, created)
+        if route == 'contact':
+            return await self.luna(delegation_id, created, extra=await self.contact_context())
         if route in TO_CHAT_DAN:
             return await self.to_chat_dan(words, route, delegation_id, created)
         if route == 'end':
@@ -531,7 +535,21 @@ class Router:
             return await self.change(f'change:job:{running[-1]["id"]}', words, delegation_id, created)
         return await self.luna(delegation_id, created)
 
-    async def luna(self, delegation_id, created):
+    async def contact_context(self):
+        """Chatwork as it is now, read before the backend's first round so 「〇〇さんから連絡来た？」 is answered in one round
+        (11/12 22:44: the same question took about 6 minutes, chat Dan opening Chatwork in the browser)."""
+        from app.services import chatwork_read
+        began = time.monotonic()
+        try:
+            text = chatwork_read.spoken_digest(await chatwork_read.read(self.user_id), limit=5000)
+        except Exception as exc:
+            self.record('contact_read_failed', error_type=type(exc).__name__)
+            return ''
+        self.record('contact_read', ms=round((time.monotonic() - began) * 1000), chars=len(text))
+        return (chr(10) * 2 + text + chr(10) + '（これは今読んだ Chatwork の最近の部屋。ここに無い人・古い発言は read_chatwork の who で読む。'
+                'メールや LINE はここに含まれない。）')
+
+    async def luna(self, delegation_id, created, extra=''):
         """The earlier backend for what has no fixed route: gpt-6-luna with the call's tools, the way the Responses
         delegation ran it, here. Its answer goes back to this delegation."""
         if not self.backend:
@@ -540,7 +558,7 @@ class Router:
         others = [label for label, _ in self.answering.values()]
         self.answering[delegation_id] = (label_of(self.last_words or self.request_words()), started)
         try:
-            text, ended = await asyncio.wait_for(self._luna_loop(delegation_id, others), LUNA_SECONDS)
+            text, ended = await asyncio.wait_for(self._luna_loop(delegation_id, others, extra), LUNA_SECONDS)
         except asyncio.TimeoutError:
             text, ended = '', False
         finally:
@@ -549,7 +567,7 @@ class Router:
         if not ended:
             await self.reply(delegation_id, created, text or '今の頼みには答えを出せなかった。')
 
-    async def _luna_loop(self, delegation_id, others=()):
+    async def _luna_loop(self, delegation_id, others=(), extra=''):
         from app.services.voice_lookup import _client, _item, without_markup
         from app.services.voice_sideband import execute_call
         spec = {k: self.backend[k] for k in ('model', 'instructions', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning') if k in self.backend}
@@ -568,7 +586,7 @@ class Router:
         # asked the owner which product 「まろっぴゃくさんじゅう」 was and then for the product page's address, though both
         # had been found in the call, and a second run drafted an Instagram message nobody had asked for.
         given = [{'role': 'user', 'content': '通話のここまで（新しいものが下。最後の本人の言葉が今の頼み）:' + chr(10) + turns_text(self.dialogue.history, 16000)
-                  + self.call_context(others) + chr(10) * 2 + LUNA_RULES}]
+                  + self.call_context(others) + extra + chr(10) * 2 + LUNA_RULES}]
         previous = None
 
         async def speak(text):   # a later result of a function goes into the call as spoken commentary

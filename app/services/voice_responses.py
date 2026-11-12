@@ -32,6 +32,7 @@ INSTRUCTIONS = """あなたはダン。音声通話の判断と実行を受け�
 - 途中の作業開始通知や相談の質問をチャットに書かない。決まったことは通話後にまとめて残る。
 - 本人の保存情報を聞かれたら get_saved_information。無ければ「保存されていません」と言い、教えてくれれば保存できると添える。番号は1桁ずつ読める形（例: ゼロはちゼロなな）で返す。
 - 過去の会話・以前の作業・メールの話は search_records。ウェブの一般情報は web_search。場所を言わない天気は get_location の現在地を使う。近くの店・施設は dan_tool の places（中心を省けば本人の現在地。距離順で一瞬）で候補を出し、営業時間や評判が要る数件だけ web_search で確かめる。
+- 人からの連絡（「〇〇さんから連絡来た？」「メッセージ来てる？」「その中身は？」）は、まず read_chatwork で Chatwork を今読む（数秒。ブラウザで開かない）。名前が言われたら who に入れる。届いた日時・誰から・何の件か・本人が返事済みかを短く答え、中身を聞かれたら要点を話す。Chatwork に無ければそう言い、メールなど他を見るかは本人の頼みに従う。
 - ファイル・画像・動画・資料を「出して」「見せて」「貼って」「送って（この画面に）」と言われたら show_in_chat（1秒で本人のチャット画面に出る。画像・動画はその場に表示、資料は押せば開くリンク）。どのファイルか分からなければ room_files でこの部屋のファイル一覧（新しい順・何の資料か）を見て選ぶ。作業に渡したり、パソコンで開いたりしない。出せたら「出しました」とだけ言う。
 - パソコンでサイトやアプリを開くだけなら open_on_pc（本人が「パソコンで」と言った時だけ。ファイルを見せる用途には使わない）。ほかの操作（ブラウザ・アプリ・ファイル・コマンド・送信案・スキルの手順など）はダンの道具で自分でやってよい。保存済みの記事の表示、表示中の画面操作、過去の会話や作業状況の確認は、その情報を直接読む道具で自分で行う。他の部屋の情報は command_center の search/read/status で読み、確認のために delegate/report で別の会話を起こさない。数十秒で終わる操作は自分でやる。何分もかかる作業だけ start_work で作業担当に渡す（結果は後で別に届く）。道具を使っている間も会話は続く。
 - GoogleドキュメントやLINEなど外の画面は、dan_toolのbrowser/phoneで操作する。同じ操作セッションの実画面は自動で表示される。対応サイト・アプリの個別登録は不要。画面は操作ごとに更新する写真で、本人が直接押せるものではない。
@@ -57,7 +58,7 @@ INSTRUCTIONS = """あなたはダン。音声通話の判断と実行を受け�
 - 時刻・料金・乗り場など正確さが要る事実は、それを直接調べられる所（経路検索サイトなど）で確かめて答える。検索結果の断片から作らない。
 - ダンの仕組み（ブラウザの起動・プロセス・設定・コード）が原因で止まったら、その場で回避のために変えない（プロセスを止める・起動し直す・コードを書き換えるなど）。どこが原因で止まったかを報告し、直すなら直し方を添える。"""
 
-READ_MANY = ('web_search', 'get_calendar', 'get_location', 'room_files', 'job_status', 'search_records')
+READ_MANY = ('web_search', 'get_calendar', 'get_location', 'room_files', 'job_status', 'search_records', 'read_chatwork')
 
 async def read_many(requests, user_id, room_id, dialogue):
     # Validate the entire batch before any read; mutations and recursive batches are never admitted.
@@ -83,6 +84,9 @@ TOOLS = [
      'parameters': {'type': 'object', 'properties': {'what': {'type': 'string', 'description': '何を知りたいか（例: 郵便番号、実家の住所、アメックスの有効期限）'}}, 'required': ['what'], 'additionalProperties': False}},
     {'type': 'function', 'name': 'search_records', 'description': '本人とダンの過去の会話、以前頼んだ作業の結果、やり取りしたメールを探す。言葉の一致で探す（意味では探さない）ので、話題の言葉をスペースで区切って並べ、言い換えも入れる（例: 見積 請求書 送付 送った）。記録は当時の報告（伝聞）なので、今の状態の答えにはせず、どこを見ればよいかの手がかりにする。',
      'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': '探す話題（例: 9月18日の新幹線のキャンセル）'}}, 'required': ['query'], 'additionalProperties': False}},
+    {'type': 'function', 'name': 'read_chatwork', 'description': '本人の Chatwork に届いたメッセージを API で今読む（読むだけ・数秒）。who に相手か部屋の名前を入れるとその部屋とその人の発言、省くと最近7日に動いた部屋の最新（1対1の部屋を先に）。各部屋に未読数・本人が最後に返信済みか・各発言の日時と送り主（本人は「本人」）が付く。',
+     'parameters': {'type': 'object', 'properties': {'who': {'type': 'string', 'description': '相手か部屋の名前（例: 中村）。聞こえた字が違うこともあるので、合わなければ省いて読み直す'},
+                                                    'messages': {'type': 'integer', 'minimum': 1, 'maximum': 30, 'description': '1部屋あたりの最新の件数（既定5）'}}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_location', 'description': '本人のスマホが最後に知らせた現在地（町名まで）。', 'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
     {'type': 'function', 'name': 'get_calendar', 'description': '本人のつながっている全カレンダー（複数アカウント）の予定。既定は今日から。過去や先の日なら from（YYYY-MM-DD）とその日からの日数 days。各予定にどのアカウントか付く。読めなかったアカウントは not_read、全部切れていれば expired。',
      'parameters': {'type': 'object', 'properties': {'days': {'type': 'integer', 'minimum': 1, 'maximum': 60}, 'from': {'type': 'string', 'description': 'YYYY-MM-DD（省略時は今日）'}}, 'additionalProperties': False}},
@@ -409,6 +413,14 @@ async def run_function(name, args, user_id, room_id, dialogue, speak=None):
         return {'records': found['records'][:8], 'recent_work': found['jobs'][:3],
                 'note': '当時の会話と報告（伝聞）。今の状態・結果を聞かれているなら、これを手がかりに一次情報（メール本文・カレンダー・そのサイトの履歴）を見てから答える。',
                 'source': {'what': '本人とダンの会話記録と作業の記録（直近45日）', 'searched_words': found['keywords']}}
+    if name == 'read_chatwork':
+        from app.services import chatwork_read
+        try:
+            found = await chatwork_read.read(user_id, who=str(args.get('who') or ''), messages=args.get('messages') or 5)
+        except chatwork_read.Unavailable as exc:
+            return {'error': str(exc), 'note': 'Chatwork を今は読めなかった。届いていないとは言わない。'}
+        return {'chatwork': chatwork_read.spoken_digest(found, limit=6000), 'note': found.get('note'),
+                'source': {'what': '本人の Chatwork（API で今読んだ）', 'at': found.get('read_at')}}
     if name == 'get_location':
         from app.services.user_location import tool, current
         here = current(user_id)
