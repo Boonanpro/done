@@ -55,6 +55,9 @@ class ProductionAsset(BaseModel):
     local_path: str | None = None
     proxy_path: str | None = None
     proxy_url: str | None = None
+    # 長い録画だけの、画面で見るための小さい写し（書き出しには使わない）。_make_view_copy 参照。
+    view_path: str | None = None
+    view_url: str | None = None
     thumbnail_path: str | None = None
     thumbnail_url: str | None = None
     filename: str | None = None
@@ -203,7 +206,7 @@ def _read_assets(room_id: str) -> list[dict[str, Any]]:
     # Windows の頃の行は D:\done\… のまま。Mac ではここで今の場所に読み替える（書き戻す時も新しい形になる）。
     for row in rows if isinstance(rows, list) else []:
         if isinstance(row, dict):
-            for key in ("local_path", "proxy_path", "thumbnail_path", "original_uri"):
+            for key in ("local_path", "proxy_path", "view_path", "thumbnail_path", "original_uri"):
                 if isinstance(row.get(key), str):
                     row[key] = local_file(row[key])
     return rows
@@ -388,7 +391,7 @@ def _add_generated_video_asset(
 
 
 def _remove_asset_files(asset: dict[str, Any]) -> None:
-    for key in ("local_path", "proxy_path", "thumbnail_path"):
+    for key in ("local_path", "proxy_path", "view_path", "thumbnail_path"):
         value = asset.get(key)
         if not value:
             continue
@@ -5145,6 +5148,64 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         )
     except Exception as exc:
         _update_asset(room_id, asset_id, {"status": "failed", "error": str(exc)})
+        return
+    try:
+        _make_view_copy(room_id, asset_id)
+    except Exception:
+        pass  # the view copy is an enhancement; the proxy still works
+
+
+# VIEW COPY (2026-11-12): the proxy above is near-original quality (1920 long side, CRF17) because
+# the native editor scrubs on it and exports may read it. For an 83-min recording that is 14GB —
+# far too much for the browser editor to stream, especially from outside the house. Long
+# recordings therefore get a second, small copy used only for WATCHING in the browser editor
+# (same CFR timing, so every frame lands at the same time as in the proxy). Exports keep reading
+# local_path/proxy_path, so the finished video's quality is unchanged.
+VIEW_COPY_MIN_SECONDS = 600.0          # only recordings of 10 minutes or longer
+VIEW_COPY_MIN_PROXY_BYTES = 1_500_000_000  # ...or whose proxy is already huge
+
+
+def _needs_view_copy(asset: dict[str, Any]) -> bool:
+    if asset.get("kind") != "video":
+        return False
+    proxy = asset.get("proxy_path")
+    if not proxy or not Path(str(proxy)).exists():
+        return False
+    duration = float((asset.get("metadata") or {}).get("duration") or 0)
+    return duration >= VIEW_COPY_MIN_SECONDS or Path(str(proxy)).stat().st_size >= VIEW_COPY_MIN_PROXY_BYTES
+
+
+def _make_view_copy(room_id: str, asset_id: str, *, force: bool = False) -> Path | None:
+    """Encode {asset_id}_view.mp4 (960 long side, short GOP, no B-frames) from the proxy and
+    record view_path/view_url on the asset. Returns the path, or None when not needed."""
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset or not (force or _needs_view_copy(asset)):
+        return None
+    src = Path(str(asset.get("proxy_path") or asset.get("local_path")))
+    out_dir = _room_dir(room_id)
+    view = out_dir / f"{asset_id}_view.mp4"
+    tmp = out_dir / f"{asset_id}_view.tmp.mp4"
+    fps = float((asset.get("metadata") or {}).get("proxy_fps") or _room_frame_rate(room_id))
+    cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
+    cmd = [
+        _ffmpeg(), "-y", "-i", str(src),
+        "-vf", f"scale=w=960:h=960:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps:g}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-g", str(max(1, round(fps * 0.5))), "-bf", "0", *cfr,
+        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(tmp),
+    ]
+    creationflags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=creationflags, check=False)
+    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("view copy encode failed")
+    tmp.replace(view)
+    _update_asset(room_id, asset_id, {
+        "view_path": str(view),
+        "view_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=view",
+    })
+    return view
 
 
 def _coerce_asset_for_response(asset: dict[str, Any]) -> dict[str, Any]:
@@ -5290,7 +5351,7 @@ async def get_asset_media(
     request: Request,
     room_id: str = Query(...),
     asset_id: str = Query(...),
-    variant: Literal["original", "proxy", "thumbnail"] = Query("proxy"),
+    variant: Literal["original", "proxy", "view", "thumbnail"] = Query("proxy"),
 ):
     asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
     if not asset:
@@ -5298,6 +5359,7 @@ async def get_asset_media(
     key = {
         "original": "local_path",
         "proxy": "proxy_path",
+        "view": "view_path",
         "thumbnail": "thumbnail_path",
     }[variant]
     value = asset.get(key)

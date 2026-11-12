@@ -19,6 +19,8 @@ type ProductionAsset = {
   local_path?: string | null;
   proxy_path?: string | null;
   proxy_url?: string | null;
+  // 長い録画だけにある、画面で見るための小さい写し。あればこちらを再生する（書き出しは元から）。
+  view_url?: string | null;
   thumbnail_url?: string | null;
   filename?: string | null;
   status: AssetStatus;
@@ -74,7 +76,7 @@ function assetMediaPath(asset: ProductionAsset): string {
 }
 
 function assetMediaUrl(asset: ProductionAsset): string | undefined {
-  return asset.proxy_url || undefined;
+  return asset.view_url || asset.proxy_url || undefined;
 }
 
 function sequenceAssetForEditor(asset: ProductionAsset) {
@@ -84,8 +86,8 @@ function sequenceAssetForEditor(asset: ProductionAsset) {
     : undefined;
   return {
     id: asset.id,
-    url: asset.proxy_url || stillUrl,
-    path: asset.proxy_url || stillUrl ? undefined : assetMediaPath(asset),
+    url: asset.view_url || asset.proxy_url || stillUrl,
+    path: asset.view_url || asset.proxy_url || stillUrl ? undefined : assetMediaPath(asset),
     thumbnail_url: asset.thumbnail_url || undefined,
     label: asset.filename || asset.original_uri,
     fps: asset.metadata?.fps as string | number | undefined,
@@ -1167,7 +1169,7 @@ const ASSET_FOLDERS: Array<{ key: string; label: string; icon: typeof Film; test
 ];
 
 function assetPreviewUrl(asset: ProductionAsset): string {
-  if (asset.kind === 'video' && asset.proxy_url) return asset.proxy_url;
+  if (asset.kind === 'video' && (asset.view_url || asset.proxy_url)) return asset.view_url || asset.proxy_url || '';
   return `/api/v1/production-assets/media?room_id=${encodeURIComponent(asset.room_id)}&asset_id=${encodeURIComponent(asset.id)}&variant=original`;
 }
 
