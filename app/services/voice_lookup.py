@@ -30,7 +30,11 @@ import uuid
 # the 120 it may use. DeepSeek V4 Pro reads the same results and the whole conversation and weighs them; the search and the
 # page reading stay as they were. DeepSeek serves the Responses API without stored responses, so the rounds carry the
 # whole history (input) instead of previous_response_id. Set DAN_VOICE_LOOKUP_MODEL=gpt-6-luna to go back.
-MODEL = os.environ.get('DAN_VOICE_LOOKUP_MODEL', 'deepseek-v4-pro')
+# deepseek-flash (reasoning high) since the evening of 2026-11-12: on the four recorded requests, four runs each, it was
+# right 16/16 with a median of 82 s; V4 Pro high 11/16 and 108 s (four runs ended at the time limit with nothing said),
+# V4 Pro low 14/16 and 85 s; luna low 17/24 and 30 s (the 仲江 request 1/6); a quarter of V4 Pro's price
+# (docs/current/voice-backend-compare-20261112.md). The notes on V4 Pro below are from the morning's measurements.
+MODEL = os.environ.get('DAN_VOICE_LOOKUP_MODEL', 'deepseek-flash')
 REASONING = os.environ.get('DAN_VOICE_LOOKUP_REASONING', 'high')
 MAX_ROUNDS = 12
 SECONDS = 150          # a lookup that has not answered by then is handed to chat Dan (routed) or says so; long work belongs

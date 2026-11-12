@@ -1,0 +1,20 @@
+{
+ "turns": [
+  {
+   "role": "user",
+   "text": "中村さんからなんか連絡ありましたか"
+  }
+ ],
+ "expect": {
+  "tools_any": [
+   "run_in_background",
+   "start_work",
+   "search_records"
+  ],
+  "answer_none": [
+   "もう一度",
+   "もう一回",
+   "どの中村"
+  ]
+ }
+}

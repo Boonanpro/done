@@ -1,0 +1,30 @@
+{
+ "turns": [
+  {
+   "role": "user",
+   "text": "中村さんから連絡ありましたか"
+  },
+  {
+   "role": "assistant",
+   "text": "うん、確認するね。"
+  },
+  {
+   "role": "user",
+   "text": "なんかあのLINE来た、あのチャットワークでメッセージ来たんでしょ、中村さんから。どういう内容だった"
+  }
+ ],
+ "expect": {
+  "tools_any": [
+   "run_in_background",
+   "start_work",
+   "search_records"
+  ],
+  "args_all": [
+   "中村"
+  ],
+  "answer_none": [
+   "もう一度",
+   "もう一回"
+  ]
+ }
+}
