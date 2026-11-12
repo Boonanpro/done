@@ -244,6 +244,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       }
       if (track.type !== 'video' && track.type !== 'overlay') continue;
       for (const clip of track.clips || []) {
+        // a caption Dan put on a picture lane is drawn by the caption layer, not as a picture
+        if (clip.track === 'caption' && !clip.asset_id) continue;
         const overlay = isOverlayClip(clip, track.type);
         // A pop-out clip is drawn by the editor's canvas overlay (matted person breaking out of a
         // rounded card); skip its plain-wipe rendering here so no sharp-cornered rectangle peeks
@@ -262,7 +264,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   }, [sequence]);
 
   const captionClips = useMemo(
-    () => (sequence?.tracks || []).filter((t) => t.type === 'caption').flatMap((t) => t.clips || []),
+    // what a clip IS comes from its fields, not its lane (timeline_commands): captions on any lane
+    () => (sequence?.tracks || []).flatMap((t) => (t.clips || []).filter((c) => t.type === 'caption' || c.track === 'caption')),
     [sequence],
   );
 
