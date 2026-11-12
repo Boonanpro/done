@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.chat_artifact_routes import get_current_user
+from app.paths import local_file
 from app.services.auth_service import TokenData
 
 
@@ -195,9 +196,16 @@ def _read_assets(room_id: str) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        rows = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
+    # Windows の頃の行は D:\done\… のまま。Mac ではここで今の場所に読み替える（書き戻す時も新しい形になる）。
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict):
+            for key in ("local_path", "proxy_path", "thumbnail_path", "original_uri"):
+                if isinstance(row.get(key), str):
+                    row[key] = local_file(row[key])
+    return rows
 
 
 def _write_assets(room_id: str, assets: list[dict[str, Any]]) -> None:
