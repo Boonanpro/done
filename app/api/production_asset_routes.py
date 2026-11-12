@@ -5059,7 +5059,10 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         # reach from a keyframe, which is what makes scrub seeks ~20ms.
         # 0.2s GOP (was 0.5s): reverse frame-stepping decodes ≤1/5s of frames — the
         # editor's backward arrow feels instant instead of "walking the group".
-        _common = ["-g", str(max(1, round(timeline_fps * 0.2))), "-bf", "0", "-vsync", "cfr",
+        # FFmpeg 5.1 renamed -vsync to -fps_mode and 8 removed -vsync, so the Mac's FFmpeg 9
+        # rejected every proxy encode before it started.
+        _cfr = ["-fps_mode", "cfr"] if _ffmpeg_major(_ffmpeg()) >= 6 else ["-vsync", "cfr"]
+        _common = ["-g", str(max(1, round(timeline_fps * 0.2))), "-bf", "0", *_cfr,
                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(proxy)]
         _vf = ["-vf", f"scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps_filter}"]
         _encoders = [
