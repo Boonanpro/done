@@ -7,6 +7,10 @@
   python scripts/production_library.py register --room <部屋> --path <ファイル> [--path …] [--source nas_path]
   python scripts/production_library.py new-content --room <部屋> --title "題" [--format 16:9] [--asset <素材id> …]
   python scripts/production_library.py rename --room <部屋> --content <作品id> --title "題"
+  python scripts/production_library.py thumb --room <部屋> --content <作品id> [--at 秒]
+
+thumb は作品のタイムラインの1コマを絵にして、チャットに貼る1行（押すとエディターでその作品が開くサムネ）を出す。
+映像を作ってチャットに出す時は、書き出した動画を貼らずにこの1行を返事に入れる（2026-11-12 本人の指示）。
 
 --room は本体の部屋でも制作の部屋（ライブラリ・作品の部屋）でもよい。制作の部屋なら本体の部屋に置く。
 作品を作った後のタイムラインの編集は、作品の部屋（エディターでその作品を開いた画面の右の欄）で mcp__timeline__* を使う。
@@ -60,6 +64,37 @@ def cmd_list(room: str) -> None:
               + (f"  {float(dur):.1f}s" if dur else ""))
 
 
+def cmd_thumb(room: str, content_id: str, at: float | None) -> None:
+    """作品の1コマ（既定は1秒目。短ければ真ん中）を uploads に置き、チャットに貼る Markdown を出す。"""
+    import shutil
+    import tempfile
+    import uuid
+    from app.services import sequence_window as sw
+    from app.services import timeline_draft as td
+    c = td._find_content(td._read_contents_raw(room), content_id)
+    if not c:
+        sys.exit(f"作品 {content_id} がこの部屋にありません")
+    seq = (c.get("timeline") or {}).get("sequence") or {}
+    ends = [float(cl.get("timeline_end") or 0) for t in seq.get("tracks") or [] for cl in t.get("clips") or []]
+    dur = max(ends, default=0.0)
+    if dur <= 0:
+        sys.exit("タイムラインにまだクリップがありません")
+    t = min(max(0.0, at if at is not None else 1.0), max(0.0, dur - 0.05)) if dur > 1.2 else dur / 2
+    with tempfile.TemporaryDirectory(prefix="dan-thumb-") as work:
+        r = sw.render_frames(room, seq, [t], Path(work))
+        if not r.get("ok"):
+            sys.exit(f"絵を描けませんでした: {r.get('error')}")
+        name = f"work_{content_id[:8]}_{uuid.uuid4().hex[:6]}.jpg"
+        out = ROOT / "uploads" / name
+        import subprocess
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", r["paths"][0], "-vf", "scale=960:-2", "-q:v", "3", str(out)], check=True)
+        shutil.rmtree(work, ignore_errors=True)
+    title = str(c.get("title") or "作品").replace("[", "［").replace("]", "］")
+    m, s_ = divmod(int(round(dur)), 60)
+    print(f"[![{title}（{m}分{s_:02d}秒）](/api/v1/files/{name})]"
+          f"(/production-workspace?room_id={urllib.parse.quote(room)}&content_id={urllib.parse.quote(content_id)})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -72,6 +107,8 @@ def main() -> None:
     p.add_argument("--asset", action="append", default=[])
     p = sub.add_parser("rename"); p.add_argument("--room", required=True)
     p.add_argument("--content", required=True); p.add_argument("--title", required=True)
+    p = sub.add_parser("thumb"); p.add_argument("--room", required=True)
+    p.add_argument("--content", required=True); p.add_argument("--at", type=float, default=None)
     a = ap.parse_args()
     room = _asset_room(a.room)
     if a.cmd == "list":
@@ -88,6 +125,8 @@ def main() -> None:
     elif a.cmd == "rename":
         r = _call("PATCH", f"/contents/{a.content}?room_id={urllib.parse.quote(room)}", {"title": a.title})
         print(json.dumps({k: r.get(k) for k in ("id", "title")}, ensure_ascii=False))
+    elif a.cmd == "thumb":
+        cmd_thumb(room, a.content, a.at)
 
 
 if __name__ == "__main__":
