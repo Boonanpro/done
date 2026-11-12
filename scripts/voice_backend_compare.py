@@ -12,7 +12,9 @@ A case (tests/voice_backends/*.json): "turns" (the call up to and with the reque
 optional "cards" (drafts on the stage: proposal_id, channel, to, to_name, body) and "expect":
   "tools_any" (one of these functions must be called), "tools_none" (none of these may be),
   "args_all" / "args_none" (regex on the arguments of the called functions), "answer_all" / "answer_none" (regex on
-  the spoken answer). Exit 0 pass, 1 fail, 2 could not run.
+  the spoken answer), "route" (the request first goes through the call's router, Jev's choice of where it goes, and
+  must land on this route; 'contact' then reads Chatwork before the backend's first round as a call does). The time
+  counts from the router's choice. Exit 0 pass, 1 fail, 2 could not run.
 """
 import argparse
 import asyncio
@@ -23,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-REAL = {'get_calendar', 'get_location', 'get_saved_information', 'search_records', 'room_files', 'job_status', 'list_operations', 'dan_tool_help'}
+REAL = {'get_calendar', 'get_location', 'get_saved_information', 'search_records', 'room_files', 'job_status', 'list_operations', 'dan_tool_help', 'read_chatwork'}
 OWNER = '2582a188-ff24-4a4f-b989-6063034d90b2'
 ROOM = 'voice-backend-compare'
 
@@ -70,8 +72,14 @@ async def run(case, out, model):
     router = voice_router.Router('compare', owner, ROOM, dialogue, send, record, lambda *a, **k: None, backend=backend,
                                  stage=Stage() if case.get('cards') else None)
     began = time.monotonic()
+    routed, extra = None, ''
+    if exp_route := (case.get('expect') or {}).get('route'):
+        routed = (await router.route())[0]
+        if routed == 'contact' and hasattr(router, 'contact_context'):
+            extra = await router.contact_context()
     try:
-        answer, ended = await asyncio.wait_for(router._luna_loop('compare'), voice_router.LUNA_SECONDS)
+        loop = router._luna_loop('compare', (), extra) if extra else router._luna_loop('compare')
+        answer, ended = await asyncio.wait_for(loop, voice_router.LUNA_SECONDS)
         state = 'ended_call' if ended else ('answered' if answer or steps else 'empty')
     except asyncio.TimeoutError:
         answer, state = '', 'timed_out'
@@ -93,14 +101,15 @@ async def run(case, out, model):
     failed += ['answer lacks ' + p for p in exp.get('answer_all', []) if not re.search(p, answer)]
     failed += ['answer has ' + p for p in exp.get('answer_none', []) if re.search(p, answer)]
     if state in ('timed_out', 'empty'): failed.append(state)
+    if exp_route and routed != exp_route: failed.append(f'route {routed}')
     tokens = {k: sum(r.get(k, 0) for r in rounds) for k in ('input_tokens', 'cached_tokens', 'output_tokens')}
     used = rounds[0].get('model') if rounds else model
-    result = {'model': used, 'reasoning': os.environ.get('DAN_VOICE_ROUTER_BACKEND_REASONING') or backend.get('reasoning'), 'state': state, 'seconds': seconds,
+    result = {'route': routed, 'model': used, 'reasoning': os.environ.get('DAN_VOICE_ROUTER_BACKEND_REASONING') or backend.get('reasoning'), 'state': state, 'seconds': seconds,
               'rounds': [{k: r.get(k) for k in ('elapsed_ms', 'calls', 'output_tokens')} for r in rounds], 'tools': called, 'tokens': tokens,
               'answer': answer, 'steps': steps, 'failed': failed, 'passed': not failed}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, indent=1))
-    print(json.dumps({k: result[k] for k in ('model', 'state', 'seconds', 'tools', 'failed')}, ensure_ascii=False))
+    print(json.dumps({k: result[k] for k in ('route', 'model', 'state', 'seconds', 'tools', 'failed')}, ensure_ascii=False))
     print('answer:', answer)
     return 0 if result['passed'] else 1
 
