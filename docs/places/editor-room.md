@@ -16,8 +16,8 @@ watches:
   - frontend/src/components/production/production-workspace.tsx
   - frontend/src/components/production/editor-dan-chat.tsx
   - frontend/src/app/production-workspace/page.tsx
-fingerprint: 44c1e064eb0ffd01
-described: dd82e4265deb7e94
+fingerprint: a834782558528362
+described: 42dfe96cda0aa6d2
 ---
 # エディターの中の「ダンと制作」
 
@@ -45,7 +45,7 @@ described: dd82e4265deb7e94
 `python scripts/place_map.py stamp editor-room` が書き直す。手で直さない。
 
 - 見張るファイル: `frontend/src/app/production-workspace/page.tsx`, `frontend/src/components/production/editor-dan-chat.tsx`, `frontend/src/components/production/production-workspace.tsx`
-- ラベル: 「ダンと制作」、「作品と素材」、「作品」、「素材のフォルダ」
+- ラベル: 「ダンと制作」、「作品と素材」、「作品」、「素材のフォルダ」、「作品の一覧」
 
-<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "e65a8f6c81", "frontend/src/components/production/editor-dan-chat.tsx": "7afab6a25a", "frontend/src/components/production/production-workspace.tsx": "b79cf0990d"} -->
+<!-- place_map:files {"frontend/src/app/production-workspace/page.tsx": "e65a8f6c81", "frontend/src/components/production/editor-dan-chat.tsx": "168fd73ca8", "frontend/src/components/production/production-workspace.tsx": "5e1338bc4a"} -->
 <!-- place_map:auto:end -->
