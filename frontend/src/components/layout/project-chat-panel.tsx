@@ -75,7 +75,7 @@ import { RoomBoard } from '@/components/chat/room-board';
 import { ParallelJobsBar } from '@/components/chat/parallel-jobs-bar';
 import { MediaGrid } from '@/components/chat/media-grid';
 import {MediaViewer, collectChatMedia, mediaKind} from '@/components/chat/media-viewer';
-import { bareDanMedia, chatImageUrl, danFileMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
+import { bareDanMedia, chatImageUrl, danFileMedia, earlierTurnMedia, imageRequest, isPagePath, mediaTags, parseMediaContent, playableVideo, type DanMedia } from '@/lib/chat-media';
 import { VoiceSession } from '@/components/voice/voice-session';
 import { openEditorWindow } from '@/lib/open-editor-window';
 import { ProductionWorkspace } from '@/components/production/production-workspace';
@@ -511,14 +511,16 @@ const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpe
   if (settled && lastTextIndex >= 0) {
     // 回答が出て止まった後: 途中の宣言は作業ログに畳み、見えるのは最後の文章と、途中で出したファイル・画像・動画だけ（APK と同じ）。
     const log: TurnBlock[] = [];
-    const media: string[] = [];
+    const earlier: string[] = [];
     grouped.forEach((g, i) => {
       if (i === lastTextIndex) return;
       if (g.kind === 'tools') { log.push(...g.items); return; }
       log.push({ type: 'reasoning', text: g.text } as TurnBlock);
-      media.push(...mediaTags(g.text));   // 文章の中の添付の印（部品・コードブロックの中は見ない。lib/chat-media.ts）
+      earlier.push(g.text);
     });
     const final = (grouped[lastTextIndex] as { kind: 'text'; text: string }).text;
+    // 途中の文章の添付の印。最後の返事に添付があれば出さない（書き直す前の下書きの動画が2本並んでいた。lib/chat-media.ts）
+    const media = earlierTurnMedia(earlier, final);
     return (
       <div className="flex flex-col">
         {showWork && log.length > 0 ? <TurnToolGroup items={log} defaultOpen={toolsOpen} /> : null}
