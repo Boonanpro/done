@@ -187,7 +187,9 @@ SWEEP_PROMPT = """あなたは動画制作の会話の記録係です。下は�
 - direction: 作る前の指示・参考で、これから作る動画のテイストを決める物（例: 参考動画やサムネの見本を渡して
   「これを参考に」、「こういう編集にしたい」「BGMは落ち着いた感じで」）。
 - other: それ以外。1回だけの操作の頼み（「ここを3秒後ろに」「書き出して」）、質問、返事（「うん」「進めて」）、
-  動画以外の話、仕組みの不具合の報告。
+  仕組みの不具合の報告。台本・話す内容・文章の言い回し・商品設計・相手へ送るメッセージの話は、動画を作る途中の話でも
+  other（台本は別の仕組みが学ぶ。ここは映像の作り方＝編集・画面・サムネ・字幕・音・テンポ・素材の選び方だけ）。
+  1つの発言に台本の話と映像の話が混ざっていれば、映像の部分で判断する。
 
 迷ったら、後で同じことを言わずに済むようにしたい物（好み・判断の基準が含まれる）なら feedback か direction。
 JSON だけを返す: {"feedback": [id…], "direction": [id…], "other": [id…]}。全部の id をどれか1つに入れる。
@@ -229,6 +231,16 @@ def classify(rows: list[dict], context: list[dict], ask=None) -> dict:
     """本人の発言を feedback / direction / other に分ける（定額の Claude）。分けられなければ例外。"""
     if ask is None:
         from app.agent.cli_runner import run_oneshot_cli
+
+        # 関所から起きた裏の仕分けは部屋の担当の環境を受け継ぐが、そこに Claude を長く使える鍵は無い（Core だけが
+        # 持つ。Mac のログインの写しは切れている）。鍵の置き場所は app/core/generations.TOKEN_FILE と同じ。
+        if not os.environ.get('CLAUDE_CODE_OAUTH_TOKEN'):
+            try:
+                token = ''.join((Path.home() / '.dan' / 'claude_oauth_token').read_text(encoding='utf-8').split())
+            except OSError:
+                token = ''
+            if token:
+                os.environ['CLAUDE_CODE_OAUTH_TOKEN'] = token
 
         def ask(prompt):
             return run_oneshot_cli(prompt, model='sonnet', timeout=240)
