@@ -13,8 +13,9 @@ watches:
   - mobile/chatTimeline.ts
   - mobile/send-card.tsx
   - mobile/draft-body-editor.tsx
-fingerprint: 12b4b4da84e434ee
+fingerprint: 6cbf102115e99fbf
 described: ae77ae258153228a
+last_review: "2026-11-12 説明は変えない: 書き直した返事の下書きの添付を重ねて出さないだけ。見える部品は変わらない"
 ---
 # スマホのダンのアプリ
 
@@ -55,5 +56,5 @@ described: ae77ae258153228a
 
 - 見張るファイル: `mobile/App.tsx`, `mobile/chat-markdown.tsx`, `mobile/chat-shapes-answer-sends.ts`, `mobile/chat-shapes-answers.ts`, `mobile/chat-shapes-chart-geometry.ts`, `mobile/chat-shapes-job-report.ts`, `mobile/chat-shapes-live-line.ts`, `mobile/chat-shapes-map-geometry.ts`, `mobile/chat-shapes-plain.ts`, `mobile/chat-shapes-schema.ts`, `mobile/chat-shapes-use-answer-send.ts`, `mobile/chat-shapes.tsx`, `mobile/chatTimeline.ts`, `mobile/draft-body-editor.tsx`, `mobile/markdown-blocks.ts`, `mobile/send-card.tsx`
 
-<!-- place_map:files {"mobile/App.tsx": "8d824114d7", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "627b924799", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-map-geometry.ts": "126abfee3c", "mobile/chat-shapes-plain.ts": "3904066682", "mobile/chat-shapes-schema.ts": "f0a3fdb9aa", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "c9625f0dd7", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/draft-body-editor.tsx": "38639d86f5", "mobile/markdown-blocks.ts": "a88af55511", "mobile/send-card.tsx": "d56539e528"} -->
+<!-- place_map:files {"mobile/App.tsx": "2283059762", "mobile/chat-markdown.tsx": "6138f892a5", "mobile/chat-shapes-answer-sends.ts": "cfb8091ea4", "mobile/chat-shapes-answers.ts": "627b924799", "mobile/chat-shapes-chart-geometry.ts": "bc8c8b4951", "mobile/chat-shapes-job-report.ts": "ec51b5dac3", "mobile/chat-shapes-live-line.ts": "1c45000b28", "mobile/chat-shapes-map-geometry.ts": "126abfee3c", "mobile/chat-shapes-plain.ts": "3904066682", "mobile/chat-shapes-schema.ts": "f0a3fdb9aa", "mobile/chat-shapes-use-answer-send.ts": "fee1a83345", "mobile/chat-shapes.tsx": "c9625f0dd7", "mobile/chatTimeline.ts": "9fd4e61113", "mobile/draft-body-editor.tsx": "38639d86f5", "mobile/markdown-blocks.ts": "a88af55511", "mobile/send-card.tsx": "d56539e528"} -->
 <!-- place_map:auto:end -->
