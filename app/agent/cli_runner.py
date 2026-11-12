@@ -3473,6 +3473,9 @@ async def _process_via_streaming_session(
     env["NO_COLOR"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["DAN_LOCK_OWNER"] = "room:" + room_id
+    # 部屋ごとの常駐なので、一回きりの経路・Codex と同じく部屋を渡す（2026-11-12: これが無く、DAN_ROOM_ID で部屋を
+    # 見る関所・道具（動画の指摘の記録など）が普段の会話でだけ黙って何もしていなかった）
+    env["DAN_ROOM_ID"] = room_id
     env["CLAUDE_CODE_SILENT_TURN_REMINDER"] = "0"   # 近況の催促を止める（一回きりの経路と同じ。理由はそちら）
     run_cwd = cwd or str(CLI_WORKSPACE)
 

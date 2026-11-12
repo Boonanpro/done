@@ -93,6 +93,8 @@ async def _ensure_room(user_id: str, asset_room_id: str, content_id: Optional[st
     project = await ProjectService().create_project(
         user_id=user_id, title=title[:80], description=desc, origin_room_id=asset_room_id, metadata=metadata)
     _children_cache.pop(asset_room_id, None)
+    from app.services.video_learning import remember_editor_room
+    remember_editor_room(str(project.get("room_id") or ""))
     return {"project_id": project.get("id"), "room_id": project.get("room_id"),
             "title": project.get("title") or title, "kind": kind}
 
@@ -118,6 +120,10 @@ def room_info(room_id: str, sb=None) -> Optional[dict[str, Any]]:
                     "parent_project_id": (parent[0].get("id") if parent else "") or ""}
     except Exception:
         info = None
+    if info:
+        # 動画の指摘の裏の仕分け（video_learning.sweep）が、ターンの終わりに DB を引かずに制作の部屋を見分けるため
+        from app.services.video_learning import remember_editor_room
+        remember_editor_room(room_id)
     _info_cache[room_id] = (time.time(), info)
     return info
 

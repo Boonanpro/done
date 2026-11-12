@@ -13,6 +13,15 @@
    法則を取り出していない動画の編集方針を立てさせて比べ、勝った時だけ入れる。同時に動くのは1本、1日3本まで
    （GitHub は人の速さで）。残りは次の記録か、仕事が終わった時に起こす。
 3. 完了: 仕事の報告書を complete で確かめる（指摘の全部の扱い・比べたファイル・保存して本番に届いた手順書・変更記録）。
+
+2026-11-12 直したこと（本人「FBしたら関連するスキルが強化される仕組みになってる？ チャット・音声・開発室・エディターの
+全部で」）: 11/9 から1件も記録されていなかった。関所が部屋を DAN_ROOM_ID でしか見ず、普段の会話の担当（常駐の
+Claude）はそれを持たずに動いていたので、毎回黙って通していた（room_from_env で直した）。ほかに:
+- 作る前の指示（参考動画・サムネの見本・「こういう編集で」）も「direction」として記録し、案件のテイストに入れる。
+  最初の動画を渡す時は、それより前の本人の言葉も全部見る（before_first）。
+- エディターの「ダンと制作」の部屋は動画をチャットに貼らずタイムラインを直すので、渡す時の関所が起きない。そこでは
+  ターンの終わりに裏で sweep が本人の言葉を仕分けて記録する（番を止めない）。
+- 通話の言葉は部屋の会話に「🎙」付きで残るので、同じ所から拾われる。
 """
 from __future__ import annotations
 
@@ -40,6 +49,13 @@ OWNER = ('human', 'user')
 WINDOW_DAYS = 14
 DAILY_MAX = 3
 JST = timezone(timedelta(hours=9))
+
+
+def room_from_env() -> str:
+    """この番の部屋。Codex と一回きりの番は DAN_ROOM_ID、常駐の Claude の番は DAN_LOCK_OWNER=room:<id> だけを持つ。"""
+    owner = os.environ.get('DAN_LOCK_OWNER') or ''
+    return (os.environ.get('DAN_ROOM_ID') or os.environ.get('DAN_SESSION_ID')
+            or (owner[5:] if owner.startswith('room:') else ''))
 
 
 def now() -> datetime:
@@ -95,38 +111,44 @@ def fetch_messages(room_id: str) -> list[dict]:
     return rows
 
 
-def since_last_video(messages: list[dict]) -> list[dict]:
-    """最後にダンが動画を渡した発言より後の、本人の発言。動画を渡したことが無ければ空。"""
+def since_last_video(messages: list[dict], before_first: bool = False) -> list[dict]:
+    """最後にダンが動画を渡した発言より後の、本人の発言。動画を渡したことが無ければ空。
+    before_first: 渡したことが無ければ、窓の中の本人の発言を全部（最初の動画を渡す時・エディターの部屋。作る前の
+    指示や参考動画もそこにある）。"""
     last = max((i for i, m in enumerate(messages)
                 if m.get('sender_type') not in OWNER and m.get('sender_type') != 'system'
                 and VIDEO_MARK.search(m.get('content') or '')), default=None)
-    if last is None:
+    if last is None and not before_first:
         return []
-    return [m for m in messages[last + 1:] if m.get('sender_type') in OWNER and (m.get('content') or '').strip()]
+    start = 0 if last is None else last + 1
+    return [m for m in messages[start:] if m.get('sender_type') in OWNER and (m.get('content') or '').strip()]
 
 
-def pending(room_id: str, messages: list[dict] | None = None) -> list[dict]:
+def pending(room_id: str, messages: list[dict] | None = None, before_first: bool = False) -> list[dict]:
     """まだ扱いの決まっていない本人の発言。"""
     messages = fetch_messages(room_id) if messages is None else messages
     done = load()['rooms'].get(room_id, {}).get('accounted', {})
-    return [m for m in since_last_video(messages) if m['id'] not in done]
+    return [m for m in since_last_video(messages, before_first) if m['id'] not in done]
 
 
 # --- 記録 -----------------------------------------------------------------------------------------------------------
 
 def record(room_id: str, feedback: list[str], other: list[str], applied: str = '', video: str = '',
-           rest_other: bool = False, messages: list[dict] | None = None, start=None) -> dict:
-    """本人の発言の扱いを残す。指摘があれば、学習の仕事の順番に入れて起こせるなら起こす。"""
+           rest_other: bool = False, messages: list[dict] | None = None, start=None,
+           direction: list[str] | None = None, by: str = 'room') -> dict:
+    """本人の発言の扱いを残す。指摘か作る前の指示があれば、学習の仕事の順番に入れて起こせるなら起こす。
+    direction: 作る前の指示・参考（参考動画・サムネの見本・「こういう編集で」）。全編への当てはめ（applied）は要らない。"""
     messages = fetch_messages(room_id) if messages is None else messages
     owner_ids = {m['id'] for m in messages if m.get('sender_type') in OWNER}
-    open_ids = [m['id'] for m in pending(room_id, messages)]
+    open_ids = [m['id'] for m in pending(room_id, messages, before_first=True)]
     feedback, other = list(dict.fromkeys(feedback)), list(dict.fromkeys(other))
+    direction = [i for i in dict.fromkeys(direction or []) if i not in feedback]
     if rest_other:
-        other += [i for i in open_ids if i not in feedback and i not in other]
-    unknown = [i for i in feedback + other if i not in owner_ids]
+        other += [i for i in open_ids if i not in feedback and i not in direction and i not in other]
+    unknown = [i for i in feedback + direction + other if i not in owner_ids]
     if unknown:
         raise ValueError('この部屋の本人の発言ではない id: ' + ', '.join(unknown))
-    both = set(feedback) & set(other)
+    both = (set(feedback) | set(direction)) & set(other)
     if both:
         raise ValueError('指摘とほかの話の両方に入っている id: ' + ', '.join(sorted(both)))
     if feedback and len(applied.strip()) < 10:
@@ -138,17 +160,112 @@ def record(room_id: str, feedback: list[str], other: list[str], applied: str = '
         room = data['rooms'].setdefault(room_id, {'accounted': {}})
         for i in feedback:
             room['accounted'][i] = {'kind': 'feedback', 'record': rid, 'at': at}
+        for i in direction:
+            room['accounted'][i] = {'kind': 'direction', 'record': rid, 'at': at}
         for i in other:
             room['accounted'].setdefault(i, {'kind': 'other', 'record': rid, 'at': at})
         texts = {m['id']: m for m in messages}
         data['records'].append({
-            'id': rid, 'room': room_id, 'at': at, 'video': video, 'applied': applied, 'other': other,
-            'feedback': [{'id': i, 'at': texts[i].get('created_at'), 'text': texts[i].get('content') or ''} for i in feedback],
+            'id': rid, 'room': room_id, 'at': at, 'video': video, 'applied': applied, 'other': other, 'by': by,
+            'feedback': [{'id': i, 'kind': kind, 'at': texts[i].get('created_at'), 'text': texts[i].get('content') or ''}
+                         for kind, ids in (('feedback', feedback), ('direction', direction)) for i in ids],
             'job': None,
         })
-    left = [i for i in open_ids if i not in feedback and i not in other]
-    job = (start or maybe_start)() if feedback else None
+    left = [i for i in open_ids if i not in feedback and i not in direction and i not in other]
+    job = (start or maybe_start)() if feedback or direction else None
     return {'record': rid, 'feedback': len(feedback), 'other': len(other), 'still_open': left, 'job': job}
+
+
+# --- エディターの部屋（裏の仕分け） ------------------------------------------------------------------------------------
+
+EDITOR_ROOMS = 'editor_rooms.json'
+SWEEP_PROMPT = """あなたは動画制作の会話の記録係です。下は、エディターの「ダンと制作」の部屋で本人（動画を作る持ち主）が
+言ったことです（🎙 は通話で話した言葉）。各発言を次の3つに分けてください。
+
+- feedback: ダンが作った・直した動画やタイムラインへの指摘で、本人の好み・物差し・その案件のテイストが分かる物
+  （例:「このテロップは要らない」「効果音が大きい」「絵は左に置いて」「なんでここで寄るの」）。
+- direction: 作る前の指示・参考で、これから作る動画のテイストを決める物（例: 参考動画やサムネの見本を渡して
+  「これを参考に」、「こういう編集にしたい」「BGMは落ち着いた感じで」）。
+- other: それ以外。1回だけの操作の頼み（「ここを3秒後ろに」「書き出して」）、質問、返事（「うん」「進めて」）、
+  動画以外の話、仕組みの不具合の報告。
+
+迷ったら、後で同じことを言わずに済むようにしたい物（好み・判断の基準が含まれる）なら feedback か direction。
+JSON だけを返す: {"feedback": [id…], "direction": [id…], "other": [id…]}。全部の id をどれか1つに入れる。
+
+直前のダンの発言（文脈）:
+{context}
+
+本人の発言:
+{rows}
+"""
+
+
+def remember_editor_room(room_id: str) -> None:
+    """制作の部屋だと分かった部屋を控える（関所はターンごとに DB を引かずにこれで見分ける）。"""
+    if not room_id:
+        return
+    try:
+        rooms = set(editor_rooms())
+        if room_id in rooms:
+            return
+        rooms.add(room_id)
+        ROOT.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix='.editor.', suffix='.tmp', dir=ROOT)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(sorted(rooms)))
+        os.replace(tmp, ROOT / EDITOR_ROOMS)
+    except OSError:
+        pass
+
+
+def editor_rooms() -> list[str]:
+    try:
+        return list(json.loads((ROOT / EDITOR_ROOMS).read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        return []
+
+
+def classify(rows: list[dict], context: list[dict], ask=None) -> dict:
+    """本人の発言を feedback / direction / other に分ける（定額の Claude）。分けられなければ例外。"""
+    if ask is None:
+        from app.agent.cli_runner import run_oneshot_cli
+
+        def ask(prompt):
+            return run_oneshot_cli(prompt, model='sonnet', timeout=240)
+    clip = lambda t, n: ' '.join((t or '').split())[:n]  # noqa: E731
+    prompt = (SWEEP_PROMPT.replace('{context}', '\n'.join(f'- {clip(m.get("content"), 300)}' for m in context[-3:]) or '（無し）')
+              .replace('{rows}', '\n'.join(f'- id={m["id"]} {clip(m.get("content"), 1500)}' for m in rows)))
+    out = ask(prompt) or ''
+    match = re.search(r'\{.*\}', out, re.S)
+    data = json.loads(match.group(0)) if match else None
+    ids = {m['id'] for m in rows}
+    if not isinstance(data, dict):
+        raise ValueError('classify: JSON が返らなかった')
+    got = {k: [i for i in (data.get(k) or []) if i in ids] for k in ('feedback', 'direction', 'other')}
+    got['other'] += [i for i in ids if not any(i in v for v in got.values())]   # 返し忘れはほかの話
+    return got
+
+
+def sweep(room_id: str, messages: list[dict] | None = None, ask=None, start=None) -> dict:
+    """エディターの部屋の、まだ扱いの決まっていない本人の言葉を裏で仕分けて記録する。同じ部屋で同時に2本は動かさない。"""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with open(ROOT / f'.sweep.{re.sub(r"[^0-9a-zA-Z-]", "_", room_id)[:60]}.lock', 'a+') as lock:
+        if fcntl:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return {'skipped': 'another sweep is running'}
+        messages = fetch_messages(room_id) if messages is None else messages
+        rows = pending(room_id, messages, before_first=True)
+        if not rows:
+            return {'open': 0}
+        first = messages.index(next(m for m in messages if m['id'] == rows[0]['id']))
+        context = [m for m in messages[:first] if m.get('sender_type') not in OWNER][-3:]
+        got = classify(rows[-40:], context, ask=ask)
+        older = [m['id'] for m in rows[:-40]]   # 長く溜まった古い言葉は、文脈が切れているので仕分けない
+        return record(room_id, got['feedback'], got['other'] + older, direction=got['direction'], messages=messages,
+                      applied='エディターの部屋でその場で直した（裏の仕分け sweep。全編への当てはめは学習の仕事で見る）',
+                      by='sweep', start=start)
 
 
 # --- 学習の仕事 -----------------------------------------------------------------------------------------------------
@@ -162,6 +279,8 @@ def _job_alive(job: dict) -> bool:
 def maybe_start(today_max: int = DAILY_MAX, create=None) -> str | None:
     """順番待ちの指摘があり、動いている学習の仕事が無く、今日の本数が上限より少なければ、1本起こす。"""
     create = create or _create_job
+    if os.environ.get('DAN_VIDEO_LEARNING_NO_JOBS') == '1':   # 試しの記録（学習の仕事を起こさない）
+        return None
     with editing() as data:
         for job in data['jobs'].values():
             if job['status'] in ('queued', 'running'):
@@ -233,7 +352,18 @@ def evidence(job_id: str) -> dict:
     earlier = [{'id': j['id'], 'status': j['status'], 'result': (j.get('result') or {}).get('reason', '')[:1500]}
                for j in sorted(data['jobs'].values(), key=lambda j: j['created'])
                if j['id'] != job_id and j['status'] in ('promoted', 'case_only', 'deferred', 'no_lesson')][-3:]
-    return {'job': job_id, 'feedback_ids': job['feedback'], 'records': records, 'earlier_jobs': earlier,
+    rooms = {}
+    for r in records:
+        if r['room'] in rooms:
+            continue
+        try:
+            from app.services.editor_rooms import room_info
+            info = room_info(r['room']) or {}
+        except Exception:  # noqa: BLE001
+            info = {}
+        rooms[r['room']] = {'editor': bool(info), 'title': info.get('title', ''), 'case_room': info.get('asset_room_id', r['room']),
+                            'case_title': info.get('parent_title', '')}
+    return {'job': job_id, 'feedback_ids': job['feedback'], 'records': records, 'rooms': rooms, 'earlier_jobs': earlier,
             'skill': SKILL, 'log': LOG}
 
 
@@ -319,7 +449,8 @@ def prompt(job_id: str) -> str:
 
 1. /Users/mikihonda/done/.claude/skills/talking-demo-editing/learning.md と /Users/mikihonda/done/.claude/skills/skill-creator/SKILL.md を全部読む。手順はそこに従う。
 2. 証拠を取る: {py} {tool} evidence --job {job_id} --output <作業用JSON>
-   指摘の全文、その部屋の担当が全編に当てはめた所（applied）、前の学習の結果が入っている。
+   指摘の全文、その部屋の担当が全編に当てはめた所（applied）、前の学習の結果、部屋がどの案件か（rooms。エディターの部屋なら本体の部屋 case_room と名前）が入っている。
+   records の feedback の各項目の kind が direction の物は、作る前の指示・参考（参考動画・サムネの見本など）。案件の決まり（references/<案件>.md。無ければ作る）に、作る人がそのまま使える具体で書く。参考動画・画像が貼られていれば（[添付動画: …(/api/v1/files/…)] や URL）、実物を見て（video の ask、フレームの書き出し）、サムネ・字幕・テンポ・寄り・効果音・BGM・色のどこを参考にするかを、言われた範囲で書き出す。言われていない所まで真似させない。
 3. 指摘ごとに、見る人に何が起きていたかを言い、置く層を決める（learning.md の「指摘をどの層に置くか」）。まず案件の決まり（references/<案件>.md）に置く。本文（SKILL.md）へ上げるのは、同じ判断の誤りが2つ以上の別案件で起きた物か、見る人の理解に関わる理由がテイストに依らない物だけ。字幕の色・書体・効果音の種類・寄りの頻度・BGM の曲調のようなテイストは、2案件で同じでも案件側に残す。既にある決まりで足りるなら足さず、なぜ効かなかったかを考える。
 4. 独立した作業場所（{py} /Users/mikihonda/done/scripts/work.py new <名前>）で手順書を直し、sources/generalization-log.md に、この仕事の id を書いた項目を足す。
 5. 法則を取り出していない動画（同じ案件のまだ指摘されていない区間と、本文を直したなら別の案件の動画）で、旧版と候補版の手順書にそれぞれ編集方針を立てさせ、どちらの版か伏せて比べる。別の案件の動画に、指摘を受けた案件のテイストが持ち込まれていたら、その版の負け。依頼・2つの出力・判定をファイルに残す。候補版が勝たなければ直してやり直すか、deferred にする。案件の決まりだけを足した時は比べなくてよい（case_only）。

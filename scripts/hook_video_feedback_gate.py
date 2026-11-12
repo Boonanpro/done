@@ -11,7 +11,12 @@
      （要約の後なら要約の後に読み直した）。読んだかは見出しが道具の結果に全部出たかで見る（hook_skill_gate と同じ）。
   2. その部屋で前に動画を渡した後の本人の発言が、全部 `video_learning.py record` で記録されている（指摘か、ほかの話か）。
      指摘を記録する時は、同じ決まりを全編のどこに当てはめたかを書く。記録すると、裏で手順書を育てる仕事が起きる。
-部屋が分からない（DAN_ROOM_ID が無い）・発言を読めない時は通す。同じ理由で止めるのは2回まで。
+最初の動画を渡す時は、それより前の本人の言葉（作る前の指示・参考動画）も全部見る。
+部屋は video_learning.room_from_env で読む（2026-11-12: DAN_ROOM_ID だけを見ていて、常駐の Claude の部屋では
+いつも黙って通し、11/9 から1件も記録されていなかった）。
+エディターの「ダンと制作」の部屋（動画を貼らずにタイムラインを直す）では止めず、裏で sweep を起こして本人の言葉を
+仕分けて記録する（番を待たせない）。
+部屋が分からない・発言を読めない時は通す。同じ理由で止めるのは2回まで。
 exit 0 = 通す / stdout に {"decision":"block","reason":…} = 続けさせる（Claude と Codex で同じ形）。
 """
 from __future__ import annotations
@@ -166,9 +171,33 @@ def block(reason: str) -> int:
 def open_feedback(room: str) -> list[dict] | None:
     try:
         from app.services import video_learning as V
-        return V.pending(room)
+        return V.pending(room, before_first=True)
     except Exception:  # noqa: BLE001 — 発言を読めない時は止めない
         return None
+
+
+def current_room() -> str:
+    from app.services import video_learning as V
+    return V.room_from_env()
+
+
+def is_editor_room(room: str) -> bool:
+    from app.services import video_learning as V
+    return room in V.editor_rooms()
+
+
+def start_sweep(room: str) -> None:
+    """裏で仕分けを起こす（この番の終わりを待たせない。失敗しても番は止めない）。"""
+    from app.services import video_learning as V
+    try:
+        V.ROOT.mkdir(parents=True, exist_ok=True)
+        log = open(V.ROOT / "sweep.log", "a", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE",)}
+        subprocess.Popen([sys.executable, str(ROOT / "scripts" / "video_learning.py"), "sweep", "--room", room],
+                         cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                         start_new_session=True)
+    except OSError:
+        pass
 
 
 def main() -> int:
@@ -178,7 +207,7 @@ def main() -> int:
         return 0
     if payload.get("hook_event_name") not in (None, "Stop", "SubagentStop"):
         return 0
-    room = os.environ.get("DAN_ROOM_ID") or ""
+    room = current_room()
     path = payload.get("transcript_path") or payload.get("agent_transcript_path") or ""
     if not room or not path:
         return 0
@@ -186,6 +215,8 @@ def main() -> int:
     delivered += VIDEO_RE.findall(payload.get("last_assistant_message") or "")
     videos = edited_videos(delivered)
     if not videos:
+        if payload.get("hook_event_name") != "SubagentStop" and is_editor_room(room):
+            start_sweep(room)
         return 0
     session = str(payload.get("session_id") or hashlib.sha1(path.encode()).hexdigest()[:16])
     if not skill_read(results):
@@ -204,10 +235,11 @@ def main() -> int:
                               for m in rows[:20])
             return block(
                 "この部屋で前に動画を渡した後の本人の発言が、まだ記録されていない:\n" + lines + "\n"
-                "動画への指摘なら、言われた所だけでなく、その指摘から作った決まり（見る人に何が起きていたか）で全編を見直し、"
+                "作る前の指示・参考（参考動画・サムネの見本・「こういう編集で」）なら --direction に入れ、参考の実物を見て今の動画に"
+                "合わせる。動画への指摘なら、言われた所だけでなく、その指摘から作った決まり（見る人に何が起きていたか）で全編を見直し、"
                 "まだ言われていない所にも当てはめて直す（本人が決めた条件は変えない・頼まれていない加工は足さない）。"
                 "その上で記録する:\n"
-                f"  {TOOL} record --feedback <指摘のid …> --other <ほかの話のid …> "
+                f"  {TOOL} record --feedback <指摘のid …> --direction <作る前の指示のid …> --other <ほかの話のid …> "
                 "--applied \"<当てはめた所を納品版の分・秒で。無ければ理由>\" --video \"<版>\"\n"
                 "（ほかの話が多い時は --rest-other で、指摘以外を全部ほかの話にできる）。"
                 "記録すると、裏で動画の手順書を育てる仕事が起きる。" + REWRITE)
