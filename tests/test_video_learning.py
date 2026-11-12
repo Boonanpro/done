@@ -142,8 +142,13 @@ def _tool(i, name, inp, out):
             {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': i, 'content': out}]}}]
 
 
-def _run(monkeypatch, path, room='room-1', last=''):
+def _run(monkeypatch, path, room='room-1', last='', lock_owner=None):
     monkeypatch.setenv('DAN_ROOM_ID', room)
+    monkeypatch.delenv('DAN_SESSION_ID', raising=False)
+    if lock_owner is None:
+        monkeypatch.delenv('DAN_LOCK_OWNER', raising=False)
+    else:
+        monkeypatch.setenv('DAN_LOCK_OWNER', lock_owner)
     monkeypatch.setattr(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(
         {'hook_event_name': 'Stop', 'transcript_path': path, 'session_id': 's', 'last_assistant_message': last}).encode())))
     out = io.StringIO()
@@ -236,3 +241,83 @@ def test_gate_keeps_the_turn_across_image_notes_and_task_notices(gate, monkeypat
               'message': {'content': '<task-notification><status>stopped</status></task-notification>'}}
     lines = [_turn('直して'), *_tool('1', 'mcp__dan-tools__attach_image', {}, VIDEO), note, notice]
     assert '"block"' in _run(monkeypatch, _transcript(gate, lines))
+
+
+# --- 2026-11-12: 部屋の見分け・作る前の指示・エディターの部屋の裏の仕分け ---------------------------------------------
+
+def test_room_comes_from_the_lock_owner_of_a_resident_claude_session(monkeypatch):
+    monkeypatch.delenv('DAN_ROOM_ID', raising=False)
+    monkeypatch.delenv('DAN_SESSION_ID', raising=False)
+    monkeypatch.setenv('DAN_LOCK_OWNER', 'room:abc-123')
+    assert V.room_from_env() == 'abc-123'
+    monkeypatch.setenv('DAN_ROOM_ID', 'xyz')
+    assert V.room_from_env() == 'xyz'
+
+
+def test_gate_in_a_resident_claude_room_asks_to_record(gate, monkeypatch):
+    seen = []
+    monkeypatch.setattr(G, 'open_feedback', lambda room: seen.append(room) or [{'id': 'h1', 'created_at': '', 'content': 'マーカー要らない'}])
+    lines = [_turn('直して'), *_tool('0', 'Read', {'file_path': 'SKILL.md'}, SKILL_TEXT)]
+    out = _run(monkeypatch, _transcript(gate, lines), room='', last='v15です\n' + VIDEO, lock_owner='room:dc33')
+    assert '"block"' in out and 'h1' in out and seen == ['dc33']
+
+
+PRE = [
+    msg('h0', 'human', 'この参考動画のサムネと編集を参考にして [添付動画: ref.mp4 (/api/v1/files/ref.mp4)]', 1),
+    msg('a0', 'ai', '見ました', 2),
+    msg('h5', 'human', 'うん進めて', 3),
+]
+
+
+def test_first_video_also_sees_the_words_before_it(ledger):
+    assert V.pending(ROOM, PRE) == []
+    assert [m['id'] for m in V.pending(ROOM, PRE, before_first=True)] == ['h0', 'h5']
+
+
+def test_direction_is_learned_without_applied(ledger):
+    started = []
+    out = V.record(ROOM, [], [], direction=['h0'], rest_other=True, messages=PRE, start=lambda: started.append(1) or 'job')
+    assert out['job'] == 'job' and out['still_open'] == [] and out['other'] == 1
+    rec = V.load()['records'][0]
+    assert rec['feedback'][0]['kind'] == 'direction' and 'サムネ' in rec['feedback'][0]['text']
+
+
+def test_no_jobs_flag_keeps_dry_runs_out_of_the_queue(ledger, monkeypatch):
+    monkeypatch.setenv('DAN_VIDEO_LEARNING_NO_JOBS', '1')
+    V.record(ROOM, [], [], direction=['h0'], messages=PRE, start=None)
+    assert V.load()['jobs'] == {}
+
+
+def test_sweep_classifies_and_records(ledger):
+    asked = []
+
+    def ask(prompt):
+        asked.append(prompt)
+        return '仕分けました {"feedback": [], "direction": ["h0"], "other": ["h5"]}'
+    out = V.sweep(ROOM, messages=PRE, ask=ask, start=lambda: 'job')
+    assert out['job'] == 'job' and 'id=h0' in asked[0] and 'id=h5' in asked[0]
+    assert V.pending(ROOM, PRE, before_first=True) == []
+    assert V.load()['records'][0]['by'] == 'sweep'
+    assert V.sweep(ROOM, messages=PRE, ask=lambda p: pytest.fail('nothing open')) == {'open': 0}
+
+
+def test_sweep_puts_forgotten_ids_into_other_and_rejects_prose(ledger):
+    out = V.sweep(ROOM, messages=PRE, ask=lambda p: '{"feedback": ["h0"]}', start=lambda: None)
+    assert out['feedback'] == 1 and out['other'] == 1
+    with pytest.raises(ValueError):
+        V.classify(PRE[:1], [], ask=lambda p: 'わかりません')
+
+
+def test_editor_rooms_are_remembered(ledger):
+    V.remember_editor_room('ed-1')
+    V.remember_editor_room('ed-1')
+    assert V.editor_rooms() == ['ed-1']
+
+
+def test_gate_starts_a_sweep_in_editor_rooms_without_blocking(gate, monkeypatch):
+    started = []
+    monkeypatch.setattr(G, 'start_sweep', lambda room: started.append(room))
+    monkeypatch.setattr(G, 'is_editor_room', lambda room: room == 'ed-1')
+    lines = [_turn('このテロップ要らない')]
+    assert _run(monkeypatch, _transcript(gate, lines), room='ed-1') == '' and started == ['ed-1']
+    assert _run(monkeypatch, _transcript(gate, lines), room='room-1') == '' and started == ['ed-1']

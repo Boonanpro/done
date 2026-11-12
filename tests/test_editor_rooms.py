@@ -1,5 +1,14 @@
 """制作の部屋（エディターの中の「ダンと制作」）: 作品の部屋はいつもその作品を本体の部屋で直し、本体の部屋には一覧が出る。"""
+import pytest
+
 from app.services import editor_rooms as er
+from app.services import video_learning
+
+
+@pytest.fixture(autouse=True)
+def _private_learning_dir(monkeypatch, tmp_path):
+    """制作の部屋の控え（video_learning.remember_editor_room）を本物の場所に書かない。"""
+    monkeypatch.setattr(video_learning, "ROOT", tmp_path / "video-learning")
 
 
 def _info(monkeypatch, table):
