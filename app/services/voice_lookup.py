@@ -347,12 +347,15 @@ def _item(output):
     return {k: v for k, v in vars(output).items() if v is not None}
 
 
-def _client():
+def _client(model=None):
+    """The connection for a model's company: this file's MODEL when none is named. The router's earlier backend names its own
+    model (gpt-6-luna): on 2026-11-12 it was given this file's DeepSeek connection and every such request in a call was refused
+    (「The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed gpt-6-luna」)."""
     from openai import AsyncOpenAI
     from app.config import settings
     from app.services import inbox
     inbox._env()
-    if MODEL.startswith('deepseek'):
+    if (model or MODEL).startswith('deepseek'):
         return AsyncOpenAI(api_key=(os.environ.get('DEEPSEEK_API_KEY') or '').strip(), base_url='https://api.deepseek.com',
                            timeout=ROUND_TIMEOUT_S, max_retries=1)
     return AsyncOpenAI(api_key=settings.OPENAI_API_KEY or os.environ.get('OPENAI_API_KEY'), timeout=ROUND_TIMEOUT_S, max_retries=1)
