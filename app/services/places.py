@@ -81,7 +81,21 @@ async def gsi(client, text):
     return r.json() if r.status_code == 200 else []
 
 
+_geocoded = {}   # place name -> (lat, lng, label): a lookup asks the same place again (2026-11-13: four places at once)
+
+
 async def geocode(client, text):
+    key = ' '.join(text.split())
+    if key not in _geocoded:
+        found = await _geocode(client, key)
+        if found is None:
+            return None
+        if len(_geocoded) > 500: _geocoded.clear()
+        _geocoded[key] = found
+    return _geocoded[key]
+
+
+async def _geocode(client, text):
     # Nominatim takes 0.3-5 s; the 国土地理院 search, asked at the same time, answers Japanese names when it is slow.
     import asyncio
     backup = asyncio.ensure_future(gsi(client, text))
@@ -193,9 +207,10 @@ async def find(query, lat=None, lng=None, near='', radius_m=1000, limit=20, user
         jobs = [safe(photon(client, w, lat, lng, radius_m, limit)) for w in words]
         if osm_tag:
             jobs.append(safe(photon(client, words[0], lat, lng, radius_m, limit, osm_tag)))
-        jobs.append(safe(nominatim_near(client, query, lat, lng, radius_m, limit)))
-        if in_japan(lat, lng):
+        if in_japan(lat, lng):   # OpenPOI covers Japan; Nominatim's one request a second is kept for the place names
             jobs.insert(0, safe(openpoi(client, query, lat, lng, radius_m, limit)))
+        else:
+            jobs.append(safe(nominatim_near(client, query, lat, lng, radius_m, limit)))
         rows = [x for part in await asyncio.gather(*jobs) for x in part]
     out = []
     squash = lambda t: ''.join(t.lower().split())
